@@ -11,6 +11,8 @@
 
 pub mod classification;
 pub mod submodules;
+mod tracked_links;
+pub use tracked_links::resolve_parent_source;
 
 use std::collections::BTreeSet;
 use std::path::{Component, Path, PathBuf};
@@ -253,9 +255,7 @@ pub fn has_nested_repository_ancestor(
     Ok(false)
 }
 
-/// A worktree source entry must be a real file, not a link to bytes outside
-/// the parent's Git authority. The shared live walker does not follow leaf
-/// symlinks; classification, capture, and freshness must make the same choice.
+/// Distinguish leaf links before selecting their source authority.
 /// Missing paths remain possible tombstones and are not symlink exclusions.
 pub fn is_source_symlink(project_root: &Path, relative_path: &Path) -> std::io::Result<bool> {
     if relative_path.as_os_str().is_empty()
@@ -616,7 +616,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn readable_symlink_leaf_is_not_an_admissible_source() {
+    fn leaf_link_detection_preserves_missing_paths() {
         use std::os::unix::fs::symlink;
 
         let root = TempDir::new().unwrap();

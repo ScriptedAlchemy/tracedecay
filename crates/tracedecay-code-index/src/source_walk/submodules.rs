@@ -1,6 +1,7 @@
 //! A parent gitlink names a commit, not the worktree that may supply its bytes.
 //! Bind the registration, object store, and checkout before crossing that boundary.
 
+use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Component, Path, PathBuf};
 
@@ -225,7 +226,7 @@ impl LiveSourceBoundaries {
     pub fn resolve<'a, 'p>(
         &'a self,
         path: &'p Path,
-    ) -> std::io::Result<Option<(&'a Path, &'p Path)>> {
+    ) -> std::io::Result<Option<(&'a Path, Cow<'p, Path>)>> {
         if !is_source_location(path) {
             return Ok(None);
         }
@@ -259,12 +260,16 @@ impl LiveSourceBoundaries {
             root = &child.worktree;
             break;
         }
-        if has_nested_repository_ancestor(root, relative)?
-            || super::is_source_symlink(root, relative)?
-        {
+        if has_nested_repository_ancestor(root, relative)? {
             return Ok(None);
         }
-        Ok(Some((root, relative)))
+        if root == self.project_root {
+            Ok(super::resolve_parent_source(root, relative)?.map(|path| (root, path)))
+        } else if super::is_source_symlink(root, relative)? {
+            Ok(None)
+        } else {
+            Ok(Some((root, Cow::Borrowed(relative))))
+        }
     }
 }
 

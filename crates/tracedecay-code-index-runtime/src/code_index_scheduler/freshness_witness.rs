@@ -248,18 +248,6 @@ fn read_candidate(
     project_root: &Path,
     candidate: &StatCandidateV1,
 ) -> Result<Vec<u8>, CodeIndexSchedulerErrorV1> {
-    // A link installed after candidate classification must not turn a
-    // freshness proof into a read of a different repository's source bytes.
-    if tracedecay_code_index::source_walk::is_source_symlink(
-        project_root,
-        Path::new(&candidate.logical_path),
-    )? {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            "source symlink is outside the parent source inventory",
-        )
-        .into());
-    }
     if candidate.explicitly_admitted {
         ignored_dependencies::read_explicitly_admitted_source(
             project_root,
@@ -267,11 +255,20 @@ fn read_candidate(
             None,
         )
     } else {
-        ignored_dependencies::read_bounded_snapshot_source(
-            &project_root.join(&candidate.logical_path),
-            None,
-        )
+        let path = resolved_candidate_path(project_root, &candidate.logical_path)?;
+        ignored_dependencies::read_bounded_snapshot_source(&path, None)
     }
+}
+
+fn resolved_candidate_path(root: &Path, logical_path: &str) -> std::io::Result<PathBuf> {
+    tracedecay_code_index::source_walk::resolve_parent_source(root, Path::new(logical_path))?
+        .map(|relative| root.join(relative))
+        .ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "source alias is outside the parent Git inventory",
+            )
+        })
 }
 
 /// The canonical content digest capture would seal for `raw`: the digest of
@@ -956,13 +953,17 @@ fn filter_mismatches_in_repository<'a>(
     let Ok((mut pipeline, index)) = repository.filter_pipeline(None) else {
         return disputed;
     };
+    let repository_root = project_root.join(prefix);
     disputed
         .into_iter()
         .filter(|candidate| {
             let Some(expected) = manifest.files.get(&candidate.logical_path) else {
                 return true;
             };
-            let Ok(rela_path) = Path::new(&candidate.logical_path).strip_prefix(prefix) else {
+            let Ok(path) = resolved_candidate_path(project_root, &candidate.logical_path) else {
+                return true;
+            };
+            let Ok(rela_path) = path.strip_prefix(&repository_root) else {
                 return true;
             };
             if candidate.explicitly_admitted
@@ -972,7 +973,7 @@ fn filter_mismatches_in_repository<'a>(
             {
                 return true;
             }
-            let Ok(file) = std::fs::File::open(project_root.join(&candidate.logical_path)) else {
+            let Ok(file) = std::fs::File::open(&path) else {
                 return true;
             };
             let Ok(mut converted) = pipeline.convert_to_git(file, rela_path, &index) else {
@@ -1004,7 +1005,7 @@ pub fn sealed_source_bytes(
     let Some((root, relative)) = boundaries.resolve(Path::new(logical_path))? else {
         return Ok(None);
     };
-    let raw = ignored_dependencies::read_bounded_snapshot_source(&root.join(relative), None)?;
+    let raw = ignored_dependencies::read_bounded_snapshot_source(&root.join(&relative), None)?;
     let (sanitized, _, _) = privacy::sanitize_code_file(language, &raw)?;
     if content_digest(&sanitized) == *sealed {
         return Ok(Some(sanitized));
@@ -1022,7 +1023,7 @@ pub fn sealed_source_bytes(
     }
     let mut filtered = Vec::new();
     pipeline
-        .convert_to_git(raw.as_slice(), relative, &index)
+        .convert_to_git(raw.as_slice(), relative.as_ref(), &index)
         .map_err(|error| CodeIndexSchedulerErrorV1::Git(error.to_string()))?
         .read_to_end(&mut filtered)?;
     let (sanitized, _, _) = privacy::sanitize_code_file(language, &filtered)?;

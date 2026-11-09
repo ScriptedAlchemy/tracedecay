@@ -1403,15 +1403,32 @@ mod tests {
                 .snapshot,
         );
         assert_eq!(
-            live.iter()
-                .map(|(path, _)| path.as_str())
-                .collect::<Vec<_>>(),
-            ["AGENTS.md", "src/real.rs"]
+            branch, live,
+            "same-parent source aliases resolve to the live checkout's bytes"
         );
-        for regular in live {
+        let changed = b"pub fn linked_target() -> u32 { 19 }\n";
+        std::fs::write(root.join("src/real.rs"), changed).expect("edit only the alias target");
+        let edited = present(
+            &scheduler
+                .capture_authoritative_snapshot_without_active_generation_reuse(None)
+                .expect("capture unstaged target through each tracked alias")
+                .snapshot,
+        );
+        let expected = tracedecay_code_index::chunks::content_digest(changed);
+        for alias in [
+            "src/alias.rs",
+            "src/nested/chained.rs",
+            "src/through_directory.rs",
+        ] {
             assert!(
-                branch.contains(&regular),
-                "historical and live regular files must carry the same source digest"
+                edited
+                    .iter()
+                    .any(|(path, digest)| path == alias && *digest == expected)
+            );
+            assert!(
+                branch
+                    .iter()
+                    .any(|(path, digest)| path == alias && *digest != expected)
             );
         }
         let notes = captured

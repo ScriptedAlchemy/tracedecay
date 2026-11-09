@@ -35,7 +35,7 @@ pub use native_integration::{
     GitNativeIntegrationMode, GitNativePreflight, GitNativePreflightCaptureError,
     GitNativePreflightDisposition, GitNativeUnsupportedReason, GitTreeSubmodulePins,
 };
-pub use tree_links::resolve_tree_link;
+pub use tree_links::{RepositoryLinkEntry, resolve_repository_link, resolve_tree_link};
 
 /// A typed failure from the in-process Git repository authority.
 #[derive(Clone, Debug, thiserror::Error)]

@@ -18,7 +18,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 use super::{
-    has_nested_repository_ancestor, is_source_symlink, parent_gitlink_paths,
+    has_nested_repository_ancestor, parent_gitlink_paths, resolve_parent_source,
     submodules::live_submodules,
 };
 use gix::bstr::ByteSlice;
@@ -241,12 +241,8 @@ impl WorktreeChangeClassificationV1 {
             {
                 let relative = Path::new(path);
                 let parent = relative.parent().unwrap_or_else(|| Path::new(""));
-                // The live walker never follows a symlink file, even when
-                // the lexical parent is ordinary and the target is inside a
-                // registered submodule. Do not capture its target through a
-                // clean-tree or worktree path.
                 let excluded = if classification.beneath_gitlink(relative)
-                    || is_source_symlink(project_root, relative)?
+                    || resolve_parent_source(project_root, relative)?.is_none()
                 {
                     true
                 } else {
@@ -621,7 +617,19 @@ mod nested_repository_tests {
             ],
         );
         symlink("app/src/lib.rs", parent.join("bridge.rs")).unwrap();
-        fixture_git(&parent, &["add", ".gitmodules", "app", "bridge.rs"]);
+        fs::write(parent.join("parent.rs"), "pub fn parent() {}\n").unwrap();
+        symlink("parent.rs", parent.join("local.rs")).unwrap();
+        fixture_git(
+            &parent,
+            &[
+                "add",
+                ".gitmodules",
+                "app",
+                "bridge.rs",
+                "parent.rs",
+                "local.rs",
+            ],
+        );
         fixture_git(
             &parent,
             &["commit", "-qm", "registered child and source alias"],
@@ -639,14 +647,40 @@ mod nested_repository_tests {
         );
 
         let repository = tracedecay_runtime_core::git_open::open(&parent).unwrap();
-        let classified = WorktreeChangeClassificationV1::classify(&repository).unwrap();
-        assert!(!classified.candidate_paths().contains("bridge.rs"));
-        assert!(classified.changed_paths().contains("bridge.rs"));
+        for include_submodules in [false, true] {
+            let classified =
+                WorktreeChangeClassificationV1::for_policy(&repository, include_submodules)
+                    .unwrap();
+            let candidates = classified.candidate_paths();
+            let boundaries = crate::source_walk::submodules::LiveSourceBoundaries::open(
+                &parent,
+                include_submodules,
+            )
+            .unwrap();
+            let (_, relative) = boundaries.resolve(Path::new("local.rs")).unwrap().unwrap();
+            assert_eq!(relative.as_ref(), Path::new("parent.rs"));
+            assert!(
+                boundaries
+                    .resolve(Path::new("bridge.rs"))
+                    .unwrap()
+                    .is_none()
+            );
+            assert!(candidates.contains("local.rs"));
+            assert!(!candidates.contains("bridge.rs"));
+            assert!(classified.changed_paths().contains("bridge.rs"));
+            assert!(
+                classified.has_changes(),
+                "do not reuse HEAD tree source bytes"
+            );
+            assert_eq!(candidates.contains("app/src/lib.rs"), include_submodules);
+        }
+        symlink("parent.rs", parent.join("untracked_alias.rs")).unwrap();
+        let classification = WorktreeChangeClassificationV1::classify(&repository).unwrap();
         assert!(
-            classified.has_changes(),
-            "do not reuse HEAD tree source bytes"
+            !classification
+                .candidate_paths()
+                .contains("untracked_alias.rs")
         );
-        assert!(!classified.candidate_paths().contains("app/src/lib.rs"));
     }
 
     #[test]

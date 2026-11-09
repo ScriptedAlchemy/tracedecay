@@ -219,7 +219,9 @@ tracedecay tool configuration_set --args '{"layer":{"kind":"project","project_id
 
 The parent index and `.gitmodules` must identify the child, and its checkout
 must use the matching repository under the parent's Git modules directory.
-Live indexing includes child worktree changes. Historical indexing reads the
+Live indexing includes child worktree changes. The parent graph retains tracked
+source aliases that resolve through tracked links to a tracked parent file. A
+parent alias cannot cross into a child checkout. Historical indexing reads the
 child commit recorded by the selected parent revision from the local object
 store. Initialize the submodule locally before requesting that history.
 Linked worktrees, unrelated clones, and deeper nested repositories stay

@@ -4050,28 +4050,29 @@ impl CodeIndexWorktreeSchedulerV1 {
             }
             _ => (self.project_root.clone(), relative),
         };
-        let refusal = if tracedecay_code_index::source_walk::has_nested_repository_ancestor(
+        let resolved = if tracedecay_code_index::source_walk::has_nested_repository_ancestor(
             &source_root,
             source_relative,
         )? {
-            Some(CodeIndexIgnoredDependencyRefusalV1::NotIgnored)
-        } else if tracedecay_code_index::source_walk::is_source_symlink(
-            &source_root,
-            source_relative,
-        )? {
-            Some(CodeIndexIgnoredDependencyRefusalV1::SymlinkEscape)
+            Err(CodeIndexIgnoredDependencyRefusalV1::NotIgnored)
+        } else if explicitly_admitted
+            && tracedecay_code_index::source_walk::is_source_symlink(&source_root, source_relative)?
+        {
+            Err(CodeIndexIgnoredDependencyRefusalV1::SymlinkEscape)
         } else {
-            None
+            tracedecay_code_index::source_walk::resolve_parent_source(
+                &source_root,
+                source_relative,
+            )?
+            .ok_or(CodeIndexIgnoredDependencyRefusalV1::SymlinkEscape)
         };
-        if let Some(reason) = refusal {
-            // A retained admission names required bytes. Omitting them silently
-            // would turn a source refusal into a broken snapshot contract.
-            return if explicitly_admitted {
-                Err(reason.into())
-            } else {
-                Ok(CapturedFileOutcomeV1::Absent)
-            };
-        }
+        let resolved = match resolved {
+            Ok(path) => path,
+            // Retained admissions name required bytes. A refusal must remain visible.
+            Err(reason) if explicitly_admitted => return Err(reason.into()),
+            Err(_) => return Ok(CapturedFileOutcomeV1::Absent),
+        };
+        let absolute = source_root.join(resolved);
         match absolute.metadata() {
             Ok(metadata) if !metadata.is_file() => return Ok(CapturedFileOutcomeV1::Absent),
             Ok(_) => {}
