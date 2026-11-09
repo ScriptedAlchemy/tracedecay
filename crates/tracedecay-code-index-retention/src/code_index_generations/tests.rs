@@ -3,6 +3,13 @@
 use super::*;
 use super::{journal, receipt_store};
 use tracedecay_domain::sha256_hex_suffix;
+#[cfg(target_os = "linux")]
+use std::ffi::CString;
+#[cfg(target_os = "linux")]
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+#[cfg(target_os = "linux")]
+use std::os::unix::ffi::OsStrExt;
+
 
 mod graph_replay_pool_lock_tests;
 mod graph_replay_release_tests;
@@ -1937,6 +1944,181 @@ fn metadata_only_segment_census_distinguishes_empty_cancelled_and_exhausted() {
         CodeGenerationRetentionErrorV1::EntryBudgetExceeded
     ));
     assert_eq!(remaining_entries, 0);
+}
+
+
+#[cfg(target_os = "linux")]
+fn native_manifest_open_events(observer: &OwnedFd) -> usize {
+    let mut opens = 0;
+    let mut buffer = [0u8; 4096];
+    loop {
+        // The watch includes close events, preventing inotify from coalescing
+        // successive opens of the same inode into one unread notification.
+        let read = unsafe {
+            libc::read(
+                observer.as_raw_fd(),
+                buffer.as_mut_ptr().cast(),
+                buffer.len(),
+            )
+        };
+        if read < 0 {
+            let error = std::io::Error::last_os_error();
+            if error.kind() == std::io::ErrorKind::WouldBlock {
+                break;
+            }
+            if error.kind() == std::io::ErrorKind::Interrupted {
+                continue;
+            }
+            panic!("cannot read native manifest-open events: {error}");
+        }
+        if read == 0 {
+            break;
+        }
+        let bytes = usize::try_from(read).expect("nonnegative event byte count");
+        let header_size = std::mem::size_of::<libc::inotify_event>();
+        let mut offset = 0;
+        while offset < bytes {
+            assert!(offset + header_size <= bytes, "complete native event header");
+            let event = unsafe {
+                std::ptr::read_unaligned(
+                    buffer[offset..].as_ptr().cast::<libc::inotify_event>(),
+                )
+            };
+            let end = offset + header_size + usize::try_from(event.len).unwrap();
+            assert!(end <= bytes, "complete native event payload");
+            if event.mask & libc::IN_OPEN != 0 {
+                opens += 1;
+            }
+            offset = end;
+        }
+    }
+    opens
+}
+
+/// A full mark pass must reuse the revision probe's actual descriptor, not
+/// reauthorize a pathname for the same manifest. The retained evidence is
+/// still marked live, while unrelated content is eligible for collection.
+#[cfg(target_os = "linux")]
+#[test]
+fn segment_mark_reads_a_generation_manifest_with_one_kernel_open() {
+    let store = tempfile::TempDir::new().expect("retention store");
+    let generation_root = store.path().join(GENERATIONS_DIRECTORY);
+    let segments_root = store.path().join(GENERATION_SEGMENTS_DIRECTORY);
+    std::fs::create_dir_all(&generation_root).expect("generation directory");
+    std::fs::create_dir_all(&segments_root).expect("segment directory");
+
+    let evidence_bytes = b"nonempty retained segment evidence";
+    let evidence_digest = encode_tagged_lowercase_hex("sha256:", &Sha256::digest(evidence_bytes));
+    let segment_descriptor = serde_json::json!({
+        "segment_digest": evidence_digest,
+        "segment_size_bytes": evidence_bytes.len(),
+        "decoded_size_bytes": evidence_bytes.len(),
+    });
+    let generation = serde_json::json!({
+        "format_revision": SEALED_GENERATION_FORMAT_REVISION_V1,
+        "manifest": {
+            "generation_id": "generation.v1.manifest-open",
+            "seal": { "sealed_at": 7 }
+        },
+        "snapshot": { "files": [] },
+        "file_segments": [],
+        "file_evidence": [],
+        "generation_evidence": {
+            "segment_digest": evidence_digest,
+            "segment_size_bytes": evidence_bytes.len(),
+            "pages": [{
+                "page_ordinal": 0,
+                "page_digest": evidence_digest,
+                "page_size_bytes": evidence_bytes.len()
+            }]
+        },
+        "code_graph_pages": [],
+        "resolution_index": {
+            "definitions": [segment_descriptor.clone()],
+            "references": [segment_descriptor.clone()],
+            "import_aliases": segment_descriptor
+        }
+    });
+    let generation_bytes = serde_json::to_vec(&generation).expect("serialize generation");
+    let manifest_bytes = serde_json::to_vec(&serde_json::json!({
+        "state_digest": encode_tagged_lowercase_hex("sha256:", &Sha256::digest(&generation_bytes)),
+        "generation": generation,
+    }))
+    .expect("serialize sealed manifest");
+    let manifest_digest = encode_lowercase_hex(&Sha256::digest(&manifest_bytes));
+    let manifest_path = generation_root.join(format!("generation-{manifest_digest}.json"));
+    std::fs::write(&manifest_path, &manifest_bytes).expect("write sealed manifest");
+
+    let referenced_path = segments_root.join(format!(
+        "segment-{}.json",
+        sha256_hex_suffix(&evidence_digest).expect("evidence digest")
+    ));
+    std::fs::write(&referenced_path, evidence_bytes).expect("write retained evidence");
+    let orphan_bytes = b"unreferenced segment";
+    let orphan_digest = encode_lowercase_hex(&Sha256::digest(orphan_bytes));
+    let orphan_path = segments_root.join(format!("segment-{orphan_digest}.json"));
+    std::fs::write(&orphan_path, orphan_bytes).expect("write unreferenced segment");
+
+    let raw_fd = unsafe { libc::inotify_init1(libc::IN_NONBLOCK | libc::IN_CLOEXEC) };
+    assert!(raw_fd >= 0, "native inotify: {}", std::io::Error::last_os_error());
+    let observer = unsafe { OwnedFd::from_raw_fd(raw_fd) };
+    let native_path = CString::new(manifest_path.as_os_str().as_bytes())
+        .expect("manifest path has no NUL");
+    let watch = unsafe {
+        libc::inotify_add_watch(
+            observer.as_raw_fd(),
+            native_path.as_ptr(),
+            libc::IN_OPEN | libc::IN_CLOSE_NOWRITE,
+        )
+    };
+    assert!(watch >= 0, "native manifest watch: {}", std::io::Error::last_os_error());
+
+    drop(File::open(&manifest_path).expect("positive control pathname open"));
+    assert_eq!(
+        native_manifest_open_events(&observer),
+        1,
+        "the observer must detect an actual kernel open"
+    );
+    let (found, exhausted) =
+        sweep_unreferenced_generation_segments(store.path(), None, false, &|| false, None)
+            .expect("authenticated mark and conservative sweep");
+    assert!(found, "the unrelated nonempty segment is collectable");
+    assert!(!exhausted);
+    assert_eq!(
+        native_manifest_open_events(&observer),
+        1,
+        "revision probe and full segment mark must reuse one opened inode"
+    );
+
+    let (found, exhausted) =
+        sweep_unreferenced_generation_segments(store.path(), None, true, &|| false, None)
+            .expect("collect only the unreferenced segment");
+    assert!(found);
+    assert!(!exhausted);
+    assert_eq!(
+        native_manifest_open_events(&observer),
+        1,
+        "applying the mark must also avoid a second manifest open"
+    );
+    assert_eq!(
+        std::fs::read(&referenced_path).expect("retained evidence survives"),
+        evidence_bytes
+    );
+    assert!(!orphan_path.exists(), "unreferenced segment was removed");
+
+    // Identical byte extent but a different content-addressed file digest is
+    // never accepted as live evidence on the next mark.
+    let mut altered = manifest_bytes;
+    altered.push(b' ');
+    std::fs::write(&manifest_path, altered).expect("mutate disposable manifest");
+    assert!(matches!(
+        sweep_unreferenced_generation_segments(store.path(), None, false, &|| false, None),
+        Err(CodeGenerationRetentionErrorV1::UnsafeState(_))
+    ));
+    assert_eq!(
+        std::fs::read(&referenced_path).expect("corruption cannot erase live evidence"),
+        evidence_bytes
+    );
 }
 
 #[test]

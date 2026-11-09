@@ -14,14 +14,14 @@ use super::{
 const MAX_FORMAT_REVISION_PREFIX_BYTES: usize = 4 * 1024;
 const GENERATION_METADATA_READ_CHUNK_BYTES: usize = 4 * 1024;
 
-pub(super) fn read_generation_format_revision(
+pub(super) fn read_generation_format_revision_from_file(
+    file: &mut File,
     path: &Path,
     is_cancelled: &dyn Fn() -> bool,
 ) -> Result<u32, CodeGenerationRetentionErrorV1> {
     if is_cancelled() {
         return Err(CodeGenerationRetentionErrorV1::Cancelled);
     }
-    let file = File::open(path).map_err(deferred_if_absent)?;
     let mut prefix = Vec::with_capacity(MAX_FORMAT_REVISION_PREFIX_BYTES);
     file.take(MAX_FORMAT_REVISION_PREFIX_BYTES as u64)
         .read_to_end(&mut prefix)
@@ -242,7 +242,8 @@ mod tests {
     use super::{
         CodeGenerationRetentionErrorV1, GENERATION_METADATA_READ_CHUNK_BYTES,
         GenerationDigestVerificationV1, MAX_GENERATION_METADATA_PREFIX_BYTES, parse_json_u32_field,
-        read_generation_format_revision, read_generation_metadata, read_generation_metadata_prefix,
+        read_generation_format_revision_from_file, read_generation_metadata,
+        read_generation_metadata_prefix,
     };
 
     fn generation_bytes(manifest_padding: usize, payload_bytes: usize) -> Vec<u8> {
@@ -270,10 +271,12 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let bytes = generation_bytes(0, 256 * 1024);
         let (path, expected_digest) = write_generation(root.path(), &bytes);
+        let mut revision_file = File::open(&path).unwrap();
         assert_eq!(
-            read_generation_format_revision(&path, &|| false).unwrap(),
+            read_generation_format_revision_from_file(&mut revision_file, &path, &|| false).unwrap(),
             SEALED_GENERATION_FORMAT_REVISION_V1
         );
+        drop(revision_file);
         let mut file = File::open(&path).unwrap();
         let (revision, manifest) = read_generation_metadata_prefix(
             &mut file,
