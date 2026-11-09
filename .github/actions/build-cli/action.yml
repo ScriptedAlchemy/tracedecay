@@ -83,3 +83,11 @@ runs:
       with:
         path: ${{ steps.bazel.outputs.disk-cache-path }}
         key: ${{ steps.bazel.outputs.disk-cache-key }}
+
+    - name: Save newly fetched Bazel dependencies
+      if: always() && !cancelled() && steps.bazel.outputs.repository-cache-key != ''
+      uses: ./.github/actions/setup-bazel/save
+      with:
+        path: ${{ steps.bazel.outputs.repository-cache-path }}
+        key: ${{ steps.bazel.outputs.repository-cache-key }}
+        restored-entries: ${{ steps.bazel.outputs.repository-cache-entries }}
