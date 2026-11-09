@@ -218,8 +218,9 @@ impl StoreKindBytesV1 {
             .map(|component| component.as_os_str().to_string_lossy())
             .peekable();
         let first = components.next().unwrap_or_default();
+        let root_file = components.peek().is_none();
         let db_filename = tracedecay_runtime_core::config::DB_FILENAME;
-        let family = if sqlite_family_member(&first, db_filename) {
+        let family = if root_file && sqlite_family_member(&first, db_filename) {
             &mut self.graph_database
         } else if first == SEALED_GRAPH_DIRECTORY {
             &mut self.sealed_graph
@@ -239,7 +240,7 @@ impl StoreKindBytesV1 {
             } else {
                 &mut self.generation_artifacts
             }
-        } else if sqlite_family_member(&first, SESSIONS_DB_FILENAME)
+        } else if (root_file && sqlite_family_member(&first, SESSIONS_DB_FILENAME))
             || first.strip_prefix(SESSIONS_DB_FILENAME)
                 == Some(".delivery-settlement-spool-v1")
             || first
@@ -3590,6 +3591,8 @@ mod tests {
             (".sessions.db.host-admission/claim", 5),
             ("sessions.db.delivery-settlement-spool-v1/claim", 11),
             ("tracedecay.db-archive", 17),
+            ("tracedecay.db-journal/incident.bin", 37),
+            ("sessions.db-shm/incident.bin", 41),
             ("sessions.db-backup", 19),
             ("sessions.db.corrupt-incident", 23),
             (".sessions.db.host-admission-backup/claim", 13),
@@ -3631,10 +3634,10 @@ mod tests {
                 graph_container: 760,
                 graph_replay_pool: 40,
                 sessions: 926,
-                other: 79,
+                other: 157,
             }
         );
-        assert_eq!(store.total_bytes, 12_051);
+        assert_eq!(store.total_bytes, 12_129);
         assert_eq!(store.total_bytes, walked_bytes);
         assert_eq!(store.unavailable_entry_count, 0);
     }

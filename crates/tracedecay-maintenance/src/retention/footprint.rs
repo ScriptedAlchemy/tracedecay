@@ -520,20 +520,26 @@ fn footprint_keys(relative: &Path) -> Option<FootprintKeys> {
     } else if let Some(stem) = graph_container_stem(first, components.len() == 1) {
         // A top-level container and only its recognized sidecars.
         (stem.to_owned(), ProfileFamilyV1::GraphContainer)
-    } else if matches!(
-        first.as_str(),
-        "global.db" | "global.db-shm" | "global.db-journal"
-    ) {
+    } else if components.len() == 1
+        && matches!(
+            first.as_str(),
+            "global.db" | "global.db-shm" | "global.db-journal"
+        )
+    {
         ("global.db".to_owned(), ProfileFamilyV1::ProfileRegistry)
-    } else if matches!(
-        first.as_str(),
-        "user-sessions.db" | "user-sessions.db-shm" | "user-sessions.db-journal"
-    ) {
+    } else if components.len() == 1
+        && matches!(
+            first.as_str(),
+            "user-sessions.db" | "user-sessions.db-shm" | "user-sessions.db-journal"
+        )
+    {
         ("user-sessions.db".to_owned(), ProfileFamilyV1::UserSessions)
-    } else if matches!(
-        first.as_str(),
-        "user-memory.db" | "user-memory.db-shm" | "user-memory.db-journal"
-    ) {
+    } else if components.len() == 1
+        && matches!(
+            first.as_str(),
+            "user-memory.db" | "user-memory.db-shm" | "user-memory.db-journal"
+        )
+    {
         ("user-memory".to_owned(), ProfileFamilyV1::UserMemory)
     } else {
         let family = match first.as_str() {
@@ -1449,6 +1455,65 @@ mod tests {
                 observed[key].finding().state(),
                 DoctorEvidenceStateV1::Degraded,
                 "{key} must retain its own named bound"
+            );
+        }
+    }
+
+    #[test]
+    fn sqlite_sidecar_named_directories_have_independent_doctor_bounds() {
+        let temp = tempfile::tempdir().expect("footprint fixture");
+        let profile = temp.path().join("profile");
+        // A directory bearing a SQLite sidecar name is not a SQLite file.
+        for (relative, bytes) in [
+            ("global.db", 5),
+            ("user-sessions.db", 7),
+            ("user-memory.db", 9),
+            ("global.db-journal/incident.bin", 11),
+            ("user-memory.db-shm/incident.bin", 13),
+            ("user-sessions.db-shm/incident.bin", 17),
+        ] {
+            sized(&profile.join(relative), bytes);
+        }
+        let overrides = BTreeMap::from([
+            ("global.db".to_owned(), 5),
+            ("user-sessions.db".to_owned(), 7),
+            ("user-memory".to_owned(), 9),
+            ("global.db-journal".to_owned(), 10),
+            ("user-memory.db-shm".to_owned(), 12),
+            ("user-sessions.db-shm".to_owned(), 16),
+        ]);
+        let footprint = census_profile_footprint(&profile, &BTreeMap::new(), &overrides);
+        assert_eq!(footprint.total_bytes, 62);
+        assert_eq!(footprint.unavailable_entry_count, 0);
+        assert_eq!(
+            footprint.full_profile_size().state,
+            ProfileTotalCoverageStateV1::Complete
+        );
+        let observed = findings(&footprint);
+        assert_eq!(observed.len(), footprint.entries.len() + 1);
+        for (key, family, bytes) in [
+            ("global.db", ProfileFamilyV1::ProfileRegistry, 5),
+            ("user-sessions.db", ProfileFamilyV1::UserSessions, 7),
+            ("user-memory", ProfileFamilyV1::UserMemory, 9),
+            ("global.db-journal", ProfileFamilyV1::Other, 11),
+            ("user-memory.db-shm", ProfileFamilyV1::Other, 13),
+            ("user-sessions.db-shm", ProfileFamilyV1::Other, 17),
+        ] {
+            assert_eq!(entry(&footprint, key).family, family, "{key}");
+            assert_eq!(entry(&footprint, key).bytes, bytes, "{key}");
+        }
+        for key in ["global.db", "user-sessions.db", "user-memory", "profile"] {
+            assert_eq!(
+                observed[key].finding().state(),
+                DoctorEvidenceStateV1::HealthyCompleteCoverage,
+                "{key}"
+            );
+        }
+        for key in ["global.db-journal", "user-memory.db-shm", "user-sessions.db-shm"] {
+            assert_eq!(
+                observed[key].finding().state(),
+                DoctorEvidenceStateV1::Degraded,
+                "{key} must have an independent named over-budget finding"
             );
         }
     }
