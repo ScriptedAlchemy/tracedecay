@@ -273,7 +273,8 @@ mod tests {
         let (path, expected_digest) = write_generation(root.path(), &bytes);
         let mut revision_file = File::open(&path).unwrap();
         assert_eq!(
-            read_generation_format_revision_from_file(&mut revision_file, &path, &|| false).unwrap(),
+            read_generation_format_revision_from_file(&mut revision_file, &path, &|| false)
+                .unwrap(),
             SEALED_GENERATION_FORMAT_REVISION_V1
         );
         drop(revision_file);

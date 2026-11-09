@@ -1418,7 +1418,18 @@ fn sweep_unreferenced_generation_segments(
             // same opened inode. Reopening here paid a second endpoint-security
             // authorization for every current-revision manifest and could read
             // different bytes if the pathname changed between the two opens.
-            let mut file = File::open(&path).map_err(deferred_if_absent)?;
+            // Cancellation must win immediately before endpoint-authorized
+            // open(), including when a listed generation disappeared meanwhile.
+            if is_cancelled() {
+                return Err(CodeGenerationRetentionErrorV1::Cancelled);
+            }
+            let mut file = File::open(&path).map_err(|error| {
+                if is_cancelled() {
+                    CodeGenerationRetentionErrorV1::Cancelled
+                } else {
+                    deferred_if_absent(error)
+                }
+            })?;
             if read_generation_format_revision_from_file(&mut file, &path, is_cancelled)?
                 != SEALED_GENERATION_FORMAT_REVISION_V1
             {

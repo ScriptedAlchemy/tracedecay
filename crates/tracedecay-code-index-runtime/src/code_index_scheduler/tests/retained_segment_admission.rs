@@ -22,8 +22,8 @@ use tracedecay_code_index::production::{
 use tracedecay_domain::{ManifestDigest, sha256_hex_suffix};
 
 use super::{
-    DaemonCodeIndexPublicationStoreV1, MAX_STAGED_SEGMENT_READ_HANDLES,
-    PinnedPreparationSegmentV1, StagedGenerationSegmentsV1,
+    DaemonCodeIndexPublicationStoreV1, MAX_STAGED_SEGMENT_READ_HANDLES, PinnedPreparationSegmentV1,
+    StagedGenerationSegmentsV1,
 };
 
 fn cache_handles(cache: &VecDeque<PinnedPreparationSegmentV1>) -> Vec<(PathBuf, RawFd)> {

@@ -2,14 +2,13 @@
 
 use super::*;
 use super::{journal, receipt_store};
-use tracedecay_domain::sha256_hex_suffix;
 #[cfg(target_os = "linux")]
 use std::ffi::CString;
 #[cfg(target_os = "linux")]
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 #[cfg(target_os = "linux")]
 use std::os::unix::ffi::OsStrExt;
-
+use tracedecay_domain::sha256_hex_suffix;
 
 mod graph_replay_pool_lock_tests;
 mod graph_replay_release_tests;
@@ -1946,7 +1945,6 @@ fn metadata_only_segment_census_distinguishes_empty_cancelled_and_exhausted() {
     assert_eq!(remaining_entries, 0);
 }
 
-
 #[cfg(target_os = "linux")]
 fn native_manifest_open_events(observer: &OwnedFd) -> usize {
     let mut opens = 0;
@@ -1978,11 +1976,12 @@ fn native_manifest_open_events(observer: &OwnedFd) -> usize {
         let header_size = std::mem::size_of::<libc::inotify_event>();
         let mut offset = 0;
         while offset < bytes {
-            assert!(offset + header_size <= bytes, "complete native event header");
+            assert!(
+                offset + header_size <= bytes,
+                "complete native event header"
+            );
             let event = unsafe {
-                std::ptr::read_unaligned(
-                    buffer[offset..].as_ptr().cast::<libc::inotify_event>(),
-                )
+                std::ptr::read_unaligned(buffer[offset..].as_ptr().cast::<libc::inotify_event>())
             };
             let end = offset + header_size + usize::try_from(event.len).unwrap();
             assert!(end <= bytes, "complete native event payload");
@@ -2060,10 +2059,14 @@ fn segment_mark_reads_a_generation_manifest_with_one_kernel_open() {
     std::fs::write(&orphan_path, orphan_bytes).expect("write unreferenced segment");
 
     let raw_fd = unsafe { libc::inotify_init1(libc::IN_NONBLOCK | libc::IN_CLOEXEC) };
-    assert!(raw_fd >= 0, "native inotify: {}", std::io::Error::last_os_error());
+    assert!(
+        raw_fd >= 0,
+        "native inotify: {}",
+        std::io::Error::last_os_error()
+    );
     let observer = unsafe { OwnedFd::from_raw_fd(raw_fd) };
-    let native_path = CString::new(manifest_path.as_os_str().as_bytes())
-        .expect("manifest path has no NUL");
+    let native_path =
+        CString::new(manifest_path.as_os_str().as_bytes()).expect("manifest path has no NUL");
     let watch = unsafe {
         libc::inotify_add_watch(
             observer.as_raw_fd(),
@@ -2071,7 +2074,11 @@ fn segment_mark_reads_a_generation_manifest_with_one_kernel_open() {
             libc::IN_OPEN | libc::IN_CLOSE_NOWRITE,
         )
     };
-    assert!(watch >= 0, "native manifest watch: {}", std::io::Error::last_os_error());
+    assert!(
+        watch >= 0,
+        "native manifest watch: {}",
+        std::io::Error::last_os_error()
+    );
 
     drop(File::open(&manifest_path).expect("positive control pathname open"));
     assert_eq!(
@@ -2118,6 +2125,65 @@ fn segment_mark_reads_a_generation_manifest_with_one_kernel_open() {
     assert_eq!(
         std::fs::read(&referenced_path).expect("corruption cannot erase live evidence"),
         evidence_bytes
+    );
+}
+
+/// The marked file may be removed after the directory entry was returned.
+/// A cancellation arriving at that exact boundary must not be rewritten as
+/// an unrelated busy-store error or trigger any segment collection.
+#[test]
+fn segment_mark_prefers_cancellation_before_disappeared_manifest_open() {
+    let store = tempfile::TempDir::new().expect("isolated retention store");
+    let generation_root = store.path().join(GENERATIONS_DIRECTORY);
+    let segments_root = store.path().join(GENERATION_SEGMENTS_DIRECTORY);
+    std::fs::create_dir_all(&generation_root).expect("generation directory");
+    std::fs::create_dir_all(&segments_root).expect("segment directory");
+
+    let manifest_bytes = b"nonempty manifest that is withdrawn after enumeration";
+    let digest = encode_lowercase_hex(&Sha256::digest(manifest_bytes));
+    let manifest_path = generation_root.join(format!("generation-{digest}.json"));
+    std::fs::write(&manifest_path, manifest_bytes).expect("create a real manifest");
+
+    let segment_bytes = b"nonempty unreferenced segment remains untouched on cancellation";
+    let segment_digest = encode_lowercase_hex(&Sha256::digest(segment_bytes));
+    let segment_path = segments_root.join(format!("segment-{segment_digest}.json"));
+    std::fs::write(&segment_path, segment_bytes).expect("create segment to protect");
+
+    // With this single scope, the first cancellation probe runs when the
+    // actual manifest directory entry is visited. Simulate the listed file
+    // disappearing and cancellation becoming active before open(). The next
+    // probe must be the pre-open cancellation boundary.
+    let calls = std::cell::Cell::new(0usize);
+    let cancelled = || {
+        let next = calls.get() + 1;
+        calls.set(next);
+        if next == 1 {
+            std::fs::remove_file(&manifest_path)
+                .expect("simulate concurrent withdrawal of enumerated manifest");
+            false
+        } else {
+            true
+        }
+    };
+    let error = sweep_unreferenced_generation_segments(
+        store.path(),
+        None,
+        true,
+        &cancelled,
+        None,
+    )
+    .expect_err("cancellation after enumeration must prevent segment deletion");
+    assert!(matches!(error, CodeGenerationRetentionErrorV1::Cancelled));
+    assert_eq!(
+        calls.get(),
+        2,
+        "the pre-open cancellation check must run after enumerating the file"
+    );
+    assert!(!manifest_path.exists(), "the withdrawal must actually occur");
+    assert_eq!(
+        std::fs::read(&segment_path).expect("protected segment bytes"),
+        segment_bytes,
+        "cancellation cannot collect an unmarked segment"
     );
 }
 
