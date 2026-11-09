@@ -60,6 +60,13 @@ Do not put credentials in this file. The declaration is operator-supplied
 provenance, **not remote attestation**: update it whenever the deployment changes.
 The optional `--noul-temperature` is a separate client-side calibration step;
 it must be finite and strictly positive.
+For captured Scout parity, the frozen `noul_temperature` must be `null` and
+`--noul-temperature` must be omitted. Production Scout forwards the server's
+raw Noul probabilities to the intent policy without client calibration.
+Applying evaluator-only calibration could turn a below-threshold raw answer
+into a passing held-out result that Scout would never deliver. Historical
+non-Scout evaluation arms may still use frozen calibration; server-side
+`server_config.temperature` is a separate declaration.
 
 New raw-response samples, resumable `.partial` logs and completed result
 files are created owner-readable/writable only (mode 0600 on POSIX), even

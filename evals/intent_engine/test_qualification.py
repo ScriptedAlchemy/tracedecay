@@ -14,7 +14,7 @@ from unittest.mock import patch
 import qualification
 import run_http
 import score
-from common import CATS, noul_questions
+from common import CATS, calibrated, noul_questions
 
 
 class QualificationTests(unittest.TestCase):
@@ -2289,6 +2289,77 @@ class QualificationTests(unittest.TestCase):
             for record in records
         ])
         return capture_bytes, manifest
+
+    def test_captured_scout_rejects_calibration_false_pass_before_inference_and_scoring(self):
+        # Scout forwards raw Noul probabilities; the optional historical
+        # calibration could make 0.55 clear a 0.60 production threshold.
+        capture, manifest = self.captured_scout_fixture()
+        self.valid(manifest)
+        self.assertLess(0.55, manifest["thresholds"]["impact"])
+        self.assertGreater(calibrated(0.55, 0.25), manifest["thresholds"]["impact"])
+        forged = copy.deepcopy(manifest)
+        forged["noul_temperature"] = 0.25
+        forged_sha = qualification.sha256_json(forged)
+
+        # Build a coherently refrozen *captured* result rather than relying on
+        # an unrelated config mismatch to make the independent scorer fail.
+        result = self.signed_result()
+        records = qualification.loads_unambiguous_json(capture)
+        for row, record in zip(result["rows"], records):
+            raw = {key: (0.55 if key in row["labels"] else 0.1)
+                   for key in self.questions}
+            wire = record["body"].encode("utf-8")
+            row["probs_raw"] = raw
+            row["probs"] = {key: calibrated(p, 0.25) for key, p in raw.items()}
+            row["request_sha256"] = qualification.sha256_bytes(wire)
+            row["request_size_bytes"] = len(wire)
+        result["config"] = "trial_" + qualification.CAPTURED_SCOUT_CONFIG
+        experiment = result["experiment"]
+        experiment["config"] = qualification.CAPTURED_SCOUT_CONFIG
+        experiment["noul_temperature"] = 0.25
+        experiment["qualification_manifest_sha256"] = forged_sha
+        experiment["requests_sha256"] = score.evidence_digest([
+            [row["id"], row["request_sha256"]] for row in result["rows"]
+        ])
+        result["experiment_sha256"] = score.evidence_digest(experiment)
+        self.assertEqual(experiment["requests_sha256"], forged["holdout_requests_sha256"])
+        self.assertEqual(
+            qualification.holdout_decision_metrics(
+                [{**row, "probs": row["probs_raw"]} for row in result["rows"]],
+                forged["thresholds"], tuple(self.questions), forged["margin_permille"],
+            )["model_only_selected_positive_case_recall"], 0,
+        )
+        self.assertEqual(
+            qualification.holdout_decision_metrics(
+                result["rows"], forged["thresholds"], tuple(self.questions),
+                forged["margin_permille"],
+            )["model_only_selected_positive_case_recall"], 1,
+        )
+        with self.assertRaisesRegex(ValueError, "captured Scout parity forbids"):
+            qualification.qualified_report(
+                result, forged, forged_sha, self.questions, self.dataset_bytes, capture,
+            )
+
+        with tempfile.TemporaryDirectory() as temp:
+            here = Path(temp)
+            (here / "dataset.json").write_bytes(self.dataset_bytes)
+            (here / "manifest.json").write_text(json.dumps(forged))
+            (here / "captured.json").write_bytes(capture)
+            (here / "server.json").write_text(json.dumps(self.server_config))
+            with patch.object(run_http, "HERE", str(here)), patch.object(
+                run_http, "post"
+            ) as post:
+                with self.assertRaisesRegex(ValueError, "captured Scout parity forbids"):
+                    run_http.main([
+                        "--url", self.endpoint, "--tag", "calibration-parity",
+                        "--server-config", str(here / "server.json"),
+                        "--qualification-manifest", str(here / "manifest.json"),
+                        "--captured-requests", str(here / "captured.json"),
+                        "--noul-temperature", "0.25",
+                        qualification.CAPTURED_SCOUT_CONFIG,
+                    ])
+                post.assert_not_called()
+            self.assertFalse((here / "results").exists())
 
     def test_captured_scout_margins_are_frozen_before_network(self):
         capture, manifest = self.captured_scout_fixture()

@@ -244,6 +244,13 @@ def validate_manifest(manifest, dataset_sha, questions, cases=None):
     ):
         raise ValueError("qualification client calibration must be null or positive finite")
 
+    # The production Scout client forwards the server's Noul probability
+    # unchanged. Historical evaluator calibration is not a runtime feature:
+    # applying it here can turn a below-threshold raw answer into a passing
+    # model-only held-out suggestion that Scout would never produce.
+    if arm["config"] == CAPTURED_SCOUT_CONFIG and client_temperature is not None:
+        raise ValueError("captured Scout parity forbids client-side Noul calibration")
+
     tolerances = manifest.get("error_tolerances")
     required = ("max_none_false_hint_rate", "max_unwanted_hint_rate", "min_positive_case_recall", "max_p95_ms")
     if not isinstance(tolerances, dict) or set(tolerances) != set(required):
