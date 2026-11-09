@@ -171,8 +171,8 @@ runs:
           : `${os.homedir().replace(/\\/g, '/')}/.cache/bazel-repo`;
         const platform = `setup-bazel-1-${process.platform}-${os.arch()}`;
         const { WORKFLOW_NAME, JOB_NAME, CACHE_NAME, MANIFEST } = process.env;
-        const workload = `${platform}-deps-${WORKFLOW_NAME}-${JOB_NAME}-${CACHE_NAME}-`;
-        const legacy = `${platform}-repository-`;
+        const identity = [WORKFLOW_NAME, JOB_NAME, CACHE_NAME].map(encodeURIComponent).join(':');
+        const workload = `${platform}-deps:${identity}:`;
         const launcher = `${platform}-launcher-helpers-${process.env.LAUNCHER_MANIFEST}`;
         const names = [process.env.CACHE_NAME, ...(process.env.EXTRA_RESTORE_KEYS || '')
           .split(',')
@@ -180,10 +180,19 @@ runs:
           .filter(Boolean)];
         const prefixes = names.map((name) =>
           `setup-bazel-1-${process.platform}-${os.arch()}-disk-${name}-`);
-        fs.appendFileSync(
-          process.env.GITHUB_OUTPUT,
-          `repository-path=${repositoryPath}\nworkload=${workload}\nworkload-manifest=${workload}${MANIFEST}-\nlegacy-manifest=${legacy}${MANIFEST}\nlegacy=${legacy}\nlauncher=${launcher}\npath=${path}\noutput-base=${windowsRoot ? `${windowsRoot}b` : ''}\nprefix=${prefixes[0]}\nrestore-keys<<EOF\n${prefixes.join('\n')}\nEOF\n`,
-        );
+        const outputs = [
+          `repository-path=${repositoryPath}`,
+          `workload=${workload}`,
+          `workload-manifest=${workload}${MANIFEST}-`,
+          `launcher=${launcher}`,
+          `path=${path}`,
+          `output-base=${windowsRoot ? `${windowsRoot}b` : ''}`,
+          `prefix=${prefixes[0]}`,
+          'restore-keys<<EOF',
+          ...prefixes,
+          'EOF',
+        ];
+        fs.appendFileSync(process.env.GITHUB_OUTPUT, outputs.join('\n') + '\n');
         JS
 
     - name: Preserve the runner network environment for Tailscale
@@ -252,8 +261,7 @@ runs:
         # under its repository name twice; keep the output base short.
         output-base: ${{ steps.disk-cache-config.outputs.output-base }}
 
-    # New snapshots share a restore prefix only with this workload. The old
-    # platform-wide keys remain read-only seeds during migration.
+    # A partial dependency snapshot can seed only its own workload.
     - name: Restore workload dependency cache
       id: repository-cache
       if: inputs.verify-launcher-cache != 'true'
@@ -264,8 +272,6 @@ runs:
         restore-keys: |
           ${{ steps.disk-cache-config.outputs.workload-manifest }}
           ${{ steps.disk-cache-config.outputs.workload }}
-          ${{ steps.disk-cache-config.outputs.legacy-manifest }}
-          ${{ steps.disk-cache-config.outputs.legacy }}
 
     # The hosted Ubuntu warmer publishes all launcher targets as one immutable
     # snapshot. Extract it into the checksum-addressed cache after the workload

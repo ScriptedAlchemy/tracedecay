@@ -59,7 +59,7 @@ jobs:
           bazel build "${options[@]}" "${targets[@]}"
 
       # Only a successful build of every target establishes a complete archive.
-      # A warm legacy/workload cache can already contain every blob on the
+      # A warm workload cache can already contain every blob on the
       # first run; the immutable helper key must still be published then.
       - name: Publish complete launcher helpers
         if: success() && github.ref == 'refs/heads/master' && inputs.offline != true && steps.bazel.outputs.launcher-cache-hit != 'true' && steps.bazel.outputs.launcher-cache-key != ''
