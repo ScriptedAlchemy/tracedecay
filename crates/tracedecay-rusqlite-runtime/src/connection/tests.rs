@@ -465,6 +465,16 @@ fn existing_sqlite_admission_requires_a_completed_header() {
 
 #[test]
 fn initialized_wal_with_uncheckpointed_schema_remains_attachable() {
+    const EXTERNAL_READER: &str = "TRACEDECAY_TEST_INSPECT_LIVE_FIRST_SCHEMA";
+    if let Some(path) = std::env::var_os(EXTERNAL_READER) {
+        let path = PathBuf::from(path);
+        let shm = sidecar_path(&path, "-shm");
+        let before = std::fs::read(&shm).unwrap();
+        let pinned = OpenedDatabaseFile::pin_initialized(&path).unwrap();
+        assert_eq!(std::fs::read(&shm).unwrap(), before);
+        pinned.release_after_workers_exit();
+        return;
+    }
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("sessions.db");
     let writer = Connection::open(&path).unwrap();
@@ -478,6 +488,21 @@ fn initialized_wal_with_uncheckpointed_schema_remains_attachable() {
     let wal = sidecar_path(&path, "-wal");
     let before = std::fs::read(&wal).unwrap();
     assert!(!before.is_empty());
+    // A separate process has no connection sharing the writer's VFS node.
+    // It must discover the live WAL index through SQLite without rewriting it.
+    let name = format!(
+        "{}::initialized_wal_with_uncheckpointed_schema_remains_attachable",
+        module_path!().split_once("::").unwrap().1
+    );
+    let external = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", &name, "--nocapture"])
+        .env(EXTERNAL_READER, &path)
+        .output()
+        .unwrap();
+    assert!(
+        external.status.success() && String::from_utf8_lossy(&external.stdout).contains("1 passed"),
+        "external WAL inspection failed: {external:?}"
+    );
     let pinned = OpenedDatabaseFile::pin_initialized(&path).unwrap();
     assert_ne!(pinned.identity(), 0);
     assert_eq!(std::fs::read(&wal).unwrap(), before);
