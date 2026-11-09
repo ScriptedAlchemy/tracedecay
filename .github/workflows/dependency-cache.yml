@@ -31,6 +31,8 @@ jobs:
     name: Cache launcher helpers
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    env:
+      OFFLINE: ${{ inputs.offline == true }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: ./.github/actions/setup-bazel
@@ -39,9 +41,8 @@ jobs:
           cache-key: dependency-helpers
           cache-save: ${{ inputs.offline != true }}
 
-      - name: Fetch launcher helpers for every supported platform
-        env:
-          OFFLINE: ${{ inputs.offline == true }}
+      - &resolve-helpers
+        name: Resolve launcher helpers for every supported platform
         run: |
           set -euo pipefail
           targets=()
@@ -63,3 +64,36 @@ jobs:
           path: ${{ steps.bazel.outputs.repository-cache-path }}
           key: ${{ steps.bazel.outputs.repository-cache-key }}
           restored-entries: ${{ steps.bazel.outputs.repository-cache-entries }}
+
+  verify:
+    name: Verify restored dependency cache
+    needs: helpers
+    if: inputs.offline != true
+    permissions:
+      contents: read
+      actions: write
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      OFFLINE: "true"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: ./.github/actions/setup-bazel
+        with:
+          cache-key: dependency-helpers-verification
+          cache-save: "false"
+      - *resolve-helpers
+
+      - name: Retire incomplete legacy Linux cache snapshots
+        if: github.ref == 'refs/heads/master'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh cache list --repo "$GITHUB_REPOSITORY" --ref refs/heads/master \
+            --key setup-bazel-1-linux-x64-repository- --limit 100 --json id,key \
+            --jq '.[] | select(.key | test("^setup-bazel-1-linux-x64-repository-[0-9a-f]{64}$")) | .id' \
+            > "$RUNNER_TEMP/legacy-dependency-caches"
+          while IFS= read -r id; do
+            gh cache delete "$id" --repo "$GITHUB_REPOSITORY"
+          done < "$RUNNER_TEMP/legacy-dependency-caches"
