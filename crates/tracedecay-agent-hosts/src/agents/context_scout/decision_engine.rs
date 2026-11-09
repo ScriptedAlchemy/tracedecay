@@ -269,7 +269,11 @@ impl DecisionEngineClientV1 {
         if !request_is_well_formed(request) {
             return None;
         }
-        let body = request_body(request, self.identity.model.as_deref(), self.max_state_bytes);
+        let body = request_body(
+            request,
+            self.identity.model.as_deref(),
+            self.max_state_bytes,
+        );
         let wire = serde_json::to_vec(&body).ok()?;
         Some(DecisionRequestCommitmentV1 {
             wire_sha256: Sha256::digest(&wire).into(),
@@ -873,17 +877,35 @@ mod tests {
 
         configured.model = Some("different-model".to_owned());
         let changed_model = DecisionEngineClientV1::new(configured).unwrap();
-        assert_ne!(changed_model.request_commitment(&original), Some(commitment));
+        assert_ne!(
+            changed_model.request_commitment(&original),
+            Some(commitment)
+        );
         let mut changed_question = original.clone();
-        changed_question.questions[0].instructions.push_str(" Be precise.");
-        assert_ne!(client.request_commitment(&changed_question), Some(commitment));
+        changed_question.questions[0]
+            .instructions
+            .push_str(" Be precise.");
+        assert_ne!(
+            client.request_commitment(&changed_question),
+            Some(commitment)
+        );
         // The prefix intentionally discarded by the configured byte cap
         // does not affect the sent request, but changed visible text does.
         let alternate_prefix = request("different private context éé latest", vec![noul("q")]);
-        assert_eq!(client.request_commitment(&alternate_prefix), Some(commitment));
+        assert_eq!(
+            client.request_commitment(&alternate_prefix),
+            Some(commitment)
+        );
         let changed_visible = request("old private context éé latest!", vec![noul("q")]);
-        assert_ne!(client.request_commitment(&changed_visible), Some(commitment));
-        assert!(client.request_commitment(&request("state", vec![])).is_none());
+        assert_ne!(
+            client.request_commitment(&changed_visible),
+            Some(commitment)
+        );
+        assert!(
+            client
+                .request_commitment(&request("state", vec![]))
+                .is_none()
+        );
     }
 
     #[test]
