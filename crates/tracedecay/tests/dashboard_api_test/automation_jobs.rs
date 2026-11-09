@@ -23,14 +23,12 @@ fn dashboard_three_request_chain_cannot_enable_and_run_a_shell_command() {
 
         let (cg, host_runtime) = setup_project(&profile, &project_root).await;
         let agent = http_agent();
-        let port = pick_free_port();
-        let (access, base_url) = dashboard_access_for(port);
+        let (endpoint, base_url) = dashboard_endpoint().await;
         let mut server = spawn_dashboard_server_with_host_runtime(
             cg,
             host_runtime,
             tracedecay_dashboard_api::DashboardTestProjectGraphsV1::default(),
-            port,
-            access,
+            endpoint,
         );
         wait_for_dashboard(&agent, &base_url).await;
 
@@ -100,14 +98,12 @@ fn automation_jobs_crud_and_manual_run_are_dashboard_controllable() {
         let (cg, host_runtime) = setup_project(&profile, &project_root).await;
         let dashboard_root = cg.store_layout().dashboard_root.clone();
         let agent = http_agent();
-        let port = pick_free_port();
-        let (access, base_url) = dashboard_access_for(port);
+        let (endpoint, base_url) = dashboard_endpoint().await;
         let mut server = spawn_dashboard_server_with_host_runtime(
             cg,
             host_runtime,
             tracedecay_dashboard_api::DashboardTestProjectGraphsV1::default(),
-            port,
-            access,
+            endpoint,
         );
         wait_for_dashboard(&agent, &base_url).await;
 
@@ -266,8 +262,7 @@ for line in sys.stdin:
             .as_str()
             .to_owned();
         let agent = http_agent();
-        let port = pick_free_port();
-        let (access, base_url) = dashboard_access_for(port);
+        let (endpoint, base_url) = dashboard_endpoint().await;
         // User-job execution reads the pinned configuration snapshot, not
         // legacy UserConfig.save(). Mount the configuration runtime and
         // enable Codex through that authority, matching the retained
@@ -276,8 +271,7 @@ for line in sys.stdin:
             cg,
             host_runtime,
             tracedecay_dashboard_api::DashboardTestProjectGraphsV1::default(),
-            port,
-            access,
+            endpoint,
         );
         wait_for_dashboard(&agent, &base_url).await;
         configure_codex_summarizer(&agent, &base_url, &project_id, &fake_codex_bin);
@@ -473,14 +467,12 @@ for line in sys.stdin:
             .as_str()
             .to_owned();
         let agent = http_agent();
-        let port = pick_free_port();
-        let (access, base_url) = dashboard_access_for(port);
+        let (endpoint, base_url) = dashboard_endpoint().await;
         let mut server = spawn_dashboard_server_with_configuration_runtime(
             cg,
             host_runtime,
             tracedecay_dashboard_api::DashboardTestProjectGraphsV1::default(),
-            port,
-            access,
+            endpoint,
         );
         wait_for_dashboard(&agent, &base_url).await;
         configure_codex_summarizer(&agent, &base_url, &project_id, &fake_codex_bin);
