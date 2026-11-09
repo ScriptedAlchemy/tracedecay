@@ -2555,8 +2555,25 @@ impl DaemonCodeIndexPublicationStoreV1 {
     /// the store, for a build over the sealed active generation.
     pub(super) fn segment_reader(&self) -> Arc<SealedSegmentReaderV1> {
         let segments_root = self.segments_root.clone();
+        // A retained generation can request many pages from the same sealed
+        // segment. Keep descriptors inside the reader lifetime, not in a
+        // process-global cache that could survive generation retirement.
+        #[cfg(unix)]
+        let pinned_reads = Mutex::new(VecDeque::<PinnedPreparationSegmentV1>::new());
         Arc::new(move |request, buffer: &mut Vec<u8>| {
-            Self::read_segment_under(&segments_root, request, buffer)
+            #[cfg(unix)]
+            {
+                let mut pinned = pinned_reads.lock().map_err(|_| {
+                    CodeIndexProductionErrorV1::Contract(
+                        "sealed generation reader cache was poisoned".to_owned(),
+                    )
+                })?;
+                Self::read_cached_retained_segment(&segments_root, request, buffer, &mut pinned)
+            }
+            #[cfg(not(unix))]
+            {
+                Self::read_segment_under(&segments_root, request, buffer)
+            }
         })
     }
 
@@ -2580,6 +2597,138 @@ impl DaemonCodeIndexPublicationStoreV1 {
         })?;
         let path = segments_root.join(format!("segment-{digest_hex}.json"));
         Self::read_segment_at(&path, request, buffer)
+    }
+
+    /// Reuse endpoint-authorized opens for repeated pages of a retained
+    /// generation. Every hit still checks the named and opened inode: a pinned
+    /// descriptor cannot authorize reads through a replaced pathname.
+    #[cfg(unix)]
+    #[tracing::instrument(
+        name = "code_index.generation.decode.segment",
+        level = "trace",
+        skip_all
+    )]
+    fn read_cached_retained_segment(
+        segments_root: &Path,
+        request: SealedGenerationSegmentReadV1<'_>,
+        buffer: &mut Vec<u8>,
+        pinned_reads: &mut VecDeque<PinnedPreparationSegmentV1>,
+    ) -> Result<(), CodeIndexProductionErrorV1> {
+        buffer.clear();
+        let (digest, size_bytes, offset, length) = match request {
+            SealedGenerationSegmentReadV1::Whole { digest, size_bytes } => {
+                (digest, size_bytes, 0, size_bytes)
+            }
+            SealedGenerationSegmentReadV1::Range {
+                digest,
+                size_bytes,
+                offset,
+                length,
+            } => (digest, size_bytes, offset, length),
+        };
+        if offset
+            .checked_add(length)
+            .is_none_or(|end| end > size_bytes)
+        {
+            return Err(CodeIndexProductionErrorV1::Contract(
+                "sealed generation segment range exceeds its manifest identity".to_owned(),
+            ));
+        }
+        usize::try_from(length).map_err(|_| {
+            CodeIndexProductionErrorV1::Contract(
+                "sealed generation segment range exceeds addressable memory".to_owned(),
+            )
+        })?;
+        let suffix = sha256_hex_suffix(digest.as_str()).ok_or_else(|| {
+            CodeIndexProductionErrorV1::Contract("sealed segment digest is not sha256".to_owned())
+        })?;
+        let path = segments_root.join(format!("segment-{suffix}.json"));
+        if let Some(index) = pinned_reads.iter().position(|entry| entry.path == path) {
+            if pinned_reads[index].segment.size_bytes != size_bytes {
+                return Err(CodeIndexProductionErrorV1::Contract(
+                    "sealed generation segment identity does not match its manifest".to_owned(),
+                ));
+            }
+            if !pinned_reads[index].unchanged() {
+                pinned_reads.clear();
+                return Err(CodeIndexProductionErrorV1::Contract(
+                    "retained sealed segment changed while pinned".to_owned(),
+                ));
+            }
+            let entry = pinned_reads.remove(index).ok_or_else(|| {
+                CodeIndexProductionErrorV1::Contract(
+                    "sealed generation read cache lost a handle".to_owned(),
+                )
+            })?;
+            pinned_reads.push_back(entry);
+        } else {
+            let named = path.symlink_metadata().map_err(|error| {
+                CodeIndexProductionErrorV1::Contract(format!(
+                    "sealed generation segment is unavailable: {error}"
+                ))
+            })?;
+            if !named.file_type().is_file() || named.len() != size_bytes {
+                return Err(CodeIndexProductionErrorV1::Contract(
+                    "sealed generation segment identity does not match its manifest".to_owned(),
+                ));
+            }
+            // Admit the new descriptor before evicting a healthy handle.
+            // Handle::from_path would trigger an additional authorized open.
+            let file = File::open(&path).map_err(|error| {
+                CodeIndexProductionErrorV1::Contract(format!(
+                    "sealed generation segment cannot be opened: {error}"
+                ))
+            })?;
+            let opened = file.metadata().map_err(|error| {
+                CodeIndexProductionErrorV1::Contract(format!(
+                    "sealed generation segment metadata cannot be read: {error}"
+                ))
+            })?;
+            let named_after = path.symlink_metadata().map_err(|error| {
+                CodeIndexProductionErrorV1::Contract(format!(
+                    "sealed generation segment pathname cannot be rechecked: {error}"
+                ))
+            })?;
+            if !Self::same_unix_segment_identity(&named, &opened)
+                || !Self::same_unix_segment_identity(&named_after, &opened)
+            {
+                return Err(CodeIndexProductionErrorV1::Contract(
+                    "sealed generation segment identity changed while opening".to_owned(),
+                ));
+            }
+            if pinned_reads.len() == MAX_STAGED_SEGMENT_READ_HANDLES {
+                pinned_reads.pop_front();
+            }
+            pinned_reads.push_back(PinnedPreparationSegmentV1 {
+                path,
+                identity: opened,
+                segment: PinnedGenerationSegmentV1 {
+                    digest: digest.as_str().to_owned(),
+                    size_bytes,
+                    file,
+                },
+            });
+        }
+        let pinned = pinned_reads.back_mut().ok_or_else(|| {
+            CodeIndexProductionErrorV1::Contract(
+                "sealed generation read cache has no handle".to_owned(),
+            )
+        })?;
+        let result = Self::read_pinned_partitioned_segment(&mut pinned.segment, request, buffer);
+        // A failed read or changed inode cannot leave an authoritative cached
+        // descriptor or bytes visible to the caller.
+        if !pinned.unchanged() {
+            buffer.clear();
+            pinned_reads.clear();
+            return Err(CodeIndexProductionErrorV1::Contract(
+                "retained sealed segment changed during read".to_owned(),
+            ));
+        }
+        if result.is_err() {
+            buffer.clear();
+            pinned_reads.clear();
+        }
+        result
     }
 
     fn read_segment_at(

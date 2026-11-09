@@ -2087,6 +2087,122 @@ fn observed_named_opens(
 
 #[cfg(target_os = "linux")]
 #[test]
+fn retained_generation_ranges_reuse_one_open_and_refuse_a_replaced_inode() {
+    let fixture = GitFixture::new(&[("src/lib.rs", "pub fn retained() -> u32 { 7 }\n")]);
+    let source_root = TempDir::new().expect("source store");
+    let generation = source_generation(&fixture, source_root.path());
+    let target_root = TempDir::new().expect("target store");
+    let mut publisher = target_store(target_root.path(), &fixture);
+    let mut preparation = publisher
+        .prepare(&generation.sealed_scope(), None)
+        .expect("prepare real generation");
+    let publication = generation
+        .stage_publication(&mut preparation)
+        .expect("stage source snapshot");
+    let identities = CodeIndexPublishedGenerationV1::partitioned_segment_identities_from_reader(
+        publication.manifest_bytes().as_ref(),
+    )
+    .expect("parse sealed segment identities")
+    .expect("partitioned generation");
+    let identity = identities
+        .into_iter()
+        .find(|identity| identity.size_bytes > 4)
+        .expect("real generation has a nonempty segment");
+    publisher
+        .commit(&mut preparation, &publication)
+        .expect("publish real generation");
+    drop(preparation);
+    drop(publisher);
+
+    let cold = target_store(target_root.path(), &fixture);
+    let reloaded = cold
+        .load_active_shared()
+        .expect("decode retained generation")
+        .expect("committed generation");
+    assert_eq!(
+        reloaded.snapshot().content_identity,
+        generation.snapshot().content_identity,
+        "retained segment caching must preserve the exact sealed snapshot"
+    );
+    let suffix = sha256_hex_suffix(identity.digest.as_str()).expect("digest suffix");
+    let path = cold.segments_root.join(format!("segment-{suffix}.json"));
+    let (sender, receiver) = std::sync::mpsc::channel();
+    let mut watcher = notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
+        let _ = sender.send(event);
+    })
+    .expect("native file-open observer");
+    watcher
+        .watch(&cold.segments_root, notify::RecursiveMode::NonRecursive)
+        .expect("watch sealed segment directory");
+
+    let reader = cold.segment_reader();
+    let mut whole = Vec::new();
+    reader(
+        SealedGenerationSegmentReadV1::Whole {
+            digest: &identity.digest,
+            size_bytes: identity.size_bytes,
+        },
+        &mut whole,
+    )
+    .expect("read committed content-addressed segment");
+    assert_eq!(segment_digest(&whole), identity.digest);
+    assert!(whole.len() > 4);
+    let mut range = Vec::new();
+    for _ in 0..16 {
+        reader(
+            SealedGenerationSegmentReadV1::Range {
+                digest: &identity.digest,
+                size_bytes: identity.size_bytes,
+                offset: 1,
+                length: 3,
+            },
+            &mut range,
+        )
+        .expect("read retained page without pathname reopen");
+        assert_eq!(range, whole[1..4]);
+    }
+    assert_eq!(
+        observed_named_opens(&receiver, &path),
+        1,
+        "one whole and sixteen range reads must cause exactly one kernel open"
+    );
+    // Prove the observer itself records a real open.
+    drop(File::open(&path).expect("control pathname open"));
+    assert_eq!(observed_named_opens(&receiver, &path), 1);
+
+    let previous = target_root.path().join("retained-original-inode");
+    std::fs::rename(&path, &previous).expect("move original inode");
+    std::fs::write(&path, &whole).expect("replace with identical bytes");
+    assert_ne!(
+        std::fs::metadata(&path).expect("replacement metadata").ino(),
+        std::fs::metadata(&previous).expect("original metadata").ino(),
+        "replacement must use a distinct inode"
+    );
+    // Drain opens caused by writing the replacement, not by the reader.
+    let _ = observed_named_opens(&receiver, &path);
+    let mut refused = vec![0x55, 0xaa];
+    assert!(matches!(
+        reader(
+            SealedGenerationSegmentReadV1::Whole {
+                digest: &identity.digest,
+                size_bytes: identity.size_bytes,
+            },
+            &mut refused,
+        ),
+        Err(CodeIndexProductionErrorV1::Contract(_))
+    ));
+    assert!(refused.is_empty(), "refused read must expose no stale bytes");
+    assert_eq!(
+        observed_named_opens(&receiver, &path),
+        0,
+        "an invalidated pinned inode must be refused without a pathname open"
+    );
+    std::fs::remove_file(&path).expect("remove substituted name");
+    std::fs::rename(&previous, &path).expect("restore original inode");
+}
+
+#[cfg(target_os = "linux")]
+#[test]
 fn initial_pointer_publication_reuses_persisted_descriptor_without_pathname_open() {
     let fixture = GitFixture::new(&[("src/lib.rs", "pub fn alpha() -> u32 { 2 }\n")]);
     let source_root = TempDir::new().expect("source store");
