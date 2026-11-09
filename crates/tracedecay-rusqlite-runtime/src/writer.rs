@@ -372,6 +372,7 @@ pub enum WriterActorError {
     StorageFailure(StorageRuntimeErrorV1),
     IncrementalVacuumFailed(String),
     IncrementalVacuumBusy,
+    IncrementalVacuumNoSpace,
     InvalidWorkerOutcome(StorageRuntimeContractErrorV1),
     TaskPanicked,
 }
@@ -394,6 +395,9 @@ impl fmt::Display for WriterActorError {
             }
             Self::IncrementalVacuumBusy => {
                 f.write_str("SQLite vacuum deferred by writer or database contention")
+            }
+            Self::IncrementalVacuumNoSpace => {
+                f.write_str("SQLite vacuum deferred by insufficient disk space")
             }
             Self::InvalidWorkerOutcome(error) => {
                 write!(f, "SQLite writer returned an invalid outcome: {error}")

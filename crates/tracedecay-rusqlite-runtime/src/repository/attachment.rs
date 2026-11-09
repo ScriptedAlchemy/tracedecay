@@ -839,7 +839,7 @@ impl Drop for RepositoryRuntimePhysicalAttachment {
 // A lost writer, revoked authority or failed reply is fatal to admission.
 fn compaction_dispatch_error(error: WriterActorError) -> RepositoryDispatchError {
     match error {
-        WriterActorError::IncrementalVacuumBusy => {
+        WriterActorError::IncrementalVacuumBusy | WriterActorError::IncrementalVacuumNoSpace => {
             RepositoryDispatchError::CompactionDeferred(error.to_string())
         }
         other => RepositoryDispatchError::Writer(other.to_string()),
@@ -1003,6 +1003,11 @@ mod tests {
         assert!(
             matches!(blocked, RepositoryDispatchError::CompactionDeferred(_)),
             "an occupied maintenance queue or busy SQLite transaction may defer"
+        );
+        let disk_full = compaction_dispatch_error(WriterActorError::IncrementalVacuumNoSpace);
+        assert!(
+            matches!(disk_full, RepositoryDispatchError::CompactionDeferred(_)),
+            "an optional vacuum must not turn disk pressure into a store-open failure"
         );
         let sqlite = compaction_dispatch_error(WriterActorError::IncrementalVacuumFailed(
             "database is read-only".to_owned(),

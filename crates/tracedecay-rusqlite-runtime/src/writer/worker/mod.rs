@@ -1156,6 +1156,10 @@ fn incremental_vacuum_error(error: rusqlite::Error) -> WriterActorError {
         Some(rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked) => {
             WriterActorError::IncrementalVacuumBusy
         }
+        // A large optional vacuum may need more WAL space than the next
+        // ordinary small write. Disk-full on that vacuum is not evidence of
+        // lost writer authority or an unusable registered store.
+        Some(rusqlite::ErrorCode::DiskFull) => WriterActorError::IncrementalVacuumNoSpace,
         _ => WriterActorError::IncrementalVacuumFailed(error.to_string()),
     }
 }
@@ -2051,6 +2055,27 @@ mod auxiliary_scheduling_tests {
         assert!(matches!(
             result.try_recv().unwrap(),
             Err(WriterActorError::IncrementalVacuumFailed(_))
+        ));
+    }
+
+    #[test]
+    fn full_sqlite_disk_quota_defers_only_optional_vacuum() {
+        let connection = rusqlite::Connection::open_in_memory().unwrap();
+        connection.pragma_update(None, "page_size", 512).unwrap();
+        connection.pragma_update(None, "max_page_count", 8).unwrap();
+        connection
+            .execute_batch("CREATE TABLE quota_probe(payload BLOB)")
+            .unwrap();
+        // Exercise SQLite's actual SQLITE_FULL result instead of inventing
+        // an error string. An optional vacuum must not block an otherwise
+        // admitted store solely because its write would exceed the quota.
+        let full = connection
+            .execute("INSERT INTO quota_probe VALUES (zeroblob(65536))", [])
+            .unwrap_err();
+        assert_eq!(full.sqlite_error_code(), Some(rusqlite::ErrorCode::DiskFull));
+        assert!(matches!(
+            incremental_vacuum_error(full),
+            WriterActorError::IncrementalVacuumNoSpace
         ));
     }
 
