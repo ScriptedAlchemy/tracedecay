@@ -2078,7 +2078,10 @@ mod auxiliary_scheduling_tests {
         let full = connection
             .execute("INSERT INTO quota_probe VALUES (zeroblob(65536))", [])
             .unwrap_err();
-        assert_eq!(full.sqlite_error_code(), Some(rusqlite::ErrorCode::DiskFull));
+        assert_eq!(
+            full.sqlite_error_code(),
+            Some(rusqlite::ErrorCode::DiskFull)
+        );
         assert!(matches!(
             incremental_vacuum_error(full),
             WriterActorError::IncrementalVacuumNoSpace
