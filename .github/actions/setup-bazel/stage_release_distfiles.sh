@@ -14,14 +14,11 @@ stage_asset() {
   fi
 }
 
-case "$RUNNER_OS" in
-  Linux)
-    # hermetic_launcher release binaries-20261025, for Linux x86-64 tools.
-    stage_asset hermeticbuild/hermetic-launcher 674976726 finalize-stub-x86_64-linux
-    stage_asset hermeticbuild/hermetic-launcher 674976728 runfiles-stub-x86_64-linux
-    ;;
-  Windows)
-    # rules_python 2.4.6, using the archive basename from its BCR source.json.
-    stage_asset bazel-contrib/rules_python 690529045 rules_python-2.4.6.tar.gz
-    ;;
-esac
+# The same rules_python archive is required by Bazel on every host.
+stage_asset bazel-contrib/rules_python 690529045 rules_python-2.4.6.tar.gz
+
+if [[ "$RUNNER_OS" == Linux && "$RUNNER_ARCH" == X64 ]]; then
+  # hermetic_launcher release binaries-20261025, for Linux x86-64 tools.
+  stage_asset hermeticbuild/hermetic-launcher 674976726 finalize-stub-x86_64-linux
+  stage_asset hermeticbuild/hermetic-launcher 674976728 runfiles-stub-x86_64-linux
+fi

@@ -224,7 +224,7 @@ runs:
 
     - name: Stage pinned Bazel inputs from the GitHub release API
       id: release-distfiles
-      if: runner.environment == 'github-hosted' && (runner.os == 'Windows' || (runner.os == 'Linux' && runner.arch == 'X64'))
+      if: runner.environment == 'github-hosted'
       shell: bash
       run: |
         runner_temp=$RUNNER_TEMP
