@@ -435,6 +435,13 @@ pub enum CodeGenerationRetentionErrorV1 {
     TargetHeld(String),
 }
 
+/// A daemon-owned generation reader releases its open segment descriptors
+/// before the retention executor unlinks any corresponding store entries.
+/// The callback runs under the exclusive generation and shared-segment locks;
+/// a refusal preserves the existing files and their durable receipts.
+pub type RetainedSegmentHandleRetirementV1 =
+    Arc<dyn Fn() -> Result<(), CodeGenerationRetentionErrorV1> + Send + Sync>;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CodeGenerationRetentionModeV1 {
     DryRun,
@@ -1774,6 +1781,7 @@ pub fn execute_code_generation_retention(
         completed_at,
         graph_replay_pool_root,
         &|| false,
+        None,
     )
 }
 
@@ -1793,6 +1801,7 @@ pub fn execute_code_generation_retention_cancellable(
     completed_at: UtcMicros,
     graph_replay_pool_root: Option<&Path>,
     is_cancelled: &dyn Fn() -> bool,
+    retire_cached_segments: Option<&RetainedSegmentHandleRetirementV1>,
 ) -> Result<CodeGenerationRetentionReportV1, CodeGenerationRetentionErrorV1> {
     if is_cancelled() {
         return Err(CodeGenerationRetentionErrorV1::Cancelled);
@@ -1835,6 +1844,16 @@ pub fn execute_code_generation_retention_cancellable(
         return Err(CodeGenerationRetentionErrorV1::UnsafeState(
             "active generation changed after the retention mark phase".to_owned(),
         ));
+    }
+    // Readers take the shared store lock before consulting their descriptor
+    // cache. Once this exclusive lock is held there can be no in-flight
+    // retained read; empty the daemon's cache before unlinking any segment.
+    // Otherwise POSIX keeps deleted segment bytes allocated indefinitely.
+    if (!plan.collectable_generations.is_empty()
+        || plan.collectable_generation_segments == GenerationSegmentCensusV1::Present)
+        && let Some(retire) = retire_cached_segments
+    {
+        retire()?;
     }
     let mut generation_segment_batch_exhausted = if plan.collectable_generations.is_empty()
         && plan.collectable_generation_segments == GenerationSegmentCensusV1::Present
@@ -2112,6 +2131,7 @@ fn run_code_generation_retention_cancellable(
         completed_at,
         graph_replay_pool_root,
         is_cancelled,
+        None,
     )
 }
 

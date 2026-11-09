@@ -1,3 +1,6 @@
+#[cfg(target_os = "linux")]
+use std::os::unix::fs::MetadataExt;
+
 use std::{
     collections::{BTreeMap, BTreeSet},
     fmt::Write as _,
@@ -16,6 +19,7 @@ use tracedecay_code_index_retention::code_index_generations::{
     CODE_INDEX_PREPARATION_DIRECTORY_PREFIX_V1, CodeGenerationRetentionErrorV1,
     CodeGenerationRetentionModeV1, DEFAULT_STRANDED_SCOPE_MINIMUM_AGE_SECS,
     DurableGenerationCardinalityV1, DurableGenerationIndexEntryV1, DurablePublicationPointerV1,
+    DurableSealedCodeGenerationIdentityV1, RetainedSegmentHandleRetirementV1,
     MAX_CODE_GENERATION_RETENTION_BATCH_V1, acquire_code_generation_store_lock,
     code_generation_segments_root, code_text_artifact_staging_root, code_text_artifacts_root,
     durable_generation_index_digest, execute_code_generation_retention_cancellable,
@@ -640,6 +644,7 @@ fn partitioned_reclamation_is_bounded_and_preserves_retained_segments() {
         UtcMicros(8_000_000),
         None,
         &|| orphan_paths.iter().any(|path| !path.exists()),
+        None
     )
     .expect_err("interrupt segment sweep after its first unlink");
     assert!(
@@ -1639,6 +1644,171 @@ fn evidence_pack_failure_after_pages_never_publishes_manifest_or_pointer() {
         !colliding_pack.exists(),
         "canonical locked maintenance must remove a final pack with no durable manifest"
     );
+}
+
+
+#[cfg(target_os = "linux")]
+#[test]
+fn ordinary_retention_closes_cached_historical_segment_before_unlink() {
+    let fixture = GitFixture::new(&[(
+        "src/lib.rs",
+        "pub fn retained_before_collection() -> usize { 1 }\n",
+    )]);
+    let store = TempDir::new().expect("isolated generation store");
+    let generation_ids = retention_generations(&fixture, store.path(), 2);
+    assert_eq!(generation_ids.len(), 2);
+
+    let pointer: DurablePublicationPointerV1 = serde_json::from_slice(
+        &std::fs::read(store.path().join("active-code-generation-v1.json"))
+            .expect("read the published generation index"),
+    )
+    .expect("decode the published generation index");
+    let old = pointer
+        .generation_index
+        .iter()
+        .find(|entry| entry.generation_id == generation_ids[0].as_str())
+        .expect("old generation remains indexed");
+    let active = pointer
+        .generation_index
+        .iter()
+        .find(|entry| entry.generation_id == generation_ids[1].as_str())
+        .expect("successor generation remains indexed");
+    let segments_of = |generation_file: &str| {
+        let manifest = std::fs::read(
+            store.path().join("code-generations-v1").join(generation_file),
+        )
+        .expect("read exact generation manifest");
+        CodeIndexPublishedGenerationV1::partitioned_segment_identities_from_reader(
+            manifest.as_slice(),
+        )
+        .expect("parse the current sealed format")
+        .expect("a published generation has segment identities")
+    };
+    let old_segments = segments_of(&old.generation_file);
+    let active_segments = segments_of(&active.generation_file);
+    let active_digests = active_segments
+        .iter()
+        .map(|identity| identity.digest.as_str())
+        .collect::<BTreeSet<_>>();
+    let retired_segment = old_segments
+        .iter()
+        .find(|identity| !active_digests.contains(identity.digest.as_str()))
+        .expect("the source edit must replace at least one nonempty segment");
+    let suffix = sha256_hex_suffix(retired_segment.digest.as_str())
+        .expect("segment content-address suffix");
+    let path = code_generation_segments_root(store.path())
+        .join(format!("segment-{suffix}.json"));
+    let expected = std::fs::read(&path).expect("read live old segment");
+    assert!(!expected.is_empty(), "the retired segment contains actual bytes");
+    let inode = std::fs::metadata(&path).expect("original segment inode");
+
+    let scheduler = scheduler(
+        &fixture,
+        store.path().to_path_buf(),
+        Arc::new(SharedCodeIndexBytePoolV1::default()),
+    );
+    let publication = scheduler.publication.clone();
+    let identity = DurableSealedCodeGenerationIdentityV1 {
+        locator: old.generation_file.clone(),
+        digest: ManifestDigest::new(old.state_digest.clone()).expect("generation digest"),
+        size_bytes: old.size_bytes,
+    };
+    let mut received = vec![0x55, 0xaa];
+    publication
+        .read_retained_partitioned_segment(
+            &identity,
+            SealedGenerationSegmentReadV1::Whole {
+                digest: &retired_segment.digest,
+                size_bytes: retired_segment.size_bytes,
+            },
+            &mut received,
+            &UninterruptibleCodeIndexControlV1,
+        )
+        .expect("serve an actual historical segment through the cached reader");
+    assert_eq!(received, expected);
+    assert_eq!(
+        publication.retained_segment_reads.lock().expect("retained cache").len(),
+        1,
+        "one actual historical segment file is held open"
+    );
+    let holders = || {
+        std::fs::read_dir("/proc/self/fd")
+            .expect("inspect actual process descriptor table")
+            .filter_map(|entry| entry.ok())
+            .filter_map(|entry| std::fs::metadata(entry.path()).ok())
+            .filter(|metadata| metadata.dev() == inode.dev() && metadata.ino() == inode.ino())
+            .count()
+    };
+    assert!(holders() > 0, "a live descriptor must pin the original inode");
+
+    let plan = tracedecay_code_index_retention::code_index_generations::plan_code_generation_retention(
+        store.path(),
+        &BTreeSet::new(),
+    )
+    .expect("independently verify retention liveness and digests");
+    assert!(
+        plan.collectable_generations
+            .iter()
+            .any(|item| item.generation_id == generation_ids[0]),
+        "the old generation must be collectable"
+    );
+    let release = publication.retained_segment_reclaimer();
+    let releases = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let observed_releases = Arc::clone(&releases);
+    let guarded: RetainedSegmentHandleRetirementV1 = Arc::new(move || {
+        observed_releases.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        release()
+    });
+    let report = execute_code_generation_retention_cancellable(
+        store.path(),
+        plan,
+        CodeGenerationRetentionModeV1::Apply,
+        UtcMicros(100_000_000),
+        None,
+        &|| false,
+        Some(&guarded),
+    )
+    .expect("apply the real normal retention transaction");
+    assert!(
+        report.deleted_generations
+            .iter()
+            .any(|item| item.generation_id == generation_ids[0]),
+        "retention must remove the actual old generation"
+    );
+    assert_eq!(releases.load(std::sync::atomic::Ordering::SeqCst), 1);
+    assert!(
+        publication.retained_segment_reads.lock().expect("retained cache").is_empty(),
+        "retention must clear the shared descriptor cache before unlinking"
+    );
+    assert!(!path.exists(), "the old-only segment pathname is reclaimed");
+    assert_eq!(
+        holders(),
+        0,
+        "normal retention must not leave the deleted inode allocated on an idle daemon"
+    );
+    assert!(
+        publication
+            .load_generation(&generation_ids[1])
+            .expect("read live generation")
+            .is_some(),
+        "the active snapshot must remain readable"
+    );
+    received = vec![0x55, 0xaa];
+    assert!(
+        publication
+            .read_retained_partitioned_segment(
+                &identity,
+                SealedGenerationSegmentReadV1::Whole {
+                    digest: &retired_segment.digest,
+                    size_bytes: retired_segment.size_bytes,
+                },
+                &mut received,
+                &UninterruptibleCodeIndexControlV1,
+            )
+            .is_err(),
+        "a collected generation must never be served from a stale cached descriptor"
+    );
+    assert_eq!(received, Vec::<u8>::new());
 }
 
 /// Membership of the durable `generation_index` is a referential-integrity

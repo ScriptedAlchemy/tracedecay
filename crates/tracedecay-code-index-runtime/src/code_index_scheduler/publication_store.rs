@@ -35,7 +35,7 @@ use tracedecay_code_index_retention::code_index_generations::{
     DurableSealedCodeGenerationIdentityV1, MAX_DURABLE_GENERATION_INDEX_BYTES_V1,
     MAX_DURABLE_GENERATION_INDEX_ENTRIES_V1, acquire_generation_segments_publication_lock,
     code_generation_segments_root, durable_generation_index_digest, reset_code_index_scope_store,
-    retain_bounded_generation_index, try_acquire_code_generation_store_lock,
+    RetainedSegmentHandleRetirementV1, retain_bounded_generation_index, try_acquire_code_generation_store_lock,
     try_acquire_code_generation_store_read_lock,
 };
 use tracedecay_domain::{
@@ -3976,6 +3976,28 @@ impl DaemonCodeIndexPublicationStoreV1 {
     /// entry shape digests differently, is deleted outright: no copy is kept
     /// and nothing is migrated. A store another owner holds is a typed busy
     /// refusal the caller retries; every other failure is reported as is.
+    pub(super) fn retained_segment_reclaimer(&self) -> RetainedSegmentHandleRetirementV1 {
+        #[cfg(unix)]
+        {
+            let cached = Arc::clone(&self.retained_segment_reads);
+            Arc::new(move || {
+                cached
+                    .lock()
+                    .map_err(|_| {
+                        CodeGenerationRetentionErrorV1::UnsafeState(
+                            "retained segment cache is poisoned".to_owned(),
+                        )
+                    })?
+                    .clear();
+                Ok(())
+            })
+        }
+        #[cfg(not(unix))]
+        {
+            Arc::new(|| Ok(()))
+        }
+    }
+
     pub(super) fn reset_corrupt_store(
         &self,
     ) -> Result<CodeIndexScopeStoreResetV1, CodeIndexPublicationStoreErrorV1> {

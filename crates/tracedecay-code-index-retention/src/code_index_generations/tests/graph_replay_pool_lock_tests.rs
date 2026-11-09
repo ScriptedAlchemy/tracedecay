@@ -276,6 +276,7 @@ fn execute_cancels_held_pool_acquire_before_any_exposure() {
         UtcMicros(121),
         Some(&pool_root),
         &|| graph_replay_pool_acquire_observation().0 >= 1,
+        None
     )
     .expect_err("cancellation during pool wait must abort execute");
 

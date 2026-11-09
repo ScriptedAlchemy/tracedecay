@@ -30,6 +30,7 @@ use tracedecay_contracts::code_index_freshness::{
     CodeGraphServingReadinessV1, CodeIndexBuildBlockedReasonV1, CodeIndexBuildPhaseV1,
     CodeIndexBuildProgressV1, CodeIndexConvergenceParkedV1,
 };
+use tracedecay_code_index_retention::code_index_generations::RetainedSegmentHandleRetirementV1;
 use tracedecay_domain::{
     CodeGenerationId, IndexPathPolicyV1, ManifestDigest, ProjectId, RepositoryId,
     SanitizedCodeFileV1, WorktreeId, forward_slash_path, host_cpu_target,
@@ -2386,6 +2387,36 @@ type AttributionSeatsV1 =
     BTreeMap<PathBuf, (CodeGenerationId, Weak<CodeIndexPublishedGenerationV1>)>;
 
 impl CodeIndexSchedulerRegistryV1 {
+    /// Coordinate ordinary daemon retention with retained-history readers.
+    /// The executor invokes the returned owner only while it holds the
+    /// exclusive store lock; no scheduler mutex or I/O is held here.
+    pub async fn retained_segment_reclaimer(
+        &self,
+        project_root: &Path,
+    ) -> Option<RetainedSegmentHandleRetirementV1> {
+        let project_root = canonical_existing_identity(project_root).ok()?;
+        if let Some(retire) = self
+            .mounted
+            .lock()
+            .await
+            .get(&project_root)
+            .map(|mounted| {
+                mounted
+                    .historical_generation_owner
+                    .publication
+                    .retained_segment_reclaimer()
+            })
+        {
+            return Some(retire);
+        }
+        self.retiring.lock().await.get(&project_root).map(|retiring| {
+            retiring
+                .historical_generation_owner
+                .publication
+                .retained_segment_reclaimer()
+        })
+    }
+
     fn incomplete_text_slice_may_continue(pending_wake: &PendingWakeV1) -> bool {
         !pending_wake.has_pending_arrival()
     }
