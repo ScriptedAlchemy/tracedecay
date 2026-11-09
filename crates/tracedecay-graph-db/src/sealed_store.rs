@@ -904,18 +904,6 @@ pub(crate) fn sweep_abandoned_row_spills(database_path: &Path) {
     }
 }
 
-fn remove_sealed_directory_checked(directory: &Path) -> Result<(), GraphDbError> {
-    let root = directory
-        .parent()
-        .ok_or_else(|| GraphDbError::unavailable("sealed directory has no parent"))?;
-    let name = directory
-        .file_name()
-        .ok_or_else(|| GraphDbError::unavailable("sealed directory has no entry name"))?;
-    tracedecay_private_fs::capability_dir::remove_child_directory_nofollow(root, name)
-        .map(|_| ())
-        .map_err(|error| sealed_store_io_failure("sealed directory removal failed", error))
-}
-
 /// Accepted replay retirement is not permission to recursively delete a
 /// substituted or unrecognizable artifact. Require the exact durable identity
 /// under a held child capability; preserve an unverified directory for retry.
@@ -981,17 +969,6 @@ fn discard_failed_sealed_adoption(
             %error,
             path = %directory.display(),
             "failed sealed adoption left an unverified artifact for inspection"
-        );
-    }
-}
-
-fn remove_sealed_directory(directory: &Path) {
-    if let Err(error) = remove_sealed_directory_checked(directory) {
-        tracing::warn!(
-            event = "sealed_artifact_cleanup_deferred",
-            path = %directory.display(),
-            %error,
-            "sealed artifact cleanup did not complete"
         );
     }
 }
