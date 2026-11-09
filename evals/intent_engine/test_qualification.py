@@ -2,6 +2,7 @@
 import copy
 import hashlib
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -1177,6 +1178,85 @@ class QualificationTests(unittest.TestCase):
                 (here / "results" / "other-experiment_B_noul_text.json.partial").exists()
             )
             self.assertEqual(sample.read_bytes(), sample_bytes)
+
+    @unittest.skipUnless(
+        os.name == "posix" and hasattr(os, "O_NOFOLLOW"),
+        "inode-safe sample admission requires POSIX O_NOFOLLOW",
+    )
+    def test_qualified_sample_path_swaps_refuse_even_with_identical_evidence(self):
+        # The other file contains valid, byte-identical first-response evidence.
+        # Merely checking JSON digests would accept it after path substitution.
+        # Force each race at the syscall boundary, not through an idle symlink.
+        with tempfile.TemporaryDirectory() as temp:
+            sample = Path(temp) / "first.json"
+            other = Path(temp) / "other.json"
+            request = {"state": "original Scout window", "questions": self.questions}
+            response = {
+                "model": "reported-model",
+                "answers": {key: {"type": "noul", "noul": 0.2}
+                            for key in self.questions},
+            }
+            experiment_sha = "f" * 64
+            requests = {
+                "holdout-positive": (
+                    request, hashlib.sha256(run_http.request_bytes(request)).hexdigest()
+                ),
+            }
+            evidence = {
+                "case_id": "holdout-positive",
+                "experiment_sha256": experiment_sha,
+                "request_sha256": requests["holdout-positive"][1],
+                "row_sha256": "a" * 64,
+                "request": request,
+                "response": response,
+            }
+            original_bytes = json.dumps(evidence).encode("utf-8")
+            other.write_bytes(original_bytes)
+            real_open, real_fstat = os.open, os.fstat
+
+            def redirect():
+                sample.unlink()
+                sample.symlink_to(other.name)
+
+            for stage in ("before_open", "after_open"):
+                with self.subTest(stage=stage):
+                    sample.write_bytes(original_bytes)
+                    self.assertEqual(
+                        run_http.validate_qualified_sample(
+                            str(sample), experiment_sha, requests,
+                        ),
+                        (run_http.digest(response), evidence["row_sha256"]),
+                    )
+                    swaps = []
+
+                    def swap_before_open(path, flags, *args, **kwargs):
+                        if path == str(sample):
+                            swaps.append(stage)
+                            redirect()
+                        return real_open(path, flags, *args, **kwargs)
+
+                    def swap_after_open(descriptor):
+                        opened = real_fstat(descriptor)
+                        swaps.append(stage)
+                        redirect()
+                        return opened
+
+                    replacement = (
+                        patch.object(run_http.os, "open", side_effect=swap_before_open)
+                        if stage == "before_open" else
+                        patch.object(run_http.os, "fstat", side_effect=swap_after_open)
+                    )
+                    with replacement:
+                        with self.assertRaisesRegex(
+                            ValueError, "qualified sample path .*regular file|replaced or redirected",
+                        ):
+                            run_http.validate_qualified_sample(
+                                str(sample), experiment_sha, requests,
+                            )
+                    self.assertEqual(swaps, [stage], "the sample inode race must actually occur")
+                    self.assertTrue(sample.is_symlink())
+                    self.assertEqual(other.read_bytes(), original_bytes)
+                    sample.unlink()
 
     def test_qualified_sample_replaced_during_resume_refuses_completed_result(self):
         with tempfile.TemporaryDirectory() as temp:

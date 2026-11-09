@@ -60,10 +60,35 @@ def validate_qualified_sample(path, experiment_sha, requests):
     fresh or resumed frozen result. Verify its original request bytes as well
     as the experiment fingerprint, without normalizing a Scout capture.
     """
-    if os.path.islink(path) or not os.path.isfile(path):
+    # The path is untrusted resumable evidence. A separate islink/isfile
+    # preflight followed by builtins.open can follow a swapped-in symlink.
+    # Open the inode itself without following links or waiting on a FIFO,
+    # then verify it is still the named, regular sample after reading.
+    if not hasattr(os, "O_NOFOLLOW") and os.path.islink(path):
         raise ValueError("qualified sample path must be a regular file")
-    with open(path, "rb") as source:
-        sample = loads_unambiguous_json(source.read())
+    flags = os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(path, flags)
+    except OSError as error:
+        if error.errno in (errno.ELOOP, errno.ENOTDIR):
+            raise ValueError("qualified sample path must be a regular file") from error
+        raise
+    try:
+        opened = os.fstat(descriptor)
+        if not stat.S_ISREG(opened.st_mode):
+            raise ValueError("qualified sample path must be a regular file")
+        with os.fdopen(descriptor, "rb", closefd=False) as source:
+            sample_bytes = source.read()
+    finally:
+        os.close(descriptor)
+    try:
+        named = os.stat(path, follow_symlinks=False)
+    except FileNotFoundError as error:
+        raise ValueError("qualified sample path disappeared during validation") from error
+    if (not stat.S_ISREG(named.st_mode)
+            or (opened.st_dev, opened.st_ino) != (named.st_dev, named.st_ino)):
+        raise ValueError("qualified sample path was replaced or redirected")
+    sample = loads_unambiguous_json(sample_bytes)
     if not isinstance(sample, dict):
         raise ValueError("qualified sample must be a JSON object")
     case_id = sample.get("case_id")
