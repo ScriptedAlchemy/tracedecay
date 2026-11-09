@@ -214,6 +214,42 @@ class QualificationTests(unittest.TestCase):
         self.assertFalse(report["qualified_against_frozen_tolerances"])
 
 
+    def test_single_selected_wrong_hint_blocks_qualification_despite_any_hit_recall(self):
+        # The original all-hits recall is 1.0: impact is over threshold.
+        # Scout-like single selection would deliver the higher wrong category.
+        # Even a precommitted permissive unwanted-hint budget cannot allow the
+        # frozen positive-case recall check to accept that wrong first pick.
+        result = self.signed_result()
+        result["rows"][0]["probs"]["call_graph"] = 0.99
+        frozen = copy.deepcopy(self.manifest)
+        frozen["error_tolerances"]["max_unwanted_hint_rate"] = 1.0
+        manifest_sha = qualification.sha256_json(frozen)
+        result["experiment"]["qualification_manifest_sha256"] = manifest_sha
+        result["experiment_sha256"] = score.evidence_digest(result["experiment"])
+        report = qualification.qualified_report(
+            result, frozen, manifest_sha, self.questions, self.dataset_bytes
+        )
+        self.assertEqual(report["fixed_threshold_metrics"]["pos_cases_with_a_correct_hint"], 1)
+        self.assertEqual(report["holdout_decisions"]["unwanted_hint_rate"], 0.5)
+        self.assertEqual(report["holdout_decisions"]["model_only_selected_positive_case_recall"], 0)
+        self.assertEqual(report["holdout_decisions"]["model_only_selected_unwanted_hint_rate"], 0.5)
+        self.assertTrue(report["checks"]["unwanted_hint_rate"])
+        self.assertFalse(report["checks"]["positive_case_recall"])
+        self.assertFalse(report["qualified_against_frozen_tolerances"])
+
+    def test_single_selection_ties_follow_frozen_question_order(self):
+        positive = {"labels": ["impact"], "probs": {"impact": 0.9, "call_graph": 0.9}}
+        correct_first = qualification.holdout_decision_metrics(
+            [positive], {"impact": 0.6, "call_graph": 0.6}
+        )
+        wrong_first = qualification.holdout_decision_metrics(
+            [positive], {"call_graph": 0.6, "impact": 0.6}
+        )
+        self.assertEqual(correct_first["model_only_selected_positive_case_recall"], 1)
+        self.assertEqual(wrong_first["model_only_selected_positive_case_recall"], 0)
+        self.assertEqual(correct_first["unwanted_hint_rate"], 1)
+        self.assertEqual(wrong_first["unwanted_hint_rate"], 1)
+
     def test_native_kev_truncation_is_measured_not_assumed_from_a_flag(self):
         # Native Kev emits state_tokens/state_tokens_used and a top-level
         # truncated flag, not necessarily state_tokens_dropped.

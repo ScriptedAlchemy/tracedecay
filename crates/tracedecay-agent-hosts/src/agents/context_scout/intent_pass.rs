@@ -1373,9 +1373,15 @@ mod tool_signal_tests {
         assert_eq!(receipt["window"]["last_store_id"], 81);
         assert_eq!(receipt["window"]["message_count"], 1);
         assert!(receipt["window"]["window_digest"].is_string());
-        assert_eq!(receipt["window"]["selection_observed_at_micros"], 1_234_567_891);
+        assert_eq!(
+            receipt["window"]["selection_observed_at_micros"],
+            1_234_567_891
+        );
         let later_receipt: serde_json::Value = serde_json::from_str(&later).unwrap();
-        assert_eq!(later_receipt["window"]["selection_observed_at_micros"], 1_234_567_892);
+        assert_eq!(
+            later_receipt["window"]["selection_observed_at_micros"],
+            1_234_567_892
+        );
         assert_ne!(evidence, later);
         assert_eq!(
             receipt["window"]["selection_limits"],

@@ -257,7 +257,13 @@ question and `error_tolerances` with all four numbers:
 `max_none_false_hint_rate` (0–1), `max_unwanted_hint_rate` (0–1),
 `min_positive_case_recall` (0–1), and `max_p95_ms` (nonnegative milliseconds).
 The unwanted-hint budget counts an incorrect extra suggestion on a positive
-case, even if another correct suggestion made its recall appear successful.
+case, even if another correct suggestion passed its threshold. The frozen
+positive-case recall check uses the **single highest-probability qualifying
+model-only pick** (ties follow frozen question order), not any-hit recall.
+The report retains any-hit recall and all-firing metrics separately. This is
+only a necessary Noul selection check: the model-only comparison does **not**
+replay Scout's deterministic action facts, per-question margins, duplicate
+suppression or delivery state and cannot establish runtime parity.
 These tolerances must be frozen before examining the held-out results.
 
 The `annotations` array must cover every case in the original dataset, in

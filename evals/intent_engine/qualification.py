@@ -331,12 +331,14 @@ def validate_manifest(manifest, dataset_sha, questions, cases=None):
 
 
 def holdout_decision_metrics(rows, thresholds):
-    """Count unwanted suggestions even when another hint on the same case is correct.
+    """Measure all threshold hits separately from the single model-only pick.
 
-    False hints on negative-only cases are not the full false-positive budget:
-    a positive case can still receive an incorrect additional suggestion.
+    Scout delivers only the first candidate, not every above-threshold answer.
+    This diagnostic omits Scout's action facts, margins and delivery suppression;
+    it is a necessary model-only selection check, not production runtime parity.
     """
     hinted = unwanted = missed_positive = positive = 0
+    selected_correct_positive = selected_unwanted = 0
     for row in rows:
         labels = set(row["labels"])
         fired = {key for key in thresholds if row["probs"][key] >= thresholds[key]}
@@ -344,6 +346,16 @@ def holdout_decision_metrics(rows, thresholds):
         unwanted += bool(fired - labels)
         positive += bool(labels)
         missed_positive += bool(labels and not (fired & labels))
+        # Keep the frozen question order for equal probabilities. The existing
+        # top1 benchmark picks by distance above threshold, which can disagree
+        # with Scout's relevance-first candidate ordering.
+        selected = max(
+            (key for key in thresholds if key in fired),
+            key=lambda key: row["probs"][key],
+            default=None,
+        )
+        selected_correct_positive += bool(labels and selected in labels)
+        selected_unwanted += bool(selected is not None and selected not in labels)
     return {
         "hinted_cases": hinted,
         "abstained_cases": len(rows) - hinted,
@@ -353,8 +365,13 @@ def holdout_decision_metrics(rows, thresholds):
         "unwanted_hint_rate": unwanted / len(rows),
         "missed_positive_cases": missed_positive,
         "missed_positive_rate": missed_positive / positive if positive else None,
+        "model_only_selected_correct_positive_cases": selected_correct_positive,
+        "model_only_selected_positive_case_recall": (
+            selected_correct_positive / positive if positive else None
+        ),
+        "model_only_selected_unwanted_hint_cases": selected_unwanted,
+        "model_only_selected_unwanted_hint_rate": selected_unwanted / len(rows),
     }
-
 
 def qualified_report(result, manifest, manifest_sha, questions, dataset_bytes, captured_requests_bytes=None, sample_path=None):
     """Reproduce qualified predictions from the frozen original dataset."""
@@ -540,7 +557,9 @@ def qualified_report(result, manifest, manifest_sha, questions, dataset_bytes, c
     rates = {
         "none_false_hint_rate": fixed["none_false_hint_rate"],
         "unwanted_hint_rate": decisions["unwanted_hint_rate"],
-        "positive_case_recall": fixed["pos_cases_with_a_correct_hint"],
+        # An any-hit recall can pass even when the highest-ranked suggestion
+        # is wrong. Never qualify a single-delivery application on that number.
+        "positive_case_recall": decisions["model_only_selected_positive_case_recall"],
         "p95_ms": latency["p95_ms"],
     }
     if any(value is None for value in rates.values()):
