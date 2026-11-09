@@ -10,6 +10,13 @@ inputs:
   restored-entries:
     description: Entry count returned by setup-bazel before the build.
     required: true
+  restored-key:
+    description: Previously restored snapshot, returned when no new files were fetched.
+    default: ""
+outputs:
+  key:
+    description: Published or already complete dependency snapshot.
+    value: ${{ steps.changed.outputs.changed == 'true' && inputs.key || inputs.restored-key }}
 runs:
   using: composite
   steps:
