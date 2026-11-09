@@ -525,16 +525,21 @@ mod tests {
         std::fs::write(staged.join("sealed.json"), b"built").unwrap();
         std::fs::create_dir(&installed).unwrap();
 
-        let result =
-            install_child_directory_noreplace_nofollow(&root, staged_name, installed_name);
+        let result = install_child_directory_noreplace_nofollow(&root, staged_name, installed_name);
         assert_eq!(result.unwrap_err().kind(), io::ErrorKind::AlreadyExists);
-        assert!(installed.is_dir(), "an empty foreign target is not expendable");
+        assert!(
+            installed.is_dir(),
+            "an empty foreign target is not expendable"
+        );
         assert_eq!(std::fs::read(staged.join("sealed.json")).unwrap(), b"built");
 
         std::fs::remove_dir(&installed).unwrap();
         install_child_directory_noreplace_nofollow(&root, staged_name, installed_name).unwrap();
         assert!(!staged.exists());
-        assert_eq!(std::fs::read(installed.join("sealed.json")).unwrap(), b"built");
+        assert_eq!(
+            std::fs::read(installed.join("sealed.json")).unwrap(),
+            b"built"
+        );
     }
 
     #[cfg(unix)]
@@ -557,7 +562,10 @@ mod tests {
         assert!(install_child_directory_noreplace_nofollow(&real, stage, published).is_err());
         assert!(!foreign.join("installed").exists());
         assert!(!real.join("installed").exists());
-        assert_eq!(std::fs::read(foreign.join("sentinel")).unwrap(), b"preserve");
+        assert_eq!(
+            std::fs::read(foreign.join("sentinel")).unwrap(),
+            b"preserve"
+        );
     }
 
     #[test]
