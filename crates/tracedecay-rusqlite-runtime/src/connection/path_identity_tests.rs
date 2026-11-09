@@ -392,10 +392,19 @@ fn verified_reader_release_preserves_independent_writer_exclusion() {
                 .execute_batch(&format!(
                     "PRAGMA journal_mode = {journal};
                      CREATE TABLE sample(value INTEGER);
-                     INSERT INTO sample VALUES (1);
-                     BEGIN IMMEDIATE;
-                     UPDATE sample SET value = 2;"
+                     INSERT INTO sample VALUES (1);"
                 ))
+                .expect("seed committed SQLite row");
+            if journal == "WAL" && immutable {
+                // Immutable readers cannot rely on uncheckpointed WAL content.
+                // Give this variant a proven, durable committed baseline;
+                // the ordinary WAL snapshot variant stays uncheckpointed.
+                writer
+                    .execute_batch("PRAGMA wal_checkpoint(TRUNCATE)")
+                    .expect("checkpoint immutable reader baseline");
+            }
+            writer
+                .execute_batch("BEGIN IMMEDIATE; UPDATE sample SET value = 2;")
                 .expect("hold SQLite writer lock");
             let operation = if journal == "WAL" { "journal" } else { "write" };
             probe_external_connection(&path, operation, true);
@@ -410,13 +419,19 @@ fn verified_reader_release_preserves_independent_writer_exclusion() {
             assert_eq!(
                 reader
                     .connection()
-                    .query_row("SELECT 1", [], |row| row.get::<_, i64>(0)),
-                Ok(1)
+                    .query_row("SELECT value FROM sample", [], |row| row.get::<_, i64>(0)),
+                Ok(1),
+                "both verified reader policies must see committed rows, never the pending update"
             );
+            probe_external_connection_expectation(&path, "read", "read:1");
             drop(reader);
             probe_external_connection(&path, operation, true);
+            // Reader destruction must not lose the writer's lock or
+            // prevent another process from reading the committed snapshot.
+            probe_external_connection_expectation(&path, "read", "read:1");
 
             writer.execute_batch("COMMIT").expect("commit writer");
+            probe_external_connection_expectation(&path, "read", "read:2");
             if journal == "WAL" {
                 probe_external_connection(&path, "journal", true);
             } else {
