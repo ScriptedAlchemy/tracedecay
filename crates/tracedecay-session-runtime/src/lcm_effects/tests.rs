@@ -2590,6 +2590,46 @@ async fn malformed_relation_receipt_is_permanent_without_starving_summary_work()
         idle.next_retry_at_unix_seconds.is_some(),
         "sleeping receipts must keep their future retry deadline"
     );
+    // Waking the entire deferred backlog switches to the creation-ordered
+    // catch-up path. A one-item page must still surface a sentinel and settle
+    // the oldest durable receipt, even when its journal is unavailable.
+    let transaction = db.begin_write_transaction().await.unwrap();
+    let woken = transaction
+        .execute(
+            "UPDATE session_relation_receipts
+             SET recovery_next_attempt_at = 0
+             WHERE session_id LIKE 'deferred-relation-%'",
+            (),
+        )
+        .await
+        .unwrap();
+    assert_eq!(woken, 256);
+    transaction.commit().await.unwrap();
+    let dense = SessionTemporalAccess::new(&*db)
+        .recover_pending_session_relation_projection_page(
+            1,
+            std::sync::Arc::new(tracedecay_graph_db::NeverCancelled),
+        )
+        .await
+        .unwrap();
+    assert_eq!(dense.processed, 1);
+    assert!(dense.has_more, "a dense due queue keeps the page sentinel");
+    let snapshot = db.read_snapshot().await.unwrap();
+    let mut rows = snapshot
+        .query(
+            "SELECT recovery_state, recovery_failure_code
+             FROM session_relation_receipts
+             WHERE session_id = 'deferred-relation-0001'",
+            (),
+        )
+        .await
+        .unwrap();
+    let row = rows.next().await.unwrap().unwrap();
+    assert_eq!(row.get::<String>(0).unwrap(), "permanent");
+    assert_eq!(
+        row.get::<Option<String>>(1).unwrap().as_deref(),
+        Some("journal_missing")
+    );
 }
 
 #[test]

@@ -30,6 +30,8 @@ const DEFAULT_MAX_RELATIONS: usize = 100_000;
 const APPLY_PUBLICATION_RACE_ATTEMPTS: usize = 3;
 // A bounded creation-order prefix avoids counting a dense due backlog.
 const RECOVERY_CREATION_PROBE_ROWS: i64 = 64;
+// Limit the deadline-probe work before falling back to the ordered index.
+const RECOVERY_DUE_PROBE_ROWS: i64 = 16_384;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct SessionRelationRecoveryPage {
@@ -375,23 +377,25 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
         let prefer_creation_order = if prefix_due >= query_limit {
             true
         } else {
+            // Count at most a fixed number of deadline-index entries, not the
+            // entire pending queue. Sparse due work then sorts only those
+            // eligible receipts; a large due backlog instead streams in
+            // creation order without sorting the whole catch-up batch.
             let mut count_rows = snapshot
                 .query(
-                    "SELECT
-                         (SELECT COUNT(*) FROM session_relation_receipts
+                    "SELECT COUNT(*) FROM (
+                         SELECT 1 FROM session_relation_receipts
                               INDEXED BY idx_session_relation_receipts_recovery_due
-                          WHERE state = 'pending'
-                            AND recovery_state IN ('pending', 'retryable')),
-                         (SELECT COUNT(*) FROM session_relation_receipts
-                              INDEXED BY idx_session_relation_receipts_recovery_due
-                          WHERE state = 'pending'
-                            AND recovery_state IN ('pending', 'retryable')
-                            AND recovery_next_attempt_at <= ?1)",
-                    params![now],
+                         WHERE state = 'pending'
+                           AND recovery_state IN ('pending', 'retryable')
+                           AND recovery_next_attempt_at <= ?1
+                         LIMIT ?2
+                     )",
+                    params![now, RECOVERY_DUE_PROBE_ROWS],
                 )
                 .await
                 .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?;
-            let counts = count_rows
+            let due_in_probe: i64 = count_rows
                 .next()
                 .await
                 .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?
@@ -400,15 +404,11 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
                         RECONSTRUCT_OPERATION,
                         "relation recovery count probe returned no aggregate row",
                     )
-                })?;
-            let eligible: i64 = counts
+                })?
                 .get(0)
                 .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?;
-            let due: i64 = counts
-                .get(1)
-                .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?;
             drop(count_rows);
-            due.saturating_mul(3) >= eligible
+            due_in_probe >= RECOVERY_DUE_PROBE_ROWS
         };
         let index_name = if prefer_creation_order {
             "idx_session_relation_receipts_pending"
