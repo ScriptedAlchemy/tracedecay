@@ -1997,7 +1997,15 @@ mod tests {
         let mut retention = Vec::new();
         let mut availability = Vec::new();
         let mut budget = MAX_STORAGE_REPORT_WALK_ENTRIES;
-        for project_id in ["../../outside", "../outside", "nested/store", "..", ".", "", "bad\\name"] {
+        for project_id in [
+            "../../outside",
+            "../outside",
+            "nested/store",
+            "..",
+            ".",
+            "",
+            "bad\\name",
+        ] {
             let error = append_project_report(
                 &profile,
                 project_id,
