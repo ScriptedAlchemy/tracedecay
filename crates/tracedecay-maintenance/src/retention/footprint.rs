@@ -515,9 +515,7 @@ fn footprint_keys(relative: &Path) -> Option<FootprintKeys> {
                 inner
                     .first()
                     .filter(|name| is_wal_family_root(name, inner.len() == 1))
-                    .map(|first| {
-                        (format!("{store_key}/{first}"), ProfileFamilyV1::Wal)
-                    })
+                    .map(|first| (format!("{store_key}/{first}"), ProfileFamilyV1::Wal))
             });
         return Some(FootprintKeys {
             primary: (store_key, ProfileFamilyV1::ProjectStore),
@@ -1615,7 +1613,10 @@ mod tests {
         let temp = tempfile::tempdir().expect("footprint fixture");
         let profile = temp.path().join("profile");
         for (relative, bytes) in [
-            ("projects/proj_payload/code-index-v1/objects/archive.wal", 40),
+            (
+                "projects/proj_payload/code-index-v1/objects/archive.wal",
+                40,
+            ),
             ("projects/proj_payload/lcm-payloads/payload-wal/chunk", 30),
             ("projects/proj_payload/response-handles/result.wal", 17),
             ("projects/proj_payload/plain", 3),
@@ -1630,7 +1631,11 @@ mod tests {
         let footprint = census_profile_footprint(&profile, &BTreeMap::new(), &overrides);
         assert_eq!(footprint.total_bytes, 97);
         assert_eq!(footprint.unavailable_entry_count, 0);
-        assert_eq!(footprint.entries.len(), 2, "nested payloads cannot be false WALs");
+        assert_eq!(
+            footprint.entries.len(),
+            2,
+            "nested payloads cannot be false WALs"
+        );
         assert_eq!(
             footprint.full_profile_size().state,
             ProfileTotalCoverageStateV1::Complete
@@ -1839,7 +1844,11 @@ mod tests {
             ("scratch.wal", ProfileFamilyV1::Other, 13),
             ("user-sessions.db-wal", ProfileFamilyV1::Wal, 7),
             ("projects/proj_wal", ProfileFamilyV1::ProjectStore, 59),
-            ("projects/proj_wal/sessions.db-wal", ProfileFamilyV1::Wal, 17),
+            (
+                "projects/proj_wal/sessions.db-wal",
+                ProfileFamilyV1::Wal,
+                17,
+            ),
             (
                 "projects/proj_wal/tracedecay.grafeo.wal",
                 ProfileFamilyV1::Wal,
