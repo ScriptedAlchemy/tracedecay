@@ -622,12 +622,16 @@ mod replacement_tests {
         atomic_replace_child_file_nofollow(temp.path(), OsStr::new("sealed.checked"), b"proof")
             .unwrap();
         assert_eq!(std::fs::read(&marker).unwrap(), b"proof");
-        assert!(
-            std::fs::read_dir(temp.path())
-                .unwrap()
-                .all(|entry| !entry.unwrap().file_name().to_string_lossy().starts_with(".sealed-proof-")),
-            "rejected publications must not leave staging files"
-        );
+        for entry in std::fs::read_dir(temp.path()).unwrap() {
+            assert!(
+                !entry
+                    .unwrap()
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".sealed-proof-"),
+                "rejected publications must not leave staging files"
+            );
+        }
     }
 
     #[test]
