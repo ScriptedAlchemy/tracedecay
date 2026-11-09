@@ -35,17 +35,26 @@ def actions(job_steps: list[dict[str, Any]], action: str) -> list[dict[str, Any]
     return [step for step in job_steps if step.get("uses", "").startswith(action + "@")]
 
 
+def check_build_credentials(definition: dict[str, Any]) -> None:
+    if any(secret in str(definition) for secret in ("secrets.", "github.token")):
+        fail("SDK build must not receive repository credentials")
+
+
 def reviewed_steps(job_steps: list[dict[str, Any]], parents: tuple[str, ...] = ()) -> list[dict[str, Any]]:
     """Inspect local composites from the immutable checkout, including nested pins."""
     result = []
     for step in job_steps:
         uses = step.get("uses", "")
         if uses.startswith("./"):
-            if not re.fullmatch(r"\./\.github/actions/[A-Za-z0-9_-]+", uses) or uses in parents:
+            if not re.fullmatch(r"\./\.github/actions/(?:[A-Za-z0-9_-]+/)*[A-Za-z0-9_-]+", uses) or uses in parents:
                 fail(f"invalid or recursive local action: {uses}")
-            helper = yaml.safe_load((REPOSITORY_ROOT / uses / "action.yml").read_text())
+            action_file = REPOSITORY_ROOT.resolve() / uses / "action.yml"
+            if action_file.resolve() != action_file:
+                fail(f"local action must use its reviewed checkout path: {uses}")
+            helper = yaml.safe_load(action_file.read_text())
             if helper["runs"]["using"] != "composite":
                 fail(f"local action must be a reviewed composite: {uses}")
+            check_build_credentials(helper)
             result.extend(reviewed_steps(helper["runs"]["steps"], (*parents, uses)))
         else:
             if uses and not re.fullmatch(r"[^@]+@[0-9a-f]{40}", uses):
@@ -89,8 +98,7 @@ def validate(workflow: dict[str, Any]) -> None:
     checkout_path = options.get("path", ".")
     if not isinstance(checkout_path, str) or PurePosixPath(checkout_path) != PurePosixPath("."):
         fail("SDK checkout must place the validated source at the workspace root")
-    if any(secret in str((build, build_steps)) for secret in ("secrets.", "github.token")):
-        fail("SDK build must not receive repository credentials")
+    check_build_credentials(build)
 
     if set(publish.get("needs", [])) != {"validate-release", "verify-release", BUILD_JOB}:
         fail("SDK publisher must depend on source validation, release verification and the SDK build")

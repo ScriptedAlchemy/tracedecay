@@ -163,6 +163,24 @@ class SdkPublishBoundaryTests(unittest.TestCase):
         self.build["steps"].append(copy.deepcopy(self.build["steps"][0]))
         self.assert_rejected("first and only check out")
 
+    def test_nested_composite_inputs_keep_the_sdk_build_uncredentialed(self) -> None:
+        with tempfile.TemporaryDirectory() as scratch:
+            CHECKER.REPOSITORY_ROOT = Path(scratch)
+            path = ".github/actions/cache/save"
+            action = Path(scratch) / path / "action.yml"
+            action.parent.mkdir(parents=True)
+            nested = {"uses": "actions/cache/save@" + "a" * 40}
+            definition = {
+                "inputs": {"download-token": {"default": ""}},
+                "runs": {"using": "composite", "steps": [nested]},
+            }
+            action.write_text(yaml.safe_dump(definition))
+            self.assertEqual(CHECKER.reviewed_steps([{"uses": "./" + path}]), [nested])
+            definition["inputs"]["download-token"]["default"] = "${{ github.token }}"
+            action.write_text(yaml.safe_dump(definition))
+            with self.assertRaisesRegex(ValueError, "repository credentials"):
+                CHECKER.reviewed_steps([{"uses": "./" + path}])
+
 
 if __name__ == "__main__":
     unittest.main()
