@@ -2757,16 +2757,16 @@ impl DaemonCodeIndexPublicationStoreV1 {
     ) -> Result<(), CodeIndexProductionErrorV1> {
         // Errors must not leave bytes from an earlier successful range visible.
         buffer.clear();
-        let (digest, expected_size, offset, length) = match request {
+        let (digest, expected_size, offset, length, whole) = match request {
             SealedGenerationSegmentReadV1::Whole { digest, size_bytes } => {
-                (digest.as_str(), size_bytes, 0, size_bytes)
+                (digest.as_str(), size_bytes, 0, size_bytes, true)
             }
             SealedGenerationSegmentReadV1::Range {
                 digest,
                 size_bytes,
                 offset,
                 length,
-            } => (digest.as_str(), size_bytes, offset, length),
+            } => (digest.as_str(), size_bytes, offset, length, false),
         };
         if offset
             .checked_add(length)
@@ -2793,7 +2793,16 @@ impl DaemonCodeIndexPublicationStoreV1 {
                 CodeIndexProductionErrorV1::Contract(format!(
                     "sealed generation segment read failed: {error}"
                 ))
-            })
+            })?;
+        // A cold pinned read must enforce the same whole-segment digest
+        // contract as the uncached reader, not just its pathname and extent.
+        if whole && Self::state_digest(buffer) != digest {
+            buffer.clear();
+            return Err(CodeIndexProductionErrorV1::Contract(
+                "sealed generation segment does not match its content address".to_owned(),
+            ));
+        }
+        Ok(())
     }
 
     #[tracing::instrument(

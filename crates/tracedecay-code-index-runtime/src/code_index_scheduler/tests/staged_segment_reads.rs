@@ -698,6 +698,68 @@ fn staged_writer_authentication_avoids_commit_reopens_and_rejects_replaced_inode
 }
 
 #[test]
+fn cold_staged_whole_segment_read_rejects_same_inode_content_corruption() {
+    let fixture = GitFixture::new(&[("src/lib.rs", "pub fn alpha() -> u32 { 1 }\n")]);
+    let source_root = TempDir::new().expect("source store");
+    let generation = source_generation(&fixture, source_root.path());
+    let target_root = TempDir::new().expect("target store");
+    let mut target = target_store(target_root.path(), &fixture);
+    let mut preparation = target
+        .prepare(&generation.sealed_scope(), None)
+        .expect("prepare target");
+    let publication = generation
+        .stage_publication(&mut preparation)
+        .expect("stage real generation");
+    let identity = CodeIndexPublishedGenerationV1::partitioned_segment_identities_from_reader(
+        publication.manifest_bytes().as_ref(),
+    )
+    .expect("parse staged segment identities")
+    .expect("partitioned generation")
+    .into_iter()
+    .find(|segment| segment.size_bytes > 4)
+    .expect("nonempty staged segment");
+    let path = staged_path(&preparation, &identity.digest);
+    let original = std::fs::read(&path).expect("staged segment bytes");
+    assert_eq!(segment_digest(&original), identity.digest);
+    let before = path.symlink_metadata().expect("staged inode");
+
+    // Mutate before the first reader open: metadata checks within the pinned
+    // reader cannot discover a change to an inode they have never observed.
+    let mut corrupted = original.clone();
+    corrupted[0] ^= 1;
+    std::fs::write(&path, &corrupted).expect("corrupt staged inode in place");
+    assert_ne!(segment_digest(&corrupted), identity.digest);
+    let after = path.symlink_metadata().expect("changed inode");
+    assert_eq!(
+        (before.dev(), before.ino(), before.len()),
+        (after.dev(), after.ino(), after.len()),
+        "the regression must preserve the pathname, inode and extent"
+    );
+
+    let reader = preparation.segment_reader();
+    let open_count = preparation.staged_segment_read_open_attempts_for_test();
+    assert_eq!(open_count, 0, "exercise an actual cold pinned read");
+    let mut output = b"stale response".to_vec();
+    assert!(matches!(
+        reader(
+            SealedGenerationSegmentReadV1::Whole {
+                digest: &identity.digest,
+                size_bytes: identity.size_bytes,
+            },
+            &mut output,
+        ),
+        Err(CodeIndexProductionErrorV1::Contract(_))
+    ));
+    assert_eq!(
+        preparation.staged_segment_read_open_attempts_for_test(),
+        open_count + 1,
+        "the digest refusal must follow one real pinned-file open"
+    );
+    assert!(output.is_empty(), "corrupt bytes must not escape");
+    preparation.abort().expect("abort corrupted staged generation");
+}
+
+#[test]
 fn committed_whole_segment_read_refuses_same_length_corruption() {
     let fixture = GitFixture::new(&[("src/lib.rs", "pub fn alpha() -> u32 { 1 }\n")]);
     let source_root = TempDir::new().expect("source store");
