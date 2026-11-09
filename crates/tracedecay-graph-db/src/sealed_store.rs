@@ -3447,6 +3447,7 @@ mod receipt_budget_tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn census_does_not_classify_copied_or_foreign_receipts_as_live_heads() {
         let temp = tempfile::tempdir().unwrap();
@@ -3499,7 +3500,6 @@ mod receipt_budget_tests {
         assert_eq!(census.head_bytes, owned_receipt.len() as u64 + 13);
         assert!(foreign.join(SEALED_STORE_DATABASE_FILE).exists());
     }
-
 }
 
 #[cfg(test)]
