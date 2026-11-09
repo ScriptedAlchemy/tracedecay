@@ -66,7 +66,9 @@ impl Subscriber for ConnectionAtHandoff {
             .unwrap();
         assert_eq!(value(&connection), 7);
         if self.writer {
-            connection.execute_batch("UPDATE data SET value = 17").unwrap();
+            connection
+                .execute_batch("UPDATE data SET value = 17")
+                .unwrap();
         }
         probe(&self.path, self.journal, self.writer, true);
         let mut slot = self.connection.lock().unwrap();
@@ -102,7 +104,8 @@ fn external_handoff_probe() {
     let journal = env::var(JOURNAL).unwrap();
     let blocked: bool = env::var(BLOCKED).unwrap().parse().unwrap();
     let writer =
-        Connection::open_with_flags(PathBuf::from(path), OpenFlags::SQLITE_OPEN_READ_WRITE).unwrap();
+        Connection::open_with_flags(PathBuf::from(path), OpenFlags::SQLITE_OPEN_READ_WRITE)
+            .unwrap();
     writer.busy_timeout(Duration::ZERO).unwrap();
     assert_eq!(value(&writer), 7);
     let result = if journal == "writer" {
@@ -219,7 +222,9 @@ fn check_handoff(publication: Publication, writer: bool) {
         drop(connection);
         probe(&destination, journal, writer, false);
         let reopened = Connection::open(&destination).unwrap();
-        reopened.execute_batch("UPDATE data SET value = 23").unwrap();
+        reopened
+            .execute_batch("UPDATE data SET value = 23")
+            .unwrap();
         drop(reopened);
         let reopened =
             Connection::open_with_flags(&destination, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
