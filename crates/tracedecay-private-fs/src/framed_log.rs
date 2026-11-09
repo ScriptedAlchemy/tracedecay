@@ -491,9 +491,9 @@ fn remove_owned_temp(path: &Path) {
 pub mod sync_latency {
     use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicU64, Ordering};
-    use std::sync::{Arc, Mutex, PoisonError};
     #[cfg(test)]
     use std::sync::mpsc;
+    use std::sync::{Arc, Mutex, PoisonError};
     use std::time::Duration;
 
     struct Injection {
@@ -559,8 +559,7 @@ pub mod sync_latency {
     fn register(
         root: &Path,
         delay: Duration,
-        #[cfg(test)]
-        pause: Option<Arc<SyncPauseSignal>>,
+        #[cfg(test)] pause: Option<Arc<SyncPauseSignal>>,
     ) -> SyncLatencyGuard {
         let id = NEXT_ID.fetch_add(1, Ordering::SeqCst);
         let syncs = Arc::new(AtomicU64::new(0));
