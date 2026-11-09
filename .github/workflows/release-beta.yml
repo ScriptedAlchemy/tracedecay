@@ -241,6 +241,14 @@ jobs:
           path: ${{ steps.bazel.outputs.disk-cache-path }}
           key: ${{ steps.bazel.outputs.disk-cache-key }}
 
+      - name: Save newly fetched Bazel dependencies
+        if: always() && !cancelled() && steps.bazel.outputs.repository-cache-key != ''
+        uses: ./.release-automation/.github/actions/setup-bazel/save
+        with:
+          path: ${{ steps.bazel.outputs.repository-cache-path }}
+          key: ${{ steps.bazel.outputs.repository-cache-key }}
+          restored-entries: ${{ steps.bazel.outputs.repository-cache-entries }}
+
       - name: Report final build disk usage
         if: ${{ always() && hashFiles('.release-automation/.github/actions/setup-bazel/report_disk.sh') != '' }}
         continue-on-error: true
