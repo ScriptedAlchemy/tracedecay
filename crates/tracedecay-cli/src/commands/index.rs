@@ -440,16 +440,38 @@ impl FirstGenerationStall {
             Ok(worktree) => worktree,
             Err(reason) => return Some(Self::Unavailable(reason.to_owned())),
         };
-        if let Some(reason) = worktree
-            .progress
+        let active_preseal = worktree
+            .preseal_attempt
             .as_ref()
-            .and_then(|progress| progress.blocked_reason)
-        {
-            return Some(Self::Blocked(reason));
+            .is_some_and(|attempt| attempt.active);
+        let active_graph = worktree
+            .native_graph_progress
+            .as_ref()
+            .filter(|graph| graph.active);
+        if let Some(progress) = worktree.progress.as_ref() {
+            if let Some(reason) = progress.blocked_reason {
+                // The previous sealed generation can remain visible while a
+                // successor captures or publishes native graph rows. Its old
+                // refusal is not a refusal by the new, active writer.
+                let retained_text = active_preseal
+                    && worktree.latest_generation_id.as_deref()
+                        == Some(progress.generation_id.as_str())
+                    && !matches!(
+                        progress.phase,
+                        CodeIndexBuildPhaseV1::SourceScan | CodeIndexBuildPhaseV1::BulkCommit
+                    );
+                let different_graph = active_graph
+                    .is_some_and(|graph| graph.generation_id != progress.generation_id);
+                if !retained_text && !different_graph {
+                    return Some(Self::Blocked(reason));
+                }
+            }
         }
-        // The canonical ladder excludes bounded restore and source
-        // verification from rebuilds; both still own readiness work.
+        // Active attempts remain readiness work even if the freshness ladder
+        // does not classify a source verification or restore as a rebuild.
         let readiness_in_flight = worktree.rebuild_in_flight
+            || active_preseal
+            || active_graph.is_some()
             || matches!(
                 worktree.staleness_state,
                 Some(CodeIndexStalenessStateV1::Restoring | CodeIndexStalenessStateV1::Verifying)
@@ -2103,6 +2125,95 @@ mod daemon_precondition_tests {
                 ))
             );
         }
+    }
+
+    #[test]
+    fn retained_text_refusal_cannot_block_a_different_active_writer() {
+        let mut successor = attempt(CodeIndexPresealWorkPhaseV1::Capture, 4, 7, 2);
+        successor.latest_generation_id = Some("generation.v1.first".to_owned());
+        let mut retained = progress(6_136, Some(CodeIndexBuildBlockedReasonV1::ResidentMemory));
+        retained.phase = CodeIndexBuildPhaseV1::Ready;
+        successor.progress = Some(retained);
+        assert_eq!(
+            super::FirstGenerationStall::of(Ok(&successor)),
+            None,
+            "a blocked, retained Ready report must not refuse active successor capture"
+        );
+
+        let mut graph = native_graph_without_writes();
+        let mut old_text = progress(6_136, Some(CodeIndexBuildBlockedReasonV1::RetryBackoff));
+        old_text.phase = CodeIndexBuildPhaseV1::GraphPublication;
+        graph.progress = Some(old_text);
+        graph.native_graph_progress.as_mut().unwrap().generation_id =
+            "generation.successor".to_owned();
+        assert_eq!(
+            super::FirstGenerationStall::of(Ok(&graph)),
+            None,
+            "another generation's blocked text cannot refuse a live native writer"
+        );
+        graph.native_graph_progress.as_mut().unwrap().generation_id =
+            "generation.v1.first".to_owned();
+        assert_eq!(
+            super::FirstGenerationStall::of(Ok(&graph)),
+            Some(super::FirstGenerationStall::Blocked(
+                CodeIndexBuildBlockedReasonV1::RetryBackoff
+            )),
+            "a genuine same-generation refusal must still be observable"
+        );
+    }
+
+    #[test]
+    fn live_writer_owns_readiness_even_without_a_rebuild_flag() {
+        let now = Instant::now();
+        let mut capture = attempt(CodeIndexPresealWorkPhaseV1::Capture, 3, 1, 1);
+        capture.rebuild_in_flight = false;
+        let mut graph = native_graph_without_writes();
+        graph.rebuild_in_flight = false;
+        for active in [&capture, &graph] {
+            assert_eq!(super::FirstGenerationStall::of(Ok(active)), None);
+            let mut window = super::FirstGenerationIdleWindow::new(Duration::from_secs(120));
+            assert_eq!(
+                window.observe(super::FirstGenerationStall::of(Ok(active)), now),
+                None
+            );
+            assert_eq!(
+                window.observe(
+                    super::FirstGenerationStall::of(Ok(active)),
+                    now + Duration::from_secs(240)
+                ),
+                None,
+                "a real active writer is not an absent reconcile pass"
+            );
+        }
+        capture.preseal_attempt.as_mut().unwrap().active = false;
+        assert_eq!(
+            super::FirstGenerationStall::of(Ok(&capture)),
+            Some(super::FirstGenerationStall::NoPassInFlight),
+            "retiring the attempt restores no-pass stall detection"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn wait_survives_stale_blocked_text_while_successor_parses() {
+        let mut capture = attempt(CodeIndexPresealWorkPhaseV1::Capture, 4, 7, 2);
+        capture.latest_generation_id = Some("generation.v1.first".to_owned());
+        let mut prior = progress(6_136, Some(CodeIndexBuildBlockedReasonV1::ResidentMemory));
+        prior.phase = CodeIndexBuildPhaseV1::Ready;
+        capture.progress = Some(prior);
+        let mut parsed = capture.clone();
+        parsed.preseal_attempt =
+            attempt(CodeIndexPresealWorkPhaseV1::ParseEvidence, 5, 1, 2).preseal_attempt;
+        let (result, reads) = hold_over(
+            vec![
+                status(timed_out(), warming(capture)),
+                status(timed_out(), warming(parsed)),
+                ready_status(),
+            ],
+            Duration::ZERO,
+        )
+        .await;
+        assert!(result.is_ok(), "old blocked generation must not refuse new work: {result:?}");
+        assert_eq!(reads, 3, "only the actual ready receipt ends a moving wait");
     }
 
     /// A stall shorter than the window is ridden out: the window restarts
