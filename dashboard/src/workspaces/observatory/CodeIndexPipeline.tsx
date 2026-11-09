@@ -282,6 +282,10 @@ function CodeIndexBuildCard({ progress }: { progress: CodeIndexBuildProgressV1 }
 /** One worktree's actual or admitted pending work, shared by both dashboard
  * views. An inactive terminal park is not a one-second polling obligation. */
 export function worktreeHasActiveCodeIndexBuild(worktree: CodeIndexWorktreeFreshnessV1): boolean {
+  // A real successor can already be working while the retained generation
+  // still carries an old terminal refusal. An active attempt owns its work;
+  // only an idle, refused generation should suppress live polling.
+  if (worktree.preseal_attempt?.active || worktree.native_graph_progress?.active) return true;
   if (worktree.parked != null && !worktree.parked.retries_on_wake) return false;
   if (worktree.progress?.blocked_reason === 'publication_authority_corrupt') return false;
   return (

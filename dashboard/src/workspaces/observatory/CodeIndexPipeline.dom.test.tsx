@@ -279,6 +279,55 @@ describe('code-index parked and recovered readers', () => {
     expect(hasActiveCodeIndexBuild(recovered)).toBe(true);
   });
 
+  it('keeps real successor work live despite the retained generation refusal', () => {
+    const parked: NonNullable<CodeIndexWorktreeFreshnessV1['parked']> = {
+      reason: 'old publication authority corrupt',
+      remediation: 'repair the old publication store',
+      parked_at_micros: OBSERVED_AT,
+      observed_passes: 2,
+      retries_on_wake: false,
+      blocked_reason: 'publication_authority_corrupt',
+    };
+    const retained = progress({ phase: 'ready', blocked_reason: 'publication_authority_corrupt' });
+    const capture = freshness({
+      progress: retained,
+      preseal_attempt: {
+        daemon_incarnation: 1, producer_incarnation: 3, attempt_sequence: 2,
+        progress_epoch: 4, phase: 'capture', completed_items: 2,
+        total_items: 5, last_progress_micros: OBSERVED_AT, active: true,
+      },
+    }, 'loading');
+    capture.envelope.payload = CodeIndexFreshnessPayloadV1Schema.parse(capture.envelope.payload);
+    expect(hasActiveCodeIndexBuild(capture)).toBe(true);
+    const view = render(<CodeIndexPipeline result={capture} pending={false} scopeKey="project" />);
+    expect(screen.getByText('capture · 2 / 5 items')).toBeTruthy();
+
+    const native = freshness({
+      progress: retained,
+      native_graph_progress: {
+        generation_id: 'generation.successor',
+        sealed_graph_digest: 'sha256:successor-graph',
+        daemon_incarnation: 1, producer_incarnation: 4, attempt_sequence: 2,
+        progress_epoch: 3, phase: 'compact_encoding',
+        encoded_entities: 17, total_entities: 30,
+        encoded_relations: 0, total_relations: 9,
+        committed_stage_pages: 0, committed_stage_mutations: 0, committed_stage_bytes: 0,
+        committed_compact_segments: 0, committed_compact_bytes: 0,
+        last_progress_micros: OBSERVED_AT, active: true,
+      },
+    }, 'loading');
+    native.envelope.payload = CodeIndexFreshnessPayloadV1Schema.parse(native.envelope.payload);
+    expect(hasActiveCodeIndexBuild(native)).toBe(true);
+    view.rerender(<CodeIndexPipeline result={native} pending={false} scopeKey="project" />);
+    expect(screen.getByText(/17 entities encoded/)).toBeTruthy();
+    expect(screen.getByText('Graph writer')).toBeTruthy();
+
+    // The original terminal refusal remains idle without the actual writer.
+    expect(hasActiveCodeIndexBuild(freshness({
+      parked, progress: retained, rebuild_in_flight: true,
+    }, 'loading'))).toBe(false);
+  });
+
   it('distinguishes a cold indexing mount from an idle non-ready envelope', () => {
     expect(hasActiveCodeIndexBuild(freshness({
       latest_generation_id: null,

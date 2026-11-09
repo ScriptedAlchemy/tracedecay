@@ -43,6 +43,7 @@ import {
   codeIndexPhaseLabel,
   codeIndexProgressPercentage,
   formatDurationMicros,
+  hasActiveCodeIndexBuild,
   worktreeHasActiveCodeIndexBuild,
   isCurrentOrNewerCodeIndexProgress,
 } from '../observatory/CodeIndexPipeline.tsx';
@@ -315,14 +316,16 @@ function freshnessPollIntervalMs(
 }
 
 function hasActiveBuild(result: EnvelopeResult<CodeIndexFreshnessPayloadV1> | undefined): boolean {
-  if (result?.outcome !== 'envelope') return false;
-  return result.envelope.payload.worktrees.some(worktreeHasActiveCodeIndexBuild);
+  return hasActiveCodeIndexBuild(result);
 }
 
 function allActiveBuildsQuiet(
   result: EnvelopeResult<CodeIndexFreshnessPayloadV1> | undefined,
 ): boolean {
   if (result?.outcome !== 'envelope') return false;
+  // An initial loading scope may have no mounted worktree yet; it has no
+  // work clock to classify as quiet and must discover its first real mount.
+  if (result.envelope.payload.worktrees.length === 0) return false;
   const observedAt = result.envelope.time.observation_time_micros;
   return result.envelope.payload.worktrees.every((worktree) => {
     if (!worktreeHasActiveCodeIndexBuild(worktree)) return true;

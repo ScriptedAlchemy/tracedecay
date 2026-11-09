@@ -804,6 +804,65 @@ describe('Code index freshness', () => {
     expect(fetch).toHaveBeenCalledTimes(2);
   });
 
+  it('polls an active successor despite a retained terminal publication refusal', async () => {
+    vi.useFakeTimers();
+    const active = envelope('loading', {
+      worktrees: [{
+        ...worktree(),
+        progress: { ...progress(), phase: 'ready', blocked_reason: 'publication_authority_corrupt' },
+        rebuild_in_flight: false,
+        preseal_attempt: {
+          daemon_incarnation: 1, producer_incarnation: 3, attempt_sequence: 2,
+          progress_epoch: 4, phase: 'capture', completed_items: 2,
+          total_items: 5, last_progress_micros: NOW_MICROS, active: true,
+        },
+      }],
+      note: 'live daemon scheduler state',
+    });
+    const fetch = vi.fn(async () => new Response(JSON.stringify(active), { status: 200 }));
+    vi.stubGlobal('fetch', fetch);
+    renderWith();
+
+    await advanceTimers(0);
+    expect(screen.getByText('capture · 2 / 5 items')).toBeTruthy();
+    expect(fetch).toHaveBeenCalledTimes(1);
+    await advanceTimers(1_001);
+    await advanceTimers(0);
+    expect(fetch).toHaveBeenCalledTimes(2);
+  });
+
+  it('polls an empty loading scope until its first actual worktree mounts', async () => {
+    vi.useFakeTimers();
+    const pending = envelope('loading', {
+      worktrees: [],
+      note: 'the scheduler is attaching its first worktree',
+    });
+    const mounted = envelope('loading', {
+      worktrees: [{
+        ...worktree(),
+        latest_generation_id: null,
+        snapshot_content_identity: null,
+        sealed_at_micros: null,
+        staleness_state: 'indexing',
+        rebuild_in_flight: true,
+      }],
+      note: 'live daemon scheduler state',
+    });
+    const fetch = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify(pending), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify(mounted), { status: 200 }));
+    vi.stubGlobal('fetch', fetch);
+    renderWith();
+
+    await advanceTimers(0);
+    expect(screen.getByText('the scheduler is attaching its first worktree')).toBeTruthy();
+    expect(fetch).toHaveBeenCalledTimes(1);
+    await advanceTimers(1_001);
+    await advanceTimers(0);
+    expect(fetch).toHaveBeenCalledTimes(2);
+    expect(screen.getByText('no sealed generation yet')).toBeTruthy();
+  });
+
   it('keeps unsupported and unknown envelopes on the idle cadence', async () => {
     vi.useFakeTimers();
     const unsupported = envelope('unsupported', {
