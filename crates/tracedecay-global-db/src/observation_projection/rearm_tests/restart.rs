@@ -47,12 +47,7 @@ async fn retry_rearm_resumes_committed_windows_after_failure_and_restart() {
     );
 
     let interrupted = (1..=9_i64)
-        .map(|sequence| {
-            (
-                sequence,
-                if sequence <= 4 { 0 } else { FAR_FUTURE_MICROS },
-            )
-        })
+        .map(|sequence| (sequence, if sequence <= 4 { 0 } else { FAR_FUTURE_MICROS }))
         .collect::<Vec<_>>();
     assert_eq!(retry_deadlines(&harness).await, interrupted);
     assert_eq!(queue_state(&harness).await, (9, 5, 9));
@@ -101,7 +96,9 @@ async fn retry_rearm_resumes_committed_windows_after_failure_and_restart() {
     assert_eq!(queue_state(&harness).await, (9, 0, 9));
     assert_eq!(
         retry_deadlines(&harness).await,
-        (1..=9_i64).map(|sequence| (sequence, 0)).collect::<Vec<_>>()
+        (1..=9_i64)
+            .map(|sequence| (sequence, 0))
+            .collect::<Vec<_>>()
     );
     for _ in 0..2 {
         assert_eq!(
