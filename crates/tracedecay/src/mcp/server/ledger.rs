@@ -216,10 +216,16 @@ impl McpServer {
                         &tool_name,
                         committed_saved_tokens,
                         raw_file_tokens,
-                    );
+                    )
                 });
-            if let Err(error) = monitor_write.await {
-                tracing::warn!(error = %error, "live monitor entry write failed");
+            match monitor_write.await {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => {
+                    tracing::warn!(%error, "live monitor entry I/O failed");
+                }
+                Err(error) => {
+                    tracing::warn!(%error, "live monitor entry task failed");
+                }
             }
         });
     }
