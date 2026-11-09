@@ -2007,7 +2007,9 @@ impl CodeIndexWorktreeSchedulerV1 {
             return Ok(None);
         }
         let metadata = self.freshness_fence.git_metadata(&self.project_root);
-        if witness.git_metadata_signature != metadata.stable_signature() {
+        if !metadata.can_prove_freshness()
+            || witness.git_metadata_signature != metadata.stable_signature()
+        {
             return Ok(None);
         }
         // Re-swept under the adopted ignored-source roster. Equal metadata is
@@ -2063,7 +2065,9 @@ impl CodeIndexWorktreeSchedulerV1 {
             return false;
         }
         let metadata = self.freshness_fence.git_metadata(&self.project_root);
-        if witness.git_metadata_signature != metadata.stable_signature() {
+        if !metadata.can_prove_freshness()
+            || witness.git_metadata_signature != metadata.stable_signature()
+        {
             return false;
         }
         self.worktree_stat_sweep()
@@ -2266,6 +2270,7 @@ impl CodeIndexWorktreeSchedulerV1 {
             hook();
         }
         let quiet_witness = sealed_bytes_match
+            && sampled_metadata.can_prove_freshness()
             && witness.as_ref().is_some_and(|witness| {
                 witness.git_metadata_signature == sampled_metadata.stable_signature()
                     && witness.stat_signature == sampled_sweep.signature
