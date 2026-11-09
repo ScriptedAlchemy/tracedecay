@@ -251,9 +251,8 @@ async fn noncanonical_retirement_marker_cannot_reopen_an_expired_signal() {
     // The installed SQL trigger accepts equivalent JSON with whitespace.
     // The old byte-prefix decoder treated it as an unretired signal.
     let digest = hex::encode(sha2::Sha256::digest(record.signal_json.as_bytes()));
-    let whitespace_marker = format!(
-        "{{\n  \"__tracedecay_retired_stack_sha256_v1\": \"{digest}\"\n}}"
-    );
+    let whitespace_marker =
+        format!("{{\n  \"__tracedecay_retired_stack_sha256_v1\": \"{digest}\"\n}}");
     let writer = harness
         .registered
         .writer_connection()
@@ -262,7 +261,11 @@ async fn noncanonical_retirement_marker_cannot_reopen_an_expired_signal() {
         .execute(
             "UPDATE github_stack_delivery_signals SET signal_json = ?3
              WHERE project_id = ?1 AND signal_id = ?2",
-            params![PROJECT_ID, record.signal_id.as_str(), whitespace_marker.as_str()],
+            params![
+                PROJECT_ID,
+                record.signal_id.as_str(),
+                whitespace_marker.as_str()
+            ],
         )
         .await
         .expect("the terminal-only marker is allowed by SQLite");
@@ -308,9 +311,7 @@ async fn noncanonical_retirement_marker_cannot_reopen_an_expired_signal() {
         .acknowledge_github_stack_host_delivery(PROJECT_ID, &escaped.signal_id, RECIPIENT)
         .await
         .expect("settle Unicode-key fixture");
-    let escaped_marker = format!(
-        r#"{{"__trac\u0065decay_retired_stack_sha256_v1":"{digest}"}}"#
-    );
+    let escaped_marker = format!(r#"{{"__trac\u0065decay_retired_stack_sha256_v1":"{digest}"}}"#);
     let writer = harness
         .registered
         .writer_connection()
@@ -319,7 +320,11 @@ async fn noncanonical_retirement_marker_cannot_reopen_an_expired_signal() {
         .execute(
             "UPDATE github_stack_delivery_signals SET signal_json = ?3
              WHERE project_id = ?1 AND signal_id = ?2",
-            params![PROJECT_ID, escaped.signal_id.as_str(), escaped_marker.as_str()],
+            params![
+                PROJECT_ID,
+                escaped.signal_id.as_str(),
+                escaped_marker.as_str()
+            ],
         )
         .await
         .expect("SQLite accepts the escaped retirement key");
@@ -356,7 +361,11 @@ async fn noncanonical_retirement_marker_cannot_reopen_an_expired_signal() {
         .execute(
             "UPDATE github_stack_delivery_signals SET signal_json = ?3
              WHERE project_id = ?1 AND signal_id = ?2",
-            params![PROJECT_ID, malformed.signal_id.as_str(), invalid_marker.as_str()],
+            params![
+                PROJECT_ID,
+                malformed.signal_id.as_str(),
+                invalid_marker.as_str()
+            ],
         )
         .await
         .expect_err("the SQL guard must reject a non-hexadecimal fingerprint")
