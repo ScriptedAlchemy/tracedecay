@@ -1,14 +1,12 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# These public API IDs identify the binaries-20261025 release used by
-# hermetic_launcher. Bazel checks its upstream SHA-256 before accepting a
-# distdir file and uses the original release URL when the file is absent.
+# Bazel accepts a staged file only when it matches the checksum in the
+# dependency rule or registry and otherwise tries the configured source.
 distdir=${1:?expected a runner-private distdir}
-api=https://api.github.com/repos/hermeticbuild/hermetic-launcher/releases/assets
 
 stage_asset() {
-  local id=$1 name=$2
+  local repo=$1 id=$2 name=$3
   # Hosted runners share unauthenticated API quotas. Read the job token only
   # for the fixed GitHub API origin. Curl drops Authorization on a redirect
   # to the release storage host, and the header stays off the command line.
@@ -18,10 +16,16 @@ stage_asset() {
   fi
   if ! curl --proto '=https' --proto-redir '=https' --header @- --fail --silent --show-error --location --remove-on-error \
       --connect-timeout 5 --max-time 30 --header 'Accept: application/octet-stream' \
-      --output "$distdir/$name" "$api/$id" <<< "$api_header"; then
+      --output "$distdir/$name" "https://api.github.com/repos/$repo/releases/assets/$id" <<< "$api_header"; then
     printf '::notice::Release API unavailable for %s; Bazel will use its configured source.\n' "$name"
   fi
 }
 
-stage_asset 674976726 finalize-stub-x86_64-linux
-stage_asset 674976728 runfiles-stub-x86_64-linux
+# The same rules_python archive is required by Bazel on every host.
+stage_asset bazel-contrib/rules_python 690529045 rules_python-2.4.6.tar.gz
+
+if [[ "$RUNNER_OS" == Linux && "$RUNNER_ARCH" == X64 ]]; then
+  # hermetic_launcher release binaries-20261025, for Linux x86-64 tools.
+  stage_asset hermeticbuild/hermetic-launcher 674976726 finalize-stub-x86_64-linux
+  stage_asset hermeticbuild/hermetic-launcher 674976728 runfiles-stub-x86_64-linux
+fi
