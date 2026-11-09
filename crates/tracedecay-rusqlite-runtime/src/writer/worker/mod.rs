@@ -1340,7 +1340,8 @@ mod auxiliary_scheduling_tests {
     use super::{
         AcceptedRequest, AuxiliaryWork, BatchCoalescingWindow, IncrementalVacuumCommand,
         PendingBatchDwell, WriterActorError, build_batches, checkpoint_config, dwell_for_batch,
-        enqueue, reject_incremental_vacuum, run_incremental_vacuum, select_auxiliary_work,
+        enqueue, incremental_vacuum_error, reject_incremental_vacuum, run_incremental_vacuum,
+        select_auxiliary_work,
     };
 
     struct BatchProbe {
