@@ -1,6 +1,7 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { act, render, screen } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { useScope } from '../../data/scope/store.ts';
 import { IndexFreshness } from './IndexFreshness.tsx';
 
 /**
@@ -16,6 +17,7 @@ const NOW_MICROS = 1_753_003_600_000_000;
 afterEach(() => {
   vi.unstubAllGlobals();
   vi.useRealTimers();
+  act(() => useScope.getState().selectAllProjects());
 });
 
 describe('Code index freshness', () => {
@@ -247,6 +249,93 @@ describe('Code index freshness', () => {
     expect(screen.getByText('generation.catchup.02')).toBeTruthy();
     expect(screen.queryByText('generation.catchup.01')).toBeNull();
     expect(screen.queryByRole('progressbar', { name: 'Code progress' })).toBeNull();
+  });
+
+  it('does not resurrect text progress after its mount disappears and reappears', async () => {
+    vi.useFakeTimers();
+    const original = envelope('loading', {
+      worktrees: [{
+        ...worktree(),
+        latest_generation_id: null,
+        staleness_state: 'indexing',
+        rebuild_in_flight: true,
+        progress: progress(),
+      }],
+      note: 'original mounted scheduler',
+    });
+    const missing = envelope('unknown', {
+      worktrees: [],
+      note: 'scheduler unmounted',
+    });
+    const remounted = envelope('loading', {
+      worktrees: [{
+        ...worktree(),
+        latest_generation_id: null,
+        staleness_state: 'indexing',
+        rebuild_in_flight: true,
+        progress: null,
+      }],
+      note: 'scheduler remounted without a committed report',
+    });
+    const fetch = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify(original), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify(missing), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify(remounted), { status: 200 }));
+    vi.stubGlobal('fetch', fetch);
+    renderWith();
+
+    await advanceTimers(0);
+    expect(screen.getByText('250 / 500 files')).toBeTruthy();
+    await advanceTimers(1_001);
+    await advanceTimers(0);
+    expect(screen.getByText('scheduler unmounted')).toBeTruthy();
+    expect(screen.queryByRole('progressbar', { name: 'Code progress' })).toBeNull();
+    await advanceTimers(30_000);
+    await advanceTimers(0);
+    expect(screen.getByText('scheduler remounted without a committed report')).toBeTruthy();
+    expect(screen.queryByText('250 / 500 files')).toBeNull();
+    expect(screen.queryByRole('progressbar', { name: 'Code progress' })).toBeNull();
+    expect(fetch).toHaveBeenCalledTimes(3);
+  });
+
+  it('isolates retained text cursors between scoped project reads sharing a path', async () => {
+    const first = envelope('loading', {
+      worktrees: [{
+        ...worktree(),
+        latest_generation_id: null,
+        staleness_state: 'indexing',
+        rebuild_in_flight: true,
+        progress: progress(),
+      }],
+      note: 'first project observation',
+    });
+    first.scope.project_id = 'project-a';
+    const second = envelope('loading', {
+      worktrees: [{
+        ...worktree(),
+        latest_generation_id: null,
+        staleness_state: 'indexing',
+        rebuild_in_flight: true,
+        progress: null,
+      }],
+      note: 'second project observation',
+    });
+    second.scope.project_id = 'project-b';
+    const fetch = vi.fn(async (url: unknown) => new Response(
+      JSON.stringify(String(url).includes('project-a') ? first : second),
+      { status: 200 },
+    ));
+    vi.stubGlobal('fetch', fetch);
+    act(() => useScope.getState().selectProject('project-a', 'Project A'));
+    renderWith();
+
+    expect(await screen.findByText('first project observation')).toBeTruthy();
+    expect(screen.getByText('250 / 500 files')).toBeTruthy();
+    act(() => useScope.getState().selectProject('project-b', 'Project B'));
+    expect(await screen.findByText('second project observation')).toBeTruthy();
+    expect(screen.queryByText('250 / 500 files')).toBeNull();
+    expect(screen.queryByRole('progressbar', { name: 'Code progress' })).toBeNull();
+    expect(fetch).toHaveBeenCalledTimes(2);
   });
 
   it('accepts a later replacement generation after epoch restart and rejects its delayed predecessor', async () => {

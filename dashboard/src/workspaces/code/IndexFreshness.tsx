@@ -74,6 +74,7 @@ export function useIndexFreshness() {
 }
 
 export function IndexFreshness() {
+  const currentScopeKey = useScope((state) => scopeKey(state.scope));
   const freshness = useIndexFreshness();
 
   return (
@@ -87,7 +88,7 @@ export function IndexFreshness() {
       ) : freshness.data === undefined ? (
         <p className="text-2xs text-state-unknown">no response recorded</p>
       ) : (
-        <FreshnessReading result={freshness.data} />
+        <FreshnessReading key={currentScopeKey} result={freshness.data} />
       )}
     </section>
   );
@@ -335,43 +336,49 @@ function allActiveBuildsQuiet(
       ...(worktree.progress ? [worktree.progress.last_progress_micros] : []),
     ];
     return lastUpdates.length > 0 && lastUpdates.every(
-      (stamp) => stamp != null && observedAt - stamp >= QUIET_AFTER_SECONDS * 1_000_000,
-    );
-  });
-}
-
-function useLatestBuildProgress(
+      (stamp)function useLatestBuildProgress(
   result: EnvelopeResult<CodeIndexFreshnessPayloadV1>,
 ): ReadonlyMap<string, CodeIndexBuildProgress> {
   const [latestProgress, setLatestProgress] = useState<ReadonlyMap<string, CodeIndexBuildProgress>>(
     () => new Map(),
   );
   useEffect(() => {
-    if (result.outcome !== 'envelope') return;
+    if (result.outcome !== 'envelope') {
+      setLatestProgress((rendered) => rendered.size === 0 ? rendered : new Map());
+      return;
+    }
     setLatestProgress((rendered) => {
-      const next = new Map(rendered);
-      let changed = false;
+      // Only worktrees in this authoritative read may retain a cursor. If a
+      // mount disappears, its prior progress must not reappear on remount.
+      const next = new Map<string, CodeIndexBuildProgress>();
       for (const worktree of result.envelope.payload.worktrees) {
         const incoming = worktree.progress;
-        const current = next.get(worktree.worktree_root);
+        const current = rendered.get(worktree.worktree_root);
         if (!incoming) {
           if (
             current &&
-            ((result.envelope.domain_state === 'ready' &&
-              worktree.latest_generation_id === current.generation_id) ||
-              (worktree.latest_generation_id != null &&
-                worktree.latest_generation_id !== current.generation_id))
+            (worktree.latest_generation_id == null ||
+              worktree.latest_generation_id === current.generation_id) &&
+            !(result.envelope.domain_state === 'ready' &&
+              worktree.latest_generation_id === current.generation_id)
           ) {
-            // The sealed successor is authoritative; do not display a
-            // previous generation's text cursor against its readiness.
-            next.delete(worktree.worktree_root);
-            changed = true;
+            next.set(worktree.worktree_root, current);
           }
         } else if (!current || isCurrentOrNewerCodeIndexProgress(incoming, current)) {
           next.set(worktree.worktree_root, incoming);
-          changed = true;
+        } else {
+          next.set(worktree.worktree_root, current);
         }
       }
+      return next.size === rendered.size &&
+        [...next].every(([root, progress]) => rendered.get(root) === progress)
+        ? rendered
+        : next;
+    });
+  }, [result]);
+  return latestProgress;
+}
+
       return changed ? next : rendered;
     });
   }, [result]);
