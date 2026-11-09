@@ -212,6 +212,11 @@ pub(crate) async fn ensure_github_stack_delivery_schema(
               OR OLD.repository_id != NEW.repository_id
               OR OLD.watermark_id != NEW.watermark_id
               OR OLD.observed_at_micros != NEW.observed_at_micros
+              -- The issued inspection window is enforced at the registered
+              -- storage boundary, including direct SQL updates.
+              OR OLD.observed_at_micros >
+                  (CAST(strftime('%s', 'now') AS INTEGER) - {retention_days} * 86400)
+                  * 1000000
               OR json_type(OLD.signal_json, '$.__tracedecay_retired_stack_sha256_v1') IS NOT NULL
               OR EXISTS (
                   SELECT 1 FROM json_each(NEW.signal_json) LIMIT 1 OFFSET 1
@@ -266,7 +271,8 @@ pub(crate) async fn ensure_github_stack_delivery_schema(
                 SELECT RAISE(ABORT, 'GitHub stack delivery recipient is not retired');
             END;
             {promote}",
-        promote = promote_deferred_sql("")
+        promote = promote_deferred_sql(""),
+        retention_days = GITHUB_STACK_TERMINAL_RETENTION_DAYS_V1
     );
     connection.execute_batch(&schema).await.map_err(|error| {
         crate::global_db_operation_error("initialize GitHub stack delivery schema", error)
@@ -900,9 +906,13 @@ impl RegisteredGlobalDb {
         &self,
         cutoff_micros: i64,
     ) -> Result<GitHubStackTerminalRetirementPageV1, String> {
+        // Match SQLite's conservative whole-second retirement-age guard so
+        // an eligible application page cannot fail at the fractional boundary.
         let oldest_permitted_micros = tracedecay_contracts::now_micros()
             .0
-            .saturating_sub(GITHUB_STACK_TERMINAL_RETENTION_DAYS_V1 * 86_400 * 1_000_000);
+            .saturating_sub(GITHUB_STACK_TERMINAL_RETENTION_DAYS_V1 * 86_400 * 1_000_000)
+            .div_euclid(1_000_000)
+            .saturating_mul(1_000_000);
         let cutoff_micros = cutoff_micros.min(oldest_permitted_micros);
         if cutoff_micros <= 0 {
             return Ok(GitHubStackTerminalRetirementPageV1 {

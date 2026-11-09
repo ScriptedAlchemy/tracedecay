@@ -929,6 +929,28 @@ async fn terminal_retirement_cannot_be_accelerated_past_the_issued_window() {
             .retired,
         0
     );
+    // A direct registered writer must not retire fresh transport evidence,
+    // even with a syntactically valid marker for its real original bytes.
+    let digest = hex::encode(sha2::Sha256::digest(fresh.signal_json.as_bytes()));
+    let marker = format!(r#"{{"__tracedecay_retired_stack_sha256_v1":"{digest}"}}"#);
+    let writer = harness
+        .registered
+        .writer_connection()
+        .expect("registered fresh-retirement writer");
+    let refusal = writer
+        .execute(
+            "UPDATE github_stack_delivery_signals SET signal_json = ?3
+             WHERE project_id = ?1 AND signal_id = ?2",
+            params![PROJECT_ID, fresh.signal_id.as_str(), marker.as_str()],
+        )
+        .await
+        .expect_err("registered SQL must preserve the inspection window")
+        .to_string();
+    assert!(
+        refusal.contains("GitHub stack delivery signals are immutable"),
+        "{refusal}"
+    );
+    drop(writer);
     assert_eq!(
         harness
             .registered
