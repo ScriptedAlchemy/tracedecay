@@ -181,11 +181,13 @@ pub(super) async fn mount_http_application_router(
     owner: &tracedecay_runtime_core::config::ProfileRoot,
     project_id: &str,
     project_path: &Path,
+    operation_events: tracedecay_application::operation_stream::OperationEventAuthority,
 ) -> Result<()> {
     if !registry.is_active() {
         return Ok(());
     }
-    let router = build_http_application_router(owner, project_id, project_path).await?;
+    let router =
+        build_http_application_router(owner, project_id, project_path, operation_events).await?;
     registry.mount(project_id, router).await
 }
 
@@ -235,6 +237,7 @@ mod tests {
                 &owner,
                 project_id,
                 project.path(),
+                tracedecay_application::operation_stream::OperationEventAuthority::default(),
             ));
             let mut yielded = false;
             let peer = std::future::poll_fn(|task| {
