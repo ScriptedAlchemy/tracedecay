@@ -336,7 +336,7 @@ impl RegisteredGlobalDb {
                         // was the final page. Never retire or delete the lookahead.
                         let has_next_page = page.len() > UNOFFERED_RECORD_PAGE_SIZE as usize;
                         if has_next_page {
-                            page.pop();
+                            page.truncate(UNOFFERED_RECORD_PAGE_SIZE as usize);
                         }
                         let mut retired = 0_u64;
                         for (observation_id, needs_retirement) in &page {
