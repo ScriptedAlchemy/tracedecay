@@ -33,6 +33,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: ./.github/actions/setup-bazel
+        id: bazel
         with:
           cache-key: hermetic-eval-tests
           tailscale-client-id: >-
@@ -56,6 +57,14 @@ jobs:
           --test_output=errors
       - name: Execute stock-edit oracle regressions
         run: python3 evals/agent_adoption/stock_check_selftest.py
+
+      - name: Save newly fetched Bazel dependencies
+        if: always() && !cancelled() && steps.bazel.outputs.repository-cache-key != ''
+        uses: ./.github/actions/setup-bazel/save
+        with:
+          path: ${{ steps.bazel.outputs.repository-cache-path }}
+          key: ${{ steps.bazel.outputs.repository-cache-key }}
+          restored-entries: ${{ steps.bazel.outputs.repository-cache-entries }}
 
       - name: Report final build disk usage
         if: ${{ always() && hashFiles('.github/actions/setup-bazel/report_disk.sh') != '' }}
