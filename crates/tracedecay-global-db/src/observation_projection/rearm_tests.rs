@@ -1002,7 +1002,10 @@ async fn source_rewrite_begin_writer_work_is_independent_of_unrelated_queue_rows
             .await
             .unwrap();
         let row = rows.next().await.unwrap().unwrap();
-        assert_eq!(row.get::<String>(0).unwrap(), observation.observation_id().as_str());
+        assert_eq!(
+            row.get::<String>(0).unwrap(),
+            observation.observation_id().as_str()
+        );
         assert_eq!(
             row.get::<String>(1).unwrap(),
             successor.generation_id().to_string()
