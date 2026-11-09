@@ -25,7 +25,8 @@ use super::state::{
     consume_projection_queue_item, decode_observation_row, decode_sequence,
     projected_stored_message, projection_retry_state, queued_projection, read_checkpoint,
     read_message, read_observation, read_session, reconcile_session_rows_detailed,
-    schedule_projection_retry, storage, storage_message, stored_output_digest, write_checkpoint,
+    retry_mount_identity, schedule_projection_retry, storage, storage_message,
+    stored_output_digest, write_checkpoint,
 };
 use super::transition::{
     MessageTransition, MessageTransitionState, WorkflowFactTarget, WorkflowFactTransition,
@@ -404,6 +405,7 @@ async fn persist_projection_retry_on_database(
         attempt_count,
         next_retry_at_micros,
         last_error,
+        &retry_mount_identity(database)?,
     )
     .await?;
     transaction

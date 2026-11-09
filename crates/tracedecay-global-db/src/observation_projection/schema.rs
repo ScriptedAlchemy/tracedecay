@@ -372,6 +372,11 @@ pub(crate) const OBSERVATION_PROJECTION_PERFORMANCE_INDEX_SQL: &[&str] = &[
 pub(in super::super) async fn ensure_observation_projection_schema(
     conn: &impl Executor,
 ) -> Result<(), Error> {
+    // Stores created before retry ownership was recorded have only prior-mount deadlines.
+    if !projection_table_column_exists(conn, "projection_queue", "retry_mount").await? {
+        conn.execute_batch("ALTER TABLE projection_queue ADD COLUMN retry_mount TEXT")
+            .await?;
+    }
     conn.execute_batch(OBSERVATION_PROJECTION_SCHEMA_SQL)
         .await?;
     verify_final_projection_shape(conn).await?;

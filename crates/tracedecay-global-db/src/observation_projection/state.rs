@@ -16,8 +16,8 @@ use tracedecay_store::{
 use tracedecay_lcm::raw::{message_body_from_record_row, stored_message_record_select_columns};
 use tracedecay_lcm::retrieval_content::projected_content_hash;
 use tracedecay_lcm::{LcmError, LcmStorageKind};
+use tracedecay_runtime_core::db::Database;
 use tracedecay_runtime_core::db::engine::{Executor, QueryExecutor, Row, params};
-use tracedecay_runtime_core::db::{Database, DatabaseEngineReadSnapshot};
 use tracedecay_sessions::runtime::shared::durable_project_path_key;
 #[cfg(windows)]
 use tracedecay_sessions::runtime::shared::path_identity_key;
@@ -250,10 +250,6 @@ pub(super) async fn projection_retry_state(
 /// Queue rows one re-arm transaction touches.
 pub(crate) const REARM_PROJECTION_RETRY_BATCH_ROWS: i64 = 1_024;
 
-/// Hard ceiling for frozen candidate windows. A larger recovery refuses
-/// before acquiring a writer rather than spilling unbounded data beside SQLite.
-const REARM_CANDIDATE_STAGE_BYTES: usize = 64 * 1024 * 1024;
-
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct RearmedProjectionRetries {
     pub(crate) rows: u64,
@@ -264,11 +260,9 @@ pub(crate) struct RearmedProjectionRetries {
 /// observed the failure. A fresh mount re-arms only previously deferred
 /// observations. Fresh foreground retries must keep their own deadline.
 ///
-/// Freeze the exact candidates in one consistent read view *before* taking
-/// a writer lease. Keeping a WAL snapshot pinned across write windows would
-/// prevent restart checkpoints and risk revocation during large recoveries.
-/// Each subsequent short writer transaction conditionally updates unchanged
-/// observation identities; an interrupted recovery keeps its committed prefix.
+/// A foreground retry carries its mount identity in the same transaction as
+/// its deadline. Recovery can therefore release each snapshot before applying
+/// its bounded page without clearing a retry scheduled by this mount.
 #[tracing::instrument(
     name = "global_db.observation_projection.rearm_retries",
     level = "trace",
@@ -285,16 +279,12 @@ pub(crate) async fn rearm_queued_projection_retries(
         ));
     }
     let now = tracedecay_contracts::clock::now_micros().0;
-    let mut windows = stage_rearm_projection_retry_candidates(
-        database,
-        batch_rows,
-        now,
-        REARM_CANDIDATE_STAGE_BYTES,
-    )
-    .await?;
+    let mut windows = RetryRearmWindows::new(database, batch_rows, now).await?;
     let mut rearmed = RearmedProjectionRetries::default();
     while let Some(candidates) = windows.next().await? {
-        let rows = apply_rearm_projection_retry_candidates(database, &candidates, now).await?;
+        let rows =
+            apply_rearm_projection_retry_candidates(database, &candidates, now, &windows.mount)
+                .await?;
         rearmed.rows += rows;
         if rows != 0 {
             rearmed.batches += 1;
@@ -303,122 +293,146 @@ pub(crate) async fn rearm_queued_projection_retries(
     Ok(rearmed)
 }
 
-#[derive(Default)]
-pub(super) struct StagedRetryWindows {
-    memory: std::vec::IntoIter<String>,
+/// The write authority distinguishes process lifetimes and the registry epoch
+/// distinguishes remounts sharing the same authority. Only the digest is stored.
+pub(super) fn retry_mount_identity(database: &Database) -> ProjectionStoreResult<String> {
+    let authority = database
+        .write_authority()
+        .map_err(|error| storage("identify projection retry mount", error))?;
+    Ok(tracedecay_domain::canonical_text::canonical_framed_sha256(
+        b"tracedecay.projection-retry.mount",
+        &[
+            authority.token().as_bytes(),
+            &database
+                .registered_binding()
+                .authority_epoch
+                .get()
+                .to_le_bytes(),
+        ],
+    ))
 }
 
-impl StagedRetryWindows {
-    pub(super) async fn next(&mut self) -> ProjectionStoreResult<Option<String>> {
-        Ok(self.memory.next())
-    }
-}
-
-/// The snapshot pins the WAL only during read-only candidate discovery and
-/// drops before any recovery writes. Scan the old queue in bounded pages
-/// without staging the inactive prefix or any observation payload.
-/// If frozen identities exceed the memory ceiling, refuse without spilling
-/// into the database filesystem or publishing a partially rearmed prefix.
-#[tracing::instrument(
-    name = "global_db.observation_projection.stage_retry_rearm",
-    level = "trace",
-    skip_all
-)]
-pub(super) async fn stage_rearm_projection_retry_candidates(
-    database: &Database,
+pub(super) struct RetryRearmWindows<'a> {
+    database: &'a Database,
     batch_rows: i64,
-    now_micros: i64,
-    max_staged_bytes: usize,
-) -> ProjectionStoreResult<StagedRetryWindows> {
-    const OPERATION: &str = "stage queued projection retries";
-    let snapshot = database
-        .read_connection()
-        .convergence_snapshot()
-        .await
-        .map_err(|error| storage("open projection retry recovery snapshot", error))?;
-    let Some(last_rowid) = retry_rearm_frontier(&snapshot, now_micros).await? else {
-        return Ok(StagedRetryWindows::default());
-    };
-    let mut staged = Vec::new();
-    let mut staged_bytes = 0_usize;
-    let mut after_rowid = 0_i64;
-    while after_rowid < last_rowid {
-        let Some((batch_end, candidates)) = read_rearm_projection_retry_candidates(
-            &snapshot,
-            after_rowid,
-            last_rowid,
+    pub(super) mount: String,
+    deadline: i64,
+    rowid: i64,
+    last: Option<(i64, i64)>,
+}
+
+impl<'a> RetryRearmWindows<'a> {
+    pub(super) async fn new(
+        database: &'a Database,
+        batch_rows: i64,
+        now: i64,
+    ) -> ProjectionStoreResult<Self> {
+        const OPERATION: &str = "read projection retry frontier";
+        let snapshot = database
+            .read_connection()
+            .convergence_snapshot()
+            .await
+            .map_err(|error| storage(OPERATION, error))?;
+        let mut rows = snapshot
+            .query(
+                // qpsg-exempt: the deadline ceiling excludes permanent collisions at the end of the index.
+                "SELECT next_retry_at_micros, rowid FROM projection_queue
+             INDEXED BY idx_projection_queue_retry_deadline
+             WHERE next_retry_at_micros > ?1 AND next_retry_at_micros < 9223372036854775807
+             ORDER BY next_retry_at_micros DESC, rowid DESC LIMIT 1",
+                params![now],
+            )
+            .await
+            .map_err(|error| storage(OPERATION, error))?;
+        let last = rows
+            .next()
+            .await
+            .map_err(|error| storage(OPERATION, error))?
+            .map(|row| Ok((row.get(0)?, row.get(1)?)))
+            .transpose()
+            .map_err(|error: tracedecay_runtime_core::db::engine::Error| {
+                storage(OPERATION, error)
+            })?;
+        Ok(Self {
+            database,
             batch_rows,
-            now_micros,
-        )
-        .await?
-        else {
-            break;
-        };
-        let page_bytes = candidates
-            .capacity()
-            .checked_add(std::mem::size_of::<String>())
-            .ok_or_else(|| storage_message(OPERATION, "retry candidate size overflow"))?;
-        staged_bytes = staged_bytes
-            .checked_add(page_bytes)
-            .ok_or_else(|| storage_message(OPERATION, "retry staging size overflow"))?;
-        if staged_bytes > max_staged_bytes {
-            return Err(storage_message(
-                OPERATION,
-                "frozen retry candidates exceed bounded memory capacity",
-            ));
-        }
-        staged.push(candidates);
-        after_rowid = batch_end;
+            mount: retry_mount_identity(database)?,
+            deadline: now,
+            rowid: i64::MAX,
+            last,
+        })
     }
-    drop(snapshot);
-    Ok(StagedRetryWindows {
-        memory: staged.into_iter(),
-    })
-}
 
-/// Candidate membership is fixed by the recovery snapshot. The foreground
-/// writer may already have replaced a selected retry by the time we apply it,
-/// so carry the original observation identity, deadline and attempt count.
-pub(super) async fn read_rearm_projection_retry_candidates(
-    snapshot: &DatabaseEngineReadSnapshot,
-    after_rowid: i64,
-    last_rowid: i64,
-    batch_rows: i64,
-    now_micros: i64,
-) -> ProjectionStoreResult<Option<(i64, String)>> {
-    const OPERATION: &str = "read projection retry rearm window";
-    let mut candidates = snapshot
-        .query(
-            // qpsg-exempt: the literal terminal ceiling and independent clock
-            // predicate select a bounded rowid-ordered window on the reader.
-            "SELECT MAX(rowid),
-                    json_group_array(json_array(rowid, observation_id,
-                                                next_retry_at_micros, attempt_count))
-             FROM (
-                SELECT rowid, observation_id, next_retry_at_micros, attempt_count
-                FROM projection_queue NOT INDEXED
-                WHERE rowid > ?1 AND rowid <= ?2
-                  AND next_retry_at_micros > ?4
-                  AND next_retry_at_micros < 9223372036854775807
-                ORDER BY rowid LIMIT ?3
-             )",
-            params![after_rowid, last_rowid, batch_rows, now_micros],
-        )
-        .await
-        .map_err(|error| storage(OPERATION, error))?;
-    let batch = candidates
-        .next()
-        .await
-        .map_err(|error| storage(OPERATION, error))?
-        .ok_or_else(|| storage_message(OPERATION, "missing retry batch aggregate"))?;
-    let Some(batch_end) = batch
-        .get::<Option<i64>>(0)
-        .map_err(|error| storage(OPERATION, error))?
-    else {
-        return Ok(None);
-    };
-    let identities: String = batch.get(1).map_err(|error| storage(OPERATION, error))?;
-    Ok(Some((batch_end, identities)))
+    /// The deadline index includes rowid as its implicit last key. Split the
+    /// continuation into two index seeks so even many rows at the same
+    /// deadline do not repeatedly traverse the preceding pages.
+    pub(super) async fn next(&mut self) -> ProjectionStoreResult<Option<String>> {
+        const OPERATION: &str = "read projection retry rearm window";
+        let Some(end) = self.last else {
+            return Ok(None);
+        };
+        while (self.deadline, self.rowid) < end {
+            let snapshot = self
+                .database
+                .read_connection()
+                .convergence_snapshot()
+                .await
+                .map_err(|error| storage(OPERATION, error))?;
+            let mut rows = snapshot
+                .query(
+                    // qpsg-exempt: both arms seek the retry deadline index, bounded by the captured nonterminal upper key.
+                    "SELECT rowid AS id, next_retry_at_micros AS deadline,
+                        CASE WHEN retry_mount IS NOT ?4 THEN observation_id END, attempt_count
+                 FROM projection_queue INDEXED BY idx_projection_queue_retry_deadline
+                 WHERE next_retry_at_micros = ?1 AND rowid > ?2
+                   AND (next_retry_at_micros, rowid) <= (?5, ?6)
+                 UNION ALL
+                 SELECT rowid, next_retry_at_micros,
+                        CASE WHEN retry_mount IS NOT ?4 THEN observation_id END, attempt_count
+                 FROM projection_queue INDEXED BY idx_projection_queue_retry_deadline
+                 WHERE next_retry_at_micros > ?1 AND (next_retry_at_micros, rowid) <= (?5, ?6)
+                 ORDER BY deadline, id LIMIT ?3",
+                    params![
+                        self.deadline,
+                        self.rowid,
+                        self.batch_rows,
+                        self.mount.as_str(),
+                        end.0,
+                        end.1
+                    ],
+                )
+                .await
+                .map_err(|error| storage(OPERATION, error))?;
+            let mut candidates = Vec::new();
+            let mut last = None;
+            while let Some(row) = rows
+                .next()
+                .await
+                .map_err(|error| storage(OPERATION, error))?
+            {
+                let rowid: i64 = row.get(0).map_err(|error| storage(OPERATION, error))?;
+                let deadline: i64 = row.get(1).map_err(|error| storage(OPERATION, error))?;
+                let observation: Option<String> =
+                    row.get(2).map_err(|error| storage(OPERATION, error))?;
+                if let Some(observation) = observation {
+                    let attempt: i64 = row.get(3).map_err(|error| storage(OPERATION, error))?;
+                    candidates.push((rowid, observation, deadline, attempt));
+                }
+                last = Some((deadline, rowid));
+            }
+            let Some((deadline, rowid)) = last else {
+                return Ok(None);
+            };
+            self.deadline = deadline;
+            self.rowid = rowid;
+            if !candidates.is_empty() {
+                return serde_json::to_string(&candidates)
+                    .map(Some)
+                    .map_err(|error| storage(OPERATION, error));
+            }
+        }
+        Ok(None)
+    }
 }
 
 /// Primary-key lookups make writer work proportional to this bounded page.
@@ -428,6 +442,7 @@ pub(super) async fn apply_rearm_projection_retry_candidates(
     database: &Database,
     candidates: &str,
     now_micros: i64,
+    mount: &str,
 ) -> ProjectionStoreResult<u64> {
     const OPERATION: &str = "rearm queued projection retries";
     let transaction = database
@@ -438,7 +453,7 @@ pub(super) async fn apply_rearm_projection_retry_candidates(
         .execute(
             // qpsg-exempt: the candidate list contains exact rowid identities,
             // and the literal terminal bound protects a concurrent park.
-            "UPDATE projection_queue SET next_retry_at_micros = 0
+            "UPDATE projection_queue SET next_retry_at_micros = 0, retry_mount = NULL
              WHERE (rowid, observation_id, next_retry_at_micros, attempt_count) IN (
                  SELECT json_extract(value, '$[0]'),
                         json_extract(value, '$[1]'),
@@ -446,9 +461,10 @@ pub(super) async fn apply_rearm_projection_retry_candidates(
                         json_extract(value, '$[3]')
                  FROM json_each(?1)
              )
+               AND retry_mount IS NOT ?3
                AND next_retry_at_micros > ?2
                AND next_retry_at_micros < 9223372036854775807",
-            params![candidates, now_micros],
+            params![candidates, now_micros, mount],
         )
         .await
         .map_err(|error| storage(OPERATION, error))?;
@@ -466,50 +482,25 @@ pub(super) async fn apply_rearm_projection_retry_candidates(
     Ok(rows)
 }
 
-pub(super) async fn retry_rearm_frontier(
-    snapshot: &DatabaseEngineReadSnapshot,
-    now_micros: i64,
-) -> ProjectionStoreResult<Option<i64>> {
-    const OPERATION: &str = "read projection retry frontier";
-    // The deadline index bounds how far the snapshot reader needs to scan.
-    let mut rows = snapshot
-        .query(
-            // qpsg-exempt: the deadline index uses both the clock and the literal terminal ceiling.
-            "SELECT MAX(rowid)
-             FROM projection_queue INDEXED BY idx_projection_queue_retry_deadline
-             WHERE next_retry_at_micros > ?1 AND next_retry_at_micros < 9223372036854775807",
-            params![now_micros],
-        )
-        .await
-        .map_err(|error| storage(OPERATION, error))?;
-    let Some(row) = rows
-        .next()
-        .await
-        .map_err(|error| storage(OPERATION, error))?
-    else {
-        return Ok(None);
-    };
-    row.get::<Option<i64>>(0)
-        .map_err(|error| storage(OPERATION, error))
-}
-
 pub(super) async fn schedule_projection_retry(
     conn: &impl Executor,
     observation_id: &CanonicalObservationIdV1,
     attempt_count: u32,
     next_retry_at_micros: i64,
     last_error: &str,
+    mount: &str,
 ) -> ProjectionStoreResult<()> {
     let updated = conn
         .execute(
             "UPDATE projection_queue
-             SET attempt_count = ?2, next_retry_at_micros = ?3, last_error = ?4
+             SET attempt_count = ?2, next_retry_at_micros = ?3, last_error = ?4, retry_mount = ?5
              WHERE observation_id = ?1",
             params![
                 observation_id.as_str(),
                 i64::from(attempt_count),
                 next_retry_at_micros,
                 last_error,
+                mount,
             ],
         )
         .await

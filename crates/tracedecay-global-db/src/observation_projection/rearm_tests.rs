@@ -11,8 +11,7 @@ use tracedecay_domain::{
 use tracedecay_runtime_core::db::engine::params;
 
 use super::state::{
-    apply_rearm_projection_retry_candidates, read_rearm_projection_retry_candidates,
-    retry_rearm_frontier, stage_rearm_projection_retry_candidates,
+    RetryRearmWindows, apply_rearm_projection_retry_candidates, schedule_projection_retry,
 };
 use super::{RearmedProjectionRetries, rearm_queued_projection_retries};
 use crate::tests::harness::{RegisteredGlobalDbHarness, writer_telemetry};
@@ -501,16 +500,12 @@ async fn sparse_retry_rearm_writer_work_is_bounded_by_updated_rows() {
 #[asupersync::test]
 async fn rearm_reader_snapshot_cannot_clear_a_new_retry_generation() {
     let harness = RegisteredGlobalDbHarness::open("rearm-stale-candidates").await;
-    seed_queue(&harness, 3, 0).await;
+    seed_queue(&harness, 4, 0).await;
     let now = 1_000_000_i64;
-    let snapshot = harness.registered.read_snapshot().await.unwrap();
-    let frontier = retry_rearm_frontier(&snapshot, now).await.unwrap().unwrap();
-    let (last, candidates) = read_rearm_projection_retry_candidates(&snapshot, 0, frontier, 3, now)
+    let mut windows = RetryRearmWindows::new(harness.registered.runtime_database(), 4, now)
         .await
-        .unwrap()
         .unwrap();
-    drop(snapshot);
-    assert_eq!(last, 3);
+    let candidates = windows.next().await.unwrap().unwrap();
 
     // The reader's window is now stale: a foreground owner schedules a new
     // generation for one row and another row has become due.
@@ -537,6 +532,18 @@ async fn rearm_reader_snapshot_cannot_clear_a_new_retry_generation() {
             .unwrap(),
         1
     );
+    // An identical attempt count and deadline can leave every old CAS
+    // field unchanged. The foreground mount still owns the new retry.
+    schedule_projection_retry(
+        &transaction,
+        queued_observation(3).0.observation_id(),
+        3,
+        FAR_FUTURE_MICROS,
+        "new mount",
+        &windows.mount,
+    )
+    .await
+    .unwrap();
     transaction.commit().await.unwrap();
 
     assert_eq!(
@@ -544,6 +551,7 @@ async fn rearm_reader_snapshot_cannot_clear_a_new_retry_generation() {
             harness.registered.runtime_database(),
             &candidates,
             now,
+            &windows.mount,
         )
         .await
         .unwrap(),
@@ -559,9 +567,12 @@ async fn rearm_reader_snapshot_cannot_clear_a_new_retry_generation() {
         )
         .await
         .unwrap();
-    for (sequence, attempts, deadline) in
-        [(1_i64, 3_i64, 0_i64), (2, 4, FAR_FUTURE_MICROS), (3, 3, 1)]
-    {
+    for (sequence, attempts, deadline) in [
+        (1_i64, 3_i64, 0_i64),
+        (2, 4, FAR_FUTURE_MICROS),
+        (3, 3, 1),
+        (4, 3, FAR_FUTURE_MICROS),
+    ] {
         let row = rows.next().await.unwrap().unwrap();
         assert_eq!(row.get::<i64>(0).unwrap(), sequence);
         assert_eq!(row.get::<i64>(1).unwrap(), attempts);
@@ -576,53 +587,47 @@ async fn retry_rearm_does_not_erase_a_live_retry_between_windows() {
     seed_queue(&harness, 2, 1).await;
     let database = harness.registered.runtime_database();
     let now = 1_000_000_i64;
-    let mut staged = stage_rearm_projection_retry_candidates(database, 1, now, usize::MAX)
-        .await
-        .unwrap();
+    let mut windows = RetryRearmWindows::new(database, 1, now).await.unwrap();
 
-    // The snapshot is released before any writer lease. The original two
-    // deferred rows are frozen independently of later foreground retries.
+    // Apply the first old retry, then schedule a foreground retry between pages.
     assert_eq!(
         apply_rearm_projection_retry_candidates(
             database,
-            &staged.next().await.unwrap().expect("first frozen window"),
-            now
+            &windows.next().await.unwrap().expect("first retry window"),
+            now,
+            &windows.mount,
         )
         .await
         .unwrap(),
         1
     );
     let transaction = harness.registered.begin_write_transaction().await.unwrap();
-    assert_eq!(
-        transaction
-            .execute(
-                "UPDATE projection_queue
-                 SET attempt_count = attempt_count + 1,
-                     next_retry_at_micros = ?1, last_error = 'fresh live retry'
-                 WHERE observation_sequence = 2",
-                params![FAR_FUTURE_MICROS],
-            )
-            .await
-            .unwrap(),
-        1
-    );
+    schedule_projection_retry(
+        &transaction,
+        queued_observation(1).0.observation_id(),
+        4,
+        FAR_FUTURE_MICROS,
+        "fresh live retry",
+        &windows.mount,
+    )
+    .await
+    .unwrap();
     transaction.commit().await.unwrap();
 
-    // A fresh per-page SELECT would see the new deadline at sequence 2 and
-    // illegally clear this mount's backoff. The staged eligibility excludes
-    // the new retry even after dropping the WAL reader.
+    // The next reader sees the live retry and leaves its deadline intact.
     assert_eq!(
         apply_rearm_projection_retry_candidates(
             database,
-            &staged.next().await.unwrap().expect("second frozen window"),
-            now
+            &windows.next().await.unwrap().expect("next old retry"),
+            now,
+            &windows.mount,
         )
         .await
         .unwrap(),
         1
     );
 
-    assert!(staged.next().await.unwrap().is_none());
+    assert!(windows.next().await.unwrap().is_none());
     let snapshot = harness.registered.read_snapshot().await.unwrap();
     let mut rows = snapshot
         .query(
@@ -661,14 +666,13 @@ async fn rearm_leaves_later_observations_with_reused_queue_rowids_deferred() {
         .await
         .unwrap();
     transaction.commit().await.unwrap();
-    let mut staged = stage_rearm_projection_retry_candidates(database, 1, now, usize::MAX)
-        .await
-        .unwrap();
+    let mut windows = RetryRearmWindows::new(database, 1, now).await.unwrap();
     assert_eq!(
         apply_rearm_projection_retry_candidates(
             database,
-            &staged.next().await.unwrap().expect("first frozen window"),
-            now
+            &windows.next().await.unwrap().expect("first retry window"),
+            now,
+            &windows.mount,
         )
         .await
         .unwrap(),
@@ -689,18 +693,29 @@ async fn rearm_leaves_later_observations_with_reused_queue_rowids_deferred() {
         .execute(
             "INSERT INTO projection_queue
                  (observation_id, observation_sequence, attempt_count, next_retry_at_micros, last_error)
-             SELECT observation_id, sequence, 1, ?1, 'new retry'
+             SELECT observation_id, sequence, 0, 0, NULL
              FROM observations WHERE sequence = 4",
-            params![FAR_FUTURE_MICROS],
+            (),
         )
         .await
         .unwrap();
+    schedule_projection_retry(
+        &transaction,
+        queued_observation(3).0.observation_id(),
+        1,
+        FAR_FUTURE_MICROS,
+        "new retry",
+        &windows.mount,
+    )
+    .await
+    .unwrap();
     transaction.commit().await.unwrap();
     let mut remaining = 0;
-    while let Some(candidates) = staged.next().await.unwrap() {
-        remaining += apply_rearm_projection_retry_candidates(database, &candidates, now)
-            .await
-            .unwrap();
+    while let Some(candidates) = windows.next().await.unwrap() {
+        remaining +=
+            apply_rearm_projection_retry_candidates(database, &candidates, now, &windows.mount)
+                .await
+                .unwrap();
     }
     assert_eq!(
         remaining, 1,
@@ -721,20 +736,16 @@ async fn rearm_leaves_later_observations_with_reused_queue_rowids_deferred() {
 }
 
 #[asupersync::test]
-async fn staged_retry_recovery_releases_wal_reader_before_writes() {
+async fn retry_recovery_releases_wal_reader_between_pages() {
     let harness = RegisteredGlobalDbHarness::open("rearm-release-wal-reader").await;
     seed_queue(&harness, 9, 0).await;
     let database = harness.registered.runtime_database();
-    let mut staged = stage_rearm_projection_retry_candidates(database, 2, 1_000_000, usize::MAX)
+    let mut windows = RetryRearmWindows::new(database, 2, 1_000_000)
         .await
         .unwrap();
-    let first = staged
-        .next()
-        .await
-        .unwrap()
-        .expect("first frozen retry window");
+    let first = windows.next().await.unwrap().expect("first retry window");
     assert_eq!(
-        apply_rearm_projection_retry_candidates(database, &first, 1_000_000)
+        apply_rearm_projection_retry_candidates(database, &first, 1_000_000, &windows.mount)
             .await
             .unwrap(),
         2
@@ -755,11 +766,16 @@ async fn staged_retry_recovery_releases_wal_reader_before_writes() {
     );
     assert_eq!(checkpointed, log_frames);
     let mut remaining = Vec::new();
-    while let Some(candidates) = staged.next().await.unwrap() {
+    while let Some(candidates) = windows.next().await.unwrap() {
         remaining.push(
-            apply_rearm_projection_retry_candidates(database, &candidates, 1_000_000)
-                .await
-                .unwrap(),
+            apply_rearm_projection_retry_candidates(
+                database,
+                &candidates,
+                1_000_000,
+                &windows.mount,
+            )
+            .await
+            .unwrap(),
         );
     }
     assert_eq!(remaining, [2, 2, 2, 1]);
@@ -767,52 +783,69 @@ async fn staged_retry_recovery_releases_wal_reader_before_writes() {
 }
 
 #[asupersync::test]
-async fn retry_candidate_memory_ceiling_refuses_without_writes_and_recovers() {
-    let harness = RegisteredGlobalDbHarness::open("rearm-stage-memory-bound").await;
-    seed_queue(&harness, 9, 0).await;
+async fn retry_rearm_respects_mount_ownership_across_restart_and_existing_schema() {
+    let harness = RegisteredGlobalDbHarness::open("rearm-mount-owner").await;
+    seed_queue(&harness, 2, 0).await;
     let database = harness.registered.runtime_database();
-    let now = 1_000_000_i64;
-
-    // Permit exactly the first two-row window. The second window must
-    // refuse rather than spilling its frozen identities to the store disk.
-    let snapshot = harness.registered.read_snapshot().await.unwrap();
-    let frontier = retry_rearm_frontier(&snapshot, now).await.unwrap().unwrap();
-    let (end, first) = read_rearm_projection_retry_candidates(&snapshot, 0, frontier, 2, now)
+    let windows = RetryRearmWindows::new(database, 1, 1_000_000)
         .await
-        .unwrap()
         .unwrap();
-    assert_eq!(end, 2);
-    let capacity = first.capacity() + std::mem::size_of::<String>();
-    drop(snapshot);
-
-    let before = writer_telemetry(&harness.registered).transactions;
-    assert!(
-        stage_rearm_projection_retry_candidates(database, 2, now, capacity)
+    let transaction = harness.registered.begin_write_transaction().await.unwrap();
+    schedule_projection_retry(
+        &transaction,
+        queued_observation(1).0.observation_id(),
+        4,
+        FAR_FUTURE_MICROS,
+        "this mount",
+        &windows.mount,
+    )
+    .await
+    .unwrap();
+    transaction.commit().await.unwrap();
+    assert_eq!(
+        rearm_queued_projection_retries(database, 1)
             .await
-            .is_err(),
-        "a second frozen page must refuse above capacity, never spill to disk",
+            .unwrap()
+            .rows,
+        1
     );
-    assert_eq!(writer_telemetry(&harness.registered).transactions, before);
-    assert_eq!(queue_state(&harness).await, (9, 9, 9));
+    assert_eq!(
+        rearm_queued_projection_retries(database, 1)
+            .await
+            .unwrap()
+            .rows,
+        0
+    );
+    let (harness, _convergence) = harness.restart_for_daemon().await;
+    assert_eq!(
+        rearm_queued_projection_retries(harness.registered.runtime_database(), 1)
+            .await
+            .unwrap()
+            .rows,
+        1
+    );
 
-    // A failed read-only stage must release its WAL snapshot, so the ordinary
-    // production path can still rearm every deferred row in bounded writers.
+    let transaction = harness.registered.begin_write_transaction().await.unwrap();
+    transaction
+        .execute("ALTER TABLE projection_queue DROP COLUMN retry_mount", ())
+        .await
+        .unwrap();
+    transaction
+        .execute(
+            "UPDATE projection_queue SET next_retry_at_micros = ?1",
+            params![FAR_FUTURE_MICROS],
+        )
+        .await
+        .unwrap();
+    transaction.commit().await.unwrap();
+    let (harness, _convergence) = harness.restart_for_daemon().await;
     assert_eq!(
-        rearm_queued_projection_retries(database, 2).await.unwrap(),
-        RearmedProjectionRetries {
-            rows: 9,
-            batches: 5,
-        }
+        rearm_queued_projection_retries(harness.registered.runtime_database(), 1)
+            .await
+            .unwrap()
+            .rows,
+        2
     );
-    let after = writer_telemetry(&harness.registered).transactions;
-    assert_eq!(after.commands - before.commands, 5);
-    assert_eq!(queue_state(&harness).await, (9, 0, 9));
-    assert_eq!(
-        rearm_queued_projection_retries(database, 2).await.unwrap(),
-        RearmedProjectionRetries::default(),
-        "a repeat recovery must not reacquire the writer",
-    );
-    assert_eq!(writer_telemetry(&harness.registered).transactions, after);
 }
 
 #[asupersync::test]
