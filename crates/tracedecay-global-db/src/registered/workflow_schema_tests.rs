@@ -148,7 +148,10 @@ async fn short_lived_admission_reclaims_freed_pages_without_daemon_maintenance()
     let auto_vacuum: i64 = connection
         .query_row("PRAGMA auto_vacuum", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(auto_vacuum, 2, "new stores must support incremental reclamation");
+    assert_eq!(
+        auto_vacuum, 2,
+        "new stores must support incremental reclamation"
+    );
     connection
         .execute_batch(
             "CREATE TABLE ephemeral_reclaim(payload BLOB);
@@ -162,7 +165,10 @@ async fn short_lived_admission_reclaims_freed_pages_without_daemon_maintenance()
     let before_free: i64 = connection
         .query_row("PRAGMA freelist_count", [], |row| row.get(0))
         .unwrap();
-    assert!(before_free > 0, "the fixture must contain reclaimable pages");
+    assert!(
+        before_free > 0,
+        "the fixture must contain reclaimable pages"
+    );
     drop(connection);
 
     // Reopen through the actual short-lived owner: there is no background
