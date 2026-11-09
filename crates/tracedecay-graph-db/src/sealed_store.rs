@@ -4039,9 +4039,9 @@ mod build_tests {
             identity.generation.clone(),
         );
         let parent = GraphDb::open(GraphDbOpenOptions {
-            location: GraphDbLocation::Memory,
+            location: GraphDbLocation::Persistent(database_path.clone()),
             expected_format: GraphFormatVersion::current(),
-            durability: GraphDurability::Memory,
+            durability: GraphDurability::WalSync,
             cancellation: Arc::new(NeverCancelled),
         })
         .unwrap();
@@ -4092,9 +4092,9 @@ mod build_tests {
             identity.generation.clone(),
         );
         let parent = GraphDb::open(GraphDbOpenOptions {
-            location: GraphDbLocation::Memory,
+            location: GraphDbLocation::Persistent(database_path.clone()),
             expected_format: GraphFormatVersion::current(),
-            durability: GraphDurability::Memory,
+            durability: GraphDurability::WalSync,
             cancellation: Arc::new(NeverCancelled),
         })
         .unwrap();
