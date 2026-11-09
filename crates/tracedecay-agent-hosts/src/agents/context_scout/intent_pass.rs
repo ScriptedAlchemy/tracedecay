@@ -1164,31 +1164,33 @@ fn intent_decision_metadata(
         }),
         IntentDecisionV1::NoSignal => serde_json::json!({"kind": "no_signal"}),
     };
-    Some(serde_json::json!({
-        "source": "context_scout_intent_pass",
-        "route": "decision_engine",
-        "window": {
-            "first_store_id": window.first_store_id,
-            "last_store_id": window.last_store_id,
-            "message_count": window.messages.len(),
-            "window_digest": window_digest,
-            "newest_timestamp_micros": window.newest_timestamp_micros,
-        },
-        "settings_digest": settings_digest,
-        "model_outcome": engine_outcome.model_outcome(),
-        "engine": engine_identity.map(|identity| serde_json::json!({
-            "base_url_digest": hex::encode(identity.base_url_digest),
-            "configured_model": identity.model,
-            "reported_model": engine_outcome.reported_model(),
-        })),
-        "answers": answers,
-        "raw_model_probabilities": raw_model_probabilities,
-        "request_latency_micros": request_latency_micros,
-        "facts": facts,
-        "prompt_inferences": prompt_inferences,
-        "decision": selection,
-    })
-    .to_string())
+    Some(
+        serde_json::json!({
+            "source": "context_scout_intent_pass",
+            "route": "decision_engine",
+            "window": {
+                "first_store_id": window.first_store_id,
+                "last_store_id": window.last_store_id,
+                "message_count": window.messages.len(),
+                "window_digest": window_digest,
+                "newest_timestamp_micros": window.newest_timestamp_micros,
+            },
+            "settings_digest": settings_digest,
+            "model_outcome": engine_outcome.model_outcome(),
+            "engine": engine_identity.map(|identity| serde_json::json!({
+                "base_url_digest": hex::encode(identity.base_url_digest),
+                "configured_model": identity.model,
+                "reported_model": engine_outcome.reported_model(),
+            })),
+            "answers": answers,
+            "raw_model_probabilities": raw_model_probabilities,
+            "request_latency_micros": request_latency_micros,
+            "facts": facts,
+            "prompt_inferences": prompt_inferences,
+            "decision": selection,
+        })
+        .to_string(),
+    )
 }
 
 fn receipt_model_is_valid(model: &str) -> bool {
@@ -1278,16 +1280,14 @@ mod tool_signal_tests {
             threshold_permille: 600,
             margin_permille: None,
         }];
-        let engine = EngineOutcomeV1::Asked(DecisionEngineOutcomeV1::Answered(
-            DecisionAnswersV1 {
-                answers: BTreeMap::from([(
-                    Kind::Impact.as_key().to_owned(),
-                    DecisionAnswerV1::Noul(0.17),
-                )]),
-                model: Some("kev-4b".to_owned()),
-                latency_micros: 1250,
-            },
-        ));
+        let engine = EngineOutcomeV1::Asked(DecisionEngineOutcomeV1::Answered(DecisionAnswersV1 {
+            answers: BTreeMap::from([(
+                Kind::Impact.as_key().to_owned(),
+                DecisionAnswerV1::Noul(0.17),
+            )]),
+            model: Some("kev-4b".to_owned()),
+            latency_micros: 1250,
+        }));
         let negative = IntentDecisionV1::BelowThreshold {
             best: IntentBestAnswerV1 {
                 intent: Kind::Impact,
@@ -1316,7 +1316,10 @@ mod tool_signal_tests {
         assert_eq!(receipt["decision"]["best_probability_permille"], 170);
         assert_eq!(receipt["answers"][0]["probability_permille"], 170);
         assert_eq!(receipt["answers"][0]["threshold_permille"], 600);
-        assert_eq!(receipt["raw_model_probabilities"][Kind::Impact.as_key()], 0.17);
+        assert_eq!(
+            receipt["raw_model_probabilities"][Kind::Impact.as_key()],
+            0.17
+        );
         assert_eq!(receipt["request_latency_micros"], 1250);
         assert!(receipt["facts"].as_array().unwrap().is_empty());
         assert_eq!(receipt["prompt_inferences"].as_array().unwrap().len(), 1);
@@ -1349,19 +1352,21 @@ mod tool_signal_tests {
             messages: Vec::new(),
             ..window
         };
-        assert!(intent_decision_metadata(
-            &IntentDecisionEvidenceV1 {
-                window: &bad_window,
-                engine_outcome: &engine,
-                facts: &[],
-                prompt_inferences: &[],
-                decision: &negative,
-            },
-            &settings_digest,
-            &questions,
-            None,
-        )
-        .is_none());
+        assert!(
+            intent_decision_metadata(
+                &IntentDecisionEvidenceV1 {
+                    window: &bad_window,
+                    engine_outcome: &engine,
+                    facts: &[],
+                    prompt_inferences: &[],
+                    decision: &negative,
+                },
+                &settings_digest,
+                &questions,
+                None,
+            )
+            .is_none()
+        );
     }
 
     #[test]
