@@ -149,7 +149,7 @@ pub(crate) async fn ensure_github_stack_delivery_schema(
                 watermark_id TEXT NOT NULL,
                 observed_at_micros INTEGER NOT NULL CHECK(observed_at_micros > 0),
                 signal_json TEXT NOT NULL
-                    CHECK(json_valid(signal_json) AND length(signal_json) <= 1048576),
+                    CHECK(json_valid(signal_json) AND octet_length(signal_json) <= 1048576),
                 PRIMARY KEY(project_id, signal_id)
             ) STRICT;
             CREATE TABLE IF NOT EXISTS github_stack_delivery_recipients (

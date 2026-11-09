@@ -36,6 +36,76 @@ async fn state(
 }
 
 #[asupersync::test]
+async fn registered_stack_signal_limit_counts_utf8_bytes_not_characters() {
+    let harness = RegisteredGlobalDbHarness::open("github-stack-utf8-byte-limit").await;
+    // SQLite length(TEXT) counts characters; the on-disk and Rust limits
+    // count UTF-8 bytes. This valid JSON fits the former but not the latter.
+    let mut oversized = signal("signal.github-stack-utf8-oversize", 10);
+    oversized.signal_json = format!(r#"{{"payload":"{}"}}"#, "é".repeat(600_000));
+    assert!(oversized.signal_json.chars().count() < 1_048_576);
+    assert!(oversized.signal_json.len() > 1_048_576);
+
+    let writer = harness
+        .registered
+        .writer_connection()
+        .expect("registered stack byte-limit writer");
+    let refusal = writer
+        .execute(
+            "INSERT INTO github_stack_delivery_signals
+                 (project_id, signal_id, scope_digest, repository_id,
+                  watermark_id, observed_at_micros, signal_json)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![
+                oversized.project_id.as_str(),
+                oversized.signal_id.as_str(),
+                oversized.scope_digest.as_str(),
+                oversized.repository_id.as_str(),
+                oversized.watermark_id.as_str(),
+                oversized.observed_at_micros,
+                oversized.signal_json.as_str(),
+            ],
+        )
+        .await
+        .expect_err("raw registered SQL must reject a payload over the UTF-8 byte limit")
+        .to_string();
+    assert!(refusal.contains("CHECK constraint failed"), "{refusal}");
+    drop(writer);
+    assert!(
+        harness
+            .registered
+            .github_stack_signal(PROJECT_ID, &oversized.signal_id)
+            .await
+            .expect("failed raw insert must leave no signal")
+            .is_none()
+    );
+
+    // The application boundary must make the same refusal rather than
+    // relying on SQLite to accept a second, larger copy of the history.
+    assert!(
+        harness
+            .registered
+            .append_github_stack_signal(oversized, vec![RECIPIENT.to_owned()])
+            .await
+            .is_err()
+    );
+    let mut admitted = signal("signal.github-stack-utf8-within-limit", 11);
+    admitted.signal_json = format!(r#"{{"payload":"{}"}}"#, "é".repeat(400_000));
+    harness
+        .registered
+        .append_github_stack_signal(admitted.clone(), vec![RECIPIENT.to_owned()])
+        .await
+        .expect("non-ASCII bytes within the 1 MiB limit remain admissible");
+    assert_eq!(
+        harness
+            .registered
+            .github_stack_signal(PROJECT_ID, &admitted.signal_id)
+            .await
+            .expect("read admitted non-ASCII payload"),
+        Some(admitted)
+    );
+}
+
+#[asupersync::test]
 async fn pending_delivery_survives_restart_and_settles_only_after_acknowledgement() {
     let harness = RegisteredGlobalDbHarness::open("github-stack-delivery-restart").await;
     let record = signal("signal.github-stack-restart", 10);
