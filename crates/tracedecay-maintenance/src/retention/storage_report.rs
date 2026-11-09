@@ -204,7 +204,7 @@ pub(super) fn graph_container_stem(name: &str, is_leaf: bool) -> Option<&str> {
 
 // Only SQLite-owned sidecars belong to the database family. Incident debris,
 // backups and unrelated adjacent files must remain visible as "other" bytes.
-fn sqlite_family_member(name: &str, main: &str) -> bool {
+fn is_sqlite_family_member(name: &str, main: &str) -> bool {
     name == main
         || name
             .strip_prefix(main)
@@ -220,7 +220,7 @@ impl StoreKindBytesV1 {
         let first = components.next().unwrap_or_default();
         let root_file = components.peek().is_none();
         let db_filename = tracedecay_runtime_core::config::DB_FILENAME;
-        let family = if root_file && sqlite_family_member(&first, db_filename) {
+        let family = if root_file && is_sqlite_family_member(&first, db_filename) {
             &mut self.graph_database
         } else if first == SEALED_GRAPH_DIRECTORY {
             &mut self.sealed_graph
@@ -240,7 +240,7 @@ impl StoreKindBytesV1 {
             } else {
                 &mut self.generation_artifacts
             }
-        } else if (root_file && sqlite_family_member(&first, SESSIONS_DB_FILENAME))
+        } else if (root_file && is_sqlite_family_member(&first, SESSIONS_DB_FILENAME))
             || first.strip_prefix(SESSIONS_DB_FILENAME) == Some(".delivery-settlement-spool-v1")
             || first
                 .strip_prefix('.')
