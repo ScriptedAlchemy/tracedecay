@@ -503,23 +503,13 @@ async fn rearm_reader_snapshot_cannot_clear_a_new_retry_generation() {
     let harness = RegisteredGlobalDbHarness::open("rearm-stale-candidates").await;
     seed_queue(&harness, 3, 0).await;
     let now = 1_000_000_i64;
-    let frontier = retry_rearm_frontier(
-        &harness.registered.runtime_database().read_connection(),
-        now,
-    )
-    .await
-    .unwrap()
-    .unwrap();
-    let (last, candidates) = read_rearm_projection_retry_candidates(
-        &harness.registered.runtime_database().read_connection(),
-        0,
-        frontier,
-        3,
-        now,
-    )
-    .await
-    .unwrap()
-    .unwrap();
+    let snapshot = harness.registered.read_snapshot().await.unwrap();
+    let frontier = retry_rearm_frontier(&snapshot, now).await.unwrap().unwrap();
+    let (last, candidates) = read_rearm_projection_retry_candidates(&snapshot, 0, frontier, 3, now)
+        .await
+        .unwrap()
+        .unwrap();
+    drop(snapshot);
     assert_eq!(last, 3);
 
     // The reader's window is now stale: a foreground owner schedules a new
