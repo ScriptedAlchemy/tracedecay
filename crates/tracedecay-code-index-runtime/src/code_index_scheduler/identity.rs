@@ -270,10 +270,12 @@ impl GitMetadataFingerprintV1 {
             ),
         );
         if let Some(refs) = &self.submodule_refs {
-            signature.push_str(&format!("|submodule_refs={refs}"));
+            signature.push_str("|submodule_refs=");
+            signature.push_str(refs);
         }
         if let Some(indexes) = &self.submodule_indexes {
-            signature.push_str(&format!("|submodule_indexes={indexes}"));
+            signature.push_str("|submodule_indexes=");
+            signature.push_str(indexes);
         }
         if self.submodule_probe_failed {
             signature.push_str("|submodule_probe_failed=true");

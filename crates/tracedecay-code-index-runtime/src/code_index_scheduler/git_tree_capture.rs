@@ -35,6 +35,9 @@ use tracedecay_code_index::production::{
     CodeIndexRepositoryParseIdentityV1,
 };
 
+type TreeBlobVisitor<'a> =
+    dyn FnMut(&[u8], &[u8]) -> Result<(), CodeIndexSearchUnavailableReasonV1> + 'a;
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ExactGitTreeSourceV1 {
     pub reference: tracedecay_domain::RefId,
@@ -500,7 +503,7 @@ impl CodeIndexWorktreeSchedulerV1 {
         parent: &gix::Repository,
         pins: &GitTreeSubmodulePins,
         control: &branch_generations::BranchGenerationReadControlV1,
-        visitor: &mut dyn FnMut(&[u8], &[u8]) -> Result<(), CodeIndexSearchUnavailableReasonV1>,
+        visitor: &mut TreeBlobVisitor<'_>,
     ) -> Result<(), CodeIndexSearchUnavailableReasonV1> {
         let unavailable = CodeIndexSearchUnavailableReasonV1::GenerationUnavailable;
         let children =
@@ -596,9 +599,7 @@ impl CodeIndexWorktreeSchedulerV1 {
         source_revision: Option<tracedecay_domain::CommitId>,
         tree: tracedecay_domain::TreeId,
         control: &branch_generations::BranchGenerationReadControlV1,
-        visit: impl FnOnce(
-            &mut dyn FnMut(&[u8], &[u8]) -> Result<(), CodeIndexSearchUnavailableReasonV1>,
-        ) -> Result<(), CodeIndexSearchUnavailableReasonV1>,
+        visit: impl FnOnce(&mut TreeBlobVisitor<'_>) -> Result<(), CodeIndexSearchUnavailableReasonV1>,
     ) -> Result<CapturedSnapshotV1, CodeIndexSearchUnavailableReasonV1> {
         let registry = StaticLanguageRegistry::new();
         let mut roster = CapturedFileRosterV1::default();

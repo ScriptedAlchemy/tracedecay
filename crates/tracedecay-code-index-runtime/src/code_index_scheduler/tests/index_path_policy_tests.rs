@@ -270,7 +270,10 @@ fn submodule_policy_binds_live_graph_and_historical_child_pins_across_restart() 
     let mut off = start(&parent, store.path(), policy(&[], &[]));
     off.reconcile_now().unwrap();
     assert_eq!(indexed_paths(&off), ["dev/launch.ts"]);
-    assert!(grep("pinned_symbol", &policy(&[], &[])).is_empty());
+    assert_eq!(
+        grep("pinned_symbol", &policy(&[], &[])),
+        Vec::<String>::new()
+    );
     drop(off);
 
     let mut on = start(&parent, store.path(), enabled.clone());
@@ -308,7 +311,7 @@ fn submodule_policy_binds_live_graph_and_historical_child_pins_across_restart() 
         "const private_marker = 1;",
     )
     .unwrap();
-    assert!(grep("private_marker", &enabled).is_empty());
+    assert_eq!(grep("private_marker", &enabled), Vec::<String>::new());
     std::fs::write(
         checkout.join("lib.ts"),
         "export function feature() { return 'successor_symbol'; }\n",

@@ -1055,10 +1055,9 @@ mod tests {
         fixture_git(&parent, &["add", ".gitmodules", ".gitignore"]);
         fixture_git(&parent, &["commit", "-qm", "parent with submodule"]);
         fixture_git(&parent, &["rm", "--cached", "-f", "node_modules/pkg"]);
-        assert!(
-            fixture_git(&parent, &["ls-files", "--stage", "--", "node_modules/pkg"])
-                .stdout
-                .is_empty()
+        assert_eq!(
+            fixture_git(&parent, &["ls-files", "--stage", "--", "node_modules/pkg"]).stdout,
+            b""
         );
         assert!(
             fixture_git(&parent, &["ls-tree", "HEAD", "--", "node_modules/pkg"])

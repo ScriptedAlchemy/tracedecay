@@ -847,7 +847,9 @@ mod tests {
             &IndexPathPolicyV1::new(vec![], vec![]).unwrap(),
         )
         .expect("source walk with nested repository diagnostics");
-        let _visited = walk.map(|entry| entry.expect("source entry")).count();
+        for entry in walk {
+            entry.expect("source entry");
+        }
         assert_eq!(
             diagnostics.skipped_nested_repositories_note().as_deref(),
             Some("Skipped nested repositories outside parent index: \"app\"")
