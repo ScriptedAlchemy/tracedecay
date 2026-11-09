@@ -1290,15 +1290,12 @@ mod tests {
             DoctorEvidenceStateV1::Partial
         );
 
-        sized(
-            &profile.join("projects/proj_replaced"),
-            default_bound_bytes(ProfileFamilyV1::Other) + 1,
-        );
-        let over = census_profile_footprint(&profile, &registered, &BTreeMap::new());
-        assert_eq!(
-            over.total_bytes,
-            default_bound_bytes(ProfileFamilyV1::Other) + 1 + 7
-        );
+        // Exercise the same overage path without allocating a 1 GiB fixture
+        // on platforms that eagerly provision extended regular files.
+        let overrides = BTreeMap::from([("projects/proj_replaced".to_owned(), 10)]);
+        let over = census_profile_footprint(&profile, &registered, &overrides);
+        assert_eq!(over.total_bytes, 18);
+        assert_eq!(entry(&over, "projects/proj_replaced").bound_bytes, 10);
         assert_eq!(
             findings(&over)["projects/proj_replaced"].finding().state(),
             DoctorEvidenceStateV1::Degraded,
