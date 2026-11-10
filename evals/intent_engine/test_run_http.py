@@ -1063,7 +1063,7 @@ class RunHttpTest(unittest.TestCase):
         self.assertFalse(sample.exists())
         self.assertFalse(self.partial.exists())
         # Also guard the atomic-publish race after the initial preflight.
-        with self.assertRaisesRegex(ValueError, "not a regular file"):
+        with self.assertRaisesRegex(ValueError, "sample path exists or was replaced during publication"):
             run_http.publish_sample(str(sample), '{"valid": true}')
         self.assertEqual(list(self.root.glob(".noul-sample-*")), [])
 

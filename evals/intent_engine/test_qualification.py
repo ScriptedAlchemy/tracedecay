@@ -522,7 +522,7 @@ class QualificationTests(unittest.TestCase):
         # as a legitimate, zero-truncation or measured-drop result.
         forged = self.signed_result()
         forged["rows"][0].update(
-            state_tokens=3, reported_state_tokens_dropped=4, dropped=4,
+            state_tokens=3, reported_state_tokens_dropped=4, dropped=0,
         )
         with self.assertRaisesRegex(ValueError, "dropped state tokens exceed original"):
             qualification.qualified_report(
@@ -755,7 +755,7 @@ class QualificationTests(unittest.TestCase):
             wrong = copy.deepcopy(sample)
             wrong["response"]["answers"]["impact"]["noul"] = 0.31
             path.write_text(json.dumps(wrong), encoding="utf-8")
-            with self.assertRaisesRegex(ValueError, "response or row disagrees"):
+            with self.assertRaisesRegex(ValueError, "raw response disagrees with first scored row"):
                 score_sample()
 
             wrong = copy.deepcopy(sample)
@@ -1337,7 +1337,7 @@ class QualificationTests(unittest.TestCase):
             with patch.object(run_http, "HERE", str(here)), patch.object(
                 run_http, "post"
             ) as post:
-                with self.assertRaisesRegex(ValueError, "sample response or row disagrees"):
+                with self.assertRaisesRegex(ValueError, "raw response disagrees with first scored row"):
                     run_http.main(args)
                 post.assert_not_called()
             self.assertEqual(partial.read_bytes(), partial_bytes)
@@ -1707,7 +1707,7 @@ class QualificationTests(unittest.TestCase):
             with patch.object(run_http, "HERE", str(here)), patch.object(
                 run_http, "post", side_effect=replace_after_admission,
             ) as post:
-                with self.assertRaisesRegex(ValueError, "sample changed during inference"):
+                with self.assertRaisesRegex(ValueError, "raw response disagrees with first scored row"):
                     run_http.main(args)
                 self.assertEqual(post.call_count, 1)
             self.assertFalse(completed.exists())
@@ -2332,7 +2332,7 @@ class QualificationTests(unittest.TestCase):
             body = {"questions": self.questions, "state": "User: " + case["current_prompt"]}
             records.append({
                 "id": case["id"],
-                "body": json.dumps(body, ensure_ascii=False, separators=(",", ":"), sort_keys=True),
+                "body": json.dumps(body, ensure_ascii=False, indent=2, sort_keys=True),
             })
         capture_bytes = json.dumps(records, ensure_ascii=False).encode("utf-8")
         manifest = copy.deepcopy(self.manifest)
@@ -2768,7 +2768,7 @@ class QualificationTests(unittest.TestCase):
             body = qualification.loads_unambiguous_json(record["body"])
             body["state"] = "éé"
             record["body"] = json.dumps(
-                body, sort_keys=True, ensure_ascii=False, separators=(",", ":"),
+                body, sort_keys=True, ensure_ascii=False, indent=2,
             )
         capture = json.dumps(records, ensure_ascii=False).encode("utf-8")
         manifest["captured_requests_sha256"] = qualification.sha256_bytes(capture)

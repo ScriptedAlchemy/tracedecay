@@ -405,12 +405,13 @@ For this arm, `questions_sha256` binds the declared settings vocabulary and
 its order, while `captured_requests_sha256` and `holdout_requests_sha256`
 bind the actual ordered **wire bytes**. The capture validator requires the
 canonical sorted question-map wire order, not a match to the settings vector's
-iteration order. It also checks the full compact Rust `serde_json::Value` wire
-encoding (lexically ordered object keys, no optional JSON whitespace and
-UTF-8 text rather than alternative Unicode escapes). Semantically equivalent
-JSON with a different top-level order or pretty-printing is not a legitimate
-capture of this pinned runtime serializer, even if every evidence hash has
-been recomputed. Only the inner request must be canonical; the outer evidence
+iteration order. It also checks the full pretty Rust `serde_json::Value` wire
+encoding (lexically ordered object keys, two-space indentation and UTF-8 text
+rather than alternative Unicode escapes). The client uses one
+`serde_json::to_vec_pretty` byte buffer for both transport and request
+commitments. Semantically equivalent compact JSON or different indentation
+is not a legitimate capture of this pinned runtime serializer, even if every
+evidence hash has been recomputed. Only the inner request must be canonical; the outer evidence
 file preserves its original hashed bytes. This wire-shape check does **not**
 attest that the bytes actually originated from Scout.
 

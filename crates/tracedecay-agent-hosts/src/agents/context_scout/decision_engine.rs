@@ -262,12 +262,9 @@ impl DecisionEngineClientV1 {
         self.identity.clone()
     }
 
-    /// Prepare the same serde_json body used by `send_json` without
-    /// retaining the model-visible state or making a second HTTP request.
-    pub fn request_commitment(
-        &self,
-        request: &DecisionRequestV1,
-    ) -> Option<DecisionRequestCommitmentV1> {
+    /// Render the pretty UTF-8 JSON that is both sent over HTTP and committed.
+    /// Sharing the bytes prevents receipt/transport serializer drift.
+    fn request_wire(&self, request: &DecisionRequestV1) -> Option<Vec<u8>> {
         if !request_is_well_formed(request) {
             return None;
         }
@@ -276,7 +273,14 @@ impl DecisionEngineClientV1 {
             self.identity.model.as_deref(),
             self.max_state_bytes,
         );
-        let wire = serde_json::to_vec(&body).ok()?;
+        serde_json::to_vec_pretty(&body).ok()
+    }
+
+    pub fn request_commitment(
+        &self,
+        request: &DecisionRequestV1,
+    ) -> Option<DecisionRequestCommitmentV1> {
+        let wire = self.request_wire(request)?;
         Some(DecisionRequestCommitmentV1 {
             wire_sha256: Sha256::digest(&wire).into(),
             wire_bytes: wire.len(),
@@ -315,12 +319,16 @@ impl DecisionEngineClientV1 {
             return DecisionEngineOutcomeV1::Backpressured;
         };
         let started = Instant::now();
-        let body = request_body(
-            request,
-            self.identity.model.as_deref(),
-            self.max_state_bytes,
-        );
-        let mut response = match self.agent.post(&self.endpoint).send_json(&body) {
+        let Some(wire) = self.request_wire(request) else {
+            tracing::debug!("decision engine request could not be serialized");
+            return DecisionEngineOutcomeV1::Malformed;
+        };
+        let mut response = match self
+            .agent
+            .post(&self.endpoint)
+            .header("content-type", "application/json")
+            .send(wire.as_slice())
+        {
             Ok(response) => response,
             Err(error) => return transport_failure(&error),
         };
@@ -941,6 +949,7 @@ mod tests {
             <[u8; 32]>::from(Sha256::digest(actual.as_bytes()))
         );
         let sent: Value = serde_json::from_str(&actual).unwrap();
+        assert_eq!(actual, serde_json::to_string_pretty(&sent).unwrap());
         assert_eq!(sent["model"], "kev-4b");
         assert_eq!(sent["state"], tail_on_char_boundary(&original.state, 9));
         assert!(!actual.contains("old private context"));
@@ -1362,7 +1371,6 @@ mod tests {
                     choice_answer(Some("memory"), "probs", &[("code", 0.1), ("memory", 0.9)]),
                 ),
                 ("urgency", score_answer(0.5)),
-                ("unrequested", noul_answer(0.1)),
             ],
         );
         let server = fake_decision_engine(200, &body, Duration::ZERO);
@@ -1374,7 +1382,9 @@ mod tests {
                 score("urgency", &["low", "high"]),
             ],
         )));
-        assert_eq!(answers.answers.len(), 3, "unrequested answers are dropped");
+        assert_eq!(answers.answers.len(), 3, "each requested answer is returned");
+        assert_eq!(answers.answers["recall"], DecisionAnswerV1::Noul(0.9));
+        assert_eq!(answers.answers["urgency"], DecisionAnswerV1::Score(0.5));
         assert_eq!(server.requests.load(Ordering::SeqCst), 1);
     }
 

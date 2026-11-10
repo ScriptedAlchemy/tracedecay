@@ -73,14 +73,12 @@ def captured_request_bodies(raw, case_ids, questions, requested_model, max_bytes
         # order other than the production encoder's canonical sorted order.
         if list(request["questions"]) != sorted(questions):
             raise ValueError(f"captured Scout request {record['id']} question order differs from canonical Scout wire order")
-        # The production client passes a serde_json::Value to ureq::send_json.
-        # Its default Bazel serializer emits compact JSON with lexically sorted
-        # object keys, not just a sorted questions map. Otherwise an invented
-        # (but self-consistently rehashed) request could be called a Scout capture
-        # even though the production encoder could not have sent those bytes.
+        # The Rust client sends serde_json::to_vec_pretty(Value) directly
+        # and hashes those same bytes. Refuse compact, reordered or otherwise
+        # re-encoded captures even when their digests have been recomputed.
         canonical = json.dumps(
             request, sort_keys=True, ensure_ascii=False,
-            separators=(",", ":"), allow_nan=False,
+            indent=2, allow_nan=False,
         ).encode("utf-8")
         if encoded != canonical:
             raise ValueError(

@@ -108,6 +108,10 @@ class QualificationCliTests(unittest.TestCase):
                 key: {"type": "noul", "noul": value}
                 for key, value in first["probs"].items()
             },
+            "usage": {
+                "input_tokens": first["input_tokens"],
+                "state_tokens_dropped": first["reported_state_tokens_dropped"],
+            },
         }
         first["sample_response_sha256"] = fixtures.run_http.digest(response)
         sample = {
