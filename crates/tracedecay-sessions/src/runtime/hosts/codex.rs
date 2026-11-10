@@ -1038,7 +1038,7 @@ struct CodexRetainedScan {
 enum CodexScanPhase {
     Directories {
         queued: VecDeque<(PathBuf, u8, u8, u64)>,
-        current: Option<Box<(PathBuf, u8, u8, std::fs::ReadDir)>>,
+        current: Option<Box<CodexDirectoryListing>>,
     },
     Files {
         next_directory: usize,
@@ -1050,7 +1050,18 @@ enum CodexScanPhase {
 
 struct CodexDirectoryResume {
     queued: VecDeque<(PathBuf, u8, u8, u64)>,
-    current: Option<Box<(PathBuf, u8, u8, std::fs::ReadDir)>>,
+    current: Option<Box<CodexDirectoryListing>>,
+}
+
+/// Retain both the native iterator and its unfinished name witness across
+/// budgeted discovery passes; neither can be reconstructed from an offset.
+struct CodexDirectoryListing {
+    path: PathBuf,
+    depth: u8,
+    root_order: u8,
+    entries: std::fs::ReadDir,
+    fingerprint: Option<CodexDirectoryEntryFingerprint>,
+    directory_index: usize,
 }
 
 #[derive(Clone, Copy)]
@@ -2187,7 +2198,14 @@ fn retained_scan_step(
                             },
                         )?;
                     }
-                    let identity = codex_directory_witness(&path)?;
+                    // Do not enumerate a potentially huge unsettled archive
+                    // just to obtain its witness before the bounded iterator.
+                    let stat = directory_stat_witness(&path)?;
+                    let identity = stat.map(|witness| CodexDirectoryWitness {
+                        stat: witness.stat,
+                        entries: None,
+                    });
+                    let directory_index = scan.directories.len();
                     scan.directories.push(CodexDirectoryIdentity {
                         path: path.clone(),
                         root_order,
@@ -2203,10 +2221,19 @@ fn retained_scan_step(
                             source,
                         }
                     })?;
-                    *current = Some(Box::new((path, depth, root_order, listed)));
+                    *current = Some(Box::new(CodexDirectoryListing {
+                        path,
+                        depth,
+                        root_order,
+                        entries: listed,
+                        fingerprint: stat
+                            .filter(|witness| !witness.settled)
+                            .map(|_| CodexDirectoryEntryFingerprint::default()),
+                        directory_index,
+                    }));
                     continue;
                 }
-                let (dir, depth, root_order, listed) = current.as_deref_mut().ok_or(
+                let directory = current.as_deref_mut().ok_or(
                     TranscriptIngestError::InvalidCodexDiscoveryFrontier {
                         detail: "retained Codex directory iterator disappeared",
                     },
@@ -2214,12 +2241,12 @@ fn retained_scan_step(
                 if directory_entries >= directory_work_limit {
                     break;
                 }
-                match listed.next() {
+                match directory.entries.next() {
                     Some(entry) => {
                         directory_entries += 1;
                         let entry = entry.map_err(|source| TranscriptIngestError::ScanIo {
                             operation: "read Codex transcript directory entry",
-                            path: dir.clone(),
+                            path: directory.path.clone(),
                             source,
                         })?;
                         let file_type =
@@ -2230,13 +2257,16 @@ fn retained_scan_step(
                                     path: entry.path(),
                                     source,
                                 })?;
+                        if let Some(fingerprint) = directory.fingerprint.as_mut() {
+                            fingerprint.observe(&entry.file_name(), file_type)?;
+                        }
                         // Rollout files are not structural work. Charging them
                         // here spends the pass on names that are not child
                         // directories, so the newest sessions are not emitted
                         // until every older day has been listed.
                         if file_type.is_dir() && !file_type.is_symlink() {
                             directory_work += 1;
-                            if *depth >= MAX_SCAN_DEPTH {
+                            if directory.depth >= MAX_SCAN_DEPTH {
                                 return Err(TranscriptIngestError::ScanIo {
                                     operation: "traverse Codex transcript directory depth",
                                     path: entry.path(),
@@ -2283,7 +2313,7 @@ fn retained_scan_step(
                                                 detail: "Codex transcript directory depth overflowed",
                                             },
                                         )?,
-                                        *root_order,
+                                        directory.root_order,
                                         0,
                                     ));
                                     let resume_directories = CodexDirectoryResume {
@@ -2306,13 +2336,27 @@ fn retained_scan_step(
                                             detail: "Codex transcript directory depth overflowed",
                                         },
                                     )?,
-                                    *root_order,
+                                    directory.root_order,
                                     charge,
                                 ));
                             }
                         }
                     }
-                    None => *current = None,
+                    None => {
+                        if let Some(fingerprint) = directory.fingerprint.take()
+                            && let Some(identity) = scan
+                                .directories
+                                .get_mut(directory.directory_index)
+                                .filter(|item| {
+                                    item.path == directory.path
+                                        && item.root_order == directory.root_order
+                                })
+                                .and_then(|item| item.identity.as_mut())
+                        {
+                            identity.entries = Some(fingerprint.finish());
+                        }
+                        *current = None;
+                    }
                 }
             }
             CodexScanPhase::Files {
@@ -2611,6 +2655,7 @@ fn codex_directory_changed(
     Ok(directory_entry_fingerprint(path)? != entries)
 }
 
+#[cfg(test)]
 fn codex_directory_witness(path: &Path) -> TranscriptIngestResult<Option<CodexDirectoryWitness>> {
     let Some(current) = directory_stat_witness(path)? else {
         return Ok(None);
@@ -2673,13 +2718,66 @@ fn codex_directory_stat_identity(
     codex_corpus_identity(path, metadata, stat_change)
 }
 
+/// Order-independent bounded-memory set witness. Directory entries are
+/// unique names, so their separately domain-hashed names can be combined
+/// without storing and sorting an unbounded filename list.
+#[derive(Default)]
+struct CodexDirectoryEntryFingerprint {
+    names: u64,
+    xor: [u8; 32],
+}
+
+impl CodexDirectoryEntryFingerprint {
+    fn observe(
+        &mut self,
+        name: &std::ffi::OsStr,
+        file_type: std::fs::FileType,
+    ) -> TranscriptIngestResult<()> {
+        if !file_type.is_dir()
+            && Path::new(name).extension().and_then(|ext| ext.to_str()) != Some("jsonl")
+        {
+            return Ok(());
+        }
+        let tag = if file_type.is_symlink() {
+            2_u8
+        } else if file_type.is_dir() {
+            1
+        } else {
+            0
+        };
+        let mut hasher = Sha256::new();
+        hasher.update(b"tracedecay-codex-directory-entry-v2");
+        hasher.update([tag]);
+        hash_directory_name(&mut hasher, name);
+        let digest: [u8; 32] = hasher.finalize().into();
+        for (accumulator, byte) in self.xor.iter_mut().zip(digest) {
+            *accumulator ^= byte;
+        }
+        self.names = self.names.checked_add(1).ok_or(
+            TranscriptIngestError::InvalidCodexDiscoveryFrontier {
+                detail: "Codex directory fingerprint entry count overflowed",
+            },
+        )?;
+        Ok(())
+    }
+
+    fn finish(self) -> [u8; 32] {
+        let mut hasher = Sha256::new();
+        // These witnesses are process-local, not durable corpus identities.
+        hasher.update(b"tracedecay-codex-directory-entries-v2");
+        hasher.update(self.names.to_le_bytes());
+        hasher.update(self.xor);
+        hasher.finalize().into()
+    }
+}
+
 fn directory_entry_fingerprint(path: &Path) -> TranscriptIngestResult<[u8; 32]> {
     let listed = std::fs::read_dir(path).map_err(|source| TranscriptIngestError::ScanIo {
         operation: "fingerprint Codex transcript directory",
         path: path.to_path_buf(),
         source,
     })?;
-    let mut names = Vec::new();
+    let mut fingerprint = CodexDirectoryEntryFingerprint::default();
     for entry in listed {
         let entry = entry.map_err(|source| TranscriptIngestError::ScanIo {
             operation: "fingerprint Codex transcript directory entry",
@@ -2693,33 +2791,9 @@ fn directory_entry_fingerprint(path: &Path) -> TranscriptIngestResult<[u8; 32]> 
                 path: entry.path(),
                 source,
             })?;
-        // Only real subdirectories and potential JSONL candidates affect
-        // discovery. Ignored compressed archives must not change the name
-        // witness when the coarse native directory timestamp stays equal.
-        let name = entry.file_name();
-        if !file_type.is_dir()
-            && Path::new(&name).extension().and_then(|ext| ext.to_str()) != Some("jsonl")
-        {
-            continue;
-        }
-        let tag = if file_type.is_symlink() {
-            2_u8
-        } else if file_type.is_dir() {
-            1
-        } else {
-            0
-        };
-        names.push((name, tag));
+        fingerprint.observe(&entry.file_name(), file_type)?;
     }
-    names.sort();
-    let mut hasher = Sha256::new();
-    hasher.update(b"tracedecay-codex-directory-entries-v1");
-    for (name, tag) in names {
-        hasher.update([tag]);
-        hash_directory_name(&mut hasher, &name);
-        hasher.update([0xff]);
-    }
-    Ok(hasher.finalize().into())
+    Ok(fingerprint.finish())
 }
 
 fn hash_directory_name(hasher: &mut Sha256, name: &std::ffi::OsStr) {

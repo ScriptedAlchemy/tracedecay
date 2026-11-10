@@ -2917,6 +2917,81 @@ mod recent_first_discovery_tests {
         assert!(idle.report.paths.is_empty());
     }
 
+    #[test]
+    #[cfg(unix)]
+    fn unsettled_flat_archive_fingerprint_is_incremental_across_budgeted_passes() {
+        let temp = TempDir::new().unwrap();
+        let archive = temp.path().join(".codex/archived_sessions");
+        std::fs::create_dir_all(&archive).unwrap();
+        for index in 0..128 {
+            std::fs::write(
+                archive.join(format!("rollout-{index:04}.jsonl.zst")),
+                b"compressed",
+            )
+            .unwrap();
+        }
+        let eligible = archive.join("rollout-eligible.jsonl");
+        std::fs::write(&eligible, b"{}\n").unwrap();
+        let expected = directory_entry_fingerprint(&archive).unwrap();
+        assert!(
+            !directory_stat_witness(&archive).unwrap().unwrap().settled,
+            "the fixture must exercise the coarse-clock name-witness path"
+        );
+
+        let source = CodexSource::with_home(temp.path());
+        let bounds = TranscriptDiscoveryBounds::from_discovered_units(1);
+        let mut state = CodexDiscoveryState::default();
+        let mut frontier = CodexDiscoveryFrontier::initial();
+        let first = retained_pass(&source, &mut state, bounds, frontier);
+        assert!(first.report.is_truncated());
+        let scan = state.scan.as_ref().expect("unfinished structural scan");
+        let CodexScanPhase::Directories {
+            current: Some(current),
+            ..
+        } = &scan.phase
+        else {
+            panic!("the archive must retain a live directory iterator");
+        };
+        assert_eq!(current.path, archive);
+        assert!(
+            scan.directories[current.directory_index]
+                .identity
+                .expect("directory stat witness")
+                .entries
+                .is_none(),
+            "no eager whole-archive fingerprint before bounded traversal"
+        );
+        frontier = first.next_frontier;
+
+        let mut covered = BTreeSet::new();
+        for _ in 0..512 {
+            let pass = retained_pass(&source, &mut state, bounds, frontier);
+            covered.extend(pass.report.paths);
+            frontier = pass.next_frontier;
+            if frontier.is_complete() {
+                break;
+            }
+        }
+        assert!(frontier.is_complete(), "bounded traversal must converge");
+        assert_eq!(covered, BTreeSet::from([eligible]));
+        let idle = state.idle.as_ref().expect("completed sweep retains witnesses");
+        let archive_identity = idle
+            .directories
+            .iter()
+            .find(|directory| directory.path == archive)
+            .and_then(|directory| directory.identity)
+            .expect("archive directory witness");
+        assert_eq!(
+            archive_identity.entries,
+            Some(expected),
+            "the same full candidate witness must be assembled exactly once"
+        );
+
+        let stable = retained_pass(&source, &mut state, bounds, frontier);
+        assert!(stable.report.paths.is_empty());
+        assert!(stable.next_frontier.is_complete());
+    }
+
     /// Sweep-complete is store-durable: a fresh source reading only admission
     /// parse offsets (the production persist path) idles instead of restarting
     /// truncated-from-zero. MemoryHostAdmission is the same offset table a
