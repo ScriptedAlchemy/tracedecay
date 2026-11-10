@@ -7,8 +7,8 @@ use tracedecay_project::project::TraceDecay;
 use tracedecay_contracts::code_index_freshness::{
     CODE_INDEX_READINESS_WAIT_TIMED_OUT, CODE_INDEX_READINESS_WAIT_UNAVAILABLE,
     CodeIndexBuildBlockedReasonV1, CodeIndexBuildPhaseV1, CodeIndexBuildProgressV1,
-    CodeIndexNativeGraphPhaseV1, CodeIndexPresealAttemptProgressV1,
-    CodeIndexReadinessWaitOutcomeV1, CodeIndexStalenessStateV1, CodeIndexWorktreeFreshnessV1,
+    CodeIndexNativeGraphPhaseV1, CodeIndexPresealAttemptProgressV1, CodeIndexReadinessWaitOutcomeV1,
+    CodeIndexStalenessStateV1, CodeIndexWorktreeFreshnessV1,
 };
 use tracedecay_contracts::graph_tool::GraphToolResultV1;
 use tracedecay_contracts::retrieval::{
@@ -463,7 +463,23 @@ where
             None
         };
         let now = Instant::now();
-        let stalled = if concurrent_preseal.is_some() || concurrent_text.is_some() {
+        let unknown_native_only = worktree_read.is_some_and(|worktree| {
+            FirstGenerationWorkMarker::has_uninstrumented_native_write(worktree)
+                && !worktree
+                    .preseal_attempt
+                    .as_ref()
+                    .is_some_and(|attempt| attempt.active)
+        });
+        let stalled = if unknown_native_only {
+            // A retained text snapshot has no live-owner flag. Its frozen
+            // receipts cannot prove silence in the final native write. Keep
+            // real text watermarks, but pause this unobservable interval;
+            // neither polling nor this coverage change is producer work.
+            if let Some(marker) = marker {
+                progress_window.record(marker);
+            }
+            progress_window.observe(None, now)
+        } else if concurrent_preseal.is_some() || concurrent_text.is_some() {
             progress_window.observe_with_concurrent_writers(
                 marker,
                 concurrent_preseal,
@@ -517,9 +533,11 @@ impl FirstGenerationStall {
             .filter(|graph| graph.active);
         // An old terminal park cannot be renewed by the rebuild flag.
         // An independently active successor still owns its own work.
-        if let Some(parked) = worktree.parked.as_ref().filter(|parked| {
-            !parked.retries_on_wake && !active_preseal && active_graph.is_none()
-        }) {
+        if let Some(parked) = worktree
+            .parked
+            .as_ref()
+            .filter(|parked| !parked.retries_on_wake && !active_preseal && active_graph.is_none())
+        {
             return Some(Self::Parked {
                 cause: parked.reason.clone(),
                 remedy: parked.remediation.clone(),
@@ -581,6 +599,23 @@ enum FirstGenerationWorkMarker {
 }
 
 impl FirstGenerationWorkMarker {
+    fn has_uninstrumented_native_write(worktree: &CodeIndexWorktreeFreshnessV1) -> bool {
+        worktree
+            .native_graph_progress
+            .as_ref()
+            .filter(|graph| graph.active)
+            .is_some_and(|graph| {
+                let encoding_finished = graph.phase
+                    == Some(CodeIndexNativeGraphPhaseV1::CompactEncoding)
+                    && graph.total_entities == Some(graph.encoded_entities)
+                    && graph
+                        .total_relations
+                        .is_some_and(|total| total == graph.encoded_relations);
+                encoding_finished
+                    || graph.phase == Some(CodeIndexNativeGraphPhaseV1::CompactSegmentVerified)
+            })
+    }
+
     fn of(worktree: Option<&CodeIndexWorktreeFreshnessV1>) -> Option<Self> {
         let worktree = worktree?;
         // Restoring and verifying are readiness work even when the canonical
@@ -600,15 +635,7 @@ impl FirstGenerationWorkMarker {
             // digest verification AFTER all accepted row windows. That work
             // has no intermediate native milestone. Never call a healthy
             // final write a stall merely because the last encode clock froze.
-            let encoding_finished = graph.phase
-                == Some(CodeIndexNativeGraphPhaseV1::CompactEncoding)
-                && graph.total_entities == Some(graph.encoded_entities)
-                && graph
-                    .total_relations
-                    .is_some_and(|total| total == graph.encoded_relations);
-            if encoding_finished
-                || graph.phase == Some(CodeIndexNativeGraphPhaseV1::CompactSegmentVerified)
-            {
+            if Self::has_uninstrumented_native_write(worktree) {
                 // The final Grafeo container write has no row callbacks.
                 // Independently owned source or lexical writers may still
                 // report real work; never hide their observations behind it.
@@ -1153,11 +1180,10 @@ mod daemon_precondition_tests {
     use tracedecay_contracts::code_index_freshness::{
         CODE_INDEX_READINESS_WAIT_TIMED_OUT, CODE_INDEX_READINESS_WAIT_UNAVAILABLE,
         CodeGraphServingReadinessV1, CodeIndexBuildBlockedReasonV1, CodeIndexBuildPhaseV1,
-        CodeIndexBuildProgressV1, CodeIndexConvergenceParkedV1,
-        CodeIndexFreshnessLadderInputsV1, CodeIndexFreshnessLadderV1, CodeIndexNativeGraphPhaseV1,
-        CodeIndexPresealWorkPhaseV1, CodeIndexReadinessTargetV1,
-        CodeIndexReadinessV1, CodeIndexReadinessWaitOutcomeV1, CodeIndexReadinessWaitReadV1,
-        CodeIndexStalenessStateV1, CodeIndexWorktreeFreshnessV1,
+        CodeIndexBuildProgressV1, CodeIndexConvergenceParkedV1, CodeIndexFreshnessLadderInputsV1,
+        CodeIndexFreshnessLadderV1, CodeIndexNativeGraphPhaseV1, CodeIndexPresealWorkPhaseV1,
+        CodeIndexReadinessTargetV1, CodeIndexReadinessV1, CodeIndexReadinessWaitOutcomeV1,
+        CodeIndexReadinessWaitReadV1, CodeIndexStalenessStateV1, CodeIndexWorktreeFreshnessV1,
     };
     use tracedecay_contracts::retrieval::StatusCodeIndexFreshnessV1;
     use tracedecay_domain::errors::TraceDecayError;
@@ -1633,6 +1659,44 @@ mod daemon_precondition_tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
+    async fn retained_text_cannot_time_out_an_uninstrumented_native_write() {
+        for verified in [false, true] {
+            let mut initial = native_graph_after_all_encoding();
+            if verified {
+                let graph = initial.native_graph_progress.as_mut().unwrap();
+                graph.phase = Some(CodeIndexNativeGraphPhaseV1::CompactSegmentVerified);
+                graph.committed_compact_segments = 1;
+                graph.committed_compact_bytes = 60_000;
+            }
+            let mut lexical = progress(35, None);
+            lexical.phase = CodeIndexBuildPhaseV1::BulkCommit;
+            lexical.daemon_incarnation = 3;
+            lexical.producer_incarnation = 4;
+            initial.progress = Some(lexical);
+            let mut repeated = initial.clone();
+            let text = repeated.progress.as_mut().unwrap();
+            text.progress_epoch += 1;
+            text.last_progress_micros += 1_000;
+
+            let (result, reads) = hold_over(
+                vec![
+                    status(timed_out(), warming(initial)),
+                    status(timed_out(), warming(repeated.clone())),
+                    status(timed_out(), warming(repeated)),
+                    ready_status(),
+                ],
+                Duration::ZERO,
+            )
+            .await;
+            assert!(
+                result.is_ok(),
+                "frozen lexical receipts do not prove a native stall: {result:?}"
+            );
+            assert_eq!(reads, 4, "only the actual readiness proof ends the wait");
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
     async fn final_native_write_does_not_credit_text_epoch_only_replays() {
         let mut initial = native_graph_after_all_encoding();
         let mut lexical = progress(35, None);
@@ -1644,18 +1708,29 @@ mod daemon_precondition_tests {
         let text = repeated.progress.as_mut().unwrap();
         text.progress_epoch += 1;
         text.last_progress_micros += 1_000;
-        repeated.native_graph_progress.as_mut().unwrap().progress_epoch += 1;
+        repeated
+            .native_graph_progress
+            .as_mut()
+            .unwrap()
+            .progress_epoch += 1;
 
+        // Final native work has no bounded silence evidence. Once that
+        // owner retires, the same frozen text receipts must still stall;
+        // observing them during the unknown interval cannot credit work.
+        let mut retired = repeated.clone();
+        retired.native_graph_progress.as_mut().unwrap().active = false;
         let (result, reads) = hold_over(
             vec![
                 status(timed_out(), warming(initial)),
                 status(timed_out(), warming(repeated)),
+                status(timed_out(), warming(retired.clone())),
+                status(timed_out(), warming(retired)),
                 ready_status(),
             ],
             Duration::ZERO,
         )
         .await;
-        assert_eq!(reads, 2, "metadata alone cannot reach a later Ready");
+        assert_eq!(reads, 4, "frozen text must refuse after native work retires");
         let (code, reason) = refusal(result);
         assert_eq!(code, CODE_INDEX_READINESS_WAIT_TIMED_OUT);
         assert!(
@@ -1670,7 +1745,11 @@ mod daemon_precondition_tests {
         initial.preseal_attempt =
             attempt(CodeIndexPresealWorkPhaseV1::Capture, 4, 7, 2).preseal_attempt;
         let mut repeated = initial.clone();
-        repeated.native_graph_progress.as_mut().unwrap().progress_epoch += 1;
+        repeated
+            .native_graph_progress
+            .as_mut()
+            .unwrap()
+            .progress_epoch += 1;
         repeated.progress.as_mut().unwrap().progress_epoch += 1;
         repeated.progress.as_mut().unwrap().last_progress_micros += 100;
         repeated.preseal_attempt.as_mut().unwrap().progress_epoch += 1;
@@ -2649,8 +2728,14 @@ mod daemon_precondition_tests {
         let (code, message) = refusal(result);
         assert_eq!(code, CODE_INDEX_READINESS_WAIT_UNAVAILABLE);
         assert!(message.contains("code_index_convergence_parked"), "{message}");
-        assert!(message.contains("corrupt durable publication authority"), "{message}");
-        assert!(message.contains("repair the owner-private graph store"), "{message}");
+        assert!(
+            message.contains("corrupt durable publication authority"),
+            "{message}"
+        );
+        assert!(
+            message.contains("repair the owner-private graph store"),
+            "{message}"
+        );
         assert!(message.contains("retries on wake: false"), "{message}");
     }
 
@@ -2675,8 +2760,14 @@ mod daemon_precondition_tests {
         let (code, message) = refusal(result);
         assert_eq!(code, CODE_INDEX_READINESS_WAIT_TIMED_OUT);
         assert!(message.contains("convergence is parked"), "{message}");
-        assert!(message.contains("corrupt durable publication authority"), "{message}");
-        assert!(message.contains("repair the owner-private graph store"), "{message}");
+        assert!(
+            message.contains("corrupt durable publication authority"),
+            "{message}"
+        );
+        assert!(
+            message.contains("repair the owner-private graph store"),
+            "{message}"
+        );
     }
 
     #[test]
