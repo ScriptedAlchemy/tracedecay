@@ -966,9 +966,8 @@ mod tests {
         let mut counted = std::collections::HashMap::new();
         let mut charged = std::collections::BTreeMap::<Kind, (u64, u64)>::new();
         for (kind, path) in [(Kind::Superseded, &superseded), (Kind::Head, &head)] {
-            let bytes =
-                directory_bytes_from_held_dir(open(path), kind, &mut charged, &mut counted)
-                    .unwrap();
+            let bytes = directory_bytes_from_held_dir(open(path), kind, &mut charged, &mut counted)
+                .unwrap();
             let entry = charged.entry(kind).or_default();
             entry.0 += 1;
             entry.1 += bytes;
