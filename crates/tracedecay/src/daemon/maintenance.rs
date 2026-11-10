@@ -288,6 +288,33 @@ async fn run_registered_store_retention(
     outcome
 }
 
+async fn run_registered_terminal_housekeeping(
+    database: &tracedecay_global_db::RegisteredGlobalDb,
+) -> MaintenanceTickOutcome {
+    let now = match now_secs_i64() {
+        Ok(now) => now,
+        Err(failure) => {
+            log_daemon_event(
+                "retention_degraded",
+                &[
+                    ("pass", "terminal_housekeeping".to_owned()),
+                    ("failure", failure.to_owned()),
+                ],
+            );
+            return MaintenanceTickOutcome::Retry;
+        }
+    };
+    match tracedecay_maintenance::retention::registered_store::run_github_stack_terminal_retention(
+        database, now,
+    )
+    .await
+    {
+        Ok(report) if report.exhausted => MaintenanceTickOutcome::Complete,
+        // The kernel keeps the durable frontier and has logged any failure.
+        Ok(_) | Err(_) => MaintenanceTickOutcome::Retry,
+    }
+}
+
 fn record_session_lcm_outcome(
     outcome: &Option<tracedecay_domain::errors::Result<tracedecay_lcm::LcmRetentionReport>>,
 ) -> MaintenanceTickOutcome {
@@ -748,7 +775,24 @@ impl MaintenanceCoordinator {
                 tracing::trace_span!("daemon.maintenance.resident_memory_sampler"),
             ),
         );
-        if !retention_maintenance_enabled(&retention) {
+        let interval = Duration::from_secs(retention.interval_hours.max(1).saturating_mul(3_600));
+        if !optional_retention_enabled(&retention) {
+            // Terminal delivery history has a fixed inspection window that no
+            // operator policy controls. Disabling every optional age,
+            // deletion and compaction policy must not leave it unbounded, nor
+            // may the fixed pass borrow the full tick that would run them.
+            let task_owner = coordinator.clone();
+            *coordinator.task.lock().await = spawn_maintenance_task(
+                "retention_tick",
+                tracing::Instrument::instrument(
+                    async move {
+                        task_owner
+                            .run_terminal_housekeeping(administration, interval)
+                            .await;
+                    },
+                    tracing::trace_span!("daemon.maintenance.terminal_housekeeping_loop"),
+                ),
+            );
             return coordinator;
         }
         // A sealed code generation supersedes its predecessor, whose sealed
@@ -780,7 +824,6 @@ impl MaintenanceCoordinator {
             ),
         ));
         let task_owner = coordinator.clone();
-        let interval = Duration::from_secs(retention.interval_hours.max(1).saturating_mul(3_600));
         *coordinator.task.lock().await = spawn_maintenance_task(
             "retention_tick",
             tracing::Instrument::instrument(
@@ -930,6 +973,65 @@ impl MaintenanceCoordinator {
             }
         })
         .await;
+    }
+
+    /// The maintenance cadence for a daemon whose optional retention policies
+    /// are all disabled: it runs only the fixed terminal-delivery pass.
+    async fn run_terminal_housekeeping(
+        &self,
+        administration: StoreAdministration,
+        interval: Duration,
+    ) {
+        run_maintenance_loop(&self.cancellation, &self.wake, interval, |_continuation| {
+            let administration = &administration;
+            async move { self.run_terminal_housekeeping_tick(administration).await }
+        })
+        .await;
+    }
+
+    /// Retire expired terminal GitHub stack deliveries from every mounted
+    /// session store, each admitted on its own like a full tick's store unit.
+    /// A store whose page budget ends first keeps its durable frontier and
+    /// reports `Retry`, so the next tick resumes there.
+    #[tracing::instrument(
+        name = "daemon.maintenance.terminal_housekeeping_tick",
+        level = "trace",
+        skip_all
+    )]
+    pub(super) async fn run_terminal_housekeeping_tick(
+        &self,
+        administration: &StoreAdministration,
+    ) -> MaintenanceTickOutcome {
+        let Some(background_cpu) = self.background_cpu.as_ref() else {
+            log_daemon_event(
+                "retention_degraded",
+                &[
+                    ("pass", "terminal_housekeeping".to_owned()),
+                    ("failure", "background_cpu_authority_unavailable".to_owned()),
+                ],
+            );
+            return MaintenanceTickOutcome::Retry;
+        };
+        let databases = administration.mounted_registered_session_databases().await;
+        let Some(_background_cpu) = background_cpu.try_acquire() else {
+            return MaintenanceTickOutcome::Retry;
+        };
+        let mut outcome = MaintenanceTickOutcome::Complete;
+        for database in &databases {
+            if self.cancellation.is_cancelled() {
+                return MaintenanceTickOutcome::Retry;
+            }
+            let admitted = administration
+                .try_with_writer(|| async {
+                    let Ok(_clients) = administration.maintenance_store_clients().try_lock() else {
+                        return MaintenanceTickOutcome::Retry;
+                    };
+                    run_registered_terminal_housekeeping(database).await
+                })
+                .await;
+            outcome = outcome.combine(admitted.unwrap_or(MaintenanceTickOutcome::Retry));
+        }
+        outcome
     }
 
     #[tracing::instrument(name = "daemon.maintenance.tick", level = "trace", skip_all)]
@@ -1519,7 +1621,11 @@ impl ResidentMemoryLogStateV1 {
     }
 }
 
-pub(super) fn retention_maintenance_enabled(
+/// Whether an operator-controlled age, deletion or compaction policy is on.
+/// Soft budgets are Doctor findings and never count. When this is false the
+/// daemon still runs the fixed terminal-delivery pass, but none of the full
+/// tick's optional work.
+pub(super) fn optional_retention_enabled(
     retention: &tracedecay_configuration::RetentionConfig,
 ) -> bool {
     retention.session_lcm.enabled
@@ -1621,7 +1727,7 @@ mod tests {
     }
 
     #[test]
-    fn soft_budget_alone_never_enables_destructive_maintenance() {
+    fn soft_budget_alone_never_enables_optional_retention() {
         let mut retention = tracedecay_configuration::RetentionConfig::default();
         retention.session_lcm.enabled = false;
         retention.observation.enabled = false;
@@ -1632,9 +1738,47 @@ mod tests {
             .insert("sessions.db".to_string(), 1);
 
         assert!(
-            !super::retention_maintenance_enabled(&retention),
+            !super::optional_retention_enabled(&retention),
             "soft budgets are Doctor findings, never a retention trigger"
         );
+    }
+
+    /// Disabled optional policies still start the fixed terminal-delivery
+    /// owner, and that owner joins at shutdown like the full retention loop.
+    #[test]
+    fn disabled_optional_policies_still_start_the_terminal_housekeeping_owner() {
+        tracedecay_runtime_core::native_runtime::block_on(async {
+            let temp = tempfile::TempDir::new().expect("temp root");
+            let mut retention = tracedecay_configuration::RetentionConfig::default();
+            retention.session_lcm.enabled = false;
+            retention.observation.enabled = false;
+            retention.orphan_store_gc_days = None;
+            retention.compaction = None;
+            retention
+                .store_soft_budgets_bytes
+                .insert("sessions.db".to_string(), 1);
+            assert!(!super::optional_retention_enabled(&retention));
+            let coordinator = MaintenanceCoordinator::spawn(
+                temp.path().join("profile"),
+                crate::daemon::branch_admin::StoreAdministration::default(),
+                tracedecay_code_index_runtime::code_index_scheduler::CodeIndexSchedulerRegistryV1::new(1),
+                retention,
+                super::BranchStoreGcCadenceV1 { branch_gc_days: 30 },
+            )
+            .await;
+            assert!(
+                coordinator.task.lock().await.is_some(),
+                "fixed terminal housekeeping is admitted without optional policies"
+            );
+            tracedecay_runtime_core::native_runtime::timeout(
+                Duration::from_secs(10),
+                coordinator.shutdown(),
+            )
+            .await
+            .expect("shutdown joins the terminal housekeeping owner");
+            assert!(coordinator.task.lock().await.is_none());
+        })
+        .expect("native runtime");
     }
 
     #[test]
@@ -1993,7 +2137,7 @@ mod tests {
                 orphan_store_gc_days: Some(30),
                 ..tracedecay_configuration::RetentionConfig::default()
             };
-            assert!(super::retention_maintenance_enabled(&retention));
+            assert!(super::optional_retention_enabled(&retention));
             let coordinator = MaintenanceCoordinator::spawn(
                 temp.path().join("profile"),
                 crate::daemon::branch_admin::StoreAdministration::default(),

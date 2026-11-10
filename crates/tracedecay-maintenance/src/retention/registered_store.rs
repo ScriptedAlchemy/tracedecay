@@ -161,7 +161,10 @@ pub async fn run_registered_store_retention(
 /// bounded pages. A page examines and compacts a bounded number of payloads
 /// and commits its durable scan frontier atomically, so a long pending prefix
 /// is neither rescanned nor allowed to starve later terminal rows.
-async fn run_github_stack_terminal_retention(
+///
+/// This is fixed product housekeeping, so the daemon also runs it alone when
+/// every optional age, deletion and compaction policy is disabled.
+pub async fn run_github_stack_terminal_retention(
     database: &RegisteredGlobalDb,
     now: i64,
 ) -> Result<GitHubStackTerminalRetentionReportV1, RegisteredStoreRetentionErrorV1> {
