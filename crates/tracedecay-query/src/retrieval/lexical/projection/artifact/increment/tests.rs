@@ -406,13 +406,19 @@ fn carried_row_chunks_check_cancellation_and_preserve_disk_rows() {
     let original = chunks(&connection);
     assert_eq!(original.len(), 12_000);
     let shift = ShiftV1::new([((8, 14), 4), ((45, 52), 10)]).unwrap();
+    // Reference mapping is deliberately independent of ShiftV1::map:
+    // two replaced ranges remove 13 old chunks, shifting the intervening
+    // documents down by two and the trailing suffix up by one.
     let expected: Vec<_> = original
         .iter()
         .filter_map(|(chunk, document)| {
-            shift
-                .map(u64::try_from(*document).unwrap())
-                .unwrap()
-                .map(|mapped| (chunk.clone(), i64::try_from(mapped).unwrap()))
+            let mapped = match *document {
+                8..=13 | 45..=51 => None,
+                14..=44 => Some(*document - 2),
+                52.. => Some(*document + 1),
+                _ => Some(*document),
+            };
+            mapped.map(|mapped| (chunk.clone(), mapped))
         })
         .collect();
     assert_eq!(expected.len(), 11_987);
