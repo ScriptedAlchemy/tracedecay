@@ -66,8 +66,7 @@ async fn logical_reclamation_retries_a_timed_out_census_without_shrinking_the_fi
         occupied_before,
         now_micros(),
     )
-    .unwrap()
-    else {
+    .unwrap() else {
         panic!("a deadline must produce a retry-suppression mark");
     };
     port.table_growth.lock().unwrap().over_budget = Some(mark);

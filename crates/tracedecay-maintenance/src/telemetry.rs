@@ -1356,7 +1356,10 @@ mod table_growth_tests {
             panic!("the grown store must expose its page and freelist counts");
         };
         let live_pages_before = before.page_count - before.freelist_pages;
-        assert!(live_pages_before > 1024, "the fixture must have many live pages");
+        assert!(
+            live_pages_before > 1024,
+            "the fixture must have many live pages"
+        );
 
         port.table_growth
             .lock()
@@ -1394,7 +1397,10 @@ mod table_growth_tests {
 
         let retried = port.table_growth(&context, &store).await;
         assert!(
-            matches!(retried, TableGrowthTelemetryReadV1::BaselineEstablished { .. }),
+            matches!(
+                retried,
+                TableGrowthTelemetryReadV1::BaselineEstablished { .. }
+            ),
             "the cheaper post-reclamation census must run without a restart: {retried:?}"
         );
         assert_eq!(port.table_growth_state().over_budget, None);
