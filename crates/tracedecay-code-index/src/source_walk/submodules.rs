@@ -23,6 +23,10 @@ pub struct AuthenticatedSubmodule {
     pub worktree: PathBuf,
     pub git_dir: PathBuf,
     pub pin: gix::ObjectId,
+    parent_root: PathBuf,
+    module_path: String,
+    module_name: PathBuf,
+    staged_modules_id: gix::ObjectId,
 }
 
 pub(super) struct ChildSources {
@@ -31,6 +35,57 @@ pub(super) struct ChildSources {
 }
 
 impl AuthenticatedSubmodule {
+    fn parent_registration_is_live(&self) -> bool {
+        // An already-open iterator or graph reader cannot continue to use a
+        // child after the parent revokes its staged gitlink or registration.
+        // Inspect exact index entries, not the entire committed Git tree.
+        let Ok(parent) = tracedecay_runtime_core::git_open::open(&self.parent_root) else {
+            return false;
+        };
+        if parent
+            .workdir()
+            .and_then(|root| root.canonicalize().ok())
+            .as_ref()
+            != Some(&self.parent_root)
+        {
+            return false;
+        }
+        // A replaced parent Git directory cannot inherit the old child's
+        // authorization merely by advertising the same staged paths.
+        if !module_stores(&parent, &self.module_name).any(|store| store == self.git_dir) {
+            return false;
+        }
+        let Ok(index) = parent.index_or_empty() else {
+            return false;
+        };
+        let stage = gix::index::entry::Stage::Unconflicted;
+        let Some(modules) = index.entry_by_path_and_stage(".gitmodules".into(), stage) else {
+            return false;
+        };
+        if modules.id != self.staged_modules_id
+            || !modules
+                .mode
+                .to_tree_entry_mode()
+                .is_some_and(|mode| mode.is_blob())
+        {
+            return false;
+        }
+        let Some(gitlink) =
+            index.entry_by_path_and_stage(self.module_path.as_bytes().as_bstr(), stage)
+        else {
+            return false;
+        };
+        if !gitlink.mode.is_submodule() || gitlink.id != self.pin {
+            return false;
+        }
+        let Ok(Some(working)) = parent.open_modules_file() else {
+            return false;
+        };
+        working
+            .path(self.module_name.as_os_str().as_encoded_bytes().as_bstr())
+            .is_ok_and(|path| path.as_slice() == self.module_path.as_bytes())
+    }
+
     fn checkout_is_live(&self) -> bool {
         let marker = self.worktree.join(".git");
         self.worktree.canonicalize().ok().as_ref() == Some(&self.worktree)
@@ -42,6 +97,7 @@ impl AuthenticatedSubmodule {
                 .and_then(|target| target.canonicalize().ok())
                 .as_ref()
                 == Some(&self.git_dir)
+            && self.parent_registration_is_live()
     }
 
     pub(super) fn sources(&self) -> Result<ChildSources, SourceWalkError> {
@@ -193,8 +249,10 @@ fn bound_checkout(
     path: &str,
     name: &Path,
     pin: gix::ObjectId,
+    staged_modules_id: gix::ObjectId,
 ) -> Option<AuthenticatedSubmodule> {
     let root = parent.workdir()?.canonicalize().ok()?;
+    let module_path = path.to_owned();
     let path = Path::new(path);
     if has_nested_repository_ancestor(&root, path).ok()? {
         return None;
@@ -220,6 +278,10 @@ fn bound_checkout(
         worktree,
         git_dir: expected,
         pin,
+        parent_root: root,
+        module_path,
+        module_name: name.to_path_buf(),
+        staged_modules_id,
     })
 }
 
@@ -258,7 +320,7 @@ pub fn live_submodules(
         {
             continue;
         }
-        if let Some(child) = bound_checkout(parent, &path, &name, entry.id) {
+        if let Some(child) = bound_checkout(parent, &path, &name, entry.id, modules.id) {
             children.insert(path, child);
         }
     }

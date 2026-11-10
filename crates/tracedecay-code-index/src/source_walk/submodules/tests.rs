@@ -144,6 +144,53 @@ fn marker_change_before_iteration(replacement: Option<&str>) {
     assert_refused_walk(&root, pending);
 }
 
+fn parent_authority_change_before_iteration(change: impl FnOnce(&Path)) {
+    let fixture = fixture();
+    let root = fixture.path().join("parent");
+    assert_live_control(&root);
+    let boundaries = LiveSourceBoundaries::open(&root, true).unwrap();
+    let path = Path::new("app/first.rs");
+    assert!(boundaries.resolve(path).unwrap().is_some());
+    let pending = walk(&root);
+    change(&root);
+    assert!(root.join(path).is_file(), "the same child bytes still exist");
+    assert!(root.join("app/.git").is_file(), "child marker is unchanged");
+    assert!(boundaries.resolve(path).unwrap().is_none());
+    assert_refused_walk(&root, pending);
+}
+
+#[test]
+fn lazy_submodule_walk_refuses_removed_worktree_registration() {
+    parent_authority_change_before_iteration(|root| {
+        fs::remove_file(root.join(".gitmodules")).unwrap();
+    });
+}
+
+#[test]
+fn lazy_submodule_walk_refuses_removed_staged_gitlink() {
+    parent_authority_change_before_iteration(|root| {
+        git(root, &["rm", "-q", "--cached", "app"]);
+    });
+}
+
+#[test]
+fn lazy_submodule_walk_refuses_removed_staged_registration() {
+    parent_authority_change_before_iteration(|root| {
+        git(root, &["rm", "-q", "--cached", ".gitmodules"]);
+    });
+}
+
+#[test]
+fn lazy_submodule_walk_refuses_updated_staged_child_pin() {
+    parent_authority_change_before_iteration(|root| {
+        let child = root.join("app");
+        fs::write(child.join("first.rs"), "pub fn updated() {}\n").unwrap();
+        git(&child, &["add", "first.rs"]);
+        git(&child, &["commit", "-qm", "updated child"]);
+        git(root, &["add", "app"]);
+    });
+}
+
 #[test]
 fn lazy_submodule_walk_refuses_removed_marker() {
     marker_change_before_iteration(None);
