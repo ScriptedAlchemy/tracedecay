@@ -1083,11 +1083,7 @@ mod tests {
 
         // A server that omits its model remains usable as an unverified
         // runtime response, rather than inventing a reported identity.
-        let server = fake_decision_engine(
-            200,
-            &single_noul_body("q", 0.8),
-            Duration::ZERO,
-        );
+        let server = fake_decision_engine(200, &single_noul_body("q", 0.8), Duration::ZERO);
         let mut selected = config(&server.url);
         selected.model = Some("kev-4b".to_owned());
         let observed = answered(
