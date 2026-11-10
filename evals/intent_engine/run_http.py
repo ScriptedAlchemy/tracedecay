@@ -56,9 +56,9 @@ def validate_qualified_sample(path, experiment_sha, requests, expected_row=None)
     """Refuse a stale first-response sample during an exact qualified resume.
 
     Raw samples are debugging evidence, not independent model attestation.
-    Still, a sample from another experiment must never silently accompany a
-    fresh or resumed frozen result. Verify its original request bytes as well
-    as the experiment fingerprint, without normalizing a Scout capture.
+    Verify the exact original bytes through publication: a replacement can
+    preserve every scored value while rewriting the evidence artifact.
+    Never normalize the original Scout request bytes.
     """
     # The path is untrusted resumable evidence. A separate islink/isfile
     # preflight followed by builtins.open can follow a swapped-in symlink.
@@ -166,7 +166,7 @@ def validate_qualified_sample(path, experiment_sha, requests, expected_row=None)
     row_sha = sample.get("row_sha256")
     if not isinstance(row_sha, str) or not re.fullmatch(r"[0-9a-f]{64}", row_sha):
         raise ValueError("qualified sample lacks the completed first-row commitment")
-    return digest(sample["response"]), row_sha
+    return digest(sample["response"]), row_sha, hashlib.sha256(sample_bytes).hexdigest()
 
 
 def publish_sample(path, serialized, refuse_existing=False):
@@ -181,8 +181,8 @@ def publish_sample(path, serialized, refuse_existing=False):
     staged = os.path.join(directory, f".noul-sample-{secrets.token_hex(16)}")
     descriptor = os.open(staged, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     try:
-        with os.fdopen(descriptor, "w", encoding="utf-8") as output:
-            output.write(serialized)
+        with os.fdopen(descriptor, "wb") as output:
+            output.write(serialized.encode("utf-8"))
         try:
             os.link(staged, path)
         except FileExistsError:
@@ -821,6 +821,7 @@ def main(argv=None):
         header = {"experiment": identity, "experiment_sha256": digest(identity)}
         partial_path = path + ".partial"
         admitted_sample = None
+        sample_sha256 = None
         if qualification_sha is not None and args.sample_out and os.path.lexists(args.sample_out):
             # A new experiment cannot inherit a previous tag's first-response
             # evidence. An exact resume may retain only its own sample.
@@ -829,6 +830,7 @@ def main(argv=None):
             admitted_sample = validate_qualified_sample(
                 args.sample_out, header["experiment_sha256"], requests,
             )
+            sample_sha256 = admitted_sample[2]
         try:
             # Default umask 022 (or an explicit umask 000) must not expose
             # result labels, cases or response telemetry to other users.
@@ -862,12 +864,14 @@ def main(argv=None):
                         # A crash between publishing the sample and appending
                         # its row cannot be reconstructed as a completed call.
                         raise ValueError("qualified sample has no completed first-response row; use a new tag")
-                    response_sha, row_sha = admitted_sample
+                    response_sha, row_sha, _ = admitted_sample
                     first_row = done[first_id]
-                    validate_qualified_sample(
+                    current_sample = validate_qualified_sample(
                         args.sample_out, header["experiment_sha256"], requests,
                         expected_row=first_row,
                     )
+                    if current_sample[2] != sample_sha256:
+                        raise ValueError("qualified first-response sample changed during resume admission")
                     if (first_row.get("sample_response_sha256") != response_sha
                             or digest(first_row) != row_sha):
                         raise ValueError("qualified sample response or row disagrees with completed evidence")
@@ -957,6 +961,8 @@ def main(argv=None):
                         args.sample_out, serialized_sample,
                         refuse_existing=qualification_sha is not None,
                     )
+                    if qualification_sha is not None:
+                        sample_sha256 = hashlib.sha256(serialized_sample.encode("utf-8")).hexdigest()
                 partial.write(serialized_row + "\n")
                 partial.flush()
                 done[case["id"]] = row
@@ -971,12 +977,14 @@ def main(argv=None):
                 # the original first response against the durable first row
                 # immediately before exposing a completed qualification.
                 first_row = done[next(iter(cases))]
-                response_sha, row_sha = validate_qualified_sample(
+                response_sha, row_sha, final_sample_sha256 = validate_qualified_sample(
                     args.sample_out, header["experiment_sha256"], requests,
                     expected_row=first_row,
                 )
                 if (first_row.get("sample_response_sha256") != response_sha
-                        or digest(first_row) != row_sha):
+                        or digest(first_row) != row_sha
+                        or sample_sha256 is None
+                        or final_sample_sha256 != sample_sha256):
                     raise ValueError(
                         "qualified first-response sample changed during inference; "
                         "refusing completed result"

@@ -1539,7 +1539,7 @@ class QualificationTests(unittest.TestCase):
             sample.write_bytes(valid_bytes)
             self.assertEqual(
                 run_http.validate_qualified_sample(str(sample), "f" * 64, requests),
-                (run_http.digest(response), "a" * 64),
+                (run_http.digest(response), "a" * 64, hashlib.sha256(valid_bytes).hexdigest()),
             )
             sample_limit = 16 * (
                 len(run_http.request_bytes(request)) + run_http.MAX_HTTP_RESPONSE_BYTES
@@ -1619,7 +1619,7 @@ class QualificationTests(unittest.TestCase):
                         run_http.validate_qualified_sample(
                             str(sample), experiment_sha, requests,
                         ),
-                        (run_http.digest(response), evidence["row_sha256"]),
+                        (run_http.digest(response), evidence["row_sha256"], hashlib.sha256(original_bytes).hexdigest()),
                     )
                     swaps = []
 
@@ -1692,9 +1692,11 @@ class QualificationTests(unittest.TestCase):
 
             def replace_after_admission(url, body, **kwargs):
                 replacement = json.loads(original_sample)
-                replacement["response"]["answers"]["impact"]["noul"] = 0.95
+                # Keep all semantic fields and row commitments unchanged, but
+                # swap in a differently encoded sample after admission.
+                # The older row/response-only check would publish this run.
                 alternate = here / "replacement.json"
-                alternate.write_text(json.dumps(replacement))
+                alternate.write_text(json.dumps(replacement, sort_keys=True))
                 alternate.replace(sample)
                 return {
                     "model": "self-reported-test-model",
@@ -1707,7 +1709,7 @@ class QualificationTests(unittest.TestCase):
             with patch.object(run_http, "HERE", str(here)), patch.object(
                 run_http, "post", side_effect=replace_after_admission,
             ) as post:
-                with self.assertRaisesRegex(ValueError, "raw response disagrees with first scored row"):
+                with self.assertRaisesRegex(ValueError, "sample changed during inference"):
                     run_http.main(args)
                 self.assertEqual(post.call_count, 1)
             self.assertFalse(completed.exists())
