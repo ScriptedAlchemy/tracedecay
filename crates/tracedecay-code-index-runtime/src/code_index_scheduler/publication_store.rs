@@ -38,6 +38,8 @@ use tracedecay_code_index_retention::code_index_generations::{
     durable_generation_index_digest, reset_code_index_scope_store, retain_bounded_generation_index,
     try_acquire_code_generation_store_lock, try_acquire_code_generation_store_read_lock,
 };
+#[cfg(unix)]
+use tracedecay_code_index_retention::code_index_generations::CachedCodeGenerationStoreReadLockV1;
 use tracedecay_domain::{
     CodeGenerationId, ContentDigest, ManifestDigest, ProjectId, SanitizerRevision, WorktreeId,
     canonical_text::encode_tagged_lowercase_hex, sha256_hex_suffix,
@@ -520,6 +522,9 @@ pub struct DaemonCodeIndexPublicationStoreV1 {
     expected_sanitizer_revision: SanitizerRevision,
     disposition: CodeIndexPublicationDispositionV1,
     pointer_memo: Arc<std::sync::Mutex<Option<PublicationPointerMemoV1>>>,
+    /// A fresh shared kernel lock per historical read, without a new open(2).
+    #[cfg(unix)]
+    retained_generation_lock: Arc<CachedCodeGenerationStoreReadLockV1>,
     /// One bounded descriptor cache for retained page reads across requests.
     /// Cloned stores share its identity checks; retirement discards it.
     #[cfg(unix)]
@@ -1583,6 +1588,8 @@ impl DaemonCodeIndexPublicationStoreV1 {
             disposition: CodeIndexPublicationDispositionV1::Active,
             pointer_memo: Arc::new(Mutex::new(None)),
             #[cfg(unix)]
+            retained_generation_lock: Arc::new(CachedCodeGenerationStoreReadLockV1::new(store_root)),
+            #[cfg(unix)]
             retained_segment_reads: Arc::new(Mutex::new(VecDeque::new())),
             undecoded_active_expectation: None,
             reconcile_publication_fence: None,
@@ -2563,6 +2570,7 @@ impl DaemonCodeIndexPublicationStoreV1 {
         // A rejected or interrupted request must not return bytes left by
         // an earlier successful read, even when it never reaches the file.
         buffer.clear();
+        #[cfg(not(unix))]
         let root = self
             .active_path
             .parent()
@@ -2578,9 +2586,15 @@ impl DaemonCodeIndexPublicationStoreV1 {
                     CodeIndexInterruptionV1::DeadlineExceeded,
                 ));
             }
-            if let Some(lock) =
-                try_acquire_code_generation_store_read_lock(root).map_err(Self::unavailable)?
-            {
+            #[cfg(unix)]
+            let candidate = self
+                .retained_generation_lock
+                .try_acquire()
+                .map_err(Self::unavailable)?;
+            #[cfg(not(unix))]
+            let candidate =
+                try_acquire_code_generation_store_read_lock(root).map_err(Self::unavailable)?;
+            if let Some(lock) = candidate {
                 break lock;
             }
             std::thread::park_timeout(Duration::from_millis(1));

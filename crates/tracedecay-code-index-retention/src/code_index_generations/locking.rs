@@ -2,6 +2,10 @@
 use std::cell::Cell;
 use std::fs::{File, OpenOptions};
 use std::path::{Path, PathBuf};
+#[cfg(unix)]
+use std::os::unix::fs::MetadataExt;
+#[cfg(unix)]
+use std::sync::{Mutex, MutexGuard, TryLockError};
 use std::time::Instant;
 
 use tracedecay_private_fs::FileLease;
@@ -43,6 +47,97 @@ impl CodeGenerationStoreLockV1 {
             Err(CodeGenerationRetentionErrorV1::UnsafeState(
                 "text-artifact attachment requires the generation-store lock".to_owned(),
             ))
+        }
+    }
+}
+
+/// Reuses the same lock-file descriptor for successive bounded historical reads.
+///
+/// Every read still obtains a fresh kernel shared lock. The mutex is acquired
+/// without blocking so concurrent callers and cancelled requests can retry.
+/// The pathname and opened inode are authenticated before and after locking;
+/// a replaced lock authority must never silently authorize an old inode.
+#[cfg(unix)]
+pub struct CachedCodeGenerationStoreReadLockV1 {
+    store_root: PathBuf,
+    file: Mutex<Option<File>>,
+}
+
+#[cfg(unix)]
+pub struct CachedCodeGenerationStoreReadGuardV1<'a> {
+    file: MutexGuard<'a, Option<File>>,
+}
+
+#[cfg(unix)]
+impl Drop for CachedCodeGenerationStoreReadGuardV1<'_> {
+    fn drop(&mut self) {
+        if let Some(file) = self.file.as_ref() {
+            if let Err(error) = file.unlock() {
+                tracing::warn!(lease = CODE_GENERATION_LEASE_LABEL, %error, "cached read lock release failed");
+            }
+        }
+    }
+}
+
+#[cfg(unix)]
+impl CachedCodeGenerationStoreReadLockV1 {
+    pub fn new(store_root: &Path) -> Self {
+        Self {
+            store_root: store_root.to_path_buf(),
+            file: Mutex::new(None),
+        }
+    }
+
+    fn verify_named_inode(file: &File, path: &Path) -> Result<(), CodeGenerationRetentionErrorV1> {
+        let opened = file.metadata().map_err(storage)?;
+        let named = std::fs::metadata(path).map_err(super::deferred_if_absent)?;
+        if !named.is_file() || (opened.dev(), opened.ino()) != (named.dev(), named.ino()) {
+            return Err(CodeGenerationRetentionErrorV1::UnsafeState(
+                "generation-store lock pathname no longer names the opened inode".to_owned(),
+            ));
+        }
+        Ok(())
+    }
+
+    pub fn try_acquire(
+        &self,
+    ) -> Result<Option<CachedCodeGenerationStoreReadGuardV1<'_>>, CodeGenerationRetentionErrorV1>
+    {
+        let mut cached = match self.file.try_lock() {
+            Ok(guard) => guard,
+            Err(TryLockError::WouldBlock) => return Ok(None),
+            Err(TryLockError::Poisoned(_)) => {
+                return Err(CodeGenerationRetentionErrorV1::UnsafeState(
+                    "cached generation-store read lock is poisoned".to_owned(),
+                ));
+            }
+        };
+        let root = canonical_store_root(&self.store_root)?;
+        let path = root.join(STORE_LOCK_FILE);
+        if cached.is_none() {
+            *cached = Some(open_lock_file(&path)?);
+        }
+        let Some(file) = cached.as_ref() else {
+            return Err(CodeGenerationRetentionErrorV1::UnsafeState(
+                "cached generation-store lock was not initialized".to_owned(),
+            ));
+        };
+        Self::verify_named_inode(file, &path)?;
+        match file.try_lock_shared().map_err(std::io::Error::from) {
+            Ok(()) => {
+                let lease = CachedCodeGenerationStoreReadGuardV1 { file: cached };
+                // Recheck after kernel admission, before any pointer/segment read.
+                // On an error the guard's Drop explicitly unlocks the descriptor.
+                let Some(file) = lease.file.as_ref() else {
+                    return Err(CodeGenerationRetentionErrorV1::UnsafeState(
+                        "cached generation-store lock disappeared".to_owned(),
+                    ));
+                };
+                Self::verify_named_inode(file, &path)?;
+                Ok(Some(lease))
+            }
+            Err(error) if tracedecay_private_fs::is_lock_contended(&error) => Ok(None),
+            Err(error) => Err(storage(error)),
         }
     }
 }

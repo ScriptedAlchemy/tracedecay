@@ -2475,6 +2475,16 @@ fn retained_history_reads_across_requests_share_one_segment_open_and_refuse_repl
         .watch(&cold.segments_root, notify::RecursiveMode::NonRecursive)
         .expect("watch real sealed segment directory");
 
+    let lock_path = target_root.path().join(".code-generation-retention.lock");
+    let (lock_sender, lock_receiver) = std::sync::mpsc::channel();
+    let mut lock_watcher =
+        notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
+            let _ = lock_sender.send(event);
+        })
+        .expect("native generation-store lock open observer");
+    lock_watcher
+        .watch(target_root.path(), notify::RecursiveMode::NonRecursive)
+        .expect("watch the real generation-store lock directory");
     let control = tracedecay_code_index::production::UninterruptibleCodeIndexControlV1;
     let mut whole = Vec::new();
     cold.read_retained_partitioned_segment(
@@ -2510,6 +2520,17 @@ fn retained_history_reads_across_requests_share_one_segment_open_and_refuse_repl
         observed_named_opens(&receiver, &path),
         1,
         "one whole and sixteen historical reads must require one segment open"
+    );
+    assert_eq!(
+        observed_named_opens(&lock_receiver, &lock_path),
+        1,
+        "17 real historical reads must perform one cold lock-file open, not 17"
+    );
+    drop(File::open(&lock_path).expect("positive lock pathname-open control"));
+    assert_eq!(
+        observed_named_opens(&lock_receiver, &lock_path),
+        1,
+        "kernel observer must count an independent lock-file open"
     );
     assert_eq!(
         observed_pointer_opens(&pointer_receiver),
@@ -2552,6 +2573,11 @@ fn retained_history_reads_across_requests_share_one_segment_open_and_refuse_repl
         observed_pointer_opens(&pointer_receiver),
         0,
         "a clone must share the pinned publication pointer without another open"
+    );
+    assert_eq!(
+        observed_named_opens(&lock_receiver, &lock_path),
+        0,
+        "a cloned store must reuse the same lock descriptor while reacquiring the kernel lease"
     );
 
     let previous = target_root.path().join("retained-history-original-inode");

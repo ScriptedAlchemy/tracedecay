@@ -56,6 +56,8 @@ pub use graph_replay_release::{
     code_generation_graph_replay_release_page, complete_code_generation_graph_replay_release,
 };
 use locking::acquire_generation_segments_lock_checked;
+#[cfg(unix)]
+pub use locking::CachedCodeGenerationStoreReadLockV1;
 pub use locking::{
     CodeGenerationStoreLockV1, acquire_code_generation_store_lock,
     acquire_generation_segments_publication_lock, try_acquire_code_generation_store_lock,
