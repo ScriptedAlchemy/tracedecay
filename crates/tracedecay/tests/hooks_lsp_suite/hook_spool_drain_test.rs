@@ -10,7 +10,11 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 use serde_json::json;
-use tracedecay_domain::NativeHostIdentityV1;
+use tracedecay_domain::{
+    DeliveryChannelIdentityV1, DeliveryEventClassV1, DeliverySettlementAttemptV1,
+    DeliverySettlementOutcomeV1, DeliverySettlementV1, DeliverySurfaceFamilyV1,
+    NativeHostIdentityV1,
+};
 use tracedecay_domain::canonical_text::sha256_hex;
 use tracedecay_hooks::{
     HOOK_SYNCHRONOUS_BUDGET, HookDeliveryReceiptWriterV1, HookDeliveryRetentionV1,
@@ -378,7 +382,9 @@ fn a_receipt_spool_root_that_is_not_a_directory_is_reported_on_status() {
 }
 
 /// A receipt backlog larger than one drain batch settles in back-to-back
-/// sweeps, and status reads `drained` only once none is left.
+/// sweeps, and status reads `drained` only once none is left. Stage valid
+/// receipt-only deliveries so unrelated end-of-turn producer backpressure
+/// cannot turn a receipt-batch regression into a producer-work retry test.
 #[test]
 fn a_receipt_backlog_beyond_one_batch_drains_without_waiting_for_the_sweep() {
     const BACKLOG: usize = 65;
@@ -387,44 +393,47 @@ fn a_receipt_backlog_beyond_one_batch_drains_without_waiting_for_the_sweep() {
     let project = init_git_project(&home);
     let daemon = spawn_tracedecay_daemon(&home);
     tracedecay(&home, &project, &["init"]);
+    drop(daemon);
+
     let layout = default_profile_sharded_layout(&project, &home.join(".tracedecay")).unwrap();
-    let records = layout
-        .data_root
-        .join("hook-v2-spool/cursor-desktop/records.v1.bin");
     let receipts =
         hook_delivery_receipt_spool_root(&layout.data_root, NativeHostIdentityV1::CursorDesktop);
-
-    drop(daemon);
-    for index in 0..BACKLOG {
-        capture_stop(&home, &project, &format!("backlog-{index}"));
-    }
-    let held = published_receipts(&receipts)
-        .into_iter()
-        .map(|path| {
-            let receipt = serde_json::from_slice::<HookDeliverySourceReceiptV1>(
-                &std::fs::read(&path).unwrap(),
-            )
-            .unwrap();
-            std::fs::remove_file(&path).unwrap();
-            receipt
+    let now = tracedecay_runtime_core::tracedecay::utc_now_or_one();
+    let held = (0..BACKLOG)
+        .map(|index| {
+            HookDeliverySourceReceiptV1::new(DeliverySettlementV1 {
+                attempt: DeliverySettlementAttemptV1 {
+                    owner_event_id: format!("hook:native:receipt-backlog-{index}"),
+                    event_class: DeliveryEventClassV1::Activity,
+                    channel: DeliveryChannelIdentityV1 {
+                        surface: DeliverySurfaceFamilyV1::Hook,
+                        channel_ref: "hook:cursor_desktop:receipt-backlog".to_owned(),
+                    },
+                    work_attempt: None,
+                    eligible: 1,
+                    valid_at: now,
+                    attempted_at: now,
+                },
+                outcome: DeliverySettlementOutcomeV1::Delivered,
+                settled_at: now,
+                drop_reason: None,
+            })
+            .expect("valid hook delivery receipt")
         })
         .collect::<Vec<_>>();
-    assert_eq!(
-        held.len(),
-        BACKLOG,
-        "each stop publishes one delivery receipt"
-    );
-
-    // Drain the stops' events first so only the receipt backlog remains.
-    let daemon = spawn_tracedecay_daemon(&home);
-    assert!(
-        drain_latency(&records, PROMPT_DRAIN).is_some(),
-        "the stops' events must drain within {PROMPT_DRAIN:?}"
-    );
-    drop(daemon);
+    let unique = held
+        .iter()
+        .map(|receipt| receipt.receipt_id)
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(unique.len(), BACKLOG, "every receipt has a distinct identity");
     for receipt in &held {
         publish(&receipts, receipt);
     }
+    assert_eq!(
+        published_receipts(&receipts).len(),
+        BACKLOG,
+        "all receipts must be durable before the daemon restarts"
+    );
 
     let _daemon = spawn_tracedecay_daemon(&home);
     assert!(
