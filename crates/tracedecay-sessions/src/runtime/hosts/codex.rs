@@ -2693,6 +2693,15 @@ fn directory_entry_fingerprint(path: &Path) -> TranscriptIngestResult<[u8; 32]> 
                 path: entry.path(),
                 source,
             })?;
+        // Only real subdirectories and potential JSONL candidates affect
+        // discovery. Ignored compressed archives must not change the name
+        // witness when the coarse native directory timestamp stays equal.
+        let name = entry.file_name();
+        if !file_type.is_dir()
+            && Path::new(&name).extension().and_then(|ext| ext.to_str()) != Some("jsonl")
+        {
+            continue;
+        }
         let tag = if file_type.is_symlink() {
             2_u8
         } else if file_type.is_dir() {
@@ -2700,7 +2709,7 @@ fn directory_entry_fingerprint(path: &Path) -> TranscriptIngestResult<[u8; 32]> 
         } else {
             0
         };
-        names.push((entry.file_name(), tag));
+        names.push((name, tag));
     }
     names.sort();
     let mut hasher = Sha256::new();

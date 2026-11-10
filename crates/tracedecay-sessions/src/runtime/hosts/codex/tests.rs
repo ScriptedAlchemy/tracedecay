@@ -2676,6 +2676,42 @@ mod recent_first_discovery_tests {
     }
 
     #[test]
+    fn ignored_codex_archive_entries_do_not_change_candidate_fingerprint() {
+        let temp = TempDir::new().unwrap();
+        let archive = temp.path().join("archived_sessions");
+        std::fs::create_dir_all(&archive).unwrap();
+        std::fs::write(archive.join("rollout-existing.jsonl"), b"{}\n").unwrap();
+        let initial = directory_entry_fingerprint(&archive).unwrap();
+
+        // Non-JSONL names are in the directory but not in the candidate
+        // set. The previous fingerprint changed for every ignored addition.
+        for index in 0..128 {
+            std::fs::write(archive.join(format!("rollout-{index:04}.jsonl.zst")), b"zst").unwrap();
+        }
+        assert_eq!(directory_entry_fingerprint(&archive).unwrap(), initial);
+
+        std::fs::rename(
+            archive.join("rollout-0000.jsonl.zst"),
+            archive.join("rollout-renamed.jsonl.zst"),
+        )
+        .unwrap();
+        assert_eq!(directory_entry_fingerprint(&archive).unwrap(), initial);
+
+        let eligible = archive.join("rollout-new.jsonl");
+        std::fs::write(&eligible, b"{}\n").unwrap();
+        assert_ne!(directory_entry_fingerprint(&archive).unwrap(), initial);
+        std::fs::remove_file(eligible).unwrap();
+        assert_eq!(directory_entry_fingerprint(&archive).unwrap(), initial);
+
+        std::fs::create_dir(archive.join("2026")).unwrap();
+        assert_ne!(
+            directory_entry_fingerprint(&archive).unwrap(),
+            initial,
+            "child directories must remain part of traversal authority"
+        );
+    }
+
+    #[test]
     #[cfg(unix)]
     fn unsettled_directory_stat_does_not_change_with_each_sample() {
         let temp = TempDir::new().unwrap();
