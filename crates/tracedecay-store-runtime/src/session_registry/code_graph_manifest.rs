@@ -148,12 +148,9 @@ impl CheckedSealReader<'_> {
         // final handle or pathname validation as a damaged/retired seal.
         let final_file_metadata = self.reader.get_ref().metadata();
         (self.check)()?;
-        let final_file_metadata =
-            final_file_metadata.map_err(|error| GraphDbError::Corrupt {
-                message: format!(
-                    "sealed code generation metadata cannot be revalidated: {error}"
-                ),
-            })?;
+        let final_file_metadata = final_file_metadata.map_err(|error| GraphDbError::Corrupt {
+            message: format!("sealed code generation metadata cannot be revalidated: {error}"),
+        })?;
         if !same_file_identity(opened_metadata, &final_file_metadata)
             || self.bytes_read != admitted_len
         {
@@ -2125,7 +2122,11 @@ mod tests {
         let temporary = TempDir::new().unwrap();
         let directory = temporary.path().join("sealed-directory");
         std::fs::create_dir(&directory).unwrap();
-        std::fs::write(directory.join("nonempty-evidence"), b"real filesystem evidence").unwrap();
+        std::fs::write(
+            directory.join("nonempty-evidence"),
+            b"real filesystem evidence",
+        )
+        .unwrap();
         let missing = temporary.path().join("absent-seal");
         let digest = hex::encode(Sha256::digest(b"real filesystem evidence"));
 
