@@ -26,8 +26,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
-use serde::de::{self, MapAccess, SeqAccess, Visitor};
 use serde::Deserialize;
+use serde::de::{self, MapAccess, SeqAccess, Visitor};
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
 use tracedecay_application::http_agent::http_agent;
@@ -1002,12 +1002,9 @@ mod tests {
             assert_eq!(server.requests.load(Ordering::SeqCst), 1);
         }
         // Non-ambiguous JSON remains a usable answer.
-        let server = fake_decision_engine(
-            200,
-            &single_noul_body("q", 0.9),
-            Duration::ZERO,
-        );
-        let answers = answered(client(&server.url).ask_blocking(&request("state", vec![noul("q")])));
+        let server = fake_decision_engine(200, &single_noul_body("q", 0.9), Duration::ZERO);
+        let answers =
+            answered(client(&server.url).ask_blocking(&request("state", vec![noul("q")])));
         assert_eq!(answers.answers["q"], DecisionAnswerV1::Noul(0.9));
     }
 
