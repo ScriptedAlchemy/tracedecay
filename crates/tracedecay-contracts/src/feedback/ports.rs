@@ -261,7 +261,6 @@ impl FeedbackPublicationV1 {
         Ok(publication)
     }
 
-
     /// Two incomplete evaluations can share the same committed evidence even
     /// when their cycle and result identities differ. No provider, authorization,
     /// finding, runtime or policy evidence may be dropped to make that true.
