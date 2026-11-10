@@ -626,6 +626,7 @@ async fn build_storage_report_with_walk_budget(
     profile_root: &Path,
     walk_entry_budget: usize,
 ) -> tracedecay_domain::errors::Result<StorageReport> {
+    reject_linked_profile_root(profile_root)?;
     let global_db_path = profile_root.join(GLOBAL_DB_FILENAME);
     // The registry rows come from an off-profile copy, so reading them first
     // leaves the profile untouched.
@@ -914,6 +915,7 @@ async fn build_storage_report_page_with_walk_budget(
     cancellation: Option<CancellationSignal>,
     deadline: Option<Deadline>,
 ) -> tracedecay_domain::errors::Result<StorageReport> {
+    reject_linked_profile_root(profile_root)?;
     let limit = limit.clamp(1, MAX_STORAGE_REPORT_PAGE_LIMIT);
     let walk_control = StorageReportWalkControl {
         cancellation,
@@ -1249,6 +1251,7 @@ fn build_project_storage_report_with_control(
     sample_free_page_header: bool,
     walk_control: &StorageReportWalkControl,
 ) -> tracedecay_domain::errors::Result<StorageReport> {
+    reject_linked_profile_root(profile_root)?;
     tracedecay_runtime_core::storage::validate_project_id(project_id).map_err(|message| {
         tracedecay_domain::errors::TraceDecayError::Config {
             message: message.to_owned(),
@@ -1284,6 +1287,21 @@ fn build_project_storage_report_with_control(
         footprint: None,
         coverage: StorageReportCoverage::default(),
     })
+}
+
+/// A caller-supplied profile symlink is not the authority that owns its target.
+/// The physical footprint walker refuses that link; report readers must also
+/// refuse it before inspecting registry rows or sampling individual stores.
+fn reject_linked_profile_root(profile_root: &Path) -> tracedecay_domain::errors::Result<()> {
+    match std::fs::symlink_metadata(profile_root) {
+        Ok(metadata) if metadata.file_type().is_symlink() => Err(report_error(
+            "inspect storage report profile root",
+            "profile root is a symbolic link; refusing to read foreign storage",
+        )),
+        Ok(_) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(report_error("inspect storage report profile root", error)),
+    }
 }
 
 fn directory_chain_is_nofollow(root: &Path, directory: &Path) -> bool {
@@ -3270,6 +3288,44 @@ mod tests {
             "the linked WAL must remain explicitly unavailable, not be counted as zero"
         );
         assert_eq!(foreign.metadata().unwrap().len(), 512 * 1024 * 1024);
+    }
+
+    #[cfg(unix)]
+    #[asupersync::test]
+    async fn a_linked_profile_cannot_read_foreign_registry_or_store_bytes() {
+        let temporary = tempfile::tempdir().unwrap();
+        let foreign = temporary.path().join("foreign");
+        let linked = temporary.path().join("profile-link");
+        std::fs::create_dir_all(foreign.join("projects/proj_foreign")).unwrap();
+        std::fs::write(foreign.join("projects/proj_foreign/payload"), [1u8; 16]).unwrap();
+        std::fs::write(foreign.join(USER_SESSIONS_DB_FILENAME), [2u8; 4_096]).unwrap();
+        std::os::unix::fs::symlink(&foreign, &linked).unwrap();
+
+        // Before the guard, the footprint was partial, but offline sampling
+        // still followed this profile link and attributed foreign store bytes.
+        let offline = build_storage_report(&linked)
+            .await
+            .expect_err("offline report must not read linked profile storage");
+        assert!(offline.to_string().contains("symbolic link"), "{offline}");
+
+        // The explicit project route also reports shared profile DB sizes,
+        // so it must not silently measure a linked profile either.
+        let project = build_project_storage_report(
+            &linked,
+            "proj_foreign",
+            Path::new("/repos/foreign"),
+            Err(RETENTION_PROTECTION_UNRESOLVED),
+        )
+        .expect_err("project-scoped report must refuse linked profile storage");
+        assert!(project.to_string().contains("symbolic link"), "{project}");
+
+        // Explicitly selecting the real directory remains measurable. The
+        // refusal is for a linked authority, not for the fixture's contents.
+        let real = build_storage_report(&foreign).await.unwrap();
+        assert_eq!(real.user_sessions_db_bytes, 4_096);
+        assert_eq!(real.unregistered_dir_count, 1);
+        assert_eq!(real.unregistered_bytes, 16);
+        assert_eq!(real.full_profile_size.unwrap().total_bytes, 4_112);
     }
 
     #[asupersync::test]
