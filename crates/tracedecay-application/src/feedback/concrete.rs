@@ -1465,12 +1465,9 @@ impl ProjectFeedbackStore {
             return Err(FeedbackRuntimeError::Store);
         }
         publications.push(publication);
-        publications.sort_by(|left, right| {
-            left.authority
-                .revalidated_at
-                .cmp(&right.authority.revalidated_at)
-                .then_with(|| left.result.result_id.cmp(&right.result.result_id))
-        });
+        // Sort stably by revalidation time. Equal timestamps must retain
+        // their actual commit order, never sort by result identity.
+        publications.sort_by_key(|entry| entry.authority.revalidated_at);
         let encoded = serde_json::to_string(&StoredPublicationLedgerV1 {
             schema_version: PUBLICATION_LEDGER_SCHEMA_VERSION,
             publications,
@@ -2429,8 +2426,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let path = root.path().join("feedback-equal-timestamp.db");
         crate::register_test_schema_installer();
-        let authority =
-            DatabaseAuthority::acquire_test(&path, "feedback equal timestamp").unwrap();
+        let authority = DatabaseAuthority::acquire_test(&path, "feedback equal timestamp").unwrap();
         let (database, _) =
             Database::publish_test_runtime(&path, &authority, TestDatabaseRuntimeMode::Initialize)
                 .await
@@ -2458,11 +2454,14 @@ mod tests {
             (failed, unavailable)
         };
         assert_eq!(older.dedupe_key, newer.dedupe_key);
-        assert_eq!(older.authority.revalidated_at, newer.authority.revalidated_at);
+        assert_eq!(
+            older.authority.revalidated_at,
+            newer.authority.revalidated_at
+        );
         assert!(older.result.result_id > newer.result.result_id);
         assert_ne!(older.result.provider_states, newer.result.provider_states);
         assert_eq!(
-            store.record_publication(older).await.unwrap(),
+            store.record_publication(older.clone()).await.unwrap(),
             FeedbackPublicationRecordState::Recorded
         );
         assert_eq!(
@@ -2492,7 +2491,41 @@ mod tests {
             store.record_publication(replay).await.unwrap(),
             FeedbackPublicationRecordState::Reused(newer)
         );
-        assert_eq!(store.load_publications().await.unwrap().len(), 2);
+        let ordered = store.load_publications().await.unwrap();
+        assert_eq!(ordered.len(), 2);
+        assert_eq!(
+            ordered.last().unwrap().result.result_id,
+            newer.result.result_id,
+            "equal-timestamp publications retain their durable commit order"
+        );
+
+        // A later return to the first verdict is a new publication, not
+        // a lookup of its older, lexicographically larger identity.
+        let recovered = incomplete_publication(
+            "cycle.feedback.equal-timestamp.recovered",
+            "feedback.equal-timestamp.same-content",
+            older.result.provider_states[1],
+        );
+        assert_eq!(
+            store.record_publication(recovered.clone()).await.unwrap(),
+            FeedbackPublicationRecordState::Recorded
+        );
+        assert_eq!(
+            store
+                .doctor_latest_publication(&admitted)
+                .await
+                .unwrap()
+                .unwrap()
+                .result
+                .result_id,
+            recovered.result.result_id
+        );
+        let ordered = store.load_publications().await.unwrap();
+        assert_eq!(ordered.len(), 3);
+        assert_eq!(
+            ordered.last().unwrap().result.result_id,
+            recovered.result.result_id
+        );
     }
 
     #[tokio::test]
