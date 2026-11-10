@@ -457,7 +457,11 @@ fn carried_row_chunks_check_cancellation_and_preserve_disk_rows() {
         tx.rollback().unwrap();
         drop(connection);
         connection = Connection::open(&path).unwrap();
-        assert_eq!(chunks(&connection), original, "rollback must restore every chunk");
+        assert_eq!(
+            chunks(&connection),
+            original,
+            "rollback must restore every chunk"
+        );
         integrity(&connection);
     }
 
@@ -468,10 +472,15 @@ fn carried_row_chunks_check_cancellation_and_preserve_disk_rows() {
     tx.commit().unwrap();
     drop(connection);
     let reopened = Connection::open(&path).unwrap();
-    assert_eq!(chunks(&reopened), expected, "commit must survive a fresh connection");
+    assert_eq!(
+        chunks(&reopened),
+        expected,
+        "commit must survive a fresh connection"
+    );
     assert_eq!(
         reopened
-            .query_row("SELECT value FROM independent", [], |row| row.get::<_, String>(0))
+            .query_row("SELECT value FROM independent", [], |row| row
+                .get::<_, String>(0))
             .unwrap(),
         "live"
     );
