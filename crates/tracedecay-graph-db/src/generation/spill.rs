@@ -182,8 +182,8 @@ impl SpillDirectory {
                 "graph row spill staging name does not bind its owner receipt",
             ));
         }
-        if let Err(error) = tracedecay_private_fs::framed_log::rename_noreplace(staging.path(), path)
-        {
+        let installed = tracedecay_private_fs::framed_log::rename_noreplace(staging.path(), path);
+        if let Err(error) = installed {
             let root = staging.path().parent().ok_or_else(|| {
                 GraphDbError::invalid("graph row spill directory has no parent")
             })?;
