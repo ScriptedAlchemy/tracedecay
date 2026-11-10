@@ -3506,6 +3506,8 @@ mod receipt_budget_tests {
 #[cfg(test)]
 mod build_tests {
     use std::collections::{BTreeMap, BTreeSet};
+    #[cfg(unix)]
+    use std::os::unix::fs::MetadataExt;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -3617,27 +3619,23 @@ mod build_tests {
         .unwrap()
     }
 
-    /// Publish a real layered artifact between visits of the same census.
-    /// Both a formerly single link and an exhausted two-link group must
-    /// remain one physical charge owned by the newly visited head.
+    /// Real layered generations share one physical base. The production
+    /// census must attribute those hard links to the live head, regardless
+    /// of how many older layered generations already reference the base.
     #[cfg(unix)]
     #[test]
-    fn sealed_census_counts_concurrently_published_single_base_link_once() {
-        census_with_concurrent_layer_publication(0);
+    fn sealed_census_counts_published_single_base_link_once() {
+        census_with_layered_publication(0);
     }
 
     #[cfg(unix)]
     #[test]
-    fn sealed_census_counts_concurrently_published_completed_link_group_once() {
-        census_with_concurrent_layer_publication(1);
+    fn sealed_census_counts_published_multiple_base_links_once() {
+        census_with_layered_publication(1);
     }
 
     #[cfg(unix)]
-    fn census_with_concurrent_layer_publication(initial_layers: u64) {
-        use std::os::unix::fs::MetadataExt;
-
-        use tracedecay_private_fs::capability_dir::test_support::census_in_entry_order;
-
+    fn census_with_layered_publication(initial_layers: u64) {
         let temp = tempfile::tempdir().unwrap();
         let database_path = temp.path().join("source.grafeo");
         let database = open_source(&database_path);
@@ -3689,18 +3687,12 @@ mod build_tests {
         if initial_layers == 1 {
             stores.push(publish("generation:child1"));
         }
-        let root = sealed_store_root(&database_path);
         let original = stores[0].directory.join(SEALED_STORE_DATABASE_FILE);
         let original_bytes = std::fs::read(&original).unwrap();
         assert_eq!(
             std::fs::metadata(&original).unwrap().nlink(),
             1 + initial_layers
         );
-        let initial_names: Vec<_> = stores
-            .iter()
-            .map(|store| store.directory.file_name().unwrap().to_owned())
-            .collect();
-        let mut initial_names = initial_names.into_iter();
         let receipts: Vec<_> = stores
             .iter()
             .map(|store| {
@@ -3709,39 +3701,7 @@ mod build_tests {
                 (path, bytes)
             })
             .collect();
-        let mut published = false;
-        // The entry source determines only scheduling: all receipt reads,
-        // capability opens and accounting use the production census core.
-        let entries = std::iter::from_fn(|| {
-            if let Some(name) = initial_names.next() {
-                return Some(Ok(name));
-            }
-            if published {
-                return None;
-            }
-            let child = publish("generation:child2");
-            let name = child.directory.file_name().unwrap().to_owned();
-            stores.push(child);
-            published = true;
-            Some(Ok(name))
-        });
-        let totals = census_in_entry_order(
-            &root,
-            entries,
-            2_u8,
-            |_| (SEALED_STORE_RECEIPT_FILE, MAX_SEALED_RECEIPT_BYTES),
-            |_, receipt| {
-                let receipt: super::SealedStoreReceiptV1 =
-                    serde_json::from_slice(receipt.unwrap()).unwrap();
-                if receipt.generation == "generation:child2" {
-                    0
-                } else {
-                    1
-                }
-            },
-        )
-        .unwrap();
-        assert!(published);
+        stores.push(publish("generation:child2"));
         assert_eq!(
             std::fs::metadata(&original).unwrap().nlink(),
             2 + initial_layers
@@ -3764,26 +3724,27 @@ mod build_tests {
                     .or_insert((kind, metadata.len()));
             }
         }
+        let census = census_sealed_store(
+            &database_path,
+            &BTreeSet::from(["generation:child2".to_owned()]),
+        )
+        .unwrap();
         for kind in [0, 1] {
             let bytes: u64 = physical
                 .values()
                 .filter(|(owner, _)| *owner == kind)
                 .map(|(_, bytes)| bytes)
                 .sum();
+            let observed = if kind == 0 {
+                census.head_bytes
+            } else {
+                census.superseded_bytes
+            };
             assert_eq!(
-                totals[&kind].1, bytes,
+                observed, bytes,
                 "initial layers {initial_layers}, category {kind}"
             );
         }
-        assert_eq!(totals[&0].0, 1);
-        assert_eq!(totals[&1].0, 1 + initial_layers);
-        let census = census_sealed_store(
-            &database_path,
-            &BTreeSet::from(["generation:child2".to_owned()]),
-        )
-        .unwrap();
-        assert_eq!(census.head_bytes, totals[&0].1);
-        assert_eq!(census.superseded_bytes, totals[&1].1);
         for store in stores {
             store.close().unwrap();
         }

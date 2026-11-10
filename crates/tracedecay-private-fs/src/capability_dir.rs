@@ -490,32 +490,6 @@ fn census_receipted_children<K: Ord + Copy>(
     Ok(totals)
 }
 
-/// Deterministic native scheduling for consumer publication regressions.
-/// Receipt validation, held capabilities and inode accounting are shared with
-/// the public census; only the filesystem's unspecified entry order is supplied.
-#[cfg(feature = "test-helpers")]
-pub mod test_support {
-    use super::{OsStr, OsString, Path, census_receipted_children, io, open_root_nofollow};
-
-    pub fn census_in_entry_order<K: Ord + Copy>(
-        root_path: &Path,
-        entries: impl Iterator<Item = io::Result<OsString>>,
-        unrecognized: K,
-        receipt_for: impl FnMut(&OsStr) -> (&'static str, usize),
-        classify: impl FnMut(&OsStr, Option<&[u8]>) -> K,
-    ) -> io::Result<std::collections::BTreeMap<K, (u64, u64)>> {
-        let root = open_root_nofollow(root_path)?;
-        census_receipted_children(
-            &root,
-            entries,
-            unrecognized,
-            receipt_for,
-            classify,
-            super::MAX_SEALED_CENSUS_INODES,
-        )
-    }
-}
-
 /// Walk no-follow entries relative to the same held child, even after its
 /// old pathname has been renamed. The stack scales with directory depth.
 fn directory_bytes_from_held_dir<K: Ord + Copy>(
@@ -801,6 +775,8 @@ pub fn remove_open_dir_all_nofollow(directory: Dir) -> io::Result<()> {
 #[cfg(test)]
 mod replacement_tests {
     use std::io::Read;
+    #[cfg(unix)]
+    use std::os::unix::fs::MetadataExt;
 
     use super::*;
 
@@ -1180,6 +1156,83 @@ mod tests {
                 std::fs::read(temp.path().join(format!("alias-{index}"))).unwrap(),
                 b"x"
             );
+        }
+    }
+
+    /// A link group is not closed by its observed nlink count: a layered
+    /// publisher can add another alias after the census has visited every
+    /// old link. The head must inherit the one physical charge in both cases.
+    #[cfg(unix)]
+    #[test]
+    fn census_retains_inode_identity_across_later_link_publication() {
+        for initial_peer in [false, true] {
+            let temp = tempfile::tempdir().unwrap();
+            let root = temp.path().join("sealed");
+            let old = root.join("old");
+            std::fs::create_dir_all(&old).unwrap();
+            std::fs::write(old.join("owner"), b"old").unwrap();
+            let base = old.join("shared");
+            std::fs::write(&base, b"rows").unwrap();
+            let mut initial = vec![OsString::from("old")];
+            if initial_peer {
+                let peer = root.join("old-peer");
+                std::fs::create_dir(&peer).unwrap();
+                std::fs::write(peer.join("owner"), b"old").unwrap();
+                std::fs::hard_link(&base, peer.join("shared")).unwrap();
+                initial.push(OsString::from("old-peer"));
+            }
+            assert_eq!(
+                std::fs::metadata(&base).unwrap().nlink(),
+                if initial_peer { 2 } else { 1 },
+            );
+            let root_dir = open_root_nofollow(&root).unwrap();
+            let mut names = initial.into_iter();
+            let mut published = false;
+            let entries = std::iter::from_fn(|| {
+                if let Some(name) = names.next() {
+                    return Some(Ok(name));
+                }
+                if published {
+                    return None;
+                }
+                let head = root.join("head");
+                std::fs::create_dir(&head).unwrap();
+                std::fs::write(head.join("owner"), b"head").unwrap();
+                std::fs::hard_link(&base, head.join("shared")).unwrap();
+                published = true;
+                Some(Ok(OsString::from("head")))
+            });
+            let census = census_receipted_children(
+                &root_dir,
+                entries,
+                2_u8,
+                |_| ("owner", 16),
+                |_, receipt| {
+                    if receipt == Some(b"head".as_slice()) {
+                        0
+                    } else if receipt == Some(b"old".as_slice()) {
+                        1
+                    } else {
+                        2
+                    }
+                },
+                MAX_SEALED_CENSUS_INODES,
+            )
+            .unwrap();
+            assert!(published, "the head must have been published mid-census");
+            assert_eq!(
+                std::fs::metadata(&base).unwrap().nlink(),
+                if initial_peer { 3 } else { 2 },
+            );
+            assert_eq!(census.get(&0), Some(&(1, 8)), "live head owns shared bytes");
+            assert_eq!(
+                census.get(&1),
+                Some(&(if initial_peer { 2 } else { 1 }, if initial_peer { 6 } else { 3 })),
+                "old generations retain only their own receipts"
+            );
+            assert!(!census.contains_key(&2));
+            assert_eq!(std::fs::read(root.join("head/shared")).unwrap(), b"rows");
+            assert_eq!(std::fs::read(&base).unwrap(), b"rows");
         }
     }
 
