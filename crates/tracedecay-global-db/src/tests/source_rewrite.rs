@@ -360,7 +360,11 @@ async fn rewrite_completion_resumes_committed_pages_after_failure_and_restart() 
         let end = (start + 128).min(RECORDS);
         seeded.extend(seed_projected_messages(&runtime, start..end).await);
     }
-    assert_eq!(seeded.len(), RECORDS, "all source records must be projected");
+    assert_eq!(
+        seeded.len(),
+        RECORDS,
+        "all source records must be projected"
+    );
 
     let source = ObservationSourceIdentityV1::for_provider(
         ProviderId::new("codex").unwrap(),
