@@ -86,12 +86,13 @@ pub fn sync_parent_directory(path: &Path, policy: DirectorySyncPolicy) -> io::Re
 /// every pathname through endpoint security or holding a descriptor per segment.
 /// [`Self::sync`] flushes the final window and checks that earlier members still
 /// name the same immutable files. It never flushes unrelated filesystem data.
-/// Other platforms fsync each file as it is written.
+/// Other Unix platforms fsync each file as it is written, then verify the
+/// admitted pathnames again before publication. Windows syncs inline.
 #[derive(Default)]
 pub struct DurableFileBatch {
     #[cfg(target_os = "linux")]
     pending: Vec<PendingDurableFile>,
-    #[cfg(target_os = "linux")]
+    #[cfg(unix)]
     synced: Vec<DurableFileIdentity>,
 }
 
@@ -222,7 +223,12 @@ impl DurableFileBatch {
             identity.validate_path()?;
             sync_owned_file(path, file)?;
             identity.validate_metadata(&file.metadata()?)?;
-            identity.validate_path()
+            identity.validate_path()?;
+            // The writer descriptor is no longer retained after its inline
+            // barrier. Keep its authenticated pathname identity instead:
+            // a later atomic replacement must not be published by sync().
+            self.synced.push(identity);
+            Ok(())
         }
         #[cfg(not(unix))]
         {
@@ -254,7 +260,16 @@ impl DurableFileBatch {
             }
             Ok(())
         }
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(all(unix, not(target_os = "linux")))]
+        {
+            // Inline fsyncs do not authorize a pathname that was replaced or
+            // rewritten after admission and before the generation commit.
+            for identity in &self.synced {
+                identity.validate_path()?;
+            }
+            Ok(())
+        }
+        #[cfg(not(unix))]
         {
             Ok(())
         }
@@ -1059,6 +1074,61 @@ mod tests {
         assert_eq!(error.kind(), ErrorKind::InvalidData);
         assert_eq!(
             fs::read(&path).expect("substitute bytes remain"),
+            b"exact sealed bytes"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn staged_durability_refuses_replacement_after_successful_admission() {
+        let root = tempfile::tempdir().expect("isolated staging root");
+        let path = root.path().join("staged.tmp");
+        let mut writer = File::create(&path).expect("original staged writer");
+        writer.write_all(b"exact sealed bytes").expect("original bytes");
+        let original = writer.metadata().expect("authenticated original inode");
+        let mut batch = super::DurableFileBatch::new();
+        batch
+            .written_with_identity(&path, &writer, &original)
+            .expect("authenticate and flush original member");
+        drop(writer);
+        batch.sync().expect("unchanged identity is still publishable");
+
+        let replacement = root.path().join("replacement.tmp");
+        fs::write(&replacement, b"exact sealed bytes").expect("same-byte replacement");
+        fs::rename(&replacement, &path).expect("atomic inode substitution");
+        let named = fs::metadata(&path).expect("replacement metadata");
+        assert_ne!(
+            (original.dev(), original.ino()),
+            (named.dev(), named.ino()),
+            "the replacement must name a different real inode"
+        );
+
+        assert_eq!(
+            batch
+                .sync()
+                .expect_err("final sync must refuse a replacement after admission")
+                .kind(),
+            ErrorKind::InvalidData
+        );
+        assert_eq!(
+            fs::read(&path).expect("replacement bytes preserved"),
+            b"exact sealed bytes"
+        );
+
+        // Reauthentication starts a new batch, never silently mutates the
+        // already-admitted batch's authority.
+        let current = File::options()
+            .read(true)
+            .write(true)
+            .open(&path)
+            .expect("current named writer");
+        let mut fresh = super::DurableFileBatch::new();
+        fresh
+            .written(&path, &current)
+            .expect("authenticate the replacement");
+        fresh.sync().expect("new batch publishes the exact replacement");
+        assert_eq!(
+            fs::read(&path).expect("freshly durable bytes"),
             b"exact sealed bytes"
         );
     }
