@@ -264,18 +264,26 @@ fn open_checked_seal_reader<'a>(
     path: &std::path::Path,
     check: &'a dyn Fn() -> Result<(), GraphDbError>,
 ) -> Result<(CheckedSealReader<'a>, std::fs::Metadata, u64), GraphDbError> {
-    let path_metadata = path.symlink_metadata().map_err(|error| {
+    // Metadata and endpoint authorization may finish after the caller expires.
+    // Preserve the typed interruption even when the filesystem operation fails.
+    let path_metadata = path.symlink_metadata();
+    (check)()?;
+    let path_metadata = path_metadata.map_err(|error| {
         GraphDbError::unavailable(format!(
             "sealed code generation is unavailable for replay: {error}"
         ))
     })?;
     let admitted_len = validate_sealed_generation_metadata(&path_metadata)?;
-    let file = File::open(path).map_err(|error| {
+    let opened = File::open(path);
+    (check)()?;
+    let file = opened.map_err(|error| {
         GraphDbError::unavailable(format!(
             "sealed code generation cannot be opened for replay: {error}"
         ))
     })?;
-    let opened_metadata = file.metadata().map_err(|error| GraphDbError::Corrupt {
+    let opened_metadata = file.metadata();
+    (check)()?;
+    let opened_metadata = opened_metadata.map_err(|error| GraphDbError::Corrupt {
         message: format!("sealed code generation metadata cannot be read: {error}"),
     })?;
     if !same_file_identity(&path_metadata, &opened_metadata) {
@@ -2047,6 +2055,45 @@ mod tests {
         ));
     }
 
+
+    #[test]
+    fn checked_seal_open_preserves_interruption_after_metadata_io() {
+        let temporary = TempDir::new().unwrap();
+        let directory = temporary.path().join("sealed-directory");
+        std::fs::create_dir(&directory).unwrap();
+        std::fs::write(directory.join("nonempty-evidence"), b"real filesystem evidence").unwrap();
+        let missing = temporary.path().join("absent-seal");
+        let digest = hex::encode(Sha256::digest(b"real filesystem evidence"));
+
+        // Without interruption, both actual filesystem failures retain
+        // their existing classification.
+        assert!(matches!(
+            verify_checked_seal(&directory, &digest, &|| Ok(())),
+            Err(GraphDbError::Corrupt { .. })
+        ));
+        assert!(matches!(
+            verify_checked_seal(&missing, &digest, &|| Ok(())),
+            Err(GraphDbError::Unavailable { .. })
+        ));
+
+        for (path, interruption) in [
+            (&directory, GraphDbError::Cancelled),
+            (&missing, GraphDbError::DeadlineExceeded),
+        ] {
+            let probes = Cell::new(0_usize);
+            let result = verify_checked_seal(path, &digest, &|| {
+                probes.set(probes.get() + 1);
+                Err(interruption.clone())
+            });
+            assert_eq!(result.unwrap_err(), interruption);
+            assert_eq!(
+                probes.get(),
+                1,
+                "interruption must follow an actual pathname metadata operation"
+            );
+        }
+    }
+
     #[test]
     fn sealed_generation_read_rejects_same_length_mutation() {
         let temp = TempDir::new().unwrap();
@@ -2057,7 +2104,9 @@ mod tests {
         let checks = AtomicUsize::new(0);
 
         let error = verify_checked_seal(&path, &digest, &|| {
-            if checks.fetch_add(1, Ordering::SeqCst) == 1 {
+            // Change the second chunk after the first real checked read,
+            // not during the new metadata/open admission probes.
+            if checks.fetch_add(1, Ordering::SeqCst) == 4 {
                 let mut file = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
                 file.seek(SeekFrom::Start(SEAL_READ_CHECK_BYTES as u64))
                     .unwrap();
@@ -2082,7 +2131,8 @@ mod tests {
 
         assert_eq!(
             verify_checked_seal(&path, &digest, &|| {
-                if checks.fetch_add(1, Ordering::SeqCst) >= 2 {
+                // Expire after the first completed nonempty file read.
+                if checks.fetch_add(1, Ordering::SeqCst) >= 4 {
                     Err(GraphDbError::DeadlineExceeded)
                 } else {
                     Ok(())
