@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use tracedecay_code_extraction::{
     CallableArityV1, ExtractedImportEvidenceV1, ExtractedSchemaEvidenceV1, ExtractionArtifactV1,
     GoMethodSetRowV1, ImportModuleKindV1, ImportNamespaceV1, ImportReexportScopeV1,
-    SchemaEvidenceLanguageV1, SchemaEvidenceStatusV1, import_module_kind,
+    SchemaEvidenceLanguageV1, SchemaEvidenceStatusV1, TypeScriptTypeRowV1, import_module_kind,
 };
 use tracedecay_domain::{
     CanonicalRelationEdgeV1, CodeGenerationId, EdgeKind, FileOccurrenceId, ManifestDigest,
@@ -229,6 +229,15 @@ pub struct CodeFileIndexArtifactsV1 {
     /// from them.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub go_method_sets: Vec<CodeIndexGoMethodSetRowV1>,
+    pub typescript_types: Vec<CodeIndexTypeScriptTypeRowV1>,
+}
+
+/// TypeScript type evidence bound to the owning generation's symbol.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(deny_unknown_fields)]
+pub struct CodeIndexTypeScriptTypeRowV1 {
+    pub occurrence: SymbolOccurrenceId,
+    pub row: TypeScriptTypeRowV1,
 }
 
 /// One Go method-set row bound to its declaring symbol. `span` is that
@@ -281,6 +290,7 @@ impl CodeFileIndexArtifactsV1 {
         clone_bodies: Vec<CodeIndexCloneBodyV1>,
         callable_arities: Vec<CodeIndexCallableArityV1>,
         go_method_sets: Vec<CodeIndexGoMethodSetRowV1>,
+        typescript_types: Vec<CodeIndexTypeScriptTypeRowV1>,
         artifact: &ExtractionArtifactV1,
         extraction: &ExtractionBatchV1,
     ) -> Result<Self, ChunkingFailureV1> {
@@ -302,6 +312,7 @@ impl CodeFileIndexArtifactsV1 {
             unresolved_references,
             callable_arities,
             go_method_sets,
+            typescript_types,
         )?;
         artifacts.validate_generation_import_authority(extraction)?;
         Ok(artifacts)
@@ -319,6 +330,7 @@ impl CodeFileIndexArtifactsV1 {
         mut unresolved_references: Vec<CodeIndexUnresolvedReferenceV1>,
         mut callable_arities: Vec<CodeIndexCallableArityV1>,
         mut go_method_sets: Vec<CodeIndexGoMethodSetRowV1>,
+        mut typescript_types: Vec<CodeIndexTypeScriptTypeRowV1>,
     ) -> Result<Self, ChunkingFailureV1> {
         imports.sort_by(canonical_import_order);
         clone_bodies.sort_by(|left, right| {
@@ -336,6 +348,8 @@ impl CodeFileIndexArtifactsV1 {
         unresolved_references.dedup();
         callable_arities.sort();
         go_method_sets.sort();
+        typescript_types.sort();
+        typescript_types.dedup();
         let artifacts = Self {
             chunks,
             symbols,
@@ -347,6 +361,7 @@ impl CodeFileIndexArtifactsV1 {
             unresolved_references,
             callable_arities,
             go_method_sets,
+            typescript_types,
         };
         // Every payload was just derived from its tokens or reused under a
         // key covering every digest input; re-deriving them proves nothing.
@@ -426,6 +441,25 @@ impl CodeFileIndexArtifactsV1 {
             if !occurrences.contains(&reference.from_occurrence) {
                 return Err(ChunkingFailureV1::NonCanonicalIdentity(crate::noncanonical::NonCanonicalCauseV1::new(crate::noncanonical::NonCanonicalReasonCodeV1::UnresolvedReferenceMissingAnchor)));
             }
+        }
+        if self
+            .typescript_types
+            .windows(2)
+            .any(|pair| pair[0] >= pair[1])
+            || self.typescript_types.iter().any(|row| {
+                !occurrences.contains(&row.occurrence)
+                    || matches!(&row.row, TypeScriptTypeRowV1::ReceiverCall { span, .. }
+                        if span.is_empty() || !self.unresolved_references.iter().any(|reference|
+                            reference.from_occurrence == row.occurrence
+                                && reference.kind == RelationEdgeKindV1::Calls
+                                && reference.evidence_span == *span))
+            })
+        {
+            return Err(ChunkingFailureV1::NonCanonicalIdentity(
+                crate::noncanonical::NonCanonicalCauseV1::new(
+                    crate::noncanonical::NonCanonicalReasonCodeV1::FileGraphNotCanonical,
+                ),
+            ));
         }
         if self
             .unresolved_references
@@ -765,6 +799,11 @@ impl CodeFileIndexArtifactsV1 {
             row.occurrence = rematerialized_occurrence(&occurrences, &row.occurrence)?;
         }
         go_method_sets.sort();
+        let mut typescript_types = self.typescript_types.clone();
+        for row in &mut typescript_types {
+            row.occurrence = rematerialized_occurrence(&occurrences, &row.occurrence)?;
+        }
+        typescript_types.sort();
         let mut clone_bodies = self.clone_bodies.clone();
         for body in &mut clone_bodies {
             body.occurrence.source_generation = generation_id.clone();
@@ -787,6 +826,7 @@ impl CodeFileIndexArtifactsV1 {
             unresolved_references,
             callable_arities,
             go_method_sets,
+            typescript_types,
         };
         if validate_clone_payloads {
             result.validate()?;

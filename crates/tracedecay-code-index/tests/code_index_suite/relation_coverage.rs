@@ -175,15 +175,15 @@ fn rust_self_path_calls_bind_the_enclosing_impl_function() {
 }
 
 #[test]
-fn unbound_receiver_calls_make_callers_and_callees_partial() {
+fn proved_receivers_bind_while_unbound_receivers_remain_partial() {
     let graph = sealed_graph();
 
-    // `logger.handle(s)` on a local binds no edge.
+    // A constructor-backed local remains typed inside its captured closure.
     assert_eq!(
         graph.callers("ts/src/events.ts::Logger::handle"),
-        Vec::<String>::new()
+        ["ts/src/main.ts::runPipeline"]
     );
-    assert!(graph.callers_partial("ts/src/events.ts::Logger::handle"));
+    assert!(!graph.callers_partial("ts/src/events.ts::Logger::handle"));
     assert_eq!(
         graph.callers("ts/src/events.ts::formatEvent"),
         [
@@ -204,6 +204,66 @@ fn unbound_receiver_calls_make_callers_and_callees_partial() {
     // `s.score(5)` leaves `main_entry` with a callee the graph cannot list.
     assert!(graph.callees_partial("py/pkg/app.py::main_entry"));
     assert!(!graph.callees_partial("py/pkg/scoring.py::Scorer::score"));
+}
+
+#[test]
+fn typescript_receiver_edges_keep_lexical_scopes_and_exact_evidence() {
+    let source = r#"class Worker { execute() {} static staticOnly() {} }
+class Other { execute() {} }
+export function run(worker: Worker) {
+  worker.execute();
+  { const worker = new Other(); worker.execute(); }
+  worker.execute();
+  (new Worker()).execute();
+}
+export function unsupported(worker: Worker) { worker.staticOnly(); }
+"#;
+    let graph = sealed_graph_of(&[("receiver.ts", source)]);
+    let caller = graph.symbol("receiver.ts::run");
+    let worker = graph.symbol("receiver.ts::Worker::execute");
+    let other = graph.symbol("receiver.ts::Other::execute");
+    let mut calls = graph
+        .generation
+        .edges()
+        .iter()
+        .filter(|edge| {
+            edge.kind == RelationEdgeKindV1::Calls
+                && edge.from_occurrence == caller
+                && (edge.to_occurrence == worker || edge.to_occurrence == other)
+        })
+        .collect::<Vec<_>>();
+    calls.sort_by_key(|edge| edge.evidence_span);
+    assert_eq!(calls.len(), 4);
+    assert_eq!(
+        calls
+            .iter()
+            .map(|edge| &edge.to_occurrence)
+            .collect::<Vec<_>>(),
+        [&worker, &other, &worker, &worker]
+    );
+    assert_eq!(
+        calls
+            .iter()
+            .map(|edge| {
+                assert_eq!(
+                    edge.authority,
+                    tracedecay_domain::EdgeAuthorityV1::NameResolved
+                );
+                &source
+                    [edge.evidence_span.start_byte as usize..edge.evidence_span.end_byte as usize]
+            })
+            .collect::<Vec<_>>(),
+        [
+            "worker.execute",
+            "worker.execute",
+            "worker.execute",
+            "execute"
+        ]
+    );
+    assert!(!graph.callers_partial("receiver.ts::Worker::execute"));
+    assert!(!graph.callees_partial("receiver.ts::run"));
+    assert!(graph.callers("receiver.ts::Worker::staticOnly").is_empty());
+    assert!(graph.callees_partial("receiver.ts::unsupported"));
 }
 
 const NAMESPACES_TS: &str = r#"export function formatEvent(e: string): string {

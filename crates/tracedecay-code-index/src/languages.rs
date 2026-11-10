@@ -285,12 +285,12 @@ impl StaticLanguageRegistry {
             // symbol grain and appears in the indexed-file census.
             // Go v10 records method sets for seal-time interface satisfaction.
             // Rust v20 retains associated owner uses and parser-positioned
-            // generic call paths. TypeScript v15 (Svelte and Astro v11)
-            // retains constructor uses and CommonJS re-export evidence.
+            // generic call paths. TypeScript v16 (Svelte and Astro v12)
+            // retains scoped receiver and declared return-type evidence.
             let extractor_revision = match language.as_str() {
                 "rust" => 21,
-                "typescript" => 15,
-                "svelte" | "astro" => 11,
+                "typescript" => 16,
+                "svelte" | "astro" => 12,
                 "go" => 10,
                 "java" => 8,
                 "ruby" | "protobuf" | "python" => 7,

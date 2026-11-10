@@ -13,6 +13,7 @@ use std::sync::Arc;
 
 use tracedecay_code_extraction::{
     GoMethodSetRowV1, GoMethodSignatureV1, GoTypeTokenV1, GoTypeV1, ImportReexportScopeV1,
+    TypeScriptReceiverV1, TypeScriptTypeRowV1,
 };
 use tracedecay_domain::{
     CanonicalRelationEdgeV1, ChangedCodeChunkV1, CodeSearchChunkV1, ExactTechnicalTermV1,
@@ -24,7 +25,7 @@ use super::{
 };
 use crate::chunks::{
     CodeIndexEdgeAbstentionV1, CodeIndexGoMethodSetRowV1, CodeIndexImportEvidenceV1,
-    CodeIndexUnresolvedReferenceV1, CodeSearchEligibilityV1,
+    CodeIndexTypeScriptTypeRowV1, CodeIndexUnresolvedReferenceV1, CodeSearchEligibilityV1,
 };
 use crate::lineage::{LineageSymbolRecordV1, SymbolLineageCandidateV1};
 use crate::projection::ProjectionPublicationHandoffV1;
@@ -296,6 +297,18 @@ pub(super) fn go_method_set_heap_bytes(row: &CodeIndexGoMethodSetRowV1) -> usize
         GoMethodSetRowV1::GenericInterface
         | GoMethodSetRowV1::EmptyInterface
         | GoMethodSetRowV1::NamedType => 0,
+    };
+    row.occurrence.as_str().len().saturating_add(row_bytes)
+}
+
+pub(super) fn typescript_type_heap_bytes(row: &CodeIndexTypeScriptTypeRowV1) -> usize {
+    let row_bytes = match &row.row {
+        TypeScriptTypeRowV1::InstanceMethod => 0,
+        TypeScriptTypeRowV1::CallableReturn { name, .. } => name.capacity(),
+        TypeScriptTypeRowV1::ReceiverCall { receiver, .. } => match receiver {
+            TypeScriptReceiverV1::Named { name, .. }
+            | TypeScriptReceiverV1::AwaitedFactory { name } => name.capacity(),
+        },
     };
     row.occurrence.as_str().len().saturating_add(row_bytes)
 }
@@ -1029,6 +1042,11 @@ pub(super) fn file_bytes(file: &FileGenerationArtifactsV1) -> usize {
             &artifacts.go_method_sets,
             artifacts.go_method_sets.capacity(),
             go_method_set_heap_bytes,
+        ))
+        .saturating_add(vec_bytes(
+            &artifacts.typescript_types,
+            artifacts.typescript_types.capacity(),
+            typescript_type_heap_bytes,
         ))
         .saturating_add(exact_authority_bytes)
 }

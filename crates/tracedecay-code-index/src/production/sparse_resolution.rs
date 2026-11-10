@@ -19,7 +19,9 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, btree_map};
 use std::sync::{Arc, Mutex};
 use tracedecay_runtime_core::resident_memory::ResidentMemoryOperationV1;
 
-use tracedecay_code_extraction::{ImportModuleKindV1, ImportNamespaceV1, ImportReexportScopeV1};
+use tracedecay_code_extraction::{
+    ImportModuleKindV1, ImportNamespaceV1, ImportReexportScopeV1, TypeScriptTypeRowV1,
+};
 use tracedecay_domain::{
     CanonicalRelationEdgeV1, FileOccurrenceId, NodeKind, SourceSpan, SymbolIdentityDigest,
     SymbolOccurrenceId,
@@ -149,9 +151,13 @@ type ResolutionKeyV1<'s> = (
     &'s Option<String>,
     bool,
     &'s [String],
+    Vec<&'s TypeScriptTypeRowV1>,
 );
 
-fn resolution_key(symbol: &LineageSymbolRecordV1) -> ResolutionKeyV1<'_> {
+fn resolution_key<'s>(
+    symbol: &'s LineageSymbolRecordV1,
+    file: &'s FileGenerationArtifactsV1,
+) -> ResolutionKeyV1<'s> {
     (
         &symbol.identity,
         &symbol.qualified_name,
@@ -160,6 +166,15 @@ fn resolution_key(symbol: &LineageSymbolRecordV1) -> ResolutionKeyV1<'_> {
         &symbol.signature,
         symbol.is_async,
         &symbol.derives,
+        file.artifacts
+            .typescript_types
+            .iter()
+            .filter_map(|row| {
+                (row.occurrence == symbol.occurrence
+                    && !matches!(&row.row, TypeScriptTypeRowV1::ReceiverCall { .. }))
+                .then_some(&row.row)
+            })
+            .collect(),
     )
 }
 
@@ -202,7 +217,7 @@ impl ChangedNamesV1 {
             for (side, file) in [before, after].into_iter().enumerate() {
                 for symbol in &file.artifacts.symbols {
                     sides.entry(&symbol.simple_name).or_default()[side]
-                        .push(resolution_key(symbol));
+                        .push(resolution_key(symbol, file));
                 }
             }
             // Symbols are stored in occurrence order, and an edit re-keys
@@ -673,13 +688,21 @@ pub(super) fn resolve_edit(
     )?;
     let mut selection = Vec::new();
     for file_index in candidates {
-        let references = files[file_index].binding()?.unresolved_references();
+        let file = files[file_index].binding()?;
+        let references = file.unresolved_references();
         let picks = if edited_indices.contains(&file_index) {
             (0..references.len()).collect::<Vec<_>>()
         } else {
             let sites = references
                 .iter()
-                .filter(|reference| names.can_move(&reference.reference_name))
+                .filter(|reference| {
+                    names.can_move(&reference.reference_name)
+                        || super::typescript_receivers::receiver_at(file, reference).is_some_and(
+                            |receiver| {
+                                names.can_move(super::typescript_receivers::receiver_name(receiver))
+                            },
+                        )
+                })
                 .map(site)
                 .collect::<HashSet<_>>();
             (0..references.len())

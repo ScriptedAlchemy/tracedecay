@@ -1026,6 +1026,19 @@ Inspect `call_path.outcome.state` before interpreting the result:
 | `tracedecay_similar` | Find token-verified exact or rename-normalized shared implementations for a symbol or source range. |
 | `tracedecay_rename_preview` | Preview all references to a symbol before renaming it. |
 
+TypeScript callers and callees can follow instance methods from named type
+annotations on parameters and local variables, `const` values constructed with
+`new`, and `const` values obtained by awaiting a function with a named declared
+return type. Import aliases are resolved in the module that declares the type;
+an awaited factory's return type is resolved in the factory's module. These
+edges carry `name_resolved` authority from indexed source evidence.
+
+This resolution deliberately requires a unique declaration and an unambiguous
+receiver binding. Reassignment, shadowed factories, computed members, unions,
+type aliases, and generic type evaluation can leave calls unresolved. Inspect
+coverage and omission evidence before treating an empty callers or callees
+result as complete.
+
 ### Code quality analysis
 
 | Tool | What it does |

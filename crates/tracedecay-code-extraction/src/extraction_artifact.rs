@@ -391,6 +391,39 @@ pub struct ExtractedGoMethodSetRowV1 {
     pub row: GoMethodSetRowV1,
 }
 
+/// A receiver whose binding is attested by the TypeScript syntax tree.
+/// Names are resolved in the declaring file at generation sealing; they
+/// never authorize a project-wide same-name method match.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum TypeScriptReceiverV1 {
+    Named { name: String, constructor: bool },
+    AwaitedFactory { name: String },
+}
+
+/// Minimal type facts needed to bind an instance call without a compiler.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum TypeScriptTypeRowV1 {
+    /// A callable instance member, excluding constructors, static members,
+    /// getters, and setters.
+    InstanceMethod,
+    /// A single named return type, optionally inside the built-in Promise.
+    CallableReturn { name: String, promise: bool },
+    /// The exact callee span of a call through a stable local binding.
+    ReceiverCall {
+        span: SourceSpan,
+        receiver: TypeScriptReceiverV1,
+    },
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(deny_unknown_fields)]
+pub struct ExtractedTypeScriptTypeRowV1 {
+    pub node_id: String,
+    pub row: TypeScriptTypeRowV1,
+}
+
 /// Legacy graph extraction plus structured evidence from the same traversal.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -408,6 +441,7 @@ pub struct ExtractionArtifactV1 {
     /// the seal derives implicit interface satisfaction.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub go_method_sets: Vec<ExtractedGoMethodSetRowV1>,
+    pub typescript_types: Vec<ExtractedTypeScriptTypeRowV1>,
 }
 
 impl ExtractionArtifactV1 {
@@ -419,6 +453,7 @@ impl ExtractionArtifactV1 {
             schema_evidence: None,
             callable_arities: Vec::new(),
             go_method_sets: Vec::new(),
+            typescript_types: Vec::new(),
         }
     }
 
@@ -439,6 +474,8 @@ impl ExtractionArtifactV1 {
         crate::clone_body::canonicalize_clone_body_order(&mut self.clone_bodies);
         self.callable_arities.sort();
         self.go_method_sets.sort();
+        self.typescript_types.sort();
+        self.typescript_types.dedup();
         if let Some(evidence) = &mut self.schema_evidence {
             evidence.canonicalize_order();
         }

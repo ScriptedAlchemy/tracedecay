@@ -8,7 +8,9 @@ use tree_sitter::{Node as TsNode, Tree};
 
 use crate::common::{declaration_start, local_node_id};
 use crate::complexity::{TYPESCRIPT_COMPLEXITY, count_complexity};
-use crate::extraction_artifact::{ExtractedImportEvidenceV1, ExtractionArtifactV1};
+use crate::extraction_artifact::{
+    ExtractedImportEvidenceV1, ExtractedTypeScriptTypeRowV1, ExtractionArtifactV1,
+};
 use crate::traversal::find_direct_child_by_kind;
 use crate::types::{
     ComplexityAnalysisV1, Edge, EdgeKind, ExtractionResult, Node, NodeKind, UnresolvedRef,
@@ -17,6 +19,7 @@ use crate::types::{
 
 mod imports;
 mod module_references;
+mod receiver_types;
 mod string_literals;
 mod test_calls;
 
@@ -46,6 +49,7 @@ struct ExtractionState<'s> {
     unresolved_refs: Vec<UnresolvedRef>,
     errors: Vec<String>,
     imports: Vec<ExtractedImportEvidenceV1>,
+    typescript_types: Vec<ExtractedTypeScriptTypeRowV1>,
     /// Stack of (name, `node_id`) for building qualified names and parent edges.
     node_stack: Vec<(String, String)>,
     file_path: String,
@@ -64,6 +68,7 @@ impl<'s> ExtractionState<'s> {
             unresolved_refs: Vec::new(),
             errors: Vec::new(),
             imports: Vec::new(),
+            typescript_types: Vec::new(),
             node_stack: Vec::new(),
             file_path: file_path.to_string(),
             source: source.as_bytes(),
@@ -151,6 +156,25 @@ impl TypeScriptExtractor {
         tree: &Tree,
         scope: crate::parsed_extraction::ParsedExtractionScope<'_>,
     ) -> crate::parsed_extraction::ParsedExtractionArtifactV1 {
+        if matches!(
+            scope,
+            crate::parsed_extraction::ParsedExtractionScope::ChangedRegions(_)
+        ) {
+            // Receiver proof reads lexical module bindings and writes in
+            // sibling declarations. Reuse the retained tree, but re-extract
+            // this file so an edit outside a caller cannot retain stale proof.
+            let mut full = Self::extract_tree_artifact(
+                file_path,
+                source,
+                tree,
+                crate::parsed_extraction::ParsedExtractionScope::FullDocument,
+            );
+            full.disposition = crate::parsed_extraction::ParsedExtractionDisposition::Reset {
+                reason:
+                    crate::parsed_extraction::ParsedExtractionResetReason::ModuleBindingsChanged,
+            };
+            return full;
+        }
         let start = Instant::now();
         let mut state = ExtractionState::new(file_path, source);
 
@@ -627,6 +651,7 @@ impl TypeScriptExtractor {
         }
 
         Self::extract_type_refs(state, node, &id);
+        receiver_types::record_callable(state, node, &id, false);
 
         // The body and default parameter values (`x = defaults()`) run on
         // each call.
@@ -740,6 +765,7 @@ impl TypeScriptExtractor {
         }
 
         Self::extract_type_refs(state, arrow_node, &id);
+        receiver_types::record_callable(state, arrow_node, &id, false);
 
         // Extract call sites from the arrow function body. Block-bodied arrows
         // (`() => { ... }`) have a `statement_block`; expression-bodied arrows
@@ -988,6 +1014,10 @@ impl TypeScriptExtractor {
         }
 
         Self::extract_type_refs(state, node, &id);
+        let instance = node
+            .child_by_field_name("name")
+            .is_some_and(|name| state.node_text(name) != "constructor");
+        receiver_types::record_callable(state, node, &id, instance);
 
         // Default parameter values and the body run on each call.
         Self::extract_owned_call_sites(state, node, &id);
@@ -1213,6 +1243,7 @@ impl TypeScriptExtractor {
             parent_id: None,
         };
         state.nodes.push(graph_node);
+        receiver_types::record_callable(state, node, &id, true);
 
         if let Some(parent_id) = state.parent_node_id() {
             state.edges.push(Edge {
@@ -1679,6 +1710,7 @@ impl TypeScriptExtractor {
                     _ => None,
                 };
                 if let Some((callee, site)) = callee {
+                    receiver_types::record_call(state, callee, fn_node_id);
                     state.unresolved_refs.push(UnresolvedRef {
                         from_node_id: fn_node_id.to_string(),
                         reference_name: state.node_text(callee).to_string(),
@@ -2038,6 +2070,7 @@ impl TypeScriptExtractor {
             schema_evidence: None,
             callable_arities: Vec::new(),
             go_method_sets: Vec::new(),
+            typescript_types: state.typescript_types,
         }
     }
 }

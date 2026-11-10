@@ -1,9 +1,145 @@
 use tracedecay_code_extraction::LanguageExtractor;
 use tracedecay_code_extraction::TypeScriptExtractor;
+use tracedecay_code_extraction::{TypeScriptReceiverV1, TypeScriptTypeRowV1};
 use tracedecay_domain::*;
 
 include!("support/calls.rs");
 include!("support/edges.rs");
+
+#[test]
+fn receiver_types_bind_stable_scopes_and_reject_rebinding() {
+    let source = r#"import { Worker as Real, createWorker as acquire } from './workers';
+export async function consume(param: Real, values: any[]) {
+  const local = new Real();
+  local.execute();
+  param.execute();
+  const loaded = await acquire();
+  loaded.execute();
+  { const local = values[0]; local.execute(); }
+  let mutable: Real = new Real();
+  mutable = values[0];
+  mutable.execute();
+}
+function loopWrite(worker: Real, values: any[]) {
+  for (worker of values) {}
+  worker.execute();
+}
+function varWrite(worker: Real, value: any) {
+  if (value) { var worker = value; }
+  worker.execute();
+}
+function shadowed<Real>(worker: Real) { worker.execute(); }
+const recursive = function Real() { const worker = new Real(); worker.execute(); };
+const expression = class Real { method() { const worker = new Real(); worker.execute(); } };
+class Methods {
+  constructor() {}
+  static execute() {}
+  get value() { return 1; }
+  instance() {}
+}
+"#;
+    let artifact = TypeScriptExtractor.extract_artifact("receivers.ts", source);
+    assert!(
+        artifact.result.errors.is_empty(),
+        "{:?}",
+        artifact.result.errors
+    );
+    let calls = artifact
+        .typescript_types
+        .iter()
+        .filter_map(|row| match &row.row {
+            TypeScriptTypeRowV1::ReceiverCall { span, receiver } => Some((
+                source[span.start_byte as usize..span.end_byte as usize].to_owned(),
+                receiver.clone(),
+            )),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        calls,
+        vec![
+            (
+                "local.execute".to_owned(),
+                TypeScriptReceiverV1::Named {
+                    name: "Real".to_owned(),
+                    constructor: true
+                }
+            ),
+            (
+                "param.execute".to_owned(),
+                TypeScriptReceiverV1::Named {
+                    name: "Real".to_owned(),
+                    constructor: false
+                }
+            ),
+            (
+                "loaded.execute".to_owned(),
+                TypeScriptReceiverV1::AwaitedFactory {
+                    name: "acquire".to_owned()
+                }
+            ),
+        ]
+    );
+    let instances = artifact
+        .typescript_types
+        .iter()
+        .filter(|row| row.row == TypeScriptTypeRowV1::InstanceMethod)
+        .map(|row| {
+            artifact
+                .result
+                .nodes
+                .iter()
+                .find(|node| node.id == row.node_id)
+                .unwrap()
+                .name
+                .as_str()
+        })
+        .collect::<Vec<_>>();
+    assert!(instances.contains(&"instance"));
+    assert!(
+        !instances
+            .iter()
+            .any(|name| matches!(*name, "constructor" | "execute" | "value"))
+    );
+}
+
+#[test]
+fn declared_factory_returns_require_an_unshadowed_native_promise() {
+    let source = r#"class Worker {}
+export async function valid(): Promise<Worker> { return new Worker(); }
+function generic<Promise>(): Promise<Worker> { throw 1; }
+function union(): Promise<Worker | undefined> { throw 1; }
+"#;
+    let artifact = TypeScriptExtractor.extract_artifact("returns.ts", source);
+    let returned = artifact
+        .typescript_types
+        .iter()
+        .filter_map(|row| match &row.row {
+            TypeScriptTypeRowV1::CallableReturn { name, promise } => Some((
+                artifact
+                    .result
+                    .nodes
+                    .iter()
+                    .find(|node| node.id == row.node_id)
+                    .unwrap()
+                    .name
+                    .as_str(),
+                name.as_str(),
+                *promise,
+            )),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(returned, [("valid", "Worker", true)]);
+    let imported = format!("import {{ Promise }} from './custom';\n{source}");
+    let artifact = TypeScriptExtractor.extract_artifact("returns.ts", &imported);
+    assert!(
+        !artifact
+            .typescript_types
+            .iter()
+            .any(|row| matches!(row.row, TypeScriptTypeRowV1::CallableReturn { .. }))
+    );
+}
 
 #[test]
 fn test_ts_file_node_is_root() {

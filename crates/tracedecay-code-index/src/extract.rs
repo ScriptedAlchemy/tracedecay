@@ -11,8 +11,8 @@
 
 use serde::{Deserialize, Serialize};
 use tracedecay_code_extraction::{
-    ExtractedImportEvidenceV1, ExtractedSchemaEvidenceV1, ExtractionArtifactV1,
-    SchemaEvidenceIssueV1,
+    ExtractedImportEvidenceV1, ExtractedSchemaEvidenceV1, ExtractedTypeScriptTypeRowV1,
+    ExtractionArtifactV1, SchemaEvidenceIssueV1,
 };
 use tracedecay_domain::{
     CodeGenerationId, ComplexityAnalysisV1, ContentDigest, Edge, ExtractorRevision,
@@ -427,11 +427,13 @@ fn rows_digest(
         .map(CanonicalUnresolvedRefRow::from)
         .collect::<Vec<_>>();
     let mut imports = artifact.imports.clone();
+    let mut typescript_types = artifact.typescript_types.clone();
     crate::observe::measure_hot_loop!("code_index_rows_digest_sort", {
         sort_canonical_rows(&mut nodes);
         sort_canonical_rows(&mut edges);
         sort_canonical_rows(&mut unresolved);
         imports.sort();
+        typescript_types.sort();
     });
 
     #[derive(Serialize)]
@@ -443,6 +445,8 @@ fn rows_digest(
         grammar_revision: &'a str,
         extractor_revision: &'a str,
         imports: Vec<ExtractedImportEvidenceV1>,
+        #[serde(skip_serializing_if = "Vec::is_empty")]
+        typescript_types: Vec<ExtractedTypeScriptTypeRowV1>,
         #[serde(skip_serializing_if = "Option::is_none")]
         schema_evidence: Option<&'a ExtractedSchemaEvidenceV1>,
         nodes: Vec<CanonicalNodeRow<'a>>,
@@ -460,6 +464,7 @@ fn rows_digest(
             grammar_revision: descriptor.grammar_revision.as_str(),
             extractor_revision: descriptor.extractor_revision.as_str(),
             imports,
+            typescript_types,
             schema_evidence: artifact.schema_evidence.as_ref(),
             nodes,
             edges,

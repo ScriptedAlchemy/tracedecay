@@ -66,7 +66,7 @@ export function shadowed(worker: ActualWorker, unknownValue: any): void {
   }
 }
 export function reassigned(unknownValue: any): void {
-  let worker = new ActualWorker();
+  let worker: ActualWorker = new ActualWorker();
   worker = unknownValue;
   worker.guarded();
 }
