@@ -393,13 +393,15 @@ pub fn install_child_directory_noreplace_nofollow(
 
 /// Bound deduplication metadata independently of the size of the store.
 /// The Doctor caller reports partial coverage instead of trusting a census
-/// whose shared-inode inventory would otherwise grow without limit.
-const MAX_SEALED_CENSUS_SHARED_INODES: usize = 65_536;
+/// whose inode inventory would otherwise grow without limit.
+const MAX_SEALED_CENSUS_INODES: usize = 65_536;
 
 /// Census proof-bound children through held root/child capabilities, not
-/// ambient paths. Unknown entries are counted but never traversed; only
-/// multiply linked inodes consume deduplication memory. Receipts are bounded
-/// and read from the same child whose bytes are subsequently charged.
+/// ambient paths. Unknown entries are counted but never traversed. On Unix,
+/// every visited inode consumes bounded deduplication memory until the walk
+/// ends: publication can add links even to a formerly single-linked file.
+/// Exhausting that evidence budget returns `OutOfMemory`, never complete
+/// totals. Receipts are bounded and read from the child being charged.
 /// Category ordering is authority ordering: lower keys receive shared
 /// physical bytes before higher keys, independent of directory iteration.
 pub fn census_receipted_directory_bytes<K: Ord + Copy>(
@@ -413,32 +415,50 @@ pub fn census_receipted_directory_bytes<K: Ord + Copy>(
         unrecognized,
         receipt_for,
         classify,
-        MAX_SEALED_CENSUS_SHARED_INODES,
+        MAX_SEALED_CENSUS_INODES,
     )
 }
 
 fn census_receipted_directory_bytes_bounded<K: Ord + Copy>(
     root_path: &Path,
     unrecognized: K,
-    mut receipt_for: impl FnMut(&OsStr) -> (&'static str, usize),
-    mut classify: impl FnMut(&OsStr, Option<&[u8]>) -> K,
-    max_shared_inodes: usize,
+    receipt_for: impl FnMut(&OsStr) -> (&'static str, usize),
+    classify: impl FnMut(&OsStr, Option<&[u8]>) -> K,
+    max_inodes: usize,
 ) -> io::Result<std::collections::BTreeMap<K, (u64, u64)>> {
     let root = match open_root_nofollow(root_path) {
         Ok(root) => root,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Default::default()),
         Err(error) => return Err(error),
     };
+    census_receipted_children(
+        &root,
+        root.read_dir(".")?
+            .map(|entry| entry.map(|entry| entry.file_name())),
+        unrecognized,
+        receipt_for,
+        classify,
+        max_inodes,
+    )
+}
+
+fn census_receipted_children<K: Ord + Copy>(
+    root: &Dir,
+    entries: impl Iterator<Item = io::Result<OsString>>,
+    unrecognized: K,
+    mut receipt_for: impl FnMut(&OsStr) -> (&'static str, usize),
+    mut classify: impl FnMut(&OsStr, Option<&[u8]>) -> K,
+    max_inodes: usize,
+) -> io::Result<std::collections::BTreeMap<K, (u64, u64)>> {
     let mut totals = std::collections::BTreeMap::<K, (u64, u64)>::new();
     // Hard links belong to the highest-priority verified category, not the
-    // first entry returned by read_dir. Only multiply-linked identities need
-    // tracking; memory depends on unresolved shared inodes, not the total
-    // number of linked files visited or their byte size.
-    let mut counted = std::collections::HashMap::<(u64, u64), (K, u64, u64)>::new();
-    for entry in root.read_dir(".")? {
-        let entry = entry?;
-        let name = entry.file_name();
-        let child = if entry.file_type()?.is_dir() {
+    // first entry returned by read_dir. A link count is not a closed group:
+    // concurrent publication can add an alias after its last observed link.
+    let mut counted = std::collections::HashMap::<(u64, u64), (K, u64)>::new();
+    for name in entries {
+        let name = name?;
+        single_component(&name)?;
+        let child = if root.symlink_metadata(&name)?.is_dir() {
             root.open_dir_nofollow(&name).ok()
         } else {
             None
@@ -456,7 +476,7 @@ fn census_receipted_directory_bytes_bounded<K: Ord + Copy>(
                     category,
                     &mut totals,
                     &mut counted,
-                    max_shared_inodes,
+                    max_inodes,
                 )?
             };
             (category, bytes)
@@ -470,14 +490,40 @@ fn census_receipted_directory_bytes_bounded<K: Ord + Copy>(
     Ok(totals)
 }
 
+/// Deterministic native scheduling for consumer publication regressions.
+/// Receipt validation, held capabilities and inode accounting are shared with
+/// the public census; only the filesystem's unspecified entry order is supplied.
+#[cfg(feature = "test-helpers")]
+pub mod test_support {
+    use super::{OsStr, OsString, Path, census_receipted_children, io, open_root_nofollow};
+
+    pub fn census_in_entry_order<K: Ord + Copy>(
+        root_path: &Path,
+        entries: impl Iterator<Item = io::Result<OsString>>,
+        unrecognized: K,
+        receipt_for: impl FnMut(&OsStr) -> (&'static str, usize),
+        classify: impl FnMut(&OsStr, Option<&[u8]>) -> K,
+    ) -> io::Result<std::collections::BTreeMap<K, (u64, u64)>> {
+        let root = open_root_nofollow(root_path)?;
+        census_receipted_children(
+            &root,
+            entries,
+            unrecognized,
+            receipt_for,
+            classify,
+            super::MAX_SEALED_CENSUS_INODES,
+        )
+    }
+}
+
 /// Walk no-follow entries relative to the same held child, even after its
 /// old pathname has been renamed. The stack scales with directory depth.
 fn directory_bytes_from_held_dir<K: Ord + Copy>(
     directory: Dir,
     category: K,
     totals: &mut std::collections::BTreeMap<K, (u64, u64)>,
-    counted: &mut std::collections::HashMap<(u64, u64), (K, u64, u64)>,
-    max_shared_inodes: usize,
+    counted: &mut std::collections::HashMap<(u64, u64), (K, u64)>,
+    max_inodes: usize,
 ) -> io::Result<u64> {
     let mut total = 0_u64;
     // Hold only the current ancestry chain. Opening every sibling before
@@ -500,57 +546,45 @@ fn directory_bytes_from_held_dir<K: Ord + Copy>(
         #[cfg(unix)]
         {
             use cap_std::fs::MetadataExt;
-            if metadata.nlink() > 1 {
-                let key = (metadata.dev(), metadata.ino());
-                if let Some((previous_kind, charged_bytes, remaining_links)) = counted.get_mut(&key)
-                {
-                    // A lower-ordered category has stronger ownership. A
-                    // superseded generation encountered first cannot claim
-                    // hard-linked physical bytes from a later live head.
-                    if category < *previous_kind {
-                        let previous = totals.get_mut(&*previous_kind).ok_or_else(|| {
-                            io::Error::new(
-                                io::ErrorKind::InvalidData,
-                                "hard-linked sealed bytes lack their prior category",
-                            )
-                        })?;
-                        previous.1 = previous.1.checked_sub(*charged_bytes).ok_or_else(|| {
-                            io::Error::new(
-                                io::ErrorKind::InvalidData,
-                                "hard-linked sealed bytes exceed their prior category",
-                            )
-                        })?;
-                        total = total.saturating_add(*charged_bytes);
-                        *previous_kind = category;
-                    }
-                    // An immutable hard-link group no longer needs its key
-                    // after every filesystem-reported link has been seen.
-                    // Retaining completed groups makes a store with many
-                    // disjoint pairs exhaust the budget despite bounded
-                    // concurrent deduplication demand.
-                    *remaining_links -= 1;
-                    if *remaining_links == 0 {
-                        counted.remove(&key);
-                    }
-                    continue;
+            let key = (metadata.dev(), metadata.ino());
+            if let Some((previous_kind, charged_bytes)) = counted.get_mut(&key) {
+                // A lower-ordered category has stronger ownership. A
+                // superseded generation encountered first cannot claim
+                // hard-linked physical bytes from a later live head.
+                if category < *previous_kind {
+                    let previous = totals.get_mut(&*previous_kind).ok_or_else(|| {
+                        io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            "hard-linked sealed bytes lack their prior category",
+                        )
+                    })?;
+                    previous.1 = previous.1.checked_sub(*charged_bytes).ok_or_else(|| {
+                        io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            "hard-linked sealed bytes exceed their prior category",
+                        )
+                    })?;
+                    total = total.saturating_add(*charged_bytes);
+                    *previous_kind = category;
                 }
-                if counted.len() >= max_shared_inodes {
-                    return Err(io::Error::new(
-                        io::ErrorKind::OutOfMemory,
-                        "sealed census shared-inode budget exhausted; coverage is partial",
-                    ));
-                }
-                counted.try_reserve(1).map_err(|_| {
-                    io::Error::new(
-                        io::ErrorKind::OutOfMemory,
-                        "sealed census shared-inode allocation failed; coverage is partial",
-                    )
-                })?;
-                counted.insert(key, (category, metadata.len(), metadata.nlink() - 1));
+                continue;
             }
+            if counted.len() >= max_inodes {
+                return Err(io::Error::new(
+                    io::ErrorKind::OutOfMemory,
+                    "sealed census inode budget exhausted; coverage is partial",
+                ));
+            }
+            counted.try_reserve(1).map_err(|_| {
+                io::Error::new(
+                    io::ErrorKind::OutOfMemory,
+                    "sealed census inode allocation failed; coverage is partial",
+                )
+            })?;
+            counted.insert(key, (category, metadata.len()));
         }
         #[cfg(not(unix))]
-        let _ = (&counted, max_shared_inodes);
+        let _ = (&counted, max_inodes);
         total = total.saturating_add(metadata.len());
     }
     Ok(total)
@@ -1027,7 +1061,7 @@ mod tests {
                 kind,
                 &mut charged,
                 &mut counted,
-                MAX_SEALED_CENSUS_SHARED_INODES,
+                MAX_SEALED_CENSUS_INODES,
             )
             .unwrap();
             let entry = charged.entry(kind).or_default();
@@ -1036,10 +1070,6 @@ mod tests {
         }
         assert_eq!(charged.get(&Kind::Superseded), Some(&(1, 3)));
         assert_eq!(charged.get(&Kind::Head), Some(&(1, 16)));
-        assert!(
-            counted.is_empty(),
-            "a fully observed hard-link group must free its deduplication slot"
-        );
 
         // The production census also classifies receipt-bound children and
         // must report one physical copy without charging retired bytes twice.
@@ -1060,12 +1090,12 @@ mod tests {
         assert_eq!(std::fs::read(head.join("shared")).unwrap(), b"shared-bytes");
     }
 
-    /// Completed hard-link groups need no further identity retention. A
-    /// bounded census must still cover many disjoint alias pairs whose total
-    /// exceeds its simultaneous unresolved-link budget.
+    /// Disjoint pairs still require evidence for the full walk: a publisher
+    /// can add another alias after any pair completes. A small budget must
+    /// refuse; a sufficient budget must count every pair exactly once.
     #[cfg(unix)]
     #[test]
-    fn complete_link_pairs_reuse_census_deduplication_budget() {
+    fn complete_link_pairs_require_retained_census_evidence() {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path().join("sealed");
         let generation = root.join("generation");
@@ -1079,15 +1109,21 @@ mod tests {
             std::fs::hard_link(&original, column.join("alias")).unwrap();
         }
 
-        // Each column is fully traversed before the next one is opened.
-        // Previously the four completed identities accumulated and this
-        // real filesystem walk failed at the second column's first link.
+        let refused = census_receipted_directory_bytes_bounded(
+            &root,
+            false,
+            |_| ("owner", 64),
+            |_, receipt| receipt == Some(b"owned".as_slice()),
+            2,
+        )
+        .unwrap_err();
+        assert_eq!(refused.kind(), io::ErrorKind::OutOfMemory, "{refused}");
         let census = census_receipted_directory_bytes_bounded(
             &root,
             false,
             |_| ("owner", 64),
             |_, receipt| receipt == Some(b"owned".as_slice()),
-            1,
+            5,
         )
         .unwrap();
         assert_eq!(census.get(&true), Some(&(1, 21)));
@@ -1122,7 +1158,7 @@ mod tests {
             false,
             |_| ("owner", 64),
             |_, receipt| receipt == Some(b"owned".as_slice()),
-            2,
+            3,
         )
         .unwrap_err();
         assert_eq!(refused.kind(), io::ErrorKind::OutOfMemory, "{refused}");
