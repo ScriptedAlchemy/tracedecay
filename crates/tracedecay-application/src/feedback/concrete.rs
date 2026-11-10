@@ -1419,20 +1419,26 @@ impl ProjectFeedbackStore {
                 Err(FeedbackRuntimeError::Corrupt)
             };
         }
-        if publications.iter().any(|stored| {
-            (stored.dedupe_key == publication.dedupe_key
-                    && matches!(
-                        stored.result.termination,
-                        FeedbackCycleTerminationV1::Clean | FeedbackCycleTerminationV1::Blocked
-                    )
-                    && matches!(
-                        publication.result.termination,
-                        FeedbackCycleTerminationV1::Clean | FeedbackCycleTerminationV1::Blocked
-                    ))
-                // Coalesce only unchanged incomplete evidence, not merely
-                // an unchanged content key with a newer provider verdict.
-                || same_incomplete_publication_evidence(stored, &publication)
-        }) {
+        let completed_duplicate = publications.iter().any(|stored| {
+            stored.dedupe_key == publication.dedupe_key
+                && matches!(
+                    stored.result.termination,
+                    FeedbackCycleTerminationV1::Clean | FeedbackCycleTerminationV1::Blocked
+                )
+                && matches!(
+                    publication.result.termination,
+                    FeedbackCycleTerminationV1::Clean | FeedbackCycleTerminationV1::Blocked
+                )
+        });
+        // Historic incomplete evidence must not suppress a later recovery.
+        // Only the latest published verdict for this exact key can coalesce
+        // an identical incomplete evaluation.
+        let unchanged_incomplete = publications
+            .iter()
+            .filter(|stored| stored.dedupe_key == publication.dedupe_key)
+            .max_by(|left, right| publication_order(left, right))
+            .is_some_and(|stored| same_incomplete_publication_evidence(stored, &publication));
+        if completed_duplicate || unchanged_incomplete {
             transaction
                 .rollback()
                 .await
@@ -2014,6 +2020,13 @@ fn same_incomplete_publication_evidence(
     stored.dedupe_key == current.dedupe_key
         && stored.runtime == current.runtime
         && stored.authorized_scope == current.authorized_scope
+        && stored.authority.grant_id == current.authority.grant_id
+        && stored.authority.grant_revision == current.authority.grant_revision
+        && stored.authority.grant_digest == current.authority.grant_digest
+        && stored.authority.disclosure == current.authority.disclosure
+        && stored.authority.policy == current.authority.policy
+        && stored.input.request.trigger == current.input.request.trigger
+        && stored.input.request.budget == current.input.request.budget
         && stored.input.target == current.input.target
         && stored.input.actor == current.input.actor
         && left.termination == FeedbackCycleTerminationV1::IncompleteCoverage
@@ -2109,12 +2122,20 @@ fn validate_request(request: &FeedbackReadRequestV1) -> Result<(), ApplicationCo
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tracedecay_contracts::feedback::FeedbackRuntimeStateV1;
     use tracedecay_contracts::{CancellationContext, CapabilityGrantSnapshot, Deadline, RequestId};
     use tracedecay_domain::configuration::{
         AuthorityRef, ConfigurationRevisionId, ScopeSourceBinding, SourceBindingId, SourceKindV1,
     };
+    use tracedecay_domain::feedback::{
+        FeedbackActorContextV1, FeedbackAuthoritativeRuntimeStateV1, FeedbackBaselineStateV1,
+        FeedbackBudgetV1, FeedbackContentIdentityV1, FeedbackCycleId, FeedbackCycleRequestV1,
+        FeedbackCycleResultV1, FeedbackCycleRuntimeSnapshotV1, FeedbackEvaluationInputV1,
+        FeedbackScopeV1, FeedbackTargetV1, FeedbackTriggerV1, ProviderEvaluationStateV1,
+    };
     use tracedecay_domain::{
-        LocatorDigest, ProjectId, RefId, RepositoryId, WorktreeId, canonical_sha256,
+        CodeGenerationId, LocatorDigest, ProjectId, RefId, RepositoryId, WorktreeId,
+        canonical_sha256,
     };
     use tracedecay_runtime_core::db::{DatabaseAuthority, TestDatabaseRuntimeMode};
 
@@ -2196,16 +2217,6 @@ mod tests {
         evidence: &str,
         remote_state: tracedecay_domain::feedback::ProviderEvaluationStateV1,
     ) -> FeedbackPublicationV1 {
-        use tracedecay_contracts::feedback::FeedbackRuntimeStateV1;
-        use tracedecay_domain::feedback::{
-            FeedbackActorContextV1, FeedbackAuthoritativeRuntimeStateV1,
-            FeedbackBaselineStateV1, FeedbackBudgetV1, FeedbackContentIdentityV1,
-            FeedbackCycleId, FeedbackCycleRequestV1, FeedbackCycleResultV1,
-            FeedbackCycleRuntimeSnapshotV1, FeedbackEvaluationInputV1, FeedbackScopeV1,
-            FeedbackTargetV1, FeedbackTriggerV1, ProviderEvaluationStateV1,
-        };
-        use tracedecay_domain::CodeGenerationId;
-
         let admitted_scope = scope();
         let request = FeedbackCycleRequestV1::new(
             id::<FeedbackCycleId>(cycle_id),
@@ -2340,14 +2351,42 @@ mod tests {
 
         // A changed remote verdict is new inspectable evidence even if the
         // source file and request dedupe key have not changed.
-        let failed = incomplete_publication(
+        let mut failed = incomplete_publication(
             "cycle.feedback.incomplete.failed",
             "feedback.incomplete.stable-evidence",
             tracedecay_domain::feedback::ProviderEvaluationStateV1::Failed,
         );
+        failed.authority.revalidated_at = UtcMicros(11);
         assert_eq!(failed.dedupe_key, initial.dedupe_key);
         assert_ne!(failed.result.result_id, initial.result.result_id);
         assert!(store.record_publication(failed.clone()).await.unwrap());
+
+        // Returning to an older verdict is a new transition, not a duplicate
+        // of the historical A. Latest readers must observe A -> B -> A.
+        let mut recovered = incomplete_publication(
+            "cycle.feedback.incomplete.recovered",
+            "feedback.incomplete.stable-evidence",
+            unavailable,
+        );
+        recovered.authority.revalidated_at = UtcMicros(12);
+        assert!(recovered.validate().is_ok());
+        assert!(store.record_publication(recovered.clone()).await.unwrap());
+        assert_eq!(
+            store
+                .doctor_latest_publication(&admitted)
+                .await
+                .unwrap()
+                .unwrap()
+                .result
+                .result_id,
+            recovered.result.result_id
+        );
+        let unchanged = incomplete_publication(
+            "cycle.feedback.incomplete.recovered-again",
+            "feedback.incomplete.stable-evidence",
+            unavailable,
+        );
+        assert!(!store.record_publication(unchanged).await.unwrap());
 
         // An unchanged verdict with a new runtime watermark also remains
         // inspectable: source identity is not the current runtime receipt.
@@ -2358,10 +2397,11 @@ mod tests {
         );
         changed_runtime.runtime.authoritative.runtime_watermark =
             canonical_sha256(&"feedback.incomplete.new-runtime").unwrap();
+        changed_runtime.authority.revalidated_at = UtcMicros(13);
         assert!(changed_runtime.validate().is_ok());
         assert!(store.record_publication(changed_runtime.clone()).await.unwrap());
         let retained = store.load_publications().await.unwrap();
-        assert_eq!(retained.len(), 3);
+        assert_eq!(retained.len(), 4);
         assert!(retained
             .iter()
             .any(|item| item.result.result_id == failed.result.result_id));
@@ -2379,7 +2419,7 @@ mod tests {
         assert_ne!(updated.dedupe_key, initial.dedupe_key);
         assert!(store.record_publication(updated.clone()).await.unwrap());
         let retained = store.load_publications().await.unwrap();
-        assert_eq!(retained.len(), 4);
+        assert_eq!(retained.len(), 5);
         assert!(retained.iter().any(|publication| {
             publication.dedupe_key == updated.dedupe_key
                 && publication.result.termination == FeedbackCycleTerminationV1::IncompleteCoverage
