@@ -404,7 +404,10 @@ pub fn census_receipted_directory_bytes<K: Ord + Copy>(
         Err(error) => return Err(error),
     };
     let mut totals = std::collections::BTreeMap::<K, (u64, u64)>::new();
-    let mut counted = std::collections::HashSet::<(u64, u64)>::new();
+    // Hard links belong to the highest-priority verified category, not the
+    // first entry returned by read_dir. Retain only multiply-linked identities
+    // so the census remains bounded independently of file count and size.
+    let mut counted = std::collections::HashMap::<(u64, u64), (K, u64)>::new();
     for entry in root.read_dir(".")? {
         let entry = entry?;
         let name = entry.file_name();
@@ -421,7 +424,7 @@ pub fn census_receipted_directory_bytes<K: Ord + Copy>(
             let bytes = if category == unrecognized {
                 0
             } else {
-                directory_bytes_from_held_dir(child, &mut counted)?
+                directory_bytes_from_held_dir(child, category, &mut totals, &mut counted)?
             };
             (category, bytes)
         } else {
@@ -436,9 +439,11 @@ pub fn census_receipted_directory_bytes<K: Ord + Copy>(
 
 /// Walk no-follow entries relative to the same held child, even after its
 /// old pathname has been renamed. The stack scales with directory depth.
-fn directory_bytes_from_held_dir(
+fn directory_bytes_from_held_dir<K: Ord + Copy>(
     directory: Dir,
-    counted: &mut std::collections::HashSet<(u64, u64)>,
+    category: K,
+    totals: &mut std::collections::BTreeMap<K, (u64, u64)>,
+    counted: &mut std::collections::HashMap<(u64, u64), (K, u64)>,
 ) -> io::Result<u64> {
     let mut total = 0_u64;
     // Hold only the current ancestry chain. Opening every sibling before
@@ -461,8 +466,31 @@ fn directory_bytes_from_held_dir(
         #[cfg(unix)]
         {
             use cap_std::fs::MetadataExt;
-            if metadata.nlink() > 1 && !counted.insert((metadata.dev(), metadata.ino())) {
-                continue;
+            if metadata.nlink() > 1 {
+                let key = (metadata.dev(), metadata.ino());
+                if let Some((previous_kind, charged_bytes)) = counted.get_mut(&key) {
+                    // A lower-ordered category has stronger ownership. A
+                    // superseded generation encountered first cannot claim
+                    // hard-linked physical bytes from a later live head.
+                    if category < *previous_kind {
+                        let previous = totals.get_mut(&*previous_kind).ok_or_else(|| {
+                            io::Error::new(
+                                io::ErrorKind::InvalidData,
+                                "hard-linked sealed bytes lack their prior category",
+                            )
+                        })?;
+                        previous.1 = previous.1.checked_sub(*charged_bytes).ok_or_else(|| {
+                            io::Error::new(
+                                io::ErrorKind::InvalidData,
+                                "hard-linked sealed bytes exceed their prior category",
+                            )
+                        })?;
+                        total = total.saturating_add(*charged_bytes);
+                        *previous_kind = category;
+                    }
+                    continue;
+                }
+                counted.insert(key, (category, metadata.len()));
             }
         }
         #[cfg(not(unix))]
@@ -908,6 +936,64 @@ mod tests {
             std::fs::read(generation.join("column-127/value")).unwrap(),
             b"x"
         );
+    }
+
+    /// Hard-linked base bytes count once and belong to the live head even
+    /// when a superseded generation was physically visited first.
+    #[cfg(unix)]
+    #[test]
+    fn shared_sealed_bytes_follow_head_priority_not_directory_visitation() {
+        #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+        enum Kind {
+            Head,
+            Superseded,
+            Unrecognized,
+        }
+
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("sealed");
+        let superseded = root.join("old");
+        let head = root.join("head");
+        std::fs::create_dir_all(&superseded).unwrap();
+        std::fs::create_dir(&head).unwrap();
+        std::fs::write(superseded.join("owner"), b"old").unwrap();
+        std::fs::write(head.join("owner"), b"head").unwrap();
+        std::fs::write(superseded.join("shared"), b"shared-bytes").unwrap();
+        std::fs::hard_link(superseded.join("shared"), head.join("shared")).unwrap();
+
+        // Exercise the actual walker in the adverse order without relying on
+        // the operating system's unspecified read_dir ordering.
+        let mut counted = std::collections::HashMap::new();
+        let mut charged = std::collections::BTreeMap::<Kind, (u64, u64)>::new();
+        for (kind, path) in [(Kind::Superseded, &superseded), (Kind::Head, &head)] {
+            let bytes =
+                directory_bytes_from_held_dir(open(path), kind, &mut charged, &mut counted)
+                    .unwrap();
+            let entry = charged.entry(kind).or_default();
+            entry.0 += 1;
+            entry.1 += bytes;
+        }
+        assert_eq!(charged.get(&Kind::Superseded), Some(&(1, 3)));
+        assert_eq!(charged.get(&Kind::Head), Some(&(1, 16)));
+        assert_eq!(counted.len(), 1, "one shared inode was visited twice");
+
+        // The production census also classifies receipt-bound children and
+        // must report one physical copy without charging retired bytes twice.
+        let reported = census_receipted_directory_bytes(
+            &root,
+            Kind::Unrecognized,
+            |_| ("owner", 64),
+            |_, receipt| match receipt {
+                Some(bytes) if bytes == b"head" => Kind::Head,
+                Some(bytes) if bytes == b"old" => Kind::Superseded,
+                _ => Kind::Unrecognized,
+            },
+        )
+        .unwrap();
+        assert_eq!(reported.get(&Kind::Head), Some(&(1, 16)));
+        assert_eq!(reported.get(&Kind::Superseded), Some(&(1, 3)));
+        assert_eq!(reported.get(&Kind::Unrecognized), None);
+        assert_eq!(std::fs::read(head.join("shared")).unwrap(), b"shared-bytes");
     }
 
     #[test]
