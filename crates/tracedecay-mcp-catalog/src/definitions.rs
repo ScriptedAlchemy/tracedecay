@@ -161,7 +161,10 @@ fn project_selector_object(description: &str) -> Value {
 const CONTEXT_DESCRIPTION: &str = "Build an AI-ready context for a task description. Returns \
      relevant symbols, relationships, up to three untracked project memory matches when \
      available, and optionally code snippets. Use it for broad questions that need \
-     relationship synthesis across the code graph.";
+     relationship synthesis across the code graph. Supply call_path with exact start and \
+     end symbol IDs to include their connecting call path; include_code adds available \
+     indexed source for that path. Path results report missing, bounded, or unavailable \
+     traversal explicitly.";
 
 pub fn project_catalog_discovery_scope() -> BTreeSet<ScopeDimension> {
     [
