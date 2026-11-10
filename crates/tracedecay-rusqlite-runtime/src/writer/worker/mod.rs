@@ -66,7 +66,8 @@ use ingress::{
 };
 use rejection::{
     cancel_waiting, reject_all, reject_all_exact_sql, reject_all_incremental_vacuum,
-    reject_faulted_write_ingress, reject_incremental_vacuum, reject_unauthorized,
+    reject_faulted_execution_batches, reject_faulted_write_ingress, reject_incremental_vacuum,
+    reject_unauthorized,
 };
 
 /// When the blocked writer retries its drain: the fence's short interval, or
@@ -917,6 +918,10 @@ impl Worker {
                     break;
                 }
                 if self.state.load(Ordering::Acquire) == WriterState::Faulted as u8 {
+                    // Earlier batch work may fault the writer. All remaining
+                    // accepted batches have left the fair queue, so a normal
+                    // faulted-queue drain cannot settle or account for them.
+                    reject_faulted_execution_batches(batches, &self.telemetry);
                     break;
                 }
             }
@@ -1412,8 +1417,9 @@ mod auxiliary_scheduling_tests {
     use super::{
         AcceptedRequest, AuxiliaryWork, BatchCoalescingWindow, IncrementalVacuumCommand,
         PendingBatchDwell, WriterActorError, build_batches, checkpoint_config, dwell_for_batch,
-        enqueue, incremental_vacuum_error, reject_faulted_write_ingress, reject_incremental_vacuum,
-        rollback_incremental_vacuum, run_incremental_vacuum, select_auxiliary_work,
+        enqueue, incremental_vacuum_error, reject_faulted_execution_batches,
+        reject_faulted_write_ingress, reject_incremental_vacuum, rollback_incremental_vacuum,
+        run_incremental_vacuum, select_auxiliary_work,
     };
 
     struct BatchProbe {
@@ -1565,6 +1571,55 @@ mod auxiliary_scheduling_tests {
             sender.try_send(late),
             Err(mpsc::SendError::Disconnected(_))
         ));
+    }
+
+    #[test]
+    fn faulted_writer_settles_selected_but_unexecuted_batches() {
+        let telemetry = WriterTelemetry::default();
+        let mut config = tracedecay_store::AdmissionConfigV1::default();
+        config.foreground_batch.max_operations = 1;
+        config.background_batch.max_operations = 1;
+        let mut accepted = Vec::new();
+        let mut replies = Vec::new();
+        for index in 0..3 {
+            let (item, reply) = accepted_request_with_reply(
+                &format!("operation.faulted-batch.{index}"),
+                &format!("key.faulted-batch.{index}"),
+            );
+            telemetry.admitted(item.admission_bytes());
+            accepted.push(item);
+            replies.push(reply);
+        }
+        assert_eq!(telemetry.snapshot().queue.queued_operations, 3);
+
+        // Only one batch reached execution before the writer faulted. The
+        // other two were already selected out of the fair queue.
+        let mut batches = build_batches(accepted, &config).into_iter();
+        assert_eq!(batches.len(), 3);
+        let executed = batches.next().expect("first batch exists");
+        for item in executed.items {
+            telemetry.released(1, item.admission_bytes());
+            let result = Ok(RuntimeSubmitOutcomeV1::Unavailable {
+                reason: UnavailableReasonV1::Faulted,
+            });
+            telemetry.completed(&result);
+            item.settle(result);
+        }
+        reject_faulted_execution_batches(batches, &telemetry);
+
+        for mut reply in replies {
+            assert_eq!(
+                reply.try_recv().expect("every admitted request must be settled"),
+                Ok(RuntimeSubmitOutcomeV1::Unavailable {
+                    reason: UnavailableReasonV1::Faulted,
+                })
+            );
+        }
+        let snapshot = telemetry.snapshot();
+        assert_eq!(snapshot.queue.queued_operations, 0);
+        assert_eq!(snapshot.queue.queued_bytes, 0);
+        assert_eq!(snapshot.operations.admitted_operations, 3);
+        assert_eq!(snapshot.operations.completed_operations, 3);
     }
 
     #[test]
