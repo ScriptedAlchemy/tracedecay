@@ -2077,6 +2077,10 @@ fn retained_scan_step(
     let directory_work_limit =
         work_limit.saturating_mul(usize::from(MAX_SCAN_DEPTH).saturating_add(2));
     let mut directory_work = 0usize;
+    // Flat archived directories can contain thousands of non-transcript
+    // entries. Retain their ReadDir cursor across turns, just as for child
+    // directories, instead of enumerating the whole archive in one call.
+    let mut directory_entries = 0usize;
     let mut file_work = 0usize;
     let mut paths = Vec::new();
     let mut selected_sources = Vec::new();
@@ -2207,8 +2211,12 @@ fn retained_scan_step(
                         detail: "retained Codex directory iterator disappeared",
                     },
                 )?;
+                if directory_entries >= directory_work_limit {
+                    break;
+                }
                 match listed.next() {
                     Some(entry) => {
+                        directory_entries += 1;
                         let entry = entry.map_err(|source| TranscriptIngestError::ScanIo {
                             operation: "read Codex transcript directory entry",
                             path: dir.clone(),

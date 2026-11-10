@@ -1230,7 +1230,7 @@ mod recent_first_discovery_tests {
     use crate::runtime::hosts::codex::{
         CodexCorpusEpoch, CodexDiscoveryDelivery, CodexDiscoveryFrontier, CodexDiscoveryHub,
         CodexDiscoverySourceKey, CodexDiscoveryState, CodexExactSessionPathAuthority,
-        CodexIndexedPath, CodexReplayIndex, EXACT_HOOK_DISCOVERY_UNITS_PER_CALL,
+        CodexIndexedPath, CodexReplayIndex, CodexScanPhase, EXACT_HOOK_DISCOVERY_UNITS_PER_CALL,
         IDLE_FULL_VALIDATION_CYCLES, MAX_EXACT_HOOK_SESSION_REQUESTS,
         MAX_EXACT_HOOK_SOURCE_AUTHORITIES, MAX_SCAN_DEPTH, codex_corpus_identity,
         codex_directory_changed, codex_directory_stat_identity, codex_directory_witness,
@@ -2826,6 +2826,52 @@ mod recent_first_discovery_tests {
             directory_scan.directories.len() <= structural_work_limit,
             "one call must not traverse the entire directory corpus"
         );
+    }
+
+    #[test]
+    fn archived_non_jsonl_entries_yield_directory_enumeration_across_windows() {
+        let temp = TempDir::new().unwrap();
+        let archive = temp.path().join(".codex/archived_sessions");
+        std::fs::create_dir_all(&archive).unwrap();
+        for index in 0..64 {
+            std::fs::write(archive.join(format!("rollout-{index:03}.zst")), b"compressed")
+                .unwrap();
+        }
+        let admitted = archive.join("rollout-admitted.jsonl");
+        std::fs::write(&admitted, b"{}\n").unwrap();
+
+        let source = CodexSource::with_home(temp.path());
+        let bounds = TranscriptDiscoveryBounds::from_discovered_units(1);
+        let mut state = CodexDiscoveryState::default();
+        let mut frontier = CodexDiscoveryFrontier::initial();
+        let first = retained_pass(&source, &mut state, bounds, frontier);
+        assert!(first.report.is_truncated());
+        assert!(first.report.paths.is_empty());
+        assert!(
+            matches!(
+                state.scan.as_ref().map(|scan| &scan.phase),
+                Some(CodexScanPhase::Directories {
+                    current: Some(_),
+                    ..
+                })
+            ),
+            "non-transcript directory entries must not exhaust one discovery turn"
+        );
+        frontier = first.next_frontier;
+
+        let mut covered = BTreeSet::new();
+        for _ in 0..256 {
+            let pass = retained_pass(&source, &mut state, bounds, frontier);
+            covered.extend(pass.report.paths);
+            frontier = pass.next_frontier;
+            if frontier.is_complete() {
+                break;
+            }
+        }
+        assert_eq!(covered, BTreeSet::from([admitted]));
+        assert!(frontier.is_complete(), "bounded pages must converge");
+        let idle = retained_pass(&source, &mut state, bounds, frontier);
+        assert!(idle.report.paths.is_empty());
     }
 
     /// Sweep-complete is store-durable: a fresh source reading only admission
