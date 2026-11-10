@@ -539,7 +539,7 @@ fn directory_bytes_from_held_dir<K: Ord + Copy>(
             }
         }
         #[cfg(not(unix))]
-        let _ = &counted;
+        let _ = (&counted, max_shared_inodes);
         total = total.saturating_add(metadata.len());
     }
     Ok(total)
