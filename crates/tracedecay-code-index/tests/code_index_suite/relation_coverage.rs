@@ -298,6 +298,31 @@ namespace Dotted.Path {
 "#;
 
 #[test]
+fn imported_receiver_types_and_factories_do_not_guess_nested_declarations() {
+    let graph = sealed_graph_of(&[
+        (
+            "hidden.ts",
+            "export class PublicWorker { execute() {} }\nexport namespace Hidden { export class Worker { execute() {} } export async function make(): Promise<PublicWorker> { return new PublicWorker(); } }\n",
+        ),
+        (
+            "consumer.ts",
+            "import { Worker, make } from './hidden';\nexport async function run() { const local = new Worker(); local.execute(); const loaded = await make(); loaded.execute(); }\n",
+        ),
+    ]);
+    for target in [
+        "hidden.ts::Hidden::Worker::execute",
+        "hidden.ts::PublicWorker::execute",
+    ] {
+        assert!(
+            graph.callers(target).is_empty(),
+            "must not invent the import binding: {target}"
+        );
+        assert!(graph.callers_partial(target));
+    }
+    assert!(graph.callees_partial("consumer.ts::run"));
+}
+
+#[test]
 fn typescript_namespace_members_are_symbols_and_bound_callers() {
     let graph = sealed_graph_of(&[("ts/src/events.ts", NAMESPACES_TS)]);
 

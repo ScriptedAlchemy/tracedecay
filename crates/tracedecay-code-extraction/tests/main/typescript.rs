@@ -44,6 +44,31 @@ class Methods {
         "{:?}",
         artifact.result.errors
     );
+    for owner in ["recursive", "expression"] {
+        let node = artifact
+            .result
+            .nodes
+            .iter()
+            .find(|node| node.name == owner)
+            .unwrap();
+        assert!(
+            artifact
+                .result
+                .unresolved_refs
+                .iter()
+                .any(|reference| reference.from_node_id == node.id
+                    && reference.reference_name == "worker.execute"),
+            "named expression body must remain visible: {owner}"
+        );
+        assert!(
+            !artifact
+                .typescript_types
+                .iter()
+                .any(|row| row.node_id == node.id
+                    && matches!(&row.row, TypeScriptTypeRowV1::ReceiverCall { .. })),
+            "self name must shadow the imported class: {owner}"
+        );
+    }
     let calls = artifact
         .typescript_types
         .iter()

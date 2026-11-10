@@ -71,10 +71,26 @@ fn module_symbol<T: ResolutionFileV1>(
         .split_once('.')
         .map_or((name, None), |(head, rest)| (head, Some(rest)));
     if let Some(binding) = unique_local_import(file, head, kind) {
-        return match members {
+        let outcome = match members {
             Some(members) => modules.resolve_member_call(files, by_name, binding, members, kind),
             None => modules.resolve_import_binding(files, by_name, binding, kind),
-        };
+        }?;
+        // This slice proves module declarations only. The general module
+        // resolver also exposes namespace symbols; a uniquely named nested
+        // declaration is not evidence that a module imports that name.
+        return Ok(match outcome {
+            ImportBindingOutcomeV1::Bound(home, symbol)
+                if symbol
+                    .qualified_name
+                    .strip_prefix(files[home].logical_path())
+                    .and_then(|tail| tail.strip_prefix("::"))
+                    == Some(symbol.simple_name.as_str()) =>
+            {
+                ImportBindingOutcomeV1::Bound(home, symbol)
+            }
+            ImportBindingOutcomeV1::Bound(..) => ImportBindingOutcomeV1::Unresolved,
+            other => other,
+        });
     }
     // Several imports, or a type-only import used as a constructor, cannot
     // fall through to a same-named local declaration.
