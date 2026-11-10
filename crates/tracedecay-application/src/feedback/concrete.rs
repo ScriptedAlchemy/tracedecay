@@ -1397,9 +1397,30 @@ impl ProjectFeedbackStore {
             .map(decode_ledger)
             .transpose()?
             .unwrap_or_default();
+        // A durable result identity may replay but may not be rebound to
+        // different evidence or a different admission scope.
+        if let Some(stored) = publications
+            .iter()
+            .find(|stored| stored.result.result_id == publication.result.result_id)
+        {
+            let exact_identity = stored.result == publication.result
+                && stored.runtime == publication.runtime
+                && stored.dedupe_key == publication.dedupe_key
+                && stored.input.target == publication.input.target
+                && stored.input.actor == publication.input.actor
+                && stored.authorized_scope == publication.authorized_scope;
+            transaction
+                .rollback()
+                .await
+                .map_err(|_| FeedbackRuntimeError::Store)?;
+            return if exact_identity {
+                Ok(false)
+            } else {
+                Err(FeedbackRuntimeError::Corrupt)
+            };
+        }
         if publications.iter().any(|stored| {
-            stored.result.result_id == publication.result.result_id
-                || (stored.dedupe_key == publication.dedupe_key
+            (stored.dedupe_key == publication.dedupe_key
                     && matches!(
                         stored.result.termination,
                         FeedbackCycleTerminationV1::Clean | FeedbackCycleTerminationV1::Blocked
@@ -1408,14 +1429,9 @@ impl ProjectFeedbackStore {
                         publication.result.termination,
                         FeedbackCycleTerminationV1::Clean | FeedbackCycleTerminationV1::Blocked
                     ))
-                // An incomplete local cycle must not exhaust the durable
-                // publication ledger on repeated saves of unchanged evidence.
-                // Do not make it a completed lookup hit: remote-required
-                // policy and the next cycle still see incomplete coverage.
-                || (stored.dedupe_key == publication.dedupe_key
-                    && stored.result.termination == FeedbackCycleTerminationV1::IncompleteCoverage
-                    && publication.result.termination
-                        == FeedbackCycleTerminationV1::IncompleteCoverage)
+                // Coalesce only unchanged incomplete evidence, not merely
+                // an unchanged content key with a newer provider verdict.
+                || same_incomplete_publication_evidence(stored, &publication)
         }) {
             transaction
                 .rollback()
@@ -1986,6 +2002,40 @@ fn apply_pending_worker_drops(
     envelope.delivery.dropped
 }
 
+/// A dedupe key identifies source content, but provider coverage and runtime
+/// watermarks can change between local saves without a new source digest.
+/// Compare complete stable result evidence, excluding only per-cycle identities.
+fn same_incomplete_publication_evidence(
+    stored: &FeedbackPublicationV1,
+    current: &FeedbackPublicationV1,
+) -> bool {
+    let left = &stored.result;
+    let right = &current.result;
+    stored.dedupe_key == current.dedupe_key
+        && stored.runtime == current.runtime
+        && stored.authorized_scope == current.authorized_scope
+        && stored.input.target == current.input.target
+        && stored.input.actor == current.input.actor
+        && left.termination == FeedbackCycleTerminationV1::IncompleteCoverage
+        && right.termination == FeedbackCycleTerminationV1::IncompleteCoverage
+        && left.scope == right.scope
+        && left.content_identity == right.content_identity
+        && left.durability == right.durability
+        && left.policy_digest == right.policy_digest
+        && left.configuration_digest == right.configuration_digest
+        && left.provider_states == right.provider_states
+        && left.advisory_provider_states == right.advisory_provider_states
+        && left.baseline_states == right.baseline_states
+        && left.impact == right.impact
+        && left.impact_state == right.impact_state
+        && left.affected_tests_state == right.affected_tests_state
+        && left.findings == right.findings
+        && left.total_findings == right.total_findings
+        && left.returned_findings == right.returned_findings
+        && left.omitted_findings == right.omitted_findings
+        && left.advisory_only == right.advisory_only
+}
+
 fn publication_matches_context(
     publication: &FeedbackPublicationV1,
     context: &RequestContext,
@@ -2141,7 +2191,11 @@ mod tests {
         }
     }
 
-    fn incomplete_publication(cycle_id: &str, evidence: &str) -> FeedbackPublicationV1 {
+    fn incomplete_publication(
+        cycle_id: &str,
+        evidence: &str,
+        remote_state: tracedecay_domain::feedback::ProviderEvaluationStateV1,
+    ) -> FeedbackPublicationV1 {
         use tracedecay_contracts::feedback::FeedbackRuntimeStateV1;
         use tracedecay_domain::feedback::{
             FeedbackActorContextV1, FeedbackAuthoritativeRuntimeStateV1,
@@ -2188,7 +2242,7 @@ mod tests {
             FeedbackCycleTerminationV1::IncompleteCoverage,
             vec![
                 ProviderEvaluationStateV1::SupportedCompletedComplete,
-                ProviderEvaluationStateV1::Unavailable,
+                remote_state,
             ],
             vec![FeedbackBaselineStateV1::NoPriorBaseline],
             None,
@@ -2253,9 +2307,11 @@ mod tests {
             source_observations: None,
         };
 
+        let unavailable = tracedecay_domain::feedback::ProviderEvaluationStateV1::Unavailable;
         let initial = incomplete_publication(
             "cycle.feedback.incomplete.initial",
             "feedback.incomplete.stable-evidence",
+            unavailable,
         );
         assert!(store.record_publication(initial.clone()).await.unwrap());
         // Every re-run has a fresh result identity but the same exact evidence.
@@ -2263,6 +2319,7 @@ mod tests {
             let repeated = incomplete_publication(
                 &format!("cycle.feedback.incomplete.repeated.{ordinal}"),
                 "feedback.incomplete.stable-evidence",
+                unavailable,
             );
             assert_ne!(repeated.result.result_id, initial.result.result_id);
             assert!(!store.record_publication(repeated).await.unwrap());
@@ -2281,20 +2338,87 @@ mod tests {
             "incomplete evidence must not grant a completed dedupe verdict"
         );
 
+        // A changed remote verdict is new inspectable evidence even if the
+        // source file and request dedupe key have not changed.
+        let failed = incomplete_publication(
+            "cycle.feedback.incomplete.failed",
+            "feedback.incomplete.stable-evidence",
+            tracedecay_domain::feedback::ProviderEvaluationStateV1::Failed,
+        );
+        assert_eq!(failed.dedupe_key, initial.dedupe_key);
+        assert_ne!(failed.result.result_id, initial.result.result_id);
+        assert!(store.record_publication(failed.clone()).await.unwrap());
+
+        // An unchanged verdict with a new runtime watermark also remains
+        // inspectable: source identity is not the current runtime receipt.
+        let mut changed_runtime = incomplete_publication(
+            "cycle.feedback.incomplete.runtime",
+            "feedback.incomplete.stable-evidence",
+            unavailable,
+        );
+        changed_runtime.runtime.authoritative.runtime_watermark =
+            canonical_sha256(&"feedback.incomplete.new-runtime").unwrap();
+        assert!(changed_runtime.validate().is_ok());
+        assert!(store.record_publication(changed_runtime.clone()).await.unwrap());
+        let retained = store.load_publications().await.unwrap();
+        assert_eq!(retained.len(), 3);
+        assert!(retained
+            .iter()
+            .any(|item| item.result.result_id == failed.result.result_id));
+        assert!(retained
+            .iter()
+            .any(|item| item.runtime == changed_runtime.runtime));
+
         // Fresh evidence remains publishable and incomplete, not silently
         // hidden by the earlier project's incomplete publication.
         let updated = incomplete_publication(
             "cycle.feedback.incomplete.updated",
             "feedback.incomplete.updated-evidence",
+            unavailable,
         );
         assert_ne!(updated.dedupe_key, initial.dedupe_key);
         assert!(store.record_publication(updated.clone()).await.unwrap());
         let retained = store.load_publications().await.unwrap();
-        assert_eq!(retained.len(), 2);
+        assert_eq!(retained.len(), 4);
         assert!(retained.iter().any(|publication| {
             publication.dedupe_key == updated.dedupe_key
                 && publication.result.termination == FeedbackCycleTerminationV1::IncompleteCoverage
         }));
+    }
+
+    #[tokio::test]
+    async fn conflicting_durable_result_identity_refuses_rebinding() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("feedback-incomplete-identity.db");
+        crate::register_test_schema_installer();
+        let authority =
+            DatabaseAuthority::acquire_test(&path, "feedback incomplete identity").unwrap();
+        let (database, _) =
+            Database::publish_test_runtime(&path, &authority, TestDatabaseRuntimeMode::Initialize)
+                .await
+                .unwrap();
+        let store = ProjectFeedbackStore {
+            database,
+            response_handle_root: root.path().join("response-handles"),
+            source_observations: None,
+        };
+        let original = incomplete_publication(
+            "cycle.feedback.incomplete.identity",
+            "feedback.incomplete.same-result",
+            tracedecay_domain::feedback::ProviderEvaluationStateV1::Unavailable,
+        );
+        assert!(store.record_publication(original.clone()).await.unwrap());
+        assert!(!store.record_publication(original.clone()).await.unwrap());
+
+        let mut conflicting = original.clone();
+        conflicting.runtime.authoritative.runtime_watermark =
+            canonical_sha256(&"feedback.incomplete.conflicting-runtime").unwrap();
+        assert!(conflicting.validate().is_ok());
+        assert!(matches!(
+            store.record_publication(conflicting).await,
+            Err(FeedbackRuntimeError::Corrupt)
+        ));
+        assert_eq!(store.load_publications().await.unwrap(), vec![original]);
     }
 
     #[test]
