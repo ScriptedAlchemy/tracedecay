@@ -124,33 +124,40 @@ fn cold_build_reports_actual_preseal_capture_and_parser_evidence() {
         slot.read().unwrap().snapshot().is_none(),
         "no fabricated cold progress"
     );
+
     published(
         owner
-            .reconcile_now()
-            .expect("real cold capture and publication"),
-    );
-    let observed = slot
-        .read()
-        .unwrap()
-        .snapshot()
-        .expect("pre-seal observation");
-    assert!(!observed.active, "a finished attempt cannot appear stalled");
-    assert_eq!(
-        observed.phase,
-        tracedecay_code_index::production::CodeIndexPresealWorkPhaseV1::Resolution
+            .reconcile_now_with_capture(|scheduler, control| {
+                // Read the actual production slot while its guard is alive.
+                // A completed pass must retire this live snapshot; observing
+                // only after reconcile returns would misattribute old work.
+                let captured = scheduler.capture_authoritative_snapshot(Some(control))?;
+                let observed = slot
+                    .read()
+                    .unwrap()
+                    .snapshot()
+                    .expect("real cold capture observation");
+                assert!(observed.active, "capture still owns its progress");
+                assert_eq!(
+                    observed.phase,
+                    tracedecay_code_index::production::CodeIndexPresealWorkPhaseV1::Capture
+                );
+                assert!(
+                    observed.completed_items >= 2,
+                    "real cold capture must report both files"
+                );
+                assert!(observed.last_progress_micros.is_some_and(|at| at > 0));
+                assert!(
+                    observed.progress_epoch >= 3,
+                    "attempt admission and two real captured-file callbacks"
+                );
+                Ok(captured)
+            })
+            .expect("real cold capture, parse, resolution, and publication"),
     );
     assert!(
-        observed.completed_items >= 2,
-        "real cold resolution must process both files"
-    );
-    assert_eq!(
-        observed.total_items, None,
-        "heterogeneous resolution work has no denominator"
-    );
-    assert!(observed.last_progress_micros.is_some_and(|at| at > 0));
-    assert!(
-        observed.progress_epoch >= 7,
-        "two captures, two parser-backed files, two resolution facts and attempt start"
+        slot.read().unwrap().snapshot().is_none(),
+        "a completed first generation cannot leave preseal work for a future source wake"
     );
 }
 
@@ -191,14 +198,28 @@ fn retained_restart_capture_publishes_and_fences_preseal_attempt() {
     assert!(observed.progress_epoch > 1);
     assert!(observed.last_progress_micros.is_some_and(|at| at > 0));
     drop(capture);
-    let finished = slot.read().unwrap().snapshot().expect("finished attempt");
     assert!(
-        !finished.active,
-        "dropping the retained owner fences callbacks"
+        slot.read().unwrap().snapshot().is_none(),
+        "the completed retained owner must retire its scoped work"
     );
-    assert_eq!(finished.completed_items, observed.completed_items);
-    assert_eq!(finished.last_progress_micros, observed.last_progress_micros);
-    assert!(finished.progress_epoch > observed.progress_epoch);
+    // A real subsequent retained capture must start a new attempt rather than
+    // inheriting the previous capture's work timestamp or sequence.
+    let next = reopened
+        .capture_retained_reconcile_attempt()
+        .expect("second retained capture succeeds")
+        .expect("second retained capture has a live owner");
+    let resumed = slot.read().unwrap().snapshot().expect("second real capture");
+    assert!(resumed.active);
+    assert_eq!(
+        resumed.phase,
+        tracedecay_code_index::production::CodeIndexPresealWorkPhaseV1::Capture
+    );
+    assert!(resumed.attempt_sequence > observed.attempt_sequence);
+    assert!(resumed.progress_epoch > observed.progress_epoch);
+    assert!(resumed.completed_items >= 2);
+    assert!(resumed.last_progress_micros.is_some_and(|at| at > 0));
+    drop(next);
+    assert!(slot.read().unwrap().snapshot().is_none());
 }
 
 #[test]

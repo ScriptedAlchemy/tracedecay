@@ -8,8 +8,7 @@ use tracedecay_contracts::code_index_freshness::{
     CODE_INDEX_READINESS_WAIT_TIMED_OUT, CODE_INDEX_READINESS_WAIT_UNAVAILABLE,
     CodeIndexBuildBlockedReasonV1, CodeIndexBuildPhaseV1, CodeIndexBuildProgressV1,
     CodeIndexNativeGraphPhaseV1, CodeIndexPresealAttemptProgressV1,
-    CodeIndexReadinessWaitOutcomeV1, CodeIndexStalenessStateV1,
-    CodeIndexWorktreeFreshnessV1,
+    CodeIndexReadinessWaitOutcomeV1, CodeIndexStalenessStateV1, CodeIndexWorktreeFreshnessV1,
 };
 use tracedecay_contracts::graph_tool::GraphToolResultV1;
 use tracedecay_contracts::retrieval::{
@@ -425,11 +424,14 @@ where
         } else {
             None
         };
-        if progress_window.observe_with_concurrent_preseal(
-            marker,
-            concurrent_preseal,
-            Instant::now(),
-        ) {
+        let now = Instant::now();
+        let stalled = match concurrent_preseal {
+            Some(preseal) => {
+                progress_window.observe_with_concurrent_preseal(marker, Some(preseal), now)
+            }
+            None => progress_window.observe(marker, now),
+        };
+        if stalled {
             return Err(first_generation_wait_refusal(
                 CODE_INDEX_READINESS_WAIT_TIMED_OUT,
                 format!(
