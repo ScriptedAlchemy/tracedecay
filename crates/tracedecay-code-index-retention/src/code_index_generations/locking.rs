@@ -71,10 +71,10 @@ pub struct CachedCodeGenerationStoreReadGuardV1<'a> {
 #[cfg(unix)]
 impl Drop for CachedCodeGenerationStoreReadGuardV1<'_> {
     fn drop(&mut self) {
-        if let Some(file) = self.file.as_ref() {
-            if let Err(error) = file.unlock() {
-                tracing::warn!(lease = CODE_GENERATION_LEASE_LABEL, %error, "cached read lock release failed");
-            }
+        if let Some(file) = self.file.as_ref()
+            && let Err(error) = file.unlock()
+        {
+            tracing::warn!(lease = CODE_GENERATION_LEASE_LABEL, %error, "cached read lock release failed");
         }
     }
 }

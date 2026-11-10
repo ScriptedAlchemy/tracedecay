@@ -53,10 +53,17 @@ pub(super) fn read_generation_metadata(
     // alias to another generation. This metadata witness adds no pathname open.
     let named_before = path.symlink_metadata().map_err(deferred_if_absent)?;
     if !named_before.file_type().is_file() {
-        return Err(CodeGenerationRetentionErrorV1::UnsafeState(format!(
+        let message = format!(
             "generation file '{}' is not a regular file",
             path.display()
-        )));
+        );
+        // A substituted link is an authority violation. Other non-files
+        // remain storage-shape failures, not missing publisher entries.
+        return Err(if named_before.file_type().is_symlink() {
+            CodeGenerationRetentionErrorV1::UnsafeState(message)
+        } else {
+            storage(message)
+        });
     }
     let mut file = File::open(path).map_err(deferred_if_absent)?;
     let opened_before = file.metadata().map_err(storage)?;
@@ -494,9 +501,15 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let bytes = generation_bytes(0, 32 * 1024);
         let (target, _) = write_generation(root.path(), &bytes);
-        let alias = root.path().join(format!("generation-{}.json", "a".repeat(64)));
+        let alias = root
+            .path()
+            .join(format!("generation-{}.json", "a".repeat(64)));
         std::os::unix::fs::symlink(&target, &alias).unwrap();
-        assert_eq!(fs::read(&alias).unwrap(), bytes, "alias resolves to valid bytes");
+        assert_eq!(
+            fs::read(&alias).unwrap(),
+            bytes,
+            "alias resolves to valid bytes"
+        );
 
         for mode in [
             GenerationDigestVerificationV1::MetadataOnly,
@@ -510,7 +523,10 @@ mod tests {
         let (_, _, digest, size) =
             read_generation_metadata(&target, GenerationDigestVerificationV1::Full, &|| false)
                 .unwrap();
-        assert_eq!(digest, encode_tagged_lowercase_hex("sha256:", &Sha256::digest(&bytes)));
+        assert_eq!(
+            digest,
+            encode_tagged_lowercase_hex("sha256:", &Sha256::digest(&bytes))
+        );
         assert_eq!(size, bytes.len() as u64);
     }
 
