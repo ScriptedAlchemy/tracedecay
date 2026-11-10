@@ -272,11 +272,12 @@ fn indexed_child_inventory_refuses_revoked_gitlink_before_capture() {
     let fixture = fixture();
     let root = fixture.path().join("parent");
     let repository = tracedecay_runtime_core::git_open::open(&root).unwrap();
-    let classified = crate::source_walk::classification::WorktreeChangeClassificationV1::for_policy(
-        &repository,
-        true,
-    )
-    .unwrap();
+    let classified =
+        crate::source_walk::classification::WorktreeChangeClassificationV1::for_policy(
+            &repository,
+            true,
+        )
+        .unwrap();
     let (_, child) = classified
         .bound_child("app/first.rs")
         .expect("registered child source");

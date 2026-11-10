@@ -350,7 +350,9 @@ impl WorktreeChangeClassificationV1 {
     /// a filesystem root alone cannot survive a staged parent revocation.
     pub fn bound_child(&self, logical_path: &str) -> Option<(&str, &AuthenticatedSubmodule)> {
         let prefix = self.child_sources.get(logical_path)?.as_str();
-        self.child_bindings.get(prefix).map(|binding| (prefix, binding))
+        self.child_bindings
+            .get(prefix)
+            .map(|binding| (prefix, binding))
     }
 
     /// A snapshot may reuse unchanged child rows without reading them again.
