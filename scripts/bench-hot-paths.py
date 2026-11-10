@@ -16,7 +16,7 @@ Lanes (each sample row names its lane and operation):
   request         sequential warm reads: status, search, grep, callers, context,
                   plan context; wall time per call and the daemon's CPU delta
   memory          daemon RSS split (anon/file), threads, profile size on disk
-  edit_reconcile  one appended line, `tracedecay sync`, until a new generation
+  edit_reconcile  one semantic symbol edit, `tracedecay sync`, until a new generation
                   is current and ready; elapsed time and peak daemon RSS
 
 Session capture/read has its own fixture-backed harness,
@@ -451,8 +451,16 @@ class Run:
                     threads=status.get("Threads"), profile_bytes=tree_bytes(self.profile),
                     status_memory=retained)
 
+    @staticmethod
+    def semantic_edit_source(target: Path, nonce: int) -> tuple[str, str]:
+        """Append a unique parseable symbol so the measured edit changes the graph."""
+        symbol = f"tracedecay_bench_hot_paths_edit_{nonce}"
+        if target.suffix == ".rs":
+            return symbol, f"\npub fn {symbol}() -> u64 {{ {nonce}u64 }}\n"
+        return symbol, f"\ndef {symbol}():\n    return {nonce}\n"
+
     def lane_edit_reconcile(self) -> None:
-        log("edit_reconcile (one appended line until a new generation is ready)")
+        log("edit_reconcile (one semantic source edit until a new generation is ready)")
         # Git's -z mode preserves whitespace and newlines in tracked paths.
         # A tracked symlink may point outside the disposable clone: never
         # append to one, even if its target is a regular source file.
@@ -478,7 +486,7 @@ class Run:
             self.record("edit_reconcile", "edit_to_ready", unavailable="no tracked regular .rs or .py file")
             return
         tracked_file, target = selected
-        marker = "//" if target.suffix == ".rs" else "#"
+        symbol, edit = self.semantic_edit_source(target, time.time_ns())
         # Another daemon refresh may have advanced the generation since
         # indexing. Fence the edit against the latest ready generation, not
         # the possibly stale generation recorded at initial enrollment.
@@ -502,13 +510,31 @@ class Run:
         rss_sampler.start()
         try:
             with target.open("a", encoding="utf-8") as handle:
-                handle.write(f"\n{marker} bench-hot-paths edit {time.time_ns()}\n")
+                handle.write(edit)
             sync = self.client(["sync"])
             if not sync.ok:
                 raise HarnessError(f"`tracedecay sync` failed: {sync.stderr[-2000:].decode(errors='replace')}")
             ready = self.wait_for_ready("edit_reconcile", previous_generation)
+            ready_at = time.perf_counter()
         finally:
             peak_rss_kb = rss_sampler.stop()
+        # A generation transition is not proof that the edit was indexed:
+        # a concurrent unrelated refresh can publish another generation.
+        # The search must be served from a graph containing this new symbol.
+        search = self.tool("tracedecay_search", {"query": symbol, "limit": 10, "format": "json"})
+        if not search.ok:
+            raise HarnessError("edit_reconcile: search for the edited symbol failed")
+        try:
+            hits = json.loads(search.stdout)["structuredContent"]["results"]
+        except (ValueError, KeyError, TypeError):
+            hits = None
+        if not isinstance(hits, list) or not any(
+            isinstance(hit, dict)
+            and isinstance(hit.get("display"), dict)
+            and hit["display"].get("name") == symbol
+            for hit in hits
+        ):
+            raise HarnessError(f"edit_reconcile: edited symbol {symbol} absent from ready graph")
         if peak_rss_kb is None:
             ready.pop("peak_daemon_rss_kb", None)
             ready["unsupported"] = (
@@ -518,9 +544,9 @@ class Run:
             ready["peak_daemon_rss_kb"] = peak_rss_kb
         self.generation = ready["generation_id"]
         self.record("edit_reconcile", "sync_request", wall_ms=sync.wall_ms)
-        self.record("edit_reconcile", "edited_file", path=tracked_file)
+        self.record("edit_reconcile", "edited_file", path=tracked_file, symbol=symbol)
         self.record("edit_reconcile", "edit_to_ready",
-                    **{**ready, "wall_ms": (time.perf_counter() - start) * 1000})
+                    **{**ready, "wall_ms": (ready_at - start) * 1000})
 
     def stop_daemon(self) -> None:
         if self.daemon is None or self.daemon.poll() is not None:

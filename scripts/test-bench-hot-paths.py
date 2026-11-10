@@ -54,6 +54,24 @@ FAKE_TRACEDECAY = textwrap.dedent(
     elif argv[:1] in (["init"], ["sync"]):
         value = load()
         value["generation"] += 1
+        # Emulate immutable indexed generation state. Later searches read this
+        # snapshot, not the live filesystem, which would hide a stale graph.
+        symbols = {}
+        if os.environ.get("FAKE_SKIP_EDIT_SYMBOL") != "1":
+            for root, dirs, names in os.walk("."):
+                dirs[:] = [d for d in dirs if not os.path.islink(os.path.join(root, d))]
+                for name in names:
+                    path = os.path.join(root, name)
+                    if not name.endswith((".rs", ".py")) or os.path.islink(path):
+                        continue
+                    with open(path, encoding="utf-8") as indexed_source:
+                        for line in indexed_source:
+                            for prefix in ("pub fn tracedecay_bench_hot_paths_edit_",
+                                           "def tracedecay_bench_hot_paths_edit_"):
+                                if line.startswith(prefix):
+                                    indexed_symbol = line.split("(", 1)[0].split()[-1]
+                                    symbols[indexed_symbol] = os.path.relpath(path, ".")
+        value["indexed_symbols"] = symbols
         save(value)
     elif argv[:1] == ["tool"]:
         generation = load()["generation"]
@@ -79,6 +97,13 @@ FAKE_TRACEDECAY = textwrap.dedent(
                     "candidate": {"anchor_id": "code-symbol:node.fake"},
                     "final_ordinal": 0,
                     "node_id": "node.fake",
+                })
+            indexed_path = load().get("indexed_symbols", {}).get(args["query"])
+            if indexed_path is not None:
+                payload["results"].append({
+                    "candidate": {"anchor_id": "code-symbol:node.edited"},
+                    "node_id": "node.edited",
+                    "display": {"name": args["query"], "path": indexed_path},
                 })
             body = json.dumps(payload)
             reply(payload, content_payload={
@@ -160,6 +185,8 @@ class BenchHotPathsTests(unittest.TestCase):
         self.assertEqual(single[("index", "init_to_ready")]["generation_id"], "generation.1")
         self.assertEqual(single[("edit_reconcile", "edit_to_ready")]["generation_id"], "generation.2")
         self.assertEqual(single[("edit_reconcile", "edited_file")]["path"], "src/lib.rs")
+        self.assertRegex(single[("edit_reconcile", "edited_file")]["symbol"],
+                         r"^tracedecay_bench_hot_paths_edit_\d+$")
         edit_ready = single[("edit_reconcile", "edit_to_ready")]
         if sys.platform.startswith("linux"):
             self.assertIsInstance(edit_ready["peak_daemon_rss_kb"], int)
@@ -201,6 +228,15 @@ class BenchHotPathsTests(unittest.TestCase):
         self.assertEqual(safe.read_text(), "pub fn safe() {}\n")
         self.assertEqual(list(self.tmp.iterdir()), [])
 
+
+    def test_a_generation_without_the_edited_symbol_is_rejected(self) -> None:
+        # A later ready generation is not evidence of the semantic edit when
+        # its own indexed snapshot lacks the newly introduced declaration.
+        result = self.bench(env={"FAKE_SKIP_EDIT_SYMBOL": "1"})
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertIn("edited symbol", result.stderr)
+        self.assertIn("absent from ready graph", result.stderr)
+        self.assertEqual(list(self.tmp.iterdir()), [])
 
     def test_edit_timer_and_rss_observer_cover_the_file_mutation(self) -> None:
         # The live daemon can start indexing on the filesystem notification
@@ -245,6 +281,18 @@ class BenchHotPathsTests(unittest.TestCase):
             run.client = sync
             run.wait_for_ready = ready
 
+            def verify_indexed_symbol(name, args):
+                self.assertEqual(name, "tracedecay_search")
+                self.assertRegex(args["query"], r"^tracedecay_bench_hot_paths_edit_\d+$")
+                self.assertIn(args["query"], (self.repo / "src" / "lib.rs").read_text())
+                events.append("symbol_visible")
+                payload = {"structuredContent": {"results": [
+                    {"display": {"name": args["query"], "path": "src/lib.rs"}}
+                ]}}
+                return module.Call(True, json.dumps(payload).encode(), b"", 0.1, 0, 0)
+
+            run.tool = verify_indexed_symbol
+
             class RecordingSampler:
                 def __init__(self, pid):
                     assert pid == 1234
@@ -271,7 +319,7 @@ class BenchHotPathsTests(unittest.TestCase):
             ):
                 run.lane_edit_reconcile()
             self.assertEqual(
-                events, ["sampler_started", "edit_started", "sync", "ready", "sampler_stopped"]
+                events, ["sampler_started", "edit_started", "sync", "ready", "sampler_stopped", "symbol_visible"]
             )
             measured = next(data for lane, op, data in rows if (lane, op) == ("edit_reconcile", "edit_to_ready"))
             self.assertGreaterEqual(
@@ -279,7 +327,10 @@ class BenchHotPathsTests(unittest.TestCase):
                 "the incremental-pass wall time must include file mutation before sync",
             )
             self.assertEqual(measured["peak_daemon_rss_kb"], 2048)
-            self.assertIn("bench-hot-paths edit", target.read_text())
+            self.assertRegex(target.read_text(), r"pub fn tracedecay_bench_hot_paths_edit_\d+\(\) -> u64")
+            py_symbol, python_edit = module.Run.semantic_edit_source(Path("sample.py"), 123)
+            self.assertEqual(py_symbol, "tracedecay_bench_hot_paths_edit_123")
+            compile("def existing():\n    return 1\n" + python_edit, "sample.py", "exec")
             self.assertEqual(run.generation, "generation.8")
 
             # A missing generation must be refused before writing a source
