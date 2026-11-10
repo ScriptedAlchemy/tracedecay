@@ -502,8 +502,7 @@ fn directory_bytes_from_held_dir<K: Ord + Copy>(
             use cap_std::fs::MetadataExt;
             if metadata.nlink() > 1 {
                 let key = (metadata.dev(), metadata.ino());
-                if let Some((previous_kind, charged_bytes, remaining_links)) =
-                    counted.get_mut(&key)
+                if let Some((previous_kind, charged_bytes, remaining_links)) = counted.get_mut(&key)
                 {
                     // A lower-ordered category has stronger ownership. A
                     // superseded generation encountered first cannot claim
