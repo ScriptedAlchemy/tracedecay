@@ -3943,8 +3943,12 @@ fn recovery_completes_a_committed_rewrite_that_never_reached_the_pointer() {
 fn vanished_listed_generation_open_defers_instead_of_storage_loss() {
     let root = tempfile::tempdir().expect("census root");
     let missing = root.path().join(format!("generation-{:064x}.json", 1));
-    let error = super::generation_scan::read_generation_format_revision(&missing, &|| false)
-        .expect_err("a vanished listed generation defers the census");
+    let error = super::generation_scan::read_generation_metadata(
+        &missing,
+        GenerationDigestVerificationV1::MetadataOnly,
+        &|| false,
+    )
+    .expect_err("a vanished listed generation defers the census");
     assert!(
         matches!(error, CodeGenerationRetentionErrorV1::GenerationStoreBusy),
         "a missing listed generation is a publisher race, not a storage failure: {error:?}"
@@ -3952,9 +3956,12 @@ fn vanished_listed_generation_open_defers_instead_of_storage_loss() {
 
     let directory = root.path().join("not-a-generation-file");
     std::fs::create_dir(&directory).expect("directory where a file was listed");
-    let storage_error =
-        super::generation_scan::read_generation_format_revision(&directory, &|| false)
-            .expect_err("a directory is not a vanished file");
+    let storage_error = super::generation_scan::read_generation_metadata(
+        &directory,
+        GenerationDigestVerificationV1::MetadataOnly,
+        &|| false,
+    )
+    .expect_err("a directory is not a vanished file");
     assert!(
         matches!(storage_error, CodeGenerationRetentionErrorV1::Storage(_)),
         "non-NotFound census I/O stays a storage failure: {storage_error:?}"

@@ -523,7 +523,7 @@ pub struct DaemonCodeIndexPublicationStoreV1 {
     /// One bounded descriptor cache for retained page reads across requests.
     /// Cloned stores share its identity checks; retirement discards it.
     #[cfg(unix)]
-    retained_segment_reads: Arc<Mutex<VecDeque<PinnedPreparationSegmentV1>>>,
+    pub(super) retained_segment_reads: Arc<Mutex<VecDeque<PinnedPreparationSegmentV1>>>,
     undecoded_active_expectation: Option<UndecodedActivePublicationExpectationV1>,
     /// The canonical source-hint authority plus the exact pre-capture epoch
     /// used by a retained rebuild. Ordinary publication leaves this absent.

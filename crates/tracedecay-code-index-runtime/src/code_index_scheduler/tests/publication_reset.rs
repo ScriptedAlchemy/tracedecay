@@ -152,7 +152,13 @@ fn failed_reset_releases_pointer_handles_across_store_clones() {
         "no deleted pointer inode remains open"
     );
     assert!(target.pointer_memo.lock().expect("reset memo").is_none());
-    assert!(clone.pointer_memo.lock().expect("cloned reset memo").is_none());
+    assert!(
+        clone
+            .pointer_memo
+            .lock()
+            .expect("cloned reset memo")
+            .is_none()
+    );
 
     // A fresh store must be able to rebuild the reset scope and recover the
     // same snapshot, independently of the deliberately poisoned old cache.
