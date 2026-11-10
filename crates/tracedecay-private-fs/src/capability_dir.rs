@@ -1228,7 +1228,10 @@ mod tests {
             assert_eq!(census.get(&0), Some(&(1, 8)), "live head owns shared bytes");
             assert_eq!(
                 census.get(&1),
-                Some(&(if initial_peer { 2 } else { 1 }, if initial_peer { 6 } else { 3 })),
+                Some(&(
+                    if initial_peer { 2 } else { 1 },
+                    if initial_peer { 6 } else { 3 }
+                )),
                 "old generations retain only their own receipts"
             );
             assert!(!census.contains_key(&2));
