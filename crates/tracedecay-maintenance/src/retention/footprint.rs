@@ -645,16 +645,22 @@ fn entry_statement(entry: &ProfileFootprintEntryV1) -> String {
     // Budget the complete rendered finding, including both commands, the
     // deletion warning, and the measured overage. A root-length heuristic
     // does not account for selector length, UTF-8, or the other evidence.
+    let root_state = entry
+        .project
+        .as_ref()
+        .map(|project| format!(" ({})", project.state.label()))
+        .unwrap_or_default();
     let compact = render(
-        " (registered root omitted from bounded diagnostic)",
+        &format!(" (registered root omitted from bounded diagnostic){root_state}"),
         &reclaim,
     );
     if fits(&compact) {
         compact
     } else {
         // Never turn a long identity into a truncated destructive command.
-        // Keep the pressure evidence but omit an action that cannot fit whole.
-        render("", "")
+        // Preserve the root's liveness and measured pressure if the complete
+        // recovery command cannot fit within the diagnostic limit.
+        render(&root_state, "")
     }
 }
 
@@ -1112,6 +1118,45 @@ mod tests {
             "over-budget bytes and limit must survive a long repository path: {bounded_statement}"
         );
         assert!(bounded_statement.contains("registered root omitted"));
+
+        over.entries
+            .iter_mut()
+            .find(|entry| entry.key == "projects/proj_live")
+            .expect("registered footprint")
+            .project
+            .as_mut()
+            .expect("registered project")
+            .state = ProjectRootStateV1::Missing;
+        let missing_statement = findings(&over)["projects/proj_live"]
+            .finding()
+            .coverage()
+            .statement()
+            .to_owned();
+        assert!(
+            missing_statement.contains("(root missing on disk)"),
+            "a compact finding must retain a missing root: {missing_statement}"
+        );
+        assert!(
+            missing_statement.contains("tracedecay --dry-run projects forget proj_live"),
+            "the bounded recovery command must remain intact: {missing_statement}"
+        );
+        over.entries
+            .iter_mut()
+            .find(|entry| entry.key == "projects/proj_live")
+            .expect("registered footprint")
+            .project
+            .as_mut()
+            .expect("registered project")
+            .state = ProjectRootStateV1::Unverifiable;
+        let unverifiable_statement = findings(&over)["projects/proj_live"]
+            .finding()
+            .coverage()
+            .statement()
+            .to_owned();
+        assert!(
+            unverifiable_statement.contains("(root unverifiable)"),
+            "a compact finding must retain an unverifiable root: {unverifiable_statement}"
+        );
 
         let normal =
             census_profile_footprint(&fixture.profile, &fixture.registered, &BTreeMap::new());
