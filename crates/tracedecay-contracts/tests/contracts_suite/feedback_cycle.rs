@@ -1474,8 +1474,7 @@ fn repeated_incomplete_feedback_reuses_inspectable_committed_identity() {
     assert!(first.publication.is_some());
 
     let mut repeated = input;
-    repeated.request.cycle_id =
-        FeedbackCycleId::new("cycle.feedback.incomplete.repeated").unwrap();
+    repeated.request.cycle_id = FeedbackCycleId::new("cycle.feedback.incomplete.repeated").unwrap();
     let repeated_provider = provider_identity(&repeated);
     let repeated_service = FeedbackCycleService::new(
         runtime_port(&repeated),

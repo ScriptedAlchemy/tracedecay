@@ -2308,7 +2308,10 @@ mod tests {
             );
             assert_ne!(repeated.result.result_id, initial.result.result_id);
             let state = store.record_publication(repeated).await.unwrap();
-            assert_eq!(state, FeedbackPublicationRecordState::Reused(initial.clone()));
+            assert_eq!(
+                state,
+                FeedbackPublicationRecordState::Reused(initial.clone())
+            );
         }
         let retained = store.load_publications().await.unwrap();
         assert_eq!(
@@ -2370,7 +2373,10 @@ mod tests {
             unavailable,
         );
         let state = store.record_publication(unchanged).await.unwrap();
-        assert_eq!(state, FeedbackPublicationRecordState::Reused(recovered.clone()));
+        assert_eq!(
+            state,
+            FeedbackPublicationRecordState::Reused(recovered.clone())
+        );
 
         // An unchanged verdict with a new runtime watermark also remains
         // inspectable: source identity is not the current runtime receipt.
@@ -2383,7 +2389,10 @@ mod tests {
             canonical_sha256(&"feedback.incomplete.new-runtime").unwrap();
         changed_runtime.authority.revalidated_at = UtcMicros(13);
         assert!(changed_runtime.validate().is_ok());
-        let state = store.record_publication(changed_runtime.clone()).await.unwrap();
+        let state = store
+            .record_publication(changed_runtime.clone())
+            .await
+            .unwrap();
         assert_eq!(state, FeedbackPublicationRecordState::Recorded);
         let retained = store.load_publications().await.unwrap();
         assert_eq!(retained.len(), 4);
@@ -2440,7 +2449,10 @@ mod tests {
         let state = store.record_publication(original.clone()).await.unwrap();
         assert_eq!(state, FeedbackPublicationRecordState::Recorded);
         let state = store.record_publication(original.clone()).await.unwrap();
-        assert_eq!(state, FeedbackPublicationRecordState::Reused(original.clone()));
+        assert_eq!(
+            state,
+            FeedbackPublicationRecordState::Reused(original.clone())
+        );
 
         let mut conflicting = original.clone();
         conflicting.runtime.authoritative.runtime_watermark =

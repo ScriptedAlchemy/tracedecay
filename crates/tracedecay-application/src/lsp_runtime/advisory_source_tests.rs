@@ -989,7 +989,10 @@ async fn incomplete_publication_remains_readable_without_consuming_completed_ded
         tracedecay_domain::feedback::FeedbackCycleTerminationV1::IncompleteCoverage
     );
     assert_eq!(repeated_execution.publication, Some(publication.clone()));
-    assert_eq!(repeated_execution.cycle.result_id, publication.result.result_id);
+    assert_eq!(
+        repeated_execution.cycle.result_id,
+        publication.result.result_id
+    );
     assert_ne!(repeated_input.request.cycle_id, publication.result.cycle_id);
     let replayed_canonical = compose_canonical_result(
         &runtime,
