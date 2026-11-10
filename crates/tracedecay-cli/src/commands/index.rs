@@ -7,8 +7,8 @@ use tracedecay_project::project::TraceDecay;
 use tracedecay_contracts::code_index_freshness::{
     CODE_INDEX_READINESS_WAIT_TIMED_OUT, CODE_INDEX_READINESS_WAIT_UNAVAILABLE,
     CodeIndexBuildBlockedReasonV1, CodeIndexBuildPhaseV1, CodeIndexBuildProgressV1,
-    CodeIndexNativeGraphPhaseV1, CodeIndexPresealAttemptProgressV1, CodeIndexReadinessWaitOutcomeV1,
-    CodeIndexStalenessStateV1, CodeIndexWorktreeFreshnessV1,
+    CodeIndexNativeGraphPhaseV1, CodeIndexPresealAttemptProgressV1,
+    CodeIndexReadinessWaitOutcomeV1, CodeIndexStalenessStateV1, CodeIndexWorktreeFreshnessV1,
 };
 use tracedecay_contracts::graph_tool::GraphToolResultV1;
 use tracedecay_contracts::retrieval::{
@@ -998,7 +998,10 @@ impl std::fmt::Display for FirstGenerationStall {
             Self::NoPassInFlight => formatter.write_str("no reconcile pass is in flight"),
             Self::Blocked(reason) => write!(formatter, "the build is blocked ({reason:?})"),
             Self::Parked { cause, remedy } => {
-                write!(formatter, "convergence is parked ({cause}); remedy: {remedy}")
+                write!(
+                    formatter,
+                    "convergence is parked ({cause}); remedy: {remedy}"
+                )
             }
         }
     }
@@ -1730,7 +1733,10 @@ mod daemon_precondition_tests {
             Duration::ZERO,
         )
         .await;
-        assert_eq!(reads, 4, "frozen text must refuse after native work retires");
+        assert_eq!(
+            reads, 4,
+            "frozen text must refuse after native work retires"
+        );
         let (code, reason) = refusal(result);
         assert_eq!(code, CODE_INDEX_READINESS_WAIT_TIMED_OUT);
         assert!(
@@ -2727,7 +2733,10 @@ mod daemon_precondition_tests {
         assert_eq!(reads, 1, "unavailable cannot claim a later Ready");
         let (code, message) = refusal(result);
         assert_eq!(code, CODE_INDEX_READINESS_WAIT_UNAVAILABLE);
-        assert!(message.contains("code_index_convergence_parked"), "{message}");
+        assert!(
+            message.contains("code_index_convergence_parked"),
+            "{message}"
+        );
         assert!(
             message.contains("corrupt durable publication authority"),
             "{message}"
