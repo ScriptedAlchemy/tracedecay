@@ -223,22 +223,29 @@ impl SpillDirectory {
         // Receipt failures must leave the requested name available to retry.
         // Keep the partial marker private until the complete spill can be installed.
         let temporary = staging_name(owner, &receipt);
-        let staging = tempfile::Builder::new()
+        let mut staging = tempfile::Builder::new()
             .prefix(&temporary)
             .rand_bytes(0)
             .tempdir_in(parent)
             .map_err(|error| spill_io("directory create", error))?;
-        let marker = staging.path().join(ROW_SPILL_OWNER_RECEIPT_FILE);
-        let mut file = std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&marker)
-            .map_err(|error| spill_io("owner marker create", error))?;
-        file.write_all(&receipt)
-            .and_then(|()| file.sync_all())
-            .map_err(|error| spill_io("owner marker persist", error))?;
-        drop(file);
+        Self::persist_pending_receipt(&mut staging, &receipt)?;
         Ok(staging)
+    }
+
+    fn persist_pending_receipt(
+        staging: &mut tempfile::TempDir,
+        receipt: &[u8],
+    ) -> Result<(), GraphDbError> {
+        // TempDir's Drop is pathname-based even when receipt creation fails.
+        // Once our name has been replaced, that Drop could erase foreign
+        // bytes. Disarm it before the first fallible marker operation.
+        staging.disable_cleanup(true);
+        tracedecay_private_fs::capability_dir::write_exclusive_pending_receipt_nofollow(
+            staging.path(),
+            OsStr::new(ROW_SPILL_OWNER_RECEIPT_FILE),
+            receipt,
+        )
+        .map_err(|error| spill_io("owner marker persist", error))
     }
 
     fn path(&self) -> &Path {
@@ -1227,7 +1234,7 @@ impl GraphGenerationManifestIdentity {
 mod owner_receipt_tests {
     use super::{
         RECEIPT_PREFIX, ROW_SPILL_OWNER_RECEIPT_FILE, ROW_SPILL_PREFIX, SpillDirectory,
-        row_spill_owner, staging_name,
+        row_spill_owner, row_spill_owner_receipt, staging_name,
     };
 
     #[cfg(unix)]
@@ -1264,6 +1271,53 @@ mod owner_receipt_tests {
         assert!(
             original_receipt.starts_with(RECEIPT_PREFIX.as_bytes()),
             "original owned staging bytes must remain separate from the foreign entry"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn failed_pending_receipt_open_preserves_substituted_directory() {
+        let root = tempfile::tempdir().unwrap();
+        let owner = row_spill_owner();
+        let destination = root.path().join(format!("{ROW_SPILL_PREFIX}{owner}-9"));
+        let receipt = row_spill_owner_receipt(destination.file_name().unwrap(), owner).unwrap();
+        let name = staging_name(owner, &receipt);
+        let mut staging = tempfile::Builder::new()
+            .prefix(&name)
+            .rand_bytes(0)
+            .tempdir_in(root.path())
+            .unwrap();
+        let pending_path = staging.path().to_path_buf();
+        let moved = root.path().join("original-pending");
+        std::fs::rename(&pending_path, &moved).unwrap();
+        std::fs::create_dir(&pending_path).unwrap();
+        std::fs::write(
+            pending_path.join(ROW_SPILL_OWNER_RECEIPT_FILE),
+            b"foreign receipt",
+        )
+        .unwrap();
+        std::fs::write(pending_path.join("sentinel"), b"foreign contents").unwrap();
+
+        let refused = SpillDirectory::persist_pending_receipt(&mut staging, &receipt);
+        assert!(
+            refused
+                .unwrap_err()
+                .to_string()
+                .contains("owner marker persist")
+        );
+        drop(staging);
+        assert_eq!(
+            std::fs::read(pending_path.join("sentinel")).unwrap(),
+            b"foreign contents",
+            "failed receipt creation must not drop a substituted real directory"
+        );
+        assert_eq!(
+            std::fs::read(pending_path.join(ROW_SPILL_OWNER_RECEIPT_FILE)).unwrap(),
+            b"foreign receipt"
+        );
+        assert!(
+            moved.is_dir(),
+            "the original staging directory cannot authorize deleting its replacement"
         );
     }
 

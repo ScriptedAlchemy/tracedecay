@@ -228,6 +228,60 @@ fn single_component(name: &OsStr) -> io::Result<()> {
     Ok(())
 }
 
+/// Persist a new producer-owned staging receipt through a held directory.
+///
+/// An exclusive marker creation is the only authority for removing an
+/// incomplete marker. On write/sync failure, remove only that marker and
+/// attempt a nonrecursive removal of the same held directory. A substituted
+/// directory containing other bytes must survive. The caller must disable
+/// pathname-based temporary-directory cleanup before invoking this operation.
+pub fn write_exclusive_pending_receipt_nofollow(
+    directory_path: &Path,
+    filename: &OsStr,
+    contents: &[u8],
+) -> io::Result<()> {
+    single_component(filename)?;
+    let directory = open_root_nofollow(directory_path)?;
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    let mut marker = directory.open_with(filename, &options)?;
+    #[cfg(unix)]
+    let marker_identity = {
+        use cap_std::fs::MetadataExt;
+        marker.metadata().ok().map(|metadata| (metadata.dev(), metadata.ino()))
+    };
+    let written = marker.write_all(contents).and_then(|()| marker.sync_all());
+    drop(marker);
+    if let Err(error) = written {
+        // Keep the original write failure. A different marker entry is not
+        // ours to delete, and a nonempty substituted directory is not ours
+        // to remove. Neither cleanup operation follows an ambient pathname.
+        #[cfg(unix)]
+        let same_marker = {
+            use cap_std::fs::MetadataExt;
+            marker_identity.is_some_and(|identity| {
+                directory
+                    .symlink_metadata(filename)
+                    .ok()
+                    .is_some_and(|metadata| {
+                        metadata.is_file() && (metadata.dev(), metadata.ino()) == identity
+                    })
+            })
+        };
+        #[cfg(not(unix))]
+        let same_marker = false;
+        if same_marker {
+            if let Err(cleanup) = directory.remove_file(filename) {
+                tracing::warn!(%cleanup, "pending owner marker could not be removed");
+            } else if let Err(cleanup) = directory.remove_open_dir() {
+                tracing::warn!(%cleanup, "pending owner directory was not empty");
+            }
+        }
+        return Err(error);
+    }
+    Ok(())
+}
+
 /// Publish a rebuildable marker through one held directory. Replacing the
 /// pathname after acquisition cannot redirect its bytes into a foreign tree.
 pub fn atomic_replace_child_file_nofollow(
