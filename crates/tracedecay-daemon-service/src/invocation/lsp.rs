@@ -775,12 +775,23 @@ impl DaemonInvocationService {
         };
         // The session map lock covers only the state transition. The receipt's
         // durable admission is disk-latency work and runs after it releases.
-        let (acknowledged, delivery) = {
+        let (acknowledged, delivery, project_lease) = {
             let mut sessions = self.lsp_sessions.lock().await;
             let Some(session) = sessions.get_mut(access.session_id()) else {
                 return DaemonInvocationResponse::problem(
                     request_id,
                     DaemonInvocationProblem::NotFoundOrNotAuthorized,
+                );
+            };
+            // Session controls need no request project. Pin the exact owner
+            // before changing the frame so its recorder outlives admission.
+            let Some(project_lease) = self
+                .project_runtimes
+                .admit_request(session.project_identity.project_root(), None)
+            else {
+                return DaemonInvocationResponse::problem(
+                    request_id,
+                    DaemonInvocationProblem::Unavailable,
                 );
             };
             let acknowledged = session.actor.acknowledge_outbound();
@@ -794,10 +805,10 @@ impl DaemonInvocationService {
             } else {
                 None
             };
-            (acknowledged, delivery)
+            (acknowledged, delivery, project_lease)
         };
         if let Some(delivery) = delivery {
-            let _ = delivery.admit().await;
+            let _ = delivery.admit(project_lease).await;
         }
         DaemonInvocationResponse::with_outcome(
             request_id,
@@ -816,6 +827,25 @@ impl DaemonInvocationService {
         let access = match self.authenticate(lsp_registry, session, now_ms).await {
             Ok(access) => access,
             Err(problem) => return DaemonInvocationResponse::problem(request_id, problem),
+        };
+        let project_lease = {
+            let sessions = self.lsp_sessions.lock().await;
+            let Some(session) = sessions.get(access.session_id()) else {
+                return DaemonInvocationResponse::problem(
+                    request_id,
+                    DaemonInvocationProblem::NotFoundOrNotAuthorized,
+                );
+            };
+            let Some(project_lease) = self
+                .project_runtimes
+                .admit_request(session.project_identity.project_root(), None)
+            else {
+                return DaemonInvocationResponse::problem(
+                    request_id,
+                    DaemonInvocationProblem::Unavailable,
+                );
+            };
+            project_lease
         };
         let endpoint_closed = {
             let mut registry = lsp_registry.lock().await;
@@ -836,17 +866,24 @@ impl DaemonInvocationService {
         // The stdio bridge reaches this path after a write or flush failure.
         // Removing the actor discards its in-flight frame, so terminalize that
         // exact captured attempt before any later detach bookkeeping can fail.
-        if let Ok(delivery) = session.claim_in_flight_delivery(
-            tracedecay_domain::DeliverySettlementOutcomeV1::Dropped,
-            Some(tracedecay_domain::DeliveryDropReasonV1::Disconnected),
-        ) {
-            let _ = delivery.admit().await;
-        }
+        let admission = session
+            .claim_in_flight_delivery(
+                tracedecay_domain::DeliverySettlementOutcomeV1::Dropped,
+                Some(tracedecay_domain::DeliveryDropReasonV1::Disconnected),
+            )
+            .ok()
+            .map(|delivery| delivery.admit(project_lease));
+        // Admission is already owned by the blocking task. Take and cancel
+        // the disconnected lease before awaiting it; cancellation of this
+        // request then aborts the removed lease task through its existing Drop.
         let lease_cancelled = self
             .lsp_lease_tasks
             .cancel(access.session_id())
             .await
             .is_ok();
+        if let Some(admission) = admission {
+            let _ = admission.await;
+        }
         // Detach is idempotent over every state that already satisfies it.
         // `LspSessionControl::detach` is a transition, so it refuses
         // `Detached -> Detached`, and `Exited`/`Expired` are already past it.

@@ -1,6 +1,7 @@
 //! Durable delivery identity and terminalization for outbound LSP frames.
 
 use super::*;
+use crate::project_runtime::ProjectRuntimeRequestLeaseV1;
 
 pub fn lsp_delivery_attempt(
     frame: &[u8],
@@ -105,23 +106,37 @@ pub(super) struct LspDeliverySettlementClaim {
 
 impl LspDeliverySettlementClaim {
     /// Admits the receipt on the blocking pool. The work is queued at this
-    /// call, so abandoning the returned future abandons only the wait: a
-    /// claimed receipt is never lost to a dropped connection.
-    pub(super) async fn admit(self) -> LspDeliverySettlementAdmissionV1 {
-        match tracedecay_runtime_core::native_runtime::spawn_blocking(move || self.admit_inline())
-            .await
-        {
-            Ok(admission) => admission,
-            Err(error) => {
-                tracing::warn!(%error, "LSP delivery receipt admission could not run");
-                LspDeliverySettlementAdmissionV1::Refused(
-                    "lsp_delivery_settlement_blocking_pool_unavailable",
-                )
+    /// call, so abandoning the returned future abandons only the wait. The
+    /// session's admitted project lease travels with the work: retirement
+    /// joins it before shutting down the recorder, even if the client leaves.
+    pub(super) fn admit(
+        self,
+        project_lease: ProjectRuntimeRequestLeaseV1,
+    ) -> impl Future<Output = LspDeliverySettlementAdmissionV1> + Send {
+        let dispatch = tracing::dispatcher::get_default(Clone::clone);
+        let admission = tracedecay_runtime_core::native_runtime::spawn_blocking(move || {
+            let _project_lease = project_lease;
+            tracing::dispatcher::with_default(&dispatch, || self.admit_inline())
+        });
+        async move {
+            match admission.await {
+                Ok(admission) => admission,
+                Err(error) => {
+                    tracing::warn!(%error, "LSP delivery receipt admission could not run");
+                    LspDeliverySettlementAdmissionV1::Refused(
+                        "lsp_delivery_settlement_blocking_pool_unavailable",
+                    )
+                }
             }
         }
     }
 
     /// Admission on the calling thread, for `Drop`, which cannot await.
+    #[tracing::instrument(
+        name = "daemon.service.lsp.delivery_receipt.admit",
+        level = "trace",
+        skip_all
+    )]
     fn admit_inline(self) -> LspDeliverySettlementAdmissionV1 {
         match self.recorder.try_record(self.settlement) {
             Ok(tracedecay_application::observability::DeliverySettlementRecordOutcomeV1::Enqueued) => {
