@@ -731,16 +731,12 @@ impl Worker {
                                     tracing::trace_span!("rusqlite.writer.incremental_vacuum")
                                         .entered();
                                 {
-                                    if run_incremental_vacuum(
-                                        checkpoint.connection_mut(),
-                                        command,
-                                    ) {
+                                    if run_incremental_vacuum(checkpoint.connection_mut(), command)
+                                    {
                                         // A failed SQLite rollback must not leak its
                                         // transaction into the next accepted write.
-                                        self.state.store(
-                                            WriterState::Faulted as u8,
-                                            Ordering::Release,
-                                        );
+                                        self.state
+                                            .store(WriterState::Faulted as u8, Ordering::Release);
                                         reject_all(
                                             &mut queue,
                                             &self.telemetry,
