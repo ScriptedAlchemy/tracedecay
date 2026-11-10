@@ -99,12 +99,11 @@ impl RegisteredStore {
                  WHERE name NOT LIKE 'sqlite_%' ORDER BY type, name",
             )
             .unwrap();
-        let objects = statement
+        statement
             .query_map([], |row| row.get::<_, String>(0))
             .unwrap()
             .map(Result::unwrap)
-            .collect();
-        objects
+            .collect()
     }
 
     /// Runs daemon admission, cancelling its token just before the
