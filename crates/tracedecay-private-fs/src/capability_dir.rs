@@ -967,6 +967,8 @@ mod replacement_tests {
 mod tests {
     #[cfg(unix)]
     use std::os::unix::fs::MetadataExt;
+    #[cfg(unix)]
+    use std::os::unix::net::UnixListener;
 
     use cap_std::ambient_authority;
 
@@ -1279,8 +1281,6 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn socket_receipt_is_unrecognized_without_hiding_the_verified_head() {
-        use std::os::unix::net::UnixListener;
-
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path().join("s");
         let head = root.join("head");
