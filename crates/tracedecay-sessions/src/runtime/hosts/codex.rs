@@ -2308,7 +2308,7 @@ fn retained_scan_step(
                                     }
                                     queued.push_front((
                                         child,
-                                        depth.checked_add(1).ok_or(
+                                        directory.depth.checked_add(1).ok_or(
                                             TranscriptIngestError::InvalidCodexDiscoveryFrontier {
                                                 detail: "Codex transcript directory depth overflowed",
                                             },
@@ -2331,7 +2331,7 @@ fn retained_scan_step(
                                 scan.directory_bytes = charged;
                                 queued.push_front((
                                     child,
-                                    depth.checked_add(1).ok_or(
+                                    directory.depth.checked_add(1).ok_or(
                                         TranscriptIngestError::InvalidCodexDiscoveryFrontier {
                                             detail: "Codex transcript directory depth overflowed",
                                         },

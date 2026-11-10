@@ -2974,7 +2974,10 @@ mod recent_first_discovery_tests {
         }
         assert!(frontier.is_complete(), "bounded traversal must converge");
         assert_eq!(covered, BTreeSet::from([eligible]));
-        let idle = state.idle.as_ref().expect("completed sweep retains witnesses");
+        let idle = state
+            .idle
+            .as_ref()
+            .expect("completed sweep retains witnesses");
         let archive_identity = idle
             .directories
             .iter()
