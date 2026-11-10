@@ -281,20 +281,46 @@ fn indexed_child_inventory_refuses_revoked_gitlink_before_capture() {
     let (_, child) = classified
         .bound_child("app/first.rs")
         .expect("registered child source");
-    assert!(child.checkout_is_live());
-    assert!(classified.child_bindings_live());
+    assert!(child.checkout_is_live().unwrap());
+    assert!(classified.child_bindings_live().unwrap());
 
     git(&root, &["rm", "-q", "--cached", "app"]);
     assert!(root.join("app/.git").is_file());
     assert!(root.join("app/first.rs").is_file());
     assert!(classified.bound_child("app/first.rs").is_some());
-    assert!(!child.checkout_is_live());
+    assert!(!child.checkout_is_live().unwrap());
     assert!(
-        !classified.child_bindings_live(),
+        !classified.child_bindings_live().unwrap(),
         "retained capture authority must expire when the staged gitlink disappears"
     );
 
     git(&root, &["add", "app"]);
-    assert!(child.checkout_is_live());
-    assert!(classified.child_bindings_live());
+    assert!(child.checkout_is_live().unwrap());
+    assert!(classified.child_bindings_live().unwrap());
+}
+
+#[test]
+fn unavailable_parent_index_refuses_retained_graph_and_lazy_walk() {
+    let fixture = fixture();
+    let root = fixture.path().join("parent");
+    assert_live_control(&root);
+    let boundaries = LiveSourceBoundaries::open(&root, true).unwrap();
+    let path = Path::new("app/first.rs");
+    assert!(boundaries.resolve(path).unwrap().is_some());
+    let pending = walk(&root);
+
+    // The marker and child bytes are intact, but parent authority is corrupt.
+    // Returning Ok(None) here would make unavailable data look absent.
+    fs::write(root.join(".git/index"), b"not a valid Git index").unwrap();
+    assert!(root.join(path).is_file());
+    let error = boundaries
+        .resolve(path)
+        .expect_err("unreadable parent index must not hide an admitted child");
+    assert_eq!(error.kind(), io::ErrorKind::Other);
+
+    let error = pending
+        .filter_map(Result::err)
+        .next()
+        .expect("the child walk must report unavailable parent authority");
+    assert_eq!(error.io_error().unwrap().kind(), io::ErrorKind::Other);
 }

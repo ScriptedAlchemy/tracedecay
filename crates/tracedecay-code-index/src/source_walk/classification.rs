@@ -357,10 +357,13 @@ impl WorktreeChangeClassificationV1 {
 
     /// A snapshot may reuse unchanged child rows without reading them again.
     /// That reuse must not outlive any captured parent/child authorization.
-    pub fn child_bindings_live(&self) -> bool {
-        self.child_bindings
-            .values()
-            .all(AuthenticatedSubmodule::checkout_is_live)
+    pub fn child_bindings_live(&self) -> std::io::Result<bool> {
+        for child in self.child_bindings.values() {
+            if !child.checkout_is_live()? {
+                return Ok(false);
+            }
+        }
+        Ok(true)
     }
 
     pub(super) fn gitlink_paths(&self) -> &BTreeSet<String> {

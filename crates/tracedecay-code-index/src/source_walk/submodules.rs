@@ -35,32 +35,28 @@ pub(super) struct ChildSources {
 }
 
 impl AuthenticatedSubmodule {
-    fn parent_registration_is_live(&self) -> bool {
-        // An already-open iterator or graph reader cannot continue to use a
-        // child after the parent revokes its staged gitlink or registration.
-        // Inspect exact index entries, not the entire committed Git tree.
-        let Ok(parent) = tracedecay_runtime_core::git_open::open(&self.parent_root) else {
-            return false;
-        };
+    fn parent_registration_is_live(&self) -> io::Result<bool> {
+        // A retained child must preserve the parent's exact staged authority.
+        // An unreadable Git authority is not a revoked or absent source.
+        let parent = tracedecay_runtime_core::git_open::open(&self.parent_root)
+            .map_err(|error| io::Error::other(error.to_string()))?;
         if parent
             .workdir()
             .and_then(|root| root.canonicalize().ok())
             .as_ref()
             != Some(&self.parent_root)
         {
-            return false;
+            return Ok(false);
         }
-        // A replaced parent Git directory cannot inherit the old child's
-        // authorization merely by advertising the same staged paths.
         if !module_stores(&parent, &self.module_name).any(|store| store == self.git_dir) {
-            return false;
+            return Ok(false);
         }
-        let Ok(index) = parent.index_or_empty() else {
-            return false;
-        };
+        let index = parent
+            .index_or_empty()
+            .map_err(|error| io::Error::other(error.to_string()))?;
         let stage = gix::index::entry::Stage::Unconflicted;
         let Some(modules) = index.entry_by_path_and_stage(".gitmodules".into(), stage) else {
-            return false;
+            return Ok(false);
         };
         if modules.id != self.staged_modules_id
             || !modules
@@ -68,27 +64,32 @@ impl AuthenticatedSubmodule {
                 .to_tree_entry_mode()
                 .is_some_and(|mode| mode.is_blob())
         {
-            return false;
+            return Ok(false);
         }
         let Some(gitlink) =
             index.entry_by_path_and_stage(self.module_path.as_bytes().as_bstr(), stage)
         else {
-            return false;
+            return Ok(false);
         };
         if !gitlink.mode.is_submodule() || gitlink.id != self.pin {
-            return false;
+            return Ok(false);
         }
-        let Ok(Some(working)) = parent.open_modules_file() else {
-            return false;
+        let Some(working) = parent
+            .open_modules_file()
+            .map_err(|error| io::Error::other(error.to_string()))?
+        else {
+            return Ok(false);
         };
-        working
+        let registered_path = working
             .path(self.module_name.as_os_str().as_encoded_bytes().as_bstr())
-            .is_ok_and(|path| path.as_slice() == self.module_path.as_bytes())
+            .map_err(|error| io::Error::other(error.to_string()))?;
+        Ok(registered_path.as_slice() == self.module_path.as_bytes())
     }
 
-    pub fn checkout_is_live(&self) -> bool {
+    pub fn checkout_is_live(&self) -> io::Result<bool> {
         let marker = self.worktree.join(".git");
-        self.worktree.canonicalize().ok().as_ref() == Some(&self.worktree)
+        let checkout_matches = self.worktree.canonicalize().ok().as_ref()
+            == Some(&self.worktree)
             && marker
                 .symlink_metadata()
                 .is_ok_and(|metadata| metadata.is_file())
@@ -96,15 +97,15 @@ impl AuthenticatedSubmodule {
                 .ok()
                 .and_then(|target| target.canonicalize().ok())
                 .as_ref()
-                == Some(&self.git_dir)
-            && self.parent_registration_is_live()
-            // The child gitdir marker is unchanged if its repository config
-            // redirects core.worktree. A fresh binding would refuse that store;
-            // an existing graph reader or lazy walk must do the same.
-            && open_pinned_store(&self.git_dir, self.pin)
-                .and_then(|child| child.workdir()?.canonicalize().ok())
-                .as_ref()
-                == Some(&self.worktree)
+                == Some(&self.git_dir);
+        if !checkout_matches || !self.parent_registration_is_live()? {
+            return Ok(false);
+        }
+        // Rechecking the pinned child also rejects core.worktree redirection.
+        Ok(open_pinned_store(&self.git_dir, self.pin)
+            .and_then(|child| child.workdir()?.canonicalize().ok())
+            .as_ref()
+            == Some(&self.worktree))
     }
 
     pub(super) fn sources(&self) -> Result<ChildSources, SourceWalkError> {
@@ -142,21 +143,25 @@ impl Iterator for CheckoutWalk {
 
     fn next(&mut self) -> Option<Self::Item> {
         self.walk.as_ref()?;
-        if let Some(child) = &self.child
-            && !child.checkout_is_live()
-        {
-            // Check before polling, including the root entry: ignore does not
-            // apply filter_entry to a walk's root. Stop permanently after a
-            // binding change, even if the original marker is later restored.
-            self.walk = None;
-            return Some(Err(WalkError::WithPath {
-                path: child.worktree.clone(),
-                err: Box::new(WalkError::Io(io::Error::new(
+        if let Some(child) = &self.child {
+            let refusal = match child.checkout_is_live() {
+                Ok(true) => None,
+                Ok(false) => Some(io::Error::new(
                     io::ErrorKind::InvalidData,
                     "authenticated submodule checkout binding changed during source walk",
-                ))),
-            }));
+                )),
+                Err(error) => Some(error),
+            };
+            if let Some(error) = refusal {
+                // A failed Git read must not become a successful empty walk.
+                self.walk = None;
+                return Some(Err(WalkError::WithPath {
+                    path: child.worktree.clone(),
+                    err: Box::new(WalkError::Io(error)),
+                }));
+            }
         }
+
         let next = self.walk.as_mut()?.next();
         if next.is_none() {
             self.walk = None;
@@ -376,9 +381,10 @@ impl LiveSourceBoundaries {
                 return Ok(None);
             };
             relative = path.strip_prefix(ancestor).map_err(std::io::Error::other)?;
-            if !relative.to_str().is_some_and(|file| files.contains(file))
-                || !child.checkout_is_live()
-            {
+            if !relative.to_str().is_some_and(|file| files.contains(file)) {
+                return Ok(None);
+            }
+            if !child.checkout_is_live()? {
                 return Ok(None);
             }
             root = &child.worktree;

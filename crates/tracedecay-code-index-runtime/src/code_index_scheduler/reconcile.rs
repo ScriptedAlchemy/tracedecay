@@ -4036,7 +4036,9 @@ impl CodeIndexWorktreeSchedulerV1 {
         let absolute = self.project_root.join(relative);
         let (source_root, source_relative) = match child_binding {
             Some((prefix, binding)) if !explicitly_admitted => {
-                if !binding.checkout_is_live()
+                if !binding
+                    .checkout_is_live()
+                    .map_err(|error| CodeIndexSchedulerErrorV1::Git(error.to_string()))?
                     || !git_tree_capture::is_source_path(registry, logical_path.as_bytes())
                 {
                     return Ok(CapturedFileOutcomeV1::Absent);
@@ -4108,8 +4110,13 @@ impl CodeIndexWorktreeSchedulerV1 {
         ignored_dependencies::checkpoint_if_present(control)?;
         // A staged gitlink or registration may be revoked while a file is
         // streaming. Do not admit its bytes after the original binding expires.
-        if child_binding.is_some_and(|(_, binding)| !binding.checkout_is_live()) {
-            return Ok(CapturedFileOutcomeV1::Absent);
+        if let Some((_, binding)) = child_binding {
+            if !binding
+                .checkout_is_live()
+                .map_err(|error| CodeIndexSchedulerErrorV1::Git(error.to_string()))?
+            {
+                return Ok(CapturedFileOutcomeV1::Absent);
+            }
         }
         self.capture_candidate_bytes(
             registry,
@@ -4157,7 +4164,10 @@ impl CodeIndexWorktreeSchedulerV1 {
             self.path_policy.includes_submodules(),
         )
         .map_err(|error| CodeIndexSchedulerErrorV1::Git(error.to_string()))?;
-        if !classification.child_bindings_live() {
+        if !classification
+                .child_bindings_live()
+                .map_err(|error| CodeIndexSchedulerErrorV1::Git(error.to_string()))?
+            {
             return Err(CodeIndexSchedulerErrorV1::Git(
                 "authenticated child checkout binding changed during classification".into(),
             ));
@@ -4278,7 +4288,10 @@ impl CodeIndexWorktreeSchedulerV1 {
                     },
                 ) {
                 Ok(captured) => {
-                    if !classification.child_bindings_live() {
+                    if !classification
+                .child_bindings_live()
+                .map_err(|error| CodeIndexSchedulerErrorV1::Git(error.to_string()))?
+            {
                         return Err(CodeIndexSchedulerErrorV1::Git(
                             "authenticated child checkout binding changed during tree capture"
                                 .into(),
@@ -4505,7 +4518,10 @@ impl CodeIndexWorktreeSchedulerV1 {
             retained_bytes,
             retained_reservations,
         };
-        if !classification.child_bindings_live() {
+        if !classification
+                .child_bindings_live()
+                .map_err(|error| CodeIndexSchedulerErrorV1::Git(error.to_string()))?
+            {
             return Err(CodeIndexSchedulerErrorV1::Git(
                 "authenticated child checkout binding changed during snapshot capture".into(),
             ));
