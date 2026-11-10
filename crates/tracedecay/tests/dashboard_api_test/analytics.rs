@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 
 use crate::common::{
     MessageRecordBuilder, canonicalize_test_dir, create_runtime, get_json, http_agent,
-    isolated_profile_under_home, pick_free_port, tempdir_or_panic, wait_for_dashboard,
+    isolated_profile_under_home, tempdir_or_panic, wait_for_dashboard,
 };
 use crate::runtime::DashboardTestRuntimeV1;
 use serde_json::Value;
@@ -503,8 +503,7 @@ async fn start_fixture(seed_durable_events: bool) -> Fixture {
         seed_durable_analytics(&host_runtime, &project_root).await;
     }
 
-    let port = pick_free_port();
-    let (access, base_url) = crate::dashboard_api_support::dashboard_access_for(port);
+    let (endpoint, base_url) = crate::dashboard_api_support::dashboard_endpoint().await;
     let server_runtime = Arc::clone(&host_runtime);
     let server_graph = Arc::new(cg);
     let server_profile = profile.clone();
@@ -512,24 +511,21 @@ async fn start_fixture(seed_durable_events: bool) -> Fixture {
         let authority = server_runtime
             .dashboard_test_authority()
             .expect("dashboard analytics authority");
-        let _ = dashboard::run_until_shutdown_for_tests_with_host_admission(
+        dashboard::run_until_shutdown_for_tests_with_host_admission(
             server_graph,
             &server_profile,
             None,
             authority,
             tracedecay_dashboard_api::DashboardTestProjectGraphsV1::default(),
-            tracedecay_dashboard_api::DashboardTestEndpointV1 {
-                host: "127.0.0.1",
-                port,
-                access,
-            },
+            endpoint,
             tracedecay_project::product_runtime::register_fixture_product_runtime().build_version(),
             tracedecay_api::static_dashboard_router(
                 tracedecay_project::product_runtime::FIXTURE_DASHBOARD_ASSETS,
             ),
             std::future::pending(),
         )
-        .await;
+        .await
+        .expect("serve fixture dashboard");
     });
     wait_for_dashboard(&http_agent(), &base_url).await;
 

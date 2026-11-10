@@ -85,8 +85,11 @@ export function LoomPage() {
   const proximity = useLoomProximity();
   const [params, setParams] = useSearchParams();
   const selectedId = params.get(LOOM_PARAMS.session);
+  const selectedBareId = params.get(LOOM_PARAMS.bareSession);
   const setSelectedId = (id: string | null) => {
     const next = new URLSearchParams(params);
+    // Scene selection is a qualified lane, superseding any bare deep link.
+    next.delete(LOOM_PARAMS.bareSession);
     if (id == null) next.delete(LOOM_PARAMS.session);
     else next.set(LOOM_PARAMS.session, id);
     next.delete(LOOM_PARAMS.event);
@@ -118,6 +121,7 @@ export function LoomPage() {
             timelinePending={timeline.isPending}
             timelineServed={timeline.data?.outcome === 'envelope'}
             selectedId={selectedId}
+            selectedBareId={selectedBareId}
             selectedEncounterId={proximity.selectedEncounterId}
             proximity={proximity.result}
             proximityEncounters={proximity.encounters}
@@ -143,6 +147,7 @@ function TemporalBody({
   timelinePending,
   timelineServed,
   selectedId,
+  selectedBareId,
   selectedEncounterId,
   proximity,
   proximityEncounters,
@@ -156,6 +161,7 @@ function TemporalBody({
   timelinePending: boolean;
   timelineServed: boolean;
   selectedId: string | null;
+  selectedBareId: string | null;
   selectedEncounterId: string | null;
   proximity: LoomProximityState['result'];
   proximityEncounters: LoomProximityState['encounters'];
@@ -168,7 +174,10 @@ function TemporalBody({
   const data = envelope.payload;
   const rows = data.sessions ?? [];
 
-  const selection = useMemo(() => resolveLoomSession(rows, parseLoomSession(selectedId)), [rows, selectedId]);
+  const selection = useMemo(
+    () => resolveLoomSession(rows, parseLoomSession(selectedId, selectedBareId)),
+    [rows, selectedId, selectedBareId],
+  );
   const selectedLane = useMemo(
     () => (selection.kind === 'lane' ? { id: selection.laneId, sessionId: selection.row.session_id } : null),
     [selection],

@@ -1,9 +1,13 @@
 import * as Dialog from '@radix-ui/react-dialog';
 import { Command as CommandIcon, CornerDownLeft, Search } from 'lucide-react';
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { useNavigate } from 'react-router';
-import { WORKSPACES } from '../routes';
-import { channelNumber } from '../channels.ts';
+import { matchPath, useLocation, useNavigate } from 'react-router';
+import {
+  CHANNELS,
+  channelNumber,
+  paletteMatchesQuery,
+  workspaceSearchText,
+} from '../channels.ts';
 import { cn } from '../../ui/cn';
 import { useProjectRegistry, projectRegistryPayload } from '../../data/query/projectRegistry.ts';
 import {
@@ -16,6 +20,7 @@ interface CommandPaletteRow {
   id: string;
   label: string;
   hint: string;
+  searchText: string;
   /** The channel number for a workspace row; project rows have none. */
   channel: string | null;
   action: () => void;
@@ -49,10 +54,15 @@ export function CommandPalette({
   onOpenChange: (open: boolean) => void;
 }) {
   const navigate = useNavigate();
+  const location = useLocation();
   const scope = useScope((state) => state.scope);
   const selectProject = useScope((s) => s.selectProject);
   const [query, setQuery] = useState('');
-  const [active, setActive] = useState(0);
+  const [selection, setSelection] = useState<{
+    query: string;
+    index: number;
+    rowId: string | null;
+  }>({ query: '', index: 0, rowId: null });
   // Entities: registered projects become scope-setting results. Fetched only
   // while the palette is open; a failed registry read simply yields no
   // project rows (workspace navigation never depends on it).
@@ -62,13 +72,42 @@ export function CommandPalette({
   const projects = useProjectRegistry({ enabled: open });
 
   const entries = useMemo<CommandPaletteRow[]>(() => {
-    const workspaceEntries = WORKSPACES.map((w) => ({
-      id: `nav:${w.path}`,
-      label: w.label,
-      hint: 'workspace',
-      channel: channelNumber(w.path),
+    const workspaceEntries = CHANNELS.map((channel) => ({
+      id: `nav:${channel.path}`,
+      label: channel.label,
+      hint: channel.taskHint,
+      searchText: workspaceSearchText(channel),
+      channel: channelNumber(channel.path),
       action: () => {
-        navigate(scopedWorkspacePath(scope, w.path));
+        // Reselecting this workspace is not a renderer or selection reset.
+        // Only an actual workspace/scope transition replaces view-owned state.
+        const params = new URLSearchParams(location.search);
+        // A deep link's scopeLabel is only a display claim. Project identity
+        // is the admitted scope ID; a missing/stale label must not erase the
+        // selected renderer, replay window, or entity in that same project.
+        const sameScope = scope.kind === 'all'
+          ? !params.has('scope')
+          : params.get('scope') === scope.projectId;
+        // The index route mounts Brain too. Reopening it through the palette
+        // must preserve field=sigma and entity selection just like /brain.
+        const sameWorkspace = matchPath(`/${channel.path}`, location.pathname) !== null ||
+          (channel.path === 'brain' && location.pathname === '/');
+        if (!sameWorkspace || !sameScope) {
+          navigate(scopedWorkspacePath(scope, channel.path));
+        } else if (
+          (scope.kind === 'all' && params.has('scopeLabel')) ||
+          (scope.kind === 'project' && params.get('scopeLabel') !== scope.label)
+        ) {
+          // A scopeLabel without a scope ID is not a project selection. Remove
+          // its unverified claim without resetting the current view or entity.
+          // For a real project, refresh only the display label.
+          if (scope.kind === 'project') params.set('scopeLabel', scope.label);
+          else params.delete('scopeLabel');
+          navigate(
+            { pathname: location.pathname, search: `?${params.toString()}`, hash: location.hash },
+            { replace: true },
+          );
+        }
         onOpenChange(false);
       },
     }));
@@ -80,6 +119,7 @@ export function CommandPalette({
               id: `scope:${project.project_id}:${project.canonical_root}`,
               label: project.label,
               hint: `project · ${group.label}`,
+              searchText: project.label.toLowerCase(),
               channel: null,
               action: () => {
                 // The listing already measured `is_active`, against the same
@@ -104,34 +144,50 @@ export function CommandPalette({
           )
         : [];
     return [...workspaceEntries, ...projectEntries];
-  }, [navigate, onOpenChange, projects.data, scope, selectProject]);
+  }, [navigate, location.pathname, location.search, location.hash, onOpenChange, projects.data, scope, selectProject]);
 
   const filtered = useMemo(() => {
-    const q = query.trim().toLowerCase();
-    if (!q) return entries;
-    return entries.filter((entry) => entry.label.toLowerCase().includes(q));
+    const needle = query.trim().toLowerCase();
+    const matchRank = (entry: CommandPaletteRow) => {
+      const label = entry.label.toLowerCase();
+      if (label === needle) return 0;
+      if (label.includes(needle)) return 1;
+      return 2;
+    };
+    // Preserve the rail/project order inside each rank while ensuring that
+    // typing a workspace's exact name selects that workspace on Enter.
+    return entries
+      .filter((entry) => paletteMatchesQuery(entry.searchText, query))
+      .sort((left, right) => matchRank(left) - matchRank(right));
   }, [entries, query]);
 
-  useEffect(() => setActive(0), [query, open]);
   useEffect(() => {
-    if (open) setQuery('');
+    if (open) {
+      setQuery('');
+      setSelection({ query: '', index: 0, rowId: null });
+    }
   }, [open]);
 
   /**
-   * The row actually being pointed at, which is not always the one `active`
-   * holds.
-   *
-   * `active` is only reset by a query change or a reopen, and the list has a
-   * second input: the registry read behind the project rows. A listing that
-   * shrinks, a refetch returning fewer projects, or an `ok` result becoming a
-   * failure, which drops every project row at once, leaves the stored index
-   * past the end. That row does not exist, so `aria-activedescendant` referred
-   * to nothing and Enter fired nothing: a palette that looked navigable and was
-   * inert. Clamped on read rather than corrected in an effect, so there is no
-   * render in which the index is out of range.
+   * Preserve the selected row's identity when a registry refresh reorders
+   * entries. A numeric index alone can silently activate a different project
+   * after the registry changes. When that identity disappears, clamp its last
+   * position to an extant row. Query changes reset selection synchronously.
    */
-  const activeIndex = filtered.length === 0 ? 0 : Math.min(active, filtered.length - 1);
+  const currentSelection =
+    selection.query === query ? selection : { query, index: 0, rowId: null };
+  const matchingIndex = currentSelection.rowId === null
+    ? -1
+    : filtered.findIndex((entry) => entry.id === currentSelection.rowId);
+  const activeIndex = filtered.length === 0
+    ? 0
+    : matchingIndex >= 0
+      ? matchingIndex
+      : Math.max(0, Math.min(currentSelection.index, filtered.length - 1));
   const activeEntry = filtered[activeIndex];
+  const selectIndex = (index: number) => {
+    setSelection({ query, index, rowId: filtered[index]?.id ?? null });
+  };
 
   const listRef = useRef<HTMLUListElement>(null);
   useEffect(() => {
@@ -154,10 +210,12 @@ export function CommandPalette({
       e.preventDefault();
       // From the clamped index, so a shrunk list steps from its last real row
       // rather than from a stale index further down.
-      setActive(Math.min(activeIndex + 1, filtered.length - 1));
+      // An empty result set has no final row. Setting -1 here would leave
+      // a newly fetched matching project invisible to Enter and screen readers.
+      if (filtered.length > 0) selectIndex(Math.min(activeIndex + 1, filtered.length - 1));
     } else if (e.key === 'ArrowUp') {
       e.preventDefault();
-      setActive(Math.max(activeIndex - 1, 0));
+      if (filtered.length > 0) selectIndex(Math.max(activeIndex - 1, 0));
     } else if (e.key === 'Enter') {
       e.preventDefault();
       activeEntry?.action();
@@ -185,7 +243,13 @@ export function CommandPalette({
             <input
               autoFocus
               value={query}
-              onChange={(e) => setQuery(e.target.value)}
+              onChange={(e) => {
+                const nextQuery = e.target.value;
+                // A query edit starts a new search even if the text later
+                // returns to an earlier value. Registry refreshes do not.
+                setSelection({ query: nextQuery, index: 0, rowId: null });
+                setQuery(nextQuery);
+              }}
               placeholder="Go to workspace or project…"
               className="min-h-[var(--touch-target-min)] w-full bg-transparent text-body outline-none placeholder:text-text-muted"
               role="combobox"
@@ -212,7 +276,7 @@ export function CommandPalette({
                   id={optionId(i)}
                   role="option"
                   aria-selected={i === activeIndex}
-                  onMouseEnter={() => setActive(i)}
+                  onMouseEnter={() => selectIndex(i)}
                   onClick={entry.action}
                   className={cn(
                     // The same selection grammar as the rail: a cyan position
@@ -234,10 +298,12 @@ export function CommandPalette({
                   >
                     {entry.channel ?? ''}
                   </code>
-                  <span className="min-w-0 flex-1 truncate">{entry.label}</span>
-                  <span className="flex shrink-0 items-center gap-2 text-sm text-text-muted">
-                    {entry.hint}
-                    {i === activeIndex ? <CornerDownLeft aria-hidden size={11} /> : null}
+                  <span className="min-w-[5rem] flex-1 truncate">{entry.label}</span>
+                  <span className="flex min-w-0 max-w-[45%] items-center gap-2 text-sm text-text-muted">
+                    <span className="min-w-0 truncate">{entry.hint}</span>
+                    {i === activeIndex ? (
+                      <CornerDownLeft aria-hidden size={11} className="shrink-0" />
+                    ) : null}
                   </span>
                 </li>
               ))

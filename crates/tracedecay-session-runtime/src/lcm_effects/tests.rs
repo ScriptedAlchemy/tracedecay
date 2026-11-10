@@ -91,6 +91,26 @@ fn compression_request(session_id: &str) -> LcmCompressionRequest {
     }
 }
 
+#[tokio::test]
+async fn a_queued_compression_honors_cancellation_without_blocking_other_sessions() {
+    let harness = RegisteredGlobalDbHarness::open("lcm-session-compression-turn").await;
+    let signal = CancellationSignal::active("queued-compression").unwrap();
+    let owner = DaemonLcmEffectService::new(harness.registered.clone(), None, None, None);
+    let caller = DaemonLcmEffectService::new(harness.registered.clone(), None, Some(&signal), None);
+    let first = compression_request("first-session");
+    let _held = owner.compression_turn(&first).await.unwrap();
+    let waiting = caller.compress(first);
+    tokio::pin!(waiting);
+    assert!(futures_util::poll!(&mut waiting).is_pending());
+
+    let _independent = owner
+        .compression_turn(&compression_request("other-session"))
+        .await
+        .unwrap();
+    signal.cancel(UtcMicros(1));
+    assert!(matches!(waiting.await, Err(LcmError::Cancelled)));
+}
+
 fn provided_summary(summary_text: impl Into<String>) -> LcmSummarizerMode {
     LcmSummarizerMode::Provided {
         summary_text: summary_text.into(),
@@ -2258,6 +2278,157 @@ async fn partial_revision_invalidation_hides_replay_and_yields_to_a_due_peer() {
 }
 
 #[tokio::test]
+async fn relation_recovery_orders_tied_keys_and_preserves_the_deferred_deadline() {
+    let harness = RegisteredGlobalDbHarness::open("relation-recovery-page-order").await;
+    let db = &harness.registered;
+    let transaction = db.begin_write_transaction().await.unwrap();
+    transaction
+        .execute_batch(
+            "WITH RECURSIVE seq(n) AS (
+                 VALUES(0) UNION ALL SELECT n + 1 FROM seq WHERE n < 70
+             )
+             INSERT INTO session_temporal_generations (
+                 session_id, generation, state, frozen_watermarks_json, created_at
+             ) SELECT printf('relation-page-%02d', n / 2), 1 + n % 2, 'building', '{}', n
+               FROM seq;
+             INSERT INTO session_relation_receipts (
+                 session_id, generation, scope_kind, scope_id, expected_graph_watermark,
+                 state, created_at, recovery_state, recovery_next_attempt_at
+             ) SELECT session_id, generation, 'project_sessions', 'unrelated-scope', 'expected',
+                      'pending', 42, CASE WHEN generation = 1 THEN 'retryable' ELSE 'pending' END,
+                      CASE WHEN created_at = 70 THEN unixepoch() + 86400
+                           ELSE (70 - created_at) % 3 END
+               FROM session_temporal_generations;",
+        )
+        .await
+        .unwrap();
+    transaction.commit().await.unwrap();
+    let access = SessionTemporalAccess::new(&**db);
+    let cancellation = std::sync::Arc::new(tracedecay_graph_db::NeverCancelled);
+    let first = access
+        .recover_pending_session_relation_projection_page(65, cancellation.clone())
+        .await
+        .unwrap();
+    assert_eq!(
+        (first.processed, first.recovered, first.has_more),
+        (65, 0, true)
+    );
+    let snapshot = db.read_snapshot().await.unwrap();
+    let mut rows = snapshot
+        .query(
+            "SELECT generation, recovery_state, recovery_failure_code
+             FROM session_relation_receipts WHERE session_id = 'relation-page-32'
+             ORDER BY generation",
+            (),
+        )
+        .await
+        .unwrap();
+    let settled = rows.next().await.unwrap().unwrap();
+    assert_eq!(settled.get::<i64>(0).unwrap(), 1);
+    assert_eq!(settled.get::<String>(2).unwrap(), "scope_mismatch");
+    let sentinel = rows.next().await.unwrap().unwrap();
+    assert_eq!(sentinel.get::<i64>(0).unwrap(), 2);
+    assert_eq!(sentinel.get::<String>(1).unwrap(), "pending");
+    assert_eq!(sentinel.get::<Option<String>>(2).unwrap(), None);
+    drop(rows);
+    let mut rows = snapshot
+        .query(
+            "SELECT recovery_next_attempt_at FROM session_relation_receipts
+             WHERE session_id = 'relation-page-35' AND generation = 1",
+            (),
+        )
+        .await
+        .unwrap();
+    let deferred_deadline = rows.next().await.unwrap().unwrap().get::<i64>(0).unwrap();
+    drop(rows);
+    drop(snapshot);
+    let rest = access
+        .recover_pending_session_relation_projection_page(65, cancellation.clone())
+        .await
+        .unwrap();
+    assert_eq!(
+        (rest.processed, rest.recovered, rest.has_more),
+        (5, 0, false)
+    );
+    let idle = access
+        .recover_pending_session_relation_projection_page(65, cancellation)
+        .await
+        .unwrap();
+    assert_eq!((idle.processed, idle.has_more), (0, false));
+    assert_eq!(idle.next_retry_at_unix_seconds, Some(deferred_deadline));
+}
+
+#[tokio::test]
+async fn relation_recovery_fragmented_deadlines_preserve_order_across_single_item_pages() {
+    let harness = RegisteredGlobalDbHarness::open("relation-fragmented-deadlines").await;
+    let db = &harness.registered;
+    let transaction = db.begin_write_transaction().await.unwrap();
+    transaction
+        .execute_batch(
+            "WITH RECURSIVE seq(n) AS (
+                 VALUES(0) UNION ALL SELECT n + 1 FROM seq WHERE n < 535
+             )
+             INSERT INTO session_temporal_generations (
+                 session_id, generation, state, frozen_watermarks_json, created_at
+             ) SELECT printf('fragmented-relation-%04d', n), 1, 'building', '{}', n
+               FROM seq;
+             INSERT INTO session_relation_receipts (
+                 session_id, generation, scope_kind, scope_id, expected_graph_watermark,
+                 state, created_at, recovery_state, recovery_next_attempt_at
+             ) SELECT session_id, generation, 'project_sessions', 'unrelated-scope',
+                      'expected', 'pending', created_at,
+                      CASE WHEN created_at < 512 THEN 'retryable' ELSE 'pending' END,
+                      CASE WHEN created_at < 512 THEN unixepoch() + 86400
+                           ELSE created_at - 511 END
+               FROM session_temporal_generations;",
+        )
+        .await
+        .unwrap();
+    transaction.commit().await.unwrap();
+
+    let access = SessionTemporalAccess::new(&**db);
+    let cancellation = std::sync::Arc::new(tracedecay_graph_db::NeverCancelled);
+    // The 512 older receipts are sleeping, while 24 newer due receipts have
+    // 24 distinct deadlines. No four-deadline band can cover the due set.
+    // This forces the fragmented fallback repeatedly, not just on page one.
+    for index in 0..24 {
+        let page = access
+            .recover_pending_session_relation_projection_page(1, cancellation.clone())
+            .await
+            .unwrap();
+        assert_eq!((page.processed, page.recovered), (1, 0));
+        assert_eq!(page.has_more, index < 23);
+
+        let snapshot = db.read_snapshot().await.unwrap();
+        let mut rows = snapshot
+            .query(
+                "SELECT session_id FROM session_relation_receipts
+                 WHERE recovery_state = 'permanent' ORDER BY created_at",
+                (),
+            )
+            .await
+            .unwrap();
+        let mut settled = Vec::new();
+        while let Some(row) = rows.next().await.unwrap() {
+            settled.push(row.get::<String>(0).unwrap());
+        }
+        assert_eq!(settled.len(), index + 1);
+        let expected = format!("fragmented-relation-{:04}", index + 512);
+        assert_eq!(settled.last().map(String::as_str), Some(expected.as_str()));
+    }
+
+    let idle = access
+        .recover_pending_session_relation_projection_page(1, cancellation)
+        .await
+        .unwrap();
+    assert_eq!((idle.processed, idle.has_more), (0, false));
+    assert!(
+        idle.next_retry_at_unix_seconds.is_some(),
+        "the sleeping prefix must retain its future wakeup"
+    );
+}
+
+#[tokio::test]
 async fn malformed_relation_receipt_is_permanent_without_starving_summary_work() {
     let harness = RegisteredGlobalDbHarness::open("lcm-relation-recovery-poison").await;
     let db = harness.registered.clone();
@@ -2439,6 +2610,179 @@ async fn malformed_relation_receipt_is_permanent_without_starving_summary_work()
             .next_retry_delay
             .is_some_and(|delay| !delay.is_zero() && delay <= std::time::Duration::from_secs(60)),
         "the scheduler must retain the isolated relation retry deadline"
+    );
+    let deferred = SessionTemporalAccess::new(&*db)
+        .recover_pending_session_relation_projection_page(
+            1,
+            std::sync::Arc::new(tracedecay_graph_db::NeverCancelled),
+        )
+        .await
+        .unwrap();
+    assert_eq!(deferred.processed, 0, "a future retry is not due");
+    assert!(!deferred.has_more);
+    assert!(deferred.next_retry_at_unix_seconds.is_some());
+
+    // Preserve one-sentinel-row pagination after the idle eligibility probe:
+    // two durable due receipts must be recovered in distinct bounded pages,
+    // with has_more advertising the unprocessed second receipt.
+    let transaction = db.begin_write_transaction().await.unwrap();
+    let changed = transaction
+        .execute(
+            "UPDATE session_relation_receipts
+             SET state = 'pending', graph_watermark = NULL, applied_at = NULL,
+                 recovery_state = 'pending', recovery_failure_code = NULL,
+                 recovery_failure_count = 0,
+                 recovery_next_attempt_at = 0
+             WHERE session_id IN (?1, ?2)",
+            params![poison_session, healthy_session],
+        )
+        .await
+        .unwrap();
+    assert_eq!(changed, 2, "both durable receipts must be present");
+    // The older receipts are valid rows in the registered temporal schema,
+    // but their deadlines are in the future. Only the two real publication
+    // receipts should be recovered, in creation order, on bounded pages.
+    let generations = transaction
+        .execute(
+            "WITH RECURSIVE seq(n) AS (
+                 SELECT 1 UNION ALL SELECT n + 1 FROM seq WHERE n < 256
+             )
+             INSERT INTO session_temporal_generations (
+                 session_id, generation, state, frozen_watermarks_json, created_at
+             )
+             SELECT printf('deferred-relation-%04d', n), 1, 'building', '{}', n FROM seq",
+            (),
+        )
+        .await
+        .unwrap();
+    assert_eq!(generations, 256);
+    let deferred_count = transaction
+        .execute(
+            "WITH RECURSIVE seq(n) AS (
+                 SELECT 1 UNION ALL SELECT n + 1 FROM seq WHERE n < 256
+             )
+             INSERT INTO session_relation_receipts (
+                 session_id, generation, scope_kind, scope_id,
+                 expected_graph_watermark, state, created_at,
+                 recovery_state, recovery_failure_count,
+                 recovery_next_attempt_at
+             )
+             SELECT printf('deferred-relation-%04d', n), 1,
+                    scope.scope_kind, scope.scope_id, 'deferred-test',
+                    'pending', n, 'retryable', 1, unixepoch() + 3600
+             FROM seq CROSS JOIN (
+                 SELECT scope_kind, scope_id
+                 FROM session_relation_receipts WHERE session_id = ?1
+                 LIMIT 1
+             ) AS scope",
+            params![poison_session],
+        )
+        .await
+        .unwrap();
+    assert_eq!(deferred_count, 256);
+    let ordered = transaction
+        .execute(
+            "UPDATE session_relation_receipts
+             SET created_at = CASE session_id WHEN ?1 THEN 1000 ELSE 2000 END
+             WHERE session_id IN (?1, ?2)",
+            params![poison_session, healthy_session],
+        )
+        .await
+        .unwrap();
+    assert_eq!(ordered, 2);
+    transaction.commit().await.unwrap();
+
+    let recovered_first = SessionTemporalAccess::new(&*db)
+        .recover_pending_session_relation_projection_page(
+            1,
+            std::sync::Arc::new(tracedecay_graph_db::NeverCancelled),
+        )
+        .await
+        .unwrap();
+    assert_eq!(recovered_first.processed, 1);
+    assert!(recovered_first.has_more, "the second due receipt is owed");
+    let snapshot = db.read_snapshot().await.unwrap();
+    let mut rows = snapshot
+        .query(
+            "SELECT recovery_state FROM session_relation_receipts WHERE session_id = ?1",
+            params![poison_session],
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        rows.next()
+            .await
+            .unwrap()
+            .unwrap()
+            .get::<String>(0)
+            .unwrap(),
+        "permanent",
+        "the earlier due receipt must settle on the first page"
+    );
+    drop(rows);
+    drop(snapshot);
+
+    let recovered_second = SessionTemporalAccess::new(&*db)
+        .recover_pending_session_relation_projection_page(
+            1,
+            std::sync::Arc::new(tracedecay_graph_db::NeverCancelled),
+        )
+        .await
+        .unwrap();
+    assert_eq!(recovered_second.processed, 1);
+    assert!(!recovered_second.has_more);
+    let idle = SessionTemporalAccess::new(&*db)
+        .recover_pending_session_relation_projection_page(
+            1,
+            std::sync::Arc::new(tracedecay_graph_db::NeverCancelled),
+        )
+        .await
+        .unwrap();
+    assert_eq!(idle.processed, 0, "settled receipts stay parked");
+    assert!(!idle.has_more);
+    assert!(
+        idle.next_retry_at_unix_seconds.is_some(),
+        "sleeping receipts must keep their future retry deadline"
+    );
+    // Waking the entire deferred backlog switches to the creation-ordered
+    // catch-up path. A one-item page must still surface a sentinel and settle
+    // the oldest durable receipt, even when its journal is unavailable.
+    let transaction = db.begin_write_transaction().await.unwrap();
+    let woken = transaction
+        .execute(
+            "UPDATE session_relation_receipts
+             SET recovery_next_attempt_at = 0
+             WHERE session_id LIKE 'deferred-relation-%'",
+            (),
+        )
+        .await
+        .unwrap();
+    assert_eq!(woken, 256);
+    transaction.commit().await.unwrap();
+    let dense = SessionTemporalAccess::new(&*db)
+        .recover_pending_session_relation_projection_page(
+            1,
+            std::sync::Arc::new(tracedecay_graph_db::NeverCancelled),
+        )
+        .await
+        .unwrap();
+    assert_eq!(dense.processed, 1);
+    assert!(dense.has_more, "a dense due queue keeps the page sentinel");
+    let snapshot = db.read_snapshot().await.unwrap();
+    let mut rows = snapshot
+        .query(
+            "SELECT recovery_state, recovery_failure_code
+             FROM session_relation_receipts
+             WHERE session_id = 'deferred-relation-0001'",
+            (),
+        )
+        .await
+        .unwrap();
+    let row = rows.next().await.unwrap().unwrap();
+    assert_eq!(row.get::<String>(0).unwrap(), "permanent");
+    assert_eq!(
+        row.get::<Option<String>>(1).unwrap().as_deref(),
+        Some("journal_missing")
     );
 }
 
