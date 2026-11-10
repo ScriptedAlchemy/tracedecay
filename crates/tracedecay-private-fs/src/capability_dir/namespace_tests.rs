@@ -34,7 +34,10 @@ fn publication_refuses_escaped_sources_and_destinations_without_moving_store_fil
             let error = rename_noreplace(&stage, source.as_os_str(), &target, OsStr::new(name))
                 .unwrap_err();
             assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
-            assert_eq!(fs::read(foreign_path.join(name)).unwrap(), foreign.as_bytes());
+            assert_eq!(
+                fs::read(foreign_path.join(name)).unwrap(),
+                foreign.as_bytes()
+            );
             assert!(!target_path.join(name).exists());
         }
         let destination_name = format!("published-{name}");
@@ -47,7 +50,10 @@ fn publication_refuses_escaped_sources_and_destinations_without_moving_store_fil
                     .unwrap_err();
             assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
             assert_eq!(fs::read(stage_path.join(name)).unwrap(), owned.as_bytes());
-            assert_eq!(fs::read(foreign_path.join(name)).unwrap(), foreign.as_bytes());
+            assert_eq!(
+                fs::read(foreign_path.join(name)).unwrap(),
+                foreign.as_bytes()
+            );
             assert!(!foreign_path.join(&destination_name).exists());
         }
     }
@@ -142,13 +148,9 @@ mod process_replacement {
             ("bridge/sessions.db", "published.sqlite"),
             ("owned.sqlite", "bridge/published.sqlite"),
         ] {
-            let error = rename_noreplace(
-                &stage,
-                OsStr::new(source),
-                &stage,
-                OsStr::new(destination),
-            )
-            .unwrap_err();
+            let error =
+                rename_noreplace(&stage, OsStr::new(source), &stage, OsStr::new(destination))
+                    .unwrap_err();
             assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
         }
         for name in FAMILY {

@@ -679,7 +679,9 @@ fn worker_identity_refuses_a_vfs_without_move_attestation() {
     // Rejecting that connection must leave the real database intact and
     // permit a worker using the ordinary SQLite VFS.
     let real_connection = Connection::open(file.path()).unwrap();
-    pinned.verify_connection(&real_connection, file.path()).unwrap();
+    pinned
+        .verify_connection(&real_connection, file.path())
+        .unwrap();
     assert_eq!(
         real_connection.query_row("SELECT value FROM items", [], |row| row.get::<_, i64>(0)),
         Ok(1)
