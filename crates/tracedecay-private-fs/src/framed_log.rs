@@ -1054,7 +1054,9 @@ mod tests {
         let root = tempfile::tempdir().expect("isolated staging root");
         let path = root.path().join("staged.tmp");
         let mut writer = File::create(&path).expect("original staged writer");
-        writer.write_all(b"exact sealed bytes").expect("original bytes");
+        writer
+            .write_all(b"exact sealed bytes")
+            .expect("original bytes");
         let original = writer.metadata().expect("authenticated writer inode");
 
         let replacement = root.path().join("replacement.tmp");
@@ -1084,14 +1086,18 @@ mod tests {
         let root = tempfile::tempdir().expect("isolated staging root");
         let path = root.path().join("staged.tmp");
         let mut writer = File::create(&path).expect("original staged writer");
-        writer.write_all(b"exact sealed bytes").expect("original bytes");
+        writer
+            .write_all(b"exact sealed bytes")
+            .expect("original bytes");
         let original = writer.metadata().expect("authenticated original inode");
         let mut batch = super::DurableFileBatch::new();
         batch
             .written_with_identity(&path, &writer, &original)
             .expect("authenticate and flush original member");
         drop(writer);
-        batch.sync().expect("unchanged identity is still publishable");
+        batch
+            .sync()
+            .expect("unchanged identity is still publishable");
 
         let replacement = root.path().join("replacement.tmp");
         fs::write(&replacement, b"exact sealed bytes").expect("same-byte replacement");
@@ -1126,7 +1132,9 @@ mod tests {
         fresh
             .written(&path, &current)
             .expect("authenticate the replacement");
-        fresh.sync().expect("new batch publishes the exact replacement");
+        fresh
+            .sync()
+            .expect("new batch publishes the exact replacement");
         assert_eq!(
             fs::read(&path).expect("freshly durable bytes"),
             b"exact sealed bytes"
