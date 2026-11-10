@@ -738,7 +738,7 @@ fn read_bounded_child_receipt(
     name: &OsStr,
     maximum: usize,
 ) -> io::Result<Vec<u8>> {
-    let name = CString::new(name.as_bytes())
+    let c_name = CString::new(name.as_bytes())
         .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "receipt name contains NUL"))?;
     // SAFETY: the held directory fd is valid; name is a NUL-terminated
     // sibling component. O_NOFOLLOW prevents link traversal and O_NONBLOCK
@@ -746,12 +746,27 @@ fn read_bounded_child_receipt(
     let descriptor = unsafe {
         libc::openat(
             directory.as_raw_fd(),
-            name.as_ptr(),
+            c_name.as_ptr(),
             libc::O_RDONLY | libc::O_CLOEXEC | libc::O_NOFOLLOW | libc::O_NONBLOCK,
         )
     };
     if descriptor < 0 {
-        return Err(io::Error::last_os_error());
+        let error = io::Error::last_os_error();
+        // Unix sockets may reject O_RDONLY with ENXIO before fstat can
+        // establish their type. Only downgrade that error when the SAME
+        // held directory still names a nonregular receipt. A regular file's
+        // I/O failure must remain a refusal of complete census coverage.
+        if error.raw_os_error() == Some(libc::ENXIO)
+            && directory
+                .symlink_metadata(name)
+                .is_ok_and(|metadata| !metadata.file_type().is_file())
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "sealed receipt is not a regular file",
+            ));
+        }
+        return Err(error);
     }
     // SAFETY: openat returned a new owned fd and this File is its sole owner.
     let file = unsafe { std::fs::File::from_raw_fd(descriptor) };
@@ -1259,6 +1274,51 @@ mod tests {
             assert_eq!(std::fs::read(root.join("head/shared")).unwrap(), b"rows");
             assert_eq!(std::fs::read(&base).unwrap(), b"rows");
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn socket_receipt_is_unrecognized_without_hiding_the_verified_head() {
+        use std::os::unix::net::UnixListener;
+
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("s");
+        let head = root.join("head");
+        let unknown = root.join("unknown");
+        std::fs::create_dir_all(&head).unwrap();
+        std::fs::create_dir(&unknown).unwrap();
+        std::fs::write(head.join("owner"), b"owned").unwrap();
+        std::fs::write(head.join("payload"), b"durable").unwrap();
+        std::fs::write(unknown.join("sentinel"), b"preserve").unwrap();
+        let _socket = UnixListener::bind(unknown.join("owner")).unwrap();
+
+        // On Unix, openat(O_RDONLY | O_NONBLOCK) on a socket may fail with
+        // ENXIO before a regular-file check. The held directory's metadata
+        // proves that entry is nonregular, not an unreadable owned receipt.
+        let receipt = read_bounded_child_receipt(&open(&unknown), OsStr::new("owner"), 64);
+        assert_eq!(receipt.unwrap_err().kind(), io::ErrorKind::InvalidData);
+
+        let totals = census_receipted_directory_bytes(
+            &root,
+            2_u8,
+            |_| ("owner", 64),
+            |_, receipt| {
+                if receipt == Some(b"owned".as_slice()) {
+                    0
+                } else {
+                    2
+                }
+            },
+        )
+        .unwrap();
+        assert_eq!(totals.get(&0), Some(&(1, 12)));
+        assert_eq!(totals.get(&2), Some(&(1, 0)));
+        assert_eq!(std::fs::read(head.join("payload")).unwrap(), b"durable");
+        assert_eq!(
+            std::fs::read(unknown.join("sentinel")).unwrap(),
+            b"preserve"
+        );
+        assert!(unknown.join("owner").exists());
     }
 
     #[cfg(unix)]
