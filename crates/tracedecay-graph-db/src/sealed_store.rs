@@ -965,8 +965,8 @@ fn retire_sealed_directory_checked(
                 && expected_digest.is_none_or(|digest| receipt.recovered_digest == digest)
         },
     );
-    let removed =
-        result.map_err(|error| sealed_store_io_failure("sealed generation retirement refused", error))?;
+    let removed = result
+        .map_err(|error| sealed_store_io_failure("sealed generation retirement refused", error))?;
     // A resident reader carries exact proof that this artifact was installed.
     // If its root or child disappeared before we acquired a deletion capability,
     // physical retirement was not confirmed: the directory may have been moved
