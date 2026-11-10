@@ -70,6 +70,34 @@ impl VerifiedRootCacheV1 {
         self.last_access = self.last_access.saturating_add(1);
         self.last_access
     }
+
+    /// Keep the newest authenticated root warm when all older roots have
+    /// active proofs. Excess entries are bounded by those outstanding pins
+    /// and trimmed as soon as their proofs finish.
+    fn trim_idle(&mut self) {
+        if self.roots.len() <= MAX_VERIFIED_SEGMENT_ROOTS {
+            return;
+        }
+        let newest = self
+            .roots
+            .iter()
+            .max_by_key(|(_, (_, accessed))| *accessed)
+            .map(|(root, _)| root.clone());
+        while self.roots.len() > MAX_VERIFIED_SEGMENT_ROOTS {
+            let oldest = self
+                .roots
+                .iter()
+                .filter(|(root, (snapshot, _))| {
+                    newest.as_deref() != Some(root.as_path()) && Arc::strong_count(snapshot) == 1
+                })
+                .min_by_key(|(_, (_, accessed))| *accessed)
+                .map(|(root, _)| root.clone());
+            let Some(oldest) = oldest else {
+                break;
+            };
+            self.roots.remove(&oldest);
+        }
+    }
 }
 
 /// Per segments root, the last successfully committed proof. In-flight proofs
@@ -161,7 +189,7 @@ impl SealedSegmentProofV1<'_> {
 
     /// Remember exactly this generation, but do not let a late proof replace
     /// a snapshot another successful proof has committed since we began.
-    pub(super) fn commit(self) {
+    pub(super) fn commit(mut self) {
         // Every reused entry equals its prior value. With no new fingerprints,
         // equal cardinality proves the same map without another full scan.
         // Keep that snapshot's identity: an unchanged overlapping proof must
@@ -186,26 +214,29 @@ impl SealedSegmentProofV1<'_> {
         };
         if unchanged {
             let accessed = roots.next_access();
-            roots
-                .roots
-                .insert(self.segments_root, (Arc::new(self.proven), accessed));
-            if roots.roots.len() > MAX_VERIFIED_SEGMENT_ROOTS {
-                // An in-flight proof holds an Arc to its parent snapshot.
-                // Evicting that snapshot would reject its valid successor
-                // at commit and make the next edit rehash the generation.
-                // The freshly inserted snapshot has only the cache owner,
-                // so an over-capacity insertion always has a candidate.
-                let oldest = roots
-                    .roots
-                    .iter()
-                    .filter(|(_, (snapshot, _))| Arc::strong_count(snapshot) == 1)
-                    .min_by_key(|(_, (_, accessed))| *accessed)
-                    .map(|(root, _)| root.clone());
-                if let Some(oldest) = oldest {
-                    roots.roots.remove(&oldest);
-                }
-            }
+            roots.roots.insert(
+                self.segments_root.clone(),
+                (Arc::new(std::mem::take(&mut self.proven)), accessed),
+            );
+            roots.trim_idle();
         }
+    }
+}
+
+impl Drop for SealedSegmentProofV1<'_> {
+    fn drop(&mut self) {
+        // Release the parent pin before trimming. An all-pinned burst may
+        // have temporarily retained a successfully authenticated new root
+        // above the idle cap; leaving the last active proof reaps it.
+        if self.prior.take().is_none() {
+            return;
+        }
+        let mut roots = self
+            .verified
+            .roots
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        roots.trim_idle();
     }
 }
 
@@ -499,6 +530,75 @@ mod tests {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         assert_eq!(cache.roots.len(), MAX_VERIFIED_SEGMENT_ROOTS);
+    }
+
+    #[test]
+    fn all_pinned_roots_preserve_newly_authenticated_source_until_idle_trim() {
+        let temp = TempDir::new().unwrap();
+        let verified = VerifiedSealedSegmentsV1::default();
+        let mut existing = Vec::new();
+        for index in 0..MAX_VERIFIED_SEGMENT_ROOTS {
+            let root = temp.path().join(format!("root-{index}"));
+            std::fs::create_dir(&root).unwrap();
+            let (digest, path) = write_segment(&root, b"[1]");
+            let mut initial = verified.begin(&root);
+            authenticate(&mut initial, &digest, &path);
+            initial.commit();
+            existing.push((root, digest, path));
+        }
+
+        // The entire parent cache is pinned by real in-flight proofs. The
+        // previously sole evictable candidate was the successful newcomer.
+        let mut pinned = Vec::new();
+        for (root, digest, path) in &existing {
+            let mut proof = verified.begin(root);
+            assert!(proof.already_verified(digest, 3, path));
+            pinned.push(proof);
+        }
+        let new_root = temp.path().join("new-root");
+        std::fs::create_dir(&new_root).unwrap();
+        let (new_digest, new_path) = write_segment(&new_root, b"[2]");
+        let mut newcomer = verified.begin(&new_root);
+        authenticate(&mut newcomer, &new_digest, &new_path);
+        newcomer.commit();
+
+        let mut warm = verified.begin(&new_root);
+        assert!(
+            warm.already_verified(&new_digest, 3, &new_path),
+            "a complete new-root proof must not be its own eviction victim"
+        );
+        drop(warm);
+        assert_eq!(
+            verified
+                .roots
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .roots
+                .len(),
+            MAX_VERIFIED_SEGMENT_ROOTS + 1,
+            "only the one temporarily pinned-over-cap root may remain"
+        );
+
+        // Releasing old proof references restores the idle bound without
+        // discarding new source or reintroducing a stale parent entry.
+        drop(pinned);
+        let mut retained = verified.begin(&new_root);
+        assert!(retained.already_verified(&new_digest, 3, &new_path));
+        assert_eq!(
+            verified
+                .roots
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .roots
+                .len(),
+            MAX_VERIFIED_SEGMENT_ROOTS
+        );
+        let (old_root, old_digest, old_path) = &existing[0];
+        let mut evicted = verified.begin(old_root);
+        assert!(
+            !evicted.already_verified(old_digest, 3, old_path),
+            "the oldest retired root, not the new generation, must be evicted"
+        );
     }
 
     #[test]
