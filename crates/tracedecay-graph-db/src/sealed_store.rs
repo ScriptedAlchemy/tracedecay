@@ -965,9 +965,19 @@ fn retire_sealed_directory_checked(
                 && expected_digest.is_none_or(|digest| receipt.recovered_digest == digest)
         },
     );
-    result
-        .map(|_| ())
-        .map_err(|error| sealed_store_io_failure("sealed generation retirement refused", error))
+    let removed =
+        result.map_err(|error| sealed_store_io_failure("sealed generation retirement refused", error))?;
+    // A resident reader carries exact proof that this artifact was installed.
+    // If its root or child disappeared before we acquired a deletion capability,
+    // physical retirement was not confirmed: the directory may have been moved
+    // aside and still contain the sole durable generation. Keep the reader
+    // registered so maintenance can retry rather than mark it collected.
+    if !removed && expected_digest.is_some() {
+        return Err(GraphDbError::unavailable(
+            "registered sealed generation retirement found no owned artifact",
+        ));
+    }
+    Ok(())
 }
 
 /// Staging and invalid-artifact cleanup are best effort. Retiring an accepted
@@ -4108,6 +4118,87 @@ mod build_tests {
         parent.retire_sealed_generation_store(&locator).unwrap();
         assert!(parent.sealed_generation_reader(&locator).is_none());
         assert!(!store.directory.exists());
+    }
+
+    /// A missing pathname is not evidence that an installed generation's
+    /// durable bytes were removed. It may have been relocated between
+    /// registration and the retirement attempt.
+    #[test]
+    fn registered_retirement_refuses_disappeared_root_or_child_until_restored() {
+        let check: &dyn Fn() -> Result<(), GraphDbError> = &|| Ok(());
+        for move_root in [true, false] {
+            let temp = tempfile::tempdir().unwrap();
+            let database_path = temp.path().join("source.grafeo");
+            let manifest = manifest(2, 1);
+            let identity = manifest.identity();
+            let expected = manifest.expected_recovered_digest(check).unwrap();
+            let (store, _) = build_or_open_sealed_store(
+                SealedRowSource::Manifest(&manifest),
+                &identity,
+                &expected,
+                &database_path,
+                check,
+            )
+            .unwrap();
+            let locator = crate::lease::GenerationLocator::new(
+                identity.projection.clone(),
+                identity.generation.clone(),
+            );
+            let parent = GraphDb::open(GraphDbOpenOptions {
+                location: GraphDbLocation::Persistent(database_path.clone()),
+                expected_format: GraphFormatVersion::current(),
+                durability: GraphDurability::WalSync,
+                cancellation: Arc::new(NeverCancelled),
+            })
+            .unwrap();
+            parent
+                .inner
+                .sealed_generations
+                .write()
+                .unwrap()
+                .insert(locator.clone(), Arc::clone(&store));
+
+            let root = sealed_store_root(&database_path);
+            let (original, relocated) = if move_root {
+                (root, temp.path().join("relocated-sealed-root"))
+            } else {
+                (store.directory.clone(), root.join("relocated-sealed-child"))
+            };
+            std::fs::rename(&original, &relocated).unwrap();
+            let surviving_receipt = if move_root {
+                relocated
+                    .join(store.directory.file_name().unwrap())
+                    .join(SEALED_STORE_RECEIPT_FILE)
+            } else {
+                relocated.join(SEALED_STORE_RECEIPT_FILE)
+            };
+            let receipt = std::fs::read(&surviving_receipt).unwrap();
+
+            let refused = parent.retire_sealed_generation_store(&locator);
+            assert!(
+                matches!(&refused, Err(GraphDbError::Unavailable { .. })),
+                "missing owned artifact must remain pending (root={move_root}): {refused:?}"
+            );
+            assert_eq!(
+                std::fs::read(&surviving_receipt).unwrap(),
+                receipt,
+                "retirement must preserve the relocated sealed receipt"
+            );
+            let retained = parent
+                .sealed_generation_reader(&locator)
+                .expect("failed retirement must retain its registered reader");
+            assert!(Arc::ptr_eq(&retained, &store));
+            drop(retained);
+
+            // Retry against the restored owner must really delete the bytes
+            // and remove the reader. A permanent refusal cannot pass.
+            std::fs::rename(&relocated, &original).unwrap();
+            parent.retire_sealed_generation_store(&locator).unwrap();
+            assert!(parent.sealed_generation_reader(&locator).is_none());
+            assert!(!store.directory.exists());
+            // Disk-only duplicate notifications remain idempotent.
+            retire_sealed_directory_checked(&store.directory, &locator, None).unwrap();
+        }
     }
 
     #[cfg(unix)]
