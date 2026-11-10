@@ -3189,8 +3189,7 @@ mod tests {
             assert!(
                 matches!(
                     (&uninterrupted, retired),
-                    (GraphDbError::Corrupt { .. }, false)
-                        | (GraphDbError::SealSuperseded, true)
+                    (GraphDbError::Corrupt { .. }, false) | (GraphDbError::SealSuperseded, true)
                 ),
                 "unexpected retirement classification: {uninterrupted:?}"
             );
