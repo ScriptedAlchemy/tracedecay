@@ -1,4 +1,3 @@
-use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -325,17 +324,31 @@ async fn activation_is_pinned_to_the_generation_the_refresh_extends() {
     );
 }
 
-#[derive(Default)]
 struct GatedHistory {
     entered: tokio::sync::Notify,
-    release: tokio::sync::Notify,
+    release: tokio::sync::watch::Sender<bool>,
+}
+
+impl Default for GatedHistory {
+    fn default() -> Self {
+        Self {
+            entered: tokio::sync::Notify::new(),
+            release: tokio::sync::watch::Sender::new(false),
+        }
+    }
 }
 
 impl SessionHistoricalIngestor for GatedHistory {
     fn run_pass(&self) -> SessionHistoricalIngestPass<'_> {
+        let mut release = self.release.subscribe();
         Box::pin(async move {
             self.entered.notify_one();
-            self.release.notified().await;
+            // The watch latch preserves release even when it precedes this poll,
+            // while yielding the native worker to concurrent live projection.
+            release
+                .wait_for(|released| *released)
+                .await
+                .expect("history release sender remains open");
             SessionHistoricalIngestOutcome::Complete.into()
         })
     }
@@ -345,12 +358,26 @@ impl SessionHistoricalIngestor for GatedHistory {
     }
 
     fn cancel(&self) {
-        self.release.notify_one();
+        let _ = self.release.send_replace(true);
     }
+}
+
+#[derive(Clone, Copy, Debug)]
+enum PublicationScope {
+    Session,
+    Profile,
 }
 
 #[tokio::test]
 async fn reset_requested_during_a_refresh_supersedes_its_candidate() {
+    // Each request wakes the worker immediately. A second request may already
+    // belong to the replacement pass, so exercise each scope on its own reset.
+    for scope in [PublicationScope::Session, PublicationScope::Profile] {
+        assert_superseded_publication(scope).await;
+    }
+}
+
+async fn assert_superseded_publication(scope: PublicationScope) {
     let tmp = TempDir::new().unwrap();
     let (runtime, path, stale) = frontier_digest_fixture(&tmp, true).await;
     let session_id = stale.session_id().clone();
@@ -398,23 +425,28 @@ async fn reset_requested_during_a_refresh_supersedes_its_candidate() {
         )
         .await;
     history.entered.notified().await;
-    let named_join = wake.wake_and_wait_for_session_projection(&session_id, Duration::from_secs(5));
-    let aggregate_join = wake.wake_and_wait_for_projection(Duration::from_secs(5));
-    tokio::pin!(named_join, aggregate_join);
+    let timeout = Duration::from_secs(5);
+    let published = match scope {
+        PublicationScope::Session => {
+            wake.wake_and_wait_for_session_projection(&session_id, timeout)
+                .await
+        }
+        PublicationScope::Profile => wake.wake_and_wait_for_projection(timeout).await,
+    };
+    assert!(
+        !published,
+        "the superseded operation published for {scope:?}"
+    );
     assert_eq!(
-        std::future::poll_fn(|cx| std::task::Poll::Ready((
-            named_join.as_mut().poll(cx).is_pending(),
-            aggregate_join.as_mut().poll(cx).is_pending(),
-        )))
+        rows(
+            &path,
+            "SELECT operation_id FROM session_refresh_operations WHERE state = 'failed'"
+        )
         .await,
-        (true, true)
+        vec![stale.operation_id().as_str()],
+        "{scope:?} must observe the failed operation while history remains parked"
     );
-    history.release.notify_one();
-    assert_eq!(
-        tokio::join!(named_join, aggregate_join),
-        (false, false),
-        "the superseded operation must refuse both waiting publication joins"
-    );
+    assert!(!history.release.send_replace(true));
     registry.wait_profile_idle(&path).await;
 
     assert_eq!(

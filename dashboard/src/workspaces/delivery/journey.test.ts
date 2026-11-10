@@ -83,7 +83,7 @@ describe('buildJourney', () => {
     expect(byLane.get('sessions')!.episodes[0]).toMatchObject({
       grade: 'inferred',
       at: null,
-      href: '/loom?loomSession=session.alpha.1',
+      href: '/loom?loomBareSession=session.alpha.1',
     });
     // Objective, session, and the two agent-usage rows carry no event time.
     expect(model.undated).toBe(4);
@@ -101,7 +101,7 @@ describe('buildJourney', () => {
     expect(Object.fromEntries(url.searchParams)).toEqual({
       scope: 'project.alpha',
       scopeLabel: 'Alpha',
-      loomSession: 'session.alpha.1',
+      loomBareSession: 'session.alpha.1',
     });
   });
 
