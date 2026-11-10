@@ -1442,7 +1442,7 @@ mod auxiliary_scheduling_tests {
         AcceptedRequest, AuxiliaryWork, BatchCoalescingWindow, IncrementalVacuumCommand,
         PendingBatchDwell, WriterActorError, build_batches, checkpoint_config, dwell_for_batch,
         enqueue, incremental_vacuum_error, reject_faulted_execution_batches,
-        reject_retired_write_ingress, reject_incremental_vacuum, rollback_incremental_vacuum,
+        reject_incremental_vacuum, reject_retired_write_ingress, rollback_incremental_vacuum,
         run_incremental_vacuum, select_auxiliary_work,
     };
 
