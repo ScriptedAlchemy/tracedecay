@@ -594,45 +594,33 @@ impl Worker {
                 break;
             }
             if self.state.load(Ordering::Acquire) == WriterState::Faulted as u8 {
-                reject_all(&mut queue, &self.telemetry, UnavailableReasonV1::Faulted);
+                // A permanent fault must release its SQLite connection, even
+                // when registered clients still hold idle channel senders.
+                // Close ingress before rejecting already-admitted writes so
+                // a racing sender cannot lose its typed fault reply.
+                self.exact_sql_receiver.close();
+                self.incremental_vacuum_receiver.close();
+                self.checkpoint_receiver.close();
+                reject_faulted_write_ingress(&mut self.receiver, &mut queue, &self.telemetry);
+                drain_command_ingress(
+                    &mut self.exact_sql_receiver,
+                    &mut exact_sql_queue,
+                    &mut exact_sql_closed,
+                );
+                drain_command_ingress(
+                    &mut self.incremental_vacuum_receiver,
+                    &mut incremental_vacuum_queue,
+                    &mut incremental_vacuum_closed,
+                );
+                drain_command_ingress(
+                    &mut self.checkpoint_receiver,
+                    &mut checkpoint_queue,
+                    &mut checkpoint_closed,
+                );
                 reject_all_exact_sql(&mut exact_sql_queue);
                 reject_all_incremental_vacuum(&mut incremental_vacuum_queue);
                 checkpoint_queue.clear();
-                if input_closed
-                    && exact_sql_closed
-                    && incremental_vacuum_closed
-                    && checkpoint_closed
-                {
-                    break;
-                }
-                let wake = wait_for_work(
-                    &self.cx,
-                    &mut self.receiver,
-                    &mut self.exact_sql_receiver,
-                    &mut self.incremental_vacuum_receiver,
-                    &mut self.checkpoint_receiver,
-                    &mut self.shutdown_receiver,
-                    input_closed,
-                    exact_sql_closed,
-                    incremental_vacuum_closed,
-                    checkpoint_closed,
-                    earliest(None, probe.as_ref()),
-                )
-                .await;
-                apply_wake(
-                    wake,
-                    &mut queue,
-                    &mut inflight,
-                    &mut exact_sql_queue,
-                    &mut incremental_vacuum_queue,
-                    &mut checkpoint_queue,
-                    &self.telemetry,
-                    &mut input_closed,
-                    &mut exact_sql_closed,
-                    &mut incremental_vacuum_closed,
-                    &mut checkpoint_closed,
-                );
-                continue;
+                return;
             }
             if let Some(command) = checkpoint_queue.pop_front() {
                 self.run_requested_checkpoint(&mut checkpoint, command)
