@@ -458,8 +458,11 @@ fn census_receipted_children<K: Ord + Copy>(
     for name in entries {
         let name = name?;
         single_component(&name)?;
+        // A real generation that cannot be opened may still own gigabytes.
+        // Do not report complete zero-byte coverage by treating I/O failure
+        // as an unknown entry; preserve the failure for partial reporting.
         let child = if root.symlink_metadata(&name)?.is_dir() {
-            root.open_dir_nofollow(&name).ok()
+            Some(root.open_dir_nofollow(&name)?)
         } else {
             None
         };
@@ -1238,6 +1241,46 @@ mod tests {
             assert_eq!(std::fs::read(root.join("head/shared")).unwrap(), b"rows");
             assert_eq!(std::fs::read(&base).unwrap(), b"rows");
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn inaccessible_generation_refuses_complete_census_and_recovers() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("sealed");
+        let generation = root.join("generation");
+        std::fs::create_dir_all(&generation).unwrap();
+        std::fs::write(generation.join("owner"), b"owned").unwrap();
+        std::fs::write(generation.join("payload"), b"durable").unwrap();
+
+        let original = std::fs::metadata(&generation).unwrap().permissions();
+        std::fs::set_permissions(&generation, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let refused = census_receipted_directory_bytes(
+            &root,
+            false,
+            |_| ("owner", 16),
+            |_, receipt| receipt == Some(b"owned".as_slice()),
+        );
+        // Restore access before assertions so even a failed test can reclaim
+        // its fixture, and so recovery exercises the exact same stored bytes.
+        std::fs::set_permissions(&generation, original).unwrap();
+        assert_eq!(
+            refused
+                .expect_err("an unreadable generation cannot be reported as zero")
+                .kind(),
+            io::ErrorKind::PermissionDenied,
+        );
+        let complete = census_receipted_directory_bytes(
+            &root,
+            false,
+            |_| ("owner", 16),
+            |_, receipt| receipt == Some(b"owned".as_slice()),
+        )
+        .unwrap();
+        assert_eq!(complete.get(&true), Some(&(1, 12)));
+        assert_eq!(std::fs::read(generation.join("payload")).unwrap(), b"durable");
     }
 
     #[test]
