@@ -2173,7 +2173,10 @@ mod tests {
         let finding = &observed[&hash_key];
         let statement = finding.finding().coverage().statement();
         assert_eq!(finding.finding().state(), DoctorEvidenceStateV1::Degraded);
-        assert!(statement.contains("full path in storage report"), "{statement}");
+        assert!(
+            statement.contains("full path in storage report"),
+            "{statement}"
+        );
         assert!(
             statement.ends_with(&format!("{} of 1 B bound", format_bytes(bytes))),
             "the complete numeric bound must survive a long evidence key: {statement}"
