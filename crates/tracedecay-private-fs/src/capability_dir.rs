@@ -392,6 +392,8 @@ pub fn install_child_directory_noreplace_nofollow(
 /// ambient paths. Unknown entries are counted but never traversed; only
 /// multiply linked inodes consume deduplication memory. Receipts are bounded
 /// and read from the same child whose bytes are subsequently charged.
+/// Category ordering is authority ordering: lower keys receive shared
+/// physical bytes before higher keys, independent of directory iteration.
 pub fn census_receipted_directory_bytes<K: Ord + Copy>(
     root_path: &Path,
     unrecognized: K,
@@ -405,8 +407,8 @@ pub fn census_receipted_directory_bytes<K: Ord + Copy>(
     };
     let mut totals = std::collections::BTreeMap::<K, (u64, u64)>::new();
     // Hard links belong to the highest-priority verified category, not the
-    // first entry returned by read_dir. Retain only multiply-linked identities
-    // so the census remains bounded independently of file count and size.
+    // first entry returned by read_dir. Only multiply-linked identities need
+    // tracking; memory depends on shared inodes, not file byte size.
     let mut counted = std::collections::HashMap::<(u64, u64), (K, u64)>::new();
     for entry in root.read_dir(".")? {
         let entry = entry?;
