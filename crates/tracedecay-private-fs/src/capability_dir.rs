@@ -248,7 +248,10 @@ pub fn write_exclusive_pending_receipt_nofollow(
     #[cfg(unix)]
     let marker_identity = {
         use cap_std::fs::MetadataExt;
-        marker.metadata().ok().map(|metadata| (metadata.dev(), metadata.ino()))
+        marker
+            .metadata()
+            .ok()
+            .map(|metadata| (metadata.dev(), metadata.ino()))
     };
     let written = marker.write_all(contents).and_then(|()| marker.sync_all());
     drop(marker);

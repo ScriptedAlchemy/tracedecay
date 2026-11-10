@@ -184,9 +184,10 @@ impl SpillDirectory {
         }
         let installed = tracedecay_private_fs::framed_log::rename_noreplace(staging.path(), path);
         if let Err(error) = installed {
-            let root = staging.path().parent().ok_or_else(|| {
-                GraphDbError::invalid("graph row spill directory has no parent")
-            })?;
+            let root = staging
+                .path()
+                .parent()
+                .ok_or_else(|| GraphDbError::invalid("graph row spill directory has no parent"))?;
             // On failure, only the exact owner receipt read from the opened
             // child authorizes recursive removal. A substituted directory,
             // even an ordinary real directory, must survive unchanged.

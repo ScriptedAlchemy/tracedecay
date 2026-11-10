@@ -93,7 +93,9 @@ fn lazy_open_rechecks_close_before_materializing_an_engine() {
         .unwrap()
         .unwrap();
     assert_eq!(
-        entity.properties.get(&GraphPropertyName::new("name").unwrap()),
+        entity
+            .properties
+            .get(&GraphPropertyName::new("name").unwrap()),
         Some(&GraphProperty::String("retained".to_owned()))
     );
     drop(snapshot);
