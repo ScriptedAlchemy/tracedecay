@@ -1234,16 +1234,20 @@ fn run_incremental_vacuum(
         }));
         return !connection.is_autocommit();
     }
-    let match_result = {
+    // A named `Result<Transaction<'_>, _>` stays drop-live (and so keeps the
+    // mutable connection borrow) through the failure arm. Reduce the begin
+    // result to an owned error inside a `let ... else` scrutinee: its
+    // temporaries are dropped before the else block inspects the connection.
+    let mut begin_failure = None;
+    let Ok(mut transaction) = ({
         let _span = tracing::trace_span!("rusqlite.begin_immediate").entered();
         connection.transaction_with_behavior(TransactionBehavior::Immediate)
-    };
-    let mut transaction = match match_result {
-        Ok(transaction) => transaction,
-        Err(error) => {
-            command.settle(Err(incremental_vacuum_error(error)));
-            return !connection.is_autocommit();
+    })
+    .map_err(|error| begin_failure = Some(incremental_vacuum_error(error))) else {
+        if let Some(failure) = begin_failure {
+            command.settle(Err(failure));
         }
+        return !connection.is_autocommit();
     };
     // Each result row releases one page. pragma_update only steps once, so
     // drain this bounded pragma before deciding whether its transaction commits.

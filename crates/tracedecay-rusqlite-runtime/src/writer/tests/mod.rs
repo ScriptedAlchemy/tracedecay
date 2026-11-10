@@ -24,6 +24,7 @@ use tracedecay_store::{
 use super::*;
 use crate::{
     StorageOperationExecutor,
+    admission::QueueItem,
     checkpoint::{
         CheckpointBlockers, CheckpointDecision, CheckpointInterruption, CheckpointMode,
         CheckpointOutcome, CheckpointPressure, CheckpointReport, CheckpointResult, WalPressure,
@@ -354,7 +355,9 @@ fn faulted_writer_retires_without_waiting_for_registered_client_senders() {
         "faulted writer retained its SQLite connection while clients remained registered"
     );
     assert_eq!(
-        response.try_recv().expect("accepted request receives a fault reply"),
+        response
+            .try_recv()
+            .expect("accepted request receives a fault reply"),
         Ok(RuntimeSubmitOutcomeV1::Unavailable {
             reason: UnavailableReasonV1::Faulted,
         })
