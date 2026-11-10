@@ -88,8 +88,7 @@ impl AuthenticatedSubmodule {
 
     pub fn checkout_is_live(&self) -> io::Result<bool> {
         let marker = self.worktree.join(".git");
-        let checkout_matches = self.worktree.canonicalize().ok().as_ref()
-            == Some(&self.worktree)
+        let checkout_matches = self.worktree.canonicalize().ok().as_ref() == Some(&self.worktree)
             && marker
                 .symlink_metadata()
                 .is_ok_and(|metadata| metadata.is_file())

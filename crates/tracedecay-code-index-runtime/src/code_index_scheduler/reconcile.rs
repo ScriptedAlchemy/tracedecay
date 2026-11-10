@@ -4165,9 +4165,9 @@ impl CodeIndexWorktreeSchedulerV1 {
         )
         .map_err(|error| CodeIndexSchedulerErrorV1::Git(error.to_string()))?;
         if !classification
-                .child_bindings_live()
-                .map_err(|error| CodeIndexSchedulerErrorV1::Git(error.to_string()))?
-            {
+            .child_bindings_live()
+            .map_err(|error| CodeIndexSchedulerErrorV1::Git(error.to_string()))?
+        {
             return Err(CodeIndexSchedulerErrorV1::Git(
                 "authenticated child checkout binding changed during classification".into(),
             ));
@@ -4519,9 +4519,9 @@ impl CodeIndexWorktreeSchedulerV1 {
             retained_reservations,
         };
         if !classification
-                .child_bindings_live()
-                .map_err(|error| CodeIndexSchedulerErrorV1::Git(error.to_string()))?
-            {
+            .child_bindings_live()
+            .map_err(|error| CodeIndexSchedulerErrorV1::Git(error.to_string()))?
+        {
             return Err(CodeIndexSchedulerErrorV1::Git(
                 "authenticated child checkout binding changed during snapshot capture".into(),
             ));
