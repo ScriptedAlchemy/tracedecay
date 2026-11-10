@@ -208,7 +208,11 @@ fn retained_restart_capture_publishes_and_fences_preseal_attempt() {
         .capture_retained_reconcile_attempt()
         .expect("second retained capture succeeds")
         .expect("second retained capture has a live owner");
-    let resumed = slot.read().unwrap().snapshot().expect("second real capture");
+    let resumed = slot
+        .read()
+        .unwrap()
+        .snapshot()
+        .expect("second real capture");
     assert!(resumed.active);
     assert_eq!(
         resumed.phase,
