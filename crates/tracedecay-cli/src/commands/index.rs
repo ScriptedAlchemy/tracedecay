@@ -609,14 +609,21 @@ impl FirstGenerationWorkMarker {
             if encoding_finished
                 || graph.phase == Some(CodeIndexNativeGraphPhaseV1::CompactSegmentVerified)
             {
-                // The final Grafeo container write has no row callbacks, but
-                // a separately owned successor can still capture or parse.
-                // Keep its observed work visible without timing the final write.
+                // The final Grafeo container write has no row callbacks.
+                // Independently owned source or lexical writers may still
+                // report real work; never hide their observations behind it.
                 return worktree
                     .preseal_attempt
                     .as_ref()
                     .filter(|attempt| attempt.active)
-                    .map(Self::preseal);
+                    .map(Self::preseal)
+                    .or_else(|| {
+                        worktree
+                            .progress
+                            .as_ref()
+                            .filter(|progress| progress.phase == CodeIndexBuildPhaseV1::BulkCommit)
+                            .map(Self::text)
+                    });
             }
             // Starting the native attempt proves only that there is an owner,
             // not that it has written any rows. A silent initial window must
@@ -1575,6 +1582,86 @@ mod daemon_precondition_tests {
             "committed lexical pages must remain observable beside a final native write and successor capture: {result:?}"
         );
         assert_eq!(reads, 3);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn final_native_write_does_not_hide_independent_text_receipts() {
+        for verified in [false, true] {
+            let mut first = native_graph_after_all_encoding();
+            if verified {
+                let graph = first.native_graph_progress.as_mut().unwrap();
+                graph.phase = Some(CodeIndexNativeGraphPhaseV1::CompactSegmentVerified);
+                graph.committed_compact_segments = 1;
+                graph.committed_compact_bytes = 60_000;
+                graph.progress_epoch += 1;
+            }
+            let mut lexical = progress(35, None);
+            lexical.phase = CodeIndexBuildPhaseV1::BulkCommit;
+            lexical.daemon_incarnation = 3;
+            lexical.producer_incarnation = 4;
+            first.progress = Some(lexical);
+            assert!(matches!(
+                super::FirstGenerationWorkMarker::of(Some(&first)),
+                Some(super::FirstGenerationWorkMarker::CommittedText { .. })
+            ));
+
+            let mut advanced = first.clone();
+            let text = advanced.progress.as_mut().unwrap();
+            text.progress_epoch += 1;
+            text.committed_pages += 1;
+            text.committed_payload_bytes += 1_024;
+            let (result, reads) = hold_over(
+                vec![
+                    status(timed_out(), warming(first.clone())),
+                    status(timed_out(), warming(advanced)),
+                    ready_status(),
+                ],
+                Duration::ZERO,
+            )
+            .await;
+            assert!(
+                result.is_ok(),
+                "real lexical page commits during final native work must reach Ready (verified={verified}): {result:?}"
+            );
+            assert_eq!(reads, 3);
+
+            // When the independent text writer is no longer committing, the
+            // final native container write stays unknown, not a fake stall.
+            first.progress.as_mut().unwrap().phase = CodeIndexBuildPhaseV1::Ready;
+            assert_eq!(super::FirstGenerationWorkMarker::of(Some(&first)), None);
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn final_native_write_does_not_credit_text_epoch_only_replays() {
+        let mut initial = native_graph_after_all_encoding();
+        let mut lexical = progress(35, None);
+        lexical.phase = CodeIndexBuildPhaseV1::BulkCommit;
+        lexical.daemon_incarnation = 3;
+        lexical.producer_incarnation = 4;
+        initial.progress = Some(lexical);
+        let mut repeated = initial.clone();
+        let text = repeated.progress.as_mut().unwrap();
+        text.progress_epoch += 1;
+        text.last_progress_micros += 1_000;
+        repeated.native_graph_progress.as_mut().unwrap().progress_epoch += 1;
+
+        let (result, reads) = hold_over(
+            vec![
+                status(timed_out(), warming(initial)),
+                status(timed_out(), warming(repeated)),
+                ready_status(),
+            ],
+            Duration::ZERO,
+        )
+        .await;
+        assert_eq!(reads, 2, "metadata alone cannot reach a later Ready");
+        let (code, reason) = refusal(result);
+        assert_eq!(code, CODE_INDEX_READINESS_WAIT_TIMED_OUT);
+        assert!(
+            reason.contains("no observed capture, parse, text, or native graph work"),
+            "{reason}"
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]
