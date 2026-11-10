@@ -65,8 +65,8 @@ use ingress::{
     select_auxiliary_work, wait_for_work,
 };
 use rejection::{
-    cancel_waiting, reject_all, reject_all_exact_sql, reject_all_incremental_vacuum,
-    reject_faulted_execution_batches, reject_faulted_write_ingress, reject_incremental_vacuum,
+    cancel_waiting, reject_all_exact_sql, reject_all_incremental_vacuum,
+    reject_faulted_execution_batches, reject_incremental_vacuum, reject_retired_write_ingress,
     reject_unauthorized,
 };
 
@@ -570,7 +570,33 @@ impl Worker {
                 }
             };
             if lost {
-                reject_all(&mut queue, &self.telemetry, UnavailableReasonV1::FileLost);
+                // A sender may have passed the Ready check before the loss
+                // probe flipped state. Close ingress before the final drain
+                // so accepted work cannot disappear when this worker retires.
+                self.exact_sql_receiver.close();
+                self.incremental_vacuum_receiver.close();
+                self.checkpoint_receiver.close();
+                reject_retired_write_ingress(
+                    &mut self.receiver,
+                    &mut queue,
+                    &self.telemetry,
+                    UnavailableReasonV1::FileLost,
+                );
+                drain_command_ingress(
+                    &mut self.exact_sql_receiver,
+                    &mut exact_sql_queue,
+                    &mut exact_sql_closed,
+                );
+                drain_command_ingress(
+                    &mut self.incremental_vacuum_receiver,
+                    &mut incremental_vacuum_queue,
+                    &mut incremental_vacuum_closed,
+                );
+                drain_command_ingress(
+                    &mut self.checkpoint_receiver,
+                    &mut checkpoint_queue,
+                    &mut checkpoint_closed,
+                );
                 reject_all_exact_sql(&mut exact_sql_queue);
                 reject_all_incremental_vacuum(&mut incremental_vacuum_queue);
                 checkpoint_queue.clear();
@@ -601,7 +627,12 @@ impl Worker {
                 self.exact_sql_receiver.close();
                 self.incremental_vacuum_receiver.close();
                 self.checkpoint_receiver.close();
-                reject_faulted_write_ingress(&mut self.receiver, &mut queue, &self.telemetry);
+                reject_retired_write_ingress(
+                    &mut self.receiver,
+                    &mut queue,
+                    &self.telemetry,
+                    UnavailableReasonV1::Faulted,
+                );
                 drain_command_ingress(
                     &mut self.exact_sql_receiver,
                     &mut exact_sql_queue,
@@ -731,10 +762,11 @@ impl Worker {
                                         self.exact_sql_receiver.close();
                                         self.incremental_vacuum_receiver.close();
                                         self.checkpoint_receiver.close();
-                                        reject_faulted_write_ingress(
+                                        reject_retired_write_ingress(
                                             &mut self.receiver,
                                             &mut queue,
                                             &self.telemetry,
+                                            UnavailableReasonV1::Faulted,
                                         );
                                         drain_command_ingress(
                                             &mut self.exact_sql_receiver,
@@ -1410,7 +1442,7 @@ mod auxiliary_scheduling_tests {
         AcceptedRequest, AuxiliaryWork, BatchCoalescingWindow, IncrementalVacuumCommand,
         PendingBatchDwell, WriterActorError, build_batches, checkpoint_config, dwell_for_batch,
         enqueue, incremental_vacuum_error, reject_faulted_execution_batches,
-        reject_faulted_write_ingress, reject_incremental_vacuum, rollback_incremental_vacuum,
+        reject_retired_write_ingress, reject_incremental_vacuum, rollback_incremental_vacuum,
         run_incremental_vacuum, select_auxiliary_work,
     };
 
@@ -1544,7 +1576,12 @@ mod auxiliary_scheduling_tests {
         assert!(sender.try_send(unread).is_ok());
         assert_eq!(telemetry.snapshot().queue.queued_operations, 2);
 
-        reject_faulted_write_ingress(&mut receiver, &mut queue, &telemetry);
+        reject_retired_write_ingress(
+            &mut receiver,
+            &mut queue,
+            &telemetry,
+            UnavailableReasonV1::Faulted,
+        );
 
         let fault = RuntimeSubmitOutcomeV1::Unavailable {
             reason: UnavailableReasonV1::Faulted,
@@ -1559,6 +1596,52 @@ mod auxiliary_scheduling_tests {
         assert_eq!(snapshot.operations.completed_operations, 2);
 
         let (late, _) = accepted_request_with_reply("operation.fault-late", "key.fault-late");
+        assert!(matches!(
+            sender.try_send(late),
+            Err(mpsc::SendError::Disconnected(_))
+        ));
+    }
+
+    #[test]
+    fn lost_file_settles_parked_and_unread_writes_with_typed_reason() {
+        let telemetry = WriterTelemetry::default();
+        let (sender, mut receiver) = mpsc::channel(2);
+        let mut queue = FairQueue::default();
+
+        let (parked, mut parked_reply) =
+            accepted_request_with_reply("operation.lost-parked", "key.lost-parked");
+        telemetry.admitted(parked.admission_bytes());
+        assert!(queue.push(parked).is_ok());
+
+        let (unread, mut unread_reply) =
+            accepted_request_with_reply("operation.lost-unread", "key.lost-unread");
+        telemetry.admitted(unread.admission_bytes());
+        assert!(sender.try_send(unread).is_ok());
+        assert_eq!(telemetry.snapshot().queue.queued_operations, 2);
+
+        // The loss probe may race a sender that passed the Ready check.
+        // Both queued and unread admissions must receive FileLost, not a
+        // dropped reply, and the old store must retain no queue accounting.
+        reject_retired_write_ingress(
+            &mut receiver,
+            &mut queue,
+            &telemetry,
+            UnavailableReasonV1::FileLost,
+        );
+
+        let lost = RuntimeSubmitOutcomeV1::Unavailable {
+            reason: UnavailableReasonV1::FileLost,
+        };
+        assert_eq!(parked_reply.try_recv().unwrap(), Ok(lost.clone()));
+        assert_eq!(unread_reply.try_recv().unwrap(), Ok(lost));
+        assert!(queue.is_empty());
+        let snapshot = telemetry.snapshot();
+        assert_eq!(snapshot.queue.queued_operations, 0);
+        assert_eq!(snapshot.queue.queued_bytes, 0);
+        assert_eq!(snapshot.operations.admitted_operations, 2);
+        assert_eq!(snapshot.operations.completed_operations, 2);
+
+        let (late, _) = accepted_request_with_reply("operation.lost-late", "key.lost-late");
         assert!(matches!(
             sender.try_send(late),
             Err(mpsc::SendError::Disconnected(_))

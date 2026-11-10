@@ -55,18 +55,19 @@ pub(super) fn reject_unauthorized(
     }
 }
 
-/// Shut off ingress before settling buffered requests on fatal writer
-/// retirement. Dropping this receiver would lose accepted request replies and
-/// leave their queued-operation telemetry inflated.
-pub(super) fn reject_faulted_write_ingress(
+/// A retired writer must settle every accepted request, including those not yet
+/// transferred from ingress to its fair queue. Closing first prevents a racing
+/// sender from losing its reply and leaving queue telemetry inflated.
+pub(super) fn reject_retired_write_ingress(
     receiver: &mut mpsc::Receiver<AcceptedRequest>,
     queue: &mut FairQueue<AcceptedRequest>,
     telemetry: &WriterTelemetry,
+    reason: UnavailableReasonV1,
 ) {
     receiver.close();
-    reject_all(queue, telemetry, UnavailableReasonV1::Faulted);
+    reject_all(queue, telemetry, reason);
     while let Ok(item) = receiver.try_recv() {
-        settle_unavailable(item, telemetry, UnavailableReasonV1::Faulted);
+        settle_unavailable(item, telemetry, reason);
     }
 }
 
