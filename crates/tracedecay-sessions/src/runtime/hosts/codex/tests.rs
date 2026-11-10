@@ -2686,7 +2686,11 @@ mod recent_first_discovery_tests {
         // Non-JSONL names are in the directory but not in the candidate
         // set. The previous fingerprint changed for every ignored addition.
         for index in 0..128 {
-            std::fs::write(archive.join(format!("rollout-{index:04}.jsonl.zst")), b"zst").unwrap();
+            std::fs::write(
+                archive.join(format!("rollout-{index:04}.jsonl.zst")),
+                b"zst",
+            )
+            .unwrap();
         }
         assert_eq!(directory_entry_fingerprint(&archive).unwrap(), initial);
 
@@ -2870,8 +2874,11 @@ mod recent_first_discovery_tests {
         let archive = temp.path().join(".codex/archived_sessions");
         std::fs::create_dir_all(&archive).unwrap();
         for index in 0..64 {
-            std::fs::write(archive.join(format!("rollout-{index:03}.zst")), b"compressed")
-                .unwrap();
+            std::fs::write(
+                archive.join(format!("rollout-{index:03}.zst")),
+                b"compressed",
+            )
+            .unwrap();
         }
         let admitted = archive.join("rollout-admitted.jsonl");
         std::fs::write(&admitted, b"{}\n").unwrap();
