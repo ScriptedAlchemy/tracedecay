@@ -26,6 +26,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
+use serde::de::{self, MapAccess, SeqAccess, Visitor};
+use serde::Deserialize;
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
 use tracedecay_application::http_agent::http_agent;
@@ -349,7 +351,7 @@ impl DecisionEngineClientV1 {
             tracing::debug!("decision engine answer exceeds the byte limit");
             return DecisionEngineOutcomeV1::Malformed;
         }
-        let value = match serde_json::from_slice::<Value>(&answer_bytes) {
+        let value = match serde_json::from_slice::<UnambiguousValue>(&answer_bytes) {
             Ok(value) => value,
             Err(error) => {
                 tracing::debug!(%error, "decision engine answer is not JSON");
@@ -357,7 +359,7 @@ impl DecisionEngineClientV1 {
             }
         };
         let latency_micros = u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX);
-        match parse_answers(&value, request) {
+        match parse_answers(&value.0, request) {
             Some((answers, model)) => DecisionEngineOutcomeV1::Answered(DecisionAnswersV1 {
                 answers,
                 model,
@@ -486,6 +488,79 @@ fn is_io_timeout(error: &std::io::Error) -> bool {
         error.kind(),
         std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock
     ) || error.to_string().to_ascii_lowercase().contains("timed out")
+}
+
+/// Refuse ambiguous response objects before interpreting model decisions.
+/// serde_json::Value alone silently keeps the last occurrence of a JSON key,
+/// while the qualified HTTP evaluator rejects all duplicate keys.
+struct UnambiguousValue(Value);
+
+impl<'de> Deserialize<'de> for UnambiguousValue {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        deserializer.deserialize_any(UnambiguousValueVisitor)
+    }
+}
+
+struct UnambiguousValueVisitor;
+
+impl<'de> Visitor<'de> for UnambiguousValueVisitor {
+    type Value = UnambiguousValue;
+
+    fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("JSON without duplicate object keys")
+    }
+
+    fn visit_unit<E: de::Error>(self) -> Result<Self::Value, E> {
+        Ok(UnambiguousValue(Value::Null))
+    }
+
+    fn visit_bool<E: de::Error>(self, value: bool) -> Result<Self::Value, E> {
+        Ok(UnambiguousValue(Value::Bool(value)))
+    }
+
+    fn visit_i64<E: de::Error>(self, value: i64) -> Result<Self::Value, E> {
+        Ok(UnambiguousValue(Value::Number(value.into())))
+    }
+
+    fn visit_u64<E: de::Error>(self, value: u64) -> Result<Self::Value, E> {
+        Ok(UnambiguousValue(Value::Number(value.into())))
+    }
+
+    fn visit_f64<E: de::Error>(self, value: f64) -> Result<Self::Value, E> {
+        let number = serde_json::Number::from_f64(value)
+            .ok_or_else(|| E::custom("nonfinite decision JSON number"))?;
+        Ok(UnambiguousValue(Value::Number(number)))
+    }
+
+    fn visit_str<E: de::Error>(self, value: &str) -> Result<Self::Value, E> {
+        Ok(UnambiguousValue(Value::String(value.to_owned())))
+    }
+
+    fn visit_string<E: de::Error>(self, value: String) -> Result<Self::Value, E> {
+        Ok(UnambiguousValue(Value::String(value)))
+    }
+
+    fn visit_seq<A: SeqAccess<'de>>(self, mut sequence: A) -> Result<Self::Value, A::Error> {
+        let mut values = Vec::new();
+        while let Some(value) = sequence.next_element::<UnambiguousValue>()? {
+            values.push(value.0);
+        }
+        Ok(UnambiguousValue(Value::Array(values)))
+    }
+
+    fn visit_map<A: MapAccess<'de>>(self, mut entries: A) -> Result<Self::Value, A::Error> {
+        let mut values = Map::new();
+        while let Some((key, value)) = entries.next_entry::<String, UnambiguousValue>()? {
+            if values.contains_key(&key) {
+                return Err(de::Error::custom(format!("duplicate decision JSON key: {key}")));
+            }
+            values.insert(key, value.0);
+        }
+        Ok(UnambiguousValue(Value::Object(values)))
+    }
 }
 
 type ParsedAnswers = (BTreeMap<String, DecisionAnswerV1>, Option<String>);
@@ -897,6 +972,43 @@ mod tests {
                 .request_commitment(&request("state", vec![]))
                 .is_none()
         );
+    }
+
+    #[test]
+    fn duplicate_json_keys_cannot_change_the_model_decision() {
+        // Every response below is otherwise a valid typed answer. The ordinary
+        // serde_json::Value decoder accepts the last duplicate key; it must
+        // not let an ambiguous server response qualify as Scout evidence.
+        for (body, questions) in [
+            (
+                r#"{"answers":{"q":{"type":"noul","noul":0.1,"noul":0.9}}}"#,
+                vec![noul("q")],
+            ),
+            (
+                r#"{"model":"untrusted","model":"kev-4b","answers":{"q":{"type":"noul","noul":0.9}}}"#,
+                vec![noul("q")],
+            ),
+            (
+                r#"{"answers":{"route":{"type":"choice","choice":"code","probs":{"code":0.7,"code":0.7,"memory":0.3}}}}"#,
+                vec![choice("route", &["code", "memory"])],
+            ),
+        ] {
+            let server = fake_decision_engine(200, body, Duration::ZERO);
+            assert_eq!(
+                client(&server.url).ask_blocking(&request("state", questions)),
+                DecisionEngineOutcomeV1::Malformed,
+                "{body}"
+            );
+            assert_eq!(server.requests.load(Ordering::SeqCst), 1);
+        }
+        // Non-ambiguous JSON remains a usable answer.
+        let server = fake_decision_engine(
+            200,
+            &single_noul_body("q", 0.9),
+            Duration::ZERO,
+        );
+        let answers = answered(client(&server.url).ask_blocking(&request("state", vec![noul("q")])));
+        assert_eq!(answers.answers["q"], DecisionAnswerV1::Noul(0.9));
     }
 
     #[test]
