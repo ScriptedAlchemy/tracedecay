@@ -2201,7 +2201,7 @@ fn retained_scan_step(
                     // Do not enumerate a potentially huge unsettled archive
                     // just to obtain its witness before the bounded iterator.
                     let stat = directory_stat_witness(&path)?;
-                    let identity = stat.map(|witness| CodexDirectoryWitness {
+                    let identity = stat.as_ref().map(|witness| CodexDirectoryWitness {
                         stat: witness.stat,
                         entries: None,
                     });
