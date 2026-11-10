@@ -444,12 +444,31 @@ class Run:
 
     def lane_edit_reconcile(self) -> None:
         log("edit_reconcile (one appended line until a new generation is ready)")
-        tracked = subprocess.run(["git", "-C", str(self.repo), "ls-files", "*.rs", "*.py"],
-                                 capture_output=True, text=True, check=True).stdout.split()
-        if not tracked:
-            self.record("edit_reconcile", "edit_to_ready", unavailable="no tracked .rs or .py file")
+        # Git's -z mode preserves whitespace and newlines in tracked paths.
+        # A tracked symlink may point outside the disposable clone: never
+        # append to one, even if its target is a regular source file.
+        listing = subprocess.run(
+            ["git", "-C", str(self.repo), "ls-files", "-z", "--", "*.rs", "*.py"],
+            capture_output=True, check=True,
+        ).stdout
+        repo_root = self.repo.resolve()
+        selected = None
+        for raw_name in listing.split(b"\0"):
+            if not raw_name:
+                continue
+            name = os.fsdecode(raw_name)
+            candidate = self.repo / name
+            if (
+                not candidate.is_symlink()
+                and candidate.is_file()
+                and candidate.resolve().is_relative_to(repo_root)
+            ):
+                selected = (name, candidate)
+                break
+        if selected is None:
+            self.record("edit_reconcile", "edit_to_ready", unavailable="no tracked regular .rs or .py file")
             return
-        target = self.repo / tracked[0]
+        tracked_file, target = selected
         marker = "//" if target.suffix == ".rs" else "#"
         # Another daemon refresh may have advanced the generation since
         # indexing. Fence the edit against the latest ready generation, not
@@ -490,7 +509,7 @@ class Run:
             ready["peak_daemon_rss_kb"] = peak_rss_kb
         self.generation = ready["generation_id"]
         self.record("edit_reconcile", "sync_request", wall_ms=sync.wall_ms)
-        self.record("edit_reconcile", "edited_file", path=tracked[0])
+        self.record("edit_reconcile", "edited_file", path=tracked_file)
         self.record("edit_reconcile", "edit_to_ready",
                     **{**ready, "wall_ms": (time.perf_counter() - start) * 1000})
 

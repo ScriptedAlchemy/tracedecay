@@ -170,6 +170,35 @@ class BenchHotPathsTests(unittest.TestCase):
         self.assertEqual(list(self.tmp.iterdir()), [])
         self.assertEqual((self.repo / "src" / "lib.rs").read_text(), "pub fn answer() -> u32 { 42 }\n")
 
+    def test_edit_never_follows_tracked_symlinks_and_preserves_spaced_names(self) -> None:
+        # A Git checkout can contain a tracked symlink to a path outside the
+        # benchmark's private clone. The old first-file append would mutate
+        # that external path. A quoted, spaced Git path also broke .split().
+        outside = self.root / "operator-source.py"
+        outside.write_text("print('untouched')\n")
+        if os.name != "nt":
+            (self.repo / "a0-external.py").symlink_to(outside)
+        safe = self.repo / "a1 spaced.rs"
+        safe.write_text("pub fn safe() {}\n")
+        subprocess.run(["git", "-C", str(self.repo), "add", "-A"], check=True)
+        subprocess.run(
+            ["git", "-C", str(self.repo), "-c", "user.name=t", "-c", "user.email=t@t",
+             "commit", "-qm", "track escaped source candidates"],
+            check=True,
+        )
+
+        result = self.bench()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        selected = next(
+            row for row in self.rows()
+            if (row["lane"], row["op"]) == ("edit_reconcile", "edited_file")
+        )
+        self.assertEqual(selected["path"], "a1 spaced.rs")
+        self.assertEqual(outside.read_text(), "print('untouched')\n")
+        self.assertEqual(safe.read_text(), "pub fn safe() {}\n")
+        self.assertEqual(list(self.tmp.iterdir()), [])
+
+
     def test_edit_timer_and_rss_observer_cover_the_file_mutation(self) -> None:
         # The live daemon can start indexing on the filesystem notification
         # before `sync` returns. Reproduce an observable slow edit and
