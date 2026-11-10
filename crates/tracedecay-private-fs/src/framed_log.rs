@@ -4,7 +4,7 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Seek, SeekFrom, Write};
 #[cfg(target_os = "linux")]
 use std::os::fd::AsRawFd;
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 use std::os::unix::fs::MetadataExt;
 #[cfg(unix)]
 use std::os::unix::fs::OpenOptionsExt;
@@ -101,13 +101,13 @@ struct PendingDurableFile {
     file: File,
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 struct DurableFileIdentity {
     path: PathBuf,
     metadata: fs::Metadata,
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 impl DurableFileIdentity {
     fn validate_metadata(&self, current: &fs::Metadata) -> io::Result<()> {
         let original = &self.metadata;
@@ -208,7 +208,23 @@ impl DurableFileBatch {
             });
             Ok(())
         }
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(all(unix, not(target_os = "linux")))]
+        {
+            // The caller authenticated these exact writer bytes. On macOS
+            // the barrier runs immediately, but the pathname may still be
+            // replaced while fsync blocks under endpoint authorization.
+            // Witness both the writer and its name without another open().
+            let identity = DurableFileIdentity {
+                path: path.to_path_buf(),
+                metadata: authenticated.clone(),
+            };
+            identity.validate_metadata(&file.metadata()?)?;
+            identity.validate_path()?;
+            sync_owned_file(path, file)?;
+            identity.validate_metadata(&file.metadata()?)?;
+            identity.validate_path()
+        }
+        #[cfg(not(unix))]
         {
             let _ = authenticated;
             sync_owned_file(path, file)
@@ -1004,12 +1020,48 @@ pub fn truncate_file(path: &Path, len: u64) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use std::fs;
+    #[cfg(unix)]
+    use std::fs::File;
+    #[cfg(unix)]
+    use std::io::{ErrorKind, Write};
+    #[cfg(unix)]
+    use std::os::unix::fs::MetadataExt;
     use std::path::Path;
 
     use super::{
         DIRECTORY_SYNC_CALLS, DirectorySyncPolicy, append_durable, atomic_write_accelerator,
         atomic_write_prepared, rename_noreplace, replace_via_rename,
     };
+
+    #[cfg(unix)]
+    #[test]
+    fn staged_durability_refuses_replaced_writer_path_before_barrier() {
+        let root = tempfile::tempdir().expect("isolated staging root");
+        let path = root.path().join("staged.tmp");
+        let mut writer = File::create(&path).expect("original staged writer");
+        writer.write_all(b"exact sealed bytes").expect("original bytes");
+        let original = writer.metadata().expect("authenticated writer inode");
+
+        let replacement = root.path().join("replacement.tmp");
+        fs::write(&replacement, b"exact sealed bytes").expect("same-byte replacement");
+        fs::rename(&replacement, &path).expect("substitute the named inode");
+        let named = fs::metadata(&path).expect("replacement metadata");
+        assert_ne!(
+            (original.dev(), original.ino()),
+            (named.dev(), named.ino()),
+            "the replacement must be a different inode with identical bytes"
+        );
+
+        let mut batch = super::DurableFileBatch::new();
+        let error = batch
+            .written_with_identity(&path, &writer, &original)
+            .expect_err("the original writer must not authorize a foreign pathname");
+        assert_eq!(error.kind(), ErrorKind::InvalidData);
+        assert_eq!(
+            fs::read(&path).expect("substitute bytes remain"),
+            b"exact sealed bytes"
+        );
+    }
 
     #[test]
     fn rebuildable_accelerators_publish_without_directory_sync() {
