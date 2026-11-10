@@ -615,6 +615,39 @@ fn doctor_footprint_reference_key(key: &str) -> Cow<'_, str> {
     Cow::Owned(format!("footprint/sha256:{}", sha256_hex(key.as_bytes())))
 }
 
+/// Preserve the measured size and bound in Doctor even when an optional
+/// registered root, kind breakdown, or long footprint identity exceeds its
+/// 512-byte coverage statement. Full identities and breakdowns remain in the
+/// storage report; a truncated number would make the finding unactionable.
+fn bounded_entry_subject(entry: &ProfileFootprintEntryV1) -> (String, String) {
+    let mut evidence_key = doctor_footprint_reference_key(&entry.key).into_owned();
+    let mut subject = entry_statement(entry, &evidence_key);
+    let fits = |subject: &str| {
+        let statement = format!(
+            "{subject}: {} of {} bound",
+            format_bytes(entry.bytes),
+            format_bytes(entry.bound_bytes)
+        );
+        super::diagnostics::bounded_statement(&statement) == statement
+    };
+    if !fits(&subject) {
+        let mut compact = entry.clone();
+        compact.kinds = None;
+        if let Some(project) = compact.project.as_mut() {
+            // Keep the verified root state, but omit its optional long path.
+            project.registered_root = None;
+        }
+        subject = entry_statement(&compact, &evidence_key);
+        if !fits(&subject) {
+            // A valid Doctor reference can be longer than its statement budget.
+            // Retain stable evidence identity without losing the numeric bound.
+            evidence_key = format!("footprint/sha256:{}", sha256_hex(entry.key.as_bytes()));
+            subject = entry_statement(&compact, &evidence_key);
+        }
+    }
+    (evidence_key, subject)
+}
+
 /// One `OverBudgetStore` finding per footprint entry plus one for the profile
 /// total. A floor above its bound proves the overage, so an over-bound entry
 /// is degraded with complete coverage even when bytes went unread.
@@ -622,10 +655,9 @@ fn doctor_footprint_reference_key(key: &str) -> Cow<'_, str> {
 pub fn footprint_findings(footprint: &ProfileFootprintV1) -> DoctorStorageFamilyReadV1 {
     let mut findings = Vec::with_capacity(footprint.entries.len() + 1);
     for entry in &footprint.entries {
-        let evidence_key = doctor_footprint_reference_key(&entry.key);
-        let subject = entry_statement(entry, &evidence_key);
+        let (evidence_key, subject) = bounded_entry_subject(entry);
         let Some(finding) = bounded_finding(
-            evidence_key.as_ref(),
+            evidence_key.as_str(),
             &subject,
             entry.bytes,
             entry.bound_bytes,
@@ -2090,5 +2122,67 @@ mod tests {
                 "{key} must retain its real, independent bound"
             );
         }
+    }
+
+    #[test]
+    fn long_footprint_details_keep_doctor_size_and_bound_visible() {
+        let temporary = tempfile::tempdir().unwrap();
+        let profile = temporary.path().join("profile");
+        let key = "projects/proj_long";
+        let bytes = 3 * 1024;
+        sized(&profile.join(key).join("tracedecay.db"), bytes);
+        let registered = BTreeMap::from([(
+            "proj_long".to_owned(),
+            temporary.path().display().to_string(),
+        )]);
+        let overrides = BTreeMap::from([(key.to_owned(), 1)]);
+        let mut footprint = census_profile_footprint(&profile, &registered, &overrides);
+        let project = footprint
+            .entries
+            .iter_mut()
+            .find(|entry| entry.key == key)
+            .expect("measured project");
+        assert_eq!(
+            project.project.as_ref().unwrap().state,
+            ProjectRootStateV1::Present
+        );
+        // The complete state remains available in the storage report; only
+        // the Doctor coverage text is bounded.
+        project.project.as_mut().unwrap().registered_root = Some("long-root/".repeat(120));
+        let observed = findings(&footprint);
+        let finding = &observed[key];
+        let statement = finding.finding().coverage().statement();
+        assert_eq!(finding.finding().state(), DoctorEvidenceStateV1::Degraded);
+        assert!(statement.contains("root present"), "{statement}");
+        assert!(
+            statement.ends_with(&format!("{} of 1 B bound", format_bytes(bytes))),
+            "the measured overage must not be clipped after a long root: {statement}"
+        );
+        assert!(!statement.contains("long-root/long-root"), "{statement}");
+
+        // A valid long evidence key can also fill the statement budget before
+        // the numeric overage. Hash the reference, never the reported bytes.
+        let project = footprint
+            .entries
+            .iter_mut()
+            .find(|entry| entry.key == key)
+            .expect("measured project");
+        project.key = format!("projects/proj_{}/graph.grafeo", "x".repeat(520));
+        let hash_key = format!("footprint/sha256:{}", sha256_hex(project.key.as_bytes()));
+        let observed = findings(&footprint);
+        let finding = &observed[&hash_key];
+        let statement = finding.finding().coverage().statement();
+        assert_eq!(finding.finding().state(), DoctorEvidenceStateV1::Degraded);
+        assert!(statement.contains("full path in storage report"), "{statement}");
+        assert!(
+            statement.ends_with(&format!("{} of 1 B bound", format_bytes(bytes))),
+            "the complete numeric bound must survive a long evidence key: {statement}"
+        );
+        assert_eq!(
+            std::fs::metadata(profile.join(key).join("tracedecay.db"))
+                .unwrap()
+                .len(),
+            bytes
+        );
     }
 }
