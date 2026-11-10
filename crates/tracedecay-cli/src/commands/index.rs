@@ -424,12 +424,34 @@ where
         } else {
             None
         };
+        // A separately owned retained lexical writer can commit pages while
+        // native graph encoding or successor source capture is quiet. Read
+        // its actual bulk receipts alongside the primary writer instead of
+        // letting a frozen native/preseal marker hide completed text work.
+        let concurrent_text = if matches!(
+            marker.as_ref(),
+            Some(
+                FirstGenerationWorkMarker::Preseal { .. }
+                    | FirstGenerationWorkMarker::NativeGraph { .. }
+            )
+        ) {
+            worktree_read
+                .and_then(|worktree| worktree.progress.as_ref())
+                .filter(|progress| progress.phase == CodeIndexBuildPhaseV1::BulkCommit)
+                .map(FirstGenerationWorkMarker::text)
+        } else {
+            None
+        };
         let now = Instant::now();
-        let stalled = match concurrent_preseal {
-            Some(preseal) => {
-                progress_window.observe_with_concurrent_preseal(marker, Some(preseal), now)
-            }
-            None => progress_window.observe(marker, now),
+        let stalled = if concurrent_preseal.is_some() || concurrent_text.is_some() {
+            progress_window.observe_with_concurrent_writers(
+                marker,
+                concurrent_preseal,
+                concurrent_text,
+                now,
+            )
+        } else {
+            progress_window.observe(marker, now)
         };
         if stalled {
             return Err(first_generation_wait_refusal(
@@ -776,7 +798,7 @@ impl FirstGenerationWorkMarker {
     }
 }
 
-/// Maintain independent watermarks for pre-seal and text work. Polling,
+/// Maintain independent preseal, native-graph and text watermarks. Polling,
 /// status changes and empty retries cannot renew an observed silence window.
 struct FirstGenerationProgressWindow {
     preseal: Option<FirstGenerationWorkMarker>,
@@ -800,16 +822,17 @@ impl FirstGenerationProgressWindow {
     }
 
     fn observe(&mut self, marker: Option<FirstGenerationWorkMarker>, now: Instant) -> bool {
-        self.observe_with_concurrent_preseal(marker, None, now)
+        self.observe_with_concurrent_writers(marker, None, None, now)
     }
 
-    fn observe_with_concurrent_preseal(
+    fn observe_with_concurrent_writers(
         &mut self,
         marker: Option<FirstGenerationWorkMarker>,
         concurrent_preseal: Option<FirstGenerationWorkMarker>,
+        concurrent_text: Option<FirstGenerationWorkMarker>,
         now: Instant,
     ) -> bool {
-        if marker.is_none() && concurrent_preseal.is_none() {
+        if marker.is_none() && concurrent_preseal.is_none() && concurrent_text.is_none() {
             // Uninstrumented work is unknown, not stalled. Keep watermarks
             // so returning to an old report cannot fabricate new work.
             self.unchanged_since = None;
@@ -821,6 +844,9 @@ impl FirstGenerationProgressWindow {
         }
         if let Some(preseal) = concurrent_preseal {
             advanced |= self.record(preseal);
+        }
+        if let Some(text) = concurrent_text {
+            advanced |= self.record(text);
         }
         if advanced || self.unchanged_since.is_none() {
             self.unchanged_since = Some(now);
@@ -1413,6 +1439,115 @@ mod daemon_precondition_tests {
         )
         .await;
         assert_eq!(reads, 2, "neither independent writer advanced");
+        let (code, reason) = refusal(result);
+        assert_eq!(code, CODE_INDEX_READINESS_WAIT_TIMED_OUT);
+        assert!(reason.contains("no observed capture, parse, text, or native graph work"));
+    }
+
+    fn overlapping_native_and_text() -> CodeIndexWorktreeFreshnessV1 {
+        let mut worktree = native_graph_without_writes();
+        let graph = worktree.native_graph_progress.as_mut().unwrap();
+        graph.phase = Some(CodeIndexNativeGraphPhaseV1::CompactEncoding);
+        graph.encoded_entities = 512;
+        graph.total_entities = Some(1_024);
+        graph.total_relations = Some(8);
+        graph.progress_epoch = 4;
+        graph.last_progress_micros = Some(400);
+
+        let mut lexical = progress(35, None);
+        lexical.phase = CodeIndexBuildPhaseV1::BulkCommit;
+        lexical.daemon_incarnation = 3;
+        lexical.producer_incarnation = 4;
+        worktree.progress = Some(lexical);
+        worktree
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn authentic_text_commits_advance_during_quiet_native_encoding() {
+        let initial = overlapping_native_and_text();
+        assert!(matches!(
+            super::FirstGenerationWorkMarker::of(Some(&initial)),
+            Some(super::FirstGenerationWorkMarker::NativeGraph { .. })
+        ));
+        let mut next = initial.clone();
+        let text = next.progress.as_mut().unwrap();
+        text.progress_epoch += 1;
+        text.committed_pages += 1;
+        text.last_progress_micros += 100;
+
+        let (result, reads) = hold_over(
+            vec![
+                status(timed_out(), warming(initial)),
+                status(timed_out(), warming(next)),
+                ready_status(),
+            ],
+            Duration::ZERO,
+        )
+        .await;
+        assert!(
+            result.is_ok(),
+            "a real lexical page receipt must not disappear behind a quiet native writer: {result:?}"
+        );
+        assert_eq!(reads, 3);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn completed_native_write_and_quiet_preseal_keep_real_text_receipts() {
+        let mut initial = native_graph_after_all_encoding();
+        initial.preseal_attempt =
+            attempt(CodeIndexPresealWorkPhaseV1::Capture, 4, 7, 2).preseal_attempt;
+        let mut lexical = progress(35, None);
+        lexical.phase = CodeIndexBuildPhaseV1::BulkCommit;
+        lexical.daemon_incarnation = 3;
+        lexical.producer_incarnation = 4;
+        initial.progress = Some(lexical);
+        assert!(matches!(
+            super::FirstGenerationWorkMarker::of(Some(&initial)),
+            Some(super::FirstGenerationWorkMarker::Preseal { .. })
+        ));
+        let mut next = initial.clone();
+        let text = next.progress.as_mut().unwrap();
+        text.progress_epoch += 1;
+        text.committed_pages += 1;
+        text.last_progress_micros += 100;
+
+        let (result, reads) = hold_over(
+            vec![
+                status(timed_out(), warming(initial)),
+                status(timed_out(), warming(next)),
+                ready_status(),
+            ],
+            Duration::ZERO,
+        )
+        .await;
+        assert!(
+            result.is_ok(),
+            "committed lexical pages must remain observable beside a final native write and successor capture: {result:?}"
+        );
+        assert_eq!(reads, 3);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn epoch_only_changes_in_all_overlapping_writers_still_stall() {
+        let mut initial = overlapping_native_and_text();
+        initial.preseal_attempt =
+            attempt(CodeIndexPresealWorkPhaseV1::Capture, 4, 7, 2).preseal_attempt;
+        let mut repeated = initial.clone();
+        repeated.native_graph_progress.as_mut().unwrap().progress_epoch += 1;
+        repeated.progress.as_mut().unwrap().progress_epoch += 1;
+        repeated.progress.as_mut().unwrap().last_progress_micros += 100;
+        repeated.preseal_attempt.as_mut().unwrap().progress_epoch += 1;
+
+        let (result, reads) = hold_over(
+            vec![
+                status(timed_out(), warming(initial)),
+                status(timed_out(), warming(repeated)),
+                ready_status(),
+            ],
+            Duration::ZERO,
+        )
+        .await;
+        assert_eq!(reads, 2, "no owner supplied any new completed work");
         let (code, reason) = refusal(result);
         assert_eq!(code, CODE_INDEX_READINESS_WAIT_TIMED_OUT);
         assert!(reason.contains("no observed capture, parse, text, or native graph work"));
