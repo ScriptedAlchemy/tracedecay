@@ -96,12 +96,11 @@ fn bindings_in_scope<'t>(
     {
         found.push(node);
     }
-    if is_function(node) {
-        if let Some(parameter) = node.child_by_field_name("parameter")
-            && contains_name(state, parameter, name)
-        {
-            found.push(parameter);
-        }
+    if is_function(node)
+        && let Some(parameter) = node.child_by_field_name("parameter")
+        && contains_name(state, parameter, name)
+    {
+        found.push(parameter);
     }
     if node.kind() == "formal_parameters" {
         let mut cursor = node.walk();

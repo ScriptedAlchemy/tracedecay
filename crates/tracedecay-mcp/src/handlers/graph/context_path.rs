@@ -83,6 +83,7 @@ fn evidence(
     }
 }
 
+/// Source is requested only when `code_block_limit` carries its admitted cap.
 #[tracing::instrument(name = "mcp.graph.context.call_path", level = "trace", skip_all)]
 pub(super) async fn context_call_path(
     ctx: &McpToolContext<'_>,
@@ -91,8 +92,7 @@ pub(super) async fn context_call_path(
     request: ContextCallPathRequest,
     scope_prefix: Option<&str>,
     freshness_payload: Option<&CodeIndexFreshnessPayloadV1>,
-    include_code: bool,
-    max_code_blocks: usize,
+    code_block_limit: Option<usize>,
 ) -> ContextCallPathProjection {
     let mut result = ContextCallPathResultV1 {
         from_node_id: request.from.as_str().to_owned(),
@@ -147,7 +147,7 @@ pub(super) async fn context_call_path(
         }
     };
     result.outcome = outcome;
-    let code = if include_code
+    let code = if let Some(max_code_blocks) = code_block_limit
         && let ContextCallPathOutcomeV1::Found { nodes, .. } = &mut result.outcome
     {
         match path_source(ctx, graph, symbols, max_code_blocks).await {

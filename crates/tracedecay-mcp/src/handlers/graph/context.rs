@@ -717,8 +717,7 @@ where
                 path_request,
                 scope_prefix,
                 freshness_payload.as_ref(),
-                include_code,
-                max_code_blocks,
+                include_code.then_some(max_code_blocks),
             )
             .await,
         )
@@ -729,7 +728,7 @@ where
     // enrichment refuses and releases its query.
     let path_cost = path_projection
         .as_ref()
-        .and_then(|_| graph.as_ref().ok())
+        .and(graph.as_ref().ok())
         .map(tracedecay_graph_query::VerifiedGraphQuery::read_cost);
     let (graph, mut projection, verified_graph_evidence, graph_stage) =
         match (graph, complete.as_ref()) {
@@ -869,20 +868,18 @@ where
         // stage is a typed unavailable, not an empty `ran`.
         code: if !include_code {
             ContextStageV1::NotRequested
-        } else {
-            if projection.code_blocks.is_empty() {
-                if ordinary_code_eligible == 0 && !path_code_requested {
-                    ContextStageV1::Skipped
-                } else {
-                    ContextStageV1::Unavailable
-                }
+        } else if projection.code_blocks.is_empty() {
+            if ordinary_code_eligible == 0 && !path_code_requested {
+                ContextStageV1::Skipped
             } else {
-                ContextStageV1::ran(
-                    max_code_blocks,
-                    projection.code_blocks.len(),
-                    ordinary_code_eligible > ordinary_code_served || path_code_limited,
-                )
+                ContextStageV1::Unavailable
             }
+        } else {
+            ContextStageV1::ran(
+                max_code_blocks,
+                projection.code_blocks.len(),
+                ordinary_code_eligible > ordinary_code_served || path_code_limited,
+            )
         },
         memory: ContextStageV1::NotRequested,
     };
