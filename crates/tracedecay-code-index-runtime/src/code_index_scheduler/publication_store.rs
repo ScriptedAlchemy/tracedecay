@@ -1258,7 +1258,7 @@ struct PinnedGenerationSegmentV1 {
 const MAX_STAGED_SEGMENT_READ_HANDLES: usize = 8;
 
 #[cfg(unix)]
-struct PinnedPreparationSegmentV1 {
+pub(super) struct PinnedPreparationSegmentV1 {
     path: PathBuf,
     segment: PinnedGenerationSegmentV1,
     // Both stat and fstat reflect later writes. Keep the original metadata,
