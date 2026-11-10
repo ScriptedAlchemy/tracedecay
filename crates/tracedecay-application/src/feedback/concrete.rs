@@ -1401,12 +1401,10 @@ impl ProjectFeedbackStore {
             .iter()
             .find(|stored| stored.result.result_id == publication.result.result_id)
         {
-            let exact_identity = stored.result == publication.result
-                && stored.runtime == publication.runtime
-                && stored.dedupe_key == publication.dedupe_key
-                && stored.input.target == publication.input.target
-                && stored.input.actor == publication.input.actor
-                && stored.authorized_scope == publication.authorized_scope;
+            // The complete committed record owns a result ID. Replaying it
+            // cannot silently change admission, trigger, budget, or the
+            // revalidation receipt while keeping that durable identity.
+            let exact_identity = stored == &publication;
             transaction
                 .rollback()
                 .await
@@ -1414,11 +1412,7 @@ impl ProjectFeedbackStore {
             return if !exact_identity {
                 Err(FeedbackRuntimeError::Corrupt)
             } else if stored.result.termination == FeedbackCycleTerminationV1::IncompleteCoverage {
-                if stored.same_incomplete_evidence(&publication) {
-                    Ok(FeedbackPublicationRecordState::Reused(stored.clone()))
-                } else {
-                    Err(FeedbackRuntimeError::Corrupt)
-                }
+                Ok(FeedbackPublicationRecordState::Reused(stored.clone()))
             } else {
                 Ok(FeedbackPublicationRecordState::Duplicate)
             };
@@ -2563,6 +2557,16 @@ mod tests {
         assert!(conflicting.validate().is_ok());
         assert!(matches!(
             store.record_publication(conflicting).await,
+            Err(FeedbackRuntimeError::Corrupt)
+        ));
+        // A replayed result cannot silently renew or rewrite its original
+        // authorization receipt. This was previously accepted as a duplicate
+        // because the identity check compared only selected record fields.
+        let mut rebinding_receipt = original.clone();
+        rebinding_receipt.authority.revalidated_at = UtcMicros(11);
+        assert!(rebinding_receipt.validate().is_ok());
+        assert!(matches!(
+            store.record_publication(rebinding_receipt).await,
             Err(FeedbackRuntimeError::Corrupt)
         ));
         assert_eq!(store.load_publications().await.unwrap(), vec![original]);
