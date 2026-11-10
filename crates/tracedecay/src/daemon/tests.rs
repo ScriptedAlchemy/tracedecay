@@ -229,7 +229,9 @@ fn prepare_test_profile_root(profile_root: &std::path::Path) {
     }
 }
 
-fn test_store_administration_for_profile(profile_root: &std::path::Path) -> StoreAdministration {
+pub(in crate::daemon) fn test_store_administration_for_profile(
+    profile_root: &std::path::Path,
+) -> StoreAdministration {
     prepare_test_profile_root(profile_root);
     let profile_identity =
         tracedecay_daemon_identity::profile_identity::load_or_create(profile_root)

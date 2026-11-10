@@ -98,13 +98,54 @@ impl<Output: Clone + Send + Sync + 'static> RetentionWriterJobs<Output> {
         for job in jobs.values() {
             job.cancellation.cancel();
         }
-        for (_, job) in jobs {
-            join_cancelled_maintenance_task(
-                Some(job.task),
-                "retention_store",
-                DAEMON_TASK_ABORT_DEADLINE,
-            )
-            .await;
+        let outcomes = futures_util::future::join_all(jobs.values().map(|job| job.task.wait()));
+        let reason = match native_runtime::timeout(DAEMON_TASK_ABORT_DEADLINE, outcomes).await {
+            Ok(outcomes) => {
+                for outcome in outcomes {
+                    let _ = record_retention_job_outcome(outcome);
+                }
+                return;
+            }
+            Err(TimeoutError::Elapsed) => "cooperative_join_exceeded_abort_deadline".to_owned(),
+            Err(error @ TimeoutError::TimerUnavailable(_)) => error.to_string(),
+        };
+        for job in jobs.values() {
+            if job.task.is_finished() {
+                continue;
+            }
+            log_daemon_event(
+                "daemon_shutdown",
+                &[
+                    ("outcome", "maintenance_task_aborted".to_owned()),
+                    ("owner", "retention_store".to_owned()),
+                    ("reason", reason.clone()),
+                ],
+            );
+            job.task.abort();
+        }
+        let outcomes = futures_util::future::join_all(jobs.values().map(|job| job.task.wait()));
+        let reason = match native_runtime::timeout(DAEMON_TASK_ABORT_DEADLINE, outcomes).await {
+            Ok(outcomes) => {
+                for outcome in outcomes {
+                    let _ = record_retention_job_outcome(outcome);
+                }
+                return;
+            }
+            Err(TimeoutError::Elapsed) => "join_exceeded_abort_deadline".to_owned(),
+            Err(error @ TimeoutError::TimerUnavailable(_)) => error.to_string(),
+        };
+        for job in jobs.values() {
+            if job.task.is_finished() {
+                continue;
+            }
+            log_daemon_event(
+                "daemon_shutdown",
+                &[
+                    ("outcome", "maintenance_task_abandoned".to_owned()),
+                    ("owner", "retention_store".to_owned()),
+                    ("reason", reason.clone()),
+                ],
+            );
         }
     }
 }
@@ -920,11 +961,11 @@ enum MaintenanceStoreWork {
         data_root: PathBuf,
     },
     /// The code-index scopes of a registered project that no mounted graph
-    /// owns. The job retains profile authority, never a project-store client.
+    /// owns. The queued job retains identities only. It issues a fresh profile
+    /// lease after admission and never retains a project-store client.
     Registered {
         project_id: String,
         store: RegisteredProjectStoreV1,
-        profile_database: tracedecay_global_db::RegisteredGlobalDbLeaseV1,
     },
 }
 
@@ -1337,11 +1378,7 @@ impl MaintenanceCoordinator {
         for (project_id, store) in registered_projects {
             work.push((
                 format!("r:{project_id}"),
-                MaintenanceStoreWork::Registered {
-                    project_id,
-                    store,
-                    profile_database: profile_database.clone(),
-                },
+                MaintenanceStoreWork::Registered { project_id, store },
             ));
         }
         work.sort_by(|left, right| left.0.cmp(&right.0));
@@ -1513,7 +1550,17 @@ impl MaintenanceCoordinator {
                             )
                             .await
                         }
-                        MaintenanceStoreWork::Registered { project_id, store, profile_database } => {
+                        MaintenanceStoreWork::Registered { project_id, store } => {
+                            let profile_database = match administration
+                                .registered_profile_database()
+                                .await
+                            {
+                                Ok(database) => database,
+                                Err(error) => {
+                                    tracing::error!(event = "retention_registry_unavailable", %error);
+                                    return MaintenanceTickOutcome::Retry;
+                                }
+                            };
                             match profile_database.code_project_exists(project_id).await {
                                 Ok(true) => {}
                                 Ok(false) => return MaintenanceTickOutcome::Complete,
@@ -1529,7 +1576,7 @@ impl MaintenanceCoordinator {
                                 store,
                                 &mounted_store_roots,
                                 code_index_schedulers,
-                                profile_database,
+                                &profile_database,
                                 &maintenance_observations,
                                 cancellation,
                             )
@@ -2898,12 +2945,12 @@ mod tests {
         let checkout = temp.path().join("checkout");
         std::fs::create_dir_all(&checkout).expect("checkout");
         let checkout = checkout.canonicalize().expect("canonical checkout");
-        let runtime = tracedecay_global_db::tests::harness::RegisteredGlobalDbTestRuntime::profile(
-            &profile_root,
-        )
-        .await
-        .expect("profile database");
-        let profile_database = runtime.profile_database_arc();
+        let administration =
+            crate::daemon::tests::test_store_administration_for_profile(&profile_root);
+        let profile_database = administration
+            .registered_profile_database()
+            .await
+            .expect("profile database");
         let project = profile_database
             .upsert_code_project("proj_unmounted", &checkout, None, None, None)
             .await
@@ -2937,7 +2984,6 @@ mod tests {
             )),
             ..MaintenanceCoordinator::default()
         };
-        let administration = crate::daemon::branch_admin::StoreAdministration::default();
         let schedulers =
             tracedecay_code_index_runtime::code_index_scheduler::CodeIndexSchedulerRegistryV1::new(
                 1,
@@ -3169,13 +3215,12 @@ mod tests {
             let profile_root = temp.path().join("profile");
             let checkout = temp.path().join("checkout");
             std::fs::create_dir_all(&checkout).expect("checkout");
-            let runtime =
-                tracedecay_global_db::tests::harness::RegisteredGlobalDbTestRuntime::profile(
-                    &profile_root,
-                )
+            let administration =
+                crate::daemon::tests::test_store_administration_for_profile(&profile_root);
+            let profile_database = administration
+                .registered_profile_database()
                 .await
                 .expect("profile database");
-            let profile_database = runtime.profile_database_arc();
             let project = profile_database
                 .upsert_code_project("proj_handles", &checkout, None, None, None)
                 .await
@@ -3208,7 +3253,7 @@ mod tests {
                 .run_tick(
                     &profile_root,
                     &profile_database,
-                    &crate::daemon::branch_admin::StoreAdministration::default(),
+                    &administration,
                     &tracedecay_code_index_runtime::code_index_scheduler::CodeIndexSchedulerRegistryV1::new(1),
                     &tracedecay_configuration::RetentionConfig::default(),
                     super::BranchStoreGcCadenceV1 { branch_gc_days: 30 },
@@ -3301,6 +3346,36 @@ mod tests {
             Arc::strong_count(&store_client),
             1,
             "the maintenance join returned while the tick's blocking store work held its client"
+        );
+    }
+
+    #[tokio::test]
+    async fn retention_job_shutdown_uses_group_deadlines() {
+        let jobs = super::RetentionWriterJobs::<MaintenanceTickOutcome>::default();
+        for index in 0..8 {
+            let task = NativeTask::spawn(async {
+                std::future::pending::<Option<MaintenanceTickOutcome>>().await
+            })
+            .expect("stuck retention job");
+            jobs.pending.lock().unwrap().insert(
+                (
+                    format!("store-{index}"),
+                    std::path::PathBuf::from("/held-store"),
+                ),
+                super::RetentionWriterJob {
+                    cancellation: CancellationToken::new(),
+                    task,
+                },
+            );
+        }
+
+        let started = std::time::Instant::now();
+        jobs.shutdown().await;
+
+        assert!(
+            started.elapsed() < super::DAEMON_TASK_ABORT_DEADLINE.saturating_mul(4),
+            "eight stuck jobs must share cooperative and abort deadlines, took {:?}",
+            started.elapsed()
         );
     }
 
