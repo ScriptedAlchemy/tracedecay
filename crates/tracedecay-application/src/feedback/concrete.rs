@@ -1408,6 +1408,14 @@ impl ProjectFeedbackStore {
                         publication.result.termination,
                         FeedbackCycleTerminationV1::Clean | FeedbackCycleTerminationV1::Blocked
                     ))
+                // An incomplete local cycle must not exhaust the durable
+                // publication ledger on repeated saves of unchanged evidence.
+                // Do not make it a completed lookup hit: remote-required
+                // policy and the next cycle still see incomplete coverage.
+                || (stored.dedupe_key == publication.dedupe_key
+                    && stored.result.termination == FeedbackCycleTerminationV1::IncompleteCoverage
+                    && publication.result.termination
+                        == FeedbackCycleTerminationV1::IncompleteCoverage)
         }) {
             transaction
                 .rollback()
@@ -2131,6 +2139,162 @@ mod tests {
             effective_capabilities: [operation.capability_id().clone()].into_iter().collect(),
             grant_expires_at: UtcMicros(100),
         }
+    }
+
+    fn incomplete_publication(cycle_id: &str, evidence: &str) -> FeedbackPublicationV1 {
+        use tracedecay_contracts::feedback::FeedbackRuntimeStateV1;
+        use tracedecay_domain::feedback::{
+            FeedbackActorContextV1, FeedbackAuthoritativeRuntimeStateV1,
+            FeedbackBaselineStateV1, FeedbackBudgetV1, FeedbackContentIdentityV1,
+            FeedbackCycleId, FeedbackCycleRequestV1, FeedbackCycleResultV1,
+            FeedbackCycleRuntimeSnapshotV1, FeedbackEvaluationInputV1, FeedbackScopeV1,
+            FeedbackTargetV1, FeedbackTriggerV1, ProviderEvaluationStateV1,
+        };
+        use tracedecay_domain::CodeGenerationId;
+
+        let admitted_scope = scope();
+        let request = FeedbackCycleRequestV1::new(
+            id::<FeedbackCycleId>(cycle_id),
+            FeedbackScopeV1 {
+                project_id: admitted_scope.project_id.clone(),
+                repository_id: admitted_scope.repository_id.clone(),
+                worktree_id: admitted_scope.worktree_id.clone(),
+                branch_ref: "refs/heads/main".to_owned(),
+                head_commit_id: id::<CommitId>("commit.feedback.incomplete.fixture"),
+            },
+            FeedbackContentIdentityV1::SavedContent {
+                generation_digest: canonical_sha256(&"feedback.incomplete.generation").unwrap(),
+                file_digest: canonical_sha256(&"feedback.incomplete.file").unwrap(),
+            },
+            FeedbackTriggerV1::PostEditHook,
+            canonical_sha256(&"feedback.incomplete.policy").unwrap(),
+            canonical_sha256(&"feedback.incomplete.configuration").unwrap(),
+            FeedbackBudgetV1::bounded(100, 100, 1_024, 100),
+        )
+        .unwrap();
+        let input = FeedbackEvaluationInputV1 {
+            target: FeedbackTargetV1 {
+                file: id("file.feedback.incomplete.fixture"),
+                span: None,
+                symbol: None,
+                generation_id: Some(id::<CodeGenerationId>("generation.feedback.incomplete")),
+            },
+            request,
+            actor: FeedbackActorContextV1::default(),
+            observed_at: UtcMicros(10),
+        };
+        let result = FeedbackCycleResultV1::new(
+            &input.request,
+            FeedbackCycleTerminationV1::IncompleteCoverage,
+            vec![
+                ProviderEvaluationStateV1::SupportedCompletedComplete,
+                ProviderEvaluationStateV1::Unavailable,
+            ],
+            vec![FeedbackBaselineStateV1::NoPriorBaseline],
+            None,
+            None,
+            None,
+            Vec::new(),
+            0,
+            0,
+            0,
+        )
+        .unwrap();
+        let runtime = FeedbackRuntimeStateV1::new(
+            FeedbackAuthoritativeRuntimeStateV1 {
+                snapshot: FeedbackCycleRuntimeSnapshotV1::from_request(&input.request),
+                baseline_horizon: None,
+                runtime_watermark: canonical_sha256(&"feedback.incomplete.runtime").unwrap(),
+            },
+            input.target.generation_id.clone(),
+        )
+        .unwrap();
+        let operation = feedback_surface_operation("feedback_list").unwrap().unwrap();
+        let context = context(&operation, "actor.feedback-reader.requester");
+        let authority = AuthorityReceipt::from_context(
+            &context,
+            PolicyDecisionRef::new(
+                "policy.feedback.incomplete",
+                1,
+                canonical_sha256(&"feedback.incomplete.grant-policy").unwrap(),
+                ComponentVersion::new("policy.feedback.incomplete.v1").unwrap(),
+            )
+            .unwrap(),
+            UtcMicros(10),
+        )
+        .unwrap();
+        FeedbackPublicationV1::new(
+            input.clone(),
+            input
+                .dedupe_key(&canonical_sha256(&evidence).unwrap())
+                .unwrap(),
+            result,
+            runtime,
+            admitted_scope,
+            authority,
+        )
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn repeated_incomplete_local_saves_do_not_fill_the_durable_ledger() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("feedback-incomplete-dedupe.db");
+        crate::register_test_schema_installer();
+        let authority =
+            DatabaseAuthority::acquire_test(&path, "feedback incomplete dedupe").unwrap();
+        let (database, _) =
+            Database::publish_test_runtime(&path, &authority, TestDatabaseRuntimeMode::Initialize)
+                .await
+                .unwrap();
+        let store = ProjectFeedbackStore {
+            database,
+            response_handle_root: root.path().join("response-handles"),
+            source_observations: None,
+        };
+
+        let initial = incomplete_publication(
+            "cycle.feedback.incomplete.initial",
+            "feedback.incomplete.stable-evidence",
+        );
+        assert!(store.record_publication(initial.clone()).await.unwrap());
+        // Every re-run has a fresh result identity but the same exact evidence.
+        for ordinal in 0..64 {
+            let repeated = incomplete_publication(
+                &format!("cycle.feedback.incomplete.repeated.{ordinal}"),
+                "feedback.incomplete.stable-evidence",
+            );
+            assert_ne!(repeated.result.result_id, initial.result.result_id);
+            assert!(!store.record_publication(repeated).await.unwrap());
+        }
+        let retained = store.load_publications().await.unwrap();
+        assert_eq!(retained.len(), 1, "identical incomplete saves must not grow storage");
+        assert_eq!(
+            retained[0].result.termination,
+            FeedbackCycleTerminationV1::IncompleteCoverage
+        );
+        let operation = feedback_surface_operation("feedback_list").unwrap().unwrap();
+        let admitted = context(&operation, "actor.feedback-reader.requester");
+        assert_eq!(
+            store.lookup_completed(&admitted, &initial.dedupe_key).await,
+            FeedbackCycleDedupeState::Unique,
+            "incomplete evidence must not grant a completed dedupe verdict"
+        );
+
+        // Fresh evidence remains publishable and incomplete, not silently
+        // hidden by the earlier project's incomplete publication.
+        let updated = incomplete_publication(
+            "cycle.feedback.incomplete.updated",
+            "feedback.incomplete.updated-evidence",
+        );
+        assert_ne!(updated.dedupe_key, initial.dedupe_key);
+        assert!(store.record_publication(updated.clone()).await.unwrap());
+        let retained = store.load_publications().await.unwrap();
+        assert_eq!(retained.len(), 2);
+        assert!(retained.iter().any(|publication| {
+            publication.dedupe_key == updated.dedupe_key
+                && publication.result.termination == FeedbackCycleTerminationV1::IncompleteCoverage
+        }));
     }
 
     #[test]

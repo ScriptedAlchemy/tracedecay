@@ -223,6 +223,29 @@ impl FeedbackCycleDedupePort for DedupeFixture {
     }
 }
 
+struct DuplicateIncompleteAtRecordFixture;
+
+impl FeedbackCycleDedupePort for DuplicateIncompleteAtRecordFixture {
+    fn lookup_completed<'a>(
+        &'a self,
+        _context: &'a RequestContext,
+        _key: &'a tracedecay_domain::feedback::FeedbackDedupeKeyV1,
+    ) -> tracedecay_contracts::feedback::FeedbackPortFuture<'a, FeedbackCycleDedupeState> {
+        // Incomplete evidence must remain eligible for an updated evaluation.
+        Box::pin(async { FeedbackCycleDedupeState::Unique })
+    }
+
+    fn record_publication<'a>(
+        &'a self,
+        _context: &'a RequestContext,
+        _publication: &'a FeedbackPublicationV1,
+    ) -> tracedecay_contracts::feedback::FeedbackPortFuture<'a, FeedbackPublicationRecordState>
+    {
+        // The store serialized another identical incomplete publication first.
+        Box::pin(async { FeedbackPublicationRecordState::Duplicate })
+    }
+}
+
 #[derive(Clone)]
 struct RecordingDedupeFixture {
     state: FeedbackCycleDedupeState,
@@ -1403,6 +1426,45 @@ fn dedupe_key_changes_when_authoritative_evidence_changes() {
     let keys = keys.borrow();
     assert_eq!(keys.len(), 2);
     assert_ne!(keys[0], keys[1]);
+}
+
+#[test]
+fn incomplete_publication_duplicate_never_claims_completed_coverage() {
+    let input = saved_input();
+    let provider = provider_identity(&input);
+    let service = FeedbackCycleService::new(
+        runtime_port(&input),
+        DiagnosticsFixture {
+            calls: Rc::new(Cell::new(0)),
+            results: vec![complete_result(provider.clone(), Vec::new())],
+        },
+        ImpactFixture {
+            calls: Rc::new(Cell::new(0)),
+            outcome: FeedbackImpactPortOutcome::Unavailable,
+        },
+        DuplicateIncompleteAtRecordFixture,
+        ObservationFixture::default(),
+        RouteAuthorizationFixture::default(),
+        common::operation(),
+    );
+    let result = block_on(service.execute(
+        &common::context(&common::operation()),
+        execution_request(input, provider),
+    ))
+    .unwrap();
+
+    assert_eq!(
+        result.cycle.termination,
+        FeedbackCycleTerminationV1::IncompleteCoverage,
+        "a store-level duplicate of incomplete evidence is not a clean no-op"
+    );
+    assert_eq!(
+        result.cycle.impact_state,
+        Some(FeedbackImpactStateV1::Unavailable)
+    );
+    assert!(!result.cycle.provider_states.is_empty());
+    assert!(result.dedupe_key.is_some());
+    assert!(result.publication.is_none());
 }
 
 #[test]

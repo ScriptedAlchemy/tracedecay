@@ -1291,6 +1291,14 @@ where
                 publication: Some(publication),
                 ..result
             }),
+            // Coalescing an identical incomplete publication must not become
+            // DuplicateNoop: consumers interpret that as complete local
+            // coverage, even when remote evidence was never fetched.
+            FeedbackPublicationRecordState::Duplicate
+                if result.cycle.termination == FeedbackCycleTerminationV1::IncompleteCoverage =>
+            {
+                Ok(result)
+            }
             FeedbackPublicationRecordState::Duplicate => self.assemble(
                 request,
                 Some(dedupe_key),

@@ -303,7 +303,9 @@ impl FeedbackPublicationV1 {
 
 /// Result of the daemon-serialized publication compare-and-insert.
 /// `Duplicate` means the same result, or another complete result with the same
-/// dedupe key, won the race. Incomplete publications never consume that key.
+/// dedupe key, won the race. Identical incomplete publications coalesce at
+/// the atomic write boundary, but never consume the *completed* lookup key or
+/// turn an incomplete result into a clean duplicate verdict.
 /// `Cancelled`, `TimedOut`, and `Unavailable` leave no row behind.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FeedbackPublicationRecordState {
