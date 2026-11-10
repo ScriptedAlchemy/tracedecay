@@ -133,7 +133,11 @@ fn payload_completion_honors_interruption_and_reopens_original_rows() {
                 .rev()
                 .enumerate()
                 .map(|(index, (_, digest, payload))| {
-                    (i64::try_from(index).unwrap() + 1, digest.clone(), payload.clone())
+                    (
+                        i64::try_from(index).unwrap() + 1,
+                        digest.clone(),
+                        payload.clone(),
+                    )
                 })
                 .collect()
         };
@@ -172,12 +176,14 @@ fn payload_completion_honors_interruption_and_reopens_original_rows() {
                      BEGIN SELECT stop_payload_carry(); END;"
                 ))
                 .unwrap();
-            let error = renumber_clone_payloads(&transaction, &parent, &borrowed, &control)
-                .unwrap_err();
+            let error =
+                renumber_clone_payloads(&transaction, &parent, &borrowed, &control).unwrap_err();
             if deadline {
                 assert!(matches!(
                     error,
-                    CodeLexicalArtifactErrorV1::Interrupted(CodeIndexInterruptionV1::DeadlineExceeded)
+                    CodeLexicalArtifactErrorV1::Interrupted(
+                        CodeIndexInterruptionV1::DeadlineExceeded
+                    )
                 ));
             } else {
                 assert!(matches!(
@@ -187,7 +193,10 @@ fn payload_completion_honors_interruption_and_reopens_original_rows() {
             }
             assert_eq!(writes.load(Ordering::Relaxed), stop_at);
             if fresh {
-                assert_eq!(payload_rows(&transaction), expected_payloads[..stop_at].to_vec());
+                assert_eq!(
+                    payload_rows(&transaction),
+                    expected_payloads[..stop_at].to_vec()
+                );
                 assert_eq!(occurrences(&transaction), original_occurrences);
             } else {
                 assert_eq!(payload_rows(&transaction), expected_payloads);
