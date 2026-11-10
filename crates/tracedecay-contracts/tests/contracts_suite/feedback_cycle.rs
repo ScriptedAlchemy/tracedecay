@@ -223,26 +223,40 @@ impl FeedbackCycleDedupePort for DedupeFixture {
     }
 }
 
-struct DuplicateIncompleteAtRecordFixture;
+#[derive(Clone, Default)]
+struct ReusingIncompleteAtRecordFixture {
+    committed: Rc<RefCell<Option<FeedbackPublicationV1>>>,
+}
 
-impl FeedbackCycleDedupePort for DuplicateIncompleteAtRecordFixture {
+impl FeedbackCycleDedupePort for ReusingIncompleteAtRecordFixture {
     fn lookup_completed<'a>(
         &'a self,
         _context: &'a RequestContext,
         _key: &'a tracedecay_domain::feedback::FeedbackDedupeKeyV1,
     ) -> tracedecay_contracts::feedback::FeedbackPortFuture<'a, FeedbackCycleDedupeState> {
-        // Incomplete evidence must remain eligible for an updated evaluation.
         Box::pin(async { FeedbackCycleDedupeState::Unique })
     }
 
     fn record_publication<'a>(
         &'a self,
         _context: &'a RequestContext,
-        _publication: &'a FeedbackPublicationV1,
+        publication: &'a FeedbackPublicationV1,
     ) -> tracedecay_contracts::feedback::FeedbackPortFuture<'a, FeedbackPublicationRecordState>
     {
-        // The store serialized another identical incomplete publication first.
-        Box::pin(async { FeedbackPublicationRecordState::Duplicate })
+        let state = {
+            let mut committed = self.committed.borrow_mut();
+            match committed.as_ref() {
+                Some(previous) if previous.same_incomplete_evidence(publication) => {
+                    FeedbackPublicationRecordState::Reused(previous.clone())
+                }
+                Some(_) => FeedbackPublicationRecordState::Unavailable,
+                None => {
+                    *committed = Some(publication.clone());
+                    FeedbackPublicationRecordState::Recorded
+                }
+            }
+        };
+        Box::pin(async move { state })
     }
 }
 
@@ -1429,9 +1443,10 @@ fn dedupe_key_changes_when_authoritative_evidence_changes() {
 }
 
 #[test]
-fn incomplete_publication_duplicate_never_claims_completed_coverage() {
+fn repeated_incomplete_feedback_reuses_inspectable_committed_identity() {
     let input = saved_input();
     let provider = provider_identity(&input);
+    let dedupe = ReusingIncompleteAtRecordFixture::default();
     let service = FeedbackCycleService::new(
         runtime_port(&input),
         DiagnosticsFixture {
@@ -1442,29 +1457,60 @@ fn incomplete_publication_duplicate_never_claims_completed_coverage() {
             calls: Rc::new(Cell::new(0)),
             outcome: FeedbackImpactPortOutcome::Unavailable,
         },
-        DuplicateIncompleteAtRecordFixture,
+        dedupe.clone(),
         ObservationFixture::default(),
         RouteAuthorizationFixture::default(),
         common::operation(),
     );
-    let result = block_on(service.execute(
+    let first = block_on(service.execute(
         &common::context(&common::operation()),
-        execution_request(input, provider),
+        execution_request(input.clone(), provider),
+    ))
+    .unwrap();
+    assert_eq!(
+        first.cycle.termination,
+        FeedbackCycleTerminationV1::IncompleteCoverage
+    );
+    assert!(first.publication.is_some());
+
+    let mut repeated = input;
+    repeated.request.cycle_id =
+        FeedbackCycleId::new("cycle.feedback.incomplete.repeated").unwrap();
+    let repeated_provider = provider_identity(&repeated);
+    let repeated_service = FeedbackCycleService::new(
+        runtime_port(&repeated),
+        DiagnosticsFixture {
+            calls: Rc::new(Cell::new(0)),
+            results: vec![complete_result(repeated_provider.clone(), Vec::new())],
+        },
+        ImpactFixture {
+            calls: Rc::new(Cell::new(0)),
+            outcome: FeedbackImpactPortOutcome::Unavailable,
+        },
+        dedupe,
+        ObservationFixture::default(),
+        RouteAuthorizationFixture::default(),
+        common::operation(),
+    );
+    let replayed = block_on(repeated_service.execute(
+        &common::context(&common::operation()),
+        execution_request(repeated.clone(), repeated_provider),
     ))
     .unwrap();
 
+    assert_ne!(repeated.request.cycle_id, first.cycle.cycle_id);
+    assert_eq!(replayed.cycle, first.cycle);
+    assert_eq!(replayed.publication, first.publication);
     assert_eq!(
-        result.cycle.termination,
+        replayed.cycle.termination,
         FeedbackCycleTerminationV1::IncompleteCoverage,
-        "a store-level duplicate of incomplete evidence is not a clean no-op"
+        "a durable incomplete result must not claim a clean pass"
     );
     assert_eq!(
-        result.cycle.impact_state,
+        replayed.cycle.impact_state,
         Some(FeedbackImpactStateV1::Unavailable)
     );
-    assert!(!result.cycle.provider_states.is_empty());
-    assert!(result.dedupe_key.is_some());
-    assert!(result.publication.is_none());
+    assert!(!replayed.cycle.provider_states.is_empty());
 }
 
 #[test]

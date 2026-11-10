@@ -261,6 +261,45 @@ impl FeedbackPublicationV1 {
         Ok(publication)
     }
 
+
+    /// Two incomplete evaluations can share the same committed evidence even
+    /// when their cycle and result identities differ. No provider, authorization,
+    /// finding, runtime or policy evidence may be dropped to make that true.
+    pub fn same_incomplete_evidence(&self, current: &Self) -> bool {
+        let left = &self.result;
+        let right = &current.result;
+        self.dedupe_key == current.dedupe_key
+            && self.runtime == current.runtime
+            && self.authorized_scope == current.authorized_scope
+            && self.authority.grant_id == current.authority.grant_id
+            && self.authority.grant_revision == current.authority.grant_revision
+            && self.authority.grant_digest == current.authority.grant_digest
+            && self.authority.disclosure == current.authority.disclosure
+            && self.authority.policy == current.authority.policy
+            && self.input.request.trigger == current.input.request.trigger
+            && self.input.request.budget == current.input.request.budget
+            && self.input.target == current.input.target
+            && self.input.actor == current.input.actor
+            && left.termination == FeedbackCycleTerminationV1::IncompleteCoverage
+            && right.termination == FeedbackCycleTerminationV1::IncompleteCoverage
+            && left.scope == right.scope
+            && left.content_identity == right.content_identity
+            && left.durability == right.durability
+            && left.policy_digest == right.policy_digest
+            && left.configuration_digest == right.configuration_digest
+            && left.provider_states == right.provider_states
+            && left.advisory_provider_states == right.advisory_provider_states
+            && left.baseline_states == right.baseline_states
+            && left.impact == right.impact
+            && left.impact_state == right.impact_state
+            && left.affected_tests_state == right.affected_tests_state
+            && left.findings == right.findings
+            && left.total_findings == right.total_findings
+            && left.returned_findings == right.returned_findings
+            && left.omitted_findings == right.omitted_findings
+            && left.advisory_only == right.advisory_only
+    }
+
     pub fn validate(&self) -> Result<(), ApplicationContractError> {
         self.input.validate()?;
         self.input.saved()?;
@@ -302,14 +341,14 @@ impl FeedbackPublicationV1 {
 }
 
 /// Result of the daemon-serialized publication compare-and-insert.
-/// `Duplicate` means the same result, or another complete result with the same
-/// dedupe key, won the race. Identical incomplete publications coalesce at
-/// the atomic write boundary, but never consume the *completed* lookup key or
-/// turn an incomplete result into a clean duplicate verdict.
-/// `Cancelled`, `TimedOut`, and `Unavailable` leave no row behind.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// `Duplicate` is reserved for a completed result or its exact replay.
+/// `Reused` carries the actual committed incomplete result, preserving its
+/// read handles without inserting a false identity or claiming remote success.
+/// Cancellation, timeout and unavailable states do not write a publication.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum FeedbackPublicationRecordState {
     Recorded,
+    Reused(FeedbackPublicationV1),
     Duplicate,
     Cancelled,
     TimedOut,
