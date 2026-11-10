@@ -3729,6 +3729,9 @@ mod build_tests {
             &BTreeSet::from(["generation:child2".to_owned()]),
         )
         .unwrap();
+        assert_eq!(census.head_count, 1);
+        assert_eq!(census.superseded_count, 1 + initial_layers);
+        assert_eq!(census.unrecognized_count, 0);
         for kind in [0, 1] {
             let bytes: u64 = physical
                 .values()
