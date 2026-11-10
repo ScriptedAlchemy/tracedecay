@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use crate::common::{
     canonicalize_test_dir, create_runtime, get_json, http_agent, isolated_profile_under_home,
-    pick_free_port, tempdir_or_panic, wait_for_dashboard,
+    tempdir_or_panic, wait_for_dashboard,
 };
 use crate::dashboard_api_support::{post_json_body, rg_word_paths, write_file};
 use crate::runtime::DashboardTestRuntimeV1;
@@ -792,8 +792,7 @@ async fn start_dashboard_fixture_seeded(
     let (code_graph_admission, code_graph_projection) =
         compose_graph_authority(&cg, graph_seed, freshness);
 
-    let port = pick_free_port();
-    let (access, base_url) = crate::dashboard_api_support::dashboard_access_for(port);
+    let (endpoint, base_url) = crate::dashboard_api_support::dashboard_endpoint().await;
     let server_graph = std::sync::Arc::new(cg);
     let authority = host_runtime
         .dashboard_test_authority_with_session_reads(&server_graph)
@@ -802,24 +801,21 @@ async fn start_dashboard_fixture_seeded(
         .with_code_graph_authority(code_graph_admission, code_graph_projection)
         .with_code_read_authority(Arc::new(FixtureCodeReadPortV1));
     let server = tokio::spawn(async move {
-        let _ = dashboard::run_until_shutdown_for_tests_with_host_admission(
+        dashboard::run_until_shutdown_for_tests_with_host_admission(
             server_graph,
             &profile,
             None,
             authority,
             tracedecay_dashboard_api::DashboardTestProjectGraphsV1::default(),
-            tracedecay_dashboard_api::DashboardTestEndpointV1 {
-                host: "127.0.0.1",
-                port,
-                access,
-            },
+            endpoint,
             tracedecay_project::product_runtime::register_fixture_product_runtime().build_version(),
             tracedecay_api::static_dashboard_router(
                 tracedecay_project::product_runtime::FIXTURE_DASHBOARD_ASSETS,
             ),
             std::future::pending(),
         )
-        .await;
+        .await
+        .expect("serve fixture dashboard");
     });
 
     let agent = http_agent();

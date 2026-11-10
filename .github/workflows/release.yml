@@ -164,6 +164,7 @@ jobs:
         id: bazel
         uses: ./.release-automation/.github/actions/setup-bazel
         with:
+          release-download-token: ${{ github.token }}
           remote-download-outputs: toplevel
           cache-key: release-${{ matrix.target }}
           tailscale-client-id: >-
