@@ -184,6 +184,17 @@ class BenchHotPathsTests(unittest.TestCase):
             run = module.Run.__new__(module.Run)
             run.repo = self.repo
             run.generation = "generation.1"
+            # Another refresh advanced the daemon after indexing, before
+            # the measured edit. Its current generation is the true fence.
+            run.status_payload = lambda: {
+                "code_index_freshness": {
+                    "status": "current",
+                    "worktree": {
+                        "latest_generation_id": "generation.7",
+                        "code_graph_serving": {"state": "ready"},
+                    },
+                }
+            }
             events = []
             rows = []
             run.daemon_pid = lambda: 1234
@@ -195,9 +206,9 @@ class BenchHotPathsTests(unittest.TestCase):
                 return module.Call(True, b"", b"", 0.5, 0.0, 0)
 
             def ready(lane, previous_generation):
-                self.assertEqual((lane, previous_generation), ("edit_reconcile", "generation.1"))
+                self.assertEqual((lane, previous_generation), ("edit_reconcile", "generation.7"))
                 events.append("ready")
-                return {"generation_id": "generation.2"}
+                return {"generation_id": "generation.8"}
 
             run.client = sync
             run.wait_for_ready = ready
@@ -237,6 +248,50 @@ class BenchHotPathsTests(unittest.TestCase):
             )
             self.assertEqual(measured["peak_daemon_rss_kb"], 2048)
             self.assertIn("bench-hot-paths edit", target.read_text())
+            self.assertEqual(run.generation, "generation.8")
+
+            # A missing generation must be refused before writing a source
+            # file or starting the sampler; it is not evidence of readiness.
+            before = target.read_bytes()
+            events_before = list(events)
+            run.status_payload = lambda: {
+                "code_index_freshness": {
+                    "status": "current",
+                    "worktree": {
+                        "latest_generation_id": None,
+                        "code_graph_serving": {"state": "ready"},
+                    },
+                }
+            }
+            with self.assertRaisesRegex(
+                module.HarnessError, "no current ready generation before editing"
+            ):
+                run.lane_edit_reconcile()
+            self.assertEqual(target.read_bytes(), before)
+            self.assertEqual(events, events_before)
+
+            # A ready response with no generation ID cannot finish a later
+            # pass. A subsequent actual generation must be observed instead.
+            missing = run.status_payload()
+            valid = {
+                "code_index_freshness": {
+                    "status": "current",
+                    "worktree": {
+                        "latest_generation_id": "generation.9",
+                        "code_graph_serving": {"state": "ready"},
+                    },
+                }
+            }
+            responses = iter((missing, valid))
+            run.status_payload = lambda: next(responses)
+            run.index_timeout = 10
+            del run.wait_for_ready
+            with mock.patch.object(module, "proc_status", return_value=None), mock.patch.object(
+                module.time, "sleep", return_value=None
+            ):
+                result = run.wait_for_ready("edit_reconcile", "generation.8")
+            self.assertEqual(result["generation_id"], "generation.9")
+            self.assertEqual(result["status_polls"], 2)
         finally:
             sys.modules.pop(spec.name, None)
 

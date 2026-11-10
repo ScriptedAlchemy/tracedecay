@@ -330,6 +330,8 @@ class Run:
                 if (
                     freshness.get("status") == "current"
                     and serving.get("state") == "ready"
+                    and isinstance(generation, str)
+                    and bool(generation)
                     and generation != previous_generation
                 ):
                     return {
@@ -449,6 +451,21 @@ class Run:
             return
         target = self.repo / tracked[0]
         marker = "//" if target.suffix == ".rs" else "#"
+        # Another daemon refresh may have advanced the generation since
+        # indexing. Fence the edit against the latest ready generation, not
+        # the possibly stale generation recorded at initial enrollment.
+        payload = self.status_payload() or {}
+        freshness = payload.get("code_index_freshness") or {}
+        worktree = freshness.get("worktree") or {}
+        serving = worktree.get("code_graph_serving") or {}
+        previous_generation = worktree.get("latest_generation_id")
+        if (
+            freshness.get("status") != "current"
+            or serving.get("state") != "ready"
+            or not isinstance(previous_generation, str)
+            or not previous_generation
+        ):
+            raise HarnessError("edit_reconcile: no current ready generation before editing")
         # The file watcher may begin its pass as soon as the edit lands.
         # Arm the timer and RSS sampler *before* modifying the source; a
         # sync-only measurement misses work that starts during the write.
@@ -461,7 +478,7 @@ class Run:
             sync = self.client(["sync"])
             if not sync.ok:
                 raise HarnessError(f"`tracedecay sync` failed: {sync.stderr[-2000:].decode(errors='replace')}")
-            ready = self.wait_for_ready("edit_reconcile", self.generation)
+            ready = self.wait_for_ready("edit_reconcile", previous_generation)
         finally:
             peak_rss_kb = rss_sampler.stop()
         if peak_rss_kb is None:
@@ -471,6 +488,7 @@ class Run:
             )
         else:
             ready["peak_daemon_rss_kb"] = peak_rss_kb
+        self.generation = ready["generation_id"]
         self.record("edit_reconcile", "sync_request", wall_ms=sync.wall_ms)
         self.record("edit_reconcile", "edited_file", path=tracked[0])
         self.record("edit_reconcile", "edit_to_ready",
