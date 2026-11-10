@@ -61,13 +61,16 @@ FAKE_TRACEDECAY = textwrap.dedent(
             reply({"problem": {"code": "project_not_enrolled"}}, ok=False)
         tool = argv[1]
         if tool == "tracedecay_status":
-            reply({
+            status = {
                 "code_index_freshness": {"status": "current", "worktree": {
                     "latest_generation_id": f"generation.{generation}",
                     "code_graph_serving": {"state": "ready"}}},
                 "memory": {"retained_bytes": 4096,
                            "owners": [{"kind": "graph_engine", "bytes": 4096}]},
-            })
+            }
+            # The real CLI keeps the full response in structuredContent.
+            # A preview-only text field must not hide readiness or generation.
+            reply(status, content_payload={"handle": "rh_status", "preview": "{..."}, structured=status)
         if tool == "tracedecay_search":
             args = json.loads(argv[argv.index("--args") + 1])
             payload = {"results": []}

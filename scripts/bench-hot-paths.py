@@ -252,7 +252,16 @@ class Run:
         if not call.ok:
             return None
         try:
-            return json.loads(json.loads(call.stdout)["content"][0]["text"])
+            envelope = json.loads(call.stdout)
+            if not isinstance(envelope, dict):
+                return None
+            # structuredContent is the complete typed answer; text can be a
+            # truncated preview even when the status call succeeded.
+            structured = envelope.get("structuredContent")
+            if isinstance(structured, dict):
+                return structured
+            text_payload = json.loads(envelope["content"][0]["text"])
+            return text_payload if isinstance(text_payload, dict) else None
         except (ValueError, KeyError, IndexError, TypeError):
             return None
 
