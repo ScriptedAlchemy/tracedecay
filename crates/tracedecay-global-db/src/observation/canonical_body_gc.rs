@@ -14,6 +14,8 @@ use tracedecay_runtime_core::db::Database;
 use tracedecay_runtime_core::db::engine::{Executor, QueryExecutor, params};
 use tracedecay_store::collect_body_refs;
 
+#[cfg(test)]
+mod bootstrap_write_tests;
 pub(crate) mod schema;
 #[cfg(test)]
 mod tests;
@@ -218,33 +220,31 @@ async fn bootstrap_raw(
 ) -> Result<u64> {
     let mut rows = conn
         .query(
-            "SELECT store_id, CASE WHEN storage_kind = 'inline' AND content IS NULL
-                    THEN content_hash END
-             FROM lcm_raw_messages WHERE store_id > ?1 AND store_id <= ?2
-             ORDER BY store_id LIMIT ?3",
+            "SELECT store_id FROM lcm_raw_messages
+             WHERE store_id > ?1 AND store_id <= ?2 ORDER BY store_id LIMIT ?3",
             params![progress.raw_through, progress.raw_until, limit],
         )
         .await
         .map_err(db_error)?;
     let mut page = Vec::new();
     while let Some(row) = rows.next().await.map_err(db_error)? {
-        page.push((
-            row.get::<i64>(0).map_err(db_error)?,
-            row.get::<Option<String>>(1).map_err(db_error)?,
-        ));
+        page.push(row.get::<i64>(0).map_err(db_error)?);
     }
     drop(rows);
-    for (owner, hash) in &page {
-        if let Some(hash) = hash {
-            conn.execute(
-                "INSERT OR IGNORE INTO canonical_body_gc_refs(owner_kind, owner_id, content_hash)
-                 VALUES ('raw', ?1, ?2)",
-                params![*owner, hash.as_str()],
-            )
-            .await
-            .map_err(db_error)?;
-        }
-        progress.raw_through = *owner;
+    if let Some(&last) = page.last() {
+        // Both reads share the writer transaction. The last selected identity
+        // bounds this indexed insert to the same page, including sparse IDs,
+        // without one worker submission for every referenced owner.
+        conn.execute(
+            "INSERT OR IGNORE INTO canonical_body_gc_refs(owner_kind, owner_id, content_hash)
+             SELECT 'raw', store_id, content_hash FROM lcm_raw_messages
+             WHERE store_id > ?1 AND store_id <= ?2
+               AND storage_kind = 'inline' AND content IS NULL",
+            params![progress.raw_through, last],
+        )
+        .await
+        .map_err(db_error)?;
+        progress.raw_through = last;
     }
     if page.len() < limit as usize {
         progress.raw_through = progress.raw_until;
@@ -317,14 +317,18 @@ async fn bootstrap_bodies(
         page.push(row.get::<String>(0).map_err(db_error)?);
     }
     drop(rows);
-    for hash in &page {
+    if let Some(last) = page.last() {
+        // Seed the selected key range in one statement, not one asynchronous
+        // writer submission per body. No body payload is materialized here.
         conn.execute(
-            "INSERT OR IGNORE INTO canonical_body_gc_candidates(content_hash) VALUES (?1)",
-            params![hash.as_str()],
+            "INSERT OR IGNORE INTO canonical_body_gc_candidates(content_hash)
+             SELECT content_hash FROM session_canonical_bodies
+             WHERE content_hash > ?1 AND content_hash <= ?2",
+            params![progress.bodies_after.as_str(), last.as_str()],
         )
         .await
         .map_err(db_error)?;
-        progress.bodies_after.clone_from(hash);
+        progress.bodies_after.clone_from(last);
     }
     if page.len() < limit as usize {
         progress.bodies_after.clone_from(&progress.bodies_until);
