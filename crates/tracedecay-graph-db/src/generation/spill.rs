@@ -1474,7 +1474,7 @@ mod owner_receipt_tests {
         let stale = SpillDirectory::prepare(&previous_path, previous)
             .unwrap()
             .keep();
-        let live = SpillDirectory::prepare(&final_path, current).unwrap();
+        let mut live = SpillDirectory::prepare(&final_path, current).unwrap();
         let peer_path = root.join(format!(".rows-{current}-1"));
         let _peer = SpillDirectory::create(peer_path.clone()).unwrap();
 
@@ -1482,8 +1482,14 @@ mod owner_receipt_tests {
         assert!(!stale.exists());
         assert!(live.path().is_dir());
         assert!(peer_path.is_dir());
-        drop(live);
-        let _published = SpillDirectory::create(final_path.clone()).unwrap();
+        // A prepared pending spill deliberately survives a drop; the live
+        // producer completes it by installing under its canonical name.
+        SpillDirectory::install(&mut live, &final_path, current).unwrap();
+        let published = SpillDirectory(final_path.clone());
+        assert!(final_path.is_dir());
+        drop(published);
+        assert!(!final_path.exists(), "the owner releases its own spill");
+        let _reused = SpillDirectory::create(final_path.clone()).unwrap();
         assert!(final_path.is_dir());
     }
 

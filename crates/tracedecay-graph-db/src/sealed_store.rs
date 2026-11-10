@@ -3386,7 +3386,14 @@ mod receipt_budget_tests {
             !directory.exists(),
             "verified retired generation is physically removed"
         );
-        retire_sealed_directory_checked(&directory, &locator, Some("digest")).unwrap();
+        // A registered reader proves the artifact was installed, so its
+        // absence is unconfirmed retirement. Only a disk-only retry with no
+        // resident reader may treat an already-absent directory as done.
+        assert!(
+            retire_sealed_directory_checked(&directory, &locator, Some("digest")).is_err(),
+            "a registered generation must not report retirement of an absent artifact"
+        );
+        retire_sealed_directory_checked(&directory, &locator, None).unwrap();
     }
 
     #[cfg(unix)]

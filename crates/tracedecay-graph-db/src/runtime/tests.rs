@@ -136,10 +136,17 @@ fn owner_close_releases_the_physical_database_after_durability_uncertainty() {
                 .to_owned(),
         })
     );
+    assert!(
+        !owner.engine_is_open().unwrap(),
+        "the poisoned close must release the physical database"
+    );
     assert_eq!(
         owner.close(),
-        Err(GraphDbError::Closed),
-        "the poisoned close must release the physical database before a second close"
+        Err(GraphDbError::DurabilityUncertain {
+            message: "the handle was poisoned after an observed post-commit persistence failure"
+                .to_owned(),
+        }),
+        "a retry after a poisoned close must stay uncertain, never idempotent Closed"
     );
 }
 
