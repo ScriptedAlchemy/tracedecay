@@ -90,12 +90,15 @@ impl RepositoryPhysicalAttachmentFactory {
                 readers: Some(readers),
                 admission_open: true,
                 drained: false,
+                workers_closing: false,
                 closed: false,
                 file_lost: false,
                 lost_readers: None,
                 lost_writer: None,
                 #[cfg(test)]
                 after_lost_notice: None,
+                #[cfg(test)]
+                before_worker_join: None,
                 close_failure: None,
                 retained_file_pin: Some(opened_database),
             })),
@@ -322,12 +325,15 @@ impl RepositoryPhysicalAttachmentFactory {
             readers: Some(readers),
             admission_open: true,
             drained: false,
+            workers_closing: false,
             closed: false,
             file_lost: false,
             lost_readers: None,
             lost_writer: None,
             #[cfg(test)]
             after_lost_notice: None,
+            #[cfg(test)]
+            before_worker_join: None,
             close_failure: None,
             retained_file_pin,
         }));
@@ -457,6 +463,9 @@ struct RepositoryRuntimePhysicalState {
     readers: Option<ReaderPool<RepositoryRuntimeReadExecutor>>,
     admission_open: bool,
     drained: bool,
+    /// Worker owners are temporarily outside the state lock while joining.
+    /// Empty live/lost slots do not prove their SQLite connections have closed.
+    workers_closing: bool,
     closed: bool,
     file_lost: bool,
     /// The reader pool of a lost file, kept until its workers have exited so
@@ -470,6 +479,9 @@ struct RepositoryRuntimePhysicalState {
     /// connection open for as long as it blocks.
     #[cfg(test)]
     after_lost_notice: Option<Box<dyn FnOnce() + Send>>,
+    /// Test-only: holds the extracted workers before the out-of-lock join.
+    #[cfg(test)]
+    before_worker_join: Option<Box<dyn FnOnce() + Send>>,
     close_failure: Option<String>,
     /// Kept until all SQLite workers exit: closing any raw fd for the inode
     /// while SQLite holds POSIX locks can release those locks process-wide.
@@ -511,10 +523,13 @@ impl RepositoryRuntimePhysicalAttachment {
     }
 
     /// Whether a lost file has no open connection left: the writer task
-    /// finished and every reader worker exited. Also true for an attachment
-    /// whose file was never lost.
+    /// finished and every reader worker exited, including owners currently
+    /// joining outside the state lock. Otherwise true when no close is pending.
     pub fn lost_file_closed(&self) -> bool {
         let mut state = self.lock_state();
+        if state.workers_closing {
+            return false;
+        }
         if state
             .lost_readers
             .as_ref()
@@ -582,13 +597,28 @@ impl RepositoryRuntimePhysicalAttachment {
                 );
             }
             let quiescent = state.readers.as_ref().is_some_and(ReaderPool::is_quiescent);
-            if quiescent {
-                let readers = state.readers.take();
-                drop(state);
-                // Drop joins the idle SQLite workers. No independent raw pin
-                // closes before the writer's final schema barrier.
-                drop(readers);
-                return Ok(());
+            if quiescent
+                && let Some(readers) = state.readers.take()
+            {
+                match readers.try_into_shutdown() {
+                    Ok(readers) => {
+                        state.workers_closing = true;
+                        drop(state);
+                        // Exclusive ownership fences late weak upgrades before
+                        // joining. Keep every file pin until the joins finish.
+                        readers.join();
+                        let mut state = self.lock_state();
+                        state.workers_closing = false;
+                        if state.file_lost {
+                            return Err(
+                                "SQLite initialization lost its database while joining readers"
+                                    .to_owned(),
+                            );
+                        }
+                        return Ok(());
+                    }
+                    Err(readers) => state.readers = Some(readers),
+                }
             }
             if started.elapsed() >= ATTACHMENT_DRAIN_TIMEOUT {
                 // Keep the draining readers owned by the attachment so its
@@ -880,6 +910,9 @@ impl RepositoryRuntimePhysicalAttachment {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let mut state = self.lock_state();
+        if let Some(message) = &state.close_failure {
+            return Err(message.clone());
+        }
         if state.closed {
             return Ok(());
         }
@@ -896,15 +929,32 @@ impl RepositoryRuntimePhysicalAttachment {
         drop(state);
 
         let started = Instant::now();
-        loop {
-            let state = self.lock_state();
+        let (writer, readers) = loop {
+            let mut state = self.lock_state();
             let writer_quiescent = state.writer.as_ref().is_none_or(|writer| {
                 Arc::strong_count(writer) == 1
                     && writer.telemetry_snapshot().queue.queued_operations == 0
             });
             let readers_quiescent = state.readers.as_ref().is_none_or(ReaderPool::is_quiescent);
             if writer_quiescent && readers_quiescent {
-                break;
+                match state.writer.take().map(Arc::try_unwrap).transpose() {
+                    Ok(writer) => match state
+                        .readers
+                        .take()
+                        .map(ReaderPool::try_into_shutdown)
+                        .transpose()
+                    {
+                        Ok(readers) => {
+                            state.workers_closing = true;
+                            break (writer, readers);
+                        }
+                        Err(readers) => {
+                            state.writer = writer.map(Arc::new);
+                            state.readers = Some(readers);
+                        }
+                    },
+                    Err(writer) => state.writer = Some(writer),
+                }
             }
             if started.elapsed() >= ATTACHMENT_DRAIN_TIMEOUT {
                 let queued = state.writer.as_ref().map_or(0, |writer| {
@@ -920,27 +970,29 @@ impl RepositoryRuntimePhysicalAttachment {
             }
             drop(state);
             thread::sleep(ATTACHMENT_DRAIN_POLL);
-        }
-
-        let mut state = self.lock_state();
-        let writer = match state.writer.take().map(Arc::try_unwrap).transpose() {
-            Ok(writer) => writer,
-            Err(writer) => {
-                state.writer = Some(writer);
-                return Err("repository writer is still serving a request".to_owned());
-            }
         };
-        let readers = state.readers.take();
-        drop(state);
-        drop(readers);
-        if let Some(writer) = writer
-            && let Err(error) = writer.shutdown_and_join()
+
+        #[cfg(test)]
         {
+            let hook = self.lock_state().before_worker_join.take();
+            if let Some(hook) = hook {
+                hook();
+            }
+        }
+        if let Some(readers) = readers {
+            readers.join();
+        }
+        // Neither the joins nor the writer's lost-file callback run under the
+        // attachment lock. Health checks still see their in-flight ownership.
+        let joined = writer.map_or(Ok(()), PersistentWriter::shutdown_and_join);
+        let mut state = self.lock_state();
+        state.workers_closing = false;
+        if let Err(error) = joined {
             let message = format!("join repository writer: {error}");
-            self.lock_state().close_failure = Some(message.clone());
+            state.close_failure = Some(message.clone());
             return Err(message);
         }
-        self.lock_state().drained = true;
+        state.drained = true;
         Ok(())
     }
 
@@ -956,7 +1008,7 @@ impl RepositoryRuntimePhysicalAttachment {
         if state.admission_open {
             return Err("repository physical attachment must drain before close".to_owned());
         }
-        if !state.drained {
+        if !state.drained || state.workers_closing {
             return Err("repository physical attachment has not completed drain".to_owned());
         }
         if state.writer.is_some() || state.readers.is_some() {
@@ -1119,6 +1171,8 @@ fn infrastructure(operation: impl Into<String>) -> StorageRuntimeErrorV1 {
 
 #[cfg(test)]
 mod tests {
+    mod shutdown;
+
     use std::{fs, sync::mpsc, thread, time::Duration};
 
     use tempfile::TempDir;

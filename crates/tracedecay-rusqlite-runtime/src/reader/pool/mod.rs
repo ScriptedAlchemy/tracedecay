@@ -29,6 +29,7 @@ use worker::SnapshotRevoker;
 
 mod lease;
 mod outcome;
+mod shutdown;
 
 pub use lease::{ReaderLease, SnapshotLease};
 pub use outcome::{ReaderAcquireError, ReaderPoolSnapshot, ReaderPoolState};
@@ -463,6 +464,9 @@ pub(super) struct PoolInner<E: ReaderQueryExecutor> {
     /// registration.
     #[cfg(test)]
     after_spawn: Mutex<Option<Box<dyn FnOnce() + Send>>>,
+    /// Test-only: runs between the quiescence observation and ownership claim.
+    #[cfg(test)]
+    before_shutdown_claim: Mutex<Option<Box<dyn FnOnce() + Send>>>,
 }
 
 impl<E: ReaderQueryExecutor> Drop for PoolInner<E> {
@@ -586,6 +590,8 @@ impl<E: ReaderQueryExecutor> ReaderPool<E> {
             admission: Arc::new(ReaderAdmissionRecorder::default()),
             #[cfg(test)]
             after_spawn: Mutex::new(None),
+            #[cfg(test)]
+            before_shutdown_claim: Mutex::new(None),
         });
         let pool = Self { inner };
         for _ in 0..pool.inner.budget.min_per_hot_shard {
