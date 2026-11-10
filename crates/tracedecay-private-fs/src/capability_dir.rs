@@ -1315,7 +1315,10 @@ mod tests {
         )
         .unwrap();
         assert_eq!(complete.get(&true), Some(&(1, 12)));
-        assert_eq!(std::fs::read(generation.join("payload")).unwrap(), b"durable");
+        assert_eq!(
+            std::fs::read(generation.join("payload")).unwrap(),
+            b"durable"
+        );
     }
 
     #[test]
