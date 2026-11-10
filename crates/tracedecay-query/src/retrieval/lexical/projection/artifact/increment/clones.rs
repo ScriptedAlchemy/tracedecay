@@ -366,6 +366,7 @@ fn renumber_clone_payloads(
     }
     // A successor body whose payload the parent already stores must match it.
     for (key, payload) in successor_payloads.values() {
+        checkpoint(control)?;
         if let Some(ordinal) = parent_by_digest.get(key.as_slice()) {
             let stored: Vec<u8> = transaction
                 .query_row(
@@ -411,6 +412,7 @@ fn renumber_clone_payloads(
             )
             .map_err(sqlite_error)?;
         for (number, key, payload) in fresh {
+            checkpoint(control)?;
             insert
                 .execute(params![number, key.as_slice(), payload])
                 .map_err(sqlite_error)?;
@@ -420,12 +422,17 @@ fn renumber_clone_payloads(
         .prepare_cached("UPDATE clone_occurrences SET payload_ordinal = ?2 WHERE ordinal = ?1")
         .map_err(sqlite_error)?;
     for (ordinal, number) in repointed {
+        checkpoint(control)?;
         repoint
             .execute(params![ordinal, number])
             .map_err(sqlite_error)?;
     }
-    Ok(())
+    // The final SQLite write can consume the deadline or observe cancellation.
+    // Do not report a completed carry without checking that boundary as well.
+    checkpoint(control)
 }
 
+#[cfg(test)]
+mod payload_cancellation;
 #[cfg(test)]
 mod tests;
