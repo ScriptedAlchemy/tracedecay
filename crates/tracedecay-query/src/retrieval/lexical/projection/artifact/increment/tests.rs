@@ -1,3 +1,6 @@
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+use rusqlite::types::Value;
 use rusqlite::{Connection, ErrorCode, params};
 use tracedecay_code_index::production::CodeIndexExecutionControlV1;
 
@@ -348,8 +351,6 @@ fn lexical_rowid_shift_does_not_spill_unlinked_sqlite_files() {
 
 #[test]
 fn carried_row_chunks_check_cancellation_and_preserve_disk_rows() {
-    use std::sync::atomic::{AtomicUsize, Ordering};
-
     struct StopAfter {
         checks: AtomicUsize,
         deadline: bool,
@@ -385,15 +386,20 @@ fn carried_row_chunks_check_cancellation_and_preserve_disk_rows() {
             .prepare("INSERT INTO row_chunks(chunk_id, document_id) VALUES (?1, ?2)")
             .unwrap();
         for document in 1_i64..=12_000 {
-            insert
-                .execute(params![document.to_be_bytes().repeat(4), document])
-                .unwrap();
+            // Canonical chunk digests are BLOB keys; other valid IDs retain
+            // TEXT storage. Both must survive the same mixed-key scan.
+            let chunk_id = if document % 2 == 0 {
+                Value::Text(format!("literal-chunk:{document:05}"))
+            } else {
+                Value::Blob(document.to_be_bytes().repeat(4))
+            };
+            insert.execute(params![chunk_id, document]).unwrap();
         }
         drop(insert);
         tx.commit().unwrap();
     }
 
-    let chunks = |db: &Connection| -> Vec<(Vec<u8>, i64)> {
+    let chunks = |db: &Connection| -> Vec<(Value, i64)> {
         let mut query = db
             .prepare("SELECT chunk_id, document_id FROM row_chunks ORDER BY chunk_id")
             .unwrap();
@@ -405,6 +411,15 @@ fn carried_row_chunks_check_cancellation_and_preserve_disk_rows() {
     };
     let original = chunks(&connection);
     assert_eq!(original.len(), 12_000);
+    let (blob_keys, text_keys): (i64, i64) = connection
+        .query_row(
+            "SELECT SUM(typeof(chunk_id) = 'blob'), SUM(typeof(chunk_id) = 'text')
+             FROM row_chunks",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!((blob_keys, text_keys), (6_000, 6_000));
     let shift = ShiftV1::new([((8, 14), 4), ((45, 52), 10)]).unwrap();
     // Reference mapping is deliberately independent of ShiftV1::map:
     // two replaced ranges remove 13 old chunks, shifting the intervening

@@ -344,8 +344,8 @@ mod physical_spill {
         );
         {
             let transaction = connection.transaction().unwrap();
-            // Execute the actual pre-fix, bulk two-phase SQL as a positive
-            // control. The production rowid helper is intentionally bounded now.
+            // Bulk key updates are the positive control for statement-local
+            // spills that bounded production key updates avoid.
             transaction
                 .execute(
                     "UPDATE clone_exact_postings

@@ -767,15 +767,15 @@ fn carry_row_chunks(
         let after_sql = format!(
             "SELECT chunk_id, document_id FROM row_chunks WHERE document_id >= {first} AND chunk_id > ?1 ORDER BY chunk_id LIMIT ?2"
         );
-        let mut last: Option<Vec<u8>> = None;
+        let mut last: Option<Value> = None;
         loop {
             checkpoint(control)?;
-            let window: Vec<(Vec<u8>, i64)> = postings::scan_window(
+            let window: Vec<(Value, i64)> = postings::scan_window(
                 transaction,
                 &first_sql,
                 &after_sql,
                 &last,
-                |chunk_id| vec![Value::Blob(chunk_id.clone())],
+                |chunk_id| vec![chunk_id.clone()],
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )?;
             let Some((final_chunk, _)) = window.last() else {
