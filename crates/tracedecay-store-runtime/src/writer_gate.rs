@@ -21,8 +21,12 @@
 //!       └── content: Mutex
 //! ```
 //!
-//! Every acquisition takes these in exactly that order, so no lock-order
-//! inversion is possible.
+//! Admitted operations hold this hierarchy. A queued store operation first
+//! reserves its local resources without holding daemon admission. It only
+//! *tries* the daemon read gate with that reservation held; if the daemon is
+//! busy, it releases every local resource before awaiting the daemon. Thus
+//! no local waiter pins daemon admission, and no task waits for the daemon
+//! while holding a resource another daemon reader could need.
 //!
 //! # Exclusivity argument
 //!
@@ -108,6 +112,28 @@ impl StoreGate {
         match class {
             StoreWriterClass::Owner => Arc::clone(&self.owner),
             StoreWriterClass::Content => Arc::clone(&self.content),
+        }
+    }
+
+    fn try_reserve(
+        &self,
+        class: Option<StoreWriterClass>,
+    ) -> Option<(StoreMaintenanceGuard, Option<OwnedMutexGuard<()>>)> {
+        match class {
+            Some(class) => {
+                let maintenance = Arc::clone(&self.maintenance).try_read_owned().ok()?;
+                let class_guard = self.class_mutex(class).try_lock_owned().ok()?;
+                Some((
+                    StoreMaintenanceGuard::Shared(maintenance),
+                    Some(class_guard),
+                ))
+            }
+            None => Some((
+                StoreMaintenanceGuard::Exclusive(
+                    Arc::clone(&self.maintenance).try_write_owned().ok()?,
+                ),
+                None,
+            )),
         }
     }
 }
@@ -205,48 +231,78 @@ impl StoreWriterGates {
                 _gate: None,
             },
             WriterScope::Store { data_root, class } => {
-                let daemon = tracing::Instrument::instrument(
-                    Arc::clone(&self.daemon).read_owned(),
-                    tracing::trace_span!("daemon.writer_gate.acquire.store"),
-                )
-                .await;
-                let gate = self.store_gate(data_root);
-                let maintenance = tracing::Instrument::instrument(
-                    Arc::clone(&gate.maintenance).read_owned(),
-                    tracing::trace_span!("daemon.writer_gate.acquire.store_read"),
-                )
-                .await;
-                let class_guard = tracing::Instrument::instrument(
-                    gate.class_mutex(*class).lock_owned(),
-                    tracing::trace_span!("daemon.writer_gate.acquire.class"),
-                )
-                .await;
-                WriterAdmissionGuard {
-                    _class: Some(class_guard),
-                    _maintenance: Some(StoreMaintenanceGuard::Shared(maintenance)),
-                    _daemon: DaemonGuard::Shared(daemon),
-                    _gate: Some(gate),
-                }
+                self.acquire_store(data_root, Some(*class)).await
             }
             WriterScope::StoreMaintenance { data_root } => {
-                let daemon = tracing::Instrument::instrument(
-                    Arc::clone(&self.daemon).read_owned(),
-                    tracing::trace_span!("daemon.writer_gate.acquire.store"),
-                )
-                .await;
-                let gate = self.store_gate(data_root);
-                let maintenance = tracing::Instrument::instrument(
-                    Arc::clone(&gate.maintenance).write_owned(),
-                    tracing::trace_span!("daemon.writer_gate.acquire.store_maintenance"),
-                )
-                .await;
-                WriterAdmissionGuard {
-                    _class: None,
-                    _maintenance: Some(StoreMaintenanceGuard::Exclusive(maintenance)),
+                self.acquire_store(data_root, None).await
+            }
+        }
+    }
+
+    /// Reserve the store without retaining daemon admission while queued.
+    /// `None` is exclusive maintenance; owner/content reserve a shared store
+    /// guard plus their class mutex.
+    async fn acquire_store(
+        &self,
+        data_root: &Path,
+        class: Option<StoreWriterClass>,
+    ) -> WriterAdmissionGuard {
+        let gate = self.store_gate(data_root);
+        loop {
+            let (maintenance, class_guard) = match class {
+                Some(class) => {
+                    let maintenance = tracing::Instrument::instrument(
+                        Arc::clone(&gate.maintenance).read_owned(),
+                        tracing::trace_span!("daemon.writer_gate.acquire.store_read"),
+                    )
+                    .await;
+                    let class_guard = tracing::Instrument::instrument(
+                        gate.class_mutex(class).lock_owned(),
+                        tracing::trace_span!("daemon.writer_gate.acquire.class"),
+                    )
+                    .await;
+                    (
+                        StoreMaintenanceGuard::Shared(maintenance),
+                        Some(class_guard),
+                    )
+                }
+                None => {
+                    let maintenance = tracing::Instrument::instrument(
+                        Arc::clone(&gate.maintenance).write_owned(),
+                        tracing::trace_span!("daemon.writer_gate.acquire.store_maintenance"),
+                    )
+                    .await;
+                    (StoreMaintenanceGuard::Exclusive(maintenance), None)
+                }
+            };
+            if let Ok(daemon) = Arc::clone(&self.daemon).try_read_owned() {
+                return WriterAdmissionGuard {
+                    _class: class_guard,
+                    _maintenance: Some(maintenance),
                     _daemon: DaemonGuard::Shared(daemon),
                     _gate: Some(gate),
-                }
+                };
             }
+            // Take our fair daemon turn without awaiting any local resource
+            // under it. An immediate local probe can use this turn even when
+            // another daemon writer is queued; dropping the turn first could
+            // starve a store behind continuous daemon-wide work.
+            drop(class_guard);
+            drop(maintenance);
+            let daemon = tracing::Instrument::instrument(
+                Arc::clone(&self.daemon).read_owned(),
+                tracing::trace_span!("daemon.writer_gate.acquire.store"),
+            )
+            .await;
+            if let Some((maintenance, class_guard)) = gate.try_reserve(class) {
+                return WriterAdmissionGuard {
+                    _class: class_guard,
+                    _maintenance: Some(maintenance),
+                    _daemon: DaemonGuard::Shared(daemon),
+                    _gate: Some(gate),
+                };
+            }
+            drop(daemon);
         }
     }
 
@@ -261,29 +317,26 @@ impl StoreWriterGates {
                 _gate: None,
             }),
             WriterScope::Store { data_root, class } => {
-                let daemon = Arc::clone(&self.daemon).try_read_owned().ok()?;
-                let gate = self.store_gate(data_root);
-                let maintenance = Arc::clone(&gate.maintenance).try_read_owned().ok()?;
-                let class_guard = gate.class_mutex(*class).try_lock_owned().ok()?;
-                Some(WriterAdmissionGuard {
-                    _class: Some(class_guard),
-                    _maintenance: Some(StoreMaintenanceGuard::Shared(maintenance)),
-                    _daemon: DaemonGuard::Shared(daemon),
-                    _gate: Some(gate),
-                })
+                self.try_acquire_store(data_root, Some(*class))
             }
-            WriterScope::StoreMaintenance { data_root } => {
-                let daemon = Arc::clone(&self.daemon).try_read_owned().ok()?;
-                let gate = self.store_gate(data_root);
-                let maintenance = Arc::clone(&gate.maintenance).try_write_owned().ok()?;
-                Some(WriterAdmissionGuard {
-                    _class: None,
-                    _maintenance: Some(StoreMaintenanceGuard::Exclusive(maintenance)),
-                    _daemon: DaemonGuard::Shared(daemon),
-                    _gate: Some(gate),
-                })
-            }
+            WriterScope::StoreMaintenance { data_root } => self.try_acquire_store(data_root, None),
         }
+    }
+
+    fn try_acquire_store(
+        &self,
+        data_root: &Path,
+        class: Option<StoreWriterClass>,
+    ) -> Option<WriterAdmissionGuard> {
+        let daemon = Arc::clone(&self.daemon).try_read_owned().ok()?;
+        let gate = self.store_gate(data_root);
+        let (maintenance, class_guard) = gate.try_reserve(class)?;
+        Some(WriterAdmissionGuard {
+            _class: class_guard,
+            _maintenance: Some(maintenance),
+            _daemon: DaemonGuard::Shared(daemon),
+            _gate: Some(gate),
+        })
     }
 }
 
@@ -432,6 +485,96 @@ mod tests {
             .expect("same-store owner resumes after maintenance");
         drop(follower);
         assert!(gates.try_acquire(&maintenance_scope).is_some());
+    }
+
+    #[tokio::test]
+    async fn queued_maintenance_yields_to_a_daemon_writer_without_a_lock_cycle() {
+        let gates = StoreWriterGates::default();
+        let held = gates.acquire(&store("/a", StoreWriterClass::Content)).await;
+        let scope = WriterScope::maintenance("/a");
+        let maintenance = gates.acquire(&scope);
+        tokio::pin!(maintenance);
+        poll_fn(|cx| {
+            assert!(maintenance.as_mut().poll(cx).is_pending());
+            Poll::Ready(())
+        })
+        .await;
+        let follower_scope = store("/a", StoreWriterClass::Owner);
+        let follower = gates.acquire(&follower_scope);
+        tokio::pin!(follower);
+        poll_fn(|cx| {
+            assert!(follower.as_mut().poll(cx).is_pending());
+            Poll::Ready(())
+        })
+        .await;
+        let daemon_scope = WriterScope::Daemon;
+        let daemon = gates.acquire(&daemon_scope);
+        tokio::pin!(daemon);
+        poll_fn(|cx| {
+            assert!(daemon.as_mut().poll(cx).is_pending());
+            Poll::Ready(())
+        })
+        .await;
+        drop(held);
+        // Neither queued local future is repolled. Their reservations must
+        // not retain daemon admission, even after their store becomes free.
+        let exclusive = tokio::time::timeout(Duration::from_secs(5), &mut daemon)
+            .await
+            .expect("daemon writer progresses independently of queued store futures");
+        assert!(gates.try_acquire(&scope).is_none());
+        poll_fn(|cx| {
+            assert!(maintenance.as_mut().poll(cx).is_pending());
+            assert!(follower.as_mut().poll(cx).is_pending());
+            Poll::Ready(())
+        })
+        .await;
+        drop(exclusive);
+        let retained = tokio::time::timeout(Duration::from_secs(5), &mut maintenance)
+            .await
+            .expect("maintenance resumes after daemon writer");
+        drop(retained);
+        let following = tokio::time::timeout(Duration::from_secs(5), &mut follower)
+            .await
+            .expect("store follower resumes after maintenance");
+        drop(following);
+    }
+
+    #[tokio::test]
+    async fn a_queued_store_uses_its_fair_daemon_turn() {
+        for scope in [
+            WriterScope::maintenance("/a"),
+            store("/a", StoreWriterClass::Content),
+        ] {
+            let gates = StoreWriterGates::default();
+            let held = gates.acquire(&WriterScope::Daemon).await;
+            let store = gates.acquire(&scope);
+            tokio::pin!(store);
+            poll_fn(|cx| {
+                assert!(store.as_mut().poll(cx).is_pending());
+                Poll::Ready(())
+            })
+            .await;
+            let daemon_scope = WriterScope::Daemon;
+            let following = gates.acquire(&daemon_scope);
+            tokio::pin!(following);
+            poll_fn(|cx| {
+                assert!(following.as_mut().poll(cx).is_pending());
+                Poll::Ready(())
+            })
+            .await;
+            drop(held);
+            // The later daemon writer stays queued and unpolled. The store
+            // must consume its earlier shared turn rather than discard it.
+            let admitted = tokio::time::timeout(Duration::from_secs(5), &mut store)
+                .await
+                .expect("store uses its fair daemon turn before the next daemon writer");
+            assert!(gates.try_acquire(&WriterScope::Daemon).is_none());
+            drop(admitted);
+            let next = tokio::time::timeout(Duration::from_secs(5), &mut following)
+                .await
+                .expect("following daemon writer progresses after the store");
+            drop(next);
+        }
     }
 
     #[tokio::test]

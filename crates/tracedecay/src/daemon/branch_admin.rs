@@ -1933,28 +1933,15 @@ impl StoreAdministration {
         operation().await
     }
 
-    /// Cancellation applies only while queued for writer admission.
-    /// Once the guard is acquired, the operation must finish cooperatively:
-    /// dropping an in-flight journal/retention future would abandon physical
-    /// blocking work whose client survives the daemon's shutdown join.
-    pub(super) async fn with_writer_cancellable_acquisition<Operation, OperationFuture, Output>(
+    /// Owns only the canonical gate while retention waits across ticks. The
+    /// caller polls this acquisition without waiting in the serial tick and
+    /// drops it on cancellation or when the exact store leaves the work list.
+    pub(super) fn retention_writer_acquisition(
         &self,
-        cancellation: &tracedecay_runtime_core::cancellation::CancellationToken,
-        scope: WriterScope,
-        operation: Operation,
-    ) -> Option<Output>
-    where
-        Operation: FnOnce() -> OperationFuture,
-        OperationFuture: Future<Output = Output>,
-    {
-        let _writer = tokio::select! {
-            biased;
-            () = cancellation.cancelled() => return None,
-            writer = crate::daemon::core_admission::park_admission(
-                self.gate.acquire(&scope)
-            ) => writer,
-        };
-        Some(operation().await)
+        data_root: PathBuf,
+    ) -> impl Future<Output = tracedecay_store_runtime::WriterAdmissionGuard> + Send + 'static {
+        let gate = Arc::clone(&self.gate);
+        async move { gate.acquire(&WriterScope::maintenance(data_root)).await }
     }
 
     pub(super) async fn try_with_writer<Operation, OperationFuture, Output>(
