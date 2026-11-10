@@ -226,10 +226,7 @@ impl AuthenticatedSubmodule {
             }
             // Invalidate BEFORE touching Git. A read failure must never retain
             // a previous successful authority for a later caller.
-            *self
-                .verified
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner) = None;
+            *self.verified.lock().unwrap_or_else(PoisonError::into_inner) = None;
         }
         #[cfg(unix)]
         let before = self.binding_witness().ok().flatten();
@@ -238,10 +235,7 @@ impl AuthenticatedSubmodule {
         if valid {
             let after = self.binding_witness().ok().flatten();
             if before.is_some() && before == after {
-                *self
-                    .verified
-                    .lock()
-                    .unwrap_or_else(PoisonError::into_inner) = after;
+                *self.verified.lock().unwrap_or_else(PoisonError::into_inner) = after;
             }
         }
         Ok(valid)
