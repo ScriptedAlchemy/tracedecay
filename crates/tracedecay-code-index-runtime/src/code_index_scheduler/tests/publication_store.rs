@@ -3231,6 +3231,86 @@ fn publication_pointer_memo_follows_bytes_when_size_and_mtime_stay_put() {
     );
 }
 
+#[cfg(unix)]
+#[test]
+fn pointer_commit_refuses_existing_and_dangling_symlink_slots() {
+    use std::os::unix::fs::symlink;
+
+    for target_exists in [true, false] {
+        let store = TempDir::new().expect("isolated publication store");
+        let project = TempDir::new().expect("isolated project");
+        let publication = super::super::DaemonCodeIndexPublicationStoreV1::new(
+            store.path(),
+            project.path(),
+            SanitizerRevision::new(tracedecay_privacy::CODE_SOURCE_SANITIZER_VERSION_V1)
+                .expect("sanitizer revision"),
+        )
+        .expect("open publication store");
+        let pointer_path = store.path().join("active-code-generation-v1.json");
+        let foreign_path = store.path().join("foreign-pointer.json");
+        let observed = same_length_publication_pointer("generation.symlink-observed", 0x35);
+        let replacement = same_length_publication_pointer("generation.symlink-replacement", 0x36);
+        let observed_bytes = serde_json::to_vec(&observed).expect("encode observed pointer");
+        let replacement_bytes =
+            serde_json::to_vec(&replacement).expect("encode replacement pointer");
+        if target_exists {
+            std::fs::write(&foreign_path, &observed_bytes).expect("write foreign pointer");
+        }
+        symlink(&foreign_path, &pointer_path).expect("install symlinked pointer slot");
+        let lock = acquire_code_generation_store_lock(store.path()).expect("exclusive store lock");
+        let error = publication
+            .commit_observed_pointer(
+                &lock,
+                target_exists.then_some(observed_bytes.as_slice()),
+                &replacement,
+                &replacement_bytes,
+            )
+            .expect_err("a symlink must never acquire pointer publication authority");
+        assert!(
+            matches!(
+                error,
+                CodeIndexPublicationStoreErrorV1::CorruptionResetRequired(_)
+            ),
+            "a symlinked pointer slot must be reset-required corruption: {error}"
+        );
+        assert_eq!(
+            std::fs::read_link(&pointer_path).expect("link remains in place"),
+            foreign_path,
+            "refusal must not replace the symlink"
+        );
+        if target_exists {
+            assert_eq!(
+                std::fs::read(&foreign_path).expect("foreign pointer still exists"),
+                observed_bytes,
+                "refusal must not change the foreign pointer"
+            );
+        } else {
+            assert!(
+                !foreign_path.exists(),
+                "refusal must not create the dangling symlink target"
+            );
+        }
+
+        // The same exact-byte CAS must still work after the invalid entry
+        // is replaced by an ordinary file under the existing store lock.
+        std::fs::remove_file(&pointer_path).expect("remove symlink");
+        std::fs::write(&pointer_path, &observed_bytes).expect("restore regular pointer");
+        publication
+            .commit_observed_pointer(
+                &lock,
+                Some(observed_bytes.as_slice()),
+                &replacement,
+                &replacement_bytes,
+            )
+            .expect("ordinary pointer slot preserves CAS publication");
+        assert_eq!(
+            std::fs::read(&pointer_path).expect("read published pointer"),
+            replacement_bytes,
+            "the successful publication must persist exact bytes"
+        );
+    }
+}
+
 #[test]
 fn stale_pointer_commit_does_not_replace_a_changed_active_pointer() {
     let store = TempDir::new().expect("store root");

@@ -1729,7 +1729,9 @@ impl DaemonCodeIndexPublicationStoreV1 {
     }
 
     fn require_regular_pointer_slot(&self) -> Result<(), CodeIndexPublicationStoreErrorV1> {
-        match std::fs::metadata(&self.active_path) {
+        // A dangling or same-inode symlink is still not a pointer slot.
+        // Inspect the directory entry without another endpoint-authorized open.
+        match std::fs::symlink_metadata(&self.active_path) {
             Ok(metadata) if metadata.file_type().is_file() => Ok(()),
             Ok(_) => Err(Self::corrupt_non_file_pointer()),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
@@ -2427,7 +2429,7 @@ impl DaemonCodeIndexPublicationStoreV1 {
                 .take(MAX_DURABLE_PUBLICATION_POINTER_BYTES + 1)
                 .read_to_end(&mut current)?;
             let opened_after = opened_pointer.metadata()?;
-            let named_after = std::fs::metadata(&self.active_path)?;
+            let named_after = std::fs::symlink_metadata(&self.active_path)?;
             Ok(current == bytes
                 && Self::same_unix_segment_identity(&metadata, &opened_before)
                 && Self::same_unix_segment_identity(&opened_before, &opened_after)
