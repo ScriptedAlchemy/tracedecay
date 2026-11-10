@@ -1206,7 +1206,7 @@ impl FeedbackReadPort for ProjectFeedbackStore {
                         match latest.get(&finding.finding_id) {
                             Some((prior, _))
                                 if publication_order(&publications[*prior], publication)
-                                    != std::cmp::Ordering::Less => {}
+                                    == std::cmp::Ordering::Greater => {}
                             _ => {
                                 latest.insert(finding.finding_id.clone(), (index, finding.clone()));
                             }
@@ -2042,7 +2042,6 @@ fn publication_order(
     left.authority
         .revalidated_at
         .cmp(&right.authority.revalidated_at)
-        .then_with(|| left.result.result_id.cmp(&right.result.result_id))
 }
 
 fn latest_finding<'a>(
@@ -2423,6 +2422,77 @@ mod tests {
             publication.dedupe_key == updated.dedupe_key
                 && publication.result.termination == FeedbackCycleTerminationV1::IncompleteCoverage
         }));
+    }
+
+    #[tokio::test]
+    async fn equal_timestamp_provider_verdicts_follow_durable_commit_order() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("feedback-equal-timestamp.db");
+        crate::register_test_schema_installer();
+        let authority =
+            DatabaseAuthority::acquire_test(&path, "feedback equal timestamp").unwrap();
+        let (database, _) =
+            Database::publish_test_runtime(&path, &authority, TestDatabaseRuntimeMode::Initialize)
+                .await
+                .unwrap();
+        let store = ProjectFeedbackStore {
+            database,
+            response_handle_root: root.path().join("response-handles"),
+            source_observations: None,
+        };
+        let unavailable = incomplete_publication(
+            "cycle.feedback.equal-timestamp.unavailable",
+            "feedback.equal-timestamp.same-content",
+            ProviderEvaluationStateV1::Unavailable,
+        );
+        let failed = incomplete_publication(
+            "cycle.feedback.equal-timestamp.failed",
+            "feedback.equal-timestamp.same-content",
+            ProviderEvaluationStateV1::Failed,
+        );
+        // Deliberately publish the lexicographically larger result identity
+        // first. Its identity must not win a timestamp collision.
+        let (older, newer) = if unavailable.result.result_id > failed.result.result_id {
+            (unavailable, failed)
+        } else {
+            (failed, unavailable)
+        };
+        assert_eq!(older.dedupe_key, newer.dedupe_key);
+        assert_eq!(older.authority.revalidated_at, newer.authority.revalidated_at);
+        assert!(older.result.result_id > newer.result.result_id);
+        assert_ne!(older.result.provider_states, newer.result.provider_states);
+        assert_eq!(
+            store.record_publication(older).await.unwrap(),
+            FeedbackPublicationRecordState::Recorded
+        );
+        assert_eq!(
+            store.record_publication(newer.clone()).await.unwrap(),
+            FeedbackPublicationRecordState::Recorded
+        );
+        let operation = feedback_surface_operation("feedback_list")
+            .unwrap()
+            .unwrap();
+        let admitted = context(&operation, "actor.feedback-reader.requester");
+        let latest = store
+            .doctor_latest_publication(&admitted)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(latest.result.result_id, newer.result.result_id);
+
+        // A new cycle with the latest verdict must reuse its committed
+        // publication, not resurrect the earlier provider state.
+        let replay = incomplete_publication(
+            "cycle.feedback.equal-timestamp.replay",
+            "feedback.equal-timestamp.same-content",
+            newer.result.provider_states[1],
+        );
+        assert_ne!(replay.result.result_id, newer.result.result_id);
+        assert_eq!(
+            store.record_publication(replay).await.unwrap(),
+            FeedbackPublicationRecordState::Reused(newer)
+        );
+        assert_eq!(store.load_publications().await.unwrap().len(), 2);
     }
 
     #[tokio::test]
