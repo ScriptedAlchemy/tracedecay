@@ -1982,7 +1982,7 @@ mod tests {
         let linked = census_profile_footprint(&profile, &BTreeMap::new(), &overrides);
         assert_eq!(linked.total_bytes, 0, "foreign bytes must not be owned");
         assert_eq!(linked.unavailable_entry_count, 1);
-        assert!(linked.entries.is_empty());
+        assert_eq!(linked.entries, Vec::<ProfileFootprintEntryV1>::new());
         assert!(!linked.truncated);
         assert_eq!(
             linked.full_profile_size().state,
