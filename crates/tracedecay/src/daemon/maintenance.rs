@@ -89,7 +89,7 @@ impl<Output: Clone + Send + Sync + 'static> RetentionWriterJobs<Output> {
     }
 
     async fn shutdown(&self) {
-        let jobs = std::mem::take(
+        let mut jobs = std::mem::take(
             &mut *self
                 .pending
                 .lock()
@@ -109,10 +109,8 @@ impl<Output: Clone + Send + Sync + 'static> RetentionWriterJobs<Output> {
             Err(TimeoutError::Elapsed) => "cooperative_join_exceeded_abort_deadline".to_owned(),
             Err(error @ TimeoutError::TimerUnavailable(_)) => error.to_string(),
         };
+        Self::record_finished(&mut jobs);
         for job in jobs.values() {
-            if job.task.is_finished() {
-                continue;
-            }
             log_daemon_event(
                 "daemon_shutdown",
                 &[
@@ -134,8 +132,10 @@ impl<Output: Clone + Send + Sync + 'static> RetentionWriterJobs<Output> {
             Err(TimeoutError::Elapsed) => "join_exceeded_abort_deadline".to_owned(),
             Err(error @ TimeoutError::TimerUnavailable(_)) => error.to_string(),
         };
+        Self::record_finished(&mut jobs);
         for job in jobs.values() {
-            if job.task.is_finished() {
+            if let Some(outcome) = job.task.try_finished() {
+                let _ = record_retention_job_outcome(outcome);
                 continue;
             }
             log_daemon_event(
@@ -147,6 +147,16 @@ impl<Output: Clone + Send + Sync + 'static> RetentionWriterJobs<Output> {
                 ],
             );
         }
+    }
+
+    fn record_finished(jobs: &mut BTreeMap<(String, PathBuf), RetentionWriterJob<Output>>) {
+        jobs.retain(|_, job| {
+            let Some(outcome) = job.task.try_finished() else {
+                return true;
+            };
+            let _ = record_retention_job_outcome(outcome);
+            false
+        });
     }
 }
 
@@ -3064,9 +3074,23 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "current_thread")]
     async fn retention_job_shutdown_uses_group_deadlines() {
         let jobs = super::RetentionWriterJobs::<MaintenanceTickOutcome>::default();
+        let failed: NativeTask<Option<MaintenanceTickOutcome>> =
+            NativeTask::spawn(async { panic!("retention job failed before shutdown") })
+                .expect("failed retention job");
+        assert!(matches!(
+            failed.wait().await,
+            tracedecay_runtime_core::native_runtime::NativeTaskOutcome::Panicked(_)
+        ));
+        jobs.pending.lock().unwrap().insert(
+            ("failed".to_owned(), std::path::PathBuf::from("/held-store")),
+            super::RetentionWriterJob {
+                cancellation: CancellationToken::new(),
+                task: failed,
+            },
+        );
         for index in 0..8 {
             let task = NativeTask::spawn(async {
                 std::future::pending::<Option<MaintenanceTickOutcome>>().await
@@ -3085,7 +3109,13 @@ mod tests {
         }
 
         let started = std::time::Instant::now();
+        let capture = tracedecay_runtime_core::logging::FormattedTracingCapture::start();
         jobs.shutdown().await;
+        assert!(
+            capture.text().contains("retention_store_task_panicked"),
+            "completed failure must be reported despite a stalled sibling: {}",
+            capture.text()
+        );
 
         assert!(
             started.elapsed() < super::DAEMON_TASK_ABORT_DEADLINE.saturating_mul(4),
