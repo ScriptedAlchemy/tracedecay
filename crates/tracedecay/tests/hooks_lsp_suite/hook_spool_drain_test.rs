@@ -10,12 +10,12 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 use serde_json::json;
+use tracedecay_domain::canonical_text::sha256_hex;
 use tracedecay_domain::{
     DeliveryChannelIdentityV1, DeliveryEventClassV1, DeliverySettlementAttemptV1,
     DeliverySettlementOutcomeV1, DeliverySettlementV1, DeliverySurfaceFamilyV1,
     NativeHostIdentityV1,
 };
-use tracedecay_domain::canonical_text::sha256_hex;
 use tracedecay_hooks::{
     HOOK_SYNCHRONOUS_BUDGET, HookDeliveryReceiptWriterV1, HookDeliveryRetentionV1,
     HookDeliverySourceReceiptV1, hook_delivery_receipt_spool_root,
@@ -425,7 +425,11 @@ fn a_receipt_backlog_beyond_one_batch_drains_without_waiting_for_the_sweep() {
         .iter()
         .map(|receipt| receipt.receipt_id)
         .collect::<std::collections::BTreeSet<_>>();
-    assert_eq!(unique.len(), BACKLOG, "every receipt has a distinct identity");
+    assert_eq!(
+        unique.len(),
+        BACKLOG,
+        "every receipt has a distinct identity"
+    );
     for receipt in &held {
         publish(&receipts, receipt);
     }
