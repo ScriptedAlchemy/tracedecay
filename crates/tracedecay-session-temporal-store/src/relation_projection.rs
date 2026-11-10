@@ -6,7 +6,7 @@ use tracedecay_domain::{
     SessionProjectionGenerationV1, TemporalValidityV1, ThreadId, UtcMicros,
 };
 use tracedecay_graph_db::{GraphCancellation, GraphWatermark};
-use tracedecay_runtime_core::db::engine::params;
+use tracedecay_runtime_core::db::engine::{IntoParams, params};
 use tracedecay_store::{SessionStoreError, SessionStoreResult};
 
 use super::operations::CanonicalPublicationManifest;
@@ -17,7 +17,7 @@ use super::relations::{
     ThreadHierarchyRelation, WorkflowAgentMembership,
 };
 use crate::handle::{
-    SessionTemporalAccess, SessionTemporalExec, SessionTemporalRegisteredDb,
+    SessionTemporalAccess, SessionTemporalExec, SessionTemporalQuery, SessionTemporalRegisteredDb,
     SessionTemporalWriteTxn,
 };
 
@@ -28,6 +28,25 @@ const DEFAULT_MAX_RELATIONS: usize = 100_000;
 // reconstruction and its receipt acknowledgement; each retry re-reads the
 // refreshed generation, so the bound only limits back-to-back supersessions.
 const APPLY_PUBLICATION_RACE_ATTEMPTS: usize = 3;
+const INITIAL_RECOVERY_PROBE_ROWS: i64 = 64;
+
+// Seek the next distinct deadline in each eligible state. A fifth live
+// deadline means the four equality ranges for that state are insufficient.
+const RECOVERY_DEADLINES_SQL: &str = "
+    WITH RECURSIVE states(kind) AS (VALUES('pending'), ('retryable')),
+    bands(kind, deadline, remaining) AS (
+        SELECT kind, (
+            SELECT MIN(recovery_next_attempt_at) FROM session_relation_receipts
+            WHERE state = 'pending' AND recovery_state = states.kind
+              AND recovery_next_attempt_at <= ?2
+        ), 4 FROM states
+        UNION ALL
+        SELECT kind, (
+            SELECT MIN(recovery_next_attempt_at) FROM session_relation_receipts
+            WHERE state = 'pending' AND recovery_state = bands.kind
+              AND recovery_next_attempt_at > bands.deadline AND recovery_next_attempt_at <= ?2
+        ), remaining - 1 FROM bands WHERE deadline IS NOT NULL AND remaining > 0
+    )";
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct SessionRelationRecoveryPage {
@@ -297,31 +316,79 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
         let (scope, _) = self
             .session_relation_store()
             .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?;
-        let mut rows = snapshot
+        // An idle pass with only sleeping retries must not scan all pending
+        // receipts in creation order. The recovery-due index answers this
+        // probe without visiting each deferred journal row.
+        let mut due_rows = snapshot
             .query(
-                "SELECT receipt.session_id, receipt.generation, receipt.scope_kind,
-                        receipt.scope_id, journal.projection_json,
-                        receipt.recovery_failure_count
-                 FROM session_relation_receipts AS receipt
-                 LEFT JOIN session_relation_effect_journal AS journal
-                   ON journal.session_id = receipt.session_id
-                  AND journal.generation = receipt.generation
-                 WHERE receipt.state = 'pending'
-                   AND receipt.recovery_state IN ('pending', 'retryable')
-                   AND receipt.recovery_next_attempt_at <= unixepoch()
-                 ORDER BY receipt.created_at, receipt.session_id, receipt.generation
-                 LIMIT ?1",
-                params![bounded_query_limit(limit)?],
+                "SELECT MIN(recovery_next_attempt_at), unixepoch()
+                 FROM session_relation_receipts
+                 WHERE state = 'pending'
+                   AND recovery_state IN ('pending', 'retryable')",
+                (),
             )
             .await
             .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?;
+        let earliest = due_rows
+            .next()
+            .await
+            .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?
+            .ok_or_else(|| {
+                storage_message(
+                    RECONSTRUCT_OPERATION,
+                    "relation retry probe returned no aggregate row",
+                )
+            })?;
+        let retry_at: Option<i64> = earliest
+            .get(0)
+            .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?;
+        let now: i64 = earliest
+            .get(1)
+            .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?;
+        drop(due_rows);
+        if retry_at.is_none_or(|deadline| deadline > now) {
+            return Ok(SessionRelationRecoveryPage {
+                recovered: 0,
+                processed: 0,
+                has_more: false,
+                next_retry_at_unix_seconds: retry_at,
+            });
+        }
+        let query_limit = bounded_query_limit(limit)?;
+        let candidates =
+            recovery_candidate_query(&snapshot, now, query_limit, &cancellation).await?;
+        // Drive hydration from the bounded page: a planner-selected receipt
+        // outer loop would revisit the sleeping backlog on each small page.
+        let candidate_sql = format!(
+            "WITH candidates AS MATERIALIZED ({candidates}), page AS MATERIALIZED (
+                 SELECT created_at, session_id, generation FROM candidates
+                 ORDER BY created_at, session_id, generation LIMIT (?1 - 1)
+             )
+             SELECT page.session_id, page.generation, receipt.scope_kind, receipt.scope_id,
+                    journal.projection_json, receipt.recovery_failure_count,
+                    (SELECT COUNT(*) FROM candidates) = ?1
+             FROM page CROSS JOIN session_relation_receipts AS receipt
+               ON receipt.session_id = page.session_id AND receipt.generation = page.generation
+             LEFT JOIN session_relation_effect_journal AS journal
+               ON journal.session_id = page.session_id AND journal.generation = page.generation
+             ORDER BY page.created_at, page.session_id, page.generation"
+        );
+        let mut rows = snapshot
+            .query(candidate_sql.as_str(), params![query_limit, now])
+            .await
+            .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?;
         let mut pending = Vec::new();
+        let mut has_more = false;
         while let Some(row) = rows
             .next()
             .await
             .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?
         {
             require_not_cancelled(&cancellation)?;
+            has_more = row
+                .get::<i64>(6)
+                .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?
+                != 0;
             pending.push(PendingRelationRecovery {
                 session_id: row
                     .get(0)
@@ -349,8 +416,6 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
             SessionRelationScope::ProjectSessions { .. } => "project_sessions",
             SessionRelationScope::ProfileSessions { .. } => "profile_sessions",
         };
-        let has_more = pending.len() > limit;
-        pending.truncate(limit);
         let mut recovered = 0_usize;
         let mut processed = 0_usize;
         for candidate in &pending {
@@ -1598,6 +1663,100 @@ async fn active_generation(
                 "active session relation generation receipt is unavailable",
             )
         })
+}
+
+async fn recovery_probe(
+    snapshot: &impl SessionTemporalQuery,
+    sql: &str,
+    values: impl IntoParams + Send,
+) -> SessionStoreResult<bool> {
+    let mut rows = snapshot
+        .query(sql, values)
+        .await
+        .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?;
+    rows.next()
+        .await
+        .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?
+        .ok_or_else(|| storage_message(RECONSTRUCT_OPERATION, "missing relation recovery probe"))?
+        .get::<i64>(0)
+        .map(|value| value != 0)
+        .map_err(|error| storage(RECONSTRUCT_OPERATION, error))
+}
+
+async fn recovery_candidate_query(
+    snapshot: &impl SessionTemporalQuery,
+    now: i64,
+    query_limit: i64,
+    cancellation: &Arc<dyn GraphCancellation>,
+) -> SessionStoreResult<String> {
+    let mut window = INITIAL_RECOVERY_PROBE_ROWS;
+    let index = loop {
+        require_not_cancelled(cancellation)?;
+        // Stop the creation scan as soon as the requested page and sentinel
+        // are present, even if the current probe window is much larger.
+        let page_in_prefix = "SELECT EXISTS (
+                SELECT 1 FROM (
+                    SELECT recovery_state, recovery_next_attempt_at FROM session_relation_receipts
+                         INDEXED BY idx_session_relation_receipts_pending
+                    WHERE state = 'pending'
+                    ORDER BY created_at, session_id, generation LIMIT ?1
+                ) WHERE recovery_state IN ('pending', 'retryable') AND recovery_next_attempt_at <= ?2
+                LIMIT 1 OFFSET (?3 - 1)
+            )";
+        if recovery_probe(snapshot, page_in_prefix, params![window, now, query_limit]).await? {
+            break "idx_session_relation_receipts_pending";
+        }
+
+        if window == INITIAL_RECOVERY_PROBE_ROWS {
+            let complete_bands = format!(
+                "{RECOVERY_DEADLINES_SQL} SELECT NOT EXISTS (
+                SELECT 1 FROM bands WHERE deadline IS NOT NULL AND remaining = 0)"
+            );
+            if recovery_probe(snapshot, &complete_bands, params![query_limit, now]).await? {
+                // Each exact state/deadline range is already in creation order.
+                // Only its first page can contribute to the global first page.
+                return Ok(format!(
+                    "{RECOVERY_DEADLINES_SQL}
+                    SELECT r.created_at, r.session_id, r.generation FROM bands
+                    CROSS JOIN session_relation_receipts AS r
+                    WHERE bands.deadline IS NOT NULL AND r.rowid IN (
+                        SELECT rowid FROM session_relation_receipts
+                             INDEXED BY idx_session_relation_receipts_recovery_due
+                        WHERE state = 'pending' AND recovery_state = bands.kind
+                          AND recovery_next_attempt_at = bands.deadline
+                        ORDER BY created_at, session_id, generation LIMIT ?1
+                    )
+                    ORDER BY r.created_at, r.session_id, r.generation LIMIT ?1"
+                ));
+            }
+        }
+
+        // For fragmented deadlines, compare the distance to the ordered page
+        // against the complete due population. Neither index is scanned past
+        // the growing window until it proves which bounded result to read.
+        if !recovery_probe(
+            snapshot,
+            "SELECT EXISTS (
+                SELECT 1 FROM session_relation_receipts
+                     INDEXED BY idx_session_relation_receipts_recovery_due
+                WHERE state = 'pending' AND recovery_state IN ('pending', 'retryable')
+                  AND recovery_next_attempt_at <= ?2 LIMIT 1 OFFSET ?1
+            )",
+            // The covering deadline index can inspect four keys for roughly
+            // the work of fetching one receipt through the creation index.
+            params![window.saturating_mul(4), now],
+        )
+        .await?
+        {
+            break "idx_session_relation_receipts_recovery_due";
+        }
+        window = window.saturating_mul(2);
+    };
+    Ok(format!(
+        "SELECT created_at, session_id, generation FROM session_relation_receipts INDEXED BY {index}
+         WHERE state = 'pending' AND recovery_state IN ('pending', 'retryable')
+           AND recovery_next_attempt_at <= ?2 ORDER BY created_at, session_id, generation LIMIT ?1"
+    ))
 }
 
 fn bounded_query_limit(limit: usize) -> SessionStoreResult<i64> {
