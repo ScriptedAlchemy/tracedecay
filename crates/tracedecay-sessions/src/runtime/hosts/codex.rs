@@ -1060,6 +1060,7 @@ struct CodexDirectoryListing {
     depth: u8,
     root_order: u8,
     entries: std::fs::ReadDir,
+    opening_stat: [u8; 32],
     fingerprint: Option<CodexDirectoryEntryFingerprint>,
     directory_index: usize,
 }
@@ -2211,9 +2212,9 @@ fn retained_scan_step(
                         root_order,
                         identity,
                     });
-                    if identity.is_none() {
+                    let Some(opening_stat) = identity.map(|witness| witness.stat) else {
                         continue;
-                    }
+                    };
                     let listed = std::fs::read_dir(&path).map_err(|source| {
                         TranscriptIngestError::ScanIo {
                             operation: "enumerate Codex transcript directories",
@@ -2226,6 +2227,7 @@ fn retained_scan_step(
                         depth,
                         root_order,
                         entries: listed,
+                        opening_stat,
                         fingerprint: stat
                             .filter(|witness| !witness.settled)
                             .map(|_| CodexDirectoryEntryFingerprint::default()),
@@ -2348,6 +2350,12 @@ fn retained_scan_step(
                         // iterator may omit new entries. Never publish a
                         // complete corpus frontier from that mixed snapshot.
                         let closing_stat = directory_stat_witness(&directory.path)?;
+                        if closing_stat.as_ref().map(|stat| stat.stat) != Some(directory.opening_stat) {
+                            scan.complete = false;
+                        }
+                        // Chunks can retire their directory identity while
+                        // retaining the unfinished iterator. The opening
+                        // witness still fences coverage in that case.
                         if let Some(identity) = scan
                             .directories
                             .get_mut(directory.directory_index)
@@ -2357,9 +2365,6 @@ fn retained_scan_step(
                             })
                             .and_then(|item| item.identity.as_mut())
                         {
-                            if closing_stat.as_ref().map(|stat| stat.stat) != Some(identity.stat) {
-                                scan.complete = false;
-                            }
                             if let Some(fingerprint) = directory.fingerprint.take() {
                                 identity.entries = Some(fingerprint.finish());
                             }
