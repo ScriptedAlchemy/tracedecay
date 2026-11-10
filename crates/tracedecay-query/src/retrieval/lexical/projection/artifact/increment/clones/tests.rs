@@ -275,7 +275,6 @@ fn clone_remap_stages_colliding_keys_and_rolls_back_interrupted_windows() {
     transaction.commit().unwrap();
 }
 
-
 fn clone_payload_fixture() -> (TempDir, Connection, BTreeMap<i64, Vec<u8>>) {
     let root = tempdir().unwrap();
     let mut connection = open_fixture(root.path());
@@ -304,9 +303,7 @@ fn clone_payload_fixture() -> (TempDir, Connection, BTreeMap<i64, Vec<u8>>) {
             )
             .unwrap();
         let mut occurrence_insert = transaction
-            .prepare(
-                "INSERT INTO clone_occurrences(ordinal, payload_ordinal) VALUES (?1, ?2)",
-            )
+            .prepare("INSERT INTO clone_occurrences(ordinal, payload_ordinal) VALUES (?1, ?2)")
             .unwrap();
         for ordinal in 1_i64..=16_000 {
             let digest = ordinal.to_be_bytes().repeat(4);
@@ -360,9 +357,7 @@ fn clone_payload_renumber_preserves_durable_rows_and_interrupts_restoration() {
     assert_eq!(original_occurrences.len(), 16_000);
     let mut expected: Vec<_> = original
         .iter()
-        .map(|(ordinal, digest, payload)| {
-            (16_001 - ordinal, digest.clone(), payload.clone())
-        })
+        .map(|(ordinal, digest, payload)| (16_001 - ordinal, digest.clone(), payload.clone()))
         .collect();
     expected.sort_by_key(|row| row.0);
     assert_ne!(expected, original);
@@ -392,8 +387,7 @@ fn clone_payload_renumber_preserves_durable_rows_and_interrupts_restoration() {
             checks: AtomicUsize::new(0),
             limit: 16_000 * 2 + CARRY_SCAN_ROWS + 8,
         };
-        let error =
-            renumber_clone_payloads(&transaction, &parent, &empty, &stop).unwrap_err();
+        let error = renumber_clone_payloads(&transaction, &parent, &empty, &stop).unwrap_err();
         assert!(matches!(error, CodeLexicalArtifactErrorV1::Interrupted(_)));
         let negatives: i64 = transaction
             .query_row(
@@ -420,7 +414,9 @@ fn clone_payload_renumber_preserves_durable_rows_and_interrupts_restoration() {
     assert_eq!(payload_rows(&transaction), expected);
     assert_eq!(
         payload_occurrences(&transaction),
-        (1_i64..=16_000).map(|ordinal| (ordinal, ordinal)).collect::<Vec<_>>()
+        (1_i64..=16_000)
+            .map(|ordinal| (ordinal, ordinal))
+            .collect::<Vec<_>>()
     );
     integrity(&transaction, "main");
     transaction.commit().unwrap();
@@ -429,10 +425,14 @@ fn clone_payload_renumber_preserves_durable_rows_and_interrupts_restoration() {
     assert_eq!(payload_rows(&reopened), expected);
     assert_eq!(
         payload_occurrences(&reopened),
-        (1_i64..=16_000).map(|ordinal| (ordinal, ordinal)).collect::<Vec<_>>()
+        (1_i64..=16_000)
+            .map(|ordinal| (ordinal, ordinal))
+            .collect::<Vec<_>>()
     );
     let survivor: String = reopened
-        .query_row("SELECT value FROM independent_payload", [], |row| row.get(0))
+        .query_row("SELECT value FROM independent_payload", [], |row| {
+            row.get(0)
+        })
         .unwrap();
     assert_eq!(survivor, "survivor");
     integrity(&reopened, "main");
@@ -449,8 +449,8 @@ mod physical_spill {
     use rusqlite::params;
 
     use super::{
-        ActiveControl, ShiftV1, clone_payload_fixture, expected_postings, fixture,
-        payload_rows, postings, renumber_clone_payloads, shift_clone_posting_keys,
+        ActiveControl, ShiftV1, clone_payload_fixture, expected_postings, fixture, payload_rows,
+        postings, renumber_clone_payloads, shift_clone_posting_keys,
     };
 
     fn spill_bytes() -> io::Result<u64> {
@@ -472,7 +472,6 @@ mod physical_spill {
         Ok(bytes)
     }
 
-
     #[test]
     fn clone_payload_renumber_has_no_unlinked_statement_spill() {
         const CHILD: &str = "TRACEDECAY_PAYLOAD_SPILL_TEST_CHILD";
@@ -487,7 +486,10 @@ mod physical_spill {
             let stdout = String::from_utf8_lossy(&output.stdout);
             let stderr = String::from_utf8_lossy(&output.stderr);
             assert!(output.status.success(), "{stdout}\n{stderr}");
-            assert!(stdout.contains("1 passed"), "child test was vacuous: {stdout}");
+            assert!(
+                stdout.contains("1 passed"),
+                "child test was vacuous: {stdout}"
+            );
             return;
         }
 
@@ -509,7 +511,8 @@ mod physical_spill {
                     true
                 }
             }),
-        );
+        )
+        .unwrap();
 
         {
             let transaction = connection.transaction().unwrap();
@@ -552,7 +555,7 @@ mod physical_spill {
             renumber_clone_payloads(&transaction, &parent, &empty, &ActiveControl).unwrap();
             transaction.commit().unwrap();
         }
-        connection.progress_handler(0, None::<fn() -> bool>);
+        connection.progress_handler(0, None::<fn() -> bool>).unwrap();
         assert!(!unavailable.load(Ordering::Relaxed));
         assert_eq!(
             peak.load(Ordering::Relaxed),
@@ -603,7 +606,8 @@ mod physical_spill {
                     true
                 }
             }),
-        );
+        )
+        .unwrap();
         {
             let transaction = connection.transaction().unwrap();
             // Bulk key updates are the positive control for statement-local
@@ -646,7 +650,7 @@ mod physical_spill {
             shift_clone_posting_keys(&transaction, &shift, &ActiveControl).unwrap();
             transaction.commit().unwrap();
         }
-        connection.progress_handler(0, None::<fn() -> bool>);
+        connection.progress_handler(0, None::<fn() -> bool>).unwrap();
         assert!(!unavailable.load(Ordering::Relaxed));
         assert_eq!(peak.load(Ordering::Relaxed), 0, "no implicit remap spill");
         assert_eq!(spill_bytes().unwrap(), 0);

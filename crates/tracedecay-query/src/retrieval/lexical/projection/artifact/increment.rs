@@ -239,19 +239,6 @@ impl ShiftV1 {
             })
     }
 
-    /// An SQL expression giving `column`'s successor value for a carried
-    /// row; it reads only the parent value, so one `UPDATE` applies it.
-    fn sql_image(&self, column: &str) -> String {
-        let mut expression = String::from("CASE");
-        for ((_, end), growth) in self.replaced.iter().zip(&self.growth).rev() {
-            expression.push_str(&format!(
-                " WHEN {column} >= {end} THEN {column} + ({growth})"
-            ));
-        }
-        expression.push_str(&format!(" ELSE {column} END"));
-        expression
-    }
-
     fn sql_replaced(&self, column: &str) -> String {
         if self.replaced.is_empty() {
             return "0".to_owned();
