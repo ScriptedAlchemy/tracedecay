@@ -42,6 +42,7 @@ from dataclasses import dataclass
 import json
 import os
 import platform
+import re
 import shutil
 import signal
 import statistics
@@ -63,6 +64,39 @@ CLOCK_TICKS = os.sysconf("SC_CLK_TCK") if LINUX else None
 
 SEED_SYMBOLS = ["DaemonHandshake", "default_socket_path", "call_default_tool", "TraceDecay"]
 CONTEXT_TASK = "how does the daemon serve tool calls"
+
+SOURCE_PROOF_FIELDS = (
+    "reused_segments", "hashed_segments", "hashed_bytes", "range_reads", "range_bytes",
+)
+
+
+def sealed_source_work(log_path: Path, start_offset: int) -> dict[str, int] | None:
+    """Count authenticated source work from completed daemon proof events only.
+
+    This deliberately reports unavailable, not zero, if the active binary
+    lacks telemetry. All proof events observed during this measured window
+    contribute, including independently scheduled concurrent generations.
+    """
+    totals = {field: 0 for field in SOURCE_PROOF_FIELDS}
+    proofs = 0
+    try:
+        with log_path.open("rb") as stream:
+            stream.seek(start_offset)
+            for line in stream:
+                if b"tracedecay::sealed_source_proof" not in line or b"event=sealed_source_proof" not in line:
+                    continue
+                counters = {}
+                for field in SOURCE_PROOF_FIELDS:
+                    match = re.search(rb"\b" + field.encode() + rb"=(\d+)(?=\s|$)", line)
+                    if match is None:
+                        return None
+                    counters[field] = int(match.group(1))
+                for field, value in counters.items():
+                    totals[field] += value
+                proofs += 1
+    except OSError:
+        return None
+    return {"proofs": proofs, **totals} if proofs else None
 
 
 class HarnessError(Exception):
@@ -210,6 +244,10 @@ class Run:
             TRACEDECAY_DAEMON_SOCKET=str(self.socket),
             TRACEDECAY_GLOBAL_DB=str(self.profile / "global.db"),
             TRACEDECAY_DISABLE_GLOBAL_DB="1",
+            # One per-generation source-work event; retain warnings elsewhere.
+            # A stable filter makes before/after runs comparable without
+            # turning on high-volume tracing spans during timed indexing.
+            RUST_LOG="warn,tracedecay::sealed_source_proof=info",
         )
         return env
 
@@ -551,6 +589,10 @@ class Run:
             or not previous_generation
         ):
             raise HarnessError("edit_reconcile: no current ready generation before editing")
+        # Observe only source proofs that finish after this edit's baseline.
+        # A missing event remains unknown, never an invented zero-hash pass.
+        proof_log = self.run_dir / "daemon.log"
+        proof_offset = proof_log.stat().st_size
         # The file watcher may begin its pass as soon as the edit lands.
         # Arm the timer and RSS sampler *before* modifying the source; a
         # sync-only measurement misses work that starts during the write.
@@ -578,6 +620,13 @@ class Run:
         else:
             ready["peak_daemon_rss_kb"] = peak_rss_kb
         self.generation = ready["generation_id"]
+        work = sealed_source_work(proof_log, proof_offset)
+        self.record(
+            "edit_reconcile", "sealed_source_work",
+            **(work if work is not None else {
+                "unavailable": "no complete sealed source proof telemetry in measured window"
+            }),
+        )
         self.record("edit_reconcile", "sync_request", wall_ms=sync.wall_ms)
         self.record("edit_reconcile", "edited_file", path=tracked_file, symbol=symbol)
         self.record("edit_reconcile", "edit_to_ready",

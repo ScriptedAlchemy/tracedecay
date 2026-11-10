@@ -1092,6 +1092,7 @@ fn verify_checked_seal_bundle_with_evidence_barrier(
     check: &dyn Fn() -> Result<(), GraphDbError>,
     evidence_barrier: impl FnOnce(),
 ) -> Result<(), GraphDbError> {
+    let started = std::time::Instant::now();
     let mut file = verify_checked_seal(path, expected_digest, check)?;
     let mut prefix = vec![0_u8; SEAL_READ_CHECK_BYTES];
     let read = file
@@ -1129,12 +1130,26 @@ fn verify_checked_seal_bundle_with_evidence_barrier(
     let mut evidence_barrier = Some(evidence_barrier);
     let mut interruption = None;
     let proof = std::cell::RefCell::new(verified.begin(segments_root));
+    // Count actual source authentication work, not SQLite/graph query time
+    // or the number of manifests consulted. Only completed proofs are logged.
+    let reused_segments = std::cell::Cell::new(0_u64);
+    let hashed_segments = std::cell::Cell::new(0_u64);
+    let hashed_bytes = std::cell::Cell::new(0_u64);
+    let range_reads = std::cell::Cell::new(0_u64);
+    let range_bytes = std::cell::Cell::new(0_u64);
     let verified =
         tracedecay_code_index::production::CodeIndexPublishedGenerationV1::verify_partitioned_sealed(
         &manifest,
         |digest, expected_size| {
-            segment_path(segments_root, digest)
-                .is_ok_and(|path| proof.borrow_mut().already_verified(digest, expected_size, &path))
+            let reused = segment_path(segments_root, digest).is_ok_and(|path| {
+                proof
+                    .borrow_mut()
+                    .already_verified(digest, expected_size, &path)
+            });
+            if reused {
+                reused_segments.set(reused_segments.get().saturating_add(1));
+            }
+            reused
         },
         |request, buffer| {
             if let Err(error) = (check)() {
@@ -1158,10 +1173,12 @@ fn verify_checked_seal_bundle_with_evidence_barrier(
                         buffer,
                     )?;
                     proof.borrow_mut().hashed(digest, fingerprint);
+                    hashed_segments.set(hashed_segments.get().saturating_add(1));
+                    hashed_bytes.set(hashed_bytes.get().saturating_add(size_bytes));
                     Ok(())
                 }
                 tracedecay_code_index::production::SealedGenerationSegmentReadV1::Range {
-                    ..
+                    length, ..
                 } => {
                     if pinned_evidence.is_none() {
                         pinned_evidence = Some(open_partitioned_segment(segments_root, request)?);
@@ -1177,7 +1194,10 @@ fn verify_checked_seal_bundle_with_evidence_barrier(
                         })?,
                         request,
                         buffer,
-                    )
+                    )?;
+                    range_reads.set(range_reads.get().saturating_add(1));
+                    range_bytes.set(range_bytes.get().saturating_add(length));
+                    Ok(())
                 }
             }
         },
@@ -1201,6 +1221,18 @@ fn verify_checked_seal_bundle_with_evidence_barrier(
     }
     (check)()?;
     proof.into_inner().commit();
+    tracing::info!(
+        target: "tracedecay::sealed_source_proof",
+        event = %"sealed_source_proof",
+        seal_sha256 = expected_digest,
+        reused_segments = reused_segments.get(),
+        hashed_segments = hashed_segments.get(),
+        hashed_bytes = hashed_bytes.get(),
+        range_reads = range_reads.get(),
+        range_bytes = range_bytes.get(),
+        elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
+        "verified sealed source authentication work"
+    );
     Ok(())
 }
 
@@ -2719,7 +2751,40 @@ mod tests {
             reads.load(Ordering::SeqCst)
         };
         let cold_reads = count_proof_reads(&VerifiedSealedSegmentsV1::default());
+        let trace = tracedecay_runtime_core::logging::FormattedTracingCapture::start();
         let warm_reads = count_proof_reads(&verified);
+        let observed = trace.text();
+        drop(trace);
+        let observed_field = |name: &str| -> u64 {
+            observed
+                .split(&format!("{name}="))
+                .nth(1)
+                .and_then(|field| field.split_whitespace().next())
+                .and_then(|value| value.parse().ok())
+                .unwrap_or_else(|| {
+                    panic!("missing numeric {name} in sealed proof trace: {observed}")
+                })
+        };
+        assert!(
+            observed.contains("event=sealed_source_proof"),
+            "real sealed source proof must expose source-work telemetry: {observed}"
+        );
+        assert!(
+            observed_field("hashed_segments") > 0,
+            "the newly edited source must be authenticated on the warm successor"
+        );
+        if cfg!(unix) {
+            assert!(
+                observed_field("reused_segments") >= inherited_files as u64,
+                "inherited file source must be counted as reused, not rehashed"
+            );
+        } else {
+            assert_eq!(
+                observed_field("reused_segments"),
+                0,
+                "unsupported platforms must not report source fingerprint reuse"
+            );
+        }
         if cfg!(unix) {
             assert!(
                 cold_reads >= warm_reads + inherited_files,

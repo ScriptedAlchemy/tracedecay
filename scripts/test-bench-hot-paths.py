@@ -188,6 +188,11 @@ class BenchHotPathsTests(unittest.TestCase):
         self.assertRegex(single[("edit_reconcile", "edited_file")]["symbol"],
                          r"^tracedecay_bench_hot_paths_edit_\d+$")
         edit_ready = single[("edit_reconcile", "edit_to_ready")]
+        self.assertEqual(
+            single[("edit_reconcile", "sealed_source_work")]["unavailable"],
+            "no complete sealed source proof telemetry in measured window",
+            "an uninstrumented binary cannot claim zero source authentication work",
+        )
         if sys.platform.startswith("linux"):
             self.assertIsInstance(edit_ready["peak_daemon_rss_kb"], int)
             self.assertGreater(edit_ready["peak_daemon_rss_kb"], 0)
@@ -484,6 +489,43 @@ class BenchHotPathsTests(unittest.TestCase):
             self.assertEqual(measured["status_polls"], 4)
             self.assertEqual(measured["peak_daemon_rss_kb"], 8192)
             self.assertEqual(run.generation, "generation.9")
+        finally:
+            sys.modules.pop(spec.name, None)
+
+    def test_source_work_parser_counts_actual_proofs_and_refuses_partial_events(self) -> None:
+        spec = importlib.util.spec_from_file_location("bench_source_telemetry", BENCH)
+        self.assertIsNotNone(spec)
+        self.assertIsNotNone(spec.loader)
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = module
+        try:
+            spec.loader.exec_module(module)
+            log_path = self.root / "daemon.log"
+            prefix = b"stale previous generation\n"
+            log_path.write_bytes(prefix + (
+                b"INFO unrelated event=sealed_source_proof hashed_segments=900\n"
+                b"INFO tracedecay::sealed_source_proof: event=sealed_source_proof "
+                b"reused_segments=14 hashed_segments=2 hashed_bytes=4096 "
+                b"range_reads=3 range_bytes=8192 elapsed_ms=44\n"
+                b"INFO tracedecay::sealed_source_proof: event=sealed_source_proof "
+                b"reused_segments=15 hashed_segments=1 hashed_bytes=1024 "
+                b"range_reads=1 range_bytes=256 elapsed_ms=12\n"
+            ))
+            self.assertEqual(
+                module.sealed_source_work(log_path, len(prefix)),
+                {"proofs": 2, "reused_segments": 29, "hashed_segments": 3,
+                 "hashed_bytes": 5120, "range_reads": 4, "range_bytes": 8448},
+            )
+            self.assertIsNone(module.sealed_source_work(log_path, log_path.stat().st_size))
+            with log_path.open("ab") as stream:
+                stream.write(
+                    b"INFO tracedecay::sealed_source_proof: event=sealed_source_proof "
+                    b"reused_segments=17 hashed_segments=0 hashed_bytes=0 range_reads=0\n"
+                )
+            self.assertIsNone(
+                module.sealed_source_work(log_path, len(prefix)),
+                "an incomplete event cannot silently undercount hash or range work",
+            )
         finally:
             sys.modules.pop(spec.name, None)
 
