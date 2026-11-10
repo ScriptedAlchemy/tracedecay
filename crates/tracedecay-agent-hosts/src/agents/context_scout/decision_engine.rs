@@ -368,11 +368,23 @@ impl DecisionEngineClientV1 {
         };
         let latency_micros = u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX);
         match parse_answers(&value.0, request) {
-            Some((answers, model)) => DecisionEngineOutcomeV1::Answered(DecisionAnswersV1 {
-                answers,
-                model,
-                latency_micros,
-            }),
+            Some((answers, model)) => {
+                // The server's declared model must not contradict the
+                // explicitly selected model used to prepare this request.
+                if let (Some(requested), Some(reported)) =
+                    (self.identity.model.as_deref(), model.as_deref())
+                {
+                    if requested != reported {
+                        tracing::debug!("decision engine reported a different model");
+                        return DecisionEngineOutcomeV1::Malformed;
+                    }
+                }
+                DecisionEngineOutcomeV1::Answered(DecisionAnswersV1 {
+                    answers,
+                    model,
+                    latency_micros,
+                })
+            }
             None => {
                 tracing::debug!("decision engine answer malformed");
                 DecisionEngineOutcomeV1::Malformed
@@ -586,11 +598,13 @@ fn parse_answers(value: &Value, request: &DecisionRequestV1) -> Option<ParsedAns
         let answer = answers.get(&question.key)?.as_object()?;
         parsed.insert(question.key.clone(), parse_answer(answer, &question.kind)?);
     }
-    let model = value
-        .get("model")
-        .and_then(Value::as_str)
-        .map(str::to_owned)
-        .filter(|model| !model.is_empty());
+    // Omission is permitted by the runtime contract; an explicitly present
+    // but malformed model is not the same as an omitted identity.
+    let model = match value.get("model") {
+        None => None,
+        Some(Value::String(model)) if !model.trim().is_empty() => Some(model.clone()),
+        _ => return None,
+    };
     Some((parsed, model))
 }
 
@@ -1019,6 +1033,69 @@ mod tests {
         let answers =
             answered(client(&server.url).ask_blocking(&request("state", vec![noul("q")])));
         assert_eq!(answers.answers["q"], DecisionAnswerV1::Noul(0.9));
+    }
+
+    #[test]
+    fn reported_model_must_be_valid_and_match_explicit_selection() {
+        let questions = vec![noul("q")];
+        let body = answers_body(Some("kev-4b"), &[("q", noul_answer(0.8))]);
+
+        // An explicitly selected model and a matching server declaration
+        // preserve an ordinary usable decision.
+        let server = fake_decision_engine(200, &body, Duration::ZERO);
+        let mut selected = config(&server.url);
+        selected.model = Some("kev-4b".to_owned());
+        let observed = answered(
+            DecisionEngineClientV1::new(selected)
+                .unwrap()
+                .ask_blocking(&request("state", questions.clone())),
+        );
+        assert_eq!(observed.model.as_deref(), Some("kev-4b"));
+        assert_eq!(observed.answers["q"], DecisionAnswerV1::Noul(0.8));
+        assert_eq!(server.requests.load(Ordering::SeqCst), 1);
+
+        // Each response contains an otherwise valid answer. Previously the
+        // mismatched declaration was trusted, and malformed declarations
+        // silently became None even though the server supplied a model key.
+        for model in [
+            json!("other-model"),
+            Value::Null,
+            json!(true),
+            json!(17),
+            json!("  "),
+        ] {
+            let body = json!({"model": model, "answers": {
+                "q": {"type": "noul", "noul": 0.8}
+            }})
+            .to_string();
+            let server = fake_decision_engine(200, &body, Duration::ZERO);
+            let mut selected = config(&server.url);
+            selected.model = Some("kev-4b".to_owned());
+            assert_eq!(
+                DecisionEngineClientV1::new(selected)
+                    .unwrap()
+                    .ask_blocking(&request("state", questions.clone())),
+                DecisionEngineOutcomeV1::Malformed,
+                "{body}"
+            );
+            assert_eq!(server.requests.load(Ordering::SeqCst), 1);
+        }
+
+        // A server that omits its model remains usable as an unverified
+        // runtime response, rather than inventing a reported identity.
+        let server = fake_decision_engine(
+            200,
+            &single_noul_body("q", 0.8),
+            Duration::ZERO,
+        );
+        let mut selected = config(&server.url);
+        selected.model = Some("kev-4b".to_owned());
+        let observed = answered(
+            DecisionEngineClientV1::new(selected)
+                .unwrap()
+                .ask_blocking(&request("state", questions)),
+        );
+        assert_eq!(observed.model, None);
     }
 
     #[test]
