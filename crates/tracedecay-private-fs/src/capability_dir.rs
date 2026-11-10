@@ -432,8 +432,9 @@ fn census_receipted_directory_bytes_bounded<K: Ord + Copy>(
     let mut totals = std::collections::BTreeMap::<K, (u64, u64)>::new();
     // Hard links belong to the highest-priority verified category, not the
     // first entry returned by read_dir. Only multiply-linked identities need
-    // tracking; memory depends on shared inodes, not file byte size.
-    let mut counted = std::collections::HashMap::<(u64, u64), (K, u64)>::new();
+    // tracking; memory depends on unresolved shared inodes, not the total
+    // number of linked files visited or their byte size.
+    let mut counted = std::collections::HashMap::<(u64, u64), (K, u64, u64)>::new();
     for entry in root.read_dir(".")? {
         let entry = entry?;
         let name = entry.file_name();
@@ -475,7 +476,7 @@ fn directory_bytes_from_held_dir<K: Ord + Copy>(
     directory: Dir,
     category: K,
     totals: &mut std::collections::BTreeMap<K, (u64, u64)>,
-    counted: &mut std::collections::HashMap<(u64, u64), (K, u64)>,
+    counted: &mut std::collections::HashMap<(u64, u64), (K, u64, u64)>,
     max_shared_inodes: usize,
 ) -> io::Result<u64> {
     let mut total = 0_u64;
@@ -501,7 +502,9 @@ fn directory_bytes_from_held_dir<K: Ord + Copy>(
             use cap_std::fs::MetadataExt;
             if metadata.nlink() > 1 {
                 let key = (metadata.dev(), metadata.ino());
-                if let Some((previous_kind, charged_bytes)) = counted.get_mut(&key) {
+                if let Some((previous_kind, charged_bytes, remaining_links)) =
+                    counted.get_mut(&key)
+                {
                     // A lower-ordered category has stronger ownership. A
                     // superseded generation encountered first cannot claim
                     // hard-linked physical bytes from a later live head.
@@ -521,6 +524,15 @@ fn directory_bytes_from_held_dir<K: Ord + Copy>(
                         total = total.saturating_add(*charged_bytes);
                         *previous_kind = category;
                     }
+                    // An immutable hard-link group no longer needs its key
+                    // after every filesystem-reported link has been seen.
+                    // Retaining completed groups makes a store with many
+                    // disjoint pairs exhaust the budget despite bounded
+                    // concurrent deduplication demand.
+                    *remaining_links -= 1;
+                    if *remaining_links == 0 {
+                        counted.remove(&key);
+                    }
                     continue;
                 }
                 if counted.len() >= max_shared_inodes {
@@ -535,7 +547,7 @@ fn directory_bytes_from_held_dir<K: Ord + Copy>(
                         "sealed census shared-inode allocation failed; coverage is partial",
                     )
                 })?;
-                counted.insert(key, (category, metadata.len()));
+                counted.insert(key, (category, metadata.len(), metadata.nlink() - 1));
             }
         }
         #[cfg(not(unix))]
@@ -1025,7 +1037,10 @@ mod tests {
         }
         assert_eq!(charged.get(&Kind::Superseded), Some(&(1, 3)));
         assert_eq!(charged.get(&Kind::Head), Some(&(1, 16)));
-        assert_eq!(counted.len(), 1, "one shared inode was visited twice");
+        assert!(
+            counted.is_empty(),
+            "a fully observed hard-link group must free its deduplication slot"
+        );
 
         // The production census also classifies receipt-bound children and
         // must report one physical copy without charging retired bytes twice.
@@ -1044,6 +1059,44 @@ mod tests {
         assert_eq!(reported.get(&Kind::Superseded), Some(&(1, 3)));
         assert_eq!(reported.get(&Kind::Unrecognized), None);
         assert_eq!(std::fs::read(head.join("shared")).unwrap(), b"shared-bytes");
+    }
+
+    /// Completed hard-link groups need no further identity retention. A
+    /// bounded census must still cover many disjoint alias pairs whose total
+    /// exceeds its simultaneous unresolved-link budget.
+    #[cfg(unix)]
+    #[test]
+    fn complete_link_pairs_reuse_census_deduplication_budget() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("sealed");
+        let generation = root.join("generation");
+        std::fs::create_dir_all(&generation).unwrap();
+        std::fs::write(generation.join("owner"), b"owned").unwrap();
+        for index in 0..4 {
+            let column = generation.join(format!("column-{index}"));
+            std::fs::create_dir(&column).unwrap();
+            let original = column.join("original");
+            std::fs::write(&original, b"rows").unwrap();
+            std::fs::hard_link(&original, column.join("alias")).unwrap();
+        }
+
+        // Each column is fully traversed before the next one is opened.
+        // Previously the four completed identities accumulated and this
+        // real filesystem walk failed at the second column's first link.
+        let census = census_receipted_directory_bytes_bounded(
+            &root,
+            false,
+            |_| ("owner", 64),
+            |_, receipt| receipt == Some(b"owned".as_slice()),
+            1,
+        )
+        .unwrap();
+        assert_eq!(census.get(&true), Some(&(1, 21)));
+        for index in 0..4 {
+            let column = generation.join(format!("column-{index}"));
+            assert_eq!(std::fs::read(column.join("original")).unwrap(), b"rows");
+            assert_eq!(std::fs::read(column.join("alias")).unwrap(), b"rows");
+        }
     }
 
     /// An adversarial store with many distinct hard-linked inodes must
