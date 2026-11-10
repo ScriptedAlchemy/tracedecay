@@ -99,10 +99,13 @@ impl VerifiedSealedSegmentsV1 {
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             let accessed = cache.next_access();
-            cache.roots.get_mut(segments_root).map(|(snapshot, last_used)| {
-                *last_used = accessed;
-                Arc::clone(snapshot)
-            })
+            cache
+                .roots
+                .get_mut(segments_root)
+                .map(|(snapshot, last_used)| {
+                    *last_used = accessed;
+                    Arc::clone(snapshot)
+                })
         };
         SealedSegmentProofV1 {
             verified: self,
@@ -187,9 +190,15 @@ impl SealedSegmentProofV1<'_> {
                 .roots
                 .insert(self.segments_root, (Arc::new(self.proven), accessed));
             if roots.roots.len() > MAX_VERIFIED_SEGMENT_ROOTS {
+                // An in-flight proof holds an Arc to its parent snapshot.
+                // Evicting that snapshot would reject its valid successor
+                // at commit and make the next edit rehash the generation.
+                // The freshly inserted snapshot has only the cache owner,
+                // so an over-capacity insertion always has a candidate.
                 let oldest = roots
                     .roots
                     .iter()
+                    .filter(|(_, (snapshot, _))| Arc::strong_count(snapshot) == 1)
                     .min_by_key(|(_, (_, accessed))| *accessed)
                     .map(|(root, _)| root.clone());
                 if let Some(oldest) = oldest {
@@ -420,6 +429,76 @@ mod tests {
         );
         let mut newest = verified.begin(&incoming_root);
         assert!(newest.already_verified(&incoming_digest, 3, &incoming_path));
+    }
+
+    #[test]
+    fn in_flight_successor_retains_parent_across_other_root_evictions() {
+        let temp = TempDir::new().unwrap();
+        let verified = VerifiedSealedSegmentsV1::default();
+        let mut roots = Vec::new();
+        let mut replaced = None;
+        for index in 0..MAX_VERIFIED_SEGMENT_ROOTS {
+            let root = temp.path().join(format!("root-{index}"));
+            std::fs::create_dir(&root).unwrap();
+            let (digest, path) = write_segment(&root, b"[1]");
+            let mut parent = verified.begin(&root);
+            authenticate(&mut parent, &digest, &path);
+            if index == 0 {
+                let (old_digest, old_path) = write_segment(&root, b"[3]");
+                authenticate(&mut parent, &old_digest, &old_path);
+                replaced = Some((old_digest, old_path));
+            }
+            parent.commit();
+            roots.push((root, digest, path));
+        }
+
+        let (active_root, inherited_digest, inherited_path) = &roots[0];
+        let (replaced_digest, replaced_path) = replaced.unwrap();
+        let mut successor = verified.begin(active_root);
+        assert!(successor.already_verified(inherited_digest, 3, inherited_path));
+        let (changed_digest, changed_path) = write_segment(active_root, b"[2]");
+        authenticate(&mut successor, &changed_digest, &changed_path);
+
+        // Make the still-running successor's root the least recently used.
+        // An unpinned LRU cache would evict this root on the next insertion.
+        for (root, digest, path) in roots.iter().skip(1) {
+            let mut proof = verified.begin(root);
+            assert!(proof.already_verified(digest, 3, path));
+        }
+
+        let incoming_root = temp.path().join("incoming-root");
+        std::fs::create_dir(&incoming_root).unwrap();
+        let (incoming_digest, incoming_path) = write_segment(&incoming_root, b"[4]");
+        let mut incoming = verified.begin(&incoming_root);
+        authenticate(&mut incoming, &incoming_digest, &incoming_path);
+        incoming.commit();
+        successor.commit();
+
+        let mut latest = verified.begin(active_root);
+        assert!(
+            latest.already_verified(inherited_digest, 3, inherited_path),
+            "an in-flight edit must keep its inherited authenticated source"
+        );
+        assert!(
+            latest.already_verified(&changed_digest, 3, &changed_path),
+            "evicting other roots must not discard the edited generation's proof"
+        );
+        assert!(
+            !latest.already_verified(&replaced_digest, 3, &replaced_path),
+            "the successor must not resurrect a replaced parent segment"
+        );
+
+        let (evicted_root, evicted_digest, evicted_path) = &roots[1];
+        let mut evicted = verified.begin(evicted_root);
+        assert!(
+            !evicted.already_verified(evicted_digest, 3, evicted_path),
+            "the oldest idle root, rather than an active proof, must be evicted"
+        );
+        let cache = verified
+            .roots
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert_eq!(cache.roots.len(), MAX_VERIFIED_SEGMENT_ROOTS);
     }
 
     #[test]
