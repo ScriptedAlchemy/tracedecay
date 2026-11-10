@@ -654,6 +654,40 @@ fn writer_identity_fence_rejects_a_replacement_hidden_by_path_restore() {
 
 #[cfg(unix)]
 #[test]
+fn worker_identity_refuses_a_vfs_without_move_attestation() {
+    let file = database();
+    let pinned = OpenedDatabaseFile::pin(file.path()).unwrap();
+    // SQLite's built-in memdb VFS does not implement HAS_MOVED, although
+    // it accepts the same pathname as the pinned on-disk database.
+    let virtual_connection = Connection::open_with_flags_and_vfs(
+        file.path(),
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE | rusqlite::OpenFlags::SQLITE_OPEN_CREATE,
+        "memdb",
+    )
+    .expect("open bundled SQLite's memdb VFS");
+    assert_eq!(
+        super::sqlite_connection_has_moved(&virtual_connection),
+        Ok(None),
+        "the regression must exercise an actual unsupported file control"
+    );
+    assert_eq!(
+        pinned.verify_connection(&virtual_connection, file.path()),
+        Err(OpenedDatabaseFileError::Inspect),
+        "an unchanged filename cannot authenticate an unverified SQLite VFS handle"
+    );
+
+    // Rejecting that connection must leave the real database intact and
+    // permit a worker using the ordinary SQLite VFS.
+    let real_connection = Connection::open(file.path()).unwrap();
+    pinned.verify_connection(&real_connection, file.path()).unwrap();
+    assert_eq!(
+        real_connection.query_row("SELECT value FROM items", [], |row| row.get::<_, i64>(0)),
+        Ok(1)
+    );
+}
+
+#[cfg(unix)]
+#[test]
 fn verified_immutable_reader_never_binds_transient_b_to_restored_a_identity() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("identity.db");

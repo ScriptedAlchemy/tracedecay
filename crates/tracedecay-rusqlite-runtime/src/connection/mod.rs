@@ -452,8 +452,10 @@ impl OpenedDatabaseFile {
         // HAS_MOVED below still observes the SQLite handle's different inode.
         self.verify_current_path(canonical_path)?;
         #[cfg(unix)]
-        if sqlite_connection_has_moved(_connection)? == Some(true) {
-            return Err(OpenedDatabaseFileError::Replaced);
+        match sqlite_connection_has_moved(_connection)? {
+            Some(false) => {}
+            Some(true) => return Err(OpenedDatabaseFileError::Replaced),
+            None => return Err(OpenedDatabaseFileError::Inspect),
         }
         #[cfg(unix)]
         {
