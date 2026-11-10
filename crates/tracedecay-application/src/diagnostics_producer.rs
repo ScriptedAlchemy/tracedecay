@@ -10,8 +10,8 @@
 //! A monorepo is many TypeScript projects (one tsconfig per package). Every
 //! generation carries one snapshot of all their merged findings, but a project
 //! is rechecked only when the generation changed a file that can change what
-//! tsc reports for it; the rest republish their previous result without
-//! running tsc. Each run's outcome is published to the owning project's status handle, and each
+//! tsc reports for it or its installed compiler changed; the rest republish
+//! their previous result without running tsc. Each run's outcome is published to the owning project's status handle, and each
 //! tsconfig's check within it, so a read can name the real state of the
 //! project that owns the file it asked about (still running, compiler failed,
 //! compiler missing, nothing resolved) instead of a bare "no producer" or a
@@ -43,6 +43,8 @@ use crate::diagnostics_store::DiagnosticsStore;
 
 mod status;
 
+#[cfg(all(test, unix))]
+mod installed_compiler_tests;
 #[cfg(all(test, unix))]
 mod overlap_tests;
 
@@ -107,35 +109,240 @@ impl ProjectResult {
     }
 }
 
-/// The installed compiler is outside the indexed file set. Unchanged sources
-/// do not authorize reusing a check across a TypeScript package/launcher swap.
-/// Unknown, malformed or oversized toolchain evidence forces a fresh check.
-fn installed_compiler_revision(compiler: &Path) -> Option<[u8; 32]> {
-    const MAX_EVIDENCE_BYTES: u64 = 1024 * 1024;
-    fn read_bounded(path: &Path) -> Option<Vec<u8>> {
-        let mut bytes = Vec::new();
-        std::fs::File::open(path)
-            .ok()?
-            .take(MAX_EVIDENCE_BYTES + 1)
-            .read_to_end(&mut bytes)
-            .ok()?;
-        (bytes.len() as u64 <= MAX_EVIDENCE_BYTES).then_some(bytes)
-    }
+/// The bytes of a launcher, manifest or revision record the producer reads.
+const MAX_SMALL_FILE_BYTES: u64 = 1024 * 1024;
+/// An installed compiler past these bounds has no established identity, so
+/// every run checks it from scratch; typescript@7 with its native package is
+/// about 30 MiB in 530 files.
+const MAX_COMPILER_BYTES: u64 = 512 * 1024 * 1024;
+const MAX_COMPILER_FILES: usize = 16 * 1024;
+const MAX_COMPILER_DEPTH: usize = 32;
 
-    let manifest = read_bounded(&compiler.parent()?.parent()?.join("typescript/package.json"))?;
-    let package: serde_json::Value = serde_json::from_slice(&manifest).ok()?;
-    if package.get("name")?.as_str()? != "typescript"
-        || package.get("version")?.as_str()?.is_empty()
+fn read_bounded(path: &Path) -> Option<Vec<u8>> {
+    let mut bytes = Vec::new();
+    std::fs::File::open(path)
+        .ok()?
+        .take(MAX_SMALL_FILE_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .ok()?;
+    (bytes.len() as u64 <= MAX_SMALL_FILE_BYTES).then_some(bytes)
+}
+
+fn update_framed(hasher: &mut Sha256, bytes: &[u8]) {
+    hasher.update((bytes.len() as u64).to_le_bytes());
+    hasher.update(bytes);
+}
+
+/// The revision of what each `node_modules/.bin/tsc` runs, `None` where it
+/// cannot be established. The installed compiler is outside the indexed file
+/// set, so unchanged sources never authorize reusing a check across it.
+#[tracing::instrument(
+    name = "usecases.diagnostics.typescript_compiler_revisions",
+    level = "trace",
+    skip_all
+)]
+fn installed_compiler_revisions(
+    compilers: BTreeSet<PathBuf>,
+) -> BTreeMap<PathBuf, Option<[u8; 32]>> {
+    let mut packages = BTreeMap::new();
+    compilers
+        .into_iter()
+        .map(|compiler| {
+            let revision = installed_compiler_revision(&compiler, &mut packages);
+            (compiler, revision)
+        })
+        .collect()
+}
+
+/// A package manager links `.bin/tsc` to the `bin.tsc` entry of the
+/// `typescript` package installed beside it, either as a symlink or as a shim
+/// that runs that entry, so the launcher and that package identify the
+/// compiler. A symlink to anything else runs an implementation this cannot
+/// name.
+fn installed_compiler_revision(
+    compiler: &Path,
+    packages: &mut BTreeMap<PathBuf, Option<InstalledCompilerPackage>>,
+) -> Option<[u8; 32]> {
+    let package = std::fs::canonicalize(compiler.parent()?.parent()?.join("typescript")).ok()?;
+    let installed = packages
+        .entry(package.clone())
+        .or_insert_with(|| installed_compiler_package(&package))
+        .as_ref()?;
+    if std::fs::symlink_metadata(compiler)
+        .ok()?
+        .file_type()
+        .is_symlink()
+        && std::fs::canonicalize(compiler).ok()? != installed.entry
     {
         return None;
     }
     let launcher = read_bounded(compiler)?;
     let mut hasher = Sha256::new();
-    hasher.update((manifest.len() as u64).to_le_bytes());
-    hasher.update(&manifest);
-    hasher.update((launcher.len() as u64).to_le_bytes());
-    hasher.update(&launcher);
+    update_framed(&mut hasher, compiler.as_os_str().as_encoded_bytes());
+    update_framed(&mut hasher, &launcher);
+    hasher.update(installed.digest);
     Some(hasher.finalize().into())
+}
+
+struct InstalledCompilerPackage {
+    /// The canonical `bin.tsc` entry the launcher runs.
+    entry: PathBuf,
+    /// Every installed byte the entry can load.
+    digest: [u8; 32],
+}
+
+/// The launcher entry loads its implementation from elsewhere in the package,
+/// and typescript@7 from a platform package it resolves among its
+/// dependencies, which also carries the default libraries. Rather than model
+/// that loading, the digest covers every file of the `typescript` package and
+/// of each declared dependency installed where Node resolves it.
+fn installed_compiler_package(package: &Path) -> Option<InstalledCompilerPackage> {
+    let manifest: serde_json::Value =
+        serde_json::from_slice(&read_bounded(&package.join("package.json"))?).ok()?;
+    if manifest.get("name")?.as_str()? != "typescript"
+        || manifest.get("version")?.as_str()?.is_empty()
+    {
+        return None;
+    }
+    let entry =
+        std::fs::canonicalize(package.join(manifest.get("bin")?.get("tsc")?.as_str()?)).ok()?;
+    if !entry.starts_with(package) {
+        return None;
+    }
+    let mut dependencies = BTreeSet::new();
+    for field in ["dependencies", "optionalDependencies"] {
+        if let Some(declared) = manifest.get(field) {
+            dependencies.extend(declared.as_object()?.keys().cloned());
+        }
+    }
+    let mut budget = CompilerReadBudget {
+        bytes: MAX_COMPILER_BYTES,
+        files: MAX_COMPILER_FILES,
+        buffer: vec![0; 64 * 1024],
+    };
+    let mut hasher = Sha256::new();
+    update_framed(&mut hasher, package.as_os_str().as_encoded_bytes());
+    hash_package_tree(&mut hasher, package, Path::new(""), 0, &mut budget)?;
+    for name in dependencies {
+        if !Path::new(&name)
+            .components()
+            .all(|component| matches!(component, std::path::Component::Normal(_)))
+        {
+            return None;
+        }
+        let Some(dependency) = installed_dependency(package, &name) else {
+            // Optional platform packages for other targets are never installed.
+            continue;
+        };
+        update_framed(&mut hasher, name.as_bytes());
+        update_framed(&mut hasher, dependency.as_os_str().as_encoded_bytes());
+        hash_package_tree(&mut hasher, &dependency, Path::new(""), 0, &mut budget)?;
+    }
+    Some(InstalledCompilerPackage {
+        entry,
+        digest: hasher.finalize().into(),
+    })
+}
+
+/// Node's lookup for a bare specifier imported from inside `package`: its own
+/// `node_modules`, then each ancestor's. That finds a dependency pnpm links
+/// beside the package in its virtual store and one npm hoists to the root.
+fn installed_dependency(package: &Path, name: &str) -> Option<PathBuf> {
+    package
+        .ancestors()
+        .filter(|dir| dir.file_name() != Some("node_modules".as_ref()))
+        .map(|dir| dir.join("node_modules").join(name))
+        .find(|candidate| candidate.join("package.json").is_file())
+        .and_then(|candidate| std::fs::canonicalize(candidate).ok())
+}
+
+struct CompilerReadBudget {
+    bytes: u64,
+    files: usize,
+    buffer: Vec<u8>,
+}
+
+/// Hashes every file under `root/relative` in name order, following the links
+/// a package manager installs with. Nested `node_modules` are other packages,
+/// reached only as declared dependencies.
+fn hash_package_tree(
+    hasher: &mut Sha256,
+    root: &Path,
+    relative: &Path,
+    depth: usize,
+    budget: &mut CompilerReadBudget,
+) -> Option<()> {
+    let mut names = std::fs::read_dir(root.join(relative))
+        .ok()?
+        .map(|entry| entry.map(|entry| entry.file_name()))
+        .collect::<std::io::Result<Vec<_>>>()
+        .ok()?;
+    names.sort();
+    for name in names {
+        if name == "node_modules" {
+            continue;
+        }
+        let path = relative.join(&name);
+        let metadata = std::fs::metadata(root.join(&path)).ok()?;
+        if metadata.is_dir() {
+            if depth == MAX_COMPILER_DEPTH {
+                return None;
+            }
+            hash_package_tree(hasher, root, &path, depth + 1, budget)?;
+        } else if metadata.is_file() {
+            budget.files = budget.files.checked_sub(1)?;
+            let mut file = std::fs::File::open(root.join(&path))
+                .ok()?
+                .take(budget.bytes.saturating_add(1));
+            let mut content = Sha256::new();
+            let mut length = 0_u64;
+            loop {
+                let read = file.read(&mut budget.buffer).ok()?;
+                if read == 0 {
+                    break;
+                }
+                content.update(&budget.buffer[..read]);
+                length += read as u64;
+            }
+            budget.bytes = budget.bytes.checked_sub(length)?;
+            update_framed(hasher, path.as_os_str().as_encoded_bytes());
+            hasher.update(length.to_le_bytes());
+            hasher.update(content.finalize());
+        } else {
+            return None;
+        }
+    }
+    Some(())
+}
+
+/// tsc replays the diagnostics its build-info cached whenever the build-info
+/// names the running compiler's version and the sources are unchanged, and
+/// typescript@7 records fixed versions for its own default libraries. A
+/// same-version change to the installed compiler would therefore replay the
+/// previous implementation's findings, so a build-info is kept only while the
+/// compiler revision recorded beside it is the one about to run. Only this
+/// tsconfig's own pair of files is touched.
+fn bind_build_info(build_info: &Path, compiler_revision: Option<[u8; 32]>) -> std::io::Result<()> {
+    fn remove_if_present(path: &Path) -> std::io::Result<()> {
+        match std::fs::remove_file(path) {
+            Err(error) if error.kind() != std::io::ErrorKind::NotFound => Err(error),
+            _ => Ok(()),
+        }
+    }
+
+    let record = build_info.with_extension("compiler-revision");
+    if let Some(revision) = compiler_revision
+        && read_bounded(&record).as_deref() == Some(revision.as_slice())
+    {
+        return Ok(());
+    }
+    // Removed before the record names the new revision, so an interrupted
+    // rebind never leaves an old build-info under a matching record.
+    remove_if_present(build_info)?;
+    match compiler_revision {
+        Some(revision) => std::fs::write(&record, revision),
+        None => remove_if_present(&record),
+    }
 }
 
 /// Publishes the merged findings of each project's own TypeScript compiler as
@@ -143,7 +350,8 @@ fn installed_compiler_revision(compiler: &Path) -> Option<[u8; 32]> {
 ///
 /// A project is rechecked, incrementally against its build-info in
 /// `build_info_dir`, only when `identity` changed a file that can change what
-/// tsc reports for it since the generation `state` last checked; every other
+/// tsc reports for it since the generation `state` last checked, or when its
+/// installed compiler is not the one that produced that result; every other
 /// project republishes its previous result without running tsc. The outcome
 /// and each tsconfig's check are published to the status handle `state` was
 /// built with, which [`typescript_diagnostics_availability`] reads.
@@ -173,16 +381,25 @@ pub async fn run_typescript_producer_v1(
         .checked_files
         .as_ref()
         .map(|previous| changed_paths(previous, &files));
+    let compilers = projects
+        .iter()
+        .filter_map(|project| project.compiler.clone())
+        .collect::<BTreeSet<_>>();
+    let compiler_revisions =
+        native_runtime::spawn_blocking(move || installed_compiler_revisions(compilers))
+            .await
+            .unwrap_or_else(|error| {
+                // Every revision is then unknown, which forbids reuse.
+                tracing::warn!(%error, "TypeScript compiler revisions were not computed");
+                BTreeMap::new()
+            });
     let mut results = BTreeMap::new();
     let mut stale = Vec::new();
-    let mut compiler_revisions = BTreeMap::new();
     for project in projects {
         let Some(compiler) = &project.compiler else {
             continue;
         };
-        let revision = *compiler_revisions
-            .entry(compiler.clone())
-            .or_insert_with(|| installed_compiler_revision(compiler));
+        let revision = compiler_revisions.get(compiler).copied().flatten();
         match (state.projects.get(&project.tsconfig), &changed) {
             (Some(previous), Some(changed))
                 if revision.is_some()
@@ -366,6 +583,23 @@ async fn check_projects(
             let root = project_root.to_path_buf();
             async move {
                 let check = async {
+                    let bound = build_info.clone();
+                    if let Err(error) = native_runtime::spawn_blocking(move || {
+                        bind_build_info(&bound, compiler_revision)
+                    })
+                    .await
+                    .unwrap_or_else(|error| Err(std::io::Error::other(error)))
+                    {
+                        // Nothing ran under this compiler, so the next run retries.
+                        return ProjectResult::Failed {
+                            reason: format!(
+                                "cannot bind the TypeScript build-info '{}' to the installed \
+                                 compiler: {error}",
+                                build_info.display()
+                            ),
+                            compiler_revision: None,
+                        };
+                    }
                     match run_typescript_compiler(
                         admission,
                         &compiler,
@@ -402,7 +636,8 @@ async fn check_projects(
 }
 
 /// One build-info file per tsconfig path, so linked worktrees sharing a store
-/// never share incremental state.
+/// never share incremental state; [`bind_build_info`] keeps the compiler
+/// revision that wrote it beside it.
 fn build_info_file_name(tsconfig: &Path) -> String {
     let digest = Sha256::digest(tsconfig.to_string_lossy().as_bytes());
     format!("{}.tsbuildinfo", hex::encode(digest))
@@ -658,13 +893,15 @@ mod tests {
             let log = temp.path().join("tsc.log");
             let bin = root.join("node_modules/.bin");
             std::fs::create_dir_all(&bin).expect("bin");
-            std::fs::create_dir_all(root.join("node_modules/typescript"))
+            std::fs::create_dir_all(root.join("node_modules/typescript/bin"))
                 .expect("installed TypeScript package");
             std::fs::write(
                 root.join("node_modules/typescript/package.json"),
-                r#"{"name":"typescript","version":"5.9.3"}"#,
+                r#"{"name":"typescript","version":"5.9.3","bin":{"tsc":"./bin/tsc"}}"#,
             )
             .expect("installed TypeScript manifest");
+            std::fs::write(root.join("node_modules/typescript/bin/tsc"), "")
+                .expect("installed TypeScript entry");
             write_executable_script(
                 &bin.join("tsc"),
                 format!(
@@ -864,8 +1101,11 @@ mod tests {
         fixture.run("generation.compiler.2", &mut state).await;
         assert_eq!(fixture.checked(), Vec::<String>::new());
 
-        std::fs::write(&manifest, r#"{"name":"typescript","version":"5.10.0"}"#)
-            .expect("upgrade compiler");
+        std::fs::write(
+            &manifest,
+            r#"{"name":"typescript","version":"5.10.0","bin":{"tsc":"./bin/tsc"}}"#,
+        )
+        .expect("upgrade compiler");
         fixture.run("generation.compiler.3", &mut state).await;
         assert_eq!(
             fixture.checked(),
