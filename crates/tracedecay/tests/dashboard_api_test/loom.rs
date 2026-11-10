@@ -19,7 +19,7 @@ fn dashboard_started_during_project_open_serves_sessions_once_open_completes() {
     let runtime = create_runtime();
     runtime.block_on(async {
         let project_open = ProjectOpenPublication::default();
-        let fixture = start_dashboard_fixture_while_opening(project_open.clone()).await;
+        let fixture = start_dashboard_fixture_while_opening(project_open.clone(), true).await;
         let agent = http_agent();
         let capabilities_url = format!("{}/api/capabilities", fixture.base_url);
         let temporal_url = format!("{}/api/loom/temporal?limit=25", fixture.base_url);
@@ -65,7 +65,7 @@ fn dashboard_reports_unavailable_when_the_open_publishes_no_sessions() {
     let runtime = create_runtime();
     runtime.block_on(async {
         let project_open = ProjectOpenPublication::default();
-        let fixture = start_dashboard_fixture_while_opening(project_open.clone()).await;
+        let fixture = start_dashboard_fixture_while_opening(project_open.clone(), false).await;
         let agent = http_agent();
         let capabilities_url = format!("{}/api/capabilities", fixture.base_url);
 
