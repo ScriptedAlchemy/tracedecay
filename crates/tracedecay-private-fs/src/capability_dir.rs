@@ -397,11 +397,32 @@ pub fn install_child_directory_noreplace_nofollow(
 /// and read from the same child whose bytes are subsequently charged.
 /// Category ordering is authority ordering: lower keys receive shared
 /// physical bytes before higher keys, independent of directory iteration.
+/// Bound deduplication metadata independently of the size of the store: the
+/// Doctor caller reports partial coverage rather than trusting a census
+/// whose shared-inode inventory would grow without limit.
+const MAX_SEALED_CENSUS_SHARED_INODES: usize = 65_536;
+
 pub fn census_receipted_directory_bytes<K: Ord + Copy>(
+    root_path: &Path,
+    unrecognized: K,
+    receipt_for: impl FnMut(&OsStr) -> (&'static str, usize),
+    classify: impl FnMut(&OsStr, Option<&[u8]>) -> K,
+) -> io::Result<std::collections::BTreeMap<K, (u64, u64)>> {
+    census_receipted_directory_bytes_bounded(
+        root_path,
+        unrecognized,
+        receipt_for,
+        classify,
+        MAX_SEALED_CENSUS_SHARED_INODES,
+    )
+}
+
+fn census_receipted_directory_bytes_bounded<K: Ord + Copy>(
     root_path: &Path,
     unrecognized: K,
     mut receipt_for: impl FnMut(&OsStr) -> (&'static str, usize),
     mut classify: impl FnMut(&OsStr, Option<&[u8]>) -> K,
+    max_shared_inodes: usize,
 ) -> io::Result<std::collections::BTreeMap<K, (u64, u64)>> {
     let root = match open_root_nofollow(root_path) {
         Ok(root) => root,
@@ -429,7 +450,13 @@ pub fn census_receipted_directory_bytes<K: Ord + Copy>(
             let bytes = if category == unrecognized {
                 0
             } else {
-                directory_bytes_from_held_dir(child, category, &mut totals, &mut counted)?
+                directory_bytes_from_held_dir(
+                    child,
+                    category,
+                    &mut totals,
+                    &mut counted,
+                    max_shared_inodes,
+                )?
             };
             (category, bytes)
         } else {
@@ -449,6 +476,7 @@ fn directory_bytes_from_held_dir<K: Ord + Copy>(
     category: K,
     totals: &mut std::collections::BTreeMap<K, (u64, u64)>,
     counted: &mut std::collections::HashMap<(u64, u64), (K, u64)>,
+    max_shared_inodes: usize,
 ) -> io::Result<u64> {
     let mut total = 0_u64;
     // Hold only the current ancestry chain. Opening every sibling before
@@ -495,6 +523,18 @@ fn directory_bytes_from_held_dir<K: Ord + Copy>(
                     }
                     continue;
                 }
+                if counted.len() >= max_shared_inodes {
+                    return Err(io::Error::new(
+                        io::ErrorKind::OutOfMemory,
+                        "sealed census shared-inode budget exhausted; coverage is partial",
+                    ));
+                }
+                counted.try_reserve(1).map_err(|_| {
+                    io::Error::new(
+                        io::ErrorKind::OutOfMemory,
+                        "sealed census shared-inode allocation failed; coverage is partial",
+                    )
+                })?;
                 counted.insert(key, (category, metadata.len()));
             }
         }
@@ -971,8 +1011,14 @@ mod tests {
         let mut counted = std::collections::HashMap::new();
         let mut charged = std::collections::BTreeMap::<Kind, (u64, u64)>::new();
         for (kind, path) in [(Kind::Superseded, &superseded), (Kind::Head, &head)] {
-            let bytes = directory_bytes_from_held_dir(open(path), kind, &mut charged, &mut counted)
-                .unwrap();
+            let bytes = directory_bytes_from_held_dir(
+                open(path),
+                kind,
+                &mut charged,
+                &mut counted,
+                MAX_SEALED_CENSUS_SHARED_INODES,
+            )
+            .unwrap();
             let entry = charged.entry(kind).or_default();
             entry.0 += 1;
             entry.1 += bytes;
@@ -998,6 +1044,55 @@ mod tests {
         assert_eq!(reported.get(&Kind::Superseded), Some(&(1, 3)));
         assert_eq!(reported.get(&Kind::Unrecognized), None);
         assert_eq!(std::fs::read(head.join("shared")).unwrap(), b"shared-bytes");
+    }
+
+    /// An adversarial store with many distinct hard-linked inodes must
+    /// decline its complete census before unbounded heap growth. A caller
+    /// can then truthfully mark coverage partial rather than report zeros as
+    /// a complete inventory. The ordinary production entrypoint still counts
+    /// all the same real files when within its budget.
+    #[cfg(unix)]
+    #[test]
+    fn sealed_census_refuses_excess_shared_inodes_without_losing_files() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("sealed");
+        let generation = root.join("generation");
+        std::fs::create_dir_all(&generation).unwrap();
+        std::fs::write(generation.join("owner"), b"owned").unwrap();
+        for index in 0..3 {
+            let source = generation.join(format!("payload-{index}"));
+            std::fs::write(&source, b"x").unwrap();
+            std::fs::hard_link(&source, temp.path().join(format!("alias-{index}"))).unwrap();
+        }
+
+        let refused = census_receipted_directory_bytes_bounded(
+            &root,
+            false,
+            |_| ("owner", 64),
+            |_, receipt| receipt == Some(b"owned".as_slice()),
+            2,
+        )
+        .unwrap_err();
+        assert_eq!(refused.kind(), io::ErrorKind::OutOfMemory, "{refused}");
+
+        let complete = census_receipted_directory_bytes(
+            &root,
+            false,
+            |_| ("owner", 64),
+            |_, receipt| receipt == Some(b"owned".as_slice()),
+        )
+        .unwrap();
+        assert_eq!(complete.get(&true), Some(&(1, 8)));
+        for index in 0..3 {
+            assert_eq!(
+                std::fs::read(generation.join(format!("payload-{index}"))).unwrap(),
+                b"x"
+            );
+            assert_eq!(
+                std::fs::read(temp.path().join(format!("alias-{index}"))).unwrap(),
+                b"x"
+            );
+        }
     }
 
     #[test]
