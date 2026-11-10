@@ -84,6 +84,10 @@ mod retained_segment_admission;
 #[path = "tests/publication_reset.rs"]
 mod publication_reset;
 
+#[cfg(all(test, unix))]
+#[path = "tests/publication_pointer_validation.rs"]
+mod publication_pointer_validation;
+
 const MAX_DURABLE_PUBLICATION_POINTER_BYTES: u64 = 512 * 1024;
 const DURABLE_GENERATION_IO_CHUNK_BYTES_V1: usize = 64 * 1024;
 
@@ -2421,21 +2425,15 @@ impl DaemonCodeIndexPublicationStoreV1 {
         // witnesses reject a concurrent rename; the second byte comparison
         // rejects an in-place change during parsing, even on coarse clocks.
         #[cfg(unix)]
-        let unchanged = (|| -> std::io::Result<bool> {
-            let opened_before = opened_pointer.metadata()?;
-            opened_pointer.seek(SeekFrom::Start(0))?;
-            let mut current = Vec::new();
-            (&mut opened_pointer)
-                .take(MAX_DURABLE_PUBLICATION_POINTER_BYTES + 1)
-                .read_to_end(&mut current)?;
-            let opened_after = opened_pointer.metadata()?;
-            let named_after = std::fs::symlink_metadata(&self.active_path)?;
-            Ok(current == bytes
-                && Self::same_unix_segment_identity(&metadata, &opened_before)
-                && Self::same_unix_segment_identity(&opened_before, &opened_after)
-                && Self::same_unix_segment_identity(&opened_before, &named_after))
-        })()
-        .unwrap_or(false);
+        let unchanged = {
+            Self::require_cold_pointer_witness(
+                &self.active_path,
+                &mut opened_pointer,
+                &metadata,
+                &bytes,
+            )?;
+            true
+        };
         #[cfg(not(unix))]
         let unchanged = std::fs::read(&self.active_path).ok().as_deref() == Some(bytes.as_slice());
         if unchanged {
@@ -2449,6 +2447,38 @@ impl DaemonCodeIndexPublicationStoreV1 {
             });
         }
         Ok(Some((pointer, bytes)))
+    }
+
+    /// Fail closed if a cold pointer's pathname or bytes changed while its
+    /// original descriptor was parsed. A failed witness is not a valid
+    /// publication snapshot and must never be returned to a caller.
+    #[cfg(unix)]
+    fn require_cold_pointer_witness(
+        path: &Path,
+        file: &mut File,
+        named_before: &std::fs::Metadata,
+        bytes: &[u8],
+    ) -> Result<(), CodeIndexPublicationStoreErrorV1> {
+        let opened_before = file.metadata().map_err(Self::map_pointer_io)?;
+        file.seek(SeekFrom::Start(0))
+            .map_err(Self::map_pointer_io)?;
+        let mut current = Vec::new();
+        (&mut *file)
+            .take(MAX_DURABLE_PUBLICATION_POINTER_BYTES + 1)
+            .read_to_end(&mut current)
+            .map_err(Self::map_pointer_io)?;
+        let opened_after = file.metadata().map_err(Self::map_pointer_io)?;
+        let named_after = path.symlink_metadata().map_err(Self::map_pointer_io)?;
+        if current != bytes
+            || !Self::same_unix_segment_identity(named_before, &opened_before)
+            || !Self::same_unix_segment_identity(&opened_before, &opened_after)
+            || !Self::same_unix_segment_identity(&opened_before, &named_after)
+        {
+            return Err(Self::corruption(
+                "active code-generation pointer changed during cold validation",
+            ));
+        }
+        Ok(())
     }
 
     fn remember_publication_pointer(
