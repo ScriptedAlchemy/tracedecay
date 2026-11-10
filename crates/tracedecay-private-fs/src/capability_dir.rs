@@ -391,17 +391,17 @@ pub fn install_child_directory_noreplace_nofollow(
     rename_noreplace(&root, staging_name, &root, generation_name)
 }
 
+/// Bound deduplication metadata independently of the size of the store.
+/// The Doctor caller reports partial coverage instead of trusting a census
+/// whose shared-inode inventory would otherwise grow without limit.
+const MAX_SEALED_CENSUS_SHARED_INODES: usize = 65_536;
+
 /// Census proof-bound children through held root/child capabilities, not
 /// ambient paths. Unknown entries are counted but never traversed; only
 /// multiply linked inodes consume deduplication memory. Receipts are bounded
 /// and read from the same child whose bytes are subsequently charged.
 /// Category ordering is authority ordering: lower keys receive shared
 /// physical bytes before higher keys, independent of directory iteration.
-/// Bound deduplication metadata independently of the size of the store: the
-/// Doctor caller reports partial coverage rather than trusting a census
-/// whose shared-inode inventory would grow without limit.
-const MAX_SEALED_CENSUS_SHARED_INODES: usize = 65_536;
-
 pub fn census_receipted_directory_bytes<K: Ord + Copy>(
     root_path: &Path,
     unrecognized: K,
