@@ -289,20 +289,21 @@ fn lexical_rowid_shift_does_not_spill_unlinked_sqlite_files() {
     let unreadable = Arc::new(AtomicBool::new(false));
     let observer_peak = Arc::clone(&peak);
     let observer_failed = Arc::clone(&unreadable);
-    connection.progress_handler(
-        1_024,
-        Some(move || match spill_bytes() {
-            Ok(bytes) => {
-                observer_peak.fetch_max(bytes, Ordering::Relaxed);
-                false
-            }
-            Err(_) => {
-                observer_failed.store(true, Ordering::Relaxed);
-                true
-            }
-        }),
-    )
-    .unwrap();
+    connection
+        .progress_handler(
+            1_024,
+            Some(move || match spill_bytes() {
+                Ok(bytes) => {
+                    observer_peak.fetch_max(bytes, Ordering::Relaxed);
+                    false
+                }
+                Err(_) => {
+                    observer_failed.store(true, Ordering::Relaxed);
+                    true
+                }
+            }),
+        )
+        .unwrap();
     {
         let tx = connection.transaction().unwrap();
         tx.execute(
@@ -338,7 +339,9 @@ fn lexical_rowid_shift_does_not_spill_unlinked_sqlite_files() {
         shift_rowid_keys(&tx, "row_blocks", "first_document", &shift, &Active).unwrap();
         tx.commit().unwrap();
     }
-    connection.progress_handler(0, None::<fn() -> bool>).unwrap();
+    connection
+        .progress_handler(0, None::<fn() -> bool>)
+        .unwrap();
     assert!(!unreadable.load(Ordering::Relaxed));
     assert_eq!(
         peak.load(Ordering::Relaxed),

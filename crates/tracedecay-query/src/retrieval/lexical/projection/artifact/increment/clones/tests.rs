@@ -499,20 +499,21 @@ mod physical_spill {
         let unavailable = Arc::new(AtomicBool::new(false));
         let observed = Arc::clone(&peak);
         let unavailable_probe = Arc::clone(&unavailable);
-        connection.progress_handler(
-            1_024,
-            Some(move || match spill_bytes() {
-                Ok(bytes) => {
-                    observed.fetch_max(bytes, Ordering::Relaxed);
-                    false
-                }
-                Err(_) => {
-                    unavailable_probe.store(true, Ordering::Relaxed);
-                    true
-                }
-            }),
-        )
-        .unwrap();
+        connection
+            .progress_handler(
+                1_024,
+                Some(move || match spill_bytes() {
+                    Ok(bytes) => {
+                        observed.fetch_max(bytes, Ordering::Relaxed);
+                        false
+                    }
+                    Err(_) => {
+                        unavailable_probe.store(true, Ordering::Relaxed);
+                        true
+                    }
+                }),
+            )
+            .unwrap();
 
         {
             let transaction = connection.transaction().unwrap();
@@ -555,7 +556,9 @@ mod physical_spill {
             renumber_clone_payloads(&transaction, &parent, &empty, &ActiveControl).unwrap();
             transaction.commit().unwrap();
         }
-        connection.progress_handler(0, None::<fn() -> bool>).unwrap();
+        connection
+            .progress_handler(0, None::<fn() -> bool>)
+            .unwrap();
         assert!(!unavailable.load(Ordering::Relaxed));
         assert_eq!(
             peak.load(Ordering::Relaxed),
@@ -594,20 +597,21 @@ mod physical_spill {
         let unavailable = Arc::new(AtomicBool::new(false));
         let observed_peak = Arc::clone(&peak);
         let failed_probe = Arc::clone(&unavailable);
-        connection.progress_handler(
-            4096,
-            Some(move || match spill_bytes() {
-                Ok(bytes) => {
-                    observed_peak.fetch_max(bytes, Ordering::Relaxed);
-                    false
-                }
-                Err(_) => {
-                    failed_probe.store(true, Ordering::Relaxed);
-                    true
-                }
-            }),
-        )
-        .unwrap();
+        connection
+            .progress_handler(
+                4096,
+                Some(move || match spill_bytes() {
+                    Ok(bytes) => {
+                        observed_peak.fetch_max(bytes, Ordering::Relaxed);
+                        false
+                    }
+                    Err(_) => {
+                        failed_probe.store(true, Ordering::Relaxed);
+                        true
+                    }
+                }),
+            )
+            .unwrap();
         {
             let transaction = connection.transaction().unwrap();
             // Bulk key updates are the positive control for statement-local
@@ -650,7 +654,9 @@ mod physical_spill {
             shift_clone_posting_keys(&transaction, &shift, &ActiveControl).unwrap();
             transaction.commit().unwrap();
         }
-        connection.progress_handler(0, None::<fn() -> bool>).unwrap();
+        connection
+            .progress_handler(0, None::<fn() -> bool>)
+            .unwrap();
         assert!(!unavailable.load(Ordering::Relaxed));
         assert_eq!(peak.load(Ordering::Relaxed), 0, "no implicit remap spill");
         assert_eq!(spill_bytes().unwrap(), 0);
