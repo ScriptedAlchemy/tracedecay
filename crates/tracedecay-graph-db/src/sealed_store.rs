@@ -4123,6 +4123,7 @@ mod build_tests {
     /// A missing pathname is not evidence that an installed generation's
     /// durable bytes were removed. It may have been relocated between
     /// registration and the retirement attempt.
+    #[cfg(unix)]
     #[test]
     fn registered_retirement_refuses_disappeared_root_or_child_until_restored() {
         let check: &dyn Fn() -> Result<(), GraphDbError> = &|| Ok(());
