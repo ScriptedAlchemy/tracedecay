@@ -72,7 +72,6 @@ async fn registered_stack_signal_limit_counts_utf8_bytes_not_characters() {
         refusal.contains("GitHub stack signal JSON exceeds 1 MiB"),
         "{refusal}"
     );
-    drop(writer);
     assert!(
         harness
             .registered
@@ -153,7 +152,6 @@ async fn registered_sql_cannot_forge_a_retired_signal_identity() {
             refusal.contains("GitHub stack signal uses a reserved retirement marker"),
             "{refusal}"
         );
-        drop(writer);
         assert!(
             harness
                 .registered
@@ -415,7 +413,6 @@ async fn noncanonical_retirement_marker_cannot_reopen_an_expired_signal() {
         )
         .await
         .expect("the terminal-only marker is allowed by SQLite");
-    drop(writer);
     assert!(
         harness
             .registered
@@ -474,7 +471,6 @@ async fn noncanonical_retirement_marker_cannot_reopen_an_expired_signal() {
         )
         .await
         .expect("SQLite accepts the escaped retirement key");
-    drop(writer);
     assert!(
         harness
             .registered
@@ -790,9 +786,6 @@ async fn retention_frontier_bounds_writer_work_and_resumes_past_deferred_backlog
         )
         .await
         .expect("seed a saturated recipient backlog");
-    // The writer client must not hold the first registered attachment open
-    // across the restart below.
-    drop(writer);
     let late = signal("signal.github-stack-eligible-tail", 10_000);
     // The old recipient is saturated. Give the eligible tail an independently
     // admitted recipient so it can actually settle before retirement.
@@ -950,7 +943,6 @@ async fn terminal_retirement_cannot_be_accelerated_past_the_issued_window() {
         refusal.contains("GitHub stack delivery signals are immutable"),
         "{refusal}"
     );
-    drop(writer);
     assert_eq!(
         harness
             .registered

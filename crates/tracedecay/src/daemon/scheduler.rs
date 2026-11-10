@@ -1716,52 +1716,8 @@ async fn maybe_run_global_retention(
     // A page has its own registered transaction. Release the daemon-wide
     // administration writer before admitting another page so an unrelated
     // store owner is never queued behind the entire retention backlog.
-    let mut retired = 0usize;
-    let mut compacted_ok = true;
-    for _ in 0..64 {
-        let Some(page) = administration
-            .try_with_writer(|| async {
-                database
-                    .retire_github_stack_terminal_payloads_before(cutoff_micros)
-                    .await
-            })
-            .await
-        else {
-            log_daemon_event(
-                "retention_prune",
-                &[
-                    ("scope", "global".to_string()),
-                    ("table", "github_stack_delivery_signals".to_string()),
-                    ("outcome", "deferred".to_string()),
-                    ("reason", "writer_admission_unavailable".to_string()),
-                ],
-            );
-            compacted_ok = false;
-            break;
-        };
-        match page {
-            Ok(page) => {
-                retired = retired.saturating_add(page.retired);
-                if page.exhausted {
-                    break;
-                }
-            }
-            Err(error) => {
-                log_daemon_event(
-                    "retention_prune",
-                    &[
-                        ("scope", "global".to_string()),
-                        ("table", "github_stack_delivery_signals".to_string()),
-                        ("outcome", "error".to_string()),
-                        ("failure", error),
-                    ],
-                );
-                compacted_ok = false;
-                break;
-            }
-        }
-        tokio::task::yield_now().await;
-    }
+    let (retired, compacted_ok) =
+        retire_github_stack_terminal_history(administration, database, cutoff_micros).await;
     // An interrupted pass still reports the slices it committed; only the
     // cadence outcome distinguishes it from a complete drain.
     let (committed, succeeded) = match retention {
@@ -1811,6 +1767,62 @@ async fn maybe_run_global_retention(
         );
     }
     reservation.finish(std::time::Instant::now(), succeeded && compacted_ok);
+}
+
+/// Retire completed transport payloads through individually admitted, bounded
+/// registered transactions; retain the durable frontier when admission yields.
+async fn retire_github_stack_terminal_history(
+    administration: &super::branch_admin::StoreAdministration,
+    database: &tracedecay_global_db::RegisteredGlobalDb,
+    cutoff_micros: i64,
+) -> (usize, bool) {
+    let mut retired = 0usize;
+    let mut compacted_ok = true;
+    for _ in 0..64 {
+        let Some(page) = administration
+            .try_with_writer(|| async {
+                database
+                    .retire_github_stack_terminal_payloads_before(cutoff_micros)
+                    .await
+            })
+            .await
+        else {
+            log_daemon_event(
+                "retention_prune",
+                &[
+                    ("scope", "global".to_string()),
+                    ("table", "github_stack_delivery_signals".to_string()),
+                    ("outcome", "deferred".to_string()),
+                    ("reason", "writer_admission_unavailable".to_string()),
+                ],
+            );
+            compacted_ok = false;
+            break;
+        };
+        match page {
+            Ok(page) => {
+                retired = retired.saturating_add(page.retired);
+                if page.exhausted {
+                    break;
+                }
+            }
+            Err(error) => {
+                log_daemon_event(
+                    "retention_prune",
+                    &[
+                        ("scope", "global".to_string()),
+                        ("table", "github_stack_delivery_signals".to_string()),
+                        ("outcome", "error".to_string()),
+                        ("failure", error),
+                    ],
+                );
+                compacted_ok = false;
+                break;
+            }
+        }
+        tokio::task::yield_now().await;
+    }
+    (retired, compacted_ok)
 }
 
 #[cfg(test)]
