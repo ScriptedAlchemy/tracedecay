@@ -819,7 +819,11 @@ impl FirstGenerationWorkMarker {
                 // Counter rollback within one native attempt is not work.
                 // Preserve the last coherent watermark so later replay cannot
                 // be counted as newly encoded rows or new durable receipts.
-                if completed.iter().zip(prior_completed).any(|(now, prior)| now < prior) {
+                if completed
+                    .iter()
+                    .zip(prior_completed)
+                    .any(|(now, prior)| now < prior)
+                {
                     return None;
                 }
                 Some(completed != prior_completed)
