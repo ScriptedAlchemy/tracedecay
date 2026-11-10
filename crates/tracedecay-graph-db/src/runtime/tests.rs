@@ -48,8 +48,9 @@ fn lazy_open_rechecks_close_before_materializing_an_engine() {
     // Both a never-materialized mount and a hibernated engine can be absent
     // when close races a lazy reader's admission.
     for hibernated in [false, true] {
-        let database = GraphDb::open_lazy_with_store_state(options(), PersistentGraphStoreState::Existing)
-            .unwrap();
+        let database =
+            GraphDb::open_lazy_with_store_state(options(), PersistentGraphStoreState::Existing)
+                .unwrap();
         if hibernated {
             database.ensure_opened().unwrap();
             database.hibernate_if_lazy().unwrap();
