@@ -775,8 +775,6 @@ pub fn remove_open_dir_all_nofollow(directory: Dir) -> io::Result<()> {
 #[cfg(test)]
 mod replacement_tests {
     use std::io::Read;
-    #[cfg(unix)]
-    use std::os::unix::fs::MetadataExt;
 
     use super::*;
 
@@ -931,6 +929,9 @@ mod replacement_tests {
     any(target_os = "macos", all(target_os = "linux", target_env = "gnu"))
 ))]
 mod tests {
+    #[cfg(unix)]
+    use std::os::unix::fs::MetadataExt;
+
     use cap_std::ambient_authority;
 
     use super::*;
