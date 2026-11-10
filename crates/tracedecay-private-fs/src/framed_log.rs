@@ -22,6 +22,10 @@ use windows_sys::Win32::Storage::FileSystem::{
 #[path = "framed_log_batch_tests.rs"]
 mod batch_tests;
 
+#[cfg(all(test, target_os = "linux", feature = "test-helpers"))]
+#[path = "framed_log_window_tests.rs"]
+mod window_tests;
+
 #[cfg(test)]
 thread_local! {
     static DIRECTORY_SYNC_CALLS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
@@ -246,6 +250,8 @@ impl DurableFileBatch {
         let syncer = || -> io::Result<()> {
             while let Some(member) = self.pending.get(next.fetch_add(1, Ordering::Relaxed)) {
                 member.sync()?;
+                #[cfg(all(test, feature = "test-helpers"))]
+                sync_latency::after_batch_member_sync(&member.identity.path);
             }
             Ok(())
         };
@@ -263,7 +269,16 @@ impl DurableFileBatch {
                 outcome = outcome.and(helped);
             }
             outcome
-        })
+        })?;
+        // An early member may change after its own barrier and validation
+        // while another worker is still syncing. Authenticate the whole
+        // window after every worker finishes, before success or handle release.
+        for member in &self.pending {
+            let identity = &member.identity;
+            identity.validate_metadata(&member.file.metadata()?)?;
+            identity.validate_path()?;
+        }
+        Ok(())
     }
 }
 
@@ -511,6 +526,19 @@ pub mod sync_latency {
     struct SyncPauseSignal {
         entered: mpsc::Sender<()>,
         resume: Mutex<mpsc::Receiver<()>>,
+        after_member: bool,
+    }
+
+    #[cfg(test)]
+    impl SyncPauseSignal {
+        fn wait(&self) {
+            let _ = self.entered.send(());
+            let _ = self
+                .resume
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .recv();
+        }
     }
 
     #[cfg(test)]
@@ -594,11 +622,24 @@ pub mod sync_latency {
     #[cfg(test)]
     #[must_use]
     pub(super) fn pause(root: &Path) -> (SyncLatencyGuard, SyncPause) {
+        pause_at(root, false)
+    }
+
+    /// Observe a completed member before the concurrent window joins.
+    #[cfg(all(test, target_os = "linux"))]
+    #[must_use]
+    pub(super) fn pause_after_batch_member(root: &Path) -> (SyncLatencyGuard, SyncPause) {
+        pause_at(root, true)
+    }
+
+    #[cfg(test)]
+    fn pause_at(root: &Path, after_member: bool) -> (SyncLatencyGuard, SyncPause) {
         let (entered_sender, entered_receiver) = mpsc::channel();
         let (resume_sender, resume_receiver) = mpsc::channel();
         let signal = SyncPauseSignal {
             entered: entered_sender,
             resume: Mutex::new(resume_receiver),
+            after_member,
         };
         let guard = register(root, Duration::ZERO, Some(Arc::new(signal)));
         (
@@ -608,6 +649,20 @@ pub mod sync_latency {
                 resume: resume_sender,
             },
         )
+    }
+
+    #[cfg(all(test, target_os = "linux"))]
+    pub(super) fn after_batch_member_sync(path: &Path) {
+        let pause = INJECTIONS
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .iter()
+            .find(|injection| path.starts_with(&injection.root))
+            .and_then(|injection| injection.pause.clone())
+            .filter(|pause| pause.after_member);
+        if let Some(pause) = pause {
+            pause.wait();
+        }
     }
 
     struct MatchedInjection {
@@ -632,13 +687,8 @@ pub mod sync_latency {
         if let Some(matched) = matched {
             matched.syncs.fetch_add(1, Ordering::SeqCst);
             #[cfg(test)]
-            if let Some(pause) = matched.pause {
-                let _ = pause.entered.send(());
-                let _ = pause
-                    .resume
-                    .lock()
-                    .unwrap_or_else(PoisonError::into_inner)
-                    .recv();
+            if let Some(pause) = matched.pause.filter(|pause| !pause.after_member) {
+                pause.wait();
             }
             std::thread::sleep(matched.delay);
         }
