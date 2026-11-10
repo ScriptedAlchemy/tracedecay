@@ -626,7 +626,7 @@ def qualified_report(result, manifest, manifest_sha, questions, dataset_bytes, c
     if has_sample_commitment != (sample_path is not None):
         raise ValueError("qualification first-response sample and row commitment must be provided together")
     if has_sample_commitment:
-        response_sha, row_sha = validate_qualified_sample(
+        response_sha, row_sha, _sample_sha256 = validate_qualified_sample(
             sample_path, result["experiment_sha256"], reconstructed_requests,
             expected_row=first_row,
         )
