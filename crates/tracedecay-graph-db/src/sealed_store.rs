@@ -3508,9 +3508,9 @@ mod build_tests {
         MAX_SEALED_RECEIPT_BYTES, SEALED_STAGING_OWNER_FILE, SEALED_STORE_DATABASE_FILE,
         SEALED_STORE_RECEIPT_FILE, SealedRowSource, SealedStagingOwnerV1,
         build_or_open_sealed_store, build_sealed_container, census_sealed_store,
-        initial_sealed_staging_owner, persist_sealed_store_check, sealed_artifact_database_options,
-        sealed_copy_proof, sealed_generation_directory, sealed_store_root,
-        sweep_abandoned_sealed_staging,
+        initial_sealed_staging_owner, persist_sealed_store_check, retire_sealed_directory_checked,
+        sealed_artifact_database_options, sealed_copy_proof, sealed_generation_directory,
+        sealed_store_root, sweep_abandoned_sealed_staging,
     };
     use crate::location::PersistentGraphStoreState;
     use crate::{
