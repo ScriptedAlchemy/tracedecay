@@ -2923,7 +2923,11 @@ mod recent_first_discovery_tests {
         let archive = temp.path().join(".codex/archived_sessions");
         std::fs::create_dir_all(&archive).unwrap();
         for index in 0..64 {
-            std::fs::write(archive.join(format!("rollout-{index:03}.zst")), b"ignored").unwrap();
+            std::fs::write(
+                archive.join(format!("rollout-{index:03}.zst")),
+                b"ignored",
+            )
+            .unwrap();
         }
         let source = CodexSource::with_home(temp.path());
         let bounds = TranscriptDiscoveryBounds::from_discovered_units(1);

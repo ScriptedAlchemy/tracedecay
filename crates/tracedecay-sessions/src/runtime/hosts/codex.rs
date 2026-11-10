@@ -2350,7 +2350,9 @@ fn retained_scan_step(
                         // iterator may omit new entries. Never publish a
                         // complete corpus frontier from that mixed snapshot.
                         let closing_stat = directory_stat_witness(&directory.path)?;
-                        if closing_stat.as_ref().map(|stat| stat.stat) != Some(directory.opening_stat) {
+                        if closing_stat.as_ref().map(|stat| stat.stat)
+                            != Some(directory.opening_stat)
+                        {
                             scan.complete = false;
                         }
                         // Chunks can retire their directory identity while
