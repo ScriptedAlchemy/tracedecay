@@ -53,8 +53,8 @@ pub struct CodeIndexBuildRequestV1 {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct CodeIndexRepositoryParseIdentityV1 {
-    /// Older sealed generations used the default parent-only roster.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    /// Every sealed generation records its admission policy explicitly.
+    /// Missing policy evidence is an incompatible persisted shape, not default-off.
     pub include_submodules: bool,
     pub tree: Option<TreeId>,
     pub dirty: RepositoryDirtyStateV1,
@@ -183,5 +183,44 @@ impl CodeIndexPublishedGenerationV1 {
 
     pub fn ignored_source_admissions_digest(&self) -> &ManifestDigest {
         self.ignored_source_roster.digest()
+    }
+}
+
+#[cfg(test)]
+mod parse_identity_tests {
+    use super::CodeIndexRepositoryParseIdentityV1;
+    use tracedecay_domain::RepositoryDirtyStateV1;
+
+    #[test]
+    fn sealed_parse_identity_requires_an_explicit_submodule_policy() {
+        for include_submodules in [false, true] {
+            let identity = CodeIndexRepositoryParseIdentityV1 {
+                include_submodules,
+                tree: None,
+                dirty: RepositoryDirtyStateV1::Clean,
+            };
+            let serialized = serde_json::to_value(&identity).expect("serialize parse identity");
+            assert_eq!(
+                serialized
+                    .get("include_submodules")
+                    .and_then(serde_json::Value::as_bool),
+                Some(include_submodules)
+            );
+            let restored: CodeIndexRepositoryParseIdentityV1 =
+                serde_json::from_value(serialized.clone()).expect("explicit policy round trip");
+            assert_eq!(restored, identity);
+
+            let mut missing_policy = serialized;
+            missing_policy
+                .as_object_mut()
+                .expect("parse identity object")
+                .remove("include_submodules");
+            let refused: Result<CodeIndexRepositoryParseIdentityV1, _> =
+                serde_json::from_value(missing_policy);
+            assert!(
+                refused.unwrap_err().to_string().contains("include_submodules"),
+                "missing policy must be rejected"
+            );
+        }
     }
 }

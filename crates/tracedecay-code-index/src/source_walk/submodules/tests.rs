@@ -115,7 +115,10 @@ fn assert_refused_walk(root: &Path, walk: SourceWalk) {
             }
         }
     }
-    assert_eq!(errors, 1, "binding loss must not be a successful empty walk");
+    assert_eq!(
+        errors, 1,
+        "binding loss must not be a successful empty walk"
+    );
     assert!(files.contains(Path::new("parent.rs")));
     assert!(files.iter().all(|path| !path.starts_with("app")));
 }
@@ -133,7 +136,10 @@ fn marker_change_before_iteration(replacement: Option<&str>) {
         Some(contents) => fs::write(&marker, contents).unwrap(),
         None => fs::remove_file(&marker).unwrap(),
     }
-    assert!(root.join(path).is_file(), "the child bytes are still present");
+    assert!(
+        root.join(path).is_file(),
+        "the child bytes are still present"
+    );
     assert!(boundaries.resolve(path).unwrap().is_none());
     assert_refused_walk(&root, pending);
 }
