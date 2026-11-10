@@ -3,10 +3,13 @@
 This validates the *declared* reviewer and split provenance, not the honesty of
 reviewers or the identity of a remote model. Historical runs remain unqualified.
 """
+import errno
 import hashlib
 import json
 import math
+import os
 import re
+import stat
 import statistics
 
 _DIGEST = re.compile(r"[0-9a-f]{64}\Z")
@@ -139,6 +142,60 @@ def load_manifest(path):
     with open(path, "rb") as source:
         raw = source.read()
     return loads_unambiguous_json(raw), sha256_bytes(raw)
+
+
+# Captured evidence may contain private transcript state. Bound even malformed
+# operator-supplied files before reading them into memory or hashing them.
+MAX_CAPTURED_EVIDENCE_BYTES = 64 * 1024 * 1024
+
+
+def load_captured_requests(path, case_ids, max_request_bytes):
+    """Read one frozen Scout capture with a cohort-derived byte ceiling.
+
+    Each outer JSON record contains one escaped, request-byte-bounded body
+    and its frozen case identifier. The expansion allowance includes JSON
+    escaping and formatting; the global ceiling refuses unsupported volumes.
+    This preserves original bytes, never reserializing transcript evidence.
+    """
+    if (type(max_request_bytes) is not int or max_request_bytes <= 0
+            or not case_ids or any(not isinstance(case_id, str)
+                                    for case_id in case_ids)):
+        raise ValueError("captured Scout evidence requires frozen case and request limits")
+    expected_bytes = sum(
+        16 * (max_request_bytes + len(case_id.encode("utf-8")) + 32)
+        for case_id in case_ids
+    ) + 4096
+    limit = min(MAX_CAPTURED_EVIDENCE_BYTES, expected_bytes)
+    if not hasattr(os, "O_NOFOLLOW") and os.path.islink(path):
+        raise ValueError("captured Scout evidence must be a regular file")
+    flags = os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(path, flags)
+    except OSError as error:
+        if error.errno in (errno.ELOOP, errno.ENOTDIR):
+            raise ValueError("captured Scout evidence must be a regular file") from error
+        raise
+    try:
+        opened = os.fstat(descriptor)
+        if not stat.S_ISREG(opened.st_mode):
+            raise ValueError("captured Scout evidence must be a regular file")
+        if opened.st_size > limit:
+            raise ValueError("captured Scout evidence exceeds bounded byte limit")
+        with os.fdopen(descriptor, "rb", closefd=False) as source:
+            original = source.read(limit + 1)
+        # A captured file can grow after fstat: a bounded read must refuse it.
+        if len(original) > limit:
+            raise ValueError("captured Scout evidence exceeds bounded byte limit")
+    finally:
+        os.close(descriptor)
+    try:
+        named = os.stat(path, follow_symlinks=False)
+    except FileNotFoundError as error:
+        raise ValueError("captured Scout evidence disappeared during reading") from error
+    if (not stat.S_ISREG(named.st_mode)
+            or (opened.st_dev, opened.st_ino) != (named.st_dev, named.st_ino)):
+        raise ValueError("captured Scout evidence changed file identity during reading")
+    return original
 
 
 def validate_manifest(manifest, dataset_sha, questions, cases=None):

@@ -455,6 +455,14 @@ python evals/intent_engine/score.py --qualified \
   --captured-requests /path/to/scout-requests.json
 ```
 
+Both the runner and independent scorer admit capture files through the same
+bounded original-byte reader: it refuses non-regular or substituted paths,
+source growth during reading, and sources larger than a cohort-derived JSON
+escape allowance or 64 MiB, whichever is smaller. Neither entry point reads
+an unbounded capture into memory before checking the frozen digest. Keep
+larger experiments in separately frozen bounded cohorts; this protects the
+qualification process, not the remote model's resource usage.
+
 Both the runner and independent scorer refuse altered capture bytes, missing
 or reordered held-out cases, invalid Noul questions, noncanonical Scout wire
 question key ordering (even when map values match), differing model selectors,

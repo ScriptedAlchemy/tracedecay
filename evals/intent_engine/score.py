@@ -317,7 +317,10 @@ if __name__ == "__main__":
             if flag not in ("--questions-file", "--captured-requests", "--sample-file") or flag in options:
                 raise ValueError(usage)
             options[flag] = sys.argv[index + 1]
-        from qualification import load_manifest, load_questions, loads_unambiguous_json, qualified_report
+        from qualification import (
+            load_captured_requests, load_manifest, load_questions,
+            loads_unambiguous_json, qualified_report, sha256_bytes, validate_manifest,
+        )
         from common import noul_questions
         manifest, manifest_sha = load_manifest(sys.argv[2])
         with open(sys.argv[3], "rb") as source:
@@ -327,8 +330,14 @@ if __name__ == "__main__":
         questions = load_questions(options["--questions-file"]) if "--questions-file" in options else noul_questions()
         captured_requests_bytes = None
         if "--captured-requests" in options:
-            with open(options["--captured-requests"], "rb") as source:
-                captured_requests_bytes = source.read()
+            frozen = validate_manifest(
+                manifest, sha256_bytes(dataset_bytes), questions,
+                loads_unambiguous_json(dataset_bytes),
+            )
+            captured_requests_bytes = load_captured_requests(
+                options["--captured-requests"], frozen["heldout_ids"],
+                frozen["max_request_bytes"],
+            )
         report = qualified_report(
             result, manifest, manifest_sha, questions, dataset_bytes,
             captured_requests_bytes, options.get("--sample-file"),

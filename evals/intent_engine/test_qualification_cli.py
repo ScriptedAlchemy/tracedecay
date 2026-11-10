@@ -95,6 +95,17 @@ class QualificationCliTests(unittest.TestCase):
         self.assertIn("original frozen Scout request capture", rejected.stderr)
         self.assertEqual((self.root / "qualification_summary.json").read_bytes(), frozen_report)
 
+        # A valid-sized frozen capture was admitted above; an oversized
+        # sparse file is denied before parsing/hashing and cannot replace it.
+        with (self.root / "captured.json").open("wb") as source:
+            source.truncate(fixtures.qualification.MAX_CAPTURED_EVIDENCE_BYTES + 1)
+        oversized = subprocess.run(
+            complete, cwd=self.root, capture_output=True, text=True, timeout=30,
+        )
+        self.assertNotEqual(oversized.returncode, 0)
+        self.assertIn("exceeds bounded byte limit", oversized.stderr)
+        self.assertEqual((self.root / "qualification_summary.json").read_bytes(), frozen_report)
+
     def test_raw_first_response_sample_is_checked_by_independent_cli(self):
         result = self.fixture.signed_result()
         first = result["rows"][0]

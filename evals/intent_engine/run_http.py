@@ -24,7 +24,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 from common import calibrated, noul_questions, prompt_only, text_window
 from qualification import (
-    CAPTURED_SCOUT_CONFIG, captured_request_bodies, load_manifest, load_questions,
+    CAPTURED_SCOUT_CONFIG, captured_request_bodies, load_captured_requests, load_manifest, load_questions,
     loads_unambiguous_json, validate_manifest,
 )
 
@@ -739,8 +739,9 @@ def main(argv=None):
         if (arm["config"] == CAPTURED_SCOUT_CONFIG) != bool(args.captured_requests):
             raise ValueError("captured Scout arms require --captured-requests and no historical renderer")
         if args.captured_requests:
-            with open(args.captured_requests, "rb") as source:
-                capture_bytes = source.read()
+            capture_bytes = load_captured_requests(
+                args.captured_requests, qualified["heldout_ids"], qualified["max_request_bytes"]
+            )
             if hashlib.sha256(capture_bytes).hexdigest() != qualified["captured_requests_sha256"]:
                 raise ValueError("captured Scout request evidence differs from frozen manifest")
             captured = captured_request_bodies(

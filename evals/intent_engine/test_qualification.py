@@ -2349,6 +2349,64 @@ class QualificationTests(unittest.TestCase):
         ])
         return capture_bytes, manifest
 
+    def test_captured_file_is_bounded_before_inference_without_changing_good_bytes(self):
+        capture, manifest = self.captured_scout_fixture()
+        ids = ["holdout-positive", "holdout-negative"]
+        with tempfile.TemporaryDirectory() as temp:
+            here = Path(temp)
+            path = here / "captured.json"
+            path.write_bytes(capture)
+            self.assertEqual(
+                qualification.load_captured_requests(
+                    path, ids, manifest["max_request_bytes"],
+                ),
+                capture,
+            )
+
+            # A sparse, malicious source must be refused on fstat BEFORE any
+            # read, not eagerly materialized into a huge bytes object.
+            with path.open("wb") as source:
+                source.truncate(qualification.MAX_CAPTURED_EVIDENCE_BYTES + 1)
+            with patch.object(
+                qualification.os, "fdopen", side_effect=AssertionError("oversize source was read"),
+            ) as opened:
+                with self.assertRaisesRegex(ValueError, "exceeds bounded byte limit"):
+                    qualification.load_captured_requests(
+                        path, ids, manifest["max_request_bytes"],
+                    )
+                opened.assert_not_called()
+
+            # A file that grows after fstat must also be bounded at read time.
+            # This old-size observation is deliberately false, simulating a
+            # concurrent writer without relying on nondeterministic threads.
+            reported = list(os.stat(path))
+            reported[6] = 0
+            with patch.object(
+                qualification.os, "fstat", return_value=os.stat_result(reported),
+            ):
+                with self.assertRaisesRegex(ValueError, "exceeds bounded byte limit"):
+                    qualification.load_captured_requests(
+                        path, ids, manifest["max_request_bytes"],
+                    )
+
+            (here / "dataset.json").write_bytes(self.dataset_bytes)
+            (here / "manifest.json").write_text(json.dumps(manifest))
+            (here / "server.json").write_text(json.dumps(self.server_config))
+            with patch.object(run_http, "HERE", str(here)), patch.object(
+                run_http, "post",
+            ) as post:
+                with self.assertRaisesRegex(ValueError, "exceeds bounded byte limit"):
+                    run_http.main([
+                        "--url", self.endpoint, "--tag", "bounded-capture",
+                        "--server-config", str(here / "server.json"),
+                        "--qualification-manifest", str(here / "manifest.json"),
+                        "--captured-requests", str(path),
+                        qualification.CAPTURED_SCOUT_CONFIG,
+                    ])
+                post.assert_not_called()
+            self.assertFalse((here / "results").exists())
+
+
     def test_captured_scout_rejects_calibration_false_pass_before_inference_and_scoring(self):
         # Scout forwards raw Noul probabilities; the optional historical
         # calibration could make 0.55 clear a 0.60 production threshold.
