@@ -28,6 +28,8 @@ thread_local! {
 use same_file::Handle;
 use sha2::{Digest, Sha256};
 use tracedecay_application::code_index::DaemonCodeIndexControlV1;
+#[cfg(unix)]
+use tracedecay_code_index_retention::code_index_generations::CachedCodeGenerationStoreReadLockV1;
 use tracedecay_code_index_retention::code_index_generations::{
     CODE_INDEX_PREPARATION_DIRECTORY_PREFIX_V1, CodeGenerationRetentionErrorV1,
     CodeGenerationStoreLockV1, CodeIndexScopeStoreResetV1, DurableGenerationCardinalityV1,
@@ -38,8 +40,6 @@ use tracedecay_code_index_retention::code_index_generations::{
     durable_generation_index_digest, reset_code_index_scope_store, retain_bounded_generation_index,
     try_acquire_code_generation_store_lock, try_acquire_code_generation_store_read_lock,
 };
-#[cfg(unix)]
-use tracedecay_code_index_retention::code_index_generations::CachedCodeGenerationStoreReadLockV1;
 use tracedecay_domain::{
     CodeGenerationId, ContentDigest, ManifestDigest, ProjectId, SanitizerRevision, WorktreeId,
     canonical_text::encode_tagged_lowercase_hex, sha256_hex_suffix,
@@ -1592,7 +1592,9 @@ impl DaemonCodeIndexPublicationStoreV1 {
             disposition: CodeIndexPublicationDispositionV1::Active,
             pointer_memo: Arc::new(Mutex::new(None)),
             #[cfg(unix)]
-            retained_generation_lock: Arc::new(CachedCodeGenerationStoreReadLockV1::new(store_root)),
+            retained_generation_lock: Arc::new(CachedCodeGenerationStoreReadLockV1::new(
+                store_root,
+            )),
             #[cfg(unix)]
             retained_segment_reads: Arc::new(Mutex::new(VecDeque::new())),
             undecoded_active_expectation: None,
@@ -2482,8 +2484,7 @@ impl DaemonCodeIndexPublicationStoreV1 {
         // Refuse that stale observation without incorrectly resetting a
         // healthy store; the caller can retry on the new publication.
         if (named_before.dev(), named_before.ino()) != (opened_before.dev(), opened_before.ino())
-            || (named_after.dev(), named_after.ino())
-                != (opened_before.dev(), opened_before.ino())
+            || (named_after.dev(), named_after.ino()) != (opened_before.dev(), opened_before.ino())
         {
             return Err(CodeIndexPublicationStoreErrorV1::CompareAndSwap);
         }

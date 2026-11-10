@@ -1,9 +1,9 @@
 #[cfg(test)]
 use std::cell::Cell;
 use std::fs::{File, OpenOptions};
-use std::path::{Path, PathBuf};
 #[cfg(unix)]
 use std::os::unix::fs::MetadataExt;
+use std::path::{Path, PathBuf};
 #[cfg(unix)]
 use std::sync::{Mutex, MutexGuard, TryLockError};
 use std::time::Instant;
@@ -521,7 +521,10 @@ mod cached_read_lock_tests {
             "a writer must not enter a protected historical page read"
         );
         assert!(
-            cached.try_acquire().expect("second in-process probe").is_none(),
+            cached
+                .try_acquire()
+                .expect("second in-process probe")
+                .is_none(),
             "the single descriptor must not be concurrently unlocked by another reader"
         );
         drop(read);
@@ -530,7 +533,10 @@ mod cached_read_lock_tests {
             .expect("exclusive acquisition after reader release")
             .expect("read guard must explicitly unlock");
         assert!(
-            cached.try_acquire().expect("shared probe under writer").is_none(),
+            cached
+                .try_acquire()
+                .expect("shared probe under writer")
+                .is_none(),
             "a real exclusive lock must prevent a cached shared lease"
         );
         drop(writer);
