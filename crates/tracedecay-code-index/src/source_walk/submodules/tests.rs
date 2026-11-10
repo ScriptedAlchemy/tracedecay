@@ -153,7 +153,10 @@ fn parent_authority_change_before_iteration(change: impl FnOnce(&Path)) {
     assert!(boundaries.resolve(path).unwrap().is_some());
     let pending = walk(&root);
     change(&root);
-    assert!(root.join(path).is_file(), "the same child bytes still exist");
+    assert!(
+        root.join(path).is_file(),
+        "the same child bytes still exist"
+    );
     assert!(root.join("app/.git").is_file(), "child marker is unchanged");
     assert!(boundaries.resolve(path).unwrap().is_none());
     assert_refused_walk(&root, pending);
