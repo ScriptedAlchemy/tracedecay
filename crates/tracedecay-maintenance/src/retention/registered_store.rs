@@ -5,7 +5,9 @@ use tracedecay_global_db::observation::retention::{
     ObservationRetentionConfig, ObservationRetentionReport, RetentionMode,
 };
 use tracedecay_global_db::observation::{CanonicalBodyGcReport, MAX_CANONICAL_BODY_GC_ROWS};
-use tracedecay_global_db::{ObservabilityRetentionReceiptV1, RegisteredGlobalDb};
+use tracedecay_global_db::{
+    GITHUB_STACK_TERMINAL_RETENTION_DAYS_V1, ObservabilityRetentionReceiptV1, RegisteredGlobalDb,
+};
 use tracedecay_lcm::retention::{
     MAX_REPLAY_METADATA_COMPACTION_ROWS, ReplayMetadataCompactionReport,
 };
@@ -20,6 +22,7 @@ pub enum RegisteredStoreRetentionErrorV1 {
     PayloadGc { diagnostic: String },
     CanonicalBodyGc { diagnostic: String },
     ReplayMetadataCompaction { diagnostic: String },
+    GitHubStackTerminal { diagnostic: String },
 }
 
 impl RegisteredStoreRetentionErrorV1 {
@@ -29,9 +32,24 @@ impl RegisteredStoreRetentionErrorV1 {
             Self::Observability { diagnostic }
             | Self::PayloadGc { diagnostic }
             | Self::CanonicalBodyGc { diagnostic }
-            | Self::ReplayMetadataCompaction { diagnostic } => diagnostic,
+            | Self::ReplayMetadataCompaction { diagnostic }
+            | Self::GitHubStackTerminal { diagnostic } => diagnostic,
         }
     }
+}
+
+/// Most bounded retirement transactions one retention pass runs per store.
+/// Each is its own registered transaction, so the store's writer is released
+/// between pages even though the daemon admits the pass once.
+const MAX_GITHUB_STACK_RETIRE_PAGES_PER_PASS: usize = 64;
+
+/// Outcome of the bounded terminal GitHub stack delivery pass.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct GitHubStackTerminalRetentionReportV1 {
+    pub retired: usize,
+    /// False when the page budget ended the pass first. The durable frontier
+    /// is kept, so the next pass resumes instead of rescanning.
+    pub exhausted: bool,
 }
 
 /// Typed outcomes from every independent retention authority consulted for a
@@ -48,6 +66,12 @@ pub struct RegisteredStoreRetentionReportV1 {
     pub canonical_body_gc: Result<CanonicalBodyGcReport, RegisteredStoreRetentionErrorV1>,
     /// Lossless repair of old provider replay strings duplicated by raw bodies.
     pub replay_metadata: Result<ReplayMetadataCompactionReport, RegisteredStoreRetentionErrorV1>,
+    /// Completed GitHub stack delivery payloads past their fixed inspection
+    /// window. Their window is a product invariant, not an operator policy, so
+    /// this runs for every store whenever store retention runs, independent of
+    /// automation jobs.
+    pub github_stack_terminal:
+        Result<GitHubStackTerminalRetentionReportV1, RegisteredStoreRetentionErrorV1>,
 }
 
 impl RegisteredStoreRetentionReportV1 {
@@ -71,6 +95,10 @@ impl RegisteredStoreRetentionReportV1 {
             && payload_gc_succeeded
             && self.canonical_body_gc.is_ok()
             && self.replay_metadata.is_ok()
+            && self
+                .github_stack_terminal
+                .as_ref()
+                .is_ok_and(|report| report.exhausted)
     }
 }
 
@@ -117,6 +145,7 @@ pub async fn run_registered_store_retention(
     let payload_gc = run_payload_gc(database, now).await;
     let canonical_body_gc = run_canonical_body_gc(database).await;
     let replay_metadata = run_replay_metadata_compaction(database).await;
+    let github_stack_terminal = run_github_stack_terminal_retention(database, now).await;
     RegisteredStoreRetentionReportV1 {
         session_lcm,
         observations,
@@ -124,7 +153,53 @@ pub async fn run_registered_store_retention(
         payload_gc,
         canonical_body_gc,
         replay_metadata,
+        github_stack_terminal,
     }
+}
+
+/// Retire completed stack delivery payloads from one registered store through
+/// bounded pages. A page examines and compacts a bounded number of payloads
+/// and commits its durable scan frontier atomically, so a long pending prefix
+/// is neither rescanned nor allowed to starve later terminal rows.
+async fn run_github_stack_terminal_retention(
+    database: &RegisteredGlobalDb,
+    now: i64,
+) -> Result<GitHubStackTerminalRetentionReportV1, RegisteredStoreRetentionErrorV1> {
+    let cutoff_micros = now
+        .saturating_sub(GITHUB_STACK_TERMINAL_RETENTION_DAYS_V1 * 86_400)
+        .saturating_mul(1_000_000);
+    let mut retired = 0usize;
+    let mut exhausted = false;
+    for _ in 0..MAX_GITHUB_STACK_RETIRE_PAGES_PER_PASS {
+        let page = match database
+            .retire_github_stack_terminal_payloads_before(cutoff_micros)
+            .await
+        {
+            Ok(page) => page,
+            Err(diagnostic) => {
+                tracing::warn!(
+                    event = "retention_degraded",
+                    pass = "github_stack_terminal",
+                    failure = %diagnostic,
+                );
+                return Err(RegisteredStoreRetentionErrorV1::GitHubStackTerminal { diagnostic });
+            }
+        };
+        retired = retired.saturating_add(page.retired);
+        if page.exhausted {
+            exhausted = true;
+            break;
+        }
+    }
+    if retired > 0 {
+        tracing::info!(
+            event = "retention_prune",
+            table = "github_stack_delivery_signals",
+            signals = retired,
+            window_days = GITHUB_STACK_TERMINAL_RETENTION_DAYS_V1,
+        );
+    }
+    Ok(GitHubStackTerminalRetentionReportV1 { retired, exhausted })
 }
 
 /// Resume bounded, lossless storage work without repeating the raw-drop policy.
@@ -427,5 +502,94 @@ mod tests {
             })
         );
         assert!(!report.succeeded());
+    }
+
+    /// Stack deliveries live in each registered session store, so the
+    /// store-wide pass must retire them there with every operator retention
+    /// policy disabled. Pending history and a still-open window stay intact.
+    #[asupersync::test]
+    async fn registered_retention_retires_only_expired_settled_stack_payloads() {
+        const NOW: i64 = 40 * 86_400;
+        const PROJECT: &str = "project.stack-retention";
+        const RECIPIENT: &str = "actor.stack-retention";
+        let harness = tracedecay_global_db::tests::harness::RegisteredGlobalDbHarness::open(
+            "maintenance-registered-stack-terminal-retention",
+        )
+        .await;
+        let record = |signal_id: &str, observed_at_micros: i64| {
+            tracedecay_global_db::GitHubStackSignalRecordV1 {
+                project_id: PROJECT.to_owned(),
+                signal_id: signal_id.to_owned(),
+                scope_digest: "sha256:stack-retention-scope".to_owned(),
+                repository_id: "repository.stack-retention".to_owned(),
+                watermark_id: "watermark.stack-retention".to_owned(),
+                observed_at_micros,
+                signal_json: format!(r#"{{"payload":"{signal_id}"}}"#),
+            }
+        };
+        let in_window = (NOW - 86_400) * 1_000_000;
+        for (signal_id, observed_at, settle) in [
+            ("signal.expired-settled", 10, true),
+            ("signal.expired-pending", 11, false),
+            ("signal.in-window-settled", in_window, true),
+        ] {
+            harness
+                .registered
+                .append_github_stack_signal(
+                    record(signal_id, observed_at),
+                    vec![RECIPIENT.to_owned()],
+                )
+                .await
+                .expect("persist stack signal");
+            if settle {
+                harness
+                    .registered
+                    .acknowledge_github_stack_host_delivery(PROJECT, signal_id, RECIPIENT)
+                    .await
+                    .expect("settle stack signal");
+            }
+        }
+        let session_lcm = LcmRetentionConfig {
+            enabled: false,
+            ..LcmRetentionConfig::default()
+        };
+        let observations = ObservationRetentionConfig {
+            enabled: false,
+            ..ObservationRetentionConfig::default()
+        };
+
+        let report =
+            run_registered_store_retention(&harness.registered, &session_lcm, &observations, NOW)
+                .await;
+
+        assert_eq!(
+            report.github_stack_terminal,
+            Ok(GitHubStackTerminalRetentionReportV1 {
+                retired: 1,
+                exhausted: true,
+            })
+        );
+        assert!(report.succeeded());
+        let lookup = |signal_id: &'static str| {
+            let database = harness.registered.clone();
+            async move {
+                database
+                    .github_stack_signal(PROJECT, signal_id)
+                    .await
+                    .expect("read stack signal")
+            }
+        };
+        assert!(
+            lookup("signal.expired-settled").await.is_none(),
+            "an expired settled payload is compacted"
+        );
+        assert!(
+            lookup("signal.expired-pending").await.is_some(),
+            "an undelivered signal is never retired by age"
+        );
+        assert!(
+            lookup("signal.in-window-settled").await.is_some(),
+            "a settled signal inside the inspection window is kept"
+        );
     }
 }

@@ -378,20 +378,6 @@ fn run_automation_scheduler_tick_inner<'a>(
             &cg.store_layout().dashboard_root,
         )
         .await?;
-        // Store retention is housekeeping, not a scheduled automation effect:
-        // pausing or disabling all agent jobs must not retain terminal payloads.
-        if let Ok(profile_database) = engine
-            .store_administration
-            .registered_profile_database()
-            .await
-        {
-            maybe_run_global_retention(
-                &engine.store_administration,
-                profile_database.as_ref(),
-                &cg.get_config().sync.retention,
-            )
-            .await;
-        }
         if control.paused {
             log_daemon_event(
                 "scheduler_tick",
@@ -423,6 +409,18 @@ fn run_automation_scheduler_tick_inner<'a>(
                 .owner_home()
                 .map(std::path::Path::to_path_buf),
         )?;
+        if let Ok(profile_database) = engine
+            .store_administration
+            .registered_profile_database()
+            .await
+        {
+            maybe_run_global_retention(
+                &engine.store_administration,
+                profile_database.as_ref(),
+                &cg.get_config().sync.retention,
+            )
+            .await;
+        }
         let backend =
             CodexAppServerBackend::from_automation_config(config, &configuration.codex_executable);
         let session_database = engine
