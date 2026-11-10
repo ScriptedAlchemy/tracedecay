@@ -428,6 +428,21 @@ fn retention_generations(
     generations
 }
 
+/// A fixture publication must take the same atomic-rename path as production.
+/// Rewriting the active inode in place is corruption to the pinned reader,
+/// not a legitimate publisher transition.
+fn atomic_replace_fixture_pointer(pointer_path: &Path, bytes: &[u8]) {
+    let parent = pointer_path.parent().expect("pointer parent directory");
+    let mut staged = tempfile::NamedTempFile::new_in(parent)
+        .expect("stage pointer replacement");
+    std::io::Write::write_all(staged.as_file_mut(), bytes)
+        .expect("write staged pointer bytes");
+    staged.as_file().sync_all().expect("sync staged pointer");
+    staged
+        .persist(pointer_path)
+        .expect("atomically replace active pointer");
+}
+
 fn remove_historical_pointer_entries(store_root: &Path) {
     use tracedecay_code_index_retention::code_index_generations::durable_generation_index_digest;
 
@@ -444,11 +459,10 @@ fn remove_historical_pointer_entries(store_root: &Path) {
         pointer.generation_index_truncated,
     )
     .expect("digest active-only publication index");
-    std::fs::write(
-        pointer_path,
-        serde_json::to_vec(&pointer).expect("encode legacy publication pointer"),
-    )
-    .expect("write legacy publication pointer");
+    atomic_replace_fixture_pointer(
+        &pointer_path,
+        &serde_json::to_vec(&pointer).expect("encode active-only publication pointer"),
+    );
 }
 
 fn rewrite_active_rust_extractor_revision(store_root: &Path, revision: &str) {
@@ -1243,11 +1257,10 @@ fn advance_pointer_to_unseated_successor(scoped_store_root: &Path, drift_content
         pointer.generation_index_truncated,
     )
     .expect("digest successor publication index");
-    std::fs::write(
+    atomic_replace_fixture_pointer(
         &pointer_path,
-        serde_json::to_vec(&pointer).expect("encode successor pointer"),
-    )
-    .expect("write successor pointer");
+        &serde_json::to_vec(&pointer).expect("encode successor pointer"),
+    );
 }
 
 /// Rewrite one fixture source with bytes of the same length and hand it back

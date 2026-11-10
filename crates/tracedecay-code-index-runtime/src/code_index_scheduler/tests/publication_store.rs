@@ -1,4 +1,4 @@
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 use std::os::unix::fs::MetadataExt;
 
 use std::{
@@ -48,9 +48,10 @@ use super::super::publication_store::{
     ActiveGenerationDecodeChargeV1, UnpublishedCodeIndexPublicationV1,
 };
 use super::{
-    EIGHT_DAYS_SECS, GitFixture, RETAINED_REVISION_0, execute_proof_bound_scope_retention,
-    published, remove_historical_pointer_entries, retention_generations, scheduler, seeded_scope,
-    test_project_id, unix_now_secs, with_untouched_fillers,
+    EIGHT_DAYS_SECS, GitFixture, RETAINED_REVISION_0, atomic_replace_fixture_pointer,
+    execute_proof_bound_scope_retention, published, remove_historical_pointer_entries,
+    retention_generations, scheduler, seeded_scope, test_project_id, unix_now_secs,
+    with_untouched_fillers,
 };
 use crate::code_index_scheduler::{
     CodeIndexReconcileOutcomeV1, CodeIndexSchedulerErrorV1, CodeIndexSchedulerRegistryV1,
@@ -2964,11 +2965,10 @@ fn write_repaired_pointer(pointer_path: &Path, pointer: &mut DurablePublicationP
         pointer.generation_index_truncated,
     )
     .expect("generation index digest");
-    std::fs::write(
+    atomic_replace_fixture_pointer(
         pointer_path,
-        serde_json::to_vec(pointer).expect("encode pointer"),
-    )
-    .expect("write pointer");
+        &serde_json::to_vec(pointer).expect("encode pointer"),
+    );
 }
 
 #[test]
@@ -3210,13 +3210,19 @@ fn publication_pointer_memo_follows_bytes_when_size_and_mtime_stay_put() {
         .expect("pointer metadata")
         .modified()
         .expect("pointer mtime");
-    std::fs::write(&pointer_path, &second_bytes).expect("replace pointer bytes");
-    let file = std::fs::File::options()
-        .write(true)
-        .open(&pointer_path)
-        .expect("reopen pointer");
-    file.set_modified(mtime).expect("restore pointer mtime");
-    drop(file);
+    // A legitimate publisher swaps a fresh inode, even when the new pointer
+    // has exactly the old length and mtime. A same-inode overwrite is denied
+    // separately below as corruption, not treated as a valid publication.
+    let mut staged = tempfile::NamedTempFile::new_in(store.path())
+        .expect("stage next publication pointer");
+    std::io::Write::write_all(staged.as_file_mut(), &second_bytes)
+        .expect("write next pointer bytes");
+    staged
+        .as_file()
+        .set_modified(mtime)
+        .expect("preserve prior pointer mtime");
+    staged.as_file().sync_all().expect("sync next pointer");
+    staged.persist(&pointer_path).expect("atomic pointer replacement");
     let replaced = std::fs::metadata(&pointer_path).expect("replaced metadata");
     assert_eq!(replaced.len(), first_bytes.len() as u64);
     assert_eq!(replaced.modified().ok(), Some(mtime));
@@ -3228,6 +3234,70 @@ fn publication_pointer_memo_follows_bytes_when_size_and_mtime_stay_put() {
     assert_eq!(
         reread.generation_id, second.generation_id,
         "equal size and mtime must not reuse the previous pointer"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn pointer_memo_refuses_in_place_rewrite_even_when_size_and_mtime_match() {
+    let store = TempDir::new().expect("isolated store");
+    let project = TempDir::new().expect("isolated project");
+    let publication = super::super::DaemonCodeIndexPublicationStoreV1::new(
+        store.path(),
+        project.path(),
+        SanitizerRevision::new(tracedecay_privacy::CODE_SOURCE_SANITIZER_VERSION_V1)
+            .expect("sanitizer revision"),
+    )
+    .expect("open publication store");
+    let pointer_path = store.path().join("active-code-generation-v1.json");
+    let first = same_length_publication_pointer("generation.inplace-a", 0x41);
+    let second = same_length_publication_pointer("generation.inplace-b", 0x42);
+    let first_bytes = serde_json::to_vec(&first).expect("encode original pointer");
+    let second_bytes = serde_json::to_vec(&second).expect("encode mutated pointer");
+    assert_eq!(first_bytes.len(), second_bytes.len(), "size cannot reveal mutation");
+
+    std::fs::write(&pointer_path, &first_bytes).expect("seed original pointer");
+    assert_eq!(
+        publication
+            .read_publication_pointer()
+            .expect("load original pointer")
+            .expect("original pointer exists")
+            .generation_id,
+        first.generation_id
+    );
+    let before = std::fs::metadata(&pointer_path).expect("original metadata");
+    std::fs::write(&pointer_path, &second_bytes).expect("mutate the pinned inode");
+    let file = File::options()
+        .write(true)
+        .open(&pointer_path)
+        .expect("open mutated pointer");
+    file.set_modified(before.modified().expect("original mtime"))
+        .expect("restore mtime");
+    drop(file);
+    let after = std::fs::metadata(&pointer_path).expect("mutated metadata");
+    assert_eq!((before.dev(), before.ino()), (after.dev(), after.ino()));
+    assert_eq!(before.len(), after.len());
+    assert_eq!(before.modified().ok(), after.modified().ok());
+
+    assert!(matches!(
+        publication.read_publication_pointer(),
+        Err(CodeIndexPublicationStoreErrorV1::CorruptionResetRequired(_))
+    ), "a pinned pointer must refuse an in-place rewrite even when stat hints match");
+    assert_eq!(
+        std::fs::read(&pointer_path).expect("inspect refused pointer"),
+        second_bytes,
+        "refusal must never overwrite foreign bytes"
+    );
+
+    atomic_replace_fixture_pointer(&pointer_path, &second_bytes);
+    assert_eq!(
+        publication
+            .read_publication_pointer()
+            .expect("read after real atomic replacement")
+            .expect("replacement pointer exists")
+            .generation_id,
+        second.generation_id,
+        "a fresh published inode must be readable after an in-place refusal"
     );
 }
 
