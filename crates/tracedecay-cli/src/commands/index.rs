@@ -340,9 +340,29 @@ where
             CodeIndexReadinessWaitOutcomeV1::Reached => return Ok(()),
             CodeIndexReadinessWaitOutcomeV1::TimedOut { last_state } => last_state,
             CodeIndexReadinessWaitOutcomeV1::Unavailable { reason } => {
+                // The wait carries an availability code. Preserve the actual
+                // daemon park's cause and remedy when its typed status exists.
+                let park_detail = payload
+                    .get("code_index_freshness")
+                    .cloned()
+                    .map(serde_json::from_value::<StatusCodeIndexFreshnessV1>)
+                    .transpose()?
+                    .and_then(|freshness| match freshness {
+                        StatusCodeIndexFreshnessV1::Parked { worktree } => worktree.parked,
+                        _ => None,
+                    })
+                    .map(|parked| {
+                        format!(
+                            "; parked cause: {}; remedy: {}; retries on wake: {}",
+                            parked.reason, parked.remediation, parked.retries_on_wake
+                        )
+                    })
+                    .unwrap_or_default();
                 return Err(first_generation_wait_refusal(
                     CODE_INDEX_READINESS_WAIT_UNAVAILABLE,
-                    format!("init --wait cannot reach a ready first generation: {reason}"),
+                    format!(
+                        "init --wait cannot reach a ready first generation: {reason}{park_detail}"
+                    ),
                 ));
             }
         };
@@ -469,7 +489,7 @@ where
 }
 
 /// Why the daemon's reading shows no work toward the first generation.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 enum FirstGenerationStall {
     /// No code-index scheduler serves the project, for the given reason.
     Unavailable(String),
@@ -477,6 +497,8 @@ enum FirstGenerationStall {
     NoPassInFlight,
     /// The active build reports it cannot advance.
     Blocked(CodeIndexBuildBlockedReasonV1),
+    /// A terminal convergence park names the operator action required.
+    Parked { cause: String, remedy: String },
 }
 
 impl FirstGenerationStall {
@@ -493,6 +515,16 @@ impl FirstGenerationStall {
             .native_graph_progress
             .as_ref()
             .filter(|graph| graph.active);
+        // An old terminal park cannot be renewed by the rebuild flag.
+        // An independently active successor still owns its own work.
+        if let Some(parked) = worktree.parked.as_ref().filter(|parked| {
+            !parked.retries_on_wake && !active_preseal && active_graph.is_none()
+        }) {
+            return Some(Self::Parked {
+                cause: parked.reason.clone(),
+                remedy: parked.remediation.clone(),
+            });
+        }
         if let Some(progress) = worktree.progress.as_ref() {
             if let Some(reason) = progress.blocked_reason {
                 // The previous sealed generation can remain visible while a
@@ -931,6 +963,9 @@ impl std::fmt::Display for FirstGenerationStall {
             }
             Self::NoPassInFlight => formatter.write_str("no reconcile pass is in flight"),
             Self::Blocked(reason) => write!(formatter, "the build is blocked ({reason:?})"),
+            Self::Parked { cause, remedy } => {
+                write!(formatter, "convergence is parked ({cause}); remedy: {remedy}")
+            }
         }
     }
 }
@@ -1111,8 +1146,9 @@ mod daemon_precondition_tests {
     use tracedecay_contracts::code_index_freshness::{
         CODE_INDEX_READINESS_WAIT_TIMED_OUT, CODE_INDEX_READINESS_WAIT_UNAVAILABLE,
         CodeGraphServingReadinessV1, CodeIndexBuildBlockedReasonV1, CodeIndexBuildPhaseV1,
-        CodeIndexBuildProgressV1, CodeIndexFreshnessLadderInputsV1, CodeIndexFreshnessLadderV1,
-        CodeIndexNativeGraphPhaseV1, CodeIndexPresealWorkPhaseV1, CodeIndexReadinessTargetV1,
+        CodeIndexBuildProgressV1, CodeIndexConvergenceParkedV1,
+        CodeIndexFreshnessLadderInputsV1, CodeIndexFreshnessLadderV1, CodeIndexNativeGraphPhaseV1,
+        CodeIndexPresealWorkPhaseV1, CodeIndexReadinessTargetV1,
         CodeIndexReadinessV1, CodeIndexReadinessWaitOutcomeV1, CodeIndexReadinessWaitReadV1,
         CodeIndexStalenessStateV1, CodeIndexWorktreeFreshnessV1,
     };
@@ -1220,6 +1256,20 @@ mod daemon_precondition_tests {
             rebuild_in_flight,
             ..CodeIndexWorktreeFreshnessV1::default()
         }
+    }
+
+    fn terminal_parked_worktree() -> CodeIndexWorktreeFreshnessV1 {
+        let mut worktree = building(false);
+        worktree.staleness_state = Some(CodeIndexStalenessStateV1::Parked);
+        worktree.parked = Some(CodeIndexConvergenceParkedV1 {
+            reason: "corrupt durable publication authority".to_owned(),
+            blocked_reason: Some(CodeIndexBuildBlockedReasonV1::PublicationAuthorityCorrupt),
+            remediation: "repair the owner-private graph store".to_owned(),
+            parked_at_micros: 123,
+            observed_passes: 2,
+            retries_on_wake: false,
+        });
+        worktree
     }
 
     fn readiness_worktree(state: CodeIndexStalenessStateV1) -> CodeIndexWorktreeFreshnessV1 {
@@ -2488,6 +2538,101 @@ mod daemon_precondition_tests {
             assert!(message.contains(stall), "stall must be named: {message}");
             assert!(message.contains("last state: warming"), "{message}");
         }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn unavailable_parked_wait_preserves_the_daemon_operator_remedy() {
+        let parked = terminal_parked_worktree();
+        let (result, reads) = hold_over(
+            vec![
+                status(
+                    CodeIndexReadinessWaitOutcomeV1::Unavailable {
+                        reason: "code_index_convergence_parked".to_owned(),
+                    },
+                    Some(StatusCodeIndexFreshnessV1::Parked {
+                        worktree: Box::new(parked),
+                    }),
+                ),
+                ready_status(),
+            ],
+            Duration::ZERO,
+        )
+        .await;
+        assert_eq!(reads, 1, "unavailable cannot claim a later Ready");
+        let (code, message) = refusal(result);
+        assert_eq!(code, CODE_INDEX_READINESS_WAIT_UNAVAILABLE);
+        assert!(message.contains("code_index_convergence_parked"), "{message}");
+        assert!(message.contains("corrupt durable publication authority"), "{message}");
+        assert!(message.contains("repair the owner-private graph store"), "{message}");
+        assert!(message.contains("retries on wake: false"), "{message}");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn timed_out_terminal_park_reports_cause_even_with_stale_rebuild_flag() {
+        let mut parked = terminal_parked_worktree();
+        parked.rebuild_in_flight = true;
+        let (result, reads) = hold_over(
+            vec![
+                status(
+                    timed_out(),
+                    Some(StatusCodeIndexFreshnessV1::Parked {
+                        worktree: Box::new(parked),
+                    }),
+                ),
+                ready_status(),
+            ],
+            Duration::ZERO,
+        )
+        .await;
+        assert_eq!(reads, 1);
+        let (code, message) = refusal(result);
+        assert_eq!(code, CODE_INDEX_READINESS_WAIT_TIMED_OUT);
+        assert!(message.contains("convergence is parked"), "{message}");
+        assert!(message.contains("corrupt durable publication authority"), "{message}");
+        assert!(message.contains("repair the owner-private graph store"), "{message}");
+    }
+
+    #[test]
+    fn terminal_park_is_fenced_from_a_live_successor_and_recovery() {
+        let mut parked = terminal_parked_worktree();
+        parked.rebuild_in_flight = true;
+        let expected = super::FirstGenerationStall::Parked {
+            cause: "corrupt durable publication authority".to_owned(),
+            remedy: "repair the owner-private graph store".to_owned(),
+        };
+        assert_eq!(
+            super::FirstGenerationStall::of(Ok(&parked)),
+            Some(expected.clone())
+        );
+
+        // A stale park cannot block a separately admitted live successor.
+        let mut recovered = parked.clone();
+        recovered.preseal_attempt =
+            attempt(CodeIndexPresealWorkPhaseV1::Capture, 2, 1, 5).preseal_attempt;
+        assert_eq!(super::FirstGenerationStall::of(Ok(&recovered)), None);
+
+        let started = Instant::now();
+        let mut window = super::FirstGenerationIdleWindow::new(Duration::from_secs(120));
+        assert_eq!(window.observe(Some(expected.clone()), started), None);
+        assert_eq!(
+            window.observe(Some(expected.clone()), started + Duration::from_secs(119)),
+            None
+        );
+        assert_eq!(
+            window.observe(
+                super::FirstGenerationStall::of(Ok(&recovered)),
+                started + Duration::from_secs(120),
+            ),
+            None
+        );
+        assert_eq!(
+            window.observe(Some(expected.clone()), started + Duration::from_secs(240)),
+            None
+        );
+        assert_eq!(
+            window.observe(Some(expected.clone()), started + Duration::from_secs(360)),
+            Some(expected)
+        );
     }
 
     #[test]
