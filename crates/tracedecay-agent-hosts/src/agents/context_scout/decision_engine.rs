@@ -565,10 +565,14 @@ impl<'de> Visitor<'de> for UnambiguousValueVisitor {
 
 type ParsedAnswers = (BTreeMap<String, DecisionAnswerV1>, Option<String>);
 
-/// Every requested question must be answered with the requested kind; extra
-/// answers are ignored.
+/// Every requested question must be answered with the requested kind.
+/// Unexpected answers are malformed, matching the qualified HTTP evaluator's
+/// exact-request contract rather than silently accepting a different batch.
 fn parse_answers(value: &Value, request: &DecisionRequestV1) -> Option<ParsedAnswers> {
     let answers = value.get("answers")?.as_object()?;
+    if answers.len() != request.questions.len() {
+        return None;
+    }
     let mut parsed = BTreeMap::new();
     for question in &request.questions {
         let answer = answers.get(&question.key)?.as_object()?;
@@ -1015,6 +1019,44 @@ mod tests {
             answered(client(&server.url).ask_blocking(&request("state", vec![noul("recall")])));
         assert_eq!(answers.answers["recall"], DecisionAnswerV1::Noul(0.73),);
         assert_eq!(answers.model, None);
+    }
+
+    #[test]
+    fn unsolicited_batch_answers_are_malformed_even_when_requested_answers_are_valid() {
+        // The frozen evaluator rejects extra response keys. An unrequested
+        // Noul or Score must not turn an otherwise unrelated batch into a
+        // successful production Scout decision.
+        for body in [
+            answers_body(
+                None,
+                &[("q", noul_answer(0.8)), ("unexpected", noul_answer(0.9))],
+            ),
+            answers_body(
+                None,
+                &[("q", noul_answer(0.8)), ("unexpected", score_answer(0.5))],
+            ),
+        ] {
+            let server = fake_decision_engine(200, &body, Duration::ZERO);
+            assert_eq!(
+                client(&server.url).ask_blocking(&request("state", vec![noul("q")])),
+                DecisionEngineOutcomeV1::Malformed,
+                "{body}"
+            );
+        }
+
+        // Exact two-question batches remain valid, rather than rejecting
+        // batching itself or dropping the second requested answer.
+        let body = answers_body(
+            None,
+            &[("q", noul_answer(0.8)), ("other", noul_answer(0.3))],
+        );
+        let server = fake_decision_engine(200, &body, Duration::ZERO);
+        let answers = answered(
+            client(&server.url).ask_blocking(&request("state", vec![noul("q"), noul("other")])),
+        );
+        assert_eq!(answers.answers.len(), 2);
+        assert_eq!(answers.answers["q"], DecisionAnswerV1::Noul(0.8));
+        assert_eq!(answers.answers["other"], DecisionAnswerV1::Noul(0.3));
     }
 
     #[test]
