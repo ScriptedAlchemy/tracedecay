@@ -86,7 +86,7 @@ impl AuthenticatedSubmodule {
             .is_ok_and(|path| path.as_slice() == self.module_path.as_bytes())
     }
 
-    fn checkout_is_live(&self) -> bool {
+    pub fn checkout_is_live(&self) -> bool {
         let marker = self.worktree.join(".git");
         self.worktree.canonicalize().ok().as_ref() == Some(&self.worktree)
             && marker

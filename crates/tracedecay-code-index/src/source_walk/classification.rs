@@ -19,7 +19,7 @@ use std::path::Path;
 
 use super::{
     has_nested_repository_ancestor, parent_gitlink_paths, resolve_parent_source,
-    submodules::live_submodules,
+    submodules::{AuthenticatedSubmodule, live_submodules},
 };
 use gix::bstr::ByteSlice;
 use tracedecay_runtime_core::git_repository::GIT_STATUS_MODIFICATION_CHECK_THREADS;
@@ -103,6 +103,8 @@ pub struct WorktreeChangeClassificationV1 {
     parent_gitlinks: BTreeSet<String>,
     /// Direct parent-relative child paths admitted from that checkout's own Git roster.
     child_sources: BTreeMap<String, String>,
+    /// Retained parent-owned authority for every admitted direct child.
+    child_bindings: BTreeMap<String, AuthenticatedSubmodule>,
     child_revision_changed: bool,
 }
 
@@ -321,6 +323,7 @@ impl WorktreeChangeClassificationV1 {
                         class: change.class,
                     }
                 }));
+            parent.child_bindings.insert(prefix, binding);
         }
         Ok(parent)
     }
@@ -343,8 +346,19 @@ impl WorktreeChangeClassificationV1 {
         Ok(files)
     }
 
-    pub fn child_root(&self, logical_path: &str) -> Option<&str> {
-        self.child_sources.get(logical_path).map(String::as_str)
+    /// Keep the original child authority with its admitted logical path;
+    /// a filesystem root alone cannot survive a staged parent revocation.
+    pub fn bound_child(&self, logical_path: &str) -> Option<(&str, &AuthenticatedSubmodule)> {
+        let prefix = self.child_sources.get(logical_path)?.as_str();
+        self.child_bindings.get(prefix).map(|binding| (prefix, binding))
+    }
+
+    /// A snapshot may reuse unchanged child rows without reading them again.
+    /// That reuse must not outlive any captured parent/child authorization.
+    pub fn child_bindings_live(&self) -> bool {
+        self.child_bindings
+            .values()
+            .all(AuthenticatedSubmodule::checkout_is_live)
     }
 
     pub(super) fn gitlink_paths(&self) -> &BTreeSet<String> {

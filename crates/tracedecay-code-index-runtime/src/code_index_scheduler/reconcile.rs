@@ -18,6 +18,7 @@ use gix::{
 use thiserror::Error;
 use tracedecay_application::code_index::DaemonCodeIndexControlV1;
 use tracedecay_code_index::production::CodeIndexProductionOwnerV1;
+use tracedecay_code_index::source_walk::submodules::AuthenticatedSubmodule;
 use tracedecay_code_index_retention::code_index_generations::{
     CodeIndexScopeStoreResetV1, DurablePublicationPointerV1, DurableSealedCodeGenerationIdentityV1,
 };
@@ -3987,27 +3988,30 @@ impl CodeIndexWorktreeSchedulerV1 {
             .ignored_source_admissions
             .iter()
             .any(|admission| admission.logical_path == logical_path);
-        let child_root = if self.path_policy.includes_submodules() && !explicitly_admitted {
+        let classification = if self.path_policy.includes_submodules() && !explicitly_admitted {
             let repository = tracedecay_runtime_core::git_open::open(&self.project_root)
                 .map_err(|error| CodeIndexSchedulerErrorV1::Git(error.to_string()))?;
-            let classification =
+            Some(
                 classification::WorktreeChangeClassificationV1::for_policy(&repository, true)
-                    .map_err(|error| CodeIndexSchedulerErrorV1::Git(error.to_string()))?;
-            if classification.beneath_gitlink(Path::new(logical_path))
-                && classification.child_root(logical_path).is_none()
-            {
-                return Ok(CapturedFileOutcomeV1::Absent);
-            }
-            classification.child_root(logical_path).map(str::to_owned)
+                    .map_err(|error| CodeIndexSchedulerErrorV1::Git(error.to_string()))?,
+            )
         } else {
             None
         };
+        if classification.as_ref().is_some_and(|classified| {
+            classified.beneath_gitlink(Path::new(logical_path))
+                && classified.bound_child(logical_path).is_none()
+        }) {
+            return Ok(CapturedFileOutcomeV1::Absent);
+        }
         self.capture_admitted_candidate(
             registry,
             logical_path,
             control,
             explicitly_admitted,
-            child_root.as_deref(),
+            classification
+                .as_ref()
+                .and_then(|classified| classified.bound_child(logical_path)),
         )
     }
 
@@ -4024,15 +4028,17 @@ impl CodeIndexWorktreeSchedulerV1 {
         logical_path: &str,
         control: Option<&dyn CodeIndexExecutionControlV1>,
         explicitly_admitted: bool,
-        child_root: Option<&str>,
+        child_binding: Option<(&str, &AuthenticatedSubmodule)>,
     ) -> Result<CapturedFileOutcomeV1, CodeIndexSchedulerErrorV1> {
         // Explicit ignored-source admission cannot cross a nested checkout
         // any more than an ordinary Git candidate or interactive source walk.
         let relative = Path::new(logical_path);
         let absolute = self.project_root.join(relative);
-        let (source_root, source_relative) = match child_root {
-            Some(prefix) if !explicitly_admitted => {
-                if !git_tree_capture::is_source_path(registry, logical_path.as_bytes()) {
+        let (source_root, source_relative) = match child_binding {
+            Some((prefix, binding)) if !explicitly_admitted => {
+                if !binding.checkout_is_live()
+                    || !git_tree_capture::is_source_path(registry, logical_path.as_bytes())
+                {
                     return Ok(CapturedFileOutcomeV1::Absent);
                 }
                 let root = self.project_root.join(prefix);
@@ -4100,6 +4106,11 @@ impl CodeIndexWorktreeSchedulerV1 {
             ignored_dependencies::read_bounded_snapshot_source(&absolute, control)?
         };
         ignored_dependencies::checkpoint_if_present(control)?;
+        // A staged gitlink or registration may be revoked while a file is
+        // streaming. Do not admit its bytes after the original binding expires.
+        if child_binding.is_some_and(|(_, binding)| !binding.checkout_is_live()) {
+            return Ok(CapturedFileOutcomeV1::Absent);
+        }
         self.capture_candidate_bytes(
             registry,
             logical_path.as_bytes(),
@@ -4146,6 +4157,11 @@ impl CodeIndexWorktreeSchedulerV1 {
             self.path_policy.includes_submodules(),
         )
         .map_err(|error| CodeIndexSchedulerErrorV1::Git(error.to_string()))?;
+        if !classification.child_bindings_live() {
+            return Err(CodeIndexSchedulerErrorV1::Git(
+                "authenticated child checkout binding changed during classification".into(),
+            ));
+        }
         if self.shutting_down.load(Ordering::Acquire) {
             return Err(cancelled_code_index_reconcile());
         }
@@ -4262,6 +4278,12 @@ impl CodeIndexWorktreeSchedulerV1 {
                     },
                 ) {
                 Ok(captured) => {
+                    if !classification.child_bindings_live() {
+                        return Err(CodeIndexSchedulerErrorV1::Git(
+                            "authenticated child checkout binding changed during tree capture"
+                                .into(),
+                        ));
+                    }
                     *self
                         .active_snapshot_changed_paths
                         .lock()
@@ -4371,7 +4393,7 @@ impl CodeIndexWorktreeSchedulerV1 {
                             logical_path,
                             control,
                             admitted_paths.contains(logical_path.as_str()),
-                            classification.child_root(logical_path),
+                            classification.bound_child(logical_path),
                         )
                     })
                 })
@@ -4483,6 +4505,11 @@ impl CodeIndexWorktreeSchedulerV1 {
             retained_bytes,
             retained_reservations,
         };
+        if !classification.child_bindings_live() {
+            return Err(CodeIndexSchedulerErrorV1::Git(
+                "authenticated child checkout binding changed during snapshot capture".into(),
+            ));
+        }
         *self
             .active_snapshot_changed_paths
             .lock()

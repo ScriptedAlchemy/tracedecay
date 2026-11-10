@@ -266,3 +266,34 @@ fn lazy_submodule_walk_refuses_replaced_root_before_root_entry() {
     // before polling this separate child root, not only in filter_entry.
     assert_refused_walk(&root, pending);
 }
+
+#[test]
+fn indexed_child_inventory_refuses_revoked_gitlink_before_capture() {
+    let fixture = fixture();
+    let root = fixture.path().join("parent");
+    let repository = tracedecay_runtime_core::git_open::open(&root).unwrap();
+    let classified = crate::source_walk::classification::WorktreeChangeClassificationV1::for_policy(
+        &repository,
+        true,
+    )
+    .unwrap();
+    let (_, child) = classified
+        .bound_child("app/first.rs")
+        .expect("registered child source");
+    assert!(child.checkout_is_live());
+    assert!(classified.child_bindings_live());
+
+    git(&root, &["rm", "-q", "--cached", "app"]);
+    assert!(root.join("app/.git").is_file());
+    assert!(root.join("app/first.rs").is_file());
+    assert!(classified.bound_child("app/first.rs").is_some());
+    assert!(!child.checkout_is_live());
+    assert!(
+        !classified.child_bindings_live(),
+        "retained capture authority must expire when the staged gitlink disappears"
+    );
+
+    git(&root, &["add", "app"]);
+    assert!(child.checkout_is_live());
+    assert!(classified.child_bindings_live());
+}
