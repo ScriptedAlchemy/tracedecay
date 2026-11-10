@@ -28,7 +28,7 @@ use crate::observability::{
 };
 use crate::stack_coordinator::{
     DaemonGitHubStackCoordinatorV1, GitHubStackCoordinatorErrorV1, GitHubStackObservationV1,
-    GitHubStackProviderSourceBindingV1,
+    GitHubStackProviderOutcomeV1, GitHubStackProviderSourceBindingV1,
 };
 use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
 use tracedecay_runtime_core::db::Database;
@@ -166,7 +166,7 @@ where
                         error = ?error,
                         "GitHub stack read authorization failed"
                     );
-                    None
+                    return outcome;
                 }
             };
             if let Some(stack_read) = stack_read {
@@ -222,34 +222,20 @@ where
                     stack_observed_at,
                 ) {
                     Ok(observation) => {
-                        // Offered before anchor publication so a publication
-                        // refusal below cannot conceal the observation the
-                        // coordinator already made.
-                        if let Some(stack_observability) = &self.stack_observability {
-                            stack_observability.record(&source_binding, &observation);
-                        }
-                        let anchor_publication = self
-                            .stack_anchors
-                            .publish(context, request, &observation, self.source_access.as_ref())
-                            .await;
-                        if !matches!(
-                            anchor_publication,
-                            super::GitHubStackAnchorPublicationOutcomeV1::Published
-                                | super::GitHubStackAnchorPublicationOutcomeV1::Replayed
-                        ) {
-                            tracing::warn!(
-                                event = "github_stack_anchor_publication_failed",
-                                outcome = ?anchor_publication,
-                                "GitHub stack evidence was not published to the retrieval-anchor authority"
-                            );
-                            return outcome;
-                        }
+                        self.publish_stack_observation(
+                            context,
+                            request,
+                            &source_binding,
+                            &observation,
+                        )
+                        .await;
                     }
                     Err(GitHubStackCoordinatorErrorV1::Superseded) => {
                         tracing::debug!(
                             event = "github_stack_provider_read_superseded",
                             "GitHub stack read outlived its scope registration and was not published"
                         );
+                        self.observe_stack_policy(context, request).await;
                     }
                     Err(error) => {
                         tracing::warn!(
@@ -259,9 +245,95 @@ where
                         );
                     }
                 }
+            } else {
+                self.observe_stack_policy(context, request).await;
             }
             outcome
         })
+    }
+
+    async fn observe_stack_policy(
+        &self,
+        context: &RequestContext,
+        request: &GitHubReviewReadRequestV1,
+    ) {
+        // A superseded provider response has no authority over the current
+        // policy. Bind a policy-only observation to the current source instead.
+        let observed_at = tracedecay_contracts::now_micros();
+        let Some(binding) = self.stack_anchors.source_binding(
+            context,
+            request,
+            &GitHubStackProviderOutcomeV1::Unavailable,
+            observed_at,
+        ) else {
+            tracing::warn!(
+                event = "github_stack_source_binding_failed",
+                "GitHub stack policy could not be bound to its exact source owner"
+            );
+            return;
+        };
+        match self.stack_coordinator.observe_policy(
+            self.stack_scope.clone(),
+            self.stack_provider.clone(),
+            binding.clone(),
+            observed_at,
+        ) {
+            Ok(observation) => {
+                // The coordinator preserves a provider observation already
+                // published by the current registration; it needs no new
+                // policy receipt with a different source binding.
+                if matches!(
+                    observation.capability.state,
+                    tracedecay_domain::GitHubStackCapabilityStateV1::PrivatePreviewDisabled
+                        | tracedecay_domain::GitHubStackCapabilityStateV1::Unavailable
+                ) {
+                    self.publish_stack_observation(context, request, &binding, &observation)
+                        .await;
+                }
+            }
+            Err(GitHubStackCoordinatorErrorV1::Superseded) => {
+                tracing::debug!(
+                    event = "github_stack_policy_observation_superseded",
+                    "GitHub stack policy changed before its observation was published"
+                );
+            }
+            Err(error) => {
+                tracing::warn!(
+                    event = "github_stack_policy_observation_failed",
+                    error = ?error,
+                    "GitHub stack policy observation failed"
+                );
+            }
+        }
+    }
+
+    async fn publish_stack_observation(
+        &self,
+        context: &RequestContext,
+        request: &GitHubReviewReadRequestV1,
+        binding: &GitHubStackProviderSourceBindingV1,
+        observation: &GitHubStackObservationV1,
+    ) {
+        // Offered before anchor publication so a publication refusal cannot
+        // conceal the observation the coordinator already made.
+        if let Some(observability) = &self.stack_observability {
+            observability.record(binding, observation);
+        }
+        let publication = self
+            .stack_anchors
+            .publish(context, request, observation, self.source_access.as_ref())
+            .await;
+        if !matches!(
+            publication,
+            super::GitHubStackAnchorPublicationOutcomeV1::Published
+                | super::GitHubStackAnchorPublicationOutcomeV1::Replayed
+        ) {
+            tracing::warn!(
+                event = "github_stack_anchor_publication_failed",
+                outcome = ?publication,
+                "GitHub stack evidence was not published to the retrieval-anchor authority"
+            );
+        }
     }
 
     pub fn authorize<'a>(
@@ -349,4 +421,313 @@ fn map_admission_error(
     _error: GitHubReadOnlyAdmissionError,
 ) -> GitHubReviewRuntimeOwnerBuildErrorV1 {
     GitHubReviewRuntimeOwnerBuildErrorV1::InvalidDescriptor
+}
+
+#[cfg(test)]
+mod tests {
+    use std::net::TcpListener;
+    use std::sync::{Arc, mpsc};
+
+    use serde_json::json;
+    use tracedecay_domain::configuration::GitHubStackedPullRequestPolicyV1;
+    use tracedecay_domain::feedback::{
+        GitHubReviewCurrentBranchRemapV1, GitHubReviewImmutableAnchorV1,
+    };
+    use tracedecay_domain::{
+        CommitId, GitHubStackCapabilityStateV1, GitTopologyAnchorTargetV1, IntervalStateV1,
+        ProviderId, RetrievalAnchorRecord, RetrievalAnchorTarget,
+    };
+    use tracedecay_global_db::tests::harness::open_registered_test_database_fixture;
+    use tracedecay_runtime_core::db::{
+        DatabaseAuthority, TestDatabaseRuntimeMode, TestDatabaseRuntimeScope,
+    };
+
+    use super::super::decoder::{GitHubCanonicalReviewAnchorsV1, GitHubReviewAnchorSeedV1};
+    use super::super::network::RegisteredGitHubReadOnlyCredentialV1;
+    use super::super::network::test_support::{
+        local_client, read_http_request_with_headers, write_http_json,
+    };
+    use super::super::network::tests::{
+        FixtureCredentialAuthorityModeV1, context, registered_fixture_credential, request, scope,
+    };
+    use super::super::{GitHubProviderLifecycleV1, ProjectGitHubStackAnchorAuthorityV1};
+    use super::*;
+
+    #[derive(Clone)]
+    struct EmptyReviewAnchors;
+
+    impl GitHubCanonicalReviewAnchorAuthorityV1 for EmptyReviewAnchors {
+        fn resolve<'a>(
+            &'a self,
+            _request: &'a GitHubReviewReadRequestV1,
+            _seed: &'a GitHubReviewAnchorSeedV1,
+        ) -> FeedbackPortFuture<'a, Option<GitHubCanonicalReviewAnchorsV1>> {
+            panic!("an empty review collection has no anchors to resolve")
+        }
+    }
+
+    impl GitHubCurrentBranchRemapper for EmptyReviewAnchors {
+        fn remap<'a>(
+            &'a self,
+            _context: &'a RequestContext,
+            _scope: &'a FeedbackScopeV1,
+            _original: &'a GitHubReviewImmutableAnchorV1,
+        ) -> FeedbackPortFuture<'a, Option<GitHubReviewCurrentBranchRemapV1>> {
+            panic!("an empty review collection has no anchors to remap")
+        }
+    }
+
+    struct ReadySource;
+
+    impl GitHubSourceAccessAuthorityV1 for ReadySource {
+        fn authorize<'a>(
+            &'a self,
+            _context: &'a RequestContext,
+            _request: &'a GitHubReviewReadRequestV1,
+        ) -> FeedbackPortFuture<'a, GitHubProviderLifecycleV1> {
+            Box::pin(async { GitHubProviderLifecycleV1::Ready })
+        }
+    }
+
+    #[tokio::test]
+    async fn disabled_refresh_closes_provider_drift_without_a_stack_read() {
+        policy_disable_journey(false).await;
+    }
+
+    #[tokio::test]
+    async fn superseded_refresh_closes_provider_drift_under_current_policy() {
+        policy_disable_journey(true).await;
+    }
+
+    async fn policy_disable_journey(hold_read: bool) {
+        let repository = if hold_read {
+            "runtime-policy-held"
+        } else {
+            "runtime-policy-disabled"
+        };
+        let mut scope = scope(repository);
+        scope.head_commit_id = CommitId::new("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb").unwrap();
+        let context = context(&scope);
+        let mut request = request(scope.clone());
+        request.operation = GitHubReviewReadOperationV1::RestListPullRequestReviewComments;
+        let storage = tempfile::tempdir().unwrap();
+        let (anchor_database, _anchor_owner) = open_registered_test_database_fixture(
+            &storage.path().join("project-sessions.db"),
+            TestDatabaseRuntimeScope::ProjectSessions {
+                project_id: scope.project_id.clone(),
+            },
+        )
+        .await
+        .unwrap();
+        crate::register_test_schema_installer();
+        let review_path = storage.path().join("review.db");
+        let authority =
+            DatabaseAuthority::acquire_test(&review_path, "github-runtime-policy").unwrap();
+        let (review_database, _) = Database::publish_test_runtime(
+            &review_path,
+            &authority,
+            TestDatabaseRuntimeMode::Initialize,
+        )
+        .await
+        .unwrap();
+        let coordinator = Arc::new(DaemonGitHubStackCoordinatorV1::default());
+        coordinator
+            .register_scope(
+                context.scope(),
+                GitHubStackedPullRequestPolicyV1::ProbePrivatePreview,
+            )
+            .unwrap();
+        let (_credential_authority, resolution) =
+            registered_fixture_credential(repository, FixtureCredentialAuthorityModeV1::Verified);
+        let RegisteredGitHubReadOnlyCredentialV1::Verified(credential) = resolution else {
+            panic!("verified fixture credential must resolve");
+        };
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let (arrived, request_arrived) = tokio::sync::oneshot::channel();
+        let (release, released) = mpsc::channel::<()>();
+        let head = scope.head_commit_id.as_str().to_owned();
+        let branch = scope
+            .branch_ref
+            .trim_start_matches("refs/heads/")
+            .to_owned();
+        let server = std::thread::spawn(move || {
+            let mut arrived = Some(arrived);
+            for round in 0..3 {
+                // Complete collection refreshes require two agreeing scans.
+                for _ in 0..2 {
+                    let (mut review, _) = listener.accept().unwrap();
+                    let (headers, _) = read_http_request_with_headers(&mut review);
+                    assert!(headers.starts_with("GET "));
+                    write_http_json(&mut review, &json!([]));
+                }
+                if round == 2 && !hold_read {
+                    continue;
+                }
+                let (mut stack, _) = listener.accept().unwrap();
+                let (headers, body) = read_http_request_with_headers(&mut stack);
+                assert!(
+                    body["query"]
+                        .as_str()
+                        .is_some_and(|query| query.contains("stackEntry")),
+                    "expected stack query, got {headers} {body}"
+                );
+                if round == 2 {
+                    arrived.take().unwrap().send(()).unwrap();
+                    released.recv().unwrap();
+                }
+                let base = if round == 0 {
+                    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                } else {
+                    "cccccccccccccccccccccccccccccccccccccccc"
+                };
+                write_http_json(
+                    &mut stack,
+                    &json!({"data":{"repository":{"pullRequest":{
+                        "stackEntry":{"position":1},
+                        "stack":{"id":"runtime-stack","number":421,"baseRefName":"main","size":1,
+                            "entries":{"totalCount":1,"pageInfo":{"hasNextPage":false,"endCursor":null},
+                                "nodes":[{"position":1,"pullRequest":{"number":421,"baseRefName":"main",
+                                    "headRefName":branch,"baseRefOid":base,"headRefOid":head,"baseRef":null,
+                                    "statusCheckRollup":{"state":"SUCCESS"},"mergeQueueEntry":null}}]}}
+                    }}}}),
+                );
+                let (mut compare, _) = listener.accept().unwrap();
+                let _ = read_http_request_with_headers(&mut compare);
+                write_http_json(
+                    &mut compare,
+                    &json!({"merge_base_commit":{"sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}}),
+                );
+            }
+        });
+        let client = local_client(
+            address,
+            GitHubRepositoryTargetV1 {
+                owner: "ScriptedAlchemy".to_owned(),
+                repository: repository.to_owned(),
+                pull_request_number: 421,
+                pull_request_id: request.pull_request_id.clone(),
+            },
+            credential,
+        );
+        let store = ProjectGitHubReviewStoreV1::new(review_database, scope.clone()).unwrap();
+        let decoder = GitHubOfficialResponseDecoderV1::new(
+            GitHubReviewProviderIdentityV1 {
+                provider: ProviderId::new("provider.github").unwrap(),
+                repository_owner: "ScriptedAlchemy".to_owned(),
+                repository_name: repository.to_owned(),
+                pull_request_number: 421,
+                base_commit_id: CommitId::new("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa").unwrap(),
+                head_commit_id: scope.head_commit_id.clone(),
+                merge_base_commit_id: CommitId::new("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+                    .unwrap(),
+            },
+            EmptyReviewAnchors,
+        )
+        .unwrap();
+        let transport =
+            GitHubReadOnlyRuntimeTransportV1::new(store.clone(), client.clone(), decoder);
+        let connector = GitHubReadOnlyConnector::new(
+            GitHubReadOnlyDescriptorSetV1::new(vec![rest_descriptor(request.operation)]).unwrap(),
+            transport,
+            EmptyReviewAnchors,
+        )
+        .unwrap();
+        let source_access: Arc<dyn GitHubSourceAccessAuthorityV1> = Arc::new(ReadySource);
+        let anchors =
+            ProjectGitHubStackAnchorAuthorityV1::new(anchor_database.clone(), scope).unwrap();
+        let owner = Arc::new(GitHubReviewRuntimeOwnerV1 {
+            coordinator: GitHubReviewRefreshCoordinatorV1::new(
+                connector,
+                store,
+                Arc::clone(&source_access),
+            ),
+            source_access,
+            stack_client: client,
+            stack_scope: context.scope().clone(),
+            stack_provider: ProviderId::new("provider.github").unwrap(),
+            stack_coordinator: Arc::clone(&coordinator),
+            stack_anchors: anchors.clone(),
+            stack_observability: None,
+        });
+        for _ in 0..2 {
+            let outcome = owner.refresh(&context, &request).await;
+            assert!(outcome.has_usable_observation(), "{outcome:?}");
+        }
+        let binding = anchors
+            .source_binding(
+                &context,
+                &request,
+                &GitHubStackProviderOutcomeV1::Unavailable,
+                tracedecay_contracts::now_micros(),
+            )
+            .unwrap();
+        let open = coordinator
+            .observe_policy(
+                context.scope().clone(),
+                owner.stack_provider.clone(),
+                binding.clone(),
+                tracedecay_contracts::now_micros(),
+            )
+            .unwrap();
+        assert_eq!(open.capability.state, GitHubStackCapabilityStateV1::Enabled);
+        assert!(
+            open.drift_observations
+                .iter()
+                .any(|drift| drift.drift.state == IntervalStateV1::Open)
+        );
+        if hold_read {
+            let (owner, context, request) = (Arc::clone(&owner), context.clone(), request.clone());
+            let refresh = tokio::spawn(async move { owner.refresh(&context, &request).await });
+            request_arrived.await.unwrap();
+            coordinator
+                .register_scope(&open.scope, GitHubStackedPullRequestPolicyV1::Disabled)
+                .unwrap();
+            release.send(()).unwrap();
+            assert!(refresh.await.unwrap().has_usable_observation());
+        } else {
+            coordinator
+                .register_scope(context.scope(), GitHubStackedPullRequestPolicyV1::Disabled)
+                .unwrap();
+            let outcome = owner.refresh(&context, &request).await;
+            assert!(outcome.has_usable_observation(), "{outcome:?}");
+        }
+        server.join().unwrap();
+        let mut records = anchor_database
+            .read_connection()
+            .query("SELECT anchor_json FROM retrieval_anchors", ())
+            .await
+            .unwrap();
+        let mut published_disabled = false;
+        while let Some(row) = records.next().await.unwrap() {
+            let record: RetrievalAnchorRecord =
+                serde_json::from_str(&row.get::<String>(0).unwrap()).unwrap();
+            if matches!(record.target(), RetrievalAnchorTarget::GitTopology(target)
+                if matches!(target.as_ref(), GitTopologyAnchorTargetV1::GitHubStackCapability(capability)
+                    if capability.state == GitHubStackCapabilityStateV1::PrivatePreviewDisabled))
+            {
+                published_disabled = true;
+            }
+        }
+        assert!(
+            published_disabled,
+            "disabled policy must be published to the real anchor store"
+        );
+        let settled = coordinator
+            .observe_policy(
+                context.scope().clone(),
+                owner.stack_provider.clone(),
+                binding,
+                tracedecay_contracts::now_micros(),
+            )
+            .unwrap();
+        assert_eq!(
+            settled.capability.state,
+            GitHubStackCapabilityStateV1::PrivatePreviewDisabled
+        );
+        assert!(
+            settled.drift_observations.is_empty(),
+            "the runtime refresh must already have closed provider drift"
+        );
+    }
 }

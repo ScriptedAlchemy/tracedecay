@@ -228,26 +228,16 @@ mod tests {
         request: &GitHubReviewReadRequestV1,
         credential: GitHubReadOnlyCredentialV1,
     ) -> GitHubReadOnlyClientV1 {
-        GitHubReadOnlyClientV1 {
-            agent: crate::http_agent::http_agent(
-                ureq::Agent::config_builder()
-                    .https_only(false)
-                    .http_status_as_error(false)
-                    .build(),
-            ),
-            target: GitHubRepositoryTargetV1 {
+        super::super::test_support::local_client(
+            address,
+            GitHubRepositoryTargetV1 {
                 owner: "ScriptedAlchemy".to_owned(),
                 repository: repository.to_owned(),
                 pull_request_number: 421,
                 pull_request_id: request.pull_request_id.clone(),
             },
             credential,
-            config: GitHubHttpReadConfigV1 {
-                rest_base_uri: format!("http://{address}"),
-                graphql_uri: format!("http://{address}/graphql"),
-                ..GitHubHttpReadConfigV1::default()
-            },
-        }
+        )
     }
 
     struct ReadyStackSourceAccess;
