@@ -1609,7 +1609,9 @@ mod auxiliary_scheduling_tests {
 
         for mut reply in replies {
             assert_eq!(
-                reply.try_recv().expect("every admitted request must be settled"),
+                reply
+                    .try_recv()
+                    .expect("every admitted request must be settled"),
                 Ok(RuntimeSubmitOutcomeV1::Unavailable {
                     reason: UnavailableReasonV1::Faulted,
                 })
