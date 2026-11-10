@@ -1933,9 +1933,8 @@ impl StoreAdministration {
         operation().await
     }
 
-    /// Owns only the canonical gate while retention waits across ticks. The
-    /// caller polls this acquisition without waiting in the serial tick and
-    /// drops it on cancellation or when the exact store leaves the work list.
+    /// Transfers only the canonical gate into the supervised retention job.
+    /// The acquisition retains no mounted graph or project database client.
     pub(super) fn retention_writer_acquisition(
         &self,
         data_root: PathBuf,
