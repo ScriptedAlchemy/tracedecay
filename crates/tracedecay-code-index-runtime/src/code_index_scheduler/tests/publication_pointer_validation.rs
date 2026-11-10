@@ -36,6 +36,15 @@ fn cold_pointer_witness_refuses_same_byte_inode_swap_and_symlink_alias() {
 
     fs::write(&replacement, bytes).expect("different inode with identical bytes");
     fs::rename(&pointer, &retired).expect("retire original pathname");
+    assert!(matches!(
+        DaemonCodeIndexPublicationStoreV1::require_cold_pointer_witness(
+            &pointer,
+            &mut opened,
+            &named_before,
+            &readback,
+        ),
+        Err(CodeIndexPublicationStoreErrorV1::CompareAndSwap)
+    ));
     fs::rename(&replacement, &pointer).expect("replace pathname with same bytes");
     let replacement_identity = pointer.symlink_metadata().expect("replacement inode");
     assert_ne!(
@@ -51,7 +60,7 @@ fn cold_pointer_witness_refuses_same_byte_inode_swap_and_symlink_alias() {
             &named_before,
             &readback,
         ),
-        Err(CodeIndexPublicationStoreErrorV1::CorruptionResetRequired(_))
+        Err(CodeIndexPublicationStoreErrorV1::CompareAndSwap)
     ));
 
     fs::remove_file(&pointer).expect("remove replacement");

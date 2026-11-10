@@ -2468,7 +2468,27 @@ impl DaemonCodeIndexPublicationStoreV1 {
             .read_to_end(&mut current)
             .map_err(Self::map_pointer_io)?;
         let opened_after = file.metadata().map_err(Self::map_pointer_io)?;
-        let named_after = path.symlink_metadata().map_err(Self::map_pointer_io)?;
+        let named_after = match path.symlink_metadata() {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Err(CodeIndexPublicationStoreErrorV1::CompareAndSwap);
+            }
+            Err(error) => return Err(Self::map_pointer_io(error)),
+        };
+        if !named_after.file_type().is_file() {
+            return Err(Self::corrupt_non_file_pointer());
+        }
+        // An ordinary concurrent publication replaces the pointer inode.
+        // Refuse that stale observation without incorrectly resetting a
+        // healthy store; the caller can retry on the new publication.
+        if (named_before.dev(), named_before.ino()) != (opened_before.dev(), opened_before.ino())
+            || (named_after.dev(), named_after.ino())
+                != (opened_before.dev(), opened_before.ino())
+        {
+            return Err(CodeIndexPublicationStoreErrorV1::CompareAndSwap);
+        }
+        // Mutation of the same inode or its bytes violates immutable pointer
+        // identity and requires the existing typed corruption reset.
         if current != bytes
             || !Self::same_unix_segment_identity(named_before, &opened_before)
             || !Self::same_unix_segment_identity(&opened_before, &opened_after)
