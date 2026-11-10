@@ -194,9 +194,16 @@ impl Drop for CodeIndexPresealAttemptGuardV1 {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use std::future::pending;
+    use std::panic::catch_unwind;
+    use std::sync::{Arc, RwLock};
+
+    use super::{CodeIndexBuildAttemptSlotStateV1, CodeIndexPresealAttemptGuardV1};
+    use tokio::sync::oneshot;
     use tracedecay_application::code_index::DaemonCodeIndexControlV1;
-    use tracedecay_code_index::production::CodeIndexExecutionControlV1;
+    use tracedecay_code_index::production::{
+        CodeIndexExecutionControlV1, CodeIndexPresealWorkPhaseV1, CodeIndexPresealWorkV1,
+    };
 
     #[test]
     fn durable_publication_handoff_retires_attempt_without_forging_work() {
@@ -282,6 +289,100 @@ mod tests {
         assert_eq!(slot.read().unwrap().snapshot().unwrap(), current);
 
         drop(second);
+        assert!(slot.read().unwrap().snapshot().is_none());
+    }
+
+    #[tokio::test]
+    async fn aborting_preseal_task_retires_work_and_fences_late_callbacks() {
+        let slot = Arc::new(RwLock::new(CodeIndexBuildAttemptSlotStateV1::default()));
+        let attempt = CodeIndexPresealAttemptGuardV1::begin(Arc::clone(&slot), 7, 11);
+        let control = DaemonCodeIndexControlV1::default()
+            .with_preseal_observer(attempt.observer())
+            .with_preseal_finisher(attempt.finisher());
+        control.observed_preseal_work(work(CodeIndexPresealWorkPhaseV1::Capture, 3, Some(5)));
+        let captured = slot.read().unwrap().snapshot().unwrap();
+        assert!(captured.active);
+        assert_eq!(captured.completed_items, 3);
+        assert!(captured.last_progress_micros.is_some());
+
+        // Synchronize actual task ownership without a sleep or a fake clock.
+        // Keep the guard across suspension so abort must run its destructor.
+        let (started_tx, started_rx) = oneshot::channel();
+        let task = tokio::spawn(async move {
+            assert!(started_tx.send(()).is_ok());
+            pending::<()>().await;
+            drop(attempt);
+        });
+        started_rx.await.unwrap();
+        assert_eq!(slot.read().unwrap().snapshot().unwrap(), captured);
+        task.abort();
+        assert!(task.await.unwrap_err().is_cancelled());
+        assert!(slot.read().unwrap().snapshot().is_none());
+
+        // The cancelled worker's callbacks can outlive its guard. They must
+        // neither resurrect a reading nor write into a same-producer retry.
+        control.observed_preseal_work(work(CodeIndexPresealWorkPhaseV1::Capture, 4, Some(5)));
+        control.finish_preseal_observation();
+        assert!(slot.read().unwrap().snapshot().is_none());
+        let retry = CodeIndexPresealAttemptGuardV1::begin(Arc::clone(&slot), 7, 11);
+        let admitted = slot.read().unwrap().snapshot().unwrap();
+        assert!(admitted.active);
+        assert!(admitted.attempt_sequence > captured.attempt_sequence);
+        assert!(admitted.progress_epoch > captured.progress_epoch);
+        assert_eq!(admitted.completed_items, 0);
+        assert!(admitted.last_progress_micros.is_none());
+        control.observed_preseal_work(work(CodeIndexPresealWorkPhaseV1::Capture, 5, Some(5)));
+        control.finish_preseal_observation();
+        assert_eq!(slot.read().unwrap().snapshot().unwrap(), admitted);
+
+        retry.observer()(work(CodeIndexPresealWorkPhaseV1::Capture, 1, Some(2)));
+        let resumed = slot.read().unwrap().snapshot().unwrap();
+        assert!(resumed.active);
+        assert_eq!(resumed.attempt_sequence, admitted.attempt_sequence);
+        assert_eq!(resumed.completed_items, 1);
+        assert!(resumed.last_progress_micros.is_some());
+        assert!(resumed.progress_epoch > admitted.progress_epoch);
+        drop(retry);
+        assert!(slot.read().unwrap().snapshot().is_none());
+    }
+
+    #[test]
+    fn unwinding_publication_handoff_retires_inactive_owned_progress() {
+        let slot = Arc::new(RwLock::new(CodeIndexBuildAttemptSlotStateV1::default()));
+        let attempt = CodeIndexPresealAttemptGuardV1::begin(Arc::clone(&slot), 7, 11);
+        let control = DaemonCodeIndexControlV1::default()
+            .with_preseal_observer(attempt.observer())
+            .with_preseal_finisher(attempt.finisher());
+        control.observed_preseal_work(work(CodeIndexPresealWorkPhaseV1::Capture, 3, Some(3)));
+        control.observed_preseal_work(work(CodeIndexPresealWorkPhaseV1::ParseEvidence, 2, Some(2)));
+        let before = slot.read().unwrap().snapshot().unwrap();
+        control.finish_preseal_observation();
+        let handoff = slot.read().unwrap().snapshot().unwrap();
+        assert!(!handoff.active);
+        assert_eq!(handoff.completed_items, before.completed_items);
+        assert_eq!(handoff.last_progress_micros, before.last_progress_micros);
+        assert!(handoff.progress_epoch > before.progress_epoch);
+
+        let outcome = catch_unwind(move || {
+            let _owned_attempt = attempt;
+            panic!("interrupt publication while the preseal guard still owns its handoff");
+        });
+        assert!(outcome.is_err());
+        assert!(slot.read().unwrap().snapshot().is_none());
+        control.observed_preseal_work(work(CodeIndexPresealWorkPhaseV1::Resolution, 1, None));
+        control.finish_preseal_observation();
+        assert!(slot.read().unwrap().snapshot().is_none());
+
+        let next = CodeIndexPresealAttemptGuardV1::begin(Arc::clone(&slot), 7, 11);
+        let admitted = slot.read().unwrap().snapshot().unwrap();
+        assert!(admitted.active);
+        assert!(admitted.attempt_sequence > handoff.attempt_sequence);
+        assert_eq!(admitted.completed_items, 0);
+        assert!(admitted.last_progress_micros.is_none());
+        control.observed_preseal_work(work(CodeIndexPresealWorkPhaseV1::Capture, 4, Some(4)));
+        control.finish_preseal_observation();
+        assert_eq!(slot.read().unwrap().snapshot().unwrap(), admitted);
+        drop(next);
         assert!(slot.read().unwrap().snapshot().is_none());
     }
 
