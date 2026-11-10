@@ -191,7 +191,10 @@ pub(super) fn parent_gitlink_paths_scoped(
         if let Some(scope) = scope {
             // Git index entries are sorted by byte-exact path. Probe every
             // ancestor, including unmerged stages, then only the prefix range.
-            for ancestor in scope.ancestors().filter(|path| !path.as_os_str().is_empty()) {
+            for ancestor in scope
+                .ancestors()
+                .filter(|path| !path.as_os_str().is_empty())
+            {
                 let name = forward_slash_path(ancestor);
                 let bytes = name.as_bytes();
                 let start = entries.partition_point(|entry| {
@@ -262,12 +265,12 @@ pub(super) fn parent_gitlink_paths_scoped(
                 .filter(|path| !path.as_os_str().is_empty())
                 .collect::<Vec<_>>();
             for ancestor in ancestors.into_iter().rev() {
-                let Some(entry) = tree
-                    .lookup_entry_by_path(ancestor)
-                    .map_err(|error| SourceWalkError {
-                        glob: String::new(),
-                        message: format!("cannot inspect scoped parent HEAD tree: {error}"),
-                    })?
+                let Some(entry) =
+                    tree.lookup_entry_by_path(ancestor)
+                        .map_err(|error| SourceWalkError {
+                            glob: String::new(),
+                            message: format!("cannot inspect scoped parent HEAD tree: {error}"),
+                        })?
                 else {
                     break;
                 };
@@ -279,20 +282,18 @@ pub(super) fn parent_gitlink_paths_scoped(
                     break;
                 }
                 if ancestor == scope {
-                    let subtree = repository
-                        .find_tree(entry.object_id())
-                        .map_err(|error| SourceWalkError {
+                    let subtree = repository.find_tree(entry.object_id()).map_err(|error| {
+                        SourceWalkError {
                             glob: String::new(),
                             message: format!("cannot read scoped parent HEAD tree: {error}"),
-                        })?;
-                    let entries = subtree
-                        .traverse()
-                        .breadthfirst
-                        .files()
-                        .map_err(|error| SourceWalkError {
+                        }
+                    })?;
+                    let entries = subtree.traverse().breadthfirst.files().map_err(|error| {
+                        SourceWalkError {
                             glob: String::new(),
                             message: format!("cannot walk scoped parent HEAD tree: {error}"),
-                        })?;
+                        }
+                    })?;
                     let prefix = forward_slash_path(scope);
                     for entry in entries {
                         if entry.mode.is_commit() {
@@ -305,14 +306,14 @@ pub(super) fn parent_gitlink_paths_scoped(
                 }
             }
         } else {
-            let entries = tree
-                .traverse()
-                .breadthfirst
-                .files()
-                .map_err(|error| SourceWalkError {
-                    glob: String::new(),
-                    message: format!("cannot walk parent Git HEAD tree: {error}"),
-                })?;
+            let entries =
+                tree.traverse()
+                    .breadthfirst
+                    .files()
+                    .map_err(|error| SourceWalkError {
+                        glob: String::new(),
+                        message: format!("cannot walk parent Git HEAD tree: {error}"),
+                    })?;
             for entry in entries {
                 if entry.mode.is_commit() {
                     record(entry.filepath.as_ref())?;
