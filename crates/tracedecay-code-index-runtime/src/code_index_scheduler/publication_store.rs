@@ -88,6 +88,10 @@ mod publication_reset;
 #[path = "tests/publication_pointer_validation.rs"]
 mod publication_pointer_validation;
 
+#[cfg(all(test, windows))]
+#[path = "tests/publication_pointer_validation_windows.rs"]
+mod publication_pointer_validation_windows;
+
 const MAX_DURABLE_PUBLICATION_POINTER_BYTES: u64 = 512 * 1024;
 const DURABLE_GENERATION_IO_CHUNK_BYTES_V1: usize = 64 * 1024;
 
@@ -2174,10 +2178,8 @@ impl DaemonCodeIndexPublicationStoreV1 {
     {
         // The named pointer must itself be a regular file. Following a
         // symlink would let an equal-byte replacement inherit the memo.
-        #[cfg(unix)]
+        // Never follow a pointer alias when deciding whether its slot is valid.
         let named = std::fs::symlink_metadata(&self.active_path);
-        #[cfg(not(unix))]
-        let named = std::fs::metadata(&self.active_path);
         let metadata = match named {
             Ok(metadata) => metadata,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
@@ -2247,7 +2249,6 @@ impl DaemonCodeIndexPublicationStoreV1 {
         // A cold pointer validation must not authorize a second pathname
         // open merely to populate the memo. Keep the original descriptor
         // through parsing and authenticate its bytes again before memoizing.
-        #[cfg(unix)]
         let (bytes, mut opened_pointer) = {
             let mut file = File::open(&self.active_path).map_err(Self::map_pointer_io)?;
             let mut bytes = Vec::new();
@@ -2264,8 +2265,6 @@ impl DaemonCodeIndexPublicationStoreV1 {
             }
             (bytes, file)
         };
-        #[cfg(not(unix))]
-        let bytes = std::fs::read(&self.active_path).map_err(Self::map_pointer_io)?;
         let digest = Self::state_digest(&bytes);
         {
             let mut memo = self
@@ -2288,6 +2287,12 @@ impl DaemonCodeIndexPublicationStoreV1 {
                         &opened,
                     )?;
                 }
+                #[cfg(not(unix))]
+                Self::require_non_unix_pointer_witness(
+                    &self.active_path,
+                    &mut opened_pointer,
+                    &bytes,
+                )?;
                 memo.mtime = mtime;
                 memo.size = size;
                 #[cfg(unix)]
@@ -2417,27 +2422,26 @@ impl DaemonCodeIndexPublicationStoreV1 {
         // witnesses reject a concurrent rename; the second byte comparison
         // rejects an in-place change during parsing, even on coarse clocks.
         #[cfg(unix)]
-        let unchanged = {
-            Self::require_cold_pointer_witness(
-                &self.active_path,
-                &mut opened_pointer,
-                &metadata,
-                &bytes,
-            )?;
-            true
-        };
+        Self::require_cold_pointer_witness(
+            &self.active_path,
+            &mut opened_pointer,
+            &metadata,
+            &bytes,
+        )?;
         #[cfg(not(unix))]
-        let unchanged = std::fs::read(&self.active_path).ok().as_deref() == Some(bytes.as_slice());
-        if unchanged {
-            *memo = Some(PublicationPointerMemoV1 {
-                mtime,
-                size,
-                digest,
-                pointer: pointer.clone(),
-                #[cfg(unix)]
-                file: Some(opened_pointer),
-            });
-        }
+        Self::require_non_unix_pointer_witness(
+            &self.active_path,
+            &mut opened_pointer,
+            &bytes,
+        )?;
+        *memo = Some(PublicationPointerMemoV1 {
+            mtime,
+            size,
+            digest,
+            pointer: pointer.clone(),
+            #[cfg(unix)]
+            file: Some(opened_pointer),
+        });
         Ok(Some((pointer, bytes)))
     }
 
@@ -2467,6 +2471,69 @@ impl DaemonCodeIndexPublicationStoreV1 {
             ));
         }
         Ok(())
+    }
+
+    /// Windows must still name the exact opened inode after a cold parse.
+    /// Reuse the pathname open previously spent on byte readback for a real
+    /// same-file check instead. A rotated inode is a retryable CAS; mutations
+    /// to the original opened bytes are reset-required corruption.
+    #[cfg(not(unix))]
+    fn require_non_unix_pointer_witness(
+        path: &Path,
+        file: &mut File,
+        bytes: &[u8],
+    ) -> Result<(), CodeIndexPublicationStoreErrorV1> {
+        let before = file.metadata().map_err(Self::map_pointer_io)?;
+        file.seek(SeekFrom::Start(0))
+            .map_err(Self::map_pointer_io)?;
+        let mut current = Vec::new();
+        (&mut *file)
+            .take(MAX_DURABLE_PUBLICATION_POINTER_BYTES + 1)
+            .read_to_end(&mut current)
+            .map_err(Self::map_pointer_io)?;
+        let after = file.metadata().map_err(Self::map_pointer_io)?;
+        if current != bytes
+            || before.len() != after.len()
+            || before.modified().ok() != after.modified().ok()
+        {
+            return Err(Self::corruption(
+                "active code-generation pointer changed while validating its opened inode",
+            ));
+        }
+        let named = match path.symlink_metadata() {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Err(CodeIndexPublicationStoreErrorV1::CompareAndSwap);
+            }
+            Err(error) => return Err(Self::map_pointer_io(error)),
+        };
+        if !named.file_type().is_file() {
+            return Err(Self::corrupt_non_file_pointer());
+        }
+        let opened = Handle::from_file(file.try_clone().map_err(Self::map_pointer_io)?)
+            .map_err(Self::map_pointer_io)?;
+        let named_handle = match Handle::from_path(path) {
+            Ok(handle) => handle,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Err(CodeIndexPublicationStoreErrorV1::CompareAndSwap);
+            }
+            Err(error) => return Err(Self::map_pointer_io(error)),
+        };
+        if opened != named_handle {
+            return Err(CodeIndexPublicationStoreErrorV1::CompareAndSwap);
+        }
+        // A final symlink or missing-name substitution cannot authorize the
+        // descriptor, even if a following open found the old target inode.
+        match path.symlink_metadata() {
+            Ok(metadata) if metadata.file_type().is_file() && metadata.len() == after.len() => {
+                Ok(())
+            }
+            Ok(_) => Err(Self::corrupt_non_file_pointer()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                Err(CodeIndexPublicationStoreErrorV1::CompareAndSwap)
+            }
+            Err(error) => Err(Self::map_pointer_io(error)),
+        }
     }
 
     /// The same inode witness controls every Unix pointer read, including
