@@ -485,6 +485,9 @@ async fn run_registered_store_retention(
         session_storage_outcome
             .combine(canonical_body_outcome)
             .combine(replay_metadata_outcome)
+            .combine(record_terminal_housekeeping_outcome(
+                &report.github_stack_terminal,
+            ))
     } else {
         MaintenanceTickOutcome::Retry
     };
@@ -516,14 +519,24 @@ async fn run_registered_terminal_housekeeping(
             return MaintenanceTickOutcome::Retry;
         }
     };
-    match tracedecay_maintenance::retention::registered_store::run_github_stack_terminal_retention(
-        database, now,
-    )
-    .await
-    {
+    let report =
+        tracedecay_maintenance::retention::registered_store::run_github_stack_terminal_retention(
+            database, now,
+        )
+        .await;
+    record_terminal_housekeeping_outcome(&report)
+}
+
+fn record_terminal_housekeeping_outcome(
+    report: &Result<
+        tracedecay_global_db::GitHubStackTerminalRetirementPageV1,
+        tracedecay_maintenance::retention::registered_store::RegisteredStoreRetentionErrorV1,
+    >,
+) -> MaintenanceTickOutcome {
+    match report {
         Ok(report) if report.exhausted => MaintenanceTickOutcome::Complete,
-        // The kernel keeps the durable frontier and has logged any failure.
-        Ok(_) | Err(_) => MaintenanceTickOutcome::Retry,
+        Ok(_) => MaintenanceTickOutcome::Continue(MaintenanceContinuation::StoreRetention),
+        Err(_) => MaintenanceTickOutcome::Retry,
     }
 }
 
@@ -606,9 +619,11 @@ async fn run_registered_storage_continuation(
             database,
         )
         .await;
+    let terminal = run_registered_terminal_housekeeping(database).await;
     record_session_lcm_outcome(&session_lcm)
         .combine(record_canonical_body_gc_outcome(&canonical_body_gc))
         .combine(record_replay_metadata_outcome(&replay_metadata))
+        .combine(terminal)
 }
 
 fn record_canonical_body_gc_outcome(
@@ -923,10 +938,11 @@ impl MaintenanceStoreWork {
 
     fn writer_scope(&self) -> WriterScope {
         match self {
-            // Session-wide administration has no independently proven canonical
-            // store gate. Keep its global probe nonqueued rather than blocking
-            // unrelated project opens behind a potentially long session pass.
-            Self::Session(_) => WriterScope::Daemon,
+            // Registered database paths are canonical and sit directly below
+            // their owner store root, the same identity used by logical writers.
+            Self::Session(path) => path
+                .parent()
+                .map_or(WriterScope::Daemon, store_maintenance_writer_scope),
             Self::Graph { data_root, .. } => store_maintenance_writer_scope(data_root),
             Self::Registered { store, .. } => store_maintenance_writer_scope(&store.data_root),
         }
@@ -1009,53 +1025,36 @@ impl MaintenanceCoordinator {
             ),
         );
         let interval = Duration::from_secs(retention.interval_hours.max(1).saturating_mul(3_600));
-        if !optional_retention_enabled(&retention) {
-            // Terminal delivery history has a fixed inspection window that no
-            // operator policy controls. Disabling every optional age,
-            // deletion and compaction policy must not leave it unbounded, nor
-            // may the fixed pass borrow the full tick that would run them.
-            let task_owner = coordinator.clone();
-            *coordinator.task.lock().await = spawn_maintenance_task(
-                "retention_tick",
-                tracing::Instrument::instrument(
-                    async move {
-                        task_owner
-                            .run_terminal_housekeeping(administration, interval)
-                            .await;
-                    },
-                    tracing::trace_span!("daemon.maintenance.terminal_housekeeping_loop"),
-                ),
-            );
-            return coordinator;
-        }
         // A sealed code generation supersedes its predecessor, whose sealed
         // artifact, read bundle, and segments only the retention tick
         // reclaims. Pull that tick forward on each publication instead of
         // letting a day of publications pile up behind the daily cadence.
-        let publication_owner = coordinator.clone();
-        let mut publications = code_index_schedulers.subscribe_generation_publications();
-        // Detached: it ends with the coordinator's cancellation or the
-        // publication channel.
-        drop(spawn_maintenance_task(
-            "publication_due_requests",
-            tracing::Instrument::instrument(
-                async move {
-                    loop {
-                        tokio::select! {
-                            biased;
-                            () = publication_owner.cancellation.cancelled() => break,
-                            received = publications.recv() => match received {
-                                Ok(_) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
-                                    publication_owner.request_due();
-                                }
-                                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
-                            },
+        if optional_retention_enabled(&retention) {
+            let publication_owner = coordinator.clone();
+            let mut publications = code_index_schedulers.subscribe_generation_publications();
+            // Detached: it ends with the coordinator's cancellation or the
+            // publication channel.
+            drop(spawn_maintenance_task(
+                "publication_due_requests",
+                tracing::Instrument::instrument(
+                    async move {
+                        loop {
+                            tokio::select! {
+                                biased;
+                                () = publication_owner.cancellation.cancelled() => break,
+                                received = publications.recv() => match received {
+                                    Ok(_) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                                        publication_owner.request_due();
+                                    }
+                                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                                },
+                            }
                         }
-                    }
-                },
-                tracing::trace_span!("daemon.maintenance.publication_due_requests"),
-            ),
-        ));
+                    },
+                    tracing::trace_span!("daemon.maintenance.publication_due_requests"),
+                ),
+            ));
+        }
         let task_owner = coordinator.clone();
         *coordinator.task.lock().await = spawn_maintenance_task(
             "retention_tick",
@@ -1213,65 +1212,6 @@ impl MaintenanceCoordinator {
         .await;
     }
 
-    /// The maintenance cadence for a daemon whose optional retention policies
-    /// are all disabled: it runs only the fixed terminal-delivery pass.
-    async fn run_terminal_housekeeping(
-        &self,
-        administration: StoreAdministration,
-        interval: Duration,
-    ) {
-        run_maintenance_loop(&self.cancellation, &self.wake, interval, |_continuation| {
-            let administration = &administration;
-            async move { self.run_terminal_housekeeping_tick(administration).await }
-        })
-        .await;
-    }
-
-    /// Retire expired terminal GitHub stack deliveries from every mounted
-    /// session store, each admitted on its own like a full tick's store unit.
-    /// A store whose page budget ends first keeps its durable frontier and
-    /// reports `Retry`, so the next tick resumes there.
-    #[tracing::instrument(
-        name = "daemon.maintenance.terminal_housekeeping_tick",
-        level = "trace",
-        skip_all
-    )]
-    pub(super) async fn run_terminal_housekeeping_tick(
-        &self,
-        administration: &StoreAdministration,
-    ) -> MaintenanceTickOutcome {
-        let Some(background_cpu) = self.background_cpu.as_ref() else {
-            log_daemon_event(
-                "retention_degraded",
-                &[
-                    ("pass", "terminal_housekeeping".to_owned()),
-                    ("failure", "background_cpu_authority_unavailable".to_owned()),
-                ],
-            );
-            return MaintenanceTickOutcome::Retry;
-        };
-        let databases = administration.mounted_registered_session_databases().await;
-        let Some(_background_cpu) = background_cpu.try_acquire() else {
-            return MaintenanceTickOutcome::Retry;
-        };
-        let mut outcome = MaintenanceTickOutcome::Complete;
-        for database in &databases {
-            if self.cancellation.is_cancelled() {
-                return MaintenanceTickOutcome::Retry;
-            }
-            let admitted = administration
-                .try_with_writer(|| async {
-                    let Ok(_clients) = administration.maintenance_store_clients().try_lock() else {
-                        return MaintenanceTickOutcome::Retry;
-                    };
-                    run_registered_terminal_housekeeping(database).await
-                })
-                .await;
-            outcome = outcome.combine(admitted.unwrap_or(MaintenanceTickOutcome::Retry));
-        }
-        outcome
-    }
-
     #[tracing::instrument(name = "daemon.maintenance.tick", level = "trace", skip_all)]
     #[allow(
         clippy::too_many_arguments,
@@ -1281,7 +1221,7 @@ impl MaintenanceCoordinator {
         clippy::too_many_lines,
         reason = "A maintenance tick is one ordered pass over session, graph, and retention owners."
     )]
-    async fn run_tick(
+    pub(super) async fn run_tick(
         &self,
         profile_root: &Path,
         profile_database: &tracedecay_global_db::RegisteredGlobalDbLeaseV1,
@@ -1301,6 +1241,7 @@ impl MaintenanceCoordinator {
             );
             return MaintenanceTickOutcome::Retry;
         };
+        let optional = optional_retention_enabled(retention);
         administration
             .store_telemetry_sampling()
             .begin_retention_tick_log_window();
@@ -1310,17 +1251,21 @@ impl MaintenanceCoordinator {
             .iter()
             .map(|database| database.db_path().to_path_buf())
             .collect::<Vec<_>>();
-        let project_graphs = administration
-            .mounted_project_graphs()
-            .await
-            .iter()
-            .map(|graph| MountedGraphListing {
-                key: graph_work_key(graph),
-                database_path: graph.db().database_path().to_path_buf(),
-                project_root: graph.project_root().to_path_buf(),
-                data_root: graph.store_layout().data_root.clone(),
-            })
-            .collect::<Vec<_>>();
+        let project_graphs = if optional {
+            administration
+                .mounted_project_graphs()
+                .await
+                .iter()
+                .map(|graph| MountedGraphListing {
+                    key: graph_work_key(graph),
+                    database_path: graph.db().database_path().to_path_buf(),
+                    project_root: graph.project_root().to_path_buf(),
+                    data_root: graph.store_layout().data_root.clone(),
+                })
+                .collect::<Vec<_>>()
+        } else {
+            Vec::new()
+        };
         #[cfg(any(test, feature = "test-helpers"))]
         {
             let _ = crate::test_support::hold_after_maintenance_listing_for_test().await;
@@ -1330,22 +1275,25 @@ impl MaintenanceCoordinator {
         let Some(tick_cpu) = background_cpu.try_acquire() else {
             return MaintenanceTickOutcome::Retry;
         };
-        let (registered_projects, registry_listed) =
-            match registered_project_stores(profile_root, profile_database).await {
-                Ok(stores) => (stores, true),
-                Err(error) => {
-                    log_daemon_event(
-                        "retention_degraded",
-                        &[
-                            ("pass", "code_generations".to_owned()),
-                            ("failure", "project_registry_unavailable".to_owned()),
-                            ("error", error.to_string()),
-                        ],
-                    );
-                    (Vec::new(), false)
-                }
-            };
-        if continuation.is_none() && !self.cancellation.is_cancelled() {
+        let (registered_projects, registry_listed) = match if optional {
+            registered_project_stores(profile_root, profile_database).await
+        } else {
+            Ok(Vec::new())
+        } {
+            Ok(stores) => (stores, true),
+            Err(error) => {
+                log_daemon_event(
+                    "retention_degraded",
+                    &[
+                        ("pass", "code_generations".to_owned()),
+                        ("failure", "project_registry_unavailable".to_owned()),
+                        ("error", error.to_string()),
+                    ],
+                );
+                (Vec::new(), false)
+            }
+        };
+        if optional && continuation.is_none() && !self.cancellation.is_cancelled() {
             let handle_roots = std::iter::once(profile_root)
                 .chain(
                     registered_projects
@@ -1398,7 +1346,20 @@ impl MaintenanceCoordinator {
         }
         work.sort_by(|left, right| left.0.cmp(&right.0));
         let keys = work.iter().map(|(key, _)| key.clone()).collect::<Vec<_>>();
-        self.store_continuations.lock().await.retain_stores(&keys);
+        {
+            let mut continuations = self.store_continuations.lock().await;
+            continuations.retain_stores(&keys);
+            if !optional && continuation.is_none() {
+                // A fixed-only cycle visits every mounted shard through the
+                // same bounded window. Unvisited stores keep the short cadence.
+                for key in &keys {
+                    continuations.record(
+                        key,
+                        MaintenanceTickOutcome::Continue(MaintenanceContinuation::StoreRetention),
+                    );
+                }
+            }
+        }
         self.writer_jobs.retain(
             &work
                 .iter()
@@ -1440,7 +1401,8 @@ impl MaintenanceCoordinator {
         maintenance_observations.retain_project_maintenance_state(&active_maintenance_projects);
         // A capacity retirement releasing stores skips this pass: sampling
         // leases every sampled store until it ends.
-        let telemetry_sampling = if continuation.is_none()
+        let telemetry_sampling = if optional
+            && continuation.is_none()
             && let Ok(_clients) = administration.maintenance_store_clients().try_lock()
         {
             maintenance_observations
@@ -1453,7 +1415,8 @@ impl MaintenanceCoordinator {
         } else {
             StoreTelemetrySamplingOutcome::default()
         };
-        if continuation.is_none()
+        if optional
+            && continuation.is_none()
             && let Some(registry) = administration.mounted_session_runtime_registry().await
         {
             record_lost_store_files(&maintenance_observations, &registry);
@@ -1512,7 +1475,9 @@ impl MaintenanceCoordinator {
                             else {
                                 return MaintenanceTickOutcome::Complete;
                             };
-                            if continuation.is_some() {
+                            if !optional {
+                                run_registered_terminal_housekeeping(&database).await
+                            } else if continuation.is_some() {
                                 run_registered_storage_continuation(&database, retention).await
                             } else {
                                 run_registered_store_retention(&database, retention).await
@@ -1598,6 +1563,9 @@ impl MaintenanceCoordinator {
         outcome = self.store_continuations.lock().await.combine(outcome);
         if !registry_listed {
             outcome = MaintenanceTickOutcome::Retry;
+        }
+        if !optional {
+            return outcome;
         }
 
         let Some(_background_cpu) = background_cpu.try_acquire() else {
@@ -1948,6 +1916,179 @@ mod tests {
     use tracedecay_maintenance::tick::{MaintenanceContinuation, MaintenanceTickOutcome};
     use tracedecay_runtime_core::cancellation::CancellationToken;
     use tracedecay_runtime_core::native_runtime;
+
+    #[test]
+    fn terminal_storage_failure_is_retry_and_rolls_back_progress() {
+        native_runtime::block_on(async {
+            let harness = tracedecay_global_db::tests::harness::RegisteredGlobalDbHarness::open(
+                "terminal-rollback",
+            )
+            .await;
+            harness
+                .registered
+                .append_github_stack_signal(
+                    tracedecay_global_db::GitHubStackSignalRecordV1 {
+                        project_id: "project.rollback".to_owned(),
+                        signal_id: "signal.rollback".to_owned(),
+                        scope_digest: "scope".to_owned(),
+                        repository_id: "repo".to_owned(),
+                        watermark_id: "watermark".to_owned(),
+                        observed_at_micros: 100,
+                        signal_json: "{}".to_owned(),
+                    },
+                    vec!["actor.rollback".to_owned()],
+                )
+                .await
+                .expect("terminal signal");
+            harness
+                .registered
+                .acknowledge_github_stack_host_delivery(
+                    "project.rollback",
+                    "signal.rollback",
+                    "actor.rollback",
+                )
+                .await
+                .expect("settled");
+            harness
+                .registered
+                .writer_connection()
+                .unwrap()
+                .execute_batch(
+                    "CREATE TRIGGER refuse_terminal_delete
+                 BEFORE DELETE ON github_stack_delivery_recipients
+                 BEGIN SELECT RAISE(ABORT, 'retirement refused'); END;",
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                super::run_registered_terminal_housekeeping(&harness.registered).await,
+                MaintenanceTickOutcome::Retry
+            );
+            assert!(
+                harness
+                    .registered
+                    .github_stack_signal("project.rollback", "signal.rollback")
+                    .await
+                    .unwrap()
+                    .is_some(),
+                "payload update rolled back with the failed recipient deletion"
+            );
+            let mut rows = harness
+                .registered
+                .read_connection()
+                .query(
+                    "SELECT COUNT(*) FROM github_stack_delivery_retirement_frontier",
+                    (),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                rows.next().await.unwrap().unwrap().get::<i64>(0).unwrap(),
+                0
+            );
+            drop(rows);
+            harness
+                .registered
+                .writer_connection()
+                .unwrap()
+                .execute_batch("DROP TRIGGER refuse_terminal_delete")
+                .await
+                .unwrap();
+            assert_eq!(
+                super::run_registered_terminal_housekeeping(&harness.registered).await,
+                MaintenanceTickOutcome::Complete
+            );
+        })
+        .expect("native runtime");
+    }
+
+    #[test]
+    fn terminal_progress_continues_without_repeating_optional_age_work() {
+        native_runtime::block_on(async {
+            let harness = tracedecay_global_db::tests::harness::RegisteredGlobalDbHarness::open(
+                "terminal-age-continuation",
+            )
+            .await;
+            for ordinal in 0..1041 {
+                harness
+                    .registered
+                    .append_github_stack_signal(
+                        tracedecay_global_db::GitHubStackSignalRecordV1 {
+                            project_id: "project.age-continuation".to_owned(),
+                            signal_id: format!("signal.{ordinal:05}"),
+                            scope_digest: "scope".to_owned(),
+                            repository_id: "repo".to_owned(),
+                            watermark_id: "watermark".to_owned(),
+                            observed_at_micros: 100 + ordinal,
+                            signal_json: "{}".to_owned(),
+                        },
+                        Vec::new(),
+                    )
+                    .await
+                    .expect("old terminal signal");
+            }
+            let config = tracedecay_configuration::RetentionConfig::default();
+            let first = super::run_registered_store_retention(&harness.registered, &config).await;
+            // Insert old optional detail after the first pass. A successful
+            // storage continuation must leave it for the next regular age pass.
+            harness
+                .registered
+                .writer_connection()
+                .expect("writer")
+                .execute_batch(
+                    "CREATE TABLE age_pass_audit (runs INTEGER NOT NULL) STRICT;
+                 INSERT INTO age_pass_audit VALUES (0);
+                 CREATE TRIGGER count_age_work AFTER DELETE ON analytics_events
+                 BEGIN UPDATE age_pass_audit SET runs = runs + 1; END;",
+                )
+                .await
+                .expect("audit actual age deletions");
+            harness
+                .registered
+                .append_observability_event(&tracedecay_global_db::AnalyticsEventInsert {
+                    provider: "tracedecay-observability".to_owned(),
+                    project_id: "scope:age-continuation".to_owned(),
+                    session_id: None,
+                    timestamp: 0,
+                    event_kind: "retrieval.query.completed.v1".to_owned(),
+                    hook_name: None,
+                    tool_name: None,
+                    tool_category: None,
+                    skill_name: None,
+                    hint_category: None,
+                    hint_id: Some("age-continuation:marker".to_owned()),
+                    outcome: Some("succeeded".to_owned()),
+                    metadata_json: Some(
+                        serde_json::json!({"retention_class":"optional_local_detail30d"})
+                            .to_string(),
+                    ),
+                })
+                .await
+                .expect("expired optional detail after first pass");
+            let resumed = if first.continuation().is_some() {
+                super::run_registered_storage_continuation(&harness.registered, &config).await
+            } else {
+                super::run_registered_store_retention(&harness.registered, &config).await
+            };
+            let mut rows = harness
+                .registered
+                .read_connection()
+                .query("SELECT runs FROM age_pass_audit", ())
+                .await
+                .expect("age audit");
+            assert_eq!(
+                rows.next().await.unwrap().unwrap().get::<i64>(0).unwrap(),
+                0,
+                "successful terminal progress must not replay optional age deletion"
+            );
+            assert_eq!(
+                first,
+                MaintenanceTickOutcome::Continue(MaintenanceContinuation::StoreRetention)
+            );
+            assert!(resumed.succeeded());
+        })
+        .expect("native runtime");
+    }
 
     #[test]
     fn released_store_admits_ordinary_writer_without_another_retention_tick() {

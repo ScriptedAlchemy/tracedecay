@@ -6,7 +6,8 @@ use tracedecay_global_db::observation::retention::{
 };
 use tracedecay_global_db::observation::{CanonicalBodyGcReport, MAX_CANONICAL_BODY_GC_ROWS};
 use tracedecay_global_db::{
-    GITHUB_STACK_TERMINAL_RETENTION_DAYS_V1, ObservabilityRetentionReceiptV1, RegisteredGlobalDb,
+    GITHUB_STACK_TERMINAL_RETENTION_DAYS_V1, GitHubStackTerminalRetirementPageV1,
+    ObservabilityRetentionReceiptV1, RegisteredGlobalDb,
 };
 use tracedecay_lcm::retention::{
     MAX_REPLAY_METADATA_COMPACTION_ROWS, ReplayMetadataCompactionReport,
@@ -38,20 +39,6 @@ impl RegisteredStoreRetentionErrorV1 {
     }
 }
 
-/// Most bounded retirement transactions one retention pass runs per store.
-/// Each is its own registered transaction, so the store's writer is released
-/// between pages even though the daemon admits the pass once.
-const MAX_GITHUB_STACK_RETIRE_PAGES_PER_PASS: usize = 64;
-
-/// Outcome of the bounded terminal GitHub stack delivery pass.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct GitHubStackTerminalRetentionReportV1 {
-    pub retired: usize,
-    /// False when the page budget ended the pass first. The durable frontier
-    /// is kept, so the next pass resumes instead of rescanning.
-    pub exhausted: bool,
-}
-
 /// Typed outcomes from every independent retention authority consulted for a
 /// registered store. Disabled policies never acquire their writer.
 pub struct RegisteredStoreRetentionReportV1 {
@@ -71,7 +58,7 @@ pub struct RegisteredStoreRetentionReportV1 {
     /// this runs for every store whenever store retention runs, independent of
     /// automation jobs.
     pub github_stack_terminal:
-        Result<GitHubStackTerminalRetentionReportV1, RegisteredStoreRetentionErrorV1>,
+        Result<GitHubStackTerminalRetirementPageV1, RegisteredStoreRetentionErrorV1>,
 }
 
 impl RegisteredStoreRetentionReportV1 {
@@ -95,10 +82,7 @@ impl RegisteredStoreRetentionReportV1 {
             && payload_gc_succeeded
             && self.canonical_body_gc.is_ok()
             && self.replay_metadata.is_ok()
-            && self
-                .github_stack_terminal
-                .as_ref()
-                .is_ok_and(|report| report.exhausted)
+            && self.github_stack_terminal.is_ok()
     }
 }
 
@@ -158,8 +142,9 @@ pub async fn run_registered_store_retention(
 }
 
 /// Retire completed stack delivery payloads from one registered store through
-/// bounded pages. A page examines and compacts a bounded number of payloads
-/// and commits its durable scan frontier atomically, so a long pending prefix
+/// one page per admitted store unit. A page examines and compacts a bounded
+/// number of payloads and commits its durable scan frontier atomically, so a
+/// long pending prefix
 /// is neither rescanned nor allowed to starve later terminal rows.
 ///
 /// This is fixed product housekeeping, so the daemon also runs it alone when
@@ -167,42 +152,33 @@ pub async fn run_registered_store_retention(
 pub async fn run_github_stack_terminal_retention(
     database: &RegisteredGlobalDb,
     now: i64,
-) -> Result<GitHubStackTerminalRetentionReportV1, RegisteredStoreRetentionErrorV1> {
+) -> Result<GitHubStackTerminalRetirementPageV1, RegisteredStoreRetentionErrorV1> {
     let cutoff_micros = now
         .saturating_sub(GITHUB_STACK_TERMINAL_RETENTION_DAYS_V1 * 86_400)
         .saturating_mul(1_000_000);
-    let mut retired = 0usize;
-    let mut exhausted = false;
-    for _ in 0..MAX_GITHUB_STACK_RETIRE_PAGES_PER_PASS {
-        let page = match database
-            .retire_github_stack_terminal_payloads_before(cutoff_micros)
-            .await
-        {
-            Ok(page) => page,
-            Err(diagnostic) => {
-                tracing::warn!(
-                    event = "retention_degraded",
-                    pass = "github_stack_terminal",
-                    failure = %diagnostic,
-                );
-                return Err(RegisteredStoreRetentionErrorV1::GitHubStackTerminal { diagnostic });
-            }
-        };
-        retired = retired.saturating_add(page.retired);
-        if page.exhausted {
-            exhausted = true;
-            break;
-        }
-    }
-    if retired > 0 {
+    // The daemon releases admission after this page. The store commits its
+    // frontier with the mutations; the shared continuation resumes that work
+    // under a fresh admission rather than looping while holding the gate.
+    let page = database
+        .retire_github_stack_terminal_payloads_before(cutoff_micros)
+        .await
+        .map_err(|diagnostic| {
+            tracing::warn!(
+                event = "retention_degraded",
+                pass = "github_stack_terminal",
+                failure = %diagnostic,
+            );
+            RegisteredStoreRetentionErrorV1::GitHubStackTerminal { diagnostic }
+        })?;
+    if page.retired > 0 {
         tracing::info!(
             event = "retention_prune",
             table = "github_stack_delivery_signals",
-            signals = retired,
+            signals = page.retired,
             window_days = GITHUB_STACK_TERMINAL_RETENTION_DAYS_V1,
         );
     }
-    Ok(GitHubStackTerminalRetentionReportV1 { retired, exhausted })
+    Ok(page)
 }
 
 /// Resume bounded, lossless storage work without repeating the raw-drop policy.
@@ -567,8 +543,9 @@ mod tests {
 
         assert_eq!(
             report.github_stack_terminal,
-            Ok(GitHubStackTerminalRetentionReportV1 {
+            Ok(GitHubStackTerminalRetirementPageV1 {
                 retired: 1,
+                inspected: 2,
                 exhausted: true,
             })
         );
