@@ -479,10 +479,7 @@ impl FirstGenerationStall {
                 let retained_text = active_preseal
                     && worktree.latest_generation_id.as_deref()
                         == Some(progress.generation_id.as_str())
-                    && !matches!(
-                        progress.phase,
-                        CodeIndexBuildPhaseV1::SourceScan | CodeIndexBuildPhaseV1::BulkCommit
-                    );
+                    && progress.phase != CodeIndexBuildPhaseV1::SourceScan;
                 let different_graph =
                     active_graph.is_some_and(|graph| graph.generation_id != progress.generation_id);
                 if !retained_text && !different_graph {
@@ -2369,6 +2366,62 @@ mod daemon_precondition_tests {
             "old blocked generation must not refuse new work: {result:?}"
         );
         assert_eq!(reads, 3, "only the actual ready receipt ends a moving wait");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn blocked_retained_bulk_commit_cannot_hide_successor_parse_work() {
+        // A new preseal attempt has not sealed an immutable generation yet.
+        // An older generation's blocked bulk writer must not suppress this
+        // separately owned successor's real capture and parse observations.
+        let mut capture = attempt(CodeIndexPresealWorkPhaseV1::Capture, 4, 7, 2);
+        capture.latest_generation_id = Some("generation.v1.first".to_owned());
+        let mut old_text = progress(40, Some(CodeIndexBuildBlockedReasonV1::ResidentMemory));
+        old_text.phase = CodeIndexBuildPhaseV1::BulkCommit;
+        capture.progress = Some(old_text);
+        assert_eq!(super::FirstGenerationStall::of(Ok(&capture)), None);
+
+        let mut parsed = capture.clone();
+        parsed.preseal_attempt =
+            attempt(CodeIndexPresealWorkPhaseV1::ParseEvidence, 5, 1, 2).preseal_attempt;
+        let (result, reads) = hold_over(
+            vec![
+                status(timed_out(), warming(capture)),
+                status(timed_out(), warming(parsed)),
+                ready_status(),
+            ],
+            Duration::ZERO,
+        )
+        .await;
+        assert!(
+            result.is_ok(),
+            "old blocked bulk commits must not refuse advancing successor work: {result:?}"
+        );
+        assert_eq!(reads, 3, "only a real ready receipt ends the wait");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn blocked_retained_bulk_commit_does_not_hide_a_frozen_successor() {
+        let mut capture = attempt(CodeIndexPresealWorkPhaseV1::Capture, 4, 7, 2);
+        capture.latest_generation_id = Some("generation.v1.first".to_owned());
+        let mut old_text = progress(40, Some(CodeIndexBuildBlockedReasonV1::ResidentMemory));
+        old_text.phase = CodeIndexBuildPhaseV1::BulkCommit;
+        capture.progress = Some(old_text);
+        let (result, reads) = hold_over(
+            vec![
+                status(timed_out(), warming(capture.clone())),
+                status(timed_out(), warming(capture)),
+                ready_status(),
+            ],
+            Duration::ZERO,
+        )
+        .await;
+        assert_eq!(reads, 2, "neither retained text nor new capture advanced");
+        let (code, message) = refusal(result);
+        assert_eq!(code, CODE_INDEX_READINESS_WAIT_TIMED_OUT);
+        assert!(
+            message.contains("no observed capture, parse, text, or native graph work"),
+            "{message}"
+        );
     }
 
     /// A stall shorter than the window is ridden out: the window restarts
