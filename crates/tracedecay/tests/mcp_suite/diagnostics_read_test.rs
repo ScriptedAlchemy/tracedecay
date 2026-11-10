@@ -18,9 +18,6 @@ use crate::support::{
     production_composition_fixture,
 };
 
-#[cfg(unix)]
-mod typescript_project;
-
 const JSON_RPC_ID_ONE_DIGEST: &str = "6b86b273ff34fce19d6b804eff5a3f57";
 const ABSENT_PRODUCER_CODE: &str = "application.diagnostics.unsupported";
 const ABSENT_PRODUCER_MESSAGE: &str = "No diagnostic producer is configured for this scope: no tsconfig.json was found under the project root, so no compiler runs automatically. Run the project's own build or type check and publish its output with tracedecay_diagnose (`cargo_output`), then read again.";
@@ -104,7 +101,7 @@ async fn diagnostics_read_names_a_missing_producer_and_rejects_a_bad_scope() {
 #[cfg(unix)]
 #[tokio::test]
 async fn typescript_project_publishes_diagnostics_from_its_own_compiler() {
-    use crate::diagnostics_read_test::typescript_project::{
+    use crate::common::typescript_project::{
         TYPESCRIPT_FIXTURE_TSC_INVOCATIONS, TypeScriptFixtureCompiler,
         is_typescript_fixture_configuration_query, typescript_fixture_build_info,
         write_typescript_diagnostics_fixture,
@@ -190,7 +187,7 @@ async fn typescript_project_publishes_diagnostics_from_its_own_compiler() {
 #[cfg(unix)]
 #[tokio::test]
 async fn moved_source_proof_reads_the_publication_as_stale_until_renewed() {
-    use crate::diagnostics_read_test::typescript_project::{
+    use crate::common::typescript_project::{
         TypeScriptFixtureCompiler, write_typescript_diagnostics_fixture,
     };
     use crate::support::production_composition_fixture_with_sources;
@@ -273,7 +270,7 @@ async fn moved_source_proof_reads_the_publication_as_stale_until_renewed() {
 #[cfg(unix)]
 #[tokio::test]
 async fn unresolvable_code_index_identity_reads_unavailable() {
-    use crate::diagnostics_read_test::typescript_project::{
+    use crate::common::typescript_project::{
         TypeScriptFixtureCompiler, write_typescript_diagnostics_fixture,
     };
     use crate::support::production_composition_fixture_with_sources;
@@ -314,7 +311,7 @@ async fn unresolvable_code_index_identity_reads_unavailable() {
 #[cfg(unix)]
 #[tokio::test]
 async fn typescript_project_without_a_compiler_names_the_install_command() {
-    use crate::diagnostics_read_test::typescript_project::{
+    use crate::common::typescript_project::{
         TypeScriptFixtureCompiler, write_typescript_diagnostics_fixture,
     };
     use crate::support::production_composition_fixture_with_sources;
@@ -359,7 +356,7 @@ async fn typescript_project_without_a_compiler_names_the_install_command() {
 #[cfg(unix)]
 #[tokio::test]
 async fn typescript_monorepo_checks_each_package_tsconfig() {
-    use crate::diagnostics_read_test::typescript_project::{
+    use crate::common::typescript_project::{
         TYPESCRIPT_FIXTURE_TSC_INVOCATIONS, TYPESCRIPT_MONOREPO_APP_FILE,
         TYPESCRIPT_MONOREPO_UNOWNED_FILE, TypeScriptFixtureCompiler,
         is_typescript_fixture_configuration_query, typescript_fixture_build_info,
@@ -457,7 +454,7 @@ async fn typescript_monorepo_checks_each_package_tsconfig() {
 #[cfg(unix)]
 #[tokio::test]
 async fn typescript_monorepo_without_install_names_the_workspace_install() {
-    use crate::diagnostics_read_test::typescript_project::{
+    use crate::common::typescript_project::{
         TYPESCRIPT_MONOREPO_APP_FILE, TypeScriptFixtureCompiler,
         write_typescript_monorepo_diagnostics_fixture,
     };
@@ -500,7 +497,7 @@ async fn typescript_monorepo_without_install_names_the_workspace_install() {
 #[cfg(unix)]
 #[tokio::test]
 async fn typescript_file_no_tsconfig_owns_names_the_searched_paths() {
-    use crate::diagnostics_read_test::typescript_project::{
+    use crate::common::typescript_project::{
         TYPESCRIPT_MONOREPO_UNOWNED_FILE, TypeScriptFixtureCompiler,
         write_typescript_monorepo_diagnostics_fixture,
     };
@@ -557,7 +554,7 @@ async fn typescript_file_no_tsconfig_owns_names_the_searched_paths() {
 #[cfg(unix)]
 #[tokio::test]
 async fn typescript_producer_still_running_is_pending_with_typed_detail() {
-    use crate::diagnostics_read_test::typescript_project::{
+    use crate::common::typescript_project::{
         TYPESCRIPT_FIXTURE_TSC_INVOCATIONS, TYPESCRIPT_FIXTURE_TSC_RELEASE,
         TypeScriptFixtureCompiler, typescript_fixture_build_info,
         write_typescript_diagnostics_fixture,

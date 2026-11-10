@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::{Duration, Instant};
 
-use crate::common::fixture::{
+use crate::common::typescript_project::{
     TYPESCRIPT_FIXTURE_TSC_INVOCATIONS, TYPESCRIPT_FIXTURE_TSC_RELEASE,
     TYPESCRIPT_MONOREPO_APP_FILE, TypeScriptFixtureCompiler, typescript_fixture_build_info,
     write_typescript_diagnostics_fixture, write_typescript_monorepo_diagnostics_fixture,
