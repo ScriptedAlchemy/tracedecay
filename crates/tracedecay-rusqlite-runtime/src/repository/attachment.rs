@@ -597,9 +597,7 @@ impl RepositoryRuntimePhysicalAttachment {
                 );
             }
             let quiescent = state.readers.as_ref().is_some_and(ReaderPool::is_quiescent);
-            if quiescent
-                && let Some(readers) = state.readers.take()
-            {
+            if quiescent && let Some(readers) = state.readers.take() {
                 match readers.try_into_shutdown() {
                     Ok(readers) => {
                         state.workers_closing = true;
