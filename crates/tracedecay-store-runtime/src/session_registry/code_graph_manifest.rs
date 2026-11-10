@@ -512,6 +512,10 @@ fn with_verified_segments<T>(
     if let Some(interruption) = interruption {
         return Err(interruption);
     }
+    // A graph projection may keep computing or spilling rows after its final
+    // segment read. Its last successful I/O probe is not publication authority.
+    // Refuse a result that finished after the caller's deadline.
+    (check)()?;
     let error = match built {
         Ok(built) => return Ok(built),
         Err(SealedCodeGraphRowsError::Source(error)) => {
@@ -3010,6 +3014,64 @@ mod tests {
         assert_eq!(result.unwrap_err(), GraphDbError::Cancelled);
         assert_eq!(checks.load(Ordering::SeqCst), 3);
         assert_eq!(SEGMENT_OPENS.with(|opens| opens.get()), 1);
+    }
+
+    #[test]
+    fn graph_segment_pass_rechecks_budget_after_completed_projection() {
+        let temporary = TempDir::new().unwrap();
+        let bytes = b"real sealed graph page before final projection work";
+        let digest = ManifestDigest::from_sha256_bytes(&Sha256::digest(bytes)).unwrap();
+        let path = temporary.path().join(format!(
+            "segment-{}.json",
+            sha256_hex_suffix(digest.as_str()).unwrap()
+        ));
+        std::fs::write(&path, bytes).unwrap();
+        let routes = SealRoutes {
+            seal_paths: vec![path],
+            segment_roots: vec![temporary.path().to_path_buf()],
+        };
+        let request = SealedGenerationSegmentReadV1::Whole {
+            digest: &digest,
+            size_bytes: bytes.len() as u64,
+        };
+
+        for interruption in [GraphDbError::Cancelled, GraphDbError::DeadlineExceeded] {
+            let projection_finished = AtomicBool::new(false);
+            let checks = AtomicUsize::new(0);
+            SEGMENT_OPENS.with(|opens| opens.set(0));
+            let result = with_verified_segments(
+                &digest,
+                &routes,
+                &|| {
+                    checks.fetch_add(1, Ordering::SeqCst);
+                    if projection_finished.load(Ordering::SeqCst) {
+                        Err(interruption.clone())
+                    } else {
+                        Ok(())
+                    }
+                },
+                |read| {
+                    let mut buffer = Vec::new();
+                    read(request, &mut buffer)?;
+                    assert_eq!(buffer, bytes, "the builder must read real nonempty bytes");
+                    // Model work after the last segment I/O, including a final
+                    // graph-row spill that can outlive the publication budget.
+                    projection_finished.store(true, Ordering::SeqCst);
+                    Ok(())
+                },
+            );
+            assert_eq!(result.unwrap_err(), interruption);
+            assert_eq!(
+                checks.load(Ordering::SeqCst),
+                3,
+                "pre-read, post-read and post-projection probes must execute"
+            );
+            assert_eq!(
+                SEGMENT_OPENS.with(|opens| opens.get()),
+                1,
+                "a completed page read must not be repeated for the last probe"
+            );
+        }
     }
 
     #[test]
