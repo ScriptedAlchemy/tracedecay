@@ -2903,7 +2903,10 @@ mod tests {
             ));
             std::fs::write(&path, &bytes).unwrap();
             let (_, recovered) = verify_checked_seal(&path, &digest, &|| Ok(())).unwrap();
-            assert_eq!(recovered.as_deref(), partitioned.then_some(bytes.as_slice()));
+            assert_eq!(
+                recovered.as_deref(),
+                partitioned.then_some(bytes.as_slice())
+            );
         }
     }
 
