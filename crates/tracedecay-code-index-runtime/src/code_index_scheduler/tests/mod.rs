@@ -433,10 +433,8 @@ fn retention_generations(
 /// not a legitimate publisher transition.
 fn atomic_replace_fixture_pointer(pointer_path: &Path, bytes: &[u8]) {
     let parent = pointer_path.parent().expect("pointer parent directory");
-    let mut staged = tempfile::NamedTempFile::new_in(parent)
-        .expect("stage pointer replacement");
-    std::io::Write::write_all(staged.as_file_mut(), bytes)
-        .expect("write staged pointer bytes");
+    let mut staged = tempfile::NamedTempFile::new_in(parent).expect("stage pointer replacement");
+    std::io::Write::write_all(staged.as_file_mut(), bytes).expect("write staged pointer bytes");
     staged.as_file().sync_all().expect("sync staged pointer");
     staged
         .persist(pointer_path)

@@ -165,7 +165,10 @@ fn pointer_identity_witness_retries_atomic_rotation() {
     fs::write(&pointer, b"an in-place mutation with different length")
         .expect("mutate original inode");
     let changed = pinned.metadata().expect("metadata after in-place mutation");
-    assert_eq!((refreshed.dev(), refreshed.ino()), (changed.dev(), changed.ino()));
+    assert_eq!(
+        (refreshed.dev(), refreshed.ino()),
+        (changed.dev(), changed.ino())
+    );
     assert_ne!(refreshed.len(), changed.len());
     assert!(matches!(
         witness(&pointer, &restored, &refreshed, &changed),

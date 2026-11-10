@@ -53,10 +53,7 @@ pub(super) fn read_generation_metadata(
     // alias to another generation. This metadata witness adds no pathname open.
     let named_before = path.symlink_metadata().map_err(deferred_if_absent)?;
     if !named_before.file_type().is_file() {
-        let message = format!(
-            "generation file '{}' is not a regular file",
-            path.display()
-        );
+        let message = format!("generation file '{}' is not a regular file", path.display());
         // A substituted link is an authority violation. Other non-files
         // remain storage-shape failures, not missing publisher entries.
         return Err(if named_before.file_type().is_symlink() {

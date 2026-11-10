@@ -2460,12 +2460,7 @@ impl DaemonCodeIndexPublicationStoreV1 {
             .read_to_end(&mut current)
             .map_err(Self::map_pointer_io)?;
         let opened_after = file.metadata().map_err(Self::map_pointer_io)?;
-        Self::require_pointer_identity_witness(
-            path,
-            named_before,
-            &opened_before,
-            &opened_after,
-        )?;
+        Self::require_pointer_identity_witness(path, named_before, &opened_before, &opened_after)?;
         if current != bytes {
             return Err(Self::corruption(
                 "active code-generation pointer bytes changed during cold validation",

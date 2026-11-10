@@ -3213,8 +3213,8 @@ fn publication_pointer_memo_follows_bytes_when_size_and_mtime_stay_put() {
     // A legitimate publisher swaps a fresh inode, even when the new pointer
     // has exactly the old length and mtime. A same-inode overwrite is denied
     // separately below as corruption, not treated as a valid publication.
-    let mut staged = tempfile::NamedTempFile::new_in(store.path())
-        .expect("stage next publication pointer");
+    let mut staged =
+        tempfile::NamedTempFile::new_in(store.path()).expect("stage next publication pointer");
     std::io::Write::write_all(staged.as_file_mut(), &second_bytes)
         .expect("write next pointer bytes");
     staged
@@ -3222,7 +3222,9 @@ fn publication_pointer_memo_follows_bytes_when_size_and_mtime_stay_put() {
         .set_modified(mtime)
         .expect("preserve prior pointer mtime");
     staged.as_file().sync_all().expect("sync next pointer");
-    staged.persist(&pointer_path).expect("atomic pointer replacement");
+    staged
+        .persist(&pointer_path)
+        .expect("atomic pointer replacement");
     let replaced = std::fs::metadata(&pointer_path).expect("replaced metadata");
     assert_eq!(replaced.len(), first_bytes.len() as u64);
     assert_eq!(replaced.modified().ok(), Some(mtime));
@@ -3254,7 +3256,11 @@ fn pointer_memo_refuses_in_place_rewrite_even_when_size_and_mtime_match() {
     let second = same_length_publication_pointer("generation.inplace-b", 0x42);
     let first_bytes = serde_json::to_vec(&first).expect("encode original pointer");
     let second_bytes = serde_json::to_vec(&second).expect("encode mutated pointer");
-    assert_eq!(first_bytes.len(), second_bytes.len(), "size cannot reveal mutation");
+    assert_eq!(
+        first_bytes.len(),
+        second_bytes.len(),
+        "size cannot reveal mutation"
+    );
 
     std::fs::write(&pointer_path, &first_bytes).expect("seed original pointer");
     assert_eq!(
@@ -3279,10 +3285,13 @@ fn pointer_memo_refuses_in_place_rewrite_even_when_size_and_mtime_match() {
     assert_eq!(before.len(), after.len());
     assert_eq!(before.modified().ok(), after.modified().ok());
 
-    assert!(matches!(
-        publication.read_publication_pointer(),
-        Err(CodeIndexPublicationStoreErrorV1::CorruptionResetRequired(_))
-    ), "a pinned pointer must refuse an in-place rewrite even when stat hints match");
+    assert!(
+        matches!(
+            publication.read_publication_pointer(),
+            Err(CodeIndexPublicationStoreErrorV1::CorruptionResetRequired(_))
+        ),
+        "a pinned pointer must refuse an in-place rewrite even when stat hints match"
+    );
     assert_eq!(
         std::fs::read(&pointer_path).expect("inspect refused pointer"),
         second_bytes,
