@@ -829,11 +829,18 @@ describe('LoomPage', () => {
   it('opens the thread a Delivery link names by its bare session id', async () => {
     const temporal = structuredClone(TEMPORAL);
     temporal.payload.sessions[0]!.session_id = 'session.alpha.1';
-    renderLoom({ ...HAPPY, '/api/loom/temporal': { status: 200, body: temporal } }, '/loom?loomSession=session.alpha.1');
+    renderLoom({ ...HAPPY, '/api/loom/temporal': { status: 200, body: temporal } }, '/loom?loomBareSession=session.alpha.1');
     const thread = await screen.findByRole('region', { name: 'Loaded execution' });
     expect(thread.textContent).toContain('Deliver Git primitive runtime');
     expect(screen.queryByText(/outside this loaded page/)).toBeNull();
-    expect(screen.getByTestId('loom-url').textContent).toBe('?loomSession=session.alpha.1');
+    expect(screen.getByTestId('loom-url').textContent).toBe('?loomBareSession=session.alpha.1');
+  });
+
+  it('does not open a matching thread through the removed raw lane parameter', async () => {
+    renderLoom(HAPPY, '/loom?loomSession=sess-open');
+    await screen.findByRole('button', { name: 'Select session Deliver Git primitive runtime' });
+    expect(screen.queryByRole('region', { name: 'Loaded execution' })).toBeNull();
+    expect(screen.queryByText(/outside this loaded page/)).toBeNull();
   });
 
   it('keeps a tuple-shaped bare ID on its actual session instead of another provider lane', async () => {
@@ -854,14 +861,14 @@ describe('LoomPage', () => {
   it('opens no thread for a bare id two providers answer to and says so', async () => {
     const temporal = structuredClone(TEMPORAL);
     temporal.payload.sessions[1]!.session_id = 'sess-open';
-    renderLoom({ ...HAPPY, '/api/loom/temporal': { status: 200, body: temporal } }, '/loom?loomSession=sess-open');
+    renderLoom({ ...HAPPY, '/api/loom/temporal': { status: 200, body: temporal } }, '/loom?loomBareSession=sess-open');
     expect(await screen.findByText(/names 2 sessions on this loaded page/)).toBeTruthy();
     expect(screen.queryByRole('region', { name: 'Loaded execution' })).toBeNull();
     expect(screen.queryByText(/outside this loaded page/)).toBeNull();
   });
 
   it('offers the session\'s transcript and delegation when a link names one outside the loaded page', async () => {
-    renderLoom(HAPPY, '/loom?loomSession=session.old');
+    renderLoom(HAPPY, '/loom?loomBareSession=session.old');
     expect(await screen.findByText(/outside this loaded page/)).toBeTruthy();
     const links = screen.getByRole('navigation', { name: 'Open this session in' });
     const href = (name: RegExp) => {

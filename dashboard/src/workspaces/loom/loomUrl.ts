@@ -44,7 +44,7 @@ type LoomSessionParam =
 
 export function parseLoomSession(
   raw: string | null,
-  bareId: string | null = null,
+  bareId: string | null,
 ): LoomSessionParam | null {
   // A provider-unknown session ID may be serialized JSON shaped like a lane.
   // A dedicated URL field preserves that identity without guessing a provider.
@@ -53,7 +53,9 @@ export function parseLoomSession(
   }
   if (raw == null || raw === '') return null;
   const tuple = parseTuple(raw);
-  if (tuple === null) return { kind: 'bare_id', selection: { provider: null, sessionId: raw } };
+  // loomSession names only a qualified lane. Bare identities must use their
+  // own field; malformed or obsolete lane values never become bare IDs.
+  if (tuple === null) return null;
   const [provider, sessionId] = tuple;
   return {
     kind: 'lane',
