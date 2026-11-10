@@ -498,3 +498,64 @@ fn open_lock_file(path: &Path) -> Result<File, CodeGenerationRetentionErrorV1> {
         .open(path)
         .map_err(super::deferred_if_absent)
 }
+
+#[cfg(all(test, unix))]
+mod cached_read_lock_tests {
+    use super::*;
+
+    #[test]
+    fn cached_reader_keeps_exclusive_fencing_and_refuses_replaced_lock_file() {
+        let store = tempfile::tempdir().expect("isolated generation-store root");
+        let cached = CachedCodeGenerationStoreReadLockV1::new(store.path());
+
+        let read = cached
+            .try_acquire()
+            .expect("first shared kernel lock")
+            .expect("uncontended shared lease");
+        assert!(
+            try_acquire_code_generation_store_lock(store.path())
+                .expect("probe a real exclusive kernel lock")
+                .is_none(),
+            "a writer must not enter a protected historical page read"
+        );
+        assert!(
+            cached.try_acquire().expect("second in-process probe").is_none(),
+            "the single descriptor must not be concurrently unlocked by another reader"
+        );
+        drop(read);
+
+        let writer = try_acquire_code_generation_store_lock(store.path())
+            .expect("exclusive acquisition after reader release")
+            .expect("read guard must explicitly unlock");
+        assert!(
+            cached.try_acquire().expect("shared probe under writer").is_none(),
+            "a real exclusive lock must prevent a cached shared lease"
+        );
+        drop(writer);
+        drop(
+            cached
+                .try_acquire()
+                .expect("reader recovers from write lock")
+                .expect("shared lease after exclusive release"),
+        );
+
+        let path = store.path().join(STORE_LOCK_FILE);
+        let original = std::fs::metadata(&path).expect("cached lock inode");
+        std::fs::rename(&path, store.path().join("retired-lock-inode"))
+            .expect("replace the lock pathname without closing the original inode");
+        std::fs::File::create(&path).expect("different lock file at the same pathname");
+        let replacement = std::fs::metadata(&path).expect("new lock inode");
+        assert_ne!(
+            (original.dev(), original.ino()),
+            (replacement.dev(), replacement.ino()),
+            "replacement must be a different real inode"
+        );
+        assert!(
+            matches!(
+                cached.try_acquire(),
+                Err(CodeGenerationRetentionErrorV1::UnsafeState(_))
+            ),
+            "a cached descriptor must not lock a retired inode to authorize a new scope"
+        );
+    }
+}
