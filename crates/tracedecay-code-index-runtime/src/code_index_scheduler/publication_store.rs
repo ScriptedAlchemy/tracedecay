@@ -2511,7 +2511,7 @@ impl DaemonCodeIndexPublicationStoreV1 {
         Ok(())
     }
 
-    fn remember_publication_pointer(    fn remember_publication_pointer(
+    fn remember_publication_pointer(
         &self,
         pointer: &DurablePublicationPointerV1,
         bytes: &[u8],
