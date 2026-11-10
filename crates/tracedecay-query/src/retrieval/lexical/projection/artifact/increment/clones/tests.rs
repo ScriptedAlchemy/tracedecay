@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -6,7 +7,10 @@ use tempfile::{TempDir, tempdir};
 use tracedecay_code_index::production::CodeIndexExecutionControlV1;
 
 use super::super::CARRY_SCAN_ROWS;
-use super::{ClonePostingKey, CodeLexicalArtifactErrorV1, ShiftV1, shift_clone_posting_keys};
+use super::{
+    ClonePostingKey, CodeLexicalArtifactErrorV1, ShiftV1, renumber_clone_payloads,
+    shift_clone_posting_keys,
+};
 
 struct ActiveControl;
 
@@ -271,6 +275,170 @@ fn clone_remap_stages_colliding_keys_and_rolls_back_interrupted_windows() {
     transaction.commit().unwrap();
 }
 
+
+fn clone_payload_fixture() -> (TempDir, Connection, BTreeMap<i64, Vec<u8>>) {
+    let root = tempdir().unwrap();
+    let mut connection = open_fixture(root.path());
+    connection
+        .execute_batch(
+            "CREATE TABLE clone_body_payloads(
+                 ordinal INTEGER PRIMARY KEY,
+                 payload_digest BLOB NOT NULL,
+                 payload BLOB NOT NULL
+             );
+             CREATE TABLE clone_occurrences(
+                 ordinal INTEGER PRIMARY KEY,
+                 payload_ordinal INTEGER NOT NULL
+             );
+             CREATE TABLE independent_payload(value TEXT NOT NULL);
+             INSERT INTO independent_payload VALUES ('survivor');",
+        )
+        .unwrap();
+    let transaction = connection.transaction().unwrap();
+    let mut parent = BTreeMap::new();
+    {
+        let mut payload_insert = transaction
+            .prepare(
+                "INSERT INTO clone_body_payloads
+                 (ordinal, payload_digest, payload) VALUES (?1, ?2, ?3)",
+            )
+            .unwrap();
+        let mut occurrence_insert = transaction
+            .prepare(
+                "INSERT INTO clone_occurrences(ordinal, payload_ordinal) VALUES (?1, ?2)",
+            )
+            .unwrap();
+        for ordinal in 1_i64..=16_000 {
+            let digest = ordinal.to_be_bytes().repeat(4);
+            let payload = ordinal.to_be_bytes().repeat(32);
+            payload_insert
+                .execute(params![ordinal, digest.as_slice(), payload.as_slice()])
+                .unwrap();
+            // First use is deliberately reverse-ordered relative to the
+            // existing payload keys, so every old ordinal must be rekeyed.
+            occurrence_insert
+                .execute(params![ordinal, 16_001 - ordinal])
+                .unwrap();
+            parent.insert(ordinal, digest);
+        }
+    }
+    transaction.commit().unwrap();
+    (root, connection, parent)
+}
+
+fn payload_rows(connection: &Connection) -> Vec<(i64, Vec<u8>, Vec<u8>)> {
+    let mut query = connection
+        .prepare(
+            "SELECT ordinal, payload_digest, payload
+             FROM clone_body_payloads ORDER BY ordinal",
+        )
+        .unwrap();
+    query
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+        .unwrap()
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .unwrap()
+}
+
+fn payload_occurrences(connection: &Connection) -> Vec<(i64, i64)> {
+    let mut query = connection
+        .prepare("SELECT ordinal, payload_ordinal FROM clone_occurrences ORDER BY ordinal")
+        .unwrap();
+    query
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+        .unwrap()
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .unwrap()
+}
+
+#[test]
+fn clone_payload_renumber_preserves_durable_rows_and_interrupts_restoration() {
+    let (root, mut connection, parent) = clone_payload_fixture();
+    let original = payload_rows(&connection);
+    let original_occurrences = payload_occurrences(&connection);
+    assert_eq!(original.len(), 16_000);
+    assert_eq!(original_occurrences.len(), 16_000);
+    let mut expected: Vec<_> = original
+        .iter()
+        .map(|(ordinal, digest, payload)| {
+            (16_001 - ordinal, digest.clone(), payload.clone())
+        })
+        .collect();
+    expected.sort_by_key(|row| row.0);
+    assert_ne!(expected, original);
+    let empty = BTreeMap::<i64, ([u8; 32], &[u8])>::new();
+
+    // A direct positive-key renumber would collide with an occupied key.
+    {
+        let transaction = connection.transaction().unwrap();
+        let error = transaction
+            .execute(
+                "UPDATE clone_body_payloads SET ordinal = 16001 - ordinal",
+                [],
+            )
+            .unwrap_err();
+        assert_eq!(
+            error.sqlite_error_code(),
+            Some(ErrorCode::ConstraintViolation)
+        );
+        transaction.rollback().unwrap();
+    }
+
+    // The operation checkpoints during both the scan and each old-key write.
+    // Stop after staging all 16,000 keys and restoring one bounded window.
+    {
+        let transaction = connection.transaction().unwrap();
+        let stop = CancelAfter {
+            checks: AtomicUsize::new(0),
+            limit: 16_000 * 2 + CARRY_SCAN_ROWS + 8,
+        };
+        let error =
+            renumber_clone_payloads(&transaction, &parent, &empty, &stop).unwrap_err();
+        assert!(matches!(error, CodeLexicalArtifactErrorV1::Interrupted(_)));
+        let negatives: i64 = transaction
+            .query_row(
+                "SELECT COUNT(*) FROM clone_body_payloads WHERE ordinal < 0",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(
+            negatives > 0 && negatives < 16_000,
+            "interruption must happen after partial restoration: {negatives}"
+        );
+        integrity(&transaction, "main");
+        transaction.rollback().unwrap();
+    }
+    drop(connection);
+    connection = open_fixture(root.path());
+    assert_eq!(payload_rows(&connection), original);
+    assert_eq!(payload_occurrences(&connection), original_occurrences);
+    integrity(&connection, "main");
+
+    let transaction = connection.transaction().unwrap();
+    renumber_clone_payloads(&transaction, &parent, &empty, &ActiveControl).unwrap();
+    assert_eq!(payload_rows(&transaction), expected);
+    assert_eq!(
+        payload_occurrences(&transaction),
+        (1_i64..=16_000).map(|ordinal| (ordinal, ordinal)).collect::<Vec<_>>()
+    );
+    integrity(&transaction, "main");
+    transaction.commit().unwrap();
+    drop(connection);
+    let reopened = open_fixture(root.path());
+    assert_eq!(payload_rows(&reopened), expected);
+    assert_eq!(
+        payload_occurrences(&reopened),
+        (1_i64..=16_000).map(|ordinal| (ordinal, ordinal)).collect::<Vec<_>>()
+    );
+    let survivor: String = reopened
+        .query_row("SELECT value FROM independent_payload", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(survivor, "survivor");
+    integrity(&reopened, "main");
+    integrity(&reopened, "temp");
+}
+
 #[cfg(target_os = "linux")]
 mod physical_spill {
     use std::io;
@@ -278,8 +446,11 @@ mod physical_spill {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
+    use rusqlite::params;
+
     use super::{
-        ActiveControl, ShiftV1, expected_postings, fixture, postings, shift_clone_posting_keys,
+        ActiveControl, ShiftV1, clone_payload_fixture, expected_postings, fixture,
+        payload_rows, postings, renumber_clone_payloads, shift_clone_posting_keys,
     };
 
     fn spill_bytes() -> io::Result<u64> {
@@ -299,6 +470,97 @@ mod physical_spill {
             }
         }
         Ok(bytes)
+    }
+
+
+    #[test]
+    fn clone_payload_renumber_has_no_unlinked_statement_spill() {
+        const CHILD: &str = "TRACEDECAY_PAYLOAD_SPILL_TEST_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let output = Command::new(std::env::current_exe().unwrap())
+                .arg("clone_payload_renumber_has_no_unlinked_statement_spill")
+                .arg("--test-threads=1")
+                .arg("--nocapture")
+                .env(CHILD, "1")
+                .output()
+                .unwrap();
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert!(output.status.success(), "{stdout}\n{stderr}");
+            assert!(stdout.contains("1 passed"), "child test was vacuous: {stdout}");
+            return;
+        }
+
+        let (_root, mut connection, parent) = clone_payload_fixture();
+        let original = payload_rows(&connection);
+        let peak = Arc::new(AtomicU64::new(0));
+        let unavailable = Arc::new(AtomicBool::new(false));
+        let observed = Arc::clone(&peak);
+        let unavailable_probe = Arc::clone(&unavailable);
+        connection.progress_handler(
+            1_024,
+            Some(move || match spill_bytes() {
+                Ok(bytes) => {
+                    observed.fetch_max(bytes, Ordering::Relaxed);
+                    false
+                }
+                Err(_) => {
+                    unavailable_probe.store(true, Ordering::Relaxed);
+                    true
+                }
+            }),
+        );
+
+        {
+            let transaction = connection.transaction().unwrap();
+            for ordinal in 1_i64..=16_000 {
+                transaction
+                    .execute(
+                        "UPDATE clone_body_payloads SET ordinal = ?2 WHERE ordinal = ?1",
+                        params![ordinal, -(16_001 - ordinal) - 1],
+                    )
+                    .unwrap();
+            }
+            // Old bulk restoration, with the actual production key pattern.
+            transaction
+                .execute(
+                    "UPDATE clone_body_payloads SET ordinal = -ordinal - 1 WHERE ordinal < 0",
+                    [],
+                )
+                .unwrap();
+            transaction.rollback().unwrap();
+        }
+        assert!(!unavailable.load(Ordering::Relaxed));
+        assert!(
+            peak.load(Ordering::Relaxed) > 0,
+            "bulk payload restoration must produce an observable spill"
+        );
+        assert_eq!(spill_bytes().unwrap(), 0);
+        assert_eq!(
+            connection
+                .pragma_query_value(Some("temp"), "page_count", |row| row.get::<_, i64>(0))
+                .unwrap(),
+            0,
+            "TEMP pager counts miss the transient statement-local spill"
+        );
+        assert_eq!(payload_rows(&connection), original);
+
+        peak.store(0, Ordering::Relaxed);
+        let empty = std::collections::BTreeMap::<i64, ([u8; 32], &[u8])>::new();
+        {
+            let transaction = connection.transaction().unwrap();
+            renumber_clone_payloads(&transaction, &parent, &empty, &ActiveControl).unwrap();
+            transaction.commit().unwrap();
+        }
+        connection.progress_handler(0, None::<fn() -> bool>);
+        assert!(!unavailable.load(Ordering::Relaxed));
+        assert_eq!(
+            peak.load(Ordering::Relaxed),
+            0,
+            "bounded payload key restoration must not create a file spill"
+        );
+        assert_eq!(spill_bytes().unwrap(), 0);
+        assert_ne!(payload_rows(&connection), original);
     }
 
     #[test]

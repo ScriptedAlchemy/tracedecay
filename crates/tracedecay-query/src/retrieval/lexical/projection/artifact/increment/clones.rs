@@ -270,6 +270,49 @@ fn clone_range_image(
     shifted(start, growth_before)
 }
 
+/// Restore staged negative payload ordinals without the statement-local
+/// key index that a bulk INTEGER PRIMARY KEY UPDATE can create. Restored
+/// positive keys cannot re-enter the negative-key scan.
+fn restore_clone_payload_ordinals(
+    transaction: &Transaction<'_>,
+    control: &dyn CodeIndexExecutionControlV1,
+) -> Result<(), CodeLexicalArtifactErrorV1> {
+    let mut update = transaction
+        .prepare_cached("UPDATE clone_body_payloads SET ordinal = ?2 WHERE ordinal = ?1")
+        .map_err(sqlite_error)?;
+    let mut last: Option<i64> = None;
+    loop {
+        checkpoint(control)?;
+        let window: Vec<i64> = scan_window(
+            transaction,
+            "SELECT ordinal FROM clone_body_payloads WHERE ordinal < 0 ORDER BY ordinal LIMIT ?1",
+            "SELECT ordinal FROM clone_body_payloads WHERE ordinal < 0 AND ordinal > ?1 ORDER BY ordinal LIMIT ?2",
+            &last,
+            |ordinal| vec![Value::Integer(*ordinal)],
+            |row| row.get(0),
+        )?;
+        let Some(final_ordinal) = window.last() else {
+            break;
+        };
+        last = Some(*final_ordinal);
+        for ordinal in window {
+            checkpoint(control)?;
+            // Reversing -number-1 as -(ordinal+1) also handles i64::MIN.
+            let restored = -(ordinal + 1);
+            if update
+                .execute(params![ordinal, restored])
+                .map_err(sqlite_error)?
+                != 1
+            {
+                return Err(CodeLexicalArtifactErrorV1::Corrupt(
+                    "staged clone payload changed during key restoration".to_owned(),
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Number payloads by first use over the occurrence sequence, retire the
 /// ones no occurrence uses, and point every occurrence at its number.
 fn renumber_clone_payloads(
@@ -339,6 +382,7 @@ fn renumber_clone_payloads(
         }
     }
     for (ordinal, digest) in parent_payloads {
+        checkpoint(control)?;
         match numbered.get(digest) {
             None => {
                 transaction
@@ -359,12 +403,7 @@ fn renumber_clone_payloads(
             Some(_) => {}
         }
     }
-    transaction
-        .execute(
-            "UPDATE clone_body_payloads SET ordinal = -ordinal - 1 WHERE ordinal < 0",
-            [],
-        )
-        .map_err(sqlite_error)?;
+    restore_clone_payload_ordinals(transaction, control)?;
     {
         let mut insert = transaction
             .prepare_cached(
