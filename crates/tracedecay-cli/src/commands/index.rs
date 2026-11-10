@@ -816,13 +816,13 @@ impl FirstGenerationWorkMarker {
                 if owner != prior_owner {
                     return Some(completed.iter().any(|count| *count > 0));
                 }
-                Some(
-                    completed != prior_completed
-                        && completed
-                            .iter()
-                            .zip(prior_completed)
-                            .all(|(now, prior)| now >= prior),
-                )
+                // Counter rollback within one native attempt is not work.
+                // Preserve the last coherent watermark so later replay cannot
+                // be counted as newly encoded rows or new durable receipts.
+                if completed.iter().zip(prior_completed).any(|(now, prior)| now < prior) {
+                    return None;
+                }
+                Some(completed != prior_completed)
             }
             (
                 Self::CommittedText {
@@ -2353,6 +2353,51 @@ mod daemon_precondition_tests {
         worktree.native_graph_progress = Some(graph);
         let stale = super::FirstGenerationWorkMarker::of(Some(&worktree));
         assert!(window.observe(stale, now + Duration::from_secs(359)));
+    }
+
+    #[test]
+    fn rolled_back_native_row_counts_cannot_be_replayed_as_new_work() {
+        let now = Instant::now();
+        let mut worktree = native_graph_without_writes();
+        let graph = worktree.native_graph_progress.as_mut().unwrap();
+        graph.phase = Some(CodeIndexNativeGraphPhaseV1::CompactEncoding);
+        graph.total_entities = Some(1_000);
+        graph.total_relations = Some(100);
+        graph.encoded_entities = 100;
+        graph.encoded_relations = 10;
+        graph.last_progress_micros = Some(10);
+
+        let mut window = super::FirstGenerationProgressWindow::new(Duration::from_secs(120));
+        assert!(!window.observe(super::FirstGenerationWorkMarker::of(Some(&worktree)), now));
+
+        // A newer epoch with a regressed count must not replace the last
+        // accepted row watermark, even when the old count is replayed later.
+        let graph = worktree.native_graph_progress.as_mut().unwrap();
+        graph.progress_epoch += 1;
+        graph.encoded_entities = 99;
+        assert!(!window.observe(
+            super::FirstGenerationWorkMarker::of(Some(&worktree)),
+            now + Duration::from_secs(60),
+        ));
+        let graph = worktree.native_graph_progress.as_mut().unwrap();
+        graph.progress_epoch += 1;
+        graph.encoded_entities = 100;
+        assert!(
+            window.observe(
+                super::FirstGenerationWorkMarker::of(Some(&worktree)),
+                now + Duration::from_secs(120),
+            ),
+            "replaying already observed rows cannot renew the silence window",
+        );
+
+        // Real new accepted rows with a newer epoch still renew the wait.
+        let graph = worktree.native_graph_progress.as_mut().unwrap();
+        graph.progress_epoch += 1;
+        graph.encoded_entities = 101;
+        assert!(!window.observe(
+            super::FirstGenerationWorkMarker::of(Some(&worktree)),
+            now + Duration::from_secs(121),
+        ));
     }
 
     #[test]
