@@ -91,7 +91,7 @@ FAKE_TRACEDECAY = textwrap.dedent(
             reply(status, content_payload={"handle": "rh_status", "preview": "{..."}, structured=status)
         if tool == "tracedecay_search":
             args = json.loads(argv[argv.index("--args") + 1])
-            payload = {"results": []}
+            payload = {"code_generation": f"generation.{generation}", "results": []}
             if args["query"] in {"DaemonHandshake", "default_socket_path", "call_default_tool"}:
                 payload["results"].append({
                     "candidate": {"anchor_id": "code-symbol:node.fake"},
@@ -273,9 +273,20 @@ class BenchHotPathsTests(unittest.TestCase):
                 events.append("sync")
                 return module.Call(True, b"", b"", 0.5, 0.0, 0)
 
-            def ready(lane, previous_generation):
+            def ready(lane, previous_generation, verify_generation=None):
                 self.assertEqual((lane, previous_generation), ("edit_reconcile", "generation.7"))
+                self.assertIsNotNone(verify_generation)
                 events.append("ready")
+                run.status_payload = lambda: {
+                    "code_index_freshness": {
+                        "status": "current",
+                        "worktree": {
+                            "latest_generation_id": "generation.8",
+                            "code_graph_serving": {"state": "ready"},
+                        },
+                    }
+                }
+                self.assertTrue(verify_generation("generation.8"))
                 return {"generation_id": "generation.8"}
 
             run.client = sync
@@ -286,9 +297,10 @@ class BenchHotPathsTests(unittest.TestCase):
                 self.assertRegex(args["query"], r"^tracedecay_bench_hot_paths_edit_\d+$")
                 self.assertIn(args["query"], (self.repo / "src" / "lib.rs").read_text())
                 events.append("symbol_visible")
-                payload = {"structuredContent": {"results": [
-                    {"display": {"name": args["query"], "path": "src/lib.rs"}}
-                ]}}
+                payload = {"structuredContent": {
+                    "code_generation": "generation.8",
+                    "results": [{"display": {"name": args["query"], "path": "src/lib.rs"}}],
+                }}
                 return module.Call(True, json.dumps(payload).encode(), b"", 0.1, 0, 0)
 
             run.tool = verify_indexed_symbol
@@ -319,7 +331,7 @@ class BenchHotPathsTests(unittest.TestCase):
             ):
                 run.lane_edit_reconcile()
             self.assertEqual(
-                events, ["sampler_started", "edit_started", "sync", "ready", "sampler_stopped", "symbol_visible"]
+                events, ["sampler_started", "edit_started", "sync", "ready", "symbol_visible", "sampler_stopped"]
             )
             measured = next(data for lane, op, data in rows if (lane, op) == ("edit_reconcile", "edit_to_ready"))
             self.assertGreaterEqual(
@@ -375,6 +387,103 @@ class BenchHotPathsTests(unittest.TestCase):
                 result = run.wait_for_ready("edit_reconcile", "generation.8")
             self.assertEqual(result["generation_id"], "generation.9")
             self.assertEqual(result["status_polls"], 2)
+        finally:
+            sys.modules.pop(spec.name, None)
+
+    def test_edit_waits_for_its_own_served_generation_before_stopping_rss(self) -> None:
+        # A concurrent refresh can publish a ready generation before this
+        # edit's search becomes visible. Even a matching symbol hit is not
+        # proof if it was served by another (or unspecified) generation.
+        spec = importlib.util.spec_from_file_location("bench_hot_paths_generation", BENCH)
+        self.assertIsNotNone(spec)
+        self.assertIsNotNone(spec.loader)
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = module
+        try:
+            spec.loader.exec_module(module)
+            run = module.Run.__new__(module.Run)
+            run.repo = self.repo
+            run.index_timeout = 5
+            run.generation = "generation.7"
+            run.daemon_pid = lambda: 4321
+            events: list[str] = []
+            records: list[tuple[str, str, dict]] = []
+            run.record = lambda lane, op, **data: records.append((lane, op, data))
+            run.client = lambda argv: (
+                events.append("sync") or module.Call(True, b"", b"", 0.5, 0.0, 0)
+            )
+
+            def status(generation: str) -> dict:
+                return {"code_index_freshness": {
+                    "status": "current",
+                    "worktree": {
+                        "latest_generation_id": generation,
+                        "code_graph_serving": {"state": "ready"},
+                    },
+                }}
+
+            # Pre-edit baseline 7; three unrelated ready observations at 8;
+            # finally the edited graph at 9, with its post-search status fence.
+            responses = iter(map(status, [
+                "generation.7", "generation.8", "generation.8",
+                "generation.8", "generation.9", "generation.9",
+            ]))
+            run.status_payload = lambda: next(responses)
+            attempted: list[str] = []
+
+            def search(name: str, args: dict) -> module.Call:
+                self.assertEqual(name, "tracedecay_search")
+                self.assertRegex(args["query"], r"^tracedecay_bench_hot_paths_edit_\d+$")
+                self.assertIn(args["query"], (self.repo / "src" / "lib.rs").read_text())
+                attempt = len(attempted)
+                generation = ["generation.8", "generation.8", "generation.8", "generation.9"][attempt]
+                attempted.append(generation)
+                events.append(f"search:{attempt + 1}")
+                hit = {"display": {"name": args["query"], "path": "src/lib.rs"}}
+                served = [
+                    {"code_generation": "generation.8", "results": []},
+                    {"code_generation": "generation.9", "results": [hit]},
+                    {"results": [hit]},
+                    {"code_generation": "generation.9", "results": [hit]},
+                ][attempt]
+                return module.Call(
+                    True, json.dumps({"structuredContent": served}).encode(),
+                    b"", 0.5, 0.0, 0,
+                )
+
+            run.tool = search
+
+            class RecordingSampler:
+                def __init__(self, pid: int) -> None:
+                    assert pid == 4321
+
+                def start(self) -> None:
+                    events.append("sampler_started")
+
+                def stop(self) -> int:
+                    events.append("sampler_stopped")
+                    return 8192
+
+            with mock.patch.object(module, "DaemonRssSampler", RecordingSampler), mock.patch.object(
+                module, "proc_status", return_value={"VmRSS": 4096}
+            ), mock.patch.object(module.time, "sleep", return_value=None):
+                run.lane_edit_reconcile()
+
+            self.assertEqual(
+                attempted,
+                ["generation.8", "generation.8", "generation.8", "generation.9"],
+                "unrelated, mismatched and missing search generation cannot complete a pass",
+            )
+            self.assertLess(events.index("sampler_started"), events.index("sync"))
+            self.assertLess(events.index("search:4"), events.index("sampler_stopped"))
+            measured = next(
+                data for lane, op, data in records
+                if (lane, op) == ("edit_reconcile", "edit_to_ready")
+            )
+            self.assertEqual(measured["generation_id"], "generation.9")
+            self.assertEqual(measured["status_polls"], 4)
+            self.assertEqual(measured["peak_daemon_rss_kb"], 8192)
+            self.assertEqual(run.generation, "generation.9")
         finally:
             sys.modules.pop(spec.name, None)
 

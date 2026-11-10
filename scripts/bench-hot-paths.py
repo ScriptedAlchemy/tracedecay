@@ -51,6 +51,7 @@ import tempfile
 import threading
 import time
 from pathlib import Path
+from typing import Callable
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT / "scripts" / "lib"))
@@ -316,12 +317,16 @@ class Run:
         self.record("daemon_start", "first_status_answered", answer=code or "ok",
                     wall_ms=(time.perf_counter() - start) * 1000)
 
-    def wait_for_ready(self, lane: str, previous_generation: str | None) -> dict[str, object]:
+    def wait_for_ready(
+        self, lane: str, previous_generation: str | None,
+        verify_generation: Callable[[str], bool] | None = None,
+    ) -> dict[str, object]:
         pid = self.daemon_pid()
         start = time.perf_counter()
         deadline = time.monotonic() + self.index_timeout
         peak_rss_kb = 0
         polls = 0
+        unverified = ""
         while True:
             self.daemon_pid()
             status = proc_status(pid)
@@ -343,15 +348,59 @@ class Run:
                     and bool(generation)
                     and generation != previous_generation
                 ):
-                    return {
-                        "wall_ms": (time.perf_counter() - start) * 1000,
-                        "peak_daemon_rss_kb": peak_rss_kb if LINUX else None,
-                        "generation_id": generation,
-                        "status_polls": polls,
-                    }
+                    # A newer current/ready generation can belong to unrelated
+                    # work. Count this pass only after its own served graph
+                    # proves the edited symbol under the very same identity.
+                    if verify_generation is None or verify_generation(generation):
+                        if time.monotonic() <= deadline:
+                            return {
+                                "wall_ms": (time.perf_counter() - start) * 1000,
+                                "peak_daemon_rss_kb": peak_rss_kb if LINUX else None,
+                                "generation_id": generation,
+                                "status_polls": polls,
+                            }
+                    else:
+                        unverified = (
+                            f"; edited symbol absent from ready graph at {generation}, "
+                            "or search returned a different generation"
+                        )
             if time.monotonic() > deadline:
-                raise HarnessError(f"{lane}: no current, ready generation within {self.index_timeout} s")
+                raise HarnessError(
+                    f"{lane}: no current, ready verified generation within "
+                    f"{self.index_timeout} s{unverified}"
+                )
             time.sleep(1)
+
+    def edited_symbol_in_generation(self, symbol: str, generation: str) -> bool:
+        """Accept only an exact-symbol hit served from this ready generation."""
+        search = self.tool("tracedecay_search", {"query": symbol, "limit": 10, "format": "json"})
+        if not search.ok:
+            return False
+        try:
+            served = json.loads(search.stdout)["structuredContent"]
+            if not isinstance(served, dict) or served.get("code_generation") != generation:
+                return False
+            hits = served.get("results")
+        except (ValueError, KeyError, TypeError):
+            return False
+        if not isinstance(hits, list) or not any(
+            isinstance(hit, dict)
+            and isinstance(hit.get("display"), dict)
+            and hit["display"].get("name") == symbol
+            for hit in hits
+        ):
+            return False
+        # Re-check readiness *after* search: a concurrent publication can
+        # switch the served generation between the two RPCs.
+        payload = self.status_payload() or {}
+        freshness = payload.get("code_index_freshness") or {}
+        worktree = freshness.get("worktree") or {}
+        serving = worktree.get("code_graph_serving") or {}
+        return (
+            freshness.get("status") == "current"
+            and serving.get("state") == "ready"
+            and worktree.get("latest_generation_id") == generation
+        )
 
     def lane_index(self) -> None:
         log("index (init until a current generation serves a ready graph)")
@@ -514,27 +563,13 @@ class Run:
             sync = self.client(["sync"])
             if not sync.ok:
                 raise HarnessError(f"`tracedecay sync` failed: {sync.stderr[-2000:].decode(errors='replace')}")
-            ready = self.wait_for_ready("edit_reconcile", previous_generation)
+            ready = self.wait_for_ready(
+                "edit_reconcile", previous_generation,
+                lambda generation: self.edited_symbol_in_generation(symbol, generation),
+            )
             ready_at = time.perf_counter()
         finally:
             peak_rss_kb = rss_sampler.stop()
-        # A generation transition is not proof that the edit was indexed:
-        # a concurrent unrelated refresh can publish another generation.
-        # The search must be served from a graph containing this new symbol.
-        search = self.tool("tracedecay_search", {"query": symbol, "limit": 10, "format": "json"})
-        if not search.ok:
-            raise HarnessError("edit_reconcile: search for the edited symbol failed")
-        try:
-            hits = json.loads(search.stdout)["structuredContent"]["results"]
-        except (ValueError, KeyError, TypeError):
-            hits = None
-        if not isinstance(hits, list) or not any(
-            isinstance(hit, dict)
-            and isinstance(hit.get("display"), dict)
-            and hit["display"].get("name") == symbol
-            for hit in hits
-        ):
-            raise HarnessError(f"edit_reconcile: edited symbol {symbol} absent from ready graph")
         if peak_rss_kb is None:
             ready.pop("peak_daemon_rss_kb", None)
             ready["unsupported"] = (
