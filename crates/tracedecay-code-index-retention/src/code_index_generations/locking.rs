@@ -90,7 +90,9 @@ impl CachedCodeGenerationStoreReadLockV1 {
 
     fn verify_named_inode(file: &File, path: &Path) -> Result<(), CodeGenerationRetentionErrorV1> {
         let opened = file.metadata().map_err(storage)?;
-        let named = std::fs::metadata(path).map_err(super::deferred_if_absent)?;
+        // A symlink to the retired inode is not the original lock authority.
+        // lstat authenticates the directory entry without another open().
+        let named = std::fs::symlink_metadata(path).map_err(super::deferred_if_absent)?;
         if !named.is_file() || (opened.dev(), opened.ino()) != (named.dev(), named.ino()) {
             return Err(CodeGenerationRetentionErrorV1::UnsafeState(
                 "generation-store lock pathname no longer names the opened inode".to_owned(),
@@ -541,7 +543,8 @@ mod cached_read_lock_tests {
 
         let path = store.path().join(STORE_LOCK_FILE);
         let original = std::fs::metadata(&path).expect("cached lock inode");
-        std::fs::rename(&path, store.path().join("retired-lock-inode"))
+        let retired = store.path().join("retired-lock-inode");
+        std::fs::rename(&path, &retired)
             .expect("replace the lock pathname without closing the original inode");
         std::fs::File::create(&path).expect("different lock file at the same pathname");
         let replacement = std::fs::metadata(&path).expect("new lock inode");
@@ -557,5 +560,48 @@ mod cached_read_lock_tests {
             ),
             "a cached descriptor must not lock a retired inode to authorize a new scope"
         );
+
+        // A symlink back to the retired inode has the same dev/ino when
+        // followed. The cached reader must still refuse this replacement:
+        // verifying metadata(path) would wrongly accept it.
+        std::fs::remove_file(&path).expect("remove replacement lock inode");
+        std::os::unix::fs::symlink(&retired, &path)
+            .expect("replace the lock with an alias of the retired inode");
+        let followed = std::fs::metadata(&path).expect("follow symlink as positive control");
+        assert_eq!(
+            (followed.dev(), followed.ino()),
+            (original.dev(), original.ino()),
+            "the symlink must resolve to exactly the still-open cached inode"
+        );
+        assert!(
+            std::fs::symlink_metadata(&path)
+                .expect("inspect replacement type")
+                .file_type()
+                .is_symlink(),
+            "the replacement must be a real symlink"
+        );
+        assert!(
+            matches!(
+                cached.try_acquire(),
+                Err(CodeGenerationRetentionErrorV1::UnsafeState(_))
+            ),
+            "a lock-file symlink must not authorize a retired cached inode"
+        );
+
+        // Recovery through the original pathname must not require another
+        // cache entry or skip the real shared kernel-lock acquisition.
+        std::fs::remove_file(&path).expect("remove lock symlink");
+        std::fs::rename(&retired, &path).expect("restore exact original lock inode");
+        let read = cached
+            .try_acquire()
+            .expect("recheck restored original lock")
+            .expect("reacquire real shared kernel lock");
+        assert!(
+            try_acquire_code_generation_store_lock(store.path())
+                .expect("probe exclusive lock after recovery")
+                .is_none(),
+            "restored cached read must still fence exclusive writers"
+        );
+        drop(read);
     }
 }
