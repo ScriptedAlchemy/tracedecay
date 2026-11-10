@@ -412,19 +412,6 @@ where
             .as_deref()
             .map(|progress| format!(" ({progress})"))
             .unwrap_or_default();
-        if let Some(stall) = idle_window.observe(
-            FirstGenerationStall::of(worktree.as_deref().map_err(String::as_str)),
-            Instant::now(),
-        ) {
-            return Err(first_generation_wait_refusal(
-                CODE_INDEX_READINESS_WAIT_TIMED_OUT,
-                format!(
-                    "init --wait stopped waiting for the first generation: {stall} for \
-                     {}s; last state: {last_state}{progress_suffix}",
-                    stall_window.as_secs()
-                ),
-            ));
-        }
         let worktree_read = worktree.as_deref().ok();
         let marker = FirstGenerationWorkMarker::of(worktree_read);
         // A retained text bulk commit and a successor's live capture can
@@ -475,10 +462,12 @@ where
             // receipts cannot prove silence in the final native write. Keep
             // real text watermarks, but pause this unobservable interval;
             // neither polling nor this coverage change is producer work.
-            if let Some(marker) = marker {
-                progress_window.record(marker);
-            }
-            progress_window.observe(None, now)
+            let had_prior_observation = progress_window.observed_once;
+            let work_advanced = marker.is_some_and(|marker| progress_window.record(marker));
+            let stalled = progress_window.observe(None, now);
+            progress_window.new_work_since_prior_read =
+                had_prior_observation && work_advanced;
+            stalled
         } else if concurrent_preseal.is_some() || concurrent_text.is_some() {
             progress_window.observe_with_concurrent_writers(
                 marker,
@@ -489,6 +478,27 @@ where
         } else {
             progress_window.observe(marker, now)
         };
+        // A retained refusal belongs to a producer that may be making
+        // genuine, independently receipted work. Only newly observed work
+        // clears the blocked window; epochs, retries, and the first snapshot
+        // cannot turn the wait into a heartbeat.
+        if let Some(stall) = idle_window.observe(
+            if progress_window.new_work_since_prior_read {
+                None
+            } else {
+                FirstGenerationStall::of(worktree.as_deref().map_err(String::as_str))
+            },
+            now,
+        ) {
+            return Err(first_generation_wait_refusal(
+                CODE_INDEX_READINESS_WAIT_TIMED_OUT,
+                format!(
+                    "init --wait stopped waiting for the first generation: {stall} for \
+                     {}s; last state: {last_state}{progress_suffix}",
+                    stall_window.as_secs()
+                ),
+            ));
+        }
         if stalled {
             return Err(first_generation_wait_refusal(
                 CODE_INDEX_READINESS_WAIT_TIMED_OUT,
@@ -876,6 +886,9 @@ struct FirstGenerationProgressWindow {
     native_graph: Option<FirstGenerationWorkMarker>,
     owner: Option<(u64, u64)>,
     unchanged_since: Option<Instant>,
+    // The first status is a baseline, not evidence of work after a refusal.
+    observed_once: bool,
+    new_work_since_prior_read: bool,
     stall_window: Duration,
 }
 
@@ -887,6 +900,8 @@ impl FirstGenerationProgressWindow {
             native_graph: None,
             owner: None,
             unchanged_since: None,
+            observed_once: false,
+            new_work_since_prior_read: false,
             stall_window,
         }
     }
@@ -902,6 +917,9 @@ impl FirstGenerationProgressWindow {
         concurrent_text: Option<FirstGenerationWorkMarker>,
         now: Instant,
     ) -> bool {
+        let had_prior_observation = self.observed_once;
+        self.observed_once = true;
+        self.new_work_since_prior_read = false;
         if marker.is_none() && concurrent_preseal.is_none() && concurrent_text.is_none() {
             // Uninstrumented work is unknown, not stalled. Keep watermarks
             // so returning to an old report cannot fabricate new work.
@@ -918,6 +936,7 @@ impl FirstGenerationProgressWindow {
         if let Some(text) = concurrent_text {
             advanced |= self.record(text);
         }
+        self.new_work_since_prior_read = had_prior_observation && advanced;
         if advanced || self.unchanged_since.is_none() {
             self.unchanged_since = Some(now);
             return false;
@@ -2877,6 +2896,113 @@ mod daemon_precondition_tests {
         assert_eq!(
             window.observe(Some(expected.clone()), started + Duration::from_secs(360)),
             Some(expected)
+        );
+    }
+
+    #[test]
+    fn new_native_rows_clear_retained_blocked_status_without_fake_heartbeats() {
+        let start = Instant::now();
+        let mut window = super::FirstGenerationProgressWindow::new(Duration::from_secs(120));
+        let mut idle = super::FirstGenerationIdleWindow::new(Duration::from_secs(120));
+        let mut initial = overlapping_native_and_text();
+        initial.progress.as_mut().unwrap().blocked_reason =
+            Some(CodeIndexBuildBlockedReasonV1::RetryBackoff);
+        let blocked = super::FirstGenerationStall::of(Ok(&initial));
+        assert_eq!(
+            blocked,
+            Some(super::FirstGenerationStall::Blocked(
+                CodeIndexBuildBlockedReasonV1::RetryBackoff
+            ))
+        );
+        // An initial nonzero counter is a baseline, not a post-read recovery.
+        assert!(!window.observe(
+            super::FirstGenerationWorkMarker::of(Some(&initial)),
+            start
+        ));
+        assert!(!window.new_work_since_prior_read);
+        assert_eq!(idle.observe(blocked.clone(), start), None);
+
+        // The text refusal remains visible while another genuine graph
+        // callback advances rows under its own native writer identity.
+        let mut advancing = initial.clone();
+        let graph = advancing.native_graph_progress.as_mut().unwrap();
+        graph.encoded_entities += 1;
+        graph.progress_epoch += 1;
+        graph.last_progress_micros = Some(1_000);
+        assert!(!window.observe(
+            super::FirstGenerationWorkMarker::of(Some(&advancing)),
+            start + Duration::from_secs(119)
+        ));
+        assert!(window.new_work_since_prior_read);
+        assert_eq!(
+            idle.observe(
+                if window.new_work_since_prior_read {
+                    None
+                } else {
+                    super::FirstGenerationStall::of(Ok(&advancing))
+                },
+                start + Duration::from_secs(119),
+            ),
+            None
+        );
+        assert!(!window.observe(
+            super::FirstGenerationWorkMarker::of(Some(&advancing)),
+            start + Duration::from_secs(120)
+        ));
+        assert!(!window.new_work_since_prior_read);
+        assert_eq!(
+            idle.observe(
+                super::FirstGenerationStall::of(Ok(&advancing)),
+                start + Duration::from_secs(120)
+            ),
+            None,
+            "the current blocked interval began after the last actual row work"
+        );
+        assert_eq!(
+            idle.observe(
+                super::FirstGenerationStall::of(Ok(&advancing)),
+                start + Duration::from_secs(240)
+            ),
+            Some(super::FirstGenerationStall::Blocked(
+                CodeIndexBuildBlockedReasonV1::RetryBackoff
+            )),
+            "a truly frozen blocked writer must still time out"
+        );
+    }
+
+    #[test]
+    fn blocked_epoch_only_resampling_cannot_restart_the_idle_window() {
+        let start = Instant::now();
+        let mut window = super::FirstGenerationProgressWindow::new(Duration::from_secs(120));
+        let mut idle = super::FirstGenerationIdleWindow::new(Duration::from_secs(120));
+        let mut blocked = overlapping_native_and_text();
+        blocked.progress.as_mut().unwrap().blocked_reason =
+            Some(CodeIndexBuildBlockedReasonV1::ResidentMemory);
+        assert!(!window.observe(
+            super::FirstGenerationWorkMarker::of(Some(&blocked)),
+            start
+        ));
+        assert_eq!(
+            idle.observe(super::FirstGenerationStall::of(Ok(&blocked)), start),
+            None
+        );
+        blocked.native_graph_progress.as_mut().unwrap().progress_epoch += 1;
+        blocked.native_graph_progress.as_mut().unwrap().last_progress_micros =
+            Some(5_000);
+        assert!(window.observe(
+            super::FirstGenerationWorkMarker::of(Some(&blocked)),
+            start + Duration::from_secs(120)
+        ));
+        assert!(!window.new_work_since_prior_read);
+        assert_eq!(
+            idle.observe(
+                super::FirstGenerationStall::of(Ok(&blocked)),
+                start + Duration::from_secs(120)
+            ),
+            Some(super::FirstGenerationStall::Blocked(
+                CodeIndexBuildBlockedReasonV1::ResidentMemory
+            )),
+            "a changed epoch and clock are not evidence of native work"
         );
     }
 
