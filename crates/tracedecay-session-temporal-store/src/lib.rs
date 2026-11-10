@@ -116,7 +116,7 @@ pub use doctor_health::{
 pub use projection::{
     record_canonical_observation_effect,
     record_live_collision_preserving_canonical_observation_effect, request_session_temporal_reset,
-    request_session_temporal_reset_if_materialized,
+    request_session_temporal_reset_if_materialized, request_session_temporal_resets,
 };
 pub use refresh::{
     SessionRefreshBeginBatchItemV1, SessionRefreshBeginBatchOutcomeV1, SessionRefreshBeginPlanV1,

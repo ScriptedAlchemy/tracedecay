@@ -236,6 +236,103 @@ async fn table_count(conn: &impl QueryExecutor, sql: &str) -> i64 {
     row.get(0).unwrap()
 }
 
+/// One source page can retire many effects of the same session. The
+/// temporal reset is a session-level invalidation, not a per-record writer
+/// upsert; an unchanged second update must be impossible in this page.
+#[asupersync::test]
+async fn rewrite_completion_coalesces_temporal_reset_for_one_session() {
+    let directory = TempDir::new().unwrap();
+    let runtime = HostAdmissionTestRuntimeV1::profile(directory.path())
+        .await
+        .unwrap();
+    let seeded = seed_projected_messages(&runtime, 0..4).await;
+    let registered = runtime
+        .registered_database(HostAdmissionScope::Profile)
+        .expect("registered profile database");
+    let source = seeded[0].0.source().clone();
+    let scope = ObservationScopeV1::Profile;
+    let previous = ObservationSourceGenerationV1::new(1).unwrap();
+    let generation = ObservationSourceGenerationV1::new(2).unwrap();
+    let writer = registered.writer_connection().unwrap();
+
+    assert_eq!(
+        table_count(
+            &writer,
+            "SELECT COUNT(*) FROM session_temporal_observation_effects WHERE output_count > 0"
+        )
+        .await,
+        4,
+        "all projected observations must own materialized temporal effects"
+    );
+    assert_eq!(
+        table_count(&writer, "SELECT COUNT(*) FROM session_temporal_resets").await,
+        0,
+        "the fixture must not already have pending reset requests"
+    );
+
+    let offered: Vec<_> = seeded
+        .iter()
+        .map(|(observation, _)| ObservationSourcePresenceV1 {
+            observation_id: observation.observation_id().clone(),
+            generation: previous,
+            start_offset: observation.identity().position().start(),
+        })
+        .collect();
+    registered
+        .record_observation_source_presence(&source, &scope, &offered)
+        .await
+        .unwrap();
+    registered
+        .begin_observation_source_rewrite(&source, &scope, previous, generation, 0)
+        .await
+        .unwrap();
+
+    // The previous per-observation upsert fails on its second update. The
+    // replacement must coalesce same-session effects but still retire all four.
+    writer
+        .execute(
+            "CREATE TRIGGER reject_redundant_temporal_reset
+             BEFORE UPDATE ON session_temporal_resets
+             BEGIN SELECT RAISE(ABORT, 'duplicate temporal reset'); END",
+            (),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        registered
+            .complete_observation_source_rewrite(&source, &scope, generation)
+            .await
+            .unwrap(),
+        4
+    );
+    assert_eq!(
+        table_count(&writer, "SELECT COUNT(*) FROM session_temporal_resets").await,
+        1,
+        "one session must receive exactly one durable reset request"
+    );
+    assert_eq!(
+        table_count(
+            &writer,
+            "SELECT COUNT(*) FROM observation_projection_dispositions
+             WHERE reason = 'source_record_retired'"
+        )
+        .await,
+        4,
+        "coalescing must not skip retirement of any projected record"
+    );
+    assert_eq!(
+        table_count(&writer, "SELECT COUNT(*) FROM observation_source_presence").await,
+        0,
+        "all retired presence rows must be settled"
+    );
+    assert_eq!(
+        table_count(&writer, "SELECT COUNT(*) FROM observation_source_rewrites").await,
+        0,
+        "the rewrite marker must be committed with the reset"
+    );
+}
+
 /// Retiring an unoffered record also removes its projections and workflow
 /// facts. A collision on a later page must roll that page back, but earlier
 /// page commits must remain durable for the next daemon invocation.

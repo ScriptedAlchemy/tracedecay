@@ -21,6 +21,7 @@ use tracedecay_store::{
 use super::RegisteredGlobalDb;
 use super::observation_projection::retire_source_record;
 use super::registered::JobExit;
+use tracedecay_session_temporal_store::request_session_temporal_resets;
 
 /// Each committed page settles at most this many source-presence records,
 /// releasing the writer lease and making restart continuation durable.
@@ -339,6 +340,7 @@ impl RegisteredGlobalDb {
                             page.truncate(UNOFFERED_RECORD_PAGE_SIZE as usize);
                         }
                         let mut retired = 0_u64;
+                        let mut retired_ids = Vec::new();
                         for (observation_id, needs_retirement) in &page {
                             if !needs_retirement {
                                 continue;
@@ -348,8 +350,13 @@ impl RegisteredGlobalDb {
                             > = Box::pin(retire_source_record(&transaction, observation_id));
                             if retired_one.await? {
                                 retired += 1;
+                                retired_ids.push(observation_id.as_str());
                             }
                         }
+                        // One source can yield many effects for the same session.
+                        // Request one temporal reset per affected session in
+                        // this page's transaction, rather than per observation.
+                        request_session_temporal_resets(&transaction, &retired_ids).await?;
                         if let Some((last_id, _)) = page.last() {
                             transaction
                                 .execute(
