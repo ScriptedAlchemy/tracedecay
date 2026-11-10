@@ -1292,11 +1292,7 @@ mod tests {
         );
         let owner_marker = generation.join("owner");
         let marker_permissions = std::fs::metadata(&owner_marker).unwrap().permissions();
-        std::fs::set_permissions(
-            &owner_marker,
-            std::fs::Permissions::from_mode(0o000),
-        )
-        .unwrap();
+        std::fs::set_permissions(&owner_marker, std::fs::Permissions::from_mode(0o000)).unwrap();
         let unreadable_marker = census_receipted_directory_bytes(
             &root,
             false,
