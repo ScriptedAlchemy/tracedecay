@@ -9,7 +9,7 @@
  * either hammering or abandoning the run, and the poll ends with the surface , 
  * by driving the real controller against a scripted daemon on a fake clock.
  */
-import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
+import { MutationCache, QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { act, renderHook } from '@testing-library/react';
 import { createElement, type ReactNode } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -24,7 +24,7 @@ const STATUS_PATH = `/api/explorer/queries/${RUN_ID}`;
 
 type RunState = 'pending' | 'completed';
 
-function runEnvelope(state: RunState) {
+function runEnvelope(state: RunState, runId = RUN_ID, query = QUERY) {
   return {
     schema_revision: 1,
     scope: {
@@ -52,8 +52,8 @@ function runEnvelope(state: RunState) {
     domain_state: state === 'completed' ? 'ready' : 'partial',
     legal_actions: [],
     payload: {
-      run_id: RUN_ID,
-      request: { query: QUERY, limit: 50, offset: 0 },
+      run_id: runId,
+      request: { query, limit: 50, offset: 0 },
       request_revision: 'explorer-query-request-v1',
       plan_revision: 'explorer-query-plan-v1',
       merge_revision: 'source-local-no-merge-v1',
@@ -93,8 +93,11 @@ type StatusStep =
  */
 function scriptedDaemon(script: readonly StatusStep[]) {
   const statusReads: StatusStep[] = [];
-  const fetchMock = vi.fn(async (input: RequestInfo | URL): Promise<Response> => {
+  const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
     const url = String(input);
+    if (url.includes(STATUS_PATH) && init?.method === 'DELETE') {
+      return jsonResponse(200, runEnvelope('completed'));
+    }
     if (url.includes(STATUS_PATH)) {
       const step = script[Math.min(statusReads.length, script.length - 1)];
       if (step === undefined) throw new Error('scripted daemon has no status step');
@@ -263,6 +266,32 @@ describe('explorer run-status polling', () => {
     expect(statusReads.length).toBe(afterUnmount);
   });
 
+  it('cancels an accepted run when unmounted before mutation callbacks finish', async () => {
+    let releaseCallbacks!: () => void;
+    const pending = new Promise<void>((resolve) => { releaseCallbacks = resolve; });
+    const afterAdmission = vi.fn(() => pending);
+    const client = new QueryClient({ mutationCache: new MutationCache({ onSuccess: afterAdmission }) });
+    const { fetchMock } = scriptedDaemon([{ kind: 'run', state: 'pending' }]);
+    vi.stubGlobal('fetch', fetchMock);
+    const view = renderHook(() => useExplorerController(), {
+      wrapper: ({ children }) => createElement(QueryClientProvider, { client }, children),
+    });
+    try {
+      await act(async () => {
+        view.result.current.submit(QUERY);
+        await vi.advanceTimersByTimeAsync(0);
+      });
+      expect(afterAdmission).toHaveBeenCalledOnce();
+      view.unmount();
+      expect(fetchMock.mock.calls.filter(([url, init]) =>
+        String(url).endsWith(STATUS_PATH) && init?.method === 'DELETE',
+      )).toHaveLength(1);
+    } finally {
+      releaseCallbacks();
+      client.clear();
+    }
+  });
+
   it('stops polling when the search is reset', async () => {
     // Reset drops the active run, so the poll it was the only reader of ends
     // with it rather than surviving into the next search.
@@ -282,5 +311,93 @@ describe('explorer run-status polling', () => {
     await runPollClock(300_000);
 
     expect(statusReads.length).toBe(afterReset);
+  });
+});
+
+/** A held admission POST can complete after a newer query or an unmount.
+ * The result must cancel its exact server run rather than reclaim the UI. */
+describe('explorer query admission ownership', () => {
+  it.each(['pending', 'completed'] as const)('keeps the newer query after a late %s admission', async (state) => {
+    let finishOlder!: (response: Response) => void;
+    const heldOlder = new Promise<Response>((resolve) => {
+      finishOlder = resolve;
+    });
+    const cancellations: string[] = [];
+    const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+      const url = String(input);
+      if (init?.method === 'POST' && url.endsWith('/api/explorer/queries')) {
+        const { query } = JSON.parse(String(init.body)) as { query: string };
+        if (query === 'older') return heldOlder;
+        return Promise.resolve(jsonResponse(202, runEnvelope('pending', 'run-newer', 'newer')));
+      }
+      if (init?.method === 'DELETE') {
+        cancellations.push(url);
+        return Promise.resolve(jsonResponse(200, runEnvelope('completed', 'run-newer', 'newer')));
+      }
+      if (url.endsWith('/api/explorer/queries/run-newer')) {
+        return Promise.resolve(jsonResponse(200, runEnvelope('pending', 'run-newer', 'newer')));
+      }
+      return Promise.resolve(jsonResponse(404, { error: 'unknown run' }));
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    const view = renderHook(() => useExplorerController(), { wrapper });
+
+    await act(async () => {
+      view.result.current.submit('older');
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    await act(async () => {
+      view.result.current.submit('newer');
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    expect(view.result.current.run?.run_id).toBe('run-newer');
+
+    await act(async () => {
+      finishOlder(jsonResponse(202, runEnvelope(state, 'run-older', 'older')));
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    expect(cancellations).toEqual(state === 'pending' ? ['/api/explorer/queries/run-older'] : []);
+    expect(view.result.current.run?.run_id).toBe('run-newer');
+    view.unmount();
+  });
+
+  it('cancels the old run on supersession and the live run on unmount', async () => {
+    const cancellations: string[] = [];
+    const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+      const url = String(input);
+      if (init?.method === 'POST' && url.endsWith('/api/explorer/queries')) {
+        const { query } = JSON.parse(String(init.body)) as { query: string };
+        return Promise.resolve(jsonResponse(202, runEnvelope('pending', `run-${query}`, query)));
+      }
+      if (init?.method === 'DELETE') {
+        cancellations.push(url);
+        return Promise.resolve(jsonResponse(200, runEnvelope('completed')));
+      }
+      if (url.includes('/api/explorer/queries/run-')) {
+        const query = url.substring(url.lastIndexOf('run-') + 4);
+        return Promise.resolve(jsonResponse(200, runEnvelope('pending', `run-${query}`, query)));
+      }
+      return Promise.resolve(jsonResponse(404, { error: 'unknown run' }));
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    const view = renderHook(() => useExplorerController(), { wrapper });
+
+    await act(async () => {
+      view.result.current.submit('first');
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    expect(view.result.current.run?.run_id).toBe('run-first');
+    await act(async () => {
+      view.result.current.submit('second');
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    expect(cancellations).toEqual(['/api/explorer/queries/run-first']);
+    expect(view.result.current.run?.run_id).toBe('run-second');
+
+    view.unmount();
+    expect(cancellations).toEqual([
+      '/api/explorer/queries/run-first',
+      '/api/explorer/queries/run-second',
+    ]);
   });
 });

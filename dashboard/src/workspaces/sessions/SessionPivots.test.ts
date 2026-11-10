@@ -45,10 +45,14 @@ describe('sessionHref', () => {
     expect(read(sessionHref('sessions', session, ALL)).params).toEqual({ sessionId: 'abc' });
   });
 
-  it('links a provider-less id to Loom by the bare id Delivery has always sent', () => {
+  it('links a provider-less id to Loom without reinterpreting tuple-shaped IDs', () => {
     expect(sessionHref('loom', { provider: null, sessionId: 'session.alpha.1' }, ALL)).toBe(
-      '/loom?loomSession=session.alpha.1',
+      '/loom?loomBareSession=session.alpha.1',
     );
+    const tupleShaped = read(
+      sessionHref('loom', { provider: null, sessionId: '["claude","other"]' }, ALL),
+    );
+    expect(tupleShaped.params).toEqual({ loomBareSession: '["claude","other"]' });
     expect(read(sessionHref('agents', { provider: null, sessionId: 'abc' }, ALL)).params).toEqual({
       sessionId: 'abc',
     });

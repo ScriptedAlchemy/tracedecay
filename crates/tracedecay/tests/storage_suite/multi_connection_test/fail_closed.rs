@@ -59,7 +59,7 @@ fn split_brain_is_rejected_and_unavailable_daemon_fails_closed_until_restart() {
         "rejected contender is still running after fail-closed rejection"
     );
 
-    stop_child(&mut owner);
+    drop(owner);
     install_unavailable_socket_sentinel(&socket_path);
     let before = storage_snapshot(&profile_db_path);
     for (label, mut command) in [
@@ -142,7 +142,7 @@ fn split_brain_is_rejected_and_unavailable_daemon_fails_closed_until_restart() {
         &profile_db_path,
     );
 
-    let mut restarted = spawn_daemon(&home_path, &socket_path);
+    let restarted = spawn_daemon(&home_path, &socket_path);
     assert_command_success(
         "restarted daemon status",
         &tool_status(&home_path, &project_path, &socket_path),
@@ -161,5 +161,4 @@ fn split_brain_is_rejected_and_unavailable_daemon_fails_closed_until_restart() {
         authority_after["epoch"].as_u64() > authority_before["epoch"].as_u64(),
         "restart must advance daemon authority epoch"
     );
-    stop_child(&mut restarted);
 }

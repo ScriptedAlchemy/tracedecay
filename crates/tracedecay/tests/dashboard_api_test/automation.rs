@@ -168,14 +168,12 @@ fn final_self_improvement_smoke_covers_autonomous_curation_and_skill_deployment(
             .to_owned();
         let dashboard_root = cg.store_layout().dashboard_root.clone();
         let agent = http_agent();
-        let port = pick_free_port();
-        let (access, base_url) = dashboard_access_for(port);
+        let (endpoint, base_url) = dashboard_endpoint().await;
         let mut server = spawn_dashboard_server_with_configuration_runtime(
             cg,
             host_runtime,
             tracedecay_dashboard_api::DashboardTestProjectGraphsV1::default(),
-            port,
-            access,
+            endpoint,
         );
         wait_for_dashboard(&agent, &base_url).await;
         configure_codex_summarizer(&agent, &base_url, &project_id, &fake_codex.bin);
@@ -440,14 +438,12 @@ fn fact_store_curate_answers_with_its_receipt_while_a_slow_curator_runs() {
             .as_str()
             .to_owned();
         let agent = http_agent();
-        let port = pick_free_port();
-        let (access, base_url) = dashboard_access_for(port);
+        let (endpoint, base_url) = dashboard_endpoint().await;
         let mut server = spawn_dashboard_server_with_configuration_runtime(
             cg,
             host_runtime,
             tracedecay_dashboard_api::DashboardTestProjectGraphsV1::default(),
-            port,
-            access,
+            endpoint,
         );
         wait_for_dashboard(&agent, &base_url).await;
         configure_codex_summarizer(&agent, &base_url, &project_id, &slow_codex.bin);
@@ -595,14 +591,12 @@ fn automation_run_artifact_api_serves_verified_sidecar_payloads() {
         .unwrap();
 
         let agent = http_agent();
-        let port = pick_free_port();
-        let (access, base_url) = dashboard_access_for(port);
+        let (endpoint, base_url) = dashboard_endpoint().await;
         let mut server = spawn_dashboard_server_with_host_runtime(
             cg,
             host_runtime,
             tracedecay_dashboard_api::DashboardTestProjectGraphsV1::default(),
-            port,
-            access,
+            endpoint,
         );
         wait_for_dashboard(&agent, &base_url).await;
 
@@ -717,14 +711,12 @@ fn automation_outcomes_endpoint_reports_activated_skills_and_automatic_fact_rece
         delete_dashboard_automatic_fact(&cg, &gone_receipt).await;
 
         let agent = http_agent();
-        let port = pick_free_port();
-        let (access, base_url) = dashboard_access_for(port);
+        let (endpoint, base_url) = dashboard_endpoint().await;
         let mut server = spawn_dashboard_server_with_host_runtime(
             cg,
             host_runtime,
             tracedecay_dashboard_api::DashboardTestProjectGraphsV1::default(),
-            port,
-            access,
+            endpoint,
         );
         wait_for_dashboard(&agent, &base_url).await;
 
