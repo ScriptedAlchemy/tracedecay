@@ -66,7 +66,7 @@ use ingress::{
 };
 use rejection::{
     cancel_waiting, reject_all, reject_all_exact_sql, reject_all_incremental_vacuum,
-    reject_incremental_vacuum, reject_unauthorized,
+    reject_faulted_write_ingress, reject_incremental_vacuum, reject_unauthorized,
 };
 
 /// When the blocked writer retries its drain: the fence's short interval, or
@@ -737,10 +737,30 @@ impl Worker {
                                         // transaction into the next accepted write.
                                         self.state
                                             .store(WriterState::Faulted as u8, Ordering::Release);
-                                        reject_all(
+                                        // Close channels before retiring the connection:
+                                        // accepted commands may still be in ingress.
+                                        self.exact_sql_receiver.close();
+                                        self.incremental_vacuum_receiver.close();
+                                        self.checkpoint_receiver.close();
+                                        reject_faulted_write_ingress(
+                                            &mut self.receiver,
                                             &mut queue,
                                             &self.telemetry,
-                                            UnavailableReasonV1::Faulted,
+                                        );
+                                        drain_command_ingress(
+                                            &mut self.exact_sql_receiver,
+                                            &mut exact_sql_queue,
+                                            &mut exact_sql_closed,
+                                        );
+                                        drain_command_ingress(
+                                            &mut self.incremental_vacuum_receiver,
+                                            &mut incremental_vacuum_queue,
+                                            &mut incremental_vacuum_closed,
+                                        );
+                                        drain_command_ingress(
+                                            &mut self.checkpoint_receiver,
+                                            &mut checkpoint_queue,
+                                            &mut checkpoint_closed,
                                         );
                                         reject_all_exact_sql(&mut exact_sql_queue);
                                         reject_all_incremental_vacuum(
@@ -1362,7 +1382,8 @@ mod auxiliary_scheduling_tests {
     use super::{
         AcceptedRequest, AuxiliaryWork, BatchCoalescingWindow, IncrementalVacuumCommand,
         PendingBatchDwell, WriterActorError, build_batches, checkpoint_config, dwell_for_batch,
-        enqueue, incremental_vacuum_error, reject_incremental_vacuum, run_incremental_vacuum,
+        enqueue, incremental_vacuum_error, reject_faulted_write_ingress,
+        reject_incremental_vacuum, run_incremental_vacuum,
         select_auxiliary_work,
     };
 
@@ -1477,6 +1498,44 @@ mod auxiliary_scheduling_tests {
             ),
             response,
         )
+    }
+
+    #[test]
+    fn faulted_vacuum_rejects_unread_ingress_and_balances_telemetry() {
+        let telemetry = WriterTelemetry::default();
+        let (sender, mut receiver) = mpsc::channel(2);
+        let mut queue = FairQueue::default();
+
+        let (parked, mut parked_reply) =
+            accepted_request_with_reply("operation.fault-parked", "key.fault-parked");
+        telemetry.admitted(parked.admission_bytes());
+        assert!(queue.push(parked).is_ok());
+
+        let (unread, mut unread_reply) =
+            accepted_request_with_reply("operation.fault-unread", "key.fault-unread");
+        telemetry.admitted(unread.admission_bytes());
+        assert!(sender.try_send(unread).is_ok());
+        assert_eq!(telemetry.snapshot().queue.queued_operations, 2);
+
+        reject_faulted_write_ingress(&mut receiver, &mut queue, &telemetry);
+
+        let fault = RuntimeSubmitOutcomeV1::Unavailable {
+            reason: UnavailableReasonV1::Faulted,
+        };
+        assert_eq!(parked_reply.try_recv().unwrap(), Ok(fault.clone()));
+        assert_eq!(unread_reply.try_recv().unwrap(), Ok(fault));
+        assert!(queue.is_empty());
+        let snapshot = telemetry.snapshot();
+        assert_eq!(snapshot.queue.queued_operations, 0);
+        assert_eq!(snapshot.queue.queued_bytes, 0);
+        assert_eq!(snapshot.operations.admitted_operations, 2);
+        assert_eq!(snapshot.operations.completed_operations, 2);
+
+        let (late, _) = accepted_request_with_reply("operation.fault-late", "key.fault-late");
+        assert!(matches!(
+            sender.try_send(late),
+            Err(mpsc::SendError::Disconnected(_))
+        ));
     }
 
     #[test]

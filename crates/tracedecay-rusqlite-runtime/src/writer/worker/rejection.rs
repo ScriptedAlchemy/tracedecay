@@ -5,6 +5,8 @@
 
 use std::collections::VecDeque;
 
+use asupersync::channel::mpsc;
+
 use tracedecay_store::{RuntimeCancellationStageV1, RuntimeSubmitOutcomeV1, UnavailableReasonV1};
 
 use crate::{
@@ -47,6 +49,27 @@ pub(super) fn reject_unauthorized(
     }) {
         let bytes = item.admission_bytes();
         let result = Ok(missing_authority());
+        telemetry.released(1, bytes);
+        telemetry.completed(&result);
+        item.settle(result);
+    }
+}
+
+/// Shut off ingress before settling buffered requests on fatal writer
+/// retirement. Dropping this receiver would lose accepted request replies and
+/// leave their queued-operation telemetry inflated.
+pub(super) fn reject_faulted_write_ingress(
+    receiver: &mut mpsc::Receiver<AcceptedRequest>,
+    queue: &mut FairQueue<AcceptedRequest>,
+    telemetry: &WriterTelemetry,
+) {
+    receiver.close();
+    reject_all(queue, telemetry, UnavailableReasonV1::Faulted);
+    while let Ok(item) = receiver.try_recv() {
+        let bytes = item.admission_bytes();
+        let result = Ok(RuntimeSubmitOutcomeV1::Unavailable {
+            reason: UnavailableReasonV1::Faulted,
+        });
         telemetry.released(1, bytes);
         telemetry.completed(&result);
         item.settle(result);
