@@ -1412,9 +1412,8 @@ mod auxiliary_scheduling_tests {
     use super::{
         AcceptedRequest, AuxiliaryWork, BatchCoalescingWindow, IncrementalVacuumCommand,
         PendingBatchDwell, WriterActorError, build_batches, checkpoint_config, dwell_for_batch,
-        enqueue, incremental_vacuum_error, reject_faulted_write_ingress,
-        reject_incremental_vacuum, rollback_incremental_vacuum, run_incremental_vacuum,
-        select_auxiliary_work,
+        enqueue, incremental_vacuum_error, reject_faulted_write_ingress, reject_incremental_vacuum,
+        rollback_incremental_vacuum, run_incremental_vacuum, select_auxiliary_work,
     };
 
     struct BatchProbe {
@@ -2189,8 +2188,12 @@ mod auxiliary_scheduling_tests {
             let path = directory.path().join("vacuum.db");
             let mut connection = rusqlite::Connection::open(&path).unwrap();
             connection.busy_timeout(Duration::ZERO).unwrap();
-            connection.pragma_update(None, "journal_mode", "DELETE").unwrap();
-            connection.pragma_update(None, "auto_vacuum", "INCREMENTAL").unwrap();
+            connection
+                .pragma_update(None, "journal_mode", "DELETE")
+                .unwrap();
+            connection
+                .pragma_update(None, "auto_vacuum", "INCREMENTAL")
+                .unwrap();
             connection
                 .execute_batch(
                     "CREATE TABLE retained(value TEXT NOT NULL);
@@ -2207,7 +2210,9 @@ mod auxiliary_scheduling_tests {
             // In rollback-journal mode a reader allows BEGIN IMMEDIATE and
             // reclamation but prevents COMMIT from gaining the exclusive lock.
             let reader = rusqlite::Connection::open(path).unwrap();
-            reader.execute_batch("BEGIN; SELECT value FROM retained;").unwrap();
+            reader
+                .execute_batch("BEGIN; SELECT value FROM retained;")
+                .unwrap();
             let rollback_observed = Arc::new(AtomicBool::new(false));
             let observed = Arc::clone(&rollback_observed);
             connection
@@ -2297,8 +2302,8 @@ mod auxiliary_scheduling_tests {
         let rollback_observed = Arc::new(AtomicBool::new(false));
         let observed = Arc::clone(&rollback_observed);
         connection
-            .authorizer(Some(move |context: rusqlite::hooks::AuthContext<'_>| {
-                match context.action {
+            .authorizer(Some(
+                move |context: rusqlite::hooks::AuthContext<'_>| match context.action {
                     rusqlite::hooks::AuthAction::Pragma { .. } => {
                         rusqlite::hooks::Authorization::Deny
                     }
@@ -2309,8 +2314,8 @@ mod auxiliary_scheduling_tests {
                         rusqlite::hooks::Authorization::Deny
                     }
                     _ => rusqlite::hooks::Authorization::Allow,
-                }
-            }))
+                },
+            ))
             .unwrap();
         let stages = Arc::new(Mutex::new(Vec::new()));
         let authority = Arc::new(RecordingAuthority {
