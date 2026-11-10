@@ -314,9 +314,13 @@ mod published_artifact_ceiling {
                     .await
                     .unwrap(),
             );
-            let connection = Connection::open(&path).unwrap();
-            republish(&connection, PUBLISHED_TABLE_SQL, PUBLISHED_DIGEST);
-            connection.execute_batch(PUBLISHED_ROWS).unwrap();
+            let mut connection = Connection::open(&path).unwrap();
+            // No reader sees fixture assembly, so publish its schema and rows
+            // with one durable commit instead of committing each statement.
+            let transaction = connection.transaction().unwrap();
+            republish(&transaction, PUBLISHED_TABLE_SQL, PUBLISHED_DIGEST);
+            transaction.execute_batch(PUBLISHED_ROWS).unwrap();
+            transaction.commit().unwrap();
             Self {
                 path,
                 _directory: directory,
@@ -751,9 +755,12 @@ mod published_artifact_ceiling {
                 .await
                 .unwrap(),
             );
-            let connection = Connection::open(&path).unwrap();
-            republish(&connection, PUBLISHED_TABLE_SQL, PUBLISHED_DIGEST);
-            connection.execute_batch(PUBLISHED_ROWS).unwrap();
+            let mut connection = Connection::open(&path).unwrap();
+            // Finish the private fixture before entering its daemon scope.
+            let transaction = connection.transaction().unwrap();
+            republish(&transaction, PUBLISHED_TABLE_SQL, PUBLISHED_DIGEST);
+            transaction.execute_batch(PUBLISHED_ROWS).unwrap();
+            transaction.commit().unwrap();
             drop(connection);
             let scope = tracedecay_runtime_core::db::enter_daemon_database_scope(
                 &profile_root,
