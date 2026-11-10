@@ -1742,7 +1742,7 @@ fn ordinary_retention_closes_cached_historical_segment_before_unlink() {
     let holders = || {
         std::fs::read_dir("/proc/self/fd")
             .expect("inspect actual process descriptor table")
-            .filter_map(|entry| entry.ok())
+            .filter_map(Result::ok)
             .filter_map(|entry| std::fs::metadata(entry.path()).ok())
             .filter(|metadata| metadata.dev() == inode.dev() && metadata.ino() == inode.ino())
             .count()

@@ -3948,7 +3948,8 @@ fn vanished_listed_generation_open_defers_instead_of_storage_loss() {
         GenerationDigestVerificationV1::MetadataOnly,
         &|| false,
     )
-    .expect_err("a vanished listed generation defers the census");
+    .err()
+    .expect("a vanished listed generation defers the census");
     assert!(
         matches!(error, CodeGenerationRetentionErrorV1::GenerationStoreBusy),
         "a missing listed generation is a publisher race, not a storage failure: {error:?}"
@@ -3961,7 +3962,8 @@ fn vanished_listed_generation_open_defers_instead_of_storage_loss() {
         GenerationDigestVerificationV1::MetadataOnly,
         &|| false,
     )
-    .expect_err("a directory is not a vanished file");
+    .err()
+    .expect("a directory is not a vanished file");
     assert!(
         matches!(storage_error, CodeGenerationRetentionErrorV1::Storage(_)),
         "non-NotFound census I/O stays a storage failure: {storage_error:?}"
