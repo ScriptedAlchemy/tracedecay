@@ -3299,6 +3299,7 @@ mod tests {
         std::fs::create_dir_all(foreign.join("projects/proj_foreign")).unwrap();
         std::fs::write(foreign.join("projects/proj_foreign/payload"), [1u8; 16]).unwrap();
         std::fs::write(foreign.join(USER_SESSIONS_DB_FILENAME), [2u8; 4_096]).unwrap();
+        seed_global_db(&foreign, &[("proj_foreign", "/repos/foreign")]).await;
         std::os::unix::fs::symlink(&foreign, &linked).unwrap();
 
         // Before the guard, the footprint was partial, but offline sampling
@@ -3323,9 +3324,15 @@ mod tests {
         // refusal is for a linked authority, not for the fixture's contents.
         let real = build_storage_report(&foreign).await.unwrap();
         assert_eq!(real.user_sessions_db_bytes, 4_096);
-        assert_eq!(real.unregistered_dir_count, 1);
-        assert_eq!(real.unregistered_bytes, 16);
-        assert_eq!(real.full_profile_size.unwrap().total_bytes, 4_112);
+        assert_eq!(real.stores.len(), 1);
+        assert_eq!(real.stores[0].project_id, "proj_foreign");
+        assert_eq!(real.stores[0].total_bytes, 16);
+        assert_eq!(real.unregistered_dir_count, 0);
+        assert_eq!(real.unregistered_bytes, 0);
+        let registry_bytes = std::fs::metadata(foreign.join(GLOBAL_DB_FILENAME))
+            .unwrap()
+            .len();
+        assert!(real.full_profile_size.unwrap().total_bytes >= registry_bytes + 4_112);
     }
 
     #[asupersync::test]
