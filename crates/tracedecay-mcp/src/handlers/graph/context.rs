@@ -1,7 +1,7 @@
 //! `tracedecay_context`: ranked search matches, their graph neighborhood,
 //! code blocks, and scoped memory, assembled for one task.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -10,9 +10,10 @@ use tracedecay_code_index::graph_projection::CodeGraphSymbolSummaryV1;
 use tracedecay_contracts::InvocationAnalyticsV1;
 use tracedecay_contracts::graph_tool::{GraphToolCompletionV1, GraphToolResultV1};
 use tracedecay_contracts::retrieval::{
-    ContextCodeBlockV1, ContextLexicalAnchorV1, ContextModeV1, ContextRelatedOmissionV1,
-    ContextResultV1, ContextRetrievalPlanV1, ContextRetrievalRouteV1, ContextSearchMatchV1,
-    ContextStageV1, ContextSurfaceRequestV1, LexicalAnchorDropReasonV1, PrimitiveSymbolLocationV1,
+    ContextCodeBlockV1, ContextLexicalAnchorV1, ContextModeV1, ContextPathSourceOmissionV1,
+    ContextPathSourceV1, ContextRelatedOmissionV1, ContextResultV1, ContextRetrievalPlanV1,
+    ContextRetrievalRouteV1, ContextSearchMatchV1, ContextStageV1, ContextSurfaceRequestV1,
+    LexicalAnchorDropReasonV1, PrimitiveSymbolLocationV1,
 };
 use tracedecay_domain::errors::Result;
 use tracedecay_domain::{
@@ -28,8 +29,12 @@ use crate::analysis::line_number_at;
 use crate::context_headings::CONTEXT_SEEN_NODE_IDS_LABEL;
 use crate::handlers::dependency_hints;
 use crate::handlers::support::{decode_primitive_request, unique_file_paths};
+use crate::handlers::token_budget::{SectionCut, cut, estimated_tokens, quotas, trim_section};
 
 use super::context_markdown::verified_plan_context;
+use super::context_path::{
+    context_call_path, mark_path_source_budget_omissions, validate_call_path,
+};
 use super::context_support::{
     ContextMemoryOutcome, context_memory_analytics, context_memory_options, context_memory_outcome,
     context_memory_read_control, context_memory_stage,
@@ -46,6 +51,7 @@ use super::search_freshness::{
     ServedGenerationV1, lanes_under_scheduler_freshness, search_freshness,
     worktree_freshness_from_payload,
 };
+use super::verified::CODE_SYMBOL_EVIDENCE_PREFIX;
 use super::{graph_symbol_paths, required_graph_file_path, user_line};
 
 #[cfg(test)]
@@ -57,6 +63,12 @@ use super::context_support::{context_markdown_lane_preview, context_memory_secti
 /// a hub's neighborhood before the `max_nodes` cut; past this many rows the
 /// omission reports its total as a lower bound.
 const CONTEXT_RELATED_WALK_ROWS: usize = 4_096;
+
+fn context_occurrence_key(node_id: &str) -> &str {
+    node_id
+        .strip_prefix(CODE_SYMBOL_EVIDENCE_PREFIX)
+        .unwrap_or(node_id)
+}
 
 /// Related symbols rank by the best edge kind joining them to a selected
 /// symbol, lower first: behavior (calls), then the type hierarchy
@@ -548,6 +560,12 @@ where
     let deadline = ctx.deadline().cloned();
     let cancellation = ctx.cancellation().cloned();
     let request: ContextSurfaceRequestV1 = decode_primitive_request(&args, "tracedecay_context")?;
+    let call_path_request = request
+        .call_path
+        .as_ref()
+        .map(validate_call_path)
+        .transpose()?;
+    let require_call_path = call_path_request.is_some();
     let task = request.task.as_str();
     let mode = request.mode.unwrap_or(ContextModeV1::Explore);
     let max_nodes = request
@@ -573,7 +591,8 @@ where
     let memory_options = context_memory_options(&args);
     let memory_read_control =
         context_memory_read_control(&memory_options, deadline.as_ref(), cancellation.as_ref())?;
-    // Graph enrichment is optional unless the caller asks for source bodies.
+    // Graph enrichment is optional unless the caller asks for source bodies
+    // or an exact call path.
     // That request waits for graph admission under the same deadline and
     // cancellation as search; ordinary lexical/exact retrieval stays independent.
     let search = execute_code_index_search(
@@ -599,7 +618,16 @@ where
         graph_refused_early.store(graph.is_err(), Ordering::Relaxed);
         graph
     };
-    let search_and_graph = race_primary_search_with_graph(search, graph, false, None, include_code);
+    let search_and_graph = async {
+        if require_call_path {
+            // Exact endpoints can be answered even if task search has no
+            // matches or is unavailable. Both reads retain their admitted
+            // deadline and cancellation.
+            tokio::join!(search, graph)
+        } else {
+            race_primary_search_with_graph(search, graph, false, None, include_code).await
+        }
+    };
     let ((outcome, graph), memory_outcome) = tokio::join!(search_and_graph, memory);
     // A graph open refused while search was still waiting for a restart's
     // retained generation to seat saw the unseated graph; a complete search
@@ -676,6 +704,33 @@ where
         Some(complete) => bind_verified_graph_to_search(graph, &complete.code_generation),
         None => graph,
     };
+    let path_projection = if let Some(path_request) = call_path_request {
+        let unavailable = graph
+            .as_ref()
+            .err()
+            .map(dependency_hints::unavailable_evidence);
+        Some(
+            context_call_path(
+                ctx,
+                graph.as_ref().ok(),
+                unavailable.as_ref(),
+                path_request,
+                scope_prefix,
+                freshness_payload.as_ref(),
+                include_code,
+                max_code_blocks,
+            )
+            .await,
+        )
+    } else {
+        None
+    };
+    // Preserve the path's metered reads even if later neighborhood
+    // enrichment refuses and releases its query.
+    let path_cost = path_projection
+        .as_ref()
+        .and_then(|_| graph.as_ref().ok())
+        .map(tracedecay_graph_query::VerifiedGraphQuery::read_cost);
     let (graph, mut projection, verified_graph_evidence, graph_stage) =
         match (graph, complete.as_ref()) {
             (Ok(graph), Some(complete)) => {
@@ -743,6 +798,51 @@ where
                 .chain(hydrated.touched_files.iter().map(String::as_str)),
         );
     }
+    let ordinary_code_eligible = search_hydration
+        .as_ref()
+        .map_or(projection.code_sites, |hydrated| hydrated.code_sites);
+    let ordinary_code_ids = projection
+        .code_blocks
+        .iter()
+        .map(|block| context_occurrence_key(&block.node_id).to_owned())
+        .collect::<HashSet<_>>();
+    let mut path_code_requested = false;
+    let mut path_code_limited = false;
+    let call_path = path_projection.map(|mut path| {
+        let path_ids = path
+            .nodes()
+            .iter()
+            .map(|node| node.symbol.node_id.clone())
+            .collect::<HashSet<_>>();
+        path_code_requested = include_code && !path_ids.is_empty();
+        path_code_limited = path.nodes().iter().any(|node| {
+            matches!(
+                node.source,
+                ContextPathSourceV1::Omitted {
+                    reason: ContextPathSourceOmissionV1::CodeBlockLimit,
+                }
+            )
+        });
+        projection
+            .touched_files
+            .extend(path.nodes().iter().map(|node| node.symbol.file.clone()));
+        // The connecting declarations have first claim on the source
+        // budget. Never backfill a refused path body from a looser search
+        // window for that same node.
+        path.code.extend(
+            std::mem::take(&mut projection.code_blocks)
+                .into_iter()
+                .filter(|block| !path_ids.contains(context_occurrence_key(&block.node_id))),
+        );
+        path.code.truncate(max_code_blocks);
+        projection.code_blocks = path.code;
+        path.result
+    });
+    let ordinary_code_served = projection
+        .code_blocks
+        .iter()
+        .filter(|block| ordinary_code_ids.contains(context_occurrence_key(&block.node_id)))
+        .count();
     let retrieval = ContextRetrievalPlanV1 {
         search: match complete.as_ref() {
             Some(complete) => ContextStageV1::ran(
@@ -770,11 +870,8 @@ where
         code: if !include_code {
             ContextStageV1::NotRequested
         } else {
-            let code_eligible = search_hydration
-                .as_ref()
-                .map_or(projection.code_sites, |hydrated| hydrated.code_sites);
             if projection.code_blocks.is_empty() {
-                if code_eligible == 0 {
+                if ordinary_code_eligible == 0 && !path_code_requested {
                     ContextStageV1::Skipped
                 } else {
                     ContextStageV1::Unavailable
@@ -783,7 +880,7 @@ where
                 ContextStageV1::ran(
                     max_code_blocks,
                     projection.code_blocks.len(),
-                    code_eligible > projection.code_blocks.len(),
+                    ordinary_code_eligible > ordinary_code_served || path_code_limited,
                 )
             }
         },
@@ -844,7 +941,8 @@ where
     };
     let cost = graph
         .as_ref()
-        .map(tracedecay_graph_query::VerifiedGraphQuery::read_cost);
+        .map(tracedecay_graph_query::VerifiedGraphQuery::read_cost)
+        .or(path_cost);
     // Mirror the lexical planner's admission rule: a name preference only
     // becomes a served name route when at least one eligible symbol token
     // survives normalization and the stoplist.
@@ -866,6 +964,7 @@ where
         related_symbols,
         related_omission: projection.related_omission,
         code: projection.code_blocks,
+        call_path,
         oversized_symbols,
         coverage,
         memory_matches,
@@ -877,22 +976,7 @@ where
         token_budget: None,
     };
     if let Some(budget) = budget_tokens {
-        let shares = crate::handlers::token_budget::quotas(budget, &[40, 25, 25, 10]);
-        let sections = vec![
-            crate::handlers::token_budget::trim_section("symbols", &mut result.symbols, shares[0])?,
-            crate::handlers::token_budget::trim_section(
-                "related_symbols",
-                &mut result.related_symbols,
-                shares[1],
-            )?,
-            crate::handlers::token_budget::trim_section("code", &mut result.code, shares[2])?,
-            crate::handlers::token_budget::trim_section(
-                "memory_matches",
-                &mut result.memory_matches,
-                shares[3],
-            )?,
-        ];
-        result.token_budget = Some(crate::handlers::token_budget::cut(budget, sections)?);
+        apply_context_token_budget(&mut result, budget)?;
     }
     Ok(GraphToolCompletionV1 {
         result: GraphToolResultV1::Context(Box::new(result)),
@@ -901,6 +985,44 @@ where
         analytics: Some(analytics),
         cost,
     })
+}
+
+fn apply_context_token_budget(result: &mut ContextResultV1, budget: u32) -> Result<()> {
+    // A partial chain would misrepresent the connection. Reserve the whole
+    // bounded path, including the longer source-omission receipts a cut may
+    // require, before allocating the ranked sections' quotas.
+    let path_reserved = result
+        .call_path
+        .as_ref()
+        .map(|path| {
+            let mut with_omissions = path.clone();
+            mark_path_source_budget_omissions(&mut with_omissions, &[]);
+            estimated_tokens(&with_omissions)
+        })
+        .transpose()?
+        .unwrap_or(0);
+    let shares = quotas(budget.saturating_sub(path_reserved), &[40, 25, 25, 10]);
+    let mut sections = vec![
+        trim_section("symbols", &mut result.symbols, shares[0])?,
+        trim_section("related_symbols", &mut result.related_symbols, shares[1])?,
+        trim_section("code", &mut result.code, shares[2])?,
+        trim_section("memory_matches", &mut result.memory_matches, shares[3])?,
+    ];
+    if let Some(path) = &mut result.call_path {
+        mark_path_source_budget_omissions(path, &result.code);
+        sections.insert(
+            0,
+            SectionCut {
+                section: "call_path",
+                total: 1,
+                shown: 1,
+                est_tokens: estimated_tokens(path)?,
+                over_ceiling: path_reserved > budget,
+            },
+        );
+    }
+    result.token_budget = Some(cut(budget, sections)?);
+    Ok(())
 }
 
 #[cfg(test)]

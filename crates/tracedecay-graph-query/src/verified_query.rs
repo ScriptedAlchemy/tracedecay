@@ -9,7 +9,7 @@ use std::sync::Arc;
 use crate::{GraphQueryError, GraphQueryResult as Result};
 use tracedecay_code_index::chunks::CodeIndexImportEvidenceV1;
 use tracedecay_code_index::graph_projection::{
-    CodeGraphCensusV1, CodeGraphImpactBatchV1, CodeGraphInteractiveReader,
+    CodeGraphCensusV1, CodeGraphImpactBatchV1, CodeGraphInteractiveReader, CodeGraphPathSearchV1,
     CodeGraphRankedNeighborsV1, CodeGraphReadCostMeter, CodeGraphReadinessRequirement,
     CodeGraphSemanticEdgeV1, CodeGraphSymbolPageV1, CodeGraphSymbolPredicate,
     CodeGraphSymbolSummaryV1,
@@ -593,6 +593,35 @@ impl VerifiedGraphQuery {
                 occurrences,
                 kinds,
                 max_relations,
+                Arc::clone(&self.cancellation),
+            )
+            .map_err(GraphQueryError::from)
+    }
+
+    /// Bounded shortest path over the same admitted, metered generation as
+    /// the other graph reads. An exhausted frontier and a depth cut remain
+    /// distinct in the reader's result.
+    #[tracing::instrument(
+        name = "usecases.graph.verified.shortest_path",
+        level = "trace",
+        skip_all
+    )]
+    pub fn shortest_path(
+        &self,
+        from: &SymbolOccurrenceId,
+        to: &SymbolOccurrenceId,
+        kinds: &[RelationEdgeKindV1],
+        max_depth: u32,
+        max_relations_per_hop: usize,
+    ) -> Result<CodeGraphPathSearchV1> {
+        self.refuse_if_bound_closed()?;
+        self.reader
+            .shortest_path(
+                from,
+                to,
+                kinds,
+                max_depth,
+                max_relations_per_hop,
                 Arc::clone(&self.cancellation),
             )
             .map_err(GraphQueryError::from)

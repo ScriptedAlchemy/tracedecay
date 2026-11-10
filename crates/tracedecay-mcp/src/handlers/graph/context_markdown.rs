@@ -12,8 +12,9 @@ use super::{
 };
 use crate::ToolResult;
 use crate::context_headings::{
-    CONTEXT_CODE_HEADING, CONTEXT_ENTRY_POINTS_HEADING, CONTEXT_EXTENSION_POINTS_HEADING,
-    CONTEXT_RELATED_SYMBOLS_HEADING, CONTEXT_SEEN_NODE_IDS_LABEL, CONTEXT_TEST_COVERAGE_HEADING,
+    CONTEXT_CALL_PATH_HEADING, CONTEXT_CODE_HEADING, CONTEXT_ENTRY_POINTS_HEADING,
+    CONTEXT_EXTENSION_POINTS_HEADING, CONTEXT_RELATED_SYMBOLS_HEADING, CONTEXT_SEEN_NODE_IDS_LABEL,
+    CONTEXT_TEST_COVERAGE_HEADING,
 };
 use crate::handlers::support::text_tool_result;
 use crate::path_tree::format_compact_path_list;
@@ -21,13 +22,14 @@ use crate::tools::render::{self, Md, RankedRow, ranked_rows_md};
 use serde_json::Value;
 use tracedecay_code_index::graph_projection::CodeGraphSymbolSummaryV1;
 use tracedecay_contracts::retrieval::{
-    ContextCodeBlockV1, ContextExtensionPointV1, ContextLexicalAnchorV1, ContextPlanV1,
-    ContextRelatedOmissionV1, ContextResultV1, ContextRetrievalPlanV1, ContextSearchMatchV1,
-    ContextStageV1, PrimitiveSymbolLocationV1,
+    ContextCallPathLimitV1, ContextCallPathOutcomeV1, ContextCallPathResultV1, ContextCodeBlockV1,
+    ContextExtensionPointV1, ContextLexicalAnchorV1, ContextPathSourceOmissionV1,
+    ContextPathSourceV1, ContextPlanV1, ContextRelatedOmissionV1, ContextResultV1,
+    ContextRetrievalPlanV1, ContextSearchMatchV1, ContextStageV1, PrimitiveSymbolLocationV1,
 };
-use tracedecay_domain::RelationEdgeKindV1;
 use tracedecay_domain::code_intelligence::{NodeKind, Visibility};
 use tracedecay_domain::errors::Result;
+use tracedecay_domain::{EdgeAuthorityV1, RelationEdgeKindV1};
 use tracedecay_graph_query::VerifiedGraphQuery;
 
 use super::context_support::{context_markdown_lane_preview, insert_context_memory_section};
@@ -60,6 +62,7 @@ pub(crate) fn render_context(
     };
     output.push_str(&context_markdown(
         &result.task,
+        result.call_path.as_ref(),
         &code_md,
         kept_symbols,
         &result.related_symbols,
@@ -83,11 +86,20 @@ pub(crate) fn render_context(
     if let Some(plan) = &result.plan {
         append_plan_markdown(&mut output, plan);
     }
-    if !kept_symbols.is_empty() {
-        let seen = kept_symbols
-            .iter()
-            .map(|symbol| symbol.node_id.as_str())
-            .collect::<Vec<_>>();
+    let mut seen = kept_symbols
+        .iter()
+        .map(|symbol| symbol.node_id.as_str())
+        .collect::<Vec<_>>();
+    if let Some(path) = &result.call_path
+        && let ContextCallPathOutcomeV1::Found { nodes, .. } = &path.outcome
+    {
+        for node in nodes {
+            if !seen.contains(&node.symbol.node_id.as_str()) {
+                seen.push(node.symbol.node_id.as_str());
+            }
+        }
+    }
+    if !seen.is_empty() {
         let _ = write!(
             output,
             "\n{} {}\n",
@@ -107,6 +119,116 @@ pub(crate) fn render_context(
     let preview = context_markdown_lane_preview(&output);
     let text = render::markdown_preview_with_handle(response_handle_root, &output, &preview);
     Ok(text_tool_result(&text, Vec::new()))
+}
+
+fn authority_label(authority: EdgeAuthorityV1) -> &'static str {
+    match authority {
+        EdgeAuthorityV1::SyntaxExact => "syntax_exact",
+        EdgeAuthorityV1::NameResolved => "name_resolved",
+        EdgeAuthorityV1::CompilerOrLspResolved => "compiler_or_lsp_resolved",
+        EdgeAuthorityV1::DynamicObserved => "dynamic_observed",
+        EdgeAuthorityV1::HeuristicCandidate => "heuristic_candidate",
+        EdgeAuthorityV1::UnknownUnsupported => "unknown_unsupported",
+    }
+}
+
+fn path_source_label(source: &ContextPathSourceV1) -> String {
+    match source {
+        ContextPathSourceV1::NotRequested => "source not requested".to_owned(),
+        ContextPathSourceV1::Included => "source included".to_owned(),
+        ContextPathSourceV1::Omitted { reason } => match reason {
+            ContextPathSourceOmissionV1::CodeBlockLimit => {
+                "source omitted: max_code_blocks".to_owned()
+            }
+            ContextPathSourceOmissionV1::TokenBudget => "source omitted: budget_tokens".to_owned(),
+            ContextPathSourceOmissionV1::Oversized => {
+                "source omitted: declaration exceeds the code-block size".to_owned()
+            }
+        },
+        ContextPathSourceV1::Unavailable { evidence } => format!(
+            "source unavailable: {} ({})",
+            evidence.detail, evidence.reason_code
+        ),
+    }
+}
+
+fn append_call_path_markdown(output: &mut String, path: &ContextCallPathResultV1) {
+    let _ = writeln!(output, "\n{CONTEXT_CALL_PATH_HEADING}");
+    if let Some(generation) = &path.code_generation {
+        let _ = writeln!(output, "Indexed generation: `{generation}`.");
+    }
+    if let Some(freshness) = &path.freshness {
+        output.push_str(&freshness_lines(freshness));
+    }
+    match &path.outcome {
+        ContextCallPathOutcomeV1::Found {
+            nodes,
+            edges,
+            weakest_authority,
+        } => {
+            let _ = writeln!(
+                output,
+                "\nShortest indexed call path: {} edge(s).",
+                edges.len()
+            );
+            if let Some(authority) = weakest_authority {
+                let _ = writeln!(
+                    output,
+                    "Weakest edge authority: `{}`.",
+                    authority_label(*authority)
+                );
+            }
+            output.push('\n');
+            for (index, node) in nodes.iter().enumerate() {
+                let symbol = &node.symbol;
+                let _ = writeln!(
+                    output,
+                    "{}. **{}**, {}:{} — {}. `node_id: {}`",
+                    index + 1,
+                    symbol.qualified_name,
+                    symbol.file,
+                    symbol.start_line,
+                    path_source_label(&node.source),
+                    symbol.node_id
+                );
+            }
+            if !edges.is_empty() {
+                output.push_str("\nCall edges (byte spans in each caller's indexed source):\n\n");
+                for (edge, adjacent) in edges.iter().zip(nodes.windows(2)) {
+                    let _ = writeln!(
+                        output,
+                        "- `{}` → `{}` · `{}` · {} bytes {}..{}",
+                        adjacent[0].symbol.name,
+                        adjacent[1].symbol.name,
+                        authority_label(edge.authority),
+                        adjacent[0].symbol.file,
+                        edge.evidence_span.start_byte,
+                        edge.evidence_span.end_byte
+                    );
+                }
+            }
+        }
+        ContextCallPathOutcomeV1::NoPath => {
+            output.push_str("\nNo directed path connects these exact endpoints in the indexed call graph. The reachable frontier was exhausted; unresolved or dynamic calls may still connect them at runtime.\n");
+        }
+        ContextCallPathOutcomeV1::Truncated { limit } => {
+            let reason = match limit {
+                ContextCallPathLimitV1::Depth => format!("the {}-edge depth limit", path.max_depth),
+                ContextCallPathLimitV1::Relations => "the relation-read limit".to_owned(),
+            };
+            let _ = writeln!(
+                output,
+                "\nCall-path search stopped at {reason} before exhausting the frontier. No disconnected-path conclusion is available."
+            );
+        }
+        ContextCallPathOutcomeV1::Unavailable { evidence } => {
+            let _ = writeln!(
+                output,
+                "\nCall path unavailable: {} ({}).",
+                evidence.detail, evidence.reason_code
+            );
+        }
+    }
 }
 
 /// The selected symbols as ranked rows, in selection order, rendered as
@@ -172,13 +294,18 @@ fn context_code_blocks_md(code: &[ContextCodeBlockV1]) -> String {
 /// symbols it shows, which name the entry points.
 fn context_markdown(
     task: &str,
+    call_path: Option<&ContextCallPathResultV1>,
     code_md: &str,
     symbols: &[PrimitiveSymbolLocationV1],
     related: &[PrimitiveSymbolLocationV1],
     related_omission: Option<&ContextRelatedOmissionV1>,
     oversized: &[PrimitiveSymbolLocationV1],
 ) -> String {
-    let mut output = format!("# Context for {task}\n\n{CONTEXT_CODE_HEADING}\n{code_md}");
+    let mut output = format!("# Context for {task}\n");
+    if let Some(path) = call_path {
+        append_call_path_markdown(&mut output, path);
+    }
+    let _ = write!(output, "\n{CONTEXT_CODE_HEADING}\n{code_md}");
     for symbol in oversized {
         let _ = writeln!(
             output,

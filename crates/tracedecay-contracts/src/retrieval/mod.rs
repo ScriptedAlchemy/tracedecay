@@ -236,7 +236,9 @@ pub use ports::{
     TemporalRetrievalFailure, TemporalRetrievalFuture, TemporalRetrievalPort,
 };
 pub use primitive_surface::{
-    ContextCodeBlockV1, ContextExtensionPointV1, ContextLexicalAnchorV1, ContextModeV1,
+    ContextCallPathEdgeV1, ContextCallPathLimitV1, ContextCallPathNodeV1, ContextCallPathOutcomeV1,
+    ContextCallPathRequestV1, ContextCallPathResultV1, ContextCodeBlockV1, ContextExtensionPointV1,
+    ContextLexicalAnchorV1, ContextModeV1, ContextPathSourceOmissionV1, ContextPathSourceV1,
     ContextPlanV1, ContextRelatedOmissionV1, ContextResultV1, ContextRetrievalPlanV1,
     ContextRetrievalRouteV1, ContextSearchMatchV1, ContextStageV1, ContextSurfaceRequestV1,
     ImpactNodeV1, ImpactRadiusV1, ImpactResultV1, LexicalAnchorDropReasonV1, LexicalAnchorDropV1,

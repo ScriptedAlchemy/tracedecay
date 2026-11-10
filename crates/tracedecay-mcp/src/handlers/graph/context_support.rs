@@ -22,10 +22,10 @@ use tracedecay_store::{
 
 use crate::McpToolContext;
 use crate::context_headings::{
-    CONTEXT_CODE_HEADING, CONTEXT_ENTRY_POINTS_HEADING, CONTEXT_EXTENSION_POINTS_HEADING,
-    CONTEXT_INDEX_COVERAGE_HINT_HEADING, CONTEXT_MEMORY_FEEDBACK_HINT,
-    CONTEXT_MEMORY_MATCHES_HEADING, CONTEXT_RELATED_SYMBOLS_HEADING, CONTEXT_SEEN_NODE_IDS_LABEL,
-    CONTEXT_TEST_COVERAGE_HEADING,
+    CONTEXT_CALL_PATH_HEADING, CONTEXT_CODE_HEADING, CONTEXT_ENTRY_POINTS_HEADING,
+    CONTEXT_EXTENSION_POINTS_HEADING, CONTEXT_INDEX_COVERAGE_HINT_HEADING,
+    CONTEXT_MEMORY_FEEDBACK_HINT, CONTEXT_MEMORY_MATCHES_HEADING, CONTEXT_RELATED_SYMBOLS_HEADING,
+    CONTEXT_SEEN_NODE_IDS_LABEL, CONTEXT_TEST_COVERAGE_HEADING,
 };
 use tracedecay_application::tracedecay::project_memory_owner_from_layout_id;
 use tracedecay_domain::errors::{Result, TraceDecayError};
@@ -85,7 +85,9 @@ fn context_lane_budget(lane_key: &str) -> usize {
         usize::MAX
     } else if lane_key.starts_with(CONTEXT_CODE_HEADING) {
         8_500
-    } else if lane_key.starts_with(CONTEXT_RELATED_SYMBOLS_HEADING) {
+    } else if lane_key.starts_with(CONTEXT_RELATED_SYMBOLS_HEADING)
+        || lane_key.starts_with(CONTEXT_CALL_PATH_HEADING)
+    {
         3_500
     } else if lane_key.starts_with(CONTEXT_ENTRY_POINTS_HEADING)
         || lane_key.starts_with(CONTEXT_TEST_COVERAGE_HEADING)

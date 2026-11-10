@@ -661,6 +661,7 @@ mod tests {
             related_symbols: Vec::new(),
             related_omission: None,
             code: Vec::new(),
+            call_path: None,
             oversized_symbols: Vec::new(),
             coverage: PrimitiveSearchCoverageV1 {
                 exact: PrimitiveLaneStatusV1::Complete(PrimitiveLaneCompleteV1::Complete),

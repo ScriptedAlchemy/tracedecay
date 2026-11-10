@@ -3,6 +3,7 @@
 mod clones;
 mod context;
 mod context_markdown;
+mod context_path;
 mod context_support;
 mod exact_symbol;
 mod lexical_routing;
