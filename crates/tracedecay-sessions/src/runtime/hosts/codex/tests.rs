@@ -2957,9 +2957,11 @@ mod recent_first_discovery_tests {
             "the fixture must cause a real directory authority transition"
         );
 
+        let mut observed = BTreeSet::new();
         let mut ended_first_sweep = false;
         for _ in 0..512 {
             let pass = retained_pass(&source, &mut state, bounds, frontier);
+            observed.extend(pass.report.paths);
             frontier = pass.next_frontier;
             if state.scan.is_none() {
                 assert!(
@@ -2972,7 +2974,6 @@ mod recent_first_discovery_tests {
         }
         assert!(ended_first_sweep, "the first bounded sweep must terminate");
 
-        let mut observed = BTreeSet::new();
         for _ in 0..1024 {
             let pass = retained_pass(&source, &mut state, bounds, frontier);
             observed.extend(pass.report.paths);
