@@ -516,6 +516,80 @@ async fn nonpositive_legacy_owner_ids_cannot_be_skipped_by_bootstrap() {
 }
 
 #[asupersync::test]
+async fn ignored_body_delete_rolls_back_candidates_then_reclaims_distinct_pages() {
+    let store = Store::open().await;
+    store.install().await;
+    let mut hashes = Vec::new();
+    for ordinal in 0..52 {
+        let body =
+            StoredCanonicalBody::pack(format!("unreferenced candidate {ordinal}").as_bytes())
+                .unwrap();
+        insert_body(store.conn(), &body).await;
+        hashes.push(body.content_hash);
+    }
+    assert_eq!(candidate_count(store.conn()).await, 52);
+    store
+        .conn()
+        .execute_batch(
+            "CREATE TRIGGER refuse_body_gc_delete
+             BEFORE DELETE ON session_canonical_bodies BEGIN
+                 SELECT RAISE(IGNORE);
+             END",
+        )
+        .await
+        .unwrap();
+
+    let transaction = store
+        .conn()
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .await
+        .unwrap();
+    let error = step(&transaction, 48).await.unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("collection left an unreferenced body behind")
+    );
+    transaction.rollback().await.unwrap();
+    assert_eq!(
+        candidate_count(store.conn()).await,
+        52,
+        "a vetoed DELETE cannot discard the only future collection opportunity"
+    );
+    for hash in &hashes {
+        assert!(body_exists(store.conn(), hash).await);
+    }
+
+    store
+        .conn()
+        .execute_batch("DROP TRIGGER refuse_body_gc_delete")
+        .await
+        .unwrap();
+    let first = store.tick(48).await;
+    assert_eq!(first.bodies_scanned, 48);
+    assert_eq!(first.bodies_deleted, 48);
+    assert_eq!(first.candidates_discharged, 48);
+    assert!(first.has_more);
+    assert_eq!(candidate_count(store.conn()).await, 4);
+    let second = store.tick(48).await;
+    assert_eq!(second.bodies_scanned, 4);
+    assert_eq!(second.bodies_deleted, 4);
+    assert_eq!(second.candidates_discharged, 4);
+    assert!(!second.has_more);
+    assert_eq!(candidate_count(store.conn()).await, 0);
+    for hash in &hashes {
+        assert!(!body_exists(store.conn(), hash).await);
+    }
+    assert_eq!(
+        store.tick(48).await,
+        CanonicalBodyGcReport {
+            bootstrap_complete: true,
+            ..CanonicalBodyGcReport::default()
+        }
+    );
+}
+
+#[asupersync::test]
 async fn zero_delete_pages_discharge_distinct_candidates_and_quiesce() {
     let store = Store::open().await;
     for ordinal in 0..52 {

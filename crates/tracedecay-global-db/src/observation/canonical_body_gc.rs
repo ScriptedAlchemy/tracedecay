@@ -372,6 +372,27 @@ async fn collect_candidates(
         report.stored_bytes_deleted = report.stored_bytes_deleted.saturating_add(bytes);
     }
     drop(deleted);
+    // An ignored or otherwise suppressed body DELETE must not silently
+    // discharge an unreferenced candidate. Once that candidate disappears,
+    // no owner-triggered re-enqueue is guaranteed, and the body can persist
+    // indefinitely without another collection attempt.
+    let mut uncollected = conn
+        .query(
+            "SELECT 1 FROM session_canonical_bodies b
+             WHERE b.content_hash IN (SELECT value FROM json_each(?1))
+               AND NOT EXISTS (SELECT 1 FROM canonical_body_gc_refs r
+                               WHERE r.content_hash = b.content_hash)
+             LIMIT 1",
+            params![hashes.as_str()],
+        )
+        .await
+        .map_err(db_error)?;
+    if uncollected.next().await.map_err(db_error)?.is_some() {
+        return Err(integrity_error(
+            "canonical body collection left an unreferenced body behind",
+        ));
+    }
+    drop(uncollected);
     // Referenced candidates are discharged too. The final owner removal
     // records them again; idle ticks never revisit every retained body.
     // Deleting an unreferenced body cascades to its candidate row. The
