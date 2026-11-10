@@ -144,6 +144,7 @@ fn look_again_on_not_found<T>(mut attempt: impl FnMut() -> io::Result<T>) -> io:
 
 /// Atomically renames one directory entry between already-open parent
 /// capabilities without allowing an occupied destination to be replaced.
+/// Both names must be single, unnormalized directory entries, not paths.
 /// Platforms without a suitable primitive fail closed: retaining bytes is
 /// always preferable to risking a replacement.
 pub fn rename_noreplace(
@@ -152,6 +153,8 @@ pub fn rename_noreplace(
     to_parent: &Dir,
     to: &OsStr,
 ) -> io::Result<()> {
+    require_entry_name(from)?;
+    require_entry_name(to)?;
     #[cfg(all(target_os = "linux", target_env = "gnu"))]
     {
         use std::os::fd::AsRawFd;
@@ -203,17 +206,8 @@ fn dir_entry_path(parent: &Dir, name: &OsStr) -> io::Result<std::path::PathBuf> 
 /// Windows uses the shared namespace-durable rename authority, including its
 /// NTFS fallback for replacement while delete-sharing readers remain open.
 pub fn replace_file(parent: &Dir, source: &OsStr, destination: &OsStr) -> io::Result<()> {
-    for name in [source, destination] {
-        let mut components = std::path::Path::new(name).components();
-        if !matches!(components.next(), Some(std::path::Component::Normal(_)))
-            || components.next().is_some()
-        {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "file replacement requires sibling entry names",
-            ));
-        }
-    }
+    require_entry_name(source)?;
+    require_entry_name(destination)?;
     #[cfg(windows)]
     {
         let source = dir_entry_path(parent, source)?;
@@ -226,6 +220,25 @@ pub fn replace_file(parent: &Dir, source: &OsStr, destination: &OsStr) -> io::Re
     }
     #[cfg(not(windows))]
     parent.rename(source, parent, destination)
+}
+
+/// Native *at renames still resolve absolute paths, parent traversal and
+/// intermediate symlinks. A held parent only confines a single entry name.
+/// Compare the original spelling as well: Path components normalize trailing
+/// separators and interior dots, but the native syscall receives those bytes.
+fn require_entry_name(name: &OsStr) -> io::Result<()> {
+    let mut components = std::path::Path::new(name).components();
+    if matches!(components.next(), Some(std::path::Component::Normal(entry)) if entry == name)
+        && components.next().is_none()
+        && !name.as_encoded_bytes().contains(&0)
+    {
+        Ok(())
+    } else {
+        Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "publication requires single directory entry names",
+        ))
+    }
 }
 
 /// Resolves an open directory capability back to its live filesystem path so
@@ -535,3 +548,6 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+mod namespace_tests;
