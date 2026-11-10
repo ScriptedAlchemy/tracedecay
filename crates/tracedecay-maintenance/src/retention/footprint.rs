@@ -22,6 +22,7 @@ use tracedecay_contracts::doctor::{
     storage_family_read,
 };
 use tracedecay_domain::canonical_text::sha256_hex;
+use tracedecay_domain::fold_control_characters;
 use tracedecay_global_db::registry_maintenance::{RootLivenessV1, probe_root};
 use tracedecay_runtime_core::text::format_bytes;
 
@@ -628,7 +629,11 @@ fn bounded_entry_subject(entry: &ProfileFootprintEntryV1) -> (String, String) {
             format_bytes(entry.bytes),
             format_bytes(entry.bound_bytes)
         );
-        super::diagnostics::bounded_statement(&statement) == statement
+        // Compare the *rendered* statement. Doctor folds control characters,
+        // so a valid short registered path containing a tab or newline must
+        // not be mistaken for an overlong detail and silently omitted.
+        super::diagnostics::bounded_statement(&statement)
+            == fold_control_characters(&statement).trim()
     };
     if !fits(&subject) {
         let mut compact = entry.clone();
@@ -2146,8 +2151,31 @@ mod tests {
             project.project.as_ref().unwrap().state,
             ProjectRootStateV1::Present
         );
+        // A short registered checkout path with control characters fits once
+        // folded by Doctor. Preserve its useful identity rather than dropping
+        // it just because the sanitized representation differs byte-for-byte.
+        project.project.as_mut().unwrap().registered_root =
+            Some("checkout\tbranch\nalpha".to_owned());
+        let sanitized = findings(&footprint);
+        let sanitized_statement = sanitized[key].finding().coverage().statement();
+        assert!(
+            sanitized_statement.contains("for checkout branch alpha (root present)"),
+            "sanitized registered checkout was omitted: {sanitized_statement}"
+        );
+        assert!(!sanitized_statement.contains('\t'), "{sanitized_statement}");
+        assert!(!sanitized_statement.contains('\n'), "{sanitized_statement}");
+        assert!(
+            sanitized_statement.ends_with(&format!("{} of 1 B bound", format_bytes(bytes))),
+            "a sanitized identity must keep the exact measured overage: {sanitized_statement}"
+        );
+
         // The complete state remains available in the storage report; only
         // the Doctor coverage text is bounded.
+        let project = footprint
+            .entries
+            .iter_mut()
+            .find(|entry| entry.key == key)
+            .expect("measured project");
         project.project.as_mut().unwrap().registered_root = Some("long-root/".repeat(120));
         let observed = findings(&footprint);
         let finding = &observed[key];
