@@ -530,8 +530,15 @@ fn with_verified_segments<T>(
             classify_sealed_projection_build_error(error)
         }
     };
-    if matches!(error, GraphDbError::Corrupt { .. }) && !seal_still_named(&routes.seal_paths)? {
-        return Err(GraphDbError::SealSuperseded);
+    if matches!(error, GraphDbError::Corrupt { .. }) {
+        // Endpoint security can delay the last pathname check too. Preserve
+        // a deadline or cancellation observed after that I/O, even if the
+        // seal was retired or the pathname probe itself failed.
+        let still_named = seal_still_named(&routes.seal_paths);
+        (check)()?;
+        if !still_named? {
+            return Err(GraphDbError::SealSuperseded);
+        }
     }
     Err(error)
 }
@@ -3133,6 +3140,85 @@ mod tests {
                 1,
                 "a completed page read must not be repeated for the last probe"
             );
+        }
+    }
+
+    #[test]
+    fn graph_segment_retirement_probe_preserves_late_interruption() {
+        let temporary = TempDir::new().unwrap();
+        let bytes = b"authenticated graph page before retirement classification";
+        let digest = ManifestDigest::from_sha256_bytes(&Sha256::digest(bytes)).unwrap();
+        let segment_path = temporary.path().join(format!(
+            "segment-{}.json",
+            sha256_hex_suffix(digest.as_str()).unwrap()
+        ));
+        std::fs::write(segment_path, bytes).unwrap();
+        let seal_path = temporary.path().join("seal");
+        let routes = SealRoutes {
+            seal_paths: vec![seal_path.clone()],
+            segment_roots: vec![temporary.path().to_path_buf()],
+        };
+        let run = |check: &dyn Fn() -> Result<(), GraphDbError>| {
+            with_verified_segments::<()>(&digest, &routes, check, |read| {
+                let mut page = Vec::new();
+                read(
+                    SealedGenerationSegmentReadV1::Whole {
+                        digest: &digest,
+                        size_bytes: bytes.len() as u64,
+                    },
+                    &mut page,
+                )?;
+                assert_eq!(page, bytes, "a real nonempty segment must be read");
+                // The builder has authenticated source bytes but rejects a
+                // graph row, forcing the final seal-name probe.
+                Err(super::SealedCodeGraphRowsError::Source(
+                    CodeIndexProductionErrorV1::Contract(
+                        "invalid graph row after sealed segment read".to_owned(),
+                    ),
+                ))
+            })
+        };
+
+        for retired in [false, true] {
+            std::fs::write(&seal_path, b"live seal").unwrap();
+            if retired {
+                std::fs::remove_file(&seal_path).unwrap();
+            }
+            SEGMENT_OPENS.with(|opens| opens.set(0));
+            let uninterrupted = run(&|| Ok(())).unwrap_err();
+            assert!(
+                matches!(
+                    (&uninterrupted, retired),
+                    (GraphDbError::Corrupt { .. }, false)
+                        | (GraphDbError::SealSuperseded, true)
+                ),
+                "unexpected retirement classification: {uninterrupted:?}"
+            );
+            assert_eq!(SEGMENT_OPENS.with(|opens| opens.get()), 1);
+
+            for interruption in [GraphDbError::Cancelled, GraphDbError::DeadlineExceeded] {
+                let checks = AtomicUsize::new(0);
+                SEGMENT_OPENS.with(|opens| opens.set(0));
+                let result = run(&|| {
+                    let count = checks.fetch_add(1, Ordering::SeqCst) + 1;
+                    if count == 4 {
+                        Err(interruption.clone())
+                    } else {
+                        Ok(())
+                    }
+                });
+                assert_eq!(result.unwrap_err(), interruption);
+                assert_eq!(
+                    checks.load(Ordering::SeqCst),
+                    4,
+                    "the final check must follow a real seal-path metadata probe"
+                );
+                assert_eq!(
+                    SEGMENT_OPENS.with(|opens| opens.get()),
+                    1,
+                    "the deadline probe must not reopen the authenticated page"
+                );
+            }
         }
     }
 
