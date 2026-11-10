@@ -11,7 +11,7 @@ use std::time::Instant;
 use serde::{Deserialize, Serialize};
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_runtime_core::db::Database;
-use tracedecay_runtime_core::db::engine::{Executor, QueryExecutor, params};
+use tracedecay_runtime_core::db::engine::{Executor, QueryExecutor, WriteStatement, params};
 use tracedecay_store::collect_body_refs;
 
 #[cfg(test)]
@@ -277,17 +277,32 @@ async fn bootstrap_observations(
         ));
     }
     drop(rows);
+    // Parsing preserves the canonical Rust reference contract, including
+    // value deduplication. Submit validated writes in bounded groups so an
+    // observation page cannot schedule one storage-worker hop per body hash.
+    // The caller's writer transaction rolls back every group on any failure.
+    const MAX_PENDING_OBSERVATION_REFS: usize = 128;
+    let mut pending = Vec::new();
     for (owner, json) in &page {
         for hash in collect_body_refs(json).map_err(db_error)? {
-            conn.execute(
-                "INSERT OR IGNORE INTO canonical_body_gc_refs(owner_kind, owner_id, content_hash)
-                 VALUES ('observation', ?1, ?2)",
-                params![*owner, hash],
-            )
-            .await
-            .map_err(db_error)?;
+            pending.push(
+                WriteStatement::new(
+                    "INSERT OR IGNORE INTO canonical_body_gc_refs(owner_kind, owner_id, content_hash)
+                     VALUES ('observation', ?1, ?2)",
+                    params![*owner, hash],
+                )
+                .map_err(db_error)?,
+            );
+            if pending.len() == MAX_PENDING_OBSERVATION_REFS {
+                conn.execute_statements(std::mem::take(&mut pending))
+                    .await
+                    .map_err(db_error)?;
+            }
         }
         progress.observations_through = *owner;
+    }
+    if !pending.is_empty() {
+        conn.execute_statements(pending).await.map_err(db_error)?;
     }
     if page.len() < limit as usize {
         progress.observations_through = progress.observations_until;

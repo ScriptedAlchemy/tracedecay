@@ -52,6 +52,10 @@ struct Fixture {
 
 impl Fixture {
     async fn open() -> Self {
+        Self::with_observations(false).await
+    }
+
+    async fn with_observations(include_observations: bool) -> Self {
         let directory = tempfile::tempdir().unwrap();
         let conn = TestConnection::open(&directory.path().join("bootstrap-writes.db"));
         conn.execute_batch(CANONICAL_BODIES_TABLE_SQL).await.unwrap();
@@ -96,6 +100,35 @@ impl Fixture {
                 )
                 .await
                 .unwrap();
+            if include_observations {
+                // Three distinct hashes from the third owner onward, so a
+                // 48-owner page crosses the 128-write submission boundary.
+                let current = body.content_hash.as_str();
+                let previous = bodies
+                    .last()
+                    .map_or(current, |body: &StoredCanonicalBody| body.content_hash.as_str());
+                let earlier = bodies
+                    .iter()
+                    .rev()
+                    .nth(1)
+                    .map_or(current, |body| body.content_hash.as_str());
+                let json = serde_json::json!({
+                    "payload": {"a": null, "b": null, "c": null},
+                    "_tracedecay_canonical_body_refs": {
+                        "/payload/a": current,
+                        "/payload/b": previous,
+                        "/payload/c": earlier
+                    }
+                })
+                .to_string();
+                transaction
+                    .execute(
+                        "INSERT INTO observations(sequence, observation_json) VALUES (?1, ?2)",
+                        params![ordinal * 2, json],
+                    )
+                    .await
+                    .unwrap();
+            }
             bodies.push(body);
         }
         schema::install(&transaction).await.unwrap();
@@ -315,5 +348,115 @@ async fn bootstrap_batch_eligibility_does_not_change_the_page_boundary() {
         .map(|ordinal| ordinal * 2)
         .collect::<Vec<_>>();
     assert_eq!(raw_owners(&fixture.conn).await, expected);
+    fixture.assert_bodies_preserved().await;
+}
+
+async fn observation_owners(conn: &(impl QueryExecutor + ?Sized)) -> Vec<i64> {
+    let mut rows = conn
+        .query(
+            "SELECT DISTINCT owner_id FROM canonical_body_gc_refs
+             WHERE owner_kind = 'observation' ORDER BY owner_id",
+            (),
+        )
+        .await
+        .unwrap();
+    let mut owners = Vec::new();
+    while let Some(row) = rows.next().await.unwrap() {
+        owners.push(row.get(0).unwrap());
+    }
+    owners
+}
+
+#[asupersync::test]
+async fn observation_bootstrap_batches_across_a_bounded_write_submission() {
+    let fixture = Fixture::with_observations(true).await;
+    for _ in 0..2 {
+        fixture.tick().await;
+    }
+    for (scanned, frontier, owners, refs, submissions) in [
+        (48_u64, 96_i64, 48_i64, 141_i64, 3_usize),
+        (4, 104, 52, 153, 2),
+    ] {
+        let (report, actual_submissions) = fixture.tick().await;
+        assert_eq!(report.roots_scanned, scanned);
+        assert_eq!(report.bootstrap_frontier_after, Some(format!("observations:{frontier}")));
+        assert_eq!(read_progress(&fixture.conn).await.unwrap().observations_through, frontier);
+        assert_eq!(actual_submissions, submissions);
+        assert_eq!(
+            observation_owners(&fixture.conn).await,
+            (1..=owners).map(|ordinal| ordinal * 2).collect::<Vec<_>>()
+        );
+        assert_eq!(
+            scalar(&fixture.conn, "SELECT COUNT(*) FROM canonical_body_gc_refs
+                WHERE owner_kind = 'observation'")
+                .await,
+            refs,
+            "duplicate references within an observation must stay deduplicated"
+        );
+        assert_eq!(report.bodies_deleted, 0);
+        assert!(report.has_more);
+    }
+    let mut finished = false;
+    for _ in 0..6 {
+        let (report, _) = fixture.tick().await;
+        assert_eq!(report.bodies_deleted, 0);
+        if !report.has_more {
+            finished = true;
+            break;
+        }
+    }
+    assert!(finished, "bounded bootstrap and candidate discharge must terminate");
+    fixture.assert_bodies_preserved().await;
+    let (idle, submissions) = fixture.tick().await;
+    assert!(!idle.has_more);
+    assert!(!idle.has_committed_work());
+    assert_eq!(submissions, 0);
+}
+
+#[asupersync::test]
+async fn observation_bootstrap_failure_after_a_full_batch_rolls_back_and_recovers() {
+    let fixture = Fixture::with_observations(true).await;
+    for _ in 0..2 {
+        fixture.tick().await;
+    }
+    let before = read_progress(&fixture.conn).await.unwrap();
+    fixture
+        .conn
+        .execute_batch(
+            "CREATE TRIGGER refuse_observation_seed BEFORE INSERT ON canonical_body_gc_refs
+             WHEN NEW.owner_kind = 'observation' AND NEW.owner_id = 94 BEGIN
+                 SELECT RAISE(FAIL, 'injected observation batch refusal');
+             END",
+        )
+        .await
+        .unwrap();
+    let transaction = fixture
+        .conn
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .await
+        .unwrap();
+    let error = step(&transaction, 48).await.unwrap_err();
+    assert!(error.to_string().contains("injected observation batch refusal"));
+    transaction.rollback().await.unwrap();
+    assert_eq!(read_progress(&fixture.conn).await.unwrap(), before);
+    assert!(observation_owners(&fixture.conn).await.is_empty());
+    fixture.assert_bodies_preserved().await;
+
+    fixture
+        .conn
+        .execute_batch("DROP TRIGGER refuse_observation_seed")
+        .await
+        .unwrap();
+    for (frontier, references, submissions) in [(96_i64, 141_i64, 3_usize), (104, 153, 2)] {
+        let (report, actual_submissions) = fixture.tick().await;
+        assert_eq!(report.bootstrap_frontier_after, Some(format!("observations:{frontier}")));
+        assert_eq!(actual_submissions, submissions);
+        assert_eq!(
+            scalar(&fixture.conn, "SELECT COUNT(*) FROM canonical_body_gc_refs
+                WHERE owner_kind = 'observation'")
+                .await,
+            references
+        );
+    }
     fixture.assert_bodies_preserved().await;
 }
