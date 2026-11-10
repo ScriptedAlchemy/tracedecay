@@ -468,8 +468,26 @@ fn census_receipted_children<K: Ord + Copy>(
         };
         let (category, bytes) = if let Some(child) = child {
             let (receipt_name, maximum) = receipt_for(&name);
+            // Malformed, absent, or nonregular receipts identify unrecognized
+            // entries. An I/O refusal such as EACCES or EMFILE does not prove
+            // absence and must leave coverage explicitly unavailable.
             let receipt =
-                read_bounded_child_receipt(&child, OsStr::new(receipt_name), maximum).ok();
+                match read_bounded_child_receipt(&child, OsStr::new(receipt_name), maximum) {
+                    Ok(bytes) => Some(bytes),
+                    Err(error)
+                        if matches!(
+                            error.kind(),
+                            io::ErrorKind::NotFound
+                                | io::ErrorKind::InvalidData
+                                | io::ErrorKind::InvalidInput
+                                | io::ErrorKind::IsADirectory
+                                | io::ErrorKind::FilesystemLoop
+                        ) =>
+                    {
+                        None
+                    }
+                    Err(error) => return Err(error),
+                };
             let category = classify(&name, receipt.as_deref());
             let bytes = if category == unrecognized {
                 0
@@ -1272,6 +1290,27 @@ mod tests {
                 .kind(),
             io::ErrorKind::PermissionDenied,
         );
+        let owner_marker = generation.join("owner");
+        let marker_permissions = std::fs::metadata(&owner_marker).unwrap().permissions();
+        std::fs::set_permissions(
+            &owner_marker,
+            std::fs::Permissions::from_mode(0o000),
+        )
+        .unwrap();
+        let unreadable_marker = census_receipted_directory_bytes(
+            &root,
+            false,
+            |_| ("owner", 16),
+            |_, receipt| receipt == Some(b"owned".as_slice()),
+        );
+        std::fs::set_permissions(&owner_marker, marker_permissions).unwrap();
+        assert_eq!(
+            unreadable_marker
+                .expect_err("unreadable receipt cannot silently become unknown")
+                .kind(),
+            io::ErrorKind::PermissionDenied,
+        );
+
         let complete = census_receipted_directory_bytes(
             &root,
             false,
