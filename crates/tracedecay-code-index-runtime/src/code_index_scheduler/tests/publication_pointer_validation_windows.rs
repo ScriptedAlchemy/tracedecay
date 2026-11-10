@@ -16,7 +16,9 @@ fn cold_pointer_witness_refuses_same_byte_windows_inode_rotation() {
     fs::write(&pointer, bytes).expect("write original pointer");
     let mut pinned = File::open(&pointer).expect("pin the original inode");
     let mut readback = Vec::new();
-    pinned.read_to_end(&mut readback).expect("read original bytes");
+    pinned
+        .read_to_end(&mut readback)
+        .expect("read original bytes");
     assert_eq!(readback, bytes);
     let witness = DaemonCodeIndexPublicationStoreV1::require_non_unix_pointer_witness;
     assert!(witness(&pointer, &mut pinned, &readback).is_ok());
@@ -47,12 +49,14 @@ fn cold_pointer_witness_refuses_in_place_windows_rewrite() {
     assert_eq!(original.len(), changed.len());
     fs::write(&pointer, original).expect("original pointer bytes");
     let mut pinned = File::open(&pointer).expect("opened pointer descriptor");
-    assert!(DaemonCodeIndexPublicationStoreV1::require_non_unix_pointer_witness(
-        &pointer,
-        &mut pinned,
-        original,
-    )
-    .is_ok());
+    assert!(
+        DaemonCodeIndexPublicationStoreV1::require_non_unix_pointer_witness(
+            &pointer,
+            &mut pinned,
+            original,
+        )
+        .is_ok()
+    );
 
     let mut writer = File::options()
         .write(true)
@@ -60,7 +64,10 @@ fn cold_pointer_witness_refuses_in_place_windows_rewrite() {
         .expect("rewrite same inode");
     writer.write_all(changed).expect("same-length rewrite");
     drop(writer);
-    assert_eq!(fs::read(&pointer).expect("changed pointer survives"), changed);
+    assert_eq!(
+        fs::read(&pointer).expect("changed pointer survives"),
+        changed
+    );
     assert!(matches!(
         DaemonCodeIndexPublicationStoreV1::require_non_unix_pointer_witness(
             &pointer,

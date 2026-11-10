@@ -2429,11 +2429,7 @@ impl DaemonCodeIndexPublicationStoreV1 {
             &bytes,
         )?;
         #[cfg(not(unix))]
-        Self::require_non_unix_pointer_witness(
-            &self.active_path,
-            &mut opened_pointer,
-            &bytes,
-        )?;
+        Self::require_non_unix_pointer_witness(&self.active_path, &mut opened_pointer, &bytes)?;
         *memo = Some(PublicationPointerMemoV1 {
             mtime,
             size,
