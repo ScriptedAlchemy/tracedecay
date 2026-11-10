@@ -6,7 +6,9 @@ use tracedecay_runtime_core::db::engine::{
     Executor, IntoParams, QueryExecutor, Result as EngineResult, Rows, TestConnection,
     TransactionBehavior, WriteStatement, params,
 };
-use tracedecay_store::{CANONICAL_BODIES_TABLE_SQL, StoredCanonicalBody, UPSERT_CANONICAL_BODY_SQL};
+use tracedecay_store::{
+    CANONICAL_BODIES_TABLE_SQL, StoredCanonicalBody, UPSERT_CANONICAL_BODY_SQL,
+};
 
 use super::{CanonicalBodyGcReport, read_progress, schema, step};
 
@@ -58,7 +60,9 @@ impl Fixture {
     async fn with_observations(include_observations: bool) -> Self {
         let directory = tempfile::tempdir().unwrap();
         let conn = TestConnection::open(&directory.path().join("bootstrap-writes.db"));
-        conn.execute_batch(CANONICAL_BODIES_TABLE_SQL).await.unwrap();
+        conn.execute_batch(CANONICAL_BODIES_TABLE_SQL)
+            .await
+            .unwrap();
         conn.execute_batch(
             "CREATE TABLE lcm_raw_messages (
                 store_id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -104,9 +108,9 @@ impl Fixture {
                 // Three distinct hashes from the third owner onward, so a
                 // 48-owner page crosses the 128-write submission boundary.
                 let current = body.content_hash.as_str();
-                let previous = bodies
-                    .last()
-                    .map_or(current, |body: &StoredCanonicalBody| body.content_hash.as_str());
+                let previous = bodies.last().map_or(current, |body: &StoredCanonicalBody| {
+                    body.content_hash.as_str()
+                });
                 let earlier = bodies
                     .iter()
                     .rev()
@@ -289,7 +293,11 @@ async fn bootstrap_batch_refusal_rolls_back_and_recovers() {
             .await
             .unwrap();
         let error = step(&transaction, 48).await.unwrap_err();
-        assert!(error.to_string().contains("injected bootstrap batch refusal"));
+        assert!(
+            error
+                .to_string()
+                .contains("injected bootstrap batch refusal")
+        );
         transaction.rollback().await.unwrap();
         assert_eq!(read_progress(&fixture.conn).await.unwrap(), before);
         let count = scalar(&fixture.conn, &format!("SELECT COUNT(*) FROM {table}")).await;
@@ -384,7 +392,10 @@ async fn observation_bootstrap_batches_across_a_bounded_write_submission() {
             Some(format!("observations:{frontier}"))
         );
         assert_eq!(
-            read_progress(&fixture.conn).await.unwrap().observations_through,
+            read_progress(&fixture.conn)
+                .await
+                .unwrap()
+                .observations_through,
             frontier
         );
         assert_eq!(actual_submissions, submissions);
@@ -393,9 +404,12 @@ async fn observation_bootstrap_batches_across_a_bounded_write_submission() {
             (1..=owners).map(|ordinal| ordinal * 2).collect::<Vec<_>>()
         );
         assert_eq!(
-            scalar(&fixture.conn, "SELECT COUNT(*) FROM canonical_body_gc_refs
-                WHERE owner_kind = 'observation'")
-                .await,
+            scalar(
+                &fixture.conn,
+                "SELECT COUNT(*) FROM canonical_body_gc_refs
+                WHERE owner_kind = 'observation'"
+            )
+            .await,
             refs,
             "duplicate references within an observation must stay deduplicated"
         );
@@ -411,7 +425,10 @@ async fn observation_bootstrap_batches_across_a_bounded_write_submission() {
             break;
         }
     }
-    assert!(finished, "bounded bootstrap and candidate discharge must terminate");
+    assert!(
+        finished,
+        "bounded bootstrap and candidate discharge must terminate"
+    );
     fixture.assert_bodies_preserved().await;
     let (idle, submissions) = fixture.tick().await;
     assert!(!idle.has_more);
@@ -442,7 +459,11 @@ async fn observation_bootstrap_failure_after_a_full_batch_rolls_back_and_recover
         .await
         .unwrap();
     let error = step(&transaction, 48).await.unwrap_err();
-    assert!(error.to_string().contains("injected observation batch refusal"));
+    assert!(
+        error
+            .to_string()
+            .contains("injected observation batch refusal")
+    );
     transaction.rollback().await.unwrap();
     assert_eq!(read_progress(&fixture.conn).await.unwrap(), before);
     assert!(observation_owners(&fixture.conn).await.is_empty());
@@ -455,12 +476,18 @@ async fn observation_bootstrap_failure_after_a_full_batch_rolls_back_and_recover
         .unwrap();
     for (frontier, references, submissions) in [(96_i64, 141_i64, 3_usize), (104, 153, 2)] {
         let (report, actual_submissions) = fixture.tick().await;
-        assert_eq!(report.bootstrap_frontier_after, Some(format!("observations:{frontier}")));
+        assert_eq!(
+            report.bootstrap_frontier_after,
+            Some(format!("observations:{frontier}"))
+        );
         assert_eq!(actual_submissions, submissions);
         assert_eq!(
-            scalar(&fixture.conn, "SELECT COUNT(*) FROM canonical_body_gc_refs
-                WHERE owner_kind = 'observation'")
-                .await,
+            scalar(
+                &fixture.conn,
+                "SELECT COUNT(*) FROM canonical_body_gc_refs
+                WHERE owner_kind = 'observation'"
+            )
+            .await,
             references
         );
     }
@@ -542,8 +569,17 @@ async fn ignored_observation_reference_insert_refuses_checkpoint_then_recovers()
         .unwrap();
     for (frontier, references) in [(96_i64, 141_i64), (104, 153)] {
         let (report, _) = fixture.tick().await;
-        assert_eq!(report.bootstrap_frontier_after, Some(format!("observations:{frontier}")));
-        assert_eq!(read_progress(&fixture.conn).await.unwrap().observations_through, frontier);
+        assert_eq!(
+            report.bootstrap_frontier_after,
+            Some(format!("observations:{frontier}"))
+        );
+        assert_eq!(
+            read_progress(&fixture.conn)
+                .await
+                .unwrap()
+                .observations_through,
+            frontier
+        );
         assert_eq!(
             scalar(
                 &fixture.conn,
@@ -596,7 +632,11 @@ async fn ignored_candidate_insert_refuses_checkpoint_then_recovers() {
         let (report, _) = fixture.tick().await;
         assert_eq!(report.bodies_scanned, scanned);
         assert_eq!(
-            scalar(&fixture.conn, "SELECT COUNT(*) FROM canonical_body_gc_candidates").await,
+            scalar(
+                &fixture.conn,
+                "SELECT COUNT(*) FROM canonical_body_gc_candidates"
+            )
+            .await,
             candidate_total
         );
     }
