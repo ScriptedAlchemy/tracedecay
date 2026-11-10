@@ -155,11 +155,60 @@ struct SpillDirectory(PathBuf);
 
 impl SpillDirectory {
     fn create(path: PathBuf) -> Result<Self, GraphDbError> {
-        let mut staging = Self::prepare(&path, row_spill_owner())?;
-        tracedecay_private_fs::framed_log::rename_noreplace(staging.path(), &path)
-            .map_err(|error| spill_io("directory install", error))?;
-        staging.disable_cleanup(true);
+        let owner = row_spill_owner();
+        let mut staging = Self::prepare(&path, owner)?;
+        Self::install(&mut staging, &path, owner)?;
         Ok(Self(path))
+    }
+
+    fn install(
+        staging: &mut tempfile::TempDir,
+        path: &Path,
+        owner: u128,
+    ) -> Result<(), GraphDbError> {
+        // TempDir's default Drop recursively deletes by pathname. A failed
+        // no-replace publication must not delete a foreign directory moved
+        // into that name while we attempted installation. Disable it before
+        // the rename, including the successful-rename/reused-name window.
+        staging.disable_cleanup(true);
+        let name = path
+            .file_name()
+            .ok_or_else(|| GraphDbError::invalid("graph row spill directory has no entry name"))?;
+        let receipt = row_spill_owner_receipt(name, owner)
+            .ok_or_else(|| GraphDbError::invalid("graph row spill directory name is invalid"))?;
+        let pending = staging_name(owner, &receipt);
+        if staging.path().file_name() != Some(OsStr::new(&pending)) {
+            return Err(GraphDbError::invalid(
+                "graph row spill staging name does not bind its owner receipt",
+            ));
+        }
+        if let Err(error) = tracedecay_private_fs::framed_log::rename_noreplace(staging.path(), path)
+        {
+            let root = staging.path().parent().ok_or_else(|| {
+                GraphDbError::invalid("graph row spill directory has no parent")
+            })?;
+            // On failure, only the exact owner receipt read from the opened
+            // child authorizes recursive removal. A substituted directory,
+            // even an ordinary real directory, must survive unchanged.
+            if let Err(cleanup_error) =
+                tracedecay_private_fs::capability_dir::remove_receipted_child_directory_nofollow(
+                    root,
+                    OsStr::new(&pending),
+                    OsStr::new(ROW_SPILL_OWNER_RECEIPT_FILE),
+                    MAX_ROW_SPILL_OWNER_RECEIPT_BYTES,
+                    |bytes| bytes == receipt,
+                )
+            {
+                tracing::warn!(
+                    event = "graph_row_spill_prepare_cleanup_refused",
+                    path = %staging.path().display(),
+                    error = %cleanup_error,
+                    "unverified pending row spill preserved for inspection"
+                );
+            }
+            return Err(spill_io("directory install", error));
+        }
+        Ok(())
     }
 
     fn prepare(path: &Path, owner: u128) -> Result<tempfile::TempDir, GraphDbError> {
@@ -1180,6 +1229,43 @@ mod owner_receipt_tests {
         RECEIPT_PREFIX, ROW_SPILL_OWNER_RECEIPT_FILE, ROW_SPILL_PREFIX, SpillDirectory,
         row_spill_owner, staging_name,
     };
+
+    #[cfg(unix)]
+    #[test]
+    fn failed_pending_publication_preserves_a_substituted_real_directory() {
+        let root = tempfile::tempdir().unwrap();
+        let owner = row_spill_owner();
+        let destination = root.path().join(format!("{ROW_SPILL_PREFIX}{owner}-0"));
+        let mut staged = SpillDirectory::prepare(&destination, owner).unwrap();
+        let pending_path = staged.path().to_path_buf();
+        let moved = root.path().join("original-pending-spill");
+        std::fs::rename(&pending_path, &moved).unwrap();
+        std::fs::create_dir(&pending_path).unwrap();
+        std::fs::write(pending_path.join("sentinel"), b"foreign pending contents").unwrap();
+        std::fs::create_dir(&destination).unwrap();
+        std::fs::write(destination.join("sentinel"), b"occupied destination").unwrap();
+
+        let refused = SpillDirectory::install(&mut staged, &destination, owner);
+        assert!(
+            refused.is_err(),
+            "occupied publication destination must be refused"
+        );
+        drop(staged);
+        assert_eq!(
+            std::fs::read(pending_path.join("sentinel")).unwrap(),
+            b"foreign pending contents",
+            "failed install must not recursively delete a substituted real directory"
+        );
+        assert_eq!(
+            std::fs::read(destination.join("sentinel")).unwrap(),
+            b"occupied destination"
+        );
+        let original_receipt = std::fs::read(moved.join(ROW_SPILL_OWNER_RECEIPT_FILE)).unwrap();
+        assert!(
+            original_receipt.starts_with(RECEIPT_PREFIX.as_bytes()),
+            "original owned staging bytes must remain separate from the foreign entry"
+        );
+    }
 
     #[cfg(unix)]
     #[test]
