@@ -423,8 +423,12 @@ The HTTP request body does **not** contain these local policy settings; they
 must be obtained from the same settings authority and independently verified,
 not inferred from the model predictions. Missing, incomplete, malformed or
 historical-arm margin declarations fail before HTTP inference. The arm also
-freezes a positive integer `max_state_bytes` from the actual production
-`DecisionEngineConfigV1` / effective Scout settings. This limits the UTF-8
+freezes a production-range integer `max_state_bytes` (1..1048576) from the
+actual `DecisionEngineConfigV1` / effective Scout settings. Captured thresholds
+must be exact integer-permille values, not fractional probabilities the Rust
+settings cannot represent. Frozen question instructions must be control-free,
+and a selected model must be an unpadded, control-free, at-most-256-byte name:
+the Rust client trims configured model names before sending them. This limits the UTF-8
 bytes in the decoded `state` field separately from the whole HTTP JSON byte
 ceiling. The Rust client keeps only the newest state tail (on a character
 boundary) if the input is larger; therefore a claimed capture exceeding this

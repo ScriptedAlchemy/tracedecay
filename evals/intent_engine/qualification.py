@@ -106,14 +106,17 @@ def validate_questions(questions):
     if not isinstance(questions, dict) or not questions:
         raise ValueError("qualification requires a nonempty Noul question vocabulary")
     for key, question in questions.items():
-        if not isinstance(key, str) or not key.strip():
-            raise ValueError("qualification question keys must be nonempty strings")
+        if (not isinstance(key, str) or not key.strip()
+                or any(ord(char) < 32 or 127 <= ord(char) <= 159 for char in key)):
+            raise ValueError("qualification question keys must be nonempty, control-free strings")
         if (not isinstance(question, dict)
                 or set(question) != {"type", "instructions"}
                 or question["type"] != "noul"
                 or not isinstance(question["instructions"], str)
                 or not question["instructions"].strip()
-                or len(question["instructions"].encode("utf-8")) > 512):
+                or len(question["instructions"].encode("utf-8")) > 512
+                or any(ord(char) < 32 or 127 <= ord(char) <= 159
+                       for char in question["instructions"])):
             raise ValueError(f"qualification question {key!r} must be a bounded Noul instruction")
     return questions
 
@@ -233,6 +236,11 @@ def validate_manifest(manifest, dataset_sha, questions, cases=None):
     model = arm["requested_model"]
     if model is not None and (not isinstance(model, str) or not model.strip()):
         raise ValueError("qualification HTTP arm requires a valid requested model or null")
+    if (arm["config"] == CAPTURED_SCOUT_CONFIG and model is not None
+            and (model != model.strip()
+                 or len(model.encode("utf-8")) > 256
+                 or any(ord(char) < 32 or 127 <= ord(char) <= 159 for char in model))):
+        raise ValueError("captured Scout requested model is not a canonical Rust client selector")
     for field in ("endpoint_sha256", "server_config_sha256"):
         value = arm[field]
         if not isinstance(value, str) or not _DIGEST.fullmatch(value):
@@ -250,8 +258,8 @@ def validate_manifest(manifest, dataset_sha, questions, cases=None):
     # capture with a larger model-visible transcript could be called parity.
     state_limit = manifest.get("max_state_bytes")
     if arm["config"] == CAPTURED_SCOUT_CONFIG:
-        if type(state_limit) is not int or state_limit <= 0:
-            raise ValueError("captured Scout arm requires frozen positive max_state_bytes")
+        if type(state_limit) is not int or not 1 <= state_limit <= 1024 * 1024:
+            raise ValueError("captured Scout arm requires max_state_bytes in 1..1048576")
     elif state_limit is not None:
         raise ValueError("only captured Scout arms may declare max_state_bytes")
 
@@ -284,6 +292,9 @@ def validate_manifest(manifest, dataset_sha, questions, cases=None):
         if (isinstance(value, bool) or not isinstance(value, (int, float))
                 or not math.isfinite(value) or not 0 <= value <= 1):
             raise ValueError("qualification thresholds must be finite probabilities")
+        if (arm["config"] == CAPTURED_SCOUT_CONFIG
+                and value != round(value * 1_000) / 1_000):
+            raise ValueError("captured Scout thresholds must be exact integer-permille values")
 
     # Freeze client-side probability calibration before any held-out inference.
     # Otherwise an operator can pick a post-hoc temperature while preserving

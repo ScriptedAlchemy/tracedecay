@@ -2349,6 +2349,59 @@ class QualificationTests(unittest.TestCase):
         ])
         return capture_bytes, manifest
 
+
+    def test_captured_scout_refuses_unrepresentable_runtime_settings_before_inference(self):
+        capture, original = self.captured_scout_fixture()
+        self.valid(original)
+        variants = (
+            ("fractional-threshold", lambda m: m["thresholds"].update(impact=0.6004),
+             "exact integer-permille"),
+            ("oversized-state", lambda m: m.update(max_state_bytes=1024 * 1024 + 1),
+             "max_state_bytes"),
+            ("padded-model", lambda m: m["arm"].update(requested_model=" pinned "),
+             "canonical Rust client selector"),
+            ("control-model", lambda m: m["arm"].update(requested_model="pin\u0000ned"),
+             "canonical Rust client selector"),
+            ("oversized-model", lambda m: m["arm"].update(requested_model="x" * 257),
+             "canonical Rust client selector"),
+        )
+        for name, mutate, refusal in variants:
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as temp:
+                manifest = copy.deepcopy(original)
+                mutate(manifest)
+                with self.assertRaisesRegex(ValueError, refusal):
+                    self.valid(manifest)
+                here = Path(temp)
+                (here / "dataset.json").write_bytes(self.dataset_bytes)
+                (here / "server.json").write_text(json.dumps(self.server_config))
+                (here / "manifest.json").write_text(json.dumps(manifest))
+                (here / "capture.json").write_bytes(capture)
+                with patch.object(run_http, "HERE", str(here)), patch.object(
+                    run_http, "post"
+                ) as post:
+                    with self.assertRaisesRegex(ValueError, refusal):
+                        run_http.main([
+                            "--url", self.endpoint, "--tag", "impossible-scout",
+                            "--server-config", str(here / "server.json"),
+                            "--qualification-manifest", str(here / "manifest.json"),
+                            "--captured-requests", str(here / "capture.json"),
+                            qualification.CAPTURED_SCOUT_CONFIG,
+                        ])
+                    post.assert_not_called()
+                self.assertFalse((here / "results").exists())
+
+    def test_frozen_question_instructions_refuse_control_characters(self):
+        for suffix in ("\n", "\x00", "\x7f", "\x85"):
+            with self.subTest(suffix=repr(suffix)):
+                questions = copy.deepcopy(self.questions)
+                questions["impact"]["instructions"] += suffix
+                with self.assertRaisesRegex(ValueError, "bounded Noul instruction"):
+                    qualification.validate_questions(questions)
+        questions = copy.deepcopy(self.questions)
+        questions["impact\x00"] = questions.pop("impact")
+        with self.assertRaisesRegex(ValueError, "control-free"):
+            qualification.validate_questions(questions)
+
     def test_captured_file_is_bounded_before_inference_without_changing_good_bytes(self):
         capture, manifest = self.captured_scout_fixture()
         ids = ["holdout-positive", "holdout-negative"]
