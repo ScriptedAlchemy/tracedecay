@@ -25,7 +25,7 @@ sys.path.insert(0, HERE)
 from common import calibrated, noul_questions, prompt_only, text_window
 from qualification import (
     CAPTURED_SCOUT_CONFIG, captured_request_bodies, load_captured_requests, load_manifest, load_questions,
-    loads_unambiguous_json, validate_manifest,
+    loads_unambiguous_json, read_frozen_evidence, validate_manifest,
 )
 
 # A decision response contains only a bounded set of typed answers and usage.
@@ -326,8 +326,7 @@ def post(url, body, timeout=1800, bearer_token=None):
 
 
 def load_server_config(path):
-    with open(path, encoding="utf-8") as source:
-        config = loads_unambiguous_json(source.read())
+    config = loads_unambiguous_json(read_frozen_evidence(path, purpose="HTTP serving declaration"))
     if not isinstance(config, dict):
         raise ValueError("--server-config must contain a JSON object")
     for field in ("checkpoint", "server_revision", "backend", "dtype"):
@@ -706,8 +705,9 @@ def main(argv=None):
                     if args.bearer_token_env is not None else None)
     if args.sample_out and os.path.lexists(args.sample_out) and not os.path.isfile(args.sample_out):
         raise ValueError(f"sample path exists but is not a regular file: {args.sample_out}")
-    with open(args.dataset or os.path.join(HERE, "dataset.json"), "rb") as source:
-        dataset_bytes = source.read()
+    dataset_bytes = read_frozen_evidence(
+        args.dataset or os.path.join(HERE, "dataset.json"), purpose="original evaluation dataset"
+    )
     dataset = loads_unambiguous_json(dataset_bytes)
     dataset_sha = hashlib.sha256(dataset_bytes).hexdigest()
     if args.questions_file and not args.qualification_manifest:
@@ -752,8 +752,9 @@ def main(argv=None):
         keep = set(qualified["heldout_ids"])
         dataset = [case for case in dataset if case["id"] in keep]
     if args.subset:
-        with open(args.subset, encoding="utf-8") as source:
-            ids = loads_unambiguous_json(source.read())["ids"]
+        ids = loads_unambiguous_json(read_frozen_evidence(
+            args.subset, purpose="evaluation subset selection"
+        ))["ids"]
         if (not isinstance(ids, list) or not ids
                 or any(not isinstance(case_id, str) for case_id in ids)
                 or len(set(ids)) != len(ids) or not set(ids).issubset(case_ids)):

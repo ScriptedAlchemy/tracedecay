@@ -478,3 +478,9 @@ actual request serialization must still be independently verified by the
 missing Scout exporter. Do not claim production parity, real Kev inference,
 reviewed labels, or a replacement result merely because a captured-arm
 fixture passes tests.
+
+Original frozen question, manifest, server, dataset, subset and qualified result
+inputs use the same maximum 64 MiB no-follow, held-inode reader as Scout
+captures. Oversized sparse inputs, symlinks, FIFOs and detectably changed
+inodes refuse before model traffic or scored publication. This is a resource
+and local evidence-integrity bound, not source/model attestation.

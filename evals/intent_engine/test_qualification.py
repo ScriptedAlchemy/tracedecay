@@ -99,6 +99,62 @@ class QualificationTests(unittest.TestCase):
             self.dataset if cases is None else cases,
         )
 
+    def test_frozen_manifest_and_question_inputs_refuse_sparse_and_linked_files(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            for name, raw, load in (
+                ("manifest", self.manifest_bytes, qualification.load_manifest),
+                ("questions", json.dumps(self.questions).encode("utf-8"), qualification.load_questions),
+            ):
+                with self.subTest(name=name):
+                    path = root / (name + ".json")
+                    path.write_bytes(raw)
+                    self.assertIsNotNone(load(path))
+                    with path.open("wb") as output:
+                        output.truncate(qualification.MAX_FROZEN_EVIDENCE_BYTES + 1)
+                    with patch.object(
+                        qualification.os, "fdopen",
+                        side_effect=AssertionError("oversized source was read"),
+                    ) as opened:
+                        with self.assertRaisesRegex(ValueError, "exceeds bounded byte limit"):
+                            load(path)
+                        opened.assert_not_called()
+                    path.unlink()
+                    path.mkdir()
+                    with self.assertRaisesRegex(ValueError, "must be a regular file"):
+                        load(path)
+                    path.rmdir()
+                    if os.name == "posix":
+                        outside = root / (name + "-outside.json")
+                        outside.write_bytes(raw)
+                        path.symlink_to(outside)
+                        with self.assertRaisesRegex(ValueError, "must be a regular file"):
+                            load(path)
+                        path.unlink()
+
+    def test_qualified_runner_refuses_sparse_originals_without_network_or_output(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            for name in ("dataset", "server"):
+                with self.subTest(name=name):
+                    (root / "dataset.json").write_bytes(self.dataset_bytes)
+                    (root / "server.json").write_text(json.dumps(self.server_config))
+                    (root / "manifest.json").write_bytes(self.manifest_bytes)
+                    with (root / (name + ".json")).open("wb") as output:
+                        output.truncate(qualification.MAX_FROZEN_EVIDENCE_BYTES + 1)
+                    with patch.object(run_http, "HERE", str(root)), patch.object(
+                        run_http, "post"
+                    ) as post:
+                        with self.assertRaisesRegex(ValueError, "exceeds bounded byte limit"):
+                            run_http.main([
+                                "--url", self.endpoint, "--tag", "bounded",
+                                "--server-config", str(root / "server.json"),
+                                "--qualification-manifest", str(root / "manifest.json"),
+                                "B_noul_text",
+                            ])
+                        post.assert_not_called()
+                    self.assertFalse((root / "results").exists())
+
     def test_ambiguous_frozen_input_json_refuses_without_model_calls(self):
         # Same-value duplicates are deliberately non-vacuous: the old
         # last-key-wins parser accepted all three frozen artifacts.
@@ -2419,7 +2475,7 @@ class QualificationTests(unittest.TestCase):
             # A sparse, malicious source must be refused on fstat BEFORE any
             # read, not eagerly materialized into a huge bytes object.
             with path.open("wb") as source:
-                source.truncate(qualification.MAX_CAPTURED_EVIDENCE_BYTES + 1)
+                source.truncate(qualification.MAX_FROZEN_EVIDENCE_BYTES + 1)
             with patch.object(
                 qualification.os, "fdopen", side_effect=AssertionError("oversize source was read"),
             ) as opened:

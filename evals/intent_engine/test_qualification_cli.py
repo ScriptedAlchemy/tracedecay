@@ -47,6 +47,29 @@ class QualificationCliTests(unittest.TestCase):
         self.assertFalse((self.root / "summary.json").exists())
         return report
 
+    def test_sparse_scoring_inputs_cannot_replace_qualified_report(self):
+        passing = self.run_score(self.fixture.signed_result())
+        self.assertEqual(passing.returncode, 0, passing.stderr)
+        previous = (self.root / "qualification_summary.json").read_bytes()
+        for name in ("dataset", "result"):
+            with self.subTest(name=name):
+                path = self.root / (name + ".json")
+                original = path.read_bytes()
+                with path.open("wb") as output:
+                    output.truncate(fixtures.qualification.MAX_FROZEN_EVIDENCE_BYTES + 1)
+                rejected = subprocess.run(
+                    [sys.executable, str(self.root / "score.py"), "--qualified",
+                     str(self.root / "manifest.json"), str(self.root / "dataset.json"),
+                     str(self.root / "result.json")],
+                    cwd=self.root, capture_output=True, text=True, timeout=30,
+                )
+                self.assertNotEqual(rejected.returncode, 0)
+                self.assertIn("exceeds bounded byte limit", rejected.stderr)
+                self.assertEqual(
+                    (self.root / "qualification_summary.json").read_bytes(), previous
+                )
+                path.write_bytes(original)
+
     def test_captured_arm_cli_requires_original_request_bytes(self):
         # Synthetic captured requests demonstrate byte-identity enforcement,
         # not production Scout provenance or real Kev qualification.
@@ -98,7 +121,7 @@ class QualificationCliTests(unittest.TestCase):
         # A valid-sized frozen capture was admitted above; an oversized
         # sparse file is denied before parsing/hashing and cannot replace it.
         with (self.root / "captured.json").open("wb") as source:
-            source.truncate(fixtures.qualification.MAX_CAPTURED_EVIDENCE_BYTES + 1)
+            source.truncate(fixtures.qualification.MAX_FROZEN_EVIDENCE_BYTES + 1)
         oversized = subprocess.run(
             complete, cwd=self.root, capture_output=True, text=True, timeout=30,
         )

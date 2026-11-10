@@ -319,14 +319,14 @@ if __name__ == "__main__":
             options[flag] = sys.argv[index + 1]
         from qualification import (
             load_captured_requests, load_manifest, load_questions,
-            loads_unambiguous_json, qualified_report, sha256_bytes, validate_manifest,
+            loads_unambiguous_json, qualified_report, read_frozen_evidence, sha256_bytes, validate_manifest,
         )
         from common import noul_questions
         manifest, manifest_sha = load_manifest(sys.argv[2])
-        with open(sys.argv[3], "rb") as source:
-            dataset_bytes = source.read()
-        with open(sys.argv[4], encoding="utf-8") as source:
-            result = loads_unambiguous_json(source.read())
+        dataset_bytes = read_frozen_evidence(sys.argv[3], purpose="original evaluation dataset")
+        result = loads_unambiguous_json(read_frozen_evidence(
+            sys.argv[4], purpose="completed qualification result"
+        ))
         questions = load_questions(options["--questions-file"]) if "--questions-file" in options else noul_questions()
         captured_requests_bytes = None
         if "--captured-requests" in options:
