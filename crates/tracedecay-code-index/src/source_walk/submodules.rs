@@ -109,7 +109,15 @@ pub(super) struct CheckoutBoundaries {
 
 impl CheckoutBoundaries {
     pub(super) fn open(root: &Path, include_submodules: bool) -> Result<Self, SourceWalkError> {
-        let gitlinks = super::parent_gitlink_paths(root)?;
+        Self::open_scoped(root, include_submodules, None)
+    }
+
+    pub(super) fn open_scoped(
+        root: &Path,
+        include_submodules: bool,
+        scope: Option<&Path>,
+    ) -> Result<Self, SourceWalkError> {
+        let gitlinks = super::parent_gitlink_paths_scoped(root, scope)?;
         let children = if include_submodules && !gitlinks.is_empty() {
             let parent = tracedecay_runtime_core::git_open::open(root).map_err(failure)?;
             live_submodules(&parent)?

@@ -128,6 +128,21 @@ fn nested_repository_marker(directory: &Path) -> std::io::Result<bool> {
 /// not an ordinary directory the live source walker can authenticate.
 /// This is deny-only; it never enables submodule admission.
 pub fn parent_gitlink_paths(project_root: &Path) -> Result<BTreeSet<String>, SourceWalkError> {
+    parent_gitlink_paths_scoped(project_root, None)
+}
+
+/// A positive source glob with a literal prefix cannot inspect paths outside
+/// that prefix. Keep ancestor gitlinks and any gitlinks below a named directory.
+pub(super) fn parent_gitlink_paths_scoped(
+    project_root: &Path,
+    scope: Option<&Path>,
+) -> Result<BTreeSet<String>, SourceWalkError> {
+    let scope = scope.filter(|scope| {
+        !scope.as_os_str().is_empty()
+            && scope
+                .components()
+                .all(|component| matches!(component, Component::Normal(_)))
+    });
     let repository = match tracedecay_runtime_core::git_open::open(project_root) {
         Ok(repository) => repository,
         Err(error) => {
@@ -163,14 +178,56 @@ pub fn parent_gitlink_paths(project_root: &Path) -> Result<BTreeSet<String>, Sou
             message: format!("cannot inspect parent Git index: {error}"),
         })?;
     let mut paths = BTreeSet::new();
-    for entry in index.entries() {
-        if entry.mode.is_submodule() {
-            let path: &[u8] = entry.path(&index).as_ref();
+    {
+        let mut record = |path: &[u8]| -> Result<(), SourceWalkError> {
             let relative = std::str::from_utf8(path).map_err(|_| SourceWalkError {
                 glob: String::new(),
                 message: "non-UTF-8 parent gitlink cannot be safely scoped".to_owned(),
             })?;
             paths.insert(relative.to_owned());
+            Ok(())
+        };
+        let entries = index.entries();
+        if let Some(scope) = scope {
+            // Git index entries are sorted by byte-exact path. Probe every
+            // ancestor, including unmerged stages, then only the prefix range.
+            for ancestor in scope.ancestors().filter(|path| !path.as_os_str().is_empty()) {
+                let name = forward_slash_path(ancestor);
+                let bytes = name.as_bytes();
+                let start = entries.partition_point(|entry| {
+                    let path: &[u8] = entry.path(&index).as_ref();
+                    path < bytes
+                });
+                for entry in entries[start..].iter().take_while(|entry| {
+                    let path: &[u8] = entry.path(&index).as_ref();
+                    path == bytes
+                }) {
+                    if entry.mode.is_submodule() {
+                        record(bytes)?;
+                    }
+                }
+            }
+            let prefix = format!("{}/", forward_slash_path(scope));
+            let start = entries.partition_point(|entry| {
+                let path: &[u8] = entry.path(&index).as_ref();
+                path < prefix.as_bytes()
+            });
+            for entry in entries[start..].iter().take_while(|entry| {
+                let path: &[u8] = entry.path(&index).as_ref();
+                path.starts_with(prefix.as_bytes())
+            }) {
+                if entry.mode.is_submodule() {
+                    let path: &[u8] = entry.path(&index).as_ref();
+                    record(path)?;
+                }
+            }
+        } else {
+            for entry in entries {
+                if entry.mode.is_submodule() {
+                    let path: &[u8] = entry.path(&index).as_ref();
+                    record(path)?;
+                }
+            }
         }
     }
     // A staged gitlink removal does not erase the checkout boundary from
@@ -189,24 +246,78 @@ pub fn parent_gitlink_paths(project_root: &Path) -> Result<BTreeSet<String>, Sou
             glob: String::new(),
             message: format!("cannot read parent Git HEAD tree: {error}"),
         })?;
-        let entries = tree
-            .traverse()
-            .breadthfirst
-            .files()
-            .map_err(|error| SourceWalkError {
-                glob: String::new(),
-                message: format!("cannot walk parent Git HEAD tree: {error}"),
-            })?;
-        for entry in entries {
-            if !entry.mode.is_commit() {
-                continue;
-            }
-            let path: &[u8] = entry.filepath.as_ref();
+        let mut record = |path: &[u8]| -> Result<(), SourceWalkError> {
             let relative = std::str::from_utf8(path).map_err(|_| SourceWalkError {
                 glob: String::new(),
                 message: "non-UTF-8 HEAD gitlink cannot be safely scoped".to_owned(),
             })?;
             paths.insert(relative.to_owned());
+            Ok(())
+        };
+        if let Some(scope) = scope {
+            // A staged gitlink removal survives in HEAD even without a child
+            // marker. Follow only the scope's ancestors and committed subtree.
+            let ancestors = scope
+                .ancestors()
+                .filter(|path| !path.as_os_str().is_empty())
+                .collect::<Vec<_>>();
+            for ancestor in ancestors.into_iter().rev() {
+                let Some(entry) = tree
+                    .lookup_entry_by_path(ancestor)
+                    .map_err(|error| SourceWalkError {
+                        glob: String::new(),
+                        message: format!("cannot inspect scoped parent HEAD tree: {error}"),
+                    })?
+                else {
+                    break;
+                };
+                if entry.mode().is_commit() {
+                    record(forward_slash_path(ancestor).as_bytes())?;
+                    break;
+                }
+                if !entry.mode().is_tree() {
+                    break;
+                }
+                if ancestor == scope {
+                    let subtree = repository
+                        .find_tree(entry.object_id())
+                        .map_err(|error| SourceWalkError {
+                            glob: String::new(),
+                            message: format!("cannot read scoped parent HEAD tree: {error}"),
+                        })?;
+                    let entries = subtree
+                        .traverse()
+                        .breadthfirst
+                        .files()
+                        .map_err(|error| SourceWalkError {
+                            glob: String::new(),
+                            message: format!("cannot walk scoped parent HEAD tree: {error}"),
+                        })?;
+                    let prefix = forward_slash_path(scope);
+                    for entry in entries {
+                        if entry.mode.is_commit() {
+                            let mut path = prefix.as_bytes().to_vec();
+                            path.push(b'/');
+                            path.extend_from_slice(entry.filepath.as_ref());
+                            record(&path)?;
+                        }
+                    }
+                }
+            }
+        } else {
+            let entries = tree
+                .traverse()
+                .breadthfirst
+                .files()
+                .map_err(|error| SourceWalkError {
+                    glob: String::new(),
+                    message: format!("cannot walk parent Git HEAD tree: {error}"),
+                })?;
+            for entry in entries {
+                if entry.mode.is_commit() {
+                    record(entry.filepath.as_ref())?;
+                }
+            }
         }
     } else if head.referent_name().is_none() {
         return Err(SourceWalkError {
@@ -396,8 +507,14 @@ fn source_walk_inner(
                             .is_some_and(|scope| scope.allows(&root, path))))
         }
     };
-    let boundaries =
-        submodules::CheckoutBoundaries::open(project_root, path_policy.includes_submodules())?;
+    let literal_scope = path_glob_scope.as_ref().and_then(|scope| {
+        (!scope.literal_prefix.as_os_str().is_empty()).then_some(scope.literal_prefix.as_path())
+    });
+    let boundaries = submodules::CheckoutBoundaries::open_scoped(
+        project_root,
+        path_policy.includes_submodules(),
+        literal_scope,
+    )?;
     let mut parent_gitlinks = boundaries.gitlinks;
     let mut authenticated = BTreeSet::new();
     let mut child_files = BTreeSet::new();
@@ -812,6 +929,52 @@ mod tests {
             String::from_utf8_lossy(&output.stderr)
         );
         output
+    }
+
+    #[test]
+    fn a_literal_scope_does_not_read_unrelated_committed_trees() {
+        let root = TempDir::new().expect("parent checkout");
+        fixture_git(root.path(), &["init", "-q"]);
+        for (name, contents) in [
+            ("src/keep.rs", "pub fn kept() {}\n"),
+            ("unrelated/deep/noise.rs", "pub fn noise() {}\n"),
+        ] {
+            let path = root.path().join(name);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, contents).unwrap();
+        }
+        fixture_git(root.path(), &["add", "."]);
+        fixture_git(root.path(), &["commit", "-qm", "two independent trees"]);
+        let output = fixture_git(root.path(), &["rev-parse", "HEAD:unrelated"]);
+        let oid = String::from_utf8(output.stdout).unwrap();
+        let oid = oid.trim();
+        assert!(oid.len() > 2 && oid.bytes().all(|byte| byte.is_ascii_hexdigit()));
+        let object = root
+            .path()
+            .join(".git/objects")
+            .join(&oid[..2])
+            .join(&oid[2..]);
+        assert!(object.is_file(), "fixture must have a loose unrelated tree");
+        fs::remove_file(&object).unwrap();
+
+        let policy = IndexPathPolicyV1::new(vec![], vec![]).unwrap();
+        let files = source_walk(root.path(), Some("src/keep.rs"), &policy)
+            .expect("literal scope must not read unrelated HEAD tree")
+            .map(|entry| entry.expect("scoped source entry"))
+            .filter(|entry| entry.file_type().is_some_and(|kind| kind.is_file()))
+            .map(|entry| {
+                entry
+                    .into_path()
+                    .strip_prefix(root.path())
+                    .unwrap()
+                    .to_path_buf()
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(files, vec![PathBuf::from("src/keep.rs")]);
+        assert!(
+            source_walk(root.path(), None, &policy).is_err(),
+            "an unscoped walk must still refuse unreadable HEAD tree authority"
+        );
     }
 
     #[test]
