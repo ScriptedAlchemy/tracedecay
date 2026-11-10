@@ -2918,6 +2918,77 @@ mod recent_first_discovery_tests {
     }
 
     #[test]
+    fn a_mutated_directory_cannot_complete_a_budgeted_codex_sweep() {
+        let temp = TempDir::new().unwrap();
+        let archive = temp.path().join(".codex/archived_sessions");
+        std::fs::create_dir_all(&archive).unwrap();
+        for index in 0..64 {
+            std::fs::write(archive.join(format!("rollout-{index:03}.zst")), b"ignored").unwrap();
+        }
+        let source = CodexSource::with_home(temp.path());
+        let bounds = TranscriptDiscoveryBounds::from_discovered_units(1);
+        let mut state = CodexDiscoveryState::default();
+        let mut frontier = CodexDiscoveryFrontier::initial();
+        let first = retained_pass(&source, &mut state, bounds, frontier);
+        let initial_stat = {
+            let scan = state.scan.as_ref().expect("partial structural scan");
+            let CodexScanPhase::Directories {
+                current: Some(current),
+                ..
+            } = &scan.phase
+            else {
+                panic!("a flat archive must leave its directory reader active");
+            };
+            assert_eq!(current.path, archive);
+            scan.directories[current.directory_index]
+                .identity
+                .expect("initial directory witness")
+                .stat
+        };
+        frontier = first.next_frontier;
+
+        // The initial iterator may or may not see the new entry. Regardless,
+        // its opening stat no longer proves a complete, coherent sweep.
+        let added = archive.join("rollout-arrived-during-scan.jsonl");
+        std::fs::write(&added, b"{}\n").unwrap();
+        assert_ne!(
+            directory_stat_witness(&archive).unwrap().unwrap().stat,
+            initial_stat,
+            "the fixture must cause a real directory authority transition"
+        );
+
+        let mut ended_first_sweep = false;
+        for _ in 0..512 {
+            let pass = retained_pass(&source, &mut state, bounds, frontier);
+            frontier = pass.next_frontier;
+            if state.scan.is_none() {
+                assert!(
+                    !frontier.is_complete(),
+                    "a changed directory must not earn complete coverage from a stale iterator"
+                );
+                ended_first_sweep = true;
+                break;
+            }
+        }
+        assert!(ended_first_sweep, "the first bounded sweep must terminate");
+
+        let mut observed = BTreeSet::new();
+        for _ in 0..1024 {
+            let pass = retained_pass(&source, &mut state, bounds, frontier);
+            observed.extend(pass.report.paths);
+            frontier = pass.next_frontier;
+            if frontier.is_complete() {
+                break;
+            }
+        }
+        assert!(frontier.is_complete(), "a stable subsequent sweep must converge");
+        assert!(
+            observed.contains(&added),
+            "the new source must be rediscovered before complete coverage"
+        );
+    }
+
+    #[test]
     #[cfg(unix)]
     fn unsettled_flat_archive_fingerprint_is_incremental_across_budgeted_passes() {
         let temp = TempDir::new().unwrap();

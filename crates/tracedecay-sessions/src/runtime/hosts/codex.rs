@@ -2343,17 +2343,26 @@ fn retained_scan_step(
                         }
                     }
                     None => {
-                        if let Some(fingerprint) = directory.fingerprint.take()
-                            && let Some(identity) = scan
-                                .directories
-                                .get_mut(directory.directory_index)
-                                .filter(|item| {
-                                    item.path == directory.path
-                                        && item.root_order == directory.root_order
-                                })
-                                .and_then(|item| item.identity.as_mut())
+                        // A budgeted ReadDir can span many scheduler turns.
+                        // If the directory changed while we held it, the
+                        // iterator may omit new entries. Never publish a
+                        // complete corpus frontier from that mixed snapshot.
+                        let closing_stat = directory_stat_witness(&directory.path)?;
+                        if let Some(identity) = scan
+                            .directories
+                            .get_mut(directory.directory_index)
+                            .filter(|item| {
+                                item.path == directory.path
+                                    && item.root_order == directory.root_order
+                            })
+                            .and_then(|item| item.identity.as_mut())
                         {
-                            identity.entries = Some(fingerprint.finish());
+                            if closing_stat.as_ref().map(|stat| stat.stat) != Some(identity.stat) {
+                                scan.complete = false;
+                            }
+                            if let Some(fingerprint) = directory.fingerprint.take() {
+                                identity.entries = Some(fingerprint.finish());
+                            }
                         }
                         *current = None;
                     }
