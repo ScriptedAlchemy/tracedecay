@@ -351,7 +351,16 @@ async fn rewrite_completion_resumes_committed_pages_after_failure_and_restart() 
     let registered = runtime
         .registered_database(HostAdmissionScope::Profile)
         .expect("registered profile database");
-    let seeded = seed_projected_messages(&runtime, 0..RECORDS).await;
+    // Seed the full 1,005-observation production journey in bounded
+    // admission/projection windows. A single 1,005-item projection writer
+    // transaction in fixture setup obscures the restart behavior under test
+    // and can monopolize the writer before the rewrite even starts.
+    let mut seeded = Vec::with_capacity(RECORDS);
+    for start in (0..RECORDS).step_by(128) {
+        let end = (start + 128).min(RECORDS);
+        seeded.extend(seed_projected_messages(&runtime, start..end).await);
+    }
+    assert_eq!(seeded.len(), RECORDS, "all source records must be projected");
 
     let source = ObservationSourceIdentityV1::for_provider(
         ProviderId::new("codex").unwrap(),
