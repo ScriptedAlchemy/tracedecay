@@ -1015,8 +1015,8 @@ impl GraphDb {
     /// management, still checkpoints in full before this returns.
     #[tracing::instrument(name = "graph_db.runtime.close", level = "trace", skip_all)]
     pub(crate) fn close(&self) -> Result<(), GraphDbError> {
-        let engine_is_open = match self.inner.database.read() {
-            Ok(database) => database.is_some(),
+        let engine = match self.inner.database.read() {
+            Ok(database) => database,
             Err(_) => {
                 self.inner.closed.store(true, Ordering::Release);
                 self.inner.poisoned.store(true, Ordering::Release);
@@ -1027,7 +1027,9 @@ impl GraphDb {
                 });
             }
         };
-        if !engine_is_open {
+        if engine.is_none() {
+            // Keep the absence observation locked until close is published.
+            // A lazy opener must not install an engine in that interval.
             let previously_closed = self.inner.closed.swap(true, Ordering::AcqRel);
             // A failed physical close can already have consumed the engine.
             // Its absent handle must not turn an uncertain result into a
@@ -1041,6 +1043,7 @@ impl GraphDb {
                 Ok(())
             };
         }
+        drop(engine);
         let _snapshot_gate = self.wait_snapshot_gate_write();
         let mut guard =
             match crate::observe::wait_lock(crate::observe::LOCK_WAIT_DATABASE_WRITE, || {
@@ -1721,11 +1724,16 @@ impl GraphDb {
             return Ok(());
         }
         self.ensure_available()?;
+        #[cfg(test)]
+        test_seams::fire(test_seams::Seam::LazyOpenAdmission);
         let mut database =
             crate::observe::wait_lock(crate::observe::LOCK_WAIT_DATABASE_WRITE, || {
                 self.inner.database.write()
             })
             .map_err(|_| GraphDbError::unavailable("graph database write lock is poisoned"))?;
+        // Close or a failed hibernation may have won while this opener
+        // waited. Revalidate before publishing another native engine.
+        self.ensure_available()?;
         if database.is_some() {
             return Ok(());
         }
@@ -1973,6 +1981,8 @@ pub(crate) mod test_seams {
 
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]
     pub(crate) enum Seam {
+        /// After lazy-open admission, before acquiring the database write lock.
+        LazyOpenAdmission,
         /// Immediately before grafeo opens the container at `site`.
         EngineOpen(GraphEngineOpenSite),
         /// After the engine has closed and synced the container, immediately
