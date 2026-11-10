@@ -16,7 +16,9 @@ fn write_members(batch: &mut DurableFileBatch, root: &Path, count: usize) -> Vec
             writer
                 .write_all(format!("sealed segment {index}").as_bytes())
                 .expect("nonempty member bytes");
-            batch.written(&path, &writer).expect("admit original member");
+            batch
+                .written(&path, &writer)
+                .expect("admit original member");
             path
         })
         .collect()
@@ -109,7 +111,9 @@ fn window_rollover_refuses_mutation_after_a_pending_member_completed() {
     let original = fs::metadata(first).expect("original member identity");
     let incoming = root.path().join("incoming.tmp");
     let mut writer = File::create(&incoming).expect("incoming writer");
-    writer.write_all(b"incoming segment").expect("incoming bytes");
+    writer
+        .write_all(b"incoming segment")
+        .expect("incoming bytes");
 
     let (barriers, result) = thread::scope(|scope| {
         let (barriers, pause) = sync_latency::pause_after_batch_member(first);
@@ -145,7 +149,10 @@ fn window_rollover_refuses_mutation_after_a_pending_member_completed() {
     let error = result.expect_err("changed full window");
     assert_eq!(error.kind(), ErrorKind::InvalidData);
     assert_eq!(batch.pending.len(), DURABLE_BATCH_CONCURRENT_SYNCS);
-    assert!(batch.synced.is_empty(), "no unproven member may be promoted");
+    assert!(
+        batch.synced.is_empty(),
+        "no unproven member may be promoted"
+    );
     assert!(
         batch
             .pending
