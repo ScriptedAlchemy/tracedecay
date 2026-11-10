@@ -4,7 +4,11 @@
 use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
 use std::io;
+#[cfg(unix)]
+use std::os::unix::fs::MetadataExt;
 use std::path::{Component, Path, PathBuf};
+#[cfg(unix)]
+use std::sync::{Arc, Mutex, PoisonError};
 
 use gix::bstr::ByteSlice;
 use ignore::{DirEntry, Error as WalkError, Walk};
@@ -27,6 +31,76 @@ pub struct AuthenticatedSubmodule {
     module_path: String,
     module_name: PathBuf,
     staged_modules_id: gix::ObjectId,
+    #[cfg(unix)]
+    parent_git_dir: PathBuf,
+    #[cfg(unix)]
+    parent_common_dir: PathBuf,
+    #[cfg(unix)]
+    verified: Arc<Mutex<Option<BindingWitness>>>,
+}
+
+#[cfg(unix)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct FileWitness {
+    named: (u64, u64, u32, u64, i64, i64, i64, i64),
+    target: Option<(u64, u64, u32, u64, i64, i64, i64, i64)>,
+}
+
+#[cfg(unix)]
+impl FileWitness {
+    fn identity(metadata: &std::fs::Metadata) -> (u64, u64, u32, u64, i64, i64, i64, i64) {
+        (
+            metadata.dev(),
+            metadata.ino(),
+            metadata.mode(),
+            metadata.len(),
+            metadata.mtime(),
+            metadata.mtime_nsec(),
+            metadata.ctime(),
+            metadata.ctime_nsec(),
+        )
+    }
+
+    fn at(path: &Path) -> io::Result<Option<Self>> {
+        let metadata = match std::fs::symlink_metadata(path) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(error),
+        };
+        let target = if metadata.file_type().is_symlink() {
+            Some(Self::identity(&std::fs::metadata(path)?))
+        } else {
+            None
+        };
+        Ok(Some(Self {
+            named: Self::identity(&metadata),
+            target,
+        }))
+    }
+}
+
+#[cfg(unix)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct BindingWitness {
+    paths: BTreeMap<PathBuf, Option<FileWitness>>,
+}
+
+#[cfg(unix)]
+impl BindingWitness {
+    fn unchanged(&self) -> io::Result<bool> {
+        for (path, witness) in &self.paths {
+            if FileWitness::at(path)? != *witness {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    static FULL_BINDING_VALIDATIONS: std::cell::Cell<usize> =
+        const { std::cell::Cell::new(0) };
 }
 
 pub(super) struct ChildSources {
@@ -35,6 +109,57 @@ pub(super) struct ChildSources {
 }
 
 impl AuthenticatedSubmodule {
+    #[cfg(unix)]
+    fn binding_witness(&self) -> io::Result<Option<BindingWitness>> {
+        let objects = self.git_dir.join("objects");
+        // Object alternates may change outside this parent-owned checkout.
+        // Unobservable external authority cannot be covered by a local stamp.
+        match std::fs::symlink_metadata(objects.join("info/alternates")) {
+            Ok(_) => return Ok(None),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+        let pin = self.pin.to_string();
+        let mut paths = vec![
+            self.parent_root.clone(),
+            self.parent_root.join(".git"),
+            self.parent_root.join(".gitmodules"),
+            self.parent_git_dir.clone(),
+            self.parent_git_dir.join("index"),
+            self.parent_git_dir.join("config"),
+            self.parent_git_dir.join("commondir"),
+            self.parent_common_dir.clone(),
+            self.parent_common_dir.join("config"),
+            self.parent_common_dir.join("modules"),
+            self.git_dir.clone(),
+            self.git_dir.join("config"),
+            self.git_dir.join("config.worktree"),
+            objects.clone(),
+            objects.join("pack"),
+            objects.join("info/alternates"),
+            objects.join(&pin[..2]),
+            objects.join(&pin[..2]).join(&pin[2..]),
+            self.worktree.clone(),
+            self.worktree.join(".git"),
+        ];
+        // The pack directory stamp detects additions and deletions. Track
+        // existing pack members as well to reject an in-place replacement.
+        match std::fs::read_dir(objects.join("pack")) {
+            Ok(entries) => {
+                for entry in entries {
+                    paths.push(entry?.path());
+                }
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+        let mut observed = BTreeMap::new();
+        for path in paths {
+            observed.insert(path.clone(), FileWitness::at(&path)?);
+        }
+        Ok(Some(BindingWitness { paths: observed }))
+    }
+
     fn parent_registration_is_live(&self) -> io::Result<bool> {
         // A retained child must preserve the parent's exact staged authority.
         // An unreadable Git authority is not a revoked or absent source.
@@ -87,6 +212,44 @@ impl AuthenticatedSubmodule {
     }
 
     pub fn checkout_is_live(&self) -> io::Result<bool> {
+        #[cfg(unix)]
+        {
+            let cached = self
+                .verified
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .clone();
+            if let Some(witness) = cached
+                && witness.unchanged()?
+            {
+                return Ok(true);
+            }
+            // Invalidate BEFORE touching Git. A read failure must never retain
+            // a previous successful authority for a later caller.
+            *self
+                .verified
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner) = None;
+        }
+        #[cfg(unix)]
+        let before = self.binding_witness().ok().flatten();
+        let valid = self.verify_checkout_binding()?;
+        #[cfg(unix)]
+        if valid {
+            let after = self.binding_witness().ok().flatten();
+            if before.is_some() && before == after {
+                *self
+                    .verified
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner) = after;
+            }
+        }
+        Ok(valid)
+    }
+
+    fn verify_checkout_binding(&self) -> io::Result<bool> {
+        #[cfg(test)]
+        FULL_BINDING_VALIDATIONS.with(|count| count.set(count.get() + 1));
         let marker = self.worktree.join(".git");
         let checkout_matches = self.worktree.canonicalize().ok().as_ref() == Some(&self.worktree)
             && marker
@@ -293,6 +456,12 @@ fn bound_checkout(
         module_path,
         module_name: name.to_path_buf(),
         staged_modules_id,
+        #[cfg(unix)]
+        parent_git_dir: parent.git_dir().to_path_buf(),
+        #[cfg(unix)]
+        parent_common_dir: parent.common_dir().to_path_buf(),
+        #[cfg(unix)]
+        verified: Arc::new(Mutex::new(None)),
     })
 }
 

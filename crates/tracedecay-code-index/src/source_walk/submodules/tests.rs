@@ -324,3 +324,57 @@ fn unavailable_parent_index_refuses_retained_graph_and_lazy_walk() {
         .expect("the child walk must report unavailable parent authority");
     assert_eq!(error.io_error().unwrap().kind(), io::ErrorKind::Other);
 }
+
+#[cfg(unix)]
+#[test]
+fn repeated_child_reads_do_not_reparse_stable_parent_git_authority() {
+    let fixture = fixture();
+    let root = fixture.path().join("parent");
+    let boundaries = LiveSourceBoundaries::open(&root, true).unwrap();
+    let source = Path::new("app/first.rs");
+    super::FULL_BINDING_VALIDATIONS.with(|count| count.set(0));
+
+    for _ in 0..128 {
+        assert!(boundaries.resolve(source).unwrap().is_some());
+    }
+    super::FULL_BINDING_VALIDATIONS.with(|count| {
+        assert_eq!(
+            count.get(),
+            1,
+            "128 stable source reads must share one full Git binding validation"
+        );
+    });
+    git(&root, &["rm", "-q", "--cached", "app"]);
+    assert!(
+        boundaries.resolve(source).unwrap().is_none(),
+        "a staged gitlink removal must revoke an otherwise unchanged child"
+    );
+    super::FULL_BINDING_VALIDATIONS.with(|count| {
+        assert_eq!(count.get(), 2, "revocation requires a fresh Git validation");
+    });
+    git(&root, &["add", "app"]);
+    assert!(boundaries.resolve(source).unwrap().is_some());
+}
+
+#[cfg(unix)]
+#[test]
+fn cached_child_binding_refuses_equal_length_working_registration_change() {
+    let fixture = fixture();
+    let root = fixture.path().join("parent");
+    let boundaries = LiveSourceBoundaries::open(&root, true).unwrap();
+    let source = Path::new("app/first.rs");
+    assert!(boundaries.resolve(source).unwrap().is_some());
+
+    let path = root.join(".gitmodules");
+    let before = fs::read_to_string(&path).unwrap();
+    let changed = before.replacen("path = app", "path = bad", 1);
+    assert_ne!(changed, before);
+    assert_eq!(changed.len(), before.len());
+    fs::write(&path, changed).unwrap();
+    assert!(
+        boundaries.resolve(source).unwrap().is_none(),
+        "a same-length working registration change must not reuse authority"
+    );
+    fs::write(&path, before).unwrap();
+    assert!(boundaries.resolve(source).unwrap().is_some());
+}
