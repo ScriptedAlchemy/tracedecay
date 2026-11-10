@@ -2,6 +2,7 @@
 
 use super::*;
 use crate::project_runtime::ProjectRuntimeRequestLeaseV1;
+use tracing::instrument::WithSubscriber;
 
 pub fn lsp_delivery_attempt(
     frame: &[u8],
@@ -113,11 +114,13 @@ impl LspDeliverySettlementClaim {
         self,
         project_lease: ProjectRuntimeRequestLeaseV1,
     ) -> impl Future<Output = LspDeliverySettlementAdmissionV1> + Send {
-        let dispatch = tracing::dispatcher::get_default(Clone::clone);
-        let admission = tracedecay_runtime_core::native_runtime::spawn_blocking(move || {
-            let _project_lease = project_lease;
-            tracing::dispatcher::with_default(&dispatch, || self.admit_inline())
-        });
+        let admission = tracedecay_runtime_core::native_runtime::on_blocking_pool(
+            async move {
+                let _project_lease = project_lease;
+                self.admit_inline()
+            }
+            .with_current_subscriber(),
+        );
         async move {
             match admission.await {
                 Ok(admission) => admission,
