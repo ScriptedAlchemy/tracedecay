@@ -98,6 +98,13 @@ impl AuthenticatedSubmodule {
                 .as_ref()
                 == Some(&self.git_dir)
             && self.parent_registration_is_live()
+            // The child gitdir marker is unchanged if its repository config
+            // redirects core.worktree. A fresh binding would refuse that store;
+            // an existing graph reader or lazy walk must do the same.
+            && open_pinned_store(&self.git_dir, self.pin)
+                .and_then(|child| child.workdir()?.canonicalize().ok())
+                .as_ref()
+                == Some(&self.worktree)
     }
 
     pub(super) fn sources(&self) -> Result<ChildSources, SourceWalkError> {

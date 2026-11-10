@@ -144,7 +144,7 @@ fn marker_change_before_iteration(replacement: Option<&str>) {
     assert_refused_walk(&root, pending);
 }
 
-fn parent_authority_change_before_iteration(change: impl FnOnce(&Path)) {
+fn binding_change_before_iteration(change: impl FnOnce(&Path)) {
     let fixture = fixture();
     let root = fixture.path().join("parent");
     assert_live_control(&root);
@@ -164,33 +164,51 @@ fn parent_authority_change_before_iteration(change: impl FnOnce(&Path)) {
 
 #[test]
 fn lazy_submodule_walk_refuses_removed_worktree_registration() {
-    parent_authority_change_before_iteration(|root| {
+    binding_change_before_iteration(|root| {
         fs::remove_file(root.join(".gitmodules")).unwrap();
     });
 }
 
 #[test]
 fn lazy_submodule_walk_refuses_removed_staged_gitlink() {
-    parent_authority_change_before_iteration(|root| {
+    binding_change_before_iteration(|root| {
         git(root, &["rm", "-q", "--cached", "app"]);
     });
 }
 
 #[test]
 fn lazy_submodule_walk_refuses_removed_staged_registration() {
-    parent_authority_change_before_iteration(|root| {
+    binding_change_before_iteration(|root| {
         git(root, &["rm", "-q", "--cached", ".gitmodules"]);
     });
 }
 
 #[test]
 fn lazy_submodule_walk_refuses_updated_staged_child_pin() {
-    parent_authority_change_before_iteration(|root| {
+    binding_change_before_iteration(|root| {
         let child = root.join("app");
         fs::write(child.join("first.rs"), "pub fn updated() {}\n").unwrap();
         git(&child, &["add", "first.rs"]);
         git(&child, &["commit", "-qm", "updated child"]);
         git(root, &["add", "app"]);
+    });
+}
+
+#[test]
+fn lazy_submodule_walk_refuses_changed_child_repository_worktree() {
+    binding_change_before_iteration(|root| {
+        // The marker stays at app/.git and the source bytes remain in app,
+        // but the parent-owned child Git admin now advertises another worktree.
+        let other = root.parent().unwrap().join("child");
+        git(
+            &root.join("app"),
+            &["config", "core.worktree", other.to_str().unwrap()],
+        );
+        let parent = tracedecay_runtime_core::git_open::open(root).unwrap();
+        assert!(
+            !super::live_submodules(&parent).unwrap().contains_key("app"),
+            "fresh admission must reject a retargeted child repository worktree"
+        );
     });
 }
 
