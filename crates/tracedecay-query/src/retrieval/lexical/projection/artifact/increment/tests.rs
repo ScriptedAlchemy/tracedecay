@@ -84,7 +84,9 @@ fn occurrences(c: &Connection) -> Vec<(i64, Vec<u8>, i64)> {
 fn integrity(c: &Connection) {
     for schema in ["main", "temp"] {
         let actual: String = c
-            .query_row(&format!("PRAGMA {schema}.integrity_check"), [], |r| r.get(0))
+            .query_row(&format!("PRAGMA {schema}.integrity_check"), [], |r| {
+                r.get(0)
+            })
             .unwrap();
         assert_eq!(actual, "ok", "{schema} remains intact");
     }
@@ -107,7 +109,10 @@ fn lexical_rowid_carry_preserves_disk_rows_across_replacements() {
         let error = tx
             .execute("UPDATE row_blocks SET first_document=first_document+1", [])
             .unwrap_err();
-        assert_eq!(error.sqlite_error_code(), Some(ErrorCode::ConstraintViolation));
+        assert_eq!(
+            error.sqlite_error_code(),
+            Some(ErrorCode::ConstraintViolation)
+        );
         tx.rollback().unwrap();
     }
     for (index, shift) in shifts.iter().enumerate() {
@@ -192,7 +197,9 @@ fn interrupted_rowid_carry_rolls_back_partial_key_staging() {
     }
     impl CodeIndexExecutionControlV1 for CancelAfter {
         fn is_cancelled(&self) -> bool {
-            self.probes.fetch_add(1, std::sync::atomic::Ordering::Relaxed) >= self.limit
+            self.probes
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+                >= self.limit
         }
 
         fn is_deadline_exceeded(&self) -> bool {
@@ -266,7 +273,10 @@ fn lexical_rowid_shift_does_not_spill_unlinked_sqlite_files() {
         let stdout = String::from_utf8_lossy(&output.stdout);
         let stderr = String::from_utf8_lossy(&output.stderr);
         assert!(output.status.success(), "{stdout}\n{stderr}");
-        assert!(stdout.contains("1 passed"), "child test was vacuous: {stdout}");
+        assert!(
+            stdout.contains("1 passed"),
+            "child test was vacuous: {stdout}"
+        );
         return;
     }
     let (_directory, mut connection) = fixture();
@@ -305,9 +315,14 @@ fn lexical_rowid_shift_does_not_spill_unlinked_sqlite_files() {
         tx.rollback().unwrap();
     }
     assert!(!unreadable.load(Ordering::Relaxed));
-    assert!(peak.load(Ordering::Relaxed) > 0, "old bulk rowid rewrite must spill");
+    assert!(
+        peak.load(Ordering::Relaxed) > 0,
+        "old bulk rowid rewrite must spill"
+    );
     assert_eq!(
-        connection.pragma_query_value(Some("temp"), "page_count", |r| r.get::<_, i64>(0)).unwrap(),
+        connection
+            .pragma_query_value(Some("temp"), "page_count", |r| r.get::<_, i64>(0))
+            .unwrap(),
         0,
         "TEMP pager counts cannot observe the transient statement spill"
     );
@@ -321,7 +336,11 @@ fn lexical_rowid_shift_does_not_spill_unlinked_sqlite_files() {
     }
     connection.progress_handler(0, None::<fn() -> bool>);
     assert!(!unreadable.load(Ordering::Relaxed));
-    assert_eq!(peak.load(Ordering::Relaxed), 0, "bounded rowid shift must not spill");
+    assert_eq!(
+        peak.load(Ordering::Relaxed),
+        0,
+        "bounded rowid shift must not spill"
+    );
     assert_eq!(spill_bytes().unwrap(), 0);
     assert_ne!(blocks(&connection), original);
     integrity(&connection);

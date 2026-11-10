@@ -656,9 +656,8 @@ fn shift_rowid_keys(
         } else {
             format!("{column} < 0")
         };
-        let first_sql = format!(
-            "SELECT {column} FROM {table} WHERE {predicate} ORDER BY {column} LIMIT ?1"
-        );
+        let first_sql =
+            format!("SELECT {column} FROM {table} WHERE {predicate} ORDER BY {column} LIMIT ?1");
         let after_sql = format!(
             "SELECT {column} FROM {table} WHERE {predicate} AND {column} > ?1 ORDER BY {column} LIMIT ?2"
         );
@@ -717,7 +716,13 @@ fn carry_row_blocks(
             [],
         )
         .map_err(sqlite_error)?;
-    shift_rowid_keys(transaction, "row_blocks", "first_document", documents, control)?;
+    shift_rowid_keys(
+        transaction,
+        "row_blocks",
+        "first_document",
+        documents,
+        control,
+    )?;
     let mut insert = transaction
         .prepare_cached("INSERT INTO row_blocks(first_document, payload) VALUES (?1, ?2)")
         .map_err(sqlite_error)?;

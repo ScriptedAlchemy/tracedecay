@@ -212,7 +212,10 @@ fn carried_clone_keys_shift_without_retained_file_backed_temp_pages() {
     let retained_pages: i64 = connection
         .pragma_query_value(Some("temp"), "page_count", |row| row.get(0))
         .unwrap();
-    assert!(retained_pages > 32, "positive TEMP-copy control: {retained_pages}");
+    assert!(
+        retained_pages > 32,
+        "positive TEMP-copy control: {retained_pages}"
+    );
     integrity(&connection, "main");
     integrity(&connection, "temp");
 }
@@ -275,7 +278,6 @@ mod physical_spill {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
-    use super::super::super::shift_rowid_keys;
     use super::{
         ActiveControl, ShiftV1, expected_postings, fixture, postings, shift_clone_posting_keys,
     };
@@ -314,7 +316,10 @@ mod physical_spill {
             let stdout = String::from_utf8_lossy(&output.stdout);
             let stderr = String::from_utf8_lossy(&output.stderr);
             assert!(output.status.success(), "{stdout}\n{stderr}");
-            assert!(stdout.contains("1 passed"), "child did not execute: {stdout}");
+            assert!(
+                stdout.contains("1 passed"),
+                "child did not execute: {stdout}"
+            );
             return;
         }
         let (_root, mut connection) = fixture();
@@ -339,13 +344,24 @@ mod physical_spill {
         );
         {
             let transaction = connection.transaction().unwrap();
-            shift_rowid_keys(
-                &transaction,
-                "clone_exact_postings",
-                "occurrence_ordinal",
-                &shift,
-            )
-            .unwrap();
+            // Execute the actual pre-fix, bulk two-phase SQL as a positive
+            // control. The production rowid helper is intentionally bounded now.
+            transaction
+                .execute(
+                    "UPDATE clone_exact_postings
+                     SET occurrence_ordinal = -occurrence_ordinal - 2
+                     WHERE occurrence_ordinal > 0",
+                    [],
+                )
+                .unwrap();
+            transaction
+                .execute(
+                    "UPDATE clone_exact_postings
+                     SET occurrence_ordinal = -occurrence_ordinal - 1
+                     WHERE occurrence_ordinal < 0",
+                    [],
+                )
+                .unwrap();
             transaction.rollback().unwrap();
         }
         assert!(!unavailable.load(Ordering::Relaxed));
