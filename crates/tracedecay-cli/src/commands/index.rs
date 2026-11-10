@@ -1125,10 +1125,19 @@ async fn code_index_reconciliation_is_optional(
     project_path: &Path,
     error: &tracedecay_domain::errors::TraceDecayError,
 ) -> bool {
-    if !error
-        .to_string()
-        .contains("code_index_scheduler_unavailable")
-    {
+    // Only the owner's exact typed refusal permits a non-Git enrollment to
+    // treat reconciliation as inapplicable. A transport or storage failure
+    // mentioning the scheduler in its diagnostic is still a real failure.
+    let scheduler_unavailable = match error {
+        tracedecay_domain::errors::TraceDecayError::ProjectRoute { reason_code, .. } => {
+            reason_code == "code_index_scheduler_unavailable"
+        }
+        tracedecay_domain::errors::TraceDecayError::ToolRefused(refusal) => {
+            refusal.code.as_deref() == Some("code_index_scheduler_unavailable")
+        }
+        _ => false,
+    };
+    if !scheduler_unavailable {
         return false;
     }
     let deadline = tracedecay_runtime_core::cancellation::MonotonicDeadline::at(
@@ -3167,18 +3176,60 @@ mod init_bootstrap_tests {
         .status()
         .unwrap();
         assert!(initialized.success());
-        let unavailable = tracedecay_domain::errors::TraceDecayError::Config {
-            message: "daemon tool call failed: code_index_scheduler_unavailable: admin sync was not accepted"
-                .to_string(),
-        };
-        let unrelated = tracedecay_domain::errors::TraceDecayError::Config {
-            message: "daemon tool call failed: storage unavailable".to_string(),
-        };
+        let unavailable = tracedecay_domain::errors::TraceDecayError::project_route(
+            "code_index_scheduler_unavailable",
+            true,
+            "admin sync was not accepted",
+        );
+        let tool_unavailable = tracedecay_domain::errors::TraceDecayError::tool_refused(
+            "tracedecay_admin_sync",
+            Some("code_index_scheduler_unavailable".to_owned()),
+            Some("scheduler is not mounted".to_owned()),
+        );
+        let unrelated = tracedecay_domain::errors::TraceDecayError::project_route(
+            "storage_unavailable",
+            true,
+            "storage has not mounted",
+        );
 
         assert!(code_index_reconciliation_is_optional(&non_git, &unavailable).await);
+        assert!(code_index_reconciliation_is_optional(&non_git, &tool_unavailable).await);
         assert!(!code_index_reconciliation_is_optional(&git, &unavailable).await);
         assert!(!code_index_reconciliation_is_optional(&nested_git, &unavailable).await);
         assert!(!code_index_reconciliation_is_optional(&non_git, &unrelated).await);
+    }
+
+    #[tokio::test]
+    async fn scheduler_words_in_other_errors_cannot_make_init_succeed() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let non_git = temp.path().join("non-git");
+        std::fs::create_dir_all(&non_git).unwrap();
+        let incidental = "code_index_scheduler_unavailable appeared in the diagnostic";
+        for error in [
+            tracedecay_domain::errors::TraceDecayError::Config {
+                message: incidental.to_owned(),
+            },
+            tracedecay_domain::errors::TraceDecayError::project_route(
+                "storage_unavailable",
+                true,
+                incidental,
+            ),
+            tracedecay_domain::errors::TraceDecayError::tool_refused(
+                "tracedecay_admin_sync",
+                None,
+                Some(incidental.to_owned()),
+            ),
+            tracedecay_domain::errors::TraceDecayError::tool_refused(
+                "tracedecay_admin_sync",
+                Some("storage_unavailable".to_owned()),
+                Some(incidental.to_owned()),
+            ),
+        ] {
+            assert!(
+                !code_index_reconciliation_is_optional(&non_git, &error).await,
+                "an unrelated failure must not become successful init: {error}"
+            );
+        }
     }
 
     #[test]
