@@ -2055,7 +2055,6 @@ mod tests {
         ));
     }
 
-
     #[test]
     fn checked_seal_open_preserves_interruption_after_metadata_io() {
         let temporary = TempDir::new().unwrap();
