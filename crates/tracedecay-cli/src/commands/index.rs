@@ -555,7 +555,14 @@ impl FirstGenerationWorkMarker {
             if encoding_finished
                 || graph.phase == Some(CodeIndexNativeGraphPhaseV1::CompactSegmentVerified)
             {
-                return None;
+                // The final Grafeo container write has no row callbacks, but
+                // a separately owned successor can still capture or parse.
+                // Keep its observed work visible without timing the final write.
+                return worktree
+                    .preseal_attempt
+                    .as_ref()
+                    .filter(|attempt| attempt.active)
+                    .map(Self::preseal);
             }
             // Starting the native attempt proves only that there is an owner,
             // not that it has written any rows. A silent initial window must
@@ -1406,6 +1413,97 @@ mod daemon_precondition_tests {
         )
         .await;
         assert_eq!(reads, 2, "neither independent writer advanced");
+        let (code, reason) = refusal(result);
+        assert_eq!(code, CODE_INDEX_READINESS_WAIT_TIMED_OUT);
+        assert!(reason.contains("no observed capture, parse, text, or native graph work"));
+    }
+
+    fn native_graph_after_all_encoding() -> CodeIndexWorktreeFreshnessV1 {
+        let mut worktree = native_graph_without_writes();
+        let graph = worktree.native_graph_progress.as_mut().unwrap();
+        graph.phase = Some(CodeIndexNativeGraphPhaseV1::CompactEncoding);
+        graph.encoded_entities = 3;
+        graph.total_entities = Some(3);
+        graph.encoded_relations = 2;
+        graph.total_relations = Some(2);
+        graph.progress_epoch = 5;
+        graph.last_progress_micros = Some(500);
+        worktree
+    }
+
+    #[test]
+    fn final_graph_write_does_not_hide_an_independent_source_attempt() {
+        let finished = native_graph_after_all_encoding();
+        // A final compact write has no observable per-row milestones.
+        assert_eq!(super::FirstGenerationWorkMarker::of(Some(&finished)), None);
+
+        let mut successor = finished.clone();
+        successor.preseal_attempt =
+            attempt(CodeIndexPresealWorkPhaseV1::Capture, 4, 7, 2).preseal_attempt;
+        assert!(matches!(
+            super::FirstGenerationWorkMarker::of(Some(&successor)),
+            Some(super::FirstGenerationWorkMarker::Preseal {
+                owner: (3, 5, 2),
+                epoch: 4,
+                completed: 7,
+                last_work_micros: Some(700),
+                ..
+            })
+        ));
+
+        // A digest-verified native completion also must not hide the separate
+        // source owner. Retiring that owner restores the unknown final phase.
+        successor.native_graph_progress.as_mut().unwrap().phase =
+            Some(CodeIndexNativeGraphPhaseV1::CompactSegmentVerified);
+        assert!(matches!(
+            super::FirstGenerationWorkMarker::of(Some(&successor)),
+            Some(super::FirstGenerationWorkMarker::Preseal { .. })
+        ));
+        successor.preseal_attempt.as_mut().unwrap().active = false;
+        assert_eq!(super::FirstGenerationWorkMarker::of(Some(&successor)), None);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn completed_native_encoding_cannot_hide_advancing_successor_capture() {
+        let mut capture = native_graph_after_all_encoding();
+        capture.preseal_attempt =
+            attempt(CodeIndexPresealWorkPhaseV1::Capture, 4, 7, 2).preseal_attempt;
+        let mut parse = capture.clone();
+        parse.preseal_attempt =
+            attempt(CodeIndexPresealWorkPhaseV1::ParseEvidence, 5, 1, 2).preseal_attempt;
+
+        let (result, reads) = hold_over(
+            vec![
+                status(timed_out(), warming(capture)),
+                status(timed_out(), warming(parse)),
+                ready_status(),
+            ],
+            Duration::ZERO,
+        )
+        .await;
+        assert!(
+            result.is_ok(),
+            "real capture and parse must outlive the old final graph write: {result:?}"
+        );
+        assert_eq!(reads, 3);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn completed_native_encoding_cannot_hide_a_frozen_successor() {
+        let mut capture = native_graph_after_all_encoding();
+        capture.preseal_attempt =
+            attempt(CodeIndexPresealWorkPhaseV1::Capture, 4, 7, 2).preseal_attempt;
+
+        let (result, reads) = hold_over(
+            vec![
+                status(timed_out(), warming(capture.clone())),
+                status(timed_out(), warming(capture)),
+                ready_status(),
+            ],
+            Duration::ZERO,
+        )
+        .await;
+        assert_eq!(reads, 2, "a frozen source must refuse before later Ready");
         let (code, reason) = refusal(result);
         assert_eq!(code, CODE_INDEX_READINESS_WAIT_TIMED_OUT);
         assert!(reason.contains("no observed capture, parse, text, or native graph work"));
