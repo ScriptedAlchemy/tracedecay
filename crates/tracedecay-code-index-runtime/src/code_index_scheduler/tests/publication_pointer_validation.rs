@@ -61,7 +61,13 @@ fn cold_pointer_witness_refuses_same_byte_inode_swap_and_symlink_alias() {
         (named_before.dev(), named_before.ino()),
         (followed.dev(), followed.ino())
     );
-    assert!(pointer.symlink_metadata().expect("symlink entry").file_type().is_symlink());
+    assert!(
+        pointer
+            .symlink_metadata()
+            .expect("symlink entry")
+            .file_type()
+            .is_symlink()
+    );
     assert!(matches!(
         DaemonCodeIndexPublicationStoreV1::require_cold_pointer_witness(
             &pointer,
@@ -74,11 +80,18 @@ fn cold_pointer_witness_refuses_same_byte_inode_swap_and_symlink_alias() {
 
     fs::remove_file(&pointer).expect("remove symlink");
     fs::rename(&retired, &pointer).expect("restore original inode");
+    // Rename updates ctime on Unix; authenticate the restored pathname's
+    // current metadata while retaining the original open descriptor.
+    let restored_identity = pointer.symlink_metadata().expect("restored inode");
+    assert_eq!(
+        (named_before.dev(), named_before.ino()),
+        (restored_identity.dev(), restored_identity.ino())
+    );
     assert!(
         DaemonCodeIndexPublicationStoreV1::require_cold_pointer_witness(
             &pointer,
             &mut opened,
-            &named_before,
+            &restored_identity,
             &readback,
         )
         .is_ok(),
