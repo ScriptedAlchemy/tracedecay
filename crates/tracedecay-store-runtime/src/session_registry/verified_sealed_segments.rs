@@ -55,11 +55,28 @@ impl SealedSegmentFingerprintV1 {
 
 type VerifiedSegmentMap = BTreeMap<ManifestDigest, SealedSegmentFingerprintV1>;
 
+// A root cache is a performance hint, not durable proof. Cap the number of
+// generations held by one daemon; an evicted root is verified from disk again.
+const MAX_VERIFIED_SEGMENT_ROOTS: usize = 32;
+
+#[derive(Debug, Default)]
+struct VerifiedRootCacheV1 {
+    roots: HashMap<PathBuf, (Arc<VerifiedSegmentMap>, u64)>,
+    last_access: u64,
+}
+
+impl VerifiedRootCacheV1 {
+    fn next_access(&mut self) -> u64 {
+        self.last_access = self.last_access.saturating_add(1);
+        self.last_access
+    }
+}
+
 /// Per segments root, the last successfully committed proof. In-flight proofs
 /// share that immutable snapshot without evicting or copying its entries.
 #[derive(Debug, Default)]
 pub(crate) struct VerifiedSealedSegmentsV1 {
-    roots: Mutex<HashMap<PathBuf, Arc<VerifiedSegmentMap>>>,
+    roots: Mutex<VerifiedRootCacheV1>,
 }
 
 /// One proof's view: what it may skip, and what it hashed.
@@ -76,12 +93,17 @@ impl VerifiedSealedSegmentsV1 {
     /// overlapping proof must not evict already authenticated identities.
     /// New observations remain private until the whole proof succeeds.
     pub(super) fn begin(&self, segments_root: &Path) -> SealedSegmentProofV1<'_> {
-        let prior = self
-            .roots
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .get(segments_root)
-            .cloned();
+        let prior = {
+            let mut cache = self
+                .roots
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let accessed = cache.next_access();
+            cache.roots.get_mut(segments_root).map(|(snapshot, last_used)| {
+                *last_used = accessed;
+                Arc::clone(snapshot)
+            })
+        };
         SealedSegmentProofV1 {
             verified: self,
             segments_root: segments_root.to_path_buf(),
@@ -154,13 +176,26 @@ impl SealedSegmentProofV1<'_> {
             .roots
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let unchanged = match (roots.get(&self.segments_root), self.prior.as_ref()) {
+        let unchanged = match (roots.roots.get(&self.segments_root), self.prior.as_ref()) {
             (None, None) => true,
-            (Some(current), Some(prior)) => Arc::ptr_eq(current, prior),
+            (Some((current, _)), Some(prior)) => Arc::ptr_eq(current, prior),
             _ => false,
         };
         if unchanged {
-            roots.insert(self.segments_root, Arc::new(self.proven));
+            let accessed = roots.next_access();
+            roots
+                .roots
+                .insert(self.segments_root, (Arc::new(self.proven), accessed));
+            if roots.roots.len() > MAX_VERIFIED_SEGMENT_ROOTS {
+                let oldest = roots
+                    .roots
+                    .iter()
+                    .min_by_key(|(_, (_, accessed))| *accessed)
+                    .map(|(root, _)| root.clone());
+                if let Some(oldest) = oldest {
+                    roots.roots.remove(&oldest);
+                }
+            }
         }
     }
 }
@@ -175,7 +210,10 @@ mod tests {
     use tempfile::TempDir;
     use tracedecay_domain::{ManifestDigest, sha256_hex_suffix};
 
-    use super::{SealedSegmentFingerprintV1, SealedSegmentProofV1, VerifiedSealedSegmentsV1};
+    use super::{
+        MAX_VERIFIED_SEGMENT_ROOTS, SealedSegmentFingerprintV1, SealedSegmentProofV1,
+        VerifiedSealedSegmentsV1,
+    };
 
     fn write_segment(root: &Path, bytes: &[u8]) -> (ManifestDigest, PathBuf) {
         let digest = ManifestDigest::from_sha256_bytes(&Sha256::digest(bytes)).unwrap();
@@ -326,6 +364,62 @@ mod tests {
         verified.begin(root.path()).commit();
         let mut empty = verified.begin(root.path());
         assert!(!empty.already_verified(&retained, 3, &retained_path));
+    }
+
+    #[test]
+    fn many_distinct_roots_evict_cold_proofs_but_retain_recent_source() {
+        let temp = TempDir::new().unwrap();
+        let verified = VerifiedSealedSegmentsV1::default();
+        let mut roots = Vec::new();
+        for index in 0..MAX_VERIFIED_SEGMENT_ROOTS {
+            let root = temp.path().join(format!("root-{index}"));
+            std::fs::create_dir(&root).unwrap();
+            let (digest, path) = write_segment(&root, b"[1]");
+            let mut proof = verified.begin(&root);
+            authenticate(&mut proof, &digest, &path);
+            proof.commit();
+            roots.push((root, digest, path));
+        }
+
+        // A completed read without a commit still makes this root recently used.
+        let (recent_root, recent_digest, recent_path) = &roots[0];
+        let mut recent = verified.begin(recent_root);
+        assert!(recent.already_verified(recent_digest, 3, recent_path));
+        drop(recent);
+
+        let incoming_root = temp.path().join("incoming-root");
+        std::fs::create_dir(&incoming_root).unwrap();
+        let (incoming_digest, incoming_path) = write_segment(&incoming_root, b"[2]");
+        let mut incoming = verified.begin(&incoming_root);
+        authenticate(&mut incoming, &incoming_digest, &incoming_path);
+        incoming.commit();
+
+        assert_eq!(
+            verified
+                .roots
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .roots
+                .len(),
+            MAX_VERIFIED_SEGMENT_ROOTS,
+            "a daemon must not retain one full authenticated map per historical root"
+        );
+
+        let (cold_root, cold_digest, cold_path) = &roots[1];
+        let mut cold = verified.begin(cold_root);
+        assert!(
+            !cold.already_verified(cold_digest, 3, cold_path),
+            "the least-recently-used source must be hashed again after eviction"
+        );
+        drop(cold);
+
+        let mut retained = verified.begin(recent_root);
+        assert!(
+            retained.already_verified(recent_digest, 3, recent_path),
+            "the recently accessed root must remain warm"
+        );
+        let mut newest = verified.begin(&incoming_root);
+        assert!(newest.already_verified(&incoming_digest, 3, &incoming_path));
     }
 
     #[test]
