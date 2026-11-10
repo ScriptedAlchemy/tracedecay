@@ -218,7 +218,10 @@ mod parse_identity_tests {
             let refused: Result<CodeIndexRepositoryParseIdentityV1, _> =
                 serde_json::from_value(missing_policy);
             assert!(
-                refused.unwrap_err().to_string().contains("include_submodules"),
+                refused
+                    .unwrap_err()
+                    .to_string()
+                    .contains("include_submodules"),
                 "missing policy must be rejected"
             );
         }
