@@ -143,15 +143,17 @@ impl CheckedSealReader<'_> {
         expected_digest: &str,
     ) -> Result<File, GraphDbError> {
         (self.check)()?;
+        // Endpoint authorization may finish after the caller's deadline, even
+        // on an I/O failure. Preserve typed interruption before classifying
+        // final handle or pathname validation as a damaged/retired seal.
+        let final_file_metadata = self.reader.get_ref().metadata();
+        (self.check)()?;
         let final_file_metadata =
-            self.reader
-                .get_ref()
-                .metadata()
-                .map_err(|error| GraphDbError::Corrupt {
-                    message: format!(
-                        "sealed code generation metadata cannot be revalidated: {error}"
-                    ),
-                })?;
+            final_file_metadata.map_err(|error| GraphDbError::Corrupt {
+                message: format!(
+                    "sealed code generation metadata cannot be revalidated: {error}"
+                ),
+            })?;
         if !same_file_identity(opened_metadata, &final_file_metadata)
             || self.bytes_read != admitted_len
         {
@@ -160,15 +162,21 @@ impl CheckedSealReader<'_> {
                     .to_owned(),
             });
         }
-        if seal_left_path(path, opened_metadata)? {
+        let left_path = seal_left_path(path, opened_metadata);
+        (self.check)()?;
+        if left_path? {
             return Err(GraphDbError::SealSuperseded);
         }
         #[cfg(windows)]
-        if !same_windows_handle_identity(self.reader.get_ref(), path)? {
-            return Err(GraphDbError::Corrupt {
-                message: "sealed code generation identity or length changed while it was read"
-                    .to_owned(),
-            });
+        {
+            let same_handle = same_windows_handle_identity(self.reader.get_ref(), path);
+            (self.check)()?;
+            if !same_handle? {
+                return Err(GraphDbError::Corrupt {
+                    message: "sealed code generation identity or length changed while it was read"
+                        .to_owned(),
+                });
+            }
         }
         if encode_lowercase_hex(&self.digest.finalize()) != expected_digest {
             return Err(GraphDbError::Corrupt {
@@ -1785,6 +1793,59 @@ mod tests {
         );
         assert_eq!(output, expected);
         assert_eq!(reader.bytes_read, expected.len() as u64);
+    }
+
+    #[test]
+    fn checked_seal_finish_preserves_deadline_after_final_file_and_path_io() {
+        let temporary = TempDir::new().unwrap();
+        let path = temporary.path().join("generation.json");
+        let expected = b"real nonempty sealed generation for final identity checks";
+        let digest = hex::encode(Sha256::digest(expected));
+        std::fs::write(&path, expected).unwrap();
+
+        // The stream is already authenticated. Expiry during the final
+        // handle-metadata or pathname witness must not return a verified seal.
+        for (late_probe, interruption) in [
+            (2, GraphDbError::Cancelled),
+            (3, GraphDbError::DeadlineExceeded),
+        ] {
+            let finishing = Cell::new(false);
+            let finish_checks = Cell::new(0_usize);
+            let check = || {
+                if finishing.get() {
+                    let next = finish_checks.get() + 1;
+                    finish_checks.set(next);
+                    if next == 2 && late_probe == 3 && cfg!(unix) {
+                        // Retire the pathname after the handle metadata probe.
+                        // A deadline at the path recheck outranks supersession.
+                        std::fs::remove_file(&path).unwrap();
+                    }
+                    if next == late_probe {
+                        return Err(interruption.clone());
+                    }
+                }
+                Ok(())
+            };
+            let (mut reader, opened_metadata, admitted_len) =
+                super::open_checked_seal_reader(&path, &check).unwrap();
+            let mut actual = Vec::new();
+            reader.read_to_end(&mut actual).unwrap();
+            assert_eq!(actual, expected, "finish must follow real nonempty I/O");
+            assert_eq!(reader.bytes_read, admitted_len);
+
+            finishing.set(true);
+            assert_eq!(
+                reader
+                    .finish(&path, &opened_metadata, admitted_len, &digest)
+                    .unwrap_err(),
+                interruption
+            );
+            assert_eq!(
+                finish_checks.get(),
+                late_probe,
+                "the interruption must be observed after final filesystem I/O"
+            );
+        }
     }
 
     #[cfg(unix)]
