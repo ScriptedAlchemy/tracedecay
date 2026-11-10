@@ -1,7 +1,7 @@
 use rusqlite::{Connection, ErrorCode, params};
 use tracedecay_code_index::production::CodeIndexExecutionControlV1;
 
-use super::{CodeLexicalArtifactErrorV1, ShiftV1, shift_rowid_keys};
+use super::{CodeLexicalArtifactErrorV1, ShiftV1, carry_row_chunks, shift_rowid_keys};
 
 struct Active;
 impl CodeIndexExecutionControlV1 for Active {
@@ -344,4 +344,115 @@ fn lexical_rowid_shift_does_not_spill_unlinked_sqlite_files() {
     assert_eq!(spill_bytes().unwrap(), 0);
     assert_ne!(blocks(&connection), original);
     integrity(&connection);
+}
+
+#[test]
+fn carried_row_chunks_check_cancellation_and_preserve_disk_rows() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct StopAfter {
+        checks: AtomicUsize,
+        deadline: bool,
+    }
+    impl CodeIndexExecutionControlV1 for StopAfter {
+        fn is_cancelled(&self) -> bool {
+            !self.deadline && self.checks.fetch_add(1, Ordering::Relaxed) >= 4_100
+        }
+
+        fn is_deadline_exceeded(&self) -> bool {
+            self.deadline && self.checks.fetch_add(1, Ordering::Relaxed) >= 4_100
+        }
+    }
+
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("row-chunks.sqlite");
+    let mut connection = Connection::open(&path).unwrap();
+    connection
+        .execute_batch(
+            "PRAGMA temp_store=FILE;
+             PRAGMA cache_size=8;
+             CREATE TABLE row_chunks(
+                 chunk_id BLOB NOT NULL PRIMARY KEY,
+                 document_id INTEGER NOT NULL
+             ) WITHOUT ROWID;
+             CREATE TABLE independent(value TEXT NOT NULL);
+             INSERT INTO independent VALUES ('live');",
+        )
+        .unwrap();
+    {
+        let tx = connection.transaction().unwrap();
+        let mut insert = tx
+            .prepare("INSERT INTO row_chunks(chunk_id, document_id) VALUES (?1, ?2)")
+            .unwrap();
+        for document in 1_i64..=12_000 {
+            insert
+                .execute(params![document.to_be_bytes().repeat(4), document])
+                .unwrap();
+        }
+        drop(insert);
+        tx.commit().unwrap();
+    }
+
+    let chunks = |db: &Connection| -> Vec<(Vec<u8>, i64)> {
+        let mut query = db
+            .prepare("SELECT chunk_id, document_id FROM row_chunks ORDER BY chunk_id")
+            .unwrap();
+        query
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap()
+    };
+    let original = chunks(&connection);
+    assert_eq!(original.len(), 12_000);
+    let shift = ShiftV1::new([((8, 14), 4), ((45, 52), 10)]).unwrap();
+    let expected: Vec<_> = original
+        .iter()
+        .filter_map(|(chunk, document)| {
+            shift
+                .map(u64::try_from(*document).unwrap())
+                .unwrap()
+                .map(|mapped| (chunk.clone(), i64::try_from(mapped).unwrap()))
+        })
+        .collect();
+    assert_eq!(expected.len(), 11_987);
+    assert_ne!(expected, original);
+
+    for deadline in [false, true] {
+        let tx = connection.transaction().unwrap();
+        let control = StopAfter {
+            checks: AtomicUsize::new(0),
+            deadline,
+        };
+        let error = carry_row_chunks(&tx, &shift, &[], &control).unwrap_err();
+        assert!(
+            matches!(error, CodeLexicalArtifactErrorV1::Interrupted(_)),
+            "both cancellation and deadline must interrupt the real remap: {error:?}"
+        );
+        let partial = chunks(&tx);
+        assert_ne!(partial, original, "the interrupted carry did actual writes");
+        assert_ne!(partial, expected, "it stopped before completing the remap");
+        integrity(&tx);
+        tx.rollback().unwrap();
+        drop(connection);
+        connection = Connection::open(&path).unwrap();
+        assert_eq!(chunks(&connection), original, "rollback must restore every chunk");
+        integrity(&connection);
+    }
+
+    let tx = connection.transaction().unwrap();
+    carry_row_chunks(&tx, &shift, &[], &Active).unwrap();
+    assert_eq!(chunks(&tx), expected);
+    integrity(&tx);
+    tx.commit().unwrap();
+    drop(connection);
+    let reopened = Connection::open(&path).unwrap();
+    assert_eq!(chunks(&reopened), expected, "commit must survive a fresh connection");
+    assert_eq!(
+        reopened
+            .query_row("SELECT value FROM independent", [], |row| row.get::<_, String>(0))
+            .unwrap(),
+        "live"
+    );
+    integrity(&reopened);
 }

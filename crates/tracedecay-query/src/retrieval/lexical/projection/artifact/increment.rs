@@ -753,15 +753,59 @@ fn carry_row_chunks(
         )
         .map_err(sqlite_error)?;
     if let Some(first) = documents.first_affected().filter(|_| documents.shifts()) {
-        transaction
-            .execute(
-                &format!(
-                    "UPDATE row_chunks SET document_id = {} WHERE document_id >= {first}",
-                    documents.sql_image("document_id")
-                ),
-                [],
+        // The chunk ID is the stable primary key; the document ID is only a
+        // value. Seek primary-key windows so a large carry can observe
+        // cancellation between updates without creating a sorted TEMP copy.
+        let mut update = transaction
+            .prepare_cached(
+                "UPDATE row_chunks SET document_id = ?3 WHERE chunk_id = ?1 AND document_id = ?2",
             )
             .map_err(sqlite_error)?;
+        let first_sql = format!(
+            "SELECT chunk_id, document_id FROM row_chunks WHERE document_id >= {first} ORDER BY chunk_id LIMIT ?1"
+        );
+        let after_sql = format!(
+            "SELECT chunk_id, document_id FROM row_chunks WHERE document_id >= {first} AND chunk_id > ?1 ORDER BY chunk_id LIMIT ?2"
+        );
+        let mut last: Option<Vec<u8>> = None;
+        loop {
+            checkpoint(control)?;
+            let window: Vec<(Vec<u8>, i64)> = postings::scan_window(
+                transaction,
+                &first_sql,
+                &after_sql,
+                &last,
+                |chunk_id| vec![Value::Blob(chunk_id.clone())],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )?;
+            let Some((final_chunk, _)) = window.last() else {
+                break;
+            };
+            last = Some(final_chunk.clone());
+            for (chunk_id, old_document) in window {
+                checkpoint(control)?;
+                let mapped = documents
+                    .map(u64::try_from(old_document).map_err(contract_number)?)?
+                    .ok_or_else(|| {
+                        CodeLexicalArtifactErrorV1::Corrupt(
+                            "replaced lexical chunk survived deletion".to_owned(),
+                        )
+                    })?;
+                let mapped = i64::try_from(mapped).map_err(contract_number)?;
+                if mapped == old_document {
+                    continue;
+                }
+                if update
+                    .execute(params![chunk_id, old_document, mapped])
+                    .map_err(sqlite_error)?
+                    != 1
+                {
+                    return Err(CodeLexicalArtifactErrorV1::Corrupt(
+                        "carried lexical chunk changed during remap".to_owned(),
+                    ));
+                }
+            }
+        }
     }
     let mut insert = transaction
         .prepare_cached("INSERT INTO row_chunks(chunk_id, document_id) VALUES (?1, ?2)")
