@@ -379,8 +379,14 @@ async fn observation_bootstrap_batches_across_a_bounded_write_submission() {
     ] {
         let (report, actual_submissions) = fixture.tick().await;
         assert_eq!(report.roots_scanned, scanned);
-        assert_eq!(report.bootstrap_frontier_after, Some(format!("observations:{frontier}")));
-        assert_eq!(read_progress(&fixture.conn).await.unwrap().observations_through, frontier);
+        assert_eq!(
+            report.bootstrap_frontier_after,
+            Some(format!("observations:{frontier}"))
+        );
+        assert_eq!(
+            read_progress(&fixture.conn).await.unwrap().observations_through,
+            frontier
+        );
         assert_eq!(actual_submissions, submissions);
         assert_eq!(
             observation_owners(&fixture.conn).await,
@@ -458,5 +464,150 @@ async fn observation_bootstrap_failure_after_a_full_batch_rolls_back_and_recover
             references
         );
     }
+    fixture.assert_bodies_preserved().await;
+}
+
+async fn assert_refused_bootstrap_rolls_back(fixture: &Fixture, diagnosis: &str) {
+    let before = read_progress(&fixture.conn).await.unwrap();
+    let transaction = fixture
+        .conn
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .await
+        .unwrap();
+    let error = step(&transaction, 48).await.unwrap_err();
+    assert!(
+        error.to_string().contains(diagnosis),
+        "unexpected bootstrap refusal: {error}"
+    );
+    transaction.rollback().await.unwrap();
+    assert_eq!(read_progress(&fixture.conn).await.unwrap(), before);
+    fixture.assert_bodies_preserved().await;
+}
+
+#[asupersync::test]
+async fn ignored_raw_reference_insert_refuses_checkpoint_then_recovers() {
+    let fixture = Fixture::open().await;
+    fixture
+        .conn
+        .execute_batch(
+            "CREATE TRIGGER ignore_raw_ref BEFORE INSERT ON canonical_body_gc_refs
+             WHEN NEW.owner_kind = 'raw' AND NEW.owner_id = 94
+             BEGIN SELECT RAISE(IGNORE); END",
+        )
+        .await
+        .unwrap();
+    assert_refused_bootstrap_rolls_back(&fixture, "raw bootstrap reference was not indexed").await;
+    assert!(raw_owners(&fixture.conn).await.is_empty());
+    fixture
+        .conn
+        .execute_batch("DROP TRIGGER ignore_raw_ref")
+        .await
+        .unwrap();
+    for (scanned, frontier) in [(48_u64, 96_i64), (4, 104)] {
+        let (report, _) = fixture.tick().await;
+        assert_eq!(report.roots_scanned, scanned);
+        assert_eq!(
+            read_progress(&fixture.conn).await.unwrap().raw_through,
+            frontier
+        );
+    }
+    assert_eq!(raw_owners(&fixture.conn).await.len(), 52);
+    fixture.assert_bodies_preserved().await;
+}
+
+#[asupersync::test]
+async fn ignored_observation_reference_insert_refuses_checkpoint_then_recovers() {
+    let fixture = Fixture::with_observations(true).await;
+    fixture.tick().await;
+    fixture.tick().await;
+    fixture
+        .conn
+        .execute_batch(
+            "CREATE TRIGGER ignore_observation_ref BEFORE INSERT ON canonical_body_gc_refs
+             WHEN NEW.owner_kind = 'observation' AND NEW.owner_id = 94
+             BEGIN SELECT RAISE(IGNORE); END",
+        )
+        .await
+        .unwrap();
+    assert_refused_bootstrap_rolls_back(
+        &fixture,
+        "observation bootstrap reference was not indexed",
+    )
+    .await;
+    assert!(observation_owners(&fixture.conn).await.is_empty());
+    fixture
+        .conn
+        .execute_batch("DROP TRIGGER ignore_observation_ref")
+        .await
+        .unwrap();
+    for (frontier, references) in [(96_i64, 141_i64), (104, 153)] {
+        let (report, _) = fixture.tick().await;
+        assert_eq!(report.bootstrap_frontier_after, Some(format!("observations:{frontier}")));
+        assert_eq!(read_progress(&fixture.conn).await.unwrap().observations_through, frontier);
+        assert_eq!(
+            scalar(
+                &fixture.conn,
+                "SELECT COUNT(*) FROM canonical_body_gc_refs
+                 WHERE owner_kind = 'observation'",
+            )
+            .await,
+            references,
+        );
+    }
+    fixture.assert_bodies_preserved().await;
+}
+
+#[asupersync::test]
+async fn ignored_candidate_insert_refuses_checkpoint_then_recovers() {
+    let fixture = Fixture::open().await;
+    fixture.tick().await;
+    fixture.tick().await;
+    let mut hashes = fixture
+        .bodies
+        .iter()
+        .map(|body| body.content_hash.as_str())
+        .collect::<Vec<_>>();
+    hashes.sort_unstable();
+    let skipped = hashes[47];
+    fixture
+        .conn
+        .execute_batch(&format!(
+            "CREATE TRIGGER ignore_candidate_seed BEFORE INSERT ON canonical_body_gc_candidates
+             WHEN NEW.content_hash = '{skipped}'
+             BEGIN SELECT RAISE(IGNORE); END"
+        ))
+        .await
+        .unwrap();
+    assert_refused_bootstrap_rolls_back(&fixture, "body bootstrap candidate was not indexed").await;
+    assert_eq!(
+        scalar(
+            &fixture.conn,
+            "SELECT COUNT(*) FROM canonical_body_gc_candidates",
+        )
+        .await,
+        0
+    );
+    fixture
+        .conn
+        .execute_batch("DROP TRIGGER ignore_candidate_seed")
+        .await
+        .unwrap();
+    for (scanned, candidate_total) in [(48_u64, 48_i64), (4, 52)] {
+        let (report, _) = fixture.tick().await;
+        assert_eq!(report.bodies_scanned, scanned);
+        assert_eq!(
+            scalar(&fixture.conn, "SELECT COUNT(*) FROM canonical_body_gc_candidates").await,
+            candidate_total
+        );
+    }
+    for scanned in [48_u64, 4] {
+        let (report, _) = fixture.tick().await;
+        assert_eq!(report.bodies_scanned, scanned);
+        assert_eq!(report.candidates_discharged, scanned);
+        assert_eq!(report.bodies_deleted, 0, "referenced bodies are preserved");
+    }
+    let (idle, submissions) = fixture.tick().await;
+    assert!(!idle.has_more);
+    assert_eq!(submissions, 0);
     fixture.assert_bodies_preserved().await;
 }

@@ -244,6 +244,29 @@ async fn bootstrap_raw(
         )
         .await
         .map_err(db_error)?;
+        // A suppressed INSERT must not advance bootstrap past an owner whose
+        // canonical body would subsequently appear unreferenced.
+        let mut missing = conn
+            .query(
+                "SELECT 1 FROM lcm_raw_messages raw
+                 WHERE raw.store_id > ?1 AND raw.store_id <= ?2
+                   AND raw.storage_kind = 'inline' AND raw.content IS NULL
+                   AND NOT EXISTS (
+                       SELECT 1 FROM canonical_body_gc_refs r
+                       WHERE r.owner_kind = 'raw' AND r.owner_id = raw.store_id
+                         AND r.content_hash = raw.content_hash
+                   ) LIMIT 1",
+                params![progress.raw_through, last],
+            )
+            .await
+            .map_err(db_error)?;
+        let incomplete = missing.next().await.map_err(db_error)?.is_some();
+        drop(missing);
+        if incomplete {
+            return Err(integrity_error(
+                "canonical raw bootstrap reference was not indexed",
+            ));
+        }
         progress.raw_through = last;
     }
     if page.len() < limit as usize {
@@ -283,8 +306,10 @@ async fn bootstrap_observations(
     // The caller's writer transaction rolls back every group on any failure.
     const MAX_PENDING_OBSERVATION_REFS: usize = 128;
     let mut pending = Vec::new();
+    let mut expected = Vec::new();
     for (owner, json) in &page {
         for hash in collect_body_refs(json).map_err(db_error)? {
+            expected.push((*owner, hash.clone()));
             pending.push(
                 WriteStatement::new(
                     "INSERT OR IGNORE INTO canonical_body_gc_refs(owner_kind, owner_id, content_hash)
@@ -303,6 +328,32 @@ async fn bootstrap_observations(
     }
     if !pending.is_empty() {
         conn.execute_statements(pending).await.map_err(db_error)?;
+    }
+    if !expected.is_empty() {
+        // Verify the Rust-validated reference set, not a second parse of raw
+        // observation JSON. INSERT OR IGNORE and SQLite trigger RAISE(IGNORE)
+        // can both report success without creating a missing reference.
+        let expected_json = serde_json::to_string(&expected).map_err(db_error)?;
+        let mut missing = conn
+            .query(
+                "SELECT 1 FROM json_each(?1) pair
+                 WHERE NOT EXISTS (
+                     SELECT 1 FROM canonical_body_gc_refs r
+                     WHERE r.owner_kind = 'observation'
+                       AND r.owner_id = json_extract(pair.value, '$[0]')
+                       AND r.content_hash = json_extract(pair.value, '$[1]')
+                 ) LIMIT 1",
+                params![expected_json],
+            )
+            .await
+            .map_err(db_error)?;
+        let incomplete = missing.next().await.map_err(db_error)?.is_some();
+        drop(missing);
+        if incomplete {
+            return Err(integrity_error(
+                "canonical observation bootstrap reference was not indexed",
+            ));
+        }
     }
     if page.len() < limit as usize {
         progress.observations_through = progress.observations_until;
@@ -343,6 +394,27 @@ async fn bootstrap_bodies(
         )
         .await
         .map_err(db_error)?;
+        // A vetoed candidate insert otherwise leaves an orphaned body behind
+        // the permanently committed bootstrap cursor, with no future seed.
+        let mut missing = conn
+            .query(
+                "SELECT 1 FROM session_canonical_bodies b
+                 WHERE b.content_hash > ?1 AND b.content_hash <= ?2
+                   AND NOT EXISTS (
+                       SELECT 1 FROM canonical_body_gc_candidates c
+                       WHERE c.content_hash = b.content_hash
+                   ) LIMIT 1",
+                params![progress.bodies_after.as_str(), last.as_str()],
+            )
+            .await
+            .map_err(db_error)?;
+        let incomplete = missing.next().await.map_err(db_error)?.is_some();
+        drop(missing);
+        if incomplete {
+            return Err(integrity_error(
+                "canonical body bootstrap candidate was not indexed",
+            ));
+        }
         progress.bodies_after.clone_from(last);
     }
     if page.len() < limit as usize {
