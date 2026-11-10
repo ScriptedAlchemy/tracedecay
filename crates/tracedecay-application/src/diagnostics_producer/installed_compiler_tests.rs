@@ -6,6 +6,8 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
 
+use sha2::{Digest, Sha256};
+
 use tracedecay_domain::UtcMicros;
 use tracedecay_domain::test_fixtures::id;
 use tracedecay_lsp::{TypeScriptCompilerAdmission, typescript_projects};
@@ -14,8 +16,8 @@ use tracedecay_runtime_core::db::engine::TestConnection;
 use tracedecay_runtime_core::test_executable::write_executable_script;
 
 use super::{
-    CompilerProducerRunV1, TypeScriptProducerStateV1, TypeScriptProducerStatusHandleV1,
-    run_typescript_producer_v1,
+    CompilerProducerRunV1, CompilerReadBudget, TypeScriptProducerStateV1,
+    TypeScriptProducerStatusHandleV1, hash_package_tree, run_typescript_producer_v1,
 };
 use crate::diagnostics_publication::CodeIndexPublicationIdentityV1;
 use crate::diagnostics_store::DiagnosticsStore;
@@ -358,5 +360,29 @@ async fn a_restarted_producer_does_not_replay_a_replaced_compilers_build_info() 
     assert_eq!(
         std::fs::read(peer.with_extension("compiler-revision")).unwrap(),
         [7; 32]
+    );
+}
+
+#[test]
+fn compiler_identity_refuses_an_oversized_directory_only_package() {
+    let root = tempfile::tempdir().unwrap();
+    for name in ["one", "two", "three"] {
+        std::fs::create_dir(root.path().join(name)).unwrap();
+    }
+    let mut budget = CompilerReadBudget {
+        bytes: 1024,
+        entries: 2,
+        buffer: vec![0; 64],
+    };
+    assert!(
+        hash_package_tree(
+            &mut Sha256::new(),
+            root.path(),
+            Path::new(""),
+            0,
+            &mut budget
+        )
+        .is_none(),
+        "directory entries consume the identity read budget even without payload files"
     );
 }

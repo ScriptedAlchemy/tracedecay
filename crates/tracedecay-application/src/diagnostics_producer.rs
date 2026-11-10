@@ -115,7 +115,7 @@ const MAX_SMALL_FILE_BYTES: u64 = 1024 * 1024;
 /// every run checks it from scratch; typescript@7 with its native package is
 /// about 30 MiB in 530 files.
 const MAX_COMPILER_BYTES: u64 = 512 * 1024 * 1024;
-const MAX_COMPILER_FILES: usize = 16 * 1024;
+const MAX_COMPILER_ENTRIES: usize = 16 * 1024;
 const MAX_COMPILER_DEPTH: usize = 32;
 
 fn read_bounded(path: &Path) -> Option<Vec<u8>> {
@@ -217,7 +217,7 @@ fn installed_compiler_package(package: &Path) -> Option<InstalledCompilerPackage
     }
     let mut budget = CompilerReadBudget {
         bytes: MAX_COMPILER_BYTES,
-        files: MAX_COMPILER_FILES,
+        entries: MAX_COMPILER_ENTRIES,
         buffer: vec![0; 64 * 1024],
     };
     let mut hasher = Sha256::new();
@@ -258,7 +258,7 @@ fn installed_dependency(package: &Path, name: &str) -> Option<PathBuf> {
 
 struct CompilerReadBudget {
     bytes: u64,
-    files: usize,
+    entries: usize,
     buffer: Vec<u8>,
 }
 
@@ -272,11 +272,13 @@ fn hash_package_tree(
     depth: usize,
     budget: &mut CompilerReadBudget,
 ) -> Option<()> {
-    let mut names = std::fs::read_dir(root.join(relative))
-        .ok()?
-        .map(|entry| entry.map(|entry| entry.file_name()))
-        .collect::<std::io::Result<Vec<_>>>()
-        .ok()?;
+    let mut names = Vec::new();
+    for entry in std::fs::read_dir(root.join(relative)).ok()? {
+        // Bound the listing before retaining names, including directories
+        // whose subtrees contain no payload files.
+        budget.entries = budget.entries.checked_sub(1)?;
+        names.push(entry.ok()?.file_name());
+    }
     names.sort();
     for name in names {
         if name == "node_modules" {
@@ -290,7 +292,6 @@ fn hash_package_tree(
             }
             hash_package_tree(hasher, root, &path, depth + 1, budget)?;
         } else if metadata.is_file() {
-            budget.files = budget.files.checked_sub(1)?;
             let mut file = std::fs::File::open(root.join(&path))
                 .ok()?
                 .take(budget.bytes.saturating_add(1));
