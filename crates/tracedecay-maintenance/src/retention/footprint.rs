@@ -237,6 +237,16 @@ pub fn walk_regular_files_with_budget(
                 WalkInterruptionV1::DeadlineExceeded => WalkTerminationV1::DeadlineExceeded,
             };
         }
+        // read_dir follows a symlink when the directory argument itself is
+        // a symlink. Check every pending directory, including the caller's
+        // root, instead of relying only on child DirEntry::file_type.
+        match std::fs::symlink_metadata(&directory) {
+            Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {}
+            _ => {
+                visit(&directory, WalkedEntryV1::Unavailable);
+                continue;
+            }
+        }
         let Ok(entries) = std::fs::read_dir(&directory) else {
             visit(&directory, WalkedEntryV1::Unavailable);
             continue;
@@ -1957,6 +1967,45 @@ mod tests {
         assert_eq!(termination, WalkTerminationV1::Complete);
         assert_eq!(unavailable, 1);
         assert_eq!(remaining, 10);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn linked_profile_root_cannot_measure_foreign_storage_as_owned() {
+        let temporary = tempfile::tempdir().expect("footprint fixture");
+        let outside = temporary.path().join("outside");
+        let profile = temporary.path().join("profile");
+        sized(&outside.join("lcm-payloads/foreign"), 2048);
+        std::os::unix::fs::symlink(&outside, &profile).expect("linked profile root");
+        let overrides = BTreeMap::from([("lcm-payloads".to_owned(), 1)]);
+
+        let linked = census_profile_footprint(&profile, &BTreeMap::new(), &overrides);
+        assert_eq!(linked.total_bytes, 0, "foreign bytes must not be owned");
+        assert_eq!(linked.unavailable_entry_count, 1);
+        assert!(linked.entries.is_empty());
+        assert!(!linked.truncated);
+        assert_eq!(
+            linked.full_profile_size().state,
+            ProfileTotalCoverageStateV1::Partial
+        );
+        let linked_findings = findings(&linked);
+        assert_eq!(linked_findings.len(), 1);
+        assert_eq!(
+            linked_findings["profile"].finding().state(),
+            DoctorEvidenceStateV1::Partial,
+            "unverifiable root must not be reported healthy"
+        );
+
+        // The same bytes must be measured and over-budget when the actual
+        // directory is explicitly selected instead of its symbolic link.
+        let owned = census_profile_footprint(&outside, &BTreeMap::new(), &overrides);
+        assert_eq!(owned.total_bytes, 2048);
+        assert_eq!(owned.unavailable_entry_count, 0);
+        assert_eq!(entry(&owned, "lcm-payloads").bytes, 2048);
+        assert_eq!(
+            findings(&owned)["lcm-payloads"].finding().state(),
+            DoctorEvidenceStateV1::Degraded
+        );
     }
 
     #[test]
