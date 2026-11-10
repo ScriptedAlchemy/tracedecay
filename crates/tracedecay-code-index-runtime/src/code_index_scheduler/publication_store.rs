@@ -2223,17 +2223,12 @@ impl DaemonCodeIndexPublicationStoreV1 {
                         .read_to_end(&mut current)
                         .map_err(Self::map_pointer_io)?;
                     let after = file.metadata().map_err(Self::map_pointer_io)?;
-                    let named_after = self
-                        .active_path
-                        .symlink_metadata()
-                        .map_err(Self::map_pointer_io)?;
-                    if !Self::same_unix_segment_identity(&before, &after)
-                        || !Self::same_unix_segment_identity(&before, &named_after)
-                    {
-                        return Err(Self::corruption(
-                            "active code-generation pointer changed during pinned validation",
-                        ));
-                    }
+                    Self::require_pointer_identity_witness(
+                        &self.active_path,
+                        &metadata,
+                        &before,
+                        &after,
+                    )?;
                     if Self::state_digest(&current) != entry.digest {
                         return Err(Self::corruption(
                             "active code-generation pointer bytes changed while pinned",
@@ -2286,17 +2281,12 @@ impl DaemonCodeIndexPublicationStoreV1 {
                 #[cfg(unix)]
                 {
                     let opened = opened_pointer.metadata().map_err(Self::map_pointer_io)?;
-                    let named = self
-                        .active_path
-                        .symlink_metadata()
-                        .map_err(Self::map_pointer_io)?;
-                    if !Self::same_unix_segment_identity(&metadata, &opened)
-                        || !Self::same_unix_segment_identity(&opened, &named)
-                    {
-                        return Err(Self::corruption(
-                            "active code-generation pointer changed during cached validation",
-                        ));
-                    }
+                    Self::require_pointer_identity_witness(
+                        &self.active_path,
+                        &metadata,
+                        &opened,
+                        &opened,
+                    )?;
                 }
                 memo.mtime = mtime;
                 memo.size = size;
@@ -2470,6 +2460,31 @@ impl DaemonCodeIndexPublicationStoreV1 {
             .read_to_end(&mut current)
             .map_err(Self::map_pointer_io)?;
         let opened_after = file.metadata().map_err(Self::map_pointer_io)?;
+        Self::require_pointer_identity_witness(
+            path,
+            named_before,
+            &opened_before,
+            &opened_after,
+        )?;
+        if current != bytes {
+            return Err(Self::corruption(
+                "active code-generation pointer bytes changed during cold validation",
+            ));
+        }
+        Ok(())
+    }
+
+    /// The same inode witness controls every Unix pointer read, including
+    /// warm memo hits. Atomic publication rotates the pathname and is a
+    /// retryable CAS; in-place writes and symlink aliases remain corruption.
+    /// All checks use stat metadata, without opening another pathname.
+    #[cfg(unix)]
+    fn require_pointer_identity_witness(
+        path: &Path,
+        named_before: &std::fs::Metadata,
+        opened_before: &std::fs::Metadata,
+        opened_after: &std::fs::Metadata,
+    ) -> Result<(), CodeIndexPublicationStoreErrorV1> {
         let named_after = match path.symlink_metadata() {
             Ok(metadata) => metadata,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
@@ -2480,29 +2495,23 @@ impl DaemonCodeIndexPublicationStoreV1 {
         if !named_after.file_type().is_file() {
             return Err(Self::corrupt_non_file_pointer());
         }
-        // An ordinary concurrent publication replaces the pointer inode.
-        // Refuse that stale observation without incorrectly resetting a
-        // healthy store; the caller can retry on the new publication.
         if (named_before.dev(), named_before.ino()) != (opened_before.dev(), opened_before.ino())
             || (named_after.dev(), named_after.ino()) != (opened_before.dev(), opened_before.ino())
         {
             return Err(CodeIndexPublicationStoreErrorV1::CompareAndSwap);
         }
-        // Mutation of the same inode or its bytes violates immutable pointer
-        // identity and requires the existing typed corruption reset.
-        if current != bytes
-            || !Self::same_unix_segment_identity(named_before, &opened_before)
-            || !Self::same_unix_segment_identity(&opened_before, &opened_after)
-            || !Self::same_unix_segment_identity(&opened_before, &named_after)
+        if !Self::same_unix_segment_identity(named_before, opened_before)
+            || !Self::same_unix_segment_identity(opened_before, opened_after)
+            || !Self::same_unix_segment_identity(opened_before, &named_after)
         {
             return Err(Self::corruption(
-                "active code-generation pointer changed during cold validation",
+                "active code-generation pointer changed in place during validation",
             ));
         }
         Ok(())
     }
 
-    fn remember_publication_pointer(
+    fn remember_publication_pointer(    fn remember_publication_pointer(
         &self,
         pointer: &DurablePublicationPointerV1,
         bytes: &[u8],
