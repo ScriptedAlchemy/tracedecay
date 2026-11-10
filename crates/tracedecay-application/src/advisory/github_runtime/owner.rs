@@ -27,7 +27,8 @@ use crate::observability::{
     record_github_stack_drifts,
 };
 use crate::stack_coordinator::{
-    DaemonGitHubStackCoordinatorV1, GitHubStackObservationV1, GitHubStackProviderSourceBindingV1,
+    DaemonGitHubStackCoordinatorV1, GitHubStackCoordinatorErrorV1, GitHubStackObservationV1,
+    GitHubStackProviderSourceBindingV1,
 };
 use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
 use tracedecay_runtime_core::db::Database;
@@ -151,21 +152,24 @@ where
             {
                 return outcome;
             }
-            let stack_read_enabled = match self
+            // The read is authorized by the scope's registration before any
+            // network I/O; its completion may publish only under that same
+            // registration.
+            let stack_read = match self
                 .stack_coordinator
-                .should_read_provider_stack(&self.stack_scope)
+                .authorize_provider_read(&self.stack_scope)
             {
-                Ok(enabled) => enabled,
+                Ok(read) => read,
                 Err(error) => {
                     tracing::warn!(
                         event = "github_stack_policy_read_failed",
                         error = ?error,
-                        "GitHub stack policy observation failed"
+                        "GitHub stack read authorization failed"
                     );
-                    false
+                    None
                 }
             };
-            if stack_read_enabled {
+            if let Some(stack_read) = stack_read {
                 let client = self.stack_client.clone();
                 let stack_context = context.clone();
                 let stack_review_request = request.clone();
@@ -211,7 +215,7 @@ where
                     return outcome;
                 };
                 match self.stack_coordinator.observe_provider(
-                    self.stack_scope.clone(),
+                    stack_read,
                     self.stack_provider.clone(),
                     provider_outcome,
                     source_binding.clone(),
@@ -240,6 +244,12 @@ where
                             );
                             return outcome;
                         }
+                    }
+                    Err(GitHubStackCoordinatorErrorV1::Superseded) => {
+                        tracing::debug!(
+                            event = "github_stack_provider_read_superseded",
+                            "GitHub stack read outlived its scope registration and was not published"
+                        );
                     }
                     Err(error) => {
                         tracing::warn!(

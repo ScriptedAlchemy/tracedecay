@@ -143,7 +143,8 @@ impl GitHubReadOnlyClientV1 {
 #[cfg(test)]
 mod tests {
     use std::io::Write;
-    use std::net::TcpListener;
+    use std::net::{SocketAddr, TcpListener};
+    use std::sync::mpsc;
 
     use serde_json::json;
     use tracedecay_contracts::feedback::{FeedbackPortFuture, GitHubReviewReadRequestV1};
@@ -151,9 +152,10 @@ mod tests {
         GitTopologyAnchorAuthority, GitTopologyAnchorResolution, GitTopologyAnchorResolutionOutcome,
     };
     use tracedecay_contracts::{RequestContext, now_micros};
+    use tracedecay_domain::configuration::GitHubStackedPullRequestPolicyV1;
     use tracedecay_domain::{
-        CommitId, GitTopologyAnchorTargetV1, ObservationScopeV1, ProviderId, RetrievalAnchorTarget,
-        UtcMicros,
+        CommitId, GitHubStackCapabilityStateV1, GitTopologyAnchorTargetV1, ObservationScopeV1,
+        ProviderId, RetrievalAnchorTarget, UtcMicros,
     };
     use tracedecay_global_db::tests::harness::open_registered_test_database_fixture;
     use tracedecay_runtime_core::db::TestDatabaseRuntimeScope;
@@ -165,7 +167,8 @@ mod tests {
         FixtureCredentialAuthorityModeV1, context, registered_fixture_credential, request, scope,
     };
     use super::super::{
-        GitHubHttpReadConfigV1, GitHubRepositoryTargetV1, RegisteredGitHubReadOnlyCredentialV1,
+        GitHubHttpReadConfigV1, GitHubReadOnlyCredentialV1, GitHubRepositoryTargetV1,
+        RegisteredGitHubReadOnlyCredentialV1,
     };
     use super::*;
     use crate::advisory::github_runtime::{
@@ -173,7 +176,79 @@ mod tests {
         GitHubSourceAccessAuthorityV1, GitHubStackAnchorReadOutcomeV1,
         ProjectGitHubStackAnchorAuthorityV1,
     };
-    use crate::stack_coordinator::{DaemonGitHubStackCoordinatorV1, GitHubStackProviderSnapshotV1};
+    use crate::stack_coordinator::{
+        DaemonGitHubStackCoordinatorV1, GitHubStackCoordinatorErrorV1,
+        GitHubStackProviderSnapshotV1,
+    };
+
+    const MERGE_BASE_COMMIT: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+
+    fn private_stack_response(head_commit: &str, head_ref_name: &str) -> serde_json::Value {
+        json!({
+            "data": { "repository": { "pullRequest": {
+                "stackEntry": { "position": 1 },
+                "stack": {
+                    "id": "stack-node-private-1",
+                    "number": 421,
+                    "baseRefName": "main",
+                    "size": 1,
+                    "entries": {
+                        "totalCount": 1,
+                        "pageInfo": { "hasNextPage": false, "endCursor": null },
+                        "nodes": [{
+                            "position": 1,
+                            "pullRequest": {
+                                "number": 421,
+                                "baseRefName": "main",
+                                "headRefName": head_ref_name,
+                                "baseRefOid": MERGE_BASE_COMMIT,
+                                "headRefOid": head_commit,
+                                "baseRef": null,
+                                "statusCheckRollup": { "state": "SUCCESS" },
+                                "mergeQueueEntry": {
+                                    "id": "queue-private-1",
+                                    "position": 1,
+                                    "state": "QUEUED"
+                                }
+                            }
+                        }]
+                    }
+                }
+            }}}
+        })
+    }
+
+    fn merge_base_response() -> serde_json::Value {
+        json!({ "merge_base_commit": { "sha": MERGE_BASE_COMMIT } })
+    }
+
+    fn local_stack_client(
+        address: SocketAddr,
+        repository: &str,
+        request: &GitHubReviewReadRequestV1,
+        credential: GitHubReadOnlyCredentialV1,
+    ) -> GitHubReadOnlyClientV1 {
+        GitHubReadOnlyClientV1 {
+            agent: crate::http_agent::http_agent(
+                ureq::Agent::config_builder()
+                    .https_only(false)
+                    .http_status_as_error(false)
+                    .build(),
+            ),
+            target: GitHubRepositoryTargetV1 {
+                owner: "ScriptedAlchemy".to_owned(),
+                repository: repository.to_owned(),
+                pull_request_number: 421,
+                pull_request_id: request.pull_request_id.clone(),
+            },
+            credential,
+            config: GitHubHttpReadConfigV1 {
+                rest_base_uri: format!("http://{address}"),
+                graphql_uri: format!("http://{address}/graphql"),
+                ..GitHubHttpReadConfigV1::default()
+            },
+        }
+    }
 
     struct ReadyStackSourceAccess;
 
@@ -341,38 +416,7 @@ mod tests {
             assert!(payload["query"].as_str().unwrap().contains("stackEntry"));
             write_http_json(
                 &mut graphql,
-                &json!({
-                    "data": { "repository": { "pullRequest": {
-                        "stackEntry": { "position": 1 },
-                        "stack": {
-                            "id": "stack-node-private-1",
-                            "number": 421,
-                            "baseRefName": "main",
-                            "size": 1,
-                            "entries": {
-                                "totalCount": 1,
-                                "pageInfo": { "hasNextPage": false, "endCursor": null },
-                                "nodes": [{
-                                    "position": 1,
-                                    "pullRequest": {
-                                        "number": 421,
-                                        "baseRefName": "main",
-                                        "headRefName": "github-stack-anchor-http",
-                                        "baseRefOid": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-                                        "headRefOid": head_commit,
-                                        "baseRef": null,
-                                        "statusCheckRollup": { "state": "SUCCESS" },
-                                        "mergeQueueEntry": {
-                                            "id": "queue-private-1",
-                                            "position": 1,
-                                            "state": "QUEUED"
-                                        }
-                                    }
-                                }]
-                            }
-                        }
-                    }}}
-                }),
+                &private_stack_response(&head_commit, "github-stack-anchor-http"),
             );
             let (mut compare, _) = listener.accept().unwrap();
             let (headers, _) = read_http_request_with_headers(&mut compare);
@@ -382,33 +426,20 @@ mod tests {
                     .contains("authorization: bearer github_pat_fixture_private_read")
             );
             assert!(headers.contains("/compare/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa..."));
-            write_http_json(
-                &mut compare,
-                &json!({
-                    "merge_base_commit": { "sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" }
-                }),
-            );
+            write_http_json(&mut compare, &merge_base_response());
         });
-        let client = GitHubReadOnlyClientV1 {
-            agent: crate::http_agent::http_agent(
-                ureq::Agent::config_builder()
-                    .https_only(false)
-                    .http_status_as_error(false)
-                    .build(),
-            ),
-            target: GitHubRepositoryTargetV1 {
-                owner: "ScriptedAlchemy".to_owned(),
-                repository: "stack-anchor-http".to_owned(),
-                pull_request_number: 421,
-                pull_request_id: request.pull_request_id.clone(),
-            },
-            credential,
-            config: GitHubHttpReadConfigV1 {
-                rest_base_uri: format!("http://{address}"),
-                graphql_uri: format!("http://{address}/graphql"),
-                ..GitHubHttpReadConfigV1::default()
-            },
-        };
+        let client = local_stack_client(address, "stack-anchor-http", &request, credential);
+        let coordinator = DaemonGitHubStackCoordinatorV1::default();
+        coordinator
+            .register_scope(
+                context.scope(),
+                GitHubStackedPullRequestPolicyV1::ProbePrivatePreview,
+            )
+            .unwrap();
+        let stack_read = coordinator
+            .authorize_provider_read(context.scope())
+            .unwrap()
+            .expect("a probing registration authorizes the read");
         let provider_outcome = client.read_stack(
             &context,
             &GitHubGraphQlReadRequestV1 {
@@ -436,16 +467,9 @@ mod tests {
         let source_binding = anchors
             .source_binding(&context, &request, &provider_outcome, observed_at)
             .unwrap();
-        let coordinator = DaemonGitHubStackCoordinatorV1::default();
-        coordinator
-            .register_scope(
-                context.scope(),
-                tracedecay_domain::configuration::GitHubStackedPullRequestPolicyV1::ProbePrivatePreview,
-            )
-            .unwrap();
         let observation = coordinator
             .observe_provider(
-                context.scope().clone(),
+                stack_read,
                 provider,
                 provider_outcome,
                 source_binding.clone(),
@@ -537,5 +561,144 @@ mod tests {
                 ));
             }
         }
+    }
+
+    /// The read is authorized before its network I/O. Disabling and
+    /// re-enabling the scope while the provider response is held leaves the
+    /// policy equal again, yet the late completion is refused; only a read
+    /// authorized by the new registration publishes.
+    #[tokio::test]
+    async fn stack_read_held_across_policy_reregistration_cannot_publish() {
+        let mut scope = scope("stack-held-read");
+        scope.head_commit_id = CommitId::new("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb").unwrap();
+        let context = context(&scope);
+        let request = request(scope.clone());
+        let storage = tempfile::tempdir().unwrap();
+        let (database, _owner) = open_registered_test_database_fixture(
+            &storage.path().join("project-sessions.db"),
+            TestDatabaseRuntimeScope::ProjectSessions {
+                project_id: scope.project_id.clone(),
+            },
+        )
+        .await
+        .unwrap();
+        let anchors =
+            ProjectGitHubStackAnchorAuthorityV1::new(database.clone(), scope.clone()).unwrap();
+        let provider = ProviderId::new("provider.github").unwrap();
+        let (_credential_authority, resolution) = registered_fixture_credential(
+            "stack-held-read",
+            FixtureCredentialAuthorityModeV1::Verified,
+        );
+        let RegisteredGitHubReadOnlyCredentialV1::Verified(credential) = resolution else {
+            panic!("verified fixture credential must resolve");
+        };
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let head_commit = scope.head_commit_id.as_str().to_owned();
+        let (arrived, request_arrived) = mpsc::channel();
+        let (release, released) = mpsc::channel::<()>();
+        let server = std::thread::spawn(move || {
+            for held in [true, false] {
+                let (mut graphql, _) = listener.accept().unwrap();
+                let _ = read_http_request(&mut graphql);
+                if held {
+                    arrived.send(()).unwrap();
+                    released.recv().unwrap();
+                }
+                write_http_json(
+                    &mut graphql,
+                    &private_stack_response(&head_commit, "github-stack-held-read"),
+                );
+                let (mut compare, _) = listener.accept().unwrap();
+                let _ = read_http_request(&mut compare);
+                write_http_json(&mut compare, &merge_base_response());
+            }
+        });
+        let client = local_stack_client(address, "stack-held-read", &request, credential);
+        let stack_request = GitHubGraphQlReadRequestV1 {
+            scope: scope.clone(),
+            pull_request_id: request.pull_request_id.clone(),
+            resume: GitHubReadResumeV1::empty(),
+        };
+        let coordinator = DaemonGitHubStackCoordinatorV1::default();
+        coordinator
+            .register_scope(
+                context.scope(),
+                GitHubStackedPullRequestPolicyV1::ProbePrivatePreview,
+            )
+            .unwrap();
+
+        let held_read = coordinator
+            .authorize_provider_read(context.scope())
+            .unwrap()
+            .expect("a probing registration authorizes the read");
+        let in_flight = {
+            let (client, context, stack_request, request, provider, anchors) = (
+                client.clone(),
+                context.clone(),
+                stack_request.clone(),
+                request.clone(),
+                provider.clone(),
+                anchors.clone(),
+            );
+            std::thread::spawn(move || {
+                client.read_stack(&context, &stack_request, &request, &provider, &anchors)
+            })
+        };
+        request_arrived.recv().unwrap();
+        coordinator
+            .register_scope(context.scope(), GitHubStackedPullRequestPolicyV1::Disabled)
+            .unwrap();
+        coordinator
+            .register_scope(
+                context.scope(),
+                GitHubStackedPullRequestPolicyV1::ProbePrivatePreview,
+            )
+            .unwrap();
+        release.send(()).unwrap();
+        let held_outcome = in_flight.join().unwrap();
+        assert!(
+            matches!(held_outcome, GitHubStackProviderOutcomeV1::Enabled(_)),
+            "the held provider read still returns its stack"
+        );
+        let held_at = now_micros();
+        let held_binding = anchors
+            .source_binding(&context, &request, &held_outcome, held_at)
+            .unwrap();
+        assert_eq!(
+            coordinator.observe_provider(
+                held_read,
+                provider.clone(),
+                held_outcome,
+                held_binding,
+                held_at,
+            ),
+            Err(GitHubStackCoordinatorErrorV1::Superseded)
+        );
+
+        let fresh_read = coordinator
+            .authorize_provider_read(context.scope())
+            .unwrap()
+            .expect("the new registration authorizes a fresh read");
+        let fresh_outcome =
+            client.read_stack(&context, &stack_request, &request, &provider, &anchors);
+        server.join().unwrap();
+        let fresh_at = now_micros();
+        let fresh_binding = anchors
+            .source_binding(&context, &request, &fresh_outcome, fresh_at)
+            .unwrap();
+        let observation = coordinator
+            .observe_provider(fresh_read, provider, fresh_outcome, fresh_binding, fresh_at)
+            .unwrap();
+        assert_eq!(
+            observation.capability.state,
+            GitHubStackCapabilityStateV1::Enabled
+        );
+        assert_eq!(observation.observed_at, fresh_at);
+        assert!(observation.snapshot.is_some());
+        assert!(
+            observation.transitions.is_empty(),
+            "the new registration has no baseline from the retired one"
+        );
     }
 }
