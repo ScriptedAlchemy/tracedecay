@@ -14,8 +14,8 @@ use tracedecay_runtime_core::test_executable::write_executable_script;
 
 use super::{
     CompilerProducerRunV1, TypeScriptDiagnosticsAvailabilityV1, TypeScriptProducerStateV1,
-    TypeScriptProducerStatusHandleV1, TypeScriptProjectCheckV1, run_typescript_producer_v1,
-    typescript_diagnostics_availability,
+    TypeScriptProducerStatusHandleV1, TypeScriptProjectCheckV1, publish_typescript_discovery_v1,
+    run_typescript_producer_v1, typescript_diagnostics_availability,
 };
 use crate::diagnostics_publication::CodeIndexPublicationIdentityV1;
 use crate::diagnostics_store::DiagnosticsStore;
@@ -50,13 +50,14 @@ async fn an_overlapping_old_compiler_cannot_replace_new_records_or_status_for_th
     )
     .unwrap();
     std::fs::write(root.join("node_modules/hold-compiler"), "").unwrap();
-    // Delay delivery of the installed compiler's actual result. The wrapper
+    // Delay delivery of the installed compiler's actual check. The wrapper
     // synthesizes no diagnostics: tsc has already read the old config before
     // the replacement is admitted, but its producer is still awaiting exit.
     write_executable_script(
         &bin.join("tsc"),
         b"#!/bin/sh\n\
-          if [ -f node_modules/hold-compiler ]; then\n\
+          case \" $* \" in *\" --noEmit \"*) checking=1 ;; esac\n\
+          if [ -n \"$checking\" ] && [ -f node_modules/hold-compiler ]; then\n\
             ./node_modules/.bin/real-tsc \"$@\" > node_modules/old-output 2>&1\n\
             result=$?\n\
             : > node_modules/old-compiled\n\
@@ -88,6 +89,11 @@ async fn an_overlapping_old_compiler_cannot_replace_new_records_or_status_for_th
     let background_cpu = Arc::new(ProcessBackgroundCpuV1::new(NonZeroUsize::new(2).unwrap()));
     let admission = TypeScriptCompilerAdmission::new(Arc::clone(&background_cpu));
     let mut predecessor = TypeScriptProducerStateV1::new(status.clone(), admission.clone());
+    assert_eq!(
+        publish_typescript_discovery_v1(&root, &projects, &mut predecessor).await,
+        None,
+        "a project with a compiler is about to be checked"
+    );
     let old_run = run_typescript_producer_v1(
         &root,
         &projects,
@@ -104,7 +110,26 @@ async fn an_overlapping_old_compiler_cannot_replace_new_records_or_status_for_th
         let old_output = std::fs::read_to_string(root.join("node_modules/old-output")).unwrap();
         assert!(old_output.contains("TS7006"), "{old_output}");
         assert!(old_output.contains("TS2322"), "{old_output}");
-        assert_eq!(status.current(), None, "the old producer is still running");
+        assert_eq!(
+            status.current().and_then(|status| status.run().cloned()),
+            None,
+            "the old producer is still running"
+        );
+        assert_eq!(
+            typescript_diagnostics_availability(
+                &root,
+                Some("src/index.ts".as_ref()),
+                &status,
+                None
+            ),
+            TypeScriptDiagnosticsAvailabilityV1::Configured {
+                tsconfig: root.join("tsconfig.json"),
+                compiler: root.join("node_modules/.bin/tsc"),
+                check: None,
+                last_run: None,
+            },
+            "a read names the compiler the first run is checking with"
+        );
         let mut replacement = TypeScriptProducerStateV1::new(status.clone(), admission.clone());
         std::fs::write(
             root.join("node_modules/check.json"),
@@ -139,7 +164,7 @@ async fn an_overlapping_old_compiler_cannot_replace_new_records_or_status_for_th
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].code, "TS2322");
         let published = status.current().expect("replacement status");
-        assert_eq!(published.run(), &run);
+        assert_eq!(published.run(), Some(&run));
         std::fs::write(root.join("node_modules/release-old"), "").unwrap();
         (published, records)
     };
@@ -171,9 +196,14 @@ async fn an_overlapping_old_compiler_cannot_replace_new_records_or_status_for_th
         check: Some(TypeScriptProjectCheckV1::Checked),
         last_run: Some(last_run),
         ..
-    } = typescript_diagnostics_availability(&root, Some("src/index.ts".as_ref()), &status)
+    } = typescript_diagnostics_availability(
+        &root,
+        Some("src/index.ts".as_ref()),
+        &status,
+        Some(identity.generation_id()),
+    )
     else {
         panic!("the file must report its completed replacement check");
     };
-    assert_eq!(&last_run, replacement_status.run());
+    assert_eq!(Some(&last_run), replacement_status.run());
 }

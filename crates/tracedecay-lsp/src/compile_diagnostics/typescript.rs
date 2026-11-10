@@ -1,6 +1,8 @@
-//! `tsc -p <tsconfig> --pretty false --noEmit` driver.
+//! The project's own `tsc`: its check, the configuration it resolves, and
+//! whether the projects a configuration references are built.
 //!
-//! tsc emits diagnostics as one-per-line text:
+//! A check is `tsc -p <tsconfig> --noEmit --pretty false`, and tsc emits its
+//! diagnostics one per line:
 //!
 //! ```text
 //! src/lib.ts(4,15): error TS2322: Type 'string' is not assignable to type 'number'.
@@ -9,23 +11,28 @@
 //! The parser extracts file, line, column, level, code, and message from
 //! that shape. Multi-line continuations are concatenated into the prior
 //! diagnostic; malformed diagnostic headers are failures, not continuations.
-//! Each project [`super::tsconfig`] discovers is checked with its own `-p`
-//! run rather than `tsc --build`, so a reference is checked as the project it
-//! is and nothing is emitted.
 //!
-//! The compiler is the project's own `node_modules/.bin/tsc`, so the check
-//! runs the TypeScript version the project pins rather than whatever happens
+//! Each project is checked with its own `-p` run rather than `tsc --build`,
+//! which would write the referenced projects' outputs into the checkout. tsc
+//! checks a project against the declarations its references emitted, so the
+//! producer asks the same compiler's `--build --dry` whether those are
+//! current ([`referenced_projects_out_of_date`]) before it trusts the check.
+//!
+//! The compiler is the project's own `node_modules/.bin/tsc`, so every run
+//! uses the TypeScript version the project pins rather than whatever happens
 //! to be on the daemon's `PATH`. A tsconfig without one is a typed
 //! missing-compiler state, not an empty success, because a caller that asks
 //! for diagnostics must learn that nothing checked the project.
 
-use std::path::Path;
-use std::process::Command;
+use std::ffi::OsStr;
+use std::path::{Path, PathBuf};
+use std::process::{Command, Output};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use tokio::sync::Semaphore;
 
+use super::tsconfig::normalize;
 use super::{Diagnostic, is_diagnostic_level};
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_runtime_core::background_cpu::ProcessBackgroundCpuV1;
@@ -65,7 +72,7 @@ impl TypeScriptCompilerAdmission {
     }
 }
 
-/// What one compiler child may consume once it holds a permit. A check that
+/// What one compiler child may consume once it holds a permit. A run that
 /// exceeds any bound fails; it never reports a clean project.
 #[derive(Clone, Copy)]
 struct CheckLimits {
@@ -83,6 +90,91 @@ const CHECK_LIMITS: CheckLimits = CheckLimits {
 /// Installs the project's own compiler where the producer looks for it; the
 /// command for a package with no workspace lockfile to install from.
 pub const TYPESCRIPT_INSTALL_COMMAND: &str = "npm install --save-dev typescript";
+
+/// Runs `compiler` with `args` from `project_root` once it holds one of
+/// `admission`'s permits and background CPU, within `limits`. Dropping the
+/// future or closing the admission kills and reaps the child.
+async fn run_admitted<I, S>(
+    admission: &TypeScriptCompilerAdmission,
+    compiler: &Path,
+    project_root: &Path,
+    args: I,
+    limits: CheckLimits,
+) -> Result<Output>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<OsStr>,
+{
+    let mut cmd = Command::new(compiler);
+    cmd.args(args).current_dir(project_root);
+    // Dropping this future cancels the token, and the runner then kills and
+    // reaps tsc.
+    let cancel = admission.cancellation.child_token();
+    let _cancel_on_drop = CancelOnDrop(cancel.clone());
+    let permit = Arc::clone(&admission.permits)
+        .acquire_owned()
+        .await
+        .map_err(|_| TraceDecayError::Config {
+            message: "the TypeScript compiler admission closed".to_owned(),
+        })?;
+    let bounds = GitCommandBounds {
+        deadline: Instant::now() + limits.deadline,
+        cancel: Some(cancel),
+        max_stdout_bytes: limits.max_stdout_bytes,
+        max_stderr_bytes: limits.max_stderr_bytes,
+    };
+    let background_cpu = Arc::clone(&admission.background_cpu);
+    // The permit travels with the blocking runner, which kills and reaps the
+    // child before returning, so it is held for the child's whole lifetime
+    // even when this future is dropped first.
+    native_runtime::spawn_blocking(move || {
+        let _permit = permit;
+        let _cpu = background_cpu
+            .acquire_cancellable(|| {
+                bounds
+                    .cancel
+                    .as_ref()
+                    .is_some_and(CancellationToken::is_cancelled)
+                    || Instant::now() >= bounds.deadline
+            })
+            .ok_or_else(|| {
+                if bounds
+                    .cancel
+                    .as_ref()
+                    .is_some_and(CancellationToken::is_cancelled)
+                {
+                    GitCommandError::Cancelled
+                } else {
+                    GitCommandError::DeadlineExceeded
+                }
+            })?;
+        bounded_command_output(cmd, None, &bounds)
+    })
+    .await
+    .map_err(|error| TraceDecayError::Config {
+        message: format!("failed to run `{}`: {error}", compiler.display()),
+    })?
+    .map_err(|error| TraceDecayError::Config {
+        message: match error {
+            GitCommandError::Unavailable(error) => {
+                format!("failed to spawn `{}`: {error}", compiler.display())
+            }
+            GitCommandError::ReadOutput { stream, source } => {
+                format!("failed to read `{}` {stream}: {source}", compiler.display())
+            }
+            other => format!("`{}` did not finish: {other}", compiler.display()),
+        },
+    })
+}
+
+/// The first report line that carries no file location (`error TS18003: …`);
+/// such lines describe the run itself failing, not a source finding.
+fn global_error(stdout: &str) -> Option<&str> {
+    stdout
+        .lines()
+        .map(str::trim)
+        .find(|line| is_global_error(line))
+}
 
 /// Runs one resolved compiler over one tsconfig and parses its report.
 ///
@@ -131,82 +223,20 @@ async fn run_compiler_within(
     build_info: Option<&Path>,
     limits: CheckLimits,
 ) -> Result<Vec<Diagnostic>> {
-    let mut cmd = Command::new(compiler);
-    cmd.arg("-p")
-        .arg(tsconfig)
-        .arg("--noEmit")
-        .arg("--pretty")
-        .arg("false");
+    let mut args = ["-p".as_ref(), tsconfig.as_os_str()]
+        .into_iter()
+        .chain(["--noEmit", "--pretty", "false"].map(OsStr::new))
+        .collect::<Vec<&OsStr>>();
     if let Some(build_info) = build_info {
-        cmd.arg("--incremental")
-            .arg("--tsBuildInfoFile")
-            .arg(build_info);
+        args.extend([
+            OsStr::new("--incremental"),
+            OsStr::new("--tsBuildInfoFile"),
+            build_info.as_os_str(),
+        ]);
     }
-    cmd.current_dir(project_root);
-    // Dropping this future cancels the token, and the runner then kills and
-    // reaps tsc.
-    let cancel = admission.cancellation.child_token();
-    let _cancel_on_drop = CancelOnDrop(cancel.clone());
-    let permit = Arc::clone(&admission.permits)
-        .acquire_owned()
-        .await
-        .map_err(|_| TraceDecayError::Config {
-            message: "the TypeScript compiler admission closed".to_owned(),
-        })?;
-    let bounds = GitCommandBounds {
-        deadline: Instant::now() + limits.deadline,
-        cancel: Some(cancel),
-        max_stdout_bytes: limits.max_stdout_bytes,
-        max_stderr_bytes: limits.max_stderr_bytes,
-    };
-    let background_cpu = Arc::clone(&admission.background_cpu);
-    // The permit travels with the blocking runner, which kills and reaps the
-    // child before returning, so it is held for the child's whole lifetime
-    // even when this future is dropped first.
-    let output = native_runtime::spawn_blocking(move || {
-        let _permit = permit;
-        let _cpu = background_cpu
-            .acquire_cancellable(|| {
-                bounds
-                    .cancel
-                    .as_ref()
-                    .is_some_and(CancellationToken::is_cancelled)
-                    || Instant::now() >= bounds.deadline
-            })
-            .ok_or_else(|| {
-                if bounds
-                    .cancel
-                    .as_ref()
-                    .is_some_and(CancellationToken::is_cancelled)
-                {
-                    GitCommandError::Cancelled
-                } else {
-                    GitCommandError::DeadlineExceeded
-                }
-            })?;
-        bounded_command_output(cmd, None, &bounds)
-    })
-    .await
-    .map_err(|error| TraceDecayError::Config {
-        message: format!("failed to run `{}`: {error}", compiler.display()),
-    })?
-    .map_err(|error| TraceDecayError::Config {
-        message: match error {
-            GitCommandError::Unavailable(error) => {
-                format!("failed to spawn `{}`: {error}", compiler.display())
-            }
-            GitCommandError::ReadOutput { stream, source } => {
-                format!("failed to read `{}` {stream}: {source}", compiler.display())
-            }
-            other => format!("`{}` did not finish: {other}", compiler.display()),
-        },
-    })?;
+    let output = run_admitted(admission, compiler, project_root, args, limits).await?;
     let stdout = String::from_utf8_lossy(&output.stdout);
-    if let Some(global) = stdout
-        .lines()
-        .map(str::trim)
-        .find(|line| is_global_error(line))
-    {
+    if let Some(global) = global_error(&stdout) {
         return Err(TraceDecayError::Config {
             message: format!(
                 "`{}` could not check `{}`: {global}",
@@ -216,16 +246,7 @@ async fn run_compiler_within(
         });
     }
     if !matches!(output.status.code(), Some(0..=2)) {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(TraceDecayError::Config {
-            message: format!(
-                "`{}` exited with {} checking `{}`: {}",
-                compiler.display(),
-                output.status,
-                tsconfig.display(),
-                stderr.trim().lines().next().unwrap_or("no output")
-            ),
-        });
+        return Err(exited(compiler, &output, "checking", tsconfig));
     }
     let diagnostics = parse_tsc_output(&stdout)?;
     if !output.status.success() && diagnostics.is_empty() {
@@ -239,6 +260,181 @@ async fn run_compiler_within(
         });
     }
     Ok(diagnostics)
+}
+
+/// A run that exited without the report it was asked for, named by the
+/// first thing the compiler said: its stderr, else its own report.
+fn exited(compiler: &Path, output: &Output, doing: &str, subject: &Path) -> TraceDecayError {
+    let said = |stream: &[u8]| {
+        String::from_utf8_lossy(stream)
+            .lines()
+            .map(str::trim)
+            .find(|line| !line.is_empty())
+            .map(str::to_owned)
+    };
+    TraceDecayError::Config {
+        message: format!(
+            "`{}` exited with {} {doing} `{}`: {}",
+            compiler.display(),
+            output.status,
+            subject.display(),
+            said(&output.stderr)
+                .or_else(|| said(&output.stdout))
+                .unwrap_or_else(|| "no output".to_owned())
+        ),
+    }
+}
+
+/// The configuration the compiler resolved for one tsconfig: its
+/// `--showConfig` report.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TypeScriptConfiguration {
+    /// The settings after `extends`, the include and exclude the compiler
+    /// applies and the projects it references, as the compiler reports them.
+    /// Equal reports mean the compiler resolved the same configuration.
+    report: serde_json::Value,
+    /// The tsconfig of each referenced project, absolute.
+    references: Vec<PathBuf>,
+}
+
+impl TypeScriptConfiguration {
+    #[must_use]
+    pub fn references(&self) -> &[PathBuf] {
+        &self.references
+    }
+}
+
+/// Asks `compiler` how it resolves `tsconfig`.
+///
+/// The report is the configuration's identity, not its membership: which
+/// files a project holds is the program a check records
+/// ([`super::tsconfig::typescript_build_info_program`]), since typescript@5
+/// leaves out root files an absolute `include` names. typescript@5 refuses a
+/// configuration it cannot read, and that refusal is the compiler's reason,
+/// never an empty configuration; typescript@7 reports such a configuration
+/// without the error, which its check then reports.
+#[tracing::instrument(
+    name = "compile_diagnostics.typescript.resolve_configuration",
+    level = "trace",
+    skip_all
+)]
+pub async fn resolve_configuration(
+    admission: &TypeScriptCompilerAdmission,
+    compiler: &Path,
+    project_root: &Path,
+    tsconfig: &Path,
+) -> Result<TypeScriptConfiguration> {
+    let output = run_admitted(
+        admission,
+        compiler,
+        project_root,
+        [
+            OsStr::new("-p"),
+            tsconfig.as_os_str(),
+            OsStr::new("--showConfig"),
+        ],
+        CHECK_LIMITS,
+    )
+    .await?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let refusal = |reason: &str| TraceDecayError::Config {
+        message: format!(
+            "`{}` could not resolve `{}`: {reason}",
+            compiler.display(),
+            tsconfig.display()
+        ),
+    };
+    if let Some(global) = global_error(&stdout) {
+        return Err(refusal(global));
+    }
+    if !output.status.success() {
+        return Err(exited(compiler, &output, "resolving", tsconfig));
+    }
+    let report: serde_json::Value = serde_json::from_str(&stdout).map_err(|_| {
+        refusal(
+            stdout
+                .lines()
+                .map(str::trim)
+                .find(|line| !line.is_empty())
+                .unwrap_or("no configuration report"),
+        )
+    })?;
+    if !report.is_object() {
+        return Err(refusal("the configuration report is not an object"));
+    }
+    let dir = tsconfig.parent().unwrap_or(project_root);
+    let references = match report.get("references") {
+        None => Vec::new(),
+        Some(references) => references
+            .as_array()
+            .ok_or_else(|| refusal("its references are not a list"))?
+            .iter()
+            .map(|reference| {
+                let path = reference
+                    .get("path")
+                    .and_then(serde_json::Value::as_str)
+                    .ok_or_else(|| refusal("a reference names no path"))?;
+                // A reference names a tsconfig or the directory holding one.
+                let target = normalize(&dir.join(path));
+                Ok(if target.extension().is_some_and(|ext| ext == "json") {
+                    target
+                } else {
+                    target.join("tsconfig.json")
+                })
+            })
+            .collect::<Result<_>>()?,
+    };
+    Ok(TypeScriptConfiguration { report, references })
+}
+
+/// What `compiler`'s `--build --dry` reports about `references`: `None` when
+/// it would build none of them, otherwise its own statement of each project
+/// it would build. tsc checks a referencing project against the declarations
+/// these projects emitted, so only current outputs make that check evidence
+/// about its sources. The dry build reads their build state and writes
+/// nothing.
+#[tracing::instrument(
+    name = "compile_diagnostics.typescript.referenced_projects_out_of_date",
+    level = "trace",
+    skip_all
+)]
+pub async fn referenced_projects_out_of_date(
+    admission: &TypeScriptCompilerAdmission,
+    compiler: &Path,
+    project_root: &Path,
+    references: &[PathBuf],
+) -> Result<Option<String>> {
+    // The statements below are matched in the locale they are requested in.
+    let mut args = vec![OsStr::new("--build")];
+    args.extend(references.iter().map(|reference| reference.as_os_str()));
+    args.extend(["--dry", "--pretty", "false", "--locale", "en"].map(OsStr::new));
+    let output = run_admitted(admission, compiler, project_root, args, CHECK_LIMITS).await?;
+    let subject = references.first().map_or(project_root, PathBuf::as_path);
+    if !output.status.success() {
+        return Err(exited(compiler, &output, "dry-building", subject));
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let pending = stdout
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        // Each status line leads with the time it was reported.
+        .map(|line| {
+            line.split_once(" - ")
+                .map_or(line, |(_, statement)| statement)
+        })
+        .filter(|statement| !is_current_build_statement(statement))
+        .collect::<Vec<_>>();
+    Ok((!pending.is_empty()).then(|| pending.join("; ")))
+}
+
+/// tsc's dry-build statements for a project whose outputs it would keep:
+/// up to date, or current but for their timestamps.
+fn is_current_build_statement(statement: &str) -> bool {
+    (statement.starts_with("Project '") && statement.ends_with("' is up to date"))
+        || (statement
+            .starts_with("A non-dry build would update timestamps for output of project '")
+            && statement.ends_with('\''))
 }
 
 struct CancelOnDrop(CancellationToken);

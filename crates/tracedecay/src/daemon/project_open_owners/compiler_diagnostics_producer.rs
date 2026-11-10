@@ -7,14 +7,16 @@
 //! automatic producer for that case: it discovers the project's TypeScript
 //! projects (each package's tsconfig in a monorepo) as bounded background
 //! work after admission, runs only while at least one of them has its own
-//! `node_modules/.bin/tsc`, and never installs anything.
+//! `node_modules/.bin/tsc`, and never installs anything. When none does, it
+//! publishes that discovery, so reads name the missing compiler or tsconfig
+//! from the producer's record rather than from a reading of the checkout.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use tracedecay_application::diagnostics_producer::{
     CompilerProducerRunV1, TypeScriptProducerStateV1, TypeScriptProducerStatusHandleV1,
-    run_typescript_producer_v1,
+    publish_typescript_discovery_v1, run_typescript_producer_v1,
 };
 use tracedecay_application::diagnostics_store::DiagnosticsStore;
 use tracedecay_code_index_runtime::code_index_scheduler::CodeIndexOwnerSignalsV1;
@@ -31,9 +33,9 @@ const BUILD_INFO_DIR: &str = "typescript-build-info";
 
 /// Spawns the TypeScript producer for `project_root`. Returns `false` when
 /// nothing was spawned: a route that indexes no code by contract, so there is
-/// never a generation to publish against. The spawned task ends at once when
-/// no TypeScript project under the root has a compiler; reads then describe
-/// the missing compiler from the filesystem.
+/// never a generation to publish against. The spawned task publishes its
+/// discovery and ends at once when no TypeScript project under the root has a
+/// compiler; reads then describe the missing compiler from that record.
 pub(super) fn spawn_typescript_diagnostics_producer(
     owner: &crate::mcp::McpServer,
     invocation: DaemonInvocationState,
@@ -66,8 +68,22 @@ pub(super) fn spawn_typescript_diagnostics_producer(
                 .iter()
                 .filter(|project| project.compiler.is_some())
                 .count();
+            // Reads name what discovery found from here on, not from a reading
+            // of the checkout.
+            let uncheckable =
+                publish_typescript_discovery_v1(&project_root, &projects, &mut state).await;
             if compilers == 0 {
-                log_producer_event(&project_root, "no_compiler");
+                log_producer_event(
+                    &project_root,
+                    if projects.is_empty() {
+                        "no_tsconfig"
+                    } else {
+                        "no_compiler"
+                    },
+                );
+                if let Some(run) = uncheckable {
+                    log_producer_run(&project_root, &run);
+                }
                 return;
             }
             log_daemon_event(

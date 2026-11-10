@@ -1,30 +1,25 @@
-//! Which TypeScript project owns a file, and what checks it.
+//! Where a project's TypeScript configurations are, and what the compiler
+//! recorded reading for one of them.
 //!
-//! A monorepo rarely has a root `tsconfig.json`: each package carries its own,
-//! usually extending a shared `tsconfig.base.json`. Ownership therefore follows
-//! tsserver: the nearest `tsconfig.json` from the file's directory up to the
-//! project root owns the file when its effective `files`/`include`/`exclude`
-//! (inherited through `extends`) cover it; otherwise its project references,
-//! which is the only way a `tsconfig.*.json` owns anything, are consulted
-//! before the search continues upward.
+//! A monorepo rarely has a root `tsconfig.json`: each package carries its
+//! own. Every `tsconfig.json` outside `node_modules` and hidden directories
+//! is therefore a project tsc can be pointed at with `-p`. What a project
+//! inherits, which files it holds and which projects it references are the
+//! compiler's answers ([`super::typescript`]), so nothing here reads a
+//! configuration.
 //!
 //! The compiler is the project's own `node_modules/.bin/tsc`, resolved the way
-//! Node resolves a binary: from the owning package up to the workspace root.
+//! Node resolves a binary: from the configuration's directory up to the
+//! workspace root.
 
-use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Component, Path, PathBuf};
 
-use globset::GlobBuilder;
 use serde::Deserialize;
 use walkdir::WalkDir;
 
 use super::typescript::TYPESCRIPT_INSTALL_COMMAND;
 
 const TSCONFIG: &str = "tsconfig.json";
-const TS_EXTENSIONS: [&str; 4] = ["ts", "tsx", "mts", "cts"];
-const JS_EXTENSIONS: [&str; 4] = ["js", "jsx", "mjs", "cjs"];
-/// tsc's `exclude` when a config names none.
-const DEFAULT_EXCLUDES: [&str; 3] = ["node_modules", "bower_components", "jspm_packages"];
 /// Lockfile to the command that installs that workspace's dependencies.
 const LOCKFILE_INSTALL_COMMANDS: [(&str, &str); 6] = [
     ("pnpm-lock.yaml", "pnpm install"),
@@ -45,58 +40,12 @@ pub struct TypeScriptProject {
     pub compiler: Option<PathBuf>,
 }
 
-/// A `tsconfig.json` location the owner search checked.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct SearchedTsconfig {
-    /// Relative to the project root.
-    pub path: PathBuf,
-    /// The config exists, but neither it nor its references include the file.
-    pub present: bool,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum TypeScriptFileOwner {
-    Owned(TypeScriptProject),
-    /// No tsconfig owns the file; every location the search checked, nearest
-    /// first.
-    Unowned {
-        searched: Vec<SearchedTsconfig>,
-    },
-}
-
-/// Resolves the project that owns `file` (relative to `project_root`, or
-/// absolute beneath it).
-pub fn typescript_file_owner(project_root: &Path, file: &Path) -> TypeScriptFileOwner {
-    let file = normalize(&project_root.join(file));
-    let mut searched = Vec::new();
-    let mut dir = file.parent().filter(|_| file.starts_with(project_root));
-    while let Some(current) = dir
-        && current.starts_with(project_root)
-    {
-        let candidate = current.join(TSCONFIG);
-        let present = candidate.is_file();
-        if present && let Some(owner) = owning_config(&candidate, &file, &mut BTreeSet::new()) {
-            return TypeScriptFileOwner::Owned(project(project_root, owner));
-        }
-        searched.push(SearchedTsconfig {
-            path: candidate
-                .strip_prefix(project_root)
-                .unwrap_or(&candidate)
-                .to_path_buf(),
-            present,
-        });
-        dir = current.parent();
-    }
-    TypeScriptFileOwner::Unowned { searched }
-}
-
-/// Every project under `project_root` that owns inputs: each `tsconfig.json`
-/// outside `node_modules` and hidden directories, plus the configs they
-/// reference. A solution-style config (`"files": []` with references) owns
-/// nothing and is represented by its references.
+/// Every `tsconfig.json` under `project_root` outside `node_modules` and
+/// hidden directories, with its compiler. The configurations they reference
+/// are the compiler's answer, not this walk's.
 pub fn typescript_projects(project_root: &Path) -> Vec<TypeScriptProject> {
-    let mut configs = BTreeMap::new();
-    let roots = WalkDir::new(project_root)
+    WalkDir::new(project_root)
+        .sort_by_file_name()
         .into_iter()
         .filter_entry(|entry| {
             entry.depth() == 0
@@ -105,16 +54,22 @@ pub fn typescript_projects(project_root: &Path) -> Vec<TypeScriptProject> {
         })
         .filter_map(Result::ok)
         .filter(|entry| entry.file_type().is_file() && entry.file_name() == TSCONFIG)
-        .map(walkdir::DirEntry::into_path)
-        .collect::<Vec<_>>();
-    for root in roots {
-        collect_config(normalize(&root), &mut configs);
-    }
-    configs
-        .into_iter()
-        .filter(|(_, config)| !config.owns_nothing())
-        .map(|(path, _)| project(project_root, path))
+        .map(|entry| typescript_project(project_root, entry.into_path()))
         .collect()
+}
+
+/// The project of a configuration under `project_root`, such as one a
+/// compiler-resolved reference names, with its compiler.
+#[must_use]
+pub fn typescript_project(project_root: &Path, tsconfig: PathBuf) -> TypeScriptProject {
+    let tsconfig = normalize(&tsconfig);
+    let binary = if cfg!(windows) { "tsc.cmd" } else { "tsc" };
+    let compiler = tsconfig.parent().and_then(|dir| {
+        ancestors_within(project_root, dir)
+            .map(|dir| dir.join("node_modules").join(".bin").join(binary))
+            .find(|candidate| candidate.is_file())
+    });
+    TypeScriptProject { tsconfig, compiler }
 }
 
 /// The command that installs the workspace dependencies for a package at
@@ -132,96 +87,80 @@ pub fn typescript_install_command(project_root: &Path, package_dir: &Path) -> &'
         .unwrap_or(TYPESCRIPT_INSTALL_COMMAND)
 }
 
-/// The inputs of one project that its last check's program files cannot
-/// name: a source its `include` would newly admit, the tsconfig and its
-/// `extends` chain, and the package manifests and lockfiles that decide what
-/// resolves from `node_modules`.
-pub struct TypeScriptProjectConfigInputs {
-    config: Option<Tsconfig>,
-    tsconfig: PathBuf,
-    manifest_dirs: BTreeSet<PathBuf>,
-}
-
-impl TypeScriptProjectConfigInputs {
-    #[must_use]
-    pub fn load(project_root: &Path, tsconfig: &Path) -> Self {
-        let tsconfig = normalize(tsconfig);
-        let manifest_dirs = tsconfig.parent().map_or_default(|dir| {
-            ancestors_within(project_root, dir)
-                .map(Path::to_path_buf)
-                .collect()
-        });
-        Self {
-            config: Tsconfig::load(&tsconfig),
-            tsconfig,
-            manifest_dirs,
-        }
-    }
-
-    /// Whether a change to `file` (absolute) can change what tsc reports for
-    /// this project beyond the program files it already read. Missing or
-    /// partially resolved configuration cannot rule out a change.
-    #[must_use]
-    pub fn affected_by(&self, file: &Path) -> bool {
-        let file = normalize(file);
-        if file == self.tsconfig {
-            return true;
-        }
-        let manifest = file
-            .file_name()
-            .and_then(|name| name.to_str())
-            .is_some_and(|name| {
-                name == "package.json"
-                    || LOCKFILE_INSTALL_COMMANDS
-                        .iter()
-                        .any(|(lockfile, _)| *lockfile == name)
-            });
-        if manifest
-            && file
-                .parent()
-                .is_some_and(|dir| self.manifest_dirs.contains(dir))
-        {
-            return true;
-        }
-        self.config.as_ref().is_none_or(|config| {
-            config.inputs.incomplete || config.chain.contains(&file) || config.owns(&file)
-        })
-    }
-}
-
-/// The program files a `--tsBuildInfoFile` records, absolute. `None` when the
-/// file is missing or not a build-info tsc writes, so a caller cannot mistake
-/// an unreadable record for a project that reads nothing.
+/// Whether `name` is a package manifest or lockfile: the files that decide
+/// how imports resolve from `node_modules` and which module format a
+/// package's sources have.
 #[must_use]
-pub fn typescript_build_info_program(build_info: &Path) -> Option<Vec<PathBuf>> {
+pub fn is_typescript_package_manifest(name: &str) -> bool {
+    name == "package.json"
+        || LOCKFILE_INSTALL_COMMANDS
+            .iter()
+            .any(|(lockfile, _)| *lockfile == name)
+}
+
+/// The program one check read, as its `--tsBuildInfoFile` records it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TypeScriptProgram {
+    /// Every file the program read, absolute.
+    pub files: Vec<PathBuf>,
+    /// The files the configuration itself named, absolute; the rest were
+    /// reached through imports, type references and default libraries.
+    pub roots: Vec<PathBuf>,
+}
+
+/// The program a `--tsBuildInfoFile` records. `None` when the file is missing
+/// or not a build-info tsc writes, so a caller cannot mistake an unreadable
+/// record for a project that reads nothing.
+///
+/// tsc records each file relative to the build-info, and its roots as
+/// one-based file ids or inclusive id ranges. typescript@7 leaves an empty
+/// program's file list out; typescript@5 writes the names it compares with,
+/// lower-cased where the filesystem ignores case.
+#[must_use]
+pub fn typescript_build_info_program(build_info: &Path) -> Option<TypeScriptProgram> {
     #[derive(Deserialize)]
     #[serde(rename_all = "camelCase")]
     struct BuildInfo {
+        version: String,
+        #[serde(default)]
         file_names: Vec<String>,
+        #[serde(default)]
+        root: Vec<RootFiles>,
     }
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum RootFiles {
+        One(usize),
+        Range(usize, usize),
+    }
+
     let text = std::fs::read_to_string(build_info).ok()?;
     let info: BuildInfo = serde_json::from_str(&text).ok()?;
+    if info.version.is_empty() {
+        return None;
+    }
     let dir = build_info.parent()?;
-    Some(
-        info.file_names
-            .iter()
-            .map(|name| normalize(&dir.join(name)))
-            .collect(),
-    )
+    let files = info
+        .file_names
+        .iter()
+        .map(|name| normalize(&dir.join(name)))
+        .collect::<Vec<_>>();
+    let mut roots = Vec::new();
+    for entry in info.root {
+        let (first, last) = match entry {
+            RootFiles::One(id) => (id, id),
+            RootFiles::Range(first, last) => (first, last),
+        };
+        if first == 0 || first > last {
+            return None;
+        }
+        roots.extend_from_slice(files.get(first - 1..last)?);
+    }
+    Some(TypeScriptProgram { files, roots })
 }
 
 fn is_skipped_dir(name: &str) -> bool {
     name == "node_modules" || name.starts_with('.')
-}
-
-fn project(project_root: &Path, tsconfig: PathBuf) -> TypeScriptProject {
-    let binary = if cfg!(windows) { "tsc.cmd" } else { "tsc" };
-    let compiler = tsconfig.parent().and_then(|dir| {
-        ancestors_within(project_root, dir)
-            .map(|dir| dir.join("node_modules").join(".bin").join(binary))
-            .find(|candidate| candidate.is_file())
-    });
-    TypeScriptProject { tsconfig, compiler }
 }
 
 fn ancestors_within<'a>(project_root: &'a Path, from: &'a Path) -> impl Iterator<Item = &'a Path> {
@@ -229,299 +168,8 @@ fn ancestors_within<'a>(project_root: &'a Path, from: &'a Path) -> impl Iterator
         .take_while(move |dir| dir.starts_with(project_root))
 }
 
-fn collect_config(path: PathBuf, configs: &mut BTreeMap<PathBuf, Tsconfig>) {
-    if configs.contains_key(&path) {
-        return;
-    }
-    let Some(config) = Tsconfig::load(&path) else {
-        return;
-    };
-    let references = config.references.clone();
-    configs.insert(path, config);
-    for reference in references {
-        collect_config(reference, configs);
-    }
-}
-
-/// The config among `path` and its transitive references that includes `file`.
-fn owning_config(path: &Path, file: &Path, visited: &mut BTreeSet<PathBuf>) -> Option<PathBuf> {
-    if !visited.insert(path.to_path_buf()) {
-        return None;
-    }
-    let config = Tsconfig::load(path)?;
-    if config.owns(file) {
-        return Some(path.to_path_buf());
-    }
-    config
-        .references
-        .iter()
-        .find_map(|reference| owning_config(reference, file, visited))
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct RawTsconfig {
-    extends: Option<RawExtends>,
-    files: Option<Vec<String>>,
-    include: Option<Vec<String>>,
-    exclude: Option<Vec<String>>,
-    #[serde(default)]
-    references: Vec<RawReference>,
-    #[serde(default)]
-    compiler_options: RawCompilerOptions,
-}
-
-#[derive(Deserialize)]
-#[serde(untagged)]
-enum RawExtends {
-    One(String),
-    Many(Vec<String>),
-}
-
-#[derive(Deserialize)]
-struct RawReference {
-    path: String,
-}
-
-#[derive(Default, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct RawCompilerOptions {
-    allow_js: Option<bool>,
-}
-
-impl RawTsconfig {
-    fn read(path: &Path) -> Option<Self> {
-        let text = std::fs::read_to_string(path).ok()?;
-        jsonc_parser::parse_to_serde_value(&text, &jsonc_parser::ParseOptions::default()).ok()
-    }
-}
-
-/// The inputs tsc resolves for a config after `extends`; each field is the
-/// nearest definition in the chain, resolved against the config defining it.
-#[derive(Default)]
-struct Inputs {
-    files: Option<Vec<PathBuf>>,
-    include: Option<Vec<String>>,
-    exclude: Option<Vec<String>>,
-    allow_js: Option<bool>,
-    /// A skipped base prevents this interpretation from proving safe reuse.
-    incomplete: bool,
-}
-
-impl Inputs {
-    fn resolve(path: &Path, raw: RawTsconfig, visited: &mut BTreeSet<PathBuf>) -> Self {
-        visited.insert(path.to_path_buf());
-        let dir = path.parent().unwrap_or(path);
-        let bases = match raw.extends {
-            None => Vec::new(),
-            Some(RawExtends::One(base)) => vec![base],
-            Some(RawExtends::Many(bases)) => bases,
-        };
-        // A skipped base leaves unknown inputs. Preserve the candidate for
-        // discovery, but never use partial inputs to rule out a recheck.
-        let mut inputs = Self::default();
-        for base in bases {
-            if let Some(base) = resolve_extends(dir, &base)
-                && !visited.contains(&base)
-                && let Some(raw) = RawTsconfig::read(&base)
-            {
-                inputs.overlay(Self::resolve(&base, raw, visited));
-            } else {
-                // Repeated bases include both cycles and shared ancestors in
-                // multiple extends. This interpreter cannot prove their full
-                // precedence, so reuse stays conservative in either case.
-                inputs.incomplete = true;
-            }
-        }
-        inputs.overlay(Self {
-            files: raw.files.map(|files| {
-                files
-                    .iter()
-                    .map(|file| normalize(&dir.join(file)))
-                    .collect()
-            }),
-            include: raw.include.map(|include| {
-                include
-                    .iter()
-                    .map(|pattern| include_pattern(dir, pattern))
-                    .collect()
-            }),
-            exclude: raw.exclude.map(|exclude| {
-                exclude
-                    .iter()
-                    .map(|pattern| rooted_pattern(dir, pattern))
-                    .collect()
-            }),
-            allow_js: raw.compiler_options.allow_js,
-            incomplete: false,
-        });
-        inputs
-    }
-
-    fn overlay(&mut self, nearer: Self) {
-        self.files = nearer.files.or(self.files.take());
-        self.include = nearer.include.or(self.include.take());
-        self.exclude = nearer.exclude.or(self.exclude.take());
-        self.allow_js = nearer.allow_js.or(self.allow_js);
-        self.incomplete |= nearer.incomplete;
-    }
-}
-
-struct Tsconfig {
-    dir: PathBuf,
-    inputs: Inputs,
-    references: Vec<PathBuf>,
-    /// The config and every readable config its `extends` chain names.
-    chain: BTreeSet<PathBuf>,
-}
-
-impl Tsconfig {
-    fn load(path: &Path) -> Option<Self> {
-        let mut raw = RawTsconfig::read(path)?;
-        let dir = path.parent()?.to_path_buf();
-        let references = std::mem::take(&mut raw.references)
-            .into_iter()
-            .map(|reference| {
-                let target = normalize(&dir.join(reference.path));
-                if target.extension().is_some_and(|ext| ext == "json") {
-                    target
-                } else {
-                    target.join(TSCONFIG)
-                }
-            })
-            .collect();
-        let mut chain = BTreeSet::new();
-        let inputs = Inputs::resolve(path, raw, &mut chain);
-        Some(Self {
-            dir,
-            inputs,
-            references,
-            chain,
-        })
-    }
-
-    fn owns_nothing(&self) -> bool {
-        self.inputs.include.is_none() && self.inputs.files.as_ref().is_some_and(Vec::is_empty)
-    }
-
-    fn owns(&self, file: &Path) -> bool {
-        let Some(extension) = file.extension().and_then(|ext| ext.to_str()) else {
-            return false;
-        };
-        let supported = TS_EXTENSIONS.contains(&extension)
-            || (self.inputs.allow_js == Some(true) && JS_EXTENSIONS.contains(&extension));
-        if !supported {
-            return false;
-        }
-        if self
-            .inputs
-            .files
-            .as_ref()
-            .is_some_and(|files| files.iter().any(|listed| listed == file))
-        {
-            return true;
-        }
-        let include = match (&self.inputs.include, &self.inputs.files) {
-            (Some(include), _) => include.clone(),
-            (None, Some(_)) => return false,
-            (None, None) => vec![rooted_pattern(&self.dir, "**/*")],
-        };
-        let exclude = self.inputs.exclude.clone().unwrap_or_else(|| {
-            DEFAULT_EXCLUDES
-                .iter()
-                .map(|dir| rooted_pattern(&self.dir, dir))
-                .collect()
-        });
-        let file = slash(file);
-        include.iter().any(|pattern| glob_matches(pattern, &file))
-            && !exclude.iter().any(|pattern| {
-                glob_matches(pattern, &file) || glob_matches(&format!("{pattern}/**"), &file)
-            })
-    }
-}
-
-/// tsc reads an `include` entry whose last segment has no wildcard and no
-/// extension as a directory of sources.
-fn include_pattern(dir: &Path, pattern: &str) -> String {
-    let rooted = rooted_pattern(dir, pattern);
-    let last = rooted.rsplit('/').next().unwrap_or_default();
-    if last == "**" {
-        format!("{rooted}/*")
-    } else if !last.contains(['*', '?', '.']) {
-        format!("{rooted}/**/*")
-    } else {
-        rooted
-    }
-}
-
-/// Anchors a config-relative glob at `dir`, folding leading `./` and `../`
-/// into the literal (escaped) prefix.
-fn rooted_pattern(dir: &Path, pattern: &str) -> String {
-    let mut base = normalize(dir);
-    let mut rest = pattern.trim_end_matches('/');
-    loop {
-        if let Some(tail) = rest.strip_prefix("./") {
-            rest = tail;
-        } else if let Some(tail) = rest.strip_prefix("../") {
-            base.pop();
-            rest = tail;
-        } else if rest == ".." {
-            base.pop();
-            rest = "";
-        } else if rest == "." {
-            rest = "";
-        } else {
-            break;
-        }
-    }
-    let base = globset::escape(&slash(&base));
-    if rest.is_empty() {
-        base
-    } else {
-        format!("{}/{rest}", base.trim_end_matches('/'))
-    }
-}
-
-fn resolve_extends(dir: &Path, spec: &str) -> Option<PathBuf> {
-    let with_json = |path: PathBuf| {
-        if path.is_file() {
-            Some(path)
-        } else {
-            let mut json = path.into_os_string();
-            json.push(".json");
-            let json = PathBuf::from(json);
-            json.is_file().then_some(json)
-        }
-    };
-    if spec.starts_with('.') || Path::new(spec).is_absolute() {
-        return with_json(normalize(&dir.join(spec)));
-    }
-    dir.ancestors().find_map(|ancestor| {
-        let package = ancestor.join("node_modules").join(spec);
-        with_json(package.clone()).or_else(|| {
-            let nested = package.join(TSCONFIG);
-            nested.is_file().then_some(nested)
-        })
-    })
-}
-
-fn glob_matches(pattern: &str, path: &str) -> bool {
-    GlobBuilder::new(pattern)
-        .literal_separator(true)
-        .build()
-        .is_ok_and(|glob| glob.compile_matcher().is_match(path))
-}
-
-fn slash(path: &Path) -> String {
-    let text = path.to_string_lossy();
-    if cfg!(windows) {
-        text.replace('\\', "/")
-    } else {
-        text.into_owned()
-    }
-}
-
-fn normalize(path: &Path) -> PathBuf {
+/// Folds `.` and `..` lexically, as tsc names the paths it resolves.
+pub(super) fn normalize(path: &Path) -> PathBuf {
     let mut out = PathBuf::new();
     for component in path.components() {
         match component {
@@ -548,157 +196,68 @@ mod tests {
         fs::write(path, text).unwrap();
     }
 
-    fn owner(root: &Path, file: &str) -> TypeScriptFileOwner {
-        typescript_file_owner(root, Path::new(file))
-    }
-
-    /// The rspack shape: per-package configs extending a root base that is
-    /// not itself a `tsconfig.json`, and no root `tsconfig.json`.
+    /// The rspack shape: per-package configs, one beside a solution config,
+    /// none in installed packages or hidden directories.
     fn monorepo() -> tempfile::TempDir {
         let root = tempfile::tempdir().unwrap();
         let root_path = root.path();
+        write(root_path, "tsconfig.base.json", "{}");
+        write(root_path, "packages/app/tsconfig.json", "{}");
+        write(root_path, "packages/lib/tsconfig.json", "{}");
         write(
             root_path,
-            "tsconfig.base.json",
-            "{\n  // shared options\n  \"compilerOptions\": { \"strict\": true, },\n  \"include\": [\"./src\"],\n}\n",
+            "packages/lib/node_modules/dep/tsconfig.json",
+            "{}",
         );
-        write(
-            root_path,
-            "packages/app/tsconfig.json",
-            "{ \"extends\": \"../../tsconfig.base.json\", \"include\": [\"src\"], \"exclude\": [\"src/generated\"] }",
-        );
-        write(
-            root_path,
-            "packages/lib/tsconfig.json",
-            "{ \"extends\": \"../../tsconfig.base\" }",
-        );
+        write(root_path, ".cache/tsconfig.json", "{}");
         write(root_path, "pnpm-lock.yaml", "lockfileVersion: '9.0'\n");
         root
     }
 
     #[test]
-    fn the_nearest_package_tsconfig_owns_its_sources() {
-        let root = monorepo();
-        let expected = root.path().join("packages/app/tsconfig.json");
-        assert_eq!(
-            owner(root.path(), "packages/app/src/nested/index.ts"),
-            TypeScriptFileOwner::Owned(TypeScriptProject {
-                tsconfig: expected,
-                compiler: None,
-            })
-        );
-        assert!(matches!(
-            owner(root.path(), "packages/app/src/generated/out.ts"),
-            TypeScriptFileOwner::Unowned { .. }
-        ));
-    }
-
-    /// `include` defined only in the base resolves against the base's
-    /// directory, exactly as tsc does, so it does not cover the package.
-    #[test]
-    fn extends_inherits_inputs_relative_to_the_defining_config() {
-        let root = monorepo();
-        let TypeScriptFileOwner::Unowned { searched } = owner(root.path(), "packages/lib/src/a.ts")
-        else {
-            panic!("the base's ./src is the root src, not the package's");
-        };
-        assert_eq!(
-            searched,
-            vec![
-                SearchedTsconfig {
-                    path: PathBuf::from("packages/lib/src/tsconfig.json"),
-                    present: false
-                },
-                SearchedTsconfig {
-                    path: PathBuf::from("packages/lib/tsconfig.json"),
-                    present: true
-                },
-                SearchedTsconfig {
-                    path: PathBuf::from("packages/tsconfig.json"),
-                    present: false
-                },
-                SearchedTsconfig {
-                    path: PathBuf::from("tsconfig.json"),
-                    present: false
-                },
-            ]
-        );
-    }
-
-    #[test]
-    fn project_references_own_files_the_solution_config_does_not() {
-        let root = tempfile::tempdir().unwrap();
-        write(
-            root.path(),
-            "tsconfig.json",
-            "{ \"files\": [], \"references\": [{ \"path\": \"./tsconfig.lib.json\" }, { \"path\": \"./tools\" }] }",
-        );
-        write(
-            root.path(),
-            "tsconfig.lib.json",
-            "{ \"include\": [\"src/**/*.ts\"] }",
-        );
-        write(
-            root.path(),
-            "tools/tsconfig.json",
-            "{ \"compilerOptions\": { \"allowJs\": true } }",
-        );
-        let TypeScriptFileOwner::Owned(lib) = owner(root.path(), "src/deep/a.ts") else {
-            panic!("the referenced tsconfig.lib.json owns src");
-        };
-        assert_eq!(lib.tsconfig, root.path().join("tsconfig.lib.json"));
-        let TypeScriptFileOwner::Owned(tools) = owner(root.path(), "tools/run.js") else {
-            panic!("allowJs admits the referenced tools project's scripts");
-        };
-        assert_eq!(tools.tsconfig, root.path().join("tools/tsconfig.json"));
-        assert!(matches!(
-            owner(root.path(), "src/main.rs"),
-            TypeScriptFileOwner::Unowned { .. }
-        ));
-
-        let projects = typescript_projects(root.path());
-        let configs = projects
-            .iter()
-            .map(|project| project.tsconfig.clone())
-            .collect::<Vec<_>>();
-        assert_eq!(
-            configs,
-            vec![
-                root.path().join("tools/tsconfig.json"),
-                root.path().join("tsconfig.lib.json"),
-            ],
-            "the solution config owns nothing and is represented by its references"
-        );
-    }
-
-    #[test]
-    fn the_compiler_resolves_from_the_package_then_the_workspace_root() {
+    fn every_package_tsconfig_is_a_project_with_its_nearest_compiler() {
         let root = monorepo();
         let binary = if cfg!(windows) { "tsc.cmd" } else { "tsc" };
-        write(root.path(), &format!("node_modules/.bin/{binary}"), "");
-        let projects = typescript_projects(root.path());
-        assert_eq!(projects.len(), 2, "{projects:?}");
-        assert!(
-            projects.iter().all(|project| project.compiler
-                == Some(root.path().join("node_modules/.bin").join(binary)))
+        assert_eq!(
+            typescript_projects(root.path()),
+            ["packages/app/tsconfig.json", "packages/lib/tsconfig.json"].map(|tsconfig| {
+                TypeScriptProject {
+                    tsconfig: root.path().join(tsconfig),
+                    compiler: None,
+                }
+            }),
+            "a base config is not a tsconfig.json, and installed or hidden ones are no project"
         );
 
+        write(root.path(), &format!("node_modules/.bin/{binary}"), "");
         write(
             root.path(),
             &format!("packages/app/node_modules/.bin/{binary}"),
             "",
         );
-        let TypeScriptFileOwner::Owned(app) = owner(root.path(), "packages/app/src/index.ts")
-        else {
-            panic!("app owns its sources");
-        };
+        let compilers = typescript_projects(root.path())
+            .into_iter()
+            .map(|project| project.compiler.unwrap())
+            .collect::<Vec<_>>();
         assert_eq!(
-            app.compiler,
-            Some(
+            compilers,
+            [
                 root.path()
                     .join("packages/app/node_modules/.bin")
-                    .join(binary)
-            )
+                    .join(binary),
+                root.path().join("node_modules/.bin").join(binary),
+            ]
+        );
+        assert_eq!(
+            typescript_project(
+                root.path(),
+                root.path().join("packages/lib/../lib/tsconfig.build.json")
+            ),
+            TypeScriptProject {
+                tsconfig: root.path().join("packages/lib/tsconfig.build.json"),
+                compiler: Some(root.path().join("node_modules/.bin").join(binary)),
+            },
+            "a referenced configuration resolves its compiler the same way"
         );
     }
 
@@ -723,208 +282,73 @@ mod tests {
         );
     }
 
-    /// A change outside the program files still reaches a project through its
-    /// config: a new source its `include` admits, its `extends` base, and the
-    /// manifests and lockfile above it. A sibling package's source does not.
+    /// tsc records program files relative to the build-info file and roots as
+    /// one-based ids or inclusive id ranges; a record that is not tsc's shape
+    /// is unknown, never an empty program.
     #[test]
-    fn config_inputs_name_what_the_program_files_cannot() {
-        let root = monorepo();
-        let root = root.path();
-        let app =
-            TypeScriptProjectConfigInputs::load(root, &root.join("packages/app/tsconfig.json"));
-        let affected = [
-            "packages/app/tsconfig.json",
-            "packages/app/src/new.ts",
-            "tsconfig.base.json",
-            "packages/app/package.json",
-            "package.json",
-            "pnpm-lock.yaml",
-        ]
-        .into_iter()
-        .filter(|path| app.affected_by(&root.join(path)))
-        .collect::<Vec<_>>();
-        assert_eq!(
-            affected,
-            [
-                "packages/app/tsconfig.json",
-                "packages/app/src/new.ts",
-                "tsconfig.base.json",
-                "packages/app/package.json",
-                "package.json",
-                "pnpm-lock.yaml",
-            ]
-        );
-        let unaffected = [
-            "packages/app/src/generated/out.ts",
-            "packages/app/src/notes.md",
-            "packages/lib/src/b.ts",
-            "packages/lib/package.json",
-            "src/main.rs",
-        ]
-        .into_iter()
-        .filter(|path| app.affected_by(&root.join(path)))
-        .collect::<Vec<_>>();
-        assert_eq!(unaffected, Vec::<&str>::new());
-    }
-
-    #[test]
-    fn unreadable_config_inputs_cannot_exclude_a_change() {
-        let root = tempfile::tempdir().unwrap();
-        let config = root.path().join("tsconfig.json");
-        let changed = root.path().join("new/dependency.ts");
-        let missing = TypeScriptProjectConfigInputs::load(root.path(), &config);
-        assert!(missing.affected_by(&changed));
-
-        for unreadable in [b"{ invalid json".as_slice(), b"\xff".as_slice()] {
-            fs::write(&config, unreadable).unwrap();
-            let inputs = TypeScriptProjectConfigInputs::load(root.path(), &config);
-            assert!(inputs.affected_by(&changed));
-        }
-    }
-
-    #[test]
-    fn unresolved_bases_force_rechecks_without_hiding_the_project() {
-        for (extends, base) in [
-            ("./base", "base.json"),
-            ("@scope/config", "node_modules/@scope/config/tsconfig.json"),
-        ] {
-            let root = tempfile::tempdir().unwrap();
-            write(
-                root.path(),
-                "tsconfig.json",
-                &format!(r#"{{"extends":"{extends}","include":["src"]}}"#),
-            );
-            let config = root.path().join("tsconfig.json");
-            let changed = root.path().join("new/dependency.js");
-            let incomplete = TypeScriptProjectConfigInputs::load(root.path(), &config);
-            assert!(incomplete.affected_by(&changed), "{extends}");
-            assert_eq!(
-                typescript_projects(root.path()),
-                vec![TypeScriptProject {
-                    tsconfig: config.clone(),
-                    compiler: None,
-                }],
-                "a missing base must not hide the compiler candidate"
-            );
-
-            write(root.path(), base, "{}");
-            let resolved = TypeScriptProjectConfigInputs::load(root.path(), &config);
-            assert!(!resolved.affected_by(&changed), "{extends}");
-            assert!(resolved.affected_by(&root.path().join("src/new.ts")));
-            assert!(resolved.affected_by(&root.path().join(base)));
-        }
-    }
-
-    #[test]
-    fn an_unreadable_transitive_base_keeps_reuse_incomplete() {
-        let root = tempfile::tempdir().unwrap();
-        write(root.path(), "tsconfig.json", r#"{"extends":"./middle"}"#);
-        write(
-            root.path(),
-            "middle.json",
-            r#"{"extends":"./base","include":["src"]}"#,
-        );
-        write(root.path(), "base.json", "{ invalid json");
-        let config = root.path().join("tsconfig.json");
-        let unrelated = root.path().join("sibling/new.ts");
-        let incomplete = TypeScriptProjectConfigInputs::load(root.path(), &config);
-        assert!(incomplete.affected_by(&unrelated));
-
-        write(root.path(), "base.json", "{}");
-        let resolved = TypeScriptProjectConfigInputs::load(root.path(), &config);
-        assert!(!resolved.affected_by(&unrelated));
-        assert!(resolved.affected_by(&root.path().join("src/new.ts")));
-        assert!(resolved.affected_by(&root.path().join("base.json")));
-    }
-
-    #[test]
-    fn cyclic_extends_cannot_authorize_reuse() {
-        let root = tempfile::tempdir().unwrap();
-        write(root.path(), "tsconfig.json", r#"{"extends":"./other"}"#);
-        write(
-            root.path(),
-            "other.json",
-            r#"{"extends":"./tsconfig","include":["src"]}"#,
-        );
-        let inputs =
-            TypeScriptProjectConfigInputs::load(root.path(), &root.path().join("tsconfig.json"));
-        assert!(inputs.affected_by(&root.path().join("sibling/new.ts")));
-    }
-
-    #[test]
-    fn skipped_shared_bases_do_not_claim_complete_precedence() {
-        let root = tempfile::tempdir().unwrap();
-        write(
-            root.path(),
-            "tsconfig.json",
-            r#"{"extends":["./left","./right"]}"#,
-        );
-        write(root.path(), "left.json", r#"{"extends":"./shared"}"#);
-        write(root.path(), "right.json", r#"{"extends":"./shared"}"#);
-        write(root.path(), "shared.json", r#"{"include":["src"]}"#);
-        let inputs =
-            TypeScriptProjectConfigInputs::load(root.path(), &root.path().join("tsconfig.json"));
-        assert!(inputs.affected_by(&root.path().join("sibling/new.ts")));
-    }
-
-    #[test]
-    fn fully_read_multiple_bases_keep_selective_invalidation() {
-        let root = tempfile::tempdir().unwrap();
-        write(
-            root.path(),
-            "tsconfig.json",
-            r#"{"extends":["./left","./right"]}"#,
-        );
-        write(root.path(), "left.json", r#"{"include":["left-src"]}"#);
-        write(root.path(), "right.json", r#"{"include":["right-src"]}"#);
-        let inputs =
-            TypeScriptProjectConfigInputs::load(root.path(), &root.path().join("tsconfig.json"));
-        assert!(inputs.affected_by(&root.path().join("right-src/new.ts")));
-        assert!(inputs.affected_by(&root.path().join("left.json")));
-        assert!(!inputs.affected_by(&root.path().join("left-src/new.ts")));
-        assert!(!inputs.affected_by(&root.path().join("sibling/new.ts")));
-    }
-
-    /// tsc records program files relative to the build-info file; a record
-    /// that is not tsc's shape is unknown, never an empty program.
-    #[test]
-    fn build_info_program_resolves_against_the_build_info_directory() {
+    fn build_info_program_names_files_and_roots_against_the_build_info_directory() {
         let root = tempfile::tempdir().unwrap();
         write(
             root.path(),
             "store/app.tsbuildinfo",
-            "{\"fileNames\":[\"lib.es5.d.ts\",\"../project/src/a.ts\"],\"version\":\"5.9.3\"}",
-        );
-        write(
-            root.path(),
-            "store/other.tsbuildinfo",
-            "{\"version\":\"5.9.3\"}",
+            r#"{"fileNames":["lib.es5.d.ts","../project/src/a.ts","../project/src/b.ts","../project/src/util.ts","../project/src/c.ts"],"root":[[2,3],5],"version":"5.9.3"}"#,
         );
         assert_eq!(
             typescript_build_info_program(&root.path().join("store/app.tsbuildinfo")),
-            Some(vec![
-                root.path().join("store/lib.es5.d.ts"),
-                root.path().join("project/src/a.ts"),
-            ])
+            Some(TypeScriptProgram {
+                files: [
+                    "store/lib.es5.d.ts",
+                    "project/src/a.ts",
+                    "project/src/b.ts",
+                    "project/src/util.ts",
+                    "project/src/c.ts"
+                ]
+                .map(|file| root.path().join(file))
+                .to_vec(),
+                roots: ["project/src/a.ts", "project/src/b.ts", "project/src/c.ts"]
+                    .map(|file| root.path().join(file))
+                    .to_vec(),
+            })
+        );
+
+        // typescript@7 leaves an empty program's lists out.
+        write(
+            root.path(),
+            "store/solution.tsbuildinfo",
+            r#"{"version":"7.0.2","fileInfos":[],"options":{}}"#,
         );
         assert_eq!(
-            typescript_build_info_program(&root.path().join("store/other.tsbuildinfo")),
-            None
+            typescript_build_info_program(&root.path().join("store/solution.tsbuildinfo")),
+            Some(TypeScriptProgram {
+                files: Vec::new(),
+                roots: Vec::new()
+            })
         );
+
+        for (name, record) in [
+            ("unversioned", r#"{"fileNames":["a.ts"],"root":[1]}"#),
+            ("blank", r#"{"version":"","fileNames":[]}"#),
+            (
+                "unnamed-root",
+                r#"{"version":"5.9.3","fileNames":["a.ts"],"root":[2]}"#,
+            ),
+            (
+                "zero-root",
+                r#"{"version":"5.9.3","fileNames":["a.ts"],"root":[0]}"#,
+            ),
+            (
+                "reversed-root",
+                r#"{"version":"5.9.3","fileNames":["a.ts","b.ts"],"root":[[2,1]]}"#,
+            ),
+            ("not-json", "{ invalid"),
+        ] {
+            let path = root.path().join(format!("store/{name}.tsbuildinfo"));
+            fs::write(&path, record).unwrap();
+            assert_eq!(typescript_build_info_program(&path), None, "{name}");
+        }
         assert_eq!(
             typescript_build_info_program(&root.path().join("store/missing.tsbuildinfo")),
             None
-        );
-    }
-
-    #[test]
-    fn a_path_outside_the_project_searches_nothing() {
-        let root = monorepo();
-        assert_eq!(
-            owner(root.path(), "../elsewhere/a.ts"),
-            TypeScriptFileOwner::Unowned {
-                searched: Vec::new()
-            }
         );
     }
 }
