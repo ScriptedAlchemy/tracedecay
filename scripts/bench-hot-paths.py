@@ -449,12 +449,15 @@ class Run:
             return
         target = self.repo / tracked[0]
         marker = "//" if target.suffix == ".rs" else "#"
-        with target.open("a", encoding="utf-8") as handle:
-            handle.write(f"\n{marker} bench-hot-paths edit {time.time_ns()}\n")
+        # The file watcher may begin its pass as soon as the edit lands.
+        # Arm the timer and RSS sampler *before* modifying the source; a
+        # sync-only measurement misses work that starts during the write.
         start = time.perf_counter()
         rss_sampler = DaemonRssSampler(self.daemon_pid())
         rss_sampler.start()
         try:
+            with target.open("a", encoding="utf-8") as handle:
+                handle.write(f"\n{marker} bench-hot-paths edit {time.time_ns()}\n")
             sync = self.client(["sync"])
             if not sync.ok:
                 raise HarnessError(f"`tracedecay sync` failed: {sync.stderr[-2000:].decode(errors='replace')}")

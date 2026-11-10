@@ -3,13 +3,16 @@
 
 from __future__ import annotations
 
+import importlib.util
 import json
 import os
 import subprocess
 import sys
 import tempfile
 import textwrap
+import time
 import unittest
+from unittest import mock
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -166,6 +169,76 @@ class BenchHotPathsTests(unittest.TestCase):
         self.assertEqual(single[("daemon", "alive_after_run")]["ok"], True)
         self.assertEqual(list(self.tmp.iterdir()), [])
         self.assertEqual((self.repo / "src" / "lib.rs").read_text(), "pub fn answer() -> u32 { 42 }\n")
+
+    def test_edit_timer_and_rss_observer_cover_the_file_mutation(self) -> None:
+        # The live daemon can start indexing on the filesystem notification
+        # before `sync` returns. Reproduce an observable slow edit and
+        # prove both clocks are armed before the source is touched.
+        spec = importlib.util.spec_from_file_location("bench_hot_paths_timing", BENCH)
+        self.assertIsNotNone(spec)
+        self.assertIsNotNone(spec.loader)
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = module
+        try:
+            spec.loader.exec_module(module)
+            run = module.Run.__new__(module.Run)
+            run.repo = self.repo
+            run.generation = "generation.1"
+            events = []
+            rows = []
+            run.daemon_pid = lambda: 1234
+            run.record = lambda lane, op, **data: rows.append((lane, op, data))
+
+            def sync(argv):
+                self.assertEqual(argv, ["sync"])
+                events.append("sync")
+                return module.Call(True, b"", b"", 0.5, 0.0, 0)
+
+            def ready(lane, previous_generation):
+                self.assertEqual((lane, previous_generation), ("edit_reconcile", "generation.1"))
+                events.append("ready")
+                return {"generation_id": "generation.2"}
+
+            run.client = sync
+            run.wait_for_ready = ready
+
+            class RecordingSampler:
+                def __init__(self, pid):
+                    assert pid == 1234
+
+                def start(self):
+                    events.append("sampler_started")
+
+                def stop(self):
+                    events.append("sampler_stopped")
+                    return 2048
+
+            target = self.repo / "src" / "lib.rs"
+            original_open = Path.open
+
+            def slow_edit_open(path, mode="r", *args, **kwargs):
+                if path == target and mode == "a":
+                    self.assertIn("sampler_started", events)
+                    events.append("edit_started")
+                    time.sleep(0.1)
+                return original_open(path, mode, *args, **kwargs)
+
+            with mock.patch.object(module, "DaemonRssSampler", RecordingSampler), mock.patch.object(
+                Path, "open", slow_edit_open
+            ):
+                run.lane_edit_reconcile()
+            self.assertEqual(
+                events, ["sampler_started", "edit_started", "sync", "ready", "sampler_stopped"]
+            )
+            measured = next(data for lane, op, data in rows if (lane, op) == ("edit_reconcile", "edit_to_ready"))
+            self.assertGreaterEqual(
+                measured["wall_ms"], 90.0,
+                "the incremental-pass wall time must include file mutation before sync",
+            )
+            self.assertEqual(measured["peak_daemon_rss_kb"], 2048)
+            self.assertIn("bench-hot-paths edit", target.read_text())
+        finally:
+            sys.modules.pop(spec.name, None)
 
     def test_an_unknown_seed_records_callers_unavailable_without_failing_the_run(self) -> None:
         result = self.bench("--seed-symbol", "missing_symbol")
