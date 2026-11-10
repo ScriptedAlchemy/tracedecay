@@ -133,8 +133,8 @@ impl CheckedSealReader<'_> {
         std::io::Error::other("sealed code generation checked read failed")
     }
 
-    /// Returns the verified handle, whose bytes a caller may re-read without
-    /// trusting the path again.
+    /// Returns the authenticated handle. Only the bytes hashed by this
+    /// reader are proven; a later read of the same inode is not that proof.
     fn finish(
         self,
         path: &std::path::Path,
@@ -1137,17 +1137,18 @@ fn verify_checked_seal(
     path: &std::path::Path,
     expected_digest: &str,
     check: &dyn Fn() -> Result<(), GraphDbError>,
-) -> Result<File, GraphDbError> {
+) -> Result<(File, Option<Vec<u8>>), GraphDbError> {
     let (mut reader, opened_metadata, admitted_len) = open_checked_seal_reader(path, check)?;
-    let copied = std::io::copy(&mut reader, &mut std::io::sink());
+    // Component proof must consume the very bytes this reader authenticates,
+    // not a later reread of the same potentially changed inode.
+    let manifest = read_checked_seal_manifest_for_proof(&mut reader, check);
 
     if let Some(error) = reader.failure.take() {
         return Err(error);
     }
-    copied.map_err(|error| GraphDbError::Corrupt {
-        message: format!("sealed code generation checked read failed: {error}"),
-    })?;
-    reader.finish(path, &opened_metadata, admitted_len, expected_digest)
+    let manifest = manifest?;
+    let file = reader.finish(path, &opened_metadata, admitted_len, expected_digest)?;
+    Ok((file, manifest))
 }
 
 #[tracing::instrument(
@@ -1172,20 +1173,20 @@ fn verify_checked_seal_bundle(
     )
 }
 
-/// Re-read an authenticated manifest without losing a deadline that expires
-/// during the prefix or full-content I/O, including on read failure.
-fn read_checked_seal_manifest_for_proof<R: Read + Seek>(
+/// Consume one forward-only stream, retaining a partitioned manifest for
+/// component proof. Other revisions still drain through the checked reader
+/// so their complete bytes are hashed without materializing the whole seal.
+fn read_checked_seal_manifest_for_proof<R: Read>(
     file: &mut R,
     check: &dyn Fn() -> Result<(), GraphDbError>,
 ) -> Result<Option<Vec<u8>>, GraphDbError> {
     // A successful file read may be short. Consume the entire bounded prefix
     // so a partial read cannot make a new-format seal bypass component proof.
     let mut prefix = Vec::new();
-    let read = file.seek(SeekFrom::Start(0)).and_then(|_| {
-        file.by_ref()
-            .take(SEAL_READ_CHECK_BYTES as u64)
-            .read_to_end(&mut prefix)
-    });
+    let read = file
+        .by_ref()
+        .take(SEAL_READ_CHECK_BYTES as u64)
+        .read_to_end(&mut prefix);
     // A scanned manifest read can finish after the deadline, even on I/O error.
     // Prefer that typed interruption to a misleading corruption result.
     (check)()?;
@@ -1207,18 +1208,18 @@ fn read_checked_seal_manifest_for_proof<R: Read + Seek>(
                 .parse::<u32>()
                 .ok()
         });
-    if revision != Some(tracedecay_code_index::production::SEALED_GENERATION_FORMAT_REVISION_V1) {
-        return (check)().map(|_| None);
-    }
-    let mut manifest = Vec::new();
-    let read = file
-        .seek(SeekFrom::Start(0))
-        .and_then(|_| file.read_to_end(&mut manifest));
+    let partitioned =
+        revision == Some(tracedecay_code_index::production::SEALED_GENERATION_FORMAT_REVISION_V1);
+    let read = if partitioned {
+        file.read_to_end(&mut prefix).map(|_| ())
+    } else {
+        std::io::copy(file, &mut std::io::sink()).map(|_| ())
+    };
     (check)()?;
     read.map_err(|error| GraphDbError::Corrupt {
         message: format!("sealed generation manifest read failed: {error}"),
     })?;
-    Ok(Some(manifest))
+    Ok(partitioned.then_some(prefix))
 }
 
 fn verify_checked_seal_bundle_with_evidence_barrier(
@@ -1229,8 +1230,8 @@ fn verify_checked_seal_bundle_with_evidence_barrier(
     check: &dyn Fn() -> Result<(), GraphDbError>,
     evidence_barrier: impl FnOnce(),
 ) -> Result<(), GraphDbError> {
-    let mut file = verify_checked_seal(path, expected_digest, check)?;
-    let Some(manifest) = read_checked_seal_manifest_for_proof(&mut file, check)? else {
+    let (file, manifest) = verify_checked_seal(path, expected_digest, check)?;
+    let Some(manifest) = manifest else {
         return Ok(());
     };
     let mut pinned_evidence = None;
@@ -1964,7 +1965,7 @@ mod tests {
                 branch_generations.clone(),
                 branch_replay.clone(),
             )
-            .expect("a worktree route under the same project shard is not a conflict");
+            .unwrap();
 
         // Neither route holds the seal: the shard abstains rather than claiming
         // corruption.
@@ -2811,6 +2812,7 @@ mod tests {
     struct ThreeByteFileReader {
         file: std::fs::File,
         nonempty_reads: usize,
+        bytes_read: usize,
     }
 
     impl Read for ThreeByteFileReader {
@@ -2820,6 +2822,7 @@ mod tests {
             if read != 0 {
                 self.nonempty_reads += 1;
             }
+            self.bytes_read += read;
             Ok(read)
         }
     }
@@ -2838,6 +2841,7 @@ mod tests {
         let mut file = ThreeByteFileReader {
             file: std::fs::File::open(&fixture.pool_manifest).unwrap(),
             nonempty_reads: 0,
+            bytes_read: 0,
         };
         let proven = super::read_checked_seal_manifest_for_proof(&mut file, &|| Ok(()))
             .unwrap()
@@ -2851,6 +2855,56 @@ mod tests {
             "the fixture must use multiple actual file reads"
         );
         assert_eq!(file.file.stream_position().unwrap(), expected.len() as u64);
+        assert_eq!(
+            file.bytes_read,
+            expected.len(),
+            "proof must consume each authenticated byte once without rereading the prefix"
+        );
+    }
+
+    #[test]
+    fn sealed_proof_authenticates_materialized_bytes_and_unretained_tail() {
+        let temporary = TempDir::new().unwrap();
+        for partitioned in [true, false] {
+            let mut bytes = if partitioned {
+                format!(
+                    "{{\"format_revision\":{},\"payload\":\"",
+                    tracedecay_code_index::production::SEALED_GENERATION_FORMAT_REVISION_V1
+                )
+                .into_bytes()
+            } else {
+                b"non-partitioned sealed payload\n".to_vec()
+            };
+            bytes.resize(SEAL_READ_CHECK_BYTES * 2 + 17, b'x');
+            if partitioned {
+                bytes.extend_from_slice(b"\"}");
+            }
+            let path = temporary.path().join(format!("seal-{partitioned}.json"));
+            std::fs::write(&path, &bytes).unwrap();
+            let digest = hex::encode(Sha256::digest(&bytes));
+            let wrong_digest = hex::encode(Sha256::digest(b"different sealed bytes"));
+            let (mut file, manifest) = verify_checked_seal(&path, &digest, &|| Ok(())).unwrap();
+            assert_eq!(manifest.as_deref(), partitioned.then_some(bytes.as_slice()));
+            assert_eq!(file.stream_position().unwrap(), bytes.len() as u64);
+            drop(file);
+            assert!(matches!(
+                verify_checked_seal(&path, &wrong_digest, &|| Ok(())),
+                Err(GraphDbError::Corrupt { .. })
+            ));
+
+            // The tail beyond the bounded revision probe is authenticated even
+            // when the caller does not retain the manifest for component proof.
+            let mut changed = bytes.clone();
+            changed[SEAL_READ_CHECK_BYTES + 1] ^= 1;
+            std::fs::write(&path, &changed).unwrap();
+            assert!(matches!(
+                verify_checked_seal(&path, &digest, &|| Ok(())),
+                Err(GraphDbError::Corrupt { .. })
+            ));
+            std::fs::write(&path, &bytes).unwrap();
+            let (_, recovered) = verify_checked_seal(&path, &digest, &|| Ok(())).unwrap();
+            assert_eq!(recovered.as_deref(), partitioned.then_some(bytes.as_slice()));
+        }
     }
 
     #[test]
