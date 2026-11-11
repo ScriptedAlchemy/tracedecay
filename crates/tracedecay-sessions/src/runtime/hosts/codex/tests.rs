@@ -1234,8 +1234,9 @@ mod recent_first_discovery_tests {
         IDLE_FULL_VALIDATION_CYCLES, MAX_EXACT_HOOK_SESSION_REQUESTS,
         MAX_EXACT_HOOK_SOURCE_AUTHORITIES, MAX_SCAN_DEPTH, codex_corpus_identity,
         codex_directory_changed, codex_directory_stat_identity, codex_directory_witness,
-        directory_entry_fingerprint, directory_stat_witness, indexed_replay_pass,
-        replay_index_entries_visited_for_test, reset_replay_index_entries_visited_for_test,
+        directory_entry_fingerprint, directory_scan_witness, directory_stat_witness,
+        indexed_replay_pass, replay_index_entries_visited_for_test,
+        reset_replay_index_entries_visited_for_test,
     };
     use crate::runtime::ingest::quarantine::SourceSweep;
     use crate::runtime::jsonl_observation_admission::{
@@ -3010,7 +3011,9 @@ mod recent_first_discovery_tests {
         std::fs::write(&late, b"{}\n").unwrap();
         // Model two writes within one filesystem timestamp quantum: the
         // directory stat aliases the scan's authority despite a new file.
-        let alias = directory_stat_witness(&archive).unwrap().unwrap().stat;
+        let witness = directory_scan_witness(&archive).unwrap().unwrap();
+        let alias = witness.stat;
+        let alias_stable = witness.stable_stat;
         let scan = state.scan.as_mut().unwrap();
         let CodexScanPhase::Files {
             current: Some(current),
@@ -3022,6 +3025,7 @@ mod recent_first_discovery_tests {
         let directory_index = current.0;
         let identity = scan.directories[directory_index].identity.as_mut().unwrap();
         identity.stat = alias;
+        identity.stable_stat = alias_stable;
         identity.entries = Some(original_names);
 
         let mut finished = false;
@@ -3029,14 +3033,16 @@ mod recent_first_discovery_tests {
             // Preserve the intentionally aliased stat through an arbitrarily
             // slow test run: elapsed wall time must not make this regression
             // pass by turning the native clock into a separate detection.
-            let alias = directory_stat_witness(&archive).unwrap().unwrap().stat;
+            let witness = directory_scan_witness(&archive).unwrap().unwrap();
             if let Some(scan) = state.scan.as_mut() {
                 let directory = scan
                     .directories
                     .iter_mut()
                     .find(|directory| directory.path == archive)
                     .expect("retained archive directory identity");
-                directory.identity.as_mut().unwrap().stat = alias;
+                let identity = directory.identity.as_mut().unwrap();
+                identity.stat = witness.stat;
+                identity.stable_stat = witness.stable_stat;
             }
             let pass = retained_pass(&source, &mut state, bounds, frontier);
             frontier = pass.next_frontier;

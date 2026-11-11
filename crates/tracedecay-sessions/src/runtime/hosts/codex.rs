@@ -1069,6 +1069,7 @@ struct CodexDirectoryListing {
 #[derive(Clone, Copy)]
 struct CodexDirectoryWitness {
     stat: [u8; 32],
+    stable_stat: [u8; 32],
     entries: Option<[u8; 32]>,
 }
 
@@ -2205,9 +2206,10 @@ fn retained_scan_step(
                     }
                     // Do not enumerate a potentially huge unsettled archive
                     // just to obtain its witness before the bounded iterator.
-                    let stat = directory_stat_witness(&path)?;
+                    let stat = directory_scan_witness(&path)?;
                     let identity = stat.as_ref().map(|witness| CodexDirectoryWitness {
                         stat: witness.stat,
+                        stable_stat: witness.stable_stat,
                         entries: None,
                     });
                     let directory_index = scan.directories.len();
@@ -2216,7 +2218,7 @@ fn retained_scan_step(
                         root_order,
                         identity,
                     });
-                    let Some(opening_stat) = identity.map(|witness| witness.stat) else {
+                    let Some(opening_stat) = identity.map(|witness| witness.stable_stat) else {
                         continue;
                     };
                     let listed = std::fs::read_dir(&path).map_err(|source| {
@@ -2354,8 +2356,8 @@ fn retained_scan_step(
                         // If the directory changed while we held it, the
                         // iterator may omit new entries. Never publish a
                         // complete corpus frontier from that mixed snapshot.
-                        let closing_stat = directory_stat_witness(&directory.path)?;
-                        if closing_stat.as_ref().map(|stat| stat.stat)
+                        let closing_stat = directory_scan_witness(&directory.path)?;
+                        if closing_stat.as_ref().map(|stat| stat.stable_stat)
                             != Some(directory.opening_stat)
                         {
                             scan.complete = false;
@@ -2374,6 +2376,13 @@ fn retained_scan_step(
                         {
                             if let Some(fingerprint) = directory.fingerprint.take() {
                                 identity.entries = Some(fingerprint.finish());
+                            }
+                            // Commit the closing witness so the idle probe
+                            // compares against the state this sweep actually
+                            // certified, not a stale unsettled sample.
+                            if let Some(closing) = closing_stat {
+                                identity.stat = closing.stat;
+                                identity.stable_stat = closing.stable_stat;
                             }
                         }
                         *current = None;
@@ -2427,14 +2436,28 @@ fn retained_scan_step(
                                     continue;
                                 }
                                 None => {
-                                    let directory = &scan.directories[*directory_index];
-                                    let closing = directory_stat_witness(&directory.path)?;
-                                    if closing.as_ref().map(|stamp| stamp.stat)
-                                        != directory.identity.map(|identity| identity.stat)
-                                        || directory.identity.and_then(|identity| identity.entries)
+                                    let directory_index = *directory_index;
+                                    let closing = {
+                                        let directory = &scan.directories[directory_index];
+                                        directory_scan_witness(&directory.path)?
+                                    };
+                                    let identity = scan.directories[directory_index].identity;
+                                    if closing.as_ref().map(|stamp| stamp.stable_stat)
+                                        != identity.map(|identity| identity.stable_stat)
+                                        || identity.and_then(|identity| identity.entries)
                                             != Some(std::mem::take(fingerprint).finish())
                                     {
                                         scan.complete = false;
+                                    }
+                                    // Commit the closing witness so the idle
+                                    // probe compares against the state this
+                                    // sweep actually certified.
+                                    if let Some(closing) = closing
+                                        && let Some(identity) =
+                                            scan.directories[directory_index].identity.as_mut()
+                                    {
+                                        identity.stat = closing.stat;
+                                        identity.stable_stat = closing.stable_stat;
                                     }
                                     *verification = None;
                                     continue;
@@ -2499,40 +2522,50 @@ fn retained_scan_step(
                                 // file enumeration finishes. Recheck its native
                                 // identity before granting full coverage: a
                                 // stale ReadDir may have omitted that entry.
-                                let directory = &scan.directories[*directory_index];
-                                let closing = directory_stat_witness(&directory.path)?;
-                                if closing.as_ref().map(|stat| stat.stat)
-                                    != directory.identity.map(|identity| identity.stat)
+                                let directory_index = *directory_index;
+                                let closing = {
+                                    let directory = &scan.directories[directory_index];
+                                    directory_scan_witness(&directory.path)?
+                                };
+                                let identity = scan.directories[directory_index].identity;
+                                if closing.as_ref().map(|stat| stat.stable_stat)
+                                    != identity.map(|identity| identity.stable_stat)
                                 {
                                     scan.complete = false;
-                                } else if directory
-                                    .identity
-                                    .and_then(|identity| identity.entries)
-                                    .is_some()
-                                {
+                                } else if identity.and_then(|identity| identity.entries).is_some() {
                                     // This initially unsettled listing needs an
                                     // independent current-name check, even if the
                                     // filesystem clock settled during the walk.
-                                    let reopened =
-                                        std::fs::read_dir(&directory.path).map_err(|source| {
-                                            TranscriptIngestError::ScanIo {
-                                                operation: "verify Codex transcript bucket",
-                                                path: directory.path.clone(),
-                                                source,
-                                            }
-                                        })?;
+                                    let path = scan.directories[directory_index].path.clone();
+                                    let reopened = std::fs::read_dir(&path).map_err(|source| {
+                                        TranscriptIngestError::ScanIo {
+                                            operation: "verify Codex transcript bucket",
+                                            path,
+                                            source,
+                                        }
+                                    })?;
                                     *verification = Some(Box::new((
-                                        *directory_index,
+                                        directory_index,
                                         reopened,
                                         CodexDirectoryEntryFingerprint::default(),
                                     )));
-                                } else if closing.is_some_and(|stamp| !stamp.settled)
+                                } else if closing.as_ref().is_some_and(|stamp| !stamp.settled)
                                     && resume_directories.is_none()
                                 {
                                     // An unfinished structural iterator is
                                     // resumed below; only its final pass may
                                     // certify coverage without a name witness.
                                     scan.complete = false;
+                                }
+                                // Commit the closing witness so the idle probe
+                                // compares against the state this sweep actually
+                                // certified, not a stale unsettled sample.
+                                if let Some(closing) = closing
+                                    && let Some(identity) =
+                                        scan.directories[directory_index].identity.as_mut()
+                                {
+                                    identity.stat = closing.stat;
+                                    identity.stable_stat = closing.stable_stat;
                                 }
                                 *current = None;
                             }
@@ -2737,6 +2770,16 @@ struct DirectoryStatWitness {
     settled: bool,
 }
 
+/// A directory witness for a budgeted sweep. `stable_stat` drops the
+/// settled/unsettled encoding so a directory that settles mid-sweep is not
+/// mistaken for a changed one; its name witness still describes the same
+/// entries.
+struct DirectoryScanWitness {
+    stat: [u8; 32],
+    stable_stat: [u8; 32],
+    settled: bool,
+}
+
 fn codex_directory_changed(
     path: &Path,
     stored: Option<CodexDirectoryWitness>,
@@ -2768,11 +2811,12 @@ fn codex_directory_changed(
 
 #[cfg(test)]
 fn codex_directory_witness(path: &Path) -> TranscriptIngestResult<Option<CodexDirectoryWitness>> {
-    let Some(current) = directory_stat_witness(path)? else {
+    let Some(current) = directory_scan_witness(path)? else {
         return Ok(None);
     };
     Ok(Some(CodexDirectoryWitness {
         stat: current.stat,
+        stable_stat: current.stable_stat,
         // In the settled case, a later stat comparison proves stability.
         // Avoid eagerly listing and sorting all historical rollout names;
         // an entry-name witness is needed only for a coarse-clock window.
@@ -2784,7 +2828,7 @@ fn codex_directory_witness(path: &Path) -> TranscriptIngestResult<Option<CodexDi
     }))
 }
 
-fn directory_stat_witness(path: &Path) -> TranscriptIngestResult<Option<DirectoryStatWitness>> {
+fn stat_directory(path: &Path) -> TranscriptIngestResult<Option<std::fs::Metadata>> {
     let Some(metadata) = stat_if_present(path, "stat Codex transcript directory")? else {
         return Ok(None);
     };
@@ -2798,11 +2842,43 @@ fn directory_stat_witness(path: &Path) -> TranscriptIngestResult<Option<Director
             ),
         });
     }
+    Ok(Some(metadata))
+}
+
+fn directory_stat_witness(path: &Path) -> TranscriptIngestResult<Option<DirectoryStatWitness>> {
+    let Some(metadata) = stat_directory(path)? else {
+        return Ok(None);
+    };
     let changed = change_stamp(path, &metadata);
     Ok(Some(DirectoryStatWitness {
         stat: codex_directory_stat_identity(path, &metadata, changed)?,
         settled: changed.is_settled(),
     }))
+}
+
+fn directory_scan_witness(path: &Path) -> TranscriptIngestResult<Option<DirectoryScanWitness>> {
+    let Some(metadata) = stat_directory(path)? else {
+        return Ok(None);
+    };
+    let changed = change_stamp(path, &metadata);
+    Ok(Some(DirectoryScanWitness {
+        stat: codex_directory_stat_identity(path, &metadata, changed)?,
+        stable_stat: codex_directory_stable_identity(path, &metadata)?,
+        settled: changed.is_settled(),
+    }))
+}
+
+/// The directory identity without the settled/unsettled encoding. A budgeted
+/// sweep compares this across slices: a directory that settles mid-sweep has
+/// not changed, and its name witness still describes the same entries.
+fn codex_directory_stable_identity(
+    path: &Path,
+    metadata: &std::fs::Metadata,
+) -> TranscriptIngestResult<[u8; 32]> {
+    let native_change_time = RewriteWitness::NATIVE
+        .change_time_nanos(metadata)
+        .map_or(0, |time| u128::from_le_bytes(time.to_le_bytes()));
+    codex_corpus_identity(path, metadata, ChangeStamp::Unvouched(native_change_time))
 }
 
 // An unsettled ChangeStamp has a different random sample token on *every*
