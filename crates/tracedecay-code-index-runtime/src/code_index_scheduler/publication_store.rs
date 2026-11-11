@@ -2244,7 +2244,8 @@ impl DaemonCodeIndexPublicationStoreV1 {
         // Windows cannot inspect the pathname's stable file ID through std
         // metadata. Reuse the memo's authenticated descriptor for byte reads,
         // then use one fresh same-file pathname witness after the read. A
-        // rotated name invalidates the memo and returns a retryable CAS.
+        // completed inode rotation invalidates the memo and is reloaded cold
+        // in this call; races during cold validation still refuse.
         #[cfg(not(unix))]
         {
             let mut cached = self
@@ -2261,8 +2262,10 @@ impl DaemonCodeIndexPublicationStoreV1 {
                         return Ok(Some((entry.pointer.clone(), current)));
                     }
                     Err(CodeIndexPublicationStoreErrorV1::CompareAndSwap) => {
+                        // The pathname may now name a fully published successor.
+                        // Drop the retired descriptor before authenticating it
+                        // through the same cold path used for the first read.
                         *cached = None;
-                        return Err(CodeIndexPublicationStoreErrorV1::CompareAndSwap);
                     }
                     Err(error) => return Err(error),
                 }
@@ -2276,7 +2279,16 @@ impl DaemonCodeIndexPublicationStoreV1 {
         // open merely to populate the memo. Keep the original descriptor
         // through parsing and authenticate its bytes again before memoizing.
         let (bytes, mut opened_pointer) = {
-            let mut file = File::open(&self.active_path).map_err(Self::map_pointer_io)?;
+            let mut file = File::open(&self.active_path).map_err(|error| {
+                if error.kind() == std::io::ErrorKind::NotFound {
+                    // The pointer existed at this call's first metadata probe.
+                    // A concurrent atomic publisher can withdraw it before
+                    // the cold open; retry without treating it as corruption.
+                    CodeIndexPublicationStoreErrorV1::CompareAndSwap
+                } else {
+                    Self::map_pointer_io(error)
+                }
+            })?;
             let mut bytes = Vec::new();
             (&mut file)
                 .take(MAX_DURABLE_PUBLICATION_POINTER_BYTES + 1)

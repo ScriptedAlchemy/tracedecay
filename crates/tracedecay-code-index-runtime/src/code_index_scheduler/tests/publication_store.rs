@@ -3237,6 +3237,41 @@ fn publication_pointer_memo_follows_bytes_when_size_and_mtime_stay_put() {
         reread.generation_id, second.generation_id,
         "equal size and mtime must not reuse the previous pointer"
     );
+
+    // A second valid publisher may install a different inode holding the
+    // same exact bytes. The first reader call must not surface a stale-memo
+    // CAS or require an extra caller retry just to discover that publication.
+    let mut repeated = tempfile::NamedTempFile::new_in(store.path())
+        .expect("stage identical pointer on a fresh inode");
+    std::io::Write::write_all(repeated.as_file_mut(), &second_bytes)
+        .expect("write identical pointer bytes");
+    repeated
+        .as_file()
+        .sync_all()
+        .expect("sync repeated pointer");
+    repeated
+        .persist(&pointer_path)
+        .expect("atomically republish identical pointer");
+    assert_eq!(
+        publication
+            .read_publication_pointer()
+            .expect("load stable republished pointer in one call")
+            .expect("republished pointer exists")
+            .generation_id,
+        second.generation_id
+    );
+    assert_eq!(
+        publication
+            .read_publication_pointer()
+            .expect("cached republished pointer still authentic")
+            .expect("cached pointer exists")
+            .generation_id,
+        second.generation_id
+    );
+    assert_eq!(
+        std::fs::read(&pointer_path).expect("read actual repeated pointer bytes"),
+        second_bytes
+    );
 }
 
 #[cfg(unix)]
