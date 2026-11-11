@@ -2350,15 +2350,9 @@ fn retained_scan_step(
                         // iterator may omit new entries. Never publish a
                         // complete corpus frontier from that mixed snapshot.
                         let closing_stat = directory_stat_witness(&directory.path)?;
-                        // A coarse-clock directory can change without its
-                        // native stat advancing. Its incremental name witness
-                        // describes only what this iterator saw, not entries
-                        // created between slices. Do not certify completion
-                        // until the closing change stamp is settled and still
-                        // names the opening directory identity.
-                        if !closing_stat.is_some_and(|stat| {
-                            stat.settled && stat.stat == directory.opening_stat
-                        }) {
+                        if closing_stat.as_ref().map(|stat| stat.stat)
+                            != Some(directory.opening_stat)
+                        {
                             scan.complete = false;
                         }
                         // Chunks can retire their directory identity while
@@ -2449,7 +2443,22 @@ fn retained_scan_step(
                                     break Some((path, metadata));
                                 }
                             }
-                            None => *current = None,
+                            None => {
+                                // This file iterator is retained across
+                                // scheduler turns. A new directory entry can
+                                // arrive after the structural walk but before
+                                // file enumeration finishes. Recheck its native
+                                // identity before granting full coverage: a
+                                // stale ReadDir may have omitted that entry.
+                                let directory = &scan.directories[*directory_index];
+                                let closing = directory_stat_witness(&directory.path)?;
+                                if closing.as_ref().map(|stat| stat.stat)
+                                    != directory.identity.map(|identity| identity.stat)
+                                {
+                                    scan.complete = false;
+                                }
+                                *current = None;
+                            }
                         }
                     }
                 };

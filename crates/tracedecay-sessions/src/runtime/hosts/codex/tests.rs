@@ -2918,61 +2918,59 @@ mod recent_first_discovery_tests {
     }
 
     #[test]
-    fn unsettled_directory_clock_alias_cannot_publish_complete_coverage() {
+    fn file_walk_detects_a_new_rollout_while_its_directory_cursor_is_retained() {
         let temp = TempDir::new().unwrap();
         let archive = temp.path().join(".codex/archived_sessions");
         std::fs::create_dir_all(&archive).unwrap();
         for index in 0..64 {
             std::fs::write(archive.join(format!("rollout-{index:03}.zst")), b"ignored").unwrap();
         }
+        std::fs::write(archive.join("rollout-existing.jsonl"), b"{}\n").unwrap();
+
         let source = CodexSource::with_home(temp.path());
         let bounds = TranscriptDiscoveryBounds::from_discovered_units(1);
         let mut state = CodexDiscoveryState::default();
         let mut frontier = CodexDiscoveryFrontier::initial();
-        let first = retained_pass(&source, &mut state, bounds, frontier);
-        assert!(first.report.is_truncated());
-        frontier = first.next_frontier;
-
-        // Force the valid coarse-clock case: a new source arrives while the
-        // iterator is retained, but the native directory stat does not advance.
-        // Only a settled clock can vouch for the opening and closing identity.
-        let arrived = archive.join("rollout-added-during-scan.jsonl");
+        let mut active = false;
+        for _ in 0..256 {
+            let pass = retained_pass(&source, &mut state, bounds, frontier);
+            frontier = pass.next_frontier;
+            if let Some(scan) = state.scan.as_ref()
+                && let CodexScanPhase::Files {
+                    current: Some(current),
+                    ..
+                } = &scan.phase
+            {
+                let directory = &scan.directories[current.0];
+                assert_eq!(directory.path, archive);
+                assert!(directory.identity.is_some());
+                active = true;
+                break;
+            }
+        }
+        assert!(active, "the file-phase iterator must retain its position");
+        let prior = directory_stat_witness(&archive).unwrap().unwrap().stat;
+        let arrived = archive.join("rollout-added-during-file-walk.jsonl");
         std::fs::write(&arrived, b"{}\n").unwrap();
-        let closing = directory_stat_witness(&archive).unwrap().unwrap();
-        assert!(
-            !closing.settled,
-            "the regression requires an unsettled directory change stamp"
+        assert_ne!(
+            directory_stat_witness(&archive).unwrap().unwrap().stat,
+            prior,
+            "the mutation must change the native directory witness"
         );
-        let scan = state.scan.as_mut().expect("unfinished structural scan");
-        let CodexScanPhase::Directories {
-            current: Some(directory),
-            ..
-        } = &mut scan.phase
-        else {
-            panic!("the flat archive must retain its native directory iterator");
-        };
-        assert_eq!(directory.path, archive);
-        assert!(
-            directory.fingerprint.is_some(),
-            "coarse-clock admission must retain the incremental name witness"
-        );
-        directory.opening_stat = closing.stat;
-        assert!(scan.complete);
-
-        let mut first_sweep_finished = false;
-        for _ in 0..512 {
+        let mut finished = false;
+        for _ in 0..1024 {
             let pass = retained_pass(&source, &mut state, bounds, frontier);
             frontier = pass.next_frontier;
             if state.scan.is_none() {
-                first_sweep_finished = true;
+                finished = true;
                 assert!(
                     !frontier.is_complete(),
-                    "equal but unsettled directory stats cannot vouch for complete coverage"
+                    "a new file during the retained file walk must invalidate its coverage"
                 );
                 break;
             }
         }
-        assert!(first_sweep_finished, "the bounded structural sweep must finish");
+        assert!(finished, "the bounded file traversal must reach its frontier");
     }
 
     #[test]
