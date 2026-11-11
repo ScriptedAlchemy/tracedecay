@@ -553,12 +553,13 @@ mod cancellable_queue_tests {
                 git(root, &["add", "."]);
                 git(root, &["commit", "-q", "-m", "fixture"]);
             }
-            let harness = crate::daemon::ProductionProjectCompositionHarnessV1::open(
-                isolation.path(),
-                [active_root.clone(), target_root.clone()],
-            )
-            .await
-            .expect("production route composition");
+            let harness =
+                crate::daemon::ProductionProjectCompositionHarnessV1::open_for_session_retrieval(
+                    isolation.path(),
+                    [active_root.clone(), target_root.clone()],
+                )
+                .await
+                .expect("production route composition");
             let mounted_active = harness.server(&active_root).expect("mounted active server");
             let target = harness.server(&target_root).expect("mounted target server");
             let target_project_id = target
@@ -697,10 +698,9 @@ mod cancellable_queue_tests {
                     "id": "slow-read",
                     "method": "tools/call",
                     "params": {
-                        "name": "tracedecay_grep",
+                        "name": "tracedecay_fact_store_list",
                         "arguments": {
-                            "pattern": "route_fixture",
-                            "fixed_strings": true,
+                            "category": "project",
                             "project_selector": {
                                 "project_id": fixture.target_project_id.clone()
                             },
@@ -736,6 +736,14 @@ mod cancellable_queue_tests {
 
         fixture.route_release.add_permits(1);
         let slow = receive_response(&mut responses).await;
+        assert!(
+            slow["result"]["content"].is_array(),
+            "selected fact read: {slow}"
+        );
+        assert_ne!(
+            slow["result"]["isError"], true,
+            "selected fact read: {slow}"
+        );
         assert_eq!(
             slow["id"],
             serde_json::json!("slow-read"),
@@ -772,10 +780,9 @@ mod cancellable_queue_tests {
                     "id": 10,
                     "method": "tools/call",
                     "params": {
-                        "name": "tracedecay_grep",
+                        "name": "tracedecay_fact_store_list",
                         "arguments": {
-                            "pattern": "route_fixture",
-                            "fixed_strings": true,
+                            "category": "project",
                             "project_selector": {
                                 "project_id": fixture.target_project_id.clone()
                             },
@@ -882,10 +889,9 @@ mod cancellable_queue_tests {
                         "id": id,
                         "method": "tools/call",
                         "params": {
-                            "name": "tracedecay_grep",
+                            "name": "tracedecay_fact_store_list",
                             "arguments": {
-                                "pattern": "route_fixture",
-                                "fixed_strings": true,
+                                "category": "project",
                                 "project_selector": {
                                     "project_id": fixture.target_project_id.clone()
                                 },
@@ -958,10 +964,9 @@ mod cancellable_queue_tests {
                     "id": 30,
                     "method": "tools/call",
                     "params": {
-                        "name": "tracedecay_grep",
+                        "name": "tracedecay_fact_store_list",
                         "arguments": {
-                            "pattern": "route_fixture",
-                            "fixed_strings": true,
+                            "category": "project",
                             "project_selector": {
                                 "project_id": fixture.target_project_id.clone()
                             },
@@ -1002,12 +1007,13 @@ mod cancellable_queue_tests {
             git(root, &["add", "."]);
             git(root, &["commit", "-q", "-m", "fixture"]);
         }
-        let harness = crate::daemon::ProductionProjectCompositionHarnessV1::open(
-            isolation.path(),
-            [active_root.clone(), target_root.clone()],
-        )
-        .await
-        .expect("production route composition");
+        let harness =
+            crate::daemon::ProductionProjectCompositionHarnessV1::open_for_session_retrieval(
+                isolation.path(),
+                [active_root.clone(), target_root.clone()],
+            )
+            .await
+            .expect("production route composition");
         let mounted_active = harness.server(&active_root).expect("mounted active server");
         let target = harness.server(&target_root).expect("mounted target server");
         let target_project_id = target
@@ -1072,10 +1078,9 @@ mod cancellable_queue_tests {
                     "id": 41,
                     "method": "tools/call",
                     "params": {
-                        "name": "tracedecay_grep",
+                        "name": "tracedecay_fact_store_list",
                         "arguments": {
-                            "pattern": "route_fixture",
-                            "fixed_strings": true,
+                            "category": "project",
                             "project_selector": {"project_id": target_project_id},
                             "format": "json"
                         }

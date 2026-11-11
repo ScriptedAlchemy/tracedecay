@@ -1129,6 +1129,10 @@ impl InvocationProjectRuntimeIdentityV1 {
         &self.profile_id
     }
 
+    pub(super) fn project_root(&self) -> &Path {
+        &self.project_root
+    }
+
     pub(super) fn matches_locator(&self, locator: &RegisteredRootLocatorV1) -> bool {
         self.profile_id == locator.profile.profile_id
             && self.project_id == locator.project_id

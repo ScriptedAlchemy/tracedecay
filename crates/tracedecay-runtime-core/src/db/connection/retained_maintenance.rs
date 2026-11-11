@@ -1,3 +1,5 @@
+use crate::shard_runtime::registry::StoreRuntimeRegistryFailure;
+
 use super::{
     Arc, CheckpointBlockers, CheckpointOutcome, CheckpointRequest, DATABASE_HEALTH_GATE, Database,
     DatabaseAuthorityRole, DatabaseHealth, DatabaseStorageTelemetryHandle, Result, TraceDecayError,
@@ -227,14 +229,44 @@ impl Database {
 
     /// Runs bounded incremental vacuum through the canonical writer lane.
     pub async fn run_incremental_vacuum(&self, pages: u64) -> Result<()> {
+        self.incremental_vacuum_attempt(pages)
+            .await?
+            .map_err(compaction_error)
+    }
+
+    /// Short-lived store admission may defer optional page reclamation, but
+    /// cannot serve a store whose writer or write authority has failed.
+    pub async fn reclaim_short_lived_pages(&self, pages: u64) -> Result<()> {
+        match self.incremental_vacuum_attempt(pages).await? {
+            Ok(()) => Ok(()),
+            Err(StoreRuntimeRegistryFailure::CompactionDeferred { message }) => {
+                tracing::warn!(
+                    reason = %message,
+                    pages,
+                    "short-lived registered-store reclamation deferred"
+                );
+                Ok(())
+            }
+            Err(error) => Err(compaction_error(error)),
+        }
+    }
+
+    async fn incremental_vacuum_attempt(
+        &self,
+        pages: u64,
+    ) -> Result<std::result::Result<(), StoreRuntimeRegistryFailure>> {
         let authority = self.write_authority()?;
-        self.client
+        Ok(self
+            .client
             .runtime()
             .run_bounded_incremental_compaction(pages, authority)
-            .await
-            .map_err(|error| TraceDecayError::Database {
-                message: format!("failed to compact SQLite store: {error:?}"),
-                operation: "run bounded SQLite-store compaction".to_owned(),
-            })
+            .await)
+    }
+}
+
+fn compaction_error(error: StoreRuntimeRegistryFailure) -> TraceDecayError {
+    TraceDecayError::Database {
+        message: format!("failed to compact SQLite store: {error:?}"),
+        operation: "run bounded SQLite-store compaction".to_owned(),
     }
 }

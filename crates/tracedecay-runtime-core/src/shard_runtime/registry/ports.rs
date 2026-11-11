@@ -606,9 +606,14 @@ impl PhysicalRuntimeAttachment for RepositoryRuntimePhysicalAttachment {
                 self, max_pages, authority,
             )
             .await
-            .map_err(|error| StoreRuntimeRegistryFailure::PhysicalRuntimeFailed {
-                operation: "run bounded repository compaction",
-                message: error.to_string(),
+            .map_err(|error| match error {
+                RepositoryDispatchError::CompactionDeferred(message) => {
+                    StoreRuntimeRegistryFailure::CompactionDeferred { message }
+                }
+                error => StoreRuntimeRegistryFailure::PhysicalRuntimeFailed {
+                    operation: "run bounded repository compaction",
+                    message: error.to_string(),
+                },
             })
         })
     }

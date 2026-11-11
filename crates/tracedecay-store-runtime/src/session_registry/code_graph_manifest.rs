@@ -133,8 +133,8 @@ impl CheckedSealReader<'_> {
         std::io::Error::other("sealed code generation checked read failed")
     }
 
-    /// Returns the verified handle, whose bytes a caller may re-read without
-    /// trusting the path again.
+    /// Returns the authenticated handle. Only the bytes hashed by this
+    /// reader are proven; a later read of the same inode is not that proof.
     fn finish(
         self,
         path: &std::path::Path,
@@ -143,15 +143,14 @@ impl CheckedSealReader<'_> {
         expected_digest: &str,
     ) -> Result<File, GraphDbError> {
         (self.check)()?;
-        let final_file_metadata =
-            self.reader
-                .get_ref()
-                .metadata()
-                .map_err(|error| GraphDbError::Corrupt {
-                    message: format!(
-                        "sealed code generation metadata cannot be revalidated: {error}"
-                    ),
-                })?;
+        // Endpoint authorization may finish after the caller's deadline, even
+        // on an I/O failure. Preserve typed interruption before classifying
+        // final handle or pathname validation as a damaged/retired seal.
+        let final_file_metadata = self.reader.get_ref().metadata();
+        (self.check)()?;
+        let final_file_metadata = final_file_metadata.map_err(|error| GraphDbError::Corrupt {
+            message: format!("sealed code generation metadata cannot be revalidated: {error}"),
+        })?;
         if !same_file_identity(opened_metadata, &final_file_metadata)
             || self.bytes_read != admitted_len
         {
@@ -160,15 +159,21 @@ impl CheckedSealReader<'_> {
                     .to_owned(),
             });
         }
-        if seal_left_path(path, opened_metadata)? {
+        let left_path = seal_left_path(path, opened_metadata);
+        (self.check)()?;
+        if left_path? {
             return Err(GraphDbError::SealSuperseded);
         }
         #[cfg(windows)]
-        if !same_windows_handle_identity(self.reader.get_ref(), path)? {
-            return Err(GraphDbError::Corrupt {
-                message: "sealed code generation identity or length changed while it was read"
-                    .to_owned(),
-            });
+        {
+            let same_handle = same_windows_handle_identity(self.reader.get_ref(), path);
+            (self.check)()?;
+            if !same_handle? {
+                return Err(GraphDbError::Corrupt {
+                    message: "sealed code generation identity or length changed while it was read"
+                        .to_owned(),
+                });
+            }
         }
         if encode_lowercase_hex(&self.digest.finalize()) != expected_digest {
             return Err(GraphDbError::Corrupt {
@@ -216,9 +221,18 @@ impl Read for CheckedSealReader<'_> {
             return Err(self.retain_failure(error));
         }
         let read_len = buffer.len().min(SEAL_READ_CHECK_BYTES);
-        let read = match self.reader.read(&mut buffer[..read_len]) {
+        let read = self.reader.read(&mut buffer[..read_len]);
+        // A scanned read may return after the caller's deadline, including
+        // on an I/O failure. Do not classify that interruption as corruption
+        // or expose bytes read after the deadline.
+        if let Err(error) = (self.check)() {
+            buffer[..read_len].fill(0);
+            return Err(self.retain_failure(error));
+        }
+        let read = match read {
             Ok(read) => read,
             Err(error) => {
+                buffer[..read_len].fill(0);
                 let error = GraphDbError::Corrupt {
                     message: format!("sealed code generation replay read failed: {error}"),
                 };
@@ -255,18 +269,26 @@ fn open_checked_seal_reader<'a>(
     path: &std::path::Path,
     check: &'a dyn Fn() -> Result<(), GraphDbError>,
 ) -> Result<(CheckedSealReader<'a>, std::fs::Metadata, u64), GraphDbError> {
-    let path_metadata = path.symlink_metadata().map_err(|error| {
+    // Metadata and endpoint authorization may finish after the caller expires.
+    // Preserve the typed interruption even when the filesystem operation fails.
+    let path_metadata = path.symlink_metadata();
+    (check)()?;
+    let path_metadata = path_metadata.map_err(|error| {
         GraphDbError::unavailable(format!(
             "sealed code generation is unavailable for replay: {error}"
         ))
     })?;
     let admitted_len = validate_sealed_generation_metadata(&path_metadata)?;
-    let file = File::open(path).map_err(|error| {
+    let opened = File::open(path);
+    (check)()?;
+    let file = opened.map_err(|error| {
         GraphDbError::unavailable(format!(
             "sealed code generation cannot be opened for replay: {error}"
         ))
     })?;
-    let opened_metadata = file.metadata().map_err(|error| GraphDbError::Corrupt {
+    let opened_metadata = file.metadata();
+    (check)()?;
+    let opened_metadata = opened_metadata.map_err(|error| GraphDbError::Corrupt {
         message: format!("sealed code generation metadata cannot be read: {error}"),
     })?;
     if !same_file_identity(&path_metadata, &opened_metadata) {
@@ -275,10 +297,16 @@ fn open_checked_seal_reader<'a>(
         });
     }
     #[cfg(windows)]
-    if !same_windows_handle_identity(&file, path)? {
-        return Err(GraphDbError::Corrupt {
-            message: "sealed code generation identity changed while it was opened".to_owned(),
-        });
+    {
+        // The second pathname open can cross the caller's deadline on
+        // endpoint-scanned hosts. Classify interruption before identity errors.
+        let same_handle = same_windows_handle_identity(&file, path);
+        (check)()?;
+        if !same_handle? {
+            return Err(GraphDbError::Corrupt {
+                message: "sealed code generation identity changed while it was opened".to_owned(),
+            });
+        }
     }
     Ok((
         CheckedSealReader {
@@ -331,6 +359,12 @@ fn with_verified_seal_from_roots<T>(
                 // names the authoritative copy.
                 return match read(pool, expected_digest, check) {
                     Ok(value) => Ok(value),
+                    // A late endpoint-scanned fallback may cross the deadline
+                    // after the canonical copy failed. Do not misreport that
+                    // interruption as the earlier source corruption.
+                    Err(error @ (GraphDbError::Cancelled | GraphDbError::DeadlineExceeded)) => {
+                        Err(error)
+                    }
                     Err(_) => Err(canonical_error),
                 };
             }
@@ -365,18 +399,26 @@ fn read_verified_seal_manifest(
     check: &dyn Fn() -> Result<(), GraphDbError>,
 ) -> Result<Vec<u8>, GraphDbError> {
     (check)()?;
-    let path_metadata = path.symlink_metadata().map_err(|error| {
+    // Endpoint authorization can spend the caller's budget on metadata or
+    // open as well as reads. Recheck even when an OS operation fails.
+    let metadata = path.symlink_metadata();
+    (check)()?;
+    let path_metadata = metadata.map_err(|error| {
         GraphDbError::unavailable(format!(
             "sealed code generation is unavailable for replay: {error}"
         ))
     })?;
     let admitted_len = validate_sealed_generation_metadata(&path_metadata)?;
-    let mut file = File::open(path).map_err(|error| {
+    let opened = File::open(path);
+    (check)()?;
+    let mut file = opened.map_err(|error| {
         GraphDbError::unavailable(format!(
             "sealed code generation cannot be opened for replay: {error}"
         ))
     })?;
-    let opened_metadata = file.metadata().map_err(|error| GraphDbError::Corrupt {
+    let metadata = file.metadata();
+    (check)()?;
+    let opened_metadata = metadata.map_err(|error| GraphDbError::Corrupt {
         message: format!("sealed code generation metadata cannot be read: {error}"),
     })?;
     if !same_file_identity(&path_metadata, &opened_metadata) {
@@ -385,19 +427,26 @@ fn read_verified_seal_manifest(
         });
     }
     #[cfg(windows)]
-    if !same_windows_handle_identity(&file, path)? {
-        return Err(GraphDbError::Corrupt {
-            message: "sealed code generation identity changed while it was opened".to_owned(),
-        });
+    {
+        // The second pathname open can cross the caller's deadline on
+        // endpoint-scanned hosts. Classify interruption before identity errors.
+        let same_handle = same_windows_handle_identity(&file, path);
+        (check)()?;
+        if !same_handle? {
+            return Err(GraphDbError::Corrupt {
+                message: "sealed code generation identity changed while it was opened".to_owned(),
+            });
+        }
     }
 
     let mut manifest = Vec::new();
-    file.by_ref()
-        .take(admitted_len)
-        .read_to_end(&mut manifest)
-        .map_err(|error| GraphDbError::Corrupt {
-            message: format!("sealed generation manifest read failed: {error}"),
-        })?;
+    let read = file.by_ref().take(admitted_len).read_to_end(&mut manifest);
+    // Endpoint scanning may finish this I/O after a caller deadline, even
+    // when the read failed. The interruption is not source corruption.
+    (check)()?;
+    read.map_err(|error| GraphDbError::Corrupt {
+        message: format!("sealed generation manifest read failed: {error}"),
+    })?;
     if u64::try_from(manifest.len()).ok() != Some(admitted_len)
         || encode_lowercase_hex(&Sha256::digest(&manifest)) != expected_digest
     {
@@ -436,10 +485,13 @@ fn with_verified_segments<T>(
     ) -> Result<T, SealedCodeGraphRowsError>,
 ) -> Result<T, GraphDbError> {
     let mut interruption = None;
+    let started = std::time::Instant::now();
     let mut segments = GraphSegmentReadPassV1::new(&routes.segment_roots);
     let mut read_segment = |request: SealedGenerationSegmentReadV1<'_>,
                             buffer: &mut Vec<u8>|
      -> Result<(), CodeIndexProductionErrorV1> {
+        // Cancellation must not expose bytes from a previously verified page.
+        buffer.clear();
         if let Err(error) = (check)() {
             if matches!(
                 error,
@@ -449,19 +501,38 @@ fn with_verified_segments<T>(
             }
             return Err(CodeIndexProductionErrorV1::Contract(error.to_string()));
         }
-        segments.read(request, buffer)
+        let read = segments.read(request, buffer);
+        // An endpoint-scanned open or read can outlive the caller's budget.
+        // Recheck even on I/O failure so an interruption is not corruption.
+        if let Err(error) = (check)() {
+            buffer.clear();
+            if matches!(
+                error,
+                GraphDbError::Cancelled | GraphDbError::DeadlineExceeded
+            ) {
+                interruption = Some(error.clone());
+            }
+            return Err(CodeIndexProductionErrorV1::Contract(error.to_string()));
+        }
+        read
     };
     let built = build(&mut read_segment);
     tracing::info!(
         event = "code_graph_segment_read_pass",
         segment_open_attempts = segments.open_attempts,
+        segment_open_wall_seconds = segments.open_wall_time.as_secs_f64(),
         segment_reads = segments.reads,
+        graph_pass_wall_seconds = started.elapsed().as_secs_f64(),
         "finished the pass-scoped sealed graph segment reader"
     );
     drop(segments);
     if let Some(interruption) = interruption {
         return Err(interruption);
     }
+    // A graph projection may keep computing or spilling rows after its final
+    // segment read. Its last successful I/O probe is not publication authority.
+    // Refuse a result that finished after the caller's deadline.
+    (check)()?;
     let error = match built {
         Ok(built) => return Ok(built),
         Err(SealedCodeGraphRowsError::Source(error)) => {
@@ -471,8 +542,15 @@ fn with_verified_segments<T>(
             classify_sealed_projection_build_error(error)
         }
     };
-    if matches!(error, GraphDbError::Corrupt { .. }) && !seal_still_named(&routes.seal_paths)? {
-        return Err(GraphDbError::SealSuperseded);
+    if matches!(error, GraphDbError::Corrupt { .. }) {
+        // Endpoint security can delay the last pathname check too. Preserve
+        // a deadline or cancellation observed after that I/O, even if the
+        // seal was retired or the pathname probe itself failed.
+        let still_named = seal_still_named(&routes.seal_paths);
+        (check)()?;
+        if !still_named? {
+            return Err(GraphDbError::SealSuperseded);
+        }
     }
     Err(error)
 }
@@ -788,6 +866,7 @@ struct GraphSegmentReadPassV1<'a> {
     /// Least-recently used first; the most recent handle is at the back.
     pinned: VecDeque<PinnedPartitionedSegmentV1>,
     open_attempts: usize,
+    open_wall_time: std::time::Duration,
     reads: usize,
 }
 
@@ -797,6 +876,7 @@ impl<'a> GraphSegmentReadPassV1<'a> {
             roots,
             pinned: VecDeque::new(),
             open_attempts: 0,
+            open_wall_time: std::time::Duration::ZERO,
             reads: 0,
         }
     }
@@ -806,34 +886,65 @@ impl<'a> GraphSegmentReadPassV1<'a> {
         request: SealedGenerationSegmentReadV1<'_>,
         buffer: &mut Vec<u8>,
     ) -> Result<(), CodeIndexProductionErrorV1> {
+        // A failed request must not leave bytes from a previous verified page.
+        buffer.clear();
         let (digest, _, _, _) = partitioned_segment_request(request)?;
         if let Some(position) = self
             .pinned
             .iter()
             .position(|pinned| pinned.digest == digest)
         {
+            // A rejected cached read must not promote this entry and evict
+            // another valid handle on the next miss.
+            self.reads += 1;
+            let cached = self.pinned.get_mut(position).ok_or_else(|| {
+                CodeIndexProductionErrorV1::Contract(
+                    "sealed graph segment cache lost its retained handle".to_owned(),
+                )
+            })?;
+            read_pinned_partitioned_segment(cached, request, buffer)?;
             let pinned = self.pinned.remove(position).ok_or_else(|| {
                 CodeIndexProductionErrorV1::Contract(
                     "sealed graph segment cache lost its retained handle".to_owned(),
                 )
             })?;
             self.pinned.push_back(pinned);
+            Ok(())
         } else {
-            let root = select_partitioned_segment_root(self.roots, request)?;
-            self.open_attempts += 1;
-            let pinned = open_partitioned_segment(root, request)?;
-            if self.pinned.len() == MAX_GRAPH_SEGMENT_OPEN_HANDLES {
-                self.pinned.pop_front();
-            }
-            self.pinned.push_back(pinned);
+            // Include route lookup, pathname validation and the actual open.
+            // Endpoint authorization can stall in any of these operations.
+            let started = std::time::Instant::now();
+            let selected = select_partitioned_segment_root(self.roots, request);
+            let opened = match selected {
+                Ok((root, path_metadata)) => {
+                    open_partitioned_segment(root, &path_metadata, request, || {
+                        self.open_attempts += 1;
+                    })
+                }
+                Err(error) => Err(error),
+            };
+            self.open_wall_time += started.elapsed();
+            self.read_and_pin(opened?, request, buffer)
         }
-        let pinned = self.pinned.back_mut().ok_or_else(|| {
-            CodeIndexProductionErrorV1::Contract(
-                "sealed graph segment handle was not pinned".to_owned(),
-            )
-        })?;
+    }
+
+    /// A cold handle only earns a cache slot after its first range was read.
+    /// Endpoint-scanned files can disappear or truncate after `File::open`;
+    /// a failed first read must not evict an already usable segment.
+    fn read_and_pin(
+        &mut self,
+        mut opened: PinnedPartitionedSegmentV1,
+        request: SealedGenerationSegmentReadV1<'_>,
+        buffer: &mut Vec<u8>,
+    ) -> Result<(), CodeIndexProductionErrorV1> {
+        buffer.clear();
         self.reads += 1;
-        read_pinned_partitioned_segment(pinned, request, buffer)
+        read_pinned_partitioned_segment(&mut opened, request, buffer)?;
+        if self.pinned.len() == MAX_GRAPH_SEGMENT_OPEN_HANDLES {
+            self.pinned.pop_front();
+        }
+        self.pinned.push_back(opened);
+        Ok(())
     }
 }
 
@@ -866,7 +977,7 @@ fn partitioned_segment_request(
 fn select_partitioned_segment_root<'a>(
     roots: &'a [PathBuf],
     request: tracedecay_code_index::production::SealedGenerationSegmentReadV1<'_>,
-) -> Result<&'a std::path::Path, CodeIndexProductionErrorV1> {
+) -> Result<(&'a std::path::Path, std::fs::Metadata), CodeIndexProductionErrorV1> {
     let (digest, _, _, _) = partitioned_segment_request(request)?;
     let digest = sha256_hex_suffix(digest).ok_or_else(|| {
         CodeIndexProductionErrorV1::Contract("sealed segment digest is not sha256".to_owned())
@@ -876,7 +987,7 @@ fn select_partitioned_segment_root<'a>(
             .join(format!("segment-{digest}.json"))
             .symlink_metadata()
         {
-            Ok(_) => return Ok(root),
+            Ok(path_metadata) => return Ok((root, path_metadata)),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(error) => {
                 return Err(CodeIndexProductionErrorV1::Contract(format!(
@@ -893,7 +1004,9 @@ fn select_partitioned_segment_root<'a>(
 #[tracing::instrument(name = "code_index.graph.segment.open", level = "trace", skip_all)]
 fn open_partitioned_segment(
     segments_root: &std::path::Path,
+    path_metadata: &std::fs::Metadata,
     request: tracedecay_code_index::production::SealedGenerationSegmentReadV1<'_>,
+    record_open_attempt: impl FnOnce(),
 ) -> Result<PinnedPartitionedSegmentV1, tracedecay_code_index::production::CodeIndexProductionErrorV1>
 {
     use tracedecay_code_index::production::CodeIndexProductionErrorV1;
@@ -903,16 +1016,15 @@ fn open_partitioned_segment(
         CodeIndexProductionErrorV1::Contract("sealed segment digest is not sha256".to_owned())
     })?;
     let path = segments_root.join(format!("segment-{digest_hex}.json"));
-    let path_metadata = path.symlink_metadata().map_err(|error| {
-        CodeIndexProductionErrorV1::Contract(format!(
-            "sealed generation segment is unavailable: {error}"
-        ))
-    })?;
+    // Route selection already obtained this pathname identity. Re-statting
+    // every graph page repeats an endpoint-scanned filesystem operation.
     if !path_metadata.file_type().is_file() || path_metadata.len() != expected_size {
         return Err(CodeIndexProductionErrorV1::Contract(
             "sealed generation segment identity does not match its manifest".to_owned(),
         ));
     }
+    // Count attempted opens, not pathname probes or rejected metadata.
+    record_open_attempt();
     #[cfg(test)]
     SEGMENT_OPENS.with(|opens| opens.set(opens.get() + 1));
     let file = File::open(&path).map_err(|error| {
@@ -925,7 +1037,7 @@ fn open_partitioned_segment(
             "sealed generation segment metadata cannot be read: {error}"
         ))
     })?;
-    if !same_file_identity(&path_metadata, &file_metadata) {
+    if !same_file_identity(path_metadata, &file_metadata) {
         return Err(CodeIndexProductionErrorV1::Contract(
             "sealed generation segment identity changed while it was opened".to_owned(),
         ));
@@ -973,17 +1085,29 @@ fn read_pinned_partitioned_segment(
             "sealed generation segment range exceeds addressable memory".to_owned(),
         )
     })?;
+    read_segment_range(&mut pinned.file, offset, length, buffer).map_err(|error| {
+        CodeIndexProductionErrorV1::Contract(format!(
+            "sealed generation segment read failed: {error}"
+        ))
+    })
+}
+
+/// An interrupted or short page read must not publish any partially filled bytes.
+fn read_segment_range<R: Read + Seek>(
+    reader: &mut R,
+    offset: u64,
+    length: usize,
+    buffer: &mut Vec<u8>,
+) -> std::io::Result<()> {
     buffer.clear();
     buffer.resize(length, 0);
-    pinned
-        .file
+    let read = reader
         .seek(SeekFrom::Start(offset))
-        .and_then(|_| pinned.file.read_exact(buffer))
-        .map_err(|error| {
-            CodeIndexProductionErrorV1::Contract(format!(
-                "sealed generation segment read failed: {error}"
-            ))
-        })
+        .and_then(|_| reader.read_exact(buffer));
+    if read.is_err() {
+        buffer.clear();
+    }
+    read
 }
 
 /// Read a whole segment and report the identity of the file the bytes came
@@ -993,6 +1117,8 @@ fn read_fingerprinted_segment(
     expected_size: u64,
     buffer: &mut Vec<u8>,
 ) -> Result<Option<SealedSegmentFingerprintV1>, CodeIndexProductionErrorV1> {
+    // A rejected identity or missing file must not expose the previous segment.
+    buffer.clear();
     let path_metadata = segment_path.symlink_metadata().map_err(|error| {
         CodeIndexProductionErrorV1::Contract(format!(
             "sealed generation segment is unavailable: {error}"
@@ -1018,9 +1144,7 @@ fn read_fingerprinted_segment(
             "sealed generation segment metadata cannot be read: {error}"
         ))
     })?;
-    buffer.clear();
-    buffer.resize(length, 0);
-    file.read_exact(buffer).map_err(|error| {
+    read_segment_range(&mut file, 0, length, buffer).map_err(|error| {
         CodeIndexProductionErrorV1::Contract(format!(
             "sealed generation segment read failed: {error}"
         ))
@@ -1049,17 +1173,18 @@ fn verify_checked_seal(
     path: &std::path::Path,
     expected_digest: &str,
     check: &dyn Fn() -> Result<(), GraphDbError>,
-) -> Result<File, GraphDbError> {
+) -> Result<(File, Option<Vec<u8>>), GraphDbError> {
     let (mut reader, opened_metadata, admitted_len) = open_checked_seal_reader(path, check)?;
-    let copied = std::io::copy(&mut reader, &mut std::io::sink());
+    // Component proof must consume the very bytes this reader authenticates,
+    // not a later reread of the same potentially changed inode.
+    let manifest = read_checked_seal_manifest_for_proof(&mut reader, check);
 
     if let Some(error) = reader.failure.take() {
         return Err(error);
     }
-    copied.map_err(|error| GraphDbError::Corrupt {
-        message: format!("sealed code generation checked read failed: {error}"),
-    })?;
-    reader.finish(path, &opened_metadata, admitted_len, expected_digest)
+    let manifest = manifest?;
+    let file = reader.finish(path, &opened_metadata, admitted_len, expected_digest)?;
+    Ok((file, manifest))
 }
 
 #[tracing::instrument(
@@ -1084,23 +1209,26 @@ fn verify_checked_seal_bundle(
     )
 }
 
-fn verify_checked_seal_bundle_with_evidence_barrier(
-    path: &std::path::Path,
-    segments_root: &std::path::Path,
-    expected_digest: &str,
-    verified: &VerifiedSealedSegmentsV1,
+/// Consume one forward-only stream, retaining a partitioned manifest for
+/// component proof. Other revisions still drain through the checked reader
+/// so their complete bytes are hashed without materializing the whole seal.
+fn read_checked_seal_manifest_for_proof<R: Read>(
+    file: &mut R,
     check: &dyn Fn() -> Result<(), GraphDbError>,
-    evidence_barrier: impl FnOnce(),
-) -> Result<(), GraphDbError> {
-    let mut file = verify_checked_seal(path, expected_digest, check)?;
-    let mut prefix = vec![0_u8; SEAL_READ_CHECK_BYTES];
+) -> Result<Option<Vec<u8>>, GraphDbError> {
+    // A successful file read may be short. Consume the entire bounded prefix
+    // so a partial read cannot make a new-format seal bypass component proof.
+    let mut prefix = Vec::new();
     let read = file
-        .seek(SeekFrom::Start(0))
-        .and_then(|_| file.read(&mut prefix))
-        .map_err(|error| GraphDbError::Corrupt {
-            message: format!("sealed generation manifest prefix read failed: {error}"),
-        })?;
-    prefix.truncate(read);
+        .by_ref()
+        .take(SEAL_READ_CHECK_BYTES as u64)
+        .read_to_end(&mut prefix);
+    // A scanned manifest read can finish after the deadline, even on I/O error.
+    // Prefer that typed interruption to a misleading corruption result.
+    (check)()?;
+    read.map_err(|error| GraphDbError::Corrupt {
+        message: format!("sealed generation manifest prefix read failed: {error}"),
+    })?;
     let revision_key = b"\"format_revision\":";
     let revision = prefix
         .windows(revision_key.len())
@@ -1116,15 +1244,32 @@ fn verify_checked_seal_bundle_with_evidence_barrier(
                 .parse::<u32>()
                 .ok()
         });
-    if revision != Some(tracedecay_code_index::production::SEALED_GENERATION_FORMAT_REVISION_V1) {
-        return (check)();
-    }
-    let mut manifest = Vec::new();
-    file.seek(SeekFrom::Start(0))
-        .and_then(|_| file.read_to_end(&mut manifest))
-        .map_err(|error| GraphDbError::Corrupt {
-            message: format!("sealed generation manifest read failed: {error}"),
-        })?;
+    let partitioned =
+        revision == Some(tracedecay_code_index::production::SEALED_GENERATION_FORMAT_REVISION_V1);
+    let read = if partitioned {
+        file.read_to_end(&mut prefix).map(|_| ())
+    } else {
+        std::io::copy(file, &mut std::io::sink()).map(|_| ())
+    };
+    (check)()?;
+    read.map_err(|error| GraphDbError::Corrupt {
+        message: format!("sealed generation manifest read failed: {error}"),
+    })?;
+    Ok(partitioned.then_some(prefix))
+}
+
+fn verify_checked_seal_bundle_with_evidence_barrier(
+    path: &std::path::Path,
+    segments_root: &std::path::Path,
+    expected_digest: &str,
+    verified: &VerifiedSealedSegmentsV1,
+    check: &dyn Fn() -> Result<(), GraphDbError>,
+    evidence_barrier: impl FnOnce(),
+) -> Result<(), GraphDbError> {
+    let (file, manifest) = verify_checked_seal(path, expected_digest, check)?;
+    let Some(manifest) = manifest else {
+        return Ok(());
+    };
     let mut pinned_evidence = None;
     let mut evidence_barrier = Some(evidence_barrier);
     let mut interruption = None;
@@ -1137,6 +1282,8 @@ fn verify_checked_seal_bundle_with_evidence_barrier(
                 .is_ok_and(|path| proof.borrow_mut().already_verified(digest, expected_size, &path))
         },
         |request, buffer| {
+            // Failed pre-I/O checks cannot expose a prior verified component.
+            buffer.clear();
             if let Err(error) = (check)() {
                 if matches!(error, GraphDbError::Cancelled | GraphDbError::DeadlineExceeded) {
                     interruption = Some(error.clone());
@@ -1147,39 +1294,58 @@ fn verify_checked_seal_bundle_with_evidence_barrier(
                     ),
                 );
             }
-            match request {
-                tracedecay_code_index::production::SealedGenerationSegmentReadV1::Whole {
-                    digest,
-                    size_bytes,
-                } => {
-                    let fingerprint = read_fingerprinted_segment(
-                        &segment_path(segments_root, digest)?,
+            let read = (|| -> Result<(), CodeIndexProductionErrorV1> {
+                match request {
+                    tracedecay_code_index::production::SealedGenerationSegmentReadV1::Whole {
+                        digest,
                         size_bytes,
-                        buffer,
-                    )?;
-                    proof.borrow_mut().hashed(digest, fingerprint);
-                    Ok(())
-                }
-                tracedecay_code_index::production::SealedGenerationSegmentReadV1::Range {
-                    ..
-                } => {
-                    if pinned_evidence.is_none() {
-                        pinned_evidence = Some(open_partitioned_segment(segments_root, request)?);
-                        if let Some(barrier) = evidence_barrier.take() {
-                            barrier();
-                        }
+                    } => {
+                        let fingerprint = read_fingerprinted_segment(
+                            &segment_path(segments_root, digest)?,
+                            size_bytes,
+                            buffer,
+                        )?;
+                        proof.borrow_mut().hashed(digest, fingerprint);
+                        Ok(())
                     }
-                    read_pinned_partitioned_segment(
-                        pinned_evidence.as_mut().ok_or_else(|| {
-                            tracedecay_code_index::production::CodeIndexProductionErrorV1::Contract(
-                                "sealed generation evidence handle was not pinned".to_owned(),
-                            )
-                        })?,
-                        request,
-                        buffer,
-                    )
+                    tracedecay_code_index::production::SealedGenerationSegmentReadV1::Range {
+                        ..
+                    } => {
+                        if pinned_evidence.is_none() {
+                            let roots = [segments_root.to_path_buf()];
+                            let (root, path_metadata) =
+                                select_partitioned_segment_root(&roots, request)?;
+                            pinned_evidence =
+                                Some(open_partitioned_segment(root, &path_metadata, request, || {})?);
+                            if let Some(barrier) = evidence_barrier.take() {
+                                barrier();
+                            }
+                        }
+                        read_pinned_partitioned_segment(
+                            pinned_evidence.as_mut().ok_or_else(|| {
+                                tracedecay_code_index::production::CodeIndexProductionErrorV1::Contract(
+                                    "sealed generation evidence handle was not pinned".to_owned(),
+                                )
+                            })?,
+                            request,
+                            buffer,
+                        )
+                    }
                 }
+            })();
+            // A scanned file open/read may finish after the caller's deadline,
+            // including when its own I/O fails. Preserve the typed interruption.
+            if let Err(error) = (check)() {
+                buffer.clear();
+                if matches!(
+                    error,
+                    GraphDbError::Cancelled | GraphDbError::DeadlineExceeded
+                ) {
+                    interruption = Some(error.clone());
+                }
+                return Err(CodeIndexProductionErrorV1::Contract(error.to_string()));
             }
+            read
         },
     );
     if let Some(interruption) = interruption {
@@ -1526,7 +1692,8 @@ fn classify_sealed_projection_build_error(error: CodeGraphProjectionError) -> Gr
 
 #[cfg(test)]
 mod tests {
-    use std::io::{Seek, SeekFrom, Write};
+    use std::cell::Cell;
+    use std::io::{Read, Seek, SeekFrom, Write};
     use std::path::Path;
     use std::process::Command;
     use std::sync::Arc;
@@ -1535,7 +1702,9 @@ mod tests {
     use sha2::{Digest, Sha256};
     use tempfile::TempDir;
     use tracedecay_code_index::graph_projection::build_sealed_code_graph_rows;
-    use tracedecay_code_index::production::SealedGenerationSegmentReadV1;
+    use tracedecay_code_index::production::{
+        CodeIndexProductionErrorV1, SealedGenerationSegmentReadV1,
+    };
     use tracedecay_code_index_retention::code_index_generations::{
         DurablePublicationPointerV1, acquire_code_generation_store_lock,
         code_generation_segments_root,
@@ -1557,12 +1726,211 @@ mod tests {
         DaemonCodeGraphManifestProviderV1, SEAL_READ_CHECK_BYTES, SEGMENT_OPENS, SealRoutes,
         VerifiedSealedSegmentsV1, open_seal_from_roots, read_verified_seal_manifest,
         spill_sealed_generation_graph_from_roots, validate_sealed_generation_metadata,
-        verify_checked_seal, verify_checked_seal_bundle_with_evidence_barrier,
+        verify_checked_seal, verify_checked_seal_bundle,
+        verify_checked_seal_bundle_with_evidence_barrier,
         verify_sealed_generation_source_from_roots, with_verified_segments,
     };
     use tracedecay_code_index_runtime::code_index_scheduler::{
         CodeIndexWorktreeSchedulerV1, SharedCodeIndexBytePoolV1, scoped_code_index_store_root,
     };
+
+    #[test]
+    fn checked_seal_reader_refuses_late_interruption_after_nonzero_file_read() {
+        let temporary = TempDir::new().expect("seal reader fixture");
+        let path = temporary.path().join("generation.json");
+        let expected = b"{\"format_revision\":1,\"pages\":[1]}";
+        std::fs::write(&path, expected).expect("write real sealed bytes");
+
+        for interruption in [GraphDbError::Cancelled, GraphDbError::DeadlineExceeded] {
+            let probes = Cell::new(0_usize);
+            let check = || {
+                let next = probes.get() + 1;
+                probes.set(next);
+                if next == 2 {
+                    Err(interruption.clone())
+                } else {
+                    Ok(())
+                }
+            };
+            let mut reader = super::CheckedSealReader {
+                reader: std::io::BufReader::with_capacity(
+                    SEAL_READ_CHECK_BYTES,
+                    std::fs::File::open(&path).expect("open sealed bytes"),
+                ),
+                check: &check,
+                bytes_read: 0,
+                digest: Sha256::new(),
+                failure: None,
+            };
+            let mut output = vec![0xa5; expected.len()];
+            assert!(
+                reader.read(&mut output).is_err(),
+                "interrupted read cannot return verified bytes"
+            );
+            assert_eq!(
+                reader
+                    .reader
+                    .stream_position()
+                    .expect("actual file position"),
+                expected.len() as u64,
+                "the late probe must occur after real nonempty file I/O"
+            );
+            assert_eq!(probes.get(), 2, "one pre-read and one post-read probe");
+            assert_eq!(reader.bytes_read, 0, "interrupted bytes are not hashed");
+            assert!(
+                output.iter().all(|byte| *byte == 0),
+                "interrupted data must not escape through the caller buffer"
+            );
+            assert!(matches!(
+                (&reader.failure, &interruption),
+                (Some(GraphDbError::Cancelled), GraphDbError::Cancelled)
+                    | (
+                        Some(GraphDbError::DeadlineExceeded),
+                        GraphDbError::DeadlineExceeded
+                    )
+            ));
+        }
+
+        let check = || Ok(());
+        let mut reader = super::CheckedSealReader {
+            reader: std::io::BufReader::with_capacity(
+                SEAL_READ_CHECK_BYTES,
+                std::fs::File::open(&path).expect("reopen sealed bytes"),
+            ),
+            check: &check,
+            bytes_read: 0,
+            digest: Sha256::new(),
+            failure: None,
+        };
+        let mut output = vec![0; expected.len()];
+        assert_eq!(
+            reader.read(&mut output).expect("uninterrupted file read"),
+            expected.len()
+        );
+        assert_eq!(output, expected);
+        assert_eq!(reader.bytes_read, expected.len() as u64);
+    }
+
+    #[test]
+    fn checked_seal_finish_preserves_deadline_after_final_file_and_path_io() {
+        let temporary = TempDir::new().unwrap();
+        let path = temporary.path().join("generation.json");
+        let expected = b"real nonempty sealed generation for final identity checks";
+        let digest = hex::encode(Sha256::digest(expected));
+        std::fs::write(&path, expected).unwrap();
+
+        // The stream is already authenticated. Expiry during the final
+        // handle-metadata or pathname witness must not return a verified seal.
+        for (late_probe, interruption) in [
+            (2, GraphDbError::Cancelled),
+            (3, GraphDbError::DeadlineExceeded),
+        ] {
+            let finishing = Cell::new(false);
+            let finish_checks = Cell::new(0_usize);
+            let check = || {
+                if finishing.get() {
+                    let next = finish_checks.get() + 1;
+                    finish_checks.set(next);
+                    if next == 2 && late_probe == 3 && cfg!(unix) {
+                        // Retire the pathname after the handle metadata probe.
+                        // A deadline at the path recheck outranks supersession.
+                        std::fs::remove_file(&path).unwrap();
+                    }
+                    if next == late_probe {
+                        return Err(interruption.clone());
+                    }
+                }
+                Ok(())
+            };
+            let (mut reader, opened_metadata, admitted_len) =
+                super::open_checked_seal_reader(&path, &check).unwrap();
+            let mut actual = Vec::new();
+            reader.read_to_end(&mut actual).unwrap();
+            assert_eq!(actual, expected, "finish must follow real nonempty I/O");
+            assert_eq!(reader.bytes_read, admitted_len);
+
+            finishing.set(true);
+            assert_eq!(
+                reader
+                    .finish(&path, &opened_metadata, admitted_len, &digest)
+                    .unwrap_err(),
+                interruption
+            );
+            assert_eq!(
+                finish_checks.get(),
+                late_probe,
+                "the interruption must be observed after final filesystem I/O"
+            );
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn checked_seal_open_preserves_deadline_after_windows_identity_io() {
+        let temporary = TempDir::new().expect("Windows seal identity fixture");
+        let path = temporary.path().join("generation.json");
+        std::fs::write(&path, b"actual nonempty seal").expect("create real seal file");
+
+        // The fourth probe belongs after the additional Windows pathname
+        // handle check. On the predecessor that operation has no post-I/O
+        // check, so this returns a seemingly admitted reader instead.
+        let probes = Cell::new(0_usize);
+        let check = || {
+            let next = probes.get() + 1;
+            probes.set(next);
+            if next == 4 {
+                Err(GraphDbError::DeadlineExceeded)
+            } else {
+                Ok(())
+            }
+        };
+        assert!(matches!(
+            super::open_checked_seal_reader(&path, &check),
+            Err(GraphDbError::DeadlineExceeded)
+        ));
+        assert_eq!(probes.get(), 4);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn checked_seal_reader_preserves_late_deadline_after_real_io_failure() {
+        let temporary = TempDir::new().expect("failed read fixture");
+        let mut direct = std::fs::File::open(temporary.path()).expect("open directory handle");
+        assert!(
+            direct.read(&mut [0_u8; 1]).is_err(),
+            "a directory read must actually fail on this platform"
+        );
+
+        let probes = Cell::new(0_usize);
+        let check = || {
+            let next = probes.get() + 1;
+            probes.set(next);
+            if next == 2 {
+                Err(GraphDbError::DeadlineExceeded)
+            } else {
+                Ok(())
+            }
+        };
+        let mut reader = super::CheckedSealReader {
+            reader: std::io::BufReader::with_capacity(
+                SEAL_READ_CHECK_BYTES,
+                std::fs::File::open(temporary.path()).expect("open second directory handle"),
+            ),
+            check: &check,
+            bytes_read: 0,
+            digest: Sha256::new(),
+            failure: None,
+        };
+        let mut output = [0xa5; 8];
+        assert!(reader.read(&mut output).is_err());
+        assert_eq!(probes.get(), 2, "the failure must be followed by a probe");
+        assert!(matches!(
+            reader.failure,
+            Some(GraphDbError::DeadlineExceeded)
+        ));
+        assert_eq!(output, [0; 8], "failed reads must expose no stale bytes");
+        assert_eq!(reader.bytes_read, 0);
+    }
 
     /// A fresh row spill for `owner`'s projection, removed with the spill.
     fn spill_for(owner: &GraphProjectionIdentityV1) -> GraphGenerationRowSpill {
@@ -1713,7 +2081,7 @@ mod tests {
                 branch_generations.clone(),
                 branch_replay.clone(),
             )
-            .expect("a worktree route under the same project shard is not a conflict");
+            .unwrap();
 
         // Neither route holds the seal: the shard abstains rather than claiming
         // corruption.
@@ -1796,6 +2164,48 @@ mod tests {
     }
 
     #[test]
+    fn checked_seal_open_preserves_interruption_after_metadata_io() {
+        let temporary = TempDir::new().unwrap();
+        let directory = temporary.path().join("sealed-directory");
+        std::fs::create_dir(&directory).unwrap();
+        std::fs::write(
+            directory.join("nonempty-evidence"),
+            b"real filesystem evidence",
+        )
+        .unwrap();
+        let missing = temporary.path().join("absent-seal");
+        let digest = hex::encode(Sha256::digest(b"real filesystem evidence"));
+
+        // Without interruption, both actual filesystem failures retain
+        // their existing classification.
+        assert!(matches!(
+            verify_checked_seal(&directory, &digest, &|| Ok(())),
+            Err(GraphDbError::Corrupt { .. })
+        ));
+        assert!(matches!(
+            verify_checked_seal(&missing, &digest, &|| Ok(())),
+            Err(GraphDbError::Unavailable { .. })
+        ));
+
+        for (path, interruption) in [
+            (&directory, GraphDbError::Cancelled),
+            (&missing, GraphDbError::DeadlineExceeded),
+        ] {
+            let probes = Cell::new(0_usize);
+            let result = verify_checked_seal(path, &digest, &|| {
+                probes.set(probes.get() + 1);
+                Err(interruption.clone())
+            });
+            assert_eq!(result.unwrap_err(), interruption);
+            assert_eq!(
+                probes.get(),
+                1,
+                "interruption must follow an actual pathname metadata operation"
+            );
+        }
+    }
+
+    #[test]
     fn sealed_generation_read_rejects_same_length_mutation() {
         let temp = TempDir::new().unwrap();
         let bytes = vec![b'a'; SEAL_READ_CHECK_BYTES * 2];
@@ -1805,7 +2215,9 @@ mod tests {
         let checks = AtomicUsize::new(0);
 
         let error = verify_checked_seal(&path, &digest, &|| {
-            if checks.fetch_add(1, Ordering::SeqCst) == 1 {
+            // Change the second chunk after the first real checked read,
+            // not during the new metadata/open admission probes.
+            if checks.fetch_add(1, Ordering::SeqCst) == 4 {
                 let mut file = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
                 file.seek(SeekFrom::Start(SEAL_READ_CHECK_BYTES as u64))
                     .unwrap();
@@ -1830,7 +2242,8 @@ mod tests {
 
         assert_eq!(
             verify_checked_seal(&path, &digest, &|| {
-                if checks.fetch_add(1, Ordering::SeqCst) >= 2 {
+                // Expire after the first completed nonempty file read.
+                if checks.fetch_add(1, Ordering::SeqCst) >= 4 {
                     Err(GraphDbError::DeadlineExceeded)
                 } else {
                     Ok(())
@@ -1839,6 +2252,122 @@ mod tests {
             .unwrap_err(),
             GraphDbError::DeadlineExceeded
         );
+    }
+
+    #[test]
+    fn sealed_manifest_metadata_denial_preserves_late_interruption() {
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join("not-a-sealed-file");
+        std::fs::create_dir(&path).unwrap();
+        std::fs::write(path.join("nonempty-evidence"), b"real directory contents").unwrap();
+        let digest = hex::encode(Sha256::digest(b"real directory contents"));
+
+        // A directory cannot impersonate a regular sealed generation.
+        assert!(read_verified_seal_manifest(&path, &digest, &|| Ok(())).is_err());
+        for interruption in [GraphDbError::Cancelled, GraphDbError::DeadlineExceeded] {
+            let probes = Cell::new(0_usize);
+            let result = read_verified_seal_manifest(&path, &digest, &|| {
+                let next = probes.get() + 1;
+                probes.set(next);
+                if next == 2 {
+                    Err(interruption.clone())
+                } else {
+                    Ok(())
+                }
+            });
+            assert_eq!(result.unwrap_err(), interruption);
+            assert_eq!(
+                probes.get(),
+                2,
+                "a real metadata probe must precede typed interruption"
+            );
+        }
+    }
+
+    #[test]
+    fn sealed_manifest_read_preserves_late_interruption_over_corrupt_bytes() {
+        let temp = TempDir::new().unwrap();
+        let bytes = b"nonempty canonical seal manifest payload";
+        let valid_digest = hex::encode(Sha256::digest(bytes));
+        let wrong_digest = hex::encode(Sha256::digest(b"a different seal payload"));
+        let path = temp.path().join("generation.json");
+        std::fs::write(&path, bytes).unwrap();
+
+        // The real file read succeeds with its exact digest, while identical
+        // I/O with a wrong manifest identity is still rejected as corruption.
+        assert_eq!(
+            read_verified_seal_manifest(&path, &valid_digest, &|| Ok(())).unwrap(),
+            bytes
+        );
+        assert!(matches!(
+            read_verified_seal_manifest(&path, &wrong_digest, &|| Ok(())),
+            Err(GraphDbError::Corrupt { .. })
+        ));
+
+        for interruption in [GraphDbError::Cancelled, GraphDbError::DeadlineExceeded] {
+            let probes = AtomicUsize::new(0);
+            let error = read_verified_seal_manifest(&path, &wrong_digest, &|| {
+                if probes.fetch_add(1, Ordering::SeqCst) == 4 {
+                    Err(interruption.clone())
+                } else {
+                    Ok(())
+                }
+            })
+            .unwrap_err();
+            assert_eq!(error, interruption);
+            assert_eq!(
+                probes.load(Ordering::SeqCst),
+                5,
+                "a nonzero real manifest read must finish before interruption is reported",
+            );
+        }
+    }
+
+    #[test]
+    fn retained_seal_fallback_preserves_late_interruption_after_real_reads() {
+        let temp = TempDir::new().unwrap();
+        let canonical = temp.path().join("canonical-seal");
+        let pool = temp.path().join("retained-seal");
+        let expected = b"nonempty retained seal bytes";
+        let digest = hex::encode(Sha256::digest(expected));
+        std::fs::write(&canonical, b"corrupt canonical bytes").unwrap();
+        std::fs::write(&pool, expected).unwrap();
+
+        // Prove that fallback is otherwise usable: the canonical mismatch
+        // alone must not prevent an intact retained copy from being read.
+        let recovered = super::with_verified_seal_from_roots(
+            &canonical,
+            &pool,
+            &digest,
+            &|| Ok(()),
+            read_verified_seal_manifest,
+        )
+        .unwrap();
+        assert_eq!(recovered.as_slice(), &expected[..]);
+
+        for interruption in [GraphDbError::Cancelled, GraphDbError::DeadlineExceeded] {
+            let probes = AtomicUsize::new(0);
+            let error = super::with_verified_seal_from_roots(
+                &canonical,
+                &pool,
+                &digest,
+                &|| {
+                    if probes.fetch_add(1, Ordering::SeqCst) >= 9 {
+                        Err(interruption.clone())
+                    } else {
+                        Ok(())
+                    }
+                },
+                read_verified_seal_manifest,
+            )
+            .unwrap_err();
+            assert_eq!(error, interruption);
+            assert_eq!(
+                probes.load(Ordering::SeqCst),
+                10,
+                "the retained copy must complete its real read before the late interruption",
+            );
+        }
     }
 
     #[test]
@@ -2275,7 +2804,7 @@ mod tests {
             let checks = AtomicUsize::new(0);
             assert_eq!(
                 read_after_unlink(&|| {
-                    if checks.fetch_add(1, Ordering::SeqCst) == 0 {
+                    if checks.fetch_add(1, Ordering::SeqCst) < 2 {
                         Ok(())
                     } else {
                         Err(interruption.clone())
@@ -2341,6 +2870,609 @@ mod tests {
             .unwrap_err(),
             GraphDbError::SealSuperseded
         );
+    }
+
+    #[test]
+    fn graph_segment_pass_preserves_first_existing_route_identity() {
+        let first = TempDir::new().unwrap();
+        let second = TempDir::new().unwrap();
+        let bytes = b"sealed graph page from a retained route";
+        let digest = ManifestDigest::from_sha256_bytes(&Sha256::digest(bytes)).unwrap();
+        let filename = format!(
+            "segment-{}.json",
+            sha256_hex_suffix(digest.as_str()).unwrap()
+        );
+        std::fs::write(second.path().join(&filename), bytes).unwrap();
+        let roots = vec![first.path().to_path_buf(), second.path().to_path_buf()];
+        let request = SealedGenerationSegmentReadV1::Whole {
+            digest: &digest,
+            size_bytes: bytes.len() as u64,
+        };
+        SEGMENT_OPENS.with(|opens| opens.set(0));
+        let mut pass = super::GraphSegmentReadPassV1::new(&roots);
+        let mut decoded = Vec::new();
+        pass.read(request, &mut decoded).unwrap();
+        assert_eq!(decoded, bytes);
+        assert_eq!(pass.open_attempts, 1);
+        assert_eq!(SEGMENT_OPENS.with(|opens| opens.get()), 1);
+        assert!(pass.open_wall_time > std::time::Duration::ZERO);
+
+        // A non-file at the first existing route is corrupt, not a reason
+        // to silently fall through to a later apparently valid segment.
+        std::fs::create_dir(first.path().join(&filename)).unwrap();
+        SEGMENT_OPENS.with(|opens| opens.set(0));
+        let mut fresh = super::GraphSegmentReadPassV1::new(&roots);
+        assert!(matches!(
+            fresh.read(request, &mut Vec::new()),
+            Err(CodeIndexProductionErrorV1::Contract(_))
+        ));
+        assert_eq!(SEGMENT_OPENS.with(|opens| opens.get()), 0);
+        assert_eq!(
+            fresh.open_attempts, 0,
+            "invalid pathname must not count as an open"
+        );
+
+        // A valid pathname with a mismatched manifest extent must also stop
+        // before File::open, without inflating the reported open count.
+        let roots = vec![second.path().to_path_buf()];
+        let mut wrong_extent = super::GraphSegmentReadPassV1::new(&roots);
+        let mismatch = SealedGenerationSegmentReadV1::Whole {
+            digest: &digest,
+            size_bytes: bytes.len() as u64 + 1,
+        };
+        assert!(matches!(
+            wrong_extent.read(mismatch, &mut Vec::new()),
+            Err(CodeIndexProductionErrorV1::Contract(_))
+        ));
+        assert_eq!(wrong_extent.open_attempts, 0);
+        assert_eq!(SEGMENT_OPENS.with(|opens| opens.get()), 0);
+    }
+
+    #[test]
+    fn sealed_proof_manifest_reads_preserve_late_interruption_after_real_io() {
+        let fixture = partitioned_seal_fixture("proof-manifest-late-deadline");
+        let expected = std::fs::read(&fixture.pool_manifest).unwrap();
+        assert!(!expected.is_empty());
+        let mut file = std::fs::File::open(&fixture.pool_manifest).unwrap();
+        assert_eq!(
+            super::read_checked_seal_manifest_for_proof(&mut file, &|| Ok(()))
+                .unwrap()
+                .unwrap(),
+            expected
+        );
+
+        for interruption in [GraphDbError::Cancelled, GraphDbError::DeadlineExceeded] {
+            for late_probe in [0, 1] {
+                let mut file = std::fs::File::open(&fixture.pool_manifest).unwrap();
+                let probes = AtomicUsize::new(0);
+                let result = super::read_checked_seal_manifest_for_proof(&mut file, &|| {
+                    if probes.fetch_add(1, Ordering::SeqCst) == late_probe {
+                        Err(interruption.clone())
+                    } else {
+                        Ok(())
+                    }
+                });
+                assert_eq!(result.unwrap_err(), interruption);
+                assert_eq!(probes.load(Ordering::SeqCst), late_probe + 1);
+                let actual_bytes = file.stream_position().unwrap();
+                assert!(
+                    actual_bytes > 0,
+                    "interruption must follow actual manifest I/O"
+                );
+                if late_probe == 0 {
+                    assert!(actual_bytes <= SEAL_READ_CHECK_BYTES as u64);
+                } else {
+                    assert_eq!(actual_bytes, expected.len() as u64);
+                }
+            }
+        }
+    }
+
+    /// Bound each individual OS read while still obtaining bytes from a real file.
+    /// The test proves that short successful reads cannot skip seal proof.
+    struct ThreeByteFileReader {
+        file: std::fs::File,
+        nonempty_reads: usize,
+        bytes_read: usize,
+    }
+
+    impl Read for ThreeByteFileReader {
+        fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+            let limit = buffer.len().min(3);
+            let read = self.file.read(&mut buffer[..limit])?;
+            if read != 0 {
+                self.nonempty_reads += 1;
+            }
+            self.bytes_read += read;
+            Ok(read)
+        }
+    }
+
+    impl Seek for ThreeByteFileReader {
+        fn seek(&mut self, position: SeekFrom) -> std::io::Result<u64> {
+            self.file.seek(position)
+        }
+    }
+
+    #[test]
+    fn sealed_proof_manifest_reads_all_short_chunks_from_real_file() {
+        let fixture = partitioned_seal_fixture("proof-manifest-short-reads");
+        let expected = std::fs::read(&fixture.pool_manifest).unwrap();
+        assert!(expected.len() > 3, "the manifest must need multiple reads");
+        let mut file = ThreeByteFileReader {
+            file: std::fs::File::open(&fixture.pool_manifest).unwrap(),
+            nonempty_reads: 0,
+            bytes_read: 0,
+        };
+        let proven = super::read_checked_seal_manifest_for_proof(&mut file, &|| Ok(()))
+            .unwrap()
+            .expect("a short read must not skip the sealed component proof");
+        assert_eq!(
+            proven, expected,
+            "the entire manifest must remain byte-exact"
+        );
+        assert!(
+            file.nonempty_reads > 1,
+            "the fixture must use multiple actual file reads"
+        );
+        assert_eq!(file.file.stream_position().unwrap(), expected.len() as u64);
+        assert_eq!(
+            file.bytes_read,
+            expected.len(),
+            "proof must consume each authenticated byte once without rereading the prefix"
+        );
+    }
+
+    #[test]
+    fn sealed_proof_authenticates_materialized_bytes_and_unretained_tail() {
+        let temporary = TempDir::new().unwrap();
+        for partitioned in [true, false] {
+            let mut bytes = if partitioned {
+                format!(
+                    "{{\"format_revision\":{},\"payload\":\"",
+                    tracedecay_code_index::production::SEALED_GENERATION_FORMAT_REVISION_V1
+                )
+                .into_bytes()
+            } else {
+                b"non-partitioned sealed payload\n".to_vec()
+            };
+            bytes.resize(SEAL_READ_CHECK_BYTES * 2 + 17, b'x');
+            if partitioned {
+                bytes.extend_from_slice(b"\"}");
+            }
+            let path = temporary.path().join(format!("seal-{partitioned}.json"));
+            std::fs::write(&path, &bytes).unwrap();
+            let digest = hex::encode(Sha256::digest(&bytes));
+            let wrong_digest = hex::encode(Sha256::digest(b"different sealed bytes"));
+            let (mut file, manifest) = verify_checked_seal(&path, &digest, &|| Ok(())).unwrap();
+            assert_eq!(manifest.as_deref(), partitioned.then_some(bytes.as_slice()));
+            assert_eq!(file.stream_position().unwrap(), bytes.len() as u64);
+            drop(file);
+            assert!(matches!(
+                verify_checked_seal(&path, &wrong_digest, &|| Ok(())),
+                Err(GraphDbError::Corrupt { .. })
+            ));
+
+            // The tail beyond the bounded revision probe is authenticated even
+            // when the caller does not retain the manifest for component proof.
+            let mut changed = bytes.clone();
+            changed[SEAL_READ_CHECK_BYTES + 1] ^= 1;
+            std::fs::write(&path, &changed).unwrap();
+            assert!(matches!(
+                verify_checked_seal(&path, &digest, &|| Ok(())),
+                Err(GraphDbError::Corrupt { .. })
+            ));
+            std::fs::write(&path, &bytes).unwrap();
+            let (_, recovered) = verify_checked_seal(&path, &digest, &|| Ok(())).unwrap();
+            assert_eq!(
+                recovered.as_deref(),
+                partitioned.then_some(bytes.as_slice())
+            );
+        }
+    }
+
+    #[test]
+    fn graph_segment_interruption_clears_last_verified_page_without_reopen() {
+        let temporary = TempDir::new().unwrap();
+        let bytes = b"real authenticated segment data";
+        let digest = ManifestDigest::from_sha256_bytes(&Sha256::digest(bytes)).unwrap();
+        let path = temporary.path().join(format!(
+            "segment-{}.json",
+            sha256_hex_suffix(digest.as_str()).unwrap()
+        ));
+        std::fs::write(&path, bytes).unwrap();
+        let routes = SealRoutes {
+            seal_paths: vec![path],
+            segment_roots: vec![temporary.path().to_path_buf()],
+        };
+        let request = SealedGenerationSegmentReadV1::Whole {
+            digest: &digest,
+            size_bytes: bytes.len() as u64,
+        };
+        let checks = AtomicUsize::new(0);
+        let cancelled = AtomicBool::new(false);
+        SEGMENT_OPENS.with(|opens| opens.set(0));
+        let result = with_verified_segments(
+            &digest,
+            &routes,
+            &|| {
+                checks.fetch_add(1, Ordering::SeqCst);
+                if cancelled.load(Ordering::SeqCst) {
+                    Err(GraphDbError::Cancelled)
+                } else {
+                    Ok(())
+                }
+            },
+            |read| {
+                let mut buffer = Vec::new();
+                read(request, &mut buffer)?;
+                assert_eq!(buffer, bytes);
+                cancelled.store(true, Ordering::SeqCst);
+                assert!(matches!(
+                    read(request, &mut buffer),
+                    Err(CodeIndexProductionErrorV1::Contract(_))
+                ));
+                assert!(
+                    buffer.is_empty(),
+                    "interrupted graph reads cannot expose prior page bytes"
+                );
+                Ok(())
+            },
+        );
+        assert_eq!(result.unwrap_err(), GraphDbError::Cancelled);
+        assert_eq!(checks.load(Ordering::SeqCst), 3);
+        assert_eq!(SEGMENT_OPENS.with(|opens| opens.get()), 1);
+    }
+
+    #[test]
+    fn graph_segment_pass_rechecks_budget_after_completed_projection() {
+        let temporary = TempDir::new().unwrap();
+        let bytes = b"real sealed graph page before final projection work";
+        let digest = ManifestDigest::from_sha256_bytes(&Sha256::digest(bytes)).unwrap();
+        let path = temporary.path().join(format!(
+            "segment-{}.json",
+            sha256_hex_suffix(digest.as_str()).unwrap()
+        ));
+        std::fs::write(&path, bytes).unwrap();
+        let routes = SealRoutes {
+            seal_paths: vec![path],
+            segment_roots: vec![temporary.path().to_path_buf()],
+        };
+        let request = SealedGenerationSegmentReadV1::Whole {
+            digest: &digest,
+            size_bytes: bytes.len() as u64,
+        };
+
+        for interruption in [GraphDbError::Cancelled, GraphDbError::DeadlineExceeded] {
+            let projection_finished = AtomicBool::new(false);
+            let checks = AtomicUsize::new(0);
+            SEGMENT_OPENS.with(|opens| opens.set(0));
+            let result = with_verified_segments(
+                &digest,
+                &routes,
+                &|| {
+                    checks.fetch_add(1, Ordering::SeqCst);
+                    if projection_finished.load(Ordering::SeqCst) {
+                        Err(interruption.clone())
+                    } else {
+                        Ok(())
+                    }
+                },
+                |read| {
+                    let mut buffer = Vec::new();
+                    read(request, &mut buffer)?;
+                    assert_eq!(buffer, bytes, "the builder must read real nonempty bytes");
+                    // Model work after the last segment I/O, including a final
+                    // graph-row spill that can outlive the publication budget.
+                    projection_finished.store(true, Ordering::SeqCst);
+                    Ok(())
+                },
+            );
+            assert_eq!(result.unwrap_err(), interruption);
+            assert_eq!(
+                checks.load(Ordering::SeqCst),
+                3,
+                "pre-read, post-read and post-projection probes must execute"
+            );
+            assert_eq!(
+                SEGMENT_OPENS.with(|opens| opens.get()),
+                1,
+                "a completed page read must not be repeated for the last probe"
+            );
+        }
+    }
+
+    #[test]
+    fn graph_segment_retirement_probe_preserves_late_interruption() {
+        let temporary = TempDir::new().unwrap();
+        let bytes = b"authenticated graph page before retirement classification";
+        let digest = ManifestDigest::from_sha256_bytes(&Sha256::digest(bytes)).unwrap();
+        let segment_path = temporary.path().join(format!(
+            "segment-{}.json",
+            sha256_hex_suffix(digest.as_str()).unwrap()
+        ));
+        std::fs::write(segment_path, bytes).unwrap();
+        let seal_path = temporary.path().join("seal");
+        let routes = SealRoutes {
+            seal_paths: vec![seal_path.clone()],
+            segment_roots: vec![temporary.path().to_path_buf()],
+        };
+        let run = |check: &dyn Fn() -> Result<(), GraphDbError>| {
+            with_verified_segments::<()>(&digest, &routes, check, |read| {
+                let mut page = Vec::new();
+                read(
+                    SealedGenerationSegmentReadV1::Whole {
+                        digest: &digest,
+                        size_bytes: bytes.len() as u64,
+                    },
+                    &mut page,
+                )?;
+                assert_eq!(page, bytes, "a real nonempty segment must be read");
+                // The builder has authenticated source bytes but rejects a
+                // graph row, forcing the final seal-name probe.
+                Err(super::SealedCodeGraphRowsError::Source(
+                    CodeIndexProductionErrorV1::Contract(
+                        "invalid graph row after sealed segment read".to_owned(),
+                    ),
+                ))
+            })
+        };
+
+        for retired in [false, true] {
+            std::fs::write(&seal_path, b"live seal").unwrap();
+            if retired {
+                std::fs::remove_file(&seal_path).unwrap();
+            }
+            SEGMENT_OPENS.with(|opens| opens.set(0));
+            let uninterrupted = run(&|| Ok(())).unwrap_err();
+            assert!(
+                matches!(
+                    (&uninterrupted, retired),
+                    (GraphDbError::Corrupt { .. }, false) | (GraphDbError::SealSuperseded, true)
+                ),
+                "unexpected retirement classification: {uninterrupted:?}"
+            );
+            assert_eq!(SEGMENT_OPENS.with(|opens| opens.get()), 1);
+
+            for interruption in [GraphDbError::Cancelled, GraphDbError::DeadlineExceeded] {
+                let checks = AtomicUsize::new(0);
+                SEGMENT_OPENS.with(|opens| opens.set(0));
+                let result = run(&|| {
+                    let count = checks.fetch_add(1, Ordering::SeqCst) + 1;
+                    if count == 4 {
+                        Err(interruption.clone())
+                    } else {
+                        Ok(())
+                    }
+                });
+                assert_eq!(result.unwrap_err(), interruption);
+                assert_eq!(
+                    checks.load(Ordering::SeqCst),
+                    4,
+                    "the final check must follow a real seal-path metadata probe"
+                );
+                assert_eq!(
+                    SEGMENT_OPENS.with(|opens| opens.get()),
+                    1,
+                    "the deadline probe must not reopen the authenticated page"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn graph_segment_pass_preserves_interruption_after_io() {
+        let temporary = TempDir::new().unwrap();
+        let bytes = b"authenticated bytes from a completed segment read";
+        let digest = ManifestDigest::from_sha256_bytes(&Sha256::digest(bytes)).unwrap();
+        let path = temporary.path().join(format!(
+            "segment-{}.json",
+            sha256_hex_suffix(digest.as_str()).unwrap()
+        ));
+        std::fs::write(&path, bytes).unwrap();
+        let routes = SealRoutes {
+            seal_paths: vec![path],
+            segment_roots: vec![temporary.path().to_path_buf()],
+        };
+        let request = SealedGenerationSegmentReadV1::Whole {
+            digest: &digest,
+            size_bytes: bytes.len() as u64,
+        };
+        for interruption in [GraphDbError::Cancelled, GraphDbError::DeadlineExceeded] {
+            let checks = AtomicUsize::new(0);
+            SEGMENT_OPENS.with(|opens| opens.set(0));
+            let result = with_verified_segments(
+                &digest,
+                &routes,
+                &|| {
+                    checks.fetch_add(1, Ordering::SeqCst);
+                    if SEGMENT_OPENS.with(|opens| opens.get()) == 0 {
+                        Ok(())
+                    } else {
+                        Err(interruption.clone())
+                    }
+                },
+                |read| {
+                    let mut buffer = b"previous page".to_vec();
+                    assert!(matches!(
+                        read(request, &mut buffer),
+                        Err(CodeIndexProductionErrorV1::Contract(_))
+                    ));
+                    assert!(buffer.is_empty(), "late segment bytes must not escape");
+                    // Even a builder that handled the source error cannot
+                    // turn an observed interruption into a successful pass.
+                    Ok(())
+                },
+            );
+            assert_eq!(result.unwrap_err(), interruption);
+            assert_eq!(checks.load(Ordering::SeqCst), 2);
+            assert_eq!(SEGMENT_OPENS.with(|opens| opens.get()), 1);
+        }
+        SEGMENT_OPENS.with(|opens| opens.set(0));
+        with_verified_segments(&digest, &routes, &|| Ok(()), |read| {
+            let mut buffer = Vec::new();
+            read(request, &mut buffer)?;
+            assert_eq!(buffer, bytes);
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(SEGMENT_OPENS.with(|opens| opens.get()), 1);
+    }
+
+    #[test]
+    fn graph_segment_failed_read_preserves_post_io_deadline() {
+        let temporary = TempDir::new().unwrap();
+        let bytes = b"authenticated segment before truncation";
+        let digest = ManifestDigest::from_sha256_bytes(&Sha256::digest(bytes)).unwrap();
+        let path = temporary.path().join(format!(
+            "segment-{}.json",
+            sha256_hex_suffix(digest.as_str()).unwrap()
+        ));
+        std::fs::write(&path, bytes).unwrap();
+        let routes = SealRoutes {
+            seal_paths: vec![path.clone()],
+            segment_roots: vec![temporary.path().to_path_buf()],
+        };
+        let request = SealedGenerationSegmentReadV1::Whole {
+            digest: &digest,
+            size_bytes: bytes.len() as u64,
+        };
+        let truncated = AtomicBool::new(false);
+        let checks_after_truncation = AtomicUsize::new(0);
+        SEGMENT_OPENS.with(|opens| opens.set(0));
+        let result = with_verified_segments(
+            &digest,
+            &routes,
+            &|| {
+                if truncated.load(Ordering::SeqCst)
+                    && checks_after_truncation.fetch_add(1, Ordering::SeqCst) > 0
+                {
+                    Err(GraphDbError::DeadlineExceeded)
+                } else {
+                    Ok(())
+                }
+            },
+            |read| {
+                let mut buffer = Vec::new();
+                read(request, &mut buffer)?;
+                assert_eq!(buffer, bytes);
+                std::fs::OpenOptions::new()
+                    .write(true)
+                    .open(&path)
+                    .unwrap()
+                    .set_len(0)
+                    .unwrap();
+                truncated.store(true, Ordering::SeqCst);
+                read(request, &mut buffer).unwrap_err();
+                assert!(buffer.is_empty());
+                Ok(())
+            },
+        );
+        assert_eq!(result.unwrap_err(), GraphDbError::DeadlineExceeded);
+        assert_eq!(checks_after_truncation.load(Ordering::SeqCst), 2);
+        assert_eq!(SEGMENT_OPENS.with(|opens| opens.get()), 1);
+    }
+
+    #[test]
+    fn graph_segment_short_read_discards_partially_filled_output() {
+        let mut reader = std::io::Cursor::new(b"short".to_vec());
+        let mut buffer = vec![b'x'; 3];
+        assert!(super::read_segment_range(&mut reader, 0, 8, &mut buffer).is_err());
+        assert!(
+            buffer.is_empty(),
+            "failed reads cannot expose partial segment bytes"
+        );
+        super::read_segment_range(&mut reader, 0, 5, &mut buffer).unwrap();
+        assert_eq!(buffer, b"short");
+    }
+
+    #[test]
+    fn graph_fingerprint_read_clears_refused_and_stale_page_output() {
+        let temporary = TempDir::new().unwrap();
+        let bytes = b"verified graph evidence segment";
+        let path = temporary.path().join("segment.json");
+        std::fs::write(&path, bytes).unwrap();
+        let mut buffer = b"old page".to_vec();
+
+        super::read_fingerprinted_segment(&path, bytes.len() as u64, &mut buffer).unwrap();
+        assert_eq!(buffer, bytes);
+        assert!(matches!(
+            super::read_fingerprinted_segment(&path, bytes.len() as u64 + 1, &mut buffer),
+            Err(CodeIndexProductionErrorV1::Contract(_))
+        ));
+        assert!(
+            buffer.is_empty(),
+            "a refused fingerprint must not return the previous verified page"
+        );
+
+        super::read_fingerprinted_segment(&path, bytes.len() as u64, &mut buffer).unwrap();
+        assert_eq!(buffer, bytes);
+        std::fs::remove_file(&path).unwrap();
+        assert!(matches!(
+            super::read_fingerprinted_segment(&path, bytes.len() as u64, &mut buffer),
+            Err(CodeIndexProductionErrorV1::Contract(_))
+        ));
+        assert!(
+            buffer.is_empty(),
+            "missing graph evidence must not return previously verified bytes"
+        );
+    }
+
+    #[test]
+    fn graph_segment_read_failure_clears_the_previous_verified_page() {
+        let temporary = TempDir::new().unwrap();
+        let bytes = b"authenticated page";
+        let digest = ManifestDigest::from_sha256_bytes(&Sha256::digest(bytes)).unwrap();
+        let filename = format!(
+            "segment-{}.json",
+            sha256_hex_suffix(digest.as_str()).unwrap()
+        );
+        std::fs::write(temporary.path().join(filename), bytes).unwrap();
+        let roots = vec![temporary.path().to_path_buf()];
+        let mut pass = super::GraphSegmentReadPassV1::new(&roots);
+        let request = SealedGenerationSegmentReadV1::Whole {
+            digest: &digest,
+            size_bytes: bytes.len() as u64,
+        };
+        let mut buffer = Vec::new();
+        pass.read(request, &mut buffer).unwrap();
+        assert_eq!(buffer, bytes);
+        assert_eq!(pass.open_attempts, 1);
+
+        // Reject an invalid range *before* reaching the retained file handle.
+        let invalid = SealedGenerationSegmentReadV1::Range {
+            digest: &digest,
+            size_bytes: bytes.len() as u64,
+            offset: bytes.len() as u64,
+            length: 1,
+        };
+        assert!(matches!(
+            pass.read(invalid, &mut buffer),
+            Err(CodeIndexProductionErrorV1::Contract(_))
+        ));
+        assert!(
+            buffer.is_empty(),
+            "a refused page cannot expose prior bytes"
+        );
+        assert_eq!(pass.open_attempts, 1);
+
+        pass.read(request, &mut buffer).unwrap();
+        assert_eq!(buffer, bytes);
+        assert!(matches!(
+            pass.read(
+                SealedGenerationSegmentReadV1::Whole {
+                    digest: &digest,
+                    size_bytes: bytes.len() as u64 + 1,
+                },
+                &mut buffer
+            ),
+            Err(CodeIndexProductionErrorV1::Contract(_))
+        ));
+        assert!(
+            buffer.is_empty(),
+            "a mismatched manifest cannot expose prior bytes"
+        );
+        assert_eq!(pass.open_attempts, 1);
     }
 
     #[test]
@@ -2438,6 +3570,22 @@ mod tests {
             .is_err(),
             "a cached handle must still reject an over-bound read"
         );
+        // An invalid manifest extent for the least-recent cached segment
+        // must not promote it or evict another valid descriptor later.
+        let (cached_digest, cached) = &segments[1];
+        let mut refused = b"prior page".to_vec();
+        assert!(matches!(
+            pass.read(
+                SealedGenerationSegmentReadV1::Whole {
+                    digest: cached_digest,
+                    size_bytes: cached.len() as u64 + 1,
+                },
+                &mut refused,
+            ),
+            Err(CodeIndexProductionErrorV1::Contract(_))
+        ));
+        assert!(refused.is_empty());
+        assert_eq!(pass.open_attempts, segments.len());
         let (oldest_digest, oldest) = &segments[0];
         let mut bytes = Vec::new();
         pass.read(
@@ -2452,6 +3600,116 @@ mod tests {
         assert_eq!(pass.open_attempts, segments.len() + 1);
         assert_eq!(pass.pinned.len(), super::MAX_GRAPH_SEGMENT_OPEN_HANDLES);
         assert_eq!(SEGMENT_OPENS.with(|opens| opens.get()), segments.len() + 1);
+        // The failed hit above must not have promoted segment 1: opening
+        // segment 0 evicts it, leaving segment 2 available without reopening.
+        let (retained_digest, retained) = &segments[2];
+        pass.read(
+            SealedGenerationSegmentReadV1::Whole {
+                digest: retained_digest,
+                size_bytes: retained.len() as u64,
+            },
+            &mut bytes,
+        )
+        .unwrap();
+        assert_eq!(bytes.as_slice(), retained.as_slice());
+        assert_eq!(pass.open_attempts, segments.len() + 1);
+        assert_eq!(SEGMENT_OPENS.with(|opens| opens.get()), segments.len() + 1);
+    }
+
+    #[test]
+    fn graph_segment_failed_cold_read_preserves_healthy_cache_and_recovers() {
+        let temporary = TempDir::new().unwrap();
+        let roots = vec![temporary.path().to_path_buf()];
+        let segments = (0..=super::MAX_GRAPH_SEGMENT_OPEN_HANDLES)
+            .map(|index| {
+                let bytes = format!("sealed cold page {index}").into_bytes();
+                let digest = ManifestDigest::from_sha256_bytes(&Sha256::digest(&bytes)).unwrap();
+                let path = temporary.path().join(format!(
+                    "segment-{}.json",
+                    sha256_hex_suffix(digest.as_str()).unwrap()
+                ));
+                std::fs::write(&path, &bytes).unwrap();
+                (digest, bytes, path)
+            })
+            .collect::<Vec<_>>();
+        let mut pass = super::GraphSegmentReadPassV1::new(&roots);
+        let mut buffer = Vec::new();
+        SEGMENT_OPENS.with(|opens| opens.set(0));
+        for (digest, bytes, _) in segments.iter().take(super::MAX_GRAPH_SEGMENT_OPEN_HANDLES) {
+            pass.read(
+                SealedGenerationSegmentReadV1::Whole {
+                    digest,
+                    size_bytes: bytes.len() as u64,
+                },
+                &mut buffer,
+            )
+            .unwrap();
+            assert_eq!(&buffer, bytes);
+        }
+        let original_lru = pass
+            .pinned
+            .iter()
+            .map(|segment| segment.digest.clone())
+            .collect::<Vec<_>>();
+        assert_eq!(original_lru.len(), super::MAX_GRAPH_SEGMENT_OPEN_HANDLES);
+        let initial_opens = pass.open_attempts;
+        assert!(initial_opens > 0);
+
+        // Open the next real file through the production cold-open path, then
+        // invalidate it before its first read. This deterministically exercises
+        // the post-open error that endpoint scanning can expose.
+        let (digest, bytes, path) = &segments[super::MAX_GRAPH_SEGMENT_OPEN_HANDLES];
+        let request = SealedGenerationSegmentReadV1::Whole {
+            digest,
+            size_bytes: bytes.len() as u64,
+        };
+        let (root, metadata) = super::select_partitioned_segment_root(&roots, request).unwrap();
+        let opened = super::open_partitioned_segment(root, &metadata, request, || {}).unwrap();
+        let opens_after_candidate = SEGMENT_OPENS.with(|opens| opens.get());
+        assert!(opens_after_candidate > initial_opens);
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(path)
+            .unwrap()
+            .set_len(0)
+            .unwrap();
+        buffer.extend_from_slice(b"stale");
+        assert!(matches!(
+            pass.read_and_pin(opened, request, &mut buffer),
+            Err(CodeIndexProductionErrorV1::Contract(_))
+        ));
+        assert!(buffer.is_empty());
+        assert_eq!(
+            pass.pinned
+                .iter()
+                .map(|segment| segment.digest.clone())
+                .collect::<Vec<_>>(),
+            original_lru,
+            "a failed first read must retain all eight healthy handles in LRU order"
+        );
+
+        let (oldest_digest, oldest_bytes, _) = &segments[0];
+        pass.read(
+            SealedGenerationSegmentReadV1::Whole {
+                digest: oldest_digest,
+                size_bytes: oldest_bytes.len() as u64,
+            },
+            &mut buffer,
+        )
+        .unwrap();
+        assert_eq!(&buffer, oldest_bytes);
+        assert_eq!(pass.open_attempts, initial_opens);
+        assert_eq!(
+            SEGMENT_OPENS.with(|opens| opens.get()),
+            opens_after_candidate
+        );
+
+        // Recovery must read the exact restored candidate, then admit it.
+        std::fs::write(path, bytes).unwrap();
+        pass.read(request, &mut buffer).unwrap();
+        assert_eq!(&buffer, bytes);
+        assert_eq!(pass.open_attempts, initial_opens + 1);
+        assert_eq!(pass.pinned.len(), super::MAX_GRAPH_SEGMENT_OPEN_HANDLES);
     }
 
     #[test]
@@ -3047,6 +4305,93 @@ mod tests {
             retired.to_string(),
             "sealed code generation was superseded while it was read; retry against the current seal"
         );
+    }
+
+    #[test]
+    fn failed_seal_evidence_read_preserves_post_io_interruption_and_recovers() {
+        for (label, interruption) in [
+            ("cancel", GraphDbError::Cancelled),
+            ("deadline", GraphDbError::DeadlineExceeded),
+        ] {
+            let fixture = partitioned_seal_fixture(&format!("verify-late-{label}"));
+            let verified = VerifiedSealedSegmentsV1::default();
+            // Prove this is a valid, nonempty production generation before
+            // injecting a real range-read failure on the next fresh proof.
+            verify_checked_seal_bundle(
+                &fixture.pool_manifest,
+                &fixture.segments_root,
+                &fixture.digest,
+                &verified,
+                &|| Ok(()),
+            )
+            .unwrap();
+            let interrupted = AtomicBool::new(false);
+            let late_checks = AtomicUsize::new(0);
+            let barriers = AtomicUsize::new(0);
+            let originals = std::cell::RefCell::new(Vec::<(std::path::PathBuf, Vec<u8>)>::new());
+            SEGMENT_OPENS.with(|opens| opens.set(0));
+            let failure = verify_checked_seal_bundle_with_evidence_barrier(
+                &fixture.pool_manifest,
+                &fixture.segments_root,
+                &fixture.digest,
+                &VerifiedSealedSegmentsV1::default(),
+                &|| {
+                    if interrupted.load(Ordering::SeqCst) {
+                        late_checks.fetch_add(1, Ordering::SeqCst);
+                        Err(interruption.clone())
+                    } else {
+                        Ok(())
+                    }
+                },
+                || {
+                    barriers.fetch_add(1, Ordering::SeqCst);
+                    // The range handle is already open. Truncate the disposable
+                    // fixture's segment files so that the read itself rejects.
+                    for entry in std::fs::read_dir(&fixture.segments_root).unwrap() {
+                        let path = entry.unwrap().path();
+                        if !path
+                            .file_name()
+                            .is_some_and(|name| name.to_string_lossy().starts_with("segment-"))
+                        {
+                            continue;
+                        }
+                        let bytes = std::fs::read(&path).unwrap();
+                        originals.borrow_mut().push((path.clone(), bytes));
+                        // Published segments can be read-only. This disposable
+                        // fixture must permit the deliberate in-place fault.
+                        let mut permissions = std::fs::metadata(&path).unwrap().permissions();
+                        #[allow(clippy::permissions_set_readonly_false)]
+                        permissions.set_readonly(false);
+                        std::fs::set_permissions(&path, permissions).unwrap();
+                        std::fs::OpenOptions::new()
+                            .write(true)
+                            .open(&path)
+                            .unwrap()
+                            .set_len(0)
+                            .unwrap();
+                    }
+                    interrupted.store(true, Ordering::SeqCst);
+                },
+            )
+            .unwrap_err();
+            assert_eq!(failure, interruption);
+            assert_eq!(barriers.load(Ordering::SeqCst), 1);
+            assert_eq!(late_checks.load(Ordering::SeqCst), 1);
+            assert!(SEGMENT_OPENS.with(|opens| opens.get()) > 0);
+            assert!(!originals.borrow().is_empty());
+            for (path, bytes) in originals.into_inner() {
+                std::fs::write(path, bytes).unwrap();
+            }
+            // An interrupted proof must not poison the original generation.
+            verify_checked_seal_bundle(
+                &fixture.pool_manifest,
+                &fixture.segments_root,
+                &fixture.digest,
+                &VerifiedSealedSegmentsV1::default(),
+                &|| Ok(()),
+            )
+            .unwrap();
+        }
     }
 
     fn verify_partitioned_with_interruption(

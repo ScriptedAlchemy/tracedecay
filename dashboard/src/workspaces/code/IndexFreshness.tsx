@@ -37,11 +37,14 @@ import { authorizationState } from '../../ui/EnvelopeTruth.tsx';
 import { StateChip } from '../../ui/StateChip.tsx';
 import { elideStart, formatCount, formatMicrosUtc } from '../../ui/format.ts';
 import {
+  CodeIndexAttemptReading,
   CodeIndexMountFailureNotice,
   codeIndexBlockedReasonLabel,
   codeIndexPhaseLabel,
   codeIndexProgressPercentage,
   formatDurationMicros,
+  hasActiveCodeIndexBuild,
+  worktreeHasActiveCodeIndexBuild,
   isCurrentOrNewerCodeIndexProgress,
 } from '../observatory/CodeIndexPipeline.tsx';
 import { formatBytes } from '../observatory/storageModel.ts';
@@ -71,6 +74,7 @@ export function useIndexFreshness() {
 }
 
 export function IndexFreshness() {
+  const currentScopeKey = useScope((state) => scopeKey(state.scope));
   const freshness = useIndexFreshness();
 
   return (
@@ -84,7 +88,7 @@ export function IndexFreshness() {
       ) : freshness.data === undefined ? (
         <p className="text-2xs text-state-unknown">no response recorded</p>
       ) : (
-        <FreshnessReading result={freshness.data} />
+        <FreshnessReading key={currentScopeKey} result={freshness.data} />
       )}
     </section>
   );
@@ -162,6 +166,7 @@ function WorktreeReading({
       {progress ? (
         <BuildProgressReading progress={progress} observedAtMicros={observedAtMicros} />
       ) : null}
+      <CodeIndexAttemptReading worktree={worktree} observedAtMicros={observedAtMicros} />
       {worktree.restore_progress ? (
         <div className="border-b border-edge-subtle pb-1.5 text-3xs leading-snug">
           <div className="flex items-baseline justify-between gap-2">
@@ -312,36 +317,45 @@ function freshnessPollIntervalMs(
 }
 
 function hasActiveBuild(result: EnvelopeResult<CodeIndexFreshnessPayloadV1> | undefined): boolean {
-  if (result?.outcome !== 'envelope') return false;
-  return result.envelope.payload.worktrees.some(worktreeHasActiveBuild);
-}
-
-function worktreeHasActiveBuild(worktree: CodeIndexWorktreeFreshnessV1): boolean {
-  const initialIndexing =
-    worktree.latest_generation_id == null && worktree.staleness_state === 'indexing';
-  if (
-    !worktree.rebuild_in_flight &&
-    worktree.staleness_state !== 'verifying' &&
-    worktree.staleness_state !== 'restoring' &&
-    !initialIndexing
-  ) {
-    return false;
-  }
-  if (worktree.parked != null && !worktree.parked.retries_on_wake) return false;
-  if (worktree.progress?.blocked_reason === 'publication_authority_corrupt') return false;
-  return true;
+  return hasActiveCodeIndexBuild(result);
 }
 
 function allActiveBuildsQuiet(
   result: EnvelopeResult<CodeIndexFreshnessPayloadV1> | undefined,
 ): boolean {
   if (result?.outcome !== 'envelope') return false;
+  // An initial loading scope may have no mounted worktree yet; it has no
+  // work clock to classify as quiet and must discover its first real mount.
+  if (result.envelope.payload.worktrees.length === 0) return false;
   const observedAt = result.envelope.time.observation_time_micros;
   return result.envelope.payload.worktrees.every((worktree) => {
-    if (!worktreeHasActiveBuild(worktree)) return true;
-    const progress = worktree.progress;
-    if (progress == null) return false;
-    return observedAt - progress.last_progress_micros >= QUIET_AFTER_SECONDS * 1_000_000;
+    if (!worktreeHasActiveCodeIndexBuild(worktree)) return true;
+    const preseal = worktree.preseal_attempt;
+    const native = worktree.native_graph_progress;
+    const presealActive = preseal?.active === true;
+    const nativeActive = native?.active === true;
+    // A prior Ready or graph-publication phase stamp is not new work from a
+    // frozen successor. Concurrent text construction can independently make
+    // real progress through durable commits, index building, and verification.
+    // The producer-owned progress epoch is advanced only for an observed
+    // boundary, not for repeated reads of the same phase.
+    const text = worktree.progress;
+    const concurrentTextWork =
+      text != null &&
+      text.progress_epoch > 0 &&
+      (text.phase === 'bulk_commit' ||
+        text.phase === 'index_build' ||
+        text.phase === 'verification');
+    const lastUpdates = [
+      ...(presealActive ? [preseal.last_progress_micros] : []),
+      ...(nativeActive ? [native.last_progress_micros] : []),
+      ...(text && ((!presealActive && !nativeActive) || concurrentTextWork)
+        ? [text.last_progress_micros]
+        : []),
+    ];
+    return lastUpdates.length > 0 && lastUpdates.every(
+      (stamp) => stamp != null && observedAt - stamp >= QUIET_AFTER_SECONDS * 1_000_000,
+    );
   });
 }
 
@@ -352,28 +366,36 @@ function useLatestBuildProgress(
     () => new Map(),
   );
   useEffect(() => {
-    if (result.outcome !== 'envelope') return;
+    if (result.outcome !== 'envelope') {
+      setLatestProgress((rendered) => rendered.size === 0 ? rendered : new Map());
+      return;
+    }
     setLatestProgress((rendered) => {
-      const next = new Map(rendered);
-      let changed = false;
+      // Only worktrees in this authoritative read may retain a cursor. If a
+      // mount disappears, its prior progress must not reappear on remount.
+      const next = new Map<string, CodeIndexBuildProgress>();
       for (const worktree of result.envelope.payload.worktrees) {
         const incoming = worktree.progress;
-        const current = next.get(worktree.worktree_root);
+        const current = rendered.get(worktree.worktree_root);
         if (!incoming) {
           if (
             current &&
-            result.envelope.domain_state === 'ready' &&
-            worktree.latest_generation_id === current.generation_id
+            worktree.latest_generation_id === current.generation_id &&
+            !(result.envelope.domain_state === 'ready' &&
+              worktree.latest_generation_id === current.generation_id)
           ) {
-            next.delete(worktree.worktree_root);
-            changed = true;
+            next.set(worktree.worktree_root, current);
           }
         } else if (!current || isCurrentOrNewerCodeIndexProgress(incoming, current)) {
           next.set(worktree.worktree_root, incoming);
-          changed = true;
+        } else {
+          next.set(worktree.worktree_root, current);
         }
       }
-      return changed ? next : rendered;
+      return next.size === rendered.size &&
+        [...next].every(([root, progress]) => rendered.get(root) === progress)
+        ? rendered
+        : next;
     });
   }, [result]);
   return latestProgress;

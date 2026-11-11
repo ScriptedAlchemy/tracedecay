@@ -1283,6 +1283,10 @@ pub enum StoreRuntimeRegistryFailure {
         operation: &'static str,
         message: String,
     },
+    // Recoverable page reclamation is not an admission or writer-authority failure.
+    CompactionDeferred {
+        message: String,
+    },
     /// Every reader was leased for the whole admission wait. Nothing failed;
     /// the same read can succeed once a reader returns.
     ReaderSaturated,
