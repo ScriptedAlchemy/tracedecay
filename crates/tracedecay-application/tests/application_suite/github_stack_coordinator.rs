@@ -4,7 +4,7 @@
 mod preflight_tests;
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::sync::Mutex;
+use std::sync::{Arc, Barrier, Mutex};
 
 use tracedecay_contracts::ResolvedScope;
 use tracedecay_domain::configuration::GitHubStackedPullRequestPolicyV1;
@@ -163,6 +163,95 @@ fn provider_source_binding(
     }
 }
 
+fn authorized(
+    coordinator: &DaemonGitHubStackCoordinatorV1,
+    exact_scope: &ResolvedScope,
+) -> GitHubStackProviderReadV1 {
+    coordinator
+        .authorize_provider_read(exact_scope)
+        .unwrap()
+        .expect("a probing registration authorizes a provider read")
+}
+
+const BASE_ADVANCE_TRANSITIONS: [StackSignalKindV1; 2] = [
+    StackSignalKindV1::StackTipDrift,
+    StackSignalKindV1::PullRequestDrift,
+];
+
+/// The provider stack after its final target and bottom layer base advanced,
+/// which opens exactly one base-advance drift interval against
+/// [`enabled_snapshot`].
+fn advanced_snapshot(exact_scope: &ResolvedScope) -> GitHubStackProviderSnapshotV1 {
+    let mut advanced = enabled_snapshot(exact_scope);
+    advanced.response_digest = digest('f');
+    advanced.final_target_commit_id = CommitId::new("commit.main.advanced").unwrap();
+    advanced.layers[0].pull_request.base_commit_id = advanced.final_target_commit_id.clone();
+    advanced
+}
+
+/// Publishes the base stack and then its advance, returning the open
+/// base-advance interval.
+fn open_base_advance(
+    coordinator: &DaemonGitHubStackCoordinatorV1,
+    exact_scope: &ResolvedScope,
+) -> GitHubStackDriftObservationV1 {
+    let provider = ProviderId::new("provider.github").unwrap();
+    coordinator
+        .observe_provider(
+            authorized(coordinator, exact_scope),
+            provider.clone(),
+            GitHubStackProviderOutcomeV1::Enabled(enabled_snapshot(exact_scope)),
+            provider_source_binding(exact_scope, true),
+            UtcMicros(1),
+        )
+        .unwrap();
+    let opened = coordinator
+        .observe_provider(
+            authorized(coordinator, exact_scope),
+            provider,
+            GitHubStackProviderOutcomeV1::Enabled(advanced_snapshot(exact_scope)),
+            provider_source_binding(exact_scope, true),
+            UtcMicros(2),
+        )
+        .unwrap();
+    assert_eq!(opened.transitions, BASE_ADVANCE_TRANSITIONS);
+    let [open] = opened.drift_observations.as_slice() else {
+        panic!("an advanced base opens exactly one interval");
+    };
+    assert_eq!(
+        open.drift.kind,
+        tracedecay_domain::StackDriftKindV1::BaseAdvanced
+    );
+    assert_eq!(open.drift.state, tracedecay_domain::IntervalStateV1::Open);
+    open.clone()
+}
+
+/// The single drift observation must close `open` at `terminal`.
+fn assert_closes(
+    exact_scope: &ResolvedScope,
+    observation: &GitHubStackObservationV1,
+    open: &GitHubStackDriftObservationV1,
+    terminal: i64,
+) {
+    let [closed] = observation.drift_observations.as_slice() else {
+        panic!(
+            "expected exactly the open interval to close, got {:?}",
+            observation.drift_observations
+        );
+    };
+    assert_eq!(closed.trace_id, open.trace_id);
+    assert_eq!(
+        closed.drift.state,
+        tracedecay_domain::IntervalStateV1::Closed
+    );
+    assert_eq!(
+        closed.drift.first_observed_micros,
+        open.drift.first_observed_micros
+    );
+    assert_eq!(closed.drift.terminal_micros, Some(terminal));
+    assert!(closed.validate(&exact_scope.scope_digest).is_ok());
+}
+
 fn enabled_snapshot(exact_scope: &ResolvedScope) -> GitHubStackProviderSnapshotV1 {
     let source_anchor_id = RetrievalAnchorId::new("anchor.github.pull-request.41").unwrap();
     GitHubStackProviderSnapshotV1 {
@@ -232,7 +321,7 @@ fn production_coordinator_materializes_all_four_states_and_exact_stack_anchors()
         .unwrap();
     let unavailable = coordinator
         .observe_provider(
-            probed.clone(),
+            authorized(&coordinator, &probed),
             provider.clone(),
             GitHubStackProviderOutcomeV1::Unavailable,
             provider_source_binding(&probed, false),
@@ -245,7 +334,7 @@ fn production_coordinator_materializes_all_four_states_and_exact_stack_anchors()
     );
     let degraded = coordinator
         .observe_provider(
-            probed.clone(),
+            authorized(&coordinator, &probed),
             provider.clone(),
             GitHubStackProviderOutcomeV1::Degraded {
                 response_digest: digest('f'),
@@ -260,7 +349,7 @@ fn production_coordinator_materializes_all_four_states_and_exact_stack_anchors()
     );
     let enabled = coordinator
         .observe_provider(
-            probed.clone(),
+            authorized(&coordinator, &probed),
             provider,
             GitHubStackProviderOutcomeV1::Enabled(enabled_snapshot(&probed)),
             provider_source_binding(&probed, true),
@@ -295,14 +384,53 @@ fn production_coordinator_materializes_all_four_states_and_exact_stack_anchors()
     assert_eq!(
         coordinator
             .observe_policy(
-                probed,
+                probed.clone(),
                 ProviderId::new("provider.github").unwrap(),
-                provider_source_binding(&scope(1), false),
+                provider_source_binding(&probed, false),
                 UtcMicros(5),
             )
             .unwrap(),
         enabled
     );
+    coordinator
+        .register_scope(&probed, GitHubStackedPullRequestPolicyV1::Disabled)
+        .unwrap();
+    coordinator
+        .register_scope(
+            &probed,
+            GitHubStackedPullRequestPolicyV1::ProbePrivatePreview,
+        )
+        .unwrap();
+    let reenabled = coordinator
+        .observe_policy(
+            probed.clone(),
+            ProviderId::new("provider.github").unwrap(),
+            provider_source_binding(&probed, false),
+            UtcMicros(6),
+        )
+        .unwrap();
+    assert_eq!(
+        reenabled.capability.state,
+        tracedecay_domain::GitHubStackCapabilityStateV1::Unavailable,
+        "reenabling the provider requires a fresh observation"
+    );
+    assert!(reenabled.snapshot.is_none());
+    coordinator
+        .register_scope(&probed, GitHubStackedPullRequestPolicyV1::Disabled)
+        .unwrap();
+    let disabled = coordinator
+        .observe_policy(
+            probed.clone(),
+            ProviderId::new("provider.github").unwrap(),
+            provider_source_binding(&probed, false),
+            UtcMicros(7),
+        )
+        .unwrap();
+    assert_eq!(
+        disabled.capability.state,
+        tracedecay_domain::GitHubStackCapabilityStateV1::PrivatePreviewDisabled
+    );
+    assert!(disabled.snapshot.is_none());
 }
 
 #[test]
@@ -318,7 +446,7 @@ fn mounted_provider_observation_reports_pr_tip_merge_base_and_ci_drift() {
         .unwrap();
     coordinator
         .observe_provider(
-            exact_scope.clone(),
+            authorized(&coordinator, &exact_scope),
             provider.clone(),
             GitHubStackProviderOutcomeV1::Enabled(enabled_snapshot(&exact_scope)),
             provider_source_binding(&exact_scope, true),
@@ -336,7 +464,7 @@ fn mounted_provider_observation_reports_pr_tip_merge_base_and_ci_drift() {
     changed.layers[0].ci_digest = digest('a');
     let observation = coordinator
         .observe_provider(
-            exact_scope.clone(),
+            authorized(&coordinator, &exact_scope),
             provider.clone(),
             GitHubStackProviderOutcomeV1::Enabled(changed.clone()),
             provider_source_binding(&exact_scope, true),
@@ -390,13 +518,50 @@ fn mounted_provider_observation_reports_pr_tip_merge_base_and_ci_drift() {
         ),
         Err(GitHubStackCoordinatorErrorV1::InvalidProviderObservation)
     );
-    DaemonGitHubStackCoordinatorV1::default()
+    let restored = DaemonGitHubStackCoordinatorV1::default();
+    restored
         .restore_open_drift_interval(&exact_scope, &persisted)
         .unwrap();
+    assert_eq!(
+        restored.observe_policy(
+            exact_scope.clone(),
+            provider.clone(),
+            provider_source_binding(&exact_scope, false),
+            UtcMicros(1),
+        ),
+        Err(GitHubStackCoordinatorErrorV1::InvalidProviderObservation)
+    );
+    let settled = restored
+        .observe_policy(
+            exact_scope.clone(),
+            provider.clone(),
+            provider_source_binding(&exact_scope, false),
+            UtcMicros(3),
+        )
+        .unwrap();
+    assert_eq!(settled.drift_observations.len(), 1);
+    assert_eq!(settled.drift_observations[0].trace_id, persisted.trace_id);
+    assert!(
+        settled.drift_observations[0]
+            .validate(&exact_scope.scope_digest)
+            .is_ok()
+    );
 
+    // A provider completion can reach the transition lock after a newer sample.
+    // It cannot close the open intervals before their recorded starting time.
+    assert_eq!(
+        coordinator.observe_provider(
+            authorized(&coordinator, &exact_scope),
+            provider.clone(),
+            GitHubStackProviderOutcomeV1::Enabled(changed.clone()),
+            provider_source_binding(&exact_scope, true),
+            UtcMicros(1),
+        ),
+        Err(GitHubStackCoordinatorErrorV1::InvalidProviderObservation)
+    );
     let closed = coordinator
         .observe_provider(
-            exact_scope.clone(),
+            authorized(&coordinator, &exact_scope),
             provider,
             GitHubStackProviderOutcomeV1::Enabled(changed),
             provider_source_binding(&exact_scope, true),
@@ -409,6 +574,270 @@ fn mounted_provider_observation_reports_pr_tip_merge_base_and_ci_drift() {
             && event.drift.terminal_micros == Some(3)
             && event.validate(&exact_scope.scope_digest).is_ok()
     }));
+}
+
+#[test]
+fn concurrent_identical_provider_publications_have_one_drift_transition() {
+    let coordinator = Arc::new(DaemonGitHubStackCoordinatorV1::default());
+    let exact_scope = scope(94);
+    let provider = ProviderId::new("provider.github").unwrap();
+    coordinator
+        .register_scope(
+            &exact_scope,
+            GitHubStackedPullRequestPolicyV1::ProbePrivatePreview,
+        )
+        .unwrap();
+    coordinator
+        .observe_provider(
+            authorized(&coordinator, &exact_scope),
+            provider.clone(),
+            GitHubStackProviderOutcomeV1::Enabled(enabled_snapshot(&exact_scope)),
+            provider_source_binding(&exact_scope, true),
+            UtcMicros(1),
+        )
+        .unwrap();
+
+    let mut changed = enabled_snapshot(&exact_scope);
+    changed.response_digest = digest('f');
+    changed.final_target_commit_id = CommitId::new("commit.main.changed").unwrap();
+    changed.layers[0].pull_request.base_commit_id = changed.final_target_commit_id.clone();
+    let barrier = Arc::new(Barrier::new(24));
+    let observations = std::thread::scope(|threads| {
+        let joins = (0..24)
+            .map(|_| {
+                let coordinator = Arc::clone(&coordinator);
+                let exact_scope = exact_scope.clone();
+                let provider = provider.clone();
+                let changed = changed.clone();
+                let barrier = Arc::clone(&barrier);
+                threads.spawn(move || {
+                    let read = authorized(&coordinator, &exact_scope);
+                    barrier.wait();
+                    coordinator
+                        .observe_provider(
+                            read,
+                            provider,
+                            GitHubStackProviderOutcomeV1::Enabled(changed),
+                            provider_source_binding(&exact_scope, true),
+                            UtcMicros(2),
+                        )
+                        .unwrap()
+                })
+            })
+            .collect::<Vec<_>>();
+        joins
+            .into_iter()
+            .map(|join| join.join().unwrap())
+            .collect::<Vec<_>>()
+    });
+    assert_eq!(
+        observations
+            .iter()
+            .filter(|observation| {
+                observation
+                    .transitions
+                    .contains(&StackSignalKindV1::StackTipDrift)
+            })
+            .count(),
+        1,
+        "one changed head must produce one transition, even with concurrent publishers"
+    );
+    assert_eq!(
+        observations
+            .iter()
+            .flat_map(|observation| &observation.drift_observations)
+            .filter(|event| {
+                event.drift.kind == tracedecay_domain::StackDriftKindV1::BaseAdvanced
+                    && event.drift.state == tracedecay_domain::IntervalStateV1::Open
+            })
+            .count(),
+        1,
+        "only the winning transition may open a base-advance interval"
+    );
+    assert!(observations.iter().all(|observation| {
+        observation
+            .drift_observations
+            .iter()
+            .all(|event| event.validate(&exact_scope.scope_digest).is_ok())
+    }));
+}
+
+#[test]
+fn provider_read_spanning_disable_and_reenable_cannot_publish() {
+    let coordinator = DaemonGitHubStackCoordinatorV1::default();
+    let exact_scope = scope(96);
+    let provider = ProviderId::new("provider.github").unwrap();
+    let probe = GitHubStackedPullRequestPolicyV1::ProbePrivatePreview;
+    coordinator.register_scope(&exact_scope, probe).unwrap();
+    let open = open_base_advance(&coordinator, &exact_scope);
+
+    // Disabling and re-enabling while the read runs leaves the policy equal
+    // again; the completion still belongs to the retired registration.
+    let held = authorized(&coordinator, &exact_scope);
+    coordinator
+        .register_scope(&exact_scope, GitHubStackedPullRequestPolicyV1::Disabled)
+        .unwrap();
+    assert!(
+        coordinator
+            .authorize_provider_read(&exact_scope)
+            .unwrap()
+            .is_none(),
+        "a disabled registration authorizes no provider read"
+    );
+    coordinator.register_scope(&exact_scope, probe).unwrap();
+    assert_eq!(
+        coordinator.observe_provider(
+            held,
+            provider.clone(),
+            GitHubStackProviderOutcomeV1::Enabled(enabled_snapshot(&exact_scope)),
+            provider_source_binding(&exact_scope, true),
+            UtcMicros(5),
+        ),
+        Err(GitHubStackCoordinatorErrorV1::Superseded)
+    );
+
+    // The refusal moved neither the snapshot nor the drift intervals. A new
+    // read finishing before the refused sample's timestamp still passes the
+    // fence, and closes exactly the interval the retired registration opened.
+    let fresh = coordinator
+        .observe_provider(
+            authorized(&coordinator, &exact_scope),
+            provider,
+            GitHubStackProviderOutcomeV1::Enabled(advanced_snapshot(&exact_scope)),
+            provider_source_binding(&exact_scope, true),
+            UtcMicros(3),
+        )
+        .unwrap();
+    assert_eq!(
+        fresh.capability.state,
+        tracedecay_domain::GitHubStackCapabilityStateV1::Enabled
+    );
+    assert!(fresh.snapshot.is_some());
+    assert!(
+        fresh.transitions.is_empty(),
+        "a retired registration's snapshot is not a drift baseline"
+    );
+    assert_closes(&exact_scope, &fresh, &open, 3);
+}
+
+#[test]
+fn abandoned_unchanged_and_disabled_registrations_keep_scope_state_exact() {
+    let coordinator = DaemonGitHubStackCoordinatorV1::default();
+    let exact_scope = scope(97);
+    let provider = ProviderId::new("provider.github").unwrap();
+    let probe = GitHubStackedPullRequestPolicyV1::ProbePrivatePreview;
+    assert!(
+        coordinator
+            .authorize_provider_read(&exact_scope)
+            .unwrap()
+            .is_none(),
+        "an unregistered scope authorizes no provider read"
+    );
+    coordinator.register_scope(&exact_scope, probe).unwrap();
+    coordinator
+        .observe_provider(
+            authorized(&coordinator, &exact_scope),
+            provider.clone(),
+            GitHubStackProviderOutcomeV1::Enabled(enabled_snapshot(&exact_scope)),
+            provider_source_binding(&exact_scope, true),
+            UtcMicros(1),
+        )
+        .unwrap();
+
+    // A cancelled refresh drops its read; nothing is left to clean up.
+    drop(authorized(&coordinator, &exact_scope));
+    // Re-registering the unchanged policy, as each project open does, keeps
+    // the registration, its in-flight read and its drift baseline.
+    let in_flight = authorized(&coordinator, &exact_scope);
+    coordinator.register_scope(&exact_scope, probe).unwrap();
+    let drifted = coordinator
+        .observe_provider(
+            in_flight,
+            provider.clone(),
+            GitHubStackProviderOutcomeV1::Enabled(advanced_snapshot(&exact_scope)),
+            provider_source_binding(&exact_scope, true),
+            UtcMicros(2),
+        )
+        .unwrap();
+    assert_eq!(drifted.transitions, BASE_ADVANCE_TRANSITIONS);
+    let [open] = drifted.drift_observations.as_slice() else {
+        panic!("an advanced base opens exactly one interval");
+    };
+
+    // A read spanning a plain disable is refused, not republished as the
+    // disabled policy. The policy observation then closes the open interval.
+    let spanning = authorized(&coordinator, &exact_scope);
+    coordinator
+        .register_scope(&exact_scope, GitHubStackedPullRequestPolicyV1::Disabled)
+        .unwrap();
+    assert_eq!(
+        coordinator.observe_provider(
+            spanning,
+            provider.clone(),
+            GitHubStackProviderOutcomeV1::Unavailable,
+            provider_source_binding(&exact_scope, false),
+            UtcMicros(3),
+        ),
+        Err(GitHubStackCoordinatorErrorV1::Superseded)
+    );
+    let disabled = coordinator
+        .observe_policy(
+            exact_scope.clone(),
+            provider,
+            provider_source_binding(&exact_scope, false),
+            UtcMicros(3),
+        )
+        .unwrap();
+    assert_eq!(
+        disabled.capability.state,
+        tracedecay_domain::GitHubStackCapabilityStateV1::PrivatePreviewDisabled
+    );
+    assert_closes(&exact_scope, &disabled, open, 3);
+}
+
+#[test]
+fn restarted_owner_refuses_pre_restart_reads_and_settles_restored_drift() {
+    let exact_scope = scope(98);
+    let provider = ProviderId::new("provider.github").unwrap();
+    let probe = GitHubStackedPullRequestPolicyV1::ProbePrivatePreview;
+    let before = DaemonGitHubStackCoordinatorV1::default();
+    before.register_scope(&exact_scope, probe).unwrap();
+    let open = open_base_advance(&before, &exact_scope);
+    let persisted = GitHubStackDriftObservationV1::from_persisted(
+        &exact_scope.scope_digest,
+        open.observed_at,
+        open.drift.clone(),
+    )
+    .unwrap();
+    let pre_restart = authorized(&before, &exact_scope);
+
+    // The same scope and policy registered again by a restarted owner is a
+    // different registration.
+    let restarted = DaemonGitHubStackCoordinatorV1::default();
+    restarted
+        .restore_open_drift_interval(&exact_scope, &persisted)
+        .unwrap();
+    restarted.register_scope(&exact_scope, probe).unwrap();
+    assert_eq!(
+        restarted.observe_provider(
+            pre_restart,
+            provider.clone(),
+            GitHubStackProviderOutcomeV1::Enabled(enabled_snapshot(&exact_scope)),
+            provider_source_binding(&exact_scope, true),
+            UtcMicros(4),
+        ),
+        Err(GitHubStackCoordinatorErrorV1::Superseded)
+    );
+    let settled = restarted
+        .observe_provider(
+            authorized(&restarted, &exact_scope),
+            provider,
+            GitHubStackProviderOutcomeV1::Enabled(advanced_snapshot(&exact_scope)),
+            provider_source_binding(&exact_scope, true),
+            UtcMicros(3),
+        )
+        .unwrap();
+    assert_closes(&exact_scope, &settled, &persisted, 3);
 }
 
 #[tokio::test]
@@ -687,7 +1116,7 @@ fn daemon_restart_returns_unavailable_until_a_delayed_exact_probe_upgrades_state
 
     let upgraded = restarted
         .observe_provider(
-            exact_scope,
+            authorized(&restarted, &exact_scope),
             provider,
             GitHubStackProviderOutcomeV1::Enabled(enabled_snapshot(&scope(80))),
             provider_source_binding(&scope(80), true),
