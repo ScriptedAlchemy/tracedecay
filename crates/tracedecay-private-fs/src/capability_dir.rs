@@ -251,7 +251,7 @@ fn read_child_receipt(child: &Dir, receipt: &str, limit: usize) -> io::Result<Op
         return Ok(None);
     }
     let mut bytes = Vec::new();
-    file.by_ref()
+    Read::by_ref(&mut file)
         .take((limit as u64).saturating_add(1))
         .read_to_end(&mut bytes)?;
     if bytes.len() > limit {
