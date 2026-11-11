@@ -1727,7 +1727,7 @@ fn log_handle_refusal(reason: &'static str, operation: Option<FeedbackReadOperat
 }
 
 async fn load_publication_ledger(
-    transaction: &DatabaseWriteTransaction,
+    transaction: &DatabaseWriteTransaction<'_>,
 ) -> Result<Vec<FeedbackPublicationV1>, FeedbackRuntimeError> {
     let mut rows = transaction
         .query_engine(
