@@ -646,7 +646,9 @@ mod tests {
         let error = read_verified_attachment_page(&mut counted, offset, &descriptor)
             .expect_err("changed page bytes must not decode");
         assert!(
-            error.to_string().contains("page verify: digest does not match"),
+            error
+                .to_string()
+                .contains("page verify: digest does not match"),
             "{error}"
         );
         assert_eq!(
