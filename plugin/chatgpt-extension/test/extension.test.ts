@@ -150,8 +150,10 @@ describe("ChatGPT extension against a live TraceDecay daemon", () => {
   it("runs the receipt-staged explorer without relying on tracedecay on PATH", async () => {
     const packageRoot = path.resolve(import.meta.dirname, "..");
     const staged = path.join(fixture.home, ".tracedecay/host-bundle-stage/chatgpt/tracedecay");
+    // Leave the operator's installed CLI out of receipt command discovery.
+    const installerEnv = { ...fixture.env, PATH: "" };
     const install = spawnSync(fixture.binary, ["install", "--agent", "chatgpt"], {
-      env: fixture.env, cwd: fixture.home, encoding: "utf8",
+      env: installerEnv, cwd: fixture.home, encoding: "utf8",
     });
     expect(install.status, install.stderr).toBe(0);
     const manifest = JSON.parse(await readFile(path.join(staged, "mcp.json"), "utf8"));
@@ -195,7 +197,7 @@ describe("ChatGPT extension against a live TraceDecay daemon", () => {
     } finally {
       await packaged.close();
       const uninstall = spawnSync(fixture.binary, ["uninstall", "--agent", "chatgpt"], {
-        env: fixture.env, cwd: fixture.home, encoding: "utf8",
+        env: installerEnv, cwd: fixture.home, encoding: "utf8",
       });
       expect(uninstall.status, uninstall.stderr).toBe(0);
     }
