@@ -1092,7 +1092,13 @@ mod table_growth_checkpoint_tests {
                 .is_err(),
                 "a foreign symlink must never be replaced by persistence"
             );
-            assert!(checkpoint.symlink_metadata().unwrap().file_type().is_symlink());
+            assert!(
+                checkpoint
+                    .symlink_metadata()
+                    .unwrap()
+                    .file_type()
+                    .is_symlink()
+            );
             assert!(std::fs::read(&foreign).unwrap().len() > 2);
         }
     }
@@ -1465,7 +1471,11 @@ mod table_growth_tests {
         // for the entire clock skew plus the normal retry interval.
         mark(
             1,
-            UtcMicros(now_micros().0.saturating_add(super::TABLE_SIZE_WALK_REPROBE_MICROS)),
+            UtcMicros(
+                now_micros()
+                    .0
+                    .saturating_add(super::TABLE_SIZE_WALK_REPROBE_MICROS),
+            ),
         );
         assert!(
             matches!(
