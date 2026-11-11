@@ -155,6 +155,18 @@ async fn save_progress(conn: &(impl Executor + ?Sized), progress: &Progress) -> 
 #[tracing::instrument(name = "global_db.canonical_bodies.gc", level = "trace", skip_all)]
 pub(crate) async fn run(database: &Database, max_rows: usize) -> Result<CanonicalBodyGcReport> {
     let started = Instant::now();
+    // During another retention continuation an already-drained store must not
+    // repeatedly acquire the SQLite writer merely to observe an empty queue.
+    // Do not bypass the schema authority: an idle report is safe only after
+    // verifying both the completed bootstrap and its installed objects.
+    let reader = database.read_connection();
+    if read_progress(&reader).await?.complete() && !has_candidates(&reader).await? {
+        schema::validate(&reader).await?;
+        return Ok(CanonicalBodyGcReport {
+            bootstrap_complete: true,
+            ..CanonicalBodyGcReport::default()
+        });
+    }
     let transaction = database.begin_write_transaction(OPERATION).await?;
     match step(&transaction, max_rows).await {
         Ok(mut report) => {

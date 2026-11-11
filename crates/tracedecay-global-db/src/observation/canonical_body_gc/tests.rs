@@ -904,3 +904,41 @@ async fn reinserted_candidate_page_refuses_false_discharge_and_recovers() {
     assert_eq!(idle.bodies_scanned, 0);
     assert!(!idle.has_more);
 }
+
+#[asupersync::test]
+async fn idle_registered_gc_avoids_writer_and_rechecks_new_candidates() {
+    use crate::tests::harness::{RegisteredGlobalDbHarness, writer_telemetry};
+
+    let harness = RegisteredGlobalDbHarness::open("canonical-body-idle-writer").await;
+    let before = writer_telemetry(&harness.registered).transactions;
+    for _ in 0..3 {
+        assert_eq!(
+            harness.registered.run_canonical_body_gc(48).await.unwrap(),
+            CanonicalBodyGcReport {
+                bootstrap_complete: true,
+                ..CanonicalBodyGcReport::default()
+            }
+        );
+        assert_eq!(
+            writer_telemetry(&harness.registered).transactions,
+            before,
+            "a drained retention store must not enter the SQLite writer"
+        );
+    }
+
+    let unowned = StoredCanonicalBody::pack(b"arrived after an idle retention probe").unwrap();
+    let transaction = harness.registered.begin_write_transaction().await.unwrap();
+    insert_body(&transaction, &unowned).await;
+    transaction.commit().await.unwrap();
+    let after_seed = writer_telemetry(&harness.registered).transactions;
+    let collected = harness.registered.run_canonical_body_gc(48).await.unwrap();
+    assert_eq!(collected.bodies_scanned, 1);
+    assert_eq!(collected.bodies_deleted, 1);
+    assert_eq!(collected.candidates_discharged, 1);
+    assert!(!collected.has_more);
+    assert!(
+        writer_telemetry(&harness.registered).transactions.commands > after_seed.commands,
+        "a new candidate must still enter the real writer"
+    );
+    assert!(!body_exists(&harness.registered.read_connection(), &unowned.content_hash).await);
+}
