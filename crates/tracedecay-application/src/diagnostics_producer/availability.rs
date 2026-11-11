@@ -53,7 +53,7 @@ pub enum TypeScriptDiagnosticsAvailabilityV1 {
     },
     /// A referenced project's failed check did not establish whether it
     /// includes this file. Its failure cannot be assigned to the file.
-    MembershipUnknown { reference: PathBuf },
+    MembershipUnknown { reference: PathBuf, reason: String },
     /// No tsconfig owns the file; where the owner search looked, nearest
     /// first. Empty for a workspace read, which found none under the root,
     /// and for a file outside it.
@@ -213,6 +213,7 @@ impl OwnerSearch<'_> {
             } => Some(if referenced {
                 TypeScriptDiagnosticsAvailabilityV1::MembershipUnknown {
                     reference: tsconfig.to_path_buf(),
+                    reason: reason.clone(),
                 }
             } else {
                 configured(

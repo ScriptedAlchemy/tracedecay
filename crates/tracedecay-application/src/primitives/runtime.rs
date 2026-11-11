@@ -1999,8 +1999,8 @@ fn unpublished_diagnostics_problem(
             tsconfig,
             install_command,
         } => compiler_missing_problem(project_root, &tsconfig, install_command)?,
-        TypeScriptDiagnosticsAvailabilityV1::MembershipUnknown { reference } => {
-            membership_unknown_problem(project_root, &reference)?
+        TypeScriptDiagnosticsAvailabilityV1::MembershipUnknown { reference, reason } => {
+            membership_unknown_problem(project_root, &reference, &reason)?
         }
         TypeScriptDiagnosticsAvailabilityV1::Configured {
             check: Some(TypeScriptProjectCheckV1::Failed { reason }),
@@ -2090,8 +2090,8 @@ fn unchecked_owner_problem(
             tsconfig,
             install_command,
         } => compiler_missing_problem(project_root, &tsconfig, install_command)?,
-        TypeScriptDiagnosticsAvailabilityV1::MembershipUnknown { reference } => {
-            membership_unknown_problem(project_root, &reference)?
+        TypeScriptDiagnosticsAvailabilityV1::MembershipUnknown { reference, reason } => {
+            membership_unknown_problem(project_root, &reference, &reason)?
         }
         TypeScriptDiagnosticsAvailabilityV1::Configured {
             check: Some(TypeScriptProjectCheckV1::Failed { reason }),
@@ -2119,15 +2119,22 @@ fn unchecked_owner_problem(
 fn membership_unknown_problem(
     project_root: &Path,
     reference: &Path,
+    reason: &str,
 ) -> Result<ApplicationProblem, ApplicationContractError> {
     let reference = forward_slash_path(reference.strip_prefix(project_root).unwrap_or(reference));
-    Ok(ApplicationProblem::unavailable(SafeDiagnostic::new(
-        "application.diagnostics.membership-unknown",
-        safe_problem_message(&format!(
-            "The TypeScript check for referenced project {reference} failed, so its membership \
-             for this file is unknown. Recheck the project after correcting that failure."
-        )),
-    )?))
+    Ok(ApplicationProblem::Unsupported {
+        diagnostic: SafeDiagnostic::new(
+            "application.diagnostics.membership-unknown",
+            safe_problem_message(&format!(
+                "The TypeScript check for referenced project {reference} failed: {reason}. \
+                 Its membership for this file is unknown. Fix the compiler setup, then reopen \
+                 the project and read again."
+            )),
+        )?,
+        retry: RetryDirective::AfterRevalidate,
+        legal_actions: vec![LegalAction::Refresh],
+        detail: None,
+    })
 }
 
 /// The producer was appointed but has not published which TypeScript
@@ -2240,9 +2247,10 @@ mod tests {
     use super::{
         ExtendedPrimitivePort, MAX_SAFE_DIAGNOSTIC_MESSAGE_BYTES, OmissionReason,
         PrimitiveCapacity, PrimitiveDispatch, PrimitiveRequest, StorageStatusPrimitiveRequest,
-        TypeScriptProducerStatusHandleV1, diagnostics_absence_problem, safe_problem_message,
-        session_structural_refusal_problem, symbol_temporal_state, unchecked_owner_problem,
-        unpublished_diagnostics_problem, valid_owned_primitive_request, validate_admitted_root_uri,
+        TypeScriptProducerStatusHandleV1, diagnostics_absence_problem, membership_unknown_problem,
+        safe_problem_message, session_structural_refusal_problem, symbol_temporal_state,
+        unchecked_owner_problem, unpublished_diagnostics_problem, valid_owned_primitive_request,
+        validate_admitted_root_uri,
     };
     use tracedecay_contracts::retrieval::{
         CodeGraphReadFreshnessV1, GraphRelationRequest, ImplementationSelector,
@@ -2501,6 +2509,26 @@ mod tests {
         assert!(!message.chars().any(char::is_control), "{message:?}");
         SafeDiagnostic::new("application.diagnostics.producer-failed", message)
             .expect("bounded text satisfies the safe diagnostic contract");
+    }
+
+    #[test]
+    fn failed_reference_membership_requires_revalidation() {
+        let problem = membership_unknown_problem(
+            Path::new("/workspace"),
+            Path::new("/workspace/packages/app/tsconfig.json"),
+            "TS5083: Cannot read file",
+        )
+        .expect("failed reference problem");
+        assert_eq!(problem.kind(), ApplicationProblemKind::Unsupported);
+        assert_eq!(problem.retry(), RetryDirective::AfterRevalidate);
+        assert_eq!(problem.legal_actions(), [LegalAction::Refresh]);
+        let diagnostic = problem.diagnostic().expect("diagnostic");
+        assert_eq!(
+            diagnostic.code,
+            "application.diagnostics.membership-unknown"
+        );
+        assert!(diagnostic.message.contains("packages/app/tsconfig.json"));
+        assert!(diagnostic.message.contains("TS5083: Cannot read file"));
     }
 
     #[test]

@@ -1320,6 +1320,7 @@ mod tests {
             ),
             TypeScriptDiagnosticsAvailabilityV1::MembershipUnknown {
                 reference: app.clone(),
+                reason: "TS5083: Cannot read file".to_owned(),
             },
         );
         assert!(matches!(
