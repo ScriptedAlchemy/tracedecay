@@ -844,7 +844,10 @@ async fn publishing_a_bounded_projection_backlog_keeps_the_original_history_turn
     })
     .await
     .expect("both projection batches must publish without a history permit");
-    assert!(state.history_retry_pending(), "historical admission remains queued");
+    assert!(
+        state.history_retry_pending(),
+        "historical admission remains queued"
+    );
     assert!(
         !state.history_held_for_projection(),
         "publication hold is released before waiting for admission"
