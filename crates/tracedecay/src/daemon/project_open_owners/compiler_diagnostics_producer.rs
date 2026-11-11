@@ -61,42 +61,41 @@ pub(super) fn spawn_typescript_diagnostics_producer(
     let mut state = TypeScriptProducerStateV1::new(status, admission);
     owner.spawn_background_task(tracing::Instrument::instrument(
         async move {
-            let Some(projects) = discover_projects(&project_root).await else {
-                return;
-            };
-            let compilers = projects
-                .iter()
-                .filter(|project| project.compiler.is_some())
-                .count();
-            // Reads name what discovery found from here on, not from a reading
-            // of the checkout.
-            let uncheckable =
-                publish_typescript_discovery_v1(&project_root, &projects, &mut state).await;
-            if compilers == 0 {
-                log_producer_event(
-                    &project_root,
-                    if projects.is_empty() {
-                        "no_tsconfig"
-                    } else {
-                        "no_compiler"
-                    },
-                );
-                if let Some(run) = uncheckable {
-                    log_producer_run(&project_root, &run);
-                }
-                return;
-            }
-            log_daemon_event(
-                "typescript_diagnostics_producer",
-                &[
-                    ("project", project_root.display().to_string()),
-                    ("outcome", "admitted".to_owned()),
-                    ("projects", projects.len().to_string()),
-                    ("compilers", compilers.to_string()),
-                ],
-            );
             let schedulers = invocation.code_index_schedulers.clone();
             let mut signals = CodeIndexOwnerSignalsV1::subscribe(&schedulers, &project_root).await;
+            // Subscribe before discovery so a seal during a failed walk still
+            // wakes this owner after the tree becomes readable again.
+            if let Some(projects) = discover_projects(&project_root).await {
+                let compilers = projects
+                    .iter()
+                    .filter(|project| project.compiler.is_some())
+                    .count();
+                let uncheckable =
+                    publish_typescript_discovery_v1(&project_root, &projects, &mut state).await;
+                if compilers == 0 {
+                    log_producer_event(
+                        &project_root,
+                        if projects.is_empty() {
+                            "no_tsconfig"
+                        } else {
+                            "no_compiler"
+                        },
+                    );
+                    if let Some(run) = uncheckable {
+                        log_producer_run(&project_root, &run);
+                    }
+                    return;
+                }
+                log_daemon_event(
+                    "typescript_diagnostics_producer",
+                    &[
+                        ("project", project_root.display().to_string()),
+                        ("outcome", "admitted".to_owned()),
+                        ("projects", projects.len().to_string()),
+                        ("compilers", compilers.to_string()),
+                    ],
+                );
+            }
             let build_info_dir = graph.store_layout().data_root.join(BUILD_INFO_DIR);
             // One producer run per generation, whatever its outcome: the root's
             // signals also wake on serving and pass changes, and a project
@@ -114,22 +113,21 @@ pub(super) fn spawn_typescript_diagnostics_producer(
                     Ok(Some(identity)) => {
                         attempted_for = Some(identity.generation_id().clone());
                         // A generation can add, drop, or retarget tsconfigs.
-                        let Some(projects) = discover_projects(&project_root).await else {
-                            return;
-                        };
-                        let database = graph.dashboard_database_guard();
-                        let store = DiagnosticsStore::new(database.as_ref().clone());
-                        let run = run_typescript_producer_v1(
-                            &project_root,
-                            &projects,
-                            &identity,
-                            &store,
-                            &build_info_dir,
-                            &mut state,
-                            now_micros(),
-                        )
-                        .await;
-                        log_producer_run(&project_root, &run);
+                        if let Some(projects) = discover_projects(&project_root).await {
+                            let database = graph.dashboard_database_guard();
+                            let store = DiagnosticsStore::new(database.as_ref().clone());
+                            let run = run_typescript_producer_v1(
+                                &project_root,
+                                &projects,
+                                &identity,
+                                &store,
+                                &build_info_dir,
+                                &mut state,
+                                now_micros(),
+                            )
+                            .await;
+                            log_producer_run(&project_root, &run);
+                        }
                     }
                     Ok(_) => {}
                     Err(error) => log_daemon_event(
@@ -151,8 +149,8 @@ pub(super) fn spawn_typescript_diagnostics_producer(
 }
 
 /// Walks the tree off the async runtime; `None` (logged) when the walk could
-/// not complete, which ends the producer rather than publishing a snapshot
-/// that silently skips projects.
+/// not complete. The owner retains its subscription and retries on a later
+/// sealed generation instead of publishing a partial project list.
 async fn discover_projects(project_root: &Path) -> Option<Vec<TypeScriptProject>> {
     let root = project_root.to_path_buf();
     match tracedecay_runtime_core::native_runtime::spawn_blocking(move || {

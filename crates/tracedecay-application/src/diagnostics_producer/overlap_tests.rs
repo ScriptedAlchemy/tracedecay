@@ -1,4 +1,4 @@
-//! A real compiler run may finish after its replacement has published.
+//! A retiring real compiler run cannot replace its successor's records or status.
 
 use std::num::NonZeroUsize;
 use std::path::PathBuf;
@@ -137,6 +137,9 @@ async fn an_overlapping_old_compiler_cannot_replace_new_records_or_status_for_th
         )
         .unwrap();
         std::fs::remove_file(root.join("node_modules/hold-compiler")).unwrap();
+        // The successor waits for the old compiler's build-info guard. Its new
+        // producer state already fences the old result before this release.
+        std::fs::write(root.join("node_modules/release-old"), "").unwrap();
         let run = run_typescript_producer_v1(
             &root,
             &projects,
@@ -165,7 +168,6 @@ async fn an_overlapping_old_compiler_cannot_replace_new_records_or_status_for_th
         assert_eq!(records[0].code, "TS2322");
         let published = status.current().expect("replacement status");
         assert_eq!(published.run(), Some(&run));
-        std::fs::write(root.join("node_modules/release-old"), "").unwrap();
         (published, records)
     };
     let (old_run, (replacement_status, replacement_records)) =

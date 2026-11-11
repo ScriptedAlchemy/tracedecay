@@ -7,7 +7,21 @@
 //! automatically at admission.
 
 #[cfg(unix)]
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
+#[cfg(unix)]
+use std::path::{Path, PathBuf};
+#[cfg(unix)]
 use std::time::Duration;
+
+#[cfg(unix)]
+use crate::common::typescript_project::{
+    TYPESCRIPT_FIXTURE_TSC_INVOCATIONS, TypeScriptFixtureCompiler,
+    write_typescript_diagnostics_fixture,
+};
+#[cfg(unix)]
+use crate::support::{commit_worktree, production_composition_fixture_with_sources};
 
 use serde_json::{Value, json};
 
@@ -177,6 +191,176 @@ async fn typescript_project_publishes_diagnostics_from_its_own_compiler() {
         "the producer ran the project's tsc: {invocations}"
     );
 
+    fixture.harness.shutdown().await;
+}
+
+/// Restore permissions even if the production journey fails before shutdown.
+#[cfg(unix)]
+struct DiscoveryDirectoryPermissions {
+    path: PathBuf,
+    original: std::fs::Permissions,
+}
+
+#[cfg(unix)]
+impl DiscoveryDirectoryPermissions {
+    fn restore(&self) {
+        std::fs::set_permissions(&self.path, self.original.clone())
+            .expect("restore discovery directory");
+    }
+}
+
+#[cfg(unix)]
+impl Drop for DiscoveryDirectoryPermissions {
+    fn drop(&mut self) {
+        let _ = std::fs::set_permissions(&self.path, self.original.clone());
+    }
+}
+
+/// The daemon's operator events go directly to stderr. Capture them only in
+/// an isolated child so the recovery test can await the actual failed walk.
+#[cfg(unix)]
+struct DiscoveryLogCapture {
+    saved_stderr: OwnedFd,
+    log: tempfile::NamedTempFile,
+}
+
+#[cfg(unix)]
+impl DiscoveryLogCapture {
+    fn start() -> Self {
+        assert!(crate::common::in_child_test());
+        let log = tempfile::NamedTempFile::new().expect("discovery operator log");
+        // SAFETY: dup returns a new owned descriptor, retained until Drop
+        // restores it onto stderr. This child runs only the recovery test.
+        let saved = unsafe { libc::dup(libc::STDERR_FILENO) };
+        assert!(saved >= 0, "save child stderr");
+        // SAFETY: the successful dup above transferred a new descriptor.
+        let saved_stderr = unsafe { OwnedFd::from_raw_fd(saved) };
+        // SAFETY: both descriptors are live; Drop restores the original.
+        assert_eq!(
+            unsafe { libc::dup2(log.as_file().as_raw_fd(), libc::STDERR_FILENO) },
+            libc::STDERR_FILENO,
+            "capture the child's operator events"
+        );
+        Self { saved_stderr, log }
+    }
+
+    async fn await_discovery_failure(&self, project: &Path) {
+        let marker = tracedecay_runtime_core::logging::format_daemon_log_line(
+            "typescript_diagnostics_producer",
+            &[
+                ("project", project.display().to_string()),
+                ("outcome", "discovery_failed".to_owned()),
+            ],
+        ) + " ";
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+        loop {
+            let log = std::fs::read_to_string(self.log.path()).expect("read discovery log");
+            if log.lines().any(|line| line.starts_with(&marker)) {
+                return;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "the background producer must observe the unreadable subtree: {log}"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+}
+
+#[cfg(unix)]
+impl Drop for DiscoveryLogCapture {
+    fn drop(&mut self) {
+        // SAFETY: the saved descriptor remains owned through this restore.
+        unsafe {
+            libc::dup2(self.saved_stderr.as_raw_fd(), libc::STDERR_FILENO);
+        }
+    }
+}
+
+/// A discovery failure must not permanently retire the route's compiler
+/// owner. The real compiler publishes after a readable successor generation,
+/// through the same mounted server that observed the failed discovery.
+#[cfg(unix)]
+#[tokio::test]
+async fn typescript_discovery_recovers_without_reopening_the_project_route() {
+    if !crate::common::in_child_test() {
+        crate::common::rerun_test_in_child(
+            "diagnostics_read_test::typescript_discovery_recovers_without_reopening_the_project_route",
+            &[],
+        );
+        return;
+    }
+    let log = DiscoveryLogCapture::start();
+    let mut permissions = None;
+    let fixture = production_composition_fixture_with_sources(|project| {
+        write_typescript_diagnostics_fixture(project, TypeScriptFixtureCompiler::Present);
+        std::fs::write(project.join(".gitignore"), "node_modules/\nblocked/\n")
+            .expect("the code index does not need the unreadable cache");
+        let path = project.join("blocked");
+        std::fs::create_dir(&path).expect("discovery-only cache directory");
+        permissions = Some(DiscoveryDirectoryPermissions {
+            original: std::fs::metadata(&path)
+                .expect("directory permissions")
+                .permissions(),
+            path: path.clone(),
+        });
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000))
+            .expect("make a project subtree unreadable");
+        assert!(
+            std::fs::read_dir(&path).is_err(),
+            "the discovery recovery journey requires an unprivileged test process"
+        );
+        assert!(
+            tracedecay_lsp::typescript_projects(project).is_err(),
+            "discovery must fail rather than publish a partial project list"
+        );
+    })
+    .await;
+    let server = fixture
+        .harness
+        .server(&fixture.project_root)
+        .expect("mounted server");
+    wait_for_current_graph(&server).await;
+    log.await_discovery_failure(&fixture.project_root).await;
+    let arguments = json!({"scope": "file", "path": "src/index.ts", "maximum_diagnostics": 10});
+    let pending =
+        handle_real_server_tool_call(&server, "tracedecay_diagnostics", arguments.clone()).await;
+    assert_eq!(
+        pending["structuredContent"]["problem"]["code"], "application.diagnostics.pending",
+        "failed discovery stays unknown: {pending}"
+    );
+    assert!(
+        !fixture
+            .project_root
+            .join(TYPESCRIPT_FIXTURE_TSC_INVOCATIONS)
+            .exists(),
+        "a failed walk must not run a partial set of discovered compilers"
+    );
+
+    permissions
+        .as_ref()
+        .expect("isolated directory permissions")
+        .restore();
+    let source = fixture.project_root.join("src/index.ts");
+    let original = std::fs::read_to_string(&source).expect("original TypeScript source");
+    std::fs::write(
+        &source,
+        format!("{original}\n// discovery is readable again\n"),
+    )
+    .expect("successor source generation");
+    commit_worktree(&fixture.project_root, "restore TypeScript discovery");
+    wait_for_current_graph(&server).await;
+    let published = await_published_diagnostics(&server, arguments).await;
+    let records = published_records(&published);
+    assert_eq!(records.len(), 1, "{published}");
+    assert_eq!(records[0]["diagnostic"]["code"], "TS4023", "{published}");
+    assert!(std::sync::Arc::ptr_eq(
+        &server,
+        &fixture
+            .harness
+            .server(&fixture.project_root)
+            .expect("same mounted server"),
+    ));
     fixture.harness.shutdown().await;
 }
 

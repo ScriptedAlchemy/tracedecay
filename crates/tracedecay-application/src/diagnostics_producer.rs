@@ -946,11 +946,15 @@ async fn check_project(
         compiler_revision,
         configuration,
     } = project;
+    let build_info_guard = admission.serialize_build_info(build_info).await;
     let bound = build_info.to_path_buf();
-    if let Err(error) =
-        native_runtime::spawn_blocking(move || bind_build_info(&bound, compiler_revision))
-            .await
-            .unwrap_or_else(|error| Err(std::io::Error::other(error)))
+    let bind_guard = build_info_guard.clone();
+    if let Err(error) = native_runtime::spawn_blocking(move || {
+        let _build_info_guard = bind_guard;
+        bind_build_info(&bound, compiler_revision)
+    })
+    .await
+    .unwrap_or_else(|error| Err(std::io::Error::other(error)))
     {
         // Nothing ran under this compiler, so the next run retries.
         return ProjectResult::failed(
@@ -968,6 +972,7 @@ async fn check_project(
         project_root,
         &tsconfig,
         Some(build_info),
+        Some(build_info_guard.clone()),
     )
     .await
     {
@@ -981,7 +986,9 @@ async fn check_project(
         }
     };
     let (root, recorded) = (project_root.to_path_buf(), build_info.to_path_buf());
+    let membership_guard = build_info_guard.clone();
     let membership = native_runtime::spawn_blocking(move || {
+        let _build_info_guard = membership_guard;
         typescript_build_info_program(&recorded)
             .and_then(|program| program_membership(&root, &program))
     })

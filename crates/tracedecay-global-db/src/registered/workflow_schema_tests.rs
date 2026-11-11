@@ -980,10 +980,10 @@ mod published_artifact_ceiling {
                     );
                     if state == before {
                         cancelled_published += 1;
+                        let (reopened, _) = converge_cancelled_at(&store.path, usize::MAX).await;
+                        reopened.unwrap();
+                        assert_eq!(store.state(), completed, "reopen after poll {cancel_at}");
                     }
-                    let (reopened, _) = converge_cancelled_at(&store.path, usize::MAX).await;
-                    reopened.unwrap();
-                    assert_eq!(store.state(), completed, "reopen after poll {cancel_at}");
                 }
             }
         }
