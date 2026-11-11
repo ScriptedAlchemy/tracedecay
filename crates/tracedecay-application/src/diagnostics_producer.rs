@@ -1274,6 +1274,69 @@ mod tests {
         assert_eq!(tsconfig, app);
     }
 
+    #[tokio::test]
+    async fn unrelated_failed_reference_leaves_file_membership_unknown() {
+        let root = Path::new("/workspace");
+        let solution = root.join("tsconfig.json");
+        let app = root.join("packages/app/tsconfig.json");
+        let compiler = root.join("node_modules/.bin/tsc");
+        let generation: tracedecay_domain::CodeGenerationId = id("generation.failed-reference");
+        let status = TypeScriptProducerStatusHandleV1::default();
+        published(
+            &status,
+            TypeScriptProducerStatusV1::new(
+                Some(CompilerProducerRunV1::CompilerFailed {
+                    reason: "referenced check failed".to_owned(),
+                }),
+                Some(generation.clone()),
+                BTreeMap::from([
+                    (
+                        solution,
+                        TypeScriptProjectStatusV1::Checked {
+                            compiler: compiler.clone(),
+                            membership: membership(&[]),
+                            references: vec![app.clone()],
+                        },
+                    ),
+                    (
+                        app.clone(),
+                        TypeScriptProjectStatusV1::Failed {
+                            compiler,
+                            reason: "TS5083: Cannot read file".to_owned(),
+                            references: Vec::new(),
+                        },
+                    ),
+                ]),
+            ),
+        )
+        .await;
+
+        assert_eq!(
+            typescript_diagnostics_availability(
+                root,
+                Some(Path::new("scripts/release.ts")),
+                &status,
+                Some(&generation),
+            ),
+            TypeScriptDiagnosticsAvailabilityV1::MembershipUnknown {
+                reference: app.clone(),
+            },
+        );
+        assert!(matches!(
+            typescript_diagnostics_availability(
+                root,
+                Some(Path::new("packages/app/src/main.ts")),
+                &status,
+                Some(&generation),
+            ),
+            TypeScriptDiagnosticsAvailabilityV1::Configured {
+                tsconfig,
+                check: Some(TypeScriptProjectCheckV1::Failed { .. }),
+                ..
+            } if tsconfig == app
+        ));
+    }
+
     /// Every generation publishes all three projects' results, but tsc checks
     /// only a project the generation changed an input of: the edited package
     /// after a one-file edit, nothing that checked cleanly after an edit no

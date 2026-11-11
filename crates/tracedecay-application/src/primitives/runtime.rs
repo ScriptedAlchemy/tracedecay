@@ -1999,6 +1999,9 @@ fn unpublished_diagnostics_problem(
             tsconfig,
             install_command,
         } => compiler_missing_problem(project_root, &tsconfig, install_command)?,
+        TypeScriptDiagnosticsAvailabilityV1::MembershipUnknown { reference } => {
+            membership_unknown_problem(project_root, &reference)?
+        }
         TypeScriptDiagnosticsAvailabilityV1::Configured {
             check: Some(TypeScriptProjectCheckV1::Failed { reason }),
             ..
@@ -2087,6 +2090,9 @@ fn unchecked_owner_problem(
             tsconfig,
             install_command,
         } => compiler_missing_problem(project_root, &tsconfig, install_command)?,
+        TypeScriptDiagnosticsAvailabilityV1::MembershipUnknown { reference } => {
+            membership_unknown_problem(project_root, &reference)?
+        }
         TypeScriptDiagnosticsAvailabilityV1::Configured {
             check: Some(TypeScriptProjectCheckV1::Failed { reason }),
             ..
@@ -2108,6 +2114,20 @@ fn unchecked_owner_problem(
     };
     problem.validate()?;
     Ok(Some(problem))
+}
+
+fn membership_unknown_problem(
+    project_root: &Path,
+    reference: &Path,
+) -> Result<ApplicationProblem, ApplicationContractError> {
+    let reference = forward_slash_path(reference.strip_prefix(project_root).unwrap_or(reference));
+    Ok(ApplicationProblem::unavailable(SafeDiagnostic::new(
+        "application.diagnostics.membership-unknown",
+        safe_problem_message(&format!(
+            "The TypeScript check for referenced project {reference} failed, so its membership \
+             for this file is unknown. Recheck the project after correcting that failure."
+        )),
+    )?))
 }
 
 /// The producer was appointed but has not published which TypeScript

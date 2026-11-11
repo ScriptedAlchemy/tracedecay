@@ -51,6 +51,9 @@ pub enum TypeScriptDiagnosticsAvailabilityV1 {
         tsconfig: PathBuf,
         install_command: &'static str,
     },
+    /// A referenced project's failed check did not establish whether it
+    /// includes this file. Its failure cannot be assigned to the file.
+    MembershipUnknown { reference: PathBuf },
     /// No tsconfig owns the file; where the owner search looked, nearest
     /// first. Empty for a workspace read, which found none under the root,
     /// and for a file outside it.
@@ -109,7 +112,7 @@ pub fn typescript_diagnostics_availability(
         let candidate = project_root.join(&relative);
         let project = snapshot.projects.get(&candidate);
         if let Some(project) = project
-            && let Some(open) = search.open_state(&candidate, project, &mut Vec::new())
+            && let Some(open) = search.open_state(&candidate, project, &mut Vec::new(), false)
         {
             return open;
         }
@@ -181,6 +184,7 @@ impl OwnerSearch<'_> {
         tsconfig: &Path,
         project: &TypeScriptProjectStatusV1,
         visiting: &mut Vec<PathBuf>,
+        referenced: bool,
     ) -> Option<TypeScriptDiagnosticsAvailabilityV1> {
         let configured =
             |compiler: &PathBuf, check| TypeScriptDiagnosticsAvailabilityV1::Configured {
@@ -206,12 +210,18 @@ impl OwnerSearch<'_> {
             }
             TypeScriptProjectStatusV1::Failed {
                 compiler, reason, ..
-            } => Some(configured(
-                compiler,
-                TypeScriptProjectCheckV1::Failed {
-                    reason: reason.clone(),
-                },
-            )),
+            } => Some(if referenced {
+                TypeScriptDiagnosticsAvailabilityV1::MembershipUnknown {
+                    reference: tsconfig.to_path_buf(),
+                }
+            } else {
+                configured(
+                    compiler,
+                    TypeScriptProjectCheckV1::Failed {
+                        reason: reason.clone(),
+                    },
+                )
+            }),
             TypeScriptProjectStatusV1::Checked {
                 compiler,
                 membership,
@@ -227,7 +237,7 @@ impl OwnerSearch<'_> {
                         continue;
                     }
                     open = match self.snapshot.projects.get(reference) {
-                        Some(referenced) => self.open_state(reference, referenced, visiting),
+                        Some(referenced) => self.open_state(reference, referenced, visiting, true),
                         // A reference outside the producer's record, such as
                         // one outside the project root, proves nothing.
                         None => Some(configured(compiler, TypeScriptProjectCheckV1::Checked)),
