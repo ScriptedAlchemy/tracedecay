@@ -24,6 +24,8 @@ export function CodeIndexPipeline({
   const progress = useLatestCodeIndexProgress(result, scopeKey);
   const payload = result?.outcome === 'envelope' ? result.envelope.payload : undefined;
   const worktrees = payload?.worktrees ?? [];
+  const observedAtMicros =
+    result?.outcome === 'envelope' ? result.envelope.time.observation_time_micros : null;
   if (pending) {
     return (
       <section className="mx-4 mt-3" aria-label="Code-index pipeline">
@@ -47,7 +49,7 @@ export function CodeIndexPipeline({
       {payload?.mount_failure ? (
         <CodeIndexMountFailureNotice className="mt-2" failure={payload.mount_failure} />
       ) : (
-        <CodeIndexReadinessList worktrees={worktrees} />
+        <CodeIndexReadinessList worktrees={worktrees} observedAtMicros={observedAtMicros} />
       )}
       {worktrees.some((worktree) => worktree.restore_progress != null) ? (
         <div className="mt-2 flex flex-col gap-2">
@@ -73,13 +75,17 @@ export function CodeIndexPipeline({
         </div>
       ) : null}
       {progress.length === 0 ? (
-        worktrees.some((worktree) => worktree.restore_progress != null) ? null : (
-          <p className="mt-2 text-body text-text-muted">no active code-index build</p>
+        worktrees.some(hasLiveWorktreeProgress) ? null : (
+          <p className="mt-2 text-body text-text-muted">
+            {worktrees.some((worktree) => worktree.rebuild_in_flight)
+              ? 'code-index build in progress; progress not yet reported'
+              : 'no active code-index build'}
+          </p>
         )
       ) : (
         <div className="mt-2 flex flex-col gap-2">
-          {progress.map((build) => (
-            <CodeIndexBuildCard key={build.generation_id} progress={build} />
+          {progress.map(([worktreeRoot, build]) => (
+            <CodeIndexBuildCard key={worktreeRoot} worktreeRoot={worktreeRoot} progress={build} />
           ))}
         </div>
       )}
@@ -105,8 +111,10 @@ export function CodeIndexMountFailureNotice({
 
 function CodeIndexReadinessList({
   worktrees,
+  observedAtMicros,
 }: {
   worktrees: CodeIndexWorktreeFreshnessV1[];
+  observedAtMicros: number | null;
 }) {
   if (worktrees.length === 0) {
     return <p className="mt-2 text-body text-text-muted">no mounted code-index worktree</p>;
@@ -128,9 +136,124 @@ function CodeIndexReadinessList({
               {graphServingLabel(worktree.code_graph_serving)}
             </dd>
           </dl>
+          <CodeIndexAttemptReading worktree={worktree} observedAtMicros={observedAtMicros} />
+          {worktree.parked ? (
+            <p className="mt-2 text-sm text-state-warning">
+              parked: {worktree.parked.reason} · {worktree.parked.remediation}
+            </p>
+          ) : null}
         </li>
       ))}
     </ul>
+  );
+}
+
+export function CodeIndexAttemptReading({
+  worktree,
+  observedAtMicros,
+}: {
+  worktree: CodeIndexWorktreeFreshnessV1;
+  observedAtMicros: number | null;
+}) {
+  const attempt = worktree.preseal_attempt;
+  const graph = worktree.native_graph_progress;
+  // Retiring the source observer at durable handoff must not erase its last
+  // authentic work. Show the retired reading only while the rebuild remains
+  // in flight; it does not represent an active writer or renew its work clock.
+  const showPreseal = attempt != null && (
+    attempt.active || (worktree.rebuild_in_flight && attempt.last_progress_micros != null)
+  );
+  // Only the daemon's observation time and an actual producer work stamp
+  // can establish inactivity. Reading status is not a progress heartbeat.
+  const presealQuiet = attempt?.active
+    ? observedWorkQuietDuration(attempt.last_progress_micros, observedAtMicros)
+    : null;
+  const graphQuiet = graph?.active
+    ? observedWorkQuietDuration(graph.last_progress_micros, observedAtMicros)
+    : null;
+  // An inactive writer is no longer live, but its committed milestones still
+  // belong to this generation. Encoding alone is not durable completion.
+  const showGraph = graph != null && (
+    graph.active || (
+      graph.generation_id === worktree.latest_generation_id &&
+      (graph.committed_stage_pages > 0 || graph.committed_compact_segments > 0)
+    )
+  );
+  if (!showPreseal && !showGraph) return null;
+  return (
+    <dl className="grid grid-cols-2 gap-x-4 gap-y-1 text-sm">
+      {showPreseal && attempt && (
+        <>
+          <dt className="text-text-muted">
+            {attempt.active ? 'Before sealing' : 'Last observed preseal work'}
+          </dt>
+          <dd className="text-right text-text-secondary">
+            {attempt.last_progress_micros == null ? (
+              'awaiting first observed preseal work'
+            ) : (
+              <>
+                {attempt.phase.replaceAll('_', ' ')} · {formatCount(attempt.completed_items)}
+                {attempt.total_items != null && ` / ${formatCount(attempt.total_items)}`} items
+              </>
+            )}
+          </dd>
+          {presealQuiet && (
+            <>
+              <dt className="text-state-warning">Preseal progress</dt>
+              <dd className="text-right text-state-warning">
+                no observed preseal work for {presealQuiet}
+              </dd>
+            </>
+          )}
+        </>
+      )}
+      {showGraph && graph && (
+        <>
+          <dt className="text-text-muted">
+            {graph.active ? 'Graph writer' : 'Graph milestones'}
+          </dt>
+          <dd className="text-right text-text-secondary">
+            {graph.last_progress_micros == null ? (
+              'awaiting first observed native graph work'
+            ) : (
+              <>
+                {graph.phase?.replaceAll('_', ' ') ?? 'work phase not reported'} ·{' '}
+                {formatCount(graph.encoded_entities)} entities encoded ·{' '}
+                {formatCount(graph.encoded_relations)} relations encoded ·{' '}
+                {formatCount(graph.committed_stage_pages)} pages committed ·{' '}
+                {formatCount(graph.committed_compact_segments)} segments committed
+              </>
+            )}
+          </dd>
+          {graphQuiet && (
+            <>
+              <dt className="text-state-warning">Graph progress</dt>
+              <dd className="text-right text-state-warning">
+                no observed native graph work for {graphQuiet}
+              </dd>
+            </>
+          )}
+        </>
+      )}
+    </dl>
+  );
+}
+
+function observedWorkQuietDuration(
+  lastProgressMicros: number | null,
+  observedAtMicros: number | null,
+): string | null {
+  if (lastProgressMicros == null || observedAtMicros == null) return null;
+  const quietMicros = observedAtMicros - lastProgressMicros;
+  // No work stamp, or a stamp after the read, is not evidence of a stall.
+  return quietMicros >= 30_000_000 ? formatDurationMicros(quietMicros) : null;
+}
+
+export function hasLiveWorktreeProgress(worktree: CodeIndexWorktreeFreshnessV1): boolean {
+  return (
+    worktree.restore_progress != null ||
+    worktree.preseal_attempt?.active === true ||
+    worktree.native_graph_progress?.active === true
   );
 }
 
@@ -161,7 +284,13 @@ export function graphServingLabel(
   }
 }
 
-function CodeIndexBuildCard({ progress }: { progress: CodeIndexBuildProgressV1 }) {
+function CodeIndexBuildCard({
+  progress,
+  worktreeRoot,
+}: {
+  progress: CodeIndexBuildProgressV1;
+  worktreeRoot: string;
+}) {
   const percentage = codeIndexProgressPercentage(progress);
   const hasRate =
     progress.files_per_second != null && progress.lexical_units_per_second != null;
@@ -185,6 +314,10 @@ function CodeIndexBuildCard({ progress }: { progress: CodeIndexBuildProgressV1 }
         <dt className="text-text-muted">generation</dt>
         <dd className="truncate text-right font-mono text-text-secondary" title={progress.generation_id}>
           {progress.generation_id}
+        </dd>
+        <dt className="text-text-muted">worktree</dt>
+        <dd className="truncate text-right font-mono text-text-secondary" title={worktreeRoot}>
+          {worktreeRoot}
         </dd>
         <dt className="text-text-muted">files</dt>
         <dd className="text-right text-text-secondary">
@@ -217,30 +350,53 @@ function CodeIndexBuildCard({ progress }: { progress: CodeIndexBuildProgressV1 }
   );
 }
 
+// Serving readiness can describe the previous generation while its successor
+// is still capturing sources, or while a lexical artifact is being restored.
+// Neither operation is required to have a committed build-progress report yet.
+/** One worktree's actual or admitted pending work, shared by both dashboard
+ * views. An inactive terminal park is not a one-second polling obligation. */
+export function worktreeHasActiveCodeIndexBuild(worktree: CodeIndexWorktreeFreshnessV1): boolean {
+  // A real successor can already be working while the retained generation
+  // still carries an old terminal refusal. An active attempt owns its work;
+  // only an idle, refused generation should suppress live polling.
+  if (worktree.preseal_attempt?.active || worktree.native_graph_progress?.active) return true;
+  if (worktree.parked != null && !worktree.parked.retries_on_wake) return false;
+  if (worktree.progress?.blocked_reason === 'publication_authority_corrupt') return false;
+  return (
+    worktree.rebuild_in_flight ||
+    hasLiveWorktreeProgress(worktree) ||
+    worktree.staleness_state === 'verifying' ||
+    worktree.staleness_state === 'restoring' ||
+    (worktree.progress != null && worktree.progress.phase !== 'ready') ||
+    (worktree.latest_generation_id == null && worktree.staleness_state === 'indexing')
+  );
+}
+
 export function hasActiveCodeIndexBuild(
   result: EnvelopeResult<CodeIndexFreshnessPayloadV1> | undefined,
 ): boolean {
-  return (
-    result?.outcome === 'envelope' &&
-    (result.envelope.domain_state !== 'ready' ||
-      result.envelope.payload.worktrees.some(
-        (worktree) => worktree.progress != null && worktree.progress.phase !== 'ready',
-      ))
-  );
+  if (result?.outcome !== 'envelope') return false;
+  const { domain_state, payload } = result.envelope;
+  if (payload.mount_failure) return false;
+  // A loading scope may not have enrolled its first worktree yet.
+  if (payload.worktrees.length === 0) return domain_state === 'loading';
+  return payload.worktrees.some(worktreeHasActiveCodeIndexBuild);
 }
 
 function useLatestCodeIndexProgress(
   result: EnvelopeResult<CodeIndexFreshnessPayloadV1> | undefined,
   currentScopeKey: string,
-): readonly CodeIndexBuildProgressV1[] {
+): ReadonlyArray<readonly [string, CodeIndexBuildProgressV1]> {
   const [latestProgress, setLatestProgress] = useState<ScopedCodeIndexProgress>(() => ({
     scopeKey: currentScopeKey,
     byWorktree: new Map(),
   }));
   useEffect(() => {
     if (result?.outcome !== 'envelope') {
+      // Disconnect invalidates the old observation even if a later response
+      // names the same generation without receipted work.
       setLatestProgress((rendered) =>
-        rendered.scopeKey === currentScopeKey
+        rendered.scopeKey === currentScopeKey && rendered.byWorktree.size === 0
           ? rendered
           : { scopeKey: currentScopeKey, byWorktree: new Map() },
       );
@@ -256,14 +412,19 @@ function useLatestCodeIndexProgress(
         const incoming = worktree.progress;
         const renderedProgress = current.get(worktree.worktree_root);
         if (!incoming) {
+          // A confirmed replacement seal makes the old text cursor stale.
+          // Retain only a transient missing sample for a still-sealed
+          // generation. No sealed generation means no text cursor to retain.
           if (
             renderedProgress &&
-            result.envelope.domain_state === 'ready' &&
-            worktree.latest_generation_id === renderedProgress.generation_id
+            worktree.latest_generation_id === renderedProgress.generation_id &&
+            !(
+              result.envelope.domain_state === 'ready' &&
+              worktree.latest_generation_id === renderedProgress.generation_id
+            )
           ) {
-            continue;
+            next.set(worktree.worktree_root, renderedProgress);
           }
-          if (renderedProgress) next.set(worktree.worktree_root, renderedProgress);
         } else if (
           !renderedProgress ||
           isCurrentOrNewerCodeIndexProgress(incoming, renderedProgress)
@@ -279,7 +440,7 @@ function useLatestCodeIndexProgress(
         : { scopeKey: currentScopeKey, byWorktree: next };
     });
   }, [currentScopeKey, result]);
-  return latestProgress.scopeKey === currentScopeKey ? [...latestProgress.byWorktree.values()] : [];
+  return latestProgress.scopeKey === currentScopeKey ? [...latestProgress.byWorktree] : [];
 }
 
 interface ScopedCodeIndexProgress {

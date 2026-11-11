@@ -40,6 +40,7 @@ jobs:
       - uses: ./.github/actions/setup-bazel
         id: bazel
         with:
+          release-download-token: ${{ github.token }}
           cache-key: dependency-helpers
           cache-save: ${{ inputs.offline != true }}
           verify-launcher-cache: ${{ inputs.offline == true }}

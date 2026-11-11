@@ -62,6 +62,9 @@ use tracedecay_code_index::{
     },
 };
 
+use super::attempt_progress::{
+    CodeIndexBuildAttemptSlotStateV1, CodeIndexBuildAttemptSlotV1, CodeIndexPresealAttemptGuardV1,
+};
 use super::freshness_witness::{
     ReconciledSourceWitnessV1, RestoreFreshnessWitnessV1, SourceContentManifestV1,
     SourceSweepCacheV1,
@@ -151,6 +154,9 @@ pub(super) struct RetainedReconcileCaptureV1 {
     captured: CapturedSnapshotV1,
     drained_hints: DrainedPendingHintsV1,
     control: DaemonCodeIndexControlV1,
+    // Keep this guard alive through retained parsing and publication. Any
+    // cancellation, early return, or unwind closes the exact attempt.
+    _attempt: CodeIndexPresealAttemptGuardV1,
     git_metadata: identity::GitMetadataFingerprintV1,
     stat_signature: Option<String>,
 }
@@ -1074,6 +1080,8 @@ pub struct CodeIndexWorktreeSchedulerV1 {
     /// Immutable generation-scoped build snapshot. The registry clones this
     /// slot at mount so dashboard reads never acquire the scheduler mutex.
     build_progress: CodeIndexBuildProgressSlotV1,
+    /// Attempt-scoped pre-seal evidence has no sealed-generation identity.
+    preseal_attempt_progress: CodeIndexBuildAttemptSlotV1,
     /// Durable daemon-authority epoch bound by the process registry at mount.
     progress_daemon_incarnation: u64,
     /// Registry-minted scheduler-owner token. A same-daemon retire/remount gets
@@ -1411,6 +1419,9 @@ impl CodeIndexWorktreeSchedulerV1 {
             refused_ignored_source_paths: BTreeSet::new(),
             query_owners: Mutex::new(None),
             build_progress: Arc::new(RwLock::new(CodeIndexBuildProgressSlotStateV1::default())),
+            preseal_attempt_progress: Arc::new(RwLock::new(
+                CodeIndexBuildAttemptSlotStateV1::default(),
+            )),
             progress_daemon_incarnation: 1,
             progress_producer_incarnation: 1,
         };
@@ -1468,6 +1479,15 @@ impl CodeIndexWorktreeSchedulerV1 {
         self.progress_producer_incarnation = producer_incarnation.max(1);
     }
 
+    /// Exact daemon/producer identity of this mounted scheduler, reused by
+    /// query-driven graph activation after its durable generation commit.
+    pub(crate) const fn progress_incarnations(&self) -> (u64, u64) {
+        (
+            self.progress_daemon_incarnation,
+            self.progress_producer_incarnation,
+        )
+    }
+
     #[cfg(test)]
     pub const fn progress_incarnations_for_test(&self) -> (u64, u64) {
         (
@@ -1478,6 +1498,10 @@ impl CodeIndexWorktreeSchedulerV1 {
 
     pub fn build_progress_slot(&self) -> CodeIndexBuildProgressSlotV1 {
         Arc::clone(&self.build_progress)
+    }
+
+    pub(crate) fn preseal_attempt_progress_slot(&self) -> CodeIndexBuildAttemptSlotV1 {
+        Arc::clone(&self.preseal_attempt_progress)
     }
 
     pub fn last_reconciled_at_micros_slot(&self) -> Arc<AtomicI64> {
@@ -1787,6 +1811,7 @@ impl CodeIndexWorktreeSchedulerV1 {
             .publication
             .clone()
             .with_reconcile_publication_fence(Arc::clone(&self.hints), control.clone());
+        control.finish_preseal_observation();
         match store.commit(&mut pending.preparation, &pending.publication) {
             Ok(bytes) => {
                 let sealed =
@@ -2131,6 +2156,7 @@ impl CodeIndexWorktreeSchedulerV1 {
             captured,
             drained_hints,
             control,
+            _attempt,
             git_metadata,
             stat_signature,
         } = capture;
@@ -2360,7 +2386,18 @@ impl CodeIndexWorktreeSchedulerV1 {
     pub(super) fn capture_retained_reconcile_attempt(
         &self,
     ) -> Result<Option<RetainedReconcileCaptureV1>, CodeIndexSchedulerErrorV1> {
-        let control = self.reconcile_control();
+        // A retained generation still scans the source. Changed files may
+        // proceed into a real parser-backed publish; share one attempt
+        // authority across both rather than running an unobserved capture.
+        let attempt = CodeIndexPresealAttemptGuardV1::begin(
+            Arc::clone(&self.preseal_attempt_progress),
+            self.progress_daemon_incarnation,
+            self.progress_producer_incarnation,
+        );
+        let control = self
+            .reconcile_control()
+            .with_preseal_observer(attempt.observer())
+            .with_preseal_finisher(attempt.finisher());
         let captured = self
             .capture_authoritative_snapshot_without_active_generation_reuse(Some(&control))
             .map_err(|error| prefer_resident_memory_refusal(&control, error))?;
@@ -2381,6 +2418,7 @@ impl CodeIndexWorktreeSchedulerV1 {
             captured,
             drained_hints,
             control,
+            _attempt: attempt,
             git_metadata,
             stat_signature,
         }))
@@ -2396,6 +2434,7 @@ impl CodeIndexWorktreeSchedulerV1 {
             mut captured,
             drained_hints,
             control,
+            _attempt,
             git_metadata,
             stat_signature,
         } = capture;
@@ -2972,7 +3011,15 @@ impl CodeIndexWorktreeSchedulerV1 {
         // move after this pre-capture sample stays visible to that probe.
         let mut overflow_reconciled = false;
         for retry in 0..=MAX_SUPERSEDED_RECONCILE_RETRIES {
-            let control = self.reconcile_control();
+            let attempt = CodeIndexPresealAttemptGuardV1::begin(
+                Arc::clone(&self.preseal_attempt_progress),
+                self.progress_daemon_incarnation,
+                self.progress_producer_incarnation,
+            );
+            let control = self
+                .reconcile_control()
+                .with_preseal_observer(attempt.observer())
+                .with_preseal_finisher(attempt.finisher());
             // Every earlier attempt was cancelled by a newer source epoch. A
             // source that changes faster than a pass lasts would cancel this
             // one too, so it seals what it captured; the epoch that
@@ -4286,6 +4333,7 @@ impl CodeIndexWorktreeSchedulerV1 {
                         deadline: None,
                         cancellation: None,
                     },
+                    control,
                 ) {
                 Ok(captured) => {
                     if !classification
@@ -4390,6 +4438,10 @@ impl CodeIndexWorktreeSchedulerV1 {
             })
             .collect::<Vec<_>>();
         let admitted_paths = self.ignored_admission_paths();
+        // Counts only completed real candidate decisions. A retained row was
+        // not recaptured, and an unhandled failing candidate never advances.
+        let completed_candidates = AtomicU64::new(0);
+        let total_candidates = u64::try_from(candidates.len()).unwrap_or(u64::MAX);
         let _scan_batch = tracedecay_privacy::code_source_scan_batch();
         let outcomes = tracedecay_code_index::parallelism::install(|| {
             use rayon::prelude::*;
@@ -4401,13 +4453,26 @@ impl CodeIndexWorktreeSchedulerV1 {
                             return Err(cancelled_code_index_reconcile());
                         }
                         ignored_dependencies::checkpoint_if_present(control)?;
-                        self.capture_admitted_candidate(
+                        let outcome = self.capture_admitted_candidate(
                             &registry,
                             logical_path,
                             control,
                             admitted_paths.contains(logical_path.as_str()),
                             classification.bound_child(logical_path),
-                        )
+                        )?;
+                        if let Some(observer) = control {
+                            let completed = completed_candidates
+                                .fetch_add(1, Ordering::AcqRel)
+                                .saturating_add(1);
+                            observer.observed_preseal_work(
+                                tracedecay_code_index::production::CodeIndexPresealWorkV1 {
+                                    phase: tracedecay_code_index::production::CodeIndexPresealWorkPhaseV1::Capture,
+                                    completed_items: completed,
+                                    total_items: Some(total_candidates),
+                                },
+                            );
+                        }
+                        Ok(outcome)
                     })
                 })
                 .collect::<Vec<_>>()

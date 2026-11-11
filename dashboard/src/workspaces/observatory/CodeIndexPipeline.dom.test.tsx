@@ -1,0 +1,638 @@
+import { cleanup, render, screen } from '@testing-library/react';
+import { afterEach, describe, expect, it } from 'vitest';
+import { CodeIndexFreshnessPayloadV1Schema } from '../../contracts/generated.ts';
+import type {
+  CodeIndexBuildProgressV1,
+  CodeIndexFreshnessPayloadV1,
+  CodeIndexWorktreeFreshnessV1,
+} from '../../contracts/generated.ts';
+import type { EnvelopeResult } from '../../data/query/envelope.ts';
+import { CodeIndexPipeline, hasActiveCodeIndexBuild } from './CodeIndexPipeline.tsx';
+
+type FreshnessResult = Extract<
+  EnvelopeResult<CodeIndexFreshnessPayloadV1>,
+  { outcome: 'envelope' }
+>;
+
+const GENERATION = 'generation.progress';
+const OBSERVED_AT = 1_753_003_600_000_000;
+
+function progress(overrides: Partial<CodeIndexBuildProgressV1> = {}): CodeIndexBuildProgressV1 {
+  return {
+    generation_id: GENERATION,
+    daemon_incarnation: 1,
+    producer_incarnation: 1,
+    progress_epoch: 1,
+    sealed_source_digest: 'sha256:sealed-source',
+    phase: 'bulk_commit',
+    committed_pages: 2,
+    committed_chunks: 2,
+    committed_imports: 0,
+    committed_payload_bytes: 128,
+    completed_files: 2,
+    total_files: 10,
+    completed_lexical_units: 2,
+    total_lexical_units: 10,
+    current_batch_pages: 0,
+    current_batch_payload_bytes: 0,
+    elapsed_micros: 1_000_000,
+    last_commit_latency_micros: 100,
+    files_per_second: null,
+    lexical_units_per_second: null,
+    estimated_remaining_seconds: null,
+    last_progress_micros: OBSERVED_AT,
+    blocked_reason: null,
+    ...overrides,
+  };
+}
+
+function worktree(
+  overrides: Partial<CodeIndexWorktreeFreshnessV1> = {},
+): CodeIndexWorktreeFreshnessV1 {
+  return {
+    worktree_root: '/project',
+    repository_id: 'repository.project',
+    worktree_id: 'worktree.primary',
+    source_reference: 'refs/heads/master',
+    source_revision: null,
+    latest_generation_id: GENERATION,
+    code_graph_serving: { state: 'ready' },
+    clone_index: null,
+    snapshot_content_identity: 'sha256:source',
+    sealed_at_micros: OBSERVED_AT,
+    last_reconcile_micros: OBSERVED_AT,
+    staleness_state: 'fresh',
+    rebuild_in_flight: false,
+    hook_hint_count: 0,
+    coverage: 'complete',
+    progress: null,
+    restore_progress: null,
+    parked: null,
+    ...overrides,
+  };
+}
+
+function freshness(
+  overrides: Partial<CodeIndexWorktreeFreshnessV1> = {},
+  domainState: 'ready' | 'loading' = 'ready',
+): FreshnessResult {
+  return {
+    outcome: 'envelope',
+    envelope: {
+      schema_revision: 1,
+      scope: { project_id: 'project', storage_mode: 'project', store_root: '/store' },
+      version: { entity_version: null, graph_version: null },
+      time: { valid_time_micros: null, observation_time_micros: OBSERVED_AT },
+      source_watermark: null,
+      authorization: { outcome: 'authorized' },
+      coverage: {
+        completeness: 'complete',
+        eligible: 1,
+        examined: 1,
+        matched: 1,
+        excluded: 0,
+        omitted: 0,
+        unknown: 0,
+        denominator: 1,
+        unit: 'mounted_worktree',
+        omission_reasons: [],
+      },
+      freshness: { state: 'fresh', observed_at_micros: OBSERVED_AT, watermark: null },
+      domain_state: domainState,
+      legal_actions: [],
+      payload: {
+        worktrees: [worktree(overrides)],
+        note: 'daemon scheduler state',
+      },
+    },
+  };
+}
+
+const restoreProgress = {
+  generation_id: GENERATION,
+  artifact_digest: 'sha256:artifact',
+  authenticated_completed: 2,
+  authenticated_total: 5,
+  authenticated_remaining: 3,
+};
+
+afterEach(cleanup);
+
+describe('code-index activity polling', () => {
+  it('does not turn an admitted first capture into observed work', () => {
+    const admitted = {
+      daemon_incarnation: 7, producer_incarnation: 9, attempt_sequence: 1,
+      progress_epoch: 1, phase: 'capture' as const, completed_items: 0,
+      total_items: null, last_progress_micros: null, active: true,
+    };
+    const initial = freshness({
+      latest_generation_id: null, code_graph_serving: { state: 'pending' },
+      staleness_state: 'indexing', preseal_attempt: admitted,
+    }, 'loading');
+    initial.envelope.payload = CodeIndexFreshnessPayloadV1Schema.parse(initial.envelope.payload);
+    const view = render(<CodeIndexPipeline result={initial} pending={false} scopeKey="project" />);
+    expect(screen.getByText('awaiting first observed preseal work')).toBeTruthy();
+    expect(screen.queryByText('capture · 0 items')).toBeNull();
+    expect(screen.queryByText(/no observed preseal work for/)).toBeNull();
+
+    const observed = freshness({
+      latest_generation_id: null, code_graph_serving: { state: 'pending' },
+      staleness_state: 'indexing',
+      preseal_attempt: {
+        ...admitted, progress_epoch: 2, completed_items: 3,
+        total_items: 10, last_progress_micros: OBSERVED_AT,
+      },
+    }, 'loading');
+    observed.envelope.payload = CodeIndexFreshnessPayloadV1Schema.parse(observed.envelope.payload);
+    view.rerender(<CodeIndexPipeline result={observed} pending={false} scopeKey="project" />);
+    expect(screen.getByText('capture · 3 / 10 items')).toBeTruthy();
+    expect(screen.queryByText('awaiting first observed preseal work')).toBeNull();
+  });
+
+  it('does not treat a newly admitted native writer as encoded or committed work', () => {
+    // This is the exact admission shape from the real native graph slot begin:
+    // the producer has not observed any compact row or durable receipt.
+    const admitted: NonNullable<CodeIndexWorktreeFreshnessV1['native_graph_progress']> = {
+      generation_id: GENERATION, sealed_graph_digest: 'sha256:graph',
+      daemon_incarnation: 7, producer_incarnation: 9, attempt_sequence: 1,
+      progress_epoch: 1, phase: null,
+      encoded_entities: 0, total_entities: null,
+      encoded_relations: 0, total_relations: null,
+      committed_stage_pages: 0, committed_stage_mutations: 0, committed_stage_bytes: 0,
+      committed_compact_segments: 0, committed_compact_bytes: 0,
+      last_progress_micros: null, active: true,
+    };
+    const initial = freshness({ native_graph_progress: admitted }, 'loading');
+    initial.envelope.payload = CodeIndexFreshnessPayloadV1Schema.parse(initial.envelope.payload);
+    const view = render(<CodeIndexPipeline result={initial} pending={false} scopeKey="project" />);
+    expect(screen.getByText('Graph writer')).toBeTruthy();
+    expect(screen.getByText('awaiting first observed native graph work')).toBeTruthy();
+    expect(screen.queryByText(/0 entities encoded/)).toBeNull();
+    expect(screen.queryByText(/0 pages committed/)).toBeNull();
+    expect(screen.queryByText(/no observed native graph work for/)).toBeNull();
+
+    const observed = freshness({
+      native_graph_progress: {
+        ...admitted, progress_epoch: 2, phase: 'compact_encoding',
+        encoded_entities: 3, total_entities: 10,
+        last_progress_micros: OBSERVED_AT,
+      },
+    }, 'loading');
+    observed.envelope.payload = CodeIndexFreshnessPayloadV1Schema.parse(observed.envelope.payload);
+    view.rerender(<CodeIndexPipeline result={observed} pending={false} scopeKey="project" />);
+    expect(screen.getByText(
+      'compact encoding · 3 entities encoded · 0 relations encoded · 0 pages committed · 0 segments committed',
+    )).toBeTruthy();
+    expect(screen.queryByText('awaiting first observed native graph work')).toBeNull();
+  });
+
+  it('shows pre-seal work before the first text page commits', () => {
+    const result = freshness({ preseal_attempt: {
+      daemon_incarnation: 1, producer_incarnation: 2, attempt_sequence: 3,
+      progress_epoch: 4, phase: 'resolution', completed_items: 7,
+      total_items: null, last_progress_micros: OBSERVED_AT, active: true,
+    } });
+    result.envelope.payload = CodeIndexFreshnessPayloadV1Schema.parse(result.envelope.payload);
+    expect(hasActiveCodeIndexBuild(result)).toBe(true);
+    render(<CodeIndexPipeline result={result} pending={false} scopeKey="project" />);
+    expect(screen.getByText('resolution · 7 items')).toBeTruthy();
+    expect(screen.queryByText('no active code-index build')).toBeNull();
+  });
+
+  it('keeps last observed preseal work visible through durable handoff without calling it active', () => {
+    const lastAttempt: NonNullable<CodeIndexWorktreeFreshnessV1['preseal_attempt']> = {
+      daemon_incarnation: 1, producer_incarnation: 2, attempt_sequence: 3,
+      progress_epoch: 7, phase: 'resolution', completed_items: 7,
+      total_items: null, last_progress_micros: OBSERVED_AT - 90_000_000, active: false,
+    };
+    const handoff = freshness({
+      rebuild_in_flight: true,
+      preseal_attempt: lastAttempt,
+    }, 'loading');
+    handoff.envelope.payload = CodeIndexFreshnessPayloadV1Schema.parse(handoff.envelope.payload);
+    const view = render(<CodeIndexPipeline result={handoff} pending={false} scopeKey="project" />);
+    expect(screen.getByText('Last observed preseal work')).toBeTruthy();
+    expect(screen.getByText('resolution · 7 items')).toBeTruthy();
+    expect(screen.queryByText('Before sealing')).toBeNull();
+    expect(screen.queryByText(/no observed preseal work for/)).toBeNull();
+
+    // The recorded attempt becomes historical once the rebuild ends.
+    const settled = freshness({ rebuild_in_flight: false, preseal_attempt: lastAttempt });
+    settled.envelope.payload = CodeIndexFreshnessPayloadV1Schema.parse(settled.envelope.payload);
+    view.rerender(<CodeIndexPipeline result={settled} pending={false} scopeKey="project" />);
+    expect(screen.queryByText('Last observed preseal work')).toBeNull();
+    expect(screen.queryByText('resolution · 7 items')).toBeNull();
+  });
+
+  it('reports frozen writer clocks and clears warnings on real work or retirement', () => {
+    const frozen = freshness({
+      progress: progress({ phase: 'ready' }),
+      preseal_attempt: {
+        daemon_incarnation: 1, producer_incarnation: 2, attempt_sequence: 3,
+        progress_epoch: 4, phase: 'capture', completed_items: 7,
+        total_items: 10, last_progress_micros: OBSERVED_AT - 60_000_000, active: true,
+      },
+    }, 'loading');
+    frozen.envelope.payload = CodeIndexFreshnessPayloadV1Schema.parse(frozen.envelope.payload);
+    const view = render(<CodeIndexPipeline result={frozen} pending={false} scopeKey="project" />);
+    expect(screen.getByText('no observed preseal work for 60s')).toBeTruthy();
+    expect(screen.getByText('capture · 7 / 10 items')).toBeTruthy();
+
+    const recovered = freshness({
+      preseal_attempt: {
+        daemon_incarnation: 1, producer_incarnation: 2, attempt_sequence: 3,
+        progress_epoch: 5, phase: 'parse_evidence', completed_items: 8,
+        total_items: 10, last_progress_micros: OBSERVED_AT, active: true,
+      },
+    }, 'loading');
+    recovered.envelope.payload = CodeIndexFreshnessPayloadV1Schema.parse(recovered.envelope.payload);
+    view.rerender(<CodeIndexPipeline result={recovered} pending={false} scopeKey="project" />);
+    expect(screen.getByText('parse evidence · 8 / 10 items')).toBeTruthy();
+    expect(screen.queryByText(/no observed preseal work/)).toBeNull();
+
+    const nativeProgress: NonNullable<CodeIndexWorktreeFreshnessV1['native_graph_progress']> = {
+      generation_id: GENERATION, sealed_graph_digest: 'sha256:graph',
+      daemon_incarnation: 1, producer_incarnation: 2, attempt_sequence: 4,
+      progress_epoch: 6, phase: 'stage_page_commit',
+      encoded_entities: 17, total_entities: 25,
+      encoded_relations: 3, total_relations: 9,
+      committed_stage_pages: 1, committed_stage_mutations: 3, committed_stage_bytes: 128,
+      committed_compact_segments: 0, committed_compact_bytes: 0,
+      last_progress_micros: OBSERVED_AT - 120_000_000, active: true,
+    };
+    const frozenGraph = freshness({ native_graph_progress: nativeProgress }, 'loading');
+    frozenGraph.envelope.payload = CodeIndexFreshnessPayloadV1Schema.parse(frozenGraph.envelope.payload);
+    view.rerender(<CodeIndexPipeline result={frozenGraph} pending={false} scopeKey="project" />);
+    expect(screen.getByText('no observed native graph work for 2m')).toBeTruthy();
+
+    // A verified but inactive writer remains a milestone, not a stalled writer.
+    const completed = freshness({
+      native_graph_progress: {
+        ...nativeProgress, active: false,
+        phase: 'compact_segment_verified', committed_compact_segments: 1,
+      },
+    });
+    completed.envelope.payload = CodeIndexFreshnessPayloadV1Schema.parse(completed.envelope.payload);
+    view.rerender(<CodeIndexPipeline result={completed} pending={false} scopeKey="project" />);
+    expect(screen.getByText('Graph milestones')).toBeTruthy();
+    expect(screen.queryByText(/no observed native graph work/)).toBeNull();
+
+    // Without a real work stamp, no elapsed no-work duration can be invented.
+    const unreported = freshness({
+      native_graph_progress: { ...nativeProgress, last_progress_micros: null },
+    }, 'loading');
+    unreported.envelope.payload = CodeIndexFreshnessPayloadV1Schema.parse(unreported.envelope.payload);
+    view.rerender(<CodeIndexPipeline result={unreported} pending={false} scopeKey="project" />);
+    expect(screen.queryByText(/no observed native graph work/)).toBeNull();
+  });
+
+  it('keeps polling an in-flight rebuild before its first committed report', () => {
+    expect(hasActiveCodeIndexBuild(freshness({ rebuild_in_flight: true }))).toBe(true);
+  });
+
+  it('does not let the previous ready report hide an in-flight successor', () => {
+    expect(hasActiveCodeIndexBuild(freshness({
+      rebuild_in_flight: true,
+      progress: progress({ phase: 'ready' }),
+    }))).toBe(true);
+  });
+
+  it('keeps polling a restore even when serving readiness is ready', () => {
+    expect(hasActiveCodeIndexBuild(freshness({ restore_progress: restoreProgress }))).toBe(true);
+  });
+
+  it('observes active work after an idle worktree in an aggregate read', () => {
+    const result = freshness();
+    result.envelope.payload.worktrees.push(worktree({
+      worktree_root: '/project/linked',
+      rebuild_in_flight: true,
+    }));
+    expect(hasActiveCodeIndexBuild(result)).toBe(true);
+  });
+
+  it('keeps polling measured graph publication', () => {
+    expect(hasActiveCodeIndexBuild(freshness({
+      progress: progress({ phase: 'graph_publication' }),
+    }))).toBe(true);
+  });
+
+  it('keeps polling a loading envelope before a worktree mounts', () => {
+    const result = freshness({}, 'loading');
+    result.envelope.payload.worktrees = [];
+    expect(hasActiveCodeIndexBuild(result)).toBe(true);
+  });
+
+  it('stops active polling after the generation settles', () => {
+    expect(hasActiveCodeIndexBuild(freshness({
+      progress: progress({ phase: 'ready' }),
+    }))).toBe(false);
+  });
+
+  it('stops active polling after the final report retires', () => {
+    expect(hasActiveCodeIndexBuild(freshness())).toBe(false);
+  });
+
+  it('does not invent activity for a ready empty scope', () => {
+    const result = freshness();
+    result.envelope.payload.worktrees = [];
+    expect(hasActiveCodeIndexBuild(result)).toBe(false);
+  });
+
+  it('does not invent activity before a response arrives', () => {
+    expect(hasActiveCodeIndexBuild(undefined)).toBe(false);
+  });
+
+  it('does not turn a transport failure into claimed build activity', () => {
+    expect(hasActiveCodeIndexBuild({ outcome: 'transport', state: 'error' })).toBe(false);
+  });
+});
+
+describe('code-index progress transitions', () => {
+  it('renders unreported capture, committed progress, and completion without inventing counters', async () => {
+    const cold = freshness({
+      latest_generation_id: null,
+      snapshot_content_identity: null,
+      sealed_at_micros: null,
+      rebuild_in_flight: true,
+      staleness_state: 'indexing',
+      code_graph_serving: { state: 'pending' },
+    }, 'loading');
+    const view = render(<CodeIndexPipeline result={cold} pending={false} scopeKey="project" />);
+    expect(screen.getByText('code-index build in progress; progress not yet reported')).toBeTruthy();
+    expect(screen.queryByText('no active code-index build')).toBeNull();
+    expect(screen.queryByRole('progressbar')).toBeNull();
+
+    const building = freshness({ rebuild_in_flight: true, progress: progress() }, 'loading');
+    view.rerender(<CodeIndexPipeline result={building} pending={false} scopeKey="project" />);
+    expect(await screen.findByText('bulk commit · 20.0%')).toBeTruthy();
+    expect(screen.getByRole('progressbar').getAttribute('value')).toBe('20');
+    expect(screen.queryByText('code-index build in progress; progress not yet reported')).toBeNull();
+
+    const completed = freshness({
+      progress: progress({
+        phase: 'ready',
+        progress_epoch: 2,
+        committed_pages: 10,
+        committed_chunks: 10,
+        completed_files: 10,
+        completed_lexical_units: 10,
+      }),
+    });
+    view.rerender(<CodeIndexPipeline result={completed} pending={false} scopeKey="project" />);
+    expect(await screen.findByText('ready · 100.0%')).toBeTruthy();
+    expect(hasActiveCodeIndexBuild(completed)).toBe(false);
+
+    view.rerender(<CodeIndexPipeline result={freshness()} pending={false} scopeKey="project" />);
+    expect(await screen.findByText('no active code-index build')).toBeTruthy();
+    expect(screen.queryByRole('progressbar')).toBeNull();
+  });
+
+  it('does not resurrect text counters across a transport gap', async () => {
+    const building = freshness({
+      rebuild_in_flight: true,
+      progress: progress({ progress_epoch: 9 }),
+    }, 'loading');
+    building.envelope.payload = CodeIndexFreshnessPayloadV1Schema.parse(building.envelope.payload);
+    const view = render(<CodeIndexPipeline result={building} pending={false} scopeKey="project" />);
+    expect(await screen.findByText('bulk commit · 20.0%')).toBeTruthy();
+
+    // The transport gap invalidates the old progress receipt. A subsequent
+    // reading can name the same sealed generation without reporting new work.
+    view.rerender(<CodeIndexPipeline
+      result={{ outcome: 'transport', state: 'error' }}
+      pending={false}
+      scopeKey="project"
+    />);
+    expect(screen.queryByRole('progressbar')).toBeNull();
+
+    view.rerender(<CodeIndexPipeline
+      result={freshness({ rebuild_in_flight: true, progress: null }, 'loading')}
+      pending={false}
+      scopeKey="project"
+    />);
+    expect(await screen.findByText('code-index build in progress; progress not yet reported'))
+      .toBeTruthy();
+    expect(screen.queryByText('bulk commit · 20.0%')).toBeNull();
+    expect(screen.queryByRole('progressbar')).toBeNull();
+  });
+
+  it('retires cached text when the daemon reports no sealed generation', async () => {
+    const building = freshness({
+      latest_generation_id: GENERATION,
+      rebuild_in_flight: true,
+      progress: progress({ progress_epoch: 9 }),
+    }, 'loading');
+    const view = render(<CodeIndexPipeline result={building} pending={false} scopeKey="project" />);
+    expect(await screen.findByText('bulk commit · 20.0%')).toBeTruthy();
+
+    // This is not an absent progress sample from the *same* durable
+    // generation: the mount now explicitly has no sealed generation.
+    view.rerender(<CodeIndexPipeline
+      result={freshness({
+        latest_generation_id: null,
+        sealed_at_micros: null,
+        snapshot_content_identity: null,
+        staleness_state: 'indexing',
+        rebuild_in_flight: true,
+        progress: null,
+      }, 'loading')}
+      pending={false}
+      scopeKey="project"
+    />);
+    expect(await screen.findByText('code-index build in progress; progress not yet reported'))
+      .toBeTruthy();
+    expect(screen.queryByText('bulk commit · 20.0%')).toBeNull();
+    expect(screen.queryByRole('progressbar')).toBeNull();
+  });
+
+  it('discards a retired text cursor after a different generation seals', async () => {
+    const building = freshness({
+      progress: progress({ progress_epoch: 41 }),
+      rebuild_in_flight: true,
+    }, 'loading');
+    const view = render(<CodeIndexPipeline result={building} pending={false} scopeKey="project" />);
+    expect(await screen.findByText('bulk commit · 20.0%')).toBeTruthy();
+
+    // Missing an intermediate sample is not proof that the same writer
+    // finished. Keep the real last cursor while this generation is current.
+    view.rerender(<CodeIndexPipeline
+      result={freshness({ progress: null, rebuild_in_flight: true }, 'loading')}
+      pending={false}
+      scopeKey="project"
+    />);
+    expect(screen.getByText('bulk commit · 20.0%')).toBeTruthy();
+
+    // The daemon now reports a different *sealed* generation, with no text
+    // report. The preceding generation's committed counters must disappear.
+    view.rerender(<CodeIndexPipeline
+      result={freshness({
+        latest_generation_id: 'generation.successor',
+        progress: null,
+      })}
+      pending={false}
+      scopeKey="project"
+    />);
+    expect(await screen.findByText('no active code-index build')).toBeTruthy();
+    expect(screen.queryByText('bulk commit · 20.0%')).toBeNull();
+    expect(screen.queryByRole('progressbar')).toBeNull();
+  });
+
+  it('keeps identical-generation progress separate for each mounted worktree', async () => {
+    // Linked worktrees can share a sealed generation ID but have independent
+    // build counters and must not share React list identity.
+    const first = freshness({
+      rebuild_in_flight: true,
+      progress: progress({ committed_pages: 2, completed_files: 2 }),
+    }, 'loading');
+    first.envelope.payload.worktrees.push(worktree({
+      worktree_root: '/project/linked',
+      rebuild_in_flight: true,
+      progress: progress({
+        committed_pages: 7,
+        completed_files: 7,
+        completed_lexical_units: 7,
+      }),
+    }));
+    first.envelope.payload = CodeIndexFreshnessPayloadV1Schema.parse(first.envelope.payload);
+    const view = render(<CodeIndexPipeline result={first} pending={false} scopeKey="project" />);
+
+    const original = await screen.findByText('/project');
+    const linked = screen.getByText('/project/linked');
+    expect(original.closest('article[data-code-index-generation]')?.textContent)
+      .toContain('2 / 10 files');
+    expect(linked.closest('article[data-code-index-generation]')?.textContent)
+      .toContain('7 / 10 files');
+    expect(screen.getAllByRole('progressbar', { name: /Code progress for/ })).toHaveLength(2);
+
+    const updated = freshness({
+      rebuild_in_flight: true,
+      progress: progress({ committed_pages: 2, completed_files: 2 }),
+    }, 'loading');
+    updated.envelope.payload.worktrees.push(worktree({
+      worktree_root: '/project/linked',
+      rebuild_in_flight: true,
+      progress: progress({
+        progress_epoch: 2,
+        committed_pages: 9,
+        completed_files: 9,
+        completed_lexical_units: 9,
+      }),
+    }));
+    view.rerender(<CodeIndexPipeline result={updated} pending={false} scopeKey="project" />);
+    expect(await screen.findByText('9 / 10 files')).toBeTruthy();
+    expect(screen.getByText('/project').closest('article[data-code-index-generation]')?.textContent)
+      .toContain('2 / 10 files');
+    expect(screen.getByText('/project/linked').closest('article[data-code-index-generation]')?.textContent)
+      .toContain('9 / 10 files');
+  });
+
+  it('keeps restore checks separate from build counters and stops polling after restoration', async () => {
+    const restoring = freshness({ restore_progress: restoreProgress });
+    const view = render(<CodeIndexPipeline result={restoring} pending={false} scopeKey="project" />);
+    expect(screen.getByText('restoring lexical artifact')).toBeTruthy();
+    expect(screen.getByText('3 authentication checks remaining')).toBeTruthy();
+    expect(screen.getByRole('progressbar').getAttribute('value')).toBe('2');
+    expect(screen.getByRole('progressbar').getAttribute('max')).toBe('5');
+    expect(screen.queryByText('no active code-index build')).toBeNull();
+    expect(hasActiveCodeIndexBuild(restoring)).toBe(true);
+
+    const restored = freshness();
+    view.rerender(<CodeIndexPipeline result={restored} pending={false} scopeKey="project" />);
+    expect(await screen.findByText('no active code-index build')).toBeTruthy();
+    expect(screen.queryByRole('progressbar')).toBeNull();
+    expect(hasActiveCodeIndexBuild(restored)).toBe(false);
+  });
+});
+
+describe('code-index parked and recovered readers', () => {
+  it('renders the actual park refusal, idles polling, and clears it on recovery', () => {
+    const blocked = freshness({
+      rebuild_in_flight: true,
+      staleness_state: 'parked',
+      parked: {
+        reason: 'native graph publication authority unavailable',
+        remediation: 'restore the verified graph store',
+        parked_at_micros: OBSERVED_AT,
+        observed_passes: 2,
+        retries_on_wake: false,
+        blocked_reason: 'publication_authority_corrupt',
+      },
+    }, 'loading');
+    blocked.envelope.payload = CodeIndexFreshnessPayloadV1Schema.parse(blocked.envelope.payload);
+    expect(hasActiveCodeIndexBuild(blocked)).toBe(false);
+    const view = render(<CodeIndexPipeline result={blocked} pending={false} scopeKey="project" />);
+    expect(screen.getByText(
+      'parked: native graph publication authority unavailable · restore the verified graph store',
+    )).toBeTruthy();
+
+    const recovered = freshness({ rebuild_in_flight: true, staleness_state: 'indexing' }, 'loading');
+    recovered.envelope.payload = CodeIndexFreshnessPayloadV1Schema.parse(recovered.envelope.payload);
+    view.rerender(<CodeIndexPipeline result={recovered} pending={false} scopeKey="project" />);
+    expect(screen.queryByText(/parked: native graph publication authority unavailable/)).toBeNull();
+    expect(hasActiveCodeIndexBuild(recovered)).toBe(true);
+  });
+
+  it('keeps real successor work live despite the retained generation refusal', () => {
+    const parked: NonNullable<CodeIndexWorktreeFreshnessV1['parked']> = {
+      reason: 'old publication authority corrupt',
+      remediation: 'repair the old publication store',
+      parked_at_micros: OBSERVED_AT,
+      observed_passes: 2,
+      retries_on_wake: false,
+      blocked_reason: 'publication_authority_corrupt',
+    };
+    const retained = progress({ phase: 'ready', blocked_reason: 'publication_authority_corrupt' });
+    const capture = freshness({
+      progress: retained,
+      preseal_attempt: {
+        daemon_incarnation: 1, producer_incarnation: 3, attempt_sequence: 2,
+        progress_epoch: 4, phase: 'capture', completed_items: 2,
+        total_items: 5, last_progress_micros: OBSERVED_AT, active: true,
+      },
+    }, 'loading');
+    capture.envelope.payload = CodeIndexFreshnessPayloadV1Schema.parse(capture.envelope.payload);
+    expect(hasActiveCodeIndexBuild(capture)).toBe(true);
+    const view = render(<CodeIndexPipeline result={capture} pending={false} scopeKey="project" />);
+    expect(screen.getByText('capture · 2 / 5 items')).toBeTruthy();
+
+    const native = freshness({
+      progress: retained,
+      native_graph_progress: {
+        generation_id: 'generation.successor',
+        sealed_graph_digest: 'sha256:successor-graph',
+        daemon_incarnation: 1, producer_incarnation: 4, attempt_sequence: 2,
+        progress_epoch: 3, phase: 'compact_encoding',
+        encoded_entities: 17, total_entities: 30,
+        encoded_relations: 0, total_relations: 9,
+        committed_stage_pages: 0, committed_stage_mutations: 0, committed_stage_bytes: 0,
+        committed_compact_segments: 0, committed_compact_bytes: 0,
+        last_progress_micros: OBSERVED_AT, active: true,
+      },
+    }, 'loading');
+    native.envelope.payload = CodeIndexFreshnessPayloadV1Schema.parse(native.envelope.payload);
+    expect(hasActiveCodeIndexBuild(native)).toBe(true);
+    view.rerender(<CodeIndexPipeline result={native} pending={false} scopeKey="project" />);
+    expect(screen.getByText(/17 entities encoded/)).toBeTruthy();
+    expect(screen.getByText('Graph writer')).toBeTruthy();
+
+    // The original terminal refusal remains idle without the actual writer.
+    expect(hasActiveCodeIndexBuild(freshness({
+      parked, progress: retained, rebuild_in_flight: true,
+    }, 'loading'))).toBe(false);
+  });
+
+  it('distinguishes a cold indexing mount from an idle non-ready envelope', () => {
+    expect(hasActiveCodeIndexBuild(freshness({
+      latest_generation_id: null,
+      staleness_state: 'indexing',
+      rebuild_in_flight: false,
+    }, 'loading'))).toBe(true);
+    expect(hasActiveCodeIndexBuild(freshness({}, 'loading'))).toBe(false);
+    const failed = freshness({}, 'loading');
+    failed.envelope.payload.mount_failure = {
+      message: 'code-index scheduler mount failed',
+      remediation: 'retry the mount',
+    };
+    expect(hasActiveCodeIndexBuild(failed)).toBe(false);
+  });
+});

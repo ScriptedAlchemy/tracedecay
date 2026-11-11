@@ -113,7 +113,7 @@ pub use invocation::{
     RegisteredRetainedRequestContextError, RegisteredRetainedRuntime, RegisteredWorkRuntime,
     SwitchableFeedbackCycleRuntimeV1, UnavailableFeedbackCycleRuntimeV1,
     admit_registered_hook_orchestration, advisory_cycle_invocation_result,
-    callable_code_request_context, daemon_operation_event_authority, execute_profile_configuration,
+    callable_code_request_context, execute_profile_configuration,
     feedback_proximity_invocation_result, register_hook_orchestration_runtime,
     settle_daemon_work_delivery, unregister_hook_orchestration_runtime,
 };

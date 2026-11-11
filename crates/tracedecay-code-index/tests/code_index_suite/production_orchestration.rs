@@ -3176,7 +3176,7 @@ fn partitioned_codec_fixture() -> (
 }
 
 const PARTITIONED_FORMAT_STATE_DIGEST: &str =
-    "sha256:0ba68ca337a4760c0221c1212eec669965f43abdd244f0b21be7f705f7449918";
+    "sha256:08e91a89b2dd82615897c5df08b74740fc483551f8f8cef1ef57cf96a93c837f";
 const PARTITIONED_FORMAT_SEGMENTS: &[(&str, u64)] = &[
     (
         "sha256:9b175e6aa1ddf6db4138181c0dd1cd522f37381898a58d46e26b1165b613727b",
@@ -3462,6 +3462,35 @@ fn partitioned_codec_has_stable_bytes_and_round_trips() {
     assert!(
         !file_evidence_digests.is_empty(),
         "the fixture must seal file evidence"
+    );
+    // This revision requires each evidence descriptor's authenticated target
+    // filter. A missing filter is not a permissive legacy manifest.
+    let evidence_descriptors = envelope["generation"]["file_evidence"]
+        .as_array()
+        .expect("file evidence descriptors");
+    for descriptor in evidence_descriptors {
+        assert_eq!(
+            descriptor["target_filter"].as_array().map(Vec::len),
+            Some(4),
+            "each sealed evidence descriptor has four target-filter words"
+        );
+    }
+    let mut filterless = envelope.clone();
+    filterless["generation"]["file_evidence"]
+        .as_array_mut()
+        .expect("file evidence descriptors")
+        .first_mut()
+        .expect("fixture has evidence")
+        .as_object_mut()
+        .expect("typed evidence descriptor")
+        .remove("target_filter")
+        .expect("filter must be present");
+    let error =
+        CodeIndexPublishedGenerationV1::partitioned_text_metadata(&reseal_manifest(filterless))
+            .expect_err("a current-revision manifest without a target filter must be refused");
+    assert!(
+        error.to_string().contains("missing field `target_filter`"),
+        "filterless manifest reached the wrong refusal: {error}"
     );
     // Buffer address -> its capacity after the last read it served.
     let mut file_buffers = BTreeMap::new();

@@ -296,10 +296,30 @@ pub struct CodeIndexCapturedFileV1 {
     pub sensitivity_level: SensitivityLevelV1,
 }
 
+/// Successful pre-seal capture, parse, or resolution work before a generation seals.
+/// These observations never represent durable text or native graph commits.
+pub use tracedecay_contracts::code_index_freshness::CodeIndexPresealWorkPhaseV1;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CodeIndexPresealWorkV1 {
+    pub phase: CodeIndexPresealWorkPhaseV1,
+    pub completed_items: u64,
+    /// None when a Git tree visitor has no authenticated source count yet.
+    pub total_items: Option<u64>,
+}
+
 /// Synchronous checkpoints exposed by an application/daemon request.
 pub trait CodeIndexExecutionControlV1: Sync {
     fn is_cancelled(&self) -> bool;
     fn is_deadline_exceeded(&self) -> bool;
+
+    /// Only a daemon-bound attempt has a progress owner. A benchmark,
+    /// historical read or standalone extraction has none to update.
+    fn observed_preseal_work(&self, _work: CodeIndexPresealWorkV1) {}
+
+    /// Construction has left capture, parsing and resolution for publication.
+    /// This ends pre-seal activity without inventing a completed work unit.
+    fn finish_preseal_observation(&self) {}
 }
 
 /// A control that never interrupts. Sealed seating uses it when the caller
@@ -2500,6 +2520,7 @@ where
                     Ok(sparse) => {
                         crate::observe::record_rebuild_state("increment");
                         lexical_page_source::checkpoint(control)?;
+                        control.finish_preseal_observation();
                         return self.publish(preparation, sparse);
                     }
                     Err(reason) => reason,
@@ -2527,6 +2548,7 @@ where
             control,
         )?;
         lexical_page_source::checkpoint(control)?;
+        control.finish_preseal_observation();
         self.publish(preparation, publication)
     }
 
@@ -2733,6 +2755,13 @@ where
                         chunk_policy.with_chunks_under(&chunk.sensitivity.policy_revision);
                 }
                 file_segments.push(descriptor);
+                // The file segment is staged, but no generation has sealed.
+                // Do not count this as a durable lexical or native graph page.
+                control.observed_preseal_work(CodeIndexPresealWorkV1 {
+                    phase: CodeIndexPresealWorkPhaseV1::ParseEvidence,
+                    completed_items: u64::try_from(file_segments.len()).unwrap_or(u64::MAX),
+                    total_items: Some(u64::try_from(present_count).unwrap_or(u64::MAX)),
+                });
                 captured_files.remove(&artifact.extraction.file_occurrence_id);
                 self.physical_artifacts.insert(reuse_key, &artifact);
                 // Both cache authorities are weak: dropping this artifact is

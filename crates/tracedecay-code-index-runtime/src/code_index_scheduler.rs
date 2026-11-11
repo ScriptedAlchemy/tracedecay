@@ -198,6 +198,7 @@ mod overlay_ephemerality_tests;
 mod tests;
 
 mod activation;
+mod attempt_progress;
 pub mod branch_generations;
 pub mod branch_publication;
 mod cadence;

@@ -378,6 +378,14 @@ impl SessionTemporalRefreshWakeState {
         Some(receiver)
     }
 
+    pub(super) fn has_pending_projection_join(&self) -> bool {
+        self.projection_joins
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .iter()
+            .any(|join| !join.completion.is_closed())
+    }
+
     /// Take the joins covered by the projection about to start. A join that
     /// arrives during that projection remains queued for the next pass.
     pub(super) fn take_projection_joins(&self) -> Vec<SessionProjectionJoin> {
