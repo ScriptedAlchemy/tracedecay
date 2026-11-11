@@ -576,7 +576,17 @@ impl StoreTelemetrySamplingRegistry {
             .table_growth_state_path
             .as_deref()
             .zip(path.to_str())
-            .and_then(|(state_path, key)| load_table_growth_states(state_path).remove(key))
+            .and_then(|(state_path, key)| match load_table_growth_states(state_path) {
+                Ok(mut states) => states.remove(key),
+                Err(error) => {
+                    tracing::warn!(
+                        path = %state_path.display(),
+                        %error,
+                        "table growth checkpoint is unavailable; preserving it and re-baselining this store"
+                    );
+                    None
+                }
+            })
             .unwrap_or_default();
         let port = GuardedStoreTelemetryPort::new(
             handle,
@@ -893,34 +903,29 @@ impl StoreTelemetrySamplingRegistry {
 
 /// Every persisted store state, keyed by database path. A missing or
 /// unreadable file is an empty state: the next pass re-baselines.
-fn load_table_growth_states(state_path: &Path) -> BTreeMap<String, TableGrowthStateV1> {
+fn load_table_growth_states(
+    state_path: &Path,
+) -> std::io::Result<BTreeMap<String, TableGrowthStateV1>> {
     // A stale or substituted maintenance file need not respect the size of
     // data this daemon normally writes. Do not read a sparse multi-GB file,
     // follow a foreign symlink, or wait forever on a FIFO during startup.
+    // Refuse unsafe reads rather than replacing their sole existing bytes.
     let bytes = match tracedecay_private_fs::framed_log::read_bounded(
         state_path,
         MAX_TABLE_GROWTH_STATE_BYTES,
-    ) {
-        Ok(Some(bytes)) => bytes,
-        Ok(None) => return BTreeMap::new(),
-        Err(error) => {
-            tracing::warn!(
-                path = %state_path.display(),
-                %error,
-                "table growth checkpoint cannot be read; measurements will re-baseline"
-            );
-            return BTreeMap::new();
-        }
+    )? {
+        Some(bytes) => bytes,
+        None => return Ok(BTreeMap::new()),
     };
     match serde_json::from_slice(&bytes) {
-        Ok(states) => states,
+        Ok(states) => Ok(states),
         Err(error) => {
             tracing::warn!(
                 path = %state_path.display(),
                 %error,
                 "table growth checkpoint is invalid; measurements will re-baseline"
             );
-            BTreeMap::new()
+            Ok(BTreeMap::new())
         }
     }
 }
@@ -936,7 +941,7 @@ fn persist_table_growth_states(
     state_path: &Path,
     updates: Vec<(String, TableGrowthStateV1)>,
 ) -> std::io::Result<()> {
-    let mut states = load_table_growth_states(state_path);
+    let mut states = load_table_growth_states(state_path)?;
     states.extend(updates);
     states.retain(|database_path, _| Path::new(database_path).exists());
     let bytes = serde_json::to_vec(&states).map_err(std::io::Error::other)?;
@@ -1025,7 +1030,7 @@ mod table_growth_checkpoint_tests {
             vec![(key.clone(), TableGrowthStateV1::default())],
         )
         .expect("persist genuine bounded state");
-        let loaded = load_table_growth_states(&checkpoint);
+        let loaded = load_table_growth_states(&checkpoint).expect("valid checkpoint readback");
         assert_eq!(loaded.len(), 1);
         assert!(loaded.contains_key(&key));
 
@@ -1038,7 +1043,18 @@ mod table_growth_checkpoint_tests {
             .expect("replace disposable checkpoint")
             .set_len(MAX_TABLE_GROWTH_STATE_BYTES as u64 + 1)
             .expect("sparse oversized checkpoint");
-        assert_eq!(load_table_growth_states(&checkpoint).len(), 0);
+        assert_eq!(
+            load_table_growth_states(&checkpoint).unwrap_err().kind(),
+            std::io::ErrorKind::InvalidData
+        );
+        assert!(
+            persist_table_growth_states(
+                &checkpoint,
+                vec![(key.clone(), TableGrowthStateV1::default())],
+            )
+            .is_err(),
+            "an oversized existing checkpoint must not be replaced"
+        );
         assert_eq!(
             std::fs::metadata(&checkpoint).unwrap().len(),
             MAX_TABLE_GROWTH_STATE_BYTES as u64 + 1
@@ -1060,10 +1076,19 @@ mod table_growth_checkpoint_tests {
             std::os::unix::fs::symlink(&foreign, &checkpoint)
                 .expect("substitute foreign checkpoint symlink");
             assert_eq!(
-                load_table_growth_states(&checkpoint).len(),
-                0,
+                load_table_growth_states(&checkpoint).unwrap_err().kind(),
+                std::io::ErrorKind::InvalidInput,
                 "the previous std::fs::read would import this valid foreign state"
             );
+            assert!(
+                persist_table_growth_states(
+                    &checkpoint,
+                    vec![(key, TableGrowthStateV1::default())],
+                )
+                .is_err(),
+                "a foreign symlink must never be replaced by persistence"
+            );
+            assert!(checkpoint.symlink_metadata().unwrap().file_type().is_symlink());
             assert!(std::fs::read(&foreign).unwrap().len() > 2);
         }
     }
