@@ -7,6 +7,7 @@ use std::sync::PoisonError;
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
+use futures_util::future::{FusedFuture, FutureExt};
 use tracedecay_lcm::LcmError;
 use tracedecay_store::{
     SessionRefreshBeginOrJoinRequestV1, SessionRefreshCompletionRequestV1,
@@ -246,7 +247,7 @@ pub(super) async fn run_session_temporal_refresh_scheduler(
     let mut history_release = None;
     let mut granted_history_admission = None;
     let mut projection_joins: Vec<SessionProjectionJoin> = Vec::new();
-    let live_projection = LiveProjectionDuringSummary {
+    let live_projection = LiveProjection {
         database: &database,
         state: &state,
         projector: projector.as_ref(),
@@ -264,16 +265,18 @@ pub(super) async fn run_session_temporal_refresh_scheduler(
             // Busy before any wake is consumed: a waiter must never see its
             // wake taken while the worker still reads idle.
             state.mark_worker_busy();
-            let mut projection_requested = state.take_dirty();
             let mut history_requested = state.take_historical_dirty();
             // A wake that arrives while the admitted window is still
-            // unpublished must not start the next history window. That window
-            // is the out-of-scope cursor sweep, and it holds this worker until
-            // it returns, so the newest day never leaves its building generation.
-            if state.history_held_for_projection() {
+            // unpublished must not start the next history window. Publish
+            // the newest day before admitting the out-of-scope cursor sweep.
+            let holding_projection = state.history_held_for_projection();
+            if holding_projection {
                 history_requested = false;
-                projection_requested = true;
             }
+            // A history window polls live projection alongside ingest, so leave
+            // its dirty flag available until that work can actually start.
+            let mut projection_requested =
+                !history_requested && (state.take_dirty() || holding_projection);
             if !projection_requested && !history_requested && !summary_recheck {
                 break;
             }
@@ -289,6 +292,7 @@ pub(super) async fn run_session_temporal_refresh_scheduler(
             let granted = granted_history_admission
                 .take()
                 .filter(|_| history_requested && !history_suppressed);
+            let mut report = SessionTemporalRefreshPassReport::default();
             let history_outcome = if history_requested && !history_suppressed {
                 let history_pass: Pin<Box<dyn Future<Output = HistoryPassReport> + Send + '_>> =
                     Box::pin(session_history_refresh(
@@ -297,11 +301,30 @@ pub(super) async fn run_session_temporal_refresh_scheduler(
                         granted,
                         &state,
                     ));
-                let (outcome, release) = tracing::Instrument::instrument(
+                let history_pass = tracing::Instrument::instrument(
                     history_pass,
                     tracing::trace_span!("daemon.scheduler.session_temporal.history"),
                 )
-                .await;
+                .fuse();
+                tokio::pin!(history_pass);
+                // A hook can arrive before or during this source window. Keep the
+                // admitted ingestor running while publishing its already-durable input.
+                let Some(((outcome, release), _)) = live_projection
+                    .wait_for(
+                        &mut history_pass,
+                        &mut projection_joins,
+                        &mut report,
+                        BackgroundStage::History,
+                    )
+                    .await
+                else {
+                    // Retirement owns this join. Cancellation has signalled the
+                    // ingestor, but its store and admission stay leased until it exits.
+                    if !history_pass.is_terminated() {
+                        history_pass.await;
+                    }
+                    return;
+                };
                 history_release = release;
                 Some(outcome)
             } else {
@@ -371,10 +394,7 @@ pub(super) async fn run_session_temporal_refresh_scheduler(
                 blocked_history_attempts = 0;
                 blocked_history_until = None;
             }
-            let mut report = if projection_requested
-                || state.has_requests()
-                || history_requires_projection
-            {
+            if projection_requested || state.has_requests() || history_requires_projection {
                 let projection: Pin<
                     Box<dyn Future<Output = SessionTemporalRefreshPassReport> + Send + '_>,
                 > = Box::pin(session_projection_refresh(
@@ -389,14 +409,12 @@ pub(super) async fn run_session_temporal_refresh_scheduler(
                     tracing::trace_span!("daemon.scheduler.session_temporal.projection"),
                 );
                 tokio::pin!(pass);
-                tokio::select! {
+                report = tokio::select! {
                     biased;
                     () = tracing::Instrument::instrument(state.wait_for_cancellation(), tracing::trace_span!("daemon.scheduler.session_temporal.projection_cancel")) => return,
                     report = &mut pass => report,
-                }
-            } else {
-                SessionTemporalRefreshPassReport::default()
-            };
+                };
+            }
             if state.cancelled.load(Ordering::Acquire) {
                 return;
             }
@@ -465,7 +483,12 @@ pub(super) async fn run_session_temporal_refresh_scheduler(
                         state.mark_worker_idle();
                         state.idle.notify_waiters();
                         let Some((permit, _)) = live_projection
-                            .wait_for(&mut admission, &mut projection_joins, &mut report, true)
+                            .wait_for(
+                                &mut admission,
+                                &mut projection_joins,
+                                &mut report,
+                                BackgroundStage::SummaryAdmission,
+                            )
                             .await
                         else {
                             return;
@@ -498,7 +521,12 @@ pub(super) async fn run_session_temporal_refresh_scheduler(
                         );
                         tokio::pin!(page);
                         let Some((result, recheck)) = live_projection
-                            .wait_for(&mut page, &mut projection_joins, &mut report, false)
+                            .wait_for(
+                                &mut page,
+                                &mut projection_joins,
+                                &mut report,
+                                BackgroundStage::SummaryPage,
+                            )
                             .await
                         else {
                             return;
@@ -937,23 +965,39 @@ async fn settle_projection_joins(
     }
 }
 
-/// Keeps one fair summary admission or in-flight summary page alive while the
-/// same worker services live temporal projection. Both futures keep polling:
-/// suspending a summary while it owns a writer could block the projection.
-struct LiveProjectionDuringSummary<'a> {
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum BackgroundStage {
+    History,
+    SummaryAdmission,
+    SummaryPage,
+}
+
+/// Keeps history, summary admission, or a summary page in flight while serving
+/// live projection. A stage holding a writer must keep polling so it can release it.
+struct LiveProjection<'a> {
     database: &'a RegisteredGlobalDbLeaseV1,
     state: &'a Arc<SessionTemporalRefreshWakeState>,
     projector: &'a dyn SessionTemporalRefreshProjector,
     policy: SessionTemporalRefreshPolicy,
 }
 
-impl LiveProjectionDuringSummary<'_> {
+impl LiveProjection<'_> {
+    fn projection_due(&self, stage: BackgroundStage, joins: &[SessionProjectionJoin]) -> bool {
+        // An admitted history window owns background recovery until its SQL
+        // source frontier settles. Only a waiting reader needs to publish
+        // ahead of that window.
+        self.state.dirty.load(Ordering::Acquire)
+            && (stage != BackgroundStage::History
+                || joins.iter().any(|join| !join.completion.is_closed())
+                || self.state.has_pending_projection_join())
+    }
+
     async fn wait_for<F>(
         &self,
         stage: F,
         joins: &mut Vec<SessionProjectionJoin>,
         report: &mut SessionTemporalRefreshPassReport,
-        waiting_for_admission: bool,
+        background: BackgroundStage,
     ) -> Option<(F::Output, bool)>
     where
         F: Future + Send,
@@ -971,19 +1015,20 @@ impl LiveProjectionDuringSummary<'_> {
             self.state.requeue_projection();
             retry_at = Some(Instant::now() + session_refresh_retry_delay(class, retry_attempt));
         }
-        let mut summary_pass_owed = false;
+        let mut recheck_summary = false;
         let result = loop {
             let projection_wake = async {
                 let wake = self.state.wake.notified();
+                if !self.projection_due(background, joins) {
+                    wake.await;
+                    return true;
+                }
                 if let Some(deadline) = retry_at {
                     tokio::select! {
                         () = wake => true,
                         fired = native_runtime::sleep_until(deadline) => !stop_without_timer(fired),
                     }
                 } else {
-                    if !self.state.dirty.load(Ordering::Acquire) {
-                        wake.await;
-                    }
                     true
                 }
             };
@@ -996,10 +1041,10 @@ impl LiveProjectionDuringSummary<'_> {
             if !woke {
                 return None;
             }
-            if !self.state.take_dirty() {
+            if !self.projection_due(background, joins) || !self.state.take_dirty() {
                 continue;
             }
-            summary_pass_owed |= !waiting_for_admission;
+            recheck_summary |= background == BackgroundStage::SummaryPage;
             self.state.mark_worker_busy();
             self.state.begin_pass();
             self.state.pass_count.fetch_add(1, Ordering::AcqRel);
@@ -1059,15 +1104,14 @@ impl LiveProjectionDuringSummary<'_> {
             if let Some(result) = completed_stage {
                 break result;
             }
-            if waiting_for_admission {
+            if background == BackgroundStage::SummaryAdmission {
                 self.state.mark_worker_idle();
                 self.state.idle.notify_waiters();
             }
         };
-        // A running page may have read its inputs before the consumed wake.
-        // Its follow-up needs summary convergence, not another projection of
-        // the frontier this wake already served. Admission has no page yet.
-        Some((result, summary_pass_owed))
+        // A summary page may have read its inputs before this projection,
+        // while a queued admission still has its first page ahead of it.
+        Some((result, recheck_summary))
     }
 }
 
@@ -2257,11 +2301,44 @@ mod tests {
     use tracedecay_store::{SessionRefreshReceiptRequestV1, SessionRefreshTerminalStateV1};
 
     #[tokio::test]
+    async fn a_history_window_leaves_background_projection_queued() {
+        let harness = RegisteredGlobalDbHarness::open("history-retains-background-work").await;
+        let state = Arc::new(SessionTemporalRefreshWakeState::default());
+        state.wake();
+        let live = LiveProjection {
+            database: &harness.registered,
+            state: &state,
+            projector: &CanonicalSessionTemporalProjector,
+            policy: SessionTemporalRefreshPolicy::default(),
+        };
+        let mut joins = Vec::new();
+        let mut report = SessionTemporalRefreshPassReport::default();
+        live.wait_for(
+            tokio::task::yield_now(),
+            &mut joins,
+            &mut report,
+            BackgroundStage::History,
+        )
+        .await
+        .expect("the history window finishes");
+        assert_eq!(state.pass_count.load(Ordering::Acquire), 0);
+        assert!(
+            state.take_dirty(),
+            "background recovery still owns its turn"
+        );
+    }
+
+    #[tokio::test]
     async fn a_live_wake_during_summary_retains_one_convergence_pass() {
-        for (name, waiting_for_admission, cancel, owes_convergence) in [
-            ("completed-page", false, false, true),
-            ("completed-admission", true, false, false),
-            ("cancelled-page", false, true, false),
+        for (name, background, cancel, owes_convergence) in [
+            ("completed-page", BackgroundStage::SummaryPage, false, true),
+            (
+                "completed-admission",
+                BackgroundStage::SummaryAdmission,
+                false,
+                false,
+            ),
+            ("cancelled-page", BackgroundStage::SummaryPage, true, false),
         ] {
             let harness = RegisteredGlobalDbHarness::open(name).await;
             let state = Arc::new(SessionTemporalRefreshWakeState::default());
@@ -2277,7 +2354,7 @@ mod tests {
                         entered.notify_one();
                         finish.notified().await;
                     };
-                    let live_projection = LiveProjectionDuringSummary {
+                    let live_projection = LiveProjection {
                         database: &database,
                         state: &state,
                         projector: &CanonicalSessionTemporalProjector,
@@ -2286,7 +2363,7 @@ mod tests {
                     let mut joins = Vec::new();
                     let mut report = SessionTemporalRefreshPassReport::default();
                     live_projection
-                        .wait_for(stage, &mut joins, &mut report, waiting_for_admission)
+                        .wait_for(stage, &mut joins, &mut report, background)
                         .await
                 }
             });
@@ -2360,7 +2437,7 @@ mod tests {
                     finish.notified().await;
                     17usize
                 };
-                let live_projection = LiveProjectionDuringSummary {
+                let live_projection = LiveProjection {
                     database: &database,
                     state: &state,
                     projector: &CanonicalSessionTemporalProjector,
@@ -2369,7 +2446,7 @@ mod tests {
                 let mut joins = Vec::new();
                 let mut report = SessionTemporalRefreshPassReport::default();
                 live_projection
-                    .wait_for(stage, &mut joins, &mut report, false)
+                    .wait_for(stage, &mut joins, &mut report, BackgroundStage::SummaryPage)
                     .await
             }
         });

@@ -24,6 +24,7 @@ use tracedecay_store::{
 use super::*;
 use crate::{
     StorageOperationExecutor,
+    admission::QueueItem,
     checkpoint::{
         CheckpointBlockers, CheckpointDecision, CheckpointInterruption, CheckpointMode,
         CheckpointOutcome, CheckpointPressure, CheckpointReport, CheckpointResult, WalPressure,
@@ -313,6 +314,58 @@ impl RuntimeRequestProbeV1 for Probe {
                 .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
                 .is_ok()
     }
+}
+
+#[test]
+fn faulted_writer_retires_without_waiting_for_registered_client_senders() {
+    let database = TestDatabase::new();
+    let request = Arc::new(request(metadata(
+        "operation.faulted-retirement",
+        "key.faulted-retirement",
+        'f',
+    )));
+    let writer = start(&database, &request, Arc::new(AtomicU64::new(0)));
+    let permit = writer
+        .admission
+        .reserve(&request.envelope().metadata)
+        .expect("faulted retirement fixture fits admission");
+    let (reply, mut response) = oneshot::channel();
+    let accepted = AcceptedRequest::new(
+        Arc::clone(&request),
+        Arc::new(Probe::new(&request, None)),
+        Arc::new(UnrestrictedRuntimeWriteAuthority),
+        reply,
+        permit,
+    );
+    writer.telemetry.admitted(accepted.admission_bytes());
+    let sender = writer.sender.lock().unwrap().as_ref().unwrap().clone();
+    writer
+        .state
+        .store(WriterState::Faulted as u8, Ordering::Release);
+    assert!(sender.try_send(accepted).is_ok());
+
+    // The sender is intentionally retained: the old fault path settled the
+    // request, then parked forever waiting for every client to disconnect.
+    let deadline = std::time::Instant::now() + Duration::from_secs(3);
+    while !writer.worker_exited() && std::time::Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert!(
+        writer.worker_exited(),
+        "faulted writer retained its SQLite connection while clients remained registered"
+    );
+    assert_eq!(
+        response
+            .try_recv()
+            .expect("accepted request receives a fault reply"),
+        Ok(RuntimeSubmitOutcomeV1::Unavailable {
+            reason: UnavailableReasonV1::Faulted,
+        })
+    );
+    assert_eq!(writer.telemetry_snapshot().queue.queued_operations, 0);
+    assert_eq!(writer.telemetry_snapshot().queue.queued_bytes, 0);
+    drop(sender);
+    writer.shutdown_and_join().unwrap();
 }
 
 #[test]

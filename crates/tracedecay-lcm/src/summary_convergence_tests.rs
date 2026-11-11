@@ -612,6 +612,215 @@ async fn disjoint_raw_revisions_drain_as_distinct_restart_safe_work_items() {
     );
 }
 
+async fn dirty_summary_queue_store(temp: &tempfile::TempDir) -> TestConnection {
+    let conn = TestConnection::open(&temp.path().join("sessions.db"));
+    conn.execute_batch(
+        "CREATE TABLE sessions (
+            provider TEXT NOT NULL,
+            session_id TEXT NOT NULL,
+            project_key TEXT NOT NULL,
+            project_path TEXT NOT NULL,
+            PRIMARY KEY(provider, session_id)
+         );
+         INSERT INTO sessions(provider, session_id, project_key, project_path)
+         VALUES ('cursor', 'dirty-session', 'project.dirty', '/dirty');",
+    )
+    .await
+    .unwrap();
+    schema::ensure_lcm_schema(&conn).await.unwrap();
+    conn.execute_batch(
+        "INSERT INTO lcm_raw_messages (
+            provider, message_id, session_id, role, ordinal, content,
+            content_hash, storage_kind, metadata_json
+         ) VALUES (
+            'cursor', 'message-1', 'dirty-session', 'assistant', 1, 'body',
+            'old-hash', 'inline', '{}'
+         );
+         UPDATE lcm_raw_messages SET content_hash = 'revised-hash'
+         WHERE provider = 'cursor' AND message_id = 'message-1';",
+    )
+    .await
+    .unwrap();
+    conn
+}
+
+#[asupersync::test]
+async fn dirty_raw_failure_backoff_survives_restart_and_new_revision_recovers() {
+    let temp = tempfile::tempdir().unwrap();
+    let conn = dirty_summary_queue_store(&temp).await;
+    let first = summary_convergence::next_candidate(&conn, 0)
+        .await
+        .unwrap()
+        .expect("changed raw row must enqueue invalidation");
+    assert_eq!(first.stale_from_store_id, Some(1));
+
+    assert!(
+        summary_convergence::record_outcome(
+            &conn,
+            &first,
+            summary_convergence::LcmSummaryConvergenceQueueState::Retryable,
+            Some("storage_unavailable"),
+            1,
+            100_000,
+        )
+        .await
+        .unwrap()
+    );
+    assert!(
+        summary_convergence::next_candidate(&conn, 99_999)
+            .await
+            .unwrap()
+            .is_none(),
+        "undrained dirty input must not erase a retry deadline"
+    );
+
+    drop(conn);
+    let conn = TestConnection::open(&temp.path().join("sessions.db"));
+    assert!(
+        summary_convergence::next_candidate(&conn, 99_999)
+            .await
+            .unwrap()
+            .is_none(),
+        "backoff must remain durable across a daemon/store reopening"
+    );
+    let retry = summary_convergence::next_candidate(&conn, 100_000)
+        .await
+        .unwrap()
+        .expect("the failed input becomes due at its persisted deadline");
+    assert_eq!(retry.failure_count, 1);
+    assert_eq!(retry.stale_from_store_id, Some(1));
+    assert!(
+        summary_convergence::record_outcome(
+            &conn,
+            &retry,
+            summary_convergence::LcmSummaryConvergenceQueueState::Retryable,
+            Some("storage_unavailable"),
+            2,
+            300_000,
+        )
+        .await
+        .unwrap()
+    );
+    assert!(
+        summary_convergence::next_candidate(&conn, 299_999)
+            .await
+            .unwrap()
+            .is_none(),
+        "a second identical failure must not hot-loop"
+    );
+
+    conn.execute(
+        "UPDATE lcm_raw_messages SET content_hash = 'new-revision'
+         WHERE provider = 'cursor' AND message_id = 'message-1'",
+        (),
+    )
+    .await
+    .unwrap();
+    let revised = summary_convergence::next_candidate(&conn, 0)
+        .await
+        .unwrap()
+        .expect("a new raw revision must wake the previously failed session");
+    assert!(revised.raw_revision_generation > retry.raw_revision_generation);
+    assert_eq!(revised.failure_count, 0);
+    assert_eq!(revised.stale_from_store_id, Some(1));
+    assert!(
+        !summary_convergence::record_outcome(
+            &conn,
+            &retry,
+            summary_convergence::LcmSummaryConvergenceQueueState::Permanent,
+            Some("storage_unavailable"),
+            3,
+            0,
+        )
+        .await
+        .unwrap(),
+        "superseded failures must not overwrite the newly queued work"
+    );
+}
+
+#[asupersync::test]
+async fn dirty_raw_terminal_outcomes_park_until_an_actual_raw_change() {
+    let temp = tempfile::tempdir().unwrap();
+    let conn = dirty_summary_queue_store(&temp).await;
+
+    for (state, expected_state) in [
+        (
+            summary_convergence::LcmSummaryConvergenceQueueState::Unavailable,
+            "unavailable",
+        ),
+        (
+            summary_convergence::LcmSummaryConvergenceQueueState::Permanent,
+            "permanent",
+        ),
+    ] {
+        let candidate = summary_convergence::next_candidate(&conn, 0)
+            .await
+            .unwrap()
+            .expect("new or changed raw input is due");
+        assert!(
+            summary_convergence::record_outcome(
+                &conn,
+                &candidate,
+                state,
+                Some("unavailable"),
+                1,
+                0,
+            )
+            .await
+            .unwrap()
+        );
+        assert_eq!(
+            fetch_i64(
+                &conn,
+                "SELECT COUNT(*) FROM lcm_summary_convergence_queue
+                 WHERE state = ?1 AND failure_count = 1",
+                params![expected_state],
+            )
+            .await,
+            1
+        );
+        assert!(
+            summary_convergence::next_candidate(&conn, i64::MAX)
+                .await
+                .unwrap()
+                .is_none(),
+            "old dirty rows must not reoffer a parked session"
+        );
+        conn.execute(
+            "UPDATE lcm_raw_messages SET content_hash = content_hash || 'x'
+             WHERE provider = 'cursor' AND message_id = 'message-1'",
+            (),
+        )
+        .await
+        .unwrap();
+    }
+
+    let candidate = summary_convergence::next_candidate(&conn, 0)
+        .await
+        .unwrap()
+        .expect("a new raw revision must release a terminally parked session");
+    assert_eq!(candidate.failure_count, 0);
+    assert!(
+        summary_convergence::record_outcome(
+            &conn,
+            &candidate,
+            summary_convergence::LcmSummaryConvergenceQueueState::Current,
+            None,
+            0,
+            0,
+        )
+        .await
+        .unwrap()
+    );
+    assert!(
+        summary_convergence::next_candidate(&conn, 0)
+            .await
+            .unwrap()
+            .is_some(),
+        "successful processing cannot claim complete with dirty invalidation owed"
+    );
+}
+
 async fn parked_queue_store(temp: &tempfile::TempDir, sessions: &[&str]) -> TestConnection {
     let conn = TestConnection::open(&temp.path().join("sessions.db"));
     conn.execute_batch(

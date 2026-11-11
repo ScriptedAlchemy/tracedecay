@@ -202,6 +202,7 @@ async fn hook_orchestration_runs_feedback_work_without_scout_lifecycle() {
         false,
         None,
         None,
+        false,
     );
     ADMITTING_HOOK.set(false);
     assert_eq!(admission, HookOrchestrationAdmissionV1::Enqueued);
@@ -514,6 +515,7 @@ async fn replayed_admission_after_retryable_failure_completes_a_fresh_cycle() {
             Some(Arc::new(move |_| {
                 first_acknowledged.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             })),
+            false,
         ),
         HookOrchestrationAdmissionV1::Enqueued
     );
@@ -545,6 +547,7 @@ async fn replayed_admission_after_retryable_failure_completes_a_fresh_cycle() {
                 replay_acknowledged.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 replay_terminal.notify_one();
             })),
+            false,
         ),
         HookOrchestrationAdmissionV1::Enqueued,
         "the settled failure must free its slot for the replay"

@@ -437,6 +437,68 @@ async fn claim_exact_ready_guidance(
     }
 }
 
+fn stop_intent_delivery_matches(
+    delivery: &tracedecay_agent_hosts::agents::context_scout::ContextScoutRecentDeliveryV1,
+    address: tracedecay_contracts::context_scout::ContextScoutAddressV1,
+    envelope: &tracedecay_hooks::HookEventEnvelopeV2,
+    intent_envelope_id: [u8; 16],
+) -> bool {
+    delivery.entry.work.address == address
+        && delivery.entry.envelope.envelope_id == intent_envelope_id
+        && delivery.receipt.envelope_id == intent_envelope_id
+        && delivery.receipt.receipt_id
+            == tracedecay_agent_hosts::agents::context_scout::context_scout_delivery_receipt_id(
+                envelope.event_id,
+                intent_envelope_id,
+            )
+}
+
+/// Only a Stop's own deterministic intent envelope proves that its companion
+/// was delivered. Other guidance claimed by the Stop may settle independently.
+async fn stop_intent_delivery_settled(
+    cg: &TraceDecay,
+    envelope: &tracedecay_hooks::HookEventEnvelopeV2,
+    lifecycle: Option<
+        &tracedecay_agent_hosts::agents::context_scout::address_registry::ContextScoutLifecycleAddressV1,
+    >,
+    binding: &tracedecay_hooks::HookScopeBindingV1,
+    now: UtcMicros,
+) -> bool {
+    let (Some(owner), Some(lifecycle)) = (cg.context_scout_owner(), lifecycle) else {
+        return false;
+    };
+    let Some(intent_lifecycle) = lifecycle.intent_scoped() else {
+        return false;
+    };
+    let Some(hook) = tracedecay_agent_hosts::agents::context_scout::address_registry::AdmittedContextScoutHookV1::new(
+        envelope.clone(),
+        binding,
+    ) else {
+        return false;
+    };
+    let Some((intent_address, _)) = cg
+        .resolve_current_context_scout_claim_authority(&hook, &intent_lifecycle, now)
+        .await
+    else {
+        return false;
+    };
+    let Some(intent_envelope_id) = tracedecay_agent_hosts::agents::context_scout::intent_pass::context_scout_intent_envelope_id(
+        envelope.project_id,
+        envelope.event_id,
+    ) else {
+        return false;
+    };
+    let Ok(delivery) = owner
+        .delivery_exact(intent_address, intent_envelope_id)
+        .await
+    else {
+        return false;
+    };
+    delivery.is_some_and(|delivery| {
+        stop_intent_delivery_matches(&delivery, intent_address, envelope, intent_envelope_id)
+    })
+}
+
 fn cursor_stack_wakeup_allowed(
     first_admission: bool,
     producer: tracedecay_domain::NativeHostIdentityV1,
@@ -895,6 +957,24 @@ async fn admit_hook_v2_envelope_with_lifecycle_inner(
         )
         .await;
     }
+    let intent_delivery_settled = !first_admission
+        && exact_claim_missed
+        && host_response_available
+        && matches!(
+            &provider_envelope.event,
+            tracedecay_hooks::HookEventV2::SessionBoundary {
+                boundary: tracedecay_hooks::HookBoundaryV1::End
+                    | tracedecay_hooks::HookBoundaryV1::TurnComplete,
+            }
+        )
+        && stop_intent_delivery_settled(
+            cg,
+            provider_envelope,
+            lifecycle.as_ref(),
+            &snapshot.binding,
+            now,
+        )
+        .await;
     let orchestration = tracedecay_daemon_service::admit_registered_hook_orchestration(
         envelope.clone(),
         snapshot.binding.clone(),
@@ -903,6 +983,7 @@ async fn admit_hook_v2_envelope_with_lifecycle_inner(
         false,
         Some(receipt.order),
         completion,
+        intent_delivery_settled,
     );
     let feedback_notice = if first_admission {
         tracedecay_application::advisory::peek_advisory_hook_notice(

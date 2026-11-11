@@ -1,6 +1,7 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { act, render, screen } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { useScope } from '../../data/scope/store.ts';
 import { IndexFreshness } from './IndexFreshness.tsx';
 
 /**
@@ -16,6 +17,7 @@ const NOW_MICROS = 1_753_003_600_000_000;
 afterEach(() => {
   vi.unstubAllGlobals();
   vi.useRealTimers();
+  act(() => useScope.getState().selectAllProjects());
 });
 
 describe('Code index freshness', () => {
@@ -130,6 +132,115 @@ describe('Code index freshness', () => {
     expect(text).toContain('240ms');
   });
 
+  it('distinguishes native rows encoded from pages and segments committed', async () => {
+    renderFreshness('loading', {
+      worktrees: [{
+        ...worktree(),
+        native_graph_progress: {
+          generation_id: 'generation.4f21c9',
+          sealed_graph_digest: 'sha256:graph',
+          daemon_incarnation: 1, producer_incarnation: 2, attempt_sequence: 3, progress_epoch: 4,
+          phase: 'stage_page_commit', active: true, last_progress_micros: NOW_MICROS,
+          encoded_entities: 90, total_entities: 100, encoded_relations: 40, total_relations: 50,
+          committed_stage_pages: 2, committed_stage_mutations: 70, committed_stage_bytes: 4096,
+          committed_compact_segments: 0, committed_compact_bytes: 0,
+        },
+      }],
+      note: 'daemon scheduler state',
+    });
+    expect(await screen.findByText(
+      'stage page commit · 90 entities encoded · 40 relations encoded · 2 pages committed · 0 segments committed',
+    )).toBeTruthy();
+  });
+
+  it('does not report native graph encoding or durable pages before an actual writer callback', async () => {
+    renderFreshness('loading', {
+      worktrees: [{
+        ...worktree(),
+        native_graph_progress: {
+          generation_id: 'generation.4f21c9', sealed_graph_digest: 'sha256:graph',
+          daemon_incarnation: 7, producer_incarnation: 9, attempt_sequence: 1,
+          progress_epoch: 1, phase: null, active: true, last_progress_micros: null,
+          encoded_entities: 0, total_entities: null, encoded_relations: 0, total_relations: null,
+          committed_stage_pages: 0, committed_stage_mutations: 0, committed_stage_bytes: 0,
+          committed_compact_segments: 0, committed_compact_bytes: 0,
+        },
+      }],
+      note: 'live daemon scheduler state',
+    });
+    expect(await screen.findByText('awaiting first observed native graph work')).toBeTruthy();
+    expect(screen.queryByText(/0 entities encoded/)).toBeNull();
+    expect(screen.queryByText(/0 pages committed/)).toBeNull();
+    expect(screen.queryByText(/no observed native graph work for/)).toBeNull();
+  });
+
+  it('does not present preseal admission as a measured capture', async () => {
+    renderFreshness('loading', {
+      worktrees: [{
+        ...worktree(),
+        latest_generation_id: null,
+        staleness_state: 'indexing',
+        preseal_attempt: {
+          daemon_incarnation: 7, producer_incarnation: 9, attempt_sequence: 1,
+          progress_epoch: 1, phase: 'capture', completed_items: 0,
+          total_items: null, last_progress_micros: null, active: true,
+        },
+      }],
+      note: 'live daemon scheduler state',
+    });
+    expect(await screen.findByText('awaiting first observed preseal work')).toBeTruthy();
+    expect(screen.queryByText('capture · 0 items')).toBeNull();
+    expect(screen.queryByText(/no observed preseal work for/)).toBeNull();
+  });
+
+  it('uses genuine preseal and native writer clocks for no-work warnings', async () => {
+    renderFreshness('loading', {
+      worktrees: [{
+        ...worktree(),
+        preseal_attempt: {
+          daemon_incarnation: 1, producer_incarnation: 2, attempt_sequence: 3,
+          progress_epoch: 4, phase: 'parse_evidence', completed_items: 7,
+          total_items: 10, last_progress_micros: NOW_MICROS - 60_000_000, active: true,
+        },
+        native_graph_progress: {
+          generation_id: 'generation.4f21c9', sealed_graph_digest: 'sha256:graph',
+          daemon_incarnation: 1, producer_incarnation: 2, attempt_sequence: 4,
+          progress_epoch: 6, phase: 'compact_encoding',
+          encoded_entities: 17, total_entities: 25,
+          encoded_relations: 3, total_relations: 9,
+          committed_stage_pages: 0, committed_stage_mutations: 0, committed_stage_bytes: 0,
+          committed_compact_segments: 0, committed_compact_bytes: 0,
+          last_progress_micros: NOW_MICROS - 120_000_000, active: true,
+        },
+      }],
+      note: 'live daemon scheduler state',
+    });
+    expect(await screen.findByText('parse evidence · 7 / 10 items')).toBeTruthy();
+    expect(screen.getByText('no observed preseal work for 60s')).toBeTruthy();
+    expect(screen.getByText('no observed native graph work for 2m')).toBeTruthy();
+    expect(screen.getByText(/17 entities encoded/)).toBeTruthy();
+  });
+
+  it('preserves recorded resolution work during the daemon publication handoff', async () => {
+    renderFreshness('loading', {
+      worktrees: [{
+        ...worktree(),
+        rebuild_in_flight: true,
+        preseal_attempt: {
+          daemon_incarnation: 1, producer_incarnation: 2, attempt_sequence: 3,
+          progress_epoch: 7, phase: 'resolution', completed_items: 7,
+          total_items: null, last_progress_micros: NOW_MICROS - 90_000_000,
+          active: false,
+        },
+      }],
+      note: 'live daemon scheduler state',
+    });
+    expect(await screen.findByText('Last observed preseal work')).toBeTruthy();
+    expect(screen.getByText('resolution · 7 items')).toBeTruthy();
+    expect(screen.queryByText('Before sealing')).toBeNull();
+    expect(screen.queryByText(/no observed preseal work for/)).toBeNull();
+  });
+
   it('renders bounded artifact restore progress separately from a rebuild', async () => {
     renderFreshness('loading', {
       worktrees: [
@@ -187,6 +298,172 @@ describe('Code index freshness', () => {
     expect(text).toContain('blocked: retry backoff');
     expect(text).not.toContain('0 files/s');
     expect(text).not.toContain('0 B/s');
+  });
+
+  it('retires the previous sealed generation cursor when its successor has no text report', async () => {
+    vi.useFakeTimers();
+    const before = envelope('loading', {
+      worktrees: [{
+        ...worktree(),
+        latest_generation_id: 'generation.catchup.01',
+        rebuild_in_flight: true,
+        staleness_state: 'indexing',
+        progress: progress(),
+      }],
+      note: 'live daemon scheduler state',
+    });
+    const after = envelope('ready', {
+      worktrees: [{
+        ...worktree(),
+        latest_generation_id: 'generation.catchup.02',
+        rebuild_in_flight: false,
+        staleness_state: 'fresh',
+        progress: null,
+      }],
+      note: 'live daemon scheduler state',
+    });
+    const fetch = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify(before), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify(after), { status: 200 }));
+    vi.stubGlobal('fetch', fetch);
+    renderWith();
+
+    await advanceTimers(0);
+    expect(screen.getAllByText('generation.catchup.01').length).toBeGreaterThan(0);
+    expect(screen.getByRole('progressbar', { name: 'Code progress' })).toBeTruthy();
+    await advanceTimers(1_001);
+    await advanceTimers(0);
+    expect(fetch).toHaveBeenCalledTimes(2);
+    expect(screen.getByText('generation.catchup.02')).toBeTruthy();
+    expect(screen.queryByText('generation.catchup.01')).toBeNull();
+    expect(screen.queryByRole('progressbar', { name: 'Code progress' })).toBeNull();
+  });
+
+  it('retires prior committed counters when a live mount has no sealed generation', async () => {
+    vi.useFakeTimers();
+    const building = envelope('loading', {
+      worktrees: [{
+        ...worktree(),
+        latest_generation_id: 'generation.catchup.01',
+        staleness_state: 'indexing',
+        rebuild_in_flight: true,
+        progress: progress(),
+      }],
+      note: 'previous sealed generation remains visible',
+    });
+    const restarted = envelope('loading', {
+      worktrees: [{
+        ...worktree(),
+        latest_generation_id: null,
+        sealed_at_micros: null,
+        snapshot_content_identity: null,
+        staleness_state: 'indexing',
+        rebuild_in_flight: true,
+        progress: null,
+      }],
+      note: 'no sealed generation in the current scheduler',
+    });
+    const fetch = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify(building), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify(restarted), { status: 200 }));
+    vi.stubGlobal('fetch', fetch);
+    renderWith();
+
+    await advanceTimers(0);
+    expect(screen.getByText('250 / 500 files')).toBeTruthy();
+    await advanceTimers(1_001);
+    await advanceTimers(0);
+    expect(fetch).toHaveBeenCalledTimes(2);
+    expect(screen.getByText('no sealed generation yet')).toBeTruthy();
+    expect(screen.queryByText('250 / 500 files')).toBeNull();
+    expect(screen.queryByRole('progressbar', { name: 'Code progress' })).toBeNull();
+  });
+
+  it('does not resurrect text progress after its mount disappears and reappears', async () => {
+    vi.useFakeTimers();
+    const original = envelope('loading', {
+      worktrees: [{
+        ...worktree(),
+        latest_generation_id: null,
+        staleness_state: 'indexing',
+        rebuild_in_flight: true,
+        progress: progress(),
+      }],
+      note: 'original mounted scheduler',
+    });
+    const missing = envelope('unknown', {
+      worktrees: [],
+      note: 'scheduler unmounted',
+    });
+    const remounted = envelope('loading', {
+      worktrees: [{
+        ...worktree(),
+        latest_generation_id: null,
+        staleness_state: 'indexing',
+        rebuild_in_flight: true,
+        progress: null,
+      }],
+      note: 'scheduler remounted without a committed report',
+    });
+    const fetch = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify(original), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify(missing), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify(remounted), { status: 200 }));
+    vi.stubGlobal('fetch', fetch);
+    renderWith();
+
+    await advanceTimers(0);
+    expect(screen.getByText('250 / 500 files')).toBeTruthy();
+    await advanceTimers(1_001);
+    await advanceTimers(0);
+    expect(screen.getByText('scheduler unmounted')).toBeTruthy();
+    expect(screen.queryByRole('progressbar', { name: 'Code progress' })).toBeNull();
+    await advanceTimers(30_000);
+    await advanceTimers(0);
+    expect(screen.getByText('scheduler remounted without a committed report')).toBeTruthy();
+    expect(screen.queryByText('250 / 500 files')).toBeNull();
+    expect(screen.queryByRole('progressbar', { name: 'Code progress' })).toBeNull();
+    expect(fetch).toHaveBeenCalledTimes(3);
+  });
+
+  it('isolates retained text cursors between scoped project reads sharing a path', async () => {
+    const first = envelope('loading', {
+      worktrees: [{
+        ...worktree(),
+        latest_generation_id: null,
+        staleness_state: 'indexing',
+        rebuild_in_flight: true,
+        progress: progress(),
+      }],
+      note: 'first project observation',
+    });
+    first.scope.project_id = 'project-a';
+    const second = envelope('loading', {
+      worktrees: [{
+        ...worktree(),
+        latest_generation_id: null,
+        staleness_state: 'indexing',
+        rebuild_in_flight: true,
+        progress: null,
+      }],
+      note: 'second project observation',
+    });
+    second.scope.project_id = 'project-b';
+    const fetch = vi.fn(async (url: unknown) => new Response(
+      JSON.stringify(String(url).includes('project-a') ? first : second),
+      { status: 200 },
+    ));
+    vi.stubGlobal('fetch', fetch);
+    act(() => useScope.getState().selectProject('project-a', 'Project A'));
+    renderWith();
+
+    expect(await screen.findByText('first project observation')).toBeTruthy();
+    expect(screen.getByText('250 / 500 files')).toBeTruthy();
+    act(() => useScope.getState().selectProject('project-b', 'Project B'));
+    expect(await screen.findByText('second project observation')).toBeTruthy();
+    expect(screen.queryByText('250 / 500 files')).toBeNull();
+    expect(screen.queryByRole('progressbar', { name: 'Code progress' })).toBeNull();
+    expect(fetch).toHaveBeenCalledTimes(2);
   });
 
   it('accepts a later replacement generation after epoch restart and rejects its delayed predecessor', async () => {
@@ -476,6 +753,169 @@ describe('Code index freshness', () => {
     await advanceTimers(999);
     expect(fetch).toHaveBeenCalledTimes(3);
   });
+
+  it('does not let a fresh sealed predecessor clock disguise a frozen capture successor', async () => {
+    vi.useFakeTimers();
+    const attempt = {
+      daemon_incarnation: 1,
+      producer_incarnation: 2,
+      attempt_sequence: 3,
+      progress_epoch: 4,
+      phase: 'capture',
+      completed_items: 7,
+      total_items: 20,
+      last_progress_micros: NOW_MICROS,
+      active: true,
+    };
+    const staleText = {
+      ...progress(),
+      generation_id: 'generation.4f21c9',
+      phase: 'ready',
+      last_progress_micros: NOW_MICROS + 600_000_000,
+    };
+    const frozen = {
+      ...envelope('loading', {
+        worktrees: [{
+          ...worktree(),
+          rebuild_in_flight: true,
+          staleness_state: 'indexing',
+          progress: staleText,
+          preseal_attempt: attempt,
+        }],
+        note: 'authentic independent active capture attempt',
+      }),
+      time: { valid_time_micros: null, observation_time_micros: NOW_MICROS + 600_000_000 },
+    };
+    const moving = {
+      ...envelope('loading', {
+        worktrees: [{
+          ...worktree(),
+          rebuild_in_flight: true,
+          staleness_state: 'indexing',
+          progress: staleText,
+          preseal_attempt: {
+            ...attempt,
+            progress_epoch: 5,
+            completed_items: 8,
+            last_progress_micros: NOW_MICROS + 604_000_000,
+          },
+        }],
+        note: 'authentic independent active capture attempt',
+      }),
+      time: { valid_time_micros: null, observation_time_micros: NOW_MICROS + 604_000_000 },
+    };
+    const fetch = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify(frozen), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify(moving), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify(moving), { status: 200 }));
+    vi.stubGlobal('fetch', fetch);
+    renderWith();
+
+    await advanceTimers(0);
+    expect(screen.getByText('capture · 7 / 20 items')).toBeTruthy();
+    expect(fetch).toHaveBeenCalledTimes(1);
+    await advanceTimers(1_001);
+    expect(fetch).toHaveBeenCalledTimes(1);
+    await advanceTimers(2_998);
+    expect(fetch).toHaveBeenCalledTimes(1);
+    await advanceTimers(1);
+    await advanceTimers(0);
+    expect(fetch).toHaveBeenCalledTimes(2);
+    // Vitest's waitFor advances fake timers; Testing Library findByText stalls
+    // when the HTTP response is still decoding under the virtual clock.
+    await vi.waitFor(() => {
+      expect(screen.getByText('capture · 8 / 20 items')).toBeTruthy();
+    });
+    await advanceTimers(1_001);
+    await advanceTimers(0);
+    expect(fetch).toHaveBeenCalledTimes(3);
+  });
+
+  it('still polls genuine concurrent text receipts while a preseal attempt is quiet', async () => {
+    vi.useFakeTimers();
+    const current = {
+      ...envelope('loading', {
+        worktrees: [{
+          ...worktree(),
+          rebuild_in_flight: true,
+          staleness_state: 'indexing',
+          progress: {
+            ...progress(),
+            phase: 'bulk_commit',
+            last_progress_micros: NOW_MICROS + 600_000_000,
+          },
+          preseal_attempt: {
+            daemon_incarnation: 1,
+            producer_incarnation: 2,
+            attempt_sequence: 3,
+            progress_epoch: 4,
+            phase: 'capture',
+            completed_items: 7,
+            total_items: 20,
+            last_progress_micros: NOW_MICROS,
+            active: true,
+          },
+        }],
+        note: 'concurrent durable text commit and preseal capture',
+      }),
+      time: { valid_time_micros: null, observation_time_micros: NOW_MICROS + 600_000_000 },
+    };
+    const fetch = vi.fn(async () => new Response(JSON.stringify(current), { status: 200 }));
+    vi.stubGlobal('fetch', fetch);
+    renderWith();
+
+    await advanceTimers(0);
+    expect(fetch).toHaveBeenCalledTimes(1);
+    await advanceTimers(1_001);
+    await advanceTimers(0);
+    expect(fetch).toHaveBeenCalledTimes(2);
+  });
+
+  it.each(['index_build', 'verification'] as const)(
+    'polls real concurrent %s text boundaries while successor capture is quiet',
+    async (phase) => {
+      vi.useFakeTimers();
+      const reading = {
+        ...envelope('loading', {
+          worktrees: [{
+            ...worktree(),
+            staleness_state: 'indexing',
+            rebuild_in_flight: true,
+            progress: {
+              ...progress(),
+              generation_id: 'generation.4f21c9',
+              phase,
+              progress_epoch: 9,
+              last_progress_micros: NOW_MICROS + 600_000_000,
+            },
+            preseal_attempt: {
+              daemon_incarnation: 1,
+              producer_incarnation: 2,
+              attempt_sequence: 3,
+              progress_epoch: 4,
+              phase: 'capture',
+              completed_items: 7,
+              total_items: 20,
+              last_progress_micros: NOW_MICROS,
+              active: true,
+            },
+          }],
+          note: 'independent text artifact boundary during quiet successor capture',
+        }),
+        time: { valid_time_micros: null, observation_time_micros: NOW_MICROS + 600_000_000 },
+      };
+      const fetch = vi.fn(async () => new Response(JSON.stringify(reading), { status: 200 }));
+      vi.stubGlobal('fetch', fetch);
+      renderWith();
+
+      await advanceTimers(0);
+      expect(screen.getByText('capture · 7 / 20 items')).toBeTruthy();
+      expect(fetch).toHaveBeenCalledTimes(1);
+      await advanceTimers(1_001);
+      await advanceTimers(0);
+      expect(fetch).toHaveBeenCalledTimes(2);
+    },
+  );
 
   it('keeps polling each second when a moving worktree shares a query with a quiet one', async () => {
     vi.useFakeTimers();
@@ -781,6 +1221,65 @@ describe('Code index freshness', () => {
     await advanceTimers(1);
     await advanceTimers(0);
     expect(fetch).toHaveBeenCalledTimes(2);
+  });
+
+  it('polls an active successor despite a retained terminal publication refusal', async () => {
+    vi.useFakeTimers();
+    const active = envelope('loading', {
+      worktrees: [{
+        ...worktree(),
+        progress: { ...progress(), phase: 'ready', blocked_reason: 'publication_authority_corrupt' },
+        rebuild_in_flight: false,
+        preseal_attempt: {
+          daemon_incarnation: 1, producer_incarnation: 3, attempt_sequence: 2,
+          progress_epoch: 4, phase: 'capture', completed_items: 2,
+          total_items: 5, last_progress_micros: NOW_MICROS, active: true,
+        },
+      }],
+      note: 'live daemon scheduler state',
+    });
+    const fetch = vi.fn(async () => new Response(JSON.stringify(active), { status: 200 }));
+    vi.stubGlobal('fetch', fetch);
+    renderWith();
+
+    await advanceTimers(0);
+    expect(screen.getByText('capture · 2 / 5 items')).toBeTruthy();
+    expect(fetch).toHaveBeenCalledTimes(1);
+    await advanceTimers(1_001);
+    await advanceTimers(0);
+    expect(fetch).toHaveBeenCalledTimes(2);
+  });
+
+  it('polls an empty loading scope until its first actual worktree mounts', async () => {
+    vi.useFakeTimers();
+    const pending = envelope('loading', {
+      worktrees: [],
+      note: 'the scheduler is attaching its first worktree',
+    });
+    const mounted = envelope('loading', {
+      worktrees: [{
+        ...worktree(),
+        latest_generation_id: null,
+        snapshot_content_identity: null,
+        sealed_at_micros: null,
+        staleness_state: 'indexing',
+        rebuild_in_flight: true,
+      }],
+      note: 'live daemon scheduler state',
+    });
+    const fetch = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify(pending), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify(mounted), { status: 200 }));
+    vi.stubGlobal('fetch', fetch);
+    renderWith();
+
+    await advanceTimers(0);
+    expect(screen.getByText('the scheduler is attaching its first worktree')).toBeTruthy();
+    expect(fetch).toHaveBeenCalledTimes(1);
+    await advanceTimers(1_001);
+    await advanceTimers(0);
+    expect(fetch).toHaveBeenCalledTimes(2);
+    expect(screen.getByText('no sealed generation yet')).toBeTruthy();
   });
 
   it('keeps unsupported and unknown envelopes on the idle cadence', async () => {

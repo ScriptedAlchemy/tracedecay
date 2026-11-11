@@ -7,8 +7,8 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fmt;
 use std::pin::Pin;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, OnceLock};
 use std::task::{Context, Poll};
 
 use schemars::JsonSchema;
@@ -127,14 +127,6 @@ pub enum OperationEventItem {
 }
 
 pub type OperationEvent = StreamEvent<OperationEventItem>;
-
-static OPERATION_EVENTS: OnceLock<OperationEventAuthority> = OnceLock::new();
-
-pub fn operation_event_authority() -> OperationEventAuthority {
-    OPERATION_EVENTS
-        .get_or_init(OperationEventAuthority::default)
-        .clone()
-}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct OperationBinding {
@@ -842,12 +834,9 @@ impl OperationEventAuthority {
     /// `FrontierExpired` rather than a fabricated snapshot.
     ///
     /// A record whose `OperationEmitter` is still alive is kept. The
-    /// process-global authority is shared by every daemon composition in the
-    /// process and by the project workflow handlers that begin managed test
-    /// runs outside any composition, so one composition's shutdown must not
-    /// truncate a stream another producer is between admission and its first
-    /// result on. The emitter is the only holder of the cancellation
-    /// receiver, so its receiver count is the producer liveness signal.
+    /// owning daemon must leave accepted, unsettled producers able to publish
+    /// their terminal receipt. The emitter's cancellation receiver remains
+    /// the local producer-liveness signal.
     #[tracing::instrument(name = "usecases.operation.expire_idle", level = "trace", skip_all)]
     pub async fn expire_idle(&self) {
         let mut state = self.inner.state.lock().await;

@@ -55,8 +55,6 @@ use tracedecay_sessions::runtime::git_correlation::{
 };
 use tracedecay_store::StoreShardScopeV1;
 
-const CANONICAL_BODY_RECLAIM_PAGES: u64 = 4096;
-
 const REGISTRY_SCHEMA: &str = "
     CREATE TABLE IF NOT EXISTS projects (
         path TEXT PRIMARY KEY,
@@ -1461,9 +1459,6 @@ pub(crate) async fn ensure_attached_registered_schema(
                 )
             }
         })?;
-    database
-        .run_incremental_vacuum(CANONICAL_BODY_RECLAIM_PAGES)
-        .await?;
     Ok(match refused_authority {
         Some(refused) => RegisteredSchemaAttachmentV1::SessionsRefused(refused),
         None => RegisteredSchemaAttachmentV1::Admitted(RegisteredSchemaConvergence {

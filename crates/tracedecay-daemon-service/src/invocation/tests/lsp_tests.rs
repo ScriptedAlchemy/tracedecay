@@ -2,13 +2,16 @@ use tracedecay_contracts::SharedProfileStoreLocatorV1;
 use tracedecay_domain::BrainId;
 
 use std::path::PathBuf;
+use std::time::Duration;
 
 use super::{
-    AdmittedRoot, Arc, DaemonInvocationOutcome, DaemonInvocationRequest, DaemonInvocationService,
-    DaemonLspInvocationOwner, DaemonLspOwnerRegistrar, DaemonLspSessionAccess, LspSessionId,
-    ProjectId, ResolvedScope, UtcMicros, admitted_root_fixture, canonicalize_lsp_roots,
-    lsp_delivery_attempt, now_millis, retain_lsp_delivery_attempt, unavailable_lsp_session_factory,
+    AdmittedRoot, Arc, DaemonInvocationOutcome, DaemonInvocationProblem, DaemonInvocationRequest,
+    DaemonInvocationService, DaemonLspInvocationOwner, DaemonLspOwnerRegistrar,
+    DaemonLspSessionAccess, LspSessionId, ProjectId, ResolvedScope, UtcMicros,
+    admitted_root_fixture, canonicalize_lsp_roots, lsp_delivery_attempt, now_millis,
+    retain_lsp_delivery_attempt, unavailable_lsp_session_factory,
 };
+use crate::shutdown::ShutdownStatus;
 use tokio::sync::Mutex;
 use tracedecay_contracts::{
     CancellationContext, CapabilityGrantId, CapabilityGrantSnapshot, Deadline, DisclosureClass,
@@ -17,6 +20,7 @@ use tracedecay_contracts::{
 use tracedecay_domain::{ActorId, UserProfileId, canonical_sha256};
 use tracedecay_lsp::{AuthorizedLspWorkspace, LSP_SESSION_TTL_MS, LspSessionRegistry};
 use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
+use tracing_subscriber::layer::SubscriberExt;
 
 fn bridge_lsp_deadline() -> Deadline {
     Deadline::new(UtcMicros(i64::MAX)).expect("LSP deadline")
@@ -482,6 +486,50 @@ async fn lsp_delivery_fixture() -> LspDeliveryFixture {
     }
 }
 
+async fn mounted_lsp_delivery_fixture(service: &DaemonInvocationService) -> LspDeliveryFixture {
+    let profile = tempfile::tempdir().expect("profile");
+    let project = tempfile::tempdir().expect("project");
+    let project_id = ProjectId::new("project.lsp.delivery").expect("project id");
+    let runtime = tracedecay_global_db::tests::harness::RegisteredGlobalDbTestRuntime::project(
+        profile.path(),
+        project.path(),
+        project_id.clone(),
+    )
+    .await
+    .expect("registered runtime");
+    let db = runtime.project_database_arc().expect("project database");
+    let revision = canonical_sha256(&"lsp-delivery-runtime").expect("revision");
+    let producer = service
+        .mount_observability_producer(
+            project.path().to_path_buf(),
+            db.clone(),
+            project_id.clone(),
+            revision.clone(),
+            revision,
+        )
+        .await
+        .expect("mounted observability producer");
+    let recorder = service
+        .delivery_settlement_recorder(Some(project.path()))
+        .await
+        .expect("mounted settlement recorder");
+    let authority = service
+        .delivery_settlement_authority(Some(project.path()))
+        .await
+        .expect("settlement authority lookup")
+        .expect("mounted settlement authority");
+    LspDeliveryFixture {
+        _profile: profile,
+        _runtime: runtime,
+        _project: project,
+        project_id,
+        recorder,
+        authority,
+        producer,
+        db,
+    }
+}
+
 async fn open_polled_lsp_delivery(
     fixture: &LspDeliveryFixture,
     service: &DaemonInvocationService,
@@ -575,6 +623,14 @@ async fn open_polled_lsp_delivery(
 }
 
 async fn assert_one_lsp_delivery_drop(fixture: LspDeliveryFixture) {
+    assert_one_lsp_delivery_settlement(fixture, 0, 1).await;
+}
+
+async fn assert_one_lsp_delivery_settlement(
+    fixture: LspDeliveryFixture,
+    delivered: u16,
+    dropped: u16,
+) {
     let summary = fixture
         .recorder
         .shutdown()
@@ -591,21 +647,29 @@ async fn assert_one_lsp_delivery_drop(fixture: LspDeliveryFixture) {
         panic!("LSP delivery components must release the producer")
     };
     producer.shutdown().await.expect("flush LSP observability");
-    let page = tracedecay_application::observability::RegisteredObservabilityPortV1::new(
-        fixture.db.as_ref(),
-    )
-    .query(tracedecay_contracts::ObservabilityQueryV1 {
-        authorized_scope_ref: fixture.project_id.as_str().to_owned(),
-        event_kinds: vec!["work.delivery_fanout.observed.v1".to_owned()],
-        horizon: tracedecay_contracts::ObservabilityHorizonV1 {
-            since_micros: 0,
-            until_micros: i64::MAX,
-        },
-        after_watermark: None,
-        limit: 8,
-    })
-    .await
-    .expect("read LSP delivery observation");
+    assert_lsp_delivery_observation(&fixture.db, &fixture.project_id, delivered, dropped).await;
+}
+
+async fn assert_lsp_delivery_observation(
+    db: &tracedecay_global_db::RegisteredGlobalDbLeaseV1,
+    project_id: &ProjectId,
+    delivered: u16,
+    dropped: u16,
+) {
+    let page =
+        tracedecay_application::observability::RegisteredObservabilityPortV1::new(db.as_ref())
+            .query(tracedecay_contracts::ObservabilityQueryV1 {
+                authorized_scope_ref: project_id.as_str().to_owned(),
+                event_kinds: vec!["work.delivery_fanout.observed.v1".to_owned()],
+                horizon: tracedecay_contracts::ObservabilityHorizonV1 {
+                    since_micros: 0,
+                    until_micros: i64::MAX,
+                },
+                after_watermark: None,
+                limit: 8,
+            })
+            .await
+            .expect("read LSP delivery observation");
     let [event] = page.events.as_slice() else {
         panic!("one terminal LSP delivery observation is required");
     };
@@ -613,9 +677,282 @@ async fn assert_one_lsp_delivery_drop(fixture: LspDeliveryFixture) {
     else {
         panic!("expected LSP delivery fanout observation");
     };
-    assert_eq!(fanout.delivered, 0);
-    assert_eq!(fanout.dropped, 1);
+    assert_eq!(fanout.delivered, delivered);
+    assert_eq!(fanout.dropped, dropped);
     assert_eq!(fanout.unknown, 0);
+}
+
+/// Records the thread that opens each span of one name.
+struct SpanThreads {
+    span_name: &'static str,
+    threads: Arc<std::sync::Mutex<Vec<std::thread::ThreadId>>>,
+}
+
+impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for SpanThreads {
+    fn on_new_span(
+        &self,
+        attributes: &tracing::span::Attributes<'_>,
+        _id: &tracing::span::Id,
+        _context: tracing_subscriber::layer::Context<'_, S>,
+    ) {
+        if attributes.metadata().name() == self.span_name {
+            self.threads
+                .lock()
+                .expect("span thread log")
+                .push(std::thread::current().id());
+        }
+    }
+}
+
+/// An acknowledgement publishes its delivery receipt to the recorder's spool
+/// with file and directory fsyncs. Measured on an idle macOS disk that is
+/// 8 to 13 ms and all of the acknowledge span's busy time, 50 to 80 times any
+/// other LSP operation, and it ran on the serving thread under the daemon-wide
+/// session map lock. On a disk whose fsyncs stall, that parked the serving
+/// worker and every invocation behind the lock until the client's own
+/// deadline lapsed. The receipt must still be durable before the
+/// acknowledgement is answered, but it must be admitted off the serving thread.
+#[tokio::test]
+async fn lsp_acknowledgement_admits_its_delivery_receipt_off_the_serving_thread() {
+    let fixture = lsp_delivery_fixture().await;
+    let service = DaemonInvocationService::default();
+    let registry = Arc::new(Mutex::new(LspSessionRegistry::default()));
+    let session = open_polled_lsp_delivery(&fixture, &service, &registry, "ack").await;
+
+    let spool_publishers = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let acknowledged = {
+        let _capture = tracedecay_runtime_core::logging::set_tracing_capture(
+            tracing_subscriber::registry().with(SpanThreads {
+                span_name: "private_fs.framed_log.publish",
+                threads: Arc::clone(&spool_publishers),
+            }),
+        );
+        service
+            .invoke(
+                &registry,
+                None,
+                None,
+                None,
+                None,
+                DaemonInvocationRequest::lsp_acknowledge(
+                    "request.lsp-delivery.ack.ack",
+                    session,
+                    bridge_lsp_deadline(),
+                    bridge_lsp_cancellation(),
+                ),
+            )
+            .await
+    };
+    assert!(matches!(
+        acknowledged.outcome,
+        DaemonInvocationOutcome::LspAcknowledged { acknowledged: true }
+    ));
+    {
+        let publishers = spool_publishers.lock().expect("span thread log");
+        assert!(
+            !publishers.is_empty(),
+            "observe actual durable receipt publication"
+        );
+        assert!(
+            !publishers.contains(&std::thread::current().id()),
+            "the acknowledgement published its receipt on the serving thread"
+        );
+    }
+
+    drop(service);
+    assert_one_lsp_delivery_settlement(fixture, 1, 0).await;
+}
+
+/// Pause the real recorder before admission, using its production latency span.
+struct PausedDeliveryAdmission {
+    started: std::sync::Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
+    release: std::sync::Mutex<std::sync::mpsc::Receiver<()>>,
+}
+
+impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for PausedDeliveryAdmission {
+    fn on_new_span(
+        &self,
+        attributes: &tracing::span::Attributes<'_>,
+        _id: &tracing::span::Id,
+        _context: tracing_subscriber::layer::Context<'_, S>,
+    ) {
+        if attributes.metadata().name() == "daemon.service.lsp.delivery_receipt.admit"
+            && let Some(started) = self.started.lock().expect("admission signal").take()
+        {
+            started.send(()).expect("admission waiter");
+            self.release
+                .lock()
+                .expect("admission release")
+                .recv_timeout(Duration::from_secs(5))
+                .expect("release receipt admission");
+        }
+    }
+}
+
+#[tokio::test]
+async fn cancelled_lsp_acknowledgement_pins_its_recorder_until_durable_admission() {
+    let service = DaemonInvocationService::default();
+    let fixture = mounted_lsp_delivery_fixture(&service).await;
+    let registry = Arc::new(Mutex::new(LspSessionRegistry::default()));
+    let session = open_polled_lsp_delivery(&fixture, &service, &registry, "cancelled-ack").await;
+    let (started, admission_started) = tokio::sync::oneshot::channel();
+    let (release, admission_release) = std::sync::mpsc::channel();
+    let _capture = tracedecay_runtime_core::logging::set_tracing_capture(
+        tracing_subscriber::registry().with(PausedDeliveryAdmission {
+            started: std::sync::Mutex::new(Some(started)),
+            release: std::sync::Mutex::new(admission_release),
+        }),
+    );
+    let mut acknowledgement = Box::pin(service.invoke(
+        &registry,
+        None,
+        None,
+        None,
+        None,
+        DaemonInvocationRequest::lsp_acknowledge(
+            "request.lsp-delivery.cancelled-ack",
+            session,
+            bridge_lsp_deadline(),
+            bridge_lsp_cancellation(),
+        ),
+    ));
+    tokio::select! {
+        response = &mut acknowledgement => panic!("acknowledgement outran admission: {response:?}"),
+        started = tokio::time::timeout(Duration::from_secs(2), admission_started) => {
+            started.expect("receipt admission started").expect("admission signal");
+        }
+    }
+    drop(acknowledgement);
+
+    let (drain_waiting, drain_is_waiting) = tokio::sync::oneshot::channel();
+    service
+        .project_runtimes
+        .arm_shutdown_drain_waiting(drain_waiting);
+    let mut shutdown = Box::pin(service.expire_all(None));
+    tokio::select! {
+        joined = &mut shutdown => panic!("shutdown outran the claimed receipt: {joined:?}"),
+        waiting = tokio::time::timeout(Duration::from_secs(2), drain_is_waiting) => {
+            waiting.expect("shutdown joins admitted delivery").expect("drain signal");
+        }
+    }
+    assert!(service.lsp_sessions.lock().await.is_empty());
+    assert!(!service.project_runtimes.is_empty());
+    release.send(()).expect("release durable admission");
+    let joined = tokio::time::timeout(Duration::from_secs(5), shutdown)
+        .await
+        .expect("shutdown after durable receipt");
+    assert_eq!(joined.status, ShutdownStatus::Clean);
+    assert!(
+        joined.lost_work.is_empty(),
+        "receipt must drain without loss: {joined:?}"
+    );
+    assert!(service.project_runtimes.is_empty());
+    assert_lsp_delivery_observation(&fixture.db, &fixture.project_id, 1, 0).await;
+}
+
+#[tokio::test]
+async fn cancelled_lsp_detach_reclaims_its_lease_before_waiting_for_the_receipt() {
+    let fixture = lsp_delivery_fixture().await;
+    let service = DaemonInvocationService::default();
+    let registry = Arc::new(Mutex::new(LspSessionRegistry::default()));
+    let session = open_polled_lsp_delivery(&fixture, &service, &registry, "cancelled-detach").await;
+    service
+        .disconnect_lsp_session(&registry, session.clone())
+        .await;
+    assert_eq!(service.lsp_lease_tasks.active_tasks(), 1);
+    let (started, admission_started) = tokio::sync::oneshot::channel();
+    let (release, admission_release) = std::sync::mpsc::channel();
+    let _capture = tracedecay_runtime_core::logging::set_tracing_capture(
+        tracing_subscriber::registry().with(PausedDeliveryAdmission {
+            started: std::sync::Mutex::new(Some(started)),
+            release: std::sync::Mutex::new(admission_release),
+        }),
+    );
+    let mut detach = Box::pin(service.invoke(
+        &registry,
+        None,
+        None,
+        None,
+        None,
+        DaemonInvocationRequest::lsp_detach(
+            "request.lsp-delivery.cancelled-detach",
+            session,
+            bridge_lsp_deadline(),
+            bridge_lsp_cancellation(),
+        ),
+    ));
+    tokio::select! {
+        response = &mut detach => panic!("detach outran receipt admission: {response:?}"),
+        started = tokio::time::timeout(Duration::from_secs(2), admission_started) => {
+            started.expect("receipt admission started").expect("admission signal");
+        }
+    }
+    drop(detach);
+    assert_eq!(service.lsp_lease_tasks.active_tasks(), 0);
+    assert!(service.lsp_sessions.lock().await.is_empty());
+    assert_eq!(registry.lock().await.active_sessions(), 0);
+    release.send(()).expect("release durable admission");
+    let joined = tokio::time::timeout(Duration::from_secs(5), service.expire_all(None))
+        .await
+        .expect("join cancelled detach admission");
+    assert_eq!(joined.status, ShutdownStatus::Clean);
+    assert_eq!(joined.lost_work, Vec::<String>::new());
+    drop(service);
+    assert_one_lsp_delivery_drop(fixture).await;
+}
+
+#[tokio::test]
+async fn lsp_retirement_refuses_settlement_before_taking_the_in_flight_attempt() {
+    let fixture = lsp_delivery_fixture().await;
+    let service = DaemonInvocationService::default();
+    let registry = Arc::new(Mutex::new(LspSessionRegistry::default()));
+    let session = open_polled_lsp_delivery(&fixture, &service, &registry, "retirement").await;
+    let access = session.clone().into_access().expect("session access");
+    let attempt = service
+        .lsp_sessions
+        .lock()
+        .await
+        .get(access.session_id())
+        .expect("polled session")
+        .in_flight_delivery_attempt
+        .clone()
+        .expect("captured delivery attempt");
+    service.begin_shutdown().await;
+    for request in [
+        DaemonInvocationRequest::lsp_acknowledge(
+            "request.lsp-delivery.retirement.ack",
+            session.clone(),
+            bridge_lsp_deadline(),
+            bridge_lsp_cancellation(),
+        ),
+        DaemonInvocationRequest::lsp_detach(
+            "request.lsp-delivery.retirement.detach",
+            session,
+            bridge_lsp_deadline(),
+            bridge_lsp_cancellation(),
+        ),
+    ] {
+        let response = service
+            .invoke(&registry, None, None, None, None, request)
+            .await;
+        assert!(matches!(
+            response.outcome,
+            DaemonInvocationOutcome::Problem {
+                problem: DaemonInvocationProblem::Unavailable
+            }
+        ));
+        let sessions = service.lsp_sessions.lock().await;
+        let session = sessions
+            .get(access.session_id())
+            .expect("unclaimed session");
+        assert_eq!(session.in_flight_delivery_attempt.as_ref(), Some(&attempt));
+        assert_eq!(registry.lock().await.active_sessions(), 1);
+    }
+    let joined = service.expire_all(None).await;
+    assert_eq!(joined.status, ShutdownStatus::Clean);
+    assert_eq!(joined.lost_work, Vec::<String>::new());
+    drop(service);
+    assert_one_lsp_delivery_drop(fixture).await;
 }
 
 #[tokio::test]

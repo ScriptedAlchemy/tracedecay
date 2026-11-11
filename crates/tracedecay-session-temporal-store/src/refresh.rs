@@ -1141,6 +1141,7 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
             self.inner(),
             request.session_id(),
             binding.generation,
+            binding.watermarks.active_generation(),
             &execution_control,
             COMPLETE_REFRESH,
         )
@@ -1296,6 +1297,7 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
             self.inner(),
             request.session_id(),
             binding.generation,
+            binding.watermarks.active_generation(),
             execution_control,
             COMPLETE_REFRESH,
         )
