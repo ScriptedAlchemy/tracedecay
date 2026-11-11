@@ -8,6 +8,7 @@ use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
 use futures_util::future::{FusedFuture, FutureExt};
+use tokio::sync::{AcquireError, OwnedSemaphorePermit, Semaphore};
 use tracedecay_lcm::LcmError;
 use tracedecay_store::{
     SessionRefreshBeginOrJoinRequestV1, SessionRefreshCompletionRequestV1,
@@ -137,23 +138,27 @@ fn clears_blocked_history_backoff(
 }
 
 /// What a history pass that committed nothing waits on before it runs again.
+type HistoryAdmissionWait =
+    Pin<Box<dyn Future<Output = Result<OwnedSemaphorePermit, AcquireError>> + Send>>;
+
 enum HistoryRelease {
-    /// The daemon-wide historical admission had no free permit.
-    Admission,
+    /// The daemon-wide historical admission had no free permit. The owned
+    /// waiter preserves this worker's FIFO turn across projection wakes.
+    Admission(HistoryAdmissionWait),
     /// The pass ran and reported capacity it could not get.
     Capacity(SessionHistoricalCapacityRelease),
 }
 
 impl HistoryRelease {
-    /// Resolves once the refused capacity frees. An admission wait returns the
-    /// permit its queue turn granted: dropping it and retrying admission would
-    /// hand the turn to the next waiter, so the next history pass runs under it.
-    async fn released<'a>(
-        &mut self,
-        admission: &'a tokio::sync::Semaphore,
-    ) -> Option<tokio::sync::SemaphorePermit<'a>> {
+    fn admission(admission: &Arc<Semaphore>) -> Self {
+        Self::Admission(Box::pin(Arc::clone(admission).acquire_owned()))
+    }
+
+    /// Resolves once the refused capacity frees. Repeated polling must never
+    /// register a new waiter behind profiles that arrived after this worker.
+    async fn released(&mut self) -> Option<OwnedSemaphorePermit> {
         match self {
-            Self::Admission => match admission.acquire().await {
+            Self::Admission(wait) => match wait.as_mut().await {
                 Ok(permit) => Some(permit),
                 Err(_) => std::future::pending().await,
             },
@@ -266,6 +271,14 @@ pub(super) async fn run_session_temporal_refresh_scheduler(
             // wake taken while the worker still reads idle.
             state.mark_worker_busy();
             let mut history_requested = state.take_historical_dirty();
+            // A pending historical admission already owns this source wake.
+            // Reattempting try_acquire would discard its FIFO queue position.
+            if state.history_retry_pending()
+                && matches!(history_release.as_ref(), Some(HistoryRelease::Admission(_)))
+                && granted_history_admission.is_none()
+            {
+                history_requested = false;
+            }
             // A wake that arrives while the admitted window is still
             // unpublished must not start the next history window. Publish
             // the newest day before admitting the out-of-scope cursor sweep.
@@ -431,6 +444,13 @@ pub(super) async fn run_session_temporal_refresh_scheduler(
                 history_outcome.clone()
             };
             let mut convergence_admission = lcm_convergence_admission(convergence_outcome);
+            // A live projection cannot queue the same worker for summary
+            // capacity while its historical admission turn is still pending.
+            if state.history_retry_pending()
+                && matches!(history_release.as_ref(), Some(HistoryRelease::Admission(_)))
+            {
+                convergence_admission = LcmConvergenceAdmission::Deferred;
+            }
             let history_needs_another_pass =
                 !matches!(convergence_admission, LcmConvergenceAdmission::Admitted);
             // Finish the temporal generation before spending the next pass on
@@ -675,11 +695,13 @@ pub(super) async fn run_session_temporal_refresh_scheduler(
             }
         }
         state.observe_quiescence();
+        let awaiting_admission = state.history_retry_pending()
+            && matches!(history_release.as_ref(), Some(HistoryRelease::Admission(_)));
         let release = tracing::Instrument::instrument(
             async {
                 match history_release.as_mut() {
                     Some(release) if state.history_retry_pending() => {
-                        release.released(&history_admission).await
+                        release.released().await
                     }
                     _ => std::future::pending().await,
                 }
@@ -730,9 +752,10 @@ pub(super) async fn run_session_temporal_refresh_scheduler(
                     break;
                 }
                 // Ordinary source discovery keeps its one-minute cadence.
-                // After a terminal history blocker, park through its backoff
-                // instead of firing pointless minute-by-minute scheduler passes.
-                fired = tracing::Instrument::instrument(native_runtime::sleep_until(history_idle_deadline), tracing::trace_span!("daemon.scheduler.session_temporal.history_idle_wait")) => {
+                // A queued admission already owns the next history pass, so its
+                // turn must survive discovery deadlines and projection wakes.
+                // Terminal history blockers retain their longer backoff.
+                fired = tracing::Instrument::instrument(native_runtime::sleep_until(history_idle_deadline), tracing::trace_span!("daemon.scheduler.session_temporal.history_idle_wait")), if !awaiting_admission => {
                     if stop_without_timer(fired) {
                         return;
                     }
@@ -813,8 +836,8 @@ fn stop_worker(state: &SessionTemporalRefreshWakeState) {
 /// runs, so a release during it is not lost.
 async fn session_history_refresh(
     history: &Arc<std::sync::RwLock<Option<SharedSessionHistoricalIngestor>>>,
-    admission: &tokio::sync::Semaphore,
-    granted: Option<tokio::sync::SemaphorePermit<'_>>,
+    admission: &Arc<Semaphore>,
+    granted: Option<OwnedSemaphorePermit>,
     state: &SessionTemporalRefreshWakeState,
 ) -> HistoryPassReport {
     let history = history
@@ -823,13 +846,13 @@ async fn session_history_refresh(
         .clone();
     match history {
         Some(history) => {
-            let Some(_permit) = granted.or_else(|| admission.try_acquire().ok()) else {
+            let Some(_permit) = granted.or_else(|| Arc::clone(admission).try_acquire_owned().ok()) else {
                 return (
                     SessionHistoricalIngestOutcome::Retryable {
                         reason_code: HISTORY_ADMISSION_SATURATED_REASON.to_owned(),
                         made_progress: false,
                     },
-                    Some(HistoryRelease::Admission),
+                    Some(HistoryRelease::admission(admission)),
                 );
             };
             let release = history.capacity_release();
@@ -2711,10 +2734,53 @@ mod tests {
         assert!(!state.has_pending_work());
     }
 
+    #[tokio::test]
+    async fn refused_history_admission_keeps_its_fifo_turn_across_wait_repolls() {
+        let admission = Arc::new(Semaphore::new(0));
+        let mut release = HistoryRelease::admission(&admission);
+        {
+            let first_wait = release.released();
+            tokio::pin!(first_wait);
+            assert!(
+                std::future::poll_fn(|cx| std::task::Poll::Ready(first_wait.as_mut().poll(cx)))
+                    .await
+                    .is_pending(),
+                "the refused worker must register its FIFO turn"
+            );
+        }
+
+        let later = Arc::clone(&admission).acquire_owned();
+        tokio::pin!(later);
+        assert!(
+            std::future::poll_fn(|cx| std::task::Poll::Ready(later.as_mut().poll(cx)))
+                .await
+                .is_pending(),
+            "a second profile must queue behind the first"
+        );
+
+        admission.add_permits(1);
+        let first_permit = tokio::time::timeout(Duration::from_secs(5), release.released())
+            .await
+            .expect("original waiter must receive its permit")
+            .expect("admission must remain open");
+        assert!(
+            std::future::poll_fn(|cx| std::task::Poll::Ready(later.as_mut().poll(cx)))
+                .await
+                .is_pending(),
+            "re-polling must not move the first waiter behind another profile"
+        );
+        drop(first_permit);
+        let later_permit = tokio::time::timeout(Duration::from_secs(5), later)
+            .await
+            .expect("later profile must receive the released permit")
+            .expect("admission must remain open");
+        drop(later_permit);
+    }
+
     #[test]
     fn terminal_history_backoff_clears_only_after_an_admitted_unblocked_pass() {
         let admitted = HistoryRelease::Capacity(SessionHistoricalCapacityRelease::new(Vec::new()));
-        let refused = HistoryRelease::Admission;
+        let refused = HistoryRelease::admission(&Arc::new(Semaphore::new(0)));
         assert!(!clears_blocked_history_backoff(None, Some(&admitted)));
         for made_progress in [false, true] {
             let blocked = SessionHistoricalIngestOutcome::Blocked {
