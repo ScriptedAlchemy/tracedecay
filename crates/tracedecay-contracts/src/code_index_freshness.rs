@@ -122,6 +122,66 @@ pub struct CodeIndexBuildProgressV1 {
     pub blocked_reason: Option<CodeIndexBuildBlockedReasonV1>,
 }
 
+/// Observed capture, parse, and source-reference resolution before sealing.
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum CodeIndexPresealWorkPhaseV1 {
+    Capture,
+    ParseEvidence,
+    Resolution,
+}
+
+/// Independently owned attempt work, not committed text or graph pages.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct CodeIndexPresealAttemptProgressV1 {
+    pub daemon_incarnation: u64,
+    pub producer_incarnation: u64,
+    pub attempt_sequence: u64,
+    pub progress_epoch: u64,
+    pub phase: CodeIndexPresealWorkPhaseV1,
+    pub completed_items: u64,
+    pub total_items: Option<u64>,
+    /// No timestamp is invented before actual work or by status polling.
+    pub last_progress_micros: Option<i64>,
+    pub active: bool,
+}
+
+/// Native graph writer progress is independent of text-artifact commit counts.
+/// Encoded rows are physical work, never a durable page. Stage-page commits
+/// and installed + digest-verified compact segments are durable work.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum CodeIndexNativeGraphPhaseV1 {
+    CompactEncoding,
+    StagePageCommit,
+    CompactSegmentVerified,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct CodeIndexNativeGraphProgressV1 {
+    pub generation_id: String,
+    pub sealed_graph_digest: String,
+    pub daemon_incarnation: u64,
+    pub producer_incarnation: u64,
+    pub attempt_sequence: u64,
+    pub progress_epoch: u64,
+    pub phase: Option<CodeIndexNativeGraphPhaseV1>,
+    pub encoded_entities: u64,
+    pub total_entities: Option<u64>,
+    pub encoded_relations: u64,
+    pub total_relations: Option<u64>,
+    pub committed_stage_pages: u64,
+    pub committed_stage_mutations: u64,
+    pub committed_stage_bytes: u64,
+    pub committed_compact_segments: u64,
+    pub committed_compact_bytes: u64,
+    /// The time of the last actual native writer callback, not a status read.
+    pub last_progress_micros: Option<i64>,
+    pub active: bool,
+}
+
 /// A deterministic contract violation that parked background convergence.
 ///
 /// Parked is not dead: the worker keeps re-observing the violation on its
@@ -608,6 +668,10 @@ pub struct CodeIndexWorktreeFreshnessV1 {
     pub omitted_sources: Option<CodeIndexOmittedSourcesV1>,
     /// Latest committed progress for the active generation, if one is mounted.
     pub progress: Option<CodeIndexBuildProgressV1>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preseal_attempt: Option<CodeIndexPresealAttemptProgressV1>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub native_graph_progress: Option<CodeIndexNativeGraphProgressV1>,
     /// Bounded immutable-artifact restore work currently in flight. This is
     /// separate from build progress because restore commits no index data.
     #[serde(default)]
@@ -1389,6 +1453,81 @@ mod tests {
             CodeIndexReadinessV1::Unreachable {
                 reason: "code_graph_refused: shape".to_owned(),
             }
+        );
+    }
+
+    #[test]
+    fn preseal_freshness_wire_never_invents_a_generation() {
+        let expected = CodeIndexWorktreeFreshnessV1 {
+            worktree_root: "/repo".to_owned(),
+            rebuild_in_flight: true,
+            preseal_attempt: Some(CodeIndexPresealAttemptProgressV1 {
+                daemon_incarnation: 11,
+                producer_incarnation: 4,
+                attempt_sequence: 3,
+                progress_epoch: 8,
+                phase: CodeIndexPresealWorkPhaseV1::ParseEvidence,
+                completed_items: 7,
+                total_items: Some(9),
+                last_progress_micros: Some(1_234_567),
+                active: true,
+            }),
+            ..Default::default()
+        };
+        let value = serde_json::to_value(&expected).expect("encode freshness");
+        assert!(value["latest_generation_id"].is_null());
+        assert!(value["progress"].is_null());
+        assert_eq!(value["preseal_attempt"]["phase"], "parse_evidence");
+        assert_eq!(value["preseal_attempt"]["completed_items"], 7);
+        assert_eq!(value["preseal_attempt"]["last_progress_micros"], 1_234_567);
+        let decoded: CodeIndexWorktreeFreshnessV1 =
+            serde_json::from_value(value).expect("decode freshness");
+        assert_eq!(decoded, expected);
+        let no_attempt = serde_json::to_value(CodeIndexWorktreeFreshnessV1::default())
+            .expect("encode absent attempt");
+        assert!(no_attempt.get("preseal_attempt").is_none());
+    }
+    #[test]
+    fn native_graph_freshness_wire_keeps_physical_work_separate_from_durable_writes() {
+        let graph = CodeIndexNativeGraphProgressV1 {
+            generation_id: "generation.real".to_owned(),
+            sealed_graph_digest: "sha256:native".to_owned(),
+            daemon_incarnation: 3,
+            producer_incarnation: 5,
+            attempt_sequence: 7,
+            progress_epoch: 13,
+            phase: Some(CodeIndexNativeGraphPhaseV1::CompactEncoding),
+            encoded_entities: 512,
+            total_entities: Some(1024),
+            encoded_relations: 0,
+            total_relations: None,
+            committed_stage_pages: 0,
+            committed_stage_mutations: 0,
+            committed_stage_bytes: 0,
+            committed_compact_segments: 0,
+            committed_compact_bytes: 0,
+            last_progress_micros: Some(12345),
+            active: true,
+        };
+        let wire = CodeIndexWorktreeFreshnessV1 {
+            native_graph_progress: Some(graph.clone()),
+            ..Default::default()
+        };
+        let value = serde_json::to_value(&wire).expect("serialize real native progress");
+        assert!(value["progress"].is_null());
+        assert_eq!(value["native_graph_progress"]["encoded_entities"], 512);
+        assert_eq!(value["native_graph_progress"]["committed_stage_pages"], 0);
+        assert_eq!(value["native_graph_progress"]["phase"], "compact_encoding");
+        assert_eq!(
+            serde_json::from_value::<CodeIndexWorktreeFreshnessV1>(value)
+                .expect("roundtrip native progress"),
+            wire
+        );
+        assert!(
+            serde_json::to_value(CodeIndexWorktreeFreshnessV1::default())
+                .expect("serialize absent graph progress")
+                .get("native_graph_progress")
+                .is_none()
         );
     }
 }
