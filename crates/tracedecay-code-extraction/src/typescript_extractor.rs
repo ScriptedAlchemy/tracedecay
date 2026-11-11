@@ -1690,6 +1690,16 @@ impl TypeScriptExtractor {
     /// enclosing symbol. A JSX element naming a component (`<Card />`,
     /// `<Layout.Header>`) renders, and so calls, that component.
     fn extract_call_sites(state: &mut ExtractionState<'_>, node: TsNode<'_>, fn_node_id: &str) {
+        let mut lookup = receiver_types::ReceiverLookup::default();
+        Self::extract_call_sites_with_lookup(state, node, fn_node_id, &mut lookup);
+    }
+
+    fn extract_call_sites_with_lookup<'t>(
+        state: &mut ExtractionState<'_>,
+        node: TsNode<'t>,
+        fn_node_id: &str,
+        lookup: &mut receiver_types::ReceiverLookup<'t>,
+    ) {
         let mut cursor = node.walk();
         if cursor.goto_first_child() {
             loop {
@@ -1710,7 +1720,7 @@ impl TypeScriptExtractor {
                     _ => None,
                 };
                 if let Some((callee, site)) = callee {
-                    receiver_types::record_call(state, callee, fn_node_id);
+                    receiver_types::record_call(state, callee, fn_node_id, lookup);
                     state.unresolved_refs.push(UnresolvedRef {
                         from_node_id: fn_node_id.to_string(),
                         reference_name: state.node_text(callee).to_string(),
@@ -1722,7 +1732,7 @@ impl TypeScriptExtractor {
                         argument_count: None,
                     });
                 }
-                Self::extract_call_sites(state, child, fn_node_id);
+                Self::extract_call_sites_with_lookup(state, child, fn_node_id, lookup);
                 if !cursor.goto_next_sibling() {
                     break;
                 }

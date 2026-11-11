@@ -1,6 +1,8 @@
 //! Parser-attested instance receiver facts. Unsupported values remain calls
 //! with unresolved receivers; no method is selected from its spelling alone.
 
+use std::collections::HashMap;
+
 use tracedecay_domain::SourceSpan;
 use tree_sitter::Node as TsNode;
 
@@ -8,6 +10,95 @@ use super::{ExtractionState, TypeScriptExtractor};
 use crate::extraction_artifact::{
     ExtractedTypeScriptTypeRowV1, TypeScriptReceiverV1, TypeScriptTypeRowV1,
 };
+
+/// Reuse facts about the exact retained tree while walking one owner's calls.
+/// A declaration's position is checked separately at every call site, so an
+/// earlier use cannot borrow a later call's proof. This cache never survives
+/// extraction or crosses into another tree.
+#[derive(Default)]
+pub(super) struct ReceiverLookup<'t> {
+    bindings: HashMap<usize, HashMap<String, ScopeBinding<'t>>>,
+    var_bindings: HashMap<usize, HashMap<String, bool>>,
+    writes: HashMap<usize, HashMap<String, bool>>,
+}
+
+#[derive(Clone, Copy)]
+enum ScopeBinding<'t> {
+    Missing,
+    Blocked,
+    Declared(TsNode<'t>),
+}
+
+impl<'t> ReceiverLookup<'t> {
+    fn binding_in_scope(
+        &mut self,
+        state: &ExtractionState<'_>,
+        scope: TsNode<'t>,
+        name: &str,
+    ) -> ScopeBinding<'t> {
+        if let Some(found) = self
+            .bindings
+            .get(&scope.id())
+            .and_then(|names| names.get(name))
+        {
+            return *found;
+        }
+        let mut found = Vec::new();
+        bindings_in_scope(state, scope, scope, name, &mut found);
+        let binding = match found.as_slice() {
+            [] => ScopeBinding::Missing,
+            [declaration] if !declaration.has_error() => ScopeBinding::Declared(*declaration),
+            _ => ScopeBinding::Blocked,
+        };
+        self.bindings
+            .entry(scope.id())
+            .or_default()
+            .insert(name.to_owned(), binding);
+        binding
+    }
+
+    fn has_var_binding(
+        &mut self,
+        state: &ExtractionState<'_>,
+        scope: TsNode<'t>,
+        name: &str,
+    ) -> bool {
+        if let Some(found) = self
+            .var_bindings
+            .get(&scope.id())
+            .and_then(|names| names.get(name))
+        {
+            return *found;
+        }
+        let found = has_var_binding(state, scope, scope, name);
+        self.var_bindings
+            .entry(scope.id())
+            .or_default()
+            .insert(name.to_owned(), found);
+        found
+    }
+
+    fn has_write(&mut self, state: &ExtractionState<'_>, scope: TsNode<'t>, name: &str) -> bool {
+        if let Some(found) = self
+            .writes
+            .get(&scope.id())
+            .and_then(|names| names.get(name))
+        {
+            return *found;
+        }
+        let found = has_write(state, scope, name);
+        self.writes
+            .entry(scope.id())
+            .or_default()
+            .insert(name.to_owned(), found);
+        found
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    static SCOPE_LOOKUP_NODE_VISITS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
 
 fn is_function(node: TsNode<'_>) -> bool {
     matches!(
@@ -71,6 +162,8 @@ fn bindings_in_scope<'t>(
     name: &str,
     found: &mut Vec<TsNode<'t>>,
 ) {
+    #[cfg(test)]
+    SCOPE_LOOKUP_NODE_VISITS.with(|visits| visits.set(visits.get() + 1));
     let binding = match node.kind() {
         "variable_declarator" => node.child_by_field_name("name"),
         "required_parameter" | "optional_parameter" | "rest_parameter" => {
@@ -150,6 +243,8 @@ fn has_var_binding(
     node: TsNode<'_>,
     name: &str,
 ) -> bool {
+    #[cfg(test)]
+    SCOPE_LOOKUP_NODE_VISITS.with(|visits| visits.set(visits.get() + 1));
     if node != root && is_function(node) {
         return false;
     }
@@ -175,6 +270,7 @@ fn binding<'t>(
     state: &ExtractionState<'_>,
     site: TsNode<'t>,
     name: &str,
+    lookup: &mut ReceiverLookup<'t>,
 ) -> Option<Option<(TsNode<'t>, TsNode<'t>)>> {
     let mut parent = site.parent();
     while let Some(scope) = parent {
@@ -186,17 +282,14 @@ fn binding<'t>(
                     body.start_byte() <= site.start_byte() && site.end_byte() <= body.end_byte()
                 });
             if (body_scope || scope.kind() == "program")
-                && has_var_binding(state, scope, scope, name)
+                && lookup.has_var_binding(state, scope, name)
             {
                 return Some(None);
             }
-            let mut found = Vec::new();
-            bindings_in_scope(state, scope, scope, name, &mut found);
-            if !found.is_empty() {
-                return Some(match found.as_slice() {
-                    [declaration] if !declaration.has_error() => Some((*declaration, scope)),
-                    _ => None,
-                });
+            match lookup.binding_in_scope(state, scope, name) {
+                ScopeBinding::Missing => {}
+                ScopeBinding::Blocked => return Some(None),
+                ScopeBinding::Declared(declaration) => return Some(Some((declaration, scope))),
             }
         }
         parent = scope.parent();
@@ -205,6 +298,8 @@ fn binding<'t>(
 }
 
 fn has_write(state: &ExtractionState<'_>, node: TsNode<'_>, name: &str) -> bool {
+    #[cfg(test)]
+    SCOPE_LOOKUP_NODE_VISITS.with(|visits| visits.set(visits.get() + 1));
     let target = match node.kind() {
         "assignment_expression" | "augmented_assignment_expression" | "for_in_statement" => {
             node.child_by_field_name("left")
@@ -251,11 +346,16 @@ fn named_type(state: &ExtractionState<'_>, node: TsNode<'_>) -> Option<String> {
 
 /// This slice resolves module declarations/imports only. A local type,
 /// value, or type parameter that shadows the head makes the fact unusable.
-fn module_name(state: &ExtractionState<'_>, site: TsNode<'_>, name: String) -> Option<String> {
+fn module_name<'t>(
+    state: &ExtractionState<'_>,
+    site: TsNode<'t>,
+    name: String,
+    lookup: &mut ReceiverLookup<'t>,
+) -> Option<String> {
     let head = name.split('.').next()?;
-    if let Some(bound) = binding(state, site, head) {
+    if let Some(bound) = binding(state, site, head, lookup) {
         let (_, scope) = bound?;
-        if scope.kind() != "program" || has_write(state, scope, head) {
+        if scope.kind() != "program" || lookup.has_write(state, scope, head) {
             return None;
         }
     }
@@ -283,15 +383,16 @@ fn unwrap_expression(mut node: TsNode<'_>) -> Option<TsNode<'_>> {
     Some(node)
 }
 
-fn initializer_receiver(
+fn initializer_receiver<'t>(
     state: &ExtractionState<'_>,
-    node: TsNode<'_>,
+    node: TsNode<'t>,
+    lookup: &mut ReceiverLookup<'t>,
 ) -> Option<TypeScriptReceiverV1> {
     let node = unwrap_expression(node)?;
     match node.kind() {
         "new_expression" => {
             let constructor = node.child_by_field_name("constructor")?;
-            let name = module_name(state, constructor, named_type(state, constructor)?)?;
+            let name = module_name(state, constructor, named_type(state, constructor)?, lookup)?;
             Some(TypeScriptReceiverV1::Named {
                 name,
                 constructor: true,
@@ -308,7 +409,7 @@ fn initializer_receiver(
             if callee.kind() != "identifier" {
                 return None;
             }
-            let name = module_name(state, callee, state.node_text(callee).to_owned())?;
+            let name = module_name(state, callee, state.node_text(callee).to_owned(), lookup)?;
             Some(TypeScriptReceiverV1::AwaitedFactory { name })
         }
         _ => None,
@@ -319,15 +420,16 @@ fn receiver<'t>(
     state: &ExtractionState<'_>,
     mut object: TsNode<'t>,
     mut site: TsNode<'t>,
+    lookup: &mut ReceiverLookup<'t>,
 ) -> Option<TypeScriptReceiverV1> {
     loop {
         object = unwrap_expression(object)?;
         if object.kind() != "identifier" {
-            return initializer_receiver(state, object);
+            return initializer_receiver(state, object, lookup);
         }
         let name = state.node_text(object);
-        let (declaration, scope) = binding(state, site, name)??;
-        if has_write(state, scope, name) {
+        let (declaration, scope) = binding(state, site, name, lookup)??;
+        if lookup.has_write(state, scope, name) {
             return None;
         }
         let pattern = match declaration.kind() {
@@ -350,7 +452,7 @@ fn receiver<'t>(
             return None;
         }
         if let Some(annotation) = declaration.child_by_field_name("type") {
-            let name = module_name(state, annotation, named_type(state, annotation)?)?;
+            let name = module_name(state, annotation, named_type(state, annotation)?, lookup)?;
             return Some(TypeScriptReceiverV1::Named {
                 name,
                 constructor: false,
@@ -369,7 +471,12 @@ fn receiver<'t>(
     }
 }
 
-pub(super) fn record_call(state: &mut ExtractionState<'_>, callee: TsNode<'_>, owner: &str) {
+pub(super) fn record_call<'t>(
+    state: &mut ExtractionState<'_>,
+    callee: TsNode<'t>,
+    owner: &str,
+    lookup: &mut ReceiverLookup<'t>,
+) {
     if callee.kind() != "member_expression"
         || callee.has_error()
         || TypeScriptExtractor::has_child_kind(callee, "optional_chain")
@@ -385,7 +492,7 @@ pub(super) fn record_call(state: &mut ExtractionState<'_>, callee: TsNode<'_>, o
     let Some(object) = callee.child_by_field_name("object") else {
         return;
     };
-    let Some(receiver) = receiver(state, object, callee) else {
+    let Some(receiver) = receiver(state, object, callee, lookup) else {
         return;
     };
     // Computed receiver references are retained at the property token by
@@ -432,14 +539,15 @@ pub(super) fn record_callable(
     let Some(mut ty) = annotation.named_child(0) else {
         return;
     };
+    let mut lookup = ReceiverLookup::default();
     let promise = ty.kind() == "generic_type"
         && ty
             .child_by_field_name("name")
             .is_some_and(|name| state.node_text(name) == "Promise");
     if promise {
         // A project declaration called Promise is not the built-in wrapper.
-        if binding(state, ty, "Promise").is_some()
-            || module_name(state, ty, "Promise".to_owned()).is_none()
+        if binding(state, ty, "Promise", &mut lookup).is_some()
+            || module_name(state, ty, "Promise".to_owned(), &mut lookup).is_none()
         {
             return;
         }
@@ -454,11 +562,97 @@ pub(super) fn record_callable(
         };
         ty = inner;
     }
-    let Some(name) = named_type(state, ty).and_then(|name| module_name(state, ty, name)) else {
+    let Some(name) =
+        named_type(state, ty).and_then(|name| module_name(state, ty, name, &mut lookup))
+    else {
         return;
     };
     state.typescript_types.push(ExtractedTypeScriptTypeRowV1 {
         node_id: owner.to_owned(),
         row: TypeScriptTypeRowV1::CallableReturn { name, promise },
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn repeated_receiver_walk(calls: usize, written: bool) -> usize {
+        let mut source =
+            String::from("class Worker { push(value: number) {} }\nexport function collect() { ");
+        source.push_str(if written {
+            "let receiver = new Worker(); "
+        } else {
+            "const receiver = new Worker(); "
+        });
+        for _ in 0..calls {
+            source.push_str("if (true) { receiver.push(1); }");
+        }
+        if written {
+            source.push_str("receiver = new Worker();");
+        }
+        source.push_str("}\n");
+        SCOPE_LOOKUP_NODE_VISITS.with(|visits| visits.set(0));
+        let artifact = TypeScriptExtractor::extract_typescript_artifact("repeated.ts", &source);
+        let visits = SCOPE_LOOKUP_NODE_VISITS.with(|visits| visits.replace(0));
+        assert!(
+            artifact.result.errors.is_empty(),
+            "{:?}",
+            artifact.result.errors
+        );
+        assert_eq!(
+            artifact
+                .result
+                .unresolved_refs
+                .iter()
+                .filter(|reference| reference.reference_name == "receiver.push")
+                .count(),
+            calls,
+            "the extraction retains every source call site",
+        );
+        assert_eq!(
+            artifact
+                .typescript_types
+                .iter()
+                .filter(|row| matches!(row.row, TypeScriptTypeRowV1::ReceiverCall { .. }))
+                .count(),
+            if written { 0 } else { calls },
+            "a write anywhere in the binding scope still refuses every receiver proof",
+        );
+        visits
+    }
+
+    #[test]
+    fn repeated_receiver_scope_walks_grow_with_source_size() {
+        for written in [false, true] {
+            let small = repeated_receiver_walk(128, written);
+            let large = repeated_receiver_walk(256, written);
+            assert!(small > 0);
+            assert!(
+                large <= small * 3,
+                "doubling receiver sites must not rescan the whole scope per call: {small} -> {large}, written={written}",
+            );
+        }
+    }
+
+    #[test]
+    fn cached_receiver_scope_keeps_call_site_order_and_inner_shadows() {
+        let source = "class Worker { push() {} }\nfunction run() { receiver.push(); const receiver = new Worker(); receiver.push(); { const receiver = unknownValue; receiver.push(); } receiver.push(); }";
+        let artifact = TypeScriptExtractor::extract_typescript_artifact("scopes.ts", source);
+        assert!(artifact.result.errors.is_empty());
+        let sites = artifact
+            .typescript_types
+            .iter()
+            .filter_map(|row| match row.row {
+                TypeScriptTypeRowV1::ReceiverCall { span, .. } => Some(span.start_byte as usize),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        let calls = source
+            .match_indices("receiver.push")
+            .map(|(start, _)| start)
+            .collect::<Vec<_>>();
+        assert_eq!(calls.len(), 4);
+        assert_eq!(sites, vec![calls[1], calls[3]]);
+    }
 }
