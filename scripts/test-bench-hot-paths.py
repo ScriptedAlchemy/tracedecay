@@ -6,6 +6,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+import signal
 import subprocess
 import sys
 import tempfile
@@ -251,6 +252,60 @@ class BenchHotPathsTests(unittest.TestCase):
                 module, "MACOS", True
             ), mock.patch.object(module, "resident_memory_kib", return_value=(None, None)):
                 self.assertIsNone(module.proc_status(42), "a failed ps read is not zero RSS")
+        finally:
+            sys.modules.pop(spec.name, None)
+
+    def test_stop_daemon_reaps_descendants_after_launcher_exits(self) -> None:
+        # A crashed daemon can leave an indexing child running in its session.
+        # The old poll()-based early return removed its private profile while
+        # that child was still alive. Exercise a real separate process group.
+        spec = importlib.util.spec_from_file_location("bench_hot_paths_shutdown", BENCH)
+        self.assertIsNotNone(spec)
+        self.assertIsNotNone(spec.loader)
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = module
+        try:
+            spec.loader.exec_module(module)
+            launcher = (
+                "import subprocess, sys; "
+                "child = subprocess.Popen([sys.executable, '-c', "
+                "'import time; time.sleep(60)'], "
+                "stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, "
+                "stderr=subprocess.DEVNULL); "
+                "print(child.pid, flush=True)"
+            )
+            daemon = subprocess.Popen(
+                [sys.executable, "-c", launcher],
+                start_new_session=True,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            try:
+                self.assertIsNotNone(daemon.stdout)
+                child_pid = int(daemon.stdout.readline().decode().strip())
+                self.assertGreater(child_pid, 0)
+                daemon.wait(timeout=5)
+                self.assertIsNotNone(daemon.poll(), "launcher must exit first")
+                controls = sys.modules["portable_process"]
+                self.assertTrue(
+                    controls._group_alive(daemon.pid),
+                    "the launcher exited but an independently running descendant remains",
+                )
+                run = module.Run.__new__(module.Run)
+                run.daemon = daemon
+                run.stop_daemon()
+                self.assertFalse(
+                    controls._group_alive(daemon.pid),
+                    "cleanup must terminate the live descendant, not skip an exited leader",
+                )
+            finally:
+                # The failing predecessor must not leak a 60-second child.
+                try:
+                    os.killpg(daemon.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                daemon.wait(timeout=5)
         finally:
             sys.modules.pop(spec.name, None)
 

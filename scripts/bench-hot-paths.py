@@ -45,7 +45,6 @@ import os
 import platform
 import re
 import shutil
-import signal
 import statistics
 import subprocess
 import sys
@@ -58,7 +57,7 @@ from typing import Callable
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT / "scripts" / "lib"))
 
-from portable_process import dies_with_this_process, resident_memory_kib  # noqa: E402
+from portable_process import dies_with_this_process, resident_memory_kib, stop_owned_process  # noqa: E402
 
 LINUX = sys.platform.startswith("linux")
 MACOS = sys.platform == "darwin"
@@ -647,14 +646,11 @@ class Run:
                     **{**ready, "wall_ms": (ready_at - start) * 1000})
 
     def stop_daemon(self) -> None:
-        if self.daemon is None or self.daemon.poll() is not None:
-            return
-        os.killpg(self.daemon.pid, signal.SIGTERM)
-        try:
-            self.daemon.wait(timeout=30)
-        except subprocess.TimeoutExpired:
-            os.killpg(self.daemon.pid, signal.SIGKILL)
-            self.daemon.wait(timeout=10)
+        if self.daemon is not None:
+            # The launcher may have exited while its graph/build descendants
+            # still own this private run directory. Reap the entire session,
+            # not just the daemon leader, before deleting its storage.
+            stop_owned_process(self.daemon, 30)
 
     def execute(self) -> None:
         log(f"cloning {self.source_repo} into the run directory")
