@@ -934,7 +934,7 @@ src/b.ts(2,2): warning TS6133: Second.
         let tsconfig = project.path().join("tsconfig.json");
         let build_info = project.path().join("check.tsbuildinfo");
         let admission = admission();
-        let pid = block(async {
+        block(async {
             let guard = admission.serialize_build_info(&build_info).await;
             let check = Box::pin(run_compiler(
                 &admission,
@@ -971,30 +971,41 @@ src/b.ts(2,2): warning TS6133: Second.
             let mut replacement = Box::pin(admission.serialize_build_info(&build_info));
             assert!(futures_util::poll!(replacement.as_mut()).is_pending());
             drop(check);
-            assert!(
-                futures_util::poll!(replacement.as_mut()).is_pending(),
-                "a replacement acquired the build-info before the old child was reaped"
-            );
             let deadline = Box::pin(native_runtime::sleep_until(
                 Instant::now() + Duration::from_secs(10),
             ));
-            match futures_util::future::select(replacement, deadline).await {
-                futures_util::future::Either::Left((guard, _)) => drop(guard),
+            let deadline = match futures_util::future::select(replacement, deadline).await {
+                futures_util::future::Either::Left((guard, deadline)) => {
+                    assert!(
+                        !Command::new("kill")
+                            .args(["-0", &pid])
+                            .output()
+                            .unwrap()
+                            .status
+                            .success(),
+                        "the build-info lock was released before tsc {pid} was reaped"
+                    );
+                    drop(guard);
+                    deadline
+                }
                 futures_util::future::Either::Right(_) => {
                     panic!("child settlement retained the build-info lock")
                 }
+            };
+            // The worker drops its build-info guard and compiler permit
+            // separately. Observe full settlement within the same deadline.
+            let settled = Box::pin(
+                Arc::clone(&admission.permits).acquire_many_owned(MAX_CONCURRENT_COMPILERS as u32),
+            );
+            match futures_util::future::select(settled, deadline).await {
+                futures_util::future::Either::Left((permits, _)) => {
+                    drop(permits.expect("compiler admission remains open"));
+                }
+                futures_util::future::Either::Right(_) => {
+                    panic!("child settlement retained a compiler permit")
+                }
             }
-            pid
         });
-        assert!(
-            !Command::new("kill")
-                .args(["-0", &pid])
-                .output()
-                .unwrap()
-                .status
-                .success(),
-            "the build-info lock was released before tsc {pid} was reaped"
-        );
         assert_eq!(
             admission.permits.available_permits(),
             MAX_CONCURRENT_COMPILERS
