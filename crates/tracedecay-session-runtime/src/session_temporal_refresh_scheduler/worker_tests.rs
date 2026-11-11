@@ -333,12 +333,9 @@ impl SessionHistoricalIngestor for GatedHistory {
     fn cancel(&self) {}
 }
 
-/// A hook ingest joins the refresh worker with a wake. When that wake lands
-/// while a history pass is running, the pass's projection serves it and no
-/// further pass starts, so the join must end with that pass rather than wait
-/// out its deadline.
+/// An already admitted history scan must not hold a live hook behind its window.
 #[tokio::test]
-async fn a_wake_served_by_the_running_pass_joins_that_pass() {
+async fn a_live_session_publishes_while_a_history_window_is_running() {
     let harness = RegisteredGlobalDbHarness::open("refresh-wake-served-mid-pass").await;
     let state = Arc::new(SessionTemporalRefreshWakeState::default());
     let history = Arc::new(GatedHistory {
@@ -357,23 +354,36 @@ async fn a_wake_served_by_the_running_pass_joins_that_pass() {
     ));
     history.entered.notified().await;
 
+    let session_id = SessionId::new("live-during-history").expect("session id");
+    let store = SessionTemporalStore::new(harness.registered.as_ref());
+    let begun = store
+        .begin_or_join_session_refresh(SessionRefreshBeginOrJoinRequestV1::new(
+            session_id.clone(),
+            SessionRefreshFrontierV1::new(0, 0).expect("empty frontier"),
+        ))
+        .await
+        .expect("running refresh");
     let handle = state.handle();
-    let join = handle.wake_and_wait_for_projection(Duration::from_secs(5));
-    tokio::pin!(join);
-    // The first poll registers the join and delivers the wake.
-    assert!(
-        std::future::poll_fn(|cx| std::task::Poll::Ready(join.as_mut().poll(cx)))
-            .await
-            .is_pending()
-    );
+    let published = handle
+        .wake_and_wait_for_session_projection(&session_id, Duration::from_secs(5))
+        .await;
     history.release.notify_one();
-
-    assert!(
-        join.await,
-        "the pass that served the wake must end the join"
-    );
     state.cancel();
     worker.await.expect("refresh worker exits on cancellation");
+
+    assert!(
+        published,
+        "the live session must publish while history is held"
+    );
+    let receipt = store
+        .session_refresh_receipt(SessionRefreshReceiptRequestV1::new(
+            begun.operation_id().clone(),
+            begun.session_id().clone(),
+        ))
+        .await
+        .expect("read publication receipt")
+        .expect("the live generation must be durable");
+    assert_eq!(receipt.state(), SessionRefreshTerminalStateV1::Complete);
 }
 
 /// Every history window advances but waits for the test before returning.

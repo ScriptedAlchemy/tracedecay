@@ -3042,6 +3042,426 @@ fn progress_timestamp_never_regresses_within_one_owner() {
 }
 
 #[test]
+fn unchanged_progress_resampling_cannot_renew_the_work_clock() {
+    let generation = CodeGenerationId::new("generation.idle-report").expect("generation");
+    let mut slot = super::super::CodeIndexBuildProgressSlotStateV1::default();
+    let owner = slot.replace_generation(generation.clone());
+
+    let mut first = progress_snapshot_for_generation(&generation, 3);
+    first.last_progress_micros = 100;
+    assert!(slot.publish(&generation, owner, first));
+    let accepted = slot.snapshot().expect("initial committed progress");
+
+    // Retrying an already committed cursor may resample duration, throughput,
+    // and latency. None proves new work or should revive a stalled generation.
+    let mut idle = accepted.as_ref().clone();
+    idle.elapsed_micros += 1_000;
+    idle.last_progress_micros = 10_000;
+    idle.last_commit_latency_micros = Some(99);
+    idle.files_per_second = Some(12.0);
+    idle.lexical_units_per_second = Some(21.0);
+    idle.estimated_remaining_seconds = Some(5);
+    assert!(!slot.publish(&generation, owner, idle));
+    assert_eq!(
+        slot.snapshot().expect("idle must not publish").as_ref(),
+        accepted.as_ref(),
+        "elapsed time or a new estimate must not refresh a frozen progress epoch"
+    );
+
+    // Authenticated scan work, a phase transition, a durable commit, and a
+    // new refusal are each independently observable progress/state boundaries.
+    let mut scanned = accepted.as_ref().clone();
+    scanned.completed_lexical_units += 1;
+    scanned.last_progress_micros = 200;
+    assert!(slot.publish(&generation, owner, scanned));
+    let scan = slot.snapshot().expect("source scan");
+    assert!(scan.progress_epoch > accepted.progress_epoch);
+    assert_eq!(scan.last_progress_micros, 200);
+
+    let mut phase = scan.as_ref().clone();
+    phase.phase = CodeIndexBuildPhaseV1::IndexBuild;
+    phase.last_progress_micros = 300;
+    assert!(slot.publish(&generation, owner, phase));
+    let phase = slot.snapshot().expect("new phase");
+    assert!(phase.progress_epoch > scan.progress_epoch);
+
+    let mut committed = phase.as_ref().clone();
+    committed.committed_pages += 1;
+    committed.committed_chunks += 1;
+    committed.committed_payload_bytes += 1;
+    committed.completed_files += 1;
+    committed.completed_lexical_units += 1;
+    committed.last_progress_micros = 400;
+    assert!(slot.publish(&generation, owner, committed));
+    let committed = slot.snapshot().expect("new committed page");
+    assert!(committed.progress_epoch > phase.progress_epoch);
+
+    let mut refused = committed.as_ref().clone();
+    refused.blocked_reason = Some(CodeIndexBuildBlockedReasonV1::ResidentMemory);
+    refused.last_progress_micros = 500;
+    assert!(slot.publish(&generation, owner, refused));
+    let blocked = slot.snapshot().expect("new refusal");
+    assert!(blocked.progress_epoch > committed.progress_epoch);
+
+    let mut repeated = blocked.as_ref().clone();
+    repeated.last_progress_micros = 600;
+    assert!(!slot.publish(&generation, owner, repeated));
+    assert_eq!(
+        slot.snapshot().expect("same refusal").as_ref(),
+        blocked.as_ref()
+    );
+
+    let mut recovered = blocked.as_ref().clone();
+    recovered.phase = CodeIndexBuildPhaseV1::Ready;
+    recovered.blocked_reason = None;
+    recovered.last_progress_micros = 700;
+    assert!(slot.publish(&generation, owner, recovered));
+    let ready = slot.snapshot().expect("recovered ready");
+    assert!(ready.progress_epoch > blocked.progress_epoch);
+    assert_eq!(ready.blocked_reason, None);
+}
+
+#[test]
+fn delayed_progress_cannot_undo_committed_boundaries_or_ready() {
+    let generation = CodeGenerationId::new("generation.stale-progress").expect("generation");
+    let mut slot = super::super::CodeIndexBuildProgressSlotStateV1::default();
+    let owner = slot.replace_generation(generation.clone());
+
+    let mut committed = progress_snapshot_for_generation(&generation, 6);
+    committed.committed_imports = 3;
+    committed.last_progress_micros = 600;
+    assert!(slot.publish(&generation, owner, committed));
+    let accepted = slot.snapshot().expect("accepted committed progress");
+
+    for counter in ["pages", "chunks", "imports", "payload"] {
+        let mut delayed = accepted.as_ref().clone();
+        delayed.last_progress_micros = 700;
+        match counter {
+            "pages" => delayed.committed_pages -= 1,
+            "chunks" => delayed.committed_chunks -= 1,
+            "imports" => delayed.committed_imports -= 1,
+            "payload" => delayed.committed_payload_bytes -= 1,
+            _ => unreachable!(),
+        }
+        assert!(
+            !slot.publish(&generation, owner, delayed),
+            "delayed {counter} cannot overwrite committed progress"
+        );
+        assert_eq!(
+            slot.snapshot()
+                .expect("progress after stale report")
+                .as_ref(),
+            accepted.as_ref(),
+            "refusing stale {counter} must preserve the epoch and last progress time"
+        );
+    }
+
+    let mut wrong_generation = accepted.as_ref().clone();
+    wrong_generation.generation_id = "generation.foreign".to_owned();
+    assert!(!slot.publish(&generation, owner, wrong_generation));
+    assert_eq!(
+        slot.snapshot()
+            .expect("correct generation still owns progress")
+            .as_ref(),
+        accepted.as_ref()
+    );
+
+    let mut ready = progress_snapshot_for_generation(&generation, 7);
+    ready.committed_imports = 3;
+    ready.phase = CodeIndexBuildPhaseV1::Ready;
+    ready.last_progress_micros = 650;
+    assert!(slot.publish(&generation, owner, ready));
+    let settled = slot.snapshot().expect("ready progress");
+
+    let mut late_build = settled.as_ref().clone();
+    late_build.phase = CodeIndexBuildPhaseV1::BulkCommit;
+    late_build.last_progress_micros = 700;
+    assert!(!slot.publish(&generation, owner, late_build));
+    assert_eq!(
+        slot.snapshot().expect("ready progress remains").as_ref(),
+        settled.as_ref(),
+        "a delayed build phase must not withdraw ready"
+    );
+
+    // A remounted owner starts a new committed sequence even when its
+    // generation identity is the same. The old owner must stay fenced off.
+    let replacement_owner = slot.replace_generation(generation.clone());
+    let fresh = progress_snapshot_for_generation(&generation, 1);
+    assert!(slot.publish(&generation, replacement_owner, fresh));
+    assert_eq!(slot.snapshot().expect("new owner").committed_pages, 1);
+    assert!(!slot.publish(
+        &generation,
+        owner,
+        progress_snapshot_for_generation(&generation, 99)
+    ));
+}
+
+#[test]
+fn a_new_staging_attempt_can_truthfully_restart_committed_progress() {
+    let generation = CodeGenerationId::new("generation.staging-retry").expect("generation");
+    let mut slot = super::super::CodeIndexBuildProgressSlotStateV1::default();
+    let owner = slot.replace_generation(generation.clone());
+
+    let mut old = progress_snapshot_for_generation(&generation, 12);
+    old.last_progress_micros = 500;
+    assert!(slot.publish(&generation, owner, old));
+    let old_epoch = slot
+        .snapshot()
+        .expect("first staging attempt")
+        .progress_epoch;
+
+    // Missing/incompatible SQLite staging is a verified new build attempt,
+    // not a delayed report from an older commit boundary. Without resetting
+    // the slot, rejecting counter regressions would leave status frozen.
+    assert!(slot.begin_staging_attempt(&generation, owner));
+    let mut restarted = progress_snapshot_for_generation(&generation, 0);
+    // A wall-clock adjustment or delayed sample must not rewind the
+    // timestamp even though a verified new staging attempt reset its counts.
+    restarted.last_progress_micros = 400;
+    restarted.phase = CodeIndexBuildPhaseV1::SourceScan;
+    assert!(slot.publish(&generation, owner, restarted));
+    let restarted = slot.snapshot().expect("new staging attempt");
+    assert_eq!(restarted.committed_pages, 0);
+    assert_eq!(restarted.phase, CodeIndexBuildPhaseV1::SourceScan);
+    assert_eq!(
+        restarted.last_progress_micros, 500,
+        "staging restart must not rewind the same owner's last progress timestamp"
+    );
+    assert!(
+        restarted.progress_epoch > old_epoch,
+        "a new verified staging attempt must produce a newer report epoch"
+    );
+
+    let mut resumed = progress_snapshot_for_generation(&generation, 2);
+    resumed.last_progress_micros = 700;
+    assert!(slot.publish(&generation, owner, resumed));
+    assert_eq!(slot.snapshot().expect("resumed commits").committed_pages, 2);
+
+    let foreign = CodeGenerationId::new("generation.foreign-stage").expect("foreign");
+    assert!(!slot.begin_staging_attempt(&foreign, owner));
+    assert!(!slot.begin_staging_attempt(&generation, owner + 1));
+    assert_eq!(
+        slot.snapshot().expect("unchanged latest").committed_pages,
+        2
+    );
+}
+
+#[test]
+fn staging_restart_cannot_rebind_the_progress_source_or_incarnation() {
+    let generation = CodeGenerationId::new("generation.report-identity").expect("generation");
+    let mut slot = super::super::CodeIndexBuildProgressSlotStateV1::default();
+    let owner = slot.replace_generation(generation.clone());
+    assert!(slot.publish(
+        &generation,
+        owner,
+        progress_snapshot_for_generation(&generation, 4),
+    ));
+    let accepted = slot.snapshot().expect("first committed report");
+
+    // All three publication identities must be checked independently, not
+    // merely against the generation name in the supplied owner token.
+    for field in ["daemon", "producer", "digest"] {
+        let mut foreign = progress_snapshot_for_generation(&generation, 5);
+        match field {
+            "daemon" => foreign.daemon_incarnation += 1,
+            "producer" => foreign.producer_incarnation += 1,
+            "digest" => foreign.sealed_source_digest = format!("sha256:{}", "b".repeat(64)),
+            _ => unreachable!(),
+        }
+        assert!(
+            !slot.publish(&generation, owner, foreign),
+            "foreign {field} must not replace a committed report"
+        );
+        assert_eq!(
+            slot.snapshot()
+                .expect("unchanged committed report")
+                .as_ref(),
+            accepted.as_ref()
+        );
+    }
+
+    assert!(slot.begin_staging_attempt(&generation, owner));
+    assert!(
+        slot.snapshot().is_none(),
+        "verified restart clears old counters"
+    );
+    for field in ["daemon", "producer", "digest"] {
+        let mut foreign = progress_snapshot_for_generation(&generation, 0);
+        match field {
+            "daemon" => foreign.daemon_incarnation += 1,
+            "producer" => foreign.producer_incarnation += 1,
+            "digest" => foreign.sealed_source_digest = format!("sha256:{}", "b".repeat(64)),
+            _ => unreachable!(),
+        }
+        assert!(
+            !slot.publish(&generation, owner, foreign),
+            "staging reset must retain the {field} identity fence"
+        );
+        assert!(
+            slot.snapshot().is_none(),
+            "foreign report must not seize restart"
+        );
+    }
+
+    // A real retry may still reset counters while preserving the identity.
+    assert!(slot.publish(
+        &generation,
+        owner,
+        progress_snapshot_for_generation(&generation, 0),
+    ));
+    let resumed = slot.snapshot().expect("verified restart");
+    assert_eq!(resumed.committed_pages, 0);
+    assert!(resumed.progress_epoch > accepted.progress_epoch);
+
+    // Replacing the scheduler owner permits a genuinely new incarnation.
+    let next_owner = slot.replace_generation(generation.clone());
+    let mut replaced = progress_snapshot_for_generation(&generation, 1);
+    replaced.producer_incarnation += 1;
+    assert!(slot.publish(&generation, next_owner, replaced));
+    assert_eq!(
+        slot.snapshot()
+            .expect("replacement owner")
+            .producer_incarnation,
+        2
+    );
+}
+
+#[test]
+fn retrying_an_unchanged_phase_does_not_fabricate_status_progress() {
+    let fixture = GitFixture::new(&[(
+        "src/lib.rs",
+        "pub fn caller() { callee(); }\npub fn callee() {}\n",
+    )]);
+    let store = TempDir::new().expect("store root");
+    let mut scheduler = scheduler(
+        &fixture,
+        store.path().to_path_buf(),
+        Arc::new(SharedCodeIndexBytePoolV1::default()),
+    );
+    published(scheduler.reconcile_now().expect("publish"));
+    let latest = scheduler.latest_complete().expect("latest generation");
+    assert!(
+        !latest
+            .advance_text_serving(0)
+            .expect("open text projection"),
+        "a zero-work admission must leave the projection pending"
+    );
+    let before = build_progress_snapshot(&scheduler);
+    assert_ne!(before.phase, CodeIndexBuildPhaseV1::Ready);
+
+    latest.text.publish_text_progress_phase(
+        before.phase,
+        before.current_batch_pages,
+        before.current_batch_payload_bytes,
+    );
+    let repeated = build_progress_snapshot(&scheduler);
+    assert_eq!(
+        repeated.progress_epoch, before.progress_epoch,
+        "a retry reporting no new phase or batch boundary must not feign progress"
+    );
+    assert_eq!(repeated.last_progress_micros, before.last_progress_micros);
+    assert_eq!(repeated.committed_pages, before.committed_pages);
+
+    let next_phase = if before.phase == CodeIndexBuildPhaseV1::Verification {
+        CodeIndexBuildPhaseV1::GraphPublication
+    } else {
+        CodeIndexBuildPhaseV1::Verification
+    };
+    latest.text.publish_text_progress_phase(
+        next_phase,
+        before.current_batch_pages,
+        before.current_batch_payload_bytes,
+    );
+    let transitioned = build_progress_snapshot(&scheduler);
+    assert_eq!(transitioned.phase, next_phase);
+    assert!(transitioned.progress_epoch > before.progress_epoch);
+    latest.text.publish_text_progress_phase(
+        next_phase,
+        before.current_batch_pages,
+        before.current_batch_payload_bytes,
+    );
+    let unchanged = build_progress_snapshot(&scheduler);
+    assert_eq!(unchanged.progress_epoch, transitioned.progress_epoch);
+    assert_eq!(
+        unchanged.last_progress_micros,
+        transitioned.last_progress_micros
+    );
+
+    let mut advances = 0;
+    while !latest
+        .advance_text_serving(8)
+        .expect("resume durable text build")
+    {
+        advances += 1;
+        assert!(advances < 1_000, "text build failed to finish");
+    }
+    let ready = build_progress_snapshot(&scheduler);
+    assert_eq!(ready.phase, CodeIndexBuildPhaseV1::Ready);
+    assert!(ready.progress_epoch > transitioned.progress_epoch);
+
+    // Ready is the one idempotent-looking phase that may still be a real
+    // state change: success must clear a previously published refusal.
+    scheduler
+        .build_progress_slot()
+        .write()
+        .expect("progress slot")
+        .block_current(CodeIndexBuildBlockedReasonV1::ResidentMemory);
+    let blocked = build_progress_snapshot(&scheduler);
+    assert_eq!(
+        blocked.blocked_reason,
+        Some(CodeIndexBuildBlockedReasonV1::ResidentMemory)
+    );
+    latest.text.publish_text_progress_phase(
+        CodeIndexBuildPhaseV1::Ready,
+        blocked.current_batch_pages,
+        blocked.current_batch_payload_bytes,
+    );
+    let cleared = build_progress_snapshot(&scheduler);
+    assert_eq!(cleared.blocked_reason, None);
+    assert!(cleared.progress_epoch > blocked.progress_epoch);
+}
+
+#[test]
+fn repeated_blocked_reason_is_not_reported_as_new_progress() {
+    let generation = CodeGenerationId::new("generation.blocked-report").expect("generation");
+    let mut slot = super::super::CodeIndexBuildProgressSlotStateV1::default();
+    let owner = slot.replace_generation(generation.clone());
+    assert!(slot.publish(
+        &generation,
+        owner,
+        progress_snapshot_for_generation(&generation, 2)
+    ));
+    slot.block_current(CodeIndexBuildBlockedReasonV1::ResidentMemory);
+    let first = slot.snapshot().expect("first refusal");
+    assert_eq!(
+        first.blocked_reason,
+        Some(CodeIndexBuildBlockedReasonV1::ResidentMemory)
+    );
+
+    slot.block_current(CodeIndexBuildBlockedReasonV1::ResidentMemory);
+    assert!(!slot.block_owned_text(
+        &generation,
+        owner,
+        CodeIndexBuildBlockedReasonV1::ResidentMemory,
+        Some(first.progress_epoch)
+    ));
+    assert_eq!(
+        slot.snapshot().expect("repeated refusal").progress_epoch,
+        first.progress_epoch,
+        "retries without a new refusal or committed work must not inflate the observation epoch"
+    );
+
+    let mut committed = progress_snapshot_for_generation(&generation, 3);
+    committed.last_progress_micros = first.last_progress_micros + 1;
+    assert!(slot.publish(&generation, owner, committed));
+    assert_eq!(
+        slot.snapshot().expect("committed progress").blocked_reason,
+        None,
+        "durable progress clears the previous blocked verdict"
+    );
+}
+
+#[test]
 fn progress_owner_epoch_rejects_original_a_after_a_b_a_replacement() {
     let generation_a = CodeGenerationId::new("generation.progress-a").expect("generation A");
     let generation_b = CodeGenerationId::new("generation.progress-b").expect("generation B");

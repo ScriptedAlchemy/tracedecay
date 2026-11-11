@@ -89,6 +89,7 @@ jobs:
       - uses: ./.github/actions/setup-bazel
         id: bazel
         with:
+          release-download-token: ${{ github.token }}
           cache-key: sdk-conformance
           tailscale-client-id: >-
             ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
@@ -142,6 +143,7 @@ jobs:
       - name: Build the production daemon
         uses: ./.github/actions/build-cli
         with:
+          release-download-token: ${{ github.token }}
           config: ci
           dest: target/debug
           cache-key: sdk-conformance

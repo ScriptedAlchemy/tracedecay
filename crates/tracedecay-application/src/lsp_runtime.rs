@@ -349,6 +349,7 @@ pub(crate) struct StoredLspTestRunExpansionV1 {
 pub fn lsp_session_factory<F>(
     feedback_runtime: Arc<FeedbackRuntime>,
     test_run_store: RegisteredGlobalDbLeaseV1,
+    operation_events: crate::operation_stream::OperationEventAuthority,
     code_index: Arc<dyn LspCodeIndexProjectionIdentityPort>,
     workspace_index: Arc<dyn crate::lsp_support::LspWorkspaceDocumentIndexPort>,
     diagnostic_records: Arc<dyn LspFeedbackDiagnosticRecordPort>,
@@ -368,7 +369,7 @@ where
         code_index,
         workspace_index,
     )?);
-    let test_runs = lsp_test_result_port(project.clone(), test_run_store);
+    let test_runs = lsp_test_result_port(project.clone(), test_run_store, operation_events);
     let diagnostic_projection = Arc::new(DiagnosticsStoreLspFeedbackProjection::new(
         diagnostic_records,
         project.clone(),

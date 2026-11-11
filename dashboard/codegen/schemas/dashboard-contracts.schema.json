@@ -4459,6 +4459,138 @@
       ],
       "type": "object"
     },
+    "CodeIndexNativeGraphPhaseV1": {
+      "description": "Native graph writer progress is independent of text-artifact commit counts.\nEncoded rows are physical work, never a durable page. Stage-page commits\nand installed + digest-verified compact segments are durable work.",
+      "enum": [
+        "compact_encoding",
+        "stage_page_commit",
+        "compact_segment_verified"
+      ],
+      "type": "string"
+    },
+    "CodeIndexNativeGraphProgressV1": {
+      "properties": {
+        "active": {
+          "type": "boolean"
+        },
+        "attempt_sequence": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "committed_compact_bytes": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "committed_compact_segments": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "committed_stage_bytes": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "committed_stage_mutations": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "committed_stage_pages": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "daemon_incarnation": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "encoded_entities": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "encoded_relations": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "generation_id": {
+          "type": "string"
+        },
+        "last_progress_micros": {
+          "description": "The time of the last actual native writer callback, not a status read.",
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "phase": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CodeIndexNativeGraphPhaseV1"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "producer_incarnation": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "progress_epoch": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "sealed_graph_digest": {
+          "type": "string"
+        },
+        "total_entities": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "total_relations": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "generation_id",
+        "sealed_graph_digest",
+        "daemon_incarnation",
+        "producer_incarnation",
+        "attempt_sequence",
+        "progress_epoch",
+        "phase",
+        "encoded_entities",
+        "total_entities",
+        "encoded_relations",
+        "total_relations",
+        "committed_stage_pages",
+        "committed_stage_mutations",
+        "committed_stage_bytes",
+        "committed_compact_segments",
+        "committed_compact_bytes",
+        "last_progress_micros",
+        "active"
+      ],
+      "type": "object"
+    },
     "CodeIndexOmittedSourceV1": {
       "properties": {
         "display_path": {
@@ -4508,6 +4640,79 @@
         "sources"
       ],
       "type": "object"
+    },
+    "CodeIndexPresealAttemptProgressV1": {
+      "description": "Independently owned attempt work, not committed text or graph pages.",
+      "properties": {
+        "active": {
+          "type": "boolean"
+        },
+        "attempt_sequence": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "completed_items": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "daemon_incarnation": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "last_progress_micros": {
+          "description": "No timestamp is invented before actual work or by status polling.",
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "phase": {
+          "$ref": "#/$defs/CodeIndexPresealWorkPhaseV1"
+        },
+        "producer_incarnation": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "progress_epoch": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "total_items": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "daemon_incarnation",
+        "producer_incarnation",
+        "attempt_sequence",
+        "progress_epoch",
+        "phase",
+        "completed_items",
+        "total_items",
+        "last_progress_micros",
+        "active"
+      ],
+      "type": "object"
+    },
+    "CodeIndexPresealWorkPhaseV1": {
+      "description": "Observed capture, parse, and source-reference resolution before sealing.",
+      "enum": [
+        "capture",
+        "parse_evidence",
+        "resolution"
+      ],
+      "type": "string"
     },
     "CodeIndexRestoreProgressV1": {
       "description": "Bounded authentication work required to restore one immutable lexical\nartifact as a serving reader.\n\nThe unit is a fixed restore check, not bytes or build work. Completed\nchecks are published only after they pass. `authenticated_remaining` is\nalways `authenticated_total - authenticated_completed`, so a caller can\ndistinguish bounded cold restore from an unbounded rebuild.",
@@ -4791,6 +4996,16 @@
             "null"
           ]
         },
+        "native_graph_progress": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CodeIndexNativeGraphProgressV1"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "omitted_sources": {
           "anyOf": [
             {
@@ -4812,6 +5027,16 @@
             }
           ],
           "description": "Deterministic contract violation currently parking background\nconvergence, when one is observed. `staleness_state` reads `parked`\nwhile this is set and no generation serves."
+        },
+        "preseal_attempt": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CodeIndexPresealAttemptProgressV1"
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
         "progress": {
           "anyOf": [

@@ -65,8 +65,9 @@ use ingress::{
     select_auxiliary_work, wait_for_work,
 };
 use rejection::{
-    cancel_waiting, reject_all, reject_all_exact_sql, reject_all_incremental_vacuum,
-    reject_incremental_vacuum, reject_unauthorized,
+    cancel_waiting, reject_all_exact_sql, reject_all_incremental_vacuum,
+    reject_faulted_execution_batches, reject_incremental_vacuum, reject_retired_write_ingress,
+    reject_unauthorized,
 };
 
 /// When the blocked writer retries its drain: the fence's short interval, or
@@ -571,7 +572,33 @@ impl Worker {
                 }
             };
             if lost {
-                reject_all(&mut queue, &self.telemetry, UnavailableReasonV1::FileLost);
+                // A sender may have passed the Ready check before the loss
+                // probe flipped state. Close ingress before the final drain
+                // so accepted work cannot disappear when this worker retires.
+                self.exact_sql_receiver.close();
+                self.incremental_vacuum_receiver.close();
+                self.checkpoint_receiver.close();
+                reject_retired_write_ingress(
+                    &mut self.receiver,
+                    &mut queue,
+                    &self.telemetry,
+                    UnavailableReasonV1::FileLost,
+                );
+                drain_command_ingress(
+                    &mut self.exact_sql_receiver,
+                    &mut exact_sql_queue,
+                    &mut exact_sql_closed,
+                );
+                drain_command_ingress(
+                    &mut self.incremental_vacuum_receiver,
+                    &mut incremental_vacuum_queue,
+                    &mut incremental_vacuum_closed,
+                );
+                drain_command_ingress(
+                    &mut self.checkpoint_receiver,
+                    &mut checkpoint_queue,
+                    &mut checkpoint_closed,
+                );
                 reject_all_exact_sql(&mut exact_sql_queue);
                 reject_all_incremental_vacuum(&mut incremental_vacuum_queue);
                 checkpoint_queue.clear();
@@ -595,45 +622,38 @@ impl Worker {
                 break;
             }
             if self.state.load(Ordering::Acquire) == WriterState::Faulted as u8 {
-                reject_all(&mut queue, &self.telemetry, UnavailableReasonV1::Faulted);
+                // A permanent fault must release its SQLite connection, even
+                // when registered clients still hold idle channel senders.
+                // Close ingress before rejecting already-admitted writes so
+                // a racing sender cannot lose its typed fault reply.
+                self.exact_sql_receiver.close();
+                self.incremental_vacuum_receiver.close();
+                self.checkpoint_receiver.close();
+                reject_retired_write_ingress(
+                    &mut self.receiver,
+                    &mut queue,
+                    &self.telemetry,
+                    UnavailableReasonV1::Faulted,
+                );
+                drain_command_ingress(
+                    &mut self.exact_sql_receiver,
+                    &mut exact_sql_queue,
+                    &mut exact_sql_closed,
+                );
+                drain_command_ingress(
+                    &mut self.incremental_vacuum_receiver,
+                    &mut incremental_vacuum_queue,
+                    &mut incremental_vacuum_closed,
+                );
+                drain_command_ingress(
+                    &mut self.checkpoint_receiver,
+                    &mut checkpoint_queue,
+                    &mut checkpoint_closed,
+                );
                 reject_all_exact_sql(&mut exact_sql_queue);
                 reject_all_incremental_vacuum(&mut incremental_vacuum_queue);
                 checkpoint_queue.clear();
-                if input_closed
-                    && exact_sql_closed
-                    && incremental_vacuum_closed
-                    && checkpoint_closed
-                {
-                    break;
-                }
-                let wake = wait_for_work(
-                    &self.cx,
-                    &mut self.receiver,
-                    &mut self.exact_sql_receiver,
-                    &mut self.incremental_vacuum_receiver,
-                    &mut self.checkpoint_receiver,
-                    &mut self.shutdown_receiver,
-                    input_closed,
-                    exact_sql_closed,
-                    incremental_vacuum_closed,
-                    checkpoint_closed,
-                    earliest(None, probe.as_ref()),
-                )
-                .await;
-                apply_wake(
-                    wake,
-                    &mut queue,
-                    &mut inflight,
-                    &mut exact_sql_queue,
-                    &mut incremental_vacuum_queue,
-                    &mut checkpoint_queue,
-                    &self.telemetry,
-                    &mut input_closed,
-                    &mut exact_sql_closed,
-                    &mut incremental_vacuum_closed,
-                    &mut checkpoint_closed,
-                );
-                continue;
+                return;
             }
             if let Some(command) = checkpoint_queue.pop_front() {
                 self.run_requested_checkpoint(&mut checkpoint, command)
@@ -733,7 +753,46 @@ impl Worker {
                                     tracing::trace_span!("rusqlite.writer.incremental_vacuum")
                                         .entered();
                                 {
-                                    run_incremental_vacuum(checkpoint.connection_mut(), command);
+                                    if run_incremental_vacuum(checkpoint.connection_mut(), command)
+                                    {
+                                        // A failed SQLite rollback must not leak its
+                                        // transaction into the next accepted write.
+                                        self.state
+                                            .store(WriterState::Faulted as u8, Ordering::Release);
+                                        // Close channels before retiring the connection:
+                                        // accepted commands may still be in ingress.
+                                        self.exact_sql_receiver.close();
+                                        self.incremental_vacuum_receiver.close();
+                                        self.checkpoint_receiver.close();
+                                        reject_retired_write_ingress(
+                                            &mut self.receiver,
+                                            &mut queue,
+                                            &self.telemetry,
+                                            UnavailableReasonV1::Faulted,
+                                        );
+                                        drain_command_ingress(
+                                            &mut self.exact_sql_receiver,
+                                            &mut exact_sql_queue,
+                                            &mut exact_sql_closed,
+                                        );
+                                        drain_command_ingress(
+                                            &mut self.incremental_vacuum_receiver,
+                                            &mut incremental_vacuum_queue,
+                                            &mut incremental_vacuum_closed,
+                                        );
+                                        drain_command_ingress(
+                                            &mut self.checkpoint_receiver,
+                                            &mut checkpoint_queue,
+                                            &mut checkpoint_closed,
+                                        );
+                                        reject_all_exact_sql(&mut exact_sql_queue);
+                                        reject_all_incremental_vacuum(
+                                            &mut incremental_vacuum_queue,
+                                        );
+                                        checkpoint_queue.clear();
+                                        // Closing the connection releases any live transaction.
+                                        return;
+                                    }
                                 }
                             };
                         } else {
@@ -881,6 +940,10 @@ impl Worker {
                     break;
                 }
                 if self.state.load(Ordering::Acquire) == WriterState::Faulted as u8 {
+                    // Earlier batch work may fault the writer. All remaining
+                    // accepted batches have left the fair queue, so a normal
+                    // faulted-queue drain cannot settle or account for them.
+                    reject_faulted_execution_batches(batches, &self.telemetry);
                     break;
                 }
             }
@@ -1153,10 +1216,48 @@ fn queue_wait_micros(enqueued_at: impl IntoIterator<Item = Instant>, dequeued_at
     })
 }
 
+fn incremental_vacuum_error(error: rusqlite::Error) -> WriterActorError {
+    match error.sqlite_error_code() {
+        Some(rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked) => {
+            WriterActorError::IncrementalVacuumBusy
+        }
+        // A large optional vacuum may need more WAL space than the next
+        // ordinary small write. Disk-full on that vacuum is not evidence of
+        // lost writer authority or an unusable registered store.
+        Some(rusqlite::ErrorCode::DiskFull) => WriterActorError::IncrementalVacuumNoSpace,
+        _ => WriterActorError::IncrementalVacuumFailed(error.to_string()),
+    }
+}
+
+fn rollback_incremental_vacuum(
+    mut transaction: rusqlite::Transaction<'_>,
+    failure: WriterActorError,
+) -> WriterActorError {
+    // SQLITE_FULL can roll back the transaction automatically. Preserve its
+    // real cause rather than manufacture a rollback error.
+    if transaction.is_autocommit() {
+        transaction.set_drop_behavior(rusqlite::DropBehavior::Ignore);
+        return failure;
+    }
+    match transaction.rollback() {
+        Ok(()) => failure,
+        Err(error) => {
+            tracing::error!(
+                error = %error,
+                cause = %failure,
+                "SQLite vacuum rollback failed"
+            );
+            WriterActorError::IncrementalVacuumFailed(format!(
+                "rollback after {failure} failed: {error}"
+            ))
+        }
+    }
+}
+
 fn run_incremental_vacuum(
     connection: &mut rusqlite::Connection,
     command: IncrementalVacuumCommand,
-) {
+) -> bool {
     if command
         .authority
         .verify(RuntimeWriteAuthorityStage::Dequeued)
@@ -1165,20 +1266,22 @@ fn run_incremental_vacuum(
         command.settle(Err(WriterActorError::AuthorityDenied {
             stage: RuntimeWriteAuthorityStage::Dequeued,
         }));
-        return;
+        return !connection.is_autocommit();
     }
-    let match_result = {
+    // A named `Result<Transaction<'_>, _>` stays drop-live (and so keeps the
+    // mutable connection borrow) through the failure arm. Reduce the begin
+    // result to an owned error inside a `let ... else` scrutinee: its
+    // temporaries are dropped before the else block inspects the connection.
+    let mut begin_failure = None;
+    let Ok(mut transaction) = ({
         let _span = tracing::trace_span!("rusqlite.begin_immediate").entered();
         connection.transaction_with_behavior(TransactionBehavior::Immediate)
-    };
-    let transaction = match match_result {
-        Ok(transaction) => transaction,
-        Err(error) => {
-            command.settle(Err(WriterActorError::IncrementalVacuumFailed(
-                error.to_string(),
-            )));
-            return;
+    })
+    .map_err(|error| begin_failure = Some(incremental_vacuum_error(error))) else {
+        if let Some(failure) = begin_failure {
+            command.settle(Err(failure));
         }
+        return !connection.is_autocommit();
     };
     // Each result row releases one page. pragma_update only steps once, so
     // drain this bounded pragma before deciding whether its transaction commits.
@@ -1193,31 +1296,42 @@ fn run_incremental_vacuum(
             Ok(())
         });
     if let Err(error) = reclaimed {
-        command.settle(Err(WriterActorError::IncrementalVacuumFailed(
-            error.to_string(),
-        )));
-        return;
+        let failure = rollback_incremental_vacuum(transaction, incremental_vacuum_error(error));
+        let unclosed_transaction = !connection.is_autocommit();
+        command.settle(Err(failure));
+        return unclosed_transaction;
     }
     if command
         .authority
         .verify(RuntimeWriteAuthorityStage::BeforeCommit)
         .is_err()
     {
-        let result = match transaction.rollback() {
-            Ok(()) => Err(WriterActorError::AuthorityDenied {
+        let failure = rollback_incremental_vacuum(
+            transaction,
+            WriterActorError::AuthorityDenied {
                 stage: RuntimeWriteAuthorityStage::BeforeCommit,
-            }),
-            Err(error) => Err(WriterActorError::IncrementalVacuumFailed(format!(
-                "rollback after authority loss: {error}"
-            ))),
-        };
-        command.settle(result);
-        return;
+            },
+        );
+        command.settle(Err(failure));
+        return !connection.is_autocommit();
     }
-    let result = transaction
-        .commit()
-        .map_err(|error| WriterActorError::IncrementalVacuumFailed(error.to_string()));
+    // Keep ownership after a failed COMMIT so rollback errors cannot be lost
+    // by Transaction::drop. A successful COMMIT has already closed the SQLite
+    // transaction, so prevent a redundant rollback on Drop.
+    let result = match transaction.execute_batch("COMMIT") {
+        Ok(()) => {
+            transaction.set_drop_behavior(rusqlite::DropBehavior::Ignore);
+            drop(transaction);
+            Ok(())
+        }
+        Err(error) => Err(rollback_incremental_vacuum(
+            transaction,
+            incremental_vacuum_error(error),
+        )),
+    };
+    let unclosed_transaction = !connection.is_autocommit();
     command.settle(result);
+    unclosed_transaction
 }
 
 fn build_batches(
@@ -1329,7 +1443,9 @@ mod auxiliary_scheduling_tests {
     use super::{
         AcceptedRequest, AuxiliaryWork, BatchCoalescingWindow, IncrementalVacuumCommand,
         PendingBatchDwell, WriterActorError, build_batches, checkpoint_config, dwell_for_batch,
-        enqueue, run_incremental_vacuum, select_auxiliary_work,
+        enqueue, incremental_vacuum_error, reject_faulted_execution_batches,
+        reject_incremental_vacuum, reject_retired_write_ingress, rollback_incremental_vacuum,
+        run_incremental_vacuum, select_auxiliary_work,
     };
 
     struct BatchProbe {
@@ -1443,6 +1559,146 @@ mod auxiliary_scheduling_tests {
             ),
             response,
         )
+    }
+
+    #[test]
+    fn faulted_vacuum_rejects_unread_ingress_and_balances_telemetry() {
+        let telemetry = WriterTelemetry::default();
+        let (sender, mut receiver) = mpsc::channel(2);
+        let mut queue = FairQueue::default();
+
+        let (parked, mut parked_reply) =
+            accepted_request_with_reply("operation.fault-parked", "key.fault-parked");
+        telemetry.admitted(parked.admission_bytes());
+        assert!(queue.push(parked).is_ok());
+
+        let (unread, mut unread_reply) =
+            accepted_request_with_reply("operation.fault-unread", "key.fault-unread");
+        telemetry.admitted(unread.admission_bytes());
+        assert!(sender.try_send(unread).is_ok());
+        assert_eq!(telemetry.snapshot().queue.queued_operations, 2);
+
+        reject_retired_write_ingress(
+            &mut receiver,
+            &mut queue,
+            &telemetry,
+            UnavailableReasonV1::Faulted,
+        );
+
+        let fault = RuntimeSubmitOutcomeV1::Unavailable {
+            reason: UnavailableReasonV1::Faulted,
+        };
+        assert_eq!(parked_reply.try_recv().unwrap(), Ok(fault.clone()));
+        assert_eq!(unread_reply.try_recv().unwrap(), Ok(fault));
+        assert!(queue.is_empty());
+        let snapshot = telemetry.snapshot();
+        assert_eq!(snapshot.queue.queued_operations, 0);
+        assert_eq!(snapshot.queue.queued_bytes, 0);
+        assert_eq!(snapshot.operations.admitted_operations, 2);
+        assert_eq!(snapshot.operations.completed_operations, 2);
+
+        let (late, _) = accepted_request_with_reply("operation.fault-late", "key.fault-late");
+        assert!(matches!(
+            sender.try_send(late),
+            Err(mpsc::SendError::Disconnected(_))
+        ));
+    }
+
+    #[test]
+    fn lost_file_settles_parked_and_unread_writes_with_typed_reason() {
+        let telemetry = WriterTelemetry::default();
+        let (sender, mut receiver) = mpsc::channel(2);
+        let mut queue = FairQueue::default();
+
+        let (parked, mut parked_reply) =
+            accepted_request_with_reply("operation.lost-parked", "key.lost-parked");
+        telemetry.admitted(parked.admission_bytes());
+        assert!(queue.push(parked).is_ok());
+
+        let (unread, mut unread_reply) =
+            accepted_request_with_reply("operation.lost-unread", "key.lost-unread");
+        telemetry.admitted(unread.admission_bytes());
+        assert!(sender.try_send(unread).is_ok());
+        assert_eq!(telemetry.snapshot().queue.queued_operations, 2);
+
+        // The loss probe may race a sender that passed the Ready check.
+        // Both queued and unread admissions must receive FileLost, not a
+        // dropped reply, and the old store must retain no queue accounting.
+        reject_retired_write_ingress(
+            &mut receiver,
+            &mut queue,
+            &telemetry,
+            UnavailableReasonV1::FileLost,
+        );
+
+        let lost = RuntimeSubmitOutcomeV1::Unavailable {
+            reason: UnavailableReasonV1::FileLost,
+        };
+        assert_eq!(parked_reply.try_recv().unwrap(), Ok(lost.clone()));
+        assert_eq!(unread_reply.try_recv().unwrap(), Ok(lost));
+        assert!(queue.is_empty());
+        let snapshot = telemetry.snapshot();
+        assert_eq!(snapshot.queue.queued_operations, 0);
+        assert_eq!(snapshot.queue.queued_bytes, 0);
+        assert_eq!(snapshot.operations.admitted_operations, 2);
+        assert_eq!(snapshot.operations.completed_operations, 2);
+
+        let (late, _) = accepted_request_with_reply("operation.lost-late", "key.lost-late");
+        assert!(matches!(
+            sender.try_send(late),
+            Err(mpsc::SendError::Disconnected(_))
+        ));
+    }
+
+    #[test]
+    fn faulted_writer_settles_selected_but_unexecuted_batches() {
+        let telemetry = WriterTelemetry::default();
+        let mut config = tracedecay_store::AdmissionConfigV1::default();
+        config.foreground_batch.max_operations = 1;
+        config.background_batch.max_operations = 1;
+        let mut accepted = Vec::new();
+        let mut replies = Vec::new();
+        for index in 0..3 {
+            let (item, reply) = accepted_request_with_reply(
+                &format!("operation.faulted-batch.{index}"),
+                &format!("key.faulted-batch.{index}"),
+            );
+            telemetry.admitted(item.admission_bytes());
+            accepted.push(item);
+            replies.push(reply);
+        }
+        assert_eq!(telemetry.snapshot().queue.queued_operations, 3);
+
+        // Only one batch reached execution before the writer faulted. The
+        // other two were already selected out of the fair queue.
+        let mut batches = build_batches(accepted, &config).into_iter();
+        assert_eq!(batches.len(), 3);
+        let executed = batches.next().expect("first batch exists");
+        for item in executed.items {
+            telemetry.released(1, item.admission_bytes());
+            let result = Ok(RuntimeSubmitOutcomeV1::Unavailable {
+                reason: UnavailableReasonV1::Faulted,
+            });
+            telemetry.completed(&result);
+            item.settle(result);
+        }
+        reject_faulted_execution_batches(batches, &telemetry);
+
+        for mut reply in replies {
+            assert_eq!(
+                reply
+                    .try_recv()
+                    .expect("every admitted request must be settled"),
+                Ok(RuntimeSubmitOutcomeV1::Unavailable {
+                    reason: UnavailableReasonV1::Faulted,
+                })
+            );
+        }
+        let snapshot = telemetry.snapshot();
+        assert_eq!(snapshot.queue.queued_operations, 0);
+        assert_eq!(snapshot.queue.queued_bytes, 0);
+        assert_eq!(snapshot.operations.admitted_operations, 3);
+        assert_eq!(snapshot.operations.completed_operations, 3);
     }
 
     #[test]
@@ -2010,6 +2266,253 @@ mod auxiliary_scheduling_tests {
     }
 
     #[test]
+    fn incremental_vacuum_defers_contention_but_reports_unusable_writers() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("vacuum.db");
+        let mut connection = rusqlite::Connection::open(&path).unwrap();
+        connection.busy_timeout(Duration::ZERO).unwrap();
+        let competing_writer = rusqlite::Connection::open(path).unwrap();
+        competing_writer.execute_batch("BEGIN IMMEDIATE").unwrap();
+        let command = || {
+            let (reply, response) = oneshot::channel();
+            (
+                IncrementalVacuumCommand::new(
+                    1,
+                    Arc::new(UnrestrictedRuntimeWriteAuthority),
+                    reply,
+                ),
+                response,
+            )
+        };
+
+        let (vacuum, mut result) = command();
+        assert!(
+            !run_incremental_vacuum(&mut connection, vacuum),
+            "a settled SQLite busy/read-only attempt must not strand a transaction"
+        );
+        assert!(matches!(
+            result.try_recv().unwrap(),
+            Err(WriterActorError::IncrementalVacuumBusy)
+        ));
+        competing_writer.execute_batch("ROLLBACK").unwrap();
+
+        connection.pragma_update(None, "query_only", true).unwrap();
+        let (vacuum, mut result) = command();
+        assert!(
+            !run_incremental_vacuum(&mut connection, vacuum),
+            "a settled SQLite busy/read-only attempt must not strand a transaction"
+        );
+        assert!(matches!(
+            result.try_recv().unwrap(),
+            Err(WriterActorError::IncrementalVacuumFailed(_))
+        ));
+
+        let (vacuum, mut result) = command();
+        reject_incremental_vacuum(vacuum);
+        assert!(matches!(
+            result.try_recv().unwrap(),
+            Err(WriterActorError::IncrementalVacuumFailed(_))
+        ));
+    }
+
+    #[test]
+    fn incremental_vacuum_commit_busy_preserves_rollback_outcome() {
+        for deny_rollback in [false, true] {
+            let directory = tempfile::tempdir().unwrap();
+            let path = directory.path().join("vacuum.db");
+            let mut connection = rusqlite::Connection::open(&path).unwrap();
+            connection.busy_timeout(Duration::ZERO).unwrap();
+            connection
+                .pragma_update(None, "journal_mode", "DELETE")
+                .unwrap();
+            connection
+                .pragma_update(None, "auto_vacuum", "INCREMENTAL")
+                .unwrap();
+            connection
+                .execute_batch(
+                    "CREATE TABLE retained(value TEXT NOT NULL);
+                     INSERT INTO retained VALUES ('keep the live evidence');
+                     CREATE TABLE released(value BLOB NOT NULL);
+                     WITH RECURSIVE copies(n) AS (
+                         VALUES(1) UNION ALL SELECT n + 1 FROM copies WHERE n < 64
+                     ) INSERT INTO released SELECT zeroblob(16384) FROM copies;
+                     DELETE FROM released;",
+                )
+                .unwrap();
+            let before = vacuum_page_counts(&connection);
+            assert!(before.1 > 8);
+            // In rollback-journal mode a reader allows BEGIN IMMEDIATE and
+            // reclamation but prevents COMMIT from gaining the exclusive lock.
+            let reader = rusqlite::Connection::open(path).unwrap();
+            reader
+                .execute_batch("BEGIN; SELECT value FROM retained;")
+                .unwrap();
+            let rollback_observed = Arc::new(AtomicBool::new(false));
+            let observed = Arc::clone(&rollback_observed);
+            connection
+                .authorizer(Some(move |context: rusqlite::hooks::AuthContext<'_>| {
+                    if matches!(
+                        context.action,
+                        rusqlite::hooks::AuthAction::Transaction {
+                            operation: rusqlite::hooks::TransactionOperation::Rollback
+                        }
+                    ) {
+                        observed.store(true, Ordering::SeqCst);
+                        if deny_rollback {
+                            return rusqlite::hooks::Authorization::Deny;
+                        }
+                    }
+                    rusqlite::hooks::Authorization::Allow
+                }))
+                .unwrap();
+            let stages = Arc::new(Mutex::new(Vec::new()));
+            let authority = Arc::new(RecordingAuthority {
+                stages: Arc::clone(&stages),
+                deny_before_commit: false,
+            });
+            let (reply, mut response) = oneshot::channel();
+            let must_retire_writer = run_incremental_vacuum(
+                &mut connection,
+                IncrementalVacuumCommand::new(8, authority, reply),
+            );
+            assert_eq!(
+                *stages.lock().unwrap(),
+                [
+                    RuntimeWriteAuthorityStage::Dequeued,
+                    RuntimeWriteAuthorityStage::BeforeCommit
+                ]
+            );
+            assert!(rollback_observed.load(Ordering::SeqCst));
+            let result = response.try_recv().unwrap();
+            if deny_rollback {
+                assert!(must_retire_writer, "failed cleanup must fault the writer");
+                assert!(matches!(
+                    result,
+                    Err(WriterActorError::IncrementalVacuumFailed(message))
+                        if message.contains("rollback") && message.contains("not authorized")
+                ));
+                assert!(!connection.is_autocommit());
+                connection
+                    .authorizer(Some(|_: rusqlite::hooks::AuthContext<'_>| {
+                        rusqlite::hooks::Authorization::Allow
+                    }))
+                    .unwrap();
+                connection.execute_batch("ROLLBACK").unwrap();
+            } else {
+                assert!(!must_retire_writer, "successful cleanup permits retry");
+                assert!(matches!(
+                    result,
+                    Err(WriterActorError::IncrementalVacuumBusy)
+                ));
+            }
+            assert!(connection.is_autocommit());
+            assert_eq!(vacuum_page_counts(&connection), before);
+            reader.execute_batch("ROLLBACK").unwrap();
+            let (reply, mut response) = oneshot::channel();
+            assert!(!run_incremental_vacuum(
+                &mut connection,
+                IncrementalVacuumCommand::new(
+                    8,
+                    Arc::new(UnrestrictedRuntimeWriteAuthority),
+                    reply,
+                ),
+            ));
+            assert!(response.try_recv().unwrap().is_ok());
+            assert_eq!(before.1 - vacuum_page_counts(&connection).1, 8);
+            assert_eq!(
+                connection
+                    .query_row("SELECT value FROM retained", [], |row| row
+                        .get::<_, String>(0))
+                    .unwrap(),
+                "keep the live evidence"
+            );
+        }
+    }
+
+    #[test]
+    fn incremental_vacuum_execution_failure_preserves_rollback_error() {
+        let mut connection = vacuum_connection_with_free_pages();
+        let before = vacuum_page_counts(&connection);
+        let rollback_observed = Arc::new(AtomicBool::new(false));
+        let observed = Arc::clone(&rollback_observed);
+        connection
+            .authorizer(Some(
+                move |context: rusqlite::hooks::AuthContext<'_>| match context.action {
+                    rusqlite::hooks::AuthAction::Pragma { .. } => {
+                        rusqlite::hooks::Authorization::Deny
+                    }
+                    rusqlite::hooks::AuthAction::Transaction {
+                        operation: rusqlite::hooks::TransactionOperation::Rollback,
+                    } => {
+                        observed.store(true, Ordering::SeqCst);
+                        rusqlite::hooks::Authorization::Deny
+                    }
+                    _ => rusqlite::hooks::Authorization::Allow,
+                },
+            ))
+            .unwrap();
+        let stages = Arc::new(Mutex::new(Vec::new()));
+        let authority = Arc::new(RecordingAuthority {
+            stages: Arc::clone(&stages),
+            deny_before_commit: false,
+        });
+        let (reply, mut response) = oneshot::channel();
+        assert!(run_incremental_vacuum(
+            &mut connection,
+            IncrementalVacuumCommand::new(8, authority, reply),
+        ));
+        assert_eq!(
+            *stages.lock().unwrap(),
+            [RuntimeWriteAuthorityStage::Dequeued]
+        );
+        assert!(rollback_observed.load(Ordering::SeqCst));
+        assert!(matches!(
+            response.try_recv().unwrap(),
+            Err(WriterActorError::IncrementalVacuumFailed(message))
+                if message.contains("rollback") && message.contains("not authorized")
+        ));
+        assert!(!connection.is_autocommit());
+        connection
+            .authorizer(Some(|_: rusqlite::hooks::AuthContext<'_>| {
+                rusqlite::hooks::Authorization::Allow
+            }))
+            .unwrap();
+        connection.execute_batch("ROLLBACK").unwrap();
+        assert!(connection.is_autocommit());
+        assert_eq!(vacuum_page_counts(&connection), before);
+    }
+
+    #[test]
+    fn full_sqlite_disk_quota_defers_only_optional_vacuum() {
+        let mut connection = rusqlite::Connection::open_in_memory().unwrap();
+        connection.pragma_update(None, "page_size", 512).unwrap();
+        connection.pragma_update(None, "max_page_count", 8).unwrap();
+        connection
+            .execute_batch("CREATE TABLE quota_probe(payload BLOB)")
+            .unwrap();
+        // Exercise SQLite's actual SQLITE_FULL result instead of inventing
+        // an error string. An optional vacuum must not block an otherwise
+        // admitted store solely because its write would exceed the quota.
+        let transaction = connection.transaction().unwrap();
+        let full = transaction
+            .execute("INSERT INTO quota_probe VALUES (zeroblob(65536))", [])
+            .unwrap_err();
+        assert_eq!(
+            full.sqlite_error_code(),
+            Some(rusqlite::ErrorCode::DiskFull)
+        );
+        assert!(
+            transaction.is_autocommit(),
+            "SQLITE_FULL must not leave the old write transaction open"
+        );
+        assert!(matches!(
+            rollback_incremental_vacuum(transaction, incremental_vacuum_error(full)),
+            WriterActorError::IncrementalVacuumNoSpace
+        ));
+        assert!(connection.is_autocommit());
+    }
+
+    #[test]
     fn incremental_vacuum_samples_worker_authority_stages() {
         let mut connection = rusqlite::Connection::open_in_memory().unwrap();
         connection
@@ -2108,9 +2611,12 @@ mod auxiliary_scheduling_tests {
         });
         let (reply, mut response) = oneshot::channel();
 
-        run_incremental_vacuum(
-            &mut connection,
-            IncrementalVacuumCommand::new(8, authority, reply),
+        assert!(
+            !run_incremental_vacuum(
+                &mut connection,
+                IncrementalVacuumCommand::new(8, authority, reply),
+            ),
+            "a successful rollback must leave the writer usable"
         );
 
         assert!(matches!(
@@ -2119,6 +2625,62 @@ mod auxiliary_scheduling_tests {
                 stage: RuntimeWriteAuthorityStage::BeforeCommit
             })
         ));
+        assert!(connection.is_autocommit());
+        assert_eq!(vacuum_page_counts(&connection), before);
+    }
+
+    #[test]
+    fn incremental_vacuum_preserves_rollback_failure_after_revocation() {
+        let mut connection = vacuum_connection_with_free_pages();
+        let before = vacuum_page_counts(&connection);
+        let rollback_denied = Arc::new(AtomicBool::new(false));
+        let observed = Arc::clone(&rollback_denied);
+        // Deny SQLite's actual ROLLBACK statement, not a fabricated error
+        // passed into the writer. BEGIN and the vacuum itself remain allowed.
+        connection
+            .authorizer(Some(move |context: rusqlite::hooks::AuthContext<'_>| {
+                if matches!(
+                    context.action,
+                    rusqlite::hooks::AuthAction::Transaction {
+                        operation: rusqlite::hooks::TransactionOperation::Rollback
+                    }
+                ) {
+                    observed.store(true, Ordering::SeqCst);
+                    rusqlite::hooks::Authorization::Deny
+                } else {
+                    rusqlite::hooks::Authorization::Allow
+                }
+            }))
+            .unwrap();
+        let authority = Arc::new(RecordingAuthority {
+            stages: Arc::new(Mutex::new(Vec::new())),
+            deny_before_commit: true,
+        });
+        let (reply, mut response) = oneshot::channel();
+        let must_retire_writer = run_incremental_vacuum(
+            &mut connection,
+            IncrementalVacuumCommand::new(8, authority, reply),
+        );
+        assert!(
+            must_retire_writer,
+            "a failed rollback with an open transaction must retire the writer"
+        );
+
+        assert!(rollback_denied.load(Ordering::SeqCst));
+        assert!(matches!(
+            response.try_recv().unwrap(),
+            Err(WriterActorError::IncrementalVacuumFailed(message))
+                if message.contains("rollback") && message.contains("not authorized")
+        ));
+        // The failed rollback leaves a live transaction. Clear the test-only
+        // authorizer and recover it explicitly, then verify no data was lost.
+        assert!(!connection.is_autocommit());
+        connection
+            .authorizer(Some(|_: rusqlite::hooks::AuthContext<'_>| {
+                rusqlite::hooks::Authorization::Allow
+            }))
+            .unwrap();
+        connection.execute_batch("ROLLBACK").unwrap();
         assert!(connection.is_autocommit());
         assert_eq!(vacuum_page_counts(&connection), before);
     }

@@ -1316,11 +1316,19 @@ fn apply_pragmas(
         .map_err(|source| policy("trusted schema", source))?;
 
     if mode == ConnectionMode::Writer {
+        // SQLite also remembers the last auto_vacuum assignment for a later
+        // full VACUUM of *any* database on this connection. Only repository
+        // writers deny full VACUUM. Maintenance allows it on main and attached
+        // stores, so its startup must leave their independent modes alone.
+        connection
+            .pragma_update(Some("temp"), "auto_vacuum", "FULL")
+            .map_err(|source| policy("TEMP auto-vacuum", source))?;
+        verify_pragma_i64(connection, Some("temp"), "auto_vacuum", 1)?;
         if fresh_writer {
             connection
                 .pragma_update(None, "auto_vacuum", "INCREMENTAL")
                 .map_err(|source| policy("fresh auto-vacuum", source))?;
-            verify_pragma_i64(connection, "auto_vacuum", 2)?;
+            verify_pragma_i64(connection, None, "auto_vacuum", 2)?;
         }
         connection
             .pragma_update(None, "journal_mode", "WAL")
@@ -1347,8 +1355,8 @@ fn apply_pragmas(
             .map_err(|source| policy("query-only reader", source))?;
     }
 
-    verify_pragma_i64(connection, "foreign_keys", 1)?;
-    verify_pragma_i64(connection, "trusted_schema", 0)?;
+    verify_pragma_i64(connection, None, "foreign_keys", 1)?;
+    verify_pragma_i64(connection, None, "trusted_schema", 0)?;
     if !connection
         .db_config(DbConfig::SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE)
         .map_err(|source| policy("checkpoint-on-close verification", source))?
@@ -1363,13 +1371,13 @@ fn apply_pragmas(
     match mode {
         ConnectionMode::Writer => {
             verify_pragma_text(connection, "journal_mode", "wal")?;
-            verify_pragma_i64(connection, "wal_autocheckpoint", 0)?;
-            verify_pragma_i64(connection, "synchronous", synchronous_value)?;
-            verify_pragma_i64(connection, "journal_size_limit", RETAINED_WAL_BYTES)?;
+            verify_pragma_i64(connection, None, "wal_autocheckpoint", 0)?;
+            verify_pragma_i64(connection, None, "synchronous", synchronous_value)?;
+            verify_pragma_i64(connection, None, "journal_size_limit", RETAINED_WAL_BYTES)?;
         }
-        ConnectionMode::Reader => verify_pragma_i64(connection, "query_only", 1)?,
+        ConnectionMode::Reader => verify_pragma_i64(connection, None, "query_only", 1)?,
         ConnectionMode::Maintenance => {
-            verify_pragma_i64(connection, "journal_size_limit", RETAINED_WAL_BYTES)?;
+            verify_pragma_i64(connection, None, "journal_size_limit", RETAINED_WAL_BYTES)?;
         }
     }
     Ok(())
@@ -1449,11 +1457,12 @@ impl WriterPageCache {
 
 fn verify_pragma_i64(
     connection: &Connection,
+    schema: Option<&str>,
     name: &'static str,
     expected: i64,
 ) -> Result<(), ConnectionPolicyError> {
     let actual: i64 = connection
-        .pragma_query_value(None, name, |row| row.get(0))
+        .pragma_query_value(schema, name, |row| row.get(0))
         .map_err(|source| policy("pragma verification", source))?;
     if actual != expected {
         return Err(policy(

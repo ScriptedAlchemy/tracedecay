@@ -1056,7 +1056,7 @@ struct CodexDirectoryResume {
 #[derive(Clone, Copy)]
 struct CodexDirectoryWitness {
     stat: [u8; 32],
-    entries: [u8; 32],
+    entries: Option<[u8; 32]>,
 }
 
 #[derive(Clone)]
@@ -1735,6 +1735,12 @@ impl CodexSource {
                 } else {
                     index + 1
                 };
+                // The hot prefix was already checked earlier in this tick.
+                // Advance the rotating cursor through it without repeating
+                // directory stats or unsettled entry-name fingerprint scans.
+                if index < hot {
+                    continue;
+                }
                 if let Some(directory) = idle.directories.get(index) {
                     if codex_directory_changed(&directory.path, directory.identity)? {
                         changed = true;
@@ -2578,11 +2584,23 @@ fn codex_directory_changed(
     let Some(stored) = stored else {
         return Ok(true);
     };
-    // An unsettled stat proves nothing either way; the entry names do.
-    if current.settled {
-        return Ok(current.stat != stored.stat);
+    // A different native identity proves the directory changed, even while
+    // the filesystem change clock is unsettled. Do not enumerate and sort its
+    // entries (or miss a metadata-only change with identical entry names).
+    if current.stat != stored.stat {
+        return Ok(true);
     }
-    Ok(directory_entry_fingerprint(path)? != stored.entries)
+    // A settled, identical stat proves no directory mutation.
+    if current.settled {
+        return Ok(false);
+    }
+    // An older settled directory did not need an entry-name witness.
+    // If its stat becomes unsettled, conservatively revalidate it rather
+    // than assuming that newly added rollouts were already discovered.
+    let Some(entries) = stored.entries else {
+        return Ok(true);
+    };
+    Ok(directory_entry_fingerprint(path)? != entries)
 }
 
 fn codex_directory_witness(path: &Path) -> TranscriptIngestResult<Option<CodexDirectoryWitness>> {
@@ -2591,7 +2609,14 @@ fn codex_directory_witness(path: &Path) -> TranscriptIngestResult<Option<CodexDi
     };
     Ok(Some(CodexDirectoryWitness {
         stat: current.stat,
-        entries: directory_entry_fingerprint(path)?,
+        // In the settled case, a later stat comparison proves stability.
+        // Avoid eagerly listing and sorting all historical rollout names;
+        // an entry-name witness is needed only for a coarse-clock window.
+        entries: if current.settled {
+            None
+        } else {
+            Some(directory_entry_fingerprint(path)?)
+        },
     }))
 }
 
@@ -2611,9 +2636,33 @@ fn directory_stat_witness(path: &Path) -> TranscriptIngestResult<Option<Director
     }
     let changed = change_stamp(path, &metadata);
     Ok(Some(DirectoryStatWitness {
-        stat: codex_corpus_identity(path, &metadata, changed)?,
+        stat: codex_directory_stat_identity(path, &metadata, changed)?,
         settled: changed.is_settled(),
     }))
+}
+
+// An unsettled ChangeStamp has a different random sample token on *every*
+// stat, even when the directory has not changed. That token is appropriate
+// for file-content authority, but would make an unchanged hot Codex directory
+// look modified on every idle poll, restarting the whole discovery sweep.
+// For directory change detection only, retain the native change-time value
+// instead. Equality is not proof of stability while unsettled: callers still
+// compare the directory's entry-name fingerprint in that case.
+fn codex_directory_stat_identity(
+    path: &Path,
+    metadata: &std::fs::Metadata,
+    changed: ChangeStamp,
+) -> TranscriptIngestResult<[u8; 32]> {
+    let stat_change = match changed {
+        ChangeStamp::Unvouched(_) => {
+            let native_change_time = RewriteWitness::NATIVE
+                .change_time_nanos(metadata)
+                .map_or(0, |time| u128::from_le_bytes(time.to_le_bytes()));
+            ChangeStamp::Unvouched(native_change_time)
+        }
+        settled => settled,
+    };
+    codex_corpus_identity(path, metadata, stat_change)
 }
 
 fn directory_entry_fingerprint(path: &Path) -> TranscriptIngestResult<[u8; 32]> {
