@@ -2896,8 +2896,9 @@ mod build_tests {
     use super::{
         NativeCompactEncodeBoundaryV1, SEALED_STORE_DATABASE_FILE, SealedCompactRows,
         SealedRowSource, build_or_open_sealed_store, build_or_open_sealed_store_with_work,
-        build_sealed_container_with_work, push_manifest_rows, sealed_artifact_database_options,
-        sealed_copy_proof, sealed_generation_directory, sealed_store_root,
+        build_sealed_container_with_work, census_sealed_store, push_manifest_rows,
+        sealed_artifact_database_options, sealed_copy_proof, sealed_generation_directory,
+        sealed_store_root,
     };
     use tracedecay_store::runtime::{GraphNativeWorkKindV1, GraphNativeWorkV1};
 
