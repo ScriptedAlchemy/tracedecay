@@ -306,14 +306,7 @@ impl ProjectOpenAdvisoryFeedbackCycleV1 {
         // Construct the discovery future without polling it on editor or hook
         // paths. A pending/denied remote provider cannot consume local feedback's
         // deadline or cancel its independently authorized diagnostics.
-        let github_request = self
-            .github_review_read
-            .clone()
-            .map(|(pull_request_id, operation)| GitHubReviewReadRequestV1 {
-                operation,
-                scope: self.feedback_scope.clone(),
-                pull_request_id,
-            });
+        let github_request = self.github_review_request();
         let (github, ci) = advisory_remote_requests(
             remote_mode,
             github_request,
@@ -394,6 +387,16 @@ impl ProjectOpenAdvisoryFeedbackCycleV1 {
             configuration_digest,
             feedback_cycle: pin.runtime,
         })
+    }
+
+    fn github_review_request(&self) -> Option<GitHubReviewReadRequestV1> {
+        self.github_review_read
+            .clone()
+            .map(|(pull_request_id, operation)| GitHubReviewReadRequestV1 {
+                operation,
+                scope: self.feedback_scope.clone(),
+                pull_request_id,
+            })
     }
 
     /// Drives the mounted host-delivery half for one atomically recorded

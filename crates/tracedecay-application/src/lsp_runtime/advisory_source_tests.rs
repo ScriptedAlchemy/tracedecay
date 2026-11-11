@@ -954,7 +954,7 @@ async fn incomplete_publication_remains_readable_without_consuming_completed_ded
     .expect("repeated incomplete publication");
     assert_eq!(
         store.record_publication(&context, &repeated).await,
-        FeedbackPublicationRecordState::Reused(publication.clone()),
+        FeedbackPublicationRecordState::Reused(Box::new(publication.clone())),
         "a repeated incomplete cycle must return its actual committed identity"
     );
     assert_eq!(

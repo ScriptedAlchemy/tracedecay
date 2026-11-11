@@ -347,7 +347,7 @@ impl FeedbackPublicationV1 {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum FeedbackPublicationRecordState {
     Recorded,
-    Reused(FeedbackPublicationV1),
+    Reused(Box<FeedbackPublicationV1>),
     Duplicate,
     Cancelled,
     TimedOut,

@@ -1375,47 +1375,37 @@ impl ProjectFeedbackStore {
             .begin_write_transaction("record feedback publication")
             .await
             .map_err(|_| FeedbackRuntimeError::Store)?;
-        let mut rows = transaction
-            .query_engine(
-                "SELECT value FROM metadata WHERE key = ?1",
-                params![PUBLICATION_LEDGER_METADATA_KEY],
-            )
-            .await
-            .map_err(|_| FeedbackRuntimeError::Store)?;
-        let encoded = rows
-            .next()
-            .await
-            .map_err(|_| FeedbackRuntimeError::Store)?
-            .map(|row| row.get::<String>(0))
-            .transpose()
-            .map_err(|_| FeedbackRuntimeError::Store)?;
-        drop(rows);
-        let mut publications = encoded
-            .as_deref()
-            .map(decode_ledger)
-            .transpose()?
-            .unwrap_or_default();
+        let mut publications = load_publication_ledger(&transaction).await?;
         // A durable result identity may replay but may not be rebound to
         // different evidence or a different admission scope.
         if let Some(stored) = publications
             .iter()
             .find(|stored| stored.result.result_id == publication.result.result_id)
         {
-            // The complete committed record owns a result ID. Replaying it
-            // cannot silently change admission, trigger, budget, or the
-            // revalidation receipt while keeping that durable identity.
-            let exact_identity = stored == &publication;
-            transaction
-                .rollback()
-                .await
-                .map_err(|_| FeedbackRuntimeError::Store)?;
-            return if !exact_identity {
-                Err(FeedbackRuntimeError::Corrupt)
-            } else if stored.result.termination == FeedbackCycleTerminationV1::IncompleteCoverage {
-                Ok(FeedbackPublicationRecordState::Reused(stored.clone()))
-            } else {
-                Ok(FeedbackPublicationRecordState::Duplicate)
-            };
+            // Saved-content cycle identities remain stable across saves.
+            // A fresh observation and revalidation time may reuse the original
+            // incomplete record, but its request, evidence and authority may
+            // not be rebound. The committed receipt itself remains unchanged.
+            let exact_identity = stored == &publication
+                || (stored.same_incomplete_evidence(&publication)
+                    && stored.input.request == publication.input.request
+                    && stored.result == publication.result);
+            if !exact_identity
+                || stored.result.termination != FeedbackCycleTerminationV1::IncompleteCoverage
+            {
+                transaction
+                    .rollback()
+                    .await
+                    .map_err(|_| FeedbackRuntimeError::Store)?;
+                return if exact_identity {
+                    Ok(FeedbackPublicationRecordState::Duplicate)
+                } else {
+                    Err(FeedbackRuntimeError::Corrupt)
+                };
+            }
+            // An older occurrence of this same incomplete result must not
+            // suppress a return to its verdict after an intervening change.
+            // The latest-evidence comparison below owns coalescing.
         }
         let completed_duplicate = publications.iter().any(|stored| {
             stored.dedupe_key == publication.dedupe_key
@@ -1449,7 +1439,7 @@ impl ProjectFeedbackStore {
                 .rollback()
                 .await
                 .map_err(|_| FeedbackRuntimeError::Store)?;
-            return Ok(FeedbackPublicationRecordState::Reused(committed));
+            return Ok(FeedbackPublicationRecordState::Reused(Box::new(committed)));
         }
         if publications.len() >= MAX_STORED_PUBLICATIONS {
             transaction
@@ -1734,6 +1724,30 @@ fn log_handle_refusal(reason: &'static str, operation: Option<FeedbackReadOperat
         ?operation,
         "feedback read handle was refused"
     );
+}
+
+async fn load_publication_ledger(
+    transaction: &DatabaseWriteTransaction,
+) -> Result<Vec<FeedbackPublicationV1>, FeedbackRuntimeError> {
+    let mut rows = transaction
+        .query_engine(
+            "SELECT value FROM metadata WHERE key = ?1",
+            params![PUBLICATION_LEDGER_METADATA_KEY],
+        )
+        .await
+        .map_err(|_| FeedbackRuntimeError::Store)?;
+    let encoded = rows
+        .next()
+        .await
+        .map_err(|_| FeedbackRuntimeError::Store)?
+        .map(|row| row.get::<String>(0))
+        .transpose()
+        .map_err(|_| FeedbackRuntimeError::Store)?;
+    encoded
+        .as_deref()
+        .map(decode_ledger)
+        .transpose()
+        .map(|ledger| ledger.unwrap_or_default())
 }
 
 fn decode_ledger(encoded: &str) -> Result<Vec<FeedbackPublicationV1>, FeedbackRuntimeError> {
@@ -2300,7 +2314,7 @@ mod tests {
             let state = store.record_publication(repeated).await.unwrap();
             assert_eq!(
                 state,
-                FeedbackPublicationRecordState::Reused(initial.clone())
+                FeedbackPublicationRecordState::Reused(Box::new(initial.clone()))
             );
         }
         let retained = store.load_publications().await.unwrap();
@@ -2365,7 +2379,7 @@ mod tests {
         let state = store.record_publication(unchanged).await.unwrap();
         assert_eq!(
             state,
-            FeedbackPublicationRecordState::Reused(recovered.clone())
+            FeedbackPublicationRecordState::Reused(Box::new(recovered.clone()))
         );
 
         // An unchanged verdict with a new runtime watermark also remains
@@ -2483,7 +2497,7 @@ mod tests {
         assert_ne!(replay.result.result_id, newer.result.result_id);
         assert_eq!(
             store.record_publication(replay).await.unwrap(),
-            FeedbackPublicationRecordState::Reused(newer)
+            FeedbackPublicationRecordState::Reused(Box::new(newer.clone()))
         );
         let ordered = store.load_publications().await.unwrap();
         assert_eq!(ordered.len(), 2);
@@ -2548,7 +2562,7 @@ mod tests {
         let state = store.record_publication(original.clone()).await.unwrap();
         assert_eq!(
             state,
-            FeedbackPublicationRecordState::Reused(original.clone())
+            FeedbackPublicationRecordState::Reused(Box::new(original.clone()))
         );
 
         let mut conflicting = original.clone();
@@ -2559,17 +2573,54 @@ mod tests {
             store.record_publication(conflicting).await,
             Err(FeedbackRuntimeError::Corrupt)
         ));
-        // A replayed result cannot silently renew or rewrite its original
-        // authorization receipt. This was previously accepted as a duplicate
-        // because the identity check compared only selected record fields.
+        // Revalidation for the same saved-content cycle reuses its original
+        // publication through the real admission-checking store port.
+        let operation = feedback_surface_operation("feedback_list")
+            .unwrap()
+            .unwrap();
+        let admitted = context(&operation, "actor.feedback-reader.requester");
+        let mut repeated = original.clone();
+        repeated.input.observed_at = UtcMicros(11);
+        repeated.authority.revalidated_at = UtcMicros(11);
+        assert_eq!(
+            FeedbackCycleDedupePort::record_publication(&store, &admitted, &repeated).await,
+            FeedbackPublicationRecordState::Reused(Box::new(original.clone()))
+        );
+        // The same result identity cannot acquire different grant evidence.
         let mut rebinding_receipt = original.clone();
         rebinding_receipt.authority.revalidated_at = UtcMicros(11);
+        rebinding_receipt.authority.grant_digest =
+            canonical_sha256(&"feedback.incomplete.different-grant").unwrap();
         assert!(rebinding_receipt.validate().is_ok());
         assert!(matches!(
             store.record_publication(rebinding_receipt).await,
             Err(FeedbackRuntimeError::Corrupt)
         ));
-        assert_eq!(store.load_publications().await.unwrap(), vec![original]);
+        assert_eq!(
+            store.load_publications().await.unwrap(),
+            vec![original.clone()]
+        );
+
+        let mut failed = incomplete_publication(
+            original.input.request.cycle_id.as_str(),
+            "feedback.incomplete.same-result",
+            ProviderEvaluationStateV1::Failed,
+        );
+        failed.authority.revalidated_at = UtcMicros(12);
+        assert_eq!(
+            store.record_publication(failed).await.unwrap(),
+            FeedbackPublicationRecordState::Recorded
+        );
+        repeated.input.observed_at = UtcMicros(13);
+        repeated.authority.revalidated_at = UtcMicros(13);
+        assert_eq!(
+            FeedbackCycleDedupePort::record_publication(&store, &admitted, &repeated).await,
+            FeedbackPublicationRecordState::Recorded
+        );
+        assert_eq!(
+            store.doctor_latest_publication(&admitted).await.unwrap(),
+            Some(repeated)
+        );
     }
 
     #[test]

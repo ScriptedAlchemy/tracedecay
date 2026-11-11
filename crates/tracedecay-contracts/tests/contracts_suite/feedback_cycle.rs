@@ -247,7 +247,7 @@ impl FeedbackCycleDedupePort for ReusingIncompleteAtRecordFixture {
             let mut committed = self.committed.borrow_mut();
             match committed.as_ref() {
                 Some(previous) if previous.same_incomplete_evidence(publication) => {
-                    FeedbackPublicationRecordState::Reused(previous.clone())
+                    FeedbackPublicationRecordState::Reused(Box::new(previous.clone()))
                 }
                 Some(_) => FeedbackPublicationRecordState::Unavailable,
                 None => {

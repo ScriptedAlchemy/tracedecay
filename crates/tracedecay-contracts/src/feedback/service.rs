@@ -1301,7 +1301,7 @@ where
                     cycle: existing.result.clone(),
                     dedupe_key: Some(existing.dedupe_key.clone()),
                     authority: Some(existing.authority.clone()),
-                    publication: Some(existing),
+                    publication: Some(*existing),
                     ..result
                 })
             }
