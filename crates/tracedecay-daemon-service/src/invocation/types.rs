@@ -700,6 +700,7 @@ pub fn admit_registered_hook_orchestration(
     explicit: bool,
     admission_order: Option<u64>,
     completion: Option<Arc<dyn Fn(HookOrchestrationSettlementV1) + Send + Sync + 'static>>,
+    intent_delivery_settled: bool,
 ) -> HookOrchestrationAdmissionV1 {
     // Any other hook of a session that now carries a lifecycle is the event a
     // boundary parked for that session waits on.
@@ -726,7 +727,9 @@ pub fn admit_registered_hook_orchestration(
         runtime.resume_parked(request.hook.envelope(), lifecycle);
     }
     request.admission_order = admission_order;
-    let intent_companion = request.intent_companion();
+    let intent_companion = request
+        .intent_companion()
+        .filter(|_| !intent_delivery_settled);
     request.completion = completion;
     let admission = runtime.admit(request);
     // The stop boundary's own admission is what the hook reports; its intent

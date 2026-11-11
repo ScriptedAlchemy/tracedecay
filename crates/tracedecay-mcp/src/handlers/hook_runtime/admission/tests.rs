@@ -210,6 +210,7 @@ async fn prompt_and_tool_admissions_settle_their_durable_intent_work() {
                 false,
                 Some(staged.receipt.order),
                 Some(completion),
+                false,
             ),
             tracedecay_contracts::HookOrchestrationAdmissionV1::Enqueued
         );
@@ -249,6 +250,7 @@ async fn prompt_and_tool_admissions_settle_their_durable_intent_work() {
             false,
             None,
             None,
+            false,
         ),
         tracedecay_contracts::HookOrchestrationAdmissionV1::UnsupportedTrigger
     );

@@ -437,6 +437,29 @@ async fn claim_exact_ready_guidance(
     }
 }
 
+/// A Stop receipt proves this exact native retry already delivered its claim.
+/// Its companion intent pass is settled even while the separate Stop feedback
+/// producer still owes work; only that independent producer may be redriven.
+async fn stop_intent_delivery_settled(
+    cg: &TraceDecay,
+    envelope: &tracedecay_hooks::HookEventEnvelopeV2,
+    claim_address: Option<tracedecay_contracts::context_scout::ContextScoutAddressV1>,
+) -> bool {
+    let (Some(owner), Some(address)) = (cg.context_scout_owner(), claim_address) else {
+        return false;
+    };
+    let Ok(recent) = owner.recent_exact(address, 1).await else {
+        return false;
+    };
+    recent.deliveries.into_iter().any(|delivery| {
+        delivery.receipt.receipt_id
+            == tracedecay_agent_hosts::agents::context_scout::context_scout_delivery_receipt_id(
+                envelope.event_id,
+                delivery.receipt.envelope_id,
+            )
+    })
+}
+
 fn cursor_stack_wakeup_allowed(
     first_admission: bool,
     producer: tracedecay_domain::NativeHostIdentityV1,
@@ -895,6 +918,22 @@ async fn admit_hook_v2_envelope_with_lifecycle_inner(
         )
         .await;
     }
+    let intent_delivery_settled = !first_admission
+        && exact_claim_missed
+        && host_response_available
+        && matches!(
+            &provider_envelope.event,
+            tracedecay_hooks::HookEventV2::SessionBoundary {
+                boundary: tracedecay_hooks::HookBoundaryV1::End
+                    | tracedecay_hooks::HookBoundaryV1::TurnComplete,
+            }
+        )
+        && stop_intent_delivery_settled(
+            cg,
+            provider_envelope,
+            context_scout_address.as_ref().map(|address| **address),
+        )
+        .await;
     let orchestration = tracedecay_daemon_service::admit_registered_hook_orchestration(
         envelope.clone(),
         snapshot.binding.clone(),
@@ -903,6 +942,7 @@ async fn admit_hook_v2_envelope_with_lifecycle_inner(
         false,
         Some(receipt.order),
         completion,
+        intent_delivery_settled,
     );
     let feedback_notice = if first_admission {
         tracedecay_application::advisory::peek_advisory_hook_notice(

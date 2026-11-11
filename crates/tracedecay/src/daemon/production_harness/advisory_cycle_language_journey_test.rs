@@ -420,6 +420,7 @@ async fn hook_work_completes(
                     let _ = completed.send(());
                 }
             })),
+            false,
         ),
         tracedecay_daemon_service::HookOrchestrationAdmissionV1::Enqueued,
     );
