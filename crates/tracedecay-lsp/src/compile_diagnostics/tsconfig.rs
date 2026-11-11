@@ -40,11 +40,37 @@ pub struct TypeScriptProject {
     pub compiler: Option<PathBuf>,
 }
 
+/// A walk of a project root could not complete. The configurations under it
+/// are unknown, not absent: a partial listing must never stand in for a
+/// successful discovery.
+#[derive(Debug, thiserror::Error)]
+#[error("TypeScript project discovery under {} failed: {source}", root.display())]
+pub struct TypeScriptProjectDiscoveryError {
+    root: PathBuf,
+    #[source]
+    source: walkdir::Error,
+}
+
+impl TypeScriptProjectDiscoveryError {
+    /// The project root whose walk failed.
+    #[must_use]
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
+}
+
 /// Every `tsconfig.json` under `project_root` outside `node_modules` and
 /// hidden directories, with its compiler. The configurations they reference
 /// are the compiler's answer, not this walk's.
-pub fn typescript_projects(project_root: &Path) -> Vec<TypeScriptProject> {
-    WalkDir::new(project_root)
+///
+/// A read or permission error anywhere in the tree is a failure, not a
+/// smaller project list: a caller that published this `Err` as an empty or
+/// partial discovery would name the wrong reason for a missing check.
+pub fn typescript_projects(
+    project_root: &Path,
+) -> Result<Vec<TypeScriptProject>, TypeScriptProjectDiscoveryError> {
+    let mut projects = Vec::new();
+    for entry in WalkDir::new(project_root)
         .sort_by_file_name()
         .into_iter()
         .filter_entry(|entry| {
@@ -52,10 +78,16 @@ pub fn typescript_projects(project_root: &Path) -> Vec<TypeScriptProject> {
                 || !entry.file_type().is_dir()
                 || !is_skipped_dir(&entry.file_name().to_string_lossy())
         })
-        .filter_map(Result::ok)
-        .filter(|entry| entry.file_type().is_file() && entry.file_name() == TSCONFIG)
-        .map(|entry| typescript_project(project_root, entry.into_path()))
-        .collect()
+    {
+        let entry = entry.map_err(|source| TypeScriptProjectDiscoveryError {
+            root: project_root.to_path_buf(),
+            source,
+        })?;
+        if entry.file_type().is_file() && entry.file_name() == TSCONFIG {
+            projects.push(typescript_project(project_root, entry.into_path()));
+        }
+    }
+    Ok(projects)
 }
 
 /// The project of a configuration under `project_root`, such as one a
@@ -219,7 +251,7 @@ mod tests {
         let root = monorepo();
         let binary = if cfg!(windows) { "tsc.cmd" } else { "tsc" };
         assert_eq!(
-            typescript_projects(root.path()),
+            typescript_projects(root.path()).expect("a readable tree discovers its projects"),
             ["packages/app/tsconfig.json", "packages/lib/tsconfig.json"].map(|tsconfig| {
                 TypeScriptProject {
                     tsconfig: root.path().join(tsconfig),
@@ -236,6 +268,7 @@ mod tests {
             "",
         );
         let compilers = typescript_projects(root.path())
+            .expect("a readable tree discovers its projects")
             .into_iter()
             .map(|project| project.compiler.unwrap())
             .collect::<Vec<_>>();

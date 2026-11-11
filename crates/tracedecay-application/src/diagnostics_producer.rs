@@ -1696,7 +1696,7 @@ mod tests {
         );
         let run = super::publish_typescript_discovery_v1(
             root,
-            &tracedecay_lsp::typescript_projects(root),
+            &tracedecay_lsp::typescript_projects(root).expect("tsconfig discovery"),
             &mut state,
         )
         .await;

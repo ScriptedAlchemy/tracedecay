@@ -366,7 +366,7 @@ impl InstalledCompilerProject {
     ) -> CompilerProducerRunV1 {
         run_typescript_producer_v1(
             &self.root,
-            &typescript_projects(&self.root),
+            &typescript_projects(&self.root).expect("tsconfig discovery"),
             &self.identity(generation),
             &DiagnosticsStore::new_runtime(&self.connection),
             &self.build_info_dir,

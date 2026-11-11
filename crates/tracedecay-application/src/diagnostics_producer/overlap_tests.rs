@@ -82,7 +82,7 @@ async fn an_overlapping_old_compiler_cannot_replace_new_records_or_status_for_th
             tracedecay_code_index::intake::content_digest(source),
         )],
     );
-    let projects = typescript_projects(&root);
+    let projects = typescript_projects(&root).expect("tsconfig discovery");
     assert_eq!(projects.len(), 1);
     let build_info = temp.path().join("typescript-build-info");
     let status = TypeScriptProducerStatusHandleV1::default();

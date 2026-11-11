@@ -22,7 +22,7 @@ use tracedecay_application::diagnostics_store::DiagnosticsStore;
 use tracedecay_code_index_runtime::code_index_scheduler::CodeIndexOwnerSignalsV1;
 use tracedecay_contracts::now_micros;
 use tracedecay_domain::CodeGenerationId;
-use tracedecay_lsp::{TypeScriptProject, typescript_projects};
+use tracedecay_lsp::{TypeScriptProject, TypeScriptProjectDiscoveryError, typescript_projects};
 use tracedecay_runtime_core::logging::log_daemon_event;
 
 use crate::daemon::invocation_state::DaemonInvocationState;
@@ -160,19 +160,38 @@ async fn discover_projects(project_root: &Path) -> Option<Vec<TypeScriptProject>
     })
     .await
     {
-        Ok(projects) => Some(projects),
+        Ok(walked) => discovery_outcome(project_root, walked),
         Err(error) => {
-            log_daemon_event(
-                "typescript_diagnostics_producer",
-                &[
-                    ("project", project_root.display().to_string()),
-                    ("outcome", "discovery_failed".to_owned()),
-                    ("detail", error),
-                ],
-            );
+            log_discovery_failed(project_root, &error);
             None
         }
     }
+}
+
+/// The projects a completed walk admits. A walk that failed its tree is not a
+/// smaller discovery: `None` is logged, and discovery is what must be retried.
+fn discovery_outcome(
+    project_root: &Path,
+    walked: Result<Vec<TypeScriptProject>, TypeScriptProjectDiscoveryError>,
+) -> Option<Vec<TypeScriptProject>> {
+    match walked {
+        Ok(projects) => Some(projects),
+        Err(error) => {
+            log_discovery_failed(project_root, &error.to_string());
+            None
+        }
+    }
+}
+
+fn log_discovery_failed(project_root: &Path, detail: &str) {
+    log_daemon_event(
+        "typescript_diagnostics_producer",
+        &[
+            ("project", project_root.display().to_string()),
+            ("outcome", "discovery_failed".to_owned()),
+            ("detail", detail.to_owned()),
+        ],
+    );
 }
 
 fn log_producer_event(project_root: &Path, outcome: &str) {
@@ -224,4 +243,65 @@ fn log_producer_run(project_root: &Path, run: &CompilerProducerRunV1) {
             ("detail", detail),
         ],
     );
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use std::fs;
+    use std::os::unix::fs::PermissionsExt;
+    use std::path::Path;
+
+    use tracedecay_lsp::typescript_projects;
+
+    use super::discovery_outcome;
+
+    /// A subtree the walk cannot read is a failed discovery, never a smaller
+    /// project list that reads as `no_tsconfig`/`no_compiler`, and discovery
+    /// recovers once the tree is readable again.
+    #[test]
+    fn an_unreadable_subdirectory_fails_discovery_and_the_next_walk_recovers() {
+        let temporary = tempfile::tempdir().expect("fixture root");
+        let root = temporary.path();
+        fs::create_dir_all(root.join("packages/app")).expect("readable package");
+        fs::write(root.join("packages/app/tsconfig.json"), "{}").expect("readable tsconfig");
+        let blocked = root.join("packages/blocked");
+        fs::create_dir_all(blocked.join("nested")).expect("blocked package");
+        fs::write(blocked.join("nested/tsconfig.json"), "{}").expect("blocked tsconfig");
+        fs::set_permissions(&blocked, fs::Permissions::from_mode(0o000))
+            .expect("drop traversal permission");
+
+        let walked = typescript_projects(root);
+        // The probe runs under the same permissions as the walk; a privileged
+        // runner bypasses them, so the unreadable case cannot be staged there.
+        if fs::read_dir(&blocked).is_err() {
+            let error = walked.expect_err("an unreadable subtree fails the walk");
+            assert_eq!(error.root(), root);
+            assert!(
+                error.to_string().contains(&root.display().to_string()),
+                "a failed walk names its root: {error}"
+            );
+            assert!(
+                discovery_outcome(root, Err(error)).is_none(),
+                "a failed walk is never published as a discovery"
+            );
+        }
+
+        fs::set_permissions(&blocked, fs::Permissions::from_mode(0o700))
+            .expect("restore traversal permission");
+        let recovered =
+            discovery_outcome(root, typescript_projects(root)).expect("a readable walk admits");
+        assert_eq!(
+            recovered
+                .iter()
+                .map(|project| project.tsconfig.strip_prefix(root).expect("under the root"))
+                .collect::<Vec<_>>(),
+            [
+                "packages/app/tsconfig.json",
+                "packages/blocked/nested/tsconfig.json"
+            ]
+            .map(Path::new)
+            .to_vec(),
+            "discovery recovers every project, including the one it could not read"
+        );
+    }
 }

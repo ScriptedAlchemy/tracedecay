@@ -57,9 +57,9 @@ pub use capabilities::{
 };
 pub use compile_diagnostics::Diagnostic;
 pub use compile_diagnostics::tsconfig::{
-    TypeScriptProgram, TypeScriptProject, is_typescript_package_manifest,
-    typescript_build_info_program, typescript_install_command, typescript_project,
-    typescript_projects,
+    TypeScriptProgram, TypeScriptProject, TypeScriptProjectDiscoveryError,
+    is_typescript_package_manifest, typescript_build_info_program, typescript_install_command,
+    typescript_project, typescript_projects,
 };
 pub use compile_diagnostics::typescript::{
     TYPESCRIPT_INSTALL_COMMAND, TypeScriptCompilerAdmission, TypeScriptConfiguration,

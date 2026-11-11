@@ -2457,7 +2457,7 @@ mod tests {
         std::fs::write(root.join("pnpm-lock.yaml"), "lockfileVersion: '9.0'\n").expect("lock");
         crate::diagnostics_producer::publish_typescript_discovery_v1(
             root,
-            &tracedecay_lsp::typescript_projects(root),
+            &tracedecay_lsp::typescript_projects(root).expect("tsconfig discovery"),
             &mut state,
         )
         .await;
