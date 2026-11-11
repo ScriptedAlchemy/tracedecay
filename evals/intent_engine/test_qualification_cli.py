@@ -187,7 +187,7 @@ class QualificationCliTests(unittest.TestCase):
             qualified, cwd=self.root, capture_output=True, text=True, timeout=30,
         )
         self.assertNotEqual(rejected.returncode, 0)
-        self.assertIn("response or row disagrees", rejected.stderr)
+        self.assertIn("raw response disagrees with first scored row", rejected.stderr)
         self.assertEqual(rejected.stdout, "")
         self.assertEqual((self.root / "qualification_summary.json").read_bytes(), previous)
 

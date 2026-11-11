@@ -473,6 +473,7 @@ pub struct McpServer {
     application_invocation_executor:
         Option<Arc<dyn tracedecay_daemon_protocol::DaemonInvocationExecutor>>,
     daemon_invocation_service: Option<tracedecay_daemon_service::DaemonInvocationService>,
+    operation_events: tracedecay_application::operation_stream::OperationEventAuthority,
     delivery_settlement_authority:
         Option<Arc<tracedecay_application::observability::DeliverySettlementAuthorityV1>>,
     pub(crate) delivery_settlement_recorder:
@@ -804,6 +805,10 @@ impl McpServer {
             #[cfg(any(test, feature = "test-transport"))]
             host_admission_test_runtime,
         } = context;
+        let operation_events = daemon_invocation_service
+            .as_ref()
+            .map(tracedecay_daemon_service::DaemonInvocationService::operation_events)
+            .unwrap_or_default();
         let persisted_tokens_saved = match cg.get_tokens_saved().await {
             Ok(persisted) => Some(persisted),
             Err(error) => {
@@ -1034,6 +1039,7 @@ impl McpServer {
             application_surface_client: tokio::sync::OnceCell::new(),
             application_invocation_executor,
             daemon_invocation_service,
+            operation_events,
             delivery_settlement_authority,
             delivery_settlement_recorder,
             project_server_live,

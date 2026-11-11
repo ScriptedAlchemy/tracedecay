@@ -839,17 +839,32 @@ class RunHttpTest(unittest.TestCase):
         self.assertEqual(list(self.output.parent.iterdir()), [])
 
     def test_probe_close_failure_still_removes_owned_staging(self):
+        actual_open = os.open
         actual_close = os.close
+        probe_descriptors = set()
+        failed_probes = []
+
+        def open_probe(path, *args, **kwargs):
+            descriptor = actual_open(path, *args, **kwargs)
+            if os.path.basename(path).startswith(".noul-link-probe-"):
+                probe_descriptors.add(descriptor)
+            return descriptor
 
         def close_then_fail(descriptor):
             actual_close(descriptor)
-            raise OSError(errno.EIO, "probe close failed")
+            if descriptor in probe_descriptors:
+                probe_descriptors.remove(descriptor)
+                failed_probes.append(descriptor)
+                raise OSError(errno.EIO, "probe close failed")
 
         with patch.object(run_http, "post") as post:
-            with patch.object(run_http.os, "close", side_effect=close_then_fail):
+            with patch.object(run_http.os, "open", side_effect=open_probe), patch.object(
+                run_http.os, "close", side_effect=close_then_fail,
+            ):
                 with self.assertRaisesRegex(OSError, "probe close failed"):
                     self.run_main()
             post.assert_not_called()
+        self.assertEqual(len(failed_probes), 1, "the probe itself must reach the failed close")
         self.assertEqual(list(self.output.parent.iterdir()), [])
         self.assertFalse(self.partial.exists())
 

@@ -317,7 +317,13 @@ describe('Session provenance inspector', () => {
     const identity = screen.getByRole('region', { name: 'Identity' });
     expect(identity.querySelector('[data-identity="ambiguous"]')).not.toBeNull();
     expect(identity.querySelector('[data-evidence-grade="AMBIGUOUS"]')).not.toBeNull();
-    expect(screen.queryByRole('link', { name: /Open in Loom/ })).toBeNull();
+    // The link preserves the unknown provider, so Loom reports ambiguity
+    // instead of silently selecting one of the competing provider lanes.
+    const ambiguousLoom = screen.getByRole('link', { name: /Open in Loom/ });
+    const ambiguousTarget = new URL(ambiguousLoom.getAttribute('href') ?? '', 'http://dashboard.test');
+    expect(ambiguousTarget.pathname).toBe('/loom');
+    expect(ambiguousTarget.searchParams.get('loomBareSession')).toBe('claude:035c8f3c');
+    expect(ambiguousTarget.searchParams.has('loomSession')).toBe(false);
     expect(screen.getByRole('link', { name: /Open in Agents/ }).getAttribute('href')).toBe(
       '/agents?sessionId=claude%3A035c8f3c',
     );
@@ -325,7 +331,26 @@ describe('Session provenance inspector', () => {
     expect(onSelectProvider).toHaveBeenCalledWith('codex');
   });
 
-  it('links a session whose provider was never recorded to the lane Loom draws for it', () => {
+  it('links a provider-less session absent from the loaded page through Loom bare-ID', () => {
+    stubTranscript();
+    renderWith(
+      <SessionInspector
+        selection={{ provider: null, sessionId: 'quiet' }}
+        index={ready(indexPayload({ sessions: [] }))}
+        indexPage={1}
+        onSelectProvider={() => {}}
+        onClose={() => {}}
+      />,
+    );
+    expect(screen.getByRole('region', { name: 'Identity' }).querySelector('[data-identity="absent"]')).not.toBeNull();
+    const pivot = screen.getByRole('link', { name: /Open in Loom/ });
+    const target = new URL(pivot.getAttribute('href') ?? '', 'http://dashboard.test');
+    expect(target.pathname).toBe('/loom');
+    expect(target.searchParams.get('loomBareSession')).toBe('quiet');
+    expect(target.searchParams.has('loomSession')).toBe(false);
+  });
+
+  it('keeps a recorded unknown-provider row on its explicit unknown Loom lane', () => {
     stubTranscript();
     renderWith(
       <SessionInspector
@@ -337,9 +362,9 @@ describe('Session provenance inspector', () => {
       />,
     );
     const pivot = screen.getByRole('link', { name: /Open in Loom/ });
-    expect(new URL(pivot.getAttribute('href') ?? '', 'http://dashboard.test').searchParams.get('loomSession')).toBe(
-      '["unknown","quiet"]',
-    );
+    const target = new URL(pivot.getAttribute('href') ?? '', 'http://dashboard.test');
+    expect(target.searchParams.get('loomSession')).toBe('["unknown","quiet"]');
+    expect(target.searchParams.has('loomBareSession')).toBe(false);
   });
 
   it('reports a blocked index read as the reason identity and relations are missing', () => {

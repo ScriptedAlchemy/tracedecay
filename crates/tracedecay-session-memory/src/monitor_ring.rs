@@ -63,8 +63,8 @@ impl MonitorEntry {
 /// `dir`.
 ///
 /// `project_root` is used to derive the folder name. `prefix` identifies
-/// the tool suite (e.g. "tracedecay"). Best-effort: silently returns on
-/// any failure.
+/// the tool suite (e.g. "tracedecay"). Writer failures are returned to
+/// the caller so accounting can report a degraded live-monitor projection.
 pub fn write_entry_to(
     dir: &Path,
     project_root: &Path,
@@ -72,13 +72,13 @@ pub fn write_entry_to(
     tool_name: &str,
     delta: u64,
     before: u64,
-) {
-    let _ = std::fs::create_dir_all(dir);
+) -> std::io::Result<()> {
+    std::fs::create_dir_all(dir)?;
     let mmap_path = dir.join(MMAP_FILENAME);
     let project = project_root
         .file_name()
         .map_or_default(|n| n.to_string_lossy().to_string());
-    let _ = write_entry_inner(&mmap_path, prefix, &project, tool_name, delta, before);
+    write_entry_inner(&mmap_path, prefix, &project, tool_name, delta, before)
 }
 
 fn write_str(mmap: &mut memmap2::MmapMut, offset: usize, value: &str) {
@@ -326,7 +326,8 @@ mod tests {
     fn write_values(dir: &Path, values: std::ops::RangeInclusive<u64>) {
         let project = Path::new("/projects/alpha");
         for value in values {
-            write_entry_to(dir, project, "tracedecay", "search", value, 0);
+            write_entry_to(dir, project, "tracedecay", "search", value, 0)
+                .expect("write monitor entry");
         }
     }
 
@@ -442,16 +443,41 @@ mod tests {
         );
     }
 
+    #[test]
+    fn writer_reports_unavailable_directory_and_ring_without_clobbering_them() {
+        let dir = tempfile::tempdir().expect("monitor fixture directory");
+        let project = Path::new("/projects/alpha");
+
+        // A non-directory owner path cannot be turned into a monitor cache.
+        let occupied_dir = dir.path().join("occupied");
+        std::fs::write(&occupied_dir, b"owner data").expect("create occupied path");
+        write_entry_to(&occupied_dir, project, "tracedecay", "search", 7, 10)
+            .expect_err("a file used as the monitor directory must be refused");
+        assert_eq!(
+            std::fs::read(&occupied_dir).expect("read original owner file"),
+            b"owner data"
+        );
+
+        // Opening a directory as the mmap is a separate post-mkdir failure.
+        let occupied_ring = dir.path().join(MMAP_FILENAME);
+        std::fs::create_dir(&occupied_ring).expect("create occupied mmap path");
+        write_entry_to(dir.path(), project, "tracedecay", "search", 7, 10)
+            .expect_err("an occupied mmap path must be refused");
+        assert!(occupied_ring.is_dir());
+    }
+
     /// Writers no longer msync, so an already-open reader must still observe
     /// every entry through its existing mapping, without a refresh.
     #[test]
     fn open_reader_observes_every_unflushed_entry() {
         let dir = tempfile::tempdir().expect("monitor dir");
         let project = tempfile::tempdir().expect("project dir");
-        write_entry_to(dir.path(), project.path(), "tracedecay", "first", 1, 2);
+        write_entry_to(dir.path(), project.path(), "tracedecay", "first", 1, 2)
+            .expect("write initial monitor entry");
         let reader = MmapReader::open_at(dir.path()).expect("open monitor");
         for call in 1..40_u64 {
-            write_entry_to(dir.path(), project.path(), "tracedecay", "poll", call, 2);
+            write_entry_to(dir.path(), project.path(), "tracedecay", "poll", call, 2)
+                .expect("write monitor poll entry");
         }
         assert_eq!(reader.write_idx(), 40);
         let last = reader.entry(39).expect("last slot");

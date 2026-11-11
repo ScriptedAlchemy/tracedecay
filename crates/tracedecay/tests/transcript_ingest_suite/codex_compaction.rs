@@ -183,24 +183,20 @@ done
     .unwrap();
     let project_id = mark_test_project(&project);
     // The hook resolves the project root through the initialized-store gate,
-    // exactly like production installs: `init` creates the project store
-    // first, then daemon enrollment mounts the already-initialized layout
-    // (the canonical enrollment composition itself creates the project graph
-    // database, so init must come first, as it does in a real install).
+    // exactly like production installs: `init` creates the project store and
+    // admits the canonical daemon-owned project route.
     crate::common::initialize_tracedecay_cli_project(&home, &project);
     // The daemon launches a summarizer only through the project's
     // `lcm.summarizer_executables.v1` binding, so the fake `codex` is bound
     // through the production configuration surface while the managed daemon
     // from init is still serving the project.
     configure_codex_summarizer(&home, &project, &project_id, &codex_bin);
-    crate::common::stop_managed_daemon(&home);
-    let enrollment = HostAdmissionTestRuntimeV1::project(&profile, &project, project_id.clone())
-        .await
-        .unwrap();
-    drop(enrollment);
+    // Keep that production owner through the hook. An in-process enrollment
+    // adds no fixture data and would require retiring and cold-opening the
+    // same stores again just before the hook's bounded publication join.
+    let daemon = spawn_tracedecay_daemon(&home);
     write_codex_rollout_with_compaction(&home, &project, "codex-compact");
 
-    let daemon = spawn_tracedecay_daemon(&home);
     let event = serde_json::json!({
         "hook_event_name": "PostCompact",
         "session_id": "codex-compact",

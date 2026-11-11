@@ -2851,17 +2851,22 @@ class QualificationTests(unittest.TestCase):
             reordered.reverse()
             invalid.append(("ordering", reordered))
             injected = copy.deepcopy(records)
-            injected[0]["body"] = injected[0]["body"].replace(
-                '"type":"noul"', '"type":"choice"', 1
+            injected_body = qualification.loads_unambiguous_json(injected[0]["body"])
+            injected_body["questions"][next(iter(self.questions))]["type"] = "choice"
+            injected[0]["body"] = json.dumps(
+                injected_body, ensure_ascii=False, indent=2, sort_keys=True,
             )
             invalid.append(("question contract", injected))
             extra = copy.deepcopy(records)
-            extra[0]["body"] = extra[0]["body"].replace(
-                '{"questions":', '{"debug":"injected","questions":', 1
+            extra_body = qualification.loads_unambiguous_json(extra[0]["body"])
+            extra_body["debug"] = "injected"
+            extra[0]["body"] = json.dumps(
+                extra_body, ensure_ascii=False, indent=2, sort_keys=True,
             )
             invalid.append(("extra request field", extra))
             for name, changed in invalid:
                 with self.subTest(name=name):
+                    self.assertNotEqual(changed, records, "the refusal fixture must mutate evidence")
                     changed_bytes = json.dumps(changed, ensure_ascii=False).encode("utf-8")
                     with self.assertRaises(ValueError):
                         qualification.captured_request_bodies(

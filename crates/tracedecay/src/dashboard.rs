@@ -54,7 +54,7 @@ pub async fn run_until_shutdown_for_tests_with_host_admission<F>(
     profile_sessions: Option<&tracedecay_global_db::RegisteredGlobalDbLeaseV1>,
     authority: DashboardHostAdmissionTestAuthorityV1,
     project_graphs: DashboardTestProjectGraphsV1,
-    endpoint: DashboardTestEndpointV1<'_>,
+    endpoint: DashboardTestEndpointV1,
     build_version: &'static str,
     spa_routes: axum::Router,
     shutdown: F,
