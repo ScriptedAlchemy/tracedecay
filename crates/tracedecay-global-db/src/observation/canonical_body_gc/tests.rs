@@ -6,6 +6,7 @@ use tracedecay_store::{
 };
 
 use super::{CanonicalBodyGcReport, has_candidates, read_progress, schema, step};
+use crate::tests::harness::{RegisteredGlobalDbHarness, writer_telemetry};
 
 struct Store {
     runtime: TestConnection,
@@ -907,8 +908,6 @@ async fn reinserted_candidate_page_refuses_false_discharge_and_recovers() {
 
 #[asupersync::test]
 async fn idle_registered_gc_avoids_writer_and_rechecks_new_candidates() {
-    use crate::tests::harness::{RegisteredGlobalDbHarness, writer_telemetry};
-
     let harness = RegisteredGlobalDbHarness::open("canonical-body-idle-writer").await;
     let before = writer_telemetry(&harness.registered).transactions;
     for _ in 0..3 {
