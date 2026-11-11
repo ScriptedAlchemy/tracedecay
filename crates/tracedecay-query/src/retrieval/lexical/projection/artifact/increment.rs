@@ -15,6 +15,7 @@ use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
+use rusqlite::types::Value;
 use rusqlite::{OptionalExtension, Transaction, params};
 use tracedecay_code_index::production::{
     CodeIndexExecutionControlV1, SealedLexicalFileReplacementV1, VerifiedSealedLexicalPageV1,
@@ -236,19 +237,6 @@ impl ShiftV1 {
                     .map_or(u64::MAX, |(next_start, _)| *next_start);
                 any_in(*start, *end) || (self.growth[index] != 0 && any_in(*end, next))
             })
-    }
-
-    /// An SQL expression giving `column`'s successor value for a carried
-    /// row; it reads only the parent value, so one `UPDATE` applies it.
-    fn sql_image(&self, column: &str) -> String {
-        let mut expression = String::from("CASE");
-        for ((_, end), growth) in self.replaced.iter().zip(&self.growth).rev() {
-            expression.push_str(&format!(
-                " WHEN {column} >= {end} THEN {column} + ({growth})"
-            ));
-        }
-        expression.push_str(&format!(" ELSE {column} END"));
-        expression
     }
 
     fn sql_replaced(&self, column: &str) -> String {
@@ -636,25 +624,67 @@ fn shift_rowid_keys(
     table: &str,
     column: &str,
     shift: &ShiftV1,
+    control: &dyn CodeIndexExecutionControlV1,
 ) -> Result<(), CodeLexicalArtifactErrorV1> {
     let Some(first) = shift.first_affected().filter(|_| shift.shifts()) else {
         return Ok(());
     };
-    transaction
-        .execute(
-            &format!(
-                "UPDATE {table} SET {column} = -({image}) - 1 WHERE {column} >= {first}",
-                image = shift.sql_image(column)
-            ),
-            [],
-        )
+    // A bulk UPDATE of INTEGER PRIMARY KEY values builds a statement-local
+    // ephemeral key index that can spill despite an empty TEMP pager afterward.
+    // Use bounded key-ordered reads and exact updates in both staging passes.
+    let mut update = transaction
+        .prepare_cached(&format!(
+            "UPDATE {table} SET {column} = ?2 WHERE {column} = ?1"
+        ))
         .map_err(sqlite_error)?;
-    transaction
-        .execute(
-            &format!("UPDATE {table} SET {column} = -{column} - 1 WHERE {column} < 0"),
-            [],
-        )
-        .map_err(sqlite_error)?;
+    for staging in [true, false] {
+        let predicate = if staging {
+            format!("{column} >= {first}")
+        } else {
+            format!("{column} < 0")
+        };
+        let first_sql =
+            format!("SELECT {column} FROM {table} WHERE {predicate} ORDER BY {column} LIMIT ?1");
+        let after_sql = format!(
+            "SELECT {column} FROM {table} WHERE {predicate} AND {column} > ?1 ORDER BY {column} LIMIT ?2"
+        );
+        let mut last: Option<i64> = None;
+        loop {
+            checkpoint(control)?;
+            let window: Vec<i64> = postings::scan_window(
+                transaction,
+                &first_sql,
+                &after_sql,
+                &last,
+                |key| vec![Value::Integer(*key)],
+                |row| row.get(0),
+            )?;
+            let Some(final_key) = window.last() else {
+                break;
+            };
+            last = Some(*final_key);
+            for key in window {
+                checkpoint(control)?;
+                let target = if staging {
+                    let mapped = shift
+                        .map(u64::try_from(key).map_err(contract_number)?)?
+                        .ok_or_else(|| {
+                            CodeLexicalArtifactErrorV1::Corrupt(
+                                "replaced lexical row survived deletion".to_owned(),
+                            )
+                        })?;
+                    -i64::try_from(mapped).map_err(contract_number)? - 1
+                } else {
+                    -(key + 1)
+                };
+                if update.execute(params![key, target]).map_err(sqlite_error)? != 1 {
+                    return Err(CodeLexicalArtifactErrorV1::Corrupt(
+                        "carried lexical row changed during key shift".to_owned(),
+                    ));
+                }
+            }
+        }
+    }
     Ok(())
 }
 
@@ -673,7 +703,13 @@ fn carry_row_blocks(
             [],
         )
         .map_err(sqlite_error)?;
-    shift_rowid_keys(transaction, "row_blocks", "first_document", documents)?;
+    shift_rowid_keys(
+        transaction,
+        "row_blocks",
+        "first_document",
+        documents,
+        control,
+    )?;
     let mut insert = transaction
         .prepare_cached("INSERT INTO row_blocks(first_document, payload) VALUES (?1, ?2)")
         .map_err(sqlite_error)?;
@@ -704,15 +740,59 @@ fn carry_row_chunks(
         )
         .map_err(sqlite_error)?;
     if let Some(first) = documents.first_affected().filter(|_| documents.shifts()) {
-        transaction
-            .execute(
-                &format!(
-                    "UPDATE row_chunks SET document_id = {} WHERE document_id >= {first}",
-                    documents.sql_image("document_id")
-                ),
-                [],
+        // The chunk ID is the stable primary key; the document ID is only a
+        // value. Seek primary-key windows so a large carry can observe
+        // cancellation between updates without creating a sorted TEMP copy.
+        let mut update = transaction
+            .prepare_cached(
+                "UPDATE row_chunks SET document_id = ?3 WHERE chunk_id = ?1 AND document_id = ?2",
             )
             .map_err(sqlite_error)?;
+        let first_sql = format!(
+            "SELECT chunk_id, document_id FROM row_chunks WHERE document_id >= {first} ORDER BY chunk_id LIMIT ?1"
+        );
+        let after_sql = format!(
+            "SELECT chunk_id, document_id FROM row_chunks WHERE document_id >= {first} AND chunk_id > ?1 ORDER BY chunk_id LIMIT ?2"
+        );
+        let mut last: Option<Value> = None;
+        loop {
+            checkpoint(control)?;
+            let window: Vec<(Value, i64)> = postings::scan_window(
+                transaction,
+                &first_sql,
+                &after_sql,
+                &last,
+                |chunk_id| vec![chunk_id.clone()],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )?;
+            let Some((final_chunk, _)) = window.last() else {
+                break;
+            };
+            last = Some(final_chunk.clone());
+            for (chunk_id, old_document) in window {
+                checkpoint(control)?;
+                let mapped = documents
+                    .map(u64::try_from(old_document).map_err(contract_number)?)?
+                    .ok_or_else(|| {
+                        CodeLexicalArtifactErrorV1::Corrupt(
+                            "replaced lexical chunk survived deletion".to_owned(),
+                        )
+                    })?;
+                let mapped = i64::try_from(mapped).map_err(contract_number)?;
+                if mapped == old_document {
+                    continue;
+                }
+                if update
+                    .execute(params![chunk_id, old_document, mapped])
+                    .map_err(sqlite_error)?
+                    != 1
+                {
+                    return Err(CodeLexicalArtifactErrorV1::Corrupt(
+                        "carried lexical chunk changed during remap".to_owned(),
+                    ));
+                }
+            }
+        }
     }
     let mut insert = transaction
         .prepare_cached("INSERT INTO row_chunks(chunk_id, document_id) VALUES (?1, ?2)")
@@ -819,3 +899,6 @@ fn write_page_rows(
     }
     Ok(rows.len() as u64)
 }
+
+#[cfg(test)]
+mod tests;
