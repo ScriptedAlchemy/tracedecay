@@ -1678,6 +1678,7 @@ impl ProjectOpenInputs<'_> {
                     http_owner,
                     &core.project_id,
                     self.canonical_project_path,
+                    self.invocation.service.operation_events(),
                 )
                 .await?;
                 self.log_phase("http_application_mounted", None, full_setup_started);

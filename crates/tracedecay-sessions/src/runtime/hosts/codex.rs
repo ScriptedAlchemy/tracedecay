@@ -2442,12 +2442,20 @@ fn retained_scan_step(
                                         directory_scan_witness(&directory.path)?
                                     };
                                     let identity = scan.directories[directory_index].identity;
-                                    if closing.as_ref().map(|stamp| stamp.stable_stat)
-                                        != identity.map(|identity| identity.stable_stat)
+                                    // The verification iterator may itself span
+                                    // the coarse timestamp window. Its opening
+                                    // witness must not gain settled authority
+                                    // from a closing stat after that window.
+                                    if closing.as_ref().map(|stamp| stamp.stat)
+                                        != identity.map(|identity| identity.stat)
                                         || identity.and_then(|identity| identity.entries)
                                             != Some(std::mem::take(fingerprint).finish())
                                     {
                                         scan.complete = false;
+                                        // Force the next idle probe to restart
+                                        // discovery; the failed name witness
+                                        // cannot certify the closing snapshot.
+                                        scan.directories[directory_index].identity = None;
                                     }
                                     // Commit the closing witness so the idle
                                     // probe compares against the state this
@@ -2784,7 +2792,15 @@ fn codex_directory_changed(
     path: &Path,
     stored: Option<CodexDirectoryWitness>,
 ) -> TranscriptIngestResult<bool> {
-    let Some(current) = directory_stat_witness(path)? else {
+    codex_directory_changed_since(path, directory_stat_witness(path)?, stored)
+}
+
+fn codex_directory_changed_since(
+    path: &Path,
+    current: Option<DirectoryStatWitness>,
+    stored: Option<CodexDirectoryWitness>,
+) -> TranscriptIngestResult<bool> {
+    let Some(current) = current else {
         return Ok(stored.is_some());
     };
     let Some(stored) = stored else {

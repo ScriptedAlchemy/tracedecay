@@ -575,6 +575,14 @@ async fn open_polled_lsp_delivery(
 }
 
 async fn assert_one_lsp_delivery_drop(fixture: LspDeliveryFixture) {
+    assert_one_lsp_delivery_settlement(fixture, 0, 1).await;
+}
+
+async fn assert_one_lsp_delivery_settlement(
+    fixture: LspDeliveryFixture,
+    delivered: u16,
+    dropped: u16,
+) {
     let summary = fixture
         .recorder
         .shutdown()
@@ -613,9 +621,88 @@ async fn assert_one_lsp_delivery_drop(fixture: LspDeliveryFixture) {
     else {
         panic!("expected LSP delivery fanout observation");
     };
-    assert_eq!(fanout.delivered, 0);
-    assert_eq!(fanout.dropped, 1);
+    assert_eq!(fanout.delivered, delivered);
+    assert_eq!(fanout.dropped, dropped);
     assert_eq!(fanout.unknown, 0);
+}
+
+/// Records the thread that opens each span of one name.
+struct SpanThreads {
+    span_name: &'static str,
+    threads: Arc<std::sync::Mutex<Vec<std::thread::ThreadId>>>,
+}
+
+impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for SpanThreads {
+    fn on_new_span(
+        &self,
+        attributes: &tracing::span::Attributes<'_>,
+        _id: &tracing::span::Id,
+        _context: tracing_subscriber::layer::Context<'_, S>,
+    ) {
+        if attributes.metadata().name() == self.span_name {
+            self.threads
+                .lock()
+                .expect("span thread log")
+                .push(std::thread::current().id());
+        }
+    }
+}
+
+/// An acknowledgement publishes its delivery receipt to the recorder's spool
+/// with file and directory fsyncs. Measured on an idle macOS disk that is
+/// 8 to 13 ms and all of the acknowledge span's busy time, 50 to 80 times any
+/// other LSP operation, and it ran on the serving thread under the daemon-wide
+/// session map lock. On a disk whose fsyncs stall, that parked the serving
+/// worker and every invocation behind the lock until the client's own
+/// deadline lapsed. The receipt must still be durable before the
+/// acknowledgement is answered, but it must be admitted off the serving thread.
+#[tokio::test]
+async fn lsp_acknowledgement_admits_its_delivery_receipt_off_the_serving_thread() {
+    use tracing_subscriber::layer::SubscriberExt;
+
+    let fixture = lsp_delivery_fixture().await;
+    let service = DaemonInvocationService::default();
+    let registry = Arc::new(Mutex::new(LspSessionRegistry::default()));
+    let session = open_polled_lsp_delivery(&fixture, &service, &registry, "ack").await;
+
+    let spool_publishers = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let acknowledged = {
+        let _capture = tracedecay_runtime_core::logging::set_tracing_capture(
+            tracing_subscriber::registry().with(SpanThreads {
+                span_name: "private_fs.framed_log.publish",
+                threads: Arc::clone(&spool_publishers),
+            }),
+        );
+        service
+            .invoke(
+                &registry,
+                None,
+                None,
+                None,
+                None,
+                DaemonInvocationRequest::lsp_acknowledge(
+                    "request.lsp-delivery.ack.ack",
+                    session,
+                    bridge_lsp_deadline(),
+                    bridge_lsp_cancellation(),
+                ),
+            )
+            .await
+    };
+    assert!(matches!(
+        acknowledged.outcome,
+        DaemonInvocationOutcome::LspAcknowledged { acknowledged: true }
+    ));
+    assert!(
+        !spool_publishers
+            .lock()
+            .expect("span thread log")
+            .contains(&std::thread::current().id()),
+        "the acknowledgement published its receipt on the serving thread"
+    );
+
+    drop(service);
+    assert_one_lsp_delivery_settlement(fixture, 1, 0).await;
 }
 
 #[tokio::test]
