@@ -19,12 +19,13 @@
 //! missing-compiler state, not an empty success, because a caller that asks
 //! for diagnostics must learn that nothing checked the project.
 
-use std::path::Path;
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 use std::time::{Duration, Instant};
 
-use tokio::sync::Semaphore;
+use tokio::sync::{Mutex, OwnedMutexGuard, Semaphore};
 
 use super::{Diagnostic, is_diagnostic_level};
 use tracedecay_domain::errors::{Result, TraceDecayError};
@@ -40,6 +41,7 @@ const MAX_CONCURRENT_COMPILERS: usize = 4;
 #[derive(Clone)]
 pub struct TypeScriptCompilerAdmission {
     permits: Arc<Semaphore>,
+    build_info_locks: Arc<Mutex<BTreeMap<PathBuf, Weak<Mutex<()>>>>>,
     background_cpu: Arc<ProcessBackgroundCpuV1>,
     cancellation: CancellationToken,
 }
@@ -49,6 +51,7 @@ impl TypeScriptCompilerAdmission {
     pub fn new(background_cpu: Arc<ProcessBackgroundCpuV1>) -> Self {
         Self {
             permits: Arc::new(Semaphore::new(MAX_CONCURRENT_COMPILERS)),
+            build_info_locks: Arc::new(Mutex::new(BTreeMap::new())),
             background_cpu,
             cancellation: CancellationToken::new(),
         }
@@ -57,6 +60,25 @@ impl TypeScriptCompilerAdmission {
     #[must_use]
     pub fn concurrency(&self) -> usize {
         MAX_CONCURRENT_COMPILERS
+    }
+
+    /// Serializes the complete use of one incremental build-info file, including
+    /// its revision binding. Producers sharing this admission may outlive their
+    /// route, but a retiring compiler must finish before its replacement can
+    /// delete or read the same compiler cache.
+    pub async fn serialize_build_info(&self, build_info: &Path) -> OwnedMutexGuard<()> {
+        let lock = {
+            let mut locks = self.build_info_locks.lock().await;
+            locks.retain(|_, lock| lock.strong_count() > 0);
+            if let Some(lock) = locks.get(build_info).and_then(Weak::upgrade) {
+                lock
+            } else {
+                let lock = Arc::new(Mutex::new(()));
+                locks.insert(build_info.to_path_buf(), Arc::downgrade(&lock));
+                lock
+            }
+        };
+        lock.lock_owned().await
     }
 
     pub fn cancel(&self) {
@@ -471,11 +493,26 @@ src/b.ts(2,2): warning TS6133: Second.
         native_runtime::block_on(future).expect("native runtime")
     }
 
-    #[cfg(unix)]
     fn admission() -> TypeScriptCompilerAdmission {
         TypeScriptCompilerAdmission::new(Arc::new(ProcessBackgroundCpuV1::new(
             std::num::NonZeroUsize::new(MAX_CONCURRENT_COMPILERS).unwrap(),
         )))
+    }
+
+    #[tokio::test]
+    async fn overlapping_checks_are_serialized_only_by_build_info_path() {
+        let admission = admission();
+        let build_info = Path::new("one.tsbuildinfo");
+        let held = admission.serialize_build_info(build_info).await;
+        let mut overlapping = Box::pin(admission.serialize_build_info(build_info));
+        assert!(futures_util::poll!(overlapping.as_mut()).is_pending());
+
+        let independent = admission
+            .serialize_build_info(Path::new("two.tsbuildinfo"))
+            .await;
+        drop(independent);
+        drop(held);
+        overlapping.await;
     }
 
     #[cfg(unix)]
