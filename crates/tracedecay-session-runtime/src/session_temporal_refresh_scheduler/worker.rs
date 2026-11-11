@@ -751,21 +751,25 @@ pub(super) async fn run_session_temporal_refresh_scheduler(
                     state.wake_history();
                     break;
                 }
-                // Ordinary source discovery keeps its one-minute cadence.
-                // A queued admission already owns the next history pass, so its
-                // turn must survive discovery deadlines and projection wakes.
-                // Terminal history blockers retain their longer backoff.
-                fired = tracing::Instrument::instrument(native_runtime::sleep_until(history_idle_deadline), tracing::trace_span!("daemon.scheduler.session_temporal.history_idle_wait")), if !awaiting_admission => {
+                // Ordinary source discovery retains its one-minute cadence.
+                // While history owns a queued admission turn, discover only
+                // projection work: a redundant history retry would surrender
+                // that queue position. Terminal blockers retain their backoff.
+                fired = tracing::Instrument::instrument(native_runtime::sleep_until(history_idle_deadline), tracing::trace_span!("daemon.scheduler.session_temporal.history_idle_wait")) => {
                     if stop_without_timer(fired) {
                         return;
                     }
-                    state.update_history_retry_state(false);
-                    if history
-                        .read()
-                        .unwrap_or_else(PoisonError::into_inner)
-                        .is_some()
-                    {
-                        state.wake_history();
+                    if awaiting_admission {
+                        state.wake();
+                    } else {
+                        state.update_history_retry_state(false);
+                        if history
+                            .read()
+                            .unwrap_or_else(PoisonError::into_inner)
+                            .is_some()
+                        {
+                            state.wake_history();
+                        }
                     }
                     break;
                 }
