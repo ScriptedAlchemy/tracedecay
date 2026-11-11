@@ -313,6 +313,7 @@ pub(super) fn resolution_hash_capacity(entries: usize) -> usize {
 pub(super) fn resolve_cross_file_references_charged<T: ResolutionFileV1>(
     files: &[T],
     retain_output: &mut dyn FnMut(u64) -> Result<(), CodeIndexProductionErrorV1>,
+    mut observe_file: Option<&mut dyn FnMut()>,
 ) -> Result<CrossFileResolutionV1, CodeIndexProductionErrorV1> {
     #[cfg(test)]
     SEAL_REFERENCE_RESOLUTIONS.with(|resolutions| resolutions.set(resolutions.get() + 1));
@@ -385,6 +386,11 @@ pub(super) fn resolve_cross_file_references_charged<T: ResolutionFileV1>(
         reserve_resolution_vec(&mut gaps, file_gaps.len(), &mut reserve)?;
         edges.extend(file_edges);
         gaps.extend(file_gaps);
+        // A real file's cross-reference decisions and their admitted output
+        // are complete. This is not a durable graph page or a timer wake.
+        if let Some(observe) = observe_file.as_deref_mut() {
+            observe();
+        }
     }
     let mut has_go = false;
     for file in files {

@@ -5,6 +5,8 @@
 
 use std::collections::VecDeque;
 
+use asupersync::channel::mpsc;
+
 use tracedecay_store::{RuntimeCancellationStageV1, RuntimeSubmitOutcomeV1, UnavailableReasonV1};
 
 use crate::{
@@ -16,7 +18,7 @@ use crate::{
 
 use super::super::{
     WriterActorError,
-    request::{AcceptedRequest, IncrementalVacuumCommand},
+    request::{AcceptedRequest, ExecutionBatch, IncrementalVacuumCommand},
     settlement::{interruption_outcome, missing_authority},
 };
 
@@ -53,18 +55,55 @@ pub(super) fn reject_unauthorized(
     }
 }
 
+/// A retired writer must settle every accepted request, including those not yet
+/// transferred from ingress to its fair queue. Closing first prevents a racing
+/// sender from losing its reply and leaving queue telemetry inflated.
+pub(super) fn reject_retired_write_ingress(
+    receiver: &mut mpsc::Receiver<AcceptedRequest>,
+    queue: &mut FairQueue<AcceptedRequest>,
+    telemetry: &WriterTelemetry,
+    reason: UnavailableReasonV1,
+) {
+    receiver.close();
+    reject_all(queue, telemetry, reason);
+    while let Ok(item) = receiver.try_recv() {
+        settle_unavailable(item, telemetry, reason);
+    }
+}
+
 pub(super) fn reject_all(
     queue: &mut FairQueue<AcceptedRequest>,
     telemetry: &WriterTelemetry,
     reason: UnavailableReasonV1,
 ) {
     for item in queue.drain_all() {
-        let bytes = item.admission_bytes();
-        let result = Ok(RuntimeSubmitOutcomeV1::Unavailable { reason });
-        telemetry.released(1, bytes);
-        telemetry.completed(&result);
-        item.settle(result);
+        settle_unavailable(item, telemetry, reason);
     }
+}
+
+/// Selected batches are no longer in the fair queue. If an earlier batch
+/// faults the writer, settle every remaining admission before retiring it.
+pub(super) fn reject_faulted_execution_batches(
+    batches: impl IntoIterator<Item = ExecutionBatch>,
+    telemetry: &WriterTelemetry,
+) {
+    for batch in batches {
+        for item in batch.items {
+            settle_unavailable(item, telemetry, UnavailableReasonV1::Faulted);
+        }
+    }
+}
+
+fn settle_unavailable(
+    item: AcceptedRequest,
+    telemetry: &WriterTelemetry,
+    reason: UnavailableReasonV1,
+) {
+    let bytes = item.admission_bytes();
+    let result = Ok(RuntimeSubmitOutcomeV1::Unavailable { reason });
+    telemetry.released(1, bytes);
+    telemetry.completed(&result);
+    item.settle(result);
 }
 
 pub(super) fn reject_all_exact_sql(queue: &mut VecDeque<ExactSqlWriterCommand>) {

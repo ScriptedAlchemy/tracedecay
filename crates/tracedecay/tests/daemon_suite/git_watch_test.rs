@@ -421,3 +421,76 @@ async fn concurrent_reconciliations_converge_on_one_sealed_generation() {
     assert_eq!(generation_index_len(&data_root, &project), before + 1);
     harness.shutdown().await;
 }
+
+#[tokio::test]
+async fn cold_and_restarted_daemon_status_retains_actual_native_graph_writes() {
+    let (root, project, harness) = indexed_repo().await;
+    let first = wait_for_symbol(&harness, &project, "refs/heads/main", None, "on_main").await;
+    let cold = status(&harness, &project).await;
+    let native = &cold["code_index_freshness"]["worktree"]["native_graph_progress"];
+    assert_eq!(
+        native["generation_id"], first,
+        "cold publication owner: {cold}"
+    );
+    assert_eq!(native["committed_compact_segments"], 1, "{cold}");
+    assert_eq!(native["active"], false, "{cold}");
+    assert!(
+        native["encoded_entities"]
+            .as_u64()
+            .is_some_and(|count| count > 0),
+        "the actual direct writer must report nonzero accepted entity rows: {cold}"
+    );
+    assert!(
+        native["committed_compact_bytes"]
+            .as_u64()
+            .is_some_and(|bytes| bytes > 0),
+        "only a real installed, digest-verified container is a commit: {cold}"
+    );
+    assert!(
+        native["last_progress_micros"]
+            .as_i64()
+            .is_some_and(|when| when > 0),
+        "read-side readiness must not replace the native writer clock: {cold}"
+    );
+    let original_digest = native["sealed_graph_digest"].clone();
+    harness.shutdown().await;
+
+    // A new daemon over the same durable store must serve the same original
+    // generation, without an invented second native graph publication.
+    let harness = ProductionProjectCompositionHarnessV1::open(root.path(), [project.clone()])
+        .await
+        .expect("restart the real project composition");
+    let retained = wait_for_symbol(&harness, &project, "refs/heads/main", None, "on_main").await;
+    assert_eq!(
+        retained, first,
+        "a read-only restart must retain the first seal"
+    );
+
+    fs::write(
+        project.join("src/successor.rs"),
+        "pub fn successor_after_restart() {}\n",
+    )
+    .expect("write changed source");
+    commit_all(&project, "successor after restart");
+    request_refresh(&harness, &project).await;
+    let successor = wait_for_symbol(
+        &harness,
+        &project,
+        "refs/heads/main",
+        Some(&first),
+        "successor_after_restart",
+    )
+    .await;
+    let latest = status(&harness, &project).await;
+    let native = &latest["code_index_freshness"]["worktree"]["native_graph_progress"];
+    assert_eq!(native["generation_id"], successor, "{latest}");
+    assert_ne!(native["sealed_graph_digest"], original_digest, "{latest}");
+    assert_eq!(native["committed_compact_segments"], 1, "{latest}");
+    assert!(
+        native["committed_compact_bytes"]
+            .as_u64()
+            .is_some_and(|bytes| bytes > 0),
+        "successor must emit its own verified native commit: {latest}"
+    );
+    harness.shutdown().await;
+}

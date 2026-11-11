@@ -303,6 +303,151 @@ fn assert_exact_ignored_dependency_roster(generation: &CodeIndexPublishedGenerat
     }));
 }
 
+/// A first generation has no sealed identity while the extraction worker is
+/// paused. Killing that daemon must not turn its attempt into a completed
+/// generation; the next daemon must build, seal and verify its own native graph.
+#[tokio::test]
+async fn hard_killed_cold_preseal_attempt_recovers_a_verified_native_graph() {
+    let (environment, project) = IsolatedHome::new();
+    let project = canonical_existing_identity(&project).expect("canonical fixture project");
+    let (main_revision, _) = initialize_repository(&project);
+    let hold = environment.scratch().join("hold-initial-cold-extraction");
+    let entered = PathBuf::from(format!("{}.entered", hold.display()));
+    fs::write(&hold, b"hold").expect("arm cold extraction hold");
+    let socket = daemon_socket_path(environment.home());
+    let mut daemon = spawn_tracedecay_daemon_with(environment.home(), |command| {
+        command.env("TRACEDECAY_TEST_HOLD_AFTER_COLD_EXTRACTION", &hold);
+    });
+    let project_id = initialize_tracedecay(environment.home(), &project);
+    let identity = exact_identity(&project, project_id);
+    tracedecay_project::product_runtime::register_fixture_product_runtime();
+    let handshake = crate::common::handshake_for_current_client(
+        environment.profile(),
+        Some(project.clone()),
+        None,
+        false,
+        false,
+    )
+    .expect("production daemon handshake");
+    poll_until(
+        Instant::now() + RECEIPT_TIMEOUT,
+        Duration::from_millis(20),
+        || entered.is_file().then_some(()),
+        || "the cold capture never reached its post-extraction hold".to_owned(),
+    );
+
+    // This status comes from the physical daemon while the parser-backed
+    // segments are prepared, before any sealed generation can exist.
+    let in_flight = tokio::time::timeout(RECEIPT_TIMEOUT, async {
+        loop {
+            let receipt = status(&socket, &handshake).await;
+            let attempt = &receipt["code_index_freshness"]["worktree"]["preseal_attempt"];
+            if attempt["active"] == true
+                && attempt["phase"] == "parse_evidence"
+                && attempt["completed_items"]
+                    .as_u64()
+                    .is_some_and(|count| count > 0)
+            {
+                return receipt;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .expect("cold daemon never reported real pre-seal parser work");
+    let cold = &in_flight["code_index_freshness"]["worktree"];
+    let attempt = &cold["preseal_attempt"];
+    assert_eq!(
+        cold["latest_generation_id"],
+        json!(null),
+        "unsealed capture cannot claim an immutable generation: {in_flight}"
+    );
+    assert_eq!(cold["progress"], json!(null));
+    assert_eq!(cold["native_graph_progress"], json!(null));
+    assert!(
+        attempt.get("generation_id").is_none() && attempt.get("sealed_source_digest").is_none(),
+        "pre-seal attempt cannot claim a nonexistent sealed authority: {in_flight}"
+    );
+    assert!(
+        attempt["last_progress_micros"]
+            .as_i64()
+            .is_some_and(|micros| micros > 0),
+        "a positive parse count must carry its original work timestamp: {in_flight}"
+    );
+    assert!(
+        attempt["progress_epoch"]
+            .as_u64()
+            .is_some_and(|epoch| epoch > 0),
+        "the active attempt must have an observed work epoch: {in_flight}"
+    );
+    let repeat = status(&socket, &handshake).await;
+    assert_eq!(
+        repeat["code_index_freshness"]["worktree"]["preseal_attempt"], *attempt,
+        "status polling under a paused producer must not invent new work"
+    );
+
+    let killed = daemon.kill_and_wait().expect("hard-kill the cold daemon");
+    assert!(
+        !killed.success(),
+        "cold interruption must be a real process kill"
+    );
+
+    // The hold is deliberately not propagated to the new daemon. It has to
+    // capture, parse, seal, and publish from the surviving real Git tree.
+    daemon = spawn_tracedecay_daemon_with(environment.home(), |_| {});
+    let recovered = wait_for_terminal_generation(
+        &socket,
+        &handshake,
+        &project,
+        &identity,
+        "refs/heads/main",
+        Some(&main_revision),
+        None,
+        "lifecycle_main_symbol",
+        Some("src/lib.rs"),
+    )
+    .await;
+    let mut last = Value::Null;
+    let completed_status = tokio::time::timeout(RECEIPT_TIMEOUT, async {
+        loop {
+            last = status(&socket, &handshake).await;
+            let native = &last["code_index_freshness"]["worktree"]["native_graph_progress"];
+            if native["generation_id"].as_str() == Some(recovered.generation_id.as_str())
+                && native["committed_compact_segments"] == 1
+                && native["active"] == false
+            {
+                return last.clone();
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("restarted native graph progress missing: {last}"));
+    let native = &completed_status["code_index_freshness"]["worktree"]["native_graph_progress"];
+    assert!(
+        native["committed_compact_bytes"]
+            .as_u64()
+            .is_some_and(|bytes| bytes > 0),
+        "native completion must name nonzero installed bytes: {native}"
+    );
+    assert!(
+        native["last_progress_micros"]
+            .as_i64()
+            .is_some_and(|micros| micros > 0),
+        "verified native completion must preserve its genuine work time: {native}"
+    );
+
+    let sealed = read_active_generation(environment.home(), &project);
+    assert_sealed_generation_identity(
+        &sealed,
+        &identity,
+        "refs/heads/main",
+        Some(&main_revision),
+        &recovered.generation_id,
+    );
+    stop_daemon_gracefully(&mut daemon);
+}
+
 #[tokio::test]
 async fn ignored_dependency_admission_survives_physical_daemon_restart_without_widening() {
     let (environment, project) = IsolatedHome::new();

@@ -646,6 +646,10 @@ pub async fn record_invalidation_page_yield(
     Ok(())
 }
 
+/// A failed attempt is settled against the raw revision it actually read.
+/// Older dirty raw work may remain after invalidation fails; it must not
+/// discard a retry deadline or resurrect a terminal refusal. A truly new
+/// raw revision increments the generation, so its stale outcome loses the CAS.
 pub async fn record_outcome(
     conn: &(impl Executor + ?Sized),
     candidate: &LcmSummaryConvergenceCandidate,
@@ -659,30 +663,38 @@ pub async fn record_outcome(
             "UPDATE lcm_summary_convergence_queue
          SET attempted_raw_store_id = ?3,
              state = CASE
-                 WHEN newest_raw_store_id > ?3 OR EXISTS (
-                     SELECT 1 FROM lcm_summary_convergence_dirty_raw AS dirty
-                     WHERE dirty.provider = ?1 AND dirty.session_id = ?2
+                 WHEN newest_raw_store_id > ?3 OR (
+                     ?4 IN ('pending', 'current') AND EXISTS (
+                         SELECT 1 FROM lcm_summary_convergence_dirty_raw AS dirty
+                         WHERE dirty.provider = ?1 AND dirty.session_id = ?2
+                     )
                  ) THEN 'pending'
                  ELSE ?4
              END,
              failure_code = CASE
-                 WHEN newest_raw_store_id > ?3 OR EXISTS (
-                     SELECT 1 FROM lcm_summary_convergence_dirty_raw AS dirty
-                     WHERE dirty.provider = ?1 AND dirty.session_id = ?2
+                 WHEN newest_raw_store_id > ?3 OR (
+                     ?4 IN ('pending', 'current') AND EXISTS (
+                         SELECT 1 FROM lcm_summary_convergence_dirty_raw AS dirty
+                         WHERE dirty.provider = ?1 AND dirty.session_id = ?2
+                     )
                  ) THEN NULL
                  ELSE ?5
              END,
              failure_count = CASE
-                 WHEN newest_raw_store_id > ?3 OR EXISTS (
-                     SELECT 1 FROM lcm_summary_convergence_dirty_raw AS dirty
-                     WHERE dirty.provider = ?1 AND dirty.session_id = ?2
+                 WHEN newest_raw_store_id > ?3 OR (
+                     ?4 IN ('pending', 'current') AND EXISTS (
+                         SELECT 1 FROM lcm_summary_convergence_dirty_raw AS dirty
+                         WHERE dirty.provider = ?1 AND dirty.session_id = ?2
+                     )
                  ) THEN 0
                  ELSE ?6
              END,
              next_attempt_at_ms = CASE
-                 WHEN newest_raw_store_id > ?3 OR EXISTS (
-                     SELECT 1 FROM lcm_summary_convergence_dirty_raw AS dirty
-                     WHERE dirty.provider = ?1 AND dirty.session_id = ?2
+                 WHEN newest_raw_store_id > ?3 OR (
+                     ?4 IN ('pending', 'current') AND EXISTS (
+                         SELECT 1 FROM lcm_summary_convergence_dirty_raw AS dirty
+                         WHERE dirty.provider = ?1 AND dirty.session_id = ?2
+                     )
                  ) THEN 0
                  ELSE ?7
              END,
