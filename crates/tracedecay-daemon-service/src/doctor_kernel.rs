@@ -42,6 +42,9 @@ use tracedecay_contracts::{
 };
 use tracedecay_domain::CodeGenerationId;
 use tracedecay_global_db::{GlobalDbNativeIntegrationStore, RegisteredGlobalDb};
+use tracedecay_graph_db::{
+    GraphGenerationId, GraphNamespace, GraphProjectionId, GraphProjectionIdentity,
+};
 
 use crate::DaemonFeedbackRuntimeRegistrar;
 use tracedecay_maintenance::retention::footprint::{
@@ -947,35 +950,45 @@ pub async fn collect_code_generation_retention_findings(
     storage_family_read(vec![finding])
 }
 
-/// The journaled generation ids whose sealed artifacts are still live in the
-/// project graph store: each projection's verified head, every publication
+/// The journaled projection/generation identities whose sealed artifacts remain
+/// live in the project graph store: each projection's verified head, every publication
 /// newer than its head (pending), and every generation an active replay
 /// depends on. A sealed directory outside this set is one the ordinary
 /// retirement pass reclaims; `None` when the journal cannot be read (an
 /// absent table on a store that never published, a lock, a corrupt row).
 async fn live_sealed_generations(
     graph: &tracedecay_runtime_core::db::Database,
-) -> Option<BTreeSet<String>> {
+) -> Option<BTreeSet<(GraphProjectionIdentity, GraphGenerationId)>> {
+    let shard = serde_json::to_string(&graph.registered_binding().shard_id).ok()?;
     let mut rows = graph
         .read_connection()
         .query(
-            "SELECT replay.generation
+            "SELECT replay.namespace, replay.projection, replay.generation
              FROM graph_publication_replay_v1 AS replay
              LEFT JOIN graph_verified_heads_v1 AS head
                ON head.shard_id = replay.shard_id
               AND head.namespace = replay.namespace
               AND head.projection = replay.projection
-             WHERE head.replay_sequence IS NULL
-                OR replay.sequence >= head.replay_sequence
+             WHERE replay.shard_id = ?1
+               AND (head.replay_sequence IS NULL
+                    OR replay.sequence >= head.replay_sequence)
              UNION
-             SELECT generation FROM graph_publication_replay_dependencies_v1",
-            (),
+             SELECT namespace, projection, generation
+             FROM graph_publication_replay_dependencies_v1
+             WHERE shard_id = ?1",
+            (shard,),
         )
         .await
         .ok()?;
     let mut heads = BTreeSet::new();
     while let Some(row) = rows.next().await.ok()? {
-        heads.insert(row.get::<String>(0).ok()?);
+        heads.insert((
+            GraphProjectionIdentity::new(
+                GraphNamespace::new(row.get::<String>(0).ok()?).ok()?,
+                GraphProjectionId::new(row.get::<String>(1).ok()?).ok()?,
+            ),
+            GraphGenerationId::new(row.get::<String>(2).ok()?).ok()?,
+        ));
     }
     Some(heads)
 }
@@ -986,21 +999,25 @@ async fn live_sealed_generations(
 /// that retirement has not yet reached. `None` when the journal cannot be
 /// read.
 async fn deferred_native_retirements(graph: &tracedecay_runtime_core::db::Database) -> Option<u64> {
+    let shard = serde_json::to_string(&graph.registered_binding().shard_id).ok()?;
     let mut rows = graph
         .read_connection()
         .query(
-            "SELECT (SELECT COUNT(*) FROM graph_publication_replay_tombstones_v1)
+            "SELECT (SELECT COUNT(*) FROM graph_publication_replay_tombstones_v1
+                     WHERE shard_id = ?1)
                   + (SELECT COUNT(*)
                      FROM graph_publication_replay_v1 AS replay
                      JOIN graph_verified_heads_v1 AS head
                        ON head.shard_id = replay.shard_id
                       AND head.namespace = replay.namespace
                       AND head.projection = replay.projection
-                     WHERE replay.sequence < head.replay_sequence
-                       AND replay.generation NOT IN (
-                           SELECT generation FROM graph_publication_replay_dependencies_v1
+                     WHERE replay.shard_id = ?1
+                       AND replay.sequence < head.replay_sequence
+                       AND NOT EXISTS (
+                           SELECT 1 FROM graph_publication_replay_dependencies_v1 AS dependency
+                           WHERE dependency.dependency_replay_sequence = replay.sequence
                        ))",
-            (),
+            (shard,),
         )
         .await
         .ok()?;
