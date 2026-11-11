@@ -23,8 +23,9 @@ Session capture/read has its own fixture-backed harness,
 `scripts/run-session-temporal-benchmark.sh --run`; this script records that
 lane as delegated rather than measuring a lookalike.
 
-Daemon CPU and memory come from /proc, so they are typed `unsupported` off
-Linux instead of reported as zero.
+Daemon CPU and anonymous/file memory come from Linux /proc. Current RSS and
+sampled peak RSS are also supported on macOS via the existing process-memory
+reader's `ps` fallback; unsupported readings stay unavailable, never zero.
 
 Usage:
   bazel build --config=release //crates/tracedecay-cli:tracedecay
@@ -57,9 +58,10 @@ from typing import Callable
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT / "scripts" / "lib"))
 
-from portable_process import dies_with_this_process  # noqa: E402
+from portable_process import dies_with_this_process, resident_memory_kib  # noqa: E402
 
 LINUX = sys.platform.startswith("linux")
+MACOS = sys.platform == "darwin"
 CLOCK_TICKS = os.sysconf("SC_CLK_TCK") if LINUX else None
 
 SEED_SYMBOLS = ["DaemonHandshake", "default_socket_path", "call_default_tool", "TraceDecay"]
@@ -140,6 +142,11 @@ def proc_cpu_ms(pid: int) -> float | None:
 
 
 def proc_status(pid: int) -> dict[str, int] | None:
+    if MACOS:
+        # Reuse the platform process-memory authority: ps reports RSS in KiB,
+        # but does not expose Linux-style private/file split or process HWM.
+        current, _ = resident_memory_kib(pid)
+        return {"VmRSS": current} if current is not None else None
     if not LINUX:
         return None
     wanted = {"VmRSS", "VmHWM", "RssAnon", "RssFile", "RssShmem", "Threads"}
@@ -173,10 +180,10 @@ class DaemonRssSampler:
     def _poll(self) -> None:
         while not self._stop.is_set():
             self._sample()
-            self._stop.wait(0.1)
+            self._stop.wait(0.5 if MACOS else 0.1)
 
     def start(self) -> None:
-        if not LINUX:
+        if not (LINUX or MACOS):
             return
         self._sample()
         self._thread = threading.Thread(target=self._poll, name="daemon-rss-sampler", daemon=True)
@@ -362,14 +369,14 @@ class Run:
         pid = self.daemon_pid()
         start = time.perf_counter()
         deadline = time.monotonic() + self.index_timeout
-        peak_rss_kb = 0
+        peak_rss_kb = None
         polls = 0
         unverified = ""
         while True:
             self.daemon_pid()
             status = proc_status(pid)
-            if status:
-                peak_rss_kb = max(peak_rss_kb, status.get("VmRSS", 0))
+            if status and "VmRSS" in status:
+                peak_rss_kb = max(peak_rss_kb or 0, status["VmRSS"])
             payload = self.status_payload()
             polls += 1
             if payload is not None:
@@ -393,7 +400,7 @@ class Run:
                         if time.monotonic() <= deadline:
                             return {
                                 "wall_ms": (time.perf_counter() - start) * 1000,
-                                "peak_daemon_rss_kb": peak_rss_kb if LINUX else None,
+                                "peak_daemon_rss_kb": peak_rss_kb,
                                 "generation_id": generation,
                                 "status_polls": polls,
                             }
@@ -530,10 +537,15 @@ class Run:
                 "owners": {row.get("kind"): row.get("bytes") for row in memory.get("owners") or []},
             }
         if status is None:
-            self.record("memory", phase, unsupported="daemon /proc counters are Linux-only",
+            self.record("memory", phase, unsupported=(
+                "daemon RSS sampling unavailable" if (LINUX or MACOS)
+                else "daemon RSS sampling unsupported on this platform"
+            ),
                         profile_bytes=tree_bytes(self.profile), status_memory=retained)
             return
-        self.record("memory", phase, rss_kb=status.get("VmRSS"), hwm_kb=status.get("VmHWM"),
+        self.record("memory", phase, rss_kb=status.get("VmRSS"),
+                    rss_source="linux_proc" if LINUX else "macos_ps",
+                    hwm_kb=status.get("VmHWM"),
                     anon_kb=status.get("RssAnon"), file_kb=status.get("RssFile"),
                     threads=status.get("Threads"), profile_bytes=tree_bytes(self.profile),
                     status_memory=retained)
@@ -615,10 +627,12 @@ class Run:
         if peak_rss_kb is None:
             ready.pop("peak_daemon_rss_kb", None)
             ready["unsupported"] = (
-                "daemon /proc counters are Linux-only" if not LINUX else "daemon VmRSS is unavailable"
+                "daemon RSS sampling unavailable" if (LINUX or MACOS)
+                else "daemon RSS sampling unsupported on this platform"
             )
         else:
             ready["peak_daemon_rss_kb"] = peak_rss_kb
+            ready["peak_rss_source"] = "linux_proc" if LINUX else "macos_ps"
         self.generation = ready["generation_id"]
         work = sealed_source_work(proof_log, proof_offset)
         self.record(

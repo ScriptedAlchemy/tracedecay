@@ -193,17 +193,65 @@ class BenchHotPathsTests(unittest.TestCase):
             "no complete sealed source proof telemetry in measured window",
             "an uninstrumented binary cannot claim zero source authentication work",
         )
-        if sys.platform.startswith("linux"):
+        if sys.platform.startswith("linux") or sys.platform == "darwin":
             self.assertIsInstance(edit_ready["peak_daemon_rss_kb"], int)
             self.assertGreater(edit_ready["peak_daemon_rss_kb"], 0)
         else:
-            self.assertEqual(edit_ready["unsupported"], "daemon /proc counters are Linux-only")
+            self.assertEqual(edit_ready["unsupported"], "daemon RSS sampling unsupported on this platform")
         self.assertEqual(single[("memory", "after_requests")]["status_memory"]["owners"], {"graph_engine": 4096})
         self.assertEqual(single[("request", "callers_node")]["node_id"], "node.fake")
         self.assertEqual(single[("request", "callers_node")]["seed_symbol"], "DaemonHandshake")
         self.assertEqual(single[("daemon", "alive_after_run")]["ok"], True)
         self.assertEqual(list(self.tmp.iterdir()), [])
         self.assertEqual((self.repo / "src" / "lib.rs").read_text(), "pub fn answer() -> u32 { 42 }\n")
+
+
+    def test_macos_rss_samples_the_real_process_reader_without_fabricated_peak(self) -> None:
+        # The original 2.3-GB issue was observed on macOS, where /proc is absent.
+        # Drive the actual portable process reader's ps fallback and the
+        # benchmark's sampled high-water mark with deterministic process output.
+        spec = importlib.util.spec_from_file_location("bench_hot_paths_macos_rss", BENCH)
+        self.assertIsNotNone(spec)
+        self.assertIsNotNone(spec.loader)
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = module
+        try:
+            completed = [
+                subprocess.CompletedProcess(["ps"], 0, stdout=f"{rss}\n", stderr="")
+                for rss in (6400, 12800, 7600)
+            ]
+
+            class IdleThread:
+                def __init__(self, *args, **kwargs) -> None:
+                    self.started = False
+
+                def start(self) -> None:
+                    self.started = True
+
+                def join(self) -> None:
+                    self.started = False
+
+            with mock.patch.object(module, "LINUX", False), mock.patch.object(
+                module, "MACOS", True
+            ), mock.patch("portable_process.Path.read_text", side_effect=OSError("no procfs")), mock.patch(
+                "portable_process.subprocess.run", side_effect=completed
+            ) as ps, mock.patch.object(module.threading, "Thread", IdleThread):
+                sampler = module.DaemonRssSampler(42)
+                sampler.start()
+                self.assertTrue(sampler._thread.started)
+                sampler._sample()
+                self.assertEqual(sampler.stop(), 12800)
+                self.assertFalse(sampler._thread.started)
+                self.assertEqual(ps.call_count, 3)
+                for call in ps.call_args_list:
+                    self.assertEqual(call.args[0], ["ps", "-o", "rss=", "-p", "42"])
+
+            with mock.patch.object(module, "LINUX", False), mock.patch.object(
+                module, "MACOS", True
+            ), mock.patch.object(module, "resident_memory_kib", return_value=(None, None)):
+                self.assertIsNone(module.proc_status(42), "a failed ps read is not zero RSS")
+        finally:
+            sys.modules.pop(spec.name, None)
 
     def test_edit_never_follows_tracked_symlinks_and_preserves_spaced_names(self) -> None:
         # A Git checkout can contain a tracked symlink to a path outside the

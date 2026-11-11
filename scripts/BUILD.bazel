@@ -60,7 +60,13 @@ py_test(
         "lib/portable_process.py",
     ],
     main = "test-bench-hot-paths.py",
-    target_compatible_with = ["@platforms//os:linux"],
+    # The harness uses Unix process APIs; exercise its macOS RSS path in
+    # native runs without scheduling it on unsupported Windows workers.
+    target_compatible_with = select({
+        "@platforms//os:linux": [],
+        "@platforms//os:macos": [],
+        "//conditions:default": ["@platforms//:incompatible"],
+    }),
 )
 
 py_test(
