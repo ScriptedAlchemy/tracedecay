@@ -253,7 +253,7 @@ fn open_no_follow(path: &Path) -> io::Result<File> {
     options.open(path).map_err(normalize_no_follow_error)
 }
 
-fn normalize_no_follow_error(error: io::Error) -> io::Error {
+pub(crate) fn normalize_no_follow_error(error: io::Error) -> io::Error {
     #[cfg(unix)]
     if error.raw_os_error() == Some(libc::ELOOP) {
         return io::Error::new(io::ErrorKind::InvalidInput, "path is a symbolic link");

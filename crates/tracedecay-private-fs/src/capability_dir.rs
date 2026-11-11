@@ -23,6 +23,9 @@ use cap_fs_ext::OpenOptionsMaybeDirExt;
 use cap_fs_ext::{FollowSymlinks, OpenOptionsFollowExt};
 use cap_std::fs::{Dir, File, OpenOptions};
 
+#[cfg(unix)]
+use crate::framed_log::normalize_no_follow_error;
+
 /// How many times a create-or-open that reports the entry missing is asked
 /// again before the answer is believed. xnu bounds its own retry of the same
 /// condition at ten; downstream measurements found one extra look always
@@ -481,7 +484,6 @@ fn census_receipted_children<K: Ord + Copy>(
                                 | io::ErrorKind::InvalidData
                                 | io::ErrorKind::InvalidInput
                                 | io::ErrorKind::IsADirectory
-                                | io::ErrorKind::FilesystemLoop
                         ) =>
                     {
                         None
@@ -766,7 +768,7 @@ fn read_bounded_child_receipt(
                 "sealed receipt is not a regular file",
             ));
         }
-        return Err(error);
+        return Err(normalize_no_follow_error(error));
     }
     // SAFETY: openat returned a new owned fd and this File is its sole owner.
     let file = unsafe { std::fs::File::from_raw_fd(descriptor) };
@@ -966,7 +968,7 @@ mod replacement_tests {
 ))]
 mod tests {
     #[cfg(unix)]
-    use std::os::unix::fs::MetadataExt;
+    use std::os::unix::fs::{MetadataExt, symlink};
     #[cfg(unix)]
     use std::os::unix::net::UnixListener;
 
@@ -1276,6 +1278,46 @@ mod tests {
             assert_eq!(std::fs::read(root.join("head/shared")).unwrap(), b"rows");
             assert_eq!(std::fs::read(&base).unwrap(), b"rows");
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlink_receipt_is_unrecognized_without_hiding_the_verified_head() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("sealed");
+        let head = root.join("head");
+        let unknown = root.join("unknown");
+        std::fs::create_dir_all(&head).unwrap();
+        std::fs::create_dir(&unknown).unwrap();
+        std::fs::write(head.join("owner"), b"owned").unwrap();
+        std::fs::write(head.join("payload"), b"durable").unwrap();
+        std::fs::write(unknown.join("sentinel"), b"preserve").unwrap();
+        symlink(head.join("owner"), unknown.join("owner")).unwrap();
+
+        let receipt = read_bounded_child_receipt(&open(&unknown), OsStr::new("owner"), 64);
+        assert_eq!(receipt.unwrap_err().kind(), io::ErrorKind::InvalidInput);
+
+        let totals = census_receipted_directory_bytes(
+            &root,
+            false,
+            |_| ("owner", 64),
+            |_, receipt| receipt == Some(b"owned".as_slice()),
+        )
+        .unwrap();
+        assert_eq!(totals.get(&true), Some(&(1, 12)));
+        assert_eq!(totals.get(&false), Some(&(1, 0)));
+        assert_eq!(std::fs::read(head.join("payload")).unwrap(), b"durable");
+        assert_eq!(std::fs::read(head.join("owner")).unwrap(), b"owned");
+        assert_eq!(
+            std::fs::read(unknown.join("sentinel")).unwrap(),
+            b"preserve"
+        );
+        assert!(
+            std::fs::symlink_metadata(unknown.join("owner"))
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
     }
 
     #[cfg(unix)]
