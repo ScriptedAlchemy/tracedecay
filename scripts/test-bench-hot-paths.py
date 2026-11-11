@@ -151,10 +151,12 @@ class BenchHotPathsTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.scratch.cleanup()
 
-    def bench(self, *extra: str, env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
+    def bench(
+        self, *extra: str, env: dict[str, str] | None = None, index_timeout: int = 20,
+    ) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
             [sys.executable, str(BENCH), "--bin", str(self.binary), "--target-repo", str(self.repo),
-             "--out", str(self.out), "--samples", "2", "--index-timeout", "20", *extra],
+             "--out", str(self.out), "--samples", "2", "--index-timeout", str(index_timeout), *extra],
             env={**os.environ, "TMPDIR": str(self.tmp), **(env or {})},
             capture_output=True, text=True, timeout=120, check=False,
         )
@@ -341,7 +343,9 @@ class BenchHotPathsTests(unittest.TestCase):
     def test_a_generation_without_the_edited_symbol_is_rejected(self) -> None:
         # A later ready generation is not evidence of the semantic edit when
         # its own indexed snapshot lacks the newly introduced declaration.
-        result = self.bench(env={"FAKE_SKIP_EDIT_SYMBOL": "1"})
+        # The harness must exhaust its own bounded wait; keep that wait short
+        # so the negative case does not dominate the suite's wall time.
+        result = self.bench(env={"FAKE_SKIP_EDIT_SYMBOL": "1"}, index_timeout=2)
         self.assertEqual(result.returncode, 2, result.stderr)
         self.assertIn("edited symbol", result.stderr)
         self.assertIn("absent from ready graph", result.stderr)
