@@ -724,6 +724,54 @@ async fn a_live_projection_keeps_its_queued_history_admission_turn() {
     worker.await.expect("historical worker exits on cancellation");
 }
 
+#[tokio::test]
+async fn cancelled_historical_waiter_releases_its_queued_turn() {
+    let harness = RegisteredGlobalDbHarness::open("history-fifo-cancel").await;
+    let state = Arc::new(SessionTemporalRefreshWakeState::default());
+    let history = Arc::new(GatedHistory {
+        entered: tokio::sync::Notify::new(),
+        release: tokio::sync::Notify::new(),
+    });
+    let ingestor: SharedSessionHistoricalIngestor = history;
+    let admission = Arc::new(tokio::sync::Semaphore::new(0));
+    state.wake_history();
+    let worker = tokio::spawn(run_session_temporal_refresh_scheduler(
+        harness.registered.clone(),
+        Arc::clone(&state),
+        Arc::new(CanonicalSessionTemporalProjector),
+        Arc::new(std::sync::RwLock::new(Some(ingestor))),
+        Arc::clone(&admission),
+        SessionTemporalRefreshPolicy::default(),
+    ));
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let idle = enabled_idle_notification(&state);
+            if state.is_idle() {
+                break;
+            }
+            idle.await;
+        }
+    })
+    .await
+    .expect("refused history wait must be queued");
+
+    let later = Arc::clone(&admission).acquire_owned();
+    tokio::pin!(later);
+    assert!(
+        std::future::poll_fn(|cx| std::task::Poll::Ready(later.as_mut().poll(cx)))
+            .await
+            .is_pending()
+    );
+    state.cancel();
+    worker.await.expect("cancelled worker must exit and drop its FIFO turn");
+    admission.add_permits(1);
+    let later_permit = tokio::time::timeout(Duration::from_secs(5), later)
+        .await
+        .expect("later profile must receive the cancelled worker's permit")
+        .expect("admission must remain open");
+    drop(later_permit);
+}
+
 struct ControlledProjector {
     reject: AtomicBool,
 }
