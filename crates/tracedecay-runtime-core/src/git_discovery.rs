@@ -921,9 +921,7 @@ mod tests {
             .build()
             .unwrap();
         runtime.block_on(async {
-            let cx = tokio::runtime::Handle::try_current()
-                .ok()
-                .expect("test task context");
+            let cx = tokio::runtime::Handle::try_current().expect("test task context");
             let tmp = tempdir().unwrap();
             let repository = tmp.path().join("repository");
             fs::create_dir_all(&repository).unwrap();

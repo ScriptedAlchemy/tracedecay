@@ -11,7 +11,6 @@ use std::time::Duration;
 
 use serde_json::{Value, json};
 use tracedecay::mcp::McpServer;
-use tracedecay_application::operation_stream::operation_event_authority;
 use tracedecay_contracts::request_identity::{GlobalRequestSurface, mint_global_request_id};
 use tracedecay_contracts::{Deadline, OperationBudgetUsage, OperationReceipt};
 use tracedecay_domain::UtcMicros;
@@ -661,12 +660,9 @@ async fn concurrent_read_refusals_keep_each_callers_request_identity() {
     fixture.harness.shutdown().await;
 }
 
-/// The operation-event authority is process-global, so every daemon
-/// composition in this test process shares it. A peer composition shutting
-/// down (the production `DaemonInvocationState::shutdown` path) between a
-/// managed run's admission and its first result must leave the accepted
-/// record in place: the first result lands at sequence 1 behind it instead
-/// of failing with an expired history frontier.
+/// Independently composed daemons own distinct operation authorities. Both
+/// must admit the same request ID, and shutting down a peer must not truncate
+/// an already admitted run in the surviving composition.
 #[tokio::test]
 async fn operation_history_keeps_an_admitted_test_run_across_a_peer_composition_shutdown() {
     let owner = production_composition_fixture_with_sources(write_affected_fixture).await;
@@ -678,14 +674,21 @@ async fn operation_history_keeps_an_admitted_test_run_across_a_peer_composition_
     .expect("affected fixture root URI")
     .to_string();
     let deadline = Deadline::new(UtcMicros(i64::MAX)).expect("deadline");
-    let emitter = operation_event_authority()
-        .begin_managed_test_run(
-            root_uri,
-            mint_global_request_id(GlobalRequestSurface::ManagedTestRun).expect("request id"),
-            deadline.clone(),
-        )
+    let request_id =
+        mint_global_request_id(GlobalRequestSurface::ManagedTestRun).expect("request id");
+    let owner_events = owner
+        .harness
+        .operation_events()
+        .expect("first composition authority");
+    let peer_events = peer.operation_events().expect("peer composition authority");
+    let emitter = owner_events
+        .begin_managed_test_run(root_uri.clone(), request_id.clone(), deadline.clone())
         .await
         .expect("managed test run admitted before the peer shuts down");
+    let _peer_emitter = peer_events
+        .begin_managed_test_run(root_uri, request_id, deadline.clone())
+        .await
+        .expect("independent composition must admit the same request ID");
 
     peer.shutdown().await;
 

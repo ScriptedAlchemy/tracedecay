@@ -3971,7 +3971,7 @@ impl CodeIndexSchedulerRegistryV1 {
                     &supervised_park,
                     &supervised_phase,
                     &supervised_serving_changed,
-                    &panic.to_string(),
+                    panic.as_ref(),
                 );
             }
         });

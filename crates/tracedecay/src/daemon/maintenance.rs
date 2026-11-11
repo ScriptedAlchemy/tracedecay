@@ -1,8 +1,10 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
+use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use futures_util::FutureExt;
 use tokio::sync::Mutex;
 use tracedecay_code_index::parallelism::{
     collect_idle_installed_worker_heaps, collect_installed_worker_heaps_when_idle,
@@ -25,13 +27,254 @@ use tracedecay_maintenance::tick::{
 };
 use tracedecay_runtime_core::storage::{RESPONSE_HANDLES_DIRECTORY, profile_sharded_data_root};
 
-use super::branch_admin::StoreAdministration;
+use super::branch_admin::{StoreAdministration, store_maintenance_writer_scope};
 use tracedecay_daemon_service::shutdown::DAEMON_TASK_ABORT_DEADLINE;
 use tracedecay_domain::process_heap::request_idle_thread_collection_v1;
 use tracedecay_runtime_core::logging::log_daemon_event;
 use tracedecay_runtime_core::native_runtime::{self, NativeTask, TimeoutError};
+use tracedecay_store_runtime::WriterScope;
 const MAINTENANCE_STORE_PAGE_LIMIT: usize = 8;
 const REGISTERED_PROJECT_PAGE_LIMIT: usize = 64;
+/// One owned fair acquisition and its work. Cancellation only governs the
+/// acquisition; admitted journaled work finishes cooperatively.
+struct RetentionWriterJob<Output> {
+    cancellation: tracedecay_runtime_core::cancellation::CancellationToken,
+    task: NativeTask<Option<Output>>,
+}
+
+/// The coordinator supervises queued store units independently of its cadence.
+/// A job consumes its fair turn and runs/releases admission even when no tick
+/// can run. Completed outcomes stay here until the next census observes them,
+/// preventing duplicate jobs for the same canonical store and work key.
+struct RetentionWriterJobs<Output = MaintenanceTickOutcome> {
+    pending: std::sync::Mutex<BTreeMap<(String, PathBuf), RetentionWriterJob<Output>>>,
+}
+
+impl<Output> Default for RetentionWriterJobs<Output> {
+    fn default() -> Self {
+        Self {
+            pending: std::sync::Mutex::new(BTreeMap::new()),
+        }
+    }
+}
+
+impl<Output: Clone + Send + Sync + 'static> RetentionWriterJobs<Output> {
+    fn cancel_all(&self) {
+        for job in self
+            .pending
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .values()
+        {
+            job.cancellation.cancel();
+        }
+    }
+
+    fn retain(&self, active: &BTreeSet<(String, PathBuf)>) {
+        self.pending
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .retain(|key, job| {
+                if active.contains(key) {
+                    return true;
+                }
+                job.cancellation.cancel();
+                // Keep admitted work supervised until it settles. Cancelling
+                // an acquisition releases its queued permit on the next poll.
+                job.task.try_finished().is_none_or(|outcome| {
+                    record_retention_job_outcome(outcome);
+                    false
+                })
+            });
+    }
+
+    async fn shutdown(&self) {
+        let mut jobs = std::mem::take(
+            &mut *self
+                .pending
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+        );
+        for job in jobs.values() {
+            job.cancellation.cancel();
+        }
+        let outcomes = futures_util::future::join_all(jobs.values().map(|job| job.task.wait()));
+        let reason = match native_runtime::timeout(DAEMON_TASK_ABORT_DEADLINE, outcomes).await {
+            Ok(outcomes) => {
+                for outcome in outcomes {
+                    let _ = record_retention_job_outcome(outcome);
+                }
+                return;
+            }
+            Err(TimeoutError::Elapsed) => "cooperative_join_exceeded_abort_deadline".to_owned(),
+            Err(error @ TimeoutError::TimerUnavailable(_)) => error.to_string(),
+        };
+        Self::record_finished(&mut jobs);
+        for job in jobs.values() {
+            log_daemon_event(
+                "daemon_shutdown",
+                &[
+                    ("outcome", "maintenance_task_aborted".to_owned()),
+                    ("owner", "retention_store".to_owned()),
+                    ("reason", reason.clone()),
+                ],
+            );
+            job.task.abort();
+        }
+        let outcomes = futures_util::future::join_all(jobs.values().map(|job| job.task.wait()));
+        let reason = match native_runtime::timeout(DAEMON_TASK_ABORT_DEADLINE, outcomes).await {
+            Ok(outcomes) => {
+                for outcome in outcomes {
+                    let _ = record_retention_job_outcome(outcome);
+                }
+                return;
+            }
+            Err(TimeoutError::Elapsed) => "join_exceeded_abort_deadline".to_owned(),
+            Err(error @ TimeoutError::TimerUnavailable(_)) => error.to_string(),
+        };
+        Self::record_finished(&mut jobs);
+        for job in jobs.values() {
+            if let Some(outcome) = job.task.try_finished() {
+                let _ = record_retention_job_outcome(outcome);
+                continue;
+            }
+            log_daemon_event(
+                "daemon_shutdown",
+                &[
+                    ("outcome", "maintenance_task_abandoned".to_owned()),
+                    ("owner", "retention_store".to_owned()),
+                    ("reason", reason.clone()),
+                ],
+            );
+        }
+    }
+
+    fn record_finished(jobs: &mut BTreeMap<(String, PathBuf), RetentionWriterJob<Output>>) {
+        jobs.retain(|_, job| {
+            let Some(outcome) = job.task.try_finished() else {
+                return true;
+            };
+            let _ = record_retention_job_outcome(outcome);
+            false
+        });
+    }
+}
+
+impl<Output> Drop for RetentionWriterJobs<Output> {
+    fn drop(&mut self) {
+        for job in self
+            .pending
+            .get_mut()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .values()
+        {
+            job.cancellation.cancel();
+        }
+    }
+}
+
+fn record_retention_job_outcome<Output>(
+    outcome: native_runtime::NativeTaskOutcome<Option<Output>>,
+) -> Option<Output> {
+    match outcome {
+        native_runtime::NativeTaskOutcome::Completed(output) => output,
+        native_runtime::NativeTaskOutcome::Cancelled => {
+            tracing::error!(
+                event = "retention_store_task_cancelled",
+                "retention store owner did not settle normally"
+            );
+            None
+        }
+        native_runtime::NativeTaskOutcome::Panicked(error) => {
+            tracing::error!(
+                event = "retention_store_task_panicked",
+                ?error,
+                "retention store owner failed"
+            );
+            None
+        }
+    }
+}
+
+async fn admit_retention_writer<Operation, OperationFuture, Output>(
+    administration: &StoreAdministration,
+    cancellation: &tracedecay_runtime_core::cancellation::CancellationToken,
+    scope: WriterScope,
+    jobs: &RetentionWriterJobs<Output>,
+    work_key: &str,
+    operation: Operation,
+) -> Option<Output>
+where
+    Operation: FnOnce() -> OperationFuture + Send + 'static,
+    OperationFuture: Future<Output = Output> + Send,
+    Output: Clone + Send + Sync + 'static,
+{
+    if cancellation.is_cancelled() {
+        jobs.cancel_all();
+        return None;
+    }
+    let WriterScope::StoreMaintenance { data_root } = scope else {
+        // Global maintenance remains a nonqueued probe: it must never put
+        // unrelated store writers behind an unbounded daemon-wide wait.
+        return administration.try_with_writer_in(scope, operation).await;
+    };
+    let writer = {
+        let mut pending = jobs
+            .pending
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if cancellation.is_cancelled() {
+            return None;
+        }
+        let key = (work_key.to_owned(), data_root.clone());
+        if let Some(job) = pending.get(&key) {
+            let outcome = job.task.try_finished()?;
+            pending.remove(&key);
+            return record_retention_job_outcome(outcome);
+        }
+        let mut acquisition = administration
+            .retention_writer_acquisition(data_root)
+            .boxed();
+        if let Some(writer) = acquisition.as_mut().now_or_never() {
+            writer
+        } else {
+            let job_cancellation = tracedecay_runtime_core::cancellation::CancellationToken::new();
+            let stopped = job_cancellation.clone();
+            let stopping = cancellation.clone();
+            // Transfer the exact queued future, together with the operation,
+            // to an actively polled owner. Never retain an idle lock future.
+            let task = match NativeTask::spawn(async move {
+                let writer = tokio::select! {
+                    biased;
+                    () = stopping.cancelled() => return None,
+                    () = stopped.cancelled() => return None,
+                    writer = acquisition => writer,
+                };
+                if stopping.is_cancelled() || stopped.is_cancelled() {
+                    return None;
+                }
+                let _writer = writer;
+                Some(operation().await)
+            }) {
+                Ok(task) => task,
+                Err(error) => {
+                    tracing::error!(event = "retention_store_task_unavailable", %error, "could not start retention store owner");
+                    return None;
+                }
+            };
+            pending.insert(
+                key,
+                RetentionWriterJob {
+                    cancellation: job_cancellation,
+                    task,
+                },
+            );
+            return None;
+        }
+    };
+    let _writer = writer;
+    Some(operation().await)
+}
 
 /// Every registered project whose profile shard exists on disk, keyed for the
 /// tick's work list.
@@ -162,8 +405,8 @@ fn spawn_maintenance_task(
 /// the blocking closure keeps that client past the terminal store close, which
 /// then leaves the store's WAL untruncated. The task therefore gets the abort
 /// deadline to finish cooperatively and is aborted only past it.
-async fn join_cancelled_maintenance_task(
-    task: Option<NativeTask<()>>,
+async fn join_cancelled_maintenance_task<Output: Clone + Send + Sync + 'static>(
+    task: Option<NativeTask<Output>>,
     owner: &'static str,
     abort_deadline: Duration,
 ) {
@@ -171,7 +414,27 @@ async fn join_cancelled_maintenance_task(
         return;
     };
     let reason = match native_runtime::timeout(abort_deadline, task.wait()).await {
-        Ok(_) => return,
+        Ok(native_runtime::NativeTaskOutcome::Completed(_)) => return,
+        Ok(native_runtime::NativeTaskOutcome::Cancelled) => {
+            log_daemon_event(
+                "maintenance_task_failed",
+                &[
+                    ("owner", owner.to_owned()),
+                    ("reason", "task_cancelled".to_owned()),
+                ],
+            );
+            return;
+        }
+        Ok(native_runtime::NativeTaskOutcome::Panicked(error)) => {
+            log_daemon_event(
+                "maintenance_task_failed",
+                &[
+                    ("owner", owner.to_owned()),
+                    ("reason", format!("{error:?}")),
+                ],
+            );
+            return;
+        }
         Err(TimeoutError::Elapsed) => "cooperative_join_exceeded_abort_deadline".to_string(),
         Err(error @ TimeoutError::TimerUnavailable(_)) => error.to_string(),
     };
@@ -618,6 +881,8 @@ pub(super) struct MaintenanceCoordinator {
     /// store is starved when the mounted set exceeds `MAINTENANCE_STORE_PAGE_LIMIT`.
     store_cursor: Arc<Mutex<Option<String>>>,
     store_continuations: Arc<Mutex<StoreMaintenanceContinuations>>,
+    /// Supervised canonical store jobs, including admitted work and its outcome.
+    writer_jobs: Arc<RetentionWriterJobs>,
     /// Instant of the last branch-store GC pass that succeeded for every
     /// mounted project. `None` keeps the daily cadence retry-eligible.
     last_branch_gc: Arc<Mutex<Option<Instant>>>,
@@ -639,6 +904,7 @@ impl Default for MaintenanceCoordinator {
             metrics: Arc::new(Mutex::new(MaintenanceMetricsV1::default())),
             store_cursor: Arc::new(Mutex::new(None)),
             store_continuations: Arc::new(Mutex::new(StoreMaintenanceContinuations::default())),
+            writer_jobs: Arc::new(RetentionWriterJobs::default()),
             last_branch_gc: Arc::new(Mutex::new(None)),
             resident_memory_sampler: Arc::new(Mutex::new(None)),
             resident_memory_log: Arc::new(std::sync::Mutex::new(
@@ -655,19 +921,38 @@ impl Default for MaintenanceCoordinator {
 /// retirement of an idle project refuses while anything leases its stores, so
 /// a tick that kept every listed store for its whole run refused those
 /// retirements. A store unmounted since the listing is skipped.
+#[derive(Clone)]
 enum MaintenanceStoreWork {
     Session(PathBuf),
-    Graph(PathBuf),
+    Graph {
+        database_path: PathBuf,
+        data_root: PathBuf,
+    },
     /// The code-index scopes of a registered project that no mounted graph
-    /// owns; its database is never opened by this unit.
-    Registered(RegisteredProjectStoreV1),
+    /// owns. The queued job retains identities only. It issues a fresh profile
+    /// lease after admission and never retains a project-store client.
+    Registered {
+        project_id: String,
+        store: RegisteredProjectStoreV1,
+    },
 }
 
 impl MaintenanceStoreWork {
     fn database_path(&self) -> Option<&Path> {
         match self {
-            Self::Session(database_path) | Self::Graph(database_path) => Some(database_path),
-            Self::Registered(_) => None,
+            Self::Session(database_path) | Self::Graph { database_path, .. } => Some(database_path),
+            Self::Registered { .. } => None,
+        }
+    }
+
+    fn writer_scope(&self) -> WriterScope {
+        match self {
+            // Session-wide administration has no independently proven canonical
+            // store gate. Keep its global probe nonqueued rather than blocking
+            // unrelated project opens behind a potentially long session pass.
+            Self::Session(_) => WriterScope::Daemon,
+            Self::Graph { data_root, .. } => store_maintenance_writer_scope(data_root),
+            Self::Registered { store, .. } => store_maintenance_writer_scope(&store.data_root),
         }
     }
 }
@@ -678,7 +963,6 @@ struct MountedGraphListing {
     database_path: PathBuf,
     project_root: PathBuf,
     data_root: PathBuf,
-    code_index_store_root: PathBuf,
 }
 
 /// The work-list key of a mounted project graph: its root and serving branch.
@@ -824,6 +1108,7 @@ impl MaintenanceCoordinator {
     /// join below stays correct whether or not it already ran.
     pub(super) fn cancel(&self) {
         self.cancellation.cancel();
+        self.writer_jobs.cancel_all();
     }
 
     pub(super) async fn shutdown(&self) {
@@ -837,6 +1122,7 @@ impl MaintenanceCoordinator {
             DAEMON_TASK_ABORT_DEADLINE,
         )
         .await;
+        self.writer_jobs.shutdown().await;
         join_cancelled_maintenance_task(
             self.resident_memory_sampler.lock().await.take(),
             "resident_memory_sampler",
@@ -906,6 +1192,9 @@ impl MaintenanceCoordinator {
                 let profile_database = match administration.registered_profile_database().await {
                     Ok(database) => database,
                     Err(error) => {
+                        // Without profile authority there is no current work
+                        // census to justify retaining store queue positions.
+                        self.writer_jobs.cancel_all();
                         log_daemon_event(
                             "retention_degraded",
                             &[
@@ -919,7 +1208,7 @@ impl MaintenanceCoordinator {
                 };
                 self.run_tick(
                     profile_root,
-                    profile_database.as_ref(),
+                    &profile_database,
                     administration,
                     code_index_schedulers,
                     retention,
@@ -944,7 +1233,7 @@ impl MaintenanceCoordinator {
     async fn run_tick(
         &self,
         profile_root: &Path,
-        profile_database: &tracedecay_global_db::RegisteredGlobalDb,
+        profile_database: &tracedecay_global_db::RegisteredGlobalDbLeaseV1,
         administration: &StoreAdministration,
         code_index_schedulers: &tracedecay_code_index_runtime::code_index_scheduler::CodeIndexSchedulerRegistryV1,
         retention: &tracedecay_configuration::RetentionConfig,
@@ -979,10 +1268,6 @@ impl MaintenanceCoordinator {
                 database_path: graph.db().database_path().to_path_buf(),
                 project_root: graph.project_root().to_path_buf(),
                 data_root: graph.store_layout().data_root.clone(),
-                code_index_store_root: code_index_store_root(
-                    &graph.store_layout().data_root,
-                    &graph.store_layout().project_root,
-                ),
             })
             .collect::<Vec<_>>();
         #[cfg(any(test, feature = "test-helpers"))]
@@ -991,7 +1276,7 @@ impl MaintenanceCoordinator {
         }
         // The listing copies in-memory mounts and is not CPU work, so a tick
         // parked at the listing holds no background CPU unit.
-        let Some(_background_cpu) = background_cpu.try_acquire() else {
+        let Some(tick_cpu) = background_cpu.try_acquire() else {
             return MaintenanceTickOutcome::Retry;
         };
         let (registered_projects, registry_listed) =
@@ -1020,10 +1305,6 @@ impl MaintenanceCoordinator {
                 .collect();
             sweep_response_handles(handle_roots, self.cancellation.clone()).await;
         }
-        let mounted_store_roots = project_graphs
-            .iter()
-            .map(|graph| graph.code_index_store_root.clone())
-            .collect::<BTreeSet<_>>();
         let mut active_telemetry_paths = BTreeSet::from([profile_database.db_path().to_path_buf()]);
         active_telemetry_paths.extend(session_databases.iter().cloned());
         active_telemetry_paths.extend(
@@ -1048,18 +1329,30 @@ impl MaintenanceCoordinator {
         for graph in &project_graphs {
             work.push((
                 graph.key.clone(),
-                MaintenanceStoreWork::Graph(graph.database_path.clone()),
+                MaintenanceStoreWork::Graph {
+                    database_path: graph.database_path.clone(),
+                    data_root: graph.data_root.clone(),
+                },
             ));
         }
         for (project_id, store) in registered_projects {
             work.push((
                 format!("r:{project_id}"),
-                MaintenanceStoreWork::Registered(store),
+                MaintenanceStoreWork::Registered { project_id, store },
             ));
         }
         work.sort_by(|left, right| left.0.cmp(&right.0));
         let keys = work.iter().map(|(key, _)| key.clone()).collect::<Vec<_>>();
         self.store_continuations.lock().await.retain_stores(&keys);
+        self.writer_jobs.retain(
+            &work
+                .iter()
+                .filter_map(|(key, unit)| match unit.writer_scope() {
+                    WriterScope::StoreMaintenance { data_root } => Some((key.clone(), data_root)),
+                    WriterScope::Daemon | WriterScope::Store { .. } => None,
+                })
+                .collect(),
+        );
         let after = self.store_cursor.lock().await.clone();
         let (window, _) =
             select_store_window(&keys, after.as_deref(), MAINTENANCE_STORE_PAGE_LIMIT);
@@ -1084,8 +1377,8 @@ impl MaintenanceCoordinator {
                 .map(|graph| graph.data_root.clone())
                 .collect::<BTreeSet<_>>();
             scan_data_roots.extend(work.iter().filter_map(|(_, unit)| match unit {
-                MaintenanceStoreWork::Registered(store) => Some(store.data_root.clone()),
-                MaintenanceStoreWork::Session(_) | MaintenanceStoreWork::Graph(_) => None,
+                MaintenanceStoreWork::Registered { store, .. } => Some(store.data_root.clone()),
+                MaintenanceStoreWork::Session(_) | MaintenanceStoreWork::Graph { .. } => None,
             }));
             maintenance_observations.retain_text_artifact_scan_projects(&scan_data_roots);
         }
@@ -1116,6 +1409,8 @@ impl MaintenanceCoordinator {
         // advances past attempted units even on cancellation. A continuation
         // advances bounded lossless storage work and code-generation retention
         // over the same bounded store window rather than pinning one project.
+        // CPU capacity belongs to actual work, never a queued acquisition.
+        drop(tick_cpu);
         let mut attempted = 0usize;
         let mut deferred = 0u64;
         let mut outcome = MaintenanceTickOutcome::Complete;
@@ -1124,12 +1419,34 @@ impl MaintenanceCoordinator {
                 outcome = MaintenanceTickOutcome::Retry;
                 break;
             }
-            let admitted = administration
-                .try_with_writer(|| async {
+            let scope = work[index].1.writer_scope();
+            let job_admin = administration.clone();
+            let job_cancellation = self.cancellation.clone();
+            let job_cpu = Arc::clone(background_cpu);
+            let job_schedulers = code_index_schedulers.clone();
+            let job_retention = retention.clone();
+            let job_observations = maintenance_observations.clone();
+            let job_key = keys[index].clone();
+            let job_unit = work[index].1.clone();
+            let admitted = admit_retention_writer(
+                administration,
+                &self.cancellation,
+                scope,
+                &self.writer_jobs,
+                &keys[index],
+                move || async move {
+                    let administration = &job_admin;
+                    let cancellation = &job_cancellation;
+                    let code_index_schedulers = &job_schedulers;
+                    let retention = &job_retention;
+                    let maintenance_observations = job_observations;
+                    let Some(_background_cpu) = job_cpu.try_acquire() else {
+                        return MaintenanceTickOutcome::Retry;
+                    };
                     let Ok(_clients) = administration.maintenance_store_clients().try_lock() else {
                         return MaintenanceTickOutcome::Retry;
                     };
-                    let (key, unit) = &work[index];
+                    let (key, unit) = (&job_key, &job_unit);
                     match unit {
                         MaintenanceStoreWork::Session(database_path) => {
                             let Some(database) = administration
@@ -1146,7 +1463,10 @@ impl MaintenanceCoordinator {
                                 run_registered_store_retention(&database, retention).await
                             }
                         }
-                        MaintenanceStoreWork::Graph(_) => {
+                        MaintenanceStoreWork::Graph {
+                            database_path,
+                            data_root,
+                        } => {
                             let Some(graph) = administration
                                 .mounted_project_graphs()
                                 .await
@@ -1155,30 +1475,60 @@ impl MaintenanceCoordinator {
                             else {
                                 return MaintenanceTickOutcome::Complete;
                             };
+                            // A same-key remount can replace its store between
+                            // listing and admission. The old gate cannot
+                            // authorize maintenance against the replacement.
+                            if graph.db().database_path() != database_path
+                                || graph.store_layout().data_root != *data_root
+                            {
+                                return MaintenanceTickOutcome::Retry;
+                            }
                             run_project_generation_maintenance(
                                 &project_store_maintenance_lease(&graph),
                                 code_index_schedulers,
                                 &maintenance_observations,
-                                &self.cancellation,
+                                cancellation,
                                 retention.compaction.as_ref(),
                                 continuation,
                             )
                             .await
                         }
-                        MaintenanceStoreWork::Registered(store) => {
+                        MaintenanceStoreWork::Registered { project_id, store } => {
+                            let profile_database = match administration
+                                .registered_profile_database()
+                                .await
+                            {
+                                Ok(database) => database,
+                                Err(error) => {
+                                    tracing::error!(event = "retention_registry_unavailable", %error);
+                                    return MaintenanceTickOutcome::Retry;
+                                }
+                            };
+                            match profile_database.code_project_exists(project_id).await {
+                                Ok(true) => {}
+                                Ok(false) => return MaintenanceTickOutcome::Complete,
+                                Err(error) => {
+                                    tracing::error!(event = "retention_registry_unavailable", %error);
+                                    return MaintenanceTickOutcome::Retry;
+                                }
+                            }
+                            let mounted_store_roots = administration.mounted_project_graphs().await
+                                .iter().map(|graph| code_index_store_root(&graph.store_layout().data_root, graph.project_root()))
+                                .collect();
                             run_registered_project_generation_maintenance(
                                 store,
                                 &mounted_store_roots,
                                 code_index_schedulers,
-                                profile_database,
+                                &profile_database,
                                 &maintenance_observations,
-                                &self.cancellation,
+                                cancellation,
                             )
                             .await
                         }
                     }
-                })
-                .await;
+                },
+            )
+            .await;
             attempted = attempted.saturating_add(1);
             match admitted {
                 Some(unit_outcome) => {
@@ -1204,6 +1554,10 @@ impl MaintenanceCoordinator {
         if !registry_listed {
             outcome = MaintenanceTickOutcome::Retry;
         }
+
+        let Some(_background_cpu) = background_cpu.try_acquire() else {
+            return outcome.combine(MaintenanceTickOutcome::Retry);
+        };
 
         // Profile-wide maintenance is intentionally excluded from a bounded
         // continuation: only the owning phase is eligible for the short
@@ -1530,16 +1884,595 @@ pub(super) fn retention_maintenance_enabled(
 
 #[cfg(test)]
 mod tests {
+    use std::future::{Future, poll_fn};
     use std::path::Path;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Condvar, Mutex as StdMutex};
+    use std::task::Poll;
     use std::time::Duration;
 
     use tokio::sync::Notify;
 
     use super::{MaintenanceCoordinator, NativeTask, run_resident_memory_sampler_loop};
+    use crate::daemon::branch_admin::{StoreAdministration, StoreWriterClass, WriterScope};
     use tracedecay_maintenance::telemetry::StoreTelemetrySamplingRegistry;
     use tracedecay_maintenance::tick::{MaintenanceContinuation, MaintenanceTickOutcome};
+    use tracedecay_runtime_core::cancellation::CancellationToken;
+    use tracedecay_runtime_core::native_runtime;
+
+    #[test]
+    fn released_store_admits_ordinary_writer_without_another_retention_tick() {
+        native_runtime::block_on(async {
+            let administration = StoreAdministration::default();
+            let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+            let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+            let holding = administration.clone();
+            let writer = NativeTask::spawn(async move {
+                holding
+                    .with_writer_in(
+                        WriterScope::store("/between-ticks", StoreWriterClass::Content),
+                        || async {
+                            entered_tx.send(()).expect("writer entered");
+                            release_rx.await.expect("writer released");
+                        },
+                    )
+                    .await;
+            })
+            .expect("native writer");
+            entered_rx.await.expect("store held");
+            let cancellation = CancellationToken::new();
+            let reservations = super::RetentionWriterJobs::default();
+            let retained = Arc::new(AtomicUsize::new(0));
+            let completed = Arc::clone(&retained);
+            assert_eq!(
+                super::admit_retention_writer(
+                    &administration,
+                    &cancellation,
+                    WriterScope::maintenance("/between-ticks"),
+                    &reservations,
+                    "retention",
+                    move || async move {
+                        completed.fetch_add(1, Ordering::SeqCst);
+                    },
+                )
+                .await,
+                None
+            );
+            // Queue a real later writer before releasing the current writer.
+            let following = administration.with_writer_in(
+                WriterScope::store("/between-ticks", StoreWriterClass::Owner),
+                || async { 43_u8 },
+            );
+            tokio::pin!(following);
+            poll_fn(|cx| {
+                assert!(following.as_mut().poll(cx).is_pending());
+                Poll::Ready(())
+            })
+            .await;
+            release_tx.send(()).expect("release between ticks");
+            assert!(matches!(
+                writer.wait().await,
+                native_runtime::NativeTaskOutcome::Completed(())
+            ));
+            // No retention helper or tick is polled after release, including
+            // when the next tick cannot obtain background CPU admission.
+            assert_eq!(
+                native_runtime::timeout(Duration::from_secs(2), &mut following)
+                    .await
+                    .expect("ordinary writer must resume without a retention tick"),
+                43
+            );
+            assert_eq!(
+                retained.load(Ordering::SeqCst),
+                1,
+                "the earlier fair retention turn ran exactly once"
+            );
+            reservations.shutdown().await;
+        })
+        .expect("native runtime");
+    }
+
+    #[test]
+    fn shutdown_joins_queued_retention_that_has_started_between_ticks() {
+        native_runtime::block_on(async {
+            let administration = StoreAdministration::default();
+            let coordinator = MaintenanceCoordinator::default();
+            let (holding_tx, holding_rx) = tokio::sync::oneshot::channel();
+            let (release_writer, released_writer) = tokio::sync::oneshot::channel();
+            let holding = administration.clone();
+            let writer = NativeTask::spawn(async move {
+                holding
+                    .with_writer_in(
+                        WriterScope::store("/shutdown-between-ticks", StoreWriterClass::Content),
+                        || async {
+                            holding_tx.send(()).expect("writer entered");
+                            released_writer.await.expect("writer released");
+                        },
+                    )
+                    .await;
+            })
+            .expect("native writer");
+            holding_rx.await.expect("store held");
+            let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+            let (release_work, released_work) = tokio::sync::oneshot::channel();
+            let finished = Arc::new(AtomicUsize::new(0));
+            let completed = Arc::clone(&finished);
+            assert_eq!(
+                super::admit_retention_writer(
+                    &administration,
+                    &coordinator.cancellation,
+                    WriterScope::maintenance("/shutdown-between-ticks"),
+                    &coordinator.writer_jobs,
+                    "retention",
+                    move || async move {
+                        entered_tx.send(()).expect("retention entered");
+                        released_work.await.expect("retention released");
+                        completed.fetch_add(1, Ordering::SeqCst);
+                        MaintenanceTickOutcome::Complete
+                    },
+                )
+                .await,
+                None
+            );
+            release_writer.send(()).expect("release store writer");
+            assert!(matches!(
+                writer.wait().await,
+                native_runtime::NativeTaskOutcome::Completed(())
+            ));
+            entered_rx.await.expect("queued work starts without a tick");
+            let shutdown = coordinator.shutdown();
+            tokio::pin!(shutdown);
+            poll_fn(|cx| {
+                assert!(
+                    shutdown.as_mut().poll(cx).is_pending(),
+                    "shutdown joins admitted work"
+                );
+                Poll::Ready(())
+            })
+            .await;
+            assert!(coordinator.cancellation.is_cancelled());
+            assert_eq!(finished.load(Ordering::SeqCst), 0);
+            assert_eq!(
+                administration.try_with_writer(|| async {}).await,
+                None,
+                "admitted work retains writer admission through shutdown"
+            );
+            release_work.send(()).expect("finish admitted work");
+            native_runtime::timeout(Duration::from_secs(2), &mut shutdown)
+                .await
+                .expect("cooperative shutdown");
+            assert_eq!(finished.load(Ordering::SeqCst), 1);
+            assert_eq!(administration.try_with_writer(|| async {}).await, Some(()));
+        })
+        .expect("native runtime");
+    }
+
+    /// Retry ticks submit only one fair job, which owns no daemon read guard
+    /// while the target store is busy.
+    #[tokio::test]
+    async fn retention_runs_one_fair_job_across_retry_ticks() {
+        let administration = StoreAdministration::default();
+        let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+        let holding_admin = administration.clone();
+        let holder = tokio::spawn(async move {
+            holding_admin
+                .with_writer_in(
+                    WriterScope::store("/retained-store", StoreWriterClass::Content),
+                    move || async move {
+                        entered_tx.send(()).expect("store writer entered");
+                        release_rx.await.expect("store writer released");
+                    },
+                )
+                .await;
+        });
+        entered_rx.await.expect("writer acquired its store gate");
+        let cancellation = CancellationToken::new();
+        let reservations = super::RetentionWriterJobs::default();
+        for _ in 0..4 {
+            assert_eq!(
+                super::admit_retention_writer(
+                    &administration,
+                    &cancellation,
+                    WriterScope::maintenance("/retained-store"),
+                    &reservations,
+                    "retention",
+                    || async { 42_u8 },
+                )
+                .await,
+                None,
+                "a held store defers only its own maintenance unit"
+            );
+            assert_eq!(reservations.pending.lock().unwrap().len(), 1);
+        }
+
+        assert_eq!(
+            super::admit_retention_writer(
+                &administration,
+                &cancellation,
+                WriterScope::maintenance("/retained-store"),
+                &reservations,
+                "another-branch",
+                || async { 45_u8 },
+            )
+            .await,
+            None,
+        );
+        assert_eq!(
+            reservations.pending.lock().unwrap().len(),
+            2,
+            "distinct work units in one store retain distinct fair queue positions"
+        );
+
+        // Keep unrelated writer activity running through retention admission.
+        // Same-store readers must wait behind the retained fair acquisitions.
+        let competing_admin = administration.clone();
+        let writer_entries = Arc::new(AtomicUsize::new(0));
+        let entries = Arc::clone(&writer_entries);
+        let stop_churn = CancellationToken::new();
+        let stop = stop_churn.clone();
+        let competitors = tokio::spawn(async move {
+            while !stop.is_cancelled() {
+                competing_admin
+                    .with_writer_in(
+                        WriterScope::store("/another-store", StoreWriterClass::Content),
+                        || async {
+                            entries.fetch_add(1, Ordering::SeqCst);
+                            tokio::task::yield_now().await;
+                        },
+                    )
+                    .await;
+            }
+        });
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while writer_entries.load(Ordering::SeqCst) < 4 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("unrelated writers churn before retention queues");
+
+        let later_writer = administration.with_writer_in(
+            WriterScope::store("/retained-store", StoreWriterClass::Owner),
+            || async { 43_u8 },
+        );
+        tokio::pin!(later_writer);
+        poll_fn(|cx| {
+            assert!(
+                later_writer.as_mut().poll(cx).is_pending(),
+                "a later store writer must not overtake queued retention"
+            );
+            Poll::Ready(())
+        })
+        .await;
+
+        // An independent store must still open while maintenance is queued.
+        let independent = administration.with_writer_in(
+            WriterScope::store("/independent-store", StoreWriterClass::Owner),
+            || async { 44_u8 },
+        );
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(2), independent)
+                .await
+                .expect("unrelated project open must not stall behind queued maintenance"),
+            44
+        );
+        let before_release = writer_entries.load(Ordering::SeqCst);
+        release_tx.send(()).expect("release the original writer");
+        holder.await.expect("first writer finishes");
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(5), &mut later_writer)
+                .await
+                .expect("later writer resumes after retention"),
+            43
+        );
+
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while reservations
+                .pending
+                .lock()
+                .unwrap()
+                .values()
+                .any(|job| !job.task.is_finished())
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("both fair jobs settle before their outcomes are observed");
+        assert_eq!(
+            super::admit_retention_writer(
+                &administration,
+                &cancellation,
+                WriterScope::maintenance("/retained-store"),
+                &reservations,
+                "retention",
+                || async { 42_u8 },
+            )
+            .await,
+            Some(42)
+        );
+        assert_eq!(
+            super::admit_retention_writer(
+                &administration,
+                &cancellation,
+                WriterScope::maintenance("/retained-store"),
+                &reservations,
+                "another-branch",
+                || async { 45_u8 },
+            )
+            .await,
+            Some(45),
+            "the first work unit cannot consume another branch's queued acquisition",
+        );
+        // Keep the churn alive through retention and observe a subsequent
+        // acquisition before stopping it: a finite burst is not this proof.
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while writer_entries.load(Ordering::SeqCst) <= before_release {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("unrelated writers resume after maintenance admission");
+        stop_churn.cancel();
+        assert!(reservations.pending.lock().unwrap().is_empty());
+        competitors.await.expect("unrelated writer churn finishes");
+        assert!(writer_entries.load(Ordering::SeqCst) > before_release);
+    }
+
+    #[tokio::test]
+    async fn cancelled_retention_never_constructs_work_before_admission() {
+        let administration = StoreAdministration::default();
+        let cancellation = CancellationToken::new();
+        cancellation.cancel();
+        let constructed = Arc::new(AtomicUsize::new(0));
+        let reservations = super::RetentionWriterJobs::default();
+        for scope in [WriterScope::maintenance("/held-store"), WriterScope::Daemon] {
+            assert_eq!(
+                super::admit_retention_writer(
+                    &administration,
+                    &cancellation,
+                    scope,
+                    &reservations,
+                    "retention",
+                    {
+                        let constructed = Arc::clone(&constructed);
+                        move || {
+                            constructed.fetch_add(1, Ordering::SeqCst);
+                            std::future::ready(7_u8)
+                        }
+                    },
+                )
+                .await,
+                None,
+                "cancelled retention refuses even an uncontended acquisition"
+            );
+        }
+        assert_eq!(constructed.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            administration.try_with_writer(|| async { 9_u8 }).await,
+            Some(9),
+            "refused work leaves the writer gate available"
+        );
+    }
+
+    #[tokio::test]
+    async fn cancelled_queued_retention_releases_its_writer_place() {
+        let administration = StoreAdministration::default();
+        let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+        let holding_admin = administration.clone();
+        let writer = tokio::spawn(async move {
+            holding_admin
+                .with_writer_in(
+                    WriterScope::store("/held-store", StoreWriterClass::Owner),
+                    move || async move {
+                        entered_tx.send(()).expect("entered writer");
+                        release_rx.await.expect("released writer");
+                    },
+                )
+                .await;
+        });
+        entered_rx
+            .await
+            .expect("writer holds shared daemon admission");
+        let coordinator = MaintenanceCoordinator::default();
+        let constructed = Arc::new(AtomicUsize::new(0));
+        assert_eq!(
+            super::admit_retention_writer(
+                &administration,
+                &coordinator.cancellation,
+                WriterScope::maintenance("/held-store"),
+                &coordinator.writer_jobs,
+                "retention",
+                {
+                    let constructed = Arc::clone(&constructed);
+                    move || {
+                        constructed.fetch_add(1, Ordering::SeqCst);
+                        std::future::ready(MaintenanceTickOutcome::Complete)
+                    }
+                },
+            )
+            .await,
+            None
+        );
+        let follower = administration.with_writer_in(
+            WriterScope::store("/held-store", StoreWriterClass::Content),
+            || async { 8_u8 },
+        );
+        tokio::pin!(follower);
+        poll_fn(|cx| {
+            assert!(follower.as_mut().poll(cx).is_pending());
+            Poll::Ready(())
+        })
+        .await;
+        coordinator.shutdown().await;
+        assert!(coordinator.writer_jobs.pending.lock().unwrap().is_empty());
+        assert_eq!(constructed.load(Ordering::SeqCst), 0);
+        // Owner and content otherwise run concurrently. Only queued exclusive
+        // maintenance blocked this content writer on the same store.
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(2), &mut follower)
+                .await
+                .expect("content writer resumes while the owner is still active"),
+            8
+        );
+        release_tx.send(()).expect("release held writer");
+        writer.await.expect("held writer exits");
+        assert_eq!(
+            administration.try_with_writer(|| async { 9_u8 }).await,
+            Some(9)
+        );
+    }
+
+    #[tokio::test]
+    async fn retired_store_jobs_release_followers_and_replacement_uses_its_own_gate() {
+        let temp = tempfile::tempdir().expect("store roots");
+        let retired = temp.path().join("retired");
+        let replacement = temp.path().join("replacement");
+        std::fs::create_dir_all(&retired).expect("retired root");
+        std::fs::create_dir_all(&replacement).expect("replacement root");
+        let administration = StoreAdministration::default();
+        let coordinator = MaintenanceCoordinator::default();
+        let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+        let holding_admin = administration.clone();
+        let owner_scope =
+            crate::daemon::branch_admin::store_writer_scope(&retired, StoreWriterClass::Owner);
+        let owner = tokio::spawn(async move {
+            holding_admin
+                .with_writer_in(owner_scope, || async {
+                    entered_tx.send(()).expect("owner admitted");
+                    release_rx.await.expect("owner released");
+                })
+                .await;
+        });
+        entered_rx.await.expect("held retired store");
+        let work = Arc::new(AtomicUsize::new(0));
+        // Different spellings of the same canonical store share one pending
+        // acquisition, rather than competing maintenance jobs.
+        for root in [&retired, &retired.join(".")] {
+            assert_eq!(
+                super::admit_retention_writer(
+                    &administration,
+                    &coordinator.cancellation,
+                    super::store_maintenance_writer_scope(root),
+                    &coordinator.writer_jobs,
+                    "retention",
+                    {
+                        let work = Arc::clone(&work);
+                        move || async move {
+                            work.fetch_add(1, Ordering::SeqCst);
+                            MaintenanceTickOutcome::Complete
+                        }
+                    },
+                )
+                .await,
+                None
+            );
+        }
+        assert_eq!(coordinator.writer_jobs.pending.lock().unwrap().len(), 1);
+        let following = administration.with_writer_in(
+            crate::daemon::branch_admin::store_writer_scope(&retired, StoreWriterClass::Content),
+            || async { 8_u8 },
+        );
+        tokio::pin!(following);
+        poll_fn(|cx| {
+            assert!(following.as_mut().poll(cx).is_pending());
+            Poll::Ready(())
+        })
+        .await;
+        let replacement_scope = super::store_maintenance_writer_scope(&replacement);
+        let WriterScope::StoreMaintenance { data_root } = &replacement_scope else {
+            panic!("replacement has canonical identity");
+        };
+        // The current mounted-work census keeps only the replacement identity.
+        coordinator
+            .writer_jobs
+            .retain(&std::collections::BTreeSet::from([(
+                "retention".to_owned(),
+                data_root.clone(),
+            )]));
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(2), &mut following)
+                .await
+                .expect("retirement drops the old queue position while its owner is still active"),
+            8
+        );
+        assert_eq!(
+            super::admit_retention_writer(
+                &administration,
+                &coordinator.cancellation,
+                replacement_scope,
+                &coordinator.writer_jobs,
+                "retention",
+                {
+                    let work = Arc::clone(&work);
+                    move || async move {
+                        work.fetch_add(1, Ordering::SeqCst);
+                        MaintenanceTickOutcome::Complete
+                    }
+                },
+            )
+            .await,
+            Some(MaintenanceTickOutcome::Complete)
+        );
+        assert_eq!(
+            work.load(Ordering::SeqCst),
+            1,
+            "only the replacement executes maintenance"
+        );
+        coordinator.shutdown().await;
+        assert!(coordinator.writer_jobs.pending.lock().unwrap().is_empty());
+        release_tx.send(()).expect("release retired owner");
+        owner.await.expect("retired owner settles");
+    }
+
+    /// Cancellation after writer admission must not drop a running retention
+    /// operation: its blocking/journaled work is responsible for cooperating.
+    #[tokio::test]
+    async fn cancellation_after_writer_admission_preserves_running_work() {
+        let administration = StoreAdministration::default();
+        let cancellation = CancellationToken::new();
+        let working = administration.clone();
+        let stopping = cancellation.clone();
+        let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+        let work = tokio::spawn(async move {
+            super::admit_retention_writer(
+                &working,
+                &stopping,
+                WriterScope::maintenance("/retention-store"),
+                &super::RetentionWriterJobs::default(),
+                "retention",
+                move || async move {
+                    entered_tx
+                        .send(())
+                        .expect("retention entered its critical section");
+                    release_rx.await.expect("retention work released");
+                    43_u8
+                },
+            )
+            .await
+        });
+        entered_rx.await.expect("writer admission succeeded");
+        cancellation.cancel();
+        assert_eq!(
+            administration.try_with_writer(|| async { 44_u8 }).await,
+            None,
+            "admitted work retains exclusion until it finishes"
+        );
+        release_tx.send(()).expect("finish admitted work");
+        assert_eq!(
+            work.await.expect("retention task joins"),
+            Some(43),
+            "shutdown cancellation cannot drop journaled work already admitted"
+        );
+        assert_eq!(
+            administration.try_with_writer(|| async { 44_u8 }).await,
+            Some(44)
+        );
+    }
 
     #[tokio::test]
     async fn mounted_store_identity_tracks_native_removal_outcomes() {
@@ -1717,33 +2650,32 @@ mod tests {
             .expect("sampler joins after cancellation");
     }
 
-    /// A registered project nothing has mounted since the daemon started is
-    /// collected by the first full tick and converges on its continuation,
-    /// instead of waiting for a client to mount it. A tick that runs while a
-    /// capacity release holds the maintenance store clients defers it.
+    /// Busy registered store A cannot park free store B or the profile sweep.
+    /// After release, the supervised fair job lets A converge between ticks.
+    /// Capacity release still excludes store clients.
     #[test]
-    fn a_full_tick_collects_an_unmounted_registered_project_from_a_synchronous_host() {
+    fn full_ticks_preserve_independent_store_progress_from_a_synchronous_host() {
         let hazards = crate::test_support::native_runtime_hazards();
         tracedecay_runtime_core::native_runtime::block_on(
-            a_full_tick_collects_an_unmounted_registered_project(),
+            full_ticks_preserve_independent_store_progress(),
         )
         .expect("native runtime");
         assert_eq!(crate::test_support::native_runtime_hazards(), hazards);
     }
 
-    async fn a_full_tick_collects_an_unmounted_registered_project() {
+    async fn full_ticks_preserve_independent_store_progress() {
         assert!(tokio::runtime::Handle::try_current().is_ok());
         let temp = tempfile::TempDir::new().expect("temp root");
         let profile_root = temp.path().join("profile");
         let checkout = temp.path().join("checkout");
         std::fs::create_dir_all(&checkout).expect("checkout");
         let checkout = checkout.canonicalize().expect("canonical checkout");
-        let runtime = tracedecay_global_db::tests::harness::RegisteredGlobalDbTestRuntime::profile(
-            &profile_root,
-        )
-        .await
-        .expect("profile database");
-        let profile_database = runtime.profile_database_arc();
+        let administration =
+            crate::daemon::tests::test_store_administration_for_profile(&profile_root);
+        let profile_database = administration
+            .registered_profile_database()
+            .await
+            .expect("profile database");
         let project = profile_database
             .upsert_code_project("proj_unmounted", &checkout, None, None, None)
             .await
@@ -1777,7 +2709,6 @@ mod tests {
             )),
             ..MaintenanceCoordinator::default()
         };
-        let administration = crate::daemon::branch_admin::StoreAdministration::default();
         let schedulers =
             tracedecay_code_index_runtime::code_index_scheduler::CodeIndexSchedulerRegistryV1::new(
                 1,
@@ -1806,6 +2737,165 @@ mod tests {
         );
         drop(release);
 
+        // A stays busy across more than two complete retry ticks. New work
+        // in B and the profile must still finish while A's gate remains held.
+        let (writer_started, writer_entered) = tokio::sync::oneshot::channel();
+        let (release_writer, writer_released) = tokio::sync::oneshot::channel();
+        let holding_admin = administration.clone();
+        let retained_data_root = tracedecay_runtime_core::storage::profile_sharded_data_root(
+            &profile_root,
+            &project.project_id,
+        );
+        let writer_data_root = retained_data_root.clone();
+        let writer = NativeTask::spawn(async move {
+            holding_admin
+                .with_writer_in(
+                    crate::daemon::branch_admin::store_writer_scope(
+                        &writer_data_root,
+                        StoreWriterClass::Content,
+                    ),
+                    move || async move {
+                        writer_started.send(()).expect("writer admitted");
+                        writer_released.await.expect("writer released");
+                    },
+                )
+                .await;
+        })
+        .expect("start competing store writer");
+        writer_entered
+            .await
+            .expect("project content writer owns shared store gate");
+        for _ in 0..2 {
+            let deferred = native_runtime::timeout(
+                Duration::from_secs(10),
+                coordinator.run_tick(
+                    &profile_root,
+                    &profile_database,
+                    &administration,
+                    &schedulers,
+                    &retention,
+                    branch_gc,
+                    None,
+                ),
+            )
+            .await
+            .expect("busy A cannot park a complete tick");
+            assert_eq!(deferred, MaintenanceTickOutcome::Retry);
+            assert_eq!(generation_files(), 6, "A cannot collect under its writer");
+        }
+        let other_checkout = temp.path().join("other-checkout");
+        std::fs::create_dir_all(&other_checkout).expect("other checkout");
+        let other = profile_database
+            .upsert_code_project("proj_z_independent", &other_checkout, None, None, None)
+            .await
+            .expect("register independent project B");
+        assert!(
+            project.project_id < other.project_id,
+            "A precedes B in the work window"
+        );
+        let other_store =
+            tracedecay_code_index_retention::code_index_generations::code_index_store_root(
+                &tracedecay_runtime_core::storage::profile_sharded_data_root(
+                    &profile_root,
+                    &other.project_id,
+                ),
+                Path::new(&other.canonical_root),
+            );
+        tracedecay_code_index_retention::code_index_generations::fixture::write_generation_store_fixture(
+            &other_store, 6,
+        );
+        let handles = profile_root.join(super::RESPONSE_HANDLES_DIRECTORY);
+        tracedecay_session_memory::response_handles::store_response_handle(&handles, "expired", 1)
+            .expect("expired profile handle");
+        tracedecay_session_memory::response_handles::store_response_handle(
+            &handles,
+            "fresh",
+            tracedecay_runtime_core::tracedecay::current_timestamp(),
+        )
+        .expect("fresh profile handle");
+        for _ in 0..2 {
+            let deferred = native_runtime::timeout(
+                Duration::from_secs(10),
+                coordinator.run_tick(
+                    &profile_root,
+                    &profile_database,
+                    &administration,
+                    &schedulers,
+                    &retention,
+                    branch_gc,
+                    None,
+                ),
+            )
+            .await
+            .expect("B and profile maintenance finish while A stays busy beyond two ticks");
+            assert_eq!(deferred, MaintenanceTickOutcome::Retry);
+            assert_eq!(generation_files(), 6, "A's writer is still held");
+            assert_eq!(
+                std::fs::read_dir(other_store.join("code-generations-v1"))
+                    .expect("B generations")
+                    .count(),
+                1,
+                "B reclaims its five superseded generations before A releases",
+            );
+            assert_eq!(
+                tracedecay_session_memory::response_handles::inventory_response_handles(&handles)
+                    .expect("profile handle inventory")
+                    .file_count,
+                1,
+                "the profile sweep removes the expired handle before A releases",
+            );
+            let pending = coordinator.writer_jobs.pending.lock().unwrap();
+            assert_eq!(pending.len(), 1, "only one acquisition, for busy A");
+            let WriterScope::StoreMaintenance { data_root } =
+                super::store_maintenance_writer_scope(&retained_data_root)
+            else {
+                panic!("fixture A has canonical store identity");
+            };
+            assert!(pending.contains_key(&(format!("r:{}", project.project_id), data_root)));
+        }
+        let following = administration.with_writer_in(
+            super::super::branch_admin::store_writer_scope(
+                &retained_data_root,
+                StoreWriterClass::Owner,
+            ),
+            || async {},
+        );
+        tokio::pin!(following);
+        poll_fn(|cx| {
+            assert!(following.as_mut().poll(cx).is_pending());
+            Poll::Ready(())
+        })
+        .await;
+        release_writer.send(()).expect("release competing writer");
+        assert!(
+            matches!(
+                writer.wait().await,
+                native_runtime::NativeTaskOutcome::Completed(())
+            ),
+            "competing writer must complete normally"
+        );
+        native_runtime::timeout(Duration::from_secs(10), &mut following)
+            .await
+            .expect("ordinary writer resumes after retention without another tick");
+        assert_eq!(
+            generation_files(),
+            1,
+            "A collects before any further tick is polled"
+        );
+        native_runtime::timeout(Duration::from_secs(10), async {
+            while coordinator
+                .writer_jobs
+                .pending
+                .lock()
+                .unwrap()
+                .values()
+                .any(|job| !job.task.is_finished())
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("A's supervised owner settles");
         coordinator
             .run_tick(
                 &profile_root,
@@ -1817,7 +2907,12 @@ mod tests {
                 None,
             )
             .await;
-        assert_eq!(generation_files(), 1, "the full tick collects the backlog");
+        assert!(coordinator.writer_jobs.pending.lock().unwrap().is_empty());
+        assert_eq!(
+            generation_files(),
+            1,
+            "queued retention reclaims five verified superseded generations after writer release"
+        );
 
         let continuation = coordinator
             .run_tick(
@@ -1845,13 +2940,12 @@ mod tests {
             let profile_root = temp.path().join("profile");
             let checkout = temp.path().join("checkout");
             std::fs::create_dir_all(&checkout).expect("checkout");
-            let runtime =
-                tracedecay_global_db::tests::harness::RegisteredGlobalDbTestRuntime::profile(
-                    &profile_root,
-                )
+            let administration =
+                crate::daemon::tests::test_store_administration_for_profile(&profile_root);
+            let profile_database = administration
+                .registered_profile_database()
                 .await
                 .expect("profile database");
-            let profile_database = runtime.profile_database_arc();
             let project = profile_database
                 .upsert_code_project("proj_handles", &checkout, None, None, None)
                 .await
@@ -1884,7 +2978,7 @@ mod tests {
                 .run_tick(
                     &profile_root,
                     &profile_database,
-                    &crate::daemon::branch_admin::StoreAdministration::default(),
+                    &administration,
                     &tracedecay_code_index_runtime::code_index_scheduler::CodeIndexSchedulerRegistryV1::new(1),
                     &tracedecay_configuration::RetentionConfig::default(),
                     super::BranchStoreGcCadenceV1 { branch_gc_days: 30 },
@@ -1977,6 +3071,56 @@ mod tests {
             Arc::strong_count(&store_client),
             1,
             "the maintenance join returned while the tick's blocking store work held its client"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn retention_job_shutdown_uses_group_deadlines() {
+        let jobs = super::RetentionWriterJobs::<MaintenanceTickOutcome>::default();
+        let failed: NativeTask<Option<MaintenanceTickOutcome>> =
+            NativeTask::spawn(async { panic!("retention job failed before shutdown") })
+                .expect("failed retention job");
+        assert!(matches!(
+            failed.wait().await,
+            tracedecay_runtime_core::native_runtime::NativeTaskOutcome::Panicked(_)
+        ));
+        jobs.pending.lock().unwrap().insert(
+            ("failed".to_owned(), std::path::PathBuf::from("/held-store")),
+            super::RetentionWriterJob {
+                cancellation: CancellationToken::new(),
+                task: failed,
+            },
+        );
+        for index in 0..8 {
+            let task = NativeTask::spawn(async {
+                std::future::pending::<Option<MaintenanceTickOutcome>>().await
+            })
+            .expect("stuck retention job");
+            jobs.pending.lock().unwrap().insert(
+                (
+                    format!("store-{index}"),
+                    std::path::PathBuf::from("/held-store"),
+                ),
+                super::RetentionWriterJob {
+                    cancellation: CancellationToken::new(),
+                    task,
+                },
+            );
+        }
+
+        let started = std::time::Instant::now();
+        let capture = tracedecay_runtime_core::logging::FormattedTracingCapture::start();
+        jobs.shutdown().await;
+        assert!(
+            capture.text().contains("retention_store_task_panicked"),
+            "completed failure must be reported despite a stalled sibling: {}",
+            capture.text()
+        );
+
+        assert!(
+            started.elapsed() < super::DAEMON_TASK_ABORT_DEADLINE.saturating_mul(4),
+            "eight stuck jobs must share cooperative and abort deadlines, took {:?}",
+            started.elapsed()
         );
     }
 

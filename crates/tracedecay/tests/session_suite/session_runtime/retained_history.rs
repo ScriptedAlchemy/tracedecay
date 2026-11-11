@@ -329,7 +329,7 @@ impl SessionHistoricalIngestor for BlockThirdHistoricalIngestor {
                 0 => SessionHistoricalIngestOutcome::Complete,
                 1 => {
                     // The refused capacity frees while this pass is running.
-                    self.capacity.send_modify(|epoch| *epoch += 1).unwrap();
+                    self.capacity.send_modify(|epoch| *epoch += 1);
                     SessionHistoricalIngestOutcome::Pending {
                         made_progress: false,
                     }
@@ -953,7 +953,7 @@ async fn retrying_history_is_typed_stale() {
         }
     );
 
-    ingestor.capacity.send_modify(|epoch| *epoch += 1).unwrap();
+    ingestor.capacity.send_modify(|epoch| *epoch += 1);
     ingestor.passes.wait_for(|passes| *passes >= 2).await;
 
     registry.shutdown().await;
