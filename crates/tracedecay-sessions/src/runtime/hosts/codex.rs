@@ -2557,13 +2557,12 @@ fn retained_scan_step(
                                         reopened,
                                         CodexDirectoryEntryFingerprint::default(),
                                     )));
-                                } else if closing.as_ref().is_some_and(|stamp| !stamp.settled)
-                                    && resume_directories.is_none()
-                                {
-                                    // An unfinished structural iterator is
-                                    // resumed below; only its final pass may
-                                    // certify coverage without a name witness.
+                                } else if closing.as_ref().is_some_and(|stamp| !stamp.settled) {
+                                    // Neither an unsettled native stat nor a
+                                    // resumed structural walk can replace the
+                                    // missing entry-name witness.
                                     scan.complete = false;
+                                    scan.directories[directory_index].identity = None;
                                 }
                                 // Commit the closing witness so the idle probe
                                 // compares against the state this sweep actually

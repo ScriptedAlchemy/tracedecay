@@ -3076,6 +3076,108 @@ mod recent_first_discovery_tests {
     }
 
     #[test]
+    #[cfg(target_os = "linux")]
+    fn chunked_archive_alias_cannot_complete_without_file_name_witness() {
+        let temp = TempDir::new().unwrap();
+        let archive = temp.path().join(".codex/archived_sessions");
+        std::fs::create_dir_all(archive.join("deferred")).unwrap();
+        std::fs::write(archive.join("rollout-existing.jsonl"), b"{}\n").unwrap();
+        let source = CodexSource::with_home(temp.path());
+        let mut bounds = TranscriptDiscoveryBounds::from_discovered_units(1);
+        let metadata_charge = std::mem::size_of::<std::fs::Metadata>() as u64;
+        let sessions = temp.path().join(".codex/sessions");
+        // Retain both roots, but force the archive's child into a later
+        // structural chunk while the archive's file walk owns the iterator.
+        bounds.max_discovery_bytes =
+            crate::runtime::hosts::codex::candidate_charge(&sessions, metadata_charge).unwrap()
+                + crate::runtime::hosts::codex::candidate_charge(&archive, metadata_charge)
+                    .unwrap();
+        let mut state = CodexDiscoveryState::default();
+        let mut frontier = CodexDiscoveryFrontier::initial();
+        let mut suspended = false;
+        for _ in 0..256 {
+            let pass = retained_pass(&source, &mut state, bounds, frontier);
+            frontier = pass.next_frontier;
+            if let Some(scan) = state.scan.as_mut()
+                && let CodexScanPhase::Files {
+                    current: Some(current),
+                    resume_directories: Some(_),
+                    ..
+                } = &mut scan.phase
+                && scan.directories[current.0].path == archive
+            {
+                let identity = scan.directories[current.0].identity.as_ref().unwrap();
+                assert!(
+                    identity.entries.is_none(),
+                    "retention must interrupt the structural name witness"
+                );
+                // A native ReadDir may buffer every old name before the late
+                // creation. Exhaust it now so omission is deterministic.
+                for entry in current.1.by_ref() {
+                    entry.unwrap();
+                }
+                suspended = true;
+                break;
+            }
+        }
+        assert!(suspended, "the chunked file reader must be retained");
+
+        let arrived = archive.join("rollout-after-chunked-file-reader-open.jsonl");
+        std::fs::write(&arrived, b"{}\n").unwrap();
+        let closing = directory_scan_witness(&archive).unwrap().unwrap();
+        assert!(!closing.settled, "the fixture needs the coarse clock");
+        let scan = state.scan.as_mut().unwrap();
+        let CodexScanPhase::Files {
+            current: Some(current),
+            resume_directories: Some(resume),
+            ..
+        } = &mut scan.phase
+        else {
+            panic!("the chunked file reader must still be retained");
+        };
+        // Model a directory timestamp that aliases the newly added entry in
+        // both the file phase and the structural iterator it will resume.
+        // With no structural name witness, a complete coverage claim would be
+        // based only on the stale file listing.
+        let identity = scan.directories[current.0].identity.as_mut().unwrap();
+        identity.stat = closing.stat;
+        identity.stable_stat = closing.stable_stat;
+        let resumed = resume.current.as_deref_mut().unwrap();
+        assert_eq!(resumed.path, archive);
+        resumed.opening_stat = closing.stable_stat;
+        assert!(scan.complete);
+
+        let mut observed = BTreeSet::new();
+        let mut finished = false;
+        for _ in 0..2048 {
+            let pass = retained_pass(&source, &mut state, bounds, frontier);
+            observed.extend(pass.report.paths);
+            frontier = pass.next_frontier;
+            if state.scan.is_none() {
+                assert!(
+                    observed.contains(&arrived) || !frontier.is_complete(),
+                    "the resumed structural walk cannot vouch for rollout files"
+                );
+                finished = true;
+                break;
+            }
+        }
+        assert!(finished, "the chunked sweep must terminate");
+
+        assert!(spin_until_jsonl_change_settled(&archive));
+        for _ in 0..2048 {
+            let pass = retained_pass(&source, &mut state, bounds, frontier);
+            observed.extend(pass.report.paths);
+            frontier = pass.next_frontier;
+            if frontier.is_complete() {
+                break;
+            }
+        }
+        assert!(frontier.is_complete(), "a fresh sweep must converge");
+        assert!(observed.contains(&arrived));
+    }
+
+    #[test]
     #[cfg(unix)]
     fn verification_cannot_settle_over_an_aliased_new_rollout() {
         let temp = TempDir::new().unwrap();
