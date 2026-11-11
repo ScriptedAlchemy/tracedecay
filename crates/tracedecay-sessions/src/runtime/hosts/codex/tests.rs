@@ -3023,6 +3023,18 @@ mod recent_first_discovery_tests {
 
         let mut finished = false;
         for _ in 0..2048 {
+            // Preserve the intentionally aliased stat through an arbitrarily
+            // slow test run: elapsed wall time must not make this regression
+            // pass by turning the native clock into a separate detection.
+            let alias = directory_stat_witness(&archive).unwrap().unwrap().stat;
+            if let Some(scan) = state.scan.as_mut() {
+                let directory = scan
+                    .directories
+                    .iter_mut()
+                    .find(|directory| directory.path == archive)
+                    .expect("retained archive directory identity");
+                directory.identity.as_mut().unwrap().stat = alias;
+            }
             let pass = retained_pass(&source, &mut state, bounds, frontier);
             frontier = pass.next_frontier;
             if state.scan.is_none() {

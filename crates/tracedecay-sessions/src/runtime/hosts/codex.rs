@@ -2504,30 +2504,33 @@ fn retained_scan_step(
                                     != directory.identity.map(|identity| identity.stat)
                                 {
                                     scan.complete = false;
-                                } else if closing.is_some_and(|stamp| !stamp.settled) {
-                                    // A fresh reader must recheck the structural
-                                    // name set before this iterator can confer
-                                    // full corpus coverage on a coarse clock.
-                                    if directory
-                                        .identity
-                                        .and_then(|identity| identity.entries)
-                                        .is_some()
-                                    {
-                                        let reopened = std::fs::read_dir(&directory.path).map_err(
-                                            |source| TranscriptIngestError::ScanIo {
-                                                operation: "verify Codex transcript bucket",
-                                                path: directory.path.clone(),
-                                                source,
-                                            },
-                                        )?;
-                                        *verification = Some(Box::new((
-                                            *directory_index,
-                                            reopened,
-                                            CodexDirectoryEntryFingerprint::default(),
-                                        )));
-                                    } else {
-                                        scan.complete = false;
-                                    }
+                                } else if directory
+                                    .identity
+                                    .and_then(|identity| identity.entries)
+                                    .is_some()
+                                {
+                                    // This initially unsettled listing needs an
+                                    // independent current-name check, even if the
+                                    // filesystem clock settled during the walk.
+                                    let reopened = std::fs::read_dir(&directory.path).map_err(
+                                        |source| TranscriptIngestError::ScanIo {
+                                            operation: "verify Codex transcript bucket",
+                                            path: directory.path.clone(),
+                                            source,
+                                        },
+                                    )?;
+                                    *verification = Some(Box::new((
+                                        *directory_index,
+                                        reopened,
+                                        CodexDirectoryEntryFingerprint::default(),
+                                    )));
+                                } else if closing.is_some_and(|stamp| !stamp.settled)
+                                    && resume_directories.is_none()
+                                {
+                                    // An unfinished structural iterator is
+                                    // resumed below; only its final pass may
+                                    // certify coverage without a name witness.
+                                    scan.complete = false;
                                 }
                                 *current = None;
                             }
