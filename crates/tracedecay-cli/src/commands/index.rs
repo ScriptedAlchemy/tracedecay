@@ -563,7 +563,14 @@ impl FirstGenerationStall {
                     && progress.phase != CodeIndexBuildPhaseV1::SourceScan;
                 let different_graph =
                     active_graph.is_some_and(|graph| graph.generation_id != progress.generation_id);
-                if !retained_text && !different_graph {
+                // The final Grafeo container write has no intermediate
+                // callback. A retained lexical refusal cannot prove that the
+                // still-active native owner is blocked, even for this same
+                // generation. When that owner retires, the refusal is visible
+                // again rather than becoming a synthetic graph timeout.
+                let unobserved_final_graph =
+                    FirstGenerationWorkMarker::has_uninstrumented_native_write(worktree);
+                if !retained_text && !different_graph && !unobserved_final_graph {
                     return Some(Self::Blocked(reason));
                 }
             }
@@ -1728,6 +1735,77 @@ mod daemon_precondition_tests {
             );
             assert_eq!(reads, 4, "only the actual readiness proof ends the wait");
         }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn retained_text_block_cannot_refuse_unobservable_final_graph_work() {
+        for verified in [false, true] {
+            let mut finalizing = native_graph_after_all_encoding();
+            if verified {
+                let graph = finalizing.native_graph_progress.as_mut().unwrap();
+                graph.phase = Some(CodeIndexNativeGraphPhaseV1::CompactSegmentVerified);
+                graph.committed_compact_segments = 1;
+                graph.committed_compact_bytes = 60_000;
+            }
+            let mut retained = progress(35, Some(CodeIndexBuildBlockedReasonV1::RetryBackoff));
+            retained.phase = CodeIndexBuildPhaseV1::BulkCommit;
+            retained.daemon_incarnation = 3;
+            retained.producer_incarnation = 4;
+            finalizing.progress = Some(retained);
+            assert_eq!(
+                super::FirstGenerationStall::of(Ok(&finalizing)),
+                None,
+                "a lexical refusal cannot measure an active final graph write"
+            );
+
+            let (result, reads) = hold_over(
+                vec![
+                    status(timed_out(), warming(finalizing.clone())),
+                    status(timed_out(), warming(finalizing)),
+                    ready_status(),
+                ],
+                Duration::ZERO,
+            )
+            .await;
+            assert!(
+                result.is_ok(),
+                "an uninstrumented final graph write must not inherit a stale lexical refusal (verified={verified}): {result:?}"
+            );
+            assert_eq!(reads, 3, "only the real Ready receipt completes the wait");
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn retained_text_block_returns_after_final_graph_owner_retires() {
+        let mut finalizing = native_graph_after_all_encoding();
+        let mut retained = progress(35, Some(CodeIndexBuildBlockedReasonV1::ResidentMemory));
+        retained.phase = CodeIndexBuildPhaseV1::BulkCommit;
+        retained.daemon_incarnation = 3;
+        retained.producer_incarnation = 4;
+        finalizing.progress = Some(retained);
+
+        let mut retired = finalizing.clone();
+        retired.native_graph_progress.as_mut().unwrap().active = false;
+        assert_eq!(
+            super::FirstGenerationStall::of(Ok(&retired)),
+            Some(super::FirstGenerationStall::Blocked(
+                CodeIndexBuildBlockedReasonV1::ResidentMemory
+            ))
+        );
+
+        let (result, reads) = hold_over(
+            vec![
+                status(timed_out(), warming(finalizing)),
+                status(timed_out(), warming(retired)),
+                ready_status(),
+            ],
+            Duration::ZERO,
+        )
+        .await;
+        assert_eq!(reads, 2, "the retired graph must not mask a real refusal");
+        let (code, reason) = refusal(result);
+        assert_eq!(code, CODE_INDEX_READINESS_WAIT_TIMED_OUT);
+        assert!(reason.contains("the build is blocked (ResidentMemory)"));
     }
 
     #[tokio::test(flavor = "current_thread")]
