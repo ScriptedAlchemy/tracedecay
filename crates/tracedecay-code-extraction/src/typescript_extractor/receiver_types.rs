@@ -1,7 +1,7 @@
 //! Parser-attested instance receiver facts. Unsupported values remain calls
 //! with unresolved receivers; no method is selected from its spelling alone.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use tracedecay_domain::SourceSpan;
 use tree_sitter::Node as TsNode;
@@ -14,12 +14,13 @@ use crate::extraction_artifact::{
 /// Reuse facts about the exact retained tree while walking one owner's calls.
 /// A declaration's position is checked separately at every call site, so an
 /// earlier use cannot borrow a later call's proof. This cache never survives
-/// extraction or crosses into another tree.
+/// extraction or crosses into another tree. Index every name together so
+/// different receivers in one scope do not each trigger a full tree walk.
 #[derive(Default)]
 pub(super) struct ReceiverLookup<'t> {
     bindings: HashMap<usize, HashMap<String, ScopeBinding<'t>>>,
-    var_bindings: HashMap<usize, HashMap<String, bool>>,
-    writes: HashMap<usize, HashMap<String, bool>>,
+    var_bindings: HashMap<usize, HashSet<String>>,
+    writes: HashMap<usize, HashSet<String>>,
 }
 
 #[derive(Clone, Copy)]
@@ -36,25 +37,16 @@ impl<'t> ReceiverLookup<'t> {
         scope: TsNode<'t>,
         name: &str,
     ) -> ScopeBinding<'t> {
-        if let Some(found) = self
-            .bindings
-            .get(&scope.id())
-            .and_then(|names| names.get(name))
-        {
-            return *found;
-        }
-        let mut found = Vec::new();
-        bindings_in_scope(state, scope, scope, name, &mut found);
-        let binding = match found.as_slice() {
-            [] => ScopeBinding::Missing,
-            [declaration] if !declaration.has_error() => ScopeBinding::Declared(*declaration),
-            _ => ScopeBinding::Blocked,
-        };
         self.bindings
             .entry(scope.id())
-            .or_default()
-            .insert(name.to_owned(), binding);
-        binding
+            .or_insert_with(|| {
+                let mut found = HashMap::new();
+                bindings_in_scope(state, scope, scope, &mut found);
+                found
+            })
+            .get(name)
+            .copied()
+            .unwrap_or(ScopeBinding::Missing)
     }
 
     fn has_var_binding(
@@ -63,35 +55,25 @@ impl<'t> ReceiverLookup<'t> {
         scope: TsNode<'t>,
         name: &str,
     ) -> bool {
-        if let Some(found) = self
-            .var_bindings
-            .get(&scope.id())
-            .and_then(|names| names.get(name))
-        {
-            return *found;
-        }
-        let found = has_var_binding(state, scope, scope, name);
         self.var_bindings
             .entry(scope.id())
-            .or_default()
-            .insert(name.to_owned(), found);
-        found
+            .or_insert_with(|| {
+                let mut found = HashSet::new();
+                collect_var_bindings(state, scope, scope, &mut found);
+                found
+            })
+            .contains(name)
     }
 
     fn has_write(&mut self, state: &ExtractionState<'_>, scope: TsNode<'t>, name: &str) -> bool {
-        if let Some(found) = self
-            .writes
-            .get(&scope.id())
-            .and_then(|names| names.get(name))
-        {
-            return *found;
-        }
-        let found = has_write(state, scope, name);
         self.writes
             .entry(scope.id())
-            .or_default()
-            .insert(name.to_owned(), found);
-        found
+            .or_insert_with(|| {
+                let mut found = HashSet::new();
+                collect_writes(state, scope, &mut found);
+                found
+            })
+            .contains(name)
     }
 }
 
@@ -127,13 +109,17 @@ fn is_scope(node: TsNode<'_>) -> bool {
         )
 }
 
-fn contains_name(state: &ExtractionState<'_>, node: TsNode<'_>, name: &str) -> bool {
+fn visit_binding_names<'s>(
+    state: &ExtractionState<'s>,
+    node: TsNode<'_>,
+    visit: &mut impl FnMut(&'s str),
+) {
     if matches!(
         node.kind(),
         "identifier" | "shorthand_property_identifier_pattern" | "type_identifier"
-    ) && state.node_text(node) == name
-    {
-        return true;
+    ) {
+        visit(state.node_text(node));
+        return;
     }
     // Defaults and property keys refer to values; only the pattern's
     // binding side declares or writes an identifier.
@@ -143,13 +129,40 @@ fn contains_name(state: &ExtractionState<'_>, node: TsNode<'_>, name: &str) -> b
         _ => None,
     };
     if let Some(field) = binding_field {
-        return node
-            .child_by_field_name(field)
-            .is_some_and(|binding| contains_name(state, binding, name));
+        if let Some(binding) = node.child_by_field_name(field) {
+            visit_binding_names(state, binding, visit);
+        }
+        return;
     }
     let mut cursor = node.walk();
-    node.named_children(&mut cursor)
-        .any(|child| contains_name(state, child, name))
+    for child in node.named_children(&mut cursor) {
+        visit_binding_names(state, child, visit);
+    }
+}
+
+fn record_binding<'t>(
+    state: &ExtractionState<'_>,
+    pattern: TsNode<'t>,
+    declaration: TsNode<'t>,
+    found: &mut HashMap<String, ScopeBinding<'t>>,
+) {
+    let mut names = Vec::new();
+    visit_binding_names(state, pattern, &mut |name| names.push(name));
+    // One declaration may repeat a name inside its pattern. Only separate
+    // declarations make the lexical binding ambiguous.
+    names.sort_unstable();
+    names.dedup();
+    let binding = if declaration.has_error() {
+        ScopeBinding::Blocked
+    } else {
+        ScopeBinding::Declared(declaration)
+    };
+    for name in names {
+        found
+            .entry(name.to_owned())
+            .and_modify(|binding| *binding = ScopeBinding::Blocked)
+            .or_insert(binding);
+    }
 }
 
 /// Collect the declarations belonging to one lexical scope. Nested scopes
@@ -159,8 +172,7 @@ fn bindings_in_scope<'t>(
     state: &ExtractionState<'_>,
     scope: TsNode<'t>,
     node: TsNode<'t>,
-    name: &str,
-    found: &mut Vec<TsNode<'t>>,
+    found: &mut HashMap<String, ScopeBinding<'t>>,
 ) {
     #[cfg(test)]
     SCOPE_LOOKUP_NODE_VISITS.with(|visits| visits.set(visits.get() + 1));
@@ -186,8 +198,8 @@ fn bindings_in_scope<'t>(
         }
         _ => None,
     };
-    if binding.is_some_and(|binding| contains_name(state, binding, name)) {
-        found.push(node);
+    if let Some(binding) = binding {
+        record_binding(state, binding, node, found);
     }
     if node != scope && is_scope(node) {
         return;
@@ -195,17 +207,14 @@ fn bindings_in_scope<'t>(
     // Named function/class expressions bind their own name in their body.
     if node == scope
         && (is_function(node) || node.kind() == "class")
-        && node
-            .child_by_field_name("name")
-            .is_some_and(|bound| contains_name(state, bound, name))
+        && let Some(bound) = node.child_by_field_name("name")
     {
-        found.push(node);
+        record_binding(state, bound, node, found);
     }
     if is_function(node)
         && let Some(parameter) = node.child_by_field_name("parameter")
-        && contains_name(state, parameter, name)
     {
-        found.push(parameter);
+        record_binding(state, parameter, parameter, found);
     }
     if node.kind() == "formal_parameters" {
         let mut cursor = node.walk();
@@ -217,50 +226,51 @@ fn bindings_in_scope<'t>(
                     | "array_pattern"
                     | "rest_pattern"
                     | "assignment_pattern"
-            ) && contains_name(state, child, name)
-            {
-                found.push(child);
+            ) {
+                record_binding(state, child, child, found);
             }
         }
     }
     if node.kind() == "import_clause" {
         let mut cursor = node.walk();
         for child in node.named_children(&mut cursor) {
-            if child.kind() == "identifier" && state.node_text(child) == name {
-                found.push(child);
+            if child.kind() == "identifier" {
+                record_binding(state, child, child, found);
             }
         }
     }
     let mut cursor = node.walk();
     for child in node.named_children(&mut cursor) {
-        bindings_in_scope(state, scope, child, name, found);
+        bindings_in_scope(state, scope, child, found);
     }
 }
 
-fn has_var_binding(
+fn collect_var_bindings(
     state: &ExtractionState<'_>,
     root: TsNode<'_>,
     node: TsNode<'_>,
-    name: &str,
-) -> bool {
+    found: &mut HashSet<String>,
+) {
     #[cfg(test)]
     SCOPE_LOOKUP_NODE_VISITS.with(|visits| visits.set(visits.get() + 1));
     if node != root && is_function(node) {
-        return false;
+        return;
     }
     if node.kind() == "variable_declaration" {
         let mut cursor = node.walk();
-        if node
+        for binding in node
             .named_children(&mut cursor)
             .filter_map(|child| child.child_by_field_name("name"))
-            .any(|binding| contains_name(state, binding, name))
         {
-            return true;
+            visit_binding_names(state, binding, &mut |name| {
+                found.insert(name.to_owned());
+            });
         }
     }
     let mut cursor = node.walk();
-    node.named_children(&mut cursor)
-        .any(|child| has_var_binding(state, root, child, name))
+    for child in node.named_children(&mut cursor) {
+        collect_var_bindings(state, root, child, found);
+    }
 }
 
 /// `Some(None)` is a shadow or ambiguous binding, never permission to look
@@ -297,7 +307,7 @@ fn binding<'t>(
     None
 }
 
-fn has_write(state: &ExtractionState<'_>, node: TsNode<'_>, name: &str) -> bool {
+fn collect_writes(state: &ExtractionState<'_>, node: TsNode<'_>, found: &mut HashSet<String>) {
     #[cfg(test)]
     SCOPE_LOOKUP_NODE_VISITS.with(|visits| visits.set(visits.get() + 1));
     let target = match node.kind() {
@@ -308,16 +318,18 @@ fn has_write(state: &ExtractionState<'_>, node: TsNode<'_>, name: &str) -> bool 
         _ => None,
     };
     // Writing x.field does not rebind x; destructuring assignments do.
-    if target.is_some_and(|target| {
-        target.kind() != "member_expression"
-            && target.kind() != "subscript_expression"
-            && contains_name(state, target, name)
-    }) {
-        return true;
+    if let Some(target) = target
+        && target.kind() != "member_expression"
+        && target.kind() != "subscript_expression"
+    {
+        visit_binding_names(state, target, &mut |name| {
+            found.insert(name.to_owned());
+        });
     }
     let mut cursor = node.walk();
-    node.named_children(&mut cursor)
-        .any(|child| has_write(state, child, name))
+    for child in node.named_children(&mut cursor) {
+        collect_writes(state, child, found);
+    }
 }
 
 fn named_type(state: &ExtractionState<'_>, node: TsNode<'_>) -> Option<String> {
@@ -575,13 +587,13 @@ pub(super) fn record_callable(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::{SCOPE_LOOKUP_NODE_VISITS, TypeScriptExtractor, TypeScriptTypeRowV1};
 
     fn repeated_receiver_walk(calls: usize, written: bool) -> usize {
         let mut source =
             String::from("class Worker { push(value: number) {} }\nexport function collect() { ");
         source.push_str(if written {
-            "let receiver = new Worker(); "
+            "let receiver: Worker = new Worker(); "
         } else {
             "const receiver = new Worker(); "
         });
@@ -631,6 +643,64 @@ mod tests {
             assert!(
                 large <= small * 3,
                 "doubling receiver sites must not rescan the whole scope per call: {small} -> {large}, written={written}",
+            );
+        }
+    }
+
+    fn distinct_receiver_walk(calls: usize, written: bool) -> usize {
+        let mut source =
+            String::from("class Worker { push(value: number) {} }\nexport function collect() { ");
+        for index in 0..calls {
+            if written && index == 0 {
+                source.push_str("let receiver0: Worker = new Worker(); receiver0.push(1);");
+            } else {
+                source.push_str(&format!(
+                    "const receiver{index} = new Worker(); receiver{index}.push(1);"
+                ));
+            }
+        }
+        if written {
+            source.push_str("receiver0 = new Worker();");
+        }
+        source.push_str("}\n");
+        SCOPE_LOOKUP_NODE_VISITS.with(|visits| visits.set(0));
+        let artifact = TypeScriptExtractor::extract_typescript_artifact("distinct.ts", &source);
+        let visits = SCOPE_LOOKUP_NODE_VISITS.with(|visits| visits.replace(0));
+        assert!(
+            artifact.result.errors.is_empty(),
+            "{:?}",
+            artifact.result.errors
+        );
+        assert_eq!(
+            artifact
+                .result
+                .unresolved_refs
+                .iter()
+                .filter(|reference| reference.reference_name.ends_with(".push"))
+                .count(),
+            calls,
+        );
+        assert_eq!(
+            artifact
+                .typescript_types
+                .iter()
+                .filter(|row| matches!(row.row, TypeScriptTypeRowV1::ReceiverCall { .. }))
+                .count(),
+            calls - usize::from(written),
+            "a write to one name must not erase proof for its peers",
+        );
+        visits
+    }
+
+    #[test]
+    fn distinct_receiver_scope_walks_grow_with_source_size() {
+        for written in [false, true] {
+            let small = distinct_receiver_walk(128, written);
+            let large = distinct_receiver_walk(256, written);
+            assert!(small > 0);
+            assert!(
+                large <= small * 3,
+                "doubling receiver names must not rescan the whole scope per name: {small} -> {large}, written={written}",
             );
         }
     }
