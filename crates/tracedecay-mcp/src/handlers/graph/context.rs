@@ -7,13 +7,15 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use serde_json::Value;
 use tracedecay_code_index::graph_projection::CodeGraphSymbolSummaryV1;
-use tracedecay_contracts::InvocationAnalyticsV1;
 use tracedecay_contracts::graph_tool::{GraphToolCompletionV1, GraphToolResultV1};
 use tracedecay_contracts::retrieval::{
     ContextCodeBlockV1, ContextLexicalAnchorV1, ContextModeV1, ContextPathSourceOmissionV1,
     ContextPathSourceV1, ContextRelatedOmissionV1, ContextResultV1, ContextRetrievalPlanV1,
     ContextRetrievalRouteV1, ContextSearchMatchV1, ContextStageV1, ContextSurfaceRequestV1,
     LexicalAnchorDropReasonV1, PrimitiveSymbolLocationV1,
+};
+use tracedecay_contracts::{
+    CancellationSignal, InvocationAnalyticsV1, RequestAdmission, RequestContext, now_micros,
 };
 use tracedecay_domain::errors::Result;
 use tracedecay_domain::{
@@ -68,6 +70,38 @@ fn context_occurrence_key(node_id: &str) -> &str {
     node_id
         .strip_prefix(CODE_SYMBOL_EVIDENCE_PREFIX)
         .unwrap_or(node_id)
+}
+
+struct ContextCodeHydration {
+    include_code: bool,
+    max_code_blocks: usize,
+    path_nodes: HashSet<String>,
+    graph_admission: Option<(RequestContext, CancellationSignal)>,
+}
+
+impl ContextCodeHydration {
+    fn is_path_node(&self, node_id: &str) -> bool {
+        self.path_nodes.contains(context_occurrence_key(node_id))
+    }
+
+    fn allows(&self, ctx: &McpToolContext<'_>, node_id: &str, served: usize) -> bool {
+        if !self.include_code || served >= self.max_code_blocks || self.is_path_node(node_id) {
+            return false;
+        }
+        let now = now_micros();
+        !ctx.cancellation()
+            .is_some_and(CancellationSignal::is_cancelled)
+            && !ctx
+                .deadline()
+                .is_some_and(|deadline| deadline.is_elapsed_at(now))
+            && self
+                .graph_admission
+                .as_ref()
+                .is_none_or(|(request, cancellation)| {
+                    !cancellation.is_cancelled()
+                        && matches!(request.admission_at(now), RequestAdmission::Admitted)
+                })
+    }
 }
 
 /// Related symbols rank by the best edge kind joining them to a selected
@@ -222,8 +256,7 @@ fn context_graph_projection(
     complete: &tracedecay_query::code_search::CodeIndexSearchCompletedV1,
     scope_prefix: Option<&str>,
     max_nodes: usize,
-    include_code: bool,
-    max_code_blocks: usize,
+    code_hydration: &ContextCodeHydration,
 ) -> Result<ContextGraphProjection> {
     let mut selected = Vec::new();
     let mut selected_sites = Vec::new();
@@ -277,9 +310,12 @@ fn context_graph_projection(
     let mut code_blocks = Vec::new();
     let mut oversized = Vec::new();
     let mut code_sites = 0_usize;
-    if include_code {
+    if code_hydration.include_code {
         let mut sanitized_by_path = HashMap::<String, Option<String>>::new();
         for (symbol, site) in selected.iter().zip(selected_sites.iter()) {
+            if code_hydration.is_path_node(symbol.occurrence.as_str()) {
+                continue;
+            }
             if site
                 .as_ref()
                 .and_then(tracedecay_query::code_search::CodeIndexSearchSiteV1::code_window)
@@ -299,7 +335,7 @@ fn context_graph_projection(
                 continue;
             }
             code_sites += 1;
-            if code_blocks.len() < max_code_blocks {
+            if code_hydration.allows(ctx, symbol.occurrence.as_str(), code_blocks.len()) {
                 let file_path = required_graph_file_path(symbol)?;
                 if let Some((start_line, end_line, code)) =
                     serve_site_code(ctx, file_path, site.as_ref(), &mut sanitized_by_path)
@@ -431,8 +467,7 @@ fn hydrate_context_from_search_matches(
     ctx: &McpToolContext<'_>,
     search_matches: &[ContextSearchMatchV1],
     sites: &HashMap<String, tracedecay_query::code_search::CodeIndexSearchSiteV1>,
-    include_code: bool,
-    max_code_blocks: usize,
+    code_hydration: &ContextCodeHydration,
 ) -> SearchMatchHydration {
     let mut symbols = Vec::new();
     let mut code_blocks = Vec::new();
@@ -446,16 +481,17 @@ fn hydrate_context_from_search_matches(
         let site = sites.get(&search_match.anchor_id);
         // Only a match carrying a code-capable site counts as a
         // candidate the code stage could serve.
-        if site
-            .and_then(tracedecay_query::code_search::CodeIndexSearchSiteV1::code_window)
-            .is_some()
+        if !code_hydration.is_path_node(&search_match.anchor_id)
+            && site
+                .and_then(tracedecay_query::code_search::CodeIndexSearchSiteV1::code_window)
+                .is_some()
         {
             code_sites += 1;
         }
         // A byte window alone attests no declaration extent. Keep lexical
         // matches visible while that authority is unavailable, without
         // presenting a body piece as the whole symbol.
-        let needs_code = include_code && code_blocks.len() < max_code_blocks;
+        let needs_code = code_hydration.allows(ctx, &search_match.anchor_id, code_blocks.len());
         let verified_window = if needs_code {
             match site {
                 Some(tracedecay_query::code_search::CodeIndexSearchSiteV1::SymbolLines {
@@ -491,7 +527,6 @@ fn hydrate_context_from_search_matches(
             Some(tracedecay_query::code_search::CodeIndexSearchSiteV1::ArtifactWindow(_))
             | None => {}
         }
-        let served_code = include_code.then_some(verified_window).flatten();
         let node_id = search_match.anchor_id.clone();
         // A file hit names no symbol location; it stays visible in
         // search_matches and touched_files instead of inventing one.
@@ -523,10 +558,7 @@ fn hydrate_context_from_search_matches(
                 unavailable_fields,
             });
         }
-        if include_code
-            && code_blocks.len() < max_code_blocks
-            && let Some((start_line, end_line, code)) = served_code
-        {
+        if let Some((start_line, end_line, code)) = verified_window {
             code_blocks.push(ContextCodeBlockV1 {
                 node_id,
                 file: search_match.file.clone(),
@@ -724,6 +756,24 @@ where
     } else {
         None
     };
+    // Source admission remains live after the interruptible path read. A
+    // cancellation or expiry must not fall through to an ordinary file read,
+    // and a path body must never be read again through a weaker search window.
+    let code_hydration = ContextCodeHydration {
+        include_code,
+        max_code_blocks,
+        path_nodes: path_projection
+            .iter()
+            .flat_map(|path| path.nodes())
+            .map(|node| node.symbol.node_id.clone())
+            .collect(),
+        graph_admission: graph.as_ref().ok().map(|graph| {
+            (
+                graph.request_context().clone(),
+                graph.cancellation_signal().clone(),
+            )
+        }),
+    };
     // Preserve the path's metered reads even if later neighborhood
     // enrichment refuses and releases its query.
     let path_cost = path_projection
@@ -741,8 +791,7 @@ where
                         complete,
                         scope_prefix,
                         max_nodes,
-                        include_code,
-                        max_code_blocks,
+                        &code_hydration,
                     )
                 };
                 match match_result {
@@ -781,8 +830,7 @@ where
                 ctx,
                 &search_matches,
                 &search_sites,
-                include_code,
-                max_code_blocks,
+                &code_hydration,
             )
         });
     if let Some(hydrated) = search_hydration.as_ref() {
@@ -808,12 +856,7 @@ where
     let mut path_code_requested = false;
     let mut path_code_limited = false;
     let call_path = path_projection.map(|mut path| {
-        let path_ids = path
-            .nodes()
-            .iter()
-            .map(|node| node.symbol.node_id.clone())
-            .collect::<HashSet<_>>();
-        path_code_requested = include_code && !path_ids.is_empty();
+        path_code_requested = include_code && !code_hydration.path_nodes.is_empty();
         path_code_limited = path.nodes().iter().any(|node| {
             matches!(
                 node.source,
@@ -825,14 +868,8 @@ where
         projection
             .touched_files
             .extend(path.nodes().iter().map(|node| node.symbol.file.clone()));
-        // The connecting declarations have first claim on the source
-        // budget. Never backfill a refused path body from a looser search
-        // window for that same node.
-        path.code.extend(
-            std::mem::take(&mut projection.code_blocks)
-                .into_iter()
-                .filter(|block| !path_ids.contains(context_occurrence_key(&block.node_id))),
-        );
+        // The connecting declarations have first claim on the source budget.
+        path.code.append(&mut projection.code_blocks);
         path.code.truncate(max_code_blocks);
         projection.code_blocks = path.code;
         path.result

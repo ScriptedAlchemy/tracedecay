@@ -2,6 +2,9 @@
 //! graph and port reads through the serving MCP server's admitted
 //! authorities.
 
+#[cfg(all(test, unix))]
+mod tests;
+
 use std::path::Path;
 use std::sync::{Arc, Weak};
 
