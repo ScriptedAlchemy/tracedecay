@@ -13,6 +13,9 @@ use tracedecay_runtime_core::native_runtime;
 
 #[test]
 fn spawned_loop_is_cancellable_and_joinable_from_a_synchronous_host() {
+    if !crate::test_support::alone_with_runtime_hazards() {
+        return;
+    }
     let hazards = crate::test_support::native_runtime_hazards();
     native_runtime::block_on(async {
         assert!(tokio::runtime::Handle::try_current().is_ok());
@@ -34,6 +37,9 @@ fn spawned_loop_is_cancellable_and_joinable_from_a_synchronous_host() {
 /// code-index scheduler on the installed runtime.
 #[test]
 fn reconcile_activates_a_pr_head_from_a_synchronous_host() {
+    if !crate::test_support::alone_with_runtime_hazards() {
+        return;
+    }
     let repo = tempfile::tempdir().unwrap();
     let origin = tempfile::tempdir().unwrap();
     init_repo_with_pr_11_head(repo.path(), origin.path());

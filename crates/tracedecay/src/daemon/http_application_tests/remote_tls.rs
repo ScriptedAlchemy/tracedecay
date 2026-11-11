@@ -1521,6 +1521,9 @@ async fn remote_tls_listener_expires_saturated_non_reading_responses() {
 /// The remote listener and its handlers share the installed Tokio runtime.
 #[tokio::test]
 async fn remote_tls_connections_are_served_on_the_installed_runtime() {
+    if !crate::test_support::alone_with_runtime_hazards() {
+        return;
+    }
     let temporary = tempfile::tempdir().expect("remote TLS runtime fixture");
     let (tls, certificate) = remote_tls_fixture(&temporary);
     let credentials = Arc::new(

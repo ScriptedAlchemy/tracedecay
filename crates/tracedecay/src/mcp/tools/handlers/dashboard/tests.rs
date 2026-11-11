@@ -156,6 +156,9 @@ async fn timed_out_shutdown_owner_aborts_the_dashboard_task() {
 /// through the installed runtime.
 #[test]
 fn opening_project_sessions_resolve_on_the_process_runtime() {
+    if !crate::test_support::alone_with_runtime_hazards() {
+        return;
+    }
     let hazards = crate::test_support::native_runtime_hazards();
     let unavailable = tracedecay_runtime_core::native_runtime::block_on(async {
         assert!(tokio::runtime::Handle::try_current().is_ok());

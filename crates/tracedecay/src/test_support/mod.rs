@@ -19,6 +19,30 @@ pub(crate) fn native_runtime_hazards() -> u64 {
     ) + tracedecay_rusqlite_runtime::exact_sql::native_thread_writer_waits()
 }
 
+/// Runtime hazard counters belong to the process. Measure one test alone so
+/// another test's synchronous fixture setup cannot change its observed delta.
+#[cfg(test)]
+pub(crate) fn alone_with_runtime_hazards() -> bool {
+    const CHILD: &str = "TRACEDECAY_RUNTIME_HAZARD_TEST_CHILD";
+    let thread = std::thread::current();
+    let test = thread.name().expect("libtest names its test thread");
+    if std::env::var(CHILD).as_deref() == Ok(test) {
+        return true;
+    }
+    let output = std::process::Command::new(std::env::current_exe().expect("test executable"))
+        .args([test, "--exact", "--test-threads=1", "--nocapture"])
+        .env(CHILD, test)
+        .output()
+        .expect("run the runtime-hazard test in its own process");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.status.success() && stdout.contains("1 passed"),
+        "{test} failed in its child process:\n{stdout}\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    false
+}
+
 /// Park after core publication when `TRACEDECAY_TEST_HOLD_AFTER_CORE_PUBLISH`
 /// names a file. The core graph-tool owner is already registered and the
 /// route is ready, so a session action can land before the full server

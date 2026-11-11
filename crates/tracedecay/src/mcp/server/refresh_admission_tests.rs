@@ -371,6 +371,9 @@ async fn parked_freshness_probe_logs_cause_and_remedy_as_fields() {
 /// fabricating scheduler success.
 #[test]
 fn startup_catch_up_settles_on_the_process_runtime() {
+    if !crate::test_support::alone_with_runtime_hazards() {
+        return;
+    }
     native_server_catch_up(None, async |server| {
         assert!(
             server
@@ -400,6 +403,9 @@ fn native_server_catch_up(
 
 #[test]
 fn shutdown_aborts_a_parked_startup_admission_on_the_process_runtime() {
+    if !crate::test_support::alone_with_runtime_hazards() {
+        return;
+    }
     struct Dropped(Arc<AtomicBool>);
     impl Drop for Dropped {
         fn drop(&mut self) {

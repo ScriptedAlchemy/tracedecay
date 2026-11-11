@@ -1129,6 +1129,9 @@ mod tests {
     /// a caller with no Tokio runtime can track and settle it.
     #[test]
     fn a_tokio_retirement_is_tracked_and_settled_from_a_synchronous_host() {
+        if !crate::test_support::alone_with_runtime_hazards() {
+            return;
+        }
         let tokio = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(1)
             .build()

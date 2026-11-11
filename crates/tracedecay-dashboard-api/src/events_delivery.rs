@@ -734,17 +734,21 @@ mod tests {
     }
 
     /// The reaper and the settlement it drives (durable write, owner-fact
-    /// emission under its persistence deadline) run with no Tokio runtime.
+    /// emission under its persistence deadline) run on the process runtime.
     #[test]
     fn restarted_deadline_reaper_drops_durable_receipt_without_browser_ack() {
+        if !crate::test_support::alone_with_storage_wait_counters() {
+            return;
+        }
         let profile_dir = tempfile::tempdir().expect("profile");
         let project = tempfile::tempdir().expect("project directory");
         let fixture = tokio::runtime::Runtime::new().expect("fixture runtime");
         let (_runtime, authority, producer, receipt) =
             fixture.block_on(overdue_receipt_fixture(profile_dir.path(), project.path()));
         let writer_waits = native_runtime::native_thread_writer_waits();
+        let process_runtime = native_runtime::handle().expect("process runtime").id();
         native_runtime::block_on(async move {
-            assert!(tokio::runtime::Handle::try_current().is_err());
+            assert_eq!(tokio::runtime::Handle::current().id(), process_runtime);
             let restarted = Arc::new(DashboardDeliverySettlementRegistryV1::new(Some(
                 Arc::clone(&authority),
             )));

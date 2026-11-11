@@ -870,6 +870,9 @@ async fn engine_shutdown_with_code_index_reconcile_in_flight_stays_inside_term_g
 #[cfg(unix)]
 #[test]
 fn automation_retirement_reaps_from_a_synchronous_host() {
+    if !crate::test_support::alone_with_runtime_hazards() {
+        return;
+    }
     let hazards = crate::test_support::native_runtime_hazards();
     tracedecay_runtime_core::native_runtime::block_on(async {
         assert!(tokio::runtime::Handle::try_current().is_ok());
@@ -931,6 +934,9 @@ fn automation_retirement_reaps_from_a_synchronous_host() {
 #[cfg(unix)]
 #[test]
 fn manual_branch_publication_runs_and_joins_from_a_synchronous_host() {
+    if !crate::test_support::alone_with_runtime_hazards() {
+        return;
+    }
     let hazards = crate::test_support::native_runtime_hazards();
     tracedecay_runtime_core::native_runtime::block_on(async {
         assert!(tokio::runtime::Handle::try_current().is_ok());

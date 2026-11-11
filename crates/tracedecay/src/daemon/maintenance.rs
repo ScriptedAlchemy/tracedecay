@@ -2940,6 +2940,9 @@ mod tests {
     /// Capacity release still excludes store clients.
     #[test]
     fn full_ticks_preserve_independent_store_progress_from_a_synchronous_host() {
+        if !crate::test_support::alone_with_runtime_hazards() {
+            return;
+        }
         let hazards = crate::test_support::native_runtime_hazards();
         tracedecay_runtime_core::native_runtime::block_on(
             full_ticks_preserve_independent_store_progress(),
@@ -3414,6 +3417,9 @@ mod tests {
     /// host.
     #[test]
     fn the_coordinator_runs_and_shuts_down_from_a_synchronous_host() {
+        if !crate::test_support::alone_with_runtime_hazards() {
+            return;
+        }
         let hazards = crate::test_support::native_runtime_hazards();
         tracedecay_runtime_core::native_runtime::block_on(async {
             assert!(tokio::runtime::Handle::try_current().is_ok());

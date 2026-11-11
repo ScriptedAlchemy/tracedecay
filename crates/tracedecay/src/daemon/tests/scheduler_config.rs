@@ -1096,6 +1096,9 @@ async fn cancel_stops_the_automation_loop_while_the_scheduler_map_is_held() {
 #[cfg(unix)]
 #[test]
 fn the_automation_loop_starts_and_exits_from_a_synchronous_host() {
+    if !crate::test_support::alone_with_runtime_hazards() {
+        return;
+    }
     let tokio = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
@@ -1174,6 +1177,9 @@ fn the_automation_loop_starts_and_exits_from_a_synchronous_host() {
 #[cfg(unix)]
 #[test]
 fn project_open_activation_starts_the_automation_loop_from_a_synchronous_host() {
+    if !crate::test_support::alone_with_runtime_hazards() {
+        return;
+    }
     let tokio = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()

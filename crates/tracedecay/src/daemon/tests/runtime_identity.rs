@@ -1008,6 +1008,9 @@ async fn retiring_observability_owner_reopens_same_route_without_cached_degradat
 /// Tokio runtime it opens the cold profile runtime and binds the client to it.
 #[test]
 fn profile_identity_binding_opens_a_cold_profile_runtime_from_a_synchronous_host() {
+    if !crate::test_support::alone_with_runtime_hazards() {
+        return;
+    }
     let temp = TempDir::new().expect("temp dir");
     let profile_root = temp.path().join("profile");
     let store_administration = test_store_administration_for_profile(&profile_root);

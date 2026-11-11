@@ -489,11 +489,11 @@ mod gc_tests {
         .expect("preview input")
     }
 
-    fn wait_for_attempts(observer: &PreviewGcTestObserver, expected: usize) {
+    async fn wait_for_attempts(observer: &PreviewGcTestObserver, expected: usize) {
         let deadline = Instant::now() + Duration::from_secs(3);
         while observer.purge_attempts.load(Ordering::SeqCst) < expected && Instant::now() < deadline
         {
-            std::thread::sleep(Duration::from_millis(10));
+            tokio::time::sleep(Duration::from_millis(10)).await;
         }
         assert_eq!(
             observer.purge_attempts.load(Ordering::SeqCst),
@@ -549,8 +549,8 @@ mod gc_tests {
             .await
             .expect("save preview input");
 
-        wait_for_attempts(&observer, 1);
-        std::thread::sleep(Duration::from_millis(150));
+        wait_for_attempts(&observer, 1).await;
+        tokio::time::sleep(Duration::from_millis(150)).await;
 
         assert_eq!(observer.purge_attempts.load(Ordering::SeqCst), 1);
         assert!(matches!(
@@ -592,7 +592,7 @@ mod gc_tests {
         )
         .await
         .expect("reopened registered store");
-        wait_for_attempts(&observer, 1);
+        wait_for_attempts(&observer, 1).await;
 
         assert!(matches!(
             wait_for_tombstone(&store, &preview_id).await,
@@ -624,8 +624,8 @@ mod gc_tests {
             .save_preview_input(input)
             .await
             .expect("save preview input");
-        wait_for_attempts(&observer, 1);
-        std::thread::sleep(Duration::from_millis(150));
+        wait_for_attempts(&observer, 1).await;
+        tokio::time::sleep(Duration::from_millis(150)).await;
         assert_eq!(
             observer.purge_attempts.load(Ordering::SeqCst),
             1,
@@ -644,7 +644,7 @@ mod gc_tests {
         ));
 
         observer.fail_purge.store(false, Ordering::SeqCst);
-        wait_for_attempts(&observer, 2);
+        wait_for_attempts(&observer, 2).await;
         assert!(matches!(
             wait_for_tombstone(&store, &preview_id).await,
             GitIndexPreviewInputReadV1::Expired {
