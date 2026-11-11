@@ -386,7 +386,7 @@ fn parent_worktree_config_change_revokes_cached_child_authority() {
     let root = fixture.path().join("parent");
     git(&root, &["config", "extensions.worktreeConfig", "true"]);
     let config = root.join(".git/config.worktree");
-    let original = format!("[core]\\n\\tworktree = {}\\n", root.display());
+    let original = format!("[core]\n\tworktree = {}\n", root.display());
     fs::write(&config, &original).unwrap();
 
     let boundaries = LiveSourceBoundaries::open(&root, true).unwrap();
@@ -400,11 +400,8 @@ fn parent_worktree_config_change_revokes_cached_child_authority() {
     let index_before = super::FileWitness::at(&git_directory.join("index")).unwrap();
     let foreign = fixture.path().join("foreign");
     fs::create_dir_all(&foreign).unwrap();
-    fs::write(
-        &config,
-        format!("[core]\\n\\tworktree = {}\\n", foreign.display()),
-    )
-    .unwrap();
+    let alternate = format!("[core]\n\tworktree = {}\n", foreign.display());
+    fs::write(&config, alternate).unwrap();
     assert_eq!(super::FileWitness::at(&git_directory).unwrap(), directory_before);
     assert_eq!(
         super::FileWitness::at(&git_directory.join("index")).unwrap(),
