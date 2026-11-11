@@ -273,13 +273,12 @@ impl RemoteBrainTlsListener {
                 return None;
             }
         };
-        let acceptor = self.acceptor.clone();
         let handshake_read = Arc::new(AtomicBool::new(false));
         let stream = RemoteBrainTcpStream {
             stream,
             read: Arc::clone(&handshake_read),
         };
-        let handshake = Box::pin(async move { acceptor.accept(stream).await });
+        let handshake = Box::pin(self.acceptor.accept(stream));
         Some((
             RemoteBrainTlsIo::new(
                 handshake,
