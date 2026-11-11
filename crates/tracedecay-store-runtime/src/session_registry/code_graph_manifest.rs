@@ -297,10 +297,16 @@ fn open_checked_seal_reader<'a>(
         });
     }
     #[cfg(windows)]
-    if !same_windows_handle_identity(&file, path)? {
-        return Err(GraphDbError::Corrupt {
-            message: "sealed code generation identity changed while it was opened".to_owned(),
-        });
+    {
+        // The second pathname open can cross the caller's deadline on
+        // endpoint-scanned hosts. Classify interruption before identity errors.
+        let same_handle = same_windows_handle_identity(&file, path);
+        (check)()?;
+        if !same_handle? {
+            return Err(GraphDbError::Corrupt {
+                message: "sealed code generation identity changed while it was opened".to_owned(),
+            });
+        }
     }
     Ok((
         CheckedSealReader {
@@ -421,10 +427,16 @@ fn read_verified_seal_manifest(
         });
     }
     #[cfg(windows)]
-    if !same_windows_handle_identity(&file, path)? {
-        return Err(GraphDbError::Corrupt {
-            message: "sealed code generation identity changed while it was opened".to_owned(),
-        });
+    {
+        // The second pathname open can cross the caller's deadline on
+        // endpoint-scanned hosts. Classify interruption before identity errors.
+        let same_handle = same_windows_handle_identity(&file, path);
+        (check)()?;
+        if !same_handle? {
+            return Err(GraphDbError::Corrupt {
+                message: "sealed code generation identity changed while it was opened".to_owned(),
+            });
+        }
     }
 
     let mut manifest = Vec::new();
@@ -1850,6 +1862,33 @@ mod tests {
                 "the interruption must be observed after final filesystem I/O"
             );
         }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn checked_seal_open_preserves_deadline_after_windows_identity_io() {
+        let temporary = TempDir::new().expect("Windows seal identity fixture");
+        let path = temporary.path().join("generation.json");
+        std::fs::write(&path, b"actual nonempty seal").expect("create real seal file");
+
+        // The fourth probe belongs after the additional Windows pathname
+        // handle check. On the predecessor that operation has no post-I/O
+        // check, so this returns a seemingly admitted reader instead.
+        let probes = Cell::new(0_usize);
+        let check = || {
+            let next = probes.get() + 1;
+            probes.set(next);
+            if next == 4 {
+                Err(GraphDbError::DeadlineExceeded)
+            } else {
+                Ok(())
+            }
+        };
+        assert!(matches!(
+            super::open_checked_seal_reader(&path, &check),
+            Err(GraphDbError::DeadlineExceeded)
+        ));
+        assert_eq!(probes.get(), 4);
     }
 
     #[cfg(unix)]
