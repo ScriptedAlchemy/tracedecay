@@ -152,26 +152,42 @@ impl OpenedDatabaseFile {
         // An immutable SQLite reader uses the VFS's lock-aware lifetime and
         // never opens or mutates the unverified WAL/SHM/journal sidecars.
         let pinned = Self::pin(path)?;
-        let inspection =
-            open_immutable_reader(path).map_err(|_| OpenedDatabaseFileError::InvalidHeader)?;
-        let initialized =
-            has_store_schema(&inspection).map_err(|_| OpenedDatabaseFileError::InvalidHeader)?;
-        pinned.verify_connection(&inspection, path)?;
-        drop(inspection);
-        if !initialized {
-            let sidecar = |suffix| match std::fs::symlink_metadata(sidecar_path(path, suffix)) {
-                Ok(meta) => Ok(Some(meta)),
-                Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
-                Err(_) => Err(OpenedDatabaseFileError::Inspect),
+        let sidecar = |suffix| match std::fs::symlink_metadata(sidecar_path(path, suffix)) {
+            Ok(meta) => Ok(Some(meta)),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+            Err(_) => Err(OpenedDatabaseFileError::Inspect),
+        };
+        let live_wal_is_initialized =
+            || match (sidecar("-wal")?, sidecar("-shm")?, sidecar("-journal")?) {
+                (Some(wal), Some(shm), None)
+                    if wal.is_file() && wal.len() > 0 && shm.is_file() && shm.len() > 0 =>
+                {
+                    Ok(live_wal_has_store_schema(path))
+                }
+                _ => Ok(false),
             };
+        let initialized = match open_immutable_reader(path) {
+            Ok(inspection) => {
+                let initialized = match has_store_schema(&inspection) {
+                    Ok(initialized) => initialized,
+                    // An immutable reader deliberately ignores the live WAL. A
+                    // checkpoint can expose pages from different committed
+                    // generations in that main-only view, including a schema
+                    // object whose parent table is still only in the WAL.
+                    Err(_) if live_wal_is_initialized()? => true,
+                    Err(_) => return Err(OpenedDatabaseFileError::InvalidHeader),
+                };
+                pinned.verify_connection(&inspection, path)?;
+                drop(inspection);
+                initialized
+            }
+            Err(_) if live_wal_is_initialized()? => true,
+            Err(_) => return Err(OpenedDatabaseFileError::InvalidHeader),
+        };
+        if !initialized {
             match (sidecar("-wal")?, sidecar("-shm")?, sidecar("-journal")?) {
                 (None, None, None) => {}
-                (Some(wal), Some(shm), None)
-                    if wal.is_file()
-                        && wal.len() > 0
-                        && shm.is_file()
-                        && shm.len() > 0
-                        && live_wal_has_store_schema(path) => {}
+                _ if live_wal_is_initialized()? => {}
                 _ => return Err(OpenedDatabaseFileError::IncompleteInitialization),
             }
         }
@@ -468,10 +484,17 @@ impl OpenedDatabaseFile {
             ReservedJournalPolicy::Ignore
         };
         self.verify_reserved_sidecars(canonical_path, initial_journal_policy)?;
-        let journal_mode_is_wal = connection
-            .query_row("PRAGMA journal_mode", [], |row| row.get::<_, String>(0))
-            .map_err(|_| OpenedDatabaseFileError::Inspect)?
-            .eq_ignore_ascii_case("wal");
+        let journal_mode_is_wal = if self.created_sidecars.is_some() {
+            connection
+                .query_row("PRAGMA journal_mode", [], |row| row.get::<_, String>(0))
+                .map_err(|_| OpenedDatabaseFileError::Inspect)?
+                .eq_ignore_ascii_case("wal")
+        } else {
+            // Existing stores have no reservations to classify. In particular,
+            // an immutable schema-inspection connection must not dereference a
+            // checkpoint-bounded schema merely to verify its file identity.
+            false
+        };
         // WAL initialization leaves the rollback journal unused, so SQLite
         // may remove that empty reservation. A rollback writer may also
         // recreate its journal with a new inode on every transaction. Only

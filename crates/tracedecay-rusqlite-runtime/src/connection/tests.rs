@@ -709,6 +709,64 @@ fn initialized_wal_with_uncheckpointed_schema_remains_attachable() {
 }
 
 #[test]
+fn live_wal_recovers_an_inconsistent_immutable_checkpoint_view() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("sessions.db");
+    let wal_path = sidecar_path(&path, "-wal");
+    let shm_path = sidecar_path(&path, "-shm");
+    let journal_path = sidecar_path(&path, "-journal");
+    let writer = Connection::open(&path).unwrap();
+    writer
+        .pragma_update(
+            None,
+            "application_id",
+            crate::schema_version::REGISTERED_STORE_APPLICATION_ID,
+        )
+        .unwrap();
+    writer
+        .execute_batch(
+            "PRAGMA journal_mode = WAL;
+             PRAGMA wal_checkpoint(TRUNCATE);
+             CREATE TABLE lcm_raw_messages(value INTEGER);
+             CREATE TRIGGER git_history_message_update
+             AFTER UPDATE ON lcm_raw_messages BEGIN SELECT 1; END;",
+        )
+        .unwrap();
+    let main_header = std::fs::read(&path).unwrap()[..100].to_vec();
+    let wal = std::fs::read(&wal_path).unwrap();
+    let shm = std::fs::read(&shm_path).unwrap();
+
+    // Model a main-only immutable view assembled from different committed
+    // generations: the trigger is visible but its parent table is not. Keep a
+    // valid WAL snapshot whose read view contains both objects.
+    writer
+        .execute_batch(
+            "PRAGMA writable_schema = ON;
+             DELETE FROM sqlite_schema WHERE type = 'table' AND name = 'lcm_raw_messages';
+             PRAGMA writable_schema = OFF;
+             PRAGMA wal_checkpoint(TRUNCATE);",
+        )
+        .unwrap();
+    assert!(matches!(
+        OpenedDatabaseFile::pin_initialized(&path),
+        Err(OpenedDatabaseFileError::InvalidHeader)
+    ));
+
+    std::fs::write(&wal_path, wal).unwrap();
+    std::fs::write(&shm_path, shm).unwrap();
+    let mut main = std::fs::read(&path).unwrap();
+    main[..100].copy_from_slice(&main_header);
+    std::fs::write(&path, main).unwrap();
+    if journal_path.exists() {
+        std::fs::remove_file(&journal_path).unwrap();
+    }
+    let pinned = OpenedDatabaseFile::pin_initialized(&path)
+        .expect("the authenticated live WAL completes the checkpoint-bounded main view");
+    pinned.release_after_workers_exit();
+    drop(writer);
+}
+
+#[test]
 fn create_new_refuses_to_replace_an_existing_database() {
     let file = NamedTempFile::new().unwrap();
 
