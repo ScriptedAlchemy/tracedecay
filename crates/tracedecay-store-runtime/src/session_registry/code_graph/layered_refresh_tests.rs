@@ -469,7 +469,7 @@ async fn assert_matches_cold_build(
         .await
         .expect("retain the cold graph runtime");
     let cold = cold_runtime
-        .publish_verified_snapshot(Arc::new(AtomicBool::new(false)))
+        .publish_verified_snapshot_with_admission(Arc::new(AtomicBool::new(false)), None, None)
         .expect("publish the generation cold");
     let (_, cold_receipt) = receipt_for(&fixture.root.join(profile), cold.generation().as_str());
     assert_eq!(cold_receipt["form"], "compact");
@@ -592,7 +592,7 @@ async fn small_refreshes_seal_deltas_that_serve_like_their_cold_builds() {
         .await
         .expect("retain the base graph runtime");
     let base = base_runtime
-        .publish_verified_snapshot(Arc::new(AtomicBool::new(false)))
+        .publish_verified_snapshot_with_admission(Arc::new(AtomicBool::new(false)), None, None)
         .expect("publish the base graph cold");
     let profile = root.join("profile");
     let (base_directory, base_receipt) = receipt_for(&profile, base.generation().as_str());
@@ -614,7 +614,7 @@ async fn small_refreshes_seal_deltas_that_serve_like_their_cold_builds() {
         .await
         .expect("retain the base graph runtime after a restart");
     let base = base_runtime
-        .publish_verified_snapshot(Arc::new(AtomicBool::new(false)))
+        .publish_verified_snapshot_with_admission(Arc::new(AtomicBool::new(false)), None, None)
         .expect("recover the base graph after a restart");
 
     // A three-file edit.
@@ -648,7 +648,7 @@ async fn small_refreshes_seal_deltas_that_serve_like_their_cold_builds() {
         "the edit must produce a nonempty graph delta: {child_report:?}"
     );
     let child = child_runtime
-        .publish_verified_snapshot(Arc::new(AtomicBool::new(false)))
+        .publish_verified_snapshot_with_admission(Arc::new(AtomicBool::new(false)), None, None)
         .expect("publish the refresh");
     assert_layered_over(
         &profile,
@@ -707,7 +707,7 @@ async fn small_refreshes_seal_deltas_that_serve_like_their_cold_builds() {
         "the cumulative edit must produce a nonempty graph delta: {grandchild_report:?}"
     );
     let grandchild = grandchild_runtime
-        .publish_verified_snapshot(Arc::new(AtomicBool::new(false)))
+        .publish_verified_snapshot_with_admission(Arc::new(AtomicBool::new(false)), None, None)
         .expect("publish the second refresh");
     assert_layered_over(
         &profile,
@@ -758,7 +758,7 @@ async fn a_linked_worktree_at_the_same_tree_layers_over_its_siblings_sealed_grap
         .await
         .expect("retain the primary graph runtime");
     let primary = primary_runtime
-        .publish_verified_snapshot(Arc::new(AtomicBool::new(false)))
+        .publish_verified_snapshot_with_admission(Arc::new(AtomicBool::new(false)), None, None)
         .expect("publish the primary graph cold");
     let profile = root.join("profile");
     let (primary_directory, _) =
@@ -787,7 +787,7 @@ async fn a_linked_worktree_at_the_same_tree_layers_over_its_siblings_sealed_grap
     assert_eq!(report.reextracted_files, 0, "{report:?}");
     assert_eq!(report.removed_files, 0, "{report:?}");
     let linked = linked_runtime
-        .publish_verified_snapshot(Arc::new(AtomicBool::new(false)))
+        .publish_verified_snapshot_with_admission(Arc::new(AtomicBool::new(false)), None, None)
         .expect("publish the linked worktree's graph");
     assert_ne!(linked.projection(), primary.projection());
     let (linked_directory, receipt) =
@@ -834,7 +834,7 @@ async fn a_linked_worktree_at_the_same_tree_layers_over_its_siblings_sealed_grap
         .await
         .expect("retain the edited linked graph runtime");
     let edited = edited_runtime
-        .publish_verified_snapshot(Arc::new(AtomicBool::new(false)))
+        .publish_verified_snapshot_with_admission(Arc::new(AtomicBool::new(false)), None, None)
         .expect("publish the linked worktree's edit");
     let edited_rows = scan_rows(&edited);
     assert_layered_over(
@@ -1043,7 +1043,7 @@ async fn a_growing_catalog_carry_accounts_for_its_peak_and_releases_on_cancellat
         .await
         .expect("retain base");
     let base = base_runtime
-        .publish_verified_snapshot(Arc::new(AtomicBool::new(false)))
+        .publish_verified_snapshot_with_admission(Arc::new(AtomicBool::new(false)), None, None)
         .expect("base snapshot");
     let parent = warmed_store(base, &base_generation, None);
 
@@ -1061,7 +1061,7 @@ async fn a_growing_catalog_carry_accounts_for_its_peak_and_releases_on_cancellat
         .await
         .expect("retain successor");
     let snapshot = runtime
-        .publish_verified_snapshot(Arc::new(AtomicBool::new(false)))
+        .publish_verified_snapshot_with_admission(Arc::new(AtomicBool::new(false)), None, None)
         .expect("successor snapshot");
     assert!(
         snapshot.layered_rows().is_some(),
@@ -1136,7 +1136,7 @@ async fn a_catalog_carry_accounts_for_many_rebuilt_lookup_lists() {
         .await
         .expect("retain base");
     let base = base_runtime
-        .publish_verified_snapshot(Arc::new(AtomicBool::new(false)))
+        .publish_verified_snapshot_with_admission(Arc::new(AtomicBool::new(false)), None, None)
         .expect("base snapshot");
     let parent = warmed_store(base, &base_generation, None);
 
@@ -1154,7 +1154,7 @@ async fn a_catalog_carry_accounts_for_many_rebuilt_lookup_lists() {
         .await
         .expect("retain successor");
     let snapshot = runtime
-        .publish_verified_snapshot(Arc::new(AtomicBool::new(false)))
+        .publish_verified_snapshot_with_admission(Arc::new(AtomicBool::new(false)), None, None)
         .expect("successor snapshot");
     assert!(
         snapshot.layered_rows().is_some(),
@@ -1209,7 +1209,7 @@ async fn a_catalog_scan_accounts_for_unique_names_and_file_dependency_finalizati
         .await
         .expect("retain graph");
     let snapshot = runtime
-        .publish_verified_snapshot(Arc::new(AtomicBool::new(false)))
+        .publish_verified_snapshot_with_admission(Arc::new(AtomicBool::new(false)), None, None)
         .expect("cold snapshot");
     assert_catalog_build_accounts_for_its_peak(&snapshot, &generation, None);
 }
@@ -1237,7 +1237,7 @@ async fn a_small_refresh_carries_its_catalog_from_the_generation_it_replaces() {
         .await
         .expect("retain the base graph runtime");
     let base = base_runtime
-        .publish_verified_snapshot(Arc::new(AtomicBool::new(false)))
+        .publish_verified_snapshot_with_admission(Arc::new(AtomicBool::new(false)), None, None)
         .expect("publish the base graph cold");
     let base_store = warmed_store(base, &base_generation, None);
     assert_eq!(base_store.interactive_catalog_scan_builds(), 1);
@@ -1255,7 +1255,7 @@ async fn a_small_refresh_carries_its_catalog_from_the_generation_it_replaces() {
         .await
         .expect("retain the child graph runtime");
     let child = child_runtime
-        .publish_verified_snapshot(Arc::new(AtomicBool::new(false)))
+        .publish_verified_snapshot_with_admission(Arc::new(AtomicBool::new(false)), None, None)
         .expect("publish the refresh");
     let measured_carry =
         CodeGraphProjectionStore::from_verified_snapshot(child.clone(), child_generation.clone())
@@ -1347,7 +1347,7 @@ async fn a_small_refresh_carries_its_catalog_from_the_generation_it_replaces() {
         .await
         .expect("retain the grandchild graph runtime");
     let grandchild = grandchild_runtime
-        .publish_verified_snapshot(Arc::new(AtomicBool::new(false)))
+        .publish_verified_snapshot_with_admission(Arc::new(AtomicBool::new(false)), None, None)
         .expect("publish the second refresh");
     let scanned_grandchild = warmed_store(grandchild.clone(), &grandchild_generation, None);
     assert_eq!(scanned_grandchild.interactive_catalog_scan_builds(), 1);
@@ -1390,7 +1390,7 @@ async fn a_small_refresh_carries_its_catalog_from_the_generation_it_replaces() {
         .await
         .expect("retain the cold child graph runtime");
     let cold_child = cold_runtime
-        .publish_verified_snapshot(Arc::new(AtomicBool::new(false)))
+        .publish_verified_snapshot_with_admission(Arc::new(AtomicBool::new(false)), None, None)
         .expect("publish the child cold");
     let cold_child_store = warmed_store(cold_child, &child_generation, Some(&base_store));
     assert_eq!(
@@ -1430,7 +1430,7 @@ async fn three_file_refresh_report(modules: usize, epoch: u64) -> CodeGraphLayer
         .await
         .expect("retain the base graph runtime");
     let _base = base_runtime
-        .publish_verified_snapshot(Arc::new(AtomicBool::new(false)))
+        .publish_verified_snapshot_with_admission(Arc::new(AtomicBool::new(false)), None, None)
         .expect("publish the base graph cold");
     edit_three_files(&fixture.project_root, modules);
     fixture.commit("edit three files");
@@ -1512,7 +1512,7 @@ async fn layered_refresh_peak_probe() {
             .retain(&registry, &database, &base_generation, base_binding.clone())
             .await
             .expect("retain the base graph runtime")
-            .publish_verified_snapshot(Arc::new(AtomicBool::new(false)))
+            .publish_verified_snapshot_with_admission(Arc::new(AtomicBool::new(false)), None, None)
             .expect("publish the base graph cold");
     }
     edit_three_files(&fixture.project_root, modules);
@@ -1531,7 +1531,7 @@ async fn layered_refresh_peak_probe() {
         .expect("retain the child graph runtime");
     let (child, layered_kib) = peak_kib_during(|| {
         child_runtime
-            .publish_verified_snapshot(Arc::new(AtomicBool::new(false)))
+            .publish_verified_snapshot_with_admission(Arc::new(AtomicBool::new(false)), None, None)
             .expect("publish the refresh")
     });
     let (_, receipt) = receipt_for(&root.join("profile"), child.generation().as_str());
@@ -1545,7 +1545,7 @@ async fn layered_refresh_peak_probe() {
         .expect("retain the cold graph runtime");
     let (cold, cold_kib) = peak_kib_during(|| {
         cold_runtime
-            .publish_verified_snapshot(Arc::new(AtomicBool::new(false)))
+            .publish_verified_snapshot_with_admission(Arc::new(AtomicBool::new(false)), None, None)
             .expect("publish the generation cold")
     });
     let (_, receipt) = receipt_for(&root.join("profile-cold"), cold.generation().as_str());
