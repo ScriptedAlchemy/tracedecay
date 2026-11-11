@@ -527,6 +527,25 @@ async fn tracedecay_context_withholds_partial_windows_of_oversized_declarations(
         "{payload}"
     );
 
+    let node_id = payload["oversized_symbols"][0]["node_id"]
+        .as_str()
+        .expect("oversized symbol occurrence");
+    let mut path_request = request.clone();
+    path_request["call_path"] = json!({
+        "from_node_id": format!("code-symbol:{node_id}"),
+        "to_node_id": node_id,
+    });
+    let path = context_json(&server, path_request).await;
+    assert_eq!(path["call_path"]["from_node_id"], node_id, "{path}");
+    assert_eq!(path["call_path"]["outcome"]["state"], "found", "{path}");
+    assert_eq!(path["call_path"]["outcome"]["edges"], json!([]));
+    assert_eq!(
+        path["call_path"]["outcome"]["nodes"][0]["source"],
+        json!({"state": "omitted", "reason": "oversized"}),
+        "{path}"
+    );
+    assert_eq!(path["code"], json!([]), "{path}");
+
     let mut markdown_request = request;
     markdown_request["format"] = json!("markdown");
     let markdown = context_text(&server, markdown_request).await;

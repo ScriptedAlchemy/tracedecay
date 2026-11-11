@@ -206,6 +206,11 @@ impl VerifiedGraphQuery {
         &self.request_context
     }
 
+    /// The live cancellation signal bound to this admitted query.
+    pub fn cancellation_signal(&self) -> &CancellationSignal {
+        &self.live_cancellation
+    }
+
     /// What this query has cost its stores since it was opened.
     pub fn read_cost(&self) -> RequestCostReceiptV1 {
         self.cost.receipt()

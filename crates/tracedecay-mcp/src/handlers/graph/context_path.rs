@@ -1,6 +1,10 @@
 //! Exact-endpoint call paths and source attested by their graph generation.
 
+#[cfg(test)]
+mod tests;
+
 use std::collections::{BTreeMap, HashSet};
+use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -14,13 +18,16 @@ use tracedecay_contracts::retrieval::{
     ContextPathSourceOmissionV1, ContextPathSourceV1, PrimitiveUnavailableEvidenceV1,
     PrimitiveUnavailableStatusV1, ServedCodeGraphGenerationV1,
 };
-use tracedecay_contracts::{CancellationSignal, Deadline, now_micros};
+use tracedecay_contracts::{
+    CancellationSignal, Deadline, RequestAdmission, RequestContext, now_micros,
+};
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_domain::{
     EdgeAuthorityV1, MAX_CHUNK_TEXT_BYTES, RelationEdgeKindV1, SanitizedCodeFileV1,
     SnapshotFileDispositionV1, SymbolOccurrenceId, path_matches_scope,
 };
 use tracedecay_graph_query::{CodeGraphReadError, GraphQueryError, VerifiedGraphQuery};
+use tracedecay_session_memory::context::{RequestInterruption, run_deadline_signal_interruptible};
 
 use crate::McpToolContext;
 use crate::analysis::line_number_at;
@@ -150,7 +157,7 @@ pub(super) async fn context_call_path(
     let code = if let Some(max_code_blocks) = code_block_limit
         && let ContextCallPathOutcomeV1::Found { nodes, .. } = &mut result.outcome
     {
-        match path_source(ctx, graph, symbols, max_code_blocks).await {
+        match path_source(graph, symbols, max_code_blocks).await {
             Ok((sources, code)) => {
                 for (node, source) in nodes.iter_mut().zip(sources) {
                     node.source = source;
@@ -281,37 +288,70 @@ fn path_from_graph(
 
 struct PathSourceControl {
     cancelled: Arc<AtomicBool>,
-    cancellation: Option<CancellationSignal>,
-    deadline: Deadline,
+    cancellation: CancellationSignal,
+    request: RequestContext,
 }
 
 impl PathSourceControl {
     fn check(&self) -> Result<()> {
-        if self.cancelled.load(Ordering::Acquire)
-            || self
-                .cancellation
-                .as_ref()
-                .is_some_and(CancellationSignal::is_cancelled)
-        {
-            return Err(TraceDecayError::project_route(
-                "context-call-path-source-cancelled",
+        if self.cancelled.load(Ordering::Acquire) || self.cancellation.is_cancelled() {
+            return Err(source_interruption_error(RequestInterruption::Cancelled));
+        }
+        match self.request.admission_at(now_micros()) {
+            RequestAdmission::Admitted => Ok(()),
+            RequestAdmission::Cancelled => {
+                Err(source_interruption_error(RequestInterruption::Cancelled))
+            }
+            RequestAdmission::TimedOut => Err(source_interruption_error(
+                RequestInterruption::DeadlineExceeded,
+            )),
+            RequestAdmission::GrantExpired => Err(TraceDecayError::project_route(
+                "context-call-path-source-denied",
                 false,
-                "call-path source read was cancelled",
-            ));
+                "call-path source read outlived its admitted capability grant",
+            )),
         }
-        if self.deadline.is_elapsed_at(now_micros()) {
-            return Err(TraceDecayError::project_route(
-                "context-call-path-source-timed-out",
-                true,
-                "call-path source read exceeded its deadline",
-            ));
-        }
-        Ok(())
     }
 }
 
+fn source_interruption_error(interruption: RequestInterruption) -> TraceDecayError {
+    match interruption {
+        RequestInterruption::Cancelled => TraceDecayError::project_route(
+            "context-call-path-source-cancelled",
+            false,
+            "call-path source read was cancelled",
+        ),
+        RequestInterruption::DeadlineExceeded => TraceDecayError::project_route(
+            "context-call-path-source-timed-out",
+            true,
+            "call-path source read exceeded its deadline",
+        ),
+    }
+}
+
+/// A blocked filesystem read cannot keep the request alive. The same guard
+/// also tells its worker to stop when the awaiting request is dropped.
+async fn await_path_source<T>(
+    control: Arc<PathSourceControl>,
+    work: impl Future<Output = Result<T>>,
+) -> Result<T> {
+    let _cancel_on_drop = SetFlagOnDrop::new(Arc::clone(&control.cancelled));
+    control.check()?;
+    let deadline = Deadline {
+        expires_at: control
+            .request
+            .deadline()
+            .expires_at
+            .min(control.request.grant().expires_at),
+    };
+    let settled = run_deadline_signal_interruptible(&deadline, &control.cancellation, work).await;
+    // A source worker may become ready in the same poll as cancellation or
+    // expiry. Recheck admission before any bytes can leave this boundary.
+    control.check()?;
+    settled.map_err(source_interruption_error)?
+}
+
 async fn path_source(
-    ctx: &McpToolContext<'_>,
     graph: &VerifiedGraphQuery,
     symbols: Vec<CodeGraphSymbolSummaryV1>,
     max_code_blocks: usize,
@@ -324,26 +364,32 @@ async fn path_source(
             files.insert(path.to_owned(), graph.file_by_logical_path(path)?);
         }
     }
-    let cancelled = Arc::new(AtomicBool::new(false));
-    let cancel_on_drop = SetFlagOnDrop::new(Arc::clone(&cancelled));
-    let control = PathSourceControl {
-        cancelled,
-        cancellation: ctx.cancellation().cloned(),
-        deadline: graph.request_context().deadline().clone(),
-    };
-    let result = tracedecay_runtime_core::native_runtime::spawn_blocking(move || {
-        read_path_source(project_root, &symbols, files, max_code_blocks, &control)
+    let control = Arc::new(PathSourceControl {
+        cancelled: Arc::new(AtomicBool::new(false)),
+        cancellation: graph.cancellation_signal().clone(),
+        request: graph.request_context().clone(),
+    });
+    let worker_control = Arc::clone(&control);
+    await_path_source(control, async move {
+        tracedecay_runtime_core::native_runtime::spawn_blocking(move || {
+            read_path_source(
+                project_root,
+                &symbols,
+                files,
+                max_code_blocks,
+                &worker_control,
+            )
+        })
+        .await
+        .map_err(|error| {
+            TraceDecayError::project_route(
+                "context-call-path-source-worker-unavailable",
+                true,
+                format!("call-path source worker failed: {error}"),
+            )
+        })?
     })
     .await
-    .map_err(|error| {
-        TraceDecayError::project_route(
-            "context-call-path-source-worker-unavailable",
-            true,
-            format!("call-path source worker failed: {error}"),
-        )
-    })?;
-    drop(cancel_on_drop);
-    result
 }
 
 fn read_path_source(
@@ -364,7 +410,7 @@ fn read_path_source(
             .binding
             .as_ref()
             .and_then(|binding| binding.source_span);
-        if span.is_some_and(|span| span.len() > MAX_CHUNK_TEXT_BYTES) {
+        if span.is_some_and(|span| span.len() > MAX_CHUNK_TEXT_BYTES as u64) {
             sources.push(ContextPathSourceV1::Omitted {
                 reason: ContextPathSourceOmissionV1::Oversized,
             });
