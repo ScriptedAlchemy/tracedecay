@@ -402,7 +402,10 @@ fn parent_worktree_config_change_revokes_cached_child_authority() {
     fs::create_dir_all(&foreign).unwrap();
     let alternate = format!("[core]\n\tworktree = {}\n", foreign.display());
     fs::write(&config, alternate).unwrap();
-    assert_eq!(super::FileWitness::at(&git_directory).unwrap(), directory_before);
+    assert_eq!(
+        super::FileWitness::at(&git_directory).unwrap(),
+        directory_before
+    );
     assert_eq!(
         super::FileWitness::at(&git_directory.join("index")).unwrap(),
         index_before
