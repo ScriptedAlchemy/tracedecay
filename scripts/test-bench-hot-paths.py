@@ -216,6 +216,7 @@ class BenchHotPathsTests(unittest.TestCase):
         module = importlib.util.module_from_spec(spec)
         sys.modules[spec.name] = module
         try:
+            spec.loader.exec_module(module)
             completed = [
                 subprocess.CompletedProcess(["ps"], 0, stdout=f"{rss}\n", stderr="")
                 for rss in (6400, 12800, 7600)
