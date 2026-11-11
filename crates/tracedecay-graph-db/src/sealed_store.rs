@@ -3690,10 +3690,10 @@ mod build_tests {
         MAX_SEALED_RECEIPT_BYTES, NativeCompactEncodeBoundaryV1, SEALED_STAGING_OWNER_FILE,
         SEALED_STORE_DATABASE_FILE, SEALED_STORE_RECEIPT_FILE, SealedCompactRows, SealedRowSource,
         SealedStagingOwnerV1, build_or_open_sealed_store, build_or_open_sealed_store_with_work,
-        build_sealed_container, build_sealed_container_with_work, census_sealed_store,
-        initial_sealed_staging_owner, persist_sealed_store_check, push_manifest_rows,
-        retire_sealed_directory_checked, sealed_artifact_database_options, sealed_copy_proof,
-        sealed_generation_directory, sealed_store_root, sweep_abandoned_sealed_staging,
+        build_sealed_container_with_work, census_sealed_store, initial_sealed_staging_owner,
+        persist_sealed_store_check, push_manifest_rows, retire_sealed_directory_checked,
+        sealed_artifact_database_options, sealed_copy_proof, sealed_generation_directory,
+        sealed_store_root, sweep_abandoned_sealed_staging,
     };
     use tracedecay_store::runtime::{GraphNativeWorkKindV1, GraphNativeWorkV1};
 
