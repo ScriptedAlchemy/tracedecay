@@ -133,8 +133,12 @@ import type {
   CodeIndexGenerationRecoveryServingV1,
   CodeIndexGenerationRecoveryV1,
   CodeIndexMountFailureV1,
+  CodeIndexNativeGraphPhaseV1,
+  CodeIndexNativeGraphProgressV1,
   CodeIndexOmittedSourcesV1,
   CodeIndexOmittedSourceV1,
+  CodeIndexPresealAttemptProgressV1,
+  CodeIndexPresealWorkPhaseV1,
   CodeIndexRestoreProgressV1,
   CodeIndexRouteRefusalV1,
   CodeIndexSourceOmissionReasonV1,
@@ -2603,6 +2607,51 @@ export const CodeIndexMountFailureV1Schema: z.ZodObject<{
   remediation: z.string(),
 });
 
+/** Native graph writer progress is independent of text-artifact commit counts.
+Encoded rows are physical work, never a durable page. Stage-page commits
+and installed + digest-verified compact segments are durable work. */
+export const CodeIndexNativeGraphPhaseV1Schema: z.ZodEnum<{ "compact_encoding": "compact_encoding"; "compact_segment_verified": "compact_segment_verified"; "stage_page_commit": "stage_page_commit" }> = z.enum(["compact_encoding", "compact_segment_verified", "stage_page_commit"]);
+
+export const CodeIndexNativeGraphProgressV1Schema: z.ZodObject<{
+  active: z.ZodType<boolean, unknown>;
+  attempt_sequence: z.ZodType<number, unknown>;
+  committed_compact_bytes: z.ZodType<number, unknown>;
+  committed_compact_segments: z.ZodType<number, unknown>;
+  committed_stage_bytes: z.ZodType<number, unknown>;
+  committed_stage_mutations: z.ZodType<number, unknown>;
+  committed_stage_pages: z.ZodType<number, unknown>;
+  daemon_incarnation: z.ZodType<number, unknown>;
+  encoded_entities: z.ZodType<number, unknown>;
+  encoded_relations: z.ZodType<number, unknown>;
+  generation_id: z.ZodType<string, unknown>;
+  last_progress_micros: z.ZodType<number | null, unknown>;
+  phase: z.ZodType<CodeIndexNativeGraphPhaseV1 | null, unknown>;
+  producer_incarnation: z.ZodType<number, unknown>;
+  progress_epoch: z.ZodType<number, unknown>;
+  sealed_graph_digest: z.ZodType<string, unknown>;
+  total_entities: z.ZodType<number | null, unknown>;
+  total_relations: z.ZodType<number | null, unknown>;
+}> = z.object({
+  active: z.boolean(),
+  attempt_sequence: z.number().int().min(0),
+  committed_compact_bytes: z.number().int().min(0),
+  committed_compact_segments: z.number().int().min(0),
+  committed_stage_bytes: z.number().int().min(0),
+  committed_stage_mutations: z.number().int().min(0),
+  committed_stage_pages: z.number().int().min(0),
+  daemon_incarnation: z.number().int().min(0),
+  encoded_entities: z.number().int().min(0),
+  encoded_relations: z.number().int().min(0),
+  generation_id: z.string(),
+  last_progress_micros: z.number().int().nullable(),
+  phase: z.union([z.lazy(() => CodeIndexNativeGraphPhaseV1Schema), z.null()]),
+  producer_incarnation: z.number().int().min(0),
+  progress_epoch: z.number().int().min(0),
+  sealed_graph_digest: z.string(),
+  total_entities: z.number().int().min(0).nullable(),
+  total_relations: z.number().int().min(0).nullable(),
+});
+
 /** Sources a sealed snapshot captured but does not index. */
 export const CodeIndexOmittedSourcesV1Schema: z.ZodObject<{
   count: z.ZodType<number, unknown>;
@@ -2621,6 +2670,32 @@ export const CodeIndexOmittedSourceV1Schema: z.ZodObject<{
   git_path_bytes: z.array(z.number().refine(Number.isInteger).min(0).max(255)),
   reason: z.lazy(() => CodeIndexSourceOmissionReasonV1Schema),
 });
+
+/** Independently owned attempt work, not committed text or graph pages. */
+export const CodeIndexPresealAttemptProgressV1Schema: z.ZodObject<{
+  active: z.ZodType<boolean, unknown>;
+  attempt_sequence: z.ZodType<number, unknown>;
+  completed_items: z.ZodType<number, unknown>;
+  daemon_incarnation: z.ZodType<number, unknown>;
+  last_progress_micros: z.ZodType<number | null, unknown>;
+  phase: z.ZodType<CodeIndexPresealWorkPhaseV1, unknown>;
+  producer_incarnation: z.ZodType<number, unknown>;
+  progress_epoch: z.ZodType<number, unknown>;
+  total_items: z.ZodType<number | null, unknown>;
+}> = z.object({
+  active: z.boolean(),
+  attempt_sequence: z.number().int().min(0),
+  completed_items: z.number().int().min(0),
+  daemon_incarnation: z.number().int().min(0),
+  last_progress_micros: z.number().int().nullable(),
+  phase: z.lazy(() => CodeIndexPresealWorkPhaseV1Schema),
+  producer_incarnation: z.number().int().min(0),
+  progress_epoch: z.number().int().min(0),
+  total_items: z.number().int().min(0).nullable(),
+});
+
+/** Observed capture, parse, and source-reference resolution before sealing. */
+export const CodeIndexPresealWorkPhaseV1Schema: z.ZodEnum<{ "capture": "capture"; "parse_evidence": "parse_evidence"; "resolution": "resolution" }> = z.enum(["capture", "parse_evidence", "resolution"]);
 
 /** Bounded authentication work required to restore one immutable lexical
 artifact as a serving reader.
@@ -2720,8 +2795,10 @@ export const CodeIndexWorktreeFreshnessV1Schema: z.ZodObject<{
   hook_hint_count: z.ZodType<number | null, unknown>;
   last_reconcile_micros: z.ZodType<number | null, unknown>;
   latest_generation_id: z.ZodType<string | null, unknown>;
+  native_graph_progress: z.ZodOptional<z.ZodType<CodeIndexNativeGraphProgressV1 | null, unknown>>;
   omitted_sources: z.ZodOptional<z.ZodType<CodeIndexOmittedSourcesV1 | null, unknown>>;
   parked: z.ZodType<CodeIndexConvergenceParkedV1 | null, unknown>;
+  preseal_attempt: z.ZodOptional<z.ZodType<CodeIndexPresealAttemptProgressV1 | null, unknown>>;
   progress: z.ZodType<CodeIndexBuildProgressV1 | null, unknown>;
   rebuild_in_flight: z.ZodType<boolean, unknown>;
   repository_id: z.ZodType<string | null, unknown>;
@@ -2741,8 +2818,10 @@ export const CodeIndexWorktreeFreshnessV1Schema: z.ZodObject<{
   hook_hint_count: z.number().int().min(0).nullable(),
   last_reconcile_micros: z.number().int().nullable(),
   latest_generation_id: z.string().nullable(),
+  native_graph_progress: z.union([z.lazy(() => CodeIndexNativeGraphProgressV1Schema), z.null()]).optional(),
   omitted_sources: z.union([z.lazy(() => CodeIndexOmittedSourcesV1Schema), z.null()]).optional(),
   parked: z.union([z.lazy(() => CodeIndexConvergenceParkedV1Schema), z.null()]),
+  preseal_attempt: z.union([z.lazy(() => CodeIndexPresealAttemptProgressV1Schema), z.null()]).optional(),
   progress: z.union([z.lazy(() => CodeIndexBuildProgressV1Schema), z.null()]),
   rebuild_in_flight: z.boolean(),
   repository_id: z.string().nullable(),
