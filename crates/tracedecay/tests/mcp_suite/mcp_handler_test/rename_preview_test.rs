@@ -589,12 +589,9 @@ async fn rename_preview_deadline_stops_the_worker_before_the_next_file() {
             .unwrap()
     };
     let response = serde_json::to_value(response).unwrap();
-    // Three timers carry this one deadline and any of them may settle first,
-    // so the exact terminal names which one won. All three stop this worker
-    // before its next file; none may hang, and none may claim a commit.
+    // The outer dispatch and admitted read carry the same deadline. Either
+    // timer can settle first; both must stop this worker before its next file.
     match (response.get("error"), response.get("result")) {
-        // The deadline had already elapsed at dispatch, so nothing was
-        // admitted and the boundary answers the JSON-RPC request itself.
         (Some(error), None) => {
             assert_eq!(error["code"], -32603, "{response}");
             let problem = &error["data"];
@@ -603,31 +600,12 @@ async fn rename_preview_deadline_stops_the_worker_before_the_next_file() {
             assert_eq!(problem["tool"], "tracedecay_rename_preview");
             assert_eq!(problem["retryable"], true);
         }
-        // The admitted read's own deadline won while the worker paused on
-        // the source read.
         (None, Some(result)) => {
             let problem = refusal_problem(result);
-            match problem["code"].as_str() {
-                Some("timed_out") => {
-                    assert_eq!(problem["kind"], "timed_out", "{response}");
-                    assert_eq!(problem["cancellation_stage"], "during_read", "{response}");
-                    assert_eq!(problem["terminality"], "admitted_terminal", "{response}");
-                }
-                // The outer dispatch ceiling won after admission. It is a
-                // retryable route refusal, which the graph-tool adapter
-                // reports as an unavailable pre-admission state under the
-                // ceiling's own reason code.
-                Some("tool_dispatch_deadline_exceeded") => {
-                    assert_eq!(problem["kind"], "unavailable", "{response}");
-                    assert_eq!(problem["retryable"], true, "{response}");
-                    assert_eq!(problem["retry"], "after_delay", "{response}");
-                    assert_eq!(problem["legal_actions"], json!(["retry"]), "{response}");
-                    assert_eq!(problem["terminality"], "pre_admission", "{response}");
-                    assert_eq!(problem["owning_layer"], "application", "{response}");
-                    assert_eq!(problem["cancellation_stage"], Value::Null, "{response}");
-                }
-                _ => panic!("expected one canonical deadline terminal: {response}"),
-            }
+            assert_eq!(problem["kind"], "timed_out", "{response}");
+            assert_eq!(problem["code"], "timed_out", "{response}");
+            assert_eq!(problem["cancellation_stage"], "during_read", "{response}");
+            assert_eq!(problem["terminality"], "admitted_terminal", "{response}");
         }
         _ => panic!("expected one canonical deadline terminal: {response}"),
     }
