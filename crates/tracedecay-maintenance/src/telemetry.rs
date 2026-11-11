@@ -64,7 +64,9 @@ struct OverBudgetTableSizeWalk {
 
 impl OverBudgetTableSizeWalk {
     fn still_applies(self, page_count: u64, now: UtcMicros) -> bool {
+        // A regressed wall clock cannot extend a failed-walk hold indefinitely.
         page_count >= self.page_count
+            && now.0 >= self.observed_at.0
             && now.0.saturating_sub(self.observed_at.0) < TABLE_SIZE_WALK_REPROBE_MICROS
     }
 }
@@ -1455,6 +1457,22 @@ mod table_growth_tests {
                 TableGrowthTelemetryReadV1::Observed { .. }
             ),
             "a day-old over-budget mark is probed again"
+        );
+        assert_eq!(port.table_growth_state().over_budget, None);
+
+        // A prior timed-out walk can have a future wall-clock timestamp after
+        // time synchronization moves backward. It must not hide table growth
+        // for the entire clock skew plus the normal retry interval.
+        mark(
+            1,
+            UtcMicros(now_micros().0.saturating_add(super::TABLE_SIZE_WALK_REPROBE_MICROS)),
+        );
+        assert!(
+            matches!(
+                port.table_growth(&context, &store).await,
+                TableGrowthTelemetryReadV1::Observed { .. }
+            ),
+            "a future timeout marker must not suppress a live measurement"
         );
         assert_eq!(port.table_growth_state().over_budget, None);
     }
