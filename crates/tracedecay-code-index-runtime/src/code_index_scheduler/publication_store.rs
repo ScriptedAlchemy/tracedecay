@@ -438,7 +438,6 @@ struct PublicationPointerMemoV1 {
     pointer: DurablePublicationPointerV1,
     // Retain the authenticated inode, not just its digest. An ordinary
     // historical range read must not pay another endpoint-authorized open.
-    #[cfg(unix)]
     file: Option<File>,
 }
 
@@ -2242,6 +2241,33 @@ impl DaemonCodeIndexPublicationStoreV1 {
                 }
             }
         }
+        // Windows cannot inspect the pathname's stable file ID through std
+        // metadata. Reuse the memo's authenticated descriptor for byte reads,
+        // then use one fresh same-file pathname witness after the read. A
+        // rotated name invalidates the memo and returns a retryable CAS.
+        #[cfg(not(unix))]
+        {
+            let mut cached = self
+                .pointer_memo
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            if let Some(entry) = cached.as_mut()
+                && let Some(file) = entry.file.as_mut()
+            {
+                match Self::read_cached_non_unix_pointer(&self.active_path, file, &entry.digest) {
+                    Ok(current) => {
+                        entry.mtime = mtime;
+                        entry.size = size;
+                        return Ok(Some((entry.pointer.clone(), current)));
+                    }
+                    Err(CodeIndexPublicationStoreErrorV1::CompareAndSwap) => {
+                        *cached = None;
+                        return Err(CodeIndexPublicationStoreErrorV1::CompareAndSwap);
+                    }
+                    Err(error) => return Err(error),
+                }
+            }
+        }
         // Size and mtime are hints, not identity. Text-artifact attach writes
         // a fixed-width pointer through another path, and a 1-second mtime
         // filesystem can leave both unchanged while the bytes move. The memo
@@ -2295,10 +2321,7 @@ impl DaemonCodeIndexPublicationStoreV1 {
                 )?;
                 memo.mtime = mtime;
                 memo.size = size;
-                #[cfg(unix)]
-                {
-                    memo.file = Some(opened_pointer);
-                }
+                memo.file = Some(opened_pointer);
                 return Ok(Some((memo.pointer.clone(), bytes)));
             }
         }
@@ -2435,7 +2458,6 @@ impl DaemonCodeIndexPublicationStoreV1 {
             size,
             digest,
             pointer: pointer.clone(),
-            #[cfg(unix)]
             file: Some(opened_pointer),
         });
         Ok(Some((pointer, bytes)))
@@ -2467,6 +2489,35 @@ impl DaemonCodeIndexPublicationStoreV1 {
             ));
         }
         Ok(())
+    }
+
+    /// Reuse a Windows pointer descriptor while preserving one post-read
+    /// pathname file-ID check. Only the same-file witness opens the path.
+    #[cfg(not(unix))]
+    fn read_cached_non_unix_pointer(
+        path: &Path,
+        file: &mut File,
+        expected_digest: &str,
+    ) -> Result<Vec<u8>, CodeIndexPublicationStoreErrorV1> {
+        file.seek(SeekFrom::Start(0))
+            .map_err(Self::map_pointer_io)?;
+        let mut current = Vec::new();
+        (&mut *file)
+            .take(MAX_DURABLE_PUBLICATION_POINTER_BYTES + 1)
+            .read_to_end(&mut current)
+            .map_err(Self::map_pointer_io)?;
+        if current.len() as u64 > MAX_DURABLE_PUBLICATION_POINTER_BYTES {
+            return Err(Self::corruption(
+                "durable code-generation index exceeds its byte bound",
+            ));
+        }
+        Self::require_non_unix_pointer_witness(path, file, &current)?;
+        if Self::state_digest(&current) != expected_digest {
+            return Err(Self::corruption(
+                "active code-generation pointer bytes changed while pinned",
+            ));
+        }
+        Ok(current)
     }
 
     /// Windows must still name the exact opened inode after a cold parse.
@@ -2604,19 +2655,15 @@ impl DaemonCodeIndexPublicationStoreV1 {
         .ok()
         .flatten();
         #[cfg(not(unix))]
-        let metadata = match std::fs::read(&self.active_path) {
-            Ok(current) if current == bytes => std::fs::metadata(&self.active_path).ok(),
-            _ => None,
-        };
-        #[cfg(not(unix))]
-        let _ = persisted;
+        let metadata = Self::require_non_unix_pointer_witness(&self.active_path, persisted, bytes)
+            .ok()
+            .and_then(|()| self.active_path.symlink_metadata().ok());
         if let Some(metadata) = metadata {
             *memo = Some(PublicationPointerMemoV1 {
                 mtime: metadata.modified().ok(),
                 size: metadata.len(),
                 digest: Self::state_digest(bytes),
                 pointer: pointer.clone(),
-                #[cfg(unix)]
                 file: persisted.try_clone().ok(),
             });
         } else {
