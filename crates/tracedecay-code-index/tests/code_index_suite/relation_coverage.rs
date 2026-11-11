@@ -298,6 +298,109 @@ namespace Dotted.Path {
 "#;
 
 #[test]
+fn typescript_value_aliases_keep_parameter_types_across_inner_shadows() {
+    let source = r#"import { Worker as Real, Other as Different } from './workers';
+export function run<T extends Real = Real>(worker: Real) {
+  const first = worker;
+  const alias = (first);
+  { const worker = new Different(); alias.execute(); const inner = worker; inner.execute(); }
+  alias.execute();
+}
+export function mutated(worker: Real, replacement: Real) { const alias = worker; worker = replacement; alias.execute(); }
+export function optional(worker?: Real) { const alias = worker; alias.execute(); }
+export function cyclic() { const alias = next; const next = alias; alias.execute(); }
+export function constructorValue() { const alias = Real; alias.execute(); }
+"#;
+    let graph = sealed_graph_of(&[
+        (
+            "workers.ts",
+            "export class Worker { execute() {} }\nexport class Other { execute() {} }\n",
+        ),
+        ("aliases.ts", source),
+    ]);
+    let run = graph.symbol("aliases.ts::run");
+    let worker = graph.symbol("workers.ts::Worker::execute");
+    let other = graph.symbol("workers.ts::Other::execute");
+    let mut calls = graph
+        .generation
+        .edges()
+        .iter()
+        .filter(|edge| {
+            edge.kind == RelationEdgeKindV1::Calls
+                && edge.from_occurrence == run
+                && (edge.to_occurrence == worker || edge.to_occurrence == other)
+        })
+        .collect::<Vec<_>>();
+    calls.sort_by_key(|edge| edge.evidence_span);
+    assert_eq!(
+        calls
+            .iter()
+            .map(|edge| &edge.to_occurrence)
+            .collect::<Vec<_>>(),
+        [&worker, &other, &worker]
+    );
+    assert_eq!(
+        calls
+            .iter()
+            .map(|edge| {
+                assert_eq!(
+                    edge.authority,
+                    tracedecay_domain::EdgeAuthorityV1::NameResolved
+                );
+                &source
+                    [edge.evidence_span.start_byte as usize..edge.evidence_span.end_byte as usize]
+            })
+            .collect::<Vec<_>>(),
+        ["alias.execute", "inner.execute", "alias.execute"]
+    );
+    assert!(!graph.callees_partial("aliases.ts::run"));
+    for function in ["mutated", "optional", "cyclic", "constructorValue"] {
+        let name = format!("aliases.ts::{function}");
+        let caller = graph.symbol(&name);
+        assert!(
+            !graph
+                .generation
+                .edges()
+                .iter()
+                .any(|edge| edge.from_occurrence == caller
+                    && (edge.to_occurrence == worker || edge.to_occurrence == other)),
+            "unsupported alias must not bind an instance method: {function}"
+        );
+        assert!(
+            graph.callees_partial(&name),
+            "unsupported alias must disclose a gap: {function}"
+        );
+    }
+}
+
+#[test]
+fn javascript_default_parameters_resolve_outer_receivers_before_body_bindings() {
+    let source = r#"class Worker { execute() {} }
+class Other { execute() {} }
+const shared = new Worker();
+export function run() {
+  const worker = new Worker();
+  const callback = function(value = worker) { worker.execute(); };
+  const pattern = function({ [worker]: value } = {}) { worker.execute(); };
+}
+export function parameterScope(value = shared.execute()) { var shared = new Other(); }
+"#;
+    let graph = sealed_graph_of(&[("defaults.js", source)]);
+    assert_eq!(
+        graph.callers("defaults.js::Worker::execute"),
+        [
+            "defaults.js::parameterScope",
+            "defaults.js::run",
+            "defaults.js::run",
+        ]
+    );
+    assert!(graph.callers("defaults.js::Other::execute").is_empty());
+    assert!(!graph.callers_partial("defaults.js::Worker::execute"));
+    assert!(!graph.callees_partial("defaults.js::run"));
+    assert!(!graph.callees_partial("defaults.js::parameterScope"));
+}
+
+#[test]
 fn imported_receiver_types_and_factories_do_not_guess_nested_declarations() {
     let graph = sealed_graph_of(&[
         (

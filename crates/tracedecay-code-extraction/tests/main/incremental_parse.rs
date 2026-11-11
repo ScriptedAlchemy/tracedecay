@@ -9,7 +9,7 @@ use tracedecay_code_extraction::parsed_extraction::{
 };
 use tracedecay_code_extraction::{
     ExtractionArtifactV1, ImportModuleKindV1, ImportNamespaceV1, LanguageExtractor, RustExtractor,
-    TypeScriptExtractor, TypeScriptTypeRowV1,
+    TypeScriptExtractor, TypeScriptReceiverV1, TypeScriptTypeRowV1,
 };
 use tracedecay_domain::{
     CommitId, ContentDigest, ExtractionResult, ManifestDigest, NodeKind, ProjectId, RefId,
@@ -168,6 +168,85 @@ fn typescript_module_edits_invalidate_receiver_proof_in_unchanged_functions() {
     assert_artifact_rows_match_fresh_parse(
         &changed.artifact,
         &TypeScriptExtractor.extract_artifact("src/imports.ts", &rebound),
+    );
+}
+
+#[test]
+fn typescript_alias_initializer_edits_replace_and_remove_receiver_proof() {
+    let before = "import { Worker, Other } from './workers';\nfunction run(first: Worker, second: Other) { const local = first; const alias = local; alias.execute(); }\n";
+    let (mut document, opened) = RetainedParseDocument::open(
+        typescript_identity("commit-a", "tree-a", RepositoryDirtyStateV1::Clean),
+        "typescript",
+        before,
+        ParseLimits::default(),
+    )
+    .unwrap();
+    let initial = document
+        .extract_canonical_artifact(&TypeScriptExtractor, &opened, None)
+        .unwrap();
+    let receivers = |artifact: &ExtractionArtifactV1| {
+        artifact
+            .typescript_types
+            .iter()
+            .filter_map(|row| match &row.row {
+                TypeScriptTypeRowV1::ReceiverCall { receiver, .. } => Some(receiver.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        receivers(&initial.artifact),
+        [TypeScriptReceiverV1::Named {
+            name: "Worker".to_owned(),
+            constructor: false
+        }]
+    );
+
+    let after = before.replace("local = first", "local = second");
+    let report = document
+        .reparse(
+            typescript_identity("commit-b", "tree-b", RepositoryDirtyStateV1::Dirty),
+            &after,
+        )
+        .unwrap();
+    assert_eq!(report.reuse, ParseReuse::Incremental);
+    let changed = document
+        .extract_canonical_artifact(&TypeScriptExtractor, &report, Some(&initial.artifact))
+        .unwrap();
+    assert_eq!(
+        receivers(&changed.artifact),
+        [TypeScriptReceiverV1::Named {
+            name: "Other".to_owned(),
+            constructor: false
+        }]
+    );
+    assert_artifact_rows_match_fresh_parse(
+        &changed.artifact,
+        &TypeScriptExtractor.extract_artifact("src/imports.ts", &after),
+    );
+
+    let mutable = after.replace("const local", "let local");
+    let report = document
+        .reparse(
+            typescript_identity("commit-c", "tree-c", RepositoryDirtyStateV1::Dirty),
+            &mutable,
+        )
+        .unwrap();
+    let changed = document
+        .extract_canonical_artifact(&TypeScriptExtractor, &report, Some(&changed.artifact))
+        .unwrap();
+    assert!(receivers(&changed.artifact).is_empty());
+    assert!(
+        changed
+            .artifact
+            .result
+            .unresolved_refs
+            .iter()
+            .any(|reference| reference.reference_name == "alias.execute")
+    );
+    assert_artifact_rows_match_fresh_parse(
+        &changed.artifact,
+        &TypeScriptExtractor.extract_artifact("src/imports.ts", &mutable),
     );
 }
 

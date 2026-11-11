@@ -26,7 +26,7 @@ const RUST: &str = "rust";
 
 #[test]
 fn typescript_factory_return_edits_rebind_unchanged_receivers_after_restore() {
-    const CALLER: &str = "import { makeWorker as acquire } from './factory';\nclass Created { execute() {} }\nexport async function run() { const worker = await acquire(); worker.execute(); }\n";
+    const CALLER: &str = "import { makeWorker as acquire } from './factory';\nclass Created { execute() {} }\nexport async function run() { const worker = await acquire(); const alias = worker; alias.execute(); }\n";
     const FACTORY: &str = "import { Worker as Created, Alternate as Changed } from './workers';\nexport async function makeWorker(): Promise<Created> { return new Created(); }\n";
     fn tree(factory: &str) -> Vec<(&str, &str, &str)> {
         vec![
@@ -74,7 +74,7 @@ fn typescript_factory_return_edits_rebind_unchanged_receivers_after_restore() {
             assert_eq!(
                 &CALLER
                     [edge.evidence_span.start_byte as usize..edge.evidence_span.end_byte as usize],
-                "worker.execute"
+                "alias.execute"
             );
             assert_eq!(
                 generation
@@ -92,7 +92,7 @@ fn typescript_factory_return_edits_rebind_unchanged_receivers_after_restore() {
                     .unwrap()
                     .iter()
                     .any(|gap| gap.from_occurrence == *caller
-                        && gap.reference_name == "worker.execute")
+                        && gap.reference_name == "alias.execute")
             );
         } else {
             assert!(edges.is_empty());
@@ -102,7 +102,7 @@ fn typescript_factory_return_edits_rebind_unchanged_receivers_after_restore() {
                     .unwrap()
                     .iter()
                     .any(|gap| gap.from_occurrence == *caller
-                        && gap.reference_name == "worker.execute")
+                        && gap.reference_name == "alias.execute")
             );
         }
     }

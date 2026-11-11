@@ -44,6 +44,18 @@ fn contains_name(state: &ExtractionState<'_>, node: TsNode<'_>, name: &str) -> b
     {
         return true;
     }
+    // Defaults and property keys refer to values; only the pattern's
+    // binding side declares or writes an identifier.
+    let binding_field = match node.kind() {
+        "assignment_pattern" | "object_assignment_pattern" => Some("left"),
+        "pair_pattern" => Some("value"),
+        _ => None,
+    };
+    if let Some(field) = binding_field {
+        return node
+            .child_by_field_name(field)
+            .is_some_and(|binding| contains_name(state, binding, name));
+    }
     let mut cursor = node.walk();
     node.named_children(&mut cursor)
         .any(|child| contains_name(state, child, name))
@@ -167,7 +179,13 @@ fn binding<'t>(
     let mut parent = site.parent();
     while let Some(scope) = parent {
         if is_scope(scope) {
-            if (is_function(scope) || scope.kind() == "program")
+            // Parameter initializers have an outer environment: hoisted
+            // body variables are not visible until the body is entered.
+            let body_scope = is_function(scope)
+                && scope.child_by_field_name("body").is_some_and(|body| {
+                    body.start_byte() <= site.start_byte() && site.end_byte() <= body.end_byte()
+                });
+            if (body_scope || scope.kind() == "program")
                 && has_var_binding(state, scope, scope, name)
             {
                 return Some(None);
@@ -243,10 +261,15 @@ fn module_name(state: &ExtractionState<'_>, site: TsNode<'_>, name: String) -> O
     }
     let mut parent = site.parent();
     while let Some(node) = parent {
-        if let Some(parameters) = node.child_by_field_name("type_parameters")
-            && contains_name(state, parameters, head)
-        {
-            return None;
+        if let Some(parameters) = node.child_by_field_name("type_parameters") {
+            let mut cursor = parameters.walk();
+            if parameters
+                .named_children(&mut cursor)
+                .filter_map(|parameter| parameter.child_by_field_name("name"))
+                .any(|name| state.node_text(name) == head)
+            {
+                return None;
+            }
         }
         parent = node.parent();
     }
@@ -292,53 +315,58 @@ fn initializer_receiver(
     }
 }
 
-fn receiver(
+fn receiver<'t>(
     state: &ExtractionState<'_>,
-    object: TsNode<'_>,
-    site: TsNode<'_>,
+    mut object: TsNode<'t>,
+    mut site: TsNode<'t>,
 ) -> Option<TypeScriptReceiverV1> {
-    let object = unwrap_expression(object)?;
-    if object.kind() != "identifier" {
-        return initializer_receiver(state, object);
+    loop {
+        object = unwrap_expression(object)?;
+        if object.kind() != "identifier" {
+            return initializer_receiver(state, object);
+        }
+        let name = state.node_text(object);
+        let (declaration, scope) = binding(state, site, name)??;
+        if has_write(state, scope, name) {
+            return None;
+        }
+        let pattern = match declaration.kind() {
+            "variable_declarator" => declaration.child_by_field_name("name")?,
+            "required_parameter" => declaration.child_by_field_name("pattern")?,
+            _ => return None,
+        };
+        if pattern.kind() != "identifier" {
+            return None;
+        }
+        if declaration.kind() == "variable_declarator"
+            && declaration
+                .parent()
+                .is_some_and(|parent| parent.kind() == "variable_declaration")
+        {
+            return None;
+        }
+        if declaration.kind() == "variable_declarator" && declaration.end_byte() > site.start_byte()
+        {
+            return None;
+        }
+        if let Some(annotation) = declaration.child_by_field_name("type") {
+            let name = module_name(state, annotation, named_type(state, annotation)?)?;
+            return Some(TypeScriptReceiverV1::Named {
+                name,
+                constructor: false,
+            });
+        }
+        // Resolve an immutable alias at its declaration, preserving its
+        // captured binding through inner shadows. Each step precedes its
+        // use in source, so cycles abstain without recursion or a depth cap.
+        if declaration.parent()?.kind() != "lexical_declaration"
+            || !TypeScriptExtractor::has_child_kind(declaration.parent()?, "const")
+        {
+            return None;
+        }
+        object = declaration.child_by_field_name("value")?;
+        site = object;
     }
-    let name = state.node_text(object);
-    let (declaration, scope) = binding(state, site, name)??;
-    if has_write(state, scope, name) {
-        return None;
-    }
-    let pattern = match declaration.kind() {
-        "variable_declarator" => declaration.child_by_field_name("name")?,
-        "required_parameter" => declaration.child_by_field_name("pattern")?,
-        _ => return None,
-    };
-    if pattern.kind() != "identifier" {
-        return None;
-    }
-    if declaration.kind() == "variable_declarator"
-        && declaration
-            .parent()
-            .is_some_and(|parent| parent.kind() == "variable_declaration")
-    {
-        return None;
-    }
-    if declaration.kind() == "variable_declarator" && declaration.end_byte() > site.start_byte() {
-        return None;
-    }
-    if let Some(annotation) = declaration.child_by_field_name("type") {
-        let name = module_name(state, annotation, named_type(state, annotation)?)?;
-        return Some(TypeScriptReceiverV1::Named {
-            name,
-            constructor: false,
-        });
-    }
-    // Initializer inference requires const; a mutable value without a
-    // declared type does not attest its type throughout a captured closure.
-    if declaration.parent()?.kind() != "lexical_declaration"
-        || !TypeScriptExtractor::has_child_kind(declaration.parent()?, "const")
-    {
-        return None;
-    }
-    initializer_receiver(state, declaration.child_by_field_name("value")?)
 }
 
 pub(super) fn record_call(state: &mut ExtractionState<'_>, callee: TsNode<'_>, owner: &str) {
