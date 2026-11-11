@@ -721,7 +721,103 @@ async fn a_live_projection_keeps_its_queued_history_admission_turn() {
         .expect("admission must remain open");
     drop(later_permit);
     state.cancel();
-    worker.await.expect("historical worker exits on cancellation");
+    worker
+        .await
+        .expect("historical worker exits on cancellation");
+}
+
+#[tokio::test]
+async fn publishing_a_bounded_projection_backlog_keeps_the_original_history_turn() {
+    let harness = RegisteredGlobalDbHarness::open("history-fifo-projection-backlog").await;
+    let store = SessionTemporalStore::new(harness.registered.as_ref());
+    begin_empty_refreshes(&store, ["history-fifo-first", "history-fifo-second"]).await;
+    let recoveries = store
+        .running_session_refreshes()
+        .await
+        .expect("two durable projection obligations");
+    assert_eq!(recoveries.len(), 2);
+
+    let state = Arc::new(SessionTemporalRefreshWakeState::default());
+    let history = Arc::new(GatedHistory {
+        entered: tokio::sync::Notify::new(),
+        release: tokio::sync::Notify::new(),
+    });
+    let ingestor: SharedSessionHistoricalIngestor = history.clone();
+    let admission = Arc::new(tokio::sync::Semaphore::new(0));
+    state.wake_history();
+    state.wake();
+    let worker = tokio::spawn(run_session_temporal_refresh_scheduler(
+        harness.registered.clone(),
+        Arc::clone(&state),
+        Arc::new(CanonicalSessionTemporalProjector),
+        Arc::new(std::sync::RwLock::new(Some(ingestor))),
+        Arc::clone(&admission),
+        SessionTemporalRefreshPolicy {
+            max_operations_per_pass: 1,
+            ..SessionTemporalRefreshPolicy::default()
+        },
+    ));
+
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let idle = enabled_idle_notification(&state);
+            if state.is_idle() {
+                break;
+            }
+            idle.await;
+        }
+    })
+    .await
+    .expect("both projection batches must publish without a history permit");
+    assert!(state.history_retry_pending(), "historical admission remains queued");
+    assert!(
+        !state.history_held_for_projection(),
+        "publication hold is released before waiting for admission"
+    );
+    assert_eq!(
+        state.pass_count.load(Ordering::Acquire),
+        3,
+        "two bounded projection passes must not trigger a redundant refused history pass"
+    );
+    for recovery in recoveries {
+        let receipt = store
+            .session_refresh_receipt(SessionRefreshReceiptRequestV1::new(
+                recovery.operation_id().clone(),
+                recovery.session_id().clone(),
+            ))
+            .await
+            .expect("read durable projection receipt")
+            .expect("both projections must settle");
+        assert_eq!(receipt.state(), SessionRefreshTerminalStateV1::Complete);
+    }
+
+    let later = Arc::clone(&admission).acquire_owned();
+    tokio::pin!(later);
+    assert!(
+        std::future::poll_fn(|cx| std::task::Poll::Ready(later.as_mut().poll(cx)))
+            .await
+            .is_pending()
+    );
+    admission.add_permits(1);
+    tokio::time::timeout(Duration::from_secs(5), history.entered.notified())
+        .await
+        .expect("original historical waiter must retain the first admission");
+    assert!(
+        std::future::poll_fn(|cx| std::task::Poll::Ready(later.as_mut().poll(cx)))
+            .await
+            .is_pending(),
+        "a later profile cannot overtake publication's queued history turn"
+    );
+    history.release.notify_one();
+    let later_permit = tokio::time::timeout(Duration::from_secs(5), later)
+        .await
+        .expect("later profile receives the released history permit")
+        .expect("admission remains open");
+    drop(later_permit);
+    state.cancel();
+    worker
+        .await
+        .expect("historical worker exits on cancellation");
 }
 
 #[tokio::test]
@@ -763,7 +859,9 @@ async fn cancelled_historical_waiter_releases_its_queued_turn() {
             .is_pending()
     );
     state.cancel();
-    worker.await.expect("cancelled worker must exit and drop its FIFO turn");
+    worker
+        .await
+        .expect("cancelled worker must exit and drop its FIFO turn");
     admission.add_permits(1);
     let later_permit = tokio::time::timeout(Duration::from_secs(5), later)
         .await

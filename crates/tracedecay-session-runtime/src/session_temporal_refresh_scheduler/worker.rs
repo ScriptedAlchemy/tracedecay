@@ -444,11 +444,13 @@ pub(super) async fn run_session_temporal_refresh_scheduler(
                 history_outcome.clone()
             };
             let mut convergence_admission = lcm_convergence_admission(convergence_outcome);
-            // A live projection cannot queue the same worker for summary
-            // capacity while its historical admission turn is still pending.
-            if state.history_retry_pending()
-                && matches!(history_release.as_ref(), Some(HistoryRelease::Admission(_)))
-            {
+            // A queued historical turn belongs to this worker even while
+            // projection publication runs. No second summary acquisition or
+            // fresh historical attempt may overtake that owned waiter.
+            let historical_admission_queued =
+                matches!(history_release.as_ref(), Some(HistoryRelease::Admission(_)))
+                    && granted_history_admission.is_none();
+            if historical_admission_queued {
                 convergence_admission = LcmConvergenceAdmission::Deferred;
             }
             let history_needs_another_pass =
@@ -650,14 +652,22 @@ pub(super) async fn run_session_temporal_refresh_scheduler(
                     // until that sweep ends.
                     WindowFollowUp::PublishBeforeNextHistory => {
                         state.hold_history_for_projection();
-                        state.update_history_retry_state(false);
+                        // Publication is not permission to discard an already
+                        // refused admission turn; it resumes after projection.
+                        state.update_history_retry_state(historical_admission_queued);
                         state.requeue_projection();
                         tokio::task::yield_now().await;
                     }
                     WindowFollowUp::ContinueHistory => {
                         state.release_history_for_projection();
-                        state.update_history_retry_state(false);
-                        state.wake_history();
+                        if historical_admission_queued {
+                            // The queued release, not a fresh history wake,
+                            // owns the next pass after publication settles.
+                            state.update_history_retry_state(true);
+                        } else {
+                            state.update_history_retry_state(false);
+                            state.wake_history();
+                        }
                     }
                     WindowFollowUp::AwaitHistoryRelease => {
                         state.release_history_for_projection();
@@ -700,9 +710,7 @@ pub(super) async fn run_session_temporal_refresh_scheduler(
         let release = tracing::Instrument::instrument(
             async {
                 match history_release.as_mut() {
-                    Some(release) if state.history_retry_pending() => {
-                        release.released().await
-                    }
+                    Some(release) if state.history_retry_pending() => release.released().await,
                     _ => std::future::pending().await,
                 }
             },
@@ -850,8 +858,7 @@ async fn session_history_refresh(
         .clone();
     match history {
         Some(history) => {
-            let Some(_permit) =
-                granted.or_else(|| Arc::clone(admission).try_acquire_owned().ok())
+            let Some(_permit) = granted.or_else(|| Arc::clone(admission).try_acquire_owned().ok())
             else {
                 return (
                     SessionHistoricalIngestOutcome::Retryable {
