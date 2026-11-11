@@ -587,12 +587,20 @@ fn ruby_constant_calls_bind_through_each_callers_lexical_module() {
 /// Rust's `main.rs` calls through a grouped crate-name
 /// `use fixture::{compat, legacy, report, shapes}` inside `println!`
 /// arguments, which bind like the same calls outside a macro.
+///
+/// TypeScript additionally binds the constructor-backed `store` receiver, so
+/// its `main -> add|get` calls bind while Rust's `Store` receiver stays a
+/// disclosed gap.
 #[test]
 fn typescript_and_rust_graphs_keep_their_bindings() {
-    for (language, symbols) in [("typescript", typescript()), ("rust", rust())] {
-        let graph = CallGraphV1::new(language, symbols);
-        assert_eq!(graph.calls(), bindable_calls(), "{language}");
-    }
+    let typescript_graph = CallGraphV1::new("typescript", typescript());
+    assert_eq!(
+        typescript_graph.calls(),
+        CALLS.into_iter().collect(),
+        "typescript binds import and constructor-backed receiver calls"
+    );
+    let rust_graph = CallGraphV1::new("rust", rust());
+    assert_eq!(rust_graph.calls(), bindable_calls(), "rust");
 }
 
 /// A Java call binds the one overload whose parameters accept its argument

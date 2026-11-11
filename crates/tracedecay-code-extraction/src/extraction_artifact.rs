@@ -441,6 +441,9 @@ pub struct ExtractionArtifactV1 {
     /// the seal derives implicit interface satisfaction.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub go_method_sets: Vec<ExtractedGoMethodSetRowV1>,
+    /// TypeScript receiver and callable-return evidence. Empty for every
+    /// other language, so it does not change their serialized bytes.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub typescript_types: Vec<ExtractedTypeScriptTypeRowV1>,
 }
 

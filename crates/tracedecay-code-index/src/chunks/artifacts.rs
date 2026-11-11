@@ -229,6 +229,10 @@ pub struct CodeFileIndexArtifactsV1 {
     /// from them.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub go_method_sets: Vec<CodeIndexGoMethodSetRowV1>,
+    /// TypeScript receiver and callable-return evidence by owning symbol,
+    /// canonically ordered; generation sealing resolves instance calls from
+    /// it. Empty for every other language, so it does not change their bytes.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub typescript_types: Vec<CodeIndexTypeScriptTypeRowV1>,
 }
 

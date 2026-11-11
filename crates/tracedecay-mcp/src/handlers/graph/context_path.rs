@@ -5,7 +5,7 @@ mod tests;
 
 use std::collections::{BTreeMap, HashSet};
 use std::future::Future;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -373,9 +373,9 @@ async fn path_source(
     await_path_source(control, async move {
         tracedecay_runtime_core::native_runtime::spawn_blocking(move || {
             read_path_source(
-                project_root,
+                &project_root,
                 &symbols,
-                files,
+                &files,
                 max_code_blocks,
                 &worker_control,
             )
@@ -393,9 +393,9 @@ async fn path_source(
 }
 
 fn read_path_source(
-    project_root: PathBuf,
+    project_root: &Path,
     symbols: &[CodeGraphSymbolSummaryV1],
-    files: BTreeMap<String, Option<SanitizedCodeFileV1>>,
+    files: &BTreeMap<String, Option<SanitizedCodeFileV1>>,
     max_code_blocks: usize,
     control: &PathSourceControl,
 ) -> Result<(Vec<ContextPathSourceV1>, Vec<ContextCodeBlockV1>)> {
@@ -423,12 +423,8 @@ fn read_path_source(
             continue;
         }
         let source = source_by_file.entry(path.to_owned()).or_insert_with(|| {
-            sealed_path_source(
-                &project_root,
-                path,
-                files.get(path).and_then(Option::as_ref),
-            )
-            .map_err(|error| unavailable_evidence(&error))
+            sealed_path_source(project_root, path, files.get(path).and_then(Option::as_ref))
+                .map_err(|error| unavailable_evidence(&error))
         });
         let block = match source {
             Ok(source) => path_code_block(symbol, files.get(path).and_then(Option::as_ref), source)

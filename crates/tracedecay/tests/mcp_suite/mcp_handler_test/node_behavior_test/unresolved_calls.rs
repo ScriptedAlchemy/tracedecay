@@ -17,7 +17,7 @@ use crate::support::{production_composition_fixture_with_sources, wait_for_curre
 
 const MAIN: &str = "import { Worker } from './worker';\n\
 export function bound(worker: Worker): number { return worker.act(); }\n\
-export function uncertain(receiver: any): void { receiver.act(); receiver.unknown(); }\n";
+export function uncertain(receiver: any): void { receiver.act(); receiver.other(); }\n";
 const OTHER: &str = "export function elsewhere(receiver: any): void { receiver.act(); }\n";
 const GLOB: &str = "mod left;\nmod right;\n\
 pub fn glob_uncertain() { use crate::left::*; use crate::right::*; g(); }\n";
@@ -57,7 +57,7 @@ async fn node_reports_exact_unresolved_sites_and_preserves_them_after_restore() 
         fs::create_dir_all(project.join("src")).unwrap();
         fs::write(
             project.join("src/worker.ts"),
-            "export class Worker { act(): number { return 1; } }\n",
+            "export class Worker { act(): number { return 1; } }\nexport class Other { other(): void {} }\n",
         )
         .unwrap();
         fs::write(project.join("src/main.ts"), MAIN).unwrap();
@@ -95,7 +95,7 @@ async fn node_reports_exact_unresolved_sites_and_preserves_them_after_restore() 
     let sites = report["outcome"]["sites"].as_array().unwrap();
     assert_eq!(sites.len(), 2, "{report}");
     assert_site_span(&sites[0], MAIN, "receiver.act");
-    assert_site_span(&sites[1], MAIN, "receiver.unknown");
+    assert_site_span(&sites[1], MAIN, "receiver.other");
     assert!(
         sites
             .iter()
@@ -212,11 +212,14 @@ async fn node_reports_exact_unresolved_sites_and_preserves_them_after_restore() 
 
 #[tokio::test]
 async fn node_discloses_the_recorded_site_limit() {
+    let methods = (0..20)
+        .map(|index| format!("  m{index:02}(): void {{}}\n"))
+        .collect::<String>();
+    let calls = (0..20)
+        .map(|index| format!("  receiver.m{index:02}();\n"))
+        .collect::<String>();
     let source = format!(
-        "export function many(receiver: any): void {{\n{}}}\n",
-        (0..20)
-            .map(|index| format!("  receiver.m{index:02}();\n"))
-            .collect::<String>()
+        "class Methods {{\n{methods}}}\nexport function many(receiver: any): void {{\n{calls}}}\n"
     );
     let fixture = production_composition_fixture_with_sources(|project| {
         fs::write(project.join("many.ts"), &source).unwrap();

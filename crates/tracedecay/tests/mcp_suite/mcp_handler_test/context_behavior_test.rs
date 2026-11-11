@@ -802,7 +802,7 @@ async fn context_call_path_includes_intermediate_attested_source_and_reports_sou
     assert_eq!(path["max_depth"], 8);
     assert_eq!(path["code_generation"], payload["code_generation"]);
     assert_eq!(
-        path["outcome"]["weakest_authority"], "name_resolved",
+        path["outcome"]["weakest_authority"], "syntax_exact",
         "{payload}"
     );
     let nodes = path["outcome"]["nodes"].as_array().expect("path nodes");
@@ -836,7 +836,7 @@ async fn context_call_path_includes_intermediate_attested_source_and_reports_sou
     for (edge, adjacent) in edges.iter().zip(nodes.windows(2)) {
         assert_eq!(edge["from_node_id"], adjacent[0]["symbol"]["node_id"]);
         assert_eq!(edge["to_node_id"], adjacent[1]["symbol"]["node_id"]);
-        assert_eq!(edge["authority"], "name_resolved");
+        assert_eq!(edge["authority"], "syntax_exact");
         assert!(
             edge["evidence_span"]["end_byte"].as_u64().unwrap()
                 > edge["evidence_span"]["start_byte"].as_u64().unwrap()
@@ -856,18 +856,20 @@ async fn context_call_path_includes_intermediate_attested_source_and_reports_sou
     );
     assert_eq!(
         blocks[1]["code"],
-        "fn validate_invoice() -> u32 {\n    let _api_key = \"[TraceDecay redacted: exact credential]\";\n    persist_invoice()\n}"
+        "fn validate_invoice() -> u32 {\n    let [TraceDecay redacted: credential assignment];\n    persist_invoice()\n}"
     );
     assert!(
         !payload.to_string().contains(&secret),
         "source must remain sanitized"
     );
 
-    let markdown = context_text(&server, request.clone()).await;
+    let mut markdown_request = request.clone();
+    markdown_request["format"] = json!("markdown");
+    let markdown = context_text(&server, markdown_request).await;
     require_line(&markdown, "### Call Path");
     require_line(&markdown, "Shortest indexed call path: 2 edge(s).");
     assert!(
-        markdown.contains("validate_invoice") && markdown.contains("name_resolved"),
+        markdown.contains("validate_invoice") && markdown.contains("syntax_exact"),
         "{markdown}"
     );
 
