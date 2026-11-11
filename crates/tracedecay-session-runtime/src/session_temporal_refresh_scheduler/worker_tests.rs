@@ -580,6 +580,81 @@ async fn a_retryable_projection_publishes_while_summary_admission_is_blocked() {
 }
 
 #[tokio::test]
+async fn retryable_projection_does_not_strand_refused_history_admission() {
+    let harness = RegisteredGlobalDbHarness::open("history-fifo-projection-retry").await;
+    let store = SessionTemporalStore::new(harness.registered.as_ref());
+    let session_id = SessionId::new("history-fifo-projection-retry").expect("session id");
+    let begun = store
+        .begin_or_join_session_refresh(SessionRefreshBeginOrJoinRequestV1::new(
+            session_id.clone(),
+            SessionRefreshFrontierV1::new(0, 0).expect("empty frontier"),
+        ))
+        .await
+        .expect("running refresh");
+
+    let state = Arc::new(SessionTemporalRefreshWakeState::default());
+    let history = Arc::new(GatedHistory {
+        entered: tokio::sync::Notify::new(),
+        release: tokio::sync::Notify::new(),
+    });
+    let ingestor: SharedSessionHistoricalIngestor = history.clone();
+    let admission = Arc::new(tokio::sync::Semaphore::new(0));
+    let projector = Arc::new(RetryOnceProjector {
+        retry_pending: AtomicBool::new(true),
+    });
+    state.wake_history();
+    state.wake();
+    let worker = tokio::spawn(run_session_temporal_refresh_scheduler(
+        harness.registered.clone(),
+        Arc::clone(&state),
+        projector.clone(),
+        Arc::new(std::sync::RwLock::new(Some(ingestor))),
+        Arc::clone(&admission),
+        SessionTemporalRefreshPolicy::default(),
+    ));
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let idle = enabled_idle_notification(&state);
+            if state.is_idle() {
+                break;
+            }
+            idle.await;
+        }
+    })
+    .await
+    .expect("retrying projection must finish without a historical permit");
+    assert!(
+        !projector.retry_pending.load(Ordering::Acquire),
+        "projection error must actually be exercised"
+    );
+    let receipt = store
+        .session_refresh_receipt(SessionRefreshReceiptRequestV1::new(
+            begun.operation_id().clone(),
+            session_id,
+        ))
+        .await
+        .expect("read durable receipt")
+        .expect("retried projection completes");
+    assert_eq!(receipt.state(), SessionRefreshTerminalStateV1::Complete);
+    assert!(
+        state.history_retry_pending(),
+        "refused historical admission must survive a projection retry"
+    );
+
+    // No new history or projection wake follows: only releasing capacity may
+    // resume the original historical waiter.
+    admission.add_permits(1);
+    tokio::time::timeout(Duration::from_secs(5), history.entered.notified())
+        .await
+        .expect("historical ingest must resume on its already queued permit");
+    history.release.notify_one();
+    state.cancel();
+    worker
+        .await
+        .expect("refreshed worker exits on cancellation");
+}
+
+#[tokio::test]
 async fn a_live_wake_during_summary_admission_preserves_the_queued_turn() {
     let harness = RegisteredGlobalDbHarness::open("refresh-join-during-summary-admission").await;
     let state = Arc::new(SessionTemporalRefreshWakeState::default());

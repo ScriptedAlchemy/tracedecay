@@ -339,6 +339,12 @@ pub(super) async fn run_session_temporal_refresh_scheduler(
                     return;
                 };
                 history_release = release;
+                if matches!(history_release.as_ref(), Some(HistoryRelease::Admission(_))) {
+                    // Refusal owns the waiter before publication starts.
+                    // Projection retries must not strand it by skipping the
+                    // normal history-release follow-up branch.
+                    state.update_history_retry_state(true);
+                }
                 Some(outcome)
             } else {
                 None
