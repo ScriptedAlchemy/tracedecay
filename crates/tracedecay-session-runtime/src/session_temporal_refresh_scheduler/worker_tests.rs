@@ -651,6 +651,79 @@ async fn a_live_wake_during_summary_admission_preserves_the_queued_turn() {
     worker.await.expect("refresh worker exits on cancellation");
 }
 
+#[tokio::test]
+async fn a_live_projection_keeps_its_queued_history_admission_turn() {
+    let harness = RegisteredGlobalDbHarness::open("history-fifo-survives-projection").await;
+    let state = Arc::new(SessionTemporalRefreshWakeState::default());
+    let history = Arc::new(GatedHistory {
+        entered: tokio::sync::Notify::new(),
+        release: tokio::sync::Notify::new(),
+    });
+    let ingestor: SharedSessionHistoricalIngestor = history.clone();
+    let admission = Arc::new(tokio::sync::Semaphore::new(0));
+    state.wake_history();
+    let worker = tokio::spawn(run_session_temporal_refresh_scheduler(
+        harness.registered.clone(),
+        Arc::clone(&state),
+        Arc::new(CanonicalSessionTemporalProjector),
+        Arc::new(std::sync::RwLock::new(Some(ingestor))),
+        Arc::clone(&admission),
+        SessionTemporalRefreshPolicy::default(),
+    ));
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let idle = enabled_idle_notification(&state);
+            if state.is_idle() {
+                break;
+            }
+            idle.await;
+        }
+    })
+    .await
+    .expect("refused historical worker must queue before advertising idle");
+
+    let later = Arc::clone(&admission).acquire_owned();
+    tokio::pin!(later);
+    assert!(
+        std::future::poll_fn(|cx| std::task::Poll::Ready(later.as_mut().poll(cx)))
+            .await
+            .is_pending()
+    );
+
+    let before = state.pass_count.load(Ordering::Acquire);
+    state.wake();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let idle = enabled_idle_notification(&state);
+            if state.pass_count.load(Ordering::Acquire) > before && state.is_idle() {
+                break;
+            }
+            idle.await;
+        }
+    })
+    .await
+    .expect("live projection must finish without consuming summary admission");
+
+    admission.add_permits(1);
+    tokio::time::timeout(Duration::from_secs(5), history.entered.notified())
+        .await
+        .expect("the original historical worker must receive the first permit");
+    assert!(
+        std::future::poll_fn(|cx| std::task::Poll::Ready(later.as_mut().poll(cx)))
+            .await
+            .is_pending(),
+        "another profile cannot overtake the historical worker after its live wake"
+    );
+    history.release.notify_one();
+    let later_permit = tokio::time::timeout(Duration::from_secs(5), later)
+        .await
+        .expect("later profile must receive the historical worker's released permit")
+        .expect("admission must remain open");
+    drop(later_permit);
+    state.cancel();
+    worker.await.expect("historical worker exits on cancellation");
+}
+
 struct ControlledProjector {
     reject: AtomicBool,
 }
