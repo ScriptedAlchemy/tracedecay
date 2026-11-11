@@ -28,8 +28,16 @@ def loads_unambiguous_json(raw):
     def reject_nonfinite(constant):
         raise ValueError(f"nonfinite JSON constant: {constant}")
 
+    def finite_float(number):
+        # JSON's 1e309 is syntactically valid, but Python float parsing
+        # overflows it to infinity without calling parse_constant.
+        value = float(number)
+        if not math.isfinite(value):
+            raise ValueError(f"nonfinite JSON number: {number}")
+        return value
+
     return json.loads(raw, object_pairs_hook=unique_object,
-                      parse_constant=reject_nonfinite)
+                      parse_constant=reject_nonfinite, parse_float=finite_float)
 
 
 CAPTURED_SCOUT_CONFIG = "S_scout_captured"

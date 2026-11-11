@@ -207,6 +207,34 @@ class QualificationTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "nonfinite JSON constant"):
                 qualification.load_manifest(path)
 
+    def test_overflowed_json_exponent_cannot_enter_frozen_qualification(self):
+        # The stock JSON decoder parses 1e309 into float('inf') without
+        # invoking parse_constant; an unreviewed extension was ignored by the
+        # schema and could reach model inference despite invalid evidence.
+        self.assertEqual(
+            qualification.loads_unambiguous_json(b'{"finite": 1e308}')["finite"],
+            1e308,
+        )
+        with tempfile.TemporaryDirectory() as temp:
+            here = Path(temp)
+            (here / "dataset.json").write_bytes(self.dataset_bytes)
+            (here / "server.json").write_text(json.dumps(self.server_config))
+            (here / "manifest.json").write_bytes(
+                self.manifest_bytes[:-1] + b', "unreviewed": {"tokens": 1e309}}'
+            )
+            with patch.object(run_http, "HERE", str(here)), patch.object(
+                run_http, "post"
+            ) as post:
+                with self.assertRaisesRegex(ValueError, "nonfinite JSON number"):
+                    run_http.main([
+                        "--url", self.endpoint, "--tag", "nonfinite-exponent",
+                        "--server-config", str(here / "server.json"),
+                        "--qualification-manifest", str(here / "manifest.json"),
+                        "B_noul_text",
+                    ])
+                post.assert_not_called()
+            self.assertFalse((here / "results").exists())
+
     def test_positive_and_negative_holdout_is_separate_from_tuning(self):
         verified = self.valid()
         self.assertEqual(verified["heldout_ids"], ["holdout-positive", "holdout-negative"])

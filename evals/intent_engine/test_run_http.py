@@ -84,6 +84,8 @@ class RunHttpTest(unittest.TestCase):
              "duplicate JSON object key"),
             ("nonfinite_unused_field", b'{"answers": {}, "debug": NaN}',
              "nonfinite JSON constant"),
+            ("overflowed_exponent", b'{"answers": {}, "debug": {"tokens": 1e309}}',
+             "nonfinite JSON number"),
         ):
             with self.subTest(name=name):
                 with patch("urllib.request.build_opener") as opener:

@@ -46,7 +46,8 @@ refuse before reading or publishing a prediction; an interrupted exact-identity
 run may resume after a genuine 200 without accepting the refused response.
 
 Frozen inputs and HTTP responses must be unambiguous JSON: repeated object keys
-(including identical duplicate values) and nonfinite constants such as `NaN`
+(including identical duplicate values), nonfinite constants such as `NaN`,
+and finite-looking numeric exponents that overflow to infinity (e.g. `1e309`)
 are refused. A last-key-wins parse could otherwise make a reviewer see a
 different model, split, threshold or measurement than the evaluator used.
 Malformed `.partial` rows are refused without append, and qualified scoring
