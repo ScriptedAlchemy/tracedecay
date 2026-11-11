@@ -453,6 +453,13 @@ describe("TraceDecayClient generated operation bindings", () => {
       cyclomatic_complexity: 1,
       complexity_analysis: "complete",
       cost_to_expand: { body: 60, full_file: 10 },
+      unresolved_calls: {
+        code_generation: "generation.sdk.1",
+        caller_node_id: "occurrence.sdk.main",
+        file_occurrence_id: "file.sdk.main",
+        file: "src/main.rs",
+        outcome: { state: "complete", sites: [] },
+      },
       unavailable_fields: [],
       freshness: possiblyStale,
     };

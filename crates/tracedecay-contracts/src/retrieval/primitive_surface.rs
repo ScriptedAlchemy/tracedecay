@@ -10,8 +10,9 @@ use std::collections::BTreeMap;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use tracedecay_domain::{
-    CodeGenerationId, CommitId, ComplexityAnalysisV1, EdgeAuthorityV1, ManifestDigest, ProjectId,
-    ProviderId, RepositoryId, SourceSpan, SymbolOccurrenceId, WorktreeId,
+    CodeGenerationId, CommitId, ComplexityAnalysisV1, EdgeAuthorityV1, FileOccurrenceId,
+    ManifestDigest, ProjectId, ProviderId, RepositoryId, SourceSpan, SymbolOccurrenceId,
+    WorktreeId,
 };
 
 use crate::code_index_freshness::{CodeIndexConvergenceParkedV1, CodeIndexStalenessStateV1};
@@ -704,6 +705,62 @@ pub struct NodeExpansionCostV1 {
     pub full_file: u64,
 }
 
+/// Evidence retained for one exact caller in the served graph generation.
+/// Completeness describes these recorded limitations only: the extractor
+/// may not model every dynamic dispatch form or runtime target.
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct NodeUnresolvedCallReportV1 {
+    pub code_generation: CodeGenerationId,
+    pub caller_node_id: SymbolOccurrenceId,
+    pub file_occurrence_id: FileOccurrenceId,
+    pub file: String,
+    pub outcome: NodeUnresolvedCallOutcomeV1,
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case", tag = "state")]
+pub enum NodeUnresolvedCallOutcomeV1 {
+    /// Every retained unresolved call for this caller was examined.
+    Complete {
+        sites: Vec<NodeUnresolvedCallSiteV1>,
+    },
+    /// The bounded read stopped before all retained evidence was examined.
+    /// Non-call limitations also consume the evidence-record budget.
+    Truncated {
+        sites: Vec<NodeUnresolvedCallSiteV1>,
+        maximum_references: u32,
+    },
+    Unavailable {
+        evidence: PrimitiveUnavailableEvidenceV1,
+    },
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct NodeUnresolvedCallSiteV1 {
+    /// Exact spelling retained by extraction; not a resolved target name.
+    pub reference_name: String,
+    /// Extraction-recorded byte span in the bound file. This may cover the
+    /// enclosing declaration when extraction could not attest a token span.
+    pub evidence_span: SourceSpan,
+    /// Present only when extraction counted the call's arguments.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub argument_count: Option<u32>,
+    pub reasons: Vec<NodeUnresolvedCallReasonV1>,
+}
+
+/// Only distinctions attested by the existing sealed reference evidence.
+/// A dotted spelling alone never proves dynamic dispatch or a receiver type.
+#[derive(Clone, Copy, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NodeUnresolvedCallReasonV1 {
+    TargetUnresolved,
+    AmbiguousLocal,
+    UnmodeledBlockGlob,
+    UnmodeledInlineModuleGlob,
+}
+
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct NodeDetailsV1 {
@@ -727,6 +784,7 @@ pub struct NodeDetailsV1 {
     pub cyclomatic_complexity: Option<u32>,
     pub complexity_analysis: ComplexityAnalysisV1,
     pub cost_to_expand: NodeExpansionCostV1,
+    pub unresolved_calls: NodeUnresolvedCallReportV1,
     pub unavailable_fields: Vec<String>,
     /// The worktree verdict a served graph read opens with.
     #[serde(default, skip_serializing_if = "Option::is_none")]

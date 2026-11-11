@@ -8,6 +8,7 @@ mod context_support;
 mod exact_symbol;
 mod lexical_routing;
 mod navigation;
+mod node_unresolved;
 mod primitive_surface;
 mod rename_preview;
 mod search;
@@ -25,6 +26,7 @@ pub use exact_symbol::compute_find_exact_symbol;
 pub use navigation::{
     compute_by_qualified_name, compute_derives, compute_impact, compute_node, compute_signature,
 };
+pub(crate) use node_unresolved::render_node_md;
 pub use rename_preview::compute_rename_preview;
 pub use search::compute_search;
 pub(crate) use search::render_search;

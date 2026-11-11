@@ -12,7 +12,7 @@ use tracedecay_code_index::graph_projection::{
     CodeGraphCensusV1, CodeGraphImpactBatchV1, CodeGraphInteractiveReader, CodeGraphPathSearchV1,
     CodeGraphRankedNeighborsV1, CodeGraphReadCostMeter, CodeGraphReadinessRequirement,
     CodeGraphSemanticEdgeV1, CodeGraphSymbolPageV1, CodeGraphSymbolPredicate,
-    CodeGraphSymbolSummaryV1,
+    CodeGraphSymbolSummaryV1, CodeGraphUnresolvedCallSitesV1,
 };
 use tracedecay_contracts::{
     ApplicationOperation, CancellationSignal, Deadline, RequestContext, RequestCostReceiptV1,
@@ -348,6 +348,19 @@ impl VerifiedGraphQuery {
         self.refuse_if_bound_closed()?;
         self.reader
             .has_unresolved_callers(targets, None, Arc::clone(&self.cancellation))
+            .map_err(GraphQueryError::from)
+    }
+
+    /// A bounded read of the sealed caller's recorded unresolved sites.
+    /// Admission, cancellation and cost accounting use this query's lease.
+    pub fn unresolved_call_sites(
+        &self,
+        occurrence: &SymbolOccurrenceId,
+        max_references: usize,
+    ) -> Result<Option<CodeGraphUnresolvedCallSitesV1>> {
+        self.refuse_if_bound_closed()?;
+        self.reader
+            .unresolved_call_sites(occurrence, max_references, Arc::clone(&self.cancellation))
             .map_err(GraphQueryError::from)
     }
 
