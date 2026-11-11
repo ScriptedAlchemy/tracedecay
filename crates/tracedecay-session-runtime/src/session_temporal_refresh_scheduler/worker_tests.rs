@@ -776,8 +776,8 @@ async fn publishing_a_bounded_projection_backlog_keeps_the_original_history_turn
     );
     assert_eq!(
         state.pass_count.load(Ordering::Acquire),
-        3,
-        "two bounded projection passes must not trigger a redundant refused history pass"
+        5,
+        "two operations each need projection and completion; no duplicate history refusal"
     );
     for recovery in recoveries {
         let receipt = store
