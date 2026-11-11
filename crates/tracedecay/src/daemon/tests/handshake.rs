@@ -823,7 +823,7 @@ async fn daemon_refreshes_once_only_after_generation_change() {
 
     // A new generation may reopen this profile only after the previous
     // generation's retained store owners and background tasks have joined.
-    shutdown_catalog_generation(engine).await;
+    Box::pin(shutdown_catalog_generation(engine)).await;
     let next_generation = test_daemon_engine_for_profile(&profile_root);
     prewarm_test_profile_runtime(&next_generation.store_administration).await;
     let first = daemon_round_trip(
@@ -853,7 +853,7 @@ async fn daemon_refreshes_once_only_after_generation_change() {
     .await;
     assert_eq!(second.len(), 1, "the refresh must not loop");
     assert_eq!(second[0]["id"], json!(4));
-    shutdown_catalog_generation(next_generation).await;
+    Box::pin(shutdown_catalog_generation(next_generation)).await;
 }
 
 #[cfg(unix)]
