@@ -2,9 +2,13 @@
 import { App, type McpUiHostContext } from "@modelcontextprotocol/ext-apps";
 import type { CallToolResult } from "@modelcontextprotocol/client";
 import {
+  UNRESOLVED_CALL_COVERAGE,
+  UNRESOLVED_CALL_RANGES,
+  UNRESOLVED_CALL_REASON_LABELS,
   deepLinkPath,
   isViewState,
   parseDeepLink,
+  unresolvedCallSummary,
   type BoundedGraph,
   type DeepLinkTarget,
   type Failure,
@@ -12,6 +16,7 @@ import {
   type ProjectRef,
   type Provenance,
   type Section,
+  type SymbolDetail,
   type SymbolSummary,
   type ViewState,
 } from "../shared/view.js";
@@ -85,7 +90,7 @@ async function callTool(name: ToolName, args: Record<string, unknown>, label: st
     pendingCall = null;
     const view = viewFromResult(result);
     if (view === null) {
-      setScreen({ phase: "host_error", message: `${name} returned no view payload` });
+      setScreen({ phase: "host_error", message: `${name} returned an invalid TraceDecay view payload` });
       return;
     }
     adoptView(view);
@@ -477,8 +482,33 @@ function renderGraph(project_id: string, graph: BoundedGraph): Node {
     svg.prepend(line);
   }
   const wrapper = el("div", {}, [svg]);
-  if (graph.truncated) wrapper.append(notice(`Graph bounded to depth ${graph.max_depth}; more relations exist than shown.`, "neutral", "graph-truncated"));
+  if (graph.truncated) wrapper.append(notice(`Graph limited to depth ${graph.max_depth}; relations may be incomplete or come from different snapshots.`, "neutral", "graph-truncated"));
   return wrapper;
+}
+
+function renderUnresolvedCalls(report: SymbolDetail["unresolved_calls"], provenance: Provenance | null): Node {
+  const { outcome } = report;
+  const tone = outcome.state === "complete" ? "neutral" : "warn";
+  const label = outcome.state === "complete" ? "Complete" : outcome.state === "truncated" ? "Partial" : "Unavailable";
+  const children: Node[] = [notice(unresolvedCallSummary(outcome), tone, `unresolved-calls-${outcome.state}`)];
+  const projectGeneration = provenance?.generation;
+  const snapshotMessage = projectGeneration == null
+    ? "Report snapshot recorded; project snapshot unavailable for comparison."
+    : projectGeneration === report.code_generation
+      ? "Matches the reported project snapshot."
+      : "Report and project status use different snapshots.";
+  children.push(notice(snapshotMessage, projectGeneration != null && projectGeneration !== report.code_generation ? "warn" : "neutral", "unresolved-calls-snapshot"));
+  if (outcome.state !== "unavailable") {
+    children.push(el("ul", { class: "list" }, outcome.sites.map((site) => el("li", { "data-testid": "unresolved-call-row" }, [
+      el("code", { class: "loc", "data-testid": "unresolved-call-name" }, [site.reference_name]),
+      el("span", { class: "loc", "data-testid": "unresolved-call-range" }, [`${report.file}, bytes [${site.evidence_span.start_byte}, ${site.evidence_span.end_byte})`]),
+      el("span", { "data-testid": "unresolved-call-reasons" }, [site.reasons.map((reason) => UNRESOLVED_CALL_REASON_LABELS[reason]).join("; ")]),
+      ...(site.argument_count == null ? [] : [badge(`${site.argument_count} ${site.argument_count === 1 ? "argument" : "arguments"}`)]),
+    ]))));
+    children.push(notice(UNRESOLVED_CALL_COVERAGE, "neutral", "unresolved-calls-coverage"));
+    if (outcome.sites.length > 0) children.push(notice(UNRESOLVED_CALL_RANGES, "neutral", "unresolved-calls-ranges"));
+  }
+  return panel("Unresolved calls", "unresolved-calls-panel", children, [badge(label, tone, "unresolved-calls-state")]);
 }
 
 function renderSymbol(view: Extract<ViewState, { page: "symbol" }>): Node[] {
@@ -530,9 +560,10 @@ function renderSymbol(view: Extract<ViewState, { page: "symbol" }>): Node[] {
   }
   return [
     renderSearchForm(view.project, ""),
-    panel("Symbol", "symbol-panel", [detail, notice("Symbol and impact reads do not report a generation; their snapshot identity is unverified.", "neutral", "symbol-generation"), actions]),
+    panel("Symbol", "symbol-panel", [detail, notice("Impact reads do not report a generation; their snapshot identity is unverified.", "neutral", "symbol-generation"), actions]),
     panel("Callers", "callers-panel", [relations(view.callers, "callers")]),
     panel("Callees", "callees-panel", [relations(view.callees, "callees")]),
+    ...(view.symbol.state === "ready" ? [renderUnresolvedCalls(view.symbol.data.unresolved_calls, view.provenance)] : []),
     panel("Impact", "impact-panel", [impact]),
     panel("Graph", "graph-panel", [graph]),
     renderProvenance(view.provenance, view.symbol.state === "ready" ? { kind: "symbol", project_id, node_id: view.symbol.data.node_id } : { kind: "project", project_id }),
@@ -595,7 +626,7 @@ app.ontoolinput = (params) => {
 app.ontoolresult = (result) => {
   cancelPendingCall();
   const view = viewFromResult(result);
-  if (view === null) setScreen({ phase: "host_error", message: "The tool result carried no TraceDecay view payload." });
+  if (view === null) setScreen({ phase: "host_error", message: "The tool result carried an invalid TraceDecay view payload." });
   else adoptView(view);
 };
 app.onhostcontextchanged = (context) => {
