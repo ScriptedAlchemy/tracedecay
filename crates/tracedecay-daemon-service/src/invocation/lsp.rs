@@ -435,8 +435,8 @@ impl DaemonInvocationService {
         self.store_observability.join_retirement_drains().await;
         step("observability_retirements_joined");
         self.session_holder_databases.lock().await.clear();
-        // The operation-event authority is process-global, not owned by this
-        // composition: only frontiers without a live producer expire here.
+        // This daemon owns its frontiers; an accepted producer may retain
+        // its terminal-publication window after other owners have drained.
         self.operation_events.expire_idle().await;
         step("idle_operation_events_expired");
         let lease_shutdown_clean = lease_shutdown.is_ok();
@@ -773,19 +773,31 @@ impl DaemonInvocationService {
             Ok(access) => access,
             Err(problem) => return DaemonInvocationResponse::problem(request_id, problem),
         };
-        let mut sessions = self.lsp_sessions.lock().await;
-        let Some(session) = sessions.get_mut(access.session_id()) else {
-            return DaemonInvocationResponse::problem(
-                request_id,
-                DaemonInvocationProblem::NotFoundOrNotAuthorized,
-            );
+        // The session map lock covers only the state transition. The receipt's
+        // durable admission is disk-latency work and runs after it releases.
+        let (acknowledged, delivery) = {
+            let mut sessions = self.lsp_sessions.lock().await;
+            let Some(session) = sessions.get_mut(access.session_id()) else {
+                return DaemonInvocationResponse::problem(
+                    request_id,
+                    DaemonInvocationProblem::NotFoundOrNotAuthorized,
+                );
+            };
+            let acknowledged = session.actor.acknowledge_outbound();
+            let delivery = if acknowledged {
+                session
+                    .claim_in_flight_delivery(
+                        tracedecay_domain::DeliverySettlementOutcomeV1::Delivered,
+                        None,
+                    )
+                    .ok()
+            } else {
+                None
+            };
+            (acknowledged, delivery)
         };
-        let acknowledged = session.actor.acknowledge_outbound();
-        if acknowledged {
-            let _ = session.settle_in_flight_delivery(
-                tracedecay_domain::DeliverySettlementOutcomeV1::Delivered,
-                None,
-            );
+        if let Some(delivery) = delivery {
+            let _ = delivery.admit().await;
         }
         DaemonInvocationResponse::with_outcome(
             request_id,
@@ -824,10 +836,12 @@ impl DaemonInvocationService {
         // The stdio bridge reaches this path after a write or flush failure.
         // Removing the actor discards its in-flight frame, so terminalize that
         // exact captured attempt before any later detach bookkeeping can fail.
-        let _ = session.settle_in_flight_delivery(
+        if let Ok(delivery) = session.claim_in_flight_delivery(
             tracedecay_domain::DeliverySettlementOutcomeV1::Dropped,
             Some(tracedecay_domain::DeliveryDropReasonV1::Disconnected),
-        );
+        ) {
+            let _ = delivery.admit().await;
+        }
         let lease_cancelled = self
             .lsp_lease_tasks
             .cancel(access.session_id())

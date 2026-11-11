@@ -8,10 +8,6 @@ use tracedecay_contracts::RequestContext;
 use tracedecay_contracts::feedback::FeedbackPortFuture;
 use tracedecay_domain::CommitId;
 
-pub fn daemon_operation_event_authority() -> OperationEventAuthority {
-    operation_event_authority()
-}
-
 pub(crate) struct DaemonFeedbackInvocationRequest {
     pub(crate) operation: DaemonInvocationOperation,
     pub(crate) request_handle: String,

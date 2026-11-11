@@ -61,16 +61,17 @@ fn writer_actor_allows_only_product_schema_pragmas() {
             .execute_batch(pragma.to_owned())
             .unwrap_or_else(|error| panic!("{pragma} must remain available: {error}"));
     }
-    for pragma in [
+    for sql in [
+        "VACUUM main",
         "PRAGMA auto_vacuum = NONE",
         "PRAGMA foreign_keys = OFF",
         "PRAGMA secure_delete = OFF",
         "PRAGMA writable_schema = ON",
     ] {
-        let error = channel.execute_batch(pragma.to_owned()).unwrap_err();
+        let error = channel.execute_batch(sql.to_owned()).unwrap_err();
         assert!(
             matches!(error, ExactSqlError::Sqlite { .. }),
-            "{pragma}: {error}"
+            "{sql}: {error}"
         );
     }
 }

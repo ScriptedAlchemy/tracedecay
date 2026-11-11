@@ -5,7 +5,8 @@ use tempfile::TempDir;
 fn write(dir: &Path, project: &Path, prefix: &str, tool: &str, delta: u64, before: u64) {
     tracedecay_session_memory::monitor_ring::write_entry_to(
         dir, project, prefix, tool, delta, before,
-    );
+    )
+    .expect("write monitor fixture entry");
 }
 
 /// Helper: open reader at a specific mmap dir.
