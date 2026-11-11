@@ -72,6 +72,19 @@ impl Executor for RetentionTestStore {
             .await
     }
 
+    async fn execute_statements(
+        &self,
+        statements: Vec<tracedecay_runtime_core::db::engine::WriteStatement>,
+    ) -> tracedecay_runtime_core::db::engine::Result<Vec<u64>> {
+        self.database()
+            .writer_connection()
+            .map_err(|error| {
+                tracedecay_runtime_core::db::engine::Error::invalid_operation(error.to_string())
+            })?
+            .execute_statements(statements)
+            .await
+    }
+
     async fn execute_batch(&self, sql: &str) -> tracedecay_runtime_core::db::engine::Result<()> {
         self.database()
             .writer_connection()

@@ -96,6 +96,13 @@ pub mod registered_schema {
             self.connection.execute_batch(sql).await
         }
 
+        pub async fn execute_statements(
+            &self,
+            statements: Vec<crate::db::engine::WriteStatement>,
+        ) -> crate::db::engine::Result<Vec<u64>> {
+            self.connection.execute_statements(statements).await
+        }
+
         /// Begins the authority-bound transaction used for one atomic schema
         /// installation.
         ///
@@ -154,6 +161,13 @@ pub mod registered_schema {
             RegisteredSchemaInstallationV1::execute(self, sql, params).await
         }
 
+        async fn execute_statements(
+            &self,
+            statements: Vec<crate::db::engine::WriteStatement>,
+        ) -> crate::db::engine::Result<Vec<u64>> {
+            RegisteredSchemaInstallationV1::execute_statements(self, statements).await
+        }
+
         async fn execute_batch(&self, sql: &str) -> crate::db::engine::Result<()> {
             RegisteredSchemaInstallationV1::execute_batch(self, sql).await
         }
@@ -184,6 +198,13 @@ pub mod registered_schema {
                 .await
         }
 
+        pub async fn execute_statements(
+            &self,
+            statements: Vec<crate::db::engine::WriteStatement>,
+        ) -> crate::db::engine::Result<Vec<u64>> {
+            self.transaction.execute_statements(statements).await
+        }
+
         pub async fn commit(self) -> crate::db::engine::Result<()> {
             self.transaction.commit().await
         }
@@ -212,6 +233,13 @@ pub mod registered_schema {
             P: crate::db::engine::IntoParams,
         {
             RegisteredSchemaInstallationTransactionV1::execute(self, sql, params).await
+        }
+
+        async fn execute_statements(
+            &self,
+            statements: Vec<crate::db::engine::WriteStatement>,
+        ) -> crate::db::engine::Result<Vec<u64>> {
+            RegisteredSchemaInstallationTransactionV1::execute_statements(self, statements).await
         }
 
         async fn execute_batch(&self, sql: &str) -> crate::db::engine::Result<()> {

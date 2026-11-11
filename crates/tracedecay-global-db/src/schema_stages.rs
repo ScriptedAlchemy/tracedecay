@@ -1013,6 +1013,14 @@ impl<T: Executor + Sync> Executor for CancellableSchemaTransaction<'_, T> {
         self.transaction.execute(sql, params).await
     }
 
+    async fn execute_statements(
+        &self,
+        statements: Vec<engine::WriteStatement>,
+    ) -> engine::Result<Vec<u64>> {
+        self.checkpoint()?;
+        self.transaction.execute_statements(statements).await
+    }
+
     async fn execute_batch(&self, sql: &str) -> engine::Result<()> {
         self.checkpoint()?;
         self.transaction.execute_batch(sql).await

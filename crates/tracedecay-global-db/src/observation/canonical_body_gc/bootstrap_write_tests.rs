@@ -1,10 +1,19 @@
 //! Measure real bootstrap write submissions without replacing the SQLite executor.
+//!
+//! Every page runs inside the production `begin_write_transaction` wrapper, so
+//! the counts cover the facade the daemon actually uses. Batching inside that
+//! facade is not caller-observable: a per-statement fallback expands behind the
+//! adapter's own method. `Executor::execute_statements` therefore has no
+//! default, and an adapter that does not forward to the engine's batched
+//! submission fails to compile.
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use tracedecay_runtime_core::db::engine::{
-    Executor, IntoParams, QueryExecutor, Result as EngineResult, Rows, TestConnection,
-    TransactionBehavior, WriteStatement, params,
+    Executor, IntoParams, QueryExecutor, Result as EngineResult, Rows, WriteStatement, params,
+};
+use tracedecay_runtime_core::db::{
+    Database, DatabaseAuthority, DatabaseWriteTransaction, TestDatabaseRuntimeMode,
 };
 use tracedecay_store::{
     CANONICAL_BODIES_TABLE_SQL, StoredCanonicalBody, UPSERT_CANONICAL_BODY_SQL,
@@ -47,8 +56,9 @@ impl<E: Executor + ?Sized> Executor for CountWrites<'_, E> {
 }
 
 struct Fixture {
-    conn: TestConnection,
+    database: Database,
     bodies: Vec<StoredCanonicalBody>,
+    _authority: DatabaseAuthority,
     _directory: tempfile::TempDir,
 }
 
@@ -58,25 +68,42 @@ impl Fixture {
     }
 
     async fn with_observations(include_observations: bool) -> Self {
+        // Publishing a profile-scoped fixture initializes the registered
+        // global/session schema through the fail-closed port. Registration is
+        // idempotent, so this fixture does not depend on another test having
+        // run first.
+        crate::register_registered_schema_installer();
         let directory = tempfile::tempdir().unwrap();
-        let conn = TestConnection::open(&directory.path().join("bootstrap-writes.db"));
-        conn.execute_batch(CANONICAL_BODIES_TABLE_SQL)
-            .await
-            .unwrap();
-        conn.execute_batch(
-            "CREATE TABLE lcm_raw_messages (
-                store_id INTEGER PRIMARY KEY AUTOINCREMENT,
-                storage_kind TEXT NOT NULL, content TEXT, content_hash TEXT NOT NULL
-             );
-             CREATE TABLE observations (
-                sequence INTEGER PRIMARY KEY AUTOINCREMENT,
-                observation_json TEXT NOT NULL
-             );",
+        let db_path = directory.path().join("bootstrap-writes.db");
+        let authority =
+            DatabaseAuthority::acquire_test(&db_path, "canonical body bootstrap write fixture")
+                .unwrap();
+        let (database, _) = Database::publish_test_runtime(
+            &db_path,
+            &authority,
+            TestDatabaseRuntimeMode::Initialize,
         )
         .await
         .unwrap();
-        let transaction = conn
-            .transaction_with_behavior(TransactionBehavior::Immediate)
+        let transaction = database
+            .begin_write_transaction("seed canonical body bootstrap fixture")
+            .await
+            .unwrap();
+        transaction
+            .execute_batch(CANONICAL_BODIES_TABLE_SQL)
+            .await
+            .unwrap();
+        transaction
+            .execute_batch(
+                "CREATE TABLE lcm_raw_messages (
+                    store_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    storage_kind TEXT NOT NULL, content TEXT, content_hash TEXT NOT NULL
+                 );
+                 CREATE TABLE observations (
+                    sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+                    observation_json TEXT NOT NULL
+                 );",
+            )
             .await
             .unwrap();
         let mut bodies = Vec::new();
@@ -138,36 +165,49 @@ impl Fixture {
         schema::install(&transaction).await.unwrap();
         transaction.commit().await.unwrap();
         Self {
-            conn,
+            database,
             bodies,
+            _authority: authority,
             _directory: directory,
         }
     }
 
-    async fn tick(&self) -> (CanonicalBodyGcReport, usize) {
-        let transaction = self
-            .conn
-            .transaction_with_behavior(TransactionBehavior::Immediate)
+    async fn begin_write(&self) -> DatabaseWriteTransaction<'_> {
+        self.database
+            .begin_write_transaction("canonical body bootstrap fixture write")
             .await
-            .unwrap();
-        let (report, submissions) = {
-            let counted = CountWrites {
-                inner: &transaction,
-                submissions: AtomicUsize::new(0),
-            };
-            let report = step(&counted, 48).await.unwrap();
-            (report, counted.submissions.load(Ordering::Relaxed))
+            .unwrap()
+    }
+
+    async fn execute_batch(&self, sql: &str) {
+        let transaction = self.begin_write().await;
+        transaction.execute_batch(sql).await.unwrap();
+        transaction.commit().await.unwrap();
+    }
+
+    async fn tick(&self) -> (CanonicalBodyGcReport, usize) {
+        let transaction = self.begin_write().await;
+        let counted = CountWrites {
+            inner: &transaction,
+            submissions: AtomicUsize::new(0),
         };
+        let report = step(&counted, 48).await.unwrap();
+        let submissions = counted.submissions.load(Ordering::Relaxed);
         transaction.commit().await.unwrap();
         (report, submissions)
     }
 
     async fn assert_bodies_preserved(&self) {
-        let count = scalar(&self.conn, "SELECT COUNT(*) FROM session_canonical_bodies").await;
+        let count = scalar(
+            &self.database.read_connection(),
+            "SELECT COUNT(*) FROM session_canonical_bodies",
+        )
+        .await;
         assert_eq!(count, self.bodies.len() as i64);
         for body in &self.bodies {
             let mut rows = self
-                .conn
+                .database
+                .read_connection()
                 .query(
                     "SELECT body FROM session_canonical_bodies WHERE content_hash = ?1",
                     params![body.content_hash.as_str()],
@@ -213,12 +253,14 @@ async fn bootstrap_pages_batch_writes_and_preserve_sparse_frontiers() {
     let fixture = Fixture::open().await;
     for (scanned, through, owners) in [(48_u64, 96_i64, 48_i64), (4, 104, 52)] {
         let (report, submissions) = fixture.tick().await;
-        let progress = read_progress(&fixture.conn).await.unwrap();
+        let progress = read_progress(&fixture.database.read_connection())
+            .await
+            .unwrap();
         assert_eq!(report.roots_scanned, scanned);
         assert_eq!(submissions, 2, "one seed submission plus the checkpoint");
         assert_eq!(progress.raw_through, through);
         assert_eq!(
-            raw_owners(&fixture.conn).await,
+            raw_owners(&fixture.database.read_connection()).await,
             (1..=owners).map(|ordinal| ordinal * 2).collect::<Vec<_>>()
         );
         assert_eq!(report.bodies_deleted, 0);
@@ -233,9 +275,11 @@ async fn bootstrap_pages_batch_writes_and_preserve_sparse_frontiers() {
     hashes.sort();
     for (scanned, total) in [(48_u64, 48_usize), (4, 52)] {
         let (report, submissions) = fixture.tick().await;
-        let progress = read_progress(&fixture.conn).await.unwrap();
+        let progress = read_progress(&fixture.database.read_connection())
+            .await
+            .unwrap();
         let candidates = scalar(
-            &fixture.conn,
+            &fixture.database.read_connection(),
             "SELECT COUNT(*) FROM canonical_body_gc_candidates",
         )
         .await;
@@ -269,7 +313,9 @@ async fn bootstrap_batch_refusal_rolls_back_and_recovers() {
             fixture.tick().await;
             fixture.tick().await;
         }
-        let before = read_progress(&fixture.conn).await.unwrap();
+        let before = read_progress(&fixture.database.read_connection())
+            .await
+            .unwrap();
         let table = if bodies_phase {
             "canonical_body_gc_candidates"
         } else {
@@ -278,20 +324,14 @@ async fn bootstrap_batch_refusal_rolls_back_and_recovers() {
         // FAIL deliberately leaves the first 47 inserts in the transaction.
         // The collector's rollback must discard them with the uncommitted page.
         fixture
-            .conn
             .execute_batch(&format!(
                 "CREATE TRIGGER test_bootstrap_refusal BEFORE INSERT ON {table}
                  WHEN (SELECT COUNT(*) FROM {table}) = 47 BEGIN
                     SELECT RAISE(FAIL, 'injected bootstrap batch refusal');
                  END"
             ))
-            .await
-            .unwrap();
-        let transaction = fixture
-            .conn
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .await
-            .unwrap();
+            .await;
+        let transaction = fixture.begin_write().await;
         let error = step(&transaction, 48).await.unwrap_err();
         assert!(
             error
@@ -299,15 +339,22 @@ async fn bootstrap_batch_refusal_rolls_back_and_recovers() {
                 .contains("injected bootstrap batch refusal")
         );
         transaction.rollback().await.unwrap();
-        assert_eq!(read_progress(&fixture.conn).await.unwrap(), before);
-        let count = scalar(&fixture.conn, &format!("SELECT COUNT(*) FROM {table}")).await;
+        assert_eq!(
+            read_progress(&fixture.database.read_connection())
+                .await
+                .unwrap(),
+            before
+        );
+        let count = scalar(
+            &fixture.database.read_connection(),
+            &format!("SELECT COUNT(*) FROM {table}"),
+        )
+        .await;
         assert_eq!(count, 0);
         fixture.assert_bodies_preserved().await;
         fixture
-            .conn
             .execute_batch("DROP TRIGGER test_bootstrap_refusal")
-            .await
-            .unwrap();
+            .await;
         for scanned in [48_u64, 4] {
             let (report, submissions) = fixture.tick().await;
             let actual = if bodies_phase {
@@ -319,7 +366,11 @@ async fn bootstrap_batch_refusal_rolls_back_and_recovers() {
             assert_eq!(actual, scanned);
             assert_eq!(report.bodies_deleted, 0);
         }
-        let count = scalar(&fixture.conn, &format!("SELECT COUNT(*) FROM {table}")).await;
+        let count = scalar(
+            &fixture.database.read_connection(),
+            &format!("SELECT COUNT(*) FROM {table}"),
+        )
+        .await;
         assert_eq!(count, 52);
         fixture.assert_bodies_preserved().await;
     }
@@ -329,25 +380,27 @@ async fn bootstrap_batch_refusal_rolls_back_and_recovers() {
 async fn bootstrap_batch_eligibility_does_not_change_the_page_boundary() {
     let fixture = Fixture::open().await;
     fixture
-        .conn
         .execute_batch(
             "UPDATE lcm_raw_messages SET storage_kind = 'external' WHERE store_id = 94;
              UPDATE lcm_raw_messages SET content = 'owned inline text' WHERE store_id = 96;",
         )
+        .await;
+    let (report, submissions) = fixture.tick().await;
+    let progress = read_progress(&fixture.database.read_connection())
         .await
         .unwrap();
-    let (report, submissions) = fixture.tick().await;
-    let progress = read_progress(&fixture.conn).await.unwrap();
     assert_eq!(report.roots_scanned, 48);
     assert_eq!(submissions, 2);
     assert_eq!(progress.raw_through, 96);
     assert_eq!(
-        raw_owners(&fixture.conn).await,
+        raw_owners(&fixture.database.read_connection()).await,
         (1..=46_i64).map(|ordinal| ordinal * 2).collect::<Vec<_>>()
     );
     assert!(report.has_more);
     let (tail, submissions) = fixture.tick().await;
-    let progress = read_progress(&fixture.conn).await.unwrap();
+    let progress = read_progress(&fixture.database.read_connection())
+        .await
+        .unwrap();
     assert_eq!(tail.roots_scanned, 4);
     assert_eq!(submissions, 2);
     assert_eq!(progress.raw_through, 104);
@@ -355,7 +408,10 @@ async fn bootstrap_batch_eligibility_does_not_change_the_page_boundary() {
         .filter(|ordinal| ![47, 48].contains(ordinal))
         .map(|ordinal| ordinal * 2)
         .collect::<Vec<_>>();
-    assert_eq!(raw_owners(&fixture.conn).await, expected);
+    assert_eq!(
+        raw_owners(&fixture.database.read_connection()).await,
+        expected
+    );
     fixture.assert_bodies_preserved().await;
 }
 
@@ -392,7 +448,7 @@ async fn observation_bootstrap_batches_across_a_bounded_write_submission() {
             Some(format!("observations:{frontier}"))
         );
         assert_eq!(
-            read_progress(&fixture.conn)
+            read_progress(&fixture.database.read_connection())
                 .await
                 .unwrap()
                 .observations_through,
@@ -400,12 +456,12 @@ async fn observation_bootstrap_batches_across_a_bounded_write_submission() {
         );
         assert_eq!(actual_submissions, submissions);
         assert_eq!(
-            observation_owners(&fixture.conn).await,
+            observation_owners(&fixture.database.read_connection()).await,
             (1..=owners).map(|ordinal| ordinal * 2).collect::<Vec<_>>()
         );
         assert_eq!(
             scalar(
-                &fixture.conn,
+                &fixture.database.read_connection(),
                 "SELECT COUNT(*) FROM canonical_body_gc_refs
                 WHERE owner_kind = 'observation'"
             )
@@ -442,22 +498,18 @@ async fn observation_bootstrap_failure_after_a_full_batch_rolls_back_and_recover
     for _ in 0..2 {
         fixture.tick().await;
     }
-    let before = read_progress(&fixture.conn).await.unwrap();
+    let before = read_progress(&fixture.database.read_connection())
+        .await
+        .unwrap();
     fixture
-        .conn
         .execute_batch(
             "CREATE TRIGGER refuse_observation_seed BEFORE INSERT ON canonical_body_gc_refs
              WHEN NEW.owner_kind = 'observation' AND NEW.owner_id = 94 BEGIN
                  SELECT RAISE(FAIL, 'injected observation batch refusal');
              END",
         )
-        .await
-        .unwrap();
-    let transaction = fixture
-        .conn
-        .transaction_with_behavior(TransactionBehavior::Immediate)
-        .await
-        .unwrap();
+        .await;
+    let transaction = fixture.begin_write().await;
     let error = step(&transaction, 48).await.unwrap_err();
     assert!(
         error
@@ -465,15 +517,22 @@ async fn observation_bootstrap_failure_after_a_full_batch_rolls_back_and_recover
             .contains("injected observation batch refusal")
     );
     transaction.rollback().await.unwrap();
-    assert_eq!(read_progress(&fixture.conn).await.unwrap(), before);
-    assert!(observation_owners(&fixture.conn).await.is_empty());
+    assert_eq!(
+        read_progress(&fixture.database.read_connection())
+            .await
+            .unwrap(),
+        before
+    );
+    assert!(
+        observation_owners(&fixture.database.read_connection())
+            .await
+            .is_empty()
+    );
     fixture.assert_bodies_preserved().await;
 
     fixture
-        .conn
         .execute_batch("DROP TRIGGER refuse_observation_seed")
-        .await
-        .unwrap();
+        .await;
     for (frontier, references, submissions) in [(96_i64, 141_i64, 3_usize), (104, 153, 2)] {
         let (report, actual_submissions) = fixture.tick().await;
         assert_eq!(
@@ -483,7 +542,7 @@ async fn observation_bootstrap_failure_after_a_full_batch_rolls_back_and_recover
         assert_eq!(actual_submissions, submissions);
         assert_eq!(
             scalar(
-                &fixture.conn,
+                &fixture.database.read_connection(),
                 "SELECT COUNT(*) FROM canonical_body_gc_refs
                 WHERE owner_kind = 'observation'"
             )
@@ -495,19 +554,22 @@ async fn observation_bootstrap_failure_after_a_full_batch_rolls_back_and_recover
 }
 
 async fn assert_refused_bootstrap_rolls_back(fixture: &Fixture, diagnosis: &str) {
-    let before = read_progress(&fixture.conn).await.unwrap();
-    let transaction = fixture
-        .conn
-        .transaction_with_behavior(TransactionBehavior::Immediate)
+    let before = read_progress(&fixture.database.read_connection())
         .await
         .unwrap();
+    let transaction = fixture.begin_write().await;
     let error = step(&transaction, 48).await.unwrap_err();
     assert!(
         error.to_string().contains(diagnosis),
         "unexpected bootstrap refusal: {error}"
     );
     transaction.rollback().await.unwrap();
-    assert_eq!(read_progress(&fixture.conn).await.unwrap(), before);
+    assert_eq!(
+        read_progress(&fixture.database.read_connection())
+            .await
+            .unwrap(),
+        before
+    );
     fixture.assert_bodies_preserved().await;
 }
 
@@ -515,30 +577,34 @@ async fn assert_refused_bootstrap_rolls_back(fixture: &Fixture, diagnosis: &str)
 async fn ignored_raw_reference_insert_refuses_checkpoint_then_recovers() {
     let fixture = Fixture::open().await;
     fixture
-        .conn
         .execute_batch(
             "CREATE TRIGGER ignore_raw_ref BEFORE INSERT ON canonical_body_gc_refs
              WHEN NEW.owner_kind = 'raw' AND NEW.owner_id = 94
              BEGIN SELECT RAISE(IGNORE); END",
         )
-        .await
-        .unwrap();
+        .await;
     assert_refused_bootstrap_rolls_back(&fixture, "raw bootstrap reference was not indexed").await;
-    assert!(raw_owners(&fixture.conn).await.is_empty());
-    fixture
-        .conn
-        .execute_batch("DROP TRIGGER ignore_raw_ref")
-        .await
-        .unwrap();
+    assert!(
+        raw_owners(&fixture.database.read_connection())
+            .await
+            .is_empty()
+    );
+    fixture.execute_batch("DROP TRIGGER ignore_raw_ref").await;
     for (scanned, frontier) in [(48_u64, 96_i64), (4, 104)] {
         let (report, _) = fixture.tick().await;
         assert_eq!(report.roots_scanned, scanned);
         assert_eq!(
-            read_progress(&fixture.conn).await.unwrap().raw_through,
+            read_progress(&fixture.database.read_connection())
+                .await
+                .unwrap()
+                .raw_through,
             frontier
         );
     }
-    assert_eq!(raw_owners(&fixture.conn).await.len(), 52);
+    assert_eq!(
+        raw_owners(&fixture.database.read_connection()).await.len(),
+        52
+    );
     fixture.assert_bodies_preserved().await;
 }
 
@@ -548,25 +614,25 @@ async fn ignored_observation_reference_insert_refuses_checkpoint_then_recovers()
     fixture.tick().await;
     fixture.tick().await;
     fixture
-        .conn
         .execute_batch(
             "CREATE TRIGGER ignore_observation_ref BEFORE INSERT ON canonical_body_gc_refs
              WHEN NEW.owner_kind = 'observation' AND NEW.owner_id = 94
              BEGIN SELECT RAISE(IGNORE); END",
         )
-        .await
-        .unwrap();
+        .await;
     assert_refused_bootstrap_rolls_back(
         &fixture,
         "observation bootstrap reference was not indexed",
     )
     .await;
-    assert!(observation_owners(&fixture.conn).await.is_empty());
+    assert!(
+        observation_owners(&fixture.database.read_connection())
+            .await
+            .is_empty()
+    );
     fixture
-        .conn
         .execute_batch("DROP TRIGGER ignore_observation_ref")
-        .await
-        .unwrap();
+        .await;
     for (frontier, references) in [(96_i64, 141_i64), (104, 153)] {
         let (report, _) = fixture.tick().await;
         assert_eq!(
@@ -574,7 +640,7 @@ async fn ignored_observation_reference_insert_refuses_checkpoint_then_recovers()
             Some(format!("observations:{frontier}"))
         );
         assert_eq!(
-            read_progress(&fixture.conn)
+            read_progress(&fixture.database.read_connection())
                 .await
                 .unwrap()
                 .observations_through,
@@ -582,7 +648,7 @@ async fn ignored_observation_reference_insert_refuses_checkpoint_then_recovers()
         );
         assert_eq!(
             scalar(
-                &fixture.conn,
+                &fixture.database.read_connection(),
                 "SELECT COUNT(*) FROM canonical_body_gc_refs
                  WHERE owner_kind = 'observation'",
             )
@@ -606,34 +672,30 @@ async fn ignored_candidate_insert_refuses_checkpoint_then_recovers() {
     hashes.sort_unstable();
     let skipped = hashes[47];
     fixture
-        .conn
         .execute_batch(&format!(
             "CREATE TRIGGER ignore_candidate_seed BEFORE INSERT ON canonical_body_gc_candidates
              WHEN NEW.content_hash = '{skipped}'
              BEGIN SELECT RAISE(IGNORE); END"
         ))
-        .await
-        .unwrap();
+        .await;
     assert_refused_bootstrap_rolls_back(&fixture, "body bootstrap candidate was not indexed").await;
     assert_eq!(
         scalar(
-            &fixture.conn,
+            &fixture.database.read_connection(),
             "SELECT COUNT(*) FROM canonical_body_gc_candidates",
         )
         .await,
         0
     );
     fixture
-        .conn
         .execute_batch("DROP TRIGGER ignore_candidate_seed")
-        .await
-        .unwrap();
+        .await;
     for (scanned, candidate_total) in [(48_u64, 48_i64), (4, 52)] {
         let (report, _) = fixture.tick().await;
         assert_eq!(report.bodies_scanned, scanned);
         assert_eq!(
             scalar(
-                &fixture.conn,
+                &fixture.database.read_connection(),
                 "SELECT COUNT(*) FROM canonical_body_gc_candidates"
             )
             .await,

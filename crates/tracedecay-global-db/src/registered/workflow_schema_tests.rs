@@ -1209,6 +1209,13 @@ mod published_artifact_ceiling {
             self.inner.execute(sql, params).await
         }
 
+        async fn execute_statements(
+            &self,
+            statements: Vec<engine::WriteStatement>,
+        ) -> engine::Result<Vec<u64>> {
+            self.inner.execute_statements(statements).await
+        }
+
         async fn execute_batch(&self, sql: &str) -> engine::Result<()> {
             self.note(sql);
             self.inner.execute_batch(sql).await
@@ -1279,6 +1286,13 @@ mod published_artifact_ceiling {
         {
             self.check(sql)?;
             self.inner.execute(sql, params).await
+        }
+
+        async fn execute_statements(
+            &self,
+            statements: Vec<engine::WriteStatement>,
+        ) -> engine::Result<Vec<u64>> {
+            self.inner.execute_statements(statements).await
         }
 
         async fn execute_batch(&self, sql: &str) -> engine::Result<()> {

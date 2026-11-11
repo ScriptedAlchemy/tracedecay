@@ -229,6 +229,10 @@ impl Executor for WriteTx<'_, '_> {
         Ok(self.job.execute(statement(sql, params)?)?.changed_rows as u64)
     }
 
+    async fn execute_statements(&self, statements: Vec<WriteStatement>) -> Result<Vec<u64>> {
+        super::execute_statements_serially(self, statements).await
+    }
+
     async fn execute_batch(&self, sql: &str) -> Result<()> {
         self.job.execute_batch(sql.to_owned())?;
         Ok(())
