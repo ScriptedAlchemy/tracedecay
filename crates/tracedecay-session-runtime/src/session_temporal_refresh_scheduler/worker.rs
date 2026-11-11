@@ -846,7 +846,9 @@ async fn session_history_refresh(
         .clone();
     match history {
         Some(history) => {
-            let Some(_permit) = granted.or_else(|| Arc::clone(admission).try_acquire_owned().ok()) else {
+            let Some(_permit) =
+                granted.or_else(|| Arc::clone(admission).try_acquire_owned().ok())
+            else {
                 return (
                     SessionHistoricalIngestOutcome::Retryable {
                         reason_code: HISTORY_ADMISSION_SATURATED_REASON.to_owned(),
