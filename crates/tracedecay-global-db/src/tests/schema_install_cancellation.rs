@@ -64,23 +64,19 @@ impl EmptyStore {
         .unwrap()
     }
 
-    async fn schema_objects(&self) -> Vec<String> {
-        let (owner, _runtime, _retirement) = self.publish().await.into_parts();
-        let database = owner.issue_lease().unwrap();
-        let mut rows = database
-            .read_connection()
-            .query(
+    /// Schema assertions read SQLite directly instead of reopening the registered runtime.
+    fn schema_objects(&self) -> Vec<String> {
+        let connection = rusqlite::Connection::open(&self.path).unwrap();
+        connection
+            .prepare(
                 "SELECT type || ':' || name FROM sqlite_schema
                  WHERE name NOT LIKE 'sqlite_%' ORDER BY type, name",
-                (),
             )
-            .await
-            .unwrap();
-        let mut objects = Vec::new();
-        while let Some(row) = rows.next().await.unwrap() {
-            objects.push(row.get::<String>(0).unwrap());
-        }
-        objects
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap()
     }
 
     /// Runs daemon admission, cancelling its token just before the
@@ -115,7 +111,7 @@ async fn cancelled_daemon_attach_rolls_back_schema_and_reopens() {
     let reference = EmptyStore::create();
     let (outcome, total_polls) = reference.attach_cancelled_at(usize::MAX).await;
     outcome.unwrap();
-    let installed = reference.schema_objects().await;
+    let installed = reference.schema_objects();
     assert!(
         installed.contains(&"table:code_projects".to_owned()),
         "a completed attach installs the registered schema: {installed:?}"
@@ -129,9 +125,10 @@ async fn cancelled_daemon_attach_rolls_back_schema_and_reopens() {
         let store = EmptyStore::create();
         // Publishing the runtime installs its writer ledger before admission.
         // Cancellation must preserve exactly that pre-admission schema.
-        let before_admission = store.schema_objects().await;
+        drop(store.publish().await);
+        let before_admission = store.schema_objects();
         let (outcome, _) = store.attach_cancelled_at(cancel_at).await;
-        let objects = store.schema_objects().await;
+        let objects = store.schema_objects();
         match outcome {
             Err(error) => {
                 assert!(
@@ -162,7 +159,7 @@ async fn cancelled_daemon_attach_rolls_back_schema_and_reopens() {
         reopened.unwrap_or_else(|error| {
             panic!("reopen after cancel at poll {cancel_at}/{total_polls} failed: {error:?}")
         });
-        assert_eq!(store.schema_objects().await, installed);
+        assert_eq!(store.schema_objects(), installed);
     }
     assert!(
         cancelled.contains(&1),
