@@ -205,6 +205,38 @@ async fn durable_recovery_progresses_before_another_discovery_scan() {
         report.saturated,
         "deferring discovery must schedule a follow-up pass"
     );
+
+    let completion = run_session_temporal_refresh_pass(
+        &harness.registered,
+        &state,
+        &CanonicalSessionTemporalProjector,
+        SessionTemporalRefreshPolicy {
+            max_operations_per_pass: 1,
+            ..SessionTemporalRefreshPolicy::default()
+        },
+    )
+    .await;
+    assert_eq!(completion.completed, 1);
+    assert_eq!(completion.backlog, Some(0));
+    assert!(
+        completion.saturated,
+        "the final durable completion still owes the deferred discovery scan"
+    );
+
+    let discovery = run_session_temporal_refresh_pass(
+        &harness.registered,
+        &state,
+        &CanonicalSessionTemporalProjector,
+        SessionTemporalRefreshPolicy {
+            max_operations_per_pass: 1,
+            ..SessionTemporalRefreshPolicy::default()
+        },
+    )
+    .await;
+    assert_eq!(discovery.projected_batches, 0);
+    assert_eq!(discovery.completed, 0);
+    assert_eq!(discovery.backlog, Some(0));
+    assert!(!discovery.saturated, "discovery settles the bounded drain");
 }
 
 /// Never finishes a projection, so every operation outlives its deadline.
@@ -640,6 +672,10 @@ async fn retryable_projection_does_not_strand_refused_history_admission() {
         state.history_retry_pending(),
         "refused historical admission must survive a projection retry"
     );
+    assert!(
+        !state.history_held_for_projection(),
+        "the completed projection releases its publication hold"
+    );
 
     // No new history or projection wake follows: only releasing capacity may
     // resume the original historical waiter.
@@ -854,8 +890,12 @@ async fn publishing_a_bounded_projection_backlog_keeps_the_original_history_turn
     );
     assert_eq!(
         state.pass_count.load(Ordering::Acquire),
-        5,
-        "two operations each need projection and completion; no duplicate history refusal"
+        1 + 2 * recoveries.len() + 1,
+        "one history refusal, each projection and completion, then deferred discovery"
+    );
+    assert!(
+        store.running_session_refreshes().await.unwrap().is_empty(),
+        "the bounded drain leaves no durable recovery behind"
     );
     for recovery in recoveries {
         let receipt = store

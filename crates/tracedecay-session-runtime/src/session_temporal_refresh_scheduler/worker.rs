@@ -645,8 +645,17 @@ pub(super) async fn run_session_temporal_refresh_scheduler(
             } else if history_needs_another_pass {
                 state.mark_running();
                 retry_attempt = 0;
+                // A projection retry does not run history, but the refused
+                // admission still owns its next turn. Keep that continuation
+                // while publishing the retried operation's remaining batches
+                // and completion instead of settling after its first progress.
+                let continuation = if historical_admission_queued {
+                    HistoryContinuation::AwaitRelease
+                } else {
+                    history_continuation(history_outcome)
+                };
                 match window_follow_up(
-                    history_continuation(history_outcome),
+                    continuation,
                     projection_still_unpublished(&report),
                     projection_published_work(&report)
                         || (!projection_joins.is_empty() && report.discovery_advanced),
