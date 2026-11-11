@@ -6,8 +6,11 @@ use std::sync::Arc;
 use tempfile::TempDir;
 use tracedecay_code_index::production::{
     CodeIndexAtomicPublicationPort, CodeIndexPublicationStoreErrorV1,
+    CodeIndexPublishedGenerationV1, SealedGenerationSegmentReadV1,
 };
 use tracedecay_code_index_retention::code_index_generations::try_acquire_code_generation_store_read_lock;
+#[cfg(target_os = "linux")]
+use tracedecay_domain::sha256_hex_suffix;
 use tracedecay_domain::{ProjectId, SanitizerRevision};
 
 use super::{DaemonCodeIndexPublicationStoreV1, SharedCodeIndexBytePoolV1};
@@ -33,7 +36,7 @@ fn live_inode_handles(identity: &fs::Metadata) -> usize {
 }
 
 #[test]
-fn failed_reset_releases_pointer_handles_across_store_clones() {
+fn failed_reset_releases_publication_handles_across_store_clones() {
     let fixture = GitFixture::new(&[("src/lib.rs", "pub fn reset_fixture() -> u32 { 17 }\n")]);
     let source_root = TempDir::new().expect("isolated source store");
     let mut source = CodeIndexWorktreeSchedulerV1::open(
@@ -104,7 +107,55 @@ fn failed_reset_releases_pointer_handles_across_store_clones() {
     assert_ne!(
         live_inode_handles(&identity),
         0,
-        "positive live-handle control"
+        "positive live-pointer-handle control"
+    );
+
+    let segment_identity =
+        CodeIndexPublishedGenerationV1::partitioned_segment_identities_from_reader(
+            publication.manifest_bytes().as_ref(),
+        )
+        .expect("parse published segment identities")
+        .expect("partitioned generation")
+        .into_iter()
+        .find(|identity| identity.size_bytes > 0)
+        .expect("real generation has a nonempty segment");
+    let sealed = target
+        .load_active(&generation.sealed_scope())
+        .expect("load sealed reader")
+        .expect("active generation");
+    // Keep the sealed reader alive across reset. Its descriptor cache still
+    // belongs to the store's shared retirement authority, not this reader.
+    let segment_reader = sealed.segment_reader();
+    let mut segment_bytes = Vec::new();
+    segment_reader(
+        SealedGenerationSegmentReadV1::Whole {
+            digest: &segment_identity.digest,
+            size_bytes: segment_identity.size_bytes,
+        },
+        &mut segment_bytes,
+    )
+    .expect("pin one exact active segment through the production reader");
+    assert_eq!(segment_bytes.len() as u64, segment_identity.size_bytes);
+    assert_eq!(
+        target
+            .retained_segment_reads
+            .lock()
+            .expect("shared segment cache")
+            .len(),
+        1
+    );
+    #[cfg(target_os = "linux")]
+    let segment_path = target.segments_root.join(format!(
+        "segment-{}.json",
+        sha256_hex_suffix(segment_identity.digest.as_str()).expect("segment digest suffix")
+    ));
+    #[cfg(target_os = "linux")]
+    let segment_file_identity = segment_path.symlink_metadata().expect("segment inode");
+    #[cfg(target_os = "linux")]
+    assert_ne!(
+        live_inode_handles(&segment_file_identity),
+        0,
+        "positive live-segment-handle control"
     );
 
     // A rejected reset owns no deletion authority and must preserve its memo.
@@ -150,6 +201,19 @@ fn failed_reset_releases_pointer_handles_across_store_clones() {
         live_inode_handles(&identity),
         0,
         "no deleted pointer inode remains open"
+    );
+    #[cfg(target_os = "linux")]
+    assert_eq!(
+        live_inode_handles(&segment_file_identity),
+        0,
+        "an escaped sealed reader must not retain the deleted segment inode"
+    );
+    assert!(
+        target
+            .retained_segment_reads
+            .lock()
+            .expect("reset segment cache")
+            .is_empty()
     );
     assert!(target.pointer_memo.lock().expect("reset memo").is_none());
     assert!(

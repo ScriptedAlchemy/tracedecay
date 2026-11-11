@@ -23,6 +23,7 @@ use tracedecay_code_index::production::{
 };
 use tracedecay_code_index_retention::code_index_generations::DurableSealedCodeGenerationIdentityV1;
 use tracedecay_domain::{ManifestDigest, ProjectId, SanitizerRevision, sha256_hex_suffix};
+#[cfg(target_os = "linux")]
 use tracedecay_runtime_core::logging::set_tracing_capture;
 
 use super::{

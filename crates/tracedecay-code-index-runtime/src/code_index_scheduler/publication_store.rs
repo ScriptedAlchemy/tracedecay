@@ -2559,40 +2559,38 @@ impl DaemonCodeIndexPublicationStoreV1 {
                 "active code-generation pointer changed while validating its opened inode",
             ));
         }
-        let named = match path.symlink_metadata() {
-            Ok(metadata) => metadata,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                return Err(CodeIndexPublicationStoreErrorV1::CompareAndSwap);
-            }
-            Err(error) => return Err(Self::map_pointer_io(error)),
-        };
-        if !named.file_type().is_file() {
-            return Err(Self::corrupt_non_file_pointer());
-        }
         let opened = Handle::from_file(file.try_clone().map_err(Self::map_pointer_io)?)
             .map_err(Self::map_pointer_io)?;
-        let named_handle = match Handle::from_path(path) {
-            Ok(handle) => handle,
+        // Open the final name without following a reparse point and retain that
+        // exact descriptor as the last authority check. A trailing metadata-only
+        // probe cannot distinguish another same-length inode installed after a
+        // following pathname open.
+        let named_file = match tracedecay_private_fs::framed_log::open_no_follow(path) {
+            Ok(file) => file,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                 return Err(CodeIndexPublicationStoreErrorV1::CompareAndSwap);
             }
+            Err(error) if error.kind() == std::io::ErrorKind::InvalidInput => {
+                return Err(Self::corrupt_non_file_pointer());
+            }
             Err(error) => return Err(Self::map_pointer_io(error)),
         };
+        let named_metadata = named_file.metadata().map_err(Self::map_pointer_io)?;
+        if !named_metadata.file_type().is_file() {
+            return Err(Self::corrupt_non_file_pointer());
+        }
+        let named_handle = Handle::from_file(named_file).map_err(Self::map_pointer_io)?;
         if opened != named_handle {
             return Err(CodeIndexPublicationStoreErrorV1::CompareAndSwap);
         }
-        // A final symlink or missing-name substitution cannot authorize the
-        // descriptor, even if a following open found the old target inode.
-        match path.symlink_metadata() {
-            Ok(metadata) if metadata.file_type().is_file() && metadata.len() == after.len() => {
-                Ok(())
-            }
-            Ok(_) => Err(Self::corrupt_non_file_pointer()),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                Err(CodeIndexPublicationStoreErrorV1::CompareAndSwap)
-            }
-            Err(error) => Err(Self::map_pointer_io(error)),
+        if named_metadata.len() != after.len()
+            || named_metadata.modified().ok() != after.modified().ok()
+        {
+            return Err(Self::corruption(
+                "active code-generation pointer changed in place during validation",
+            ));
         }
+        Ok(())
     }
 
     /// The same inode witness controls every Unix pointer read, including
@@ -2838,11 +2836,11 @@ impl DaemonCodeIndexPublicationStoreV1 {
     /// the store, for a build over the sealed active generation.
     pub(super) fn segment_reader(&self) -> Arc<SealedSegmentReaderV1> {
         let segments_root = self.segments_root.clone();
-        // A retained generation can request many pages from the same sealed
-        // segment. Keep descriptors inside the reader lifetime, not in a
-        // process-global cache that could survive generation retirement.
+        // Escaped readers must share the store's retirement authority. A
+        // reader-private descriptor cache would keep an unlinked inode alive
+        // after reset or normal generation retention.
         #[cfg(unix)]
-        let pinned_reads = Mutex::new(VecDeque::<PinnedPreparationSegmentV1>::new());
+        let pinned_reads = Arc::clone(&self.retained_segment_reads);
         Arc::new(move |request, buffer: &mut Vec<u8>| {
             buffer.clear();
             #[cfg(unix)]

@@ -19,14 +19,17 @@ use tracedecay_code_index_retention::code_index_generations::{
     CODE_INDEX_PREPARATION_DIRECTORY_PREFIX_V1, CodeGenerationRetentionErrorV1,
     CodeGenerationRetentionModeV1, DEFAULT_STRANDED_SCOPE_MINIMUM_AGE_SECS,
     DurableGenerationCardinalityV1, DurableGenerationIndexEntryV1, DurablePublicationPointerV1,
-    DurableSealedCodeGenerationIdentityV1, MAX_CODE_GENERATION_RETENTION_BATCH_V1,
-    RetainedSegmentHandleRetirementV1, acquire_code_generation_store_lock,
+    MAX_CODE_GENERATION_RETENTION_BATCH_V1, acquire_code_generation_store_lock,
     code_generation_segments_root, code_text_artifact_staging_root, code_text_artifacts_root,
     durable_generation_index_digest, execute_code_generation_retention_cancellable,
     execute_scope_root_retention, plan_scope_root_retention_with_liveness_proof,
     prepare_next_code_generation_retention_cancellable, run_code_generation_retention,
     scope_root_liveness_proof, try_acquire_code_generation_store_read_lock,
     withdraw_verified_text_artifact_under_lock,
+};
+#[cfg(target_os = "linux")]
+use tracedecay_code_index_retention::code_index_generations::{
+    DurableSealedCodeGenerationIdentityV1, RetainedSegmentHandleRetirementV1,
 };
 use tracedecay_domain::{
     AuthorizationRevision, CodeGenerationId, ComponentRevision, EphemeralSanitizedQueryViewV1,
