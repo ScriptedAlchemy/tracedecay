@@ -2970,7 +2970,10 @@ mod recent_first_discovery_tests {
                 break;
             }
         }
-        assert!(finished, "the bounded file traversal must reach its frontier");
+        assert!(
+            finished,
+            "the bounded file traversal must reach its frontier"
+        );
     }
 
     #[test]

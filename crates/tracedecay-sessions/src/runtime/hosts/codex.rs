@@ -2410,11 +2410,12 @@ fn retained_scan_step(
                             match entries.next() {
                                 Some(entry) => {
                                     file_work += 1;
-                                    let entry = entry.map_err(|source| TranscriptIngestError::ScanIo {
-                                        operation: "verify Codex transcript directory entry",
-                                        path: scan.directories[*directory_index].path.clone(),
-                                        source,
-                                    })?;
+                                    let entry =
+                                        entry.map_err(|source| TranscriptIngestError::ScanIo {
+                                            operation: "verify Codex transcript directory entry",
+                                            path: scan.directories[*directory_index].path.clone(),
+                                            source,
+                                        })?;
                                     let file_type = entry.file_type().map_err(|source| {
                                         TranscriptIngestError::ScanIo {
                                             operation: "verify Codex transcript entry type",
@@ -2512,13 +2513,14 @@ fn retained_scan_step(
                                     // This initially unsettled listing needs an
                                     // independent current-name check, even if the
                                     // filesystem clock settled during the walk.
-                                    let reopened = std::fs::read_dir(&directory.path).map_err(
-                                        |source| TranscriptIngestError::ScanIo {
-                                            operation: "verify Codex transcript bucket",
-                                            path: directory.path.clone(),
-                                            source,
-                                        },
-                                    )?;
+                                    let reopened =
+                                        std::fs::read_dir(&directory.path).map_err(|source| {
+                                            TranscriptIngestError::ScanIo {
+                                                operation: "verify Codex transcript bucket",
+                                                path: directory.path.clone(),
+                                                source,
+                                            }
+                                        })?;
                                     *verification = Some(Box::new((
                                         *directory_index,
                                         reopened,
