@@ -575,7 +575,9 @@ impl<'de> Visitor<'de> for UnambiguousValueVisitor {
         let mut values = Map::new();
         while let Some((key, value)) = entries.next_entry::<String, UnambiguousValue>()? {
             if values.contains_key(&key) {
-                return Err(de::Error::custom(format!("duplicate decision JSON key: {key}")));
+                return Err(de::Error::custom(format!(
+                    "duplicate decision JSON key: {key}"
+                )));
             }
             values.insert(key, value.0);
         }
@@ -1239,10 +1241,8 @@ mod tests {
             let body = json!({"answers": {"route": answer}}).to_string();
             let server = fake_decision_engine(200, &body, Duration::ZERO);
             assert_eq!(
-                client(&server.url).ask_blocking(&request(
-                    "state",
-                    vec![choice("route", &["true", "1"])],
-                )),
+                client(&server.url)
+                    .ask_blocking(&request("state", vec![choice("route", &["true", "1"])],)),
                 DecisionEngineOutcomeV1::Malformed,
                 "{body}"
             );
@@ -1255,18 +1255,15 @@ mod tests {
         }}})
         .to_string();
         let server = fake_decision_engine(200, &body, Duration::ZERO);
-        let result = answered(client(&server.url).ask_blocking(&request(
-            "state",
-            vec![choice("route", &["true", "1"])],
-        )));
+        let result = answered(
+            client(&server.url)
+                .ask_blocking(&request("state", vec![choice("route", &["true", "1"])])),
+        );
         assert_eq!(
             result.answers["route"],
             DecisionAnswerV1::Choice {
                 chosen: Some("true".to_owned()),
-                probabilities: BTreeMap::from([
-                    ("1".to_owned(), 0.5),
-                    ("true".to_owned(), 0.5),
-                ]),
+                probabilities: BTreeMap::from([("1".to_owned(), 0.5), ("true".to_owned(), 0.5),]),
             }
         );
     }
@@ -1455,7 +1452,11 @@ mod tests {
                 score("urgency", &["low", "high"]),
             ],
         )));
-        assert_eq!(answers.answers.len(), 3, "each requested answer is returned");
+        assert_eq!(
+            answers.answers.len(),
+            3,
+            "each requested answer is returned"
+        );
         assert_eq!(answers.answers["recall"], DecisionAnswerV1::Noul(0.9));
         assert_eq!(answers.answers["urgency"], DecisionAnswerV1::Score(0.5));
         assert_eq!(server.requests.load(Ordering::SeqCst), 1);
