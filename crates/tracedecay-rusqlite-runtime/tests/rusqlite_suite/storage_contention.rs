@@ -968,7 +968,6 @@ fn at_least_attachment_reads_use_the_writers_committed_watermark() {
     writer.shutdown_and_join().unwrap();
     let attachment = RepositoryPhysicalAttachmentFactory
         .attach(
-            &tracedecay_rusqlite_runtime::native_runtime::handle().expect("native runtime"),
             binding.clone(),
             verified_locator(&binding),
             database.path.canonicalize().unwrap(),
@@ -1036,7 +1035,6 @@ fn at_least_reads_under_a_newer_authority_epoch_inherit_the_committed_frontier()
     writer.shutdown_and_join().unwrap();
     let attachment = RepositoryPhysicalAttachmentFactory
         .attach(
-            &tracedecay_rusqlite_runtime::native_runtime::handle().expect("native runtime"),
             reopened.clone(),
             verified_locator(&reopened),
             database.path.canonicalize().unwrap(),
@@ -1092,7 +1090,6 @@ fn at_least_reads_under_a_superseded_authority_epoch_are_typed_unavailable() {
     writer.shutdown_and_join().unwrap();
     let attachment = RepositoryPhysicalAttachmentFactory
         .attach(
-            &tracedecay_rusqlite_runtime::native_runtime::handle().expect("native runtime"),
             superseded.clone(),
             verified_locator(&superseded),
             database.path.canonicalize().unwrap(),

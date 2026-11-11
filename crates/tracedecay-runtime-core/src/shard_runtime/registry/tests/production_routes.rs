@@ -860,7 +860,6 @@ async fn commit_diagnostics_with_writer(
     name: &str,
 ) {
     let writer = tracedecay_rusqlite_runtime::PersistentWriter::start(
-        &crate::native_runtime::handle().unwrap(),
         tracedecay_rusqlite_runtime::ExistingWriterLocator::new(
             binding.clone(),
             VerifiedStoreLocatorV1::new(
@@ -876,14 +875,7 @@ async fn commit_diagnostics_with_writer(
     )
     .unwrap();
     let (request, probe) = diagnostics_submit(binding, name);
-    let outcome = writer
-        .submit(
-            &crate::native_runtime::handle().unwrap(),
-            request,
-            Arc::new(probe),
-        )
-        .await
-        .unwrap();
+    let outcome = writer.submit(request, Arc::new(probe)).await.unwrap();
     assert!(
         matches!(
             outcome,

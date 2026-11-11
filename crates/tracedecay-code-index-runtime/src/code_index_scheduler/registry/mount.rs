@@ -910,7 +910,7 @@ impl CodeIndexSchedulerRegistryV1 {
                     .park_headroom
                     .released_by_others(&mut worker_owner_headroom)
                     > worker_owner_headroom_seen
-                    || worker_admission_headroom.has_changed();
+                    || matches!(worker_admission_headroom.has_changed(), Ok(true));
                 if headroom_moved
                     && worker_memory_retry.allow_reconstruction(&worker_control_epoch)
                     && worktree_waits_for_memory(
@@ -988,7 +988,7 @@ impl CodeIndexSchedulerRegistryV1 {
                         .park_headroom
                         .released_by_others(&mut worker_owner_headroom),
                 );
-                worker_admission_headroom.mark_seen();
+                drop(worker_admission_headroom.borrow_and_update());
                 super::CodeIndexWorkerPhaseV1::enter(
                     &worker_phase_signal,
                     super::CodeIndexWorkerPhaseV1::Working,

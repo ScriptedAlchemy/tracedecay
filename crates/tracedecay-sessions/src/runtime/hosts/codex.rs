@@ -784,8 +784,7 @@ impl CodexDiscoveryHub {
                 }
             })?;
             if std::mem::take(&mut inner.scan_waited) {
-                let _ = self
-                    .scan_released
+                self.scan_released
                     .send_modify(|epoch| *epoch = epoch.wrapping_add(1));
             }
             let Some(source_key) = replay_source else {

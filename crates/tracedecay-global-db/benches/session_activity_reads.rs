@@ -77,7 +77,7 @@ async fn seed_fixture(profile: &tempfile::TempDir) -> RegisteredGlobalDbTestRunt
 fn session_activity_reads(criterion: &mut Criterion) {
     let executor = tokio::runtime::Builder::new_current_thread()
         .enable_all()
-        .blocking_threads(0, 512)
+        .max_blocking_threads(512)
         .build()
         .expect("build benchmark runtime");
     let profile = tempfile::tempdir().expect("temporary benchmark profile");

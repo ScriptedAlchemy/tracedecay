@@ -1,6 +1,5 @@
 use std::time::{Duration, Instant};
 
-use tracedecay_rusqlite_runtime::native_runtime;
 use tracedecay_rusqlite_runtime::{WriterActorError, WriterState};
 use tracedecay_store::{
     AdmissionConfigV1, CorruptionClassV1, OperationPriorityV1, RuntimeSubmitOutcomeV1,

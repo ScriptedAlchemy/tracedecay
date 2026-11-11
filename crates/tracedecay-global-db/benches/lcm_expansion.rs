@@ -357,7 +357,7 @@ fn assert_expansion(fixture: &Fixture, expansion: &LcmExpandResponse) {
 fn lcm_expansion(criterion: &mut Criterion) {
     let executor = tokio::runtime::Builder::new_current_thread()
         .enable_all()
-        .blocking_threads(0, 512)
+        .max_blocking_threads(512)
         .build()
         .expect("build benchmark runtime");
     let fixture = executor.block_on(build_fixture());

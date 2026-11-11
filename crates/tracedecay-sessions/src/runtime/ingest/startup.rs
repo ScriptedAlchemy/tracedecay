@@ -163,8 +163,7 @@ impl Drop for StartupUserIngestGuard {
         let refused = std::mem::take(&mut state.refused_while_running);
         drop(ingests);
         if refused {
-            let _ =
-                STARTUP_USER_INGEST_RELEASED.send_modify(|epoch| *epoch = epoch.wrapping_add(1));
+            STARTUP_USER_INGEST_RELEASED.send_modify(|epoch| *epoch = epoch.wrapping_add(1));
         }
     }
 }

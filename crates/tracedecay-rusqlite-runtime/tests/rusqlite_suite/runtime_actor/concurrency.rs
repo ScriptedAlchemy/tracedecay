@@ -1,6 +1,5 @@
 use std::sync::{Arc, Condvar, Mutex, mpsc};
 
-use tracedecay_rusqlite_runtime::native_runtime;
 use tracedecay_store::{
     AdmissionConfigV1, CommitSequenceV1, OperationPriorityV1, RuntimeSubmitOutcomeV1,
     StoreCommitReceiptV1,

@@ -604,7 +604,9 @@ fn queued_compatible_writes_commit_in_one_transaction() {
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
                 let sender = sender.as_ref().expect("writer admission stays open");
-                sender.telemetry_snapshot(0).queued_messages
+                // Submission uses try_send under this lock, and the holder
+                // blocks the receiver: occupied capacity is the queued batch.
+                sender.max_capacity() - sender.capacity()
             };
             if waiting >= QUEUED_WRITES {
                 break;

@@ -663,7 +663,7 @@ mod gc_tests {
 
         let task = NativeTask::spawn(async move {
             assert!(
-                native_runtime::Runtime::current_handle().is_some(),
+                tokio::runtime::Handle::try_current().is_ok(),
                 "the store must be awaited on a native worker"
             );
             let store = DaemonGitIndexTransactionStore::open(registered).await?;

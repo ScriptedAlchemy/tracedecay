@@ -1352,7 +1352,7 @@ mod tests {
             "a pool task's writer join must report the wait it refused, got {join:?}"
         );
         let closing = std::time::Instant::now();
-        while !writer_status.is_closed() {
+        while writer_status.has_changed().is_ok() {
             assert!(
                 closing.elapsed() < Duration::from_secs(10),
                 "the writer whose join was refused must still close"
@@ -1763,7 +1763,7 @@ mod tests {
         // Every hard-drain retry publishes a checkpoint status, so wait for
         // one instead of assuming the 100 ms retry timer fired in time.
         let writer_snapshot = loop {
-            status.mark_seen();
+            drop(status.borrow_and_update());
             let writer_snapshot = attachment
                 .snapshot()
                 .writer

@@ -596,11 +596,11 @@ impl PhysicalRuntimeAttachment for RepositoryRuntimePhysicalAttachment {
         )
     }
 
-    fn run_bounded_incremental_compaction<'a>(
-        &'a self,
+    fn run_bounded_incremental_compaction(
+        &self,
         max_pages: u32,
         authority: Arc<dyn tracedecay_rusqlite_runtime::RuntimeWriteAuthority>,
-    ) -> StoreRuntimeRegistryFuture<'a, Result<(), StoreRuntimeRegistryFailure>> {
+    ) -> StoreRuntimeRegistryFuture<'_, Result<(), StoreRuntimeRegistryFailure>> {
         Box::pin(async move {
             RepositoryRuntimePhysicalAttachment::run_bounded_incremental_compaction(
                 self, max_pages, authority,
@@ -613,12 +613,12 @@ impl PhysicalRuntimeAttachment for RepositoryRuntimePhysicalAttachment {
         })
     }
 
-    fn run_checkpoint<'a>(
-        &'a self,
+    fn run_checkpoint(
+        &self,
         request: tracedecay_rusqlite_runtime::CheckpointRequest,
         authority: Arc<dyn tracedecay_rusqlite_runtime::RuntimeWriteAuthority>,
     ) -> StoreRuntimeRegistryFuture<
-        'a,
+        '_,
         Result<tracedecay_rusqlite_runtime::CheckpointOutcome, StoreRuntimeRegistryFailure>,
     > {
         Box::pin(async move {
@@ -631,12 +631,12 @@ impl PhysicalRuntimeAttachment for RepositoryRuntimePhysicalAttachment {
         })
     }
 
-    fn dispatch_submit<'a>(
-        &'a self,
+    fn dispatch_submit(
+        &self,
         request: RuntimeSubmitRequestV1,
         probe: Arc<dyn RuntimeRequestProbeV1>,
         authority: Arc<dyn tracedecay_rusqlite_runtime::RuntimeWriteAuthority>,
-    ) -> StoreRuntimeRegistryFuture<'a, Result<RuntimeSubmitOutcomeV1, StoreRuntimeRegistryFailure>>
+    ) -> StoreRuntimeRegistryFuture<'_, Result<RuntimeSubmitOutcomeV1, StoreRuntimeRegistryFailure>>
     {
         Box::pin(async move {
             RepositoryRuntimePhysicalAttachment::dispatch_submit(self, request, probe, authority)

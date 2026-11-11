@@ -2,7 +2,6 @@ use std::pin::pin;
 use std::sync::{Arc, Condvar, Mutex, mpsc};
 use std::task::{Context, Poll, Waker};
 
-use tracedecay_rusqlite_runtime::native_runtime;
 use tracedecay_store::{
     AdmissionConfigV1, BatchBudgetV1, CommitSequenceV1, OperationPriorityV1, QueueBudgetV1,
     RuntimeSubmitOutcomeV1, SaturationScopeV1, StoreCommitReceiptV1,

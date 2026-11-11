@@ -1,7 +1,6 @@
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{Arc, Condvar, Mutex, mpsc};
 
-use tracedecay_rusqlite_runtime::native_runtime;
 use tracedecay_rusqlite_runtime::{
     CheckpointBlockers, CheckpointOutcome, CheckpointPressure, CheckpointRequest, CheckpointStatus,
     WriterState,

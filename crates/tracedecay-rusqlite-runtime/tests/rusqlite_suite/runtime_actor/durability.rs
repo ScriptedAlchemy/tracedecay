@@ -1,4 +1,3 @@
-use tracedecay_rusqlite_runtime::native_runtime;
 use tracedecay_store::{AdmissionConfigV1, OperationPriorityV1, RuntimeSubmitOutcomeV1};
 
 use super::support::{
