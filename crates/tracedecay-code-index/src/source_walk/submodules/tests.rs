@@ -381,6 +381,47 @@ fn cached_child_binding_refuses_equal_length_working_registration_change() {
 
 #[cfg(unix)]
 #[test]
+fn parent_worktree_config_change_revokes_cached_child_authority() {
+    let fixture = fixture();
+    let root = fixture.path().join("parent");
+    git(&root, &["config", "extensions.worktreeConfig", "true"]);
+    let config = root.join(".git/config.worktree");
+    let original = format!("[core]\\n\\tworktree = {}\\n", root.display());
+    fs::write(&config, &original).unwrap();
+
+    let boundaries = LiveSourceBoundaries::open(&root, true).unwrap();
+    let source = Path::new("app/first.rs");
+    assert!(boundaries.resolve(source).unwrap().is_some());
+    // This change is entirely inside an existing file: neither the parent
+    // index nor Git admin directory changes, even though Git's effective
+    // worktree authority is redirected to a different checkout.
+    let git_directory = root.join(".git");
+    let directory_before = super::FileWitness::at(&git_directory).unwrap();
+    let index_before = super::FileWitness::at(&git_directory.join("index")).unwrap();
+    let foreign = fixture.path().join("foreign");
+    fs::create_dir_all(&foreign).unwrap();
+    fs::write(
+        &config,
+        format!("[core]\\n\\tworktree = {}\\n", foreign.display()),
+    )
+    .unwrap();
+    assert_eq!(super::FileWitness::at(&git_directory).unwrap(), directory_before);
+    assert_eq!(
+        super::FileWitness::at(&git_directory.join("index")).unwrap(),
+        index_before
+    );
+    assert!(root.join(source).is_file(), "child content still exists");
+    assert!(
+        boundaries.resolve(source).unwrap().is_none(),
+        "cached child authority must expire on a worktree-local parent config change"
+    );
+
+    fs::write(&config, original).unwrap();
+    assert!(boundaries.resolve(source).unwrap().is_some());
+}
+
+#[cfg(unix)]
+#[test]
 fn changing_a_split_index_invalidates_the_child_binding_witness() {
     let fixture = fixture();
     let root = fixture.path().join("parent");

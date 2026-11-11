@@ -127,9 +127,11 @@ impl AuthenticatedSubmodule {
             self.parent_git_dir.clone(),
             self.parent_git_dir.join("index"),
             self.parent_git_dir.join("config"),
+            self.parent_git_dir.join("config.worktree"),
             self.parent_git_dir.join("commondir"),
             self.parent_common_dir.clone(),
             self.parent_common_dir.join("config"),
+            self.parent_common_dir.join("config.worktree"),
             self.parent_common_dir.join("modules"),
             self.git_dir.clone(),
             self.git_dir.join("config"),
@@ -142,6 +144,8 @@ impl AuthenticatedSubmodule {
             self.worktree.clone(),
             self.worktree.join(".git"),
         ];
+        // Git's per-worktree config can redirect core.worktree without
+        // modifying the shared config, index, or Git directory itself.
         // Git split indexes carry staged gitlinks in sharedindex.* files.
         // Their contents can change without changing the main index or its
         // parent directory. Witness each file in both administrative roots;
