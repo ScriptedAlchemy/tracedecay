@@ -2578,7 +2578,15 @@ fn codex_directory_changed(
     path: &Path,
     stored: Option<CodexDirectoryWitness>,
 ) -> TranscriptIngestResult<bool> {
-    let Some(current) = directory_stat_witness(path)? else {
+    codex_directory_changed_since(path, directory_stat_witness(path)?, stored)
+}
+
+fn codex_directory_changed_since(
+    path: &Path,
+    current: Option<DirectoryStatWitness>,
+    stored: Option<CodexDirectoryWitness>,
+) -> TranscriptIngestResult<bool> {
+    let Some(current) = current else {
         return Ok(stored.is_some());
     };
     let Some(stored) = stored else {
