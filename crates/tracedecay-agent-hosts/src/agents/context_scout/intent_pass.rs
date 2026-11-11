@@ -970,19 +970,25 @@ fn intent_candidate(
     })
 }
 
-/// Envelope identity of the pass's suggestion. Derived from the boundary so a
-/// stop boundary's intent suggestion never shares the feedback suggestion's
-/// envelope identity.
-fn intent_envelope_id(hook: &AdmittedContextScoutHookV1) -> Option<[u8; 16]> {
-    let envelope = hook.envelope();
+/// Envelope identity of a boundary's intent suggestion. Derived from the
+/// boundary so it never shares the feedback suggestion's envelope identity.
+pub fn context_scout_intent_envelope_id(
+    project_id: [u8; 16],
+    event_id: [u8; 16],
+) -> Option<[u8; 16]> {
     let digest = digest_bytes(canonical_sha256(&(
         INTENT_ENVELOPE_DOMAIN,
-        envelope.project_id,
-        envelope.event_id,
+        project_id,
+        event_id,
     )))?;
     let mut envelope_id = [0; 16];
     envelope_id.copy_from_slice(&digest[..16]);
     (envelope_id != [0; 16]).then_some(envelope_id)
+}
+
+fn intent_envelope_id(hook: &AdmittedContextScoutHookV1) -> Option<[u8; 16]> {
+    let envelope = hook.envelope();
+    context_scout_intent_envelope_id(envelope.project_id, envelope.event_id)
 }
 
 /// Records one suggestion the pass decided and withheld, with the same
