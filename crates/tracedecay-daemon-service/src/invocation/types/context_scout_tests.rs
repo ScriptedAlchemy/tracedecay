@@ -368,6 +368,7 @@ async fn lifecycle_less_boundary_settles_and_resumes_on_its_sessions_lifecycle()
                         let _ = completed.send(());
                     }
                 })),
+                false,
             ),
             HookOrchestrationAdmissionV1::Enqueued
         );
@@ -387,7 +388,8 @@ async fn lifecycle_less_boundary_settles_and_resumes_on_its_sessions_lifecycle()
                 1,
                 false,
                 None,
-                None
+                None,
+                false,
             ),
             HookOrchestrationAdmissionV1::UnsupportedTrigger
         );
@@ -655,6 +657,7 @@ async fn intent_boundaries_run_in_their_own_lane_and_supersede_only_intent_work(
                     let _ = parked.send(());
                 }
             })),
+            false,
         ),
         HookOrchestrationAdmissionV1::Enqueued
     );
@@ -679,6 +682,7 @@ async fn intent_boundaries_run_in_their_own_lane_and_supersede_only_intent_work(
             false,
             None,
             None,
+            false,
         ),
         HookOrchestrationAdmissionV1::Enqueued
     );
@@ -708,6 +712,7 @@ async fn intent_boundaries_run_in_their_own_lane_and_supersede_only_intent_work(
             false,
             None,
             None,
+            false,
         ),
         HookOrchestrationAdmissionV1::Enqueued
     );
@@ -730,6 +735,7 @@ async fn intent_boundaries_run_in_their_own_lane_and_supersede_only_intent_work(
             false,
             None,
             None,
+            false,
         ),
         HookOrchestrationAdmissionV1::Backpressured
     );
@@ -745,6 +751,7 @@ async fn intent_boundaries_run_in_their_own_lane_and_supersede_only_intent_work(
             false,
             None,
             None,
+            false,
         ),
         HookOrchestrationAdmissionV1::Enqueued
     );
@@ -779,6 +786,7 @@ async fn intent_boundaries_run_in_their_own_lane_and_supersede_only_intent_work(
                     let _ = stopped.send(());
                 }
             })),
+            false,
         ),
         HookOrchestrationAdmissionV1::Enqueued
     );
