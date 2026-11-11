@@ -144,6 +144,7 @@ jobs:
       - name: Build tracedecay binary
         uses: ./.github/actions/build-cli
         with:
+          release-download-token: ${{ github.token }}
           config: ci
           dest: target/debug
           cache-key: ci-linux-debug
@@ -249,6 +250,7 @@ jobs:
       - uses: ./.github/actions/setup-bazel
         id: bazel
         with:
+          release-download-token: ${{ github.token }}
           cache-key: ci-format-linux
           tailscale-client-id: >-
             ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
@@ -369,6 +371,7 @@ jobs:
       - uses: ./.github/actions/setup-bazel
         id: bazel
         with:
+          release-download-token: ${{ github.token }}
           cache-key: ci-macos-test
           tailscale-client-id: >-
             ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
@@ -466,6 +469,7 @@ jobs:
       - uses: ./.github/actions/setup-bazel
         id: bazel
         with:
+          release-download-token: ${{ github.token }}
           cache-key: ci-linux-test-v2
           # Tailscale binds each client to this repository, workflow, and actor ID.
           # Fork PRs never receive a fleet identity.
@@ -701,6 +705,7 @@ jobs:
       - uses: ./.github/actions/setup-bazel
         id: bazel
         with:
+          release-download-token: ${{ github.token }}
           # The previous PDB-producing cache restored an 11 GiB archive.
           # Start a new generation for the changed compile/link configuration.
           cache-key: ci-windows-test-v2
@@ -836,6 +841,7 @@ jobs:
       - uses: ./.github/actions/setup-bazel
         id: bazel
         with:
+          release-download-token: ${{ github.token }}
           cache-key: ci-linux-clippy
           # Tailscale binds each client to this repository, workflow, and actor ID.
           # Fork PRs never receive a fleet identity.
@@ -911,6 +917,7 @@ jobs:
         id: cli
         uses: ./.github/actions/build-cli
         with:
+          release-download-token: ${{ github.token }}
           config: release
           dest: target/x86_64-unknown-linux-gnu/release
           cache-key: release-x86_64-unknown-linux-gnu
@@ -969,6 +976,7 @@ jobs:
       - uses: ./.github/actions/setup-bazel
         id: bazel
         with:
+          release-download-token: ${{ github.token }}
           cache-key: ci-dashboard
 
       - name: Check frontend types, tests, and artifacts

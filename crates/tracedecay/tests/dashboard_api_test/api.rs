@@ -598,7 +598,7 @@ fn holographic_fact_trust_history_returns_feedback_trail_and_empty_for_unreviewe
 fn lcm_endpoints_cover_seeded_fts_and_like_fallback() {
     let runtime = create_runtime();
     runtime.block_on(async {
-        let fixture = start_dashboard_fixture(true).await;
+        let fixture = start_dashboard_seeded_lcm_fixture().await;
         let agent = http_agent();
 
         let (status, overview) = get_json(
@@ -745,14 +745,12 @@ fn lcm_serves_project_session_store_without_global_override() {
         let (cg, session_store) = setup_project(&profile, &project_root).await;
         seed_lcm_fixture(&session_store, &project_root).await;
 
-        let port = pick_free_port();
-        let (access, base_url) = dashboard_access_for(port);
+        let (endpoint, base_url) = dashboard_endpoint().await;
         let mut server = spawn_dashboard_server_with_host_runtime(
             cg,
             session_store,
             tracedecay_dashboard_api::DashboardTestProjectGraphsV1::default(),
-            port,
-            access,
+            endpoint,
         );
 
         let agent = http_agent();
@@ -822,14 +820,12 @@ fn lcm_project_store_wins_over_global_accounting_override() {
         // The project store has rows; the overridden global accounting store has none.
         seed_lcm_fixture(&session_store, &project_root).await;
 
-        let port = pick_free_port();
-        let (access, base_url) = dashboard_access_for(port);
+        let (endpoint, base_url) = dashboard_endpoint().await;
         let mut server = spawn_dashboard_server_with_host_runtime(
             cg,
             session_store,
             tracedecay_dashboard_api::DashboardTestProjectGraphsV1::default(),
-            port,
-            access,
+            endpoint,
         );
 
         let agent = http_agent();
