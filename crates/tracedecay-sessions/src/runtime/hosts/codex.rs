@@ -2557,10 +2557,14 @@ fn retained_scan_step(
                                         reopened,
                                         CodexDirectoryEntryFingerprint::default(),
                                     )));
-                                } else if closing.as_ref().is_some_and(|stamp| !stamp.settled) {
+                                } else if closing.as_ref().is_some_and(|stamp| !stamp.settled)
+                                    || closing.as_ref().map(|stamp| stamp.stat)
+                                        != identity.map(|identity| identity.stat)
+                                {
                                     // Neither an unsettled native stat nor a
-                                    // resumed structural walk can replace the
-                                    // missing entry-name witness.
+                                    // transition to settled authority can vouch
+                                    // for a retained listing without a name
+                                    // witness, even if structural work resumes.
                                     scan.complete = false;
                                     scan.directories[directory_index].identity = None;
                                 }

@@ -3124,8 +3124,10 @@ mod recent_first_discovery_tests {
 
         let arrived = archive.join("rollout-after-chunked-file-reader-open.jsonl");
         std::fs::write(&arrived, b"{}\n").unwrap();
+        assert!(spin_until_jsonl_change_settled(&archive));
+        let metadata = std::fs::metadata(&archive).unwrap();
         let closing = directory_scan_witness(&archive).unwrap().unwrap();
-        assert!(!closing.settled, "the fixture needs the coarse clock");
+        assert!(closing.settled);
         let scan = state.scan.as_mut().unwrap();
         let CodexScanPhase::Files {
             current: Some(current),
@@ -3135,12 +3137,13 @@ mod recent_first_discovery_tests {
         else {
             panic!("the chunked file reader must still be retained");
         };
-        // Model a directory timestamp that aliases the newly added entry in
-        // both the file phase and the structural iterator it will resume.
-        // With no structural name witness, a complete coverage claim would be
-        // based only on the stale file listing.
+        // Model an unsettled opening sample whose native timestamp aliases
+        // the new entry, then closes after settlement. Derive it from the real
+        // directory metadata so scheduler delay cannot choose the clock branch.
+        // The resumed structural walk cannot vouch for the stale file listing.
         let identity = scan.directories[current.0].identity.as_mut().unwrap();
-        identity.stat = closing.stat;
+        identity.stat =
+            codex_directory_stat_identity(&archive, &metadata, ChangeStamp::Unvouched(0)).unwrap();
         identity.stable_stat = closing.stable_stat;
         let resumed = resume.current.as_deref_mut().unwrap();
         assert_eq!(resumed.path, archive);
@@ -3164,7 +3167,6 @@ mod recent_first_discovery_tests {
         }
         assert!(finished, "the chunked sweep must terminate");
 
-        assert!(spin_until_jsonl_change_settled(&archive));
         for _ in 0..2048 {
             let pass = retained_pass(&source, &mut state, bounds, frontier);
             observed.extend(pass.report.paths);
