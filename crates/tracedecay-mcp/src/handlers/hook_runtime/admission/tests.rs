@@ -126,6 +126,58 @@ fn producer_work_commits_with_its_admission_and_redrives_until_completed() {
     );
 }
 
+#[test]
+fn stop_delivery_proof_requires_its_intent_address_and_envelope_identity() {
+    let envelope = admission_test_envelope(41, 7);
+    let intent_envelope_id = tracedecay_agent_hosts::agents::context_scout::intent_pass::context_scout_intent_envelope_id(
+        envelope.project_id,
+        envelope.event_id,
+    )
+    .unwrap();
+    let mut claim = retained_claim(17);
+    claim.entry.envelope.envelope_id = intent_envelope_id;
+    let address = claim.entry.work.address;
+    let delivery = |envelope_id| {
+        let mut entry = claim.entry.clone();
+        entry.envelope.envelope_id = envelope_id;
+        tracedecay_agent_hosts::agents::context_scout::ContextScoutRecentDeliveryV1 {
+            entry,
+            receipt: tracedecay_contracts::context_scout::ContextScoutDeliveryReceiptV1 {
+                receipt_id:
+                    tracedecay_agent_hosts::agents::context_scout::context_scout_delivery_receipt_id(
+                        envelope.event_id,
+                        envelope_id,
+                    ),
+                envelope_id,
+                delivered_at: UtcMicros(30),
+                outcome:
+                    tracedecay_contracts::context_scout::ContextScoutDeliveryOutcomeV1::Attempted,
+            },
+            feedback: None,
+        }
+    };
+    assert!(stop_intent_delivery_matches(
+        &delivery(intent_envelope_id),
+        address,
+        &envelope,
+        intent_envelope_id,
+    ));
+    assert!(
+        !stop_intent_delivery_matches(&delivery([90; 16]), address, &envelope, intent_envelope_id,),
+        "feedback delivered by the Stop is not its intent delivery proof"
+    );
+    let other_address = tracedecay_contracts::context_scout::ContextScoutAddressV1 {
+        logical_message_id: [91; 16],
+        ..address
+    };
+    assert!(!stop_intent_delivery_matches(
+        &delivery(intent_envelope_id),
+        other_address,
+        &envelope,
+        intent_envelope_id,
+    ));
+}
+
 fn envelope_is_prompt(event: &tracedecay_hooks::HookEventV2) -> bool {
     matches!(event, tracedecay_hooks::HookEventV2::PromptBoundary)
 }
@@ -210,6 +262,7 @@ async fn prompt_and_tool_admissions_settle_their_durable_intent_work() {
                 false,
                 Some(staged.receipt.order),
                 Some(completion),
+                false,
             ),
             tracedecay_contracts::HookOrchestrationAdmissionV1::Enqueued
         );
@@ -249,6 +302,7 @@ async fn prompt_and_tool_admissions_settle_their_durable_intent_work() {
             false,
             None,
             None,
+            false,
         ),
         tracedecay_contracts::HookOrchestrationAdmissionV1::UnsupportedTrigger
     );

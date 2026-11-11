@@ -1,6 +1,8 @@
 //! Durable delivery identity and terminalization for outbound LSP frames.
 
 use super::*;
+use crate::project_runtime::ProjectRuntimeRequestLeaseV1;
+use tracing::instrument::WithSubscriber;
 
 pub fn lsp_delivery_attempt(
     frame: &[u8],
@@ -89,25 +91,57 @@ pub enum LspDeliverySettlementAdmissionV1 {
     Refused(&'static str),
 }
 
-impl RuntimeLspSession {
-    pub(super) fn settle_in_flight_delivery(
-        &mut self,
-        outcome: tracedecay_domain::DeliverySettlementOutcomeV1,
-        drop_reason: Option<tracedecay_domain::DeliveryDropReasonV1>,
-    ) -> LspDeliverySettlementAdmissionV1 {
-        let Some(attempt) = self.in_flight_delivery_attempt.take() else {
-            return LspDeliverySettlementAdmissionV1::NoAttemptInFlight;
-        };
-        let Some(recorder) = self.delivery_settlements.as_ref() else {
-            return LspDeliverySettlementAdmissionV1::RecorderUnavailable;
-        };
-        let settlement = tracedecay_domain::DeliverySettlementV1 {
-            settled_at: now_micros().max(attempt.attempted_at),
-            attempt,
-            outcome,
-            drop_reason,
-        };
-        match recorder.try_record(settlement) {
+/// The terminal receipt for one session's in-flight outbound frame, claimed
+/// out of the session so its durable admission can run without the session.
+///
+/// Admission publishes the receipt to the recorder's spool with file and
+/// directory fsyncs. That is disk-latency work: run under the daemon-wide
+/// session map lock it stalls every LSP session and every invocation (each one
+/// takes that lock to expire sessions), and run on an async worker it also
+/// takes the worker. Claiming under the lock and admitting after it releases
+/// both.
+pub(super) struct LspDeliverySettlementClaim {
+    recorder: Arc<tracedecay_application::observability::BoundedDeliverySettlementRecorderV1>,
+    settlement: tracedecay_domain::DeliverySettlementV1,
+}
+
+impl LspDeliverySettlementClaim {
+    /// Admits the receipt on the blocking pool. The work is queued at this
+    /// call, so abandoning the returned future abandons only the wait. The
+    /// session's admitted project lease travels with the work: retirement
+    /// joins it before shutting down the recorder, even if the client leaves.
+    pub(super) fn admit(
+        self,
+        project_lease: ProjectRuntimeRequestLeaseV1,
+    ) -> impl Future<Output = LspDeliverySettlementAdmissionV1> + Send {
+        let admission = tracedecay_runtime_core::native_runtime::on_blocking_pool(
+            async move {
+                let _project_lease = project_lease;
+                self.admit_inline()
+            }
+            .with_current_subscriber(),
+        );
+        async move {
+            match admission.await {
+                Ok(admission) => admission,
+                Err(error) => {
+                    tracing::warn!(%error, "LSP delivery receipt admission could not run");
+                    LspDeliverySettlementAdmissionV1::Refused(
+                        "lsp_delivery_settlement_blocking_pool_unavailable",
+                    )
+                }
+            }
+        }
+    }
+
+    /// Admission on the calling thread, for `Drop`, which cannot await.
+    #[tracing::instrument(
+        name = "daemon.service.lsp.delivery_receipt.admit",
+        level = "trace",
+        skip_all
+    )]
+    fn admit_inline(self) -> LspDeliverySettlementAdmissionV1 {
+        match self.recorder.try_record(self.settlement) {
             Ok(tracedecay_application::observability::DeliverySettlementRecordOutcomeV1::Enqueued) => {
                 LspDeliverySettlementAdmissionV1::Enqueued
             }
@@ -125,15 +159,44 @@ impl RuntimeLspSession {
     }
 }
 
+impl RuntimeLspSession {
+    /// Takes the exact in-flight attempt for settlement. The attempt leaves the
+    /// session here, so a concurrent terminalization can never settle it twice.
+    pub(super) fn claim_in_flight_delivery(
+        &mut self,
+        outcome: tracedecay_domain::DeliverySettlementOutcomeV1,
+        drop_reason: Option<tracedecay_domain::DeliveryDropReasonV1>,
+    ) -> Result<LspDeliverySettlementClaim, LspDeliverySettlementAdmissionV1> {
+        let Some(attempt) = self.in_flight_delivery_attempt.take() else {
+            return Err(LspDeliverySettlementAdmissionV1::NoAttemptInFlight);
+        };
+        let Some(recorder) = self.delivery_settlements.as_ref() else {
+            return Err(LspDeliverySettlementAdmissionV1::RecorderUnavailable);
+        };
+        Ok(LspDeliverySettlementClaim {
+            recorder: Arc::clone(recorder),
+            settlement: tracedecay_domain::DeliverySettlementV1 {
+                settled_at: now_micros().max(attempt.attempted_at),
+                attempt,
+                outcome,
+                drop_reason,
+            },
+        })
+    }
+}
+
 impl Drop for RuntimeLspSession {
     fn drop(&mut self) {
         // Any removal without a protocol ACK discards the frame. This fallback
         // covers transport loss, TTL expiry, owner retirement, and shutdown;
-        // explicit paths may settle first with a more specific reason.
-        let _ = self.settle_in_flight_delivery(
+        // explicit paths may settle first with a more specific reason. Drop
+        // cannot await, so admission is inline here.
+        if let Ok(claim) = self.claim_in_flight_delivery(
             tracedecay_domain::DeliverySettlementOutcomeV1::Dropped,
             Some(tracedecay_domain::DeliveryDropReasonV1::Disconnected),
-        );
+        ) {
+            let _ = claim.admit_inline();
+        }
         self.actor.expire();
     }
 }

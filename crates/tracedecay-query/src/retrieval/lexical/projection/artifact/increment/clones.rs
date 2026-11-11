@@ -4,6 +4,7 @@
 
 use std::collections::BTreeMap;
 
+use rusqlite::types::Value;
 use rusqlite::{Transaction, params};
 use tracedecay_code_index::production::CodeIndexExecutionControlV1;
 
@@ -13,6 +14,7 @@ use super::super::format::contract_number;
 use super::super::prepared::PreparedCloneBodyV1;
 use super::super::row_codec::stored_symbol_key;
 use super::super::{CodeLexicalArtifactErrorV1, checkpoint, sqlite_error};
+use super::postings::scan_window;
 use super::{ReplacedFilesV1, ShiftV1, shift_rowid_keys, shifted};
 
 /// One successor clone body with the occurrence ordinal it takes.
@@ -52,19 +54,12 @@ pub(super) fn carry_clone_rows(
             [],
         )
         .map_err(sqlite_error)?;
-    if let Some(first) = clones.first_affected().filter(|_| clones.shifts()) {
-        // The posting's ordinal is part of its key, so shifted rows are
-        // rewritten through a temporary copy.
-        transaction
-            .execute_batch(&format!(
-                "CREATE TEMP TABLE carried_clone_exact AS SELECT class, normalization_revision, digest, {image} AS occurrence_ordinal FROM clone_exact_postings WHERE occurrence_ordinal >= {first};
-                 DELETE FROM clone_exact_postings WHERE occurrence_ordinal >= {first};
-                 INSERT INTO clone_exact_postings(class, normalization_revision, digest, occurrence_ordinal) SELECT class, normalization_revision, digest, occurrence_ordinal FROM temp.carried_clone_exact;
-                 DROP TABLE temp.carried_clone_exact;",
-                image = clones.sql_image("occurrence_ordinal")
-            ))
-            .map_err(sqlite_error)?;
-    }
+    // A TEMP copy of every surviving exact posting retains unlinked pager pages
+    // after DROP until this long-lived builder resets its TEMP schema. Move the
+    // composite primary keys through bounded, ordered windows and a negative
+    // ordinal namespace. A single bulk UPDATE can itself spill an unlinked
+    // statement-local key index, even when the TEMP pager has zero pages.
+    shift_clone_posting_keys(transaction, clones, control)?;
     {
         let mut insert = transaction
             .prepare_cached(
@@ -94,7 +89,7 @@ pub(super) fn carry_clone_rows(
             [],
         )
         .map_err(sqlite_error)?;
-    shift_rowid_keys(transaction, "clone_occurrences", "ordinal", clones)?;
+    shift_rowid_keys(transaction, "clone_occurrences", "ordinal", clones, control)?;
     let mut parent_payloads = BTreeMap::<i64, Vec<u8>>::new();
     {
         let mut statement = transaction
@@ -140,6 +135,120 @@ pub(super) fn carry_clone_rows(
     renumber_clone_payloads(transaction, &parent_payloads, &successor_payloads, control)
 }
 
+/// A key-ordered window, so SQLite can seek the WITHOUT ROWID primary key
+/// without sorting the entire posting index into an external TEMP file.
+type ClonePostingKey = (i64, i64, Vec<u8>, i64);
+
+fn clone_posting_window(
+    transaction: &Transaction<'_>,
+    predicate: &str,
+    last: &Option<ClonePostingKey>,
+) -> Result<Vec<ClonePostingKey>, CodeLexicalArtifactErrorV1> {
+    let columns = "class, normalization_revision, digest, occurrence_ordinal";
+    scan_window(
+        transaction,
+        &format!(
+            "SELECT {columns} FROM clone_exact_postings WHERE {predicate} ORDER BY {columns} LIMIT ?1"
+        ),
+        &format!(
+            "SELECT {columns} FROM clone_exact_postings WHERE {predicate} AND ({columns}) > (?1, ?2, ?3, ?4) ORDER BY {columns} LIMIT ?5"
+        ),
+        last,
+        |(class, revision, digest, ordinal)| {
+            vec![
+                Value::Integer(*class),
+                Value::Integer(*revision),
+                Value::Blob(digest.clone()),
+                Value::Integer(*ordinal),
+            ]
+        },
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+    )
+}
+
+/// Shift the occurrence component of the WITHOUT ROWID posting primary key.
+/// Both passes seek bounded primary-key windows and update one keyed row at a
+/// time: SQLite's single bulk UPDATE can allocate an unlinked statement-local
+/// key index independently of the TEMP b-tree pager. The negative namespace
+/// prevents collisions with positive keys while a window advances.
+fn shift_clone_posting_keys(
+    transaction: &Transaction<'_>,
+    clones: &ShiftV1,
+    control: &dyn CodeIndexExecutionControlV1,
+) -> Result<(), CodeLexicalArtifactErrorV1> {
+    let Some(first) = clones.first_affected().filter(|_| clones.shifts()) else {
+        return Ok(());
+    };
+    let mut update = transaction
+        .prepare_cached(
+            "UPDATE clone_exact_postings SET occurrence_ordinal = ?5
+             WHERE class = ?1 AND normalization_revision = ?2
+               AND digest = ?3 AND occurrence_ordinal = ?4",
+        )
+        .map_err(sqlite_error)?;
+    let mut last = None;
+    loop {
+        checkpoint(control)?;
+        let window = clone_posting_window(
+            transaction,
+            &format!("occurrence_ordinal >= {first}"),
+            &last,
+        )?;
+        let Some(final_key) = window.last() else {
+            break;
+        };
+        last = Some(final_key.clone());
+        for (class, revision, digest, ordinal) in window {
+            checkpoint(control)?;
+            let mapped = clones
+                .map(u64::try_from(ordinal).map_err(contract_number)?)?
+                .ok_or_else(|| {
+                    CodeLexicalArtifactErrorV1::Corrupt(
+                        "carried clone posting belongs to a replaced range".to_owned(),
+                    )
+                })?;
+            let mapped = i64::try_from(mapped).map_err(contract_number)?;
+            // -mapped - 1 fits even when mapped == i64::MAX.
+            let staged = -mapped - 1;
+            if update
+                .execute(params![class, revision, digest, ordinal, staged])
+                .map_err(sqlite_error)?
+                != 1
+            {
+                return Err(CodeLexicalArtifactErrorV1::Corrupt(
+                    "carried clone posting changed during key shift".to_owned(),
+                ));
+            }
+        }
+    }
+    // All moved keys are now negative and disjoint from every unchanged key.
+    // Keyset pagination remains stable as restored positive keys leave the
+    // scan; compute -(ordinal + 1) to handle an i64::MIN staged key.
+    let mut last = None;
+    loop {
+        checkpoint(control)?;
+        let window = clone_posting_window(transaction, "occurrence_ordinal < 0", &last)?;
+        let Some(final_key) = window.last() else {
+            break;
+        };
+        last = Some(final_key.clone());
+        for (class, revision, digest, ordinal) in window {
+            checkpoint(control)?;
+            let restored = -(ordinal + 1);
+            if update
+                .execute(params![class, revision, digest, ordinal, restored])
+                .map_err(sqlite_error)?
+                != 1
+            {
+                return Err(CodeLexicalArtifactErrorV1::Corrupt(
+                    "staged clone posting changed during key restoration".to_owned(),
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Where a run's first successor occurrence lands: its parent start moved
 /// by the growth of the runs before it. `index` pairs the run with its
 /// replaced range, since two runs without clone bodies can replace the same
@@ -159,6 +268,49 @@ fn clone_range_image(
         .checked_sub(1)
         .map_or(0, |previous| clones.growth[previous]);
     shifted(start, growth_before)
+}
+
+/// Restore staged negative payload ordinals without the statement-local
+/// key index that a bulk INTEGER PRIMARY KEY UPDATE can create. Restored
+/// positive keys cannot re-enter the negative-key scan.
+fn restore_clone_payload_ordinals(
+    transaction: &Transaction<'_>,
+    control: &dyn CodeIndexExecutionControlV1,
+) -> Result<(), CodeLexicalArtifactErrorV1> {
+    let mut update = transaction
+        .prepare_cached("UPDATE clone_body_payloads SET ordinal = ?2 WHERE ordinal = ?1")
+        .map_err(sqlite_error)?;
+    let mut last: Option<i64> = None;
+    loop {
+        checkpoint(control)?;
+        let window: Vec<i64> = scan_window(
+            transaction,
+            "SELECT ordinal FROM clone_body_payloads WHERE ordinal < 0 ORDER BY ordinal LIMIT ?1",
+            "SELECT ordinal FROM clone_body_payloads WHERE ordinal < 0 AND ordinal > ?1 ORDER BY ordinal LIMIT ?2",
+            &last,
+            |ordinal| vec![Value::Integer(*ordinal)],
+            |row| row.get(0),
+        )?;
+        let Some(final_ordinal) = window.last() else {
+            break;
+        };
+        last = Some(*final_ordinal);
+        for ordinal in window {
+            checkpoint(control)?;
+            // Reversing -number-1 as -(ordinal+1) also handles i64::MIN.
+            let restored = -(ordinal + 1);
+            if update
+                .execute(params![ordinal, restored])
+                .map_err(sqlite_error)?
+                != 1
+            {
+                return Err(CodeLexicalArtifactErrorV1::Corrupt(
+                    "staged clone payload changed during key restoration".to_owned(),
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Number payloads by first use over the occurrence sequence, retire the
@@ -214,6 +366,7 @@ fn renumber_clone_payloads(
     }
     // A successor body whose payload the parent already stores must match it.
     for (key, payload) in successor_payloads.values() {
+        checkpoint(control)?;
         if let Some(ordinal) = parent_by_digest.get(key.as_slice()) {
             let stored: Vec<u8> = transaction
                 .query_row(
@@ -230,6 +383,7 @@ fn renumber_clone_payloads(
         }
     }
     for (ordinal, digest) in parent_payloads {
+        checkpoint(control)?;
         match numbered.get(digest) {
             None => {
                 transaction
@@ -250,12 +404,7 @@ fn renumber_clone_payloads(
             Some(_) => {}
         }
     }
-    transaction
-        .execute(
-            "UPDATE clone_body_payloads SET ordinal = -ordinal - 1 WHERE ordinal < 0",
-            [],
-        )
-        .map_err(sqlite_error)?;
+    restore_clone_payload_ordinals(transaction, control)?;
     {
         let mut insert = transaction
             .prepare_cached(
@@ -263,6 +412,7 @@ fn renumber_clone_payloads(
             )
             .map_err(sqlite_error)?;
         for (number, key, payload) in fresh {
+            checkpoint(control)?;
             insert
                 .execute(params![number, key.as_slice(), payload])
                 .map_err(sqlite_error)?;
@@ -272,9 +422,17 @@ fn renumber_clone_payloads(
         .prepare_cached("UPDATE clone_occurrences SET payload_ordinal = ?2 WHERE ordinal = ?1")
         .map_err(sqlite_error)?;
     for (ordinal, number) in repointed {
+        checkpoint(control)?;
         repoint
             .execute(params![ordinal, number])
             .map_err(sqlite_error)?;
     }
-    Ok(())
+    // The final SQLite write can consume the deadline or observe cancellation.
+    // Do not report a completed carry without checking that boundary as well.
+    checkpoint(control)
 }
+
+#[cfg(test)]
+mod payload_cancellation;
+#[cfg(test)]
+mod tests;

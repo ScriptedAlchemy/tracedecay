@@ -57,6 +57,7 @@ async fn pending_stop_delivers_once(
         .unwrap();
     let (engine, entry) = mount_intent(&fixture, &graph, &sessions).await;
     let effects = Arc::new(AtomicUsize::new(0));
+    let intent_runs = Arc::new(AtomicUsize::new(0));
     let captured = Arc::new(Mutex::new(None));
     let (entered, entered_rx) = tokio::sync::oneshot::channel();
     let entered = Arc::new(Mutex::new(Some(entered)));
@@ -65,15 +66,18 @@ async fn pending_stop_delivers_once(
     let released = Arc::new(tokio::sync::Mutex::new(Some(released)));
     let producer = BoundedHookOrchestratorV1::new(1, {
         let effects = Arc::clone(&effects);
+        let intent_runs = Arc::clone(&intent_runs);
         let captured = Arc::clone(&captured);
         move |request: HookOrchestrationRequestV1, _| {
             let effects = Arc::clone(&effects);
+            let intent_runs = Arc::clone(&intent_runs);
             let captured = Arc::clone(&captured);
             let entered = Arc::clone(&entered);
             let released = Arc::clone(&released);
             async move {
                 if request.trigger == HookOrchestrationTriggerV1::IntentBoundary {
                     assert!(request.completion.is_none());
+                    intent_runs.fetch_add(1, Ordering::SeqCst);
                     return;
                 }
                 assert_eq!(request.trigger, HookOrchestrationTriggerV1::Stop);
@@ -141,6 +145,8 @@ async fn pending_stop_delivers_once(
     };
     assert_eq!(pending(), vec![stop.envelope().clone()]);
     assert_eq!(effects.load(Ordering::SeqCst), 1);
+    wait_for_stop_with_settled_intent(&producer).await;
+    assert_eq!(intent_runs.load(Ordering::SeqCst), 1);
     let (terminal, terminal_rx) = tokio::sync::oneshot::channel();
     let terminal = Mutex::new(Some(terminal));
     let mut terminal_rx = Some(terminal_rx);
@@ -287,6 +293,8 @@ async fn pending_stop_delivers_once(
             status: ContextScoutStoreStatusV1::Stored
         }
     ));
+    wait_for_stop_with_settled_intent(&producer).await;
+    let intents_before_duplicate = intent_runs.load(Ordering::SeqCst);
     let duplicate = compute_hook_runtime(&graph, request(), None, None, authorities())
         .await
         .unwrap();
@@ -300,6 +308,12 @@ async fn pending_stop_delivers_once(
     assert_eq!(pending(), vec![stop.envelope().clone()]);
     assert_eq!(effects.load(Ordering::SeqCst), 1);
     assert_eq!(engine.requests(), 1);
+    wait_for_stop_with_settled_intent(&producer).await;
+    assert_eq!(
+        intent_runs.load(Ordering::SeqCst),
+        intents_before_duplicate + 1,
+        "a receipt for another intent envelope must not settle the Stop companion"
+    );
     release.take().unwrap().send(()).unwrap();
     assert_eq!(
         tokio::time::timeout(Duration::from_secs(10), terminal_rx.take().unwrap())
@@ -343,6 +357,16 @@ async fn pending_stop_delivers_once(
         fixture.binding.worktree_id,
         &sessions
     ));
+}
+
+async fn wait_for_stop_with_settled_intent(producer: &Arc<BoundedHookOrchestratorV1>) {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while producer.active_tasks() != 1 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
 }
 
 async fn wait_until_settled(

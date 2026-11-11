@@ -34,13 +34,14 @@ use tracedecay_rusqlite_runtime::workflow::{
 };
 
 use super::{
-    CANONICAL_BODY_RECLAIM_PAGES, CancellableSchemaTransaction, WorkflowSchemaAdmission,
-    inspect_workflow_schema_for_admission, read_recorded_workflow_identity,
-    schema_install_checkpoint, settle_schema_transaction, workflow_schema_refusal,
+    CancellableSchemaTransaction, WorkflowSchemaAdmission, inspect_workflow_schema_for_admission,
+    read_recorded_workflow_identity, schema_install_checkpoint, settle_schema_transaction,
+    workflow_schema_refusal,
 };
 use crate::registered::RefusedAuthorityV1;
 use crate::{global_db_operation_error, global_db_operation_message};
 
+const WORKFLOW_ARTIFACT_RECLAIM_PAGES: u64 = 4096;
 const ARTIFACT_TABLE: &str = "workflow_artifact_payloads";
 
 const PUBLISHED_ARTIFACT_TABLE_SQL: &str = "CREATE TABLE workflow_artifact_payloads (
@@ -292,7 +293,7 @@ pub(crate) async fn reclaim_freed_artifact_pages(
         }
         remaining = free_pages;
         database
-            .run_incremental_vacuum(CANONICAL_BODY_RECLAIM_PAGES)
+            .run_incremental_vacuum(WORKFLOW_ARTIFACT_RECLAIM_PAGES)
             .await?;
     }
 }

@@ -110,6 +110,125 @@ const MIXED_SOURCE_ROSTER: &[(&str, &str)] = &[
 ];
 
 #[test]
+fn cold_build_reports_actual_preseal_capture_and_parser_evidence() {
+    let fixture = GitFixture::new(&[
+        ("src/a.rs", "pub fn a() -> u32 { 1 }\n"),
+        ("src/b.rs", "pub fn b() -> u32 { 2 }\n"),
+    ]);
+    let store = TempDir::new().expect("store root");
+    let mut owner = scheduler(
+        &fixture,
+        store.path().to_path_buf(),
+        Arc::new(SharedCodeIndexBytePoolV1::default()),
+    );
+    let slot = owner.preseal_attempt_progress_slot();
+    assert!(
+        slot.read().unwrap().snapshot().is_none(),
+        "no fabricated cold progress"
+    );
+
+    published(
+        owner
+            .reconcile_now_with_capture(|scheduler, control| {
+                // Read the actual production slot while its guard is alive.
+                // A completed pass must retire this live snapshot; observing
+                // only after reconcile returns would misattribute old work.
+                let captured = scheduler.capture_authoritative_snapshot(Some(control))?;
+                let observed = slot
+                    .read()
+                    .unwrap()
+                    .snapshot()
+                    .expect("real cold capture observation");
+                assert!(observed.active, "capture still owns its progress");
+                assert_eq!(
+                    observed.phase,
+                    tracedecay_code_index::production::CodeIndexPresealWorkPhaseV1::Capture
+                );
+                assert!(
+                    observed.completed_items >= 2,
+                    "real cold capture must report both files"
+                );
+                assert!(observed.last_progress_micros.is_some_and(|at| at > 0));
+                assert!(
+                    observed.progress_epoch >= 3,
+                    "attempt admission and two real captured-file callbacks"
+                );
+                Ok(captured)
+            })
+            .expect("real cold capture, parse, resolution, and publication"),
+    );
+    assert!(
+        slot.read().unwrap().snapshot().is_none(),
+        "a completed first generation cannot leave preseal work for a future source wake"
+    );
+}
+
+/// A restart's retained-source verification is real work and must report
+/// capture without inventing a sealed generation or a polling heartbeat.
+#[test]
+fn retained_restart_capture_publishes_and_fences_preseal_attempt() {
+    let fixture = GitFixture::new(&[
+        ("src/a.rs", "pub fn a() -> u32 { 1 }\n"),
+        ("src/b.rs", "pub fn b() -> u32 { 2 }\n"),
+    ]);
+    let store = TempDir::new().expect("store root");
+    let pool = Arc::new(SharedCodeIndexBytePoolV1::default());
+    {
+        let mut initial = scheduler(&fixture, store.path().to_path_buf(), Arc::clone(&pool));
+        published(initial.reconcile_now().expect("initial generation"));
+    }
+    let reopened = scheduler(&fixture, store.path().to_path_buf(), pool);
+    let slot = reopened.preseal_attempt_progress_slot();
+    assert!(
+        slot.read().unwrap().snapshot().is_none(),
+        "reopening must not fabricate a live pre-seal attempt"
+    );
+    let capture = reopened
+        .capture_retained_reconcile_attempt()
+        .expect("retained capture succeeds")
+        .expect("the retained capture has a live owner");
+    let observed = slot.read().unwrap().snapshot().expect("real retained work");
+    assert!(observed.active);
+    assert_eq!(
+        observed.phase,
+        tracedecay_code_index::production::CodeIndexPresealWorkPhaseV1::Capture
+    );
+    assert!(
+        observed.completed_items >= 2,
+        "two files were actually captured"
+    );
+    assert!(observed.progress_epoch > 1);
+    assert!(observed.last_progress_micros.is_some_and(|at| at > 0));
+    drop(capture);
+    assert!(
+        slot.read().unwrap().snapshot().is_none(),
+        "the completed retained owner must retire its scoped work"
+    );
+    // A real subsequent retained capture must start a new attempt rather than
+    // inheriting the previous capture's work timestamp or sequence.
+    let next = reopened
+        .capture_retained_reconcile_attempt()
+        .expect("second retained capture succeeds")
+        .expect("second retained capture has a live owner");
+    let resumed = slot
+        .read()
+        .unwrap()
+        .snapshot()
+        .expect("second real capture");
+    assert!(resumed.active);
+    assert_eq!(
+        resumed.phase,
+        tracedecay_code_index::production::CodeIndexPresealWorkPhaseV1::Capture
+    );
+    assert!(resumed.attempt_sequence > observed.attempt_sequence);
+    assert!(resumed.progress_epoch > observed.progress_epoch);
+    assert!(resumed.completed_items >= 2);
+    assert!(resumed.last_progress_micros.is_some_and(|at| at > 0));
+    drop(next);
+    assert!(slot.read().unwrap().snapshot().is_none());
+}
+
+#[test]
 fn unchanged_mixed_roster_restart_retains_generation_pointer_and_artifact() {
     let fixture = GitFixture::new(MIXED_SOURCE_ROSTER);
     let store = TempDir::new().expect("store root");
@@ -2611,6 +2730,8 @@ async fn graph_activation_does_not_wait_for_bounded_text_projection() {
             None,
             replay_binding,
             Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            // In-memory test activation has no native graph writer.
+            Arc::new(|_| {}),
         )
         .await
         .expect("graph activation must not wait for the independently bounded text projection");

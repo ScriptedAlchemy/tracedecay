@@ -434,7 +434,7 @@ fn claude_stop_delivers_the_intent_suggestion_the_daemon_judged_at_the_tool_boun
     let enabled_transcript = write_claude_transcript(home, &project, ENABLED_SESSION);
     let engine = FakeDecisionEngine::start();
     let log = home.join("daemon.log");
-    let _daemon = spawn_tracedecay_daemon_logged(home, &log, |_| {});
+    let _daemon = spawn_tracedecay_daemon_logged(home, &log, |_command| {});
     assert!(
         tracedecay_command_with_home(home)
             .arg("init")
@@ -608,7 +608,9 @@ fn claude_stop_delivers_the_intent_suggestion_the_daemon_judged_at_the_tool_boun
         );
         assert!(
             Instant::now() < delivery_deadline,
-            "the retained stop must deliver within the journey budget: {evidence}"
+            "the retained stop must deliver within the journey budget: {evidence}\ndaemon: {}\nlatest hook stderr: {}",
+            std::fs::read_to_string(&log).unwrap_or_default(),
+            String::from_utf8_lossy(&stop_outputs.last().expect("completed stop attempt").stderr),
         );
         let next_stop = run_hook(home, &project, "hook-stop", &stop_event);
         stop_contexts.push(hook_context(&next_stop));

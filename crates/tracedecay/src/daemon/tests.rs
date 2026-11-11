@@ -54,6 +54,8 @@ mod runtime_identity;
 mod scheduler_config;
 mod scheduler_shutdown;
 mod socket;
+#[cfg(unix)]
+mod terminal_housekeeping;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum ObservedMcpRoute {
@@ -227,7 +229,9 @@ fn prepare_test_profile_root(profile_root: &std::path::Path) {
     }
 }
 
-fn test_store_administration_for_profile(profile_root: &std::path::Path) -> StoreAdministration {
+pub(in crate::daemon) fn test_store_administration_for_profile(
+    profile_root: &std::path::Path,
+) -> StoreAdministration {
     prepare_test_profile_root(profile_root);
     let profile_identity =
         tracedecay_daemon_identity::profile_identity::load_or_create(profile_root)

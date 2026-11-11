@@ -25,7 +25,7 @@ use crate::managed_test_runs::{
     CanonicalManagedTestRunReader, ManagedTestRunCurrentScope, ManagedTestRunReadOutcome,
     ManagedTestRunStaleReason, ManagedTestRunUnavailableReason,
 };
-use crate::operation_stream::{ManagedTestRunActivity, operation_event_authority};
+use crate::operation_stream::{ManagedTestRunActivity, OperationEventAuthority};
 
 /// Real test execution result projection owner. Feedback impact owns affected
 /// test identities; execution results remain in their separate canonical
@@ -171,9 +171,10 @@ impl ManagedTestRunProjection {
 pub(crate) fn lsp_test_result_port(
     project: Arc<RegisteredProjectLspAuthority>,
     store: RegisteredGlobalDbLeaseV1,
+    operation_events: OperationEventAuthority,
 ) -> Arc<dyn LspTestRunProjectionPort> {
     Arc::new(ManagedTestRunProjection::new(
-        CanonicalManagedTestRunReader::new(store, operation_event_authority()),
+        CanonicalManagedTestRunReader::new(store, operation_events),
         project,
     ))
 }

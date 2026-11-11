@@ -184,6 +184,9 @@ impl GitHubStackDriftObservationV1 {
 pub enum GitHubStackCoordinatorErrorV1 {
     InvalidScope,
     InvalidProviderObservation,
+    /// The scope registration that authorized the observation was replaced
+    /// before it could publish.
+    Superseded,
     Poisoned,
 }
 
@@ -197,10 +200,83 @@ pub enum StackCoordinatorErrorV1 {
     Invalid(String),
 }
 
+/// Identity of one scope registration. Every holder keeps the allocation
+/// alive, so a successor registration can never compare equal to a retired
+/// one that is still referenced.
+#[derive(Clone, Debug)]
+struct ScopeRegistrationId(Arc<()>);
+
+impl ScopeRegistrationId {
+    fn new() -> Self {
+        Self(Arc::new(()))
+    }
+}
+
+fn same_registration(
+    left: Option<&ScopeRegistrationId>,
+    right: Option<&ScopeRegistrationId>,
+) -> bool {
+    match (left, right) {
+        (Some(left), Some(right)) => Arc::ptr_eq(&left.0, &right.0),
+        (None, None) => true,
+        _ => false,
+    }
+}
+
+#[derive(Clone, Debug)]
+struct ScopeRegistration {
+    id: ScopeRegistrationId,
+    policy: GitHubStackedPullRequestPolicyV1,
+}
+
+/// One provider stack read authorized by the scope's current registration.
+///
+/// Capture it before network I/O and surrender it to
+/// [`DaemonGitHubStackCoordinatorV1::observe_provider`] on completion.
+/// Publication is refused unless that same registration is still current, so
+/// a read spanning a policy change, including a change and its reversal,
+/// cannot publish. Dropping it abandons the read without touching state.
+#[derive(Debug)]
+pub struct GitHubStackProviderReadV1 {
+    scope: ResolvedScope,
+    registration: ScopeRegistrationId,
+}
+
+/// Who derived an observation and under which registration.
+enum ObservationOrigin {
+    /// Derived from the registered policy alone; it never replaces a provider
+    /// result published under the same registration.
+    Policy(Option<ScopeRegistrationId>),
+    /// A provider read authorized by this registration.
+    Provider(ScopeRegistrationId),
+}
+
+impl ObservationOrigin {
+    fn registration(&self) -> Option<&ScopeRegistrationId> {
+        match self {
+            Self::Policy(registration) => registration.as_ref(),
+            Self::Provider(registration) => Some(registration),
+        }
+    }
+}
+
+struct PublishedObservation {
+    registration: Option<ScopeRegistrationId>,
+    observation: GitHubStackObservationV1,
+}
+
+/// A scope's registration, latest observation and open drift intervals
+/// advance together under one lock.
+#[derive(Default)]
+struct ScopeObservationState {
+    registration: Option<ScopeRegistration>,
+    current: Option<PublishedObservation>,
+    drift_intervals: Vec<DriftInterval>,
+}
+
 #[derive(Default)]
 pub struct DaemonGitHubStackCoordinatorV1 {
-    policies: Mutex<BTreeMap<ManifestDigest, GitHubStackedPullRequestPolicyV1>>,
-    observations: Mutex<BTreeMap<ManifestDigest, GitHubStackObservationV1>>,
+    observation_states: Mutex<BTreeMap<ManifestDigest, ScopeObservationState>>,
     circuit_policies: Mutex<BTreeMap<ManifestDigest, StackCircuitPolicyV1>>,
     /// Held across the append so a duplicate debounced signal racing the
     /// first one cannot append twice.
@@ -209,7 +285,6 @@ pub struct DaemonGitHubStackCoordinatorV1 {
     >,
     circuits: Mutex<BTreeMap<CircuitKey, Circuit>>,
     preflights: Mutex<PreflightState>,
-    drift_intervals: Mutex<BTreeMap<ManifestDigest, Vec<DriftInterval>>>,
 }
 
 impl DaemonGitHubStackCoordinatorV1 {
@@ -221,25 +296,59 @@ impl DaemonGitHubStackCoordinatorV1 {
         scope
             .validate()
             .map_err(|_| GitHubStackCoordinatorErrorV1::InvalidScope)?;
-        self.policies
+        let mut states = self
+            .observation_states
             .lock()
-            .map_err(|_| GitHubStackCoordinatorErrorV1::Poisoned)?
-            .insert(scope.scope_digest.clone(), policy);
+            .map_err(|_| GitHubStackCoordinatorErrorV1::Poisoned)?;
+        let state = states.entry(scope.scope_digest.clone()).or_default();
+        // A changed policy is a new registration: reads it authorized can no
+        // longer publish, and its snapshot stops being a drift baseline while
+        // its timestamp still fences late samples. Re-registering an unchanged
+        // policy keeps the registration and its in-flight reads.
+        if state
+            .registration
+            .as_ref()
+            .is_none_or(|registration| registration.policy != policy)
+        {
+            state.registration = Some(ScopeRegistration {
+                id: ScopeRegistrationId::new(),
+                policy,
+            });
+        }
         Ok(())
     }
 
-    pub fn should_read_provider_stack(
+    /// Authorizes one provider stack read when the scope's current
+    /// registration probes the private preview; `None` means no read may run.
+    pub fn authorize_provider_read(
         &self,
         scope: &ResolvedScope,
-    ) -> Result<bool, GitHubStackCoordinatorErrorV1> {
-        let policies = self
-            .policies
+    ) -> Result<Option<GitHubStackProviderReadV1>, GitHubStackCoordinatorErrorV1> {
+        Ok(self
+            .registration(scope)?
+            .filter(|registration| {
+                registration.policy == GitHubStackedPullRequestPolicyV1::ProbePrivatePreview
+            })
+            .map(|registration| GitHubStackProviderReadV1 {
+                scope: scope.clone(),
+                registration: registration.id,
+            }))
+    }
+
+    fn registration(
+        &self,
+        scope: &ResolvedScope,
+    ) -> Result<Option<ScopeRegistration>, GitHubStackCoordinatorErrorV1> {
+        scope
+            .validate()
+            .map_err(|_| GitHubStackCoordinatorErrorV1::InvalidScope)?;
+        let states = self
+            .observation_states
             .lock()
             .map_err(|_| GitHubStackCoordinatorErrorV1::Poisoned)?;
-        Ok(matches!(
-            policies.get(&scope.scope_digest),
-            Some(GitHubStackedPullRequestPolicyV1::ProbePrivatePreview)
-        ))
+        Ok(states
+            .get(&scope.scope_digest)
+            .and_then(|state| state.registration.clone()))
     }
 
     pub fn observe_policy(
@@ -249,28 +358,14 @@ impl DaemonGitHubStackCoordinatorV1 {
         source_binding: GitHubStackProviderSourceBindingV1,
         observed_at: UtcMicros,
     ) -> Result<GitHubStackObservationV1, GitHubStackCoordinatorErrorV1> {
-        let state = if self.should_read_provider_stack(&scope)? {
+        let registration = self.registration(&scope)?;
+        let state = if registration.as_ref().is_some_and(|registration| {
+            registration.policy == GitHubStackedPullRequestPolicyV1::ProbePrivatePreview
+        }) {
             GitHubStackCapabilityStateV1::Unavailable
         } else {
             GitHubStackCapabilityStateV1::PrivatePreviewDisabled
         };
-        if state == GitHubStackCapabilityStateV1::Unavailable
-            && let Some(provider_observation) = self
-                .observations
-                .lock()
-                .map_err(|_| GitHubStackCoordinatorErrorV1::Poisoned)?
-                .get(&scope.scope_digest)
-                .filter(|observation| {
-                    matches!(
-                        observation.capability.state,
-                        GitHubStackCapabilityStateV1::Enabled
-                            | GitHubStackCapabilityStateV1::Degraded
-                    )
-                })
-                .cloned()
-        {
-            return Ok(provider_observation);
-        }
         let digest = canonical_sha256(&(
             "tracedecay.github-stack.policy-observation.v1",
             &scope.scope_digest,
@@ -288,20 +383,24 @@ impl DaemonGitHubStackCoordinatorV1 {
                 source_binding: &source_binding,
             },
             observed_at,
+            ObservationOrigin::Policy(registration.map(|registration| registration.id)),
         )
     }
 
+    /// Publishes the completion of `read`. A read whose registration was
+    /// replaced while it ran is refused as `Superseded` and changes nothing.
     pub fn observe_provider(
         &self,
-        scope: ResolvedScope,
+        read: GitHubStackProviderReadV1,
         provider: ProviderId,
         outcome: GitHubStackProviderOutcomeV1,
         source_binding: GitHubStackProviderSourceBindingV1,
         observed_at: UtcMicros,
     ) -> Result<GitHubStackObservationV1, GitHubStackCoordinatorErrorV1> {
-        if !self.should_read_provider_stack(&scope)? {
-            return self.observe_policy(scope, provider, source_binding, observed_at);
-        }
+        let GitHubStackProviderReadV1 {
+            scope,
+            registration,
+        } = read;
         let state = outcome.capability_state();
         let response_digest = match outcome.response_digest() {
             Some(digest) => digest.clone(),
@@ -326,6 +425,7 @@ impl DaemonGitHubStackCoordinatorV1 {
                 source_binding: &source_binding,
             },
             observed_at,
+            ObservationOrigin::Provider(registration),
         )
     }
 
@@ -348,7 +448,24 @@ impl DaemonGitHubStackCoordinatorV1 {
         scope: &ResolvedScope,
         observation: &GitHubStackDriftObservationV1,
     ) -> Result<(), GitHubStackCoordinatorErrorV1> {
-        transition::restore_open_drift_interval(&self.drift_intervals, scope, observation)
+        let interval = transition::restored_open_interval(scope, observation)?;
+        let mut states = self
+            .observation_states
+            .lock()
+            .map_err(|_| GitHubStackCoordinatorErrorV1::Poisoned)?;
+        let active = &mut states
+            .entry(scope.scope_digest.clone())
+            .or_default()
+            .drift_intervals;
+        if let Some(existing) = active
+            .iter_mut()
+            .find(|existing| existing.kind == interval.kind)
+        {
+            *existing = interval;
+        } else {
+            active.push(interval);
+        }
+        Ok(())
     }
 
     #[tracing::instrument(name = "usecases.stack.enqueue", level = "trace", skip_all)]
@@ -608,6 +725,7 @@ impl DaemonGitHubStackCoordinatorV1 {
         state: GitHubStackCapabilityStateV1,
         material: GitHubStackObservationMaterial<'_>,
         observed_at: UtcMicros,
+        origin: ObservationOrigin,
     ) -> Result<GitHubStackObservationV1, GitHubStackCoordinatorErrorV1> {
         scope
             .validate()
@@ -689,16 +807,59 @@ impl DaemonGitHubStackCoordinatorV1 {
             })
             .transpose()
             .map_err(|_| GitHubStackCoordinatorErrorV1::InvalidProviderObservation)?;
-        let previous = self
-            .observations
+        // Serialize comparison, interval update, and snapshot publication under
+        // one scope-state transition. No network or storage I/O occurs while held.
+        let mut states = self
+            .observation_states
             .lock()
-            .map_err(|_| GitHubStackCoordinatorErrorV1::Poisoned)?
-            .get(&scope.scope_digest)
-            .and_then(|observation| observation.snapshot.as_ref())
-            .cloned();
-        let (transitions, drift_kinds) = stack_drift(previous.as_ref(), snapshot.as_ref());
+            .map_err(|_| GitHubStackCoordinatorErrorV1::Poisoned)?;
+        let state = states.entry(scope.scope_digest.clone()).or_default();
+        // The observation was derived under the registration it names. Policy
+        // and provider authority both end when that registration is replaced.
+        if !same_registration(
+            state
+                .registration
+                .as_ref()
+                .map(|registration| &registration.id),
+            origin.registration(),
+        ) {
+            return Err(GitHubStackCoordinatorErrorV1::Superseded);
+        }
+        // Only an observation published under this same registration is a
+        // drift baseline or a provider result worth preserving.
+        let registered_current = state.current.as_ref().filter(|published| {
+            same_registration(published.registration.as_ref(), origin.registration())
+        });
+        // A policy observation prepared before a real provider result of the
+        // same registration must not overwrite its enabled/degraded result.
+        if let ObservationOrigin::Policy(_) = origin
+            && let Some(previous) = registered_current.filter(|published| {
+                matches!(
+                    published.observation.capability.state,
+                    GitHubStackCapabilityStateV1::Enabled | GitHubStackCapabilityStateV1::Degraded
+                )
+            })
+        {
+            return Ok(previous.observation.clone());
+        }
+        // Provider responses may finish out of order. A late sample cannot
+        // replace a newer snapshot or close a restored interval before it opened.
+        if state
+            .current
+            .as_ref()
+            .is_some_and(|current| current.observation.observed_at > observed_at)
+            || state
+                .drift_intervals
+                .iter()
+                .any(|interval| interval.first_observed_at > observed_at)
+        {
+            return Err(GitHubStackCoordinatorErrorV1::InvalidProviderObservation);
+        }
+        let previous =
+            registered_current.and_then(|published| published.observation.snapshot.as_ref());
+        let (transitions, drift_kinds) = stack_drift(previous, snapshot.as_ref());
         let drift_observations = transition::update_drift_intervals(
-            &self.drift_intervals,
+            &mut state.drift_intervals,
             &scope.scope_digest,
             drift_kinds,
             observed_at,
@@ -713,10 +874,10 @@ impl DaemonGitHubStackCoordinatorV1 {
             transitions,
             drift_observations,
         };
-        self.observations
-            .lock()
-            .map_err(|_| GitHubStackCoordinatorErrorV1::Poisoned)?
-            .insert(scope.scope_digest, observation.clone());
+        state.current = Some(PublishedObservation {
+            registration: origin.registration().cloned(),
+            observation: observation.clone(),
+        });
         Ok(observation)
     }
 }

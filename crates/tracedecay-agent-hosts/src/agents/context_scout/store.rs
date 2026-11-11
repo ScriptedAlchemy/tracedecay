@@ -11,9 +11,9 @@ use super::{
     ContextScoutAddressExt, ContextScoutAddressV1, ContextScoutDeliveryReceiptV1,
     ContextScoutDeliveryWindowV1, ContextScoutDurableClaimOutcomeV1, ContextScoutDurableClaimV1,
     ContextScoutDurableQueueEntryExt, ContextScoutDurableQueueEntryV1,
-    ContextScoutDurableStartupOutcomeV1, ContextScoutDurableStoreOutcomeV1, ContextScoutFeedbackV1,
-    ContextScoutLeaseExt, ContextScoutLeaseV1, ContextScoutMutationBindingV1,
-    ContextScoutMutationOperationV1, ContextScoutMutationResultV1,
+    ContextScoutDurableStartupOutcomeV1, ContextScoutDurableStoreOutcomeV1, ContextScoutErrorV1,
+    ContextScoutFeedbackV1, ContextScoutLeaseExt, ContextScoutLeaseV1,
+    ContextScoutMutationBindingV1, ContextScoutMutationOperationV1, ContextScoutMutationResultV1,
     ContextScoutMutationSettlementOutcomeV1, ContextScoutMutationSettlementV1,
     ContextScoutPublicMutationV1, ContextScoutRecentDeliveryV1, ContextScoutRecentReadOutcomeV1,
     ContextScoutRecentStateV1, ContextScoutWorkV1, MAX_SCOUT_ACTIVE_ADDRESSES,
@@ -706,6 +706,26 @@ impl ProjectContextScoutDurableStoreV1 {
         address.project_id == self.project_id && address.validate().is_ok()
     }
 
+    async fn read_state(&self) -> Result<Option<StoredContextScoutStateV1>, ContextScoutErrorV1> {
+        let encoded = self
+            .database
+            .get_metadata(STORE_KEY_V1)
+            .await
+            .map_err(|_| ContextScoutErrorV1::ConfigurationUnavailable)?;
+        let Some(encoded) = encoded else {
+            return Ok(None);
+        };
+        if encoded.len() > MAX_STORED_STATE_BYTES_V1 {
+            return Err(ContextScoutErrorV1::ConfigurationUnavailable);
+        }
+        let state = serde_json::from_str::<StoredContextScoutStateV1>(&encoded)
+            .map_err(|_| ContextScoutErrorV1::ConfigurationUnavailable)?;
+        if !state.validate(self.project_id) || !state.has_complete_delivery_provenance() {
+            return Err(ContextScoutErrorV1::ConfigurationUnavailable);
+        }
+        Ok(Some(state))
+    }
+
     // The shared read funnel behind `recent`, `recent_for_protected_session`,
     // and `recent_project`: one static label for durable recent-state reads.
     #[tracing::instrument(name = "context_scout_store_read", level = "trace", skip_all)]
@@ -723,33 +743,19 @@ impl ProjectContextScoutDurableStoreV1 {
         {
             return ContextScoutRecentReadOutcomeV1::Unavailable;
         }
-        let Some(encoded) = self
-            .database
-            .get_metadata(STORE_KEY_V1)
-            .await
-            .ok()
-            .flatten()
-        else {
-            return ContextScoutRecentReadOutcomeV1::Ready(ContextScoutRecentStateV1 {
-                configuration_revision,
-                observed_at,
-                pending: Vec::new(),
-                deliveries: Vec::new(),
-                omitted: 0,
-            });
+        let state = match self.read_state().await {
+            Ok(Some(state)) => state,
+            Ok(None) => {
+                return ContextScoutRecentReadOutcomeV1::Ready(ContextScoutRecentStateV1 {
+                    configuration_revision,
+                    observed_at,
+                    pending: Vec::new(),
+                    deliveries: Vec::new(),
+                    omitted: 0,
+                });
+            }
+            Err(_) => return ContextScoutRecentReadOutcomeV1::Unavailable,
         };
-        if encoded.len() > MAX_STORED_STATE_BYTES_V1 {
-            return ContextScoutRecentReadOutcomeV1::Unavailable;
-        }
-        let Ok(state) = serde_json::from_str::<StoredContextScoutStateV1>(&encoded) else {
-            return ContextScoutRecentReadOutcomeV1::Unavailable;
-        };
-        if !state.validate(self.project_id) {
-            return ContextScoutRecentReadOutcomeV1::Unavailable;
-        }
-        if !state.has_complete_delivery_provenance() {
-            return ContextScoutRecentReadOutcomeV1::Unavailable;
-        }
         let mut pending = state
             .entries
             .iter()
@@ -815,6 +821,52 @@ impl ProjectContextScoutDurableStoreV1 {
             candidate == address
         })
         .await
+    }
+
+    /// Reads one exact delivered envelope without letting pending work or
+    /// newer receipts consume a recent-page limit.
+    pub(crate) async fn delivery_exact(
+        &self,
+        address: ContextScoutAddressV1,
+        configuration_revision: [u8; 32],
+        envelope_id: [u8; 16],
+    ) -> Result<Option<ContextScoutRecentDeliveryV1>, ContextScoutErrorV1> {
+        if !self.in_scope(address) {
+            return Err(ContextScoutErrorV1::InvalidAddress);
+        }
+        if configuration_revision == [0; 32] {
+            return Err(ContextScoutErrorV1::ConfigurationUnavailable);
+        }
+        if envelope_id == [0; 16] {
+            return Err(ContextScoutErrorV1::ReceiptBindingMismatch);
+        }
+        let Some(state) = self.read_state().await? else {
+            return Ok(None);
+        };
+        let Some(binding) = state.delivery_addresses.iter().find(|binding| {
+            binding.address == address
+                && binding.envelope_id == envelope_id
+                && binding.entry.envelope.configuration_revision == configuration_revision
+        }) else {
+            return Ok(None);
+        };
+        let receipt = state
+            .receipts
+            .iter()
+            .find(|receipt| receipt.envelope_id == envelope_id)
+            .cloned()
+            .ok_or(ContextScoutErrorV1::ConfigurationUnavailable)?;
+        let feedback = state
+            .feedback
+            .iter()
+            .rev()
+            .find(|feedback| feedback.receipt_id == receipt.receipt_id)
+            .copied();
+        Ok(Some(ContextScoutRecentDeliveryV1 {
+            entry: binding.entry.clone(),
+            receipt,
+            feedback,
+        }))
     }
 
     pub(crate) async fn recent_for_protected_session(
