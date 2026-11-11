@@ -34,7 +34,7 @@ export function ScopeBar({
   channel,
   onOpenPalette,
 }: {
-  channel?: Channel | null;
+  channel?: Pick<Channel, 'path' | 'label'> | null;
   onOpenPalette?: () => void;
 }) {
   const scope = useScope((s) => s.scope);

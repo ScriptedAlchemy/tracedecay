@@ -543,21 +543,6 @@ fn configuration_tool_success(
     }
 }
 
-fn wait_for_daemon_socket(socket_path: &Path) {
-    let deadline = Instant::now() + Duration::from_secs(10);
-    common::poll_until(
-        deadline,
-        Duration::from_millis(25),
-        || UnixStream::connect(socket_path).is_ok().then_some(()),
-        || {
-            format!(
-                "timed out waiting for daemon socket at {}",
-                socket_path.display()
-            )
-        },
-    );
-}
-
 /// Enroll a project for the native hook capture contract: an enrollment
 /// marker binds the project root to a profile shard, and a daemon-issued
 /// hook configuration binding is published under that shard's data root so
@@ -1718,21 +1703,9 @@ fn daemon_socket_is_owner_only() {
     let home = TempDir::new().unwrap();
     let home_path = canonical_existing_path(home.path());
     let socket_path = common::daemon_socket_path(&home_path);
-    let _ = std::fs::remove_file(&socket_path);
-    let mut daemon = common::DaemonProcess::new(
-        tracedecay_command_with_home(&home_path)
-            .arg("daemon")
-            .arg("run")
-            .arg("--socket")
-            .arg(&socket_path)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .expect("tracedecay daemon should start"),
-    );
-
-    wait_for_daemon_socket(&socket_path);
+    let mut daemon = common::spawn_tracedecay_daemon_with(&home_path, |command| {
+        command.arg("--socket").arg(&socket_path);
+    });
     let mode = std::fs::metadata(&socket_path)
         .expect("socket metadata")
         .permissions()

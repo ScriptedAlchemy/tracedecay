@@ -2029,7 +2029,7 @@ mod pagination_contract_tests {
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use std::collections::BTreeSet;
     use std::io::{Read, Write};
     use std::net::TcpListener;
@@ -2066,7 +2066,7 @@ mod tests {
         include_str!("../fixtures/provider_branch_review/review_thread.graphql.json");
 
     #[derive(Clone, Copy)]
-    pub(super) enum FixtureCredentialAuthorityModeV1 {
+    pub(in crate::advisory::github_runtime) enum FixtureCredentialAuthorityModeV1 {
         Verified,
         NotConfigured,
         WriteCapable,
@@ -2139,7 +2139,7 @@ mod tests {
         }
     }
 
-    pub(super) fn registered_fixture_credential(
+    pub(in crate::advisory::github_runtime) fn registered_fixture_credential(
         repository: &str,
         mode: FixtureCredentialAuthorityModeV1,
     ) -> (
@@ -2716,7 +2716,7 @@ mod tests {
         assert_eq!(outcome, GitHubReadNetworkOutcomeV1::Denied);
     }
 
-    pub(super) fn scope(suffix: &str) -> FeedbackScopeV1 {
+    pub(in crate::advisory::github_runtime) fn scope(suffix: &str) -> FeedbackScopeV1 {
         FeedbackScopeV1 {
             project_id: ProjectId::new(format!("project.github.{suffix}")).unwrap(),
             repository_id: RepositoryId::new(format!("repository.github.{suffix}")).unwrap(),
@@ -2726,7 +2726,7 @@ mod tests {
         }
     }
 
-    pub(super) fn context(scope: &FeedbackScopeV1) -> RequestContext {
+    pub(in crate::advisory::github_runtime) fn context(scope: &FeedbackScopeV1) -> RequestContext {
         let resolved = ResolvedScope::new(
             scope.project_id.clone(),
             scope.repository_id.clone(),
@@ -2763,7 +2763,9 @@ mod tests {
         .unwrap()
     }
 
-    pub(super) fn request(scope: FeedbackScopeV1) -> GitHubReviewReadRequestV1 {
+    pub(in crate::advisory::github_runtime) fn request(
+        scope: FeedbackScopeV1,
+    ) -> GitHubReviewReadRequestV1 {
         GitHubReviewReadRequestV1 {
             operation: GitHubReviewReadOperationV1::GraphQlQueryPullRequestReviewThreads,
             scope,

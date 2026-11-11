@@ -136,19 +136,13 @@ fn wait_for_socket(socket_path: &Path, child: &mut Child) {
     );
 }
 
-pub(super) fn spawn_daemon(home: &Path, socket_path: &Path) -> ChildGuard {
-    let mut child = ChildGuard::new(
-        common::tracedecay_command_with_home(home)
-            .args(["daemon", "run", "--socket"])
+pub(super) fn spawn_daemon(home: &Path, socket_path: &Path) -> common::DaemonProcess {
+    common::spawn_tracedecay_daemon_with(home, |command| {
+        command
+            .arg("--socket")
             .arg(socket_path)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .expect("spawn daemon"),
-    );
-    wait_for_socket(socket_path, &mut child);
-    child
+            .env_remove("TRACEDECAY_TEST_ALLOW_INCOMPLETE_HOLDER_SCAN");
+    })
 }
 
 /// Where the spawned daemon's stderr was redirected, when the caller captured

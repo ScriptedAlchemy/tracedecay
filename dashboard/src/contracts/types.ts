@@ -978,6 +978,29 @@ export type CodeIndexMountFailureV1 = {
   remediation: string;
 };
 
+export type CodeIndexNativeGraphPhaseV1 = "compact_encoding" | "compact_segment_verified" | "stage_page_commit";
+
+export type CodeIndexNativeGraphProgressV1 = {
+  active: boolean;
+  attempt_sequence: number;
+  committed_compact_bytes: number;
+  committed_compact_segments: number;
+  committed_stage_bytes: number;
+  committed_stage_mutations: number;
+  committed_stage_pages: number;
+  daemon_incarnation: number;
+  encoded_entities: number;
+  encoded_relations: number;
+  generation_id: string;
+  last_progress_micros: number | null;
+  phase: CodeIndexNativeGraphPhaseV1 | null;
+  producer_incarnation: number;
+  progress_epoch: number;
+  sealed_graph_digest: string;
+  total_entities: number | null;
+  total_relations: number | null;
+};
+
 export type CodeIndexOmittedSourcesV1 = {
   count: number;
   sources: Array<CodeIndexOmittedSourceV1>;
@@ -988,6 +1011,20 @@ export type CodeIndexOmittedSourceV1 = {
   git_path_bytes: Array<number>;
   reason: CodeIndexSourceOmissionReasonV1;
 };
+
+export type CodeIndexPresealAttemptProgressV1 = {
+  active: boolean;
+  attempt_sequence: number;
+  completed_items: number;
+  daemon_incarnation: number;
+  last_progress_micros: number | null;
+  phase: CodeIndexPresealWorkPhaseV1;
+  producer_incarnation: number;
+  progress_epoch: number;
+  total_items: number | null;
+};
+
+export type CodeIndexPresealWorkPhaseV1 = "capture" | "parse_evidence" | "resolution";
 
 export type CodeIndexRestoreProgressV1 = {
   artifact_digest: string;
@@ -1047,8 +1084,10 @@ export type CodeIndexWorktreeFreshnessV1 = {
   hook_hint_count: number | null;
   last_reconcile_micros: number | null;
   latest_generation_id: string | null;
+  native_graph_progress?: CodeIndexNativeGraphProgressV1 | null | undefined;
   omitted_sources?: CodeIndexOmittedSourcesV1 | null | undefined;
   parked: CodeIndexConvergenceParkedV1 | null;
+  preseal_attempt?: CodeIndexPresealAttemptProgressV1 | null | undefined;
   progress: CodeIndexBuildProgressV1 | null;
   rebuild_in_flight: boolean;
   repository_id: string | null;

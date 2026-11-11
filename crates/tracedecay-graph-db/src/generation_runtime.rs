@@ -8,7 +8,9 @@ use std::vec::IntoIter;
 
 use grafeo_core::graph::Direction;
 use parking_lot::RwLockWriteGuard as ParkingRwLockWriteGuard;
-use tracedecay_store::runtime::GraphRecoveredGenerationDigestV1;
+use tracedecay_store::runtime::{
+    GraphNativeWorkKindV1, GraphNativeWorkV1, GraphRecoveredGenerationDigestV1,
+};
 
 use crate::generation::verify_recovered_generation;
 use crate::lease::{
@@ -128,6 +130,15 @@ enum GenerationStagePageKind {
     Relations,
 }
 
+/// Whether the native page transaction actually applied rows or replay
+/// adopted an already durable, matching receipt. This is a write verdict, not
+/// a read-side projection or a guessed number of graph pages.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum GenerationStagePageCommitV1 {
+    Applied,
+    Reused,
+}
+
 impl GenerationStagePageKind {
     fn as_str(self) -> &'static str {
         match self {
@@ -172,6 +183,7 @@ struct GenerationStagePlan<'a> {
     context: &'a GenerationStageContext,
     pages: &'a [GenerationStagePage],
     restaging_sealed_only: bool,
+    observe: Option<&'a dyn Fn(GraphNativeWorkV1)>,
 }
 
 /// CPU-only page batch, built outside the exclusive snapshot gate so the next
@@ -579,7 +591,7 @@ impl GraphDb {
         expected: &GraphRecoveredGenerationDigestV1,
         check: &dyn Fn() -> Result<(), GraphDbError>,
     ) -> Result<GraphCommit, GraphDbError> {
-        self.apply_generation_unverified_with_digest_observed(manifest, expected, check)
+        self.apply_generation_unverified_with_digest_and_work(manifest, expected, check, None)
             .map(GenerationStageOutcome::commit)
     }
 
@@ -592,12 +604,15 @@ impl GraphDb {
     /// caller is about to close, reopen, and rebuild the in-RAM store -- the
     /// overlap that made publication the peak-RSS moment. Every later stage
     /// reads only the identity, which the caller keeps.
+    /// Observable native stage work is emitted only after the real page
+    /// transaction and matching receipt have settled, never on read/replay.
     #[tracing::instrument(name = "graph_db.generation.stage", level = "trace", skip_all)]
-    pub(crate) fn apply_generation_unverified_with_digest_observed(
+    pub(crate) fn apply_generation_unverified_with_digest_and_work(
         &self,
         manifest: Arc<GraphGenerationManifest>,
         expected: &GraphRecoveredGenerationDigestV1,
         check: &dyn Fn() -> Result<(), GraphDbError>,
+        observe: Option<&dyn Fn(GraphNativeWorkV1)>,
     ) -> Result<GenerationStageOutcome, GraphDbError> {
         check()?;
         manifest.validate_checked(check)?;
@@ -642,6 +657,7 @@ impl GraphDb {
             context: &context,
             pages: &pages,
             restaging_sealed_only,
+            observe,
         };
         match Arc::try_unwrap(manifest) {
             Ok(mut manifest) => {
@@ -773,6 +789,7 @@ impl GraphDb {
             context,
             pages,
             restaging_sealed_only,
+            observe,
         } = plan;
         let mut prepared_next = None;
         for (index, page) in pages.iter().enumerate() {
@@ -813,7 +830,7 @@ impl GraphDb {
                                 )
                             })
                         });
-                self.apply_prepared_generation_stage_page(
+                let (_, outcome) = self.apply_prepared_generation_stage_page(
                     Some(manifest),
                     identity,
                     expected,
@@ -823,6 +840,17 @@ impl GraphDb {
                     current,
                     check,
                 )?;
+                if let (GenerationStagePageCommitV1::Applied, Some(observer)) = (outcome, observe) {
+                    observer(GraphNativeWorkV1::StagePageApplied {
+                        ordinal: u64::try_from(page.ordinal).unwrap_or(u64::MAX),
+                        kind: match page.kind {
+                            GenerationStagePageKind::Entities => GraphNativeWorkKindV1::Entities,
+                            GenerationStagePageKind::Relations => GraphNativeWorkKindV1::Relations,
+                        },
+                        mutations: u64::try_from(page.mutation_count()).unwrap_or(u64::MAX),
+                        live_bytes: u64::try_from(page.live_bytes()).unwrap_or(u64::MAX),
+                    });
+                }
                 // This is the exact cancellation boundary: the page transaction
                 // and receipt are durable, while no verified lease/head exists.
                 check()?;
@@ -860,6 +888,7 @@ impl GraphDb {
             context,
             pages,
             restaging_sealed_only,
+            observe,
         } = plan;
         let mut rows = OwnedGenerationStageRows::new(entities, relations);
         let Some(first_page) = pages.first() else {
@@ -922,7 +951,7 @@ impl GraphDb {
                         ));
                     }
                 };
-                self.apply_prepared_generation_stage_page(
+                let (_, outcome) = self.apply_prepared_generation_stage_page(
                     None,
                     identity,
                     expected,
@@ -932,6 +961,17 @@ impl GraphDb {
                     current.take(),
                     check,
                 )?;
+                if let (GenerationStagePageCommitV1::Applied, Some(observer)) = (outcome, observe) {
+                    observer(GraphNativeWorkV1::StagePageApplied {
+                        ordinal: u64::try_from(page.ordinal).unwrap_or(u64::MAX),
+                        kind: match page.kind {
+                            GenerationStagePageKind::Entities => GraphNativeWorkKindV1::Entities,
+                            GenerationStagePageKind::Relations => GraphNativeWorkKindV1::Relations,
+                        },
+                        mutations: u64::try_from(page.mutation_count()).unwrap_or(u64::MAX),
+                        live_bytes: u64::try_from(page.live_bytes()).unwrap_or(u64::MAX),
+                    });
+                }
                 check()?;
                 successor_handle
                     .map(|handle| {
@@ -1068,10 +1108,10 @@ impl GraphDb {
         page: &GenerationStagePage,
         prepared: Option<PreparedGenerationStagePage>,
         check: &dyn Fn() -> Result<(), GraphDbError>,
-    ) -> Result<GraphCommit, GraphDbError> {
+    ) -> Result<(GraphCommit, GenerationStagePageCommitV1), GraphDbError> {
         let (idempotency_key, input_digest) =
             generation_stage_page_receipt(identity, expected, page)?;
-        self.run_gated_batch(
+        let (commit, outcome) = self.run_gated_batch(
             check,
             |database| {
                 let mut reuse_receipt = false;
@@ -1087,7 +1127,10 @@ impl GraphDb {
                         if !context.replay_every_page
                             && Self::generation_stage_page_rows_present(database, context, page)?
                         {
-                            return Ok(GraphBatchPlan::Settled(existing.commit, ()));
+                            return Ok(GraphBatchPlan::Settled(
+                                existing.commit,
+                                GenerationStagePageCommitV1::Reused,
+                            ));
                         }
                         // The receipt still binds this exact page to this
                         // identity and recovered digest, so re-applying it is
@@ -1173,11 +1216,27 @@ impl GraphDb {
                         },
                         endpoint_namespaces,
                     },
-                    (),
+                    GenerationStagePageCommitV1::Applied,
                 ))
             },
-            |_database, commit, ()| Ok(commit),
-        )
+            |_database, commit, outcome| Ok((commit, outcome)),
+        )?;
+        if outcome == GenerationStagePageCommitV1::Applied {
+            // run_gated_batch only returns after the real page transaction
+            // and its receipt have committed, including WAL settlement for
+            // persistent stores. A replayed receipt emits no new-write event.
+            tracing::info!(
+                event = "graph_native_stage_page_applied",
+                generation = %identity.generation,
+                ordinal = page.ordinal,
+                kind = page.kind.as_str(),
+                mutations = page.mutation_count(),
+                live_bytes = page.live_bytes(),
+                wal_synced = matches!(self.inner.durability, crate::GraphDurability::WalSync),
+                "native graph page transaction completed"
+            );
+        }
+        Ok((commit, outcome))
     }
 
     /// Binds the dependency metadata in one empty batch, after every page
@@ -2776,12 +2835,14 @@ mod tests {
 
     use std::cell::Cell;
     use std::collections::{BTreeMap, BTreeSet};
-    use std::sync::Arc;
-    use std::sync::mpsc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Arc, Mutex, mpsc};
     use std::time::{Duration, Instant};
 
     use tempfile::TempDir;
-    use tracedecay_store::runtime::GraphRecoveredGenerationDigestV1;
+    use tracedecay_store::runtime::{
+        GraphNativeWorkKindV1, GraphNativeWorkV1, GraphRecoveredGenerationDigestV1,
+    };
 
     use crate::generation::{
         canonical_buffer_allocation_growths, manifest_canonicalizations,
@@ -2796,10 +2857,11 @@ mod tests {
     };
     use crate::{
         GraphDbError, GraphDbLocation, GraphDbOpenOptions, GraphDbOwner, GraphDurability,
-        GraphEntity, GraphEntityId, GraphFormatVersion, GraphGenerationDependency,
-        GraphGenerationId, GraphGenerationManifest, GraphIdempotencyKey, GraphNamespace,
-        GraphProjectionId, GraphProjectionIdentity, GraphWatermark,
-        MAX_VERIFIED_GENERATION_BATCH_MUTATIONS, NeverCancelled, SourceGeneration,
+        GraphEntity, GraphEntityId, GraphEntityRef, GraphFormatVersion, GraphGenerationDependency,
+        GraphGenerationId, GraphGenerationManifest, GraphGenerationRelation, GraphIdempotencyKey,
+        GraphNamespace, GraphProjectionId, GraphProjectionIdentity, GraphRelationId,
+        GraphRelationKind, GraphWatermark, MAX_VERIFIED_GENERATION_BATCH_MUTATIONS, NeverCancelled,
+        SourceGeneration,
     };
 
     use super::{
@@ -3218,10 +3280,11 @@ mod tests {
         let manifest = large_manifest("retry-admission");
         let sealed = sealed_digest(&manifest);
         let first = database
-            .apply_generation_unverified_with_digest_observed(
+            .apply_generation_unverified_with_digest_and_work(
                 arc_manifest(&manifest),
                 &sealed,
                 &|| Ok(()),
+                None,
             )
             .unwrap();
         let GenerationStageOutcome::Applied(first) = first else {
@@ -3235,10 +3298,11 @@ mod tests {
         reset_manifest_canonicalizations();
         reset_batch_canonicalizations();
         let reapplied = database
-            .apply_generation_unverified_with_digest_observed(
+            .apply_generation_unverified_with_digest_and_work(
                 arc_manifest(&manifest),
                 &sealed,
                 &|| Ok(()),
+                None,
             )
             .unwrap();
         let GenerationStageOutcome::Reseated(reapplied) = reapplied else {
@@ -3293,10 +3357,11 @@ mod tests {
             GenerationLocator::new(manifest.projection.clone(), manifest.generation.clone());
         let (owner, database) = persistent_database(&temp);
         database
-            .apply_generation_unverified_with_digest_observed(
+            .apply_generation_unverified_with_digest_and_work(
                 arc_manifest(&manifest),
                 &sealed,
                 &|| Ok(()),
+                None,
             )
             .unwrap();
         crate::state::reset_retirement_page_record_reads();
@@ -3334,10 +3399,11 @@ mod tests {
             GenerationLocator::new(manifest.projection.clone(), manifest.generation.clone());
         let (owner, database) = persistent_database(&temp);
         let staged = database
-            .apply_generation_unverified_with_digest_observed(
+            .apply_generation_unverified_with_digest_and_work(
                 Arc::clone(&retained_manifest),
                 &sealed,
                 &|| Ok(()),
+                None,
             )
             .unwrap();
         assert!(matches!(staged, GenerationStageOutcome::Applied(_)));
@@ -3357,10 +3423,11 @@ mod tests {
 
         let (reopened_owner, reopened) = persistent_database(&temp);
         let replayed = reopened
-            .apply_generation_unverified_with_digest_observed(
+            .apply_generation_unverified_with_digest_and_work(
                 Arc::clone(&retained_manifest),
                 &sealed,
                 &|| Ok(()),
+                None,
             )
             .unwrap();
         assert!(matches!(replayed, GenerationStageOutcome::Applied(_)));
@@ -3427,10 +3494,11 @@ mod tests {
         let retained_manifest = arc_manifest(&manifest);
         let (owner, database) = persistent_database(&temp);
         database
-            .apply_generation_unverified_with_digest_observed(
+            .apply_generation_unverified_with_digest_and_work(
                 Arc::clone(&retained_manifest),
                 &sealed,
                 &|| Ok(()),
+                None,
             )
             .unwrap();
 
@@ -3465,7 +3533,12 @@ mod tests {
             retained_manifest
         };
         reopened
-            .apply_generation_unverified_with_digest_observed(replay_manifest, &sealed, &|| Ok(()))
+            .apply_generation_unverified_with_digest_and_work(
+                replay_manifest,
+                &sealed,
+                &|| Ok(()),
+                None,
+            )
             .expect("a retained generation must replay after a partial durable row release");
         let (_, recovered) = reopened
             .reopen_and_verify_existing_generation(
@@ -3736,6 +3809,227 @@ mod tests {
     }
 
     #[test]
+    fn native_stage_observer_reports_applied_pages_not_replayed_receipts() {
+        let manifest = large_manifest("native-stage-observer");
+        let expected = sealed_digest(&manifest);
+        let pages = generation_stage_pages(&manifest).expect("nonempty native pages");
+        assert!(!pages.is_empty());
+        let temp = TempDir::new().expect("persistent native graph store");
+        let (owner, db) = persistent_database(&temp);
+        let observed = std::sync::Mutex::new(Vec::new());
+        let observe = |event| observed.lock().unwrap().push(event);
+        let result = db
+            .apply_generation_unverified_with_digest_and_work(
+                Arc::new(manifest),
+                &expected,
+                &|| Ok(()),
+                Some(&observe),
+            )
+            .expect("real native stage");
+        assert!(matches!(result, super::GenerationStageOutcome::Applied(_)));
+        let observations = observed.lock().unwrap().clone();
+        assert!(
+            !observations.is_empty(),
+            "a real native stage with rows must report committed work"
+        );
+        assert!(observations.iter().all(|event| matches!(
+            event,
+            GraphNativeWorkV1::StagePageApplied {
+                mutations: 1..,
+                live_bytes: 1..,
+                ..
+            }
+        )));
+        owner.close().expect("close native graph store");
+    }
+
+    /// The callback follows the durable page transaction, not final generation
+    /// verification. An interrupted writer must retain that page across
+    /// a physical store reopen, then report only the newly committed successor.
+    #[test]
+    fn interrupted_native_stage_resumes_receipts_without_fabricating_writes() {
+        let mut manifest = large_manifest("interrupted-native-stage");
+        let projection = manifest.projection.clone();
+        manifest.relations.push(
+            GraphGenerationRelation::new(
+                GraphRelationId::new("relation:00000").unwrap(),
+                GraphEntityRef::new(
+                    projection.clone(),
+                    GraphEntityId::new("entity:00000").unwrap(),
+                ),
+                GraphEntityRef::new(projection, GraphEntityId::new("entity:00001").unwrap()),
+                GraphRelationKind::new("calls").unwrap(),
+                BTreeMap::new(),
+            )
+            .unwrap(),
+        );
+        let pages = generation_stage_pages(&manifest).expect("real page plan");
+        assert_eq!(
+            pages.len(),
+            2,
+            "entities and relations must use distinct pages"
+        );
+        let expected = sealed_digest(&manifest);
+        let temp = TempDir::new().expect("persistent graph store");
+        let (owner, database) = persistent_database(&temp);
+        let cancel = AtomicBool::new(false);
+        let first_events = Mutex::new(Vec::new());
+        let first_observer = |event| {
+            first_events.lock().unwrap().push(event);
+            cancel.store(true, Ordering::Release);
+        };
+        let check = || {
+            if cancel.load(Ordering::Acquire) {
+                Err(GraphDbError::Cancelled)
+            } else {
+                Ok(())
+            }
+        };
+        let interrupted = database.apply_generation_unverified_with_digest_and_work(
+            arc_manifest(&manifest),
+            &expected,
+            &check,
+            Some(&first_observer),
+        );
+        assert!(
+            matches!(interrupted, Err(GraphDbError::Cancelled)),
+            "a real post-page cancellation must prevent finalization"
+        );
+        let committed_before_kill = first_events.lock().unwrap().clone();
+        assert_eq!(committed_before_kill.len(), 1, "one real page must commit");
+        assert!(matches!(
+            &committed_before_kill[0],
+            GraphNativeWorkV1::StagePageApplied {
+                ordinal: 0,
+                kind: GraphNativeWorkKindV1::Entities,
+                mutations: 1..,
+                live_bytes: 1..,
+            }
+        ));
+        drop(database);
+        owner.close().expect("settle durable page before restart");
+
+        let (reopened_owner, reopened) = persistent_database(&temp);
+        let resumed_events = Mutex::new(Vec::new());
+        let resume_observer = |event| resumed_events.lock().unwrap().push(event);
+        let outcome = reopened
+            .apply_generation_unverified_with_digest_and_work(
+                arc_manifest(&manifest),
+                &expected,
+                &|| Ok(()),
+                Some(&resume_observer),
+            )
+            .expect("recover the durable first page and commit relation page");
+        assert!(matches!(outcome, GenerationStageOutcome::Applied(_)));
+        let resumed = resumed_events.lock().unwrap().clone();
+        assert_eq!(
+            resumed.len(),
+            1,
+            "the resumed writer must not count a reused entity receipt as new work"
+        );
+        assert!(matches!(
+            &resumed[0],
+            GraphNativeWorkV1::StagePageApplied {
+                ordinal: 1,
+                kind: GraphNativeWorkKindV1::Relations,
+                mutations: 1,
+                live_bytes: 1..,
+            }
+        ));
+
+        let (_, recovered) = reopened
+            .reopen_and_verify_existing_generation(
+                &manifest.identity(),
+                &expected,
+                manifest.row_counts(),
+                &|| Ok(()),
+            )
+            .expect("the resumed native graph must survive a recovered digest proof");
+        assert_eq!(recovered, expected);
+        let replay = reopened
+            .apply_generation_unverified_with_digest_and_work(
+                arc_manifest(&manifest),
+                &expected,
+                &|| Ok(()),
+                Some(&resume_observer),
+            )
+            .expect("idempotent replay after completed recovery");
+        assert!(matches!(replay, GenerationStageOutcome::Reseated(_)));
+        assert_eq!(
+            resumed_events.lock().unwrap().as_slice(),
+            resumed.as_slice(),
+            "replaying an already verified graph cannot invent new page writes"
+        );
+        reopened_owner.close().expect("close recovered graph store");
+    }
+
+    #[test]
+    fn native_graph_page_reports_real_wal_commits_but_not_replayed_receipts() {
+        let manifest = large_manifest("native-write-observation");
+        let pages = generation_stage_pages(&manifest).expect("native page plan");
+        assert!(!pages.is_empty(), "nonzero source rows must produce a page");
+        let identity = manifest.identity();
+        let sealed = sealed_digest(&manifest);
+        let temp = TempDir::new().expect("graph store");
+        let (owner, database) = persistent_database(&temp);
+        let context = super::GenerationStageContext {
+            locator: GenerationLocator::new(
+                manifest.projection.clone(),
+                manifest.generation.clone(),
+            ),
+            physical_namespace: identity.physical_namespace().unwrap(),
+            dependency_namespaces: database.require_exact_dependencies(&identity).unwrap(),
+            dependency_digest: manifest.dependency_closure_digest(&|| Ok(())).unwrap(),
+            replay_every_page: false,
+        };
+        let prepared = super::construct_generation_stage_page(
+            &manifest,
+            &identity,
+            &context,
+            &pages[0],
+            &|| Ok(()),
+        )
+        .expect("actual native page preparation");
+        let (_, first) = database
+            .apply_prepared_generation_stage_page(
+                Some(&manifest),
+                &identity,
+                &sealed,
+                &context,
+                None,
+                &pages[0],
+                Some(prepared),
+                &|| Ok(()),
+            )
+            .expect("durably commit the first native page");
+        assert_eq!(first, super::GenerationStagePageCommitV1::Applied);
+        assert!(pages[0].mutation_count() > 0);
+        let (_, repeated) = database
+            .apply_prepared_generation_stage_page(
+                Some(&manifest),
+                &identity,
+                &sealed,
+                &context,
+                None,
+                &pages[0],
+                None,
+                &|| Ok(()),
+            )
+            .expect("reuse durable native page receipt");
+        assert_eq!(repeated, super::GenerationStagePageCommitV1::Reused);
+        drop(database);
+        owner.close().expect("close graph store");
+        let (reopened_owner, reopened) = persistent_database(&temp);
+        assert!(
+            reopened
+                .generation_stage_page_already_applied(&identity, &sealed, &context, &pages[0],)
+                .expect("verify row receipt after restart"),
+            "a reported native page must survive a close/reopen, not merely staging memory"
+        );
+        reopened_owner.close().expect("close reopened graph store");
+    }
+
+    #[test]
     fn pipelined_custom_pages_seal_the_same_digest() {
         let manifest = large_manifest("pipeline-page-apply");
         let pages = super::generation_stage_pages_with_limits(
@@ -3769,6 +4063,7 @@ mod tests {
                     context: &context,
                     pages: &pages,
                     restaging_sealed_only: false,
+                    observe: None,
                 },
                 &|| Ok(()),
             )
@@ -3825,10 +4120,11 @@ mod tests {
             }
         };
         assert!(matches!(
-            second_database.apply_generation_unverified_with_digest_observed(
+            second_database.apply_generation_unverified_with_digest_and_work(
                 arc_manifest(&manifest),
                 &sealed,
-                &cancel_after_first_page
+                &cancel_after_first_page,
+                None,
             ),
             Err(GraphDbError::Cancelled)
         ));
@@ -3852,10 +4148,11 @@ mod tests {
 
         reset_batch_canonicalizations();
         let resumed = second_database
-            .apply_generation_unverified_with_digest_observed(
+            .apply_generation_unverified_with_digest_and_work(
                 arc_manifest(&manifest),
                 &sealed,
                 &|| Ok(()),
+                None,
             )
             .unwrap();
         let GenerationStageOutcome::Applied(resumed) = resumed else {
@@ -3870,10 +4167,11 @@ mod tests {
         reset_recovered_generation_enumerations();
         reset_batch_canonicalizations();
         let exact = second_database
-            .apply_generation_unverified_with_digest_observed(
+            .apply_generation_unverified_with_digest_and_work(
                 arc_manifest(&manifest),
                 &sealed,
                 &|| Ok(()),
+                None,
             )
             .unwrap();
         let GenerationStageOutcome::Reseated(exact) = exact else {

@@ -20,7 +20,7 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { act, render, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { MemoryRouter } from 'react-router';
+import { MemoryRouter, useLocation } from 'react-router';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { CommandPalette } from './CommandPalette.tsx';
@@ -110,14 +110,20 @@ function stubListing(payload: ProjectsPayloadV1) {
   );
 }
 
-function renderPalette() {
+function PaletteLocation() {
+  const location = useLocation();
+  return <output data-testid="palette-location">{location.pathname}{location.search}{location.hash}</output>;
+}
+
+function renderPalette(initialEntry = '/') {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   return {
     client,
     ...render(
       <QueryClientProvider client={client}>
-        <MemoryRouter>
+        <MemoryRouter initialEntries={[initialEntry]}>
           <CommandPalette open onOpenChange={() => {}} />
+          <PaletteLocation />
         </MemoryRouter>
       </QueryClientProvider>,
     ),
@@ -153,6 +159,138 @@ afterEach(() => {
 });
 
 describe('CommandPalette keyboard operation', () => {
+  it.each([
+    ['/loom?loomRenderer=rails&session=run-7', 'Loom'],
+    ['/Loom/?loomRenderer=rails&session=run-7', 'Loom'],
+    ['/brain?field=sigma&node=node-3', 'Brain'],
+    ['/?field=sigma&node=node-3', 'Brain'],
+    ['/code?render=relief&symbol=symbol-2', 'Code'],
+  ])('reselects %s without resetting its active view', async (entry, label) => {
+    const user = userEvent.setup();
+    stubListing(listing([]));
+    const { findByRole, getByTestId } = renderPalette(entry);
+    await findByRole('listbox');
+
+    await user.keyboard(label);
+    await waitFor(() => expect(activeOptionLabel()).toBe(label));
+    await user.keyboard('{Enter}');
+
+    expect(getByTestId('palette-location').textContent).toBe(entry);
+  });
+
+  it('keeps the selected-project view only for the same scoped route', async () => {
+    const user = userEvent.setup();
+    useScope.getState().selectProject('project-1', 'Alpha', 'active');
+    stubListing(listing([]));
+    const original = '/loom?scope=project-1&scopeLabel=Alpha&loomRenderer=strata';
+    const { findByRole, getByTestId } = renderPalette(original);
+    await findByRole('listbox');
+
+    await user.keyboard('loom{Enter}');
+    expect(getByTestId('palette-location').textContent).toBe(original);
+  });
+
+  it.each([
+    [
+      '/loom?scope=project-1&loomRenderer=strata&session=run-4',
+      'Loom',
+      '/loom?scope=project-1&loomRenderer=strata&session=run-4&scopeLabel=Alpha',
+    ],
+    [
+      '/brain?scope=project-1&scopeLabel=OldName&field=sigma&node=node-3#selection',
+      'Brain',
+      '/brain?scope=project-1&scopeLabel=Alpha&field=sigma&node=node-3#selection',
+    ],
+  ])('reconciles the label in %s without dropping its selected view', async (url, label, expected) => {
+    const user = userEvent.setup();
+    useScope.getState().selectProject('project-1', 'Alpha', 'active');
+    stubListing(listing([]));
+    const { findByRole, getByTestId } = renderPalette(url);
+    await findByRole('listbox');
+
+    await user.keyboard(label);
+    await waitFor(() => expect(activeOptionLabel()).toBe(label));
+    await user.keyboard('{Enter}');
+    expect(getByTestId('palette-location').textContent).toBe(expected);
+  });
+
+  it('does not retain another project\'s view when switching to the selected scope', async () => {
+    const user = userEvent.setup();
+    useScope.getState().selectProject('project-1', 'Alpha', 'active');
+    stubListing(listing([]));
+    const { findByRole, getByTestId } = renderPalette(
+      '/loom?scope=project-2&scopeLabel=Beta&loomRenderer=rails',
+    );
+    await findByRole('listbox');
+
+    await user.keyboard('loom{Enter}');
+    expect(getByTestId('palette-location').textContent).toBe(
+      '/loom?scope=project-1&scopeLabel=Alpha',
+    );
+  });
+
+  it.each([
+    [
+      '/?scopeLabel=Ghost&field=sigma&node=node-3#selection',
+      'Brain',
+      '/?field=sigma&node=node-3#selection',
+    ],
+    [
+      '/Loom/?scopeLabel=Ghost&loomRenderer=strata&session=run-4#replay',
+      'Loom',
+      '/Loom/?loomRenderer=strata&session=run-4#replay',
+    ],
+  ])('removes a stray label from %s without resetting the view', async (url, label, expected) => {
+    const user = userEvent.setup();
+    stubListing(listing([]));
+    const { findByRole, getByTestId } = renderPalette(url);
+    await findByRole('listbox');
+
+    await user.keyboard(label);
+    await waitFor(() => expect(activeOptionLabel()).toBe(label));
+    await user.keyboard('{Enter}');
+    expect(getByTestId('palette-location').textContent).toBe(expected);
+  });
+
+  it('does not carry a workspace view into a different workspace', async () => {
+    const user = userEvent.setup();
+    stubListing(listing([]));
+    const { findByRole, getByTestId } = renderPalette('/loom?loomRenderer=rails');
+    await findByRole('listbox');
+
+    await user.keyboard('code{Enter}');
+    expect(getByTestId('palette-location').textContent).toBe('/code');
+  });
+
+  it('updates project scope rather than retaining an unscoped view', async () => {
+    const user = userEvent.setup();
+    useScope.getState().selectProject('project-1', 'Alpha', 'active');
+    stubListing(listing([]));
+    const { findByRole, getByTestId } = renderPalette('/loom?loomRenderer=rails');
+    await findByRole('listbox');
+
+    await user.keyboard('loom{Enter}');
+    expect(getByTestId('palette-location').textContent).toBe('/loom?scope=project-1&scopeLabel=Alpha');
+  });
+
+  it.each([
+    ['code', 'Code'],
+    ['sessions', 'Sessions'],
+    ['knowledge', 'Knowledge'],
+  ])('opens the exact %s workspace instead of a matching task hint', async (query, label) => {
+    const user = userEvent.setup();
+    stubListing(listing([]));
+    const { findByRole, getByTestId } = renderPalette();
+    await findByRole('listbox');
+
+    // Explorer occurs earlier in CHANNELS and mentions each term in its
+    // hint. Enter must still navigate to the exact named workspace.
+    await user.keyboard(query);
+    await waitFor(() => expect(activeOptionLabel()).toBe(label));
+    await user.keyboard('{Enter}');
+    expect(getByTestId('palette-location').textContent).toBe(`/${query}`);
+  });
+
   it('focuses the search box on open, so the first keystroke reaches it', async () => {
     stubListing(listing([]));
     renderPalette();
@@ -334,6 +472,103 @@ describe('CommandPalette long and shrinking lists', () => {
     );
     expect(active).not.toBeNull();
     expect(active?.getAttribute('aria-selected')).toBe('true');
+  });
+
+  it('keeps keyboard activation when a project appears after an empty search', async () => {
+    const user = userEvent.setup();
+    stubListing(listing([]));
+    const { findByRole, getByTestId, client } = renderPalette();
+    await findByRole('listbox');
+
+    await user.keyboard('RareProject');
+    await waitFor(() => expect(activeOptionLabel()).toBe('(nothing is announced as active)'));
+    await user.keyboard('{ArrowDown}');
+
+    // The registry can finish a new read without the user typing again.
+    // Before the fix ArrowDown wrote -1 while results were empty; the matching
+    // row then existed but lacked an active IDREF and Enter could not select it.
+    act(() => {
+      client.setQueryData([...projectRegistryListKey, UNSCOPED_CACHE_KEY], {
+        outcome: 'envelope',
+        envelope: fixtureEnvelope(listing([registryEntry('proj-new', 'RareProject', true)])),
+      });
+    });
+    await waitFor(() => expect(activeOptionLabel()).toBe('RareProject'));
+    const id = combobox().getAttribute('aria-activedescendant');
+    expect(id).toBeTruthy();
+    expect(document.getElementById(id!)?.getAttribute('aria-selected')).toBe('true');
+
+    await user.keyboard('{Enter}');
+    expect(useScope.getState().scope).toMatchObject({
+      kind: 'project',
+      projectId: 'proj-new',
+      activation: 'active',
+    });
+    // Project activation is a scoped navigation, not a plain workspace visit.
+    expect(getByTestId('palette-location').textContent).toBe(
+      '/brain?scope=proj-new&scopeLabel=RareProject',
+    );
+  });
+
+  it('keeps the selected project identity when a registry refresh reorders results', async () => {
+    const user = userEvent.setup();
+    const alpha = registryEntry('proj-alpha', 'Rare Alpha', false);
+    const beta = registryEntry('proj-beta', 'Rare Beta', true);
+    stubListing(listing([alpha, beta]));
+    const { findByText, client } = renderPalette();
+    await findByText('Rare Beta');
+
+    await user.keyboard('Rare');
+    await waitFor(() => expect(activeOptionLabel()).toBe('Rare Alpha'));
+    await user.keyboard('{ArrowDown}');
+    expect(activeOptionLabel()).toBe('Rare Beta');
+
+    // Reordered registration results must not silently select a different
+    // project while the keyboard is stationary.
+    act(() => {
+      client.setQueryData([...projectRegistryListKey, UNSCOPED_CACHE_KEY], {
+        outcome: 'envelope',
+        envelope: fixtureEnvelope(listing([beta, alpha])),
+      });
+    });
+    await waitFor(() => expect(activeOptionLabel()).toBe('Rare Beta'));
+    const id = combobox().getAttribute('aria-activedescendant');
+    expect(document.getElementById(id ?? '')?.getAttribute('aria-selected')).toBe('true');
+
+    await user.keyboard('{Enter}');
+    expect(useScope.getState().scope).toMatchObject({
+      kind: 'project',
+      projectId: 'proj-beta',
+      activation: 'active',
+    });
+  });
+
+  it('forgets a chosen project when the search is edited and then restored', async () => {
+    const user = userEvent.setup();
+    const alpha = registryEntry('proj-alpha', 'Rare Alpha', false);
+    const beta = registryEntry('proj-beta', 'Rare Beta', true);
+    stubListing(listing([alpha, beta]));
+    const { findByText } = renderPalette();
+    await findByText('Rare Beta');
+
+    await user.keyboard('Rare');
+    await waitFor(() => expect(activeOptionLabel()).toBe('Rare Alpha'));
+    await user.keyboard('{ArrowDown}');
+    expect(activeOptionLabel()).toBe('Rare Beta');
+
+    await user.keyboard('x');
+    await waitFor(() =>
+      expect(activeOptionLabel()).toBe('(nothing is announced as active)'),
+    );
+    await user.keyboard('{Backspace}');
+    await waitFor(() => expect(activeOptionLabel()).toBe('Rare Alpha'));
+
+    await user.keyboard('{Enter}');
+    expect(useScope.getState().scope).toMatchObject({
+      kind: 'project',
+      projectId: 'proj-alpha',
+      activation: 'selected',
+    });
   });
 
   it('clamps the active row when the listing shrinks, and Enter still fires', async () => {

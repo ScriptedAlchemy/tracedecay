@@ -2431,7 +2431,7 @@ mod tests {
             StoreIncarnationV1::new(1).unwrap(),
             StoreAuthorityEpochV1::new(1).unwrap(),
         );
-        let path = root.join("graph.grafeo");
+        let path = root.canonicalize().unwrap().join("graph.grafeo");
         let verified_locator = VerifiedStoreLocatorV1::new(
             binding.shard_id.clone(),
             binding.incarnation,

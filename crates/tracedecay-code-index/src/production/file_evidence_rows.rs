@@ -623,6 +623,10 @@ impl PersistedFileEvidenceV1 {
             .any(|path| paths.contains(path.as_str()))
     }
 
+    pub(super) fn target_paths(&self) -> impl Iterator<Item = &str> {
+        self.target_paths.iter().map(String::as_str)
+    }
+
     pub(super) fn cross_file_edge_count(&self) -> usize {
         self.edges.len()
     }
