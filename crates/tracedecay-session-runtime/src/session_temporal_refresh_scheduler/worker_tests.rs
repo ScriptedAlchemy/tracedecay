@@ -223,7 +223,10 @@ async fn durable_recovery_progresses_before_another_discovery_scan() {
         "the final durable completion still owes the deferred discovery scan"
     );
 
-    let discovery = run_session_temporal_refresh_pass(
+    // The bounded discovery sweep alternates pending-effect and
+    // active-generation pages, so the drain settles on the pass that confirms
+    // the active sweep is exhausted rather than on the first discovery pass.
+    let mut discovery = run_session_temporal_refresh_pass(
         &harness.registered,
         &state,
         &CanonicalSessionTemporalProjector,
@@ -233,9 +236,28 @@ async fn durable_recovery_progresses_before_another_discovery_scan() {
         },
     )
     .await;
-    assert_eq!(discovery.projected_batches, 0);
-    assert_eq!(discovery.completed, 0);
-    assert_eq!(discovery.backlog, Some(0));
+    assert!(
+        discovery.discovery_advanced,
+        "the deferred discovery scan must run"
+    );
+    for _ in 0..4 {
+        assert_eq!(discovery.projected_batches, 0);
+        assert_eq!(discovery.completed, 0);
+        assert_eq!(discovery.backlog, Some(0));
+        if !discovery.saturated {
+            break;
+        }
+        discovery = run_session_temporal_refresh_pass(
+            &harness.registered,
+            &state,
+            &CanonicalSessionTemporalProjector,
+            SessionTemporalRefreshPolicy {
+                max_operations_per_pass: 1,
+                ..SessionTemporalRefreshPolicy::default()
+            },
+        )
+        .await;
+    }
     assert!(!discovery.saturated, "discovery settles the bounded drain");
 }
 
