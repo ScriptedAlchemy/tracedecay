@@ -82,8 +82,8 @@ use std::os::windows::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::sync::{LazyLock, Mutex, OnceLock, PoisonError};
 
-use asupersync::channel::watch;
 use sha2::{Digest, Sha256};
+use tokio::sync::watch;
 use tracedecay_private_fs::{ChangeClockReading, ChangeStamp, RewriteWitness};
 use tracedecay_runtime_core::background_cpu::ProcessBackgroundCpuV1;
 use tracedecay_runtime_core::resident_memory::{

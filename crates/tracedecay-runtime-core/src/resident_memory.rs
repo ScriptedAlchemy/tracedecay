@@ -8,7 +8,6 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::time::{Duration, Instant};
 
-use asupersync::channel::watch;
 #[cfg(target_os = "macos")]
 use mach2::{
     kern_return::KERN_SUCCESS,
@@ -19,6 +18,7 @@ use mach2::{
     traps::mach_task_self,
 };
 use sysinfo::{MemoryRefreshKind, RefreshKind, System};
+use tokio::sync::watch;
 use tracedecay_domain::process_heap::installed_process_allocator_release_v1;
 use tracedecay_domain::{CodeGenerationId, ProjectId, WorktreeId};
 
@@ -1040,7 +1040,7 @@ impl Drop for ResidentMemoryPressureRegistrationV1 {
 
 fn advance_headroom_epoch(epoch: &watch::Sender<u64>) {
     // Refused only once the sender is dropped, and the caller still holds it.
-    let _ = epoch.send_modify(|epoch| *epoch = epoch.wrapping_add(1));
+    epoch.send_modify(|epoch| *epoch = epoch.wrapping_add(1));
 }
 
 static PROCESS_RESIDENT_MEMORY_PRESSURE_V1: OnceLock<Arc<ResidentMemoryPressureV1>> =

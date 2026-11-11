@@ -48,11 +48,11 @@ impl QueryExecutor for SnapshotConnection {
     where
         P: IntoParams,
     {
-        let cx = crate::native_runtime::cx().ok_or(EngineError::RuntimeContextUnavailable)?;
+        let cx = crate::native_runtime::handle().ok_or(EngineError::RuntimeContextUnavailable)?;
         let params = params.into_params()?;
         let connection = Arc::clone(&self.connection);
         let sql = sql.to_owned();
-        cx.spawn_blocking(move |_| {
+        crate::native_runtime::spawn_blocking_on(&cx, move || {
             let connection = connection
                 .lock()
                 .map_err(|_| EngineError::Runtime("snapshot connection lock poisoned".into()))?;
@@ -80,8 +80,6 @@ impl QueryExecutor for SnapshotConnection {
             }
             Ok(Rows::from_rows(collected))
         })
-        .map_err(|error| EngineError::Runtime(format!("snapshot task admission failed: {error}")))?
-        .join(&cx)
         .await
         .map_err(|error| EngineError::Runtime(format!("snapshot query task failed: {error}")))?
     }
@@ -92,11 +90,11 @@ impl Executor for SnapshotConnection {
     where
         P: IntoParams,
     {
-        let cx = crate::native_runtime::cx().ok_or(EngineError::RuntimeContextUnavailable)?;
+        let cx = crate::native_runtime::handle().ok_or(EngineError::RuntimeContextUnavailable)?;
         let params = params.into_params()?;
         let connection = Arc::clone(&self.connection);
         let sql = sql.to_owned();
-        cx.spawn_blocking(move |_| {
+        crate::native_runtime::spawn_blocking_on(&cx, move || {
             let connection = connection
                 .lock()
                 .map_err(|_| EngineError::Runtime("snapshot connection lock poisoned".into()))?;
@@ -109,25 +107,21 @@ impl Executor for SnapshotConnection {
             u64::try_from(changed)
                 .map_err(|_| EngineError::Runtime("snapshot row count overflow".into()))
         })
-        .map_err(|error| EngineError::Runtime(format!("snapshot task admission failed: {error}")))?
-        .join(&cx)
         .await
         .map_err(|error| EngineError::Runtime(format!("snapshot execute task failed: {error}")))?
     }
 
     async fn execute_batch(&self, sql: &str) -> crate::db::engine::Result<()> {
-        let cx = crate::native_runtime::cx().ok_or(EngineError::RuntimeContextUnavailable)?;
+        let cx = crate::native_runtime::handle().ok_or(EngineError::RuntimeContextUnavailable)?;
         let connection = Arc::clone(&self.connection);
         let sql = sql.to_owned();
-        cx.spawn_blocking(move |_| {
+        crate::native_runtime::spawn_blocking_on(&cx, move || {
             connection
                 .lock()
                 .map_err(|_| EngineError::Runtime("snapshot connection lock poisoned".into()))?
                 .execute_batch(&sql)
                 .map_err(|error| snapshot_sqlite_error("execute snapshot batch", error))
         })
-        .map_err(|error| EngineError::Runtime(format!("snapshot task admission failed: {error}")))?
-        .join(&cx)
         .await
         .map_err(|error| EngineError::Runtime(format!("snapshot batch task failed: {error}")))?
     }

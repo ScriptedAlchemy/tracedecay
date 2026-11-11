@@ -7,7 +7,7 @@ use tracedecay_runtime_core::cancellation::CancellationToken;
 use super::{execute_collection, plan_collection};
 use crate::telemetry::StoreTelemetrySamplingRegistry;
 
-#[asupersync::test]
+#[tokio::test]
 async fn maintenance_owner_advances_noop_pages_and_applies_a_later_orphan() {
     let store = tempfile::tempdir().unwrap();
     let artifacts = code_text_artifacts_root(store.path());

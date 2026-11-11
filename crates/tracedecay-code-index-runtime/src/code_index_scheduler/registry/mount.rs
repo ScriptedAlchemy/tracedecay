@@ -4003,16 +4003,10 @@ impl CodeIndexSchedulerRegistryV1 {
         let headroom_memory_retry = Arc::downgrade(&memory_retry);
         let headroom_source_epoch = Arc::downgrade(&epoch);
         spawn_detached("code_index_headroom_watcher", async move {
-            let Some(cx) = tracedecay_runtime_core::native_runtime::cx() else {
-                tracing::error!(
-                    "native runtime unavailable; memory headroom no longer wakes this worktree"
-                );
-                return;
-            };
             loop {
                 let (changed, owner_released) = tokio::select! {
-                    changed = owner_headroom.changed(&cx) => (changed, true),
-                    changed = admission_headroom.changed(&cx) => (changed, false),
+                    changed = owner_headroom.changed() => (changed, true),
+                    changed = admission_headroom.changed() => (changed, false),
                 };
                 let (
                     Ok(()),

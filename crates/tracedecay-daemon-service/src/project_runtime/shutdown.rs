@@ -5,7 +5,7 @@ use std::pin::Pin;
 use std::sync::{Arc, atomic::Ordering};
 use std::time::Instant;
 
-use tracedecay_runtime_core::native_runtime::{NativeTask, NativeTaskOutcome};
+use tracedecay_runtime_core::native_runtime::{self, NativeTask, NativeTaskOutcome};
 
 use super::{ProjectRuntime, ProjectRuntimeRegistryV1};
 use crate::invocation::UnavailableFeedbackCycleRuntimeV1;
@@ -488,10 +488,10 @@ fn release_drained_runtimes<R: Send + 'static>(runtimes: BTreeMap<PathBuf, R>) {
             ],
         );
     };
-    // Queued here rather than through the awaitable helper, which would only
-    // start the release once polled. Without a pool the runtimes drop inline.
-    let _ = tracedecay_runtime_core::native_runtime::handle()
-        .and_then(|runtime| runtime.spawn_blocking(release));
+    // Queue immediately and drop the join handle to detach the release.
+    // Without a pool the captured runtimes drop inline.
+    let _ = native_runtime::handle()
+        .map(|runtime| native_runtime::spawn_blocking_on(&runtime, release));
 }
 
 #[cfg(test)]

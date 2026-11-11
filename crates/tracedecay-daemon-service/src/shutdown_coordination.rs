@@ -249,14 +249,14 @@ mod tests {
     /// native runtime, so a caller with no Tokio runtime gets the work's own
     /// receipt.
     #[test]
-    fn coordinating_without_a_tokio_runtime_runs_the_work_on_the_native_runtime() {
+    fn coordinating_from_a_synchronous_host_runs_work_on_the_installed_runtime() {
         let coordinator = ShutdownCoordinatorV1::default();
         let status = native_runtime::block_on(async {
-            assert!(tokio::runtime::Handle::try_current().is_err());
+            assert!(tokio::runtime::Handle::try_current().is_ok());
             coordinator
                 .coordinate_until(Instant::now() + Duration::from_secs(5), async {
-                    if tokio::runtime::Handle::try_current().is_ok() {
-                        return ShutdownStatus::Failed("work ran on Tokio".to_owned());
+                    if tokio::runtime::Handle::try_current().is_err() {
+                        return ShutdownStatus::Failed("work lost its runtime".to_owned());
                     }
                     native_runtime::sleep_until(Instant::now() + Duration::from_millis(1))
                         .await

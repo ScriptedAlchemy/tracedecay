@@ -3229,8 +3229,8 @@ async fn project_registry_read_does_not_wait_for_a_blocked_project_open() {
     engine.shutdown_all().await;
 }
 
-// The publication wait runs under the request's executor, which need not be
-// Tokio: under `native_runtime::block_on` no Tokio runtime is entered.
+// A synchronous host enters the installed runtime for the publication wait;
+// both immediate publication and deadline expiry must settle there.
 #[test]
 fn foreground_project_open_wait_is_bounded_and_accepts_quick_publication() {
     let project_path = std::path::PathBuf::from("/projects/uncontended");

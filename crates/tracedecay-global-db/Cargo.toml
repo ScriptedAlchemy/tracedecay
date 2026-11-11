@@ -18,7 +18,7 @@ test-helpers = [
 ]
 
 [dependencies]
-asupersync.workspace = true
+tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros", "time", "sync", "io-util", "net"] }
 base64.workspace = true
 futures-util.workspace = true
 getrandom.workspace = true

@@ -17,7 +17,7 @@ test-helpers = [
 ]
 
 [dependencies]
-asupersync.workspace = true
+tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros", "time", "sync", "io-util", "net"] }
 cap-fs-ext.workspace = true
 cap-std.workspace = true
 futures-util.workspace = true

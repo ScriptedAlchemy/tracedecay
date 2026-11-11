@@ -352,14 +352,14 @@ mod tests {
     /// Both Work observation recovery loops run on the native runtime: with no
     /// Tokio runtime anywhere they mount, and shutdown joins them.
     #[test]
-    fn work_observation_recovery_owners_run_without_a_tokio_runtime() {
+    fn work_observation_recovery_owners_run_from_a_synchronous_host() {
         let site = "daemon-service.work_blocked_interval_recovery.start";
         let profile = tempfile::tempdir().expect("profile root");
         let project = tempfile::tempdir().expect("project root");
         let tokio_misses = native_runtime::tokio_runtime_missing_count(site);
         let writer_waits = tracedecay_rusqlite_runtime::exact_sql::native_thread_writer_waits();
         native_runtime::block_on(async {
-            assert!(tokio::runtime::Handle::try_current().is_err());
+            assert!(tokio::runtime::Handle::try_current().is_ok());
             let project_id = ProjectId::new("project.work.native-recovery").expect("project id");
             let host = tracedecay_project::test_support::host_admission::HostAdmissionTestRuntimeV1::project(
                 profile.path(),

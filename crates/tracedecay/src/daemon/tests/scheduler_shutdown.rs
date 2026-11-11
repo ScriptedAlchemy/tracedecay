@@ -865,14 +865,14 @@ async fn engine_shutdown_with_code_index_reconcile_in_flight_stays_inside_term_g
     );
 }
 
-/// Retirement hands the aborted loop to a reaper on the native runtime, which
-/// joins it and releases its registration with no Tokio runtime entered.
+/// Retirement hands the aborted loop to a reaper on the installed runtime,
+/// which joins it and releases its registration for a synchronous host.
 #[cfg(unix)]
 #[test]
-fn automation_retirement_reaps_without_a_tokio_runtime() {
+fn automation_retirement_reaps_from_a_synchronous_host() {
     let hazards = crate::test_support::native_runtime_hazards();
     tracedecay_runtime_core::native_runtime::block_on(async {
-        assert!(tokio::runtime::Handle::try_current().is_err());
+        assert!(tokio::runtime::Handle::try_current().is_ok());
         let engine = DaemonEngine::default();
         let key = ProjectServerKey {
             owner: StoreOwnerKey {
@@ -926,14 +926,14 @@ fn automation_retirement_reaps_without_a_tokio_runtime() {
     assert_eq!(crate::test_support::native_runtime_hazards(), hazards);
 }
 
-/// Branch add admits its publication onto the native runtime and shutdown
-/// joins it, with no Tokio runtime entered.
+/// A synchronous host admits branch publication onto the installed runtime,
+/// then shutdown joins it.
 #[cfg(unix)]
 #[test]
-fn manual_branch_publication_runs_and_joins_without_a_tokio_runtime() {
+fn manual_branch_publication_runs_and_joins_from_a_synchronous_host() {
     let hazards = crate::test_support::native_runtime_hazards();
     tracedecay_runtime_core::native_runtime::block_on(async {
-        assert!(tokio::runtime::Handle::try_current().is_err());
+        assert!(tokio::runtime::Handle::try_current().is_ok());
         let administration = DaemonEngine::default().store_administration.clone();
         let (release_sender, release_receiver) = tokio::sync::oneshot::channel();
         let admission = administration

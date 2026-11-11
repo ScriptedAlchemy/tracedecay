@@ -13,11 +13,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::task::{Context, Poll};
 use std::time::Duration;
 
-use asupersync::io::{AsyncRead, AsyncWrite, ReadBuf};
-use asupersync::net::{TcpListener, TcpStream};
-use asupersync::time::{Sleep, wall_now};
-use asupersync::tls::{TlsAcceptor, TlsStream};
-use asupersync::types::Time;
 use axum::body::Body;
 use axum::extract::Request;
 use axum::http::{HeaderValue, header::CONNECTION};
@@ -28,7 +23,11 @@ use rustls::client::{verify_server_cert_signed_by_trust_anchor, verify_server_na
 use rustls::pki_types::pem::PemObject;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, ServerName, UnixTime};
 use rustls::server::ParsedCertificate;
+use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
+use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, oneshot};
+use tokio::time::{Instant, Sleep, sleep};
+use tokio_rustls::{TlsAcceptor, server::TlsStream};
 use tokio_util::sync::CancellationToken;
 use tracedecay_daemon_control::RemoteBrainTlsConfig;
 use tracedecay_dashboard_api::serve_http_connection;
@@ -245,7 +244,7 @@ impl RemoteBrainTlsListener {
             .map_err(|error| tls_configuration_error("bind Remote Brain TLS listener", error))?;
         Ok(Self {
             listener,
-            acceptor: TlsAcceptor::new(server),
+            acceptor: TlsAcceptor::from(Arc::new(server)),
             admission: Arc::new(Semaphore::new(MAX_REMOTE_BRAIN_TLS_CONNECTIONS)),
             deadlines: RemoteBrainTlsDeadlines::PRODUCTION,
             #[cfg(any(test, feature = "test-helpers"))]
@@ -263,7 +262,7 @@ impl RemoteBrainTlsListener {
             Ok(accepted) => accepted,
             Err(error) => {
                 tracing::warn!(%error, "Remote Brain TLS listener accept failed");
-                Sleep::after(wall_now(), Duration::from_millis(50)).await;
+                sleep(Duration::from_millis(50)).await;
                 return None;
             }
         };
@@ -280,8 +279,7 @@ impl RemoteBrainTlsListener {
             stream,
             read: Arc::clone(&handshake_read),
         };
-        let handshake =
-            Box::pin(async move { acceptor.accept(stream).await.map_err(io::Error::other) });
+        let handshake = Box::pin(async move { acceptor.accept(stream).await });
         Some((
             RemoteBrainTlsIo::new(
                 handshake,
@@ -409,37 +407,34 @@ fn observe_remote_brain_connection_end(outcome: native_runtime::NativeTaskOutcom
 
 /// A resettable connection deadline that reports expiry on every poll.
 ///
-/// The connection task runs on the native runtime and polls an Asupersync
-/// `Sleep` directly. It is a documented exception to
-/// `native_runtime::sleep_until`: the read and write deadlines reset on every
-/// transferred chunk, and a native task per reset would cost tens of
-/// microseconds each. `Sleep` panics when polled after it completes,
-/// so expiry is latched here until the next reset.
+/// The pinned Tokio timer is reused for every transferred chunk. Expiry is
+/// latched until the next reset, so a connection can report the same deadline
+/// from repeated read/write polls without creating another task or timer.
 struct IoDeadline {
-    sleep: Sleep,
+    sleep: Pin<Box<Sleep>>,
     expired: bool,
 }
 
 impl IoDeadline {
     fn after(duration: Duration) -> Self {
         Self {
-            sleep: Sleep::after(wall_now(), duration),
+            sleep: Box::pin(sleep(duration)),
             expired: false,
         }
     }
 
-    fn reset_after(&mut self, now: Time, duration: Duration) {
-        self.sleep.reset_after(now, duration);
+    fn reset_after(&mut self, now: Instant, duration: Duration) {
+        self.sleep.as_mut().reset(now + duration);
         self.expired = false;
     }
 
-    fn deadline(&self) -> Time {
+    fn deadline(&self) -> Instant {
         self.sleep.deadline()
     }
 
     fn poll_expired(&mut self, context: &mut Context<'_>) -> bool {
         if !self.expired {
-            self.expired = Pin::new(&mut self.sleep).poll(context).is_ready();
+            self.expired = self.sleep.as_mut().poll(context).is_ready();
         }
         self.expired
     }
@@ -527,9 +522,9 @@ struct RemoteBrainTlsIo {
     #[cfg(any(test, feature = "test-helpers"))]
     egress_response_expired: bool,
     #[cfg(any(test, feature = "test-helpers"))]
-    egress_last_positive_write: Option<Time>,
+    egress_last_positive_write: Option<Instant>,
     #[cfg(any(test, feature = "test-helpers"))]
-    egress_write_idle_deadline_at: Option<Time>,
+    egress_write_idle_deadline_at: Option<Instant>,
     #[cfg(any(test, feature = "test-helpers"))]
     egress: Arc<RemoteBrainTlsEgressObserver>,
     header_bytes: Vec<u8>,
@@ -629,7 +624,7 @@ impl RemoteBrainTlsIo {
         start_egress: bool,
     ) -> io::Result<()> {
         if !self.egress_started && start_egress {
-            let now = wall_now();
+            let now = Instant::now();
             self.reset_write_idle_deadline(now);
             self.response_deadline
                 .reset_after(now, self.deadlines.response);
@@ -658,8 +653,7 @@ impl RemoteBrainTlsIo {
                 .egress_last_positive_write
                 .zip(self.egress_write_idle_deadline_at)
                 .is_none_or(|(last_write, deadline_at)| {
-                    Duration::from_nanos(deadline_at.duration_since(last_write))
-                        != self.deadlines.write_idle
+                    deadline_at.duration_since(last_write) != self.deadlines.write_idle
                 });
             if violates_idle_deadline {
                 self.egress
@@ -683,7 +677,7 @@ impl RemoteBrainTlsIo {
         ))
     }
 
-    fn reset_write_idle_deadline(&mut self, now: Time) {
+    fn reset_write_idle_deadline(&mut self, now: Instant) {
         self.write_idle_deadline
             .reset_after(now, self.deadlines.write_idle);
         #[cfg(any(test, feature = "test-helpers"))]
@@ -716,7 +710,7 @@ impl RemoteBrainTlsIo {
         match handshake.as_mut().poll(context) {
             Poll::Pending => {
                 if self.handshake_read.swap(false, Ordering::Relaxed) {
-                    let now = wall_now();
+                    let now = Instant::now();
                     self.read_idle_deadline
                         .reset_after(now, self.deadlines.read_idle);
                     if !self.peer_heard {
@@ -734,7 +728,7 @@ impl RemoteBrainTlsIo {
                 // arm only when polled: wake the reader to re-poll the stream.
                 context.waker().wake_by_ref();
                 self.transport = RemoteBrainTlsTransport::Streaming(Box::new(stream));
-                let now = wall_now();
+                let now = Instant::now();
                 self.read_idle_deadline
                     .reset_after(now, self.deadlines.read_idle);
                 self.request_read_deadline
@@ -873,7 +867,8 @@ impl AsyncRead for RemoteBrainTlsIo {
         if matches!(result, Poll::Ready(Ok(()))) {
             if buffer.filled().len() > before {
                 let read_idle = self.deadlines.read_idle;
-                self.read_idle_deadline.reset_after(wall_now(), read_idle);
+                self.read_idle_deadline
+                    .reset_after(Instant::now(), read_idle);
             }
             if let Err(error) = self.observe_http_request(&buffer.filled()[before..]) {
                 return Poll::Ready(Err(error));
@@ -910,7 +905,7 @@ impl AsyncWrite for RemoteBrainTlsIo {
             RemoteBrainTlsTransport::Handshaking(_) => Poll::Pending,
         };
         if matches!(result, Poll::Ready(Ok(written)) if written > 0) {
-            self.reset_write_idle_deadline(wall_now());
+            self.reset_write_idle_deadline(Instant::now());
         }
         #[cfg(any(test, feature = "test-helpers"))]
         self.observe_egress_write_pending(result.is_pending());

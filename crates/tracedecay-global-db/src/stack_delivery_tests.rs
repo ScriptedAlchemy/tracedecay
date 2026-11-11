@@ -31,7 +31,7 @@ async fn state(
         .expect("read recipient state")
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn pending_delivery_survives_restart_and_settles_only_after_acknowledgement() {
     let harness = RegisteredGlobalDbHarness::open("github-stack-delivery-restart").await;
     let record = signal("signal.github-stack-restart", 10);
@@ -99,7 +99,7 @@ async fn pending_delivery_survives_restart_and_settles_only_after_acknowledgemen
     );
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn saturation_is_per_recipient_and_defers_the_exact_overflow_recipient() {
     let harness = RegisteredGlobalDbHarness::open("github-stack-delivery-saturation").await;
     for index in 0..MAX_GITHUB_STACK_ACTIVE_PENDING_V1 {
@@ -155,7 +155,7 @@ async fn saturation_is_per_recipient_and_defers_the_exact_overflow_recipient() {
     );
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn settling_a_recipient_promotes_only_its_oldest_deferred_row() {
     let harness = RegisteredGlobalDbHarness::open("github-stack-delivery-promotion").await;
     let both = vec![RECIPIENT.to_owned(), "actor.other".to_owned()];

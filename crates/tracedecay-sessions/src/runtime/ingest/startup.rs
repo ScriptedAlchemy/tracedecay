@@ -4,7 +4,7 @@ use std::sync::LazyLock;
 
 use tracedecay_runtime_core::erase_send;
 
-use asupersync::channel::watch;
+use tokio::sync::watch;
 
 use super::authority::SessionIngestAuthority;
 use crate::ProviderPassUnits;

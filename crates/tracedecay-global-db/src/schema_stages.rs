@@ -2110,7 +2110,7 @@ mod tests {
     /// older LCM, git correlation, or workflow schema is refused for its
     /// sessions, while the profile authority, which holds no session rows,
     /// keeps serving its registry and leaves those markers exactly as found.
-    #[asupersync::test]
+    #[tokio::test]
     async fn released_session_feature_markers_refuse_session_stores_but_not_the_profile_authority()
     {
         const PREVIOUS_LCM: i64 = LCM_SCHEMA_VERSION - 1;
@@ -2211,7 +2211,7 @@ mod tests {
         );
     }
 
-    #[asupersync::test]
+    #[tokio::test]
     async fn existing_store_reinstalls_the_project_leading_session_lookup_index() {
         let directory = TempDir::new().unwrap();
         let database_path = directory.path().join("sessions.db");
@@ -2274,7 +2274,7 @@ mod tests {
         );
     }
 
-    #[asupersync::test]
+    #[tokio::test]
     async fn existing_registry_without_remote_deletion_catalog_requires_typed_reset() {
         let directory = TempDir::new().unwrap();
         let database_path = directory.path().join("sessions.db");
@@ -2310,7 +2310,7 @@ mod tests {
         );
     }
 
-    #[asupersync::test]
+    #[tokio::test]
     async fn existing_registry_with_mismatched_remote_deletion_catalog_requires_typed_reset() {
         let directory = TempDir::new().unwrap();
         let database_path = directory.path().join("sessions.db");
@@ -2352,7 +2352,7 @@ mod tests {
     /// 8-column table released binaries through 0.0.74 created or any other
     /// drift, is refused with the project-registry reset state and left
     /// exactly as admission found it instead of being altered in place.
-    #[asupersync::test]
+    #[tokio::test]
     async fn registry_with_non_final_code_project_shape_requires_typed_reset() {
         for (drift, columns_after_refusal) in [
             (
@@ -2402,7 +2402,7 @@ mod tests {
     /// Released registries (through v1.0.0-beta.63) record a per-scope
     /// `db_relpath`. That shape is refused with the project-registry reset
     /// state, and its rows are left exactly as admission found them.
-    #[asupersync::test]
+    #[tokio::test]
     async fn registry_with_released_graph_scope_relpath_requires_typed_reset() {
         let directory = TempDir::new().unwrap();
         let database_path = directory.path().join("sessions.db");
@@ -2491,7 +2491,7 @@ mod tests {
         );
     }
 
-    #[asupersync::test]
+    #[tokio::test]
     async fn restored_triggers_still_refuse_corrupt_rows_without_repairing_them() {
         let directory = TempDir::new().unwrap();
         let database_path = directory.path().join("sessions.db");
@@ -2567,7 +2567,7 @@ mod tests {
         );
     }
 
-    #[asupersync::test]
+    #[tokio::test]
     async fn restored_triggers_arm_a_persistent_audit_that_refuses_fk_violations() {
         let directory = TempDir::new().unwrap();
         let database_path = directory.path().join("sessions.db");
@@ -2624,7 +2624,7 @@ mod tests {
         );
     }
 
-    #[asupersync::test]
+    #[tokio::test]
     async fn damaged_triggers_on_a_clean_store_are_restored_and_admitted() {
         let directory = TempDir::new().unwrap();
         let database_path = directory.path().join("sessions.db");
@@ -2705,7 +2705,7 @@ mod tests {
     /// A payload table that resembles the published one but is not it stays
     /// refused, and the refusal names the drifted table and both identities so
     /// an operator can tell it from damage.
-    #[asupersync::test]
+    #[tokio::test]
     async fn altered_artifact_table_refusal_names_the_table_and_both_identities() {
         let shape = format!(
             "DROP TABLE workflow_artifact_payloads;
@@ -2751,7 +2751,7 @@ mod tests {
 
     /// `workflow_schema` that cannot answer the identity query is one more
     /// drifted object to report, not a reason to fail the open.
-    #[asupersync::test]
+    #[tokio::test]
     async fn undecodable_recorded_identity_is_reported_as_unreadable() {
         let (_database_path, _directory, reason) = workflow_refusal_after(
             "DROP TABLE workflow_schema;
@@ -2781,7 +2781,7 @@ mod tests {
 
     /// A held database says nothing about the store, so it must not turn into
     /// reset wording.
-    #[asupersync::test]
+    #[tokio::test]
     async fn busy_identity_read_stays_a_typed_failure_instead_of_a_reset_reason() {
         let error = super::recorded_workflow_identity(&BusyConnection)
             .await
@@ -2795,7 +2795,7 @@ mod tests {
         );
     }
 
-    #[asupersync::test]
+    #[tokio::test]
     async fn missing_workflow_table_is_named_without_blaming_present_tables() {
         let (_database_path, _directory, reason) =
             workflow_refusal_after("DROP TABLE workflow_handoffs;").await;
@@ -2813,7 +2813,7 @@ mod tests {
         );
     }
 
-    #[asupersync::test]
+    #[tokio::test]
     async fn store_without_any_workflow_table_reports_them_absent() {
         let drops = WORKFLOW_TABLE_CONTRACTS_V1
             .iter()
@@ -2835,7 +2835,7 @@ mod tests {
         assert!(!reason.contains("the store records"), "{reason}");
     }
 
-    #[asupersync::test]
+    #[tokio::test]
     async fn workflow_identity_refusal_names_the_differing_fields_and_hides_foreign_text() {
         // The stored table pins `schema_version = 1`, so a digest is the one
         // identity field a store can disagree on while its tables stay exact.

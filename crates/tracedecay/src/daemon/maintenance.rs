@@ -1722,7 +1722,7 @@ mod tests {
     /// instead of waiting for a client to mount it. A tick that runs while a
     /// capacity release holds the maintenance store clients defers it.
     #[test]
-    fn a_full_tick_collects_an_unmounted_registered_project_without_a_tokio_runtime() {
+    fn a_full_tick_collects_an_unmounted_registered_project_from_a_synchronous_host() {
         let hazards = crate::test_support::native_runtime_hazards();
         tracedecay_runtime_core::native_runtime::block_on(
             a_full_tick_collects_an_unmounted_registered_project(),
@@ -1732,7 +1732,7 @@ mod tests {
     }
 
     async fn a_full_tick_collects_an_unmounted_registered_project() {
-        assert!(tokio::runtime::Handle::try_current().is_err());
+        assert!(tokio::runtime::Handle::try_current().is_ok());
         let temp = tempfile::TempDir::new().expect("temp root");
         let profile_root = temp.path().join("profile");
         let checkout = temp.path().join("checkout");
@@ -1981,13 +1981,13 @@ mod tests {
     }
 
     /// The coordinator starts its sampler, publication and retention owners
-    /// on the native runtime and joins them at shutdown, with no Tokio
-    /// runtime entered.
+    /// on the installed runtime and joins them at shutdown from a synchronous
+    /// host.
     #[test]
-    fn the_coordinator_runs_and_shuts_down_without_a_tokio_runtime() {
+    fn the_coordinator_runs_and_shuts_down_from_a_synchronous_host() {
         let hazards = crate::test_support::native_runtime_hazards();
         tracedecay_runtime_core::native_runtime::block_on(async {
-            assert!(tokio::runtime::Handle::try_current().is_err());
+            assert!(tokio::runtime::Handle::try_current().is_ok());
             let temp = tempfile::TempDir::new().expect("temp root");
             let retention = tracedecay_configuration::RetentionConfig {
                 orphan_store_gc_days: Some(30),

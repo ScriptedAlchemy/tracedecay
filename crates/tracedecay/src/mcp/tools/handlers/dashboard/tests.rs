@@ -152,13 +152,13 @@ async fn timed_out_shutdown_owner_aborts_the_dashboard_task() {
     assert!(get_manager().lock().await.is_empty());
 }
 
-/// The session resolution for a dashboard of a still-opening project runs
-/// where no Tokio runtime exists and publishes its terminal answer.
+/// Session resolution for a still-opening project publishes a terminal answer
+/// through the installed runtime.
 #[test]
-fn opening_project_sessions_resolve_without_a_tokio_runtime() {
+fn opening_project_sessions_resolve_on_the_process_runtime() {
     let hazards = crate::test_support::native_runtime_hazards();
     let unavailable = tracedecay_runtime_core::native_runtime::block_on(async {
-        assert!(tokio::runtime::Handle::try_current().is_err());
+        assert!(tokio::runtime::Handle::try_current().is_ok());
         let resolver = crate::mcp::server::install_retained_project_server_resolver(|_| {
             Box::pin(async { Ok(None) })
         });

@@ -11,7 +11,7 @@ pub mod git;
 pub mod host_admission;
 
 /// Tokio-dependent paths this process skipped, plus synchronous writer waits
-/// that parked a native worker. An off-Tokio test asserts this does not move.
+/// that parked an async worker. Runtime tests assert this does not move.
 #[cfg(test)]
 pub(crate) fn native_runtime_hazards() -> u64 {
     tracedecay_runtime_core::native_runtime::tokio_runtime_missing_count(

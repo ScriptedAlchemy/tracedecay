@@ -513,8 +513,7 @@ async fn rejected_auth_preface_reads_typed_refusal_then_clean_eof() {
     let server_task = tokio::spawn(async move {
         Box::pin(
             crate::daemon::connection_serving::serve_authenticated_socket_client_with_class(
-                tracedecay_daemon_protocol::transport::BrokerStream::from_tokio_unix(server)
-                    .expect("daemon end of the test socket"),
+                tracedecay_daemon_protocol::transport::BrokerStream::Unix(server),
                 engine,
                 "daemon-minted-token".to_string(),
                 super::super::core_admission::DaemonClientAdmissionClass::General,
@@ -931,8 +930,7 @@ async fn saturated_daemon_refuses_wire_drifted_handshake_instead_of_resetting() 
     let (client, server) = tokio::net::UnixStream::pair().expect("unix stream pair");
     let server_task = tokio::spawn(async move {
         crate::daemon::core_admission::reject_saturated_daemon_client(
-            tracedecay_daemon_protocol::BrokerStream::from_tokio_unix(server)
-                .expect("daemon end of the test socket"),
+            tracedecay_daemon_protocol::BrokerStream::Unix(server),
             crate::daemon::core_admission::DaemonClientSaturationResponse {
                 kind: crate::daemon::core_admission::DaemonClientSaturationKind::ClientCapacityReached,
                 retryable: true,

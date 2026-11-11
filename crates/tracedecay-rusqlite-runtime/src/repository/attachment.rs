@@ -1,4 +1,3 @@
-use asupersync::{Cx, runtime::RuntimeHandle};
 use std::{
     error::Error,
     fmt,
@@ -105,18 +104,16 @@ impl RepositoryPhysicalAttachmentFactory {
 
     pub fn attach(
         &self,
-        runtime: &RuntimeHandle,
         binding: StoreRuntimeBindingV1,
         locator: VerifiedStoreLocatorV1,
         path: PathBuf,
         admission: AdmissionConfigV1,
     ) -> Result<RepositoryRuntimePhysicalAttachment, RepositoryAttachmentStartError> {
-        self.attach_with_start_hook(runtime, binding, locator, path, admission, &mut |_| {})
+        self.attach_with_start_hook(binding, locator, path, admission, &mut |_| {})
     }
 
     fn attach_with_start_hook(
         &self,
-        runtime: &RuntimeHandle,
         binding: StoreRuntimeBindingV1,
         locator: VerifiedStoreLocatorV1,
         path: PathBuf,
@@ -126,7 +123,6 @@ impl RepositoryPhysicalAttachmentFactory {
         let opened_database =
             OpenedDatabaseFile::pin(&path).map_err(RepositoryAttachmentStartError::Identity)?;
         self.attach_opened(
-            runtime,
             binding,
             locator,
             path,
@@ -140,7 +136,6 @@ impl RepositoryPhysicalAttachmentFactory {
     #[tracing::instrument(name = "rusqlite.attachment.initialize", level = "trace", skip_all)]
     pub fn initialize(
         &self,
-        runtime: &RuntimeHandle,
         binding: StoreRuntimeBindingV1,
         locator: VerifiedStoreLocatorV1,
         path: PathBuf,
@@ -149,7 +144,6 @@ impl RepositoryPhysicalAttachmentFactory {
         let opened_database = OpenedDatabaseFile::create_new(&path)
             .map_err(RepositoryAttachmentStartError::Identity)?;
         self.attach_opened(
-            runtime,
             binding,
             locator,
             path,
@@ -164,7 +158,6 @@ impl RepositoryPhysicalAttachmentFactory {
     #[tracing::instrument(name = "rusqlite.attachment.attach", level = "trace", skip_all)]
     fn attach_opened(
         &self,
-        runtime: &RuntimeHandle,
         binding: StoreRuntimeBindingV1,
         locator: VerifiedStoreLocatorV1,
         path: PathBuf,
@@ -228,7 +221,6 @@ impl RepositoryPhysicalAttachmentFactory {
         let notice_state = Arc::clone(&lost_state);
         start_hook(AttachmentWorkerStartStage::BeforeWriter);
         let writer_result = PersistentWriter::start_with_checkpoint_blockers(
-            runtime,
             writer_locator,
             admission.clone(),
             ConcreteRepositoryWriteExecutor::default(),
@@ -581,7 +573,6 @@ impl RepositoryRuntimePhysicalAttachment {
 
     pub async fn dispatch_submit(
         &self,
-        cx: &Cx,
         request: RuntimeSubmitRequestV1,
         probe: Arc<dyn RuntimeRequestProbeV1>,
         authority: Arc<dyn RuntimeWriteAuthority>,
@@ -602,7 +593,7 @@ impl RepositoryRuntimePhysicalAttachment {
                 .ok_or(RepositoryDispatchError::Closed)?
         };
         writer
-            .submit_authorized(cx, request, probe, authority)
+            .submit_authorized(request, probe, authority)
             .await
             .map_err(|error| match error {
                 WriterActorError::StorageFailure(error) => {
@@ -614,7 +605,6 @@ impl RepositoryRuntimePhysicalAttachment {
 
     pub async fn run_bounded_incremental_compaction(
         &self,
-        cx: &Cx,
         max_pages: u32,
         authority: Arc<dyn RuntimeWriteAuthority>,
     ) -> Result<(), RepositoryDispatchError> {
@@ -629,14 +619,13 @@ impl RepositoryRuntimePhysicalAttachment {
                 .ok_or(RepositoryDispatchError::Closed)?
         };
         writer
-            .bounded_incremental_vacuum(cx, max_pages, authority)
+            .bounded_incremental_vacuum(max_pages, authority)
             .await
             .map_err(|error| RepositoryDispatchError::Writer(error.to_string()))
     }
 
     pub async fn run_checkpoint(
         &self,
-        cx: &Cx,
         request: CheckpointRequest,
         authority: Arc<dyn RuntimeWriteAuthority>,
     ) -> Result<CheckpointOutcome, RepositoryDispatchError> {
@@ -655,7 +644,7 @@ impl RepositoryRuntimePhysicalAttachment {
             .trigger_authorized(request, authority)
             .map_err(|error| RepositoryDispatchError::Writer(error.to_string()))?;
         ticket
-            .wait(cx)
+            .wait()
             .await
             .map_err(|error| RepositoryDispatchError::Writer(error.to_string()))
     }
@@ -963,28 +952,19 @@ mod tests {
 
     use crate::exact_sql::{ExactSqlError, ExactSqlStatement, ExactSqlValue};
 
-    use asupersync::channel::watch;
+    use tokio::sync::watch;
 
     use super::*;
 
-    fn native_runtime() -> RuntimeHandle {
-        crate::native_runtime::handle().expect("native runtime")
-    }
-
-    fn cx() -> Cx {
-        crate::native_runtime::cx().expect("native runtime context")
-    }
-
     async fn wait_for<T>(
-        cx: &Cx,
         receiver: &mut watch::Receiver<T>,
         mut predicate: impl FnMut(&T) -> bool,
-    ) -> Result<(), watch::RecvError> {
+    ) -> Result<(), watch::error::RecvError> {
         loop {
             if predicate(&receiver.borrow_and_update()) {
                 return Ok(());
             }
-            receiver.changed(cx).await?;
+            receiver.changed().await?;
         }
     }
 
@@ -1042,7 +1022,6 @@ mod tests {
         let path = path.canonicalize().unwrap();
         let binding = binding();
         let result = RepositoryPhysicalAttachmentFactory.attach_with_start_hook(
-            &native_runtime(),
             binding.clone(),
             locator(&binding),
             path.clone(),
@@ -1113,7 +1092,6 @@ mod tests {
         create_identity_database(&path, "seed");
         RepositoryPhysicalAttachmentFactory
             .attach(
-                &native_runtime(),
                 binding.clone(),
                 locator(binding),
                 path.canonicalize().unwrap(),
@@ -1188,7 +1166,6 @@ mod tests {
         let created_path = directory.path().join("created.sqlite3");
         let created = RepositoryPhysicalAttachmentFactory
             .initialize(
-                &native_runtime(),
                 binding.clone(),
                 locator(&binding),
                 created_path.clone(),
@@ -1272,7 +1249,7 @@ mod tests {
             assert_eq!(rows.rows[0].values, vec![ExactSqlValue::Integer(2)]);
             attachment
         };
-        native_runtime();
+        crate::native_runtime::handle().expect("native runtime");
         let before = threads();
         let attachments = (0..64).map(exercise).collect::<Vec<_>>();
         let started = threads()
@@ -1565,7 +1542,6 @@ mod tests {
         for cycle in 0_i64..3 {
             let attachment = factory
                 .attach(
-                    &native_runtime(),
                     binding.clone(),
                     locator.clone(),
                     path.clone(),
@@ -1715,13 +1691,7 @@ mod tests {
         admission.wal.soft_limit_bytes = 8 * 1024;
         admission.wal.hard_limit_bytes = 16 * 1024;
         let attachment = RepositoryPhysicalAttachmentFactory
-            .attach(
-                &native_runtime(),
-                binding.clone(),
-                locator(&binding),
-                path,
-                admission,
-            )
+            .attach(binding.clone(), locator(&binding), path, admission)
             .unwrap();
         let handle = attachment.exact_sql_handle().unwrap();
         handle
@@ -1758,7 +1728,6 @@ mod tests {
         let mut status = checkpoint.status_subscription();
         runtime
             .block_on(wait_for(
-                &cx(),
                 &mut checkpoint.pressure_subscription(),
                 |pressure| matches!(pressure, crate::CheckpointPressure::BlockGeneral { .. }),
             ))
@@ -1803,7 +1772,7 @@ mod tests {
                 break writer_snapshot;
             }
             runtime
-                .block_on(status.changed(&cx()))
+                .block_on(status.changed())
                 .expect("the writer keeps retrying the hard drain");
         };
         assert!(matches!(
@@ -1818,7 +1787,7 @@ mod tests {
         completed_rx.recv().unwrap().unwrap();
         queued.join().unwrap();
         runtime
-            .block_on(wait_for(&cx(), &mut status, |status| {
+            .block_on(wait_for(&mut status, |status| {
                 matches!(checkpoint.pressure(), crate::CheckpointPressure::Open)
                     && status.latest.as_ref().is_some_and(|outcome| match outcome {
                         crate::CheckpointOutcome::BelowSoft { wal }
@@ -1856,13 +1825,7 @@ mod tests {
         admission.wal.soft_limit_bytes = 8 * 1024;
         admission.wal.hard_limit_bytes = 16 * 1024;
         let attachment = RepositoryPhysicalAttachmentFactory
-            .attach(
-                &native_runtime(),
-                binding.clone(),
-                locator(&binding),
-                path,
-                admission,
-            )
+            .attach(binding.clone(), locator(&binding), path, admission)
             .unwrap();
         let handle = attachment.exact_sql_handle().unwrap();
         handle
@@ -1894,7 +1857,7 @@ mod tests {
             .unwrap();
         let mut pressure = checkpoint.pressure_subscription();
         runtime
-            .block_on(wait_for(&cx(), &mut pressure, |pressure| {
+            .block_on(wait_for(&mut pressure, |pressure| {
                 matches!(pressure, crate::CheckpointPressure::BlockGeneral { .. })
             }))
             .expect("the over-hard-limit write must publish hard checkpoint pressure");
@@ -1926,7 +1889,7 @@ mod tests {
             "the queued write must not grow the physical WAL while the log cannot restart"
         );
         runtime
-            .block_on(wait_for(&cx(), &mut pressure, |pressure| {
+            .block_on(wait_for(&mut pressure, |pressure| {
                 matches!(
                     pressure,
                     crate::CheckpointPressure::BlockGeneral { blockers, .. }
@@ -1940,7 +1903,7 @@ mod tests {
         queued.join().unwrap();
         let mut status = checkpoint.status_subscription();
         runtime
-            .block_on(wait_for(&cx(), &mut status, |status| {
+            .block_on(wait_for(&mut status, |status| {
                 status.latest.as_ref().is_some_and(|outcome| match outcome {
                     crate::CheckpointOutcome::BelowSoft { wal }
                     | crate::CheckpointOutcome::Complete { wal, .. } => wal.bytes <= 8 * 1024,
@@ -1974,13 +1937,7 @@ mod tests {
         admission.wal.soft_limit_bytes = 8 * 1024;
         admission.wal.hard_limit_bytes = 16 * 1024;
         let attachment = RepositoryPhysicalAttachmentFactory
-            .attach(
-                &native_runtime(),
-                binding.clone(),
-                locator(&binding),
-                path,
-                admission,
-            )
+            .attach(binding.clone(), locator(&binding), path, admission)
             .unwrap();
         let handle = attachment.exact_sql_handle().unwrap();
         handle
@@ -2013,7 +1970,7 @@ mod tests {
             .unwrap();
         let mut pressure = checkpoint.pressure_subscription();
         runtime
-            .block_on(wait_for(&cx(), &mut pressure, |pressure| {
+            .block_on(wait_for(&mut pressure, |pressure| {
                 matches!(pressure, crate::CheckpointPressure::BlockGeneral { .. })
             }))
             .expect("the over-hard-limit write must publish hard checkpoint pressure");
@@ -2033,8 +1990,7 @@ mod tests {
             .expect("the queued write commits while the reader still holds its snapshot");
         writer.join().unwrap();
         let mut status = checkpoint.status_subscription();
-        let context = cx();
-        let converged = wait_for(&context, &mut status, |status| {
+        let converged = wait_for(&mut status, |status| {
             matches!(checkpoint.pressure(), crate::CheckpointPressure::Open)
                 && status.latest.as_ref().is_some_and(|outcome| match outcome {
                     crate::CheckpointOutcome::BelowSoft { wal }

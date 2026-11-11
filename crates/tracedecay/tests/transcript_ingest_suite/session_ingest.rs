@@ -100,8 +100,7 @@ async fn open_registry_at(
 /// closes the store writer on a native worker after the drop returns. A reopen
 /// then races the old writer's shutdown checkpoint for the write lock.
 async fn close_registry(registry: DaemonSessionRuntimeRegistryV1) {
-    let cx = tracedecay_runtime_core::native_runtime::cx().unwrap();
-    registry.shutdown_terminal_tasks(&cx).await.unwrap();
+    registry.shutdown_terminal_tasks().await.unwrap();
     registry
         .close_retained_graph_runtimes_for_shutdown(
             std::time::Instant::now() + std::time::Duration::from_mins(1),

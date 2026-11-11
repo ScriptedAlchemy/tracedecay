@@ -3,7 +3,7 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
-use asupersync::channel::watch;
+use tokio::sync::watch;
 
 use tracedecay_store::{RuntimeMaintenanceStateV1, StoreRuntimeBindingV1, VerifiedStoreLocatorV1};
 
@@ -101,9 +101,7 @@ impl CloseAttemptGuard {
         if let Some(reservation) = self.reservation.take() {
             let completion = reservation.completion.clone();
             let result = self.registry.finish_exact_close(reservation, outcome);
-            if let Err(error) = completion.send(Some(result)) {
-                tracing::error!(%error, "failed to publish registered runtime close completion");
-            }
+            completion.send_replace(Some(result));
         }
     }
 }
@@ -119,9 +117,7 @@ impl Drop for CloseAttemptGuard {
                     message: "native close task ended without completing".to_owned(),
                 }),
             );
-            if let Err(error) = completion.send(Some(result)) {
-                tracing::error!(%error, "failed to publish registered runtime close failure");
-            }
+            completion.send_replace(Some(result));
         }
     }
 }
@@ -154,11 +150,7 @@ impl StoreRuntimeRegistry {
         &self,
         deadline: std::time::Instant,
     ) -> Result<usize, StoreRuntimeRegistryFailure> {
-        let cx =
-            crate::native_runtime::cx().ok_or(StoreRuntimeRegistryFailure::RuntimeUnavailable {
-                operation: "close idle registered runtimes for shutdown",
-            })?;
-        self.cancel_and_join_opens_for_shutdown(&cx).await?;
+        self.cancel_and_join_opens_for_shutdown().await?;
         let mut closed = 0;
         loop {
             let final_pass = is_last_drain_pass(std::time::Instant::now(), deadline);
@@ -325,10 +317,6 @@ impl StoreRuntimeRegistry {
         authority: &DatabaseAuthority,
         stale_opened_file_identity: Option<u64>,
     ) -> Result<ClosedStoreRuntime, StoreRuntimeRegistryFailure> {
-        let cx =
-            crate::native_runtime::cx().ok_or(StoreRuntimeRegistryFailure::RuntimeUnavailable {
-                operation: "close exact registered runtime",
-            })?;
         let reservation =
             self.reserve_exact_close(expected, authority, stale_opened_file_identity)?;
         let mut completion = reservation.completion.subscribe();
@@ -384,14 +372,11 @@ impl StoreRuntimeRegistry {
             if let Some(result) = completion.borrow().clone() {
                 return result;
             }
-            completion.changed(&cx).await.map_err(|error| match error {
-                watch::RecvError::Cancelled => StoreRuntimeRegistryFailure::WaitCancelled {
-                    operation: "wait for exact registered runtime close",
-                },
-                error => StoreRuntimeRegistryFailure::PhysicalRuntimeFailed {
+            completion.changed().await.map_err(|error| {
+                StoreRuntimeRegistryFailure::PhysicalRuntimeFailed {
                     operation: "wait for exact registered runtime close",
                     message: error.to_string(),
-                },
+                }
             })?;
         }
     }
@@ -728,7 +713,7 @@ mod tests {
         rusqlite::Connection::open(&profile_path).unwrap();
         let profile_path = profile_path.canonicalize().unwrap();
         let registry = StoreRuntimeRegistry::new(
-            asupersync::runtime::Runtime::current_handle().unwrap(),
+            tokio::runtime::Handle::try_current().ok().unwrap(),
             Arc::new(FixtureResolver { profile_path }),
             Arc::new(LifecycleShardRuntimePublisher),
         )
@@ -768,7 +753,7 @@ mod tests {
         (registry, profile, code, authority)
     }
 
-    #[asupersync::test]
+    #[tokio::test]
     async fn close_path_rejects_single_runtime_without_retained_authority() {
         let temporary = tempfile::tempdir().unwrap();
         let path = temporary.path().join("runtime.db");
@@ -791,7 +776,7 @@ mod tests {
         drop(profile);
     }
 
-    #[asupersync::test]
+    #[tokio::test]
     async fn close_path_detects_duplicate_path_before_authority_validation() {
         let temporary = tempfile::tempdir().unwrap();
         let path = temporary.path().join("runtime.db");
@@ -799,7 +784,7 @@ mod tests {
         let authority =
             DatabaseAuthority::for_runtime(&path, "mount duplicate-path code runtime").unwrap();
         let registry = StoreRuntimeRegistry::new(
-            asupersync::runtime::Runtime::current_handle().unwrap(),
+            tokio::runtime::Handle::try_current().ok().unwrap(),
             Arc::new(FixtureResolver {
                 profile_path: path.clone(),
             }),
@@ -860,7 +845,7 @@ mod tests {
         drop(profile);
     }
 
-    #[asupersync::test]
+    #[tokio::test]
     async fn exact_close_refuses_every_live_client_lease_before_closing() {
         let temporary = tempfile::tempdir().unwrap();
         let path = temporary.path().join("runtime.db");
@@ -915,7 +900,7 @@ mod tests {
 
     /// A spent store-close budget makes one final pass: the held runtime stays
     /// mounted instead of the drain waiting on it.
-    #[asupersync::test]
+    #[tokio::test]
     async fn runtime_held_through_shutdown_close_still_closes_exactly_once_released() {
         let temporary = tempfile::tempdir().unwrap();
         let path = temporary.path().join("runtime.db");
@@ -944,7 +929,7 @@ mod tests {
     /// Leases released seconds after store close begins still have their
     /// runtimes closed, so their WALs are truncated, while the caller's
     /// deadline is far off.
-    #[asupersync::test]
+    #[tokio::test]
     async fn shutdown_close_waits_for_a_lease_released_while_it_runs() {
         let temporary = tempfile::tempdir().unwrap();
         let path = temporary.path().join("runtime.db");
@@ -978,7 +963,7 @@ mod tests {
         assert!(!is_last_drain_pass(now, now + SHUTDOWN_HOLD_DRAIN_POLL * 2));
     }
 
-    #[asupersync::test]
+    #[tokio::test]
     async fn refused_shutdown_close_still_settles_its_reserved_runtime() {
         let temporary = tempfile::tempdir().unwrap();
         let path = temporary.path().join("runtime.db");
@@ -1003,7 +988,7 @@ mod tests {
         drop(profile);
     }
 
-    #[asupersync::test]
+    #[tokio::test]
     async fn exact_close_refuses_an_operation_token_after_the_client_drops() {
         let temporary = tempfile::tempdir().unwrap();
         let path = temporary.path().join("runtime.db");
@@ -1043,7 +1028,7 @@ mod tests {
     }
 
     #[cfg(unix)]
-    #[asupersync::test]
+    #[tokio::test]
     async fn stale_exact_close_uses_retained_binding_authority_and_opened_identity() {
         let temporary = tempfile::tempdir().unwrap();
         let path = temporary.path().join("runtime.db");
@@ -1066,7 +1051,7 @@ mod tests {
         drop(profile);
     }
 
-    #[asupersync::test]
+    #[tokio::test]
     async fn destructive_reservation_fences_open_until_preserved_store_reopens() {
         let temporary = tempfile::tempdir().unwrap();
         let path = temporary.path().join("runtime.db");
@@ -1090,9 +1075,10 @@ mod tests {
         };
         let open_registry = registry.clone();
         let open_authority = authority.clone();
-        let mut pending = asupersync::Cx::current()
+        let pending = tokio::runtime::Handle::try_current()
+            .ok()
             .unwrap()
-            .spawn(move |_| async move {
+            .spawn(async move {
                 open_registry
                     .open(StoreRuntimeOpenRequest::new_authorized(
                         code_shard(),
@@ -1101,23 +1087,18 @@ mod tests {
                         open_authority,
                     ))
                     .await
-            })
-            .unwrap();
-        asupersync::runtime::yield_now().await;
+            });
+        tokio::task::yield_now().await;
         assert!(
             !pending.is_finished(),
             "ordinary opens must wait for destructive maintenance"
         );
 
         reservation.abort_preserved().unwrap();
-        let reopened = match asupersync::time::timeout(
-            asupersync::Cx::current().unwrap().now(),
-            Duration::from_secs(2),
-            pending.join(&asupersync::Cx::current().unwrap()),
-        )
-        .await
-        .expect("reserved open must wake")
-        .unwrap()
+        let reopened = match tokio::time::timeout(Duration::from_secs(2), pending)
+            .await
+            .expect("reserved open must wake")
+            .unwrap()
         {
             StoreRuntimeOpenResult::Published(handle) => handle,
             StoreRuntimeOpenResult::Failed(failure) => {
@@ -1136,7 +1117,7 @@ mod tests {
         drop(profile);
     }
 
-    #[asupersync::test]
+    #[tokio::test]
     async fn destructive_reservation_atomically_rejects_open_begin() {
         let temporary = tempfile::tempdir().unwrap();
         let path = temporary.path().join("runtime.db");
@@ -1170,7 +1151,7 @@ mod tests {
         drop(profile);
     }
 
-    #[asupersync::test]
+    #[tokio::test]
     async fn failed_destructive_close_releases_reservation_for_retry() {
         let temporary = tempfile::tempdir().unwrap();
         let path = temporary.path().join("runtime.db");
@@ -1198,7 +1179,7 @@ mod tests {
         drop(profile);
     }
 
-    #[asupersync::test]
+    #[tokio::test]
     async fn destructive_reservation_does_not_block_unrelated_database_under_same_root() {
         let temporary = tempfile::tempdir().unwrap();
         let reserved_path = temporary.path().join("reserved.db");
@@ -1219,8 +1200,7 @@ mod tests {
         let authority =
             DatabaseAuthority::for_runtime(&unrelated_path, "mount unrelated database").unwrap();
 
-        let unrelated = asupersync::time::timeout(
-            asupersync::Cx::current().unwrap().now(),
+        let unrelated = tokio::time::timeout(
             Duration::from_secs(2),
             registry.open(StoreRuntimeOpenRequest::new_authorized(
                 code_shard_for("worktree.unrelated"),
@@ -1300,7 +1280,7 @@ mod tests {
         }
     }
 
-    #[asupersync::test]
+    #[tokio::test]
     async fn failed_exact_close_retains_a_faulted_evicting_runtime() {
         let temporary = tempfile::tempdir().unwrap();
         let path = temporary.path().join("runtime.db");
@@ -1311,7 +1291,7 @@ mod tests {
         rusqlite::Connection::open(&profile_path).unwrap();
         let profile_path = profile_path.canonicalize().unwrap();
         let registry = StoreRuntimeRegistry::with_config(
-            asupersync::runtime::Runtime::current_handle().unwrap(),
+            tokio::runtime::Handle::try_current().ok().unwrap(),
             Arc::new(FixtureResolver { profile_path }),
             Arc::new(FailingPublisher),
             StoreRuntimeRegistryConfig::default(),
@@ -1406,7 +1386,7 @@ mod tests {
     }
 
     #[cfg(target_os = "linux")]
-    #[asupersync::test]
+    #[tokio::test]
     async fn a_store_unlinked_under_its_runtime_closes_its_files_and_reopens_fresh() {
         use tracedecay_rusqlite_runtime::exact_sql::{ExactSqlStatement, ExactSqlValue};
 
@@ -1486,7 +1466,7 @@ mod tests {
     }
 
     #[cfg(target_os = "linux")]
-    #[asupersync::test]
+    #[tokio::test]
     async fn an_evicted_lost_runtime_leaves_no_pin_on_its_key() {
         let temporary = tempfile::tempdir().unwrap();
         let (registry, profile, code, authority) =

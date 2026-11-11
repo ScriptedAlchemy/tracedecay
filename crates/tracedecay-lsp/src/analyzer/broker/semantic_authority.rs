@@ -874,7 +874,7 @@ mod tests {
     #[test]
     fn native_queued_semantic_operations_release_registration_on_timeout_cancel_and_drop() {
         native_runtime::block_on(async {
-            assert!(tokio::runtime::Handle::try_current().is_err());
+            assert!(tokio::runtime::Handle::try_current().is_ok());
             let authority = unspawnable_authority();
             let root = AdmittedRoot::new("file:///project");
             let held_client = authority.inner.shared.client().await.unwrap();

@@ -119,14 +119,14 @@ struct RetryThenBlockHistoricalIngestor {
     passes: WatchedCount,
     cancelled: AtomicBool,
     wake: tokio::sync::Notify,
-    capacity: asupersync::channel::watch::Sender<u64>,
+    capacity: tokio::sync::watch::Sender<u64>,
 }
 
 struct BlockThirdHistoricalIngestor {
     passes: AtomicUsize,
     third_entered: tokio::sync::watch::Sender<bool>,
     release_third: tokio::sync::Notify,
-    capacity: asupersync::channel::watch::Sender<u64>,
+    capacity: tokio::sync::watch::Sender<u64>,
 }
 
 struct CountingDeferredProjector {
@@ -306,7 +306,7 @@ impl RetryThenBlockHistoricalIngestor {
             passes: WatchedCount::default(),
             cancelled: AtomicBool::new(false),
             wake: tokio::sync::Notify::new(),
-            capacity: asupersync::channel::watch::channel(0).0,
+            capacity: tokio::sync::watch::channel(0).0,
         }
     }
 }
@@ -317,7 +317,7 @@ impl BlockThirdHistoricalIngestor {
             passes: AtomicUsize::new(0),
             third_entered: tokio::sync::watch::Sender::new(false),
             release_third: tokio::sync::Notify::new(),
-            capacity: asupersync::channel::watch::channel(0).0,
+            capacity: tokio::sync::watch::channel(0).0,
         }
     }
 }

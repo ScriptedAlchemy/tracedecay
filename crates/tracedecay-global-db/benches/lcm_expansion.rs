@@ -355,7 +355,8 @@ fn assert_expansion(fixture: &Fixture, expansion: &LcmExpandResponse) {
 }
 
 fn lcm_expansion(criterion: &mut Criterion) {
-    let executor = asupersync::runtime::RuntimeBuilder::current_thread()
+    let executor = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
         .blocking_threads(0, 512)
         .build()
         .expect("build benchmark runtime");
@@ -373,7 +374,7 @@ fn lcm_expansion(criterion: &mut Criterion) {
     group.finish();
 }
 
-struct BenchExecutor<'a>(&'a asupersync::runtime::Runtime);
+struct BenchExecutor<'a>(&'a tokio::runtime::Runtime);
 
 impl criterion::async_executor::AsyncExecutor for BenchExecutor<'_> {
     fn block_on<T>(&self, future: impl Future<Output = T>) -> T {

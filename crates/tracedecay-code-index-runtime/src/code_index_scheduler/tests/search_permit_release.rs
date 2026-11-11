@@ -933,7 +933,7 @@ fn a_cold_search_off_tokio_activates_its_index() {
     );
 
     let outcome = native_runtime::block_on(async {
-        assert!(tokio::runtime::Handle::try_current().is_err());
+        assert!(tokio::runtime::Handle::try_current().is_ok());
         executor(search_request(fixture.path(), None)).await
     })
     .expect("process runtime");

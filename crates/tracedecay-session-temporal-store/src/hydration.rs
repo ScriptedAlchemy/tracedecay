@@ -2303,7 +2303,7 @@ mod tests {
         .expect("snapshot")
     }
 
-    #[asupersync::test]
+    #[tokio::test]
     async fn root_snapshot_hydrates_an_authorized_cross_session_occurrence() {
         let dir = tempdir().expect("temporary directory");
         let runtime = HostAdmissionTestRuntimeV1::profile(dir.path())
@@ -2360,7 +2360,7 @@ mod tests {
         );
     }
 
-    #[asupersync::test]
+    #[tokio::test]
     async fn tampered_raw_fallback_is_typed_unavailable_without_canary_leakage() {
         let dir = tempdir().expect("temporary directory");
         let runtime = HostAdmissionTestRuntimeV1::profile(dir.path())
@@ -2421,7 +2421,7 @@ mod tests {
         assert_eq!(output, b"");
     }
 
-    #[asupersync::test]
+    #[tokio::test]
     async fn occurrence_authorization_does_not_parse_observation_content() {
         let dir = tempdir().expect("temporary directory");
         let runtime = HostAdmissionTestRuntimeV1::profile(dir.path())
@@ -2464,7 +2464,7 @@ mod tests {
         assert!(output.is_empty());
     }
 
-    #[asupersync::test]
+    #[tokio::test]
     async fn one_snapshot_hydrates_occurrence_and_summary_without_request_digest_binding() {
         let dir = tempdir().expect("temporary directory");
         let runtime = HostAdmissionTestRuntimeV1::profile(dir.path())
@@ -2571,7 +2571,7 @@ mod tests {
     /// hydrate; refusing it as `Unverifiable` drops real
     /// `lcm_grep`/`lcm_expand` matches into
     /// `omissions: reason=unverifiable`.
-    #[asupersync::test]
+    #[tokio::test]
     async fn occurrence_keyed_on_stable_record_id_resolves_when_relations_message_id_absent() {
         let dir = tempdir().expect("temporary directory");
         let runtime = HostAdmissionTestRuntimeV1::profile(dir.path())
@@ -2680,7 +2680,7 @@ mod tests {
         (result, output)
     }
 
-    #[asupersync::test]
+    #[tokio::test]
     async fn redacted_anchor_is_a_typed_denial_that_emits_no_payload() {
         let dir = tempdir().expect("temporary directory");
         let runtime = HostAdmissionTestRuntimeV1::profile(dir.path())
@@ -2722,7 +2722,7 @@ mod tests {
         );
     }
 
-    #[asupersync::test]
+    #[tokio::test]
     async fn declared_oversize_is_rejected_before_read() {
         let dir = tempdir().expect("temporary directory");
         let runtime = HostAdmissionTestRuntimeV1::profile(dir.path())
@@ -2811,7 +2811,7 @@ mod tests {
         }
     }
 
-    #[asupersync::test]
+    #[tokio::test]
     async fn cancellation_and_deadline_interrupt_before_read() {
         let dir = tempdir().expect("temporary directory");
         let runtime = HostAdmissionTestRuntimeV1::profile(dir.path())

@@ -252,7 +252,7 @@ async fn assert_health_route(handle: &StoreRuntimeClientLease, writer_expected: 
     ));
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn lifecycle_publisher_mounts_profile_project_and_session_health_routes() {
     let root = TempDir::new().unwrap();
     let resolver = Arc::new(FileResolver::default());
@@ -261,7 +261,7 @@ async fn lifecycle_publisher_mounts_profile_project_and_session_health_routes() 
     resolver.push(seed_db(&root, "sessions.db"));
 
     let registry = StoreRuntimeRegistry::with_config(
-        asupersync::runtime::Runtime::current_handle().unwrap(),
+        tokio::runtime::Handle::try_current().ok().unwrap(),
         resolver,
         Arc::new(LifecycleShardRuntimePublisher),
         StoreRuntimeRegistryConfig::new(2).unwrap(),
@@ -285,14 +285,14 @@ async fn lifecycle_publisher_mounts_profile_project_and_session_health_routes() 
     assert_health_route(&sessions, true).await;
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn read_only_open_mounts_readers_without_acquiring_a_writer() {
     let root = TempDir::new().unwrap();
     let resolver = Arc::new(FileResolver::default());
     resolver.push(seed_final_graph_db(&root, "profile.db").await);
     resolver.push(seed_final_graph_db(&root, "project.db").await);
     let registry = StoreRuntimeRegistry::new(
-        asupersync::runtime::Runtime::current_handle().unwrap(),
+        tokio::runtime::Handle::try_current().ok().unwrap(),
         resolver,
         Arc::new(LifecycleShardRuntimePublisher),
     )
@@ -331,7 +331,7 @@ async fn read_only_open_mounts_readers_without_acquiring_a_writer() {
 /// open waits; a fallback thread ends a wait that parked the worker, so the
 /// failure is an assertion rather than a hang.
 #[cfg(unix)]
-#[asupersync::test]
+#[tokio::test]
 async fn store_open_keeps_the_async_worker_serving_while_the_file_opens() {
     use std::fs::OpenOptions;
     use std::os::unix::fs::OpenOptionsExt;
@@ -350,7 +350,7 @@ async fn store_open_keeps_the_async_worker_serving_while_the_file_opens() {
     let resolver = Arc::new(FileResolver::default());
     resolver.push(held.clone());
     let registry = StoreRuntimeRegistry::new(
-        asupersync::runtime::Runtime::current_handle().unwrap(),
+        tokio::runtime::Handle::try_current().ok().unwrap(),
         resolver,
         Arc::new(LifecycleShardRuntimePublisher),
     )
@@ -380,7 +380,6 @@ async fn store_open_keeps_the_async_worker_serving_while_the_file_opens() {
         outcome
     };
     let release = async {
-        let cx = asupersync::Cx::current().unwrap();
         while !settled.load(Ordering::SeqCst) {
             match OpenOptions::new()
                 .write(true)
@@ -393,11 +392,11 @@ async fn store_open_keeps_the_async_worker_serving_while_the_file_opens() {
                 }
                 Err(error) => assert_eq!(error.raw_os_error(), Some(libc::ENXIO)),
             }
-            asupersync::time::sleep(cx.now(), Duration::from_millis(1)).await;
+            tokio::time::sleep(Duration::from_millis(1)).await;
         }
         false
     };
-    let (outcome, released) = asupersync::join!(open, release);
+    let (outcome, released) = tokio::join!(open, release);
     drop(released_by_worker);
     let parked = fallback.join().unwrap();
 
@@ -416,7 +415,7 @@ async fn store_open_keeps_the_async_worker_serving_while_the_file_opens() {
     );
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn read_only_open_refuses_nonfinal_schema_as_reset_required_before_publication() {
     let root = TempDir::new().unwrap();
     let profile_path = seed_final_graph_db(&root, "profile.db").await;
@@ -432,7 +431,7 @@ async fn read_only_open_refuses_nonfinal_schema_as_reset_required_before_publica
     resolver.push(profile_path);
     resolver.push(project_path);
     let registry = StoreRuntimeRegistry::new(
-        asupersync::runtime::Runtime::current_handle().unwrap(),
+        tokio::runtime::Handle::try_current().ok().unwrap(),
         resolver,
         Arc::new(LifecycleShardRuntimePublisher),
     )
@@ -476,7 +475,7 @@ async fn read_only_open_refuses_nonfinal_schema_as_reset_required_before_publica
     );
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn writable_existing_open_refuses_tampered_final_shape_before_publication() {
     let root = TempDir::new().unwrap();
     let profile_path = seed_db(&root, "profile.db");
@@ -490,7 +489,7 @@ async fn writable_existing_open_refuses_tampered_final_shape_before_publication(
     resolver.push(profile_path);
     resolver.push(project_path.clone());
     let registry = StoreRuntimeRegistry::new(
-        asupersync::runtime::Runtime::current_handle().unwrap(),
+        tokio::runtime::Handle::try_current().ok().unwrap(),
         resolver,
         Arc::new(LifecycleShardRuntimePublisher),
     )
@@ -541,7 +540,7 @@ async fn writable_existing_open_refuses_tampered_final_shape_before_publication(
     );
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn remote_node_initialization_installs_only_the_final_registered_schema() {
     let root = TempDir::new().unwrap();
     let profile_path = root.path().join("profile.db");
@@ -550,7 +549,7 @@ async fn remote_node_initialization_installs_only_the_final_registered_schema() 
     resolver.push(profile_path.clone());
     resolver.push(remote_path.clone());
     let registry = StoreRuntimeRegistry::new(
-        asupersync::runtime::Runtime::current_handle().unwrap(),
+        tokio::runtime::Handle::try_current().ok().unwrap(),
         resolver,
         Arc::new(LifecycleShardRuntimePublisher),
     )
@@ -616,7 +615,7 @@ async fn remote_node_initialization_installs_only_the_final_registered_schema() 
     );
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn distinct_logical_shards_cannot_publish_two_writers_for_one_database() {
     let root = TempDir::new().unwrap();
     let resolver = Arc::new(FileResolver::default());
@@ -624,7 +623,7 @@ async fn distinct_logical_shards_cannot_publish_two_writers_for_one_database() {
     let shared_path = seed_final_graph_db(&root, "shared-project.db").await;
     resolver.push(shared_path.clone());
     let registry = StoreRuntimeRegistry::new(
-        asupersync::runtime::Runtime::current_handle().unwrap(),
+        tokio::runtime::Handle::try_current().ok().unwrap(),
         resolver,
         Arc::new(LifecycleShardRuntimePublisher),
     )
@@ -710,7 +709,7 @@ fn user_version(path: &Path) -> u32 {
 /// A store at an older released schema is never upgraded in place, even by a
 /// write-authorized open: admission fails with the typed fresh-start refusal
 /// and leaves the stamp untouched.
-#[asupersync::test]
+#[tokio::test]
 async fn existing_store_at_an_older_schema_is_refused_even_with_write_authority() {
     let root = TempDir::new().unwrap();
     let resolver = Arc::new(FileResolver::default());
@@ -719,7 +718,7 @@ async fn existing_store_at_an_older_schema_is_refused_even_with_write_authority(
     rewind_to_pre_digest_shape(&project_path).await;
     resolver.push(project_path.clone());
     let registry = StoreRuntimeRegistry::new(
-        asupersync::runtime::Runtime::current_handle().unwrap(),
+        tokio::runtime::Handle::try_current().ok().unwrap(),
         resolver,
         Arc::new(LifecycleShardRuntimePublisher),
     )
@@ -879,7 +878,7 @@ async fn commit_diagnostics_with_writer(
     let (request, probe) = diagnostics_submit(binding, name);
     let outcome = writer
         .submit(
-            &crate::native_runtime::cx().unwrap(),
+            &crate::native_runtime::handle().unwrap(),
             request,
             Arc::new(probe),
         )
@@ -902,7 +901,7 @@ async fn commit_diagnostics_with_writer(
 /// daemon of the same incarnation, or a sibling runtime on the file) fences
 /// every writer below that authority. The reopen converges above it instead of
 /// publishing a runtime whose every submit would be fenced.
-#[asupersync::test]
+#[tokio::test]
 async fn reopening_a_store_behind_its_persisted_writer_authority_converges_above_it() {
     let root = TempDir::new().unwrap();
     let resolver = Arc::new(FileResolver::default());
@@ -924,7 +923,7 @@ async fn reopening_a_store_behind_its_persisted_writer_authority_converges_above
         incarnation(),
         tracedecay_store::StoreAuthorityEpochV1::new(1 << 40).unwrap(),
     );
-    let runtime = asupersync::runtime::Runtime::current_handle().unwrap();
+    let runtime = tokio::runtime::Handle::try_current().ok().unwrap();
     commit_diagnostics_with_writer(&project_path, &ahead, "previous-authority").await;
 
     let registry =
@@ -976,7 +975,7 @@ async fn reopening_a_store_behind_its_persisted_writer_authority_converges_above
 /// A graph-first owner cannot be rebound while any of its graph leases remain
 /// live. Reopening refuses once with the exact writer fence, then succeeds
 /// above the ledger after the ordinary graph close releases that authority.
-#[asupersync::test]
+#[tokio::test]
 async fn a_stale_graph_writer_authority_refuses_once_then_reopens_after_graph_close() {
     let root = TempDir::new().unwrap();
     let resolver = Arc::new(FileResolver::default());
@@ -992,7 +991,7 @@ async fn a_stale_graph_writer_authority_refuses_once_then_reopens_after_graph_cl
     resolver.push(project_path.clone());
     resolver.push(graph_path);
     let registry = StoreRuntimeRegistry::new(
-        asupersync::runtime::Runtime::current_handle().unwrap(),
+        tokio::runtime::Handle::try_current().ok().unwrap(),
         resolver.clone(),
         Arc::new(LifecycleShardRuntimePublisher),
     )

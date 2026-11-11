@@ -6,7 +6,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::task::Poll;
 use std::time::{Duration, Instant};
 
-use asupersync::sync::Notify;
+use tokio::sync::Notify;
 use tracedecay_runtime_core::native_runtime;
 
 use crate::tick::{MaintenanceCadence, MaintenanceContinuation, MaintenanceTickOutcome};
@@ -43,9 +43,15 @@ impl MaintenanceWake {
     }
 
     async fn woken(&self) {
-        self.notify
-            .wait_until(|| self.woken.swap(false, Ordering::AcqRel))
-            .await;
+        loop {
+            let notified = self.notify.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            if self.woken.swap(false, Ordering::AcqRel) {
+                return;
+            }
+            notified.await;
+        }
     }
 
     fn take_due_request(&self) -> bool {
@@ -128,8 +134,7 @@ mod tests {
     use std::sync::Arc;
     use std::time::{Duration, Instant};
 
-    use asupersync::Cx;
-    use asupersync::channel::mpsc;
+    use tokio::sync::mpsc;
     use tracedecay_runtime_core::cancellation::CancellationToken;
 
     use super::{MaintenanceWake, run_cadence};
@@ -156,7 +161,7 @@ mod tests {
     {
         let cancellation = CancellationToken::new();
         let wake = Arc::new(MaintenanceWake::default());
-        let (ticks, observed) = mpsc::unbounded();
+        let (ticks, observed) = mpsc::unbounded_channel();
         let mut outcomes = outcomes.into_iter();
         let run = run_cadence(&cancellation, &wake, cadence, |continuation| {
             let _ = ticks.send(Tick {
@@ -170,21 +175,18 @@ mod tests {
             drive(Arc::clone(&wake), observed).await;
             cancellation.cancel();
         };
-        asupersync::time::timeout(
-            asupersync::time::wall_now(),
-            Duration::from_secs(10),
-            async { futures_util::join!(run, driven) },
-        )
+        tokio::time::timeout(Duration::from_secs(10), async {
+            futures_util::join!(run, driven)
+        })
         .await
         .expect("the loop must tick when due and end once cancelled");
     }
 
     async fn next_tick(observed: &mut mpsc::UnboundedReceiver<Tick>) -> Tick {
-        let cx = Cx::current().expect("test runtime context");
-        observed.recv(&cx).await.expect("tick observed")
+        observed.recv().await.expect("tick observed")
     }
 
-    #[asupersync::test]
+    #[tokio::test]
     async fn wakes_never_move_the_due_deadline() {
         let started = Instant::now();
         drive_loop(
@@ -193,7 +195,7 @@ mod tests {
             |wake, mut observed| async move {
                 for _ in 0..3 {
                     wake.wake();
-                    asupersync::runtime::yield_now().await;
+                    tokio::task::yield_now().await;
                 }
                 let first = next_tick(&mut observed).await;
                 assert!(
@@ -203,7 +205,7 @@ mod tests {
 
                 for _ in 0..3 {
                     wake.wake();
-                    asupersync::runtime::yield_now().await;
+                    tokio::task::yield_now().await;
                 }
                 let requested = Instant::now();
                 wake.request_due();
@@ -220,7 +222,7 @@ mod tests {
     /// A due request is the publication signal: it pulls the next tick to at
     /// most one retry delay away, coalesces with other requests inside that
     /// window, and the daily cadence resumes after that tick.
-    #[asupersync::test]
+    #[tokio::test]
     async fn due_requests_coalesce_into_one_pulled_forward_tick() {
         drive_loop(
             MaintenanceCadence::with_retry_delay(DAILY, RETRY),
@@ -231,7 +233,7 @@ mod tests {
                 let requested = Instant::now();
                 for _ in 0..3 {
                     wake.request_due();
-                    asupersync::runtime::yield_now().await;
+                    tokio::task::yield_now().await;
                 }
                 let pulled = next_tick(&mut observed).await;
                 assert!(
@@ -251,7 +253,7 @@ mod tests {
         .await;
     }
 
-    #[asupersync::test]
+    #[tokio::test]
     async fn progress_continuation_reenters_only_the_owning_phase() {
         drive_loop(
             MaintenanceCadence::with_retry_delay(DAILY, RETRY),
@@ -276,7 +278,7 @@ mod tests {
         .await;
     }
 
-    #[asupersync::test]
+    #[tokio::test]
     async fn cancellation_ends_a_parked_loop_before_its_deadline() {
         drive_loop(
             MaintenanceCadence::with_retry_delay(DAILY, DAILY),

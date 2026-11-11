@@ -18,7 +18,7 @@ test-helpers = [
 test-transport = ["test-helpers", "tracedecay-runtime-core/test-transport"]
 
 [dependencies]
-asupersync.workspace = true
+tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros", "time", "sync", "io-util", "net"] }
 futures-util.workspace = true
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true

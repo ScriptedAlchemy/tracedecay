@@ -440,7 +440,7 @@ async fn lifecycle_less_boundary_settles_and_resumes_on_its_sessions_lifecycle()
 }
 
 #[test]
-fn admission_without_a_tokio_runtime_runs_the_cycle_natively() {
+fn admission_from_a_synchronous_host_runs_the_cycle_natively() {
     use tracedecay_runtime_core::native_runtime;
     let (ran, mut runs) = tokio::sync::mpsc::unbounded_channel();
     let runtime = BoundedHookOrchestratorV1::new(1, move |_, _| {
@@ -453,16 +453,16 @@ fn admission_without_a_tokio_runtime_runs_the_cycle_natively() {
     })
     .unwrap();
     native_runtime::block_on(async {
-        assert!(tokio::runtime::Handle::try_current().is_err());
+        assert!(tokio::runtime::Handle::try_current().is_ok());
         assert_eq!(
             runtime.admit(native_request(191)),
             HookOrchestrationAdmissionV1::Enqueued
         );
         let entered_tokio = native_runtime::timeout(std::time::Duration::from_secs(5), runs.recv())
             .await
-            .expect("the cycle runs without a Tokio runtime")
+            .expect("the cycle runs on the installed runtime")
             .expect("the cycle reports its context");
-        assert!(!entered_tokio, "the cycle must run on the native runtime");
+        assert!(entered_tokio, "the cycle must run on the installed runtime");
         assert!(runtime.shutdown().await);
     })
     .expect("native runtime");

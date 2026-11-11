@@ -637,14 +637,15 @@ async fn failover_http_route_binds_the_request_expiry_as_execution_deadline() {
     assert_eq!(controlled_deadline.load(Ordering::SeqCst), 40);
 }
 
-/// The route runs the port on the native blocking pool, so a remote request
-/// settles with no Tokio runtime entered.
+/// A caller on a plain thread can drive the route through the installed
+/// process runtime; the route runs its synchronous port on the blocking pool.
 #[test]
-fn failover_http_route_settles_without_an_entered_tokio_runtime() {
+fn failover_http_route_settles_from_a_plain_thread() {
+    assert!(tokio::runtime::Handle::try_current().is_err());
     let port_calls = Arc::new(AtomicUsize::new(0));
     let controlled_deadline = Arc::new(AtomicI64::new(0));
     let response = tracedecay_rusqlite_runtime::native_runtime::block_on(async {
-        assert!(tokio::runtime::Handle::try_current().is_err());
+        assert!(tokio::runtime::Handle::try_current().is_ok());
         deadline_capturing_router(Arc::clone(&port_calls), Arc::clone(&controlled_deadline))
             .oneshot(recovery_http_request(
                 "/failover",

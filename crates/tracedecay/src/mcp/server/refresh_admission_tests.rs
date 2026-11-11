@@ -367,10 +367,10 @@ async fn parked_freshness_probe_logs_cause_and_remedy_as_fields() {
     );
 }
 
-/// Missing admission settles startup on the native runtime, with no fabricated
-/// scheduler success and no Tokio runtime requirement.
+/// Missing admission settles startup on the installed runtime without
+/// fabricating scheduler success.
 #[test]
-fn startup_catch_up_settles_without_a_tokio_runtime() {
+fn startup_catch_up_settles_on_the_process_runtime() {
     native_server_catch_up(None, async |server| {
         assert!(
             server
@@ -386,7 +386,7 @@ fn native_server_catch_up(
 ) {
     let hazards = crate::test_support::native_runtime_hazards();
     tracedecay_runtime_core::native_runtime::block_on(async {
-        assert!(tokio::runtime::Handle::try_current().is_err());
+        assert!(tokio::runtime::Handle::try_current().is_ok());
         let (graph, _dir, _authority) = init_indexed_repo().await;
         let mut context = McpServerConstructionContext::direct(graph, None);
         context.code_index_reconcile_sink = reconcile;
@@ -399,7 +399,7 @@ fn native_server_catch_up(
 }
 
 #[test]
-fn shutdown_aborts_a_parked_startup_admission_without_a_tokio_runtime() {
+fn shutdown_aborts_a_parked_startup_admission_on_the_process_runtime() {
     struct Dropped(Arc<AtomicBool>);
     impl Drop for Dropped {
         fn drop(&mut self) {

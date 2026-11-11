@@ -110,7 +110,7 @@ impl EmptyStore {
     }
 }
 
-#[asupersync::test(flavor = "multi_thread")]
+#[tokio::test(flavor = "multi_thread")]
 async fn cancelled_daemon_attach_rolls_back_schema_and_reopens() {
     let reference = EmptyStore::create();
     let (outcome, total_polls) = reference.attach_cancelled_at(usize::MAX).await;
