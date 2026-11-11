@@ -80,9 +80,10 @@ async fn rewrite_completion_retires_unoffered_records_beyond_the_query_cap() {
     // all presence rows, without issuing per-ghost UPDATE/receipt queries
     // while holding the SQLite writer's fixed transaction lease.
     let before = writer_telemetry(&harness.registered).sqlite_vm.statements;
-    let before_commits = writer_telemetry(&harness.registered)
-        .transactions
-        .committed_transactions;
+    // Each rewrite page is one exact-SQL writer job. Its individual SQL
+    // statements stay inside that job. The committed_transactions counter
+    // belongs to batch execution, not exact-SQL jobs.
+    let before_commands = writer_telemetry(&harness.registered).transactions.commands;
     let retired = harness
         .registered
         .complete_observation_source_rewrite(&source, &scope, generation)
@@ -91,11 +92,11 @@ async fn rewrite_completion_retires_unoffered_records_beyond_the_query_cap() {
     assert_eq!(retired, 0);
     let statements = writer_telemetry(&harness.registered).sqlite_vm.statements - before;
     let after = writer_telemetry(&harness.registered);
-    let commits = after.transactions.committed_transactions - before_commits;
+    let writer_jobs = after.transactions.commands - before_commands;
     assert_eq!(
-        commits,
+        writer_jobs,
         (UNOFFERED_RECORDS as u64).div_ceil(128),
-        "each bounded page must durably commit before the next page"
+        "each bounded page must use exactly one writer job"
     );
     assert!(
         statements.saturating_mul(16) < UNOFFERED_RECORDS as u64,
@@ -186,9 +187,7 @@ async fn rewrite_completion_exact_page_boundaries_need_no_empty_writer() {
             .begin_observation_source_rewrite(&source, &scope, previous, generation, 0)
             .await
             .unwrap();
-        let before = writer_telemetry(&harness.registered)
-            .transactions
-            .committed_transactions;
+        let before = writer_telemetry(&harness.registered).transactions.commands;
         assert_eq!(
             harness
                 .registered
@@ -198,12 +197,9 @@ async fn rewrite_completion_exact_page_boundaries_need_no_empty_writer() {
             0,
             "presence-only ghosts must not count as projected retirements"
         );
-        let commits = writer_telemetry(&harness.registered)
-            .transactions
-            .committed_transactions
-            - before;
+        let writer_jobs = writer_telemetry(&harness.registered).transactions.commands - before;
         assert_eq!(
-            commits,
+            writer_jobs,
             u64::try_from(unoffered).unwrap().div_ceil(128),
             "{fixture}: no empty writer transaction after an exact full page"
         );
@@ -451,13 +447,12 @@ async fn rewrite_completion_resumes_committed_pages_after_failure_and_restart() 
             .await
             .unwrap();
 
-        let before_commits = writer_telemetry(registered)
-            .transactions
-            .committed_transactions;
+        let before_commands = writer_telemetry(registered).transactions.commands;
         let error = registered
             .complete_observation_source_rewrite(&source, &scope, generation)
             .await
             .unwrap_err();
+        let writer_jobs = writer_telemetry(registered).transactions.commands - before_commands;
         assert!(
             matches!(error, ProjectionStoreError::ProvenanceCollision),
             "colliding output ownership must fail completion, got {error:?}"
@@ -474,13 +469,10 @@ async fn rewrite_completion_resumes_committed_pages_after_failure_and_restart() 
             already_retired >= 128 && already_retired < (RECORDS - 1) as i64,
             "failure must preserve completed pages, but not the colliding page"
         );
-        let commits = writer_telemetry(registered)
-            .transactions
-            .committed_transactions
-            - before_commits;
-        assert!(
-            commits >= 1,
-            "at least one bounded retirement page must commit"
+        assert_eq!(
+            writer_jobs,
+            u64::try_from(already_retired).unwrap().div_ceil(128) + 1,
+            "each durable page and the final rolled-back page need exactly one writer job"
         );
         assert_eq!(
             table_count(
@@ -1101,9 +1093,9 @@ async fn source_rewrite_steps_with_survivor_prefix(unoffered: usize) -> u64 {
     );
     let after = writer_telemetry(&harness.registered);
     assert_eq!(
-        after.transactions.committed_transactions - before.transactions.committed_transactions,
+        after.transactions.commands - before.transactions.commands,
         unoffered.div_ceil(128) as u64,
-        "each bounded page must commit independently"
+        "each bounded page must use exactly one writer job"
     );
     assert_eq!(
         table_count(

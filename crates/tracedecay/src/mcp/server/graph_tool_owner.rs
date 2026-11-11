@@ -5,10 +5,10 @@
 use std::path::Path;
 use std::sync::{Arc, Weak};
 
-use tracedecay_contracts::ApplicationProblem;
 use tracedecay_contracts::ResolvedScope;
 use tracedecay_contracts::graph_tool::GraphToolResultV1;
 use tracedecay_contracts::retrieval::HookRuntimeResultV1;
+use tracedecay_contracts::{ApplicationProblem, CancellationStage, RetryDirective};
 use tracedecay_daemon_service::{
     DaemonInvocationService, GraphToolFuture, GraphToolInvocationV1, ProjectGraphToolPortV1,
     RegisteredGraphToolOwnerV1,
@@ -16,7 +16,9 @@ use tracedecay_daemon_service::{
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_mcp::handlers::graph_tool::graph_tool_owner_stores;
 use tracedecay_mcp::server::{hook_ingest_refresh_session, join_hook_ingest_refresh};
-use tracedecay_mcp::tools::binding::{BranchSensitivity, tool_branch_sensitivity};
+use tracedecay_mcp::tools::binding::{
+    BranchSensitivity, mcp_dispatch_contract, tool_branch_sensitivity,
+};
 use tracedecay_project::project::TraceDecay;
 use tracedecay_runtime_core::branch::BranchMemo;
 use tracedecay_tool_catalog::{ApplicationSurfaceOperation, OwnerStoresV1};
@@ -51,12 +53,44 @@ impl ProjectGraphToolPortV1 for McpGraphToolPort {
             {
                 return Err(ApplicationProblem::runtime_mounting());
             }
+            let operation = invocation.operation;
+            let served_code_graph = ServedCodeGraphSlot::default();
             server
-                .compute_graph_tool(invocation)
+                .compute_graph_tool(invocation, served_code_graph.clone())
                 .await
-                .map_err(|error| graph_tool_error_problem(&error))
+                .map_err(|error| {
+                    graph_tool_owner_error_problem(operation, &served_code_graph, &error)
+                })
         })
     }
+}
+
+fn graph_tool_owner_error_problem(
+    operation: ApplicationSurfaceOperation,
+    served_code_graph: &ServedCodeGraphSlot,
+    error: &TraceDecayError,
+) -> ApplicationProblem {
+    // A served generation proves the verified read passed its admission
+    // authority. Its dispatch ceiling is now a terminal read timeout, not
+    // an authority refusal before admission. Owner effects and errors that
+    // already carry a typed verdict retain their own phase and outcome.
+    if error.project_route_problem_record().is_none()
+        && error.project_route_typed_detail().is_none()
+        && matches!(
+            error.project_route_context(),
+            Some(("tool_dispatch_deadline_exceeded", _, _))
+        )
+        && served_code_graph.served().is_some()
+        && mcp_dispatch_contract(operation.mcp_tool_name())
+            .is_ok_and(tracedecay_tool_catalog::McpDispatchContractV1::read_only)
+    {
+        return ApplicationProblem::TimedOut {
+            stage: CancellationStage::DuringRead,
+            retry: RetryDirective::Never,
+            legal_actions: Vec::new(),
+        };
+    }
+    graph_tool_error_problem(error)
 }
 
 impl McpServer {
@@ -156,6 +190,7 @@ impl McpServer {
     async fn compute_graph_tool(
         &self,
         invocation: GraphToolInvocationV1,
+        served_code_graph: ServedCodeGraphSlot,
     ) -> Result<tracedecay_contracts::graph_tool::GraphToolCompletionV1> {
         let publication_session =
             if invocation.operation == ApplicationSurfaceOperation::HookRuntime {
@@ -178,6 +213,7 @@ impl McpServer {
             application_request_id: Some(invocation.request_id),
             application_deadline: Some(invocation.deadline),
             application_cancellation: Some(invocation.cancellation),
+            served_code_graph,
             ..self.tool_call_registry_options(session_sync_service.as_deref())
         };
         let computed = compute_graph_tool_for_owner(
@@ -247,5 +283,97 @@ impl McpServer {
             .map_err(|error| TraceDecayError::Config {
                 message: format!("the graph-tool owner failed to register: {error}"),
             })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use tracedecay_contracts::retrieval::{CodeGraphReadFreshnessV1, ServedCodeGraphGenerationV1};
+    use tracedecay_contracts::{ApplicationProblem, CancellationStage, RequestId, SafeDiagnostic};
+    use tracedecay_domain::errors::TraceDecayError;
+    use tracedecay_mcp::application_output::tool_result::problem_error;
+    use tracedecay_mcp::tools::dispatch_ceiling::tool_dispatch_deadline_error;
+    use tracedecay_tool_catalog::ApplicationSurfaceOperation;
+
+    use super::graph_tool_owner_error_problem;
+    use crate::mcp::tools::graph_tool_error_problem;
+    use crate::mcp::tools::handlers::ServedCodeGraphSlot;
+
+    fn record_graph_read(slot: &ServedCodeGraphSlot) {
+        slot.record(ServedCodeGraphGenerationV1 {
+            generation: "generation.graph-owner-deadline".to_owned(),
+            freshness: CodeGraphReadFreshnessV1::Current,
+            worktree: None,
+        });
+    }
+
+    #[test]
+    fn dispatch_deadline_after_verified_read_is_an_admitted_timeout() {
+        let operation = ApplicationSurfaceOperation::RenamePreview;
+        let error = tool_dispatch_deadline_error(operation.mcp_tool_name(), Duration::ZERO);
+        let served = ServedCodeGraphSlot::default();
+        assert_eq!(
+            graph_tool_owner_error_problem(operation, &served, &error),
+            graph_tool_error_problem(&error),
+            "a route refusal does not prove the read was admitted",
+        );
+
+        record_graph_read(&served);
+        assert_eq!(
+            graph_tool_owner_error_problem(operation, &served, &error),
+            ApplicationProblem::timed_out(CancellationStage::DuringRead).unwrap(),
+            "a served graph proves this deadline ended an admitted read",
+        );
+    }
+
+    #[test]
+    fn served_graph_does_not_reclassify_effects_or_other_owner_verdicts() {
+        let served = ServedCodeGraphSlot::default();
+        record_graph_read(&served);
+        let effect = ApplicationSurfaceOperation::Dashboard;
+        let deadline = tool_dispatch_deadline_error(effect.mcp_tool_name(), Duration::ZERO);
+        assert_eq!(
+            graph_tool_owner_error_problem(effect, &served, &deadline),
+            graph_tool_error_problem(&deadline),
+            "an owner effect retains its own settlement authority",
+        );
+
+        let refusal = TraceDecayError::project_route(
+            "code-graph-runtime-mounting",
+            true,
+            "the graph runtime is mounting",
+        );
+        assert_eq!(
+            graph_tool_owner_error_problem(
+                ApplicationSurfaceOperation::RenamePreview,
+                &served,
+                &refusal,
+            ),
+            graph_tool_error_problem(&refusal),
+            "a retryable refusal is not necessarily a deadline",
+        );
+
+        let typed = ApplicationProblem::unavailable(SafeDiagnostic {
+            code: "tool_dispatch_deadline_exceeded".to_owned(),
+            message: "a nested authority refused before admitting its work".to_owned(),
+        });
+        let error = problem_error(
+            tracedecay_api::adapter_problem(
+                RequestId::new("request.graph-owner.typed-refusal").unwrap(),
+                typed.clone(),
+            )
+            .unwrap(),
+        );
+        assert_eq!(
+            graph_tool_owner_error_problem(
+                ApplicationSurfaceOperation::RenamePreview,
+                &served,
+                &error,
+            ),
+            typed,
+            "an existing typed verdict retains its own admission phase",
+        );
     }
 }
