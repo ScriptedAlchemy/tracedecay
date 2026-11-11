@@ -22,6 +22,7 @@ use super::*;
 
 #[tokio::test]
 async fn sealed_journal_liveness_and_retirement_preserve_projection_identity() {
+    tracedecay_global_db::register_registered_schema_installer();
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("graph.db");
     let authority =
