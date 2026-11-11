@@ -23,6 +23,7 @@ async fn build_http_application_router(
     owner: &tracedecay_runtime_core::config::ProfileRoot,
     project_id: &str,
     project_path: &Path,
+    operation_events: tracedecay_application::operation_stream::OperationEventAuthority,
 ) -> Result<axum::Router> {
     let project_id = tracedecay_domain::ProjectId::new(project_id.to_owned()).map_err(|error| {
         TraceDecayError::Config {
@@ -45,7 +46,7 @@ async fn build_http_application_router(
         let client = crate::daemon::core_client::invocation_client_for_current(&owner, handshake)?;
         tracedecay_daemon_service::application_surface::http_application_router(
             client,
-            tracedecay_daemon_service::daemon_operation_event_authority(),
+            operation_events,
             project_id,
         )
         .map_err(|error| TraceDecayError::Config {
@@ -64,6 +65,7 @@ pub(super) fn install_http_application_cold_resolver(
     invocation: DaemonInvocationState,
     project_open_gates: Arc<tokio::sync::Mutex<ProjectOpenGates>>,
 ) -> Result<()> {
+    let operation_events = invocation.service.operation_events();
     registry.install_remote_deletion_runtime_owners(
         super::remote_deletion::RemoteDeletionRuntimeOwners {
             administration: store_administration.clone(),
@@ -73,6 +75,7 @@ pub(super) fn install_http_application_cold_resolver(
     )?;
     registry.install_resolver(move |project_id| {
         let store_administration = store_administration.clone();
+        let operation_events = operation_events.clone();
         tracing::Instrument::instrument(
             async move {
                 let database = store_administration.registered_profile_database().await?;
@@ -121,6 +124,7 @@ pub(super) fn install_http_application_cold_resolver(
                     store_administration.owner_profile()?,
                     project_id.as_str(),
                     &canonical_root,
+                    operation_events,
                 )
                 .await
                 .map(Some)
@@ -177,11 +181,13 @@ pub(super) async fn mount_http_application_router(
     owner: &tracedecay_runtime_core::config::ProfileRoot,
     project_id: &str,
     project_path: &Path,
+    operation_events: tracedecay_application::operation_stream::OperationEventAuthority,
 ) -> Result<()> {
     if !registry.is_active() {
         return Ok(());
     }
-    let router = build_http_application_router(owner, project_id, project_path).await?;
+    let router =
+        build_http_application_router(owner, project_id, project_path, operation_events).await?;
     registry.mount(project_id, router).await
 }
 
@@ -231,6 +237,7 @@ mod tests {
                 &owner,
                 project_id,
                 project.path(),
+                tracedecay_application::operation_stream::OperationEventAuthority::default(),
             ));
             let mut yielded = false;
             let peer = std::future::poll_fn(|task| {

@@ -787,15 +787,17 @@ async fn compute_run_affected_tests(
     let recording = options
         .registered_project_session_db
         .clone()
-        .map(|store| workflow::ManagedTestRunRecording {
+        .zip(options.operation_events.clone())
+        .map(|(store, events)| workflow::ManagedTestRunRecording {
             store,
+            events,
             session_id: mcp_analytics_session_id(&args),
         })
         .ok_or_else(|| {
             TraceDecayError::project_route(
                 "runtime_mounting",
                 true,
-                "managed test runs are recorded in the project session store, which is still mounting",
+                "managed test runs require a mounted project session store and owning operation-event authority",
             )
         });
     workflow::compute_run_affected_tests(
