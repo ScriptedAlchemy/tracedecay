@@ -465,8 +465,7 @@ where
             let had_prior_observation = progress_window.observed_once;
             let work_advanced = marker.is_some_and(|marker| progress_window.record(marker));
             let stalled = progress_window.observe(None, now);
-            progress_window.new_work_since_prior_read =
-                had_prior_observation && work_advanced;
+            progress_window.new_work_since_prior_read = had_prior_observation && work_advanced;
             stalled
         } else if concurrent_preseal.is_some() || concurrent_text.is_some() {
             progress_window.observe_with_concurrent_writers(
@@ -2915,10 +2914,7 @@ mod daemon_precondition_tests {
             ))
         );
         // An initial nonzero counter is a baseline, not a post-read recovery.
-        assert!(!window.observe(
-            super::FirstGenerationWorkMarker::of(Some(&initial)),
-            start
-        ));
+        assert!(!window.observe(super::FirstGenerationWorkMarker::of(Some(&initial)), start));
         assert!(!window.new_work_since_prior_read);
         assert_eq!(idle.observe(blocked.clone(), start), None);
 
@@ -2978,17 +2974,21 @@ mod daemon_precondition_tests {
         let mut blocked = overlapping_native_and_text();
         blocked.progress.as_mut().unwrap().blocked_reason =
             Some(CodeIndexBuildBlockedReasonV1::ResidentMemory);
-        assert!(!window.observe(
-            super::FirstGenerationWorkMarker::of(Some(&blocked)),
-            start
-        ));
+        assert!(!window.observe(super::FirstGenerationWorkMarker::of(Some(&blocked)), start));
         assert_eq!(
             idle.observe(super::FirstGenerationStall::of(Ok(&blocked)), start),
             None
         );
-        blocked.native_graph_progress.as_mut().unwrap().progress_epoch += 1;
-        blocked.native_graph_progress.as_mut().unwrap().last_progress_micros =
-            Some(5_000);
+        blocked
+            .native_graph_progress
+            .as_mut()
+            .unwrap()
+            .progress_epoch += 1;
+        blocked
+            .native_graph_progress
+            .as_mut()
+            .unwrap()
+            .last_progress_micros = Some(5_000);
         assert!(window.observe(
             super::FirstGenerationWorkMarker::of(Some(&blocked)),
             start + Duration::from_secs(120)
