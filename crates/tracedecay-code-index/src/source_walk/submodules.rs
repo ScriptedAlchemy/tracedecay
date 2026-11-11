@@ -149,7 +149,11 @@ impl AuthenticatedSubmodule {
         for admin in [&self.parent_git_dir, &self.parent_common_dir] {
             for entry in std::fs::read_dir(admin)? {
                 let entry = entry?;
-                if entry.file_name().to_string_lossy().starts_with("sharedindex.") {
+                if entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with("sharedindex.")
+                {
                     paths.push(entry.path());
                 }
             }

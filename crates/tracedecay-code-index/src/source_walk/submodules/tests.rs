@@ -391,10 +391,18 @@ fn changing_a_split_index_invalidates_the_child_binding_witness() {
     let shared = fs::read_dir(root.join(".git"))
         .unwrap()
         .map(|entry| entry.unwrap())
-        .find(|entry| entry.file_name().to_string_lossy().starts_with("sharedindex."))
+        .find(|entry| {
+            entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with("sharedindex.")
+        })
         .expect("real Git split index")
         .path();
-    let witness = child.binding_witness().unwrap().expect("local Git authority");
+    let witness = child
+        .binding_witness()
+        .unwrap()
+        .expect("local Git authority");
     assert!(
         witness.paths.contains_key(&shared),
         "the secondary index is part of staged gitlink authority"
