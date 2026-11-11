@@ -584,9 +584,11 @@ async fn check_projects(
             let root = project_root.to_path_buf();
             async move {
                 let check = async {
-                    let _build_info_guard = admission.serialize_build_info(&build_info).await;
+                    let build_info_guard = admission.serialize_build_info(&build_info).await;
                     let bound = build_info.clone();
+                    let bind_guard = build_info_guard.clone();
                     if let Err(error) = native_runtime::spawn_blocking(move || {
+                        let _build_info_guard = bind_guard;
                         bind_build_info(&bound, compiler_revision)
                     })
                     .await
@@ -608,6 +610,7 @@ async fn check_projects(
                         &root,
                         &tsconfig,
                         Some(&build_info),
+                        Some(build_info_guard.clone()),
                     )
                     .await
                     {

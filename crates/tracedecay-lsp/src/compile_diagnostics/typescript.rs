@@ -37,6 +37,14 @@ use tracedecay_runtime_core::native_runtime;
 /// Limit simultaneous compiler children as well as their background CPU demand.
 const MAX_CONCURRENT_COMPILERS: usize = 4;
 
+/// A shared ownership token for one build-info path's serialization lock.
+/// Clones let abandoned async checks retain the lock in detached compiler
+/// supervision until its child has been killed and reaped.
+#[derive(Clone)]
+pub struct TypeScriptBuildInfoGuard {
+    _guard: Arc<OwnedMutexGuard<()>>,
+}
+
 /// Shared by project producers in one daemon generation.
 #[derive(Clone)]
 pub struct TypeScriptCompilerAdmission {
@@ -66,7 +74,7 @@ impl TypeScriptCompilerAdmission {
     /// its revision binding. Producers sharing this admission may outlive their
     /// route, but a retiring compiler must finish before its replacement can
     /// delete or read the same compiler cache.
-    pub async fn serialize_build_info(&self, build_info: &Path) -> OwnedMutexGuard<()> {
+    pub async fn serialize_build_info(&self, build_info: &Path) -> TypeScriptBuildInfoGuard {
         let lock = {
             let mut locks = self.build_info_locks.lock().await;
             locks.retain(|_, lock| lock.strong_count() > 0);
@@ -78,7 +86,9 @@ impl TypeScriptCompilerAdmission {
                 lock
             }
         };
-        lock.lock_owned().await
+        TypeScriptBuildInfoGuard {
+            _guard: Arc::new(lock.lock_owned().await),
+        }
     }
 
     pub fn cancel(&self) {
@@ -133,6 +143,7 @@ pub async fn run_compiler(
     project_root: &Path,
     tsconfig: &Path,
     build_info: Option<&Path>,
+    build_info_guard: Option<TypeScriptBuildInfoGuard>,
 ) -> Result<Vec<Diagnostic>> {
     run_compiler_within(
         admission,
@@ -140,6 +151,7 @@ pub async fn run_compiler(
         project_root,
         tsconfig,
         build_info,
+        build_info_guard,
         CHECK_LIMITS,
     )
     .await
@@ -151,6 +163,7 @@ async fn run_compiler_within(
     project_root: &Path,
     tsconfig: &Path,
     build_info: Option<&Path>,
+    build_info_guard: Option<TypeScriptBuildInfoGuard>,
     limits: CheckLimits,
 ) -> Result<Vec<Diagnostic>> {
     let mut cmd = Command::new(compiler);
@@ -182,11 +195,12 @@ async fn run_compiler_within(
         max_stderr_bytes: limits.max_stderr_bytes,
     };
     let background_cpu = Arc::clone(&admission.background_cpu);
-    // The permit travels with the blocking runner, which kills and reaps the
-    // child before returning, so it is held for the child's whole lifetime
-    // even when this future is dropped first.
+    // The permit and build-info lock travel with the blocking runner, which
+    // kills and reaps the child before returning. They remain held for the
+    // child's whole lifetime even when this future is dropped first.
     let output = native_runtime::spawn_blocking(move || {
         let _permit = permit;
+        let _build_info_guard = build_info_guard;
         let _cpu = background_cpu
             .acquire_cancellable(|| {
                 bounds
@@ -536,6 +550,7 @@ src/b.ts(2,2): warning TS6133: Second.
                 project.path(),
                 &tsconfig,
                 None,
+                None,
             ))
             .unwrap_or_else(|error| panic!("exit {exit} is a checked project: {error}"));
             assert_eq!(diagnostics.len(), 1, "exit {exit}");
@@ -567,6 +582,7 @@ src/b.ts(2,2): warning TS6133: Second.
                 project.path(),
                 &project.path().join("tsconfig.json"),
                 None,
+                None,
             ));
             assert!(result.is_err(), "exit {exit} and report {report:?}");
         }
@@ -583,6 +599,7 @@ src/b.ts(2,2): warning TS6133: Second.
             &compiler,
             project.path(),
             &project.path().join("tsconfig.json"),
+            None,
             None,
         ))
         .expect("clean compiler exit");
@@ -605,6 +622,7 @@ src/b.ts(2,2): warning TS6133: Second.
             &compiler,
             project.path(),
             &project.path().join("tsconfig.json"),
+            None,
             None,
         ))
         .expect_err("a file-less tsc error is not a clean project");
@@ -645,7 +663,8 @@ src/b.ts(2,2): warning TS6133: Second.
                 &compiler,
                 project.path(),
                 &tsconfig,
-                None
+                None,
+                None,
             ));
             let started = std::pin::pin!(async {
                 loop {
@@ -698,6 +717,87 @@ src/b.ts(2,2): warning TS6133: Second.
 
     #[cfg(unix)]
     #[test]
+    fn dropping_a_check_keeps_build_info_locked_until_the_child_is_reaped() {
+        let project = tempfile::tempdir().unwrap();
+        let compiler = project.path().join("tsc");
+        let pid_file = project.path().join("tsc.pid");
+        write_executable_script(
+            &compiler,
+            "#!/bin/sh\necho $$ > tsc.pid.tmp && mv tsc.pid.tmp tsc.pid\nexec sleep 60\n",
+        )
+        .unwrap();
+        let tsconfig = project.path().join("tsconfig.json");
+        let build_info = project.path().join("check.tsbuildinfo");
+        let admission = admission();
+        let pid = block(async {
+            let guard = admission.serialize_build_info(&build_info).await;
+            let check = Box::pin(run_compiler(
+                &admission,
+                &compiler,
+                project.path(),
+                &tsconfig,
+                Some(&build_info),
+                Some(guard),
+            ));
+            let started = std::pin::pin!(async {
+                loop {
+                    if let Ok(pid) = std::fs::read_to_string(&pid_file) {
+                        return pid.trim().to_owned();
+                    }
+                    native_runtime::sleep_until(Instant::now() + Duration::from_millis(10))
+                        .await
+                        .unwrap();
+                }
+            });
+            let (check, pid) = match futures_util::future::select(check, started).await {
+                futures_util::future::Either::Left((result, _)) => {
+                    panic!("the check finished before it was dropped: {result:?}")
+                }
+                futures_util::future::Either::Right((pid, check)) => (check, pid),
+            };
+            assert!(
+                Command::new("kill")
+                    .args(["-0", &pid])
+                    .output()
+                    .unwrap()
+                    .status
+                    .success()
+            );
+            let mut replacement = Box::pin(admission.serialize_build_info(&build_info));
+            assert!(futures_util::poll!(replacement.as_mut()).is_pending());
+            drop(check);
+            assert!(
+                futures_util::poll!(replacement.as_mut()).is_pending(),
+                "a replacement acquired the build-info before the old child was reaped"
+            );
+            let deadline = Box::pin(native_runtime::sleep_until(
+                Instant::now() + Duration::from_secs(10),
+            ));
+            match futures_util::future::select(replacement, deadline).await {
+                futures_util::future::Either::Left((guard, _)) => drop(guard),
+                futures_util::future::Either::Right(_) => {
+                    panic!("child settlement retained the build-info lock")
+                }
+            }
+            pid
+        });
+        assert!(
+            !Command::new("kill")
+                .args(["-0", &pid])
+                .output()
+                .unwrap()
+                .status
+                .success(),
+            "the build-info lock was released before tsc {pid} was reaped"
+        );
+        assert_eq!(
+            admission.permits.available_permits(),
+            MAX_CONCURRENT_COMPILERS
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn dropping_a_waiting_check_never_spawns_and_releases_its_demand() {
         let project = tempfile::tempdir().unwrap();
         let compiler = project.path().join("tsc");
@@ -716,13 +816,14 @@ src/b.ts(2,2): warning TS6133: Second.
                 project.path(),
                 &tsconfig,
                 None,
+                None,
             ));
             assert!(futures_util::poll!(waiting.as_mut()).is_pending());
             assert!(!project.path().join("ran").exists());
             drop(waiting);
             drop(held);
             assert!(
-                run_compiler(&admission, &compiler, project.path(), &tsconfig, None)
+                run_compiler(&admission, &compiler, project.path(), &tsconfig, None, None)
                     .await
                     .unwrap()
                     .is_empty()
@@ -758,6 +859,7 @@ src/b.ts(2,2): warning TS6133: Second.
                 project.path(),
                 &tsconfig,
                 None,
+                None,
             ));
             assert!(futures_util::poll!(waiting.as_mut()).is_pending());
             admission.cancel();
@@ -770,7 +872,7 @@ src/b.ts(2,2): warning TS6133: Second.
             );
             drop(held);
             assert!(
-                run_compiler(&admission, &compiler, project.path(), &tsconfig, None)
+                run_compiler(&admission, &compiler, project.path(), &tsconfig, None, None)
                     .await
                     .is_err()
             );
@@ -809,7 +911,8 @@ src/b.ts(2,2): warning TS6133: Second.
                 &compiler,
                 project.path(),
                 &tsconfig,
-                None
+                None,
+                None,
             ))
             .unwrap()
             .is_empty()
@@ -846,6 +949,7 @@ src/b.ts(2,2): warning TS6133: Second.
             project.path(),
             &tsconfig,
             None,
+            None,
             CheckLimits {
                 deadline: Duration::from_secs(30),
                 ..tiny_limits()
@@ -866,6 +970,7 @@ src/b.ts(2,2): warning TS6133: Second.
             &compiler,
             project.path(),
             &project.path().join("tsconfig.json"),
+            None,
             None,
             CheckLimits {
                 deadline: Duration::from_secs(30),
@@ -895,6 +1000,7 @@ src/b.ts(2,2): warning TS6133: Second.
             project.path(),
             &tsconfig,
             None,
+            None,
             tiny_limits(),
         ))
         .expect_err("a stalled compiler never reports clean");
@@ -916,6 +1022,7 @@ src/b.ts(2,2): warning TS6133: Second.
             &compiler,
             project.path(),
             &project.path().join("tsconfig.json"),
+            None,
             None,
             CheckLimits {
                 deadline: Duration::from_secs(30),
@@ -946,8 +1053,9 @@ src/b.ts(2,2): warning TS6133: Second.
         let tsconfig = project.path().join("tsconfig.json");
         let admission = admission();
         let results = block(futures_util::future::join_all(
-            (0..MAX_CONCURRENT_COMPILERS * 3)
-                .map(|_| run_compiler(&admission, &compiler, project.path(), &tsconfig, None)),
+            (0..MAX_CONCURRENT_COMPILERS * 3).map(|_| {
+                run_compiler(&admission, &compiler, project.path(), &tsconfig, None, None)
+            }),
         ));
         assert!(results.iter().all(Result::is_ok), "{results:?}");
         let seen = std::fs::read_to_string(project.path().join("seen")).unwrap();
