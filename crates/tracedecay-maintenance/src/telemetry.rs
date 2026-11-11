@@ -1043,10 +1043,10 @@ mod table_growth_checkpoint_tests {
             .expect("replace disposable checkpoint")
             .set_len(MAX_TABLE_GROWTH_STATE_BYTES as u64 + 1)
             .expect("sparse oversized checkpoint");
-        assert_eq!(
-            load_table_growth_states(&checkpoint).unwrap_err().kind(),
-            std::io::ErrorKind::InvalidData
-        );
+        assert!(matches!(
+            load_table_growth_states(&checkpoint),
+            Err(error) if error.kind() == std::io::ErrorKind::InvalidData
+        ));
         assert!(
             persist_table_growth_states(
                 &checkpoint,
@@ -1075,9 +1075,11 @@ mod table_growth_checkpoint_tests {
             std::fs::remove_file(&checkpoint).expect("remove disposable oversized file");
             std::os::unix::fs::symlink(&foreign, &checkpoint)
                 .expect("substitute foreign checkpoint symlink");
-            assert_eq!(
-                load_table_growth_states(&checkpoint).unwrap_err().kind(),
-                std::io::ErrorKind::InvalidInput,
+            assert!(
+                matches!(
+                    load_table_growth_states(&checkpoint),
+                    Err(error) if error.kind() == std::io::ErrorKind::InvalidInput
+                ),
                 "the previous std::fs::read would import this valid foreign state"
             );
             assert!(
