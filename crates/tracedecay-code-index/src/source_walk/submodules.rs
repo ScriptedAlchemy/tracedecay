@@ -142,6 +142,18 @@ impl AuthenticatedSubmodule {
             self.worktree.clone(),
             self.worktree.join(".git"),
         ];
+        // Git split indexes carry staged gitlinks in sharedindex.* files.
+        // Their contents can change without changing the main index or its
+        // parent directory. Witness each file in both administrative roots;
+        // the directory stamps above detect newly added or removed files.
+        for admin in [&self.parent_git_dir, &self.parent_common_dir] {
+            for entry in std::fs::read_dir(admin)? {
+                let entry = entry?;
+                if entry.file_name().to_string_lossy().starts_with("sharedindex.") {
+                    paths.push(entry.path());
+                }
+            }
+        }
         // The pack directory stamp detects additions and deletions. Track
         // existing pack members as well to reject an in-place replacement.
         match std::fs::read_dir(objects.join("pack")) {

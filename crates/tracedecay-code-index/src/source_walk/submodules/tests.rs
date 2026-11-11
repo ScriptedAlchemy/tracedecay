@@ -378,3 +378,42 @@ fn cached_child_binding_refuses_equal_length_working_registration_change() {
     fs::write(&path, before).unwrap();
     assert!(boundaries.resolve(source).unwrap().is_some());
 }
+
+#[cfg(unix)]
+#[test]
+fn changing_a_split_index_invalidates_the_child_binding_witness() {
+    let fixture = fixture();
+    let root = fixture.path().join("parent");
+    let boundaries = LiveSourceBoundaries::open(&root, true).unwrap();
+    let (child, _) = boundaries.children.get("app").expect("authenticated child");
+    git(&root, &["update-index", "--split-index"]);
+
+    let shared = fs::read_dir(root.join(".git"))
+        .unwrap()
+        .map(|entry| entry.unwrap())
+        .find(|entry| entry.file_name().to_string_lossy().starts_with("sharedindex."))
+        .expect("real Git split index")
+        .path();
+    let witness = child.binding_witness().unwrap().expect("local Git authority");
+    assert!(
+        witness.paths.contains_key(&shared),
+        "the secondary index is part of staged gitlink authority"
+    );
+    assert!(witness.unchanged().unwrap());
+
+    // Mutate only the secondary index's bytes, not the main index or its
+    // parent directory. Watching only .git/index would reuse stale authority.
+    let index = root.join(".git/index");
+    let original_index = super::FileWitness::at(&index).unwrap();
+    let original_directory = super::FileWitness::at(&root.join(".git")).unwrap();
+    fs::write(&shared, b"corrupt shared index").unwrap();
+    assert_eq!(super::FileWitness::at(&index).unwrap(), original_index);
+    assert_eq!(
+        super::FileWitness::at(&root.join(".git")).unwrap(),
+        original_directory
+    );
+    assert!(
+        !witness.unchanged().unwrap(),
+        "a corrupt shared-index inode must invalidate the cached Git authority"
+    );
+}
