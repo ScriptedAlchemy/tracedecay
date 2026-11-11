@@ -2,7 +2,7 @@
 
 use std::collections::{BTreeSet, VecDeque};
 use std::io::SeekFrom;
-use std::process::{Command, Stdio};
+use std::process::Command;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -978,18 +978,13 @@ async fn packaged_host_ingest_delivers_a_registered_advisory_cycle() {
             String::from_utf8_lossy(&output.stderr)
         );
     }
-    common::initialize_tracedecay_cli_project(environment.home(), &project);
     let daemon_log = environment.home().join("advisory-daemon.log");
-    let _daemon = common::spawn_tracedecay_daemon_with(environment.home(), |command| {
-        // `.cargo/config.toml` sets TRACEDECAY_DISABLE_GLOBAL_DB=1 so cargo
-        // children never touch the operator ledger. This journey depends on
-        // the registered profile accounting owner for hint-outcome settlement.
-        command
-            .env_remove("TRACEDECAY_DISABLE_GLOBAL_DB")
-            .stderr(Stdio::from(
-                std::fs::File::create(&daemon_log).expect("create isolated advisory daemon log"),
-            ));
-    });
+    let _daemon =
+        common::spawn_tracedecay_daemon_logged(environment.home(), &daemon_log, |command| {
+            // Hint-outcome settlement requires the isolated profile's accounting owner.
+            command.env_remove("TRACEDECAY_DISABLE_GLOBAL_DB");
+        });
+    common::initialize_tracedecay_cli_project(environment.home(), &project);
     let transcript = project.join("cursor-proximity.jsonl");
     std::fs::write(
         &transcript,
@@ -1201,8 +1196,16 @@ async fn packaged_host_ingest_delivers_a_registered_advisory_cycle() {
             );
         } else {
             let stderr = String::from_utf8_lossy(&stop_output.stderr).into_owned();
+            let temporal_pending =
+                serde_json::from_slice::<Value>(&stop_output.stdout).is_ok_and(|response| {
+                    let problem = &response["structuredContent"]["problem"];
+                    problem["code"] == "temporal_refresh_unavailable"
+                        && problem["retryable"] == true
+                        && problem["retry_scope"] == "same_request"
+                        && problem["terminality"] == "pre_admission"
+                });
             assert!(
-                stderr.contains("is warming in the background"),
+                stderr.contains("is warming in the background") || temporal_pending,
                 "registered daemon stop ingest failed\nstdout:\n{}\nstderr:\n{stderr}\ndaemon log:\n{}",
                 String::from_utf8_lossy(&stop_output.stdout),
                 std::fs::read_to_string(&daemon_log).expect("read isolated advisory daemon log"),

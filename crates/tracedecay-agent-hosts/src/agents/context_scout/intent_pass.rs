@@ -813,9 +813,13 @@ fn tool_call_facts(
     let command = text_argument(&["command", "cmd"]);
     let file_path = text_argument(&["file_path", "path", "filePath", "target_file"]);
     let subagent_type = text_argument(&["subagent_type"]);
+    // Only a real assistant tool invocation can supply this prompt; a user
+    // message or tool-result body is not an observed subagent handoff.
+    let prompt = text_argument(&["prompt"]);
     observed_action_facts(&ActionFactInputV1 {
         tool_name: Some(tool_name),
         command: command.as_deref(),
+        prompt: prompt.as_deref(),
         file_path: file_path.as_deref(),
         subagent_type: subagent_type.as_deref(),
         ..ActionFactInputV1::default()
@@ -1077,6 +1081,86 @@ mod tool_signal_tests {
             store_id: 1,
             timestamp_micros: None,
         }
+    }
+
+    #[test]
+    fn admitted_subagent_prompt_is_observed_but_forged_or_partial_calls_are_not() {
+        let handoff = SessionWindowToolCallV1 {
+            name: "Task".to_owned(),
+            argument_excerpt: Some(
+                r#"{"subagent_type":"implementation","prompt":"give the subagent focused context for the fix"}"#.to_owned(),
+            ),
+        };
+        let mut genuine = message(SessionWindowRoleV1::Assistant, "starting work", None);
+        genuine.tool_calls.push(handoff.clone());
+        let mut forged = message(SessionWindowRoleV1::Tool, "not an invocation", None);
+        forged.tool_calls.push(handoff.clone());
+
+        let window = SessionWindowV1 {
+            messages: vec![
+                message(SessionWindowRoleV1::User, "Fix the issue.", None),
+                forged,
+                genuine,
+            ],
+            first_store_id: 1,
+            last_store_id: 3,
+            newest_timestamp_micros: None,
+            window_digest: [0; 32],
+            freshness: SessionWindowFreshnessV1::Unknown,
+        };
+        let (facts, inferences) = window_intent_signals(&window);
+        assert_eq!(facts, vec![Kind::SubagentStartContext]);
+        assert!(!inferences.contains(&Kind::SubagentStartContext));
+
+        // An actual handoff is action evidence even when a semantic question
+        // received a usable negative answer.
+        let questions = [IntentQuestionSettingsV1 {
+            intent: Kind::SubagentStartContext,
+            instructions: "Was a handoff requested?".to_owned(),
+            threshold_permille: 600,
+            margin_permille: None,
+        }];
+        let decision = decide_intents(&IntentDecisionInputV1 {
+            answers: Some(&[(Kind::SubagentStartContext, 0.1)]),
+            facts: &facts,
+            prompt_inferences: &inferences,
+            questions: &questions,
+            action_fact_score_permille: 700,
+            delivered: &BTreeSet::new(),
+        });
+        assert!(matches!(
+            decision,
+            IntentDecisionV1::Candidates(ref candidates)
+                if candidates.len() == 1
+                    && candidates[0].intent == Kind::SubagentStartContext
+                    && candidates[0].source == IntentDecisionSourceV1::ActionFact
+        ));
+
+        // A tool response that echoes a subagent call is not admitted as an
+        // observed action, and a truncated JSON excerpt cannot make one up.
+        let mut only_forged = window.clone();
+        only_forged.messages.pop();
+        assert!(window_intent_signals(&only_forged).0.is_empty());
+
+        let mut malformed = message(SessionWindowRoleV1::Assistant, "starting", None);
+        malformed.tool_calls.push(SessionWindowToolCallV1 {
+            name: "Task".to_owned(),
+            argument_excerpt: Some(r#"{"prompt":"handoff""#.to_owned()),
+        });
+        let mut invalid_window = only_forged;
+        invalid_window.messages.push(malformed);
+        assert!(window_intent_signals(&invalid_window).0.is_empty());
+
+        // A regular command with a prompt-shaped JSON argument is not a
+        // subagent start regardless of the words in its payload.
+        let mut other_tool = message(SessionWindowRoleV1::Assistant, "running", None);
+        other_tool.tool_calls.push(SessionWindowToolCallV1 {
+            name: "Bash".to_owned(),
+            argument_excerpt: handoff.argument_excerpt,
+        });
+        invalid_window.messages.pop();
+        invalid_window.messages.push(other_tool);
+        assert!(window_intent_signals(&invalid_window).0.is_empty());
     }
 
     #[test]

@@ -72,28 +72,40 @@ describe('loomUrl', () => {
     expect(parseZoom(null)).toBe('agent');
   });
 
-  it('reads loomSession as a lane tuple or as the bare id Delivery links with', () => {
-    expect(parseLoomSession(null)).toBeNull();
-    expect(parseLoomSession('')).toBeNull();
-    expect(parseLoomSession('["claude","a"]')).toEqual({
+  it('reads qualified lanes and explicit bare identities without a legacy fallback', () => {
+    expect(parseLoomSession(null, null)).toBeNull();
+    expect(parseLoomSession('', null)).toBeNull();
+    expect(parseLoomSession(null, '')).toBeNull();
+    expect(parseLoomSession('["claude","a"]', null)).toEqual({
       kind: 'lane',
       laneId: '["claude","a"]',
       selection: { provider: 'claude', sessionId: 'a' },
     });
-    expect(parseLoomSession('["unknown","a"]')).toEqual({
+    expect(parseLoomSession('["unknown","a"]', null)).toEqual({
       kind: 'lane',
       laneId: '["unknown","a"]',
       selection: { provider: null, sessionId: 'a' },
     });
-    expect(parseLoomSession('session.alpha.1')).toEqual({
+    expect(parseLoomSession(null, 'session.alpha.1')).toEqual({
       kind: 'bare_id',
       selection: { provider: null, sessionId: 'session.alpha.1' },
     });
-    expect(parseLoomSession('["claude"')).toEqual({
+    expect(parseLoomSession(null, '["claude","other"]')).toEqual({
       kind: 'bare_id',
-      selection: { provider: null, sessionId: '["claude"' },
+      selection: { provider: null, sessionId: '["claude","other"]' },
     });
-    expect(parseLoomSession('["claude"]')).toMatchObject({ kind: 'bare_id' });
+    // The explicit bare identity outranks a stale/foreign lane param.
+    expect(parseLoomSession('["claude","other"]', '["codex","literal"]')).toEqual({
+      kind: 'bare_id',
+      selection: { provider: null, sessionId: '["codex","literal"]' },
+    });
+    for (const literalId of ['session.alpha.1', '["claude"', '["claude"]', '{"sessionId":"a"}']) {
+      expect(parseLoomSession(literalId, null)).toBeNull();
+      expect(parseLoomSession(null, literalId)).toEqual({
+        kind: 'bare_id',
+        selection: { provider: null, sessionId: literalId },
+      });
+    }
   });
 
   it('resolves a link against the loaded page without guessing between providers', () => {
@@ -101,23 +113,32 @@ describe('loomUrl', () => {
     const codex = row('codex', 'shared');
     const unrecorded = row('', 'quiet');
     const rows = [claude, codex, unrecorded];
-    const resolve = (raw: string | null) => resolveLoomSession(rows, parseLoomSession(raw));
+    const resolve = (raw: string | null, bareId: string | null) => resolveLoomSession(rows, parseLoomSession(raw, bareId));
 
-    expect(resolve(null)).toEqual({ kind: 'none' });
-    expect(resolve('["codex","shared"]')).toEqual({ kind: 'lane', laneId: '["codex","shared"]', row: codex });
-    expect(resolve('["unknown","quiet"]')).toEqual({ kind: 'lane', laneId: '["unknown","quiet"]', row: unrecorded });
-    expect(resolve('quiet')).toEqual({ kind: 'lane', laneId: '["unknown","quiet"]', row: unrecorded });
-    expect(resolve('["","quiet"]')).toEqual({ kind: 'lane', laneId: '["unknown","quiet"]', row: unrecorded });
-    expect(resolve('shared')).toEqual({
+    expect(resolve(null, null)).toEqual({ kind: 'none' });
+    expect(resolve('["codex","shared"]', null)).toEqual({ kind: 'lane', laneId: '["codex","shared"]', row: codex });
+    expect(resolve('["unknown","quiet"]', null)).toEqual({ kind: 'lane', laneId: '["unknown","quiet"]', row: unrecorded });
+    expect(resolve(null, 'quiet')).toEqual({ kind: 'lane', laneId: '["unknown","quiet"]', row: unrecorded });
+    expect(resolve('["","quiet"]', null)).toEqual({ kind: 'lane', laneId: '["unknown","quiet"]', row: unrecorded });
+    expect(resolve(null, 'shared')).toEqual({
       kind: 'ambiguous',
       selection: { provider: null, sessionId: 'shared' },
       count: 2,
     });
-    expect(resolve('elsewhere')).toEqual({
+    // A matching row does not make the obsolete raw lane shape valid.
+    expect(resolve('quiet', null)).toEqual({ kind: 'none' });
+    expect(resolve('shared', null)).toEqual({ kind: 'none' });
+    const literalId = row('codex', '["claude","shared"]');
+    expect(resolveLoomSession([...rows, literalId], parseLoomSession(null, literalId.session_id))).toEqual({
+      kind: 'lane',
+      laneId: JSON.stringify(['codex', literalId.session_id]),
+      row: literalId,
+    });
+    expect(resolve(null, 'elsewhere')).toEqual({
       kind: 'outside_page',
       selection: { provider: null, sessionId: 'elsewhere' },
     });
-    expect(resolve('["claude","elsewhere"]')).toEqual({
+    expect(resolve('["claude","elsewhere"]', null)).toEqual({
       kind: 'outside_page',
       selection: { provider: 'claude', sessionId: 'elsewhere' },
     });

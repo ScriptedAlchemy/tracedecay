@@ -1,7 +1,9 @@
 //! Integration-test transport using the same admitted authorities as daemon startup.
+use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use asupersync::net::TcpListener;
 use axum::Router;
 use tracedecay_contracts::code_index_freshness::CodeIndexFreshnessReader;
 use tracedecay_domain::errors::Result;
@@ -230,10 +232,27 @@ impl DashboardTestProjectGraphsV1 {
     }
 }
 
-pub struct DashboardTestEndpointV1<'a> {
-    pub host: &'a str,
-    pub port: u16,
-    pub access: DashboardAccessToken,
+/// An admitted loopback listener retained from address allocation through serving.
+pub struct DashboardTestEndpointV1 {
+    listener: TcpListener,
+    addr: SocketAddr,
+    access: DashboardAccessToken,
+}
+
+impl DashboardTestEndpointV1 {
+    pub async fn bind(host: &str, port: u16, access: DashboardAccessToken) -> Result<Self> {
+        let (listener, addr) = bind_dashboard(host, port).await?;
+        Ok(Self {
+            listener,
+            addr,
+            access,
+        })
+    }
+
+    #[must_use]
+    pub fn launch_url(&self) -> String {
+        self.access.launch_url(self.addr)
+    }
 }
 
 #[doc(hidden)]
@@ -241,7 +260,7 @@ pub async fn run_until_shutdown_for_tests_with_host_admission<F>(
     cg: Arc<DashboardProjectContext>,
     authority: DashboardHostAdmissionTestAuthorityV1,
     project_graphs: DashboardTestProjectGraphsV1,
-    endpoint: DashboardTestEndpointV1<'_>,
+    endpoint: DashboardTestEndpointV1,
     build_version: &'static str,
     spa_routes: Router,
     shutdown: F,
@@ -249,7 +268,11 @@ pub async fn run_until_shutdown_for_tests_with_host_admission<F>(
 where
     F: std::future::Future<Output = ()> + Send + 'static,
 {
-    let DashboardTestEndpointV1 { host, port, access } = endpoint;
+    let DashboardTestEndpointV1 {
+        listener,
+        addr,
+        access,
+    } = endpoint;
     // A directly served dashboard is not handed a daemon-owned analyzer broker,
     // so it opens the same one the MCP server mounts. Without it the code
     // diagnostics surface would answer unsupported purely because of which
@@ -303,7 +326,6 @@ where
     )
     .await?;
     let app = router(cg.as_ref(), state, spa_routes).await?;
-    let (listener, addr) = bind_dashboard(host, port).await?;
     let url = access.launch_url(addr);
     let app = with_dashboard_http_admission(app, addr, access);
 
@@ -322,4 +344,26 @@ where
             })?;
     serve_loopback(ConnectionExecutor::Tokio(runtime), listener, app, shutdown).await;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{DashboardAccessToken, DashboardTestEndpointV1};
+
+    #[asupersync::test]
+    async fn fixture_retains_the_advertised_listening_socket_before_serving() {
+        let token = DashboardAccessToken::mint().unwrap();
+        let endpoint = DashboardTestEndpointV1::bind("127.0.0.1", 0, token)
+            .await
+            .unwrap();
+        let addr = endpoint.addr;
+        assert!(addr.ip().is_loopback());
+        assert!(
+            endpoint
+                .launch_url()
+                .starts_with(&format!("http://{addr}/"))
+        );
+        assert!(std::net::TcpListener::bind(addr).is_err());
+        std::net::TcpStream::connect(addr).unwrap();
+    }
 }

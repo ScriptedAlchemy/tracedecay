@@ -6,7 +6,7 @@
 //! swapped for a symlink cannot redirect the operation.
 
 use std::ffi::OsStr;
-use std::io::{self, Read};
+use std::io::{self, Read, Write};
 use std::path::{Component, Path};
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -16,7 +16,7 @@ use cap_std::fs::OpenOptionsExt;
 #[cfg(not(windows))]
 use cap_fs_ext::OpenOptionsMaybeDirExt;
 use cap_fs_ext::{DirExt, FollowSymlinks, OpenOptionsFollowExt};
-use cap_std::fs::{Dir, File, OpenOptions};
+use cap_std::fs::{Dir, DirEntry, File, OpenOptions};
 
 /// How many times a create-or-open that reports the entry missing is asked
 /// again before the answer is believed. xnu bounds its own retry of the same
@@ -318,8 +318,6 @@ pub fn replace_nested_file_nofollow(directory: &Path, name: &str, bytes: &[u8]) 
 
 /// Atomically replaces a single file beneath a directory held by its owner.
 pub fn replace_file_in_open_directory(directory: &Dir, name: &str, bytes: &[u8]) -> io::Result<()> {
-    use std::io::Write;
-
     let leaf = checked_leaf_name(name)?;
 
     for _ in 0..16 {
@@ -372,25 +370,45 @@ pub struct DirectoryCensus<const N: usize> {
 pub fn census_child_directories_nofollow<const N: usize>(
     root: &Path,
     receipt: Option<(&str, usize)>,
-    mut classify: impl FnMut(&OsStr, Option<&[u8]>) -> Option<usize>,
+    classify: impl FnMut(&OsStr, Option<&[u8]>) -> Option<usize>,
 ) -> io::Result<Option<DirectoryCensus<N>>> {
     let Some(directory) = open_owned_directory_nofollow(root)? else {
         return Ok(None);
     };
+    census_directory_entries(&directory, directory.read_dir(".")?, receipt, classify).map(Some)
+}
+
+fn census_directory_entries<const N: usize>(
+    directory: &Dir,
+    entries: impl Iterator<Item = io::Result<DirEntry>>,
+    receipt: Option<(&str, usize)>,
+    mut classify: impl FnMut(&OsStr, Option<&[u8]>) -> Option<usize>,
+) -> io::Result<DirectoryCensus<N>> {
     let mut classes: [Vec<Dir>; N] = std::array::from_fn(|_| Vec::new());
     let mut result = DirectoryCensus {
         counts: [0; N],
         bytes: [0; N],
         unrecognized: 0,
     };
-    for entry in directory.read_dir(".")? {
+    for entry in entries {
         let entry = entry?;
-        if !entry.file_type()?.is_dir() {
+        let file_type = match entry.file_type() {
+            Ok(file_type) => file_type,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error),
+        };
+        if !file_type.is_dir() {
             result.unrecognized = result.unrecognized.saturating_add(1);
             continue;
         }
         let name = entry.file_name();
-        let child = directory.open_dir_nofollow(&name)?;
+        // Publication can rename a staging child after enumeration. Its
+        // disappearance does not invalidate the other held generations.
+        let child = match directory.open_dir_nofollow(&name) {
+            Ok(child) => child,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error),
+        };
         let receipt_bytes = receipt
             .and_then(|(file, limit)| read_child_receipt(&child, file, limit).ok().flatten());
         match classify(&name, receipt_bytes.as_deref()) {
@@ -411,7 +429,7 @@ pub fn census_child_directories_nofollow<const N: usize>(
                 result.bytes[index].saturating_add(directory_bytes_nofollow(child, &mut counted)?);
         }
     }
-    Ok(Some(result))
+    Ok(result)
 }
 
 fn directory_bytes_nofollow(
@@ -538,6 +556,31 @@ mod replacement_tests {
     use std::io::Read;
 
     use super::*;
+
+    #[test]
+    fn census_retains_other_generations_when_a_listed_stage_is_published() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("sealed");
+        std::fs::create_dir_all(root.join(".staging")).unwrap();
+        std::fs::create_dir_all(root.join("existing")).unwrap();
+        std::fs::write(root.join(".staging/payload"), [1_u8; 17]).unwrap();
+        std::fs::write(root.join("existing/payload"), [2_u8; 41]).unwrap();
+        let held = open_owned_directory_nofollow(&root).unwrap().unwrap();
+        let listed: Vec<_> = held.read_dir(".").unwrap().collect();
+        assert_eq!(listed.len(), 2);
+        std::fs::rename(root.join(".staging"), root.join("published")).unwrap();
+
+        let measured =
+            census_directory_entries::<1>(&held, listed.into_iter(), None, |_, _| Some(0)).unwrap();
+        assert_eq!(measured.counts, [1]);
+        assert_eq!(measured.bytes, [41]);
+        assert_eq!(measured.unrecognized, 0);
+        let next = census_child_directories_nofollow::<1>(&root, None, |_, _| Some(0))
+            .unwrap()
+            .unwrap();
+        assert_eq!(next.counts, [2]);
+        assert_eq!(next.bytes, [58]);
+    }
 
     #[cfg(unix)]
     #[test]

@@ -7,8 +7,8 @@ pub(crate) use std::time::{Duration, Instant};
 
 pub(crate) use crate::common::{
     MessageRecordBuilder, create_runtime, fake_codex_bin, get_json, http_agent,
-    http_agent_with_timeout, install_fake_codex_launcher, pick_free_port, response_to_json,
-    tempdir_or_panic, wait_for_dashboard,
+    http_agent_with_timeout, install_fake_codex_launcher, response_to_json, tempdir_or_panic,
+    wait_for_dashboard,
 };
 pub(crate) use crate::runtime::DashboardTestRuntimeV1;
 pub(crate) use serde_json::Value;
@@ -101,8 +101,11 @@ impl DashboardServer {
         if let Some(shutdown) = self.shutdown.take() {
             let _ = shutdown.send(());
         }
-        if let Some(thread) = self.thread.take() {
-            let _ = thread.join();
+        if let Some(thread) = self.thread.take()
+            && let Err(panic) = thread.join()
+            && !thread::panicking()
+        {
+            std::panic::resume_unwind(panic);
         }
     }
 }
@@ -113,36 +116,22 @@ impl Drop for DashboardServer {
     }
 }
 
-/// The access token a fixture dashboard on `port` admits, and the base URL
-/// whose userinfo carries it to every request built from it.
-pub(crate) fn dashboard_access_for(
-    port: u16,
-) -> (tracedecay_dashboard_api::DashboardAccessToken, String) {
+pub(crate) async fn dashboard_endpoint()
+-> (tracedecay_dashboard_api::DashboardTestEndpointV1, String) {
     let access = tracedecay_dashboard_api::DashboardAccessToken::mint()
-        .unwrap_or_else(|error| panic!("mint dashboard access token: {error}"));
-    let base_url = crate::common::dashboard_api_base_url(
-        &access.launch_url(std::net::SocketAddr::from(([127, 0, 0, 1], port))),
-    );
-    (access, base_url)
-}
-
-fn fixture_endpoint(
-    port: u16,
-    access: tracedecay_dashboard_api::DashboardAccessToken,
-) -> tracedecay_dashboard_api::DashboardTestEndpointV1<'static> {
-    tracedecay_dashboard_api::DashboardTestEndpointV1 {
-        host: "127.0.0.1",
-        port,
-        access,
-    }
+        .expect("mint dashboard access token");
+    let endpoint = tracedecay_dashboard_api::DashboardTestEndpointV1::bind("127.0.0.1", 0, access)
+        .await
+        .expect("bind fixture dashboard");
+    let base_url = crate::common::dashboard_api_base_url(&endpoint.launch_url());
+    (endpoint, base_url)
 }
 
 pub(crate) fn spawn_dashboard_server_with_host_runtime(
     cg: TraceDecay,
     host_runtime: Arc<DashboardTestRuntimeV1>,
     project_graphs: tracedecay_dashboard_api::DashboardTestProjectGraphsV1,
-    port: u16,
-    access: tracedecay_dashboard_api::DashboardAccessToken,
+    endpoint: tracedecay_dashboard_api::DashboardTestEndpointV1,
 ) -> DashboardServer {
     spawn_dashboard_server_with_runner(
         cg,
@@ -151,7 +140,7 @@ pub(crate) fn spawn_dashboard_server_with_host_runtime(
         None,
         None,
         None,
-        fixture_endpoint(port, access),
+        endpoint,
     )
 }
 
@@ -159,8 +148,7 @@ pub(crate) fn spawn_dashboard_server_with_configuration_runtime(
     cg: TraceDecay,
     host_runtime: Arc<DashboardTestRuntimeV1>,
     project_graphs: tracedecay_dashboard_api::DashboardTestProjectGraphsV1,
-    port: u16,
-    access: tracedecay_dashboard_api::DashboardAccessToken,
+    endpoint: tracedecay_dashboard_api::DashboardTestEndpointV1,
 ) -> DashboardServer {
     spawn_dashboard_server_with_runner(
         cg,
@@ -169,7 +157,7 @@ pub(crate) fn spawn_dashboard_server_with_configuration_runtime(
         None,
         None,
         None,
-        fixture_endpoint(port, access),
+        endpoint,
     )
 }
 
@@ -235,7 +223,7 @@ fn spawn_dashboard_server_with_runner(
         Arc<dyn tracedecay_dashboard_api::DashboardGitCorrelationReadPortV1>,
     >,
     project_open: Option<ProjectOpenPublication>,
-    endpoint: tracedecay_dashboard_api::DashboardTestEndpointV1<'static>,
+    endpoint: tracedecay_dashboard_api::DashboardTestEndpointV1,
 ) -> DashboardServer {
     let (shutdown, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
     let thread = thread::spawn(move || {
@@ -302,7 +290,7 @@ fn spawn_dashboard_server_with_runner(
             )
             .await;
             let _ = cg.checkpoint().await;
-            let _ = result;
+            result.expect("serve fixture dashboard");
         });
     });
     DashboardServer {
@@ -1097,16 +1085,16 @@ pub(crate) async fn start_dashboard_fixture(seed_lcm: bool) -> DashboardFixture 
     start_dashboard_fixture_with_options(seed_lcm, true, false).await
 }
 
+pub(crate) async fn start_dashboard_seeded_lcm_fixture() -> DashboardFixture {
+    start_dashboard_fixture_with_options(true, false, false).await
+}
+
 pub(crate) async fn start_dashboard_fixture_without_memory() -> DashboardFixture {
     start_dashboard_fixture_with_options(false, false, false).await
 }
 
 pub(crate) async fn start_dashboard_configuration_fixture() -> DashboardFixture {
     start_dashboard_fixture_with_options(false, false, true).await
-}
-
-pub(crate) async fn start_dashboard_retained_memory_fixture() -> DashboardFixture {
-    start_dashboard_fixture_with_options(false, true, true).await
 }
 
 /// Starts a dashboard fixture with a fake `DashboardDeliveryReadPortV1` and
@@ -1127,14 +1115,15 @@ pub(crate) async fn start_dashboard_fixture_with_delivery_authority(
     .await
 }
 
-/// Starts a session-read fixture over seeded sessions, composed the way the
+/// Starts a session-read fixture composed the way the
 /// daemon composes a dashboard whose project is still opening: its session
 /// authorities mount once `project_open` publishes them.
 pub(crate) async fn start_dashboard_fixture_while_opening(
     project_open: ProjectOpenPublication,
+    seed_lcm: bool,
 ) -> DashboardFixture {
     start_dashboard_fixture_with_options_and_delivery(
-        true,
+        seed_lcm,
         false,
         false,
         None,
@@ -1229,8 +1218,7 @@ async fn start_dashboard_fixture_with_options_and_delivery(
     if seed_lcm {
         seed_lcm_fixture(&host_runtime, &project_root).await;
     }
-    let port = pick_free_port();
-    let (access, base_url) = dashboard_access_for(port);
+    let (endpoint, base_url) = dashboard_endpoint().await;
     let server = spawn_dashboard_server_with_runner(
         cg,
         Some((Arc::clone(&host_runtime), project_graphs.clone())),
@@ -1238,7 +1226,7 @@ async fn start_dashboard_fixture_with_options_and_delivery(
         delivery_authority,
         git_correlation_authority,
         project_open,
-        fixture_endpoint(port, access),
+        endpoint,
     );
 
     let agent = http_agent();

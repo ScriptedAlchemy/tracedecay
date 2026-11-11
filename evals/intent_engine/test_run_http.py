@@ -1068,6 +1068,39 @@ class RunHttpTest(unittest.TestCase):
         self.assertFalse(self.partial.exists())
         self.assertEqual(len(json.loads(self.output.read_text())["rows"]), 2)
 
+    def test_sample_published_before_row_is_recovered_without_repeating_inference(self):
+        sample = self.root / "first-response.json"
+        extra = ["--sample-out", str(sample)]
+        publish = run_http.publish_sample
+
+        def interrupted_publish(path, serialized):
+            publish(path, serialized)
+            raise OSError("interrupted after sample publication")
+
+        with patch.object(run_http, "post", side_effect=self.response) as post:
+            with patch.object(run_http, "publish_sample", side_effect=interrupted_publish):
+                with self.assertRaisesRegex(OSError, "interrupted after sample"):
+                    self.run_main(extra)
+        post.assert_called_once()
+        self.assertEqual(len(self.partial.read_text().splitlines()), 1)
+        original = sample.read_bytes()
+        captured = json.loads(original)
+
+        altered = copy.deepcopy(captured)
+        altered["row"]["request_sha256"] = "0" * 64
+        sample.write_text(json.dumps(altered))
+        self.assert_refused_unchanged(extra)
+        sample.write_bytes(original)
+
+        with patch.object(run_http, "post", side_effect=self.response) as post:
+            self.run_main(extra)
+        post.assert_called_once()
+        rows = json.loads(self.output.read_text())["rows"]
+        self.assertEqual([row["id"] for row in rows], ["first", "second"])
+        self.assertEqual(rows[0], captured["row"])
+        self.assertEqual(sample.read_bytes(), original)
+        self.assertFalse(self.partial.exists())
+
     def test_sample_identity_and_raw_response_must_match_durable_resume(self):
         sample = self.root / "first-response.json"
         extra = ["--sample-out", str(sample)]

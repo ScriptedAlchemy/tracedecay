@@ -54,7 +54,7 @@ def sample_read_limit(requests):
     return 64 * 1024 + 8 * (MAX_DECISION_RESPONSE_BYTES + largest_request)
 
 
-def verify_existing_sample(path, header, requests, done, questions):
+def verify_existing_sample(path, header, requests, done, questions, cases, temperature):
     """A resumed capture must describe a durable response from this experiment.
 
     Never silently reuse an unrelated file as the model's first raw answer.
@@ -88,12 +88,20 @@ def verify_existing_sample(path, header, requests, done, questions):
     # A later response with matching request/digest is still mislabelled evidence.
     if case_id != next(iter(requests)):
         raise ValueError("sample capture must correspond to the first case")
-    if case_id not in done:
-        raise ValueError("sample capture has no durable matching response row")
     response = sample.get("response")
-    noul_probabilities(response, questions)
-    if done[case_id].get("response_sha256") != digest(response):
+    raw_probs = noul_probabilities(response, questions)
+    row = done.get(case_id, sample.get("row"))
+    if not isinstance(row, dict) or row.get("id") != case_id:
+        raise ValueError("sample capture has no durable matching response row")
+    validate_saved_row(row, cases, requests, questions, temperature)
+    if (row.get("response_sha256") != digest(response)
+            or row.get("probs_raw", row["probs"]) != raw_probs):
         raise ValueError("sample capture disagrees with durable response evidence")
+    if case_id not in done:
+        if done:
+            raise ValueError("sample capture is missing its first row before later results")
+        return row
+    return None
 
 
 def publish_sample(path, serialized):
@@ -373,6 +381,18 @@ def open_partial_for_resume(path):
         raise
 
 
+def validate_saved_row(row, cases, requests, questions, temperature):
+    case_id = row.get("id") if isinstance(row, dict) else None
+    if not isinstance(case_id, str) or case_id not in cases:
+        raise ValueError("result row has an unknown case")
+    case = cases[case_id]
+    if (row.get("request_sha256") != requests[case_id][1]
+            or row.get("labels") != case["labels"]
+            or row.get("context_needed") != case["context_needed"]):
+        raise ValueError(f"partial output has mismatched case evidence for {case_id}")
+    return serialize_result(row, questions, temperature)
+
+
 def resume_rows(partial, header, cases, requests, questions, temperature):
     """Validate the whole existing log before appending or issuing HTTP work."""
     header_limit = len(json.dumps(header, allow_nan=False)) + 1
@@ -396,12 +416,7 @@ def resume_rows(partial, header, cases, requests, questions, temperature):
         case_id = row.get("id") if isinstance(row, dict) else None
         if not isinstance(case_id, str) or case_id not in cases or case_id in done:
             raise ValueError(f"partial output has an unknown or duplicate case at line {line_number}")
-        case = cases[case_id]
-        if (row.get("request_sha256") != requests[case_id][1]
-                or row.get("labels") != case["labels"]
-                or row.get("context_needed") != case["context_needed"]):
-            raise ValueError(f"partial output has mismatched case evidence for {case_id}")
-        serialize_result(row, questions, temperature)
+        validate_saved_row(row, cases, requests, questions, temperature)
         done[case_id] = row
     return done
 
@@ -557,7 +572,13 @@ def main(argv=None):
             if sample_path and os.path.lexists(sample_path):
                 if created:
                     raise ValueError(f"sample capture already exists for a new run: {sample_path}")
-                verify_existing_sample(sample_path, header, requests, done, questions)
+                recovered = verify_existing_sample(
+                    sample_path, header, requests, done, questions, cases, args.noul_temperature
+                )
+                if recovered is not None:
+                    partial.write(serialize_result(recovered, questions, args.noul_temperature) + "\n")
+                    partial.flush()
+                    done[recovered["id"]] = recovered
             elif sample_path and done:
                 # A new capture would be the next response, not the first
                 # response of this experiment. Never mislabel it as raw evidence.
@@ -610,7 +631,7 @@ def main(argv=None):
                         "case_id": case["id"],
                         "experiment_sha256": header["experiment_sha256"],
                         "request_sha256": request_sha,
-                        "request": body, "response": response,
+                        "request": body, "response": response, "row": row,
                     }, indent=1, allow_nan=False)
                     if len(serialized_sample.encode("utf-8")) > sample_read_limit(requests):
                         raise ValueError("sample capture exceeds bounded evidence size")

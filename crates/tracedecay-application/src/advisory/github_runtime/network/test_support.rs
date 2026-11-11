@@ -1,5 +1,10 @@
 use std::io::{Read, Write};
-use std::net::TcpStream;
+use std::net::{SocketAddr, TcpStream};
+
+use super::{
+    GitHubHttpReadConfigV1, GitHubReadOnlyClientV1, GitHubReadOnlyCredentialV1,
+    GitHubRepositoryTargetV1,
+};
 
 pub(in crate::advisory::github_runtime) fn read_http_request_with_headers(
     stream: &mut TcpStream,
@@ -82,4 +87,27 @@ pub(in crate::advisory::github_runtime) fn write_http_response(
     ));
     stream.write_all(head.as_bytes()).unwrap();
     stream.write_all(&body).unwrap();
+}
+
+/// Real HTTP transport for isolated loopback provider fixtures.
+pub(in crate::advisory::github_runtime) fn local_client(
+    address: SocketAddr,
+    target: GitHubRepositoryTargetV1,
+    credential: GitHubReadOnlyCredentialV1,
+) -> GitHubReadOnlyClientV1 {
+    GitHubReadOnlyClientV1 {
+        agent: crate::http_agent::http_agent(
+            ureq::Agent::config_builder()
+                .https_only(false)
+                .http_status_as_error(false)
+                .build(),
+        ),
+        target,
+        credential,
+        config: GitHubHttpReadConfigV1 {
+            rest_base_uri: format!("http://{address}"),
+            graphql_uri: format!("http://{address}/graphql"),
+            ..GitHubHttpReadConfigV1::default()
+        },
+    }
 }

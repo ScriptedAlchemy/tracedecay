@@ -125,6 +125,16 @@ pub(super) fn store_writer_scope(data_root: &Path, class: StoreWriterClass) -> W
     }
 }
 
+/// Resolves maintenance to the same canonical store gate as logical writers.
+/// A missing or unresolvable store refuses isolation by falling back to daemon
+/// administration rather than silently splitting the writer identity.
+pub(super) fn store_maintenance_writer_scope(data_root: &Path) -> WriterScope {
+    match authority::canonical_identity_path(data_root) {
+        Ok(canonical) => WriterScope::maintenance(canonical),
+        Err(_) => WriterScope::Daemon,
+    }
+}
+
 /// Owner-lane scope for one registered database owner.
 ///
 /// [`StoreOwnerKey::store_root`](tracedecay_session_runtime::StoreOwnerKey) is already the
@@ -1923,6 +1933,16 @@ impl StoreAdministration {
         operation().await
     }
 
+    /// Transfers only the canonical gate into the supervised retention job.
+    /// The acquisition retains no mounted graph or project database client.
+    pub(super) fn retention_writer_acquisition(
+        &self,
+        data_root: PathBuf,
+    ) -> impl Future<Output = tracedecay_store_runtime::WriterAdmissionGuard> + Send + 'static {
+        let gate = Arc::clone(&self.gate);
+        async move { gate.acquire(&WriterScope::maintenance(data_root)).await }
+    }
+
     pub(super) async fn try_with_writer<Operation, OperationFuture, Output>(
         &self,
         operation: Operation,
@@ -1931,10 +1951,21 @@ impl StoreAdministration {
         Operation: FnOnce() -> OperationFuture,
         OperationFuture: Future<Output = Output>,
     {
-        let writer = self.gate.try_acquire(&WriterScope::Daemon)?;
-        let output = operation().await;
-        drop(writer);
-        Some(output)
+        self.try_with_writer_in(WriterScope::Daemon, operation)
+            .await
+    }
+
+    pub(super) async fn try_with_writer_in<Operation, OperationFuture, Output>(
+        &self,
+        scope: WriterScope,
+        operation: Operation,
+    ) -> Option<Output>
+    where
+        Operation: FnOnce() -> OperationFuture,
+        OperationFuture: Future<Output = Output>,
+    {
+        let _writer = self.gate.try_acquire(&scope)?;
+        Some(operation().await)
     }
 
     /// Resolves the authenticated client's project layout and runs destructive

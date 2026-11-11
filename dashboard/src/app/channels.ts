@@ -17,24 +17,99 @@
 export interface Channel {
   readonly path: string;
   readonly label: string;
+  /** Visible task hint, also searchable from the command palette. */
+  readonly taskHint: string;
 }
 
 export const CHANNELS: readonly Channel[] = [
-  { path: 'brain', label: 'Brain' },
-  { path: 'explorer', label: 'Explorer' },
-  { path: 'loom', label: 'Loom' },
-  { path: 'sessions', label: 'Sessions' },
-  { path: 'agents', label: 'Agents' },
-  { path: 'code', label: 'Code' },
-  { path: 'knowledge', label: 'Knowledge' },
-  { path: 'delivery', label: 'Delivery' },
-  { path: 'automations', label: 'Automations' },
-  { path: 'observatory', label: 'Observatory' },
-  { path: 'costs', label: 'Costs' },
-  { path: 'settings', label: 'Settings' },
-  { path: 'work', label: 'Work' },
-  { path: 'workflows', label: 'Workflows' },
+  {
+    path: 'brain',
+    label: 'Brain',
+    taskHint: 'Project health, scope and relationships',
+  },
+  {
+    path: 'explorer',
+    label: 'Explorer',
+    taskHint: 'Search code, sessions and knowledge together',
+  },
+  {
+    path: 'loom',
+    label: 'Loom',
+    taskHint: 'Agent timelines and temporal replay',
+  },
+  {
+    path: 'sessions',
+    label: 'Sessions',
+    taskHint: 'Session transcripts and history',
+  },
+  {
+    path: 'agents',
+    label: 'Agents',
+    taskHint: 'Agent identities and activity',
+  },
+  {
+    path: 'code',
+    label: 'Code',
+    taskHint: 'Source files, symbols and dependencies',
+  },
+  {
+    path: 'knowledge',
+    label: 'Knowledge',
+    taskHint: 'Memory facts and citations',
+  },
+  {
+    path: 'delivery',
+    label: 'Delivery',
+    taskHint: 'PR reviews, CI checks and releases',
+  },
+  {
+    path: 'automations',
+    label: 'Automations',
+    taskHint: 'Scheduled jobs, skills and runs',
+  },
+  {
+    path: 'observatory',
+    label: 'Observatory',
+    taskHint: 'Diagnostics, storage health and telemetry',
+  },
+  {
+    path: 'costs',
+    label: 'Costs',
+    taskHint: 'Token usage, savings and spending',
+  },
+  {
+    path: 'settings',
+    label: 'Settings',
+    taskHint: 'Configuration, integrations and permissions',
+  },
+  {
+    path: 'work',
+    label: 'Work',
+    taskHint: 'Task board, plans and progress',
+  },
+  {
+    path: 'workflows',
+    label: 'Workflows',
+    taskHint: 'Workflow definitions, execution and runs',
+  },
 ] as const;
+
+/** Search the task described by a workspace, rather than only its proper name.
+ * The rail continues to use the established label and route unchanged. */
+export function workspaceSearchText(channel: Channel): string {
+  return `${channel.label} ${channel.taskHint}`.toLowerCase();
+}
+
+/** Match all typed words, regardless of whitespace/case or the order in which
+ * the workspace's label and task description supply them. Empty queries show
+ * every available entry, including registered projects. */
+export function paletteMatchesQuery(searchText: string, query: string): boolean {
+  return query
+    .trim()
+    .toLowerCase()
+    .split(/\s+/)
+    .every((term) => searchText.includes(term));
+}
 
 /** Zero-padded channel number for a workspace path (`code` → `06`). Unknown
  * paths get `--`: the instrument never invents a channel it does not have. */

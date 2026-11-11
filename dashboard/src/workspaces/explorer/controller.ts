@@ -157,6 +157,18 @@ interface ExplorerFacet {
   readonly value: string;
 }
 
+/** The request owns its admission scope, regardless of later UI selections. */
+interface PlannerRequest {
+  readonly scope: DashboardScope;
+  readonly query: string;
+  readonly generation: number;
+}
+
+interface AcceptedPlannerRun {
+  readonly scope: DashboardScope;
+  readonly id: string;
+}
+
 /** How far the coordinator has got, counted in sources rather than in a
  * percentage: sources have incommensurable units, so "2 of 3 concluded" is the
  * only progress figure with a real denominator. */
@@ -220,13 +232,40 @@ export function useExplorerController(): ExplorerController {
   const [peeked, setPeeked] = useState<Hit | null>(null);
   const searching = submitted !== '';
   const terms = useMemo(() => queryTerms(submitted), [submitted]);
+  // A superseded POST can still be admitted after a newer search or after
+  // unmount. Its accepted run must be explicitly cancelled, not orphaned.
+  const requestGeneration = useRef(0);
+  const acceptedRun = useRef<AcceptedPlannerRun | null>(null);
+  const retireAcceptedRun = () => {
+    const previous = acceptedRun.current;
+    acceptedRun.current = null;
+    if (previous !== null) void cancelPlannerQuery(previous.scope, previous.id);
+  };
+  useEffect(() => {
+    return () => {
+      requestGeneration.current += 1;
+      const previous = acceptedRun.current;
+      acceptedRun.current = null;
+      if (previous !== null) void cancelPlannerQuery(previous.scope, previous.id);
+    };
+  }, []);
 
   const planner = useMutation({
-    mutationFn: (nextQuery: string) => createPlannerQuery(scope, nextQuery),
-    onSuccess: (result) => {
+    mutationFn: async (request: PlannerRequest) => {
+      const result = await createPlannerQuery(request.scope, request.query);
       if (result.outcome === 'envelope') {
-        setActiveRunId(result.envelope.payload.run_id);
+        const run = result.envelope.payload;
+        const live = !runIsTerminal(run.state);
+        // Record ownership as soon as the daemon admits the request. The
+        // observer can unmount before React Query runs its success callbacks.
+        if (request.generation === requestGeneration.current) {
+          acceptedRun.current = live ? { id: run.run_id, scope: request.scope } : null;
+          setActiveRunId(run.run_id);
+        } else if (live) {
+          void cancelPlannerQuery(request.scope, run.run_id);
+        }
       }
+      return result;
     },
   });
   const activeRunIdForQuery = activeRunId ?? '';
@@ -278,6 +317,19 @@ export function useExplorerController(): ExplorerController {
     runResult?.outcome === 'envelope' && runResult.envelope.payload.request.query === submitted
       ? runResult.envelope.payload
       : undefined;
+  const currentRunId = run?.run_id;
+  const currentRunState = run?.state;
+  useEffect(() => {
+    // A completed read no longer needs an explicit cancel on unmount/reset.
+    if (
+      currentRunId !== undefined &&
+      currentRunState !== undefined &&
+      runIsTerminal(currentRunState) &&
+      acceptedRun.current?.id === currentRunId
+    ) {
+      acceptedRun.current = null;
+    }
+  }, [currentRunId, currentRunState]);
 
   const graphBrowse = useEnvelope(
     ['explorer', 'graph-overview'],
@@ -378,6 +430,8 @@ export function useExplorerController(): ExplorerController {
   }, [facet, laneFilter, lanes]);
 
   const dispatch = (nextQuery: string) => {
+    requestGeneration.current += 1;
+    retireAcceptedRun();
     setActiveRunId(null);
     // A fresh run starts at the top of the backoff ladder: the previous
     // run's failures are not this one's, and must not slow its first reads.
@@ -385,7 +439,9 @@ export function useExplorerController(): ExplorerController {
     planner.reset();
     // Nothing is dispatched under a scope that will refuse it; the lanes
     // render the refusal instead.
-    if (writability.state === 'writable') planner.mutate(nextQuery);
+    if (writability.state === 'writable') {
+      planner.mutate({ query: nextQuery, scope, generation: requestGeneration.current });
+    }
   };
 
   // The rows on screen must belong to the scope in the register. When the
@@ -407,6 +463,8 @@ export function useExplorerController(): ExplorerController {
   }, [requestScope]);
 
   const reset = () => {
+    requestGeneration.current += 1;
+    retireAcceptedRun();
     setQuery('');
     setSubmitted('');
     setActiveRunId(null);
