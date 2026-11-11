@@ -10,11 +10,14 @@ use std::future::ready;
 use std::sync::Arc;
 
 use sha2::{Digest, Sha256};
+use tracedecay_application::operation_stream::{
+    OperationEventAuthority, OperationId, OperationKind,
+};
 use tracedecay_code_index::graph_projection::HermeticCodeGraphProjectionStore;
 use tracedecay_code_index::lineage::{GenerationSymbolIndexV1, LineageSymbolRecordV1};
 use tracedecay_contracts::{
     CancellationSignal, CapabilityGrantId, CapabilityGrantSnapshot, DisclosureClass,
-    RequestContext, RequestId, ResolvedScope,
+    RequestContext, RequestId, ResolvedScope, StreamEventKind,
 };
 use tracedecay_domain::{
     ActorId, BoundedSanitizedText, CanonicalRelationEdgeV1, ChunkerRevision, CodeGenerationId,
@@ -48,6 +51,7 @@ where
     .await;
     let recording = ManagedTestRunRecording {
         store: sessions.registered.clone(),
+        events: OperationEventAuthority::default(),
         session_id: None,
     };
     let completion =
@@ -1151,7 +1155,7 @@ fn scoped_file_symbol_page_needs_only_a_file_scale_budget() {
 #[tokio::test]
 async fn request_cancellation_cancels_the_waiting_managed_run() {
     let root = tempfile::tempdir().unwrap();
-    let emitter = operation_event_authority()
+    let emitter = OperationEventAuthority::default()
         .begin_managed_test_run(
             Url::from_directory_path(root.path()).unwrap().to_string(),
             mint_global_request_id(GlobalRequestSurface::ManagedTestRun).unwrap(),
@@ -1207,4 +1211,164 @@ fn assert_failed_terminal(output: &Value) {
     assert_eq!(output["error"]["kind"], "cargo");
     assert_eq!(output["terminal"]["receipt"]["termination"], "failed");
     assert!(output["note"].is_null());
+}
+
+#[tokio::test]
+async fn refused_durable_test_result_cannot_publish_a_completed_live_terminal() {
+    let cancellation = CancellationSignal::active("cancellation.affected-tests.settlement-refusal")
+        .expect("fixture cancellation");
+    let context = verified_graph_context(&cancellation);
+    let authority = OperationEventAuthority::default();
+    let emitter = authority
+        .begin(&context, OperationKind::TestRun, UtcMicros(1))
+        .await
+        .expect("admit an authenticated operation");
+    let subscription = authority
+        .subscribe(
+            &OperationId::from_request(context.request_id().clone()),
+            &context,
+            UtcMicros(1),
+            0,
+            None,
+        )
+        .await
+        .expect("subscribe before settlement");
+    let (_, _, mut stream) = subscription.into_sse_parts();
+    let accepted = tokio::time::timeout(std::time::Duration::from_secs(2), stream.next())
+        .await
+        .expect("initial event must arrive")
+        .expect("accepted event");
+    assert!(matches!(accepted.kind, StreamEventKind::Item(_)));
+
+    let store = tracedecay_global_db::tests::harness::RegisteredGlobalDbHarness::open(
+        "affected-tests-unrecorded-terminal",
+    )
+    .await;
+    // No durable start row exists. An outcome UPDATE must affect zero rows;
+    // the live stream must not tell an observer the run completed successfully.
+    let managed = ManagedTestRun {
+        emitter,
+        recording: ManagedTestRunRecording {
+            store: store.registered.clone(),
+            events: authority.clone(),
+            session_id: None,
+        },
+        started_at: UtcMicros(10),
+        deadline: Deadline::new(UtcMicros(i64::MAX)).expect("fixture deadline"),
+    };
+    let error = managed
+        .finish(
+            OperationTermination::Completed,
+            7,
+            Some(0),
+            &LibtestReport::default(),
+        )
+        .await
+        .expect_err("unrecorded outcome cannot settle durably");
+    assert!(
+        matches!(&error, TraceDecayError::Database { .. }),
+        "durable-store refusal must remain typed: {error}"
+    );
+    let terminal = tokio::time::timeout(std::time::Duration::from_secs(2), stream.next())
+        .await
+        .expect("a refused record must still settle the live stream")
+        .expect("terminal event");
+    assert!(matches!(
+        terminal.kind,
+        StreamEventKind::Terminal(termination)
+            if termination.termination == OperationTermination::Failed
+                && termination.receipt.termination == OperationTermination::Failed
+                && termination.receipt.budget.bytes_consumed == 7
+    ));
+    assert!(
+        stream.next().await.is_none(),
+        "live stream ends after refusal"
+    );
+}
+
+#[tokio::test]
+async fn durable_store_refusal_remains_primary_when_terminal_publication_also_fails() {
+    let cancellation =
+        CancellationSignal::active("cancellation.affected-tests.concurrent-terminal")
+            .expect("fixture cancellation");
+    let context = verified_graph_context(&cancellation);
+    let authority = OperationEventAuthority::default();
+    let emitter = authority
+        .begin(&context, OperationKind::TestRun, UtcMicros(1))
+        .await
+        .expect("admit an authenticated operation");
+    let subscription = authority
+        .subscribe(
+            &OperationId::from_request(context.request_id().clone()),
+            &context,
+            UtcMicros(1),
+            0,
+            None,
+        )
+        .await
+        .expect("observe the original operation terminal");
+    let (_, _, mut stream) = subscription.into_sse_parts();
+    let deadline = Deadline::new(UtcMicros(i64::MAX)).expect("fixture deadline");
+    // Deliberately pre-settle this event owner so the subsequent Failed
+    // publication is refused with TerminalAlreadyPublished.
+    emitter
+        .terminal(test_run_receipt(
+            UtcMicros(10),
+            &deadline,
+            OperationTermination::Completed,
+            0,
+        ))
+        .await
+        .expect("pre-settle lifecycle");
+
+    let store = tracedecay_global_db::tests::harness::RegisteredGlobalDbHarness::open(
+        "affected-tests-dual-settlement-refusal",
+    )
+    .await;
+    let run = ManagedTestRun {
+        emitter,
+        recording: ManagedTestRunRecording {
+            store: store.registered.clone(),
+            events: authority.clone(),
+            session_id: None,
+        },
+        started_at: UtcMicros(10),
+        deadline,
+    };
+    // No start record exists, so the durable write is also refused.
+    // Keep that primary failure even when event publication independently
+    // rejects a second, nonidentical terminal.
+    let error = run
+        .finish(
+            OperationTermination::Completed,
+            7,
+            Some(0),
+            &LibtestReport::default(),
+        )
+        .await
+        .expect_err("no successful durability should be reported");
+    assert!(
+        matches!(&error, TraceDecayError::Database { .. }),
+        "the storage refusal must take precedence: {error}"
+    );
+    let accepted = tokio::time::timeout(std::time::Duration::from_secs(2), stream.next())
+        .await
+        .expect("original accepted event must be observable")
+        .expect("accepted event");
+    assert!(matches!(accepted.kind, StreamEventKind::Item(_)));
+    let terminal = tokio::time::timeout(std::time::Duration::from_secs(2), stream.next())
+        .await
+        .expect("original terminal must remain observable")
+        .expect("original terminal event");
+    assert!(matches!(
+        terminal.kind,
+        StreamEventKind::Terminal(termination)
+            if termination.termination == OperationTermination::Completed
+                && termination.receipt.termination == OperationTermination::Completed
+                && termination.receipt.budget.bytes_consumed == 0
+    ));
+    assert!(
+        stream.next().await.is_none(),
+        "refused later publication must not insert a second terminal"
+    );
 }

@@ -466,12 +466,12 @@ fn a_comment_beside_same_named_symbols_decodes_only_what_it_reaches() {
         .collect::<String>()
         + UTIL;
     let edited = format!("{util}// probe line\n");
-    let other = "pub struct Other;\nimpl Other { pub fn new() -> Self { Other } }\n";
+    let other = "pub fn new() -> u32 { 7 }\n";
     let callers = (0..4)
         .map(|n| {
             (
                 format!("src/caller{n}.rs"),
-                format!("pub fn caller{n}() {{ let _ = crate::other::Other::new(); }}\n"),
+                format!("pub fn caller{n}() {{ let _ = crate::other::new(); }}\n"),
             )
         })
         .collect::<Vec<_>>();
@@ -481,6 +481,8 @@ fn a_comment_beside_same_named_symbols_decodes_only_what_it_reaches() {
         callers: &'a [(String, String)],
     ) -> Vec<(&'a str, &'a str, &'a str)> {
         let mut tree = rust_tree(util, MAIN);
+        tree[0].2 = "pub mod consumer;\npub mod util;\npub mod other;\n";
+        tree[1].0 = "src/consumer.rs";
         tree.push(("src/other.rs", RUST, other));
         tree.extend(
             callers
@@ -526,6 +528,28 @@ fn a_comment_beside_same_named_symbols_decodes_only_what_it_reaches() {
         .iter()
         .map(|(_, digest)| store.segment_reads(digest))
         .collect::<Vec<_>>();
+    let evidence_of = |path: &str| {
+        let key = snapshot
+            .iter()
+            .position(|file| file.logical_path == path)
+            .expect("parent evidence file");
+        manifest
+            .file_evidence
+            .iter()
+            .find(|descriptor| descriptor.file_key as usize == key)
+            .map(|descriptor| descriptor.segment_digest.clone())
+            .expect("a resolved cross-file call has sealed evidence")
+    };
+    let unrelated_evidence = callers
+        .iter()
+        .map(|(path, _)| (path.as_str(), evidence_of(path)))
+        .collect::<Vec<_>>();
+    let evidence_reads_before = unrelated_evidence
+        .iter()
+        .map(|(_, digest)| store.segment_reads(digest))
+        .collect::<Vec<_>>();
+    let dependent_evidence = evidence_of("src/consumer.rs");
+    let dependent_reads_before = store.segment_reads(&dependent_evidence);
 
     let sparse = publish(
         &mut incremental,
@@ -544,6 +568,17 @@ fn a_comment_beside_same_named_symbols_decodes_only_what_it_reaches() {
             "{path} names `new` but binds nowhere in the edited file, so its segment stays sealed"
         );
     }
+    for ((path, digest), before) in unrelated_evidence.iter().zip(evidence_reads_before) {
+        assert_eq!(
+            store.segment_reads(digest),
+            before,
+            "{path} has unrelated sealed edges and must not decode its evidence"
+        );
+    }
+    assert!(
+        store.segment_reads(&dependent_evidence) > dependent_reads_before,
+        "a caller whose sealed edge lands in the edited file must still be repointed"
+    );
     assert_sparse_matches_cold(
         &caller_tree(&util, other, &callers),
         &caller_tree(&edited, other, &callers),

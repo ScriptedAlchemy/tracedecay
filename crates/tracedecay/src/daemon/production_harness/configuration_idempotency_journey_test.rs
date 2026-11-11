@@ -20,7 +20,6 @@ use tracedecay_sdk::operations::{ApplicationConfigurationSet, TypedOperation};
 use tracedecay_tool_catalog::ApplicationSurfaceOperation;
 
 use super::journey_test_support::{initialize_project, tool_payload};
-use tracedecay_daemon_service::daemon_operation_event_authority;
 
 const HTTP_AUTH_TOKEN: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
@@ -294,7 +293,7 @@ async fn configuration_http_sdk(
     let router =
         tracedecay_daemon_service::application_surface::http_application_router_with_executor(
             executor,
-            daemon_operation_event_authority(),
+            resources.invocation.service.operation_events(),
             target.project_id.clone(),
         )
         .expect("canonical HTTP application router");
