@@ -631,7 +631,7 @@ impl RepositoryRuntimePhysicalAttachment {
         writer
             .bounded_incremental_vacuum(cx, max_pages, authority)
             .await
-            .map_err(|error| RepositoryDispatchError::Writer(error.to_string()))
+            .map_err(compaction_dispatch_error)
     }
 
     pub async fn run_checkpoint(
@@ -835,12 +835,24 @@ impl Drop for RepositoryRuntimePhysicalAttachment {
     }
 }
 
+// Only a failed SQLite vacuum or saturated maintenance channel is deferrable.
+// A lost writer, revoked authority or failed reply is fatal to admission.
+fn compaction_dispatch_error(error: WriterActorError) -> RepositoryDispatchError {
+    match error {
+        WriterActorError::IncrementalVacuumBusy | WriterActorError::IncrementalVacuumNoSpace => {
+            RepositoryDispatchError::CompactionDeferred(error.to_string())
+        }
+        other => RepositoryDispatchError::Writer(other.to_string()),
+    }
+}
+
 #[derive(Debug)]
 pub enum RepositoryDispatchError {
     Closed,
     Reader(ReaderAcquireError),
     ReaderWorker(String),
     Writer(String),
+    CompactionDeferred(String),
     WriterRuntime(StorageRuntimeErrorV1),
 }
 
@@ -851,6 +863,9 @@ impl fmt::Display for RepositoryDispatchError {
             Self::Reader(error) => write!(formatter, "repository read failed: {error}"),
             Self::ReaderWorker(error) => write!(formatter, "repository snapshot failed: {error}"),
             Self::Writer(error) => write!(formatter, "repository write failed: {error}"),
+            Self::CompactionDeferred(reason) => {
+                write!(formatter, "SQLite compaction deferred: {reason}")
+            }
             Self::WriterRuntime(error) => write!(formatter, "repository write failed: {error}"),
         }
     }
@@ -860,7 +875,10 @@ impl Error for RepositoryDispatchError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
             Self::Reader(error) => Some(error),
-            Self::Closed | Self::ReaderWorker(_) | Self::Writer(_) => None,
+            Self::Closed
+            | Self::ReaderWorker(_)
+            | Self::Writer(_)
+            | Self::CompactionDeferred(_) => None,
             Self::WriterRuntime(error) => Some(error),
         }
     }
@@ -966,6 +984,39 @@ mod tests {
     use asupersync::channel::watch;
 
     use super::*;
+
+    #[test]
+    fn vacuum_dispatch_does_not_hide_writer_or_authority_failure() {
+        let revoked = compaction_dispatch_error(WriterActorError::AuthorityDenied {
+            stage: crate::RuntimeWriteAuthorityStage::BeforeAdmission,
+        });
+        assert!(
+            matches!(revoked, RepositoryDispatchError::Writer(_)),
+            "lost write authority must deny admission"
+        );
+        let closed = compaction_dispatch_error(WriterActorError::ReplyDropped);
+        assert!(
+            matches!(closed, RepositoryDispatchError::Writer(_)),
+            "a stopped writer must deny admission"
+        );
+        let blocked = compaction_dispatch_error(WriterActorError::IncrementalVacuumBusy);
+        assert!(
+            matches!(blocked, RepositoryDispatchError::CompactionDeferred(_)),
+            "an occupied maintenance queue or busy SQLite transaction may defer"
+        );
+        let disk_full = compaction_dispatch_error(WriterActorError::IncrementalVacuumNoSpace);
+        assert!(
+            matches!(disk_full, RepositoryDispatchError::CompactionDeferred(_)),
+            "an optional vacuum must not turn disk pressure into a store-open failure"
+        );
+        let sqlite = compaction_dispatch_error(WriterActorError::IncrementalVacuumFailed(
+            "database is read-only".to_owned(),
+        ));
+        assert!(
+            matches!(sqlite, RepositoryDispatchError::Writer(_)),
+            "database and worker failures must deny admission"
+        );
+    }
 
     fn native_runtime() -> RuntimeHandle {
         crate::native_runtime::handle().expect("native runtime")
