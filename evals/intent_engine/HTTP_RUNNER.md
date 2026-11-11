@@ -12,11 +12,15 @@ python evals/intent_engine/run_http.py \
 ```
 
 The `--timeout-ms` CLI flag must match frozen `arm.timeout_ms` for qualified
-experiments. The frozen value (1 to 1,800,000 milliseconds) is enforced on
-each network request, not just checked as a p95 scoring tolerance afterward.
-This is a transport deadline, not proof of the production Scout pass's
-end-to-end cancellation or resource costs. Historical unqualified runs
-retain their original 30-minute default.
+experiments. The frozen value (1 to 1,800,000 milliseconds) is passed as the
+HTTP socket timeout **and** checked against the measured total exchange time
+before a decoded 200 response may be admitted as a prediction. A model server
+that keeps individual reads alive but finishes after the requested deadline
+cannot silently enter a passing held-out report. Python urllib cannot forcibly
+interrupt a single ongoing trickle read at the overall deadline: this check
+refuses **late completed evidence**, not a hard bound on a hanging call or
+proof of the production Scout pass's cancellation/resource costs. Historical
+unqualified runs retain their original 30-minute default.
 
 The endpoint must use HTTP or HTTPS with a hostname. File URLs, data URLs,
 other non-HTTP schemes, malformed ports and URL-embedded credentials are

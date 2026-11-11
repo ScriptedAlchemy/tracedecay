@@ -96,6 +96,58 @@ class RunHttpTest(unittest.TestCase):
                         run_http.post("http://localhost:8009/v1/systemone",
                                       {"state": "test", "questions": {}})
 
+    def test_http_total_deadline_refuses_late_200_after_successful_reads(self):
+        # urllib's timeout applies to individual socket operations. A server
+        # that keeps each read alive can still finish beyond the frozen budget.
+        # Exercise the actual post() admission, not an injected model scorer.
+        payload = json.dumps({
+            "answers": {key: {"noul": 0.25} for key in run_http.noul_questions()},
+        }).encode("utf-8")
+        for elapsed, accepted in ((0.04, True), (0.06, False)):
+            with self.subTest(elapsed=elapsed):
+                with patch("urllib.request.build_opener") as opener, patch.object(
+                    run_http.time, "perf_counter",
+                    side_effect=[100.0, 100.0 + elapsed],
+                ):
+                    response = opener.return_value.open.return_value.__enter__.return_value
+                    response.status = 200
+                    response.read.return_value = payload
+                    if accepted:
+                        answer, latency = run_http.post(
+                            self.base[1], {"state": "test", "questions": {}}, timeout=0.05,
+                        )
+                        self.assertEqual(answer["answers"]["impact"]["noul"], 0.25)
+                        self.assertAlmostEqual(latency, 40.0)
+                    else:
+                        with self.assertRaisesRegex(TimeoutError, "whole-request timeout"):
+                            run_http.post(
+                                self.base[1], {"state": "test", "questions": {}}, timeout=0.05,
+                            )
+                    response.read.assert_called_once_with(
+                        run_http.MAX_HTTP_RESPONSE_BYTES + 1
+                    )
+                    self.assertEqual(opener.return_value.open.call_args.kwargs["timeout"], 0.05)
+
+    def test_late_response_leaves_only_resumable_header_not_sample_or_result(self):
+        sample = self.root / "late-sample.json"
+        payload = json.dumps({
+            "answers": {key: {"noul": 0.25} for key in run_http.noul_questions()},
+        }).encode("utf-8")
+        with patch("urllib.request.build_opener") as opener, patch.object(
+            run_http.time, "perf_counter",
+            side_effect=[100.0, 100.10, 200.0, 200.01],
+        ):
+            response = opener.return_value.open.return_value.__enter__.return_value
+            response.status = 200
+            response.read.return_value = payload
+            with self.assertRaisesRegex(TimeoutError, "whole-request timeout"):
+                self.run_main(("--timeout-ms", "50", "--sample-out", str(sample)))
+            opener.return_value.open.assert_called_once()
+        self.assertTrue(self.partial.exists())
+        self.assertEqual(len(self.partial.read_text().splitlines()), 1)
+        self.assertFalse(sample.exists())
+        self.assertFalse(self.output.exists())
+
     def test_http_response_limit_reads_only_bounded_bytes_and_accepts_boundary(self):
         body = b'{"answers":{}}'
         max_bytes = run_http.MAX_HTTP_RESPONSE_BYTES

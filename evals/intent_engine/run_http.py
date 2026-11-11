@@ -322,7 +322,13 @@ def post(url, body, timeout=1800, bearer_token=None):
         if len(raw) > MAX_HTTP_RESPONSE_BYTES:
             raise ValueError("decision HTTP response exceeds bounded byte limit")
         out = loads_unambiguous_json(raw)
-    return out, (time.perf_counter() - started) * 1000
+    # urllib's timeout is per socket operation, not a whole-request clock.
+    # A server can keep a request alive by sending each chunk before the next
+    # idle timeout. A late 200 must not become evidence of a Scout decision.
+    elapsed = time.perf_counter() - started
+    if elapsed > timeout:
+        raise TimeoutError("decision HTTP exceeded whole-request timeout")
+    return out, elapsed * 1000
 
 
 def load_server_config(path):
