@@ -22,14 +22,15 @@ use tracedecay_runtime_core::shard_runtime::registry::{
     CanonicalCodeGraphStoreLeaseV1, CanonicalGraphStoreOwnerRetirementTargetV1, StoreRuntimeKey,
 };
 use tracedecay_store::{
-    CodeShardScopeV1, FactReadControl, GraphGenerationIdV1, GraphPendingReplayDiscardOutcomeV1,
-    GraphProjectionIdV1, GraphProjectionIdentityV1, GraphPublicationIdempotencyKeyV1,
-    GraphPublicationInputDigestV1, GraphPublicationKeyV1, GraphPublicationOperationContextV1,
-    GraphPublicationProjectionPageRequestV1, GraphPublicationReplayLookupV1,
-    GraphPublicationReplayRecordV1, GraphPublicationStoreV1, GraphReplayAppendOutcomeV1,
-    GraphVerifiedHeadV1, ProjectId, RetainedGraphStoreLeaseV1, RuntimeCancellationIdV1,
-    RuntimeCancellationIdentityV1, RuntimeDeadlineIdV1, RuntimeDeadlineV1, RuntimeInterruptionV1,
-    RuntimeRequestControlV1, RuntimeRequestProbeV1, StoreShardIdV1, StoreShardScopeV1,
+    CodeShardScopeV1, FactReadControl, GraphGenerationIdV1, GraphNativeWorkObserverV1,
+    GraphPendingReplayDiscardOutcomeV1, GraphProjectionIdV1, GraphProjectionIdentityV1,
+    GraphPublicationIdempotencyKeyV1, GraphPublicationInputDigestV1, GraphPublicationKeyV1,
+    GraphPublicationOperationContextV1, GraphPublicationProjectionPageRequestV1,
+    GraphPublicationReplayLookupV1, GraphPublicationReplayRecordV1, GraphPublicationStoreV1,
+    GraphReplayAppendOutcomeV1, GraphVerifiedHeadV1, ProjectId, RetainedGraphStoreLeaseV1,
+    RuntimeCancellationIdV1, RuntimeCancellationIdentityV1, RuntimeDeadlineIdV1, RuntimeDeadlineV1,
+    RuntimeInterruptionV1, RuntimeRequestControlV1, RuntimeRequestProbeV1, StoreShardIdV1,
+    StoreShardScopeV1,
 };
 
 use super::{DaemonSessionRuntimeRegistryV1, Result, session_registry_error};
@@ -1286,17 +1287,11 @@ impl RetainedCodeGraphRuntimeV1 {
         level = "trace",
         skip_all
     )]
-    pub fn publish_verified_snapshot(
-        &self,
-        request_cancelled: Arc<AtomicBool>,
-    ) -> std::result::Result<VerifiedGraphSnapshot, GraphDbError> {
-        self.publish_verified_snapshot_with_admission(request_cancelled, None)
-    }
-
     fn publish_verified_snapshot_with_admission(
         &self,
         request_cancelled: Arc<AtomicBool>,
         admission: Option<Arc<dyn CodeGraphBuildAdmissionV1>>,
+        native_work: Option<GraphNativeWorkObserverV1>,
     ) -> std::result::Result<VerifiedGraphSnapshot, GraphDbError> {
         // The project-shard build permit is claimed before any row is built
         // and held through publication so 1/2/4/8 worktree scopes cannot
@@ -1347,8 +1342,11 @@ impl RetainedCodeGraphRuntimeV1 {
             deadline: deadline_identity,
             cancellation: cancellation_identity,
         };
-        let context = GraphPublicationOperationContextV1::new(&control, &probe)
+        let mut context = GraphPublicationOperationContextV1::new(&control, &probe)
             .map_err(|error| GraphDbError::invalid(error.to_string()))?;
+        if let Some(observer) = native_work {
+            context = context.with_native_work_observer(observer);
+        }
         let interruption = || match probe.interruption() {
             Some(RuntimeInterruptionV1::Cancelled) => Err(GraphDbError::Cancelled),
             Some(RuntimeInterruptionV1::DeadlineExceeded) => Err(GraphDbError::DeadlineExceeded),
@@ -2113,8 +2111,12 @@ impl RetainedCodeGraphRuntimeV1 {
                 deadline: deadline_identity,
                 cancellation: cancellation_identity,
             };
-            let context = GraphPublicationOperationContextV1::new(&control, &probe)
-                .map_err(|error| GraphDbError::invalid(error.to_string()))?;
+            // The journal read's context already carries the scheduler's
+            // owner-scoped observer. Native writes run under this separate
+            // one-shot commit probe; do not silently drop their real milestones.
+            let publish_context = GraphPublicationOperationContextV1::new(&control, &probe)
+                .map_err(|error| GraphDbError::invalid(error.to_string()))?
+                .inheriting_native_work_from(context);
             let publish_registration = || GraphDbRegistration {
                 authority_lease: Arc::clone(&authority_lease),
                 cancellation: Arc::clone(&request_cancellation),
@@ -2150,7 +2152,7 @@ impl RetainedCodeGraphRuntimeV1 {
             let preparation = self.graph_registry.prepare_verified_publication(
                 publish_registration(),
                 storage,
-                &context,
+                &publish_context,
                 key,
                 Some(manifest),
             )?;
@@ -2166,8 +2168,12 @@ impl RetainedCodeGraphRuntimeV1 {
                     let _span =
                         tracing::trace_span!("daemon.session_registry.publish_snapshot.gate_hold")
                             .entered();
-                    self.graph_registry
-                        .complete_verified_publication(completion, storage, &context, *proven)
+                    self.graph_registry.complete_verified_publication(
+                        completion,
+                        storage,
+                        &publish_context,
+                        *proven,
+                    )
                 }
             }
         };
@@ -3103,22 +3109,28 @@ impl CodeGraphSeatLeaseV1 for RetainedCodeGraphRuntimeV1 {
     fn publish_verified_snapshot(
         &self,
         request_cancelled: Arc<AtomicBool>,
+        native_work: GraphNativeWorkObserverV1,
     ) -> std::result::Result<
         tracedecay_graph_db::VerifiedGraphSnapshot,
         tracedecay_graph_db::GraphDbError,
     > {
-        Self::publish_verified_snapshot(self, request_cancelled)
+        self.publish_verified_snapshot_with_admission(request_cancelled, None, Some(native_work))
     }
 
     fn publish_verified_snapshot_admitted(
         &self,
         request_cancelled: Arc<AtomicBool>,
         admission: Arc<dyn CodeGraphBuildAdmissionV1>,
+        native_work: GraphNativeWorkObserverV1,
     ) -> std::result::Result<
         tracedecay_graph_db::VerifiedGraphSnapshot,
         tracedecay_graph_db::GraphDbError,
     > {
-        self.publish_verified_snapshot_with_admission(request_cancelled, Some(admission))
+        self.publish_verified_snapshot_with_admission(
+            request_cancelled,
+            Some(admission),
+            Some(native_work),
+        )
     }
 
     fn recover_verified_snapshot_from_head(

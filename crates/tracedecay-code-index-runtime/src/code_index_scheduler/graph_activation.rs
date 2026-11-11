@@ -24,6 +24,7 @@ use tracedecay_code_index::production::{
 };
 use tracedecay_runtime_core::native_runtime;
 use tracedecay_runtime_core::resident_memory::ProcessResidentMemoryV1;
+use tracedecay_store::GraphNativeWorkObserverV1;
 
 /// Test-only graph activation faults, keyed by worktree id. The worktree id
 /// is unique per test fixture, while generation ids are content-derived and
@@ -450,6 +451,7 @@ impl CodeGraphActivationAuthorityV1 {
         replay_binding: CodeGraphReplayBindingV1,
         admission: Option<Arc<dyn CodeGraphBuildAdmissionV1>>,
         cancellation: Arc<AtomicBool>,
+        native_work: GraphNativeWorkObserverV1,
     ) -> Result<bool, CodeIndexSchedulerErrorV1> {
         if self.policy() == CodeGraphActivationPolicyV1::RefusedByConfiguration {
             return Ok(false);
@@ -477,9 +479,11 @@ impl CodeGraphActivationAuthorityV1 {
                 .map_err(|error| CodeIndexSchedulerErrorV1::GraphActivation(error.to_string()))?;
                 native_runtime::spawn_blocking(move || match admission {
                     Some(admission) => retained
-                        .publish_verified_snapshot_admitted(cancellation, admission)
+                        .publish_verified_snapshot_admitted(cancellation, admission, native_work)
                         .map(drop),
-                    None => retained.publish_verified_snapshot(cancellation).map(drop),
+                    None => retained
+                        .publish_verified_snapshot(cancellation, native_work)
+                        .map(drop),
                 })
                 .await
                 .map_err(|error| {
@@ -510,6 +514,7 @@ impl CodeGraphActivationAuthorityV1 {
         predecessor: Option<Arc<CodeGraphProjectionStore>>,
         replay_binding: CodeGraphReplayBindingV1,
         cancellation: Arc<AtomicBool>,
+        native_work: GraphNativeWorkObserverV1,
     ) -> Result<Option<CodeGraphCatalogWarmV1>, CodeIndexSchedulerErrorV1> {
         let policy = self.policy();
         if policy == CodeGraphActivationPolicyV1::RefusedByConfiguration {
@@ -551,6 +556,7 @@ impl CodeGraphActivationAuthorityV1 {
                         resident_memory,
                         predecessor,
                         cancellation,
+                        native_work,
                     )
                 })
                 .await
@@ -844,6 +850,7 @@ impl LatestCompleteCodeIndexV1 {
         resident_memory: Arc<ProcessResidentMemoryV1>,
         predecessor: Option<Arc<CodeGraphProjectionStore>>,
         cancellation: Arc<AtomicBool>,
+        native_work: GraphNativeWorkObserverV1,
     ) -> Result<Option<PendingInteractiveCatalogWarmV1>, CodeIndexSchedulerErrorV1> {
         let generation_id = self.generation.manifest().generation_id.clone();
         let authority = retained.authority();
@@ -851,7 +858,7 @@ impl LatestCompleteCodeIndexV1 {
             let _span =
                 tracing::trace_span!("code_graph.activation.publish_verified_snapshot").entered();
             retained
-                .publish_verified_snapshot(Arc::clone(&cancellation))
+                .publish_verified_snapshot(Arc::clone(&cancellation), native_work)
                 .map_err(CodeGraphProjectionError::from)
                 .inspect_err(|error| {
                     // The publication stopped at the measured-RSS watermark.
