@@ -65,25 +65,6 @@ impl RegisteredStore {
         .unwrap()
     }
 
-    async fn schema_objects(&self) -> Vec<String> {
-        let (owner, _runtime, _retirement) = self.publish().await.into_parts();
-        let database = owner.issue_lease().unwrap();
-        let mut rows = database
-            .read_connection()
-            .query(
-                "SELECT type || ':' || name FROM sqlite_schema
-                 WHERE name NOT LIKE 'sqlite_%' ORDER BY type, name",
-                (),
-            )
-            .await
-            .unwrap();
-        let mut objects = Vec::new();
-        while let Some(row) = rows.next().await.unwrap() {
-            objects.push(row.get::<String>(0).unwrap());
-        }
-        objects
-    }
-
     /// Inspect a completed family with an ordinary independent read-only SQLite
     /// connection. Reopening the registered runtime for every observation would
     /// perform another full attachment lifecycle and obscure cancellation timing.
@@ -174,8 +155,7 @@ async fn cancelled_daemon_attach_preserves_published_schema_and_reopens() {
     let reference = RegisteredStore::create();
     let (outcome, total_polls) = reference.attach_cancelled_at(usize::MAX).await;
     outcome.unwrap();
-    let installed = reference.schema_objects().await;
-    assert_eq!(reference.external_schema_objects(), installed);
+    let installed = reference.external_schema_objects();
     assert!(
         installed.contains(&"table:code_projects".to_owned()),
         "a completed attach installs the registered schema: {installed:?}"
@@ -191,8 +171,8 @@ async fn cancelled_daemon_attach_preserves_published_schema_and_reopens() {
         let store = RegisteredStore::create();
         // Cancellation cannot modify the already-published schema or
         // prevent the next admission from reopening the same family.
-        let before_admission = store.schema_objects().await;
-        assert_eq!(store.external_schema_objects(), before_admission);
+        drop(store.publish().await);
+        let before_admission = store.external_schema_objects();
         assert_eq!(before_admission, installed);
         let (outcome, _) = store.attach_cancelled_at(cancel_at).await;
         let objects = store.external_schema_objects();

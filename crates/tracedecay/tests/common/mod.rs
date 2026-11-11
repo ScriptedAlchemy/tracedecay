@@ -1608,6 +1608,13 @@ impl LcmTestRuntime {
         }
     }
 
+    pub async fn shutdown(self) {
+        self.runtime
+            .shutdown()
+            .await
+            .expect("registered LCM test runtime shutdown");
+    }
+
     pub async fn upsert_session(&self, session: &SessionRecord) -> bool {
         self.runtime
             .upsert_session_for_test(HostAdmissionScope::Profile, session)
