@@ -40,15 +40,18 @@ pub struct AuthenticatedSubmodule {
 }
 
 #[cfg(unix)]
+type FileIdentity = (u64, u64, u32, u64, i64, i64, i64, i64);
+
+#[cfg(unix)]
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct FileWitness {
-    named: (u64, u64, u32, u64, i64, i64, i64, i64),
-    target: Option<(u64, u64, u32, u64, i64, i64, i64, i64)>,
+    named: FileIdentity,
+    target: Option<FileIdentity>,
 }
 
 #[cfg(unix)]
 impl FileWitness {
-    fn identity(metadata: &std::fs::Metadata) -> (u64, u64, u32, u64, i64, i64, i64, i64) {
+    fn identity(metadata: &std::fs::Metadata) -> FileIdentity {
         (
             metadata.dev(),
             metadata.ino(),

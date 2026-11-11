@@ -4157,13 +4157,12 @@ impl CodeIndexWorktreeSchedulerV1 {
         ignored_dependencies::checkpoint_if_present(control)?;
         // A staged gitlink or registration may be revoked while a file is
         // streaming. Do not admit its bytes after the original binding expires.
-        if let Some((_, binding)) = child_binding {
-            if !binding
+        if let Some((_, binding)) = child_binding
+            && !binding
                 .checkout_is_live()
                 .map_err(|error| CodeIndexSchedulerErrorV1::Git(error.to_string()))?
-            {
-                return Ok(CapturedFileOutcomeV1::Absent);
-            }
+        {
+            return Ok(CapturedFileOutcomeV1::Absent);
         }
         self.capture_candidate_bytes(
             registry,
@@ -4337,9 +4336,9 @@ impl CodeIndexWorktreeSchedulerV1 {
                 ) {
                 Ok(captured) => {
                     if !classification
-                .child_bindings_live()
-                .map_err(|error| CodeIndexSchedulerErrorV1::Git(error.to_string()))?
-            {
+                        .child_bindings_live()
+                        .map_err(|error| CodeIndexSchedulerErrorV1::Git(error.to_string()))?
+                    {
                         return Err(CodeIndexSchedulerErrorV1::Git(
                             "authenticated child checkout binding changed during tree capture"
                                 .into(),

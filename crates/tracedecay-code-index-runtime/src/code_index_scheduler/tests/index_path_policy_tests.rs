@@ -4,17 +4,19 @@
 
 use std::path::Path;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use tempfile::TempDir;
+use tracedecay_code_index::production::{CodeIndexExecutionControlV1, CodeIndexPresealWorkV1};
 use tracedecay_domain::{IndexPathPolicyV1, SnapshotFileDispositionV1};
 
 use super::{
-    GitFixture, SharedCodeIndexBytePoolV1, published, test_project_id,
+    GitFixture, SharedCodeIndexBytePoolV1, published, run_git_in, test_project_id,
     wait_for_live_complete_generation,
 };
 use crate::code_index_scheduler::{
     CodeIndexDemandAdmissionV1, CodeIndexHintPolicyV1, CodeIndexReconcileOutcomeV1,
-    CodeIndexSchedulerRegistryV1, CodeIndexWorktreeSchedulerV1,
+    CodeIndexSchedulerErrorV1, CodeIndexSchedulerRegistryV1, CodeIndexWorktreeSchedulerV1,
 };
 use crate::config::registry_default_index_path_policy;
 
@@ -393,6 +395,92 @@ fn submodule_policy_binds_live_graph_and_historical_child_pins_across_restart() 
     let mut off = start(&parent, store.path(), policy(&[], &[]));
     off.reconcile_now().unwrap();
     assert_eq!(indexed_paths(&off), ["dev/launch.ts"]);
+}
+
+#[test]
+fn submodule_revocation_during_capture_refuses_snapshot_and_preserves_publication() {
+    let parent = GitFixture::new(&[("parent.rs", "pub fn parent() {}\n")]);
+    let child = GitFixture::new(&[("lib.rs", "pub fn original() {}\n")]);
+    run_git_in(
+        parent.path(),
+        &[
+            "-c",
+            "protocol.file.allow=always",
+            "submodule",
+            "add",
+            "-q",
+            child.path().to_str().unwrap(),
+            "app",
+        ],
+    );
+    run_git_in(parent.path(), &["commit", "-qm", "bind child"]);
+    let store = TempDir::new().unwrap();
+    let mut scheduler = start(
+        &parent,
+        store.path(),
+        policy(&[], &[]).with_submodules(true),
+    );
+    let original = published(scheduler.reconcile_now().unwrap()).generation_id;
+    assert_eq!(indexed_paths(&scheduler), ["app/lib.rs", "parent.rs"]);
+    std::fs::write(parent.path().join("app/lib.rs"), "pub fn edited() {}\n").unwrap();
+
+    struct RevokeAfterCapture<'a> {
+        root: &'a Path,
+        revoked: AtomicBool,
+    }
+
+    impl CodeIndexExecutionControlV1 for RevokeAfterCapture<'_> {
+        fn is_cancelled(&self) -> bool {
+            false
+        }
+
+        fn is_deadline_exceeded(&self) -> bool {
+            false
+        }
+
+        fn observed_preseal_work(&self, _work: CodeIndexPresealWorkV1) {
+            if !self.revoked.swap(true, Ordering::AcqRel) {
+                run_git_in(self.root, &["rm", "-q", "--cached", "app"]);
+            }
+        }
+    }
+
+    let control = RevokeAfterCapture {
+        root: parent.path(),
+        revoked: AtomicBool::new(false),
+    };
+    let captured =
+        scheduler.capture_authoritative_snapshot_without_active_generation_reuse(Some(&control));
+    assert!(control.revoked.load(Ordering::Acquire));
+    assert!(
+        matches!(captured, Err(CodeIndexSchedulerErrorV1::Git(ref message))
+            if message.contains("checkout binding changed")),
+        "revoked child bytes must not become an authoritative snapshot"
+    );
+    assert_eq!(
+        scheduler
+            .latest_complete()
+            .unwrap()
+            .generation()
+            .manifest()
+            .generation_id,
+        original,
+        "a refused capture must not replace the published generation"
+    );
+
+    run_git_in(parent.path(), &["add", "app"]);
+    published(scheduler.reconcile_now().unwrap());
+    assert_eq!(indexed_paths(&scheduler), ["app/lib.rs", "parent.rs"]);
+    assert_ne!(
+        scheduler
+            .latest_complete()
+            .unwrap()
+            .generation()
+            .manifest()
+            .generation_id,
+        original,
+        "restoring authorization allows the edited child to publish"
+    );
 }
 
 #[test]

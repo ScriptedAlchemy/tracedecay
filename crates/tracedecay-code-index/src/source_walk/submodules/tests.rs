@@ -425,9 +425,12 @@ fn parent_worktree_config_change_revokes_cached_child_authority() {
 fn changing_a_split_index_invalidates_the_child_binding_witness() {
     let fixture = fixture();
     let root = fixture.path().join("parent");
-    let boundaries = LiveSourceBoundaries::open(&root, true).unwrap();
-    let (child, _) = boundaries.children.get("app").expect("authenticated child");
     git(&root, &["update-index", "--split-index"]);
+    let boundaries = LiveSourceBoundaries::open(&root, true).unwrap();
+    let source = Path::new("app/first.rs");
+    assert!(boundaries.resolve(source).unwrap().is_some());
+    let pending = walk(&root);
+    let (child, _) = boundaries.children.get("app").expect("authenticated child");
 
     let shared = fs::read_dir(root.join(".git"))
         .unwrap()
@@ -465,4 +468,13 @@ fn changing_a_split_index_invalidates_the_child_binding_witness() {
         !witness.unchanged().unwrap(),
         "a corrupt shared-index inode must invalidate the cached Git authority"
     );
+    assert!(
+        boundaries.resolve(source).is_err(),
+        "a retained graph reader must refuse unreadable split-index authority"
+    );
+    let error = pending
+        .filter_map(Result::err)
+        .next()
+        .expect("a retained child walk must report unreadable split-index authority");
+    assert_eq!(error.io_error().unwrap().kind(), io::ErrorKind::Other);
 }
