@@ -90,6 +90,13 @@ enum DatabasePin {
     Sqlite(Connection),
 }
 
+#[derive(Clone, Copy)]
+enum ReservedJournalPolicy {
+    Ignore,
+    Require,
+    PermitRemoval,
+}
+
 impl OpenedDatabaseFile {
     #[cfg(all(unix, not(any(target_os = "linux", target_os = "android"))))]
     pub(crate) fn pin(path: &Path) -> Result<Self, OpenedDatabaseFileError> {
@@ -445,14 +452,37 @@ impl OpenedDatabaseFile {
 
     pub(crate) fn verify_connection(
         &self,
-        _connection: &Connection,
+        connection: &Connection,
         canonical_path: &Path,
     ) -> Result<(), OpenedDatabaseFileError> {
         // Check the pathname identity first. If it changes during this stat,
         // HAS_MOVED below still observes the SQLite handle's different inode.
         self.verify_current_path(canonical_path)?;
+        let initialization_main_is_empty = std::fs::metadata(canonical_path)
+            .map_err(|_| OpenedDatabaseFileError::Open)?
+            .len()
+            == 0;
+        let initial_journal_policy = if initialization_main_is_empty {
+            ReservedJournalPolicy::Require
+        } else {
+            ReservedJournalPolicy::Ignore
+        };
+        self.verify_reserved_sidecars(canonical_path, initial_journal_policy)?;
+        let journal_mode_is_wal = connection
+            .query_row("PRAGMA journal_mode", [], |row| row.get::<_, String>(0))
+            .map_err(|_| OpenedDatabaseFileError::Inspect)?
+            .eq_ignore_ascii_case("wal");
+        // WAL initialization leaves the rollback journal unused, so SQLite
+        // may remove that empty reservation. A rollback writer may also
+        // recreate its journal with a new inode on every transaction. Only
+        // initialization and WAL startup can authenticate the reservation.
+        let journal_policy = if journal_mode_is_wal {
+            ReservedJournalPolicy::PermitRemoval
+        } else {
+            initial_journal_policy
+        };
         #[cfg(unix)]
-        match sqlite_connection_has_moved(_connection)? {
+        match sqlite_connection_has_moved(connection)? {
             Some(false) => {}
             Some(true) => return Err(OpenedDatabaseFileError::Replaced),
             None => return Err(OpenedDatabaseFileError::Inspect),
@@ -462,6 +492,44 @@ impl OpenedDatabaseFile {
             // Recheck after the file-control syscall; both checks must agree
             // before any writer policy can create or mutate sidecars.
             self.verify_current_path(canonical_path)?;
+        }
+        // A retained descriptor pins the reserved inode, not its directory
+        // entry. Authenticate every sidecar entry after SQLite has opened the
+        // database so a sidecar-only substitution cannot pass worker startup.
+        self.verify_reserved_sidecars(canonical_path, journal_policy)?;
+        Ok(())
+    }
+
+    fn verify_reserved_sidecars(
+        &self,
+        canonical_path: &Path,
+        journal_policy: ReservedJournalPolicy,
+    ) -> Result<(), OpenedDatabaseFileError> {
+        let Some(sidecars) = &self.created_sidecars else {
+            return Ok(());
+        };
+        let reservations = sidecars
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let reservations = reservations
+            .as_ref()
+            .ok_or(OpenedDatabaseFileError::Replaced)?;
+        for (reservation, suffix) in reservations.iter().zip(["-wal", "-shm", "-journal"]) {
+            let path = sidecar_path(canonical_path, suffix);
+            if suffix == "-journal" {
+                let verify = match journal_policy {
+                    ReservedJournalPolicy::Ignore => false,
+                    ReservedJournalPolicy::Require => true,
+                    ReservedJournalPolicy::PermitRemoval => path
+                        .try_exists()
+                        .map_err(|_| OpenedDatabaseFileError::Inspect)?,
+                };
+                if !verify {
+                    continue;
+                }
+            }
+            let identity = opened_file_identity(reservation)?;
+            Self::verify_path_identity(&path, identity)?;
         }
         Ok(())
     }

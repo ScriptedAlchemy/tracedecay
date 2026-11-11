@@ -1733,6 +1733,114 @@ mod tests {
         reopened.close_and_join().unwrap();
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn reserved_sidecar_substitution_child() {
+        let Some(path) = std::env::var_os("TRACEDECAY_RESERVED_SIDECAR_SUBSTITUTION") else {
+            return;
+        };
+        let suffix = std::env::var("TRACEDECAY_RESERVED_SIDECAR_SUFFIX").unwrap();
+        let path = std::path::PathBuf::from(path);
+        let mut sidecar = path.as_os_str().to_os_string();
+        sidecar.push(&suffix);
+        let sidecar = std::path::PathBuf::from(sidecar);
+        let mut owned = sidecar.as_os_str().to_os_string();
+        owned.push(".owned");
+        fs::rename(&sidecar, std::path::PathBuf::from(owned)).unwrap();
+        fs::write(&sidecar, format!("foreign {suffix}")).unwrap();
+        println!("reserved-sidecar-substitution-complete");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn initialization_refuses_cross_process_sidecar_substitution_and_retries() {
+        for suffix in ["-wal", "-shm", "-journal"] {
+            let directory = TempDir::new().unwrap();
+            let path = directory.path().join("sessions.db");
+            let binding = binding();
+            let runtime = native_runtime();
+            let files = OpenedDatabaseFile::create_new(&path).unwrap();
+            let factory = RepositoryPhysicalAttachmentFactory;
+            let outcome = start_with_reserved_files(files, |worker_pin| {
+                factory.attach_opened(
+                    &runtime,
+                    binding.clone(),
+                    locator(&binding),
+                    path.clone(),
+                    AdmissionConfigV1::default(),
+                    worker_pin,
+                    true,
+                    &mut |stage| {
+                        if stage != AttachmentWorkerStartStage::BeforeWriter {
+                            return;
+                        }
+                        let name = format!(
+                            "{}::reserved_sidecar_substitution_child",
+                            module_path!().split_once("::").unwrap().1
+                        );
+                        let output = std::process::Command::new(std::env::current_exe().unwrap())
+                            .args(["--exact", &name, "--nocapture"])
+                            .env("TRACEDECAY_RESERVED_SIDECAR_SUBSTITUTION", &path)
+                            .env("TRACEDECAY_RESERVED_SIDECAR_SUFFIX", suffix)
+                            .output()
+                            .unwrap();
+                        assert!(
+                            output.status.success()
+                                && String::from_utf8_lossy(&output.stdout)
+                                    .contains("reserved-sidecar-substitution-complete"),
+                            "sidecar substitution failed: {} {}",
+                            String::from_utf8_lossy(&output.stdout),
+                            String::from_utf8_lossy(&output.stderr)
+                        );
+                    },
+                )
+            });
+            let failure = match outcome {
+                Ok(_) => panic!("{suffix} substitution passed SQLite attachment startup"),
+                Err(error) => error,
+            };
+            assert!(
+                matches!(
+                    &failure.error,
+                    RepositoryAttachmentStartError::Writer(
+                        WriterStartError::OpenedDatabaseIdentity(OpenedDatabaseFileError::Replaced)
+                    )
+                ),
+                "{suffix}: {}",
+                failure.error
+            );
+            let (_, files) = failure.files.expect("failed workers returned reservations");
+
+            let mut sidecar = path.as_os_str().to_os_string();
+            sidecar.push(suffix);
+            let sidecar = std::path::PathBuf::from(sidecar);
+            assert_eq!(
+                fs::read(&sidecar).unwrap(),
+                format!("foreign {suffix}").as_bytes(),
+                "SQLite opened or overwrote the substituted sidecar before refusal"
+            );
+            let mut owned = sidecar.as_os_str().to_os_string();
+            owned.push(".owned");
+            let owned = std::path::PathBuf::from(owned);
+            assert!(owned.is_file());
+            fs::remove_file(&sidecar).unwrap();
+            fs::rename(&owned, &sidecar).unwrap();
+
+            let reopened = factory
+                .start_reserved_initialization(
+                    &runtime,
+                    binding.clone(),
+                    locator(&binding),
+                    path.clone(),
+                    AdmissionConfigV1::default(),
+                    Some(files),
+                )
+                .expect("restoring the reserved inode permits initialization retry");
+            assert!(reopened.snapshot().healthy);
+            reopened.abort_initialization().unwrap();
+        }
+    }
+
     #[test]
     fn failed_initialization_preserves_created_database_and_sidecars() {
         let directory = TempDir::new().unwrap();
