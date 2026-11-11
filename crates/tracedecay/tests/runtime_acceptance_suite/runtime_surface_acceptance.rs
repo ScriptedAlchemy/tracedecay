@@ -340,10 +340,6 @@ async fn git_runtime_fixture() -> RuntimeFixture {
     )
     .expect("write staged Git change");
     git(&project, &["add", "src/main.rs"]);
-    // Git reads answer a typed retryable `mounting` problem until project open
-    // installs the owner's authority; the journeys start from a served project.
-    await_published_code_index(environment.home(), &project);
-
     let handshake = crate::common::handshake_for_current_client(
         environment.profile(),
         Some(project.clone()),
@@ -1945,19 +1941,19 @@ async fn production_primitive_code_routes_have_cli_mcp_http_parity() {
 #[tokio::test(flavor = "multi_thread")]
 async fn git_preview_and_apply_have_real_cli_mcp_runtime_parity() {
     let fixture = git_runtime_fixture().await;
-    let status = resolve_mcp_application_surface(
+    let status = admitted_mcp_invocation(
+        &fixture.client,
         ApplicationSurfaceOperation::GitStatus,
-        RequestId::new("request.git-parity.status").expect("status request id"),
-        parse_application_surface_request(
-            ApplicationSurfaceOperation::GitStatus,
-            serde_json::json!({}),
-        )
-        .expect("Git status request"),
-        RequestedOutputFormat::Json,
-        Some(&fixture.client),
+        "request.git-parity.status",
+        || {
+            parse_application_surface_request(
+                ApplicationSurfaceOperation::GitStatus,
+                serde_json::json!({}),
+            )
+            .expect("Git status request")
+        },
     )
-    .await
-    .expect("Git status dispatch");
+    .await;
     let scope = status
         .result
         .as_ref()

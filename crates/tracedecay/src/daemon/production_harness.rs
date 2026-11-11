@@ -868,6 +868,18 @@ impl ProductionProjectCompositionHarnessV1 {
             })
     }
 
+    /// The real stream owner of this isolated daemon composition, for lifecycle tests.
+    pub fn operation_events(
+        &self,
+    ) -> Result<tracedecay_application::operation_stream::OperationEventAuthority> {
+        self.resources
+            .as_ref()
+            .map(|resources| resources.invocation.service.operation_events())
+            .ok_or_else(|| TraceDecayError::Config {
+                message: "production composition has already shut down".to_owned(),
+            })
+    }
+
     pub fn server(&self, project_root: impl AsRef<Path>) -> Result<Arc<crate::mcp::McpServer>> {
         let canonical_project_path =
             tracedecay_runtime_core::path_safety::canonical_existing_identity(

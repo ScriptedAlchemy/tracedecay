@@ -1,9 +1,13 @@
 use std::future::Future;
+use std::path::PathBuf;
 use std::pin::Pin;
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 use std::time::Duration;
 
+use tokio::sync::{Mutex, OwnedMutexGuard};
 use tracedecay_contracts::{CancellationSignal, Deadline};
+use tracedecay_runtime_core::native_runtime::{self, TimeoutError};
+use tracedecay_runtime_core::weak_registry::WeakRegistry;
 use tracedecay_temporal_query::execution::ExecutionControl;
 
 use tracedecay_domain::SessionId;
@@ -110,10 +114,48 @@ impl DaemonLcmEffectService {
         }
     }
 
+    /// Planning and publishing use separate transactions around the provider
+    /// call. A foreground hook and retained convergence for the same session
+    /// must re-plan after the preceding publication before launching a model.
+    async fn compression_turn(
+        &self,
+        request: &LcmCompressionRequest,
+    ) -> Result<OwnedMutexGuard<()>, LcmError> {
+        type SessionTurns = WeakRegistry<(PathBuf, String, String), Mutex<()>>;
+        static TURNS: LazyLock<SessionTurns> = LazyLock::new(WeakRegistry::new);
+        let key = (
+            self.db.db_path().to_path_buf(),
+            request.provider.clone(),
+            request.session_id.clone(),
+        );
+        let (turn, _) = TURNS.get_or_insert_with(key, || Arc::new(Mutex::new(())));
+        let remaining = self.control.remaining()?;
+        if let Ok(guard) = Arc::clone(&turn).try_lock_owned() {
+            return Ok(guard);
+        }
+        let cancelled = async {
+            match &self.control.cancellation {
+                Some(signal) => signal.cancelled().await,
+                None => std::future::pending().await,
+            }
+        };
+        tokio::select! {
+            biased;
+            () = cancelled => Err(LcmError::Cancelled),
+            result = native_runtime::timeout(remaining, turn.lock_owned()) => result.map_err(|error| {
+                match error {
+                    TimeoutError::Elapsed => LcmError::DeadlineExceeded,
+                    TimeoutError::TimerUnavailable(reason) => LcmError::Io(reason),
+                }
+            }),
+        }
+    }
+
     pub(super) async fn compress(
         &self,
         mut request: LcmCompressionRequest,
     ) -> Result<LcmCompressionResponse, LcmError> {
+        let _turn = self.compression_turn(&request).await?;
         // Observation-projected sessions land raw rows without ingest
         // protection; the verified raw loads inside compression reject them.
         // Hydrate the canonical sanitization receipts first so the daemon
@@ -197,6 +239,7 @@ impl DaemonLcmEffectService {
         mut request: LcmCompressionRequest,
         convergence_candidate: &tracedecay_lcm::summary_convergence::LcmSummaryConvergenceCandidate,
     ) -> Result<tracedecay_lcm::summary_convergence::LcmBoundedCompressionResponse, LcmError> {
+        let _turn = self.compression_turn(&request).await?;
         if request.summarizer.has_nonempty_provided_summary() {
             return self
                 .commit_retained_compression(&request, Some(convergence_candidate), None)

@@ -42,6 +42,7 @@ jobs:
       - uses: ./.github/actions/setup-bazel
         id: bazel
         with:
+          release-download-token: ${{ github.token }}
           cache-key: ci-embedded-bundles
 
       - name: Build TypeScript SDK for the ChatGPT extension
