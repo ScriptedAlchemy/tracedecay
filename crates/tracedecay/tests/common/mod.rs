@@ -10,7 +10,6 @@ pub mod typescript_project;
 use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::io::{BufRead, BufReader, Read, Write};
-use std::net::TcpListener;
 #[cfg(not(unix))]
 use std::net::TcpStream;
 #[cfg(unix)]
@@ -536,17 +535,6 @@ pub fn create_runtime() -> tokio::runtime::Runtime {
     {
         Ok(runtime) => runtime,
         Err(err) => panic!("failed to create tokio runtime: {err}"),
-    }
-}
-
-pub fn pick_free_port() -> u16 {
-    let listener = match TcpListener::bind("127.0.0.1:0") {
-        Ok(listener) => listener,
-        Err(err) => panic!("failed to bind free local port: {err}"),
-    };
-    match listener.local_addr() {
-        Ok(addr) => addr.port(),
-        Err(err) => panic!("failed to read bound local address: {err}"),
     }
 }
 
@@ -1586,7 +1574,8 @@ pub async fn wait_for_dashboard(agent: &ureq::Agent, base_url: &str) {
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
-    panic!("dashboard server did not become ready at {base_url}");
+    let address = base_url.rsplit('@').next().unwrap_or(base_url);
+    panic!("dashboard server did not become ready at {address}");
 }
 
 pub fn isolated_lcm_db_path(tmp: &TempDir) -> std::path::PathBuf {

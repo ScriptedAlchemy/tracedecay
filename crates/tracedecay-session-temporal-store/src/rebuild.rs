@@ -24,11 +24,17 @@ pub(super) async fn rebuild_candidate_session_relations(
     database: &impl SessionTemporalRegisteredDb,
     session_id: &tracedecay_domain::SessionId,
     generation: tracedecay_domain::SessionProjectionGenerationV1,
+    base_generation: tracedecay_domain::SessionProjectionGenerationV1,
     control: &ExecutionControl,
     operation: &'static str,
 ) -> SessionStoreResult<SessionRelationProjection> {
     let reconstructed = reconstruct_candidate_session_relations(
-        database, session_id, generation, control, operation,
+        database,
+        session_id,
+        generation,
+        base_generation,
+        control,
+        operation,
     )
     .await?;
 
@@ -66,6 +72,7 @@ pub(super) async fn reconstruct_candidate_session_relations(
     database: &impl SessionTemporalRegisteredDb,
     session_id: &tracedecay_domain::SessionId,
     generation: tracedecay_domain::SessionProjectionGenerationV1,
+    base_generation: tracedecay_domain::SessionProjectionGenerationV1,
     control: &ExecutionControl,
     operation: &'static str,
 ) -> SessionStoreResult<SessionRelationProjection> {
@@ -73,16 +80,33 @@ pub(super) async fn reconstruct_candidate_session_relations(
     let (scope, relation_store) = database
         .session_relation_store()
         .map_err(|error| storage(operation, error))?;
+    // The refresh binding freezes its predecessor, and activation later
+    // checks it is still active. Native graph I/O must not pin a SQLite reader.
+    let reconstruction_cancellation = execution_control_graph_cancellation(control);
+    let base = match relation_store.load_projection(
+        &scope,
+        session_id,
+        base_generation.value(),
+        MAX_REBUILD_RELATION_PROJECTION_ITEMS,
+        MAX_REBUILD_RELATION_PROJECTION_ITEMS,
+        std::sync::Arc::clone(&reconstruction_cancellation),
+    ) {
+        Ok(projection) => Some(projection),
+        Err(SessionRelationError::NotFound) => None,
+        Err(error) => {
+            checkpoint_relation_rebuild_control(control)?;
+            return Err(storage(operation, error));
+        }
+    };
+    checkpoint_relation_rebuild_control(control)?;
     let snapshot = database
         .read_snapshot()
         .await
         .map_err(|error| storage(operation, error))?;
-    let reconstruction_cancellation = execution_control_graph_cancellation(control);
-    checkpoint_relation_rebuild_control(control)?;
     let reconstructed = candidate_session_relation_projection(
         &snapshot,
         &scope,
-        &relation_store,
+        base.as_ref(),
         session_id,
         generation,
         MAX_REBUILD_RELATION_PROJECTION_ITEMS,

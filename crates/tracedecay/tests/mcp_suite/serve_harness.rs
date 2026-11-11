@@ -105,8 +105,10 @@ pub fn run_serve_after_ready(
         "params": initialize_params
     }));
     session.await_project_ready();
+    // This is a connected host journey. Let each operation deliver its reply
+    // before timing the proxy's exit on EOF.
     for request in requests {
-        session.send(request);
+        session.request(request.clone());
     }
     session.finish(SERVE_CHILD_TIMEOUT)
 }

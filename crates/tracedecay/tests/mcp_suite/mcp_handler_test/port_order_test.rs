@@ -163,8 +163,9 @@ fn ordered_chain() -> Value {
 }
 
 #[tokio::test]
-async fn port_order_ports_leaves_first_and_reports_one_scc() {
+async fn port_order_refuses_invalid_inputs_then_orders_the_published_graph() {
     let fixture = open_port_order_project().await;
+    assert_invalid_port_order_inputs(&fixture).await;
 
     // `mid` calls `leaf`; `top` calls `mid`. Leaves share level 0 in source order.
     let chain = call_port_order(
@@ -302,12 +303,9 @@ async fn port_order_ports_leaves_first_and_reports_one_scc() {
     fixture.harness.shutdown().await;
 }
 
-#[tokio::test]
-async fn port_order_rejects_unknown_kinds_and_missing_source_dir() {
-    let fixture = open_port_order_project().await;
-
+async fn assert_invalid_port_order_inputs(fixture: &ProductionCompositionFixture) {
     let unknown_kind = tool_refusal(
-        &fixture,
+        fixture,
         json!({"source_dir": "order", "kinds": ["not_a_kind"]}),
     )
     .await;
@@ -318,7 +316,7 @@ async fn port_order_rejects_unknown_kinds_and_missing_source_dir() {
         "invalid parameter: kinds must contain at least one supported node kind"
     );
 
-    let missing_source_dir = tool_refusal(&fixture, json!({})).await;
+    let missing_source_dir = tool_refusal(fixture, json!({})).await;
     assert_eq!(missing_source_dir["kind"], "invalid_request");
     assert_eq!(
         missing_source_dir["code"],
@@ -328,8 +326,6 @@ async fn port_order_rejects_unknown_kinds_and_missing_source_dir() {
         missing_source_dir["message"],
         "invalid arguments for tracedecay_port_order: missing field `source_dir`"
     );
-
-    fixture.harness.shutdown().await;
 }
 
 async fn tool_refusal(fixture: &ProductionCompositionFixture, mut arguments: Value) -> Value {
