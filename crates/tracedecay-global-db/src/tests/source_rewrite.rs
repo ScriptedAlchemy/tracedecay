@@ -493,6 +493,17 @@ async fn rewrite_completion_resumes_committed_pages_after_failure_and_restart() 
             1,
             "failed page must leave the rewrite pending for restart"
         );
+
+        // Repair the injected corruption before reopening: admission audits
+        // the invalid survivor provenance and refuses the store by contract.
+        writer
+            .execute(
+                "DELETE FROM observation_projection_provenance
+                 WHERE observation_id = ?1 AND output_ordinal = 1",
+                params![survivor.observation_id().as_str()],
+            )
+            .await
+            .unwrap();
         already_retired
     };
 
@@ -516,15 +527,6 @@ async fn rewrite_completion_resumes_committed_pages_after_failure_and_restart() 
         already_retired,
         "restart must retain the completed retirement frontier"
     );
-
-    writer
-        .execute(
-            "DELETE FROM observation_projection_provenance
-             WHERE observation_id = ?1 AND output_ordinal = 1",
-            params![survivor.observation_id().as_str()],
-        )
-        .await
-        .unwrap();
 
     let retired = registered
         .complete_observation_source_rewrite(&source, &scope, generation)
