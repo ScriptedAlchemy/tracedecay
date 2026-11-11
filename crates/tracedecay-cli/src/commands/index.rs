@@ -2248,19 +2248,10 @@ mod daemon_precondition_tests {
         accepted.progress_epoch += 1;
         accepted.committed_pages += 1;
         let marker = super::FirstGenerationWorkMarker::text(&accepted);
-        assert!(!window.observe(
-            Some(marker.clone()),
-            start + Duration::from_secs(119)
-        ));
+        assert!(!window.observe(Some(marker.clone()), start + Duration::from_secs(119)));
         assert!(window.new_work_since_prior_read);
-        assert!(!window.observe(
-            Some(marker.clone()),
-            start + Duration::from_secs(238)
-        ));
-        assert!(window.observe(
-            Some(marker),
-            start + Duration::from_secs(239)
-        ));
+        assert!(!window.observe(Some(marker.clone()), start + Duration::from_secs(238)));
+        assert!(window.observe(Some(marker), start + Duration::from_secs(239)));
     }
 
     #[tokio::test(flavor = "current_thread")]
