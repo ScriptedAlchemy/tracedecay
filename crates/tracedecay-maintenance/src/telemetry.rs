@@ -37,6 +37,9 @@ const STORAGE_TELEMETRY_USE_CASE: &str = "use-case.application.storage.telemetry
 
 const TABLE_GROWTH_STATE_DIRECTORY: &str = "maintenance";
 const TABLE_GROWTH_STATE_FILE: &str = "table-growth-v1.json";
+/// The durable baseline is metadata, never an unbounded profile payload.
+/// Leave room below the maintenance-family soft bound for other cursors.
+const MAX_TABLE_GROWTH_STATE_BYTES: usize = 16 * 1024 * 1024;
 /// How long a walk that ran out of its deadline suppresses the next one.
 const TABLE_SIZE_WALK_REPROBE_MICROS: i64 = 24 * 60 * 60 * 1_000_000;
 
@@ -891,10 +894,35 @@ impl StoreTelemetrySamplingRegistry {
 /// Every persisted store state, keyed by database path. A missing or
 /// unreadable file is an empty state: the next pass re-baselines.
 fn load_table_growth_states(state_path: &Path) -> BTreeMap<String, TableGrowthStateV1> {
-    std::fs::read(state_path)
-        .ok()
-        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
-        .unwrap_or_default()
+    // A stale or substituted maintenance file need not respect the size of
+    // data this daemon normally writes. Do not read a sparse multi-GB file,
+    // follow a foreign symlink, or wait forever on a FIFO during startup.
+    let bytes = match tracedecay_private_fs::framed_log::read_bounded(
+        state_path,
+        MAX_TABLE_GROWTH_STATE_BYTES,
+    ) {
+        Ok(Some(bytes)) => bytes,
+        Ok(None) => return BTreeMap::new(),
+        Err(error) => {
+            tracing::warn!(
+                path = %state_path.display(),
+                %error,
+                "table growth checkpoint cannot be read; measurements will re-baseline"
+            );
+            return BTreeMap::new();
+        }
+    };
+    match serde_json::from_slice(&bytes) {
+        Ok(states) => states,
+        Err(error) => {
+            tracing::warn!(
+                path = %state_path.display(),
+                %error,
+                "table growth checkpoint is invalid; measurements will re-baseline"
+            );
+            BTreeMap::new()
+        }
+    }
 }
 
 /// Merge `updates` into the persisted state and drop stores whose database no
@@ -912,6 +940,12 @@ fn persist_table_growth_states(
     states.extend(updates);
     states.retain(|database_path, _| Path::new(database_path).exists());
     let bytes = serde_json::to_vec(&states).map_err(std::io::Error::other)?;
+    if bytes.len() > MAX_TABLE_GROWTH_STATE_BYTES {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "table growth checkpoint exceeds the bounded maintenance-state size",
+        ));
+    }
     if let Some(parent) = state_path.parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -969,6 +1003,70 @@ fn storage_telemetry_request_context(
         Deadline::new(expires_at)?,
         CancellationContext::active(format!("cancel.daemon.storage-telemetry.{suffix}"))?,
     )
+}
+
+#[cfg(test)]
+#[allow(clippy::expect_used, clippy::panic)]
+mod table_growth_checkpoint_tests {
+    use super::{
+        MAX_TABLE_GROWTH_STATE_BYTES, TableGrowthStateV1, load_table_growth_states,
+        persist_table_growth_states,
+    };
+
+    #[test]
+    fn checkpoint_reads_refuse_oversized_and_foreign_files_without_losing_valid_state() {
+        let temp = tempfile::tempdir().expect("isolated checkpoint fixture");
+        let database = temp.path().join("project.db");
+        std::fs::write(&database, b"owned").expect("existing database identity");
+        let checkpoint = temp.path().join("maintenance/table-growth-v1.json");
+        let key = database.to_str().expect("UTF-8 fixture path").to_owned();
+        persist_table_growth_states(
+            &checkpoint,
+            vec![(key.clone(), TableGrowthStateV1::default())],
+        )
+        .expect("persist genuine bounded state");
+        let loaded = load_table_growth_states(&checkpoint);
+        assert_eq!(loaded.len(), 1);
+        assert!(loaded.contains_key(&key));
+
+        // A sparse file exercises the held-file length refusal, without
+        // allocating or reading an oversized JSON payload in the test.
+        std::fs::OpenOptions::new()
+            .write(true)
+            .truncate(true)
+            .open(&checkpoint)
+            .expect("replace disposable checkpoint")
+            .set_len(MAX_TABLE_GROWTH_STATE_BYTES as u64 + 1)
+            .expect("sparse oversized checkpoint");
+        assert_eq!(load_table_growth_states(&checkpoint).len(), 0);
+        assert_eq!(
+            std::fs::metadata(&checkpoint).unwrap().len(),
+            MAX_TABLE_GROWTH_STATE_BYTES as u64 + 1
+        );
+
+        #[cfg(unix)]
+        {
+            let foreign = temp.path().join("foreign-state.json");
+            std::fs::write(
+                &foreign,
+                serde_json::to_vec(&std::collections::BTreeMap::from([(
+                    key.clone(),
+                    TableGrowthStateV1::default(),
+                )]))
+                .expect("valid foreign state"),
+            )
+            .expect("foreign contents");
+            std::fs::remove_file(&checkpoint).expect("remove disposable oversized file");
+            std::os::unix::fs::symlink(&foreign, &checkpoint)
+                .expect("substitute foreign checkpoint symlink");
+            assert_eq!(
+                load_table_growth_states(&checkpoint).len(),
+                0,
+                "the previous std::fs::read would import this valid foreign state"
+            );
+            assert!(std::fs::read(&foreign).unwrap().len() > 2);
+        }
+    }
 }
 
 #[cfg(test)]
