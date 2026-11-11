@@ -15,8 +15,126 @@ use tracedecay_contracts::doctor::{
     ObservabilityReadV1, ObservabilityStateV1, host_integration_finding,
 };
 use tracedecay_graph_db::GraphDbCorruptionCensusV1;
+use tracedecay_runtime_core::db::{Database, DatabaseAuthority, TestDatabaseRuntimeMode};
+use tracedecay_rusqlite_runtime::repository::GRAPH_PUBLICATION_SCHEMA_V1;
 
 use super::*;
+
+#[tokio::test]
+async fn sealed_journal_liveness_and_retirement_preserve_projection_identity() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("graph.db");
+    let authority =
+        DatabaseAuthority::acquire_test(&path, "doctor sealed journal fixture").unwrap();
+    let (database, _) =
+        Database::publish_test_runtime(&path, &authority, TestDatabaseRuntimeMode::Initialize)
+            .await
+            .unwrap();
+    database
+        .execute_write_batch(
+            "install graph publication schema",
+            GRAPH_PUBLICATION_SCHEMA_V1,
+        )
+        .await
+        .unwrap();
+    let shard = serde_json::to_string(&database.registered_binding().shard_id).unwrap();
+    let mut foreign = database.registered_binding().shard_id.clone();
+    foreign.profile_id = tracedecay_domain::UserProfileId::new("profile.foreign").unwrap();
+    let foreign = serde_json::to_string(&foreign).unwrap();
+    let digest = format!("sha256:{}", "0".repeat(64));
+    for (sequence, owner, namespace, projection, generation) in [
+        (1_i64, &shard, "project", "code", "generation:shared"),
+        (2, &shard, "project", "sessions", "generation:shared"),
+        (3, &shard, "project", "sessions", "generation:current"),
+        (4, &shard, "other-project", "code", "generation:shared"),
+        (5, &shard, "other-project", "code", "generation:current"),
+        (6, &foreign, "project", "sessions", "generation:shared"),
+    ] {
+        database
+            .execute_write(
+                "publish graph journal fixture",
+                "INSERT INTO graph_publication_replay_v1
+                 (sequence, shard_id, namespace, projection, generation, idempotency_key,
+                  input_digest, dependency_generation_closure_digest, direct_dependency_bytes,
+                  expected_recovered_digest, canonical_replay_source_digest, canonical_replay_source)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7, 2, ?7, ?7, X'7b7d')",
+                (sequence, owner.as_str(), namespace, projection, generation,
+                 format!("publication:{sequence}"), digest.as_str()),
+            )
+            .await
+            .unwrap();
+    }
+    for sequence in [1_i64, 3, 5, 6] {
+        database
+            .execute_write(
+                "install graph journal head",
+                "INSERT INTO graph_verified_heads_v1
+                 (shard_id, namespace, projection, replay_sequence, recovered_digest)
+                 SELECT shard_id, namespace, projection, sequence, expected_recovered_digest
+                 FROM graph_publication_replay_v1 WHERE sequence = ?1",
+                (sequence,),
+            )
+            .await
+            .unwrap();
+    }
+    database
+        .execute_write(
+            "retain exact graph dependency",
+            "INSERT INTO graph_publication_replay_dependencies_v1
+             (owner_replay_sequence, ordinal, dependency_replay_sequence,
+              shard_id, namespace, projection, generation)
+             SELECT 3, 0, sequence, shard_id, namespace, projection, generation
+             FROM graph_publication_replay_v1 WHERE sequence = 1",
+            (),
+        )
+        .await
+        .unwrap();
+    let identity = |namespace: &str, projection: &str, generation: &str| {
+        (
+            GraphProjectionIdentity::new(
+                GraphNamespace::new(namespace).unwrap(),
+                GraphProjectionId::new(projection).unwrap(),
+            ),
+            GraphGenerationId::new(generation).unwrap(),
+        )
+    };
+    let mut expected = BTreeSet::from([
+        identity("project", "code", "generation:shared"),
+        identity("project", "sessions", "generation:current"),
+        identity("other-project", "code", "generation:current"),
+    ]);
+    assert_eq!(
+        live_sealed_generations(&database).await,
+        Some(expected.clone())
+    );
+    assert_eq!(deferred_native_retirements(&database).await, Some(2));
+
+    database
+        .execute_write(
+            "retain one superseded projection as a dependency",
+            "INSERT INTO graph_publication_replay_dependencies_v1
+             (owner_replay_sequence, ordinal, dependency_replay_sequence,
+              shard_id, namespace, projection, generation)
+             SELECT 3, 1, sequence, shard_id, namespace, projection, generation
+             FROM graph_publication_replay_v1 WHERE sequence = 4",
+            (),
+        )
+        .await
+        .unwrap();
+    expected.insert(identity("other-project", "code", "generation:shared"));
+    assert_eq!(live_sealed_generations(&database).await, Some(expected));
+    assert_eq!(deferred_native_retirements(&database).await, Some(1));
+    assert_eq!(
+        database
+            .query_scalar_i64(
+                "preserved replays",
+                "SELECT COUNT(*) FROM graph_publication_replay_v1"
+            )
+            .await
+            .unwrap(),
+        6,
+    );
+}
 
 #[test]
 fn configuration_read_from_pin_absent_on_cold_cache() {

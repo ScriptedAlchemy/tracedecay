@@ -1445,7 +1445,7 @@ fn sealed_census_separates_heads_and_preserves_unproven_staging() {
     std::fs::create_dir_all(&unreadable).unwrap();
     std::fs::write(unreadable.join("generation.grafeo"), b"no receipt").unwrap();
 
-    let heads = std::collections::BTreeSet::from(["census-g2".to_owned()]);
+    let heads = BTreeSet::from([(identity, GraphGenerationId::new("census-g2").unwrap())]);
     let census =
         tracedecay_graph_db::census_sealed_store(&support::graph_path(temp.path()), &heads)
             .unwrap();

@@ -81,10 +81,10 @@ use crate::state::{
 };
 use crate::{
     GraphCommit, GraphDb, GraphDbError, GraphDbLocation, GraphDbOpenOptions, GraphDurability,
-    GraphEntity, GraphFormatVersion, GraphGenerationManifest, GraphGenerationManifestIdentity,
-    GraphGenerationRowSpill, GraphGenerationRows, GraphNamespace, GraphProjectionId,
-    GraphProjectionIdentity, GraphRelation, GraphWatermark, GraphWriteBatch, NeverCancelled,
-    SourceGeneration, SpilledGraphGeneration,
+    GraphEntity, GraphFormatVersion, GraphGenerationId, GraphGenerationManifest,
+    GraphGenerationManifestIdentity, GraphGenerationRowSpill, GraphGenerationRows, GraphNamespace,
+    GraphProjectionId, GraphProjectionIdentity, GraphRelation, GraphWatermark, GraphWriteBatch,
+    NeverCancelled, SourceGeneration, SpilledGraphGeneration,
 };
 
 /// A sealed generation opened without the shared staging database.
@@ -581,8 +581,8 @@ pub struct SealedStoreCensusV1 {
     pub unrecognized_count: u64,
 }
 
-/// Measure the sealed root beside `database_path` against the generation ids
-/// of the store's current verified heads (as journaled: `<projection>:<digest>`).
+/// Measure the sealed root beside `database_path` against the exact projection
+/// and generation identities that remain live in that store's journal.
 ///
 /// Metadata only: every entry is one receipt read plus a directory size walk,
 /// never a container open. An unreadable receipt counts as unrecognized so the
@@ -597,7 +597,7 @@ enum SealedCensusEntry {
 
 pub fn census_sealed_store(
     database_path: &Path,
-    head_generations: &std::collections::BTreeSet<String>,
+    head_generations: &std::collections::BTreeSet<(GraphProjectionIdentity, GraphGenerationId)>,
 ) -> std::io::Result<SealedStoreCensusV1> {
     let root = sealed_store_root(database_path);
     let current_producer = row_spill_owner().to_string();
@@ -644,7 +644,17 @@ pub fn census_sealed_store(
             {
                 return SealedCensusEntry::Unrecognized;
             }
-            if head_generations.contains(&receipt.generation) {
+            let (Ok(namespace), Ok(projection), Ok(generation)) = (
+                GraphNamespace::new(receipt.namespace),
+                GraphProjectionId::new(receipt.projection),
+                GraphGenerationId::new(receipt.generation),
+            ) else {
+                return SealedCensusEntry::Unrecognized;
+            };
+            if head_generations.contains(&(
+                GraphProjectionIdentity::new(namespace, projection),
+                generation,
+            )) {
                 SealedCensusEntry::Head
             } else {
                 SealedCensusEntry::Superseded
@@ -3442,8 +3452,14 @@ mod receipt_budget_tests {
         let oldest = oldest.unwrap();
         std::os::unix::fs::symlink(&foreign, oldest.join("foreign")).unwrap();
         std::os::unix::fs::symlink(temp.path().join("missing"), oldest.join("dangling")).unwrap();
-        let census =
-            census_sealed_store(&database, &BTreeSet::from(["generation:g69".to_owned()])).unwrap();
+        let heads = BTreeSet::from([(
+            GraphProjectionIdentity::new(
+                GraphNamespace::new("test").unwrap(),
+                GraphProjectionId::new("code").unwrap(),
+            ),
+            GraphGenerationId::new("generation:g69").unwrap(),
+        )]);
+        let census = census_sealed_store(&database, &heads).unwrap();
         assert_eq!(census.head_count, 1);
         assert_eq!(census.superseded_count, 69);
         assert_eq!(census.unrecognized_count, 0);
@@ -3493,8 +3509,11 @@ mod receipt_budget_tests {
             .set_len(5 * 1024 * 1024 * 1024)
             .unwrap();
 
-        let census =
-            census_sealed_store(&database, &BTreeSet::from([generation.to_owned()])).unwrap();
+        let census = census_sealed_store(
+            &database,
+            &BTreeSet::from([(locator.projection, locator.generation)]),
+        )
+        .unwrap();
         assert_eq!(census.head_count, 1);
         assert_eq!(census.superseded_count, 0);
         assert_eq!(census.unrecognized_count, 1);
@@ -3634,6 +3653,65 @@ mod build_tests {
         census_with_layered_publication(1);
     }
 
+    #[test]
+    fn sealed_census_scopes_equal_generation_names_to_their_projection() {
+        let temp = tempfile::tempdir().unwrap();
+        let database_path = temp.path().join("source.grafeo");
+        let mut heads = BTreeSet::new();
+        let mut artifacts = Vec::new();
+        let mut expected_head_bytes = 0;
+        let mut expected_superseded_bytes = 0;
+        for (namespace, projection, generation, live) in [
+            ("project", "code", "generation:shared", true),
+            ("project", "sessions", "generation:shared", false),
+            ("project", "sessions", "generation:current", true),
+            ("other-project", "code", "generation:shared", false),
+            ("other-project", "code", "generation:current", true),
+        ] {
+            let mut manifest = manifest(2, 0);
+            manifest.projection = GraphProjectionIdentity::new(
+                GraphNamespace::new(namespace).unwrap(),
+                GraphProjectionId::new(projection).unwrap(),
+            );
+            manifest.generation = GraphGenerationId::new(generation).unwrap();
+            let identity = manifest.identity();
+            let expected = manifest.expected_recovered_digest(&|| Ok(())).unwrap();
+            let (store, _) = build_or_open_sealed_store(
+                SealedRowSource::Manifest(&manifest),
+                &identity,
+                &expected,
+                &database_path,
+                &|| Ok(()),
+            )
+            .unwrap();
+            let directory = store.directory.clone();
+            drop(store);
+            if live {
+                heads.insert((identity.projection, identity.generation));
+            }
+            for entry in std::fs::read_dir(directory).unwrap() {
+                let path = entry.unwrap().path();
+                let bytes = std::fs::read(&path).unwrap();
+                if live {
+                    expected_head_bytes += bytes.len() as u64;
+                } else {
+                    expected_superseded_bytes += bytes.len() as u64;
+                }
+                artifacts.push((path, bytes));
+            }
+        }
+
+        let census = census_sealed_store(&database_path, &heads).unwrap();
+        assert_eq!(census.head_count, 3);
+        assert_eq!(census.superseded_count, 2);
+        assert_eq!(census.unrecognized_count, 0);
+        assert_eq!(census.head_bytes, expected_head_bytes);
+        assert_eq!(census.superseded_bytes, expected_superseded_bytes);
+        for (path, bytes) in artifacts {
+            assert_eq!(std::fs::read(path).unwrap(), bytes);
+        }
+    }
+
     #[cfg(unix)]
     fn census_with_layered_publication(initial_layers: u64) {
         let temp = tempfile::tempdir().unwrap();
@@ -3726,7 +3804,10 @@ mod build_tests {
         }
         let census = census_sealed_store(
             &database_path,
-            &BTreeSet::from(["generation:child2".to_owned()]),
+            &BTreeSet::from([(
+                identity.projection,
+                GraphGenerationId::new("generation:child2").unwrap(),
+            )]),
         )
         .unwrap();
         assert_eq!(census.head_count, 1);
