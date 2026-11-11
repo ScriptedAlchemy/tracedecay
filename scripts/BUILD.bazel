@@ -52,6 +52,18 @@ py_test(
 )
 
 py_test(
+    name = "bench_hot_paths_test",
+    size = "small",
+    srcs = [
+        "bench-hot-paths.py",
+        "test-bench-hot-paths.py",
+        "lib/portable_process.py",
+    ],
+    main = "test-bench-hot-paths.py",
+    target_compatible_with = ["@platforms//os:linux"],
+)
+
+py_test(
     name = "bazel_dependency_patches_test",
     size = "small",
     srcs = ["test-bazel-dependency-patches.py"],

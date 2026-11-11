@@ -256,6 +256,9 @@ class BenchHotPathsTests(unittest.TestCase):
             spec.loader.exec_module(module)
             run = module.Run.__new__(module.Run)
             run.repo = self.repo
+            run.run_dir = self.root / "run"
+            run.run_dir.mkdir()
+            (run.run_dir / "daemon.log").touch()
             run.generation = "generation.1"
             # Another refresh advanced the daemon after indexing, before
             # the measured edit. Its current generation is the true fence.
@@ -408,6 +411,9 @@ class BenchHotPathsTests(unittest.TestCase):
             spec.loader.exec_module(module)
             run = module.Run.__new__(module.Run)
             run.repo = self.repo
+            run.run_dir = self.root / "run"
+            run.run_dir.mkdir()
+            (run.run_dir / "daemon.log").touch()
             run.index_timeout = 5
             run.generation = "generation.7"
             run.daemon_pid = lambda: 4321
