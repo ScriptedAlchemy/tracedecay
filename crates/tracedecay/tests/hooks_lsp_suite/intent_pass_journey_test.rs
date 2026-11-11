@@ -170,11 +170,6 @@ fn run_hook(home: &Path, project: &Path, hook: &str, event: &Value) -> Output {
     let mut child = command
         .arg(hook)
         .current_dir(project)
-        .env("TRACEDECAY_SPAN_TIMINGS", "1")
-        .env(
-            "RUST_LOG",
-            "warn,tracedecay_agent_hosts::hooks=trace,tracedecay_project::runtime_ports=trace,tracedecay::runtime_ports=trace,tracedecay::daemon::core_client=trace",
-        )
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -439,12 +434,7 @@ fn claude_stop_delivers_the_intent_suggestion_the_daemon_judged_at_the_tool_boun
     let enabled_transcript = write_claude_transcript(home, &project, ENABLED_SESSION);
     let engine = FakeDecisionEngine::start();
     let log = home.join("daemon.log");
-    let _daemon = spawn_tracedecay_daemon_logged(home, &log, |command| {
-        command.env("TRACEDECAY_SPAN_TIMINGS", "1").env(
-            "RUST_LOG",
-            "warn,tracedecay_mcp::handlers::hook_runtime=trace,tracedecay_hooks::admission_ledger=trace",
-        );
-    });
+    let _daemon = spawn_tracedecay_daemon_logged(home, &log, |_command| {});
     assert!(
         tracedecay_command_with_home(home)
             .arg("init")

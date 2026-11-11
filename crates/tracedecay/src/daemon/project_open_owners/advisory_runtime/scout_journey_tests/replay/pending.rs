@@ -311,8 +311,8 @@ async fn pending_stop_delivers_once(
     wait_for_stop_with_settled_intent(&producer).await;
     assert_eq!(
         intent_runs.load(Ordering::SeqCst),
-        intents_before_duplicate,
-        "a delivered Stop retry must not rerun its settled intent pass"
+        intents_before_duplicate + 1,
+        "a receipt for another intent envelope must not settle the Stop companion"
     );
     release.take().unwrap().send(()).unwrap();
     assert_eq!(
