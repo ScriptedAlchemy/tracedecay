@@ -29,7 +29,6 @@ const STAGED_MEMBERS: [&str; 4] = [
 ];
 use tracedecay_rusqlite_runtime::repository::InitializationFiles;
 
-const OWNER: &str = "schema-installation.owner";
 const SYNC: DirectorySyncPolicy = DirectorySyncPolicy::TolerateUnsupported;
 
 /// Coordinates an authorized reset of an offline store with the existing
@@ -510,18 +509,15 @@ impl InitializationDirectory {
             Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
             Err(error) => return Err(error),
         };
-        for entry in Dir::from_std_file(pin).entries()? {
-            // An empty owner-only marker from the previous layout is harmless
-            // for read-only admission. Never retire it by mutable pathname.
-            let entry = entry?;
-            if entry.file_name() != OWNER
-                || !entry.file_type()?.is_file()
-                || entry.metadata()?.len() != 0
-            {
-                return Err(ambiguous(
-                    "SQLite staging requires writable reconciliation before read-only attachment",
-                ));
-            }
+        if Dir::from_std_file(pin)
+            .entries()?
+            .next()
+            .transpose()?
+            .is_some()
+        {
+            return Err(ambiguous(
+                "SQLite staging requires writable reconciliation before read-only attachment",
+            ));
         }
         Ok(())
     }
@@ -889,6 +885,37 @@ mod tests {
         }
         assert_eq!(fs::read(&independent).unwrap(), bytes);
         assert_eq!(read_value(&schema), 7);
+    }
+
+    #[test]
+    fn unproven_staging_marker_refuses_read_only_handoff() {
+        let root = TempDir::new().unwrap();
+        let destination = root.path().join("sessions.db");
+        seed(&destination, 7);
+        let original = fs::read(&destination).unwrap();
+        let directory = InitializationDirectory::path(&destination);
+        create_private_directory(&directory).unwrap();
+        InitializationDirectory::verify_read_only_handoff(&destination).unwrap();
+        let marker = directory.join("schema-installation.owner");
+        fs::write(&marker, []).unwrap();
+
+        assert_eq!(
+            InitializationDirectory::verify_read_only_handoff(&destination)
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::InvalidData
+        );
+        assert_eq!(
+            InitializationDirectory::recover_published(&destination)
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::InvalidData
+        );
+        assert!(lock_offline_sqlite_family_for_reset(&destination).is_err());
+        assert!(marker.is_file());
+        assert_eq!(fs::metadata(&marker).unwrap().len(), 0);
+        assert_eq!(fs::read(&destination).unwrap(), original);
+        assert_eq!(read_value(&destination), 7);
     }
 
     #[test]
