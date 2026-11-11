@@ -1,7 +1,7 @@
 //! Independently readable code-graph output pages.
 
 use std::fs::File;
-use std::io::{Read, Seek, SeekFrom, Write};
+use std::io::{BufReader, Read, Seek, SeekFrom, Write};
 use std::path::Path;
 
 use serde::{Deserialize, Serialize};
@@ -15,6 +15,7 @@ use super::{
 
 const CODE_GRAPH_PAGE_STORE_MAGIC_V1: &[u8; 8] = b"TDGRAPH1";
 const CODE_GRAPH_PAGE_STORE_REVISION_V1: u32 = 1;
+const CODE_GRAPH_HEADER_READ_BYTES: usize = 64 * 1024;
 
 fn store_error(context: &str, error: impl std::fmt::Display) -> CodeIndexProductionErrorV1 {
     CodeIndexProductionErrorV1::Contract(format!("code graph page store {context}: {error}"))
@@ -69,6 +70,7 @@ pub(crate) trait CodeGraphPageStoreV1 {
 fn decode_verified_page(
     descriptor: &CodeGraphPageDescriptorV1,
     encoded: &[u8],
+    digest_context: &'static str,
 ) -> Result<PersistedCodeGraphPageV1, CodeIndexProductionErrorV1> {
     let size_bytes =
         u64::try_from(encoded.len()).map_err(|_| store_error("page length", "exceeds u64"))?;
@@ -82,7 +84,7 @@ fn decode_verified_page(
         .map_err(|error| store_error("page digest", error))?;
     if digest != descriptor.page_digest {
         return Err(store_error(
-            "page read",
+            digest_context,
             "digest does not match its descriptor",
         ));
     }
@@ -213,7 +215,7 @@ impl CodeGraphPageStoreWriterV1 {
         }
         let encoded =
             serde_json::to_vec(page).map_err(|error| store_error("page encode", error))?;
-        decode_verified_page(expected, &encoded)?;
+        decode_verified_page(expected, &encoded, "page read")?;
         self.file
             .write_all(&encoded)
             .map_err(|error| store_error("page write", error))?;
@@ -235,7 +237,7 @@ impl CodeGraphPageStoreWriterV1 {
 }
 
 fn read_attachment_bytes(
-    file: &mut File,
+    file: &mut impl Read,
     length: u64,
     context: &str,
 ) -> Result<Vec<u8>, CodeIndexProductionErrorV1> {
@@ -254,50 +256,34 @@ fn read_attachment_bytes(
     Ok(encoded)
 }
 
+#[tracing::instrument(
+    name = "code_index.graph.page_store.decode_header",
+    level = "trace",
+    skip_all
+)]
 fn decode_attachment_header(
     reader: impl Read,
 ) -> Result<CodeGraphPageStoreHeaderV1, CodeIndexProductionErrorV1> {
+    // serde_json does not buffer reader input. Keep the caller's header-only
+    // Take inside the buffer so refills neither issue one file read per byte
+    // nor consume page payloads that belong to subsequent reads.
+    let reader = BufReader::with_capacity(CODE_GRAPH_HEADER_READ_BYTES, reader);
     serde_json::from_reader(reader).map_err(|error| store_error("header decode", error))
 }
 
-fn verify_attachment_page(
-    file: &mut File,
+/// Authenticate one complete attachment page from the very bytes decoded.
+/// The former separate hash pass and reread doubled per-page disk I/O.
+fn read_verified_attachment_page<R: Read + Seek>(
+    reader: &mut R,
     offset: u64,
     descriptor: &CodeGraphPageDescriptorV1,
-) -> Result<(), CodeIndexProductionErrorV1> {
-    file.seek(SeekFrom::Start(offset))
-        .map_err(|error| store_error("page verify", error))?;
-    let mut reader = file.take(descriptor.size_bytes);
-    let mut hasher = Sha256::new();
-    let mut buffer = [0_u8; 64 * 1024];
-    let mut verified = 0_u64;
-    while verified < descriptor.size_bytes {
-        let read = reader
-            .read(&mut buffer)
-            .map_err(|error| store_error("page verify", error))?;
-        if read == 0 {
-            return Err(store_error(
-                "page verify",
-                "attachment ends inside the page",
-            ));
-        }
-        hasher.update(&buffer[..read]);
-        verified = verified
-            .checked_add(
-                u64::try_from(read)
-                    .map_err(|_| store_error("page verify", "read length exceeds u64"))?,
-            )
-            .ok_or_else(|| store_error("page verify", "read length overflows u64"))?;
-    }
-    let digest = ManifestDigest::from_sha256_bytes(&hasher.finalize())
-        .map_err(|error| store_error("page verify", error))?;
-    if digest != descriptor.page_digest {
-        return Err(store_error(
-            "page verify",
-            "digest does not match its descriptor",
-        ));
-    }
-    Ok(())
+) -> Result<PersistedCodeGraphPageV1, CodeIndexProductionErrorV1> {
+    reader
+        .seek(SeekFrom::Start(offset))
+        .map_err(|error| store_error("page read", error))?;
+    let encoded = read_attachment_bytes(reader, descriptor.size_bytes, "page read")?;
+    // Extent and digest validation precede JSON decode/allocation.
+    decode_verified_page(descriptor, &encoded, "page verify")
 }
 
 pub(crate) struct FileCodeGraphPageStoreV1 {
@@ -394,12 +380,7 @@ impl CodeGraphPageStoreV1 for FileCodeGraphPageStoreV1 {
             .filter(|expected| *expected == descriptor)
             .ok_or_else(|| store_error("page read", "descriptor is outside its store"))?;
         let offset = self.offsets[descriptor.file_key as usize];
-        verify_attachment_page(&mut self.file, offset, expected)?;
-        self.file
-            .seek(SeekFrom::Start(offset))
-            .map_err(|error| store_error("page read", error))?;
-        let encoded = read_attachment_bytes(&mut self.file, expected.size_bytes, "page read")?;
-        decode_verified_page(expected, &encoded)
+        read_verified_attachment_page(&mut self.file, offset, expected)
     }
 }
 
@@ -431,6 +412,27 @@ mod tests {
             self.served = true;
             buffer[0] = b'!';
             Ok(1)
+        }
+    }
+
+    struct CountedFileReader {
+        file: File,
+        calls: usize,
+        bytes_read: u64,
+    }
+
+    impl Read for CountedFileReader {
+        fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+            self.calls += 1;
+            let read = self.file.read(buffer)?;
+            self.bytes_read += read as u64;
+            Ok(read)
+        }
+    }
+
+    impl Seek for CountedFileReader {
+        fn seek(&mut self, offset: SeekFrom) -> std::io::Result<u64> {
+            self.file.seek(offset)
         }
     }
 
@@ -508,6 +510,157 @@ mod tests {
         assert_eq!(
             serde_json::to_vec(&read).expect("encode read page"),
             serde_json::to_vec(&page).expect("encode page")
+        );
+    }
+
+    #[test]
+    fn real_attachment_header_batches_reads_and_preserves_page_boundaries() {
+        let scratch = tempfile::tempdir().expect("scratch");
+        let path = scratch.path().join("many-pages");
+        let generation =
+            CodeGenerationId::new("generation.v1.fixture.00000001.aaaaaaaa").expect("generation");
+        let pages = (0..256_u32)
+            .map(|index| {
+                let mut page = fixture_page();
+                page.file.file_occurrence_id =
+                    FileOccurrenceId::new(format!("file.fixture.{index}")).unwrap();
+                page.file.logical_path = format!("src/module_{index:04}.rs");
+                page
+            })
+            .collect::<Vec<_>>();
+        let descriptors = pages
+            .iter()
+            .enumerate()
+            .map(|(index, page)| {
+                let mut descriptor = descriptor_with_decode_bytes(page, |size| size * 2);
+                descriptor.file_key = u32::try_from(index).unwrap();
+                descriptor
+            })
+            .collect::<Vec<_>>();
+        let mut writer =
+            CodeGraphPageStoreWriterV1::create(&path, &generation, PROJECTOR, &descriptors)
+                .expect("create real attachment");
+        for (descriptor, page) in descriptors.iter().zip(&pages) {
+            writer.write_page(descriptor, page).expect("write page");
+        }
+        writer.finish().expect("finish real attachment");
+
+        let mut file = File::open(&path).unwrap();
+        let mut prefix = [0_u8; 16];
+        file.read_exact(&mut prefix).unwrap();
+        let header_size = u64::from_le_bytes(prefix[8..].try_into().unwrap());
+        assert!(header_size > CODE_GRAPH_HEADER_READ_BYTES as u64);
+        let mut reader = CountedFileReader {
+            file,
+            calls: 0,
+            bytes_read: 0,
+        };
+        let header = decode_attachment_header((&mut reader).take(header_size)).unwrap();
+        assert_eq!(header.generation, generation);
+        assert_eq!(header.pages, descriptors);
+        assert_eq!(reader.bytes_read, header_size);
+        assert_eq!(reader.file.stream_position().unwrap(), 16 + header_size);
+        let read_bound = header_size.div_ceil(CODE_GRAPH_HEADER_READ_BYTES as u64) + 1;
+        assert!(reader.calls > 1, "the header must span real file reads");
+        assert!(
+            reader.calls as u64 <= read_bound,
+            "header decoding made {} file reads for {header_size} bytes",
+            reader.calls
+        );
+
+        // A positive read control observes the next page, not buffered data
+        // lost past the header boundary when its reader is dropped.
+        let header_reads = reader.calls;
+        let mut first_page_byte = [0_u8; 1];
+        reader.read_exact(&mut first_page_byte).unwrap();
+        assert_eq!(first_page_byte, [b'{']);
+        assert_eq!(reader.calls, header_reads + 1);
+        reader.file.seek(SeekFrom::Start(16)).unwrap();
+        assert!(decode_attachment_header((&mut reader).take(header_size - 1)).is_err());
+        assert_eq!(reader.file.stream_position().unwrap(), 16 + header_size - 1);
+        drop(reader);
+
+        let mut store = FileCodeGraphPageStoreV1::open(&path, PROJECTOR)
+            .expect("open the production attachment")
+            .expect("current revision");
+        assert_eq!(store.pages(), descriptors.as_slice());
+        for (descriptor, page) in descriptors.iter().zip(&pages) {
+            let recovered = store.read_page(descriptor).expect("verify every page");
+            assert_eq!(
+                serde_json::to_vec(&recovered).unwrap(),
+                serde_json::to_vec(page).unwrap()
+            );
+        }
+    }
+
+    #[test]
+    fn attachment_page_reads_once_and_authenticates_before_decoding() {
+        let scratch = tempfile::tempdir().expect("scratch");
+        let path = scratch.path().join("one-page");
+        let page = fixture_page();
+        let descriptor = descriptor_with_decode_bytes(&page, |size| size * 2);
+        write_store(&path, &descriptor);
+
+        let mut store = FileCodeGraphPageStoreV1::open(&path, PROJECTOR)
+            .expect("open page store")
+            .expect("current page store revision");
+        let offset = store.offsets[0];
+        let mut counted = CountedFileReader {
+            file: File::open(&path).expect("read attachment"),
+            calls: 0,
+            bytes_read: 0,
+        };
+        let restored = read_verified_attachment_page(&mut counted, offset, &descriptor)
+            .expect("single authenticated read");
+        assert_eq!(
+            serde_json::to_vec(&restored).unwrap(),
+            serde_json::to_vec(&page).unwrap()
+        );
+        assert!(counted.calls > 0, "a real file must be read");
+        assert_eq!(
+            counted.bytes_read, descriptor.size_bytes,
+            "a page read must consume exactly one payload, not a hash pass and a second decode pass"
+        );
+        assert_eq!(
+            serde_json::to_vec(&store.read_page(&descriptor).unwrap()).unwrap(),
+            serde_json::to_vec(&restored).unwrap(),
+            "the real store must use the same authenticated reader"
+        );
+        drop(counted);
+        drop(store);
+
+        // Mutate the real attachment without changing its size. The digest
+        // must refuse before JSON decode and without another page read.
+        let mut writable = std::fs::OpenOptions::new()
+            .write(true)
+            .open(&path)
+            .expect("open disposable attachment for corruption");
+        writable.seek(SeekFrom::Start(offset)).unwrap();
+        writable.write_all(b"!").unwrap();
+        drop(writable);
+        let mut counted = CountedFileReader {
+            file: File::open(&path).expect("reopen changed attachment"),
+            calls: 0,
+            bytes_read: 0,
+        };
+        let error = read_verified_attachment_page(&mut counted, offset, &descriptor)
+            .expect_err("changed page bytes must not decode");
+        assert!(
+            error
+                .to_string()
+                .contains("page verify: digest does not match"),
+            "{error}"
+        );
+        assert_eq!(
+            counted.bytes_read, descriptor.size_bytes,
+            "corruption must not force an additional verification read"
+        );
+        let mut store = FileCodeGraphPageStoreV1::open(&path, PROJECTOR)
+            .expect("reopen changed page store")
+            .expect("header remains valid");
+        assert!(
+            store.read_page(&descriptor).is_err(),
+            "the normal attachment reader must also reject corrupt bytes"
         );
     }
 
