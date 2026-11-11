@@ -6,12 +6,16 @@
 //! bootstrap frontiers are complete. A candidate and its indexed references are
 //! checked under one guarded writer, so another owner cannot race collection.
 
+use std::time::Instant;
+
 use serde::{Deserialize, Serialize};
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_runtime_core::db::Database;
-use tracedecay_runtime_core::db::engine::{Executor, QueryExecutor, params};
+use tracedecay_runtime_core::db::engine::{Executor, QueryExecutor, WriteStatement, params};
 use tracedecay_store::collect_body_refs;
 
+#[cfg(test)]
+mod bootstrap_write_tests;
 pub(crate) mod schema;
 #[cfg(test)]
 mod tests;
@@ -25,6 +29,15 @@ pub const MAX_CANONICAL_BODY_GC_ROWS: usize = 48;
 pub struct CanonicalBodyGcReport {
     pub roots_scanned: u64,
     pub bodies_scanned: u64,
+    /// Wall-clock duration from writer admission through commit, not CPU time.
+    pub elapsed_ms: Option<u128>,
+    /// Candidates discharged in the committed page, even if their body stays live.
+    pub candidates_discharged: u64,
+    /// Phase-qualified SQL bootstrap cursor before the committed page.
+    /// The value is absent during candidate collection and idle ticks.
+    pub bootstrap_frontier_before: Option<String>,
+    /// The corresponding persisted cursor, verified in the same writer.
+    pub bootstrap_frontier_after: Option<String>,
     pub bodies_deleted: u64,
     /// Stored BLOB bytes deleted, including the effect of their existing
     /// compression. This is not database-file or filesystem space reclaimed.
@@ -34,6 +47,16 @@ pub struct CanonicalBodyGcReport {
     pub has_more: bool,
 }
 
+impl CanonicalBodyGcReport {
+    /// A bootstrap page can commit its remaining frontier after every owner in it was deleted.
+    pub fn has_committed_work(&self) -> bool {
+        self.roots_scanned != 0
+            || self.bodies_scanned != 0
+            || self.bootstrap_frontier_after.is_some()
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 struct Progress {
     raw_through: i64,
     raw_until: i64,
@@ -118,15 +141,37 @@ async fn save_progress(conn: &(impl Executor + ?Sized), progress: &Progress) -> 
     if changed != 1 {
         return Err(integrity_error("canonical body ownership frontier changed"));
     }
+    // The UPDATE can report one affected row even if a database trigger
+    // rewrites the checkpoint. Verify the durable value before committing the
+    // references or candidate seed that depended on this bootstrap page.
+    if read_progress(conn).await? != *progress {
+        return Err(integrity_error(
+            "canonical body ownership bootstrap frontier was not persisted",
+        ));
+    }
     Ok(())
 }
 
 #[tracing::instrument(name = "global_db.canonical_bodies.gc", level = "trace", skip_all)]
 pub(crate) async fn run(database: &Database, max_rows: usize) -> Result<CanonicalBodyGcReport> {
+    let started = Instant::now();
+    // During another retention continuation an already-drained store must not
+    // repeatedly acquire the SQLite writer merely to observe an empty queue.
+    // Do not bypass the schema authority: an idle report is safe only after
+    // verifying both the completed bootstrap and its installed objects.
+    let reader = database.read_connection();
+    if read_progress(&reader).await?.complete() && !has_candidates(&reader).await? {
+        schema::validate(&reader).await?;
+        return Ok(CanonicalBodyGcReport {
+            bootstrap_complete: true,
+            ..CanonicalBodyGcReport::default()
+        });
+    }
     let transaction = database.begin_write_transaction(OPERATION).await?;
     match step(&transaction, max_rows).await {
-        Ok(report) => {
+        Ok(mut report) => {
             transaction.commit().await?;
+            report.elapsed_ms = Some(started.elapsed().as_millis());
             Ok(report)
         }
         Err(error) => match transaction.rollback().await {
@@ -144,14 +189,34 @@ async fn step(conn: &(impl Executor + ?Sized), max_rows: usize) -> Result<Canoni
     let mut progress = read_progress(conn).await?;
     let mut report = CanonicalBodyGcReport::default();
     if !progress.complete() {
-        if progress.raw_through < progress.raw_until {
+        let before = progress.clone();
+        let (frontier_before, frontier_after) = if progress.raw_through < progress.raw_until {
             report.roots_scanned = bootstrap_raw(conn, &mut progress, limit).await?;
+            (
+                format!("raw:{}", before.raw_through),
+                format!("raw:{}", progress.raw_through),
+            )
         } else if progress.observations_through < progress.observations_until {
             report.roots_scanned = bootstrap_observations(conn, &mut progress, limit).await?;
+            (
+                format!("observations:{}", before.observations_through),
+                format!("observations:{}", progress.observations_through),
+            )
         } else {
             report.bodies_scanned = bootstrap_bodies(conn, &mut progress, limit).await?;
+            (
+                format!("bodies:{}", before.bodies_after),
+                format!("bodies:{}", progress.bodies_after),
+            )
+        };
+        if progress == before {
+            return Err(integrity_error(
+                "canonical body ownership bootstrap page did not advance",
+            ));
         }
         save_progress(conn, &progress).await?;
+        report.bootstrap_frontier_before = Some(frontier_before);
+        report.bootstrap_frontier_after = Some(frontier_after);
     } else {
         collect_candidates(conn, limit, &mut report).await?;
     }
@@ -167,33 +232,54 @@ async fn bootstrap_raw(
 ) -> Result<u64> {
     let mut rows = conn
         .query(
-            "SELECT store_id, CASE WHEN storage_kind = 'inline' AND content IS NULL
-                    THEN content_hash END
-             FROM lcm_raw_messages WHERE store_id > ?1 AND store_id <= ?2
-             ORDER BY store_id LIMIT ?3",
+            "SELECT store_id FROM lcm_raw_messages
+             WHERE store_id > ?1 AND store_id <= ?2 ORDER BY store_id LIMIT ?3",
             params![progress.raw_through, progress.raw_until, limit],
         )
         .await
         .map_err(db_error)?;
     let mut page = Vec::new();
     while let Some(row) = rows.next().await.map_err(db_error)? {
-        page.push((
-            row.get::<i64>(0).map_err(db_error)?,
-            row.get::<Option<String>>(1).map_err(db_error)?,
-        ));
+        page.push(row.get::<i64>(0).map_err(db_error)?);
     }
     drop(rows);
-    for (owner, hash) in &page {
-        if let Some(hash) = hash {
-            conn.execute(
-                "INSERT OR IGNORE INTO canonical_body_gc_refs(owner_kind, owner_id, content_hash)
-                 VALUES ('raw', ?1, ?2)",
-                params![*owner, hash.as_str()],
+    if let Some(&last) = page.last() {
+        // Both reads share the writer transaction. The last selected identity
+        // bounds this indexed insert to the same page, including sparse IDs,
+        // without one worker submission for every referenced owner.
+        conn.execute(
+            "INSERT OR IGNORE INTO canonical_body_gc_refs(owner_kind, owner_id, content_hash)
+             SELECT 'raw', store_id, content_hash FROM lcm_raw_messages
+             WHERE store_id > ?1 AND store_id <= ?2
+               AND storage_kind = 'inline' AND content IS NULL",
+            params![progress.raw_through, last],
+        )
+        .await
+        .map_err(db_error)?;
+        // A suppressed INSERT must not advance bootstrap past an owner whose
+        // canonical body would subsequently appear unreferenced.
+        let mut missing = conn
+            .query(
+                "SELECT 1 FROM lcm_raw_messages raw
+                 WHERE raw.store_id > ?1 AND raw.store_id <= ?2
+                   AND raw.storage_kind = 'inline' AND raw.content IS NULL
+                   AND NOT EXISTS (
+                       SELECT 1 FROM canonical_body_gc_refs r
+                       WHERE r.owner_kind = 'raw' AND r.owner_id = raw.store_id
+                         AND r.content_hash = raw.content_hash
+                   ) LIMIT 1",
+                params![progress.raw_through, last],
             )
             .await
             .map_err(db_error)?;
+        let incomplete = missing.next().await.map_err(db_error)?.is_some();
+        drop(missing);
+        if incomplete {
+            return Err(integrity_error(
+                "canonical raw bootstrap reference was not indexed",
+            ));
         }
-        progress.raw_through = *owner;
+        progress.raw_through = last;
     }
     if page.len() < limit as usize {
         progress.raw_through = progress.raw_until;
@@ -226,17 +312,60 @@ async fn bootstrap_observations(
         ));
     }
     drop(rows);
+    // Parsing preserves the canonical Rust reference contract, including
+    // value deduplication. Submit validated writes in bounded groups so an
+    // observation page cannot schedule one storage-worker hop per body hash.
+    // The caller's writer transaction rolls back every group on any failure.
+    const MAX_PENDING_OBSERVATION_REFS: usize = 128;
+    let mut pending = Vec::new();
+    let mut expected = Vec::new();
     for (owner, json) in &page {
         for hash in collect_body_refs(json).map_err(db_error)? {
-            conn.execute(
-                "INSERT OR IGNORE INTO canonical_body_gc_refs(owner_kind, owner_id, content_hash)
-                 VALUES ('observation', ?1, ?2)",
-                params![*owner, hash],
+            expected.push((*owner, hash.clone()));
+            pending.push(
+                WriteStatement::new(
+                    "INSERT OR IGNORE INTO canonical_body_gc_refs(owner_kind, owner_id, content_hash)
+                     VALUES ('observation', ?1, ?2)",
+                    params![*owner, hash],
+                )
+                .map_err(db_error)?,
+            );
+            if pending.len() == MAX_PENDING_OBSERVATION_REFS {
+                conn.execute_statements(std::mem::take(&mut pending))
+                    .await
+                    .map_err(db_error)?;
+            }
+        }
+        progress.observations_through = *owner;
+    }
+    if !pending.is_empty() {
+        conn.execute_statements(pending).await.map_err(db_error)?;
+    }
+    if !expected.is_empty() {
+        // Verify the Rust-validated reference set, not a second parse of raw
+        // observation JSON. INSERT OR IGNORE and SQLite trigger RAISE(IGNORE)
+        // can both report success without creating a missing reference.
+        let expected_json = serde_json::to_string(&expected).map_err(db_error)?;
+        let mut missing = conn
+            .query(
+                "SELECT 1 FROM json_each(?1) pair
+                 WHERE NOT EXISTS (
+                     SELECT 1 FROM canonical_body_gc_refs r
+                     WHERE r.owner_kind = 'observation'
+                       AND r.owner_id = json_extract(pair.value, '$[0]')
+                       AND r.content_hash = json_extract(pair.value, '$[1]')
+                 ) LIMIT 1",
+                params![expected_json],
             )
             .await
             .map_err(db_error)?;
+        let incomplete = missing.next().await.map_err(db_error)?.is_some();
+        drop(missing);
+        if incomplete {
+            return Err(integrity_error(
+                "canonical observation bootstrap reference was not indexed",
+            ));
         }
-        progress.observations_through = *owner;
     }
     if page.len() < limit as usize {
         progress.observations_through = progress.observations_until;
@@ -266,14 +395,39 @@ async fn bootstrap_bodies(
         page.push(row.get::<String>(0).map_err(db_error)?);
     }
     drop(rows);
-    for hash in &page {
+    if let Some(last) = page.last() {
+        // Seed the selected key range in one statement, not one asynchronous
+        // writer submission per body. No body payload is materialized here.
         conn.execute(
-            "INSERT OR IGNORE INTO canonical_body_gc_candidates(content_hash) VALUES (?1)",
-            params![hash.as_str()],
+            "INSERT OR IGNORE INTO canonical_body_gc_candidates(content_hash)
+             SELECT content_hash FROM session_canonical_bodies
+             WHERE content_hash > ?1 AND content_hash <= ?2",
+            params![progress.bodies_after.as_str(), last.as_str()],
         )
         .await
         .map_err(db_error)?;
-        progress.bodies_after.clone_from(hash);
+        // A vetoed candidate insert otherwise leaves an orphaned body behind
+        // the permanently committed bootstrap cursor, with no future seed.
+        let mut missing = conn
+            .query(
+                "SELECT 1 FROM session_canonical_bodies b
+                 WHERE b.content_hash > ?1 AND b.content_hash <= ?2
+                   AND NOT EXISTS (
+                       SELECT 1 FROM canonical_body_gc_candidates c
+                       WHERE c.content_hash = b.content_hash
+                   ) LIMIT 1",
+                params![progress.bodies_after.as_str(), last.as_str()],
+            )
+            .await
+            .map_err(db_error)?;
+        let incomplete = missing.next().await.map_err(db_error)?.is_some();
+        drop(missing);
+        if incomplete {
+            return Err(integrity_error(
+                "canonical body bootstrap candidate was not indexed",
+            ));
+        }
+        progress.bodies_after.clone_from(last);
     }
     if page.len() < limit as usize {
         progress.bodies_after.clone_from(&progress.bodies_until);
@@ -321,15 +475,65 @@ async fn collect_candidates(
         report.stored_bytes_deleted = report.stored_bytes_deleted.saturating_add(bytes);
     }
     drop(deleted);
+    // An ignored or otherwise suppressed body DELETE must not silently
+    // discharge an unreferenced candidate. Once that candidate disappears,
+    // no owner-triggered re-enqueue is guaranteed, and the body can persist
+    // indefinitely without another collection attempt.
+    let mut uncollected = conn
+        .query(
+            "SELECT 1 FROM session_canonical_bodies b
+             WHERE b.content_hash IN (SELECT value FROM json_each(?1))
+               AND NOT EXISTS (SELECT 1 FROM canonical_body_gc_refs r
+                               WHERE r.content_hash = b.content_hash)
+             LIMIT 1",
+            params![hashes.as_str()],
+        )
+        .await
+        .map_err(db_error)?;
+    if uncollected.next().await.map_err(db_error)?.is_some() {
+        return Err(integrity_error(
+            "canonical body collection left an unreferenced body behind",
+        ));
+    }
+    drop(uncollected);
     // Referenced candidates are discharged too. The final owner removal
     // records them again; idle ticks never revisit every retained body.
-    conn.execute(
-        "DELETE FROM canonical_body_gc_candidates
-         WHERE content_hash IN (SELECT value FROM json_each(?1))",
-        params![hashes],
-    )
-    .await
-    .map_err(db_error)?;
+    // Deleting an unreferenced body cascades to its candidate row. The
+    // remaining explicit removals discharge referenced bodies that stay live.
+    let explicitly_discharged = conn
+        .execute(
+            "DELETE FROM canonical_body_gc_candidates
+             WHERE content_hash IN (SELECT value FROM json_each(?1))",
+            params![hashes.as_str()],
+        )
+        .await
+        .map_err(db_error)?;
+    // A DELETE row count is not a durable discharge receipt: an AFTER DELETE
+    // trigger may have re-enqueued the very same candidates. Refuse the page
+    // under this writer instead of recommitting an identical 48-row batch.
+    let mut remaining = conn
+        .query(
+            "SELECT 1 FROM canonical_body_gc_candidates
+             WHERE content_hash IN (SELECT value FROM json_each(?1)) LIMIT 1",
+            params![hashes.as_str()],
+        )
+        .await
+        .map_err(db_error)?;
+    if remaining.next().await.map_err(db_error)?.is_some() {
+        return Err(integrity_error(
+            "canonical body candidate discharge was not persisted",
+        ));
+    }
+    drop(remaining);
+    let discharged = explicitly_discharged
+        .checked_add(report.bodies_deleted)
+        .ok_or_else(|| integrity_error("canonical body candidate discharge overflow"))?;
+    if discharged != report.bodies_scanned {
+        return Err(integrity_error(
+            "canonical body candidate page was not fully discharged",
+        ));
+    }
+    report.candidates_discharged = discharged;
     Ok(())
 }
 

@@ -5,6 +5,9 @@
 //! representations keep their own content. A durable rowid frontier and a byte
 //! budget keep this repair off the foreground ingest path.
 
+use std::collections::BTreeSet;
+use std::time::Instant;
+
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tracedecay_runtime_core::db::Database;
@@ -12,6 +15,8 @@ use tracedecay_runtime_core::db::engine::{Executor, QueryExecutor, params};
 
 use crate::{LcmError, LcmRawMessage, gc, payload, raw, schema, security, summary_convergence};
 
+#[cfg(all(test, target_os = "linux"))]
+mod read_cost;
 #[cfg(test)]
 mod tests;
 
@@ -19,19 +24,29 @@ const FRONTIER_KEY: &str = "replay_metadata_compaction_store_id_v1";
 const OPERATION: &str = "compact duplicate LCM replay metadata";
 pub const MAX_REPLAY_METADATA_COMPACTION_ROWS: usize = 48;
 // Bound both receipt verification and metadata sanitization while a writer is
-// held. The raw metadata envelope itself is capped at 1 MiB by ingestion.
+// held. Eligibility parsing has its own equal byte budget: ineligible rows
+// still cost JSON work. Ingestion caps each metadata envelope at 1 MiB.
 const MAX_BATCH_BYTES: u64 = 4 * 1024 * 1024;
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReplayMetadataCompactionReport {
     pub rows_scanned: u64,
+    /// Wall-clock duration from initial frontier read through commit, not CPU time.
+    pub elapsed_ms: Option<u128>,
+    /// Transactional store-id frontier consumed by this page, absent on idle reads.
+    pub frontier_before: Option<i64>,
+    pub frontier_after: Option<i64>,
     pub rows_compacted: u64,
-    /// Eligible rows retained because their representation, sanitizer result,
-    /// or byte bound could not prove this narrow lossless transformation.
+    /// Rows retained because their representation, sanitizer result, or byte
+    /// bound could not prove this narrow lossless transformation, including
+    /// rows rejected by the eligibility check before body verification.
     pub rows_skipped: u64,
     /// Subset of skipped rows whose metadata plus canonical/stored body
     /// representations exceed this pass's 4 MiB read and verification budget.
     pub rows_skipped_oversized: u64,
+    /// Metadata bytes admitted to SQL eligibility checks, including ineligible
+    /// rows. Work deferred by the body verification budget is not parsed.
+    pub metadata_bytes_examined: u64,
     /// UTF-8 metadata bytes removed. This does not measure file shrinkage.
     pub metadata_bytes_removed: u64,
     pub has_more: bool,
@@ -70,6 +85,7 @@ pub async fn compact_replay_metadata(
     database: &Database,
     max_rows: usize,
 ) -> Result<ReplayMetadataCompactionReport, LcmError> {
+    let started = Instant::now();
     let read = database.read_connection();
     if !has_work(&read, frontier(&read).await?).await? {
         return Ok(ReplayMetadataCompactionReport::default());
@@ -79,8 +95,9 @@ pub async fn compact_replay_metadata(
         .await
         .map_err(db_error)?;
     match step(&transaction, max_rows).await {
-        Ok(report) => {
+        Ok(mut report) => {
             transaction.commit().await.map_err(db_error)?;
+            report.elapsed_ms = Some(started.elapsed().as_millis());
             Ok(report)
         }
         Err(error) => match transaction.rollback().await {
@@ -93,39 +110,48 @@ pub async fn compact_replay_metadata(
 struct Candidate {
     store_id: i64,
     eligible: bool,
-    read_bytes: Option<u64>,
+    oversized: bool,
+    body_size_known: bool,
 }
 
-/// Read only sizes and identities until each candidate earns the byte budget.
+/// Admit a prefix bounded by both metadata parsing and body-read estimates
+/// before testing eligibility. Deferred rows must not be JSON-parsed again.
 async fn candidates(
     conn: &(impl QueryExecutor + ?Sized),
     after: i64,
     limit: usize,
-) -> Result<Vec<Candidate>, LcmError> {
+) -> Result<(Vec<Candidate>, u64), LcmError> {
+    // octet_length reads record metadata, unlike length(CAST(text AS BLOB)).
+    // Even a small scalar after a large body can load its overflow chain:
+    // defer storage_kind to eligibility and avoid unnecessary canonical joins.
     let mut rows = conn
         .query(
-            "SELECT r.store_id,
-                    CASE WHEN r.storage_kind = 'inline' AND json_valid(r.metadata_json)
-                         THEN json_type(r.metadata_json, '$.lcm_active_replay') = 'true'
-                          AND json_type(r.metadata_json, '$.active_replay.content') = 'text'
-                         ELSE 0 END,
-                    LENGTH(CAST(r.metadata_json AS BLOB)),
-                    COALESCE(LENGTH(CAST(r.content AS BLOB)), b.uncompressed_bytes),
+            "SELECT r.store_id, octet_length(r.metadata_json),
+                    COALESCE(octet_length(r.content),
+                        CASE WHEN LENGTH(b.body) <= ?3 THEN b.uncompressed_bytes END),
                     COALESCE(LENGTH(b.body), 0)
              FROM lcm_raw_messages r
-             LEFT JOIN session_canonical_bodies b ON b.content_hash = r.content_hash
+             LEFT JOIN session_canonical_bodies b ON b.content_hash = CASE
+                 WHEN r.content IS NULL AND octet_length(r.metadata_json) <= ?3
+                 THEN r.content_hash END
              WHERE r.store_id > ?1 ORDER BY r.store_id LIMIT ?2",
             params![
                 after,
-                limit.clamp(1, MAX_REPLAY_METADATA_COMPACTION_ROWS) as i64
+                limit.clamp(1, MAX_REPLAY_METADATA_COMPACTION_ROWS) as i64,
+                MAX_BATCH_BYTES as i64
             ],
         )
         .await?;
     let mut result = Vec::new();
+    let mut eligibility_ids = Vec::new();
+    let mut remaining = MAX_BATCH_BYTES;
+    let mut read_remaining = MAX_BATCH_BYTES;
     while let Some(row) = rows.next().await? {
-        let metadata: Option<i64> = row.get(2)?;
-        let body: Option<i64> = row.get(3)?;
-        let stored: i64 = row.get(4)?;
+        let store_id: i64 = row.get(0)?;
+        let metadata: Option<i64> = row.get(1)?;
+        let body: Option<i64> = row.get(2)?;
+        let stored: i64 = row.get(3)?;
+        let metadata_bytes = u64::try_from(metadata.unwrap_or(0)).map_err(db_error)?;
         let read_bytes = metadata
             .zip(body)
             .and_then(|(metadata, body)| {
@@ -136,62 +162,116 @@ async fn candidates(
                 ))
             })
             .and_then(|(metadata, body, stored)| metadata.checked_add(body)?.checked_add(stored));
+        let oversized = metadata_bytes > MAX_BATCH_BYTES
+            || stored > MAX_BATCH_BYTES as i64
+            || read_bytes.is_some_and(|bytes| bytes > MAX_BATCH_BYTES);
+        if !oversized {
+            if metadata_bytes > remaining {
+                break;
+            }
+            // Eligibility is not yet known. Charge each potential body read
+            // before parsing so deferred rows are not revisited for JSON work.
+            if let Some(bytes) = read_bytes {
+                if bytes > read_remaining {
+                    break;
+                }
+                read_remaining -= bytes;
+            }
+            remaining -= metadata_bytes;
+            if metadata.is_some() {
+                eligibility_ids.push(store_id);
+            }
+        }
         result.push(Candidate {
-            store_id: row.get(0)?,
-            eligible: row.get::<Option<i64>>(1)?.unwrap_or(0) != 0,
-            read_bytes,
+            store_id,
+            eligible: false,
+            oversized,
+            body_size_known: read_bytes.is_some(),
         });
     }
-    Ok(result)
+    drop(rows);
+    // Resolve the admitted prefix in one query, not one query per raw row.
+    // Both reads share the writer transaction, so sizes and identities cannot
+    // change between admission and parsing. Oversized documents stay untouched.
+    if !eligibility_ids.is_empty() {
+        let ids = serde_json::to_string(&eligibility_ids).map_err(db_error)?;
+        let mut rows = conn
+            .query(
+                "SELECT store_id FROM lcm_raw_messages
+                 WHERE store_id IN (SELECT value FROM json_each(?1))
+                   AND CASE WHEN storage_kind = 'inline' AND json_valid(metadata_json)
+                            THEN json_type(metadata_json, '$.lcm_active_replay') = 'true'
+                             AND json_type(metadata_json, '$.active_replay.content') = 'text'
+                            ELSE 0 END",
+                params![ids],
+            )
+            .await?;
+        let mut eligible = BTreeSet::new();
+        while let Some(row) = rows.next().await? {
+            eligible.insert(row.get::<i64>(0)?);
+        }
+        for candidate in &mut result {
+            candidate.eligible = eligible.contains(&candidate.store_id);
+        }
+    }
+    Ok((result, MAX_BATCH_BYTES - remaining))
 }
 
+#[tracing::instrument(
+    name = "lcm.retention.replay_metadata.page",
+    level = "trace",
+    skip_all,
+    fields(metadata_bytes_examined = tracing::field::Empty),
+    err
+)]
 async fn step(
     conn: &(impl Executor + ?Sized),
     max_rows: usize,
 ) -> Result<ReplayMetadataCompactionReport, LcmError> {
     let mut after = frontier(conn).await?;
-    let candidates = candidates(conn, after, max_rows).await?;
-    let mut report = ReplayMetadataCompactionReport::default();
-    let mut remaining = MAX_BATCH_BYTES;
+    let before = after;
+    let (candidates, metadata_bytes_examined) = candidates(conn, after, max_rows).await?;
+    tracing::Span::current().record("metadata_bytes_examined", metadata_bytes_examined);
+    let mut report = ReplayMetadataCompactionReport {
+        metadata_bytes_examined,
+        ..ReplayMetadataCompactionReport::default()
+    };
     let mut guard_suspended = false;
     for candidate in candidates {
-        if candidate.eligible {
-            let bytes = candidate.read_bytes.ok_or_else(|| {
-                db_error(format!(
+        if candidate.oversized {
+            report.rows_skipped += 1;
+            report.rows_skipped_oversized += 1;
+        } else if candidate.eligible {
+            if !candidate.body_size_known {
+                return Err(db_error(format!(
                     "raw row {} has no bounded canonical body",
                     candidate.store_id
-                ))
-            })?;
-            if bytes > MAX_BATCH_BYTES {
-                report.rows_skipped += 1;
-                report.rows_skipped_oversized += 1;
-            } else if bytes > remaining {
-                break;
-            } else {
-                remaining -= bytes;
-                let message = raw::load_raw_message_by_store_id(conn, candidate.store_id).await?;
-                if let Some(metadata) = compacted_metadata(&message)? {
-                    if !guard_suspended {
-                        summary_convergence::suspend_raw_update_guard(conn).await?;
-                        guard_suspended = true;
-                    }
-                    let changed =
-                        apply_metadata(conn, candidate.store_id, &message, &metadata).await?;
-                    if changed {
-                        report.rows_compacted += 1;
-                        report.metadata_bytes_removed += message
-                            .metadata_json
-                            .as_deref()
-                            .map_or(0, str::len)
-                            .saturating_sub(metadata.len())
-                            as u64;
-                    } else {
-                        report.rows_skipped += 1;
-                    }
+                )));
+            }
+            let message = raw::load_raw_message_by_store_id(conn, candidate.store_id).await?;
+            if let Some(metadata) = compacted_metadata(&message)? {
+                if !guard_suspended {
+                    summary_convergence::suspend_raw_update_guard(conn).await?;
+                    guard_suspended = true;
+                }
+                let changed = apply_metadata(conn, candidate.store_id, &message, &metadata).await?;
+                if changed {
+                    report.rows_compacted += 1;
+                    report.metadata_bytes_removed += message
+                        .metadata_json
+                        .as_deref()
+                        .map_or(0, str::len)
+                        .saturating_sub(metadata.len())
+                        as u64;
                 } else {
                     report.rows_skipped += 1;
                 }
+            } else {
+                report.rows_skipped += 1;
             }
+        } else {
+            // Eligibility refusal retains the original representation too.
+            report.rows_skipped += 1;
         }
         report.rows_scanned += 1;
         after = candidate.store_id;
@@ -199,7 +279,25 @@ async fn step(
     if guard_suspended {
         summary_convergence::restore_raw_update_guard(conn).await?;
     }
-    schema::set_gc_meta(conn, FRONTIER_KEY, &after.to_string()).await?;
+    if report.rows_scanned > 0 {
+        if after <= before {
+            return Err(db_error(
+                "replay metadata page did not advance its frontier",
+            ));
+        }
+        schema::set_gc_meta(conn, FRONTIER_KEY, &after.to_string()).await?;
+        // An advancing local key is not proof that its checkpoint was stored.
+        // Verify inside the same writer so a refused or rewritten checkpoint
+        // rolls back this page instead of committing a false progress report.
+        let persisted = frontier(conn).await?;
+        if persisted != after {
+            return Err(db_error(format!(
+                "replay metadata frontier was not persisted: expected {after}, found {persisted}"
+            )));
+        }
+        report.frontier_before = Some(before);
+        report.frontier_after = Some(persisted);
+    }
     report.has_more = has_work(conn, after).await?;
     Ok(report)
 }

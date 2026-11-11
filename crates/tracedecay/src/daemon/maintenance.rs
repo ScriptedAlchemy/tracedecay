@@ -267,8 +267,10 @@ async fn run_registered_store_retention(
         Ok(_) => {}
     }
     log_payload_gc_outcome(&report.payload_gc);
-    let canonical_body_outcome = record_canonical_body_gc_outcome(&report.canonical_body_gc);
-    let replay_metadata_outcome = record_replay_metadata_outcome(&report.replay_metadata);
+    let canonical_body_outcome =
+        record_canonical_body_gc_outcome(database.db_path(), &report.canonical_body_gc);
+    let replay_metadata_outcome =
+        record_replay_metadata_outcome(database.db_path(), &report.replay_metadata);
     let outcome = if report.succeeded() {
         session_storage_outcome
             .combine(canonical_body_outcome)
@@ -368,11 +370,18 @@ async fn run_registered_storage_continuation(
         )
         .await;
     record_session_lcm_outcome(&session_lcm)
-        .combine(record_canonical_body_gc_outcome(&canonical_body_gc))
-        .combine(record_replay_metadata_outcome(&replay_metadata))
+        .combine(record_canonical_body_gc_outcome(
+            database.db_path(),
+            &canonical_body_gc,
+        ))
+        .combine(record_replay_metadata_outcome(
+            database.db_path(),
+            &replay_metadata,
+        ))
 }
 
 fn record_canonical_body_gc_outcome(
+    store: &Path,
     outcome: &Result<
         tracedecay_global_db::observation::CanonicalBodyGcReport,
         tracedecay_maintenance::retention::registered_store::RegisteredStoreRetentionErrorV1,
@@ -380,12 +389,39 @@ fn record_canonical_body_gc_outcome(
 ) -> MaintenanceTickOutcome {
     match outcome {
         Ok(report) => {
-            if report.roots_scanned > 0 || report.bodies_scanned > 0 {
+            if report.has_committed_work() {
                 log_daemon_event(
                     "retention_canonical_bodies",
                     &[
+                        ("store", store.display().to_string()),
                         ("roots_scanned", report.roots_scanned.to_string()),
                         ("bodies_scanned", report.bodies_scanned.to_string()),
+                        (
+                            "bootstrap_frontier_before",
+                            report
+                                .bootstrap_frontier_before
+                                .as_deref()
+                                .unwrap_or("not_scanned")
+                                .to_owned(),
+                        ),
+                        (
+                            "bootstrap_frontier_after",
+                            report
+                                .bootstrap_frontier_after
+                                .as_deref()
+                                .unwrap_or("not_scanned")
+                                .to_owned(),
+                        ),
+                        (
+                            "elapsed_ms",
+                            report
+                                .elapsed_ms
+                                .map_or_else(|| "unmeasured".to_owned(), |value| value.to_string()),
+                        ),
+                        (
+                            "candidates_discharged",
+                            report.candidates_discharged.to_string(),
+                        ),
                         ("bodies_deleted", report.bodies_deleted.to_string()),
                         (
                             "stored_bytes_deleted",
@@ -407,6 +443,7 @@ fn record_canonical_body_gc_outcome(
                 "retention_degraded",
                 &[
                     ("pass", "canonical_body_gc".to_owned()),
+                    ("store", store.display().to_string()),
                     ("failure", error.diagnostic().to_owned()),
                 ],
             );
@@ -416,6 +453,7 @@ fn record_canonical_body_gc_outcome(
 }
 
 fn record_replay_metadata_outcome(
+    store: &Path,
     outcome: &Result<
         tracedecay_lcm::retention::ReplayMetadataCompactionReport,
         tracedecay_maintenance::retention::registered_store::RegisteredStoreRetentionErrorV1,
@@ -427,7 +465,32 @@ fn record_replay_metadata_outcome(
                 log_daemon_event(
                     "retention_replay_metadata",
                     &[
+                        ("store", store.display().to_string()),
                         ("rows_scanned", report.rows_scanned.to_string()),
+                        (
+                            "elapsed_ms",
+                            report
+                                .elapsed_ms
+                                .map_or_else(|| "unmeasured".to_owned(), |value| value.to_string()),
+                        ),
+                        (
+                            "metadata_bytes_examined",
+                            report.metadata_bytes_examined.to_string(),
+                        ),
+                        (
+                            "frontier_before",
+                            report.frontier_before.map_or_else(
+                                || "not_scanned".to_owned(),
+                                |value| value.to_string(),
+                            ),
+                        ),
+                        (
+                            "frontier_after",
+                            report.frontier_after.map_or_else(
+                                || "not_scanned".to_owned(),
+                                |value| value.to_string(),
+                            ),
+                        ),
                         ("rows_compacted", report.rows_compacted.to_string()),
                         ("rows_skipped", report.rows_skipped.to_string()),
                         (
@@ -453,6 +516,7 @@ fn record_replay_metadata_outcome(
                 "retention_degraded",
                 &[
                     ("pass", "replay_metadata_compaction".to_owned()),
+                    ("store", store.display().to_string()),
                     ("failure", error.diagnostic().to_owned()),
                 ],
             );
@@ -2018,5 +2082,83 @@ mod tests {
         })
         .expect("native runtime");
         assert_eq!(crate::test_support::native_runtime_hazards(), hazards);
+    }
+
+    /// Two mounted databases may commit identical 48-row pages in one tick.
+    /// Operator logs must not conflate their independent SQL frontiers.
+    #[test]
+    fn retention_progress_logs_distinguish_mounted_stores() {
+        const CHILD: &str = "TRACEDECAY_RETENTION_STORE_LOG_CHILD";
+        const TEST: &str =
+            "daemon::maintenance::tests::retention_progress_logs_distinguish_mounted_stores";
+        let stores = ["/project-a/sessions.db", "/project-b/sessions.db"];
+
+        if std::env::var_os(CHILD).is_some() {
+            for store in stores {
+                let canonical = tracedecay_global_db::observation::CanonicalBodyGcReport {
+                    roots_scanned: 48,
+                    bootstrap_frontier_before: Some("raw:0".to_owned()),
+                    bootstrap_frontier_after: Some("raw:48".to_owned()),
+                    has_more: true,
+                    ..Default::default()
+                };
+                let _ = super::record_canonical_body_gc_outcome(Path::new(store), &Ok(canonical));
+                let replay = tracedecay_lcm::retention::ReplayMetadataCompactionReport {
+                    rows_scanned: 48,
+                    rows_skipped: 48,
+                    frontier_before: Some(0),
+                    frontier_after: Some(48),
+                    has_more: true,
+                    ..Default::default()
+                };
+                let _ = super::record_replay_metadata_outcome(Path::new(store), &Ok(replay));
+            }
+            return;
+        }
+
+        // Capture the actual operator stderr lines in a child process. The
+        // normal daemon logger deliberately bypasses the test output capture.
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", TEST, "--nocapture", "--test-threads=1"])
+            .env(CHILD, "1")
+            .output()
+            .expect("spawn isolated operator log test");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            output.status.success() && stdout.contains("1 passed; 0 failed"),
+            "isolated test did not execute:\n{stdout}\n{stderr}"
+        );
+
+        let lines = stderr
+            .lines()
+            .filter(|line| {
+                line.contains("event=retention_canonical_bodies ")
+                    || line.contains("event=retention_replay_metadata ")
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(lines.len(), 4, "expected two events per store: {stderr}");
+        for store in stores {
+            for (event, frontier) in [
+                (
+                    "retention_canonical_bodies",
+                    "bootstrap_frontier_after=raw:48",
+                ),
+                ("retention_replay_metadata", "frontier_after=48"),
+            ] {
+                let count = lines
+                    .iter()
+                    .filter(|line| {
+                        line.contains(&format!("event={event} "))
+                            && line.contains(&format!("store={store} "))
+                            && line.contains(frontier)
+                    })
+                    .count();
+                assert_eq!(
+                    count, 1,
+                    "missing distinct {event} page for {store}: {stderr}"
+                );
+            }
+        }
     }
 }
