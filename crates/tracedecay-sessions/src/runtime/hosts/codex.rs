@@ -2350,9 +2350,15 @@ fn retained_scan_step(
                         // iterator may omit new entries. Never publish a
                         // complete corpus frontier from that mixed snapshot.
                         let closing_stat = directory_stat_witness(&directory.path)?;
-                        if closing_stat.as_ref().map(|stat| stat.stat)
-                            != Some(directory.opening_stat)
-                        {
+                        // A coarse-clock directory can change without its
+                        // native stat advancing. Its incremental name witness
+                        // describes only what this iterator saw, not entries
+                        // created between slices. Do not certify completion
+                        // until the closing change stamp is settled and still
+                        // names the opening directory identity.
+                        if !closing_stat.is_some_and(|stat| {
+                            stat.settled && stat.stat == directory.opening_stat
+                        }) {
                             scan.complete = false;
                         }
                         // Chunks can retire their directory identity while

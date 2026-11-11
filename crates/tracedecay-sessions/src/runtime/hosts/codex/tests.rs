@@ -2918,6 +2918,64 @@ mod recent_first_discovery_tests {
     }
 
     #[test]
+    fn unsettled_directory_clock_alias_cannot_publish_complete_coverage() {
+        let temp = TempDir::new().unwrap();
+        let archive = temp.path().join(".codex/archived_sessions");
+        std::fs::create_dir_all(&archive).unwrap();
+        for index in 0..64 {
+            std::fs::write(archive.join(format!("rollout-{index:03}.zst")), b"ignored").unwrap();
+        }
+        let source = CodexSource::with_home(temp.path());
+        let bounds = TranscriptDiscoveryBounds::from_discovered_units(1);
+        let mut state = CodexDiscoveryState::default();
+        let mut frontier = CodexDiscoveryFrontier::initial();
+        let first = retained_pass(&source, &mut state, bounds, frontier);
+        assert!(first.report.is_truncated());
+        frontier = first.next_frontier;
+
+        // Force the valid coarse-clock case: a new source arrives while the
+        // iterator is retained, but the native directory stat does not advance.
+        // Only a settled clock can vouch for the opening and closing identity.
+        let arrived = archive.join("rollout-added-during-scan.jsonl");
+        std::fs::write(&arrived, b"{}\n").unwrap();
+        let closing = directory_stat_witness(&archive).unwrap().unwrap();
+        assert!(
+            !closing.settled,
+            "the regression requires an unsettled directory change stamp"
+        );
+        let scan = state.scan.as_mut().expect("unfinished structural scan");
+        let CodexScanPhase::Directories {
+            current: Some(directory),
+            ..
+        } = &mut scan.phase
+        else {
+            panic!("the flat archive must retain its native directory iterator");
+        };
+        assert_eq!(directory.path, archive);
+        assert!(
+            directory.fingerprint.is_some(),
+            "coarse-clock admission must retain the incremental name witness"
+        );
+        directory.opening_stat = closing.stat;
+        assert!(scan.complete);
+
+        let mut first_sweep_finished = false;
+        for _ in 0..512 {
+            let pass = retained_pass(&source, &mut state, bounds, frontier);
+            frontier = pass.next_frontier;
+            if state.scan.is_none() {
+                first_sweep_finished = true;
+                assert!(
+                    !frontier.is_complete(),
+                    "equal but unsettled directory stats cannot vouch for complete coverage"
+                );
+                break;
+            }
+        }
+        assert!(first_sweep_finished, "the bounded structural sweep must finish");
+    }
+
+    #[test]
     fn a_mutated_directory_cannot_complete_a_budgeted_codex_sweep() {
         let temp = TempDir::new().unwrap();
         let archive = temp.path().join(".codex/archived_sessions");
