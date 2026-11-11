@@ -896,7 +896,7 @@ async fn cancelled_lsp_detach_reclaims_its_lease_before_waiting_for_the_receipt(
         .await
         .expect("join cancelled detach admission");
     assert_eq!(joined.status, ShutdownStatus::Clean);
-    assert!(joined.lost_work.is_empty());
+    assert_eq!(joined.lost_work, Vec::<String>::new());
     drop(service);
     assert_one_lsp_delivery_drop(fixture).await;
 }
@@ -950,7 +950,7 @@ async fn lsp_retirement_refuses_settlement_before_taking_the_in_flight_attempt()
     }
     let joined = service.expire_all(None).await;
     assert_eq!(joined.status, ShutdownStatus::Clean);
-    assert!(joined.lost_work.is_empty());
+    assert_eq!(joined.lost_work, Vec::<String>::new());
     drop(service);
     assert_one_lsp_delivery_drop(fixture).await;
 }
