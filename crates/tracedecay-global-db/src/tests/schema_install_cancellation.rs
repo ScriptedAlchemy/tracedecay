@@ -12,6 +12,9 @@ use tracedecay_runtime_core::db::{
     DaemonDatabaseScope, Database, DatabaseAuthority, RegisteredTestRuntimeFixtureV1,
     TestDatabaseRuntimeMode, TestDatabaseRuntimeScope,
 };
+use tracedecay_runtime_core::shard_runtime::registry::{
+    StoreRuntimeRetirementOutcome, StoreRuntimeRetirementResult,
+};
 
 use super::harness::TEST_RUNTIME_NONCE;
 use crate::RegisteredGlobalDbOwnerV1;
@@ -83,8 +86,14 @@ impl EmptyStore {
     /// `cancel_at`-th poll, so sweeping `cancel_at` samples cancellation
     /// points across admission. Returns the outcome and how many polls
     /// admission took.
-    async fn attach_cancelled_at(&self, cancel_at: usize) -> (Result<(), TraceDecayError>, usize) {
-        let (owner, _runtime, _retirement) = self.publish().await.into_parts();
+    async fn attach_cancelled_at(
+        &self,
+        cancel_at: usize,
+    ) -> (Result<(), TraceDecayError>, usize, Vec<String>) {
+        let (owner, runtime, retirement) = self.publish().await.into_parts();
+        // Publishing installs the writer ledger. Record the actual admission
+        // baseline on this runtime, rather than opening and dropping another.
+        let before_admission = self.schema_objects();
         let cancellation = CancellationToken::new();
         let mut admission = Box::pin(RegisteredGlobalDbOwnerV1::admit_and_attach_for_daemon(
             owner,
@@ -102,14 +111,40 @@ impl EmptyStore {
             }
         })
         .await;
-        (outcome, polls)
+        drop(admission);
+        drop(runtime);
+        // A reopen must follow a joined shutdown, not race the previous
+        // fixture's writer and readers on the same SQLite path.
+        let mut reservation = match retirement
+            .registry()
+            .reserve_retirement_batch(vec![retirement.retirement_target()])
+        {
+            StoreRuntimeRetirementResult::Reserved(reservation) => reservation,
+            StoreRuntimeRetirementResult::Blocked(refusal) => {
+                panic!("completed admission retained runtime clients: {refusal:?}")
+            }
+        };
+        let committed =
+            tracedecay_runtime_core::native_runtime::spawn_blocking(move || reservation.commit())
+                .await
+                .unwrap()
+                .unwrap();
+        assert!(
+            matches!(
+                committed.outcomes(),
+                [StoreRuntimeRetirementOutcome::Closed { .. }]
+            ),
+            "fixture runtime must close before reopening: {:?}",
+            committed.outcomes()
+        );
+        (outcome, polls, before_admission)
     }
 }
 
 #[asupersync::test(flavor = "multi_thread")]
 async fn cancelled_daemon_attach_rolls_back_schema_and_reopens() {
     let reference = EmptyStore::create();
-    let (outcome, total_polls) = reference.attach_cancelled_at(usize::MAX).await;
+    let (outcome, total_polls, _) = reference.attach_cancelled_at(usize::MAX).await;
     outcome.unwrap();
     let installed = reference.schema_objects();
     assert!(
@@ -123,11 +158,7 @@ async fn cancelled_daemon_attach_rolls_back_schema_and_reopens() {
     let mut completed = Vec::new();
     for cancel_at in (1..total_polls).step_by(stride).chain([total_polls + 10]) {
         let store = EmptyStore::create();
-        // Publishing the runtime installs its writer ledger before admission.
-        // Cancellation must preserve exactly that pre-admission schema.
-        drop(store.publish().await);
-        let before_admission = store.schema_objects();
-        let (outcome, _) = store.attach_cancelled_at(cancel_at).await;
+        let (outcome, _, before_admission) = store.attach_cancelled_at(cancel_at).await;
         let objects = store.schema_objects();
         match outcome {
             Err(error) => {
@@ -155,7 +186,7 @@ async fn cancelled_daemon_attach_rolls_back_schema_and_reopens() {
                 completed.push(cancel_at);
             }
         }
-        let (reopened, _) = store.attach_cancelled_at(usize::MAX).await;
+        let (reopened, _, _) = store.attach_cancelled_at(usize::MAX).await;
         reopened.unwrap_or_else(|error| {
             panic!("reopen after cancel at poll {cancel_at}/{total_polls} failed: {error:?}")
         });
