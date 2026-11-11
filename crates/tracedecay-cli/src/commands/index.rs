@@ -958,7 +958,6 @@ impl FirstGenerationProgressWindow {
         if self.owner.is_some_and(|current| owner.0 < current.0) {
             return false;
         }
-        self.owner = Some(self.owner.map_or(owner, |current| current.max(owner)));
         let previous = match &marker {
             FirstGenerationWorkMarker::Preseal { .. } => &mut self.preseal,
             FirstGenerationWorkMarker::NativeGraph { .. } => &mut self.native_graph,
@@ -982,6 +981,10 @@ impl FirstGenerationProgressWindow {
             },
         };
         *previous = Some(marker);
+        // Rejecting an invalid cross-daemon/digest report must not advance
+        // the global daemon fence. Otherwise valid work on the current
+        // daemon is discarded even though no new owner was authenticated.
+        self.owner = Some(self.owner.map_or(owner, |current| current.max(owner)));
         advanced
     }
 }
@@ -2212,6 +2215,52 @@ mod daemon_precondition_tests {
         let marker = super::FirstGenerationWorkMarker::of(Some(&source));
         assert!(!window.observe(marker.clone(), now + Duration::from_secs(121)));
         assert!(window.observe(marker, now + Duration::from_secs(241)));
+    }
+
+    #[test]
+    fn rejected_foreign_text_digest_cannot_poison_daemon_work_fence() {
+        let start = Instant::now();
+        let mut window = super::FirstGenerationProgressWindow::new(Duration::from_secs(120));
+        let mut accepted = progress(40, None);
+        accepted.phase = CodeIndexBuildPhaseV1::BulkCommit;
+        accepted.daemon_incarnation = 3;
+        assert!(!window.observe(
+            Some(super::FirstGenerationWorkMarker::text(&accepted)),
+            start
+        ));
+
+        // A mismatched immutable digest is not a new text authority, even
+        // when the report claims a much newer daemon incarnation. Reject
+        // both its counters and its claimed global owner.
+        let mut foreign = accepted.clone();
+        foreign.daemon_incarnation = 900;
+        foreign.sealed_source_digest = "foreign-digest".to_owned();
+        foreign.progress_epoch += 1;
+        foreign.committed_pages += 100;
+        assert!(!window.observe(
+            Some(super::FirstGenerationWorkMarker::text(&foreign)),
+            start + Duration::from_secs(60)
+        ));
+        assert!(!window.new_work_since_prior_read);
+
+        // The still-valid daemon may really commit a page after that
+        // rejected report. It must renew the silence window exactly once.
+        accepted.progress_epoch += 1;
+        accepted.committed_pages += 1;
+        let marker = super::FirstGenerationWorkMarker::text(&accepted);
+        assert!(!window.observe(
+            Some(marker.clone()),
+            start + Duration::from_secs(119)
+        ));
+        assert!(window.new_work_since_prior_read);
+        assert!(!window.observe(
+            Some(marker.clone()),
+            start + Duration::from_secs(238)
+        ));
+        assert!(window.observe(
+            Some(marker),
+            start + Duration::from_secs(239)
+        ));
     }
 
     #[tokio::test(flavor = "current_thread")]
