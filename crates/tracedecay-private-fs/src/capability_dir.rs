@@ -754,11 +754,11 @@ fn read_bounded_child_receipt(
     };
     if descriptor < 0 {
         let error = io::Error::last_os_error();
-        // Unix sockets may reject O_RDONLY with ENXIO before fstat can
-        // establish their type. Only downgrade that error when the SAME
-        // held directory still names a nonregular receipt. A regular file's
-        // I/O failure must remain a refusal of complete census coverage.
-        if error.raw_os_error() == Some(libc::ENXIO)
+        // Unix socket opens return ENXIO on Linux or EOPNOTSUPP on macOS.
+        // Classify that refusal as a nonregular receipt only when the held
+        // directory still names a nonregular entry. A regular file's I/O
+        // failure must remain a refusal of complete census coverage.
+        if matches!(error.raw_os_error(), Some(libc::ENXIO | libc::EOPNOTSUPP))
             && directory
                 .symlink_metadata(name)
                 .is_ok_and(|metadata| !metadata.file_type().is_file())
@@ -1334,9 +1334,8 @@ mod tests {
         std::fs::write(unknown.join("sentinel"), b"preserve").unwrap();
         let _socket = UnixListener::bind(unknown.join("owner")).unwrap();
 
-        // On Unix, openat(O_RDONLY | O_NONBLOCK) on a socket may fail with
-        // ENXIO before a regular-file check. The held directory's metadata
-        // proves that entry is nonregular, not an unreadable owned receipt.
+        // openat on a socket fails with ENXIO or EOPNOTSUPP before fstat.
+        // The held directory's metadata proves the entry is nonregular.
         let receipt = read_bounded_child_receipt(&open(&unknown), OsStr::new("owner"), 64);
         assert_eq!(receipt.unwrap_err().kind(), io::ErrorKind::InvalidData);
 
