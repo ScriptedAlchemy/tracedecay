@@ -1043,6 +1043,7 @@ enum CodexScanPhase {
     Files {
         next_directory: usize,
         current: Option<Box<(usize, std::fs::ReadDir)>>,
+        verification: Option<Box<(usize, std::fs::ReadDir, CodexDirectoryEntryFingerprint)>>,
         deferred: Option<Box<(PathBuf, std::fs::Metadata)>>,
         resume_directories: Option<CodexDirectoryResume>,
     },
@@ -2117,6 +2118,7 @@ fn retained_scan_step(
                     scan.phase = CodexScanPhase::Files {
                         next_directory: 0,
                         current: None,
+                        verification: None,
                         deferred: None,
                         resume_directories: Some(resume_directories),
                     };
@@ -2137,6 +2139,7 @@ fn retained_scan_step(
                         scan.phase = CodexScanPhase::Files {
                             next_directory: 0,
                             current: None,
+                            verification: None,
                             deferred: None,
                             resume_directories: None,
                         };
@@ -2187,6 +2190,7 @@ fn retained_scan_step(
                         scan.phase = CodexScanPhase::Files {
                             next_directory: 0,
                             current: None,
+                            verification: None,
                             deferred: None,
                             resume_directories: Some(resume_directories),
                         };
@@ -2325,6 +2329,7 @@ fn retained_scan_step(
                                     scan.phase = CodexScanPhase::Files {
                                         next_directory: 0,
                                         current: None,
+                                        verification: None,
                                         deferred: None,
                                         resume_directories: Some(resume_directories),
                                     };
@@ -2378,6 +2383,7 @@ fn retained_scan_step(
             CodexScanPhase::Files {
                 next_directory,
                 current,
+                verification,
                 deferred,
                 resume_directories,
             } => {
@@ -2392,6 +2398,48 @@ fn retained_scan_step(
                     Some(*candidate)
                 } else {
                     loop {
+                        // An unsettled directory's native timestamp can alias
+                        // a new entry while a file iterator is suspended.
+                        // Verify eligible names through a fresh, bounded walk.
+                        if let Some((directory_index, entries, fingerprint)) =
+                            verification.as_deref_mut()
+                        {
+                            if file_work >= work_limit {
+                                break None;
+                            }
+                            match entries.next() {
+                                Some(entry) => {
+                                    file_work += 1;
+                                    let entry = entry.map_err(|source| TranscriptIngestError::ScanIo {
+                                        operation: "verify Codex transcript directory entry",
+                                        path: scan.directories[*directory_index].path.clone(),
+                                        source,
+                                    })?;
+                                    let file_type = entry.file_type().map_err(|source| {
+                                        TranscriptIngestError::ScanIo {
+                                            operation: "verify Codex transcript entry type",
+                                            path: entry.path(),
+                                            source,
+                                        }
+                                    })?;
+                                    fingerprint.observe(&entry.file_name(), file_type)?;
+                                    continue;
+                                }
+                                None => {
+                                    let directory = &scan.directories[*directory_index];
+                                    let closing = directory_stat_witness(&directory.path)?;
+                                    if closing.as_ref().map(|stamp| stamp.stat)
+                                        != directory.identity.map(|identity| identity.stat)
+                                        || directory.identity.and_then(|identity| identity.entries)
+                                            != Some(std::mem::take(fingerprint).finish())
+                                    {
+                                        scan.complete = false;
+                                    }
+                                    *verification = None;
+                                    continue;
+                                }
+                            }
+                        }
                         if current.is_none() {
                             let Some(directory) = scan.directories.get(*next_directory) else {
                                 break None;
@@ -2456,6 +2504,30 @@ fn retained_scan_step(
                                     != directory.identity.map(|identity| identity.stat)
                                 {
                                     scan.complete = false;
+                                } else if closing.is_some_and(|stamp| !stamp.settled) {
+                                    // A fresh reader must recheck the structural
+                                    // name set before this iterator can confer
+                                    // full corpus coverage on a coarse clock.
+                                    if directory
+                                        .identity
+                                        .and_then(|identity| identity.entries)
+                                        .is_some()
+                                    {
+                                        let reopened = std::fs::read_dir(&directory.path).map_err(
+                                            |source| TranscriptIngestError::ScanIo {
+                                                operation: "verify Codex transcript bucket",
+                                                path: directory.path.clone(),
+                                                source,
+                                            },
+                                        )?;
+                                        *verification = Some(Box::new((
+                                            *directory_index,
+                                            reopened,
+                                            CodexDirectoryEntryFingerprint::default(),
+                                        )));
+                                    } else {
+                                        scan.complete = false;
+                                    }
                                 }
                                 *current = None;
                             }
@@ -2463,7 +2535,10 @@ fn retained_scan_step(
                     }
                 };
                 let Some((path, metadata)) = candidate else {
-                    if *next_directory >= scan.directories.len() && current.is_none() {
+                    if *next_directory >= scan.directories.len()
+                        && current.is_none()
+                        && verification.is_none()
+                    {
                         if let Some(resume) = resume_directories.take() {
                             scan.directories.clear();
                             scan.directory_bytes = 0;

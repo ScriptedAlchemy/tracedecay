@@ -2974,6 +2974,70 @@ mod recent_first_discovery_tests {
     }
 
     #[test]
+    fn aliased_coarse_directory_stamp_cannot_certify_a_stale_file_walk() {
+        let temp = TempDir::new().unwrap();
+        let archive = temp.path().join(".codex/archived_sessions");
+        std::fs::create_dir_all(&archive).unwrap();
+        for index in 0..64 {
+            std::fs::write(archive.join(format!("rollout-{index:03}.zst")), b"ignored").unwrap();
+        }
+        std::fs::write(archive.join("rollout-existing.jsonl"), b"{}\n").unwrap();
+        let source = CodexSource::with_home(temp.path());
+        let bounds = TranscriptDiscoveryBounds::from_discovered_units(1);
+        let mut state = CodexDiscoveryState::default();
+        let mut frontier = CodexDiscoveryFrontier::initial();
+        let mut active = false;
+        for _ in 0..256 {
+            let pass = retained_pass(&source, &mut state, bounds, frontier);
+            frontier = pass.next_frontier;
+            if let Some(scan) = state.scan.as_ref()
+                && let CodexScanPhase::Files {
+                    current: Some(current),
+                    ..
+                } = &scan.phase
+                && scan.directories[current.0].path == archive
+            {
+                active = true;
+                break;
+            }
+        }
+        assert!(active, "the file reader must remain suspended across turns");
+        let original_names = directory_entry_fingerprint(&archive).unwrap();
+        let late = archive.join("rollout-after-file-reader-open.jsonl");
+        std::fs::write(&late, b"{}\n").unwrap();
+        // Model two writes within one filesystem timestamp quantum: the
+        // directory stat aliases the scan's authority despite a new file.
+        let alias = directory_stat_witness(&archive).unwrap().unwrap().stat;
+        let scan = state.scan.as_mut().unwrap();
+        let CodexScanPhase::Files {
+            current: Some(current),
+            ..
+        } = &scan.phase
+        else {
+            panic!("the file-phase iterator must still be retained");
+        };
+        let directory_index = current.0;
+        let identity = scan.directories[directory_index].identity.as_mut().unwrap();
+        identity.stat = alias;
+        identity.entries = Some(original_names);
+
+        let mut finished = false;
+        for _ in 0..2048 {
+            let pass = retained_pass(&source, &mut state, bounds, frontier);
+            frontier = pass.next_frontier;
+            if state.scan.is_none() {
+                assert!(
+                    !frontier.is_complete(),
+                    "an aliased directory timestamp hid a new eligible rollout"
+                );
+                finished = true;
+                break;
+            }
+        }
+        assert!(finished, "the bounded verification must terminate");
+    }
+
+    #[test]
     fn a_mutated_directory_cannot_complete_a_budgeted_codex_sweep() {
         let temp = TempDir::new().unwrap();
         let archive = temp.path().join(".codex/archived_sessions");
