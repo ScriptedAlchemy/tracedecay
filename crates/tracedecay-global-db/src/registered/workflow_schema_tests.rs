@@ -130,6 +130,65 @@ async fn schema_snapshot(
 }
 
 #[asupersync::test]
+async fn short_lived_admission_reclaims_freed_pages_without_daemon_maintenance() {
+    crate::register_registered_schema_installer();
+    let directory = TempDir::new().unwrap();
+    let path = directory.path().join("project/sessions.db");
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let scope = || TestDatabaseRuntimeScope::ProjectSessions {
+        project_id: ProjectId::new("project.short-lived-reclaim").unwrap(),
+    };
+
+    drop(
+        open_registered_test_database_fixture(&path, scope())
+            .await
+            .unwrap(),
+    );
+    let connection = rusqlite::Connection::open(&path).unwrap();
+    let auto_vacuum: i64 = connection
+        .query_row("PRAGMA auto_vacuum", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(
+        auto_vacuum, 2,
+        "new stores must support incremental reclamation"
+    );
+    connection
+        .execute_batch(
+            "CREATE TABLE ephemeral_reclaim(payload BLOB);
+             INSERT INTO ephemeral_reclaim VALUES (zeroblob(8388608));
+             DROP TABLE ephemeral_reclaim;",
+        )
+        .unwrap();
+    let before_pages: i64 = connection
+        .query_row("PRAGMA page_count", [], |row| row.get(0))
+        .unwrap();
+    let before_free: i64 = connection
+        .query_row("PRAGMA freelist_count", [], |row| row.get(0))
+        .unwrap();
+    assert!(
+        before_free > 0,
+        "the fixture must contain reclaimable pages"
+    );
+    drop(connection);
+
+    // Reopen through the actual short-lived owner: there is no background
+    // compactor after this call, so admission must make physical progress.
+    let (lease, owner) = open_registered_test_database_fixture(&path, scope())
+        .await
+        .unwrap();
+    let (_, after_pages, after_free) = lease.storage_page_counts().await.unwrap();
+    assert!(
+        after_pages < before_pages as u64,
+        "short-lived admission did not reduce the physical page count: {before_pages} -> {after_pages}"
+    );
+    assert!(
+        after_free < before_free as u64,
+        "short-lived admission left the original free-page backlog: {before_free} -> {after_free}"
+    );
+    drop((lease, owner));
+}
+
+#[asupersync::test]
 async fn partial_workflow_store_requires_reset_without_mutation() {
     assert_workflow_schema_reset_without_mutation(
         "CREATE TABLE workflow_schema (
@@ -864,6 +923,11 @@ mod published_artifact_ceiling {
              INSERT INTO workflow_artifact_payloads
              SELECT 'sha256:large-' || i, 1048576, randomblob(1048576) FROM n;",
         );
+        store.run(
+            "CREATE TABLE freed_pages(payload BLOB);
+             INSERT INTO freed_pages VALUES (zeroblob(2097152));
+             DROP TABLE freed_pages;",
+        );
         let before = store.state();
         let wal_path = format!("{}-wal", store.path.display());
         let wal_bytes = || fs::metadata(&wal_path).map_or(0, |metadata| metadata.len());
@@ -881,6 +945,11 @@ mod published_artifact_ceiling {
         );
         assert!(owner.reset_required().is_none());
         let lease = owner.issue_lease().unwrap();
+        let (_, _, free_pages) = lease.storage_page_counts().await.unwrap();
+        assert!(
+            free_pages > 0,
+            "admission reclaimed pages before convergence"
+        );
         let issuer = owner.weak_lease_issuer();
         assert_workflow_recovering(&lease).await;
         assert_workflow_recovering(&issuer.issue_lease().unwrap()).await;
