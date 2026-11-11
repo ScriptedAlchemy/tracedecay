@@ -143,5 +143,8 @@ fn warm_pointer_witness_refuses_same_inode_changed_bytes() {
         ),
         Err(CodeIndexPublicationStoreErrorV1::CorruptionResetRequired(_))
     ));
-    assert_eq!(fs::read(&pointer).expect("changed bytes preserved"), changed);
+    assert_eq!(
+        fs::read(&pointer).expect("changed bytes preserved"),
+        changed
+    );
 }
