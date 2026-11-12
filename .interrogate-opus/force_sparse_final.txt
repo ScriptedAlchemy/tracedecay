@@ -1,0 +1,33 @@
+REPRO rust: refused_edits=14 forced_answers_differ=0 of_which_set_differs=0 forced_errored=0
+REPRO rust done
+REPRO typescript: refused_edits=0 forced_answers_differ=0 of_which_set_differs=0 forced_errored=0
+REPRO typescript done
+REPRO python: refused_edits=0 forced_answers_differ=0 of_which_set_differs=0 forced_errored=0
+REPRO python done
+REPRO go: refused_edits=29 forced_answers_differ=2 of_which_set_differs=2 forced_errored=0
+REPRO   mathx/total.go (Some("moves_name_lookups")): edges forced=25 cold=24 missing_from_forced=0 extra_in_forced=1 order_only=false unresolved_missing=0 unresolved_extra=0
+  first missing: None
+  first extra: Some("CanonicalRelationEdgeV1 { from_occurrence: SymbolOccurrenceId(\"symbol.v1.sha256:4aa324ae7b2e12473aa0a5726c125d350477fdd0371e3018ed153df4d0f2d999\"), to_occurrence: SymbolOccurrenceId(\"symbol.v1.sha256:3c6fc46cc89f7aab1aecb0561f3d18d2e1eaa2b2b48b710d437c0e08975bffab\"), kind: Calls, authority: NameResolved, evidence_span: SourceSpan { start_byte: 88, end_byte: 93 } }")
+REPRO   mathx/total.go (Some("moves_name_lookups")): edges forced=24 cold=25 missing_from_forced=1 extra_in_forced=0 order_only=false unresolved_missing=0 unresolved_extra=0
+  first missing: Some("CanonicalRelationEdgeV1 { from_occurrence: SymbolOccurrenceId(\"symbol.v1.sha256:4aa324ae7b2e12473aa0a5726c125d350477fdd0371e3018ed153df4d0f2d999\"), to_occurrence: SymbolOccurrenceId(\"symbol.v1.sha256:3c6fc46cc89f7aab1aecb0561f3d18d2e1eaa2b2b48b710d437c0e08975bffab\"), kind: Calls, authority: NameResolved, evidence_span: SourceSpan { start_byte: 88, end_byte: 93 } }")
+  first extra: None
+REPRO go done
+REPRO java: refused_edits=2 forced_answers_differ=0 of_which_set_differs=0 forced_errored=0
+REPRO java done
+REPRO ruby: refused_edits=18 forced_answers_differ=2 of_which_set_differs=2 forced_errored=0
+REPRO   lib/util.rb (Some("moves_name_lookups")): edges forced=34 cold=34 missing_from_forced=0 extra_in_forced=0 order_only=false unresolved_missing=0 unresolved_extra=1
+  first missing: None
+  first extra: None
+REPRO   lib/util.rb (Some("moves_name_lookups")): edges forced=42 cold=42 missing_from_forced=0 extra_in_forced=0 order_only=false unresolved_missing=1 unresolved_extra=0
+  first missing: None
+  first extra: None
+REPRO ruby done
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 364 filtered out; finished in 7.70s
+REPRO2 go method set: today cold_reason=Some("moves_go_method_sets") forced cold_reason=None edges forced=4 cold=5 missing=1 extra=0 unresolved missing=0 extra=0 verdict=WRONG
+REPRO2 typescript barrel re-export moved: today cold_reason=Some("moves_name_lookups") forced cold_reason=None edges forced=1 cold=1 missing=1 extra=1 unresolved missing=0 extra=0 verdict=WRONG
+REPRO2 typescript importer switches module: today cold_reason=Some("moves_name_lookups") forced cold_reason=None edges forced=2 cold=2 missing=0 extra=0 unresolved missing=0 extra=0 verdict=same
+REPRO2 python __init__ re-export moved: today cold_reason=Some("moves_name_lookups") forced cold_reason=None edges forced=1 cold=1 missing=1 extra=1 unresolved missing=0 extra=0 verdict=WRONG
+REPRO2 rust pub use re-export moved: today cold_reason=Some("moves_name_lookups") forced cold_reason=None edges forced=1 cold=1 missing=0 extra=0 unresolved missing=0 extra=0 verdict=same
+REPRO2 go.mod module path changed: today cold_reason=Some("moves_name_lookups") forced cold_reason=None edges forced=1 cold=0 missing=0 extra=1 unresolved missing=0 extra=0 verdict=WRONG
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 364 filtered out; finished in 0.12s
+?? .interrogate-opus/

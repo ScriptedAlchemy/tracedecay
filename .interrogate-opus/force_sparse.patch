@@ -1,0 +1,379 @@
+diff --git a/crates/tracedecay-code-index/src/production/sparse_differential_tests.rs b/crates/tracedecay-code-index/src/production/sparse_differential_tests.rs
+index a2c9ef309a..62462a9406 100644
+--- a/crates/tracedecay-code-index/src/production/sparse_differential_tests.rs
++++ b/crates/tracedecay-code-index/src/production/sparse_differential_tests.rs
+@@ -443,3 +443,161 @@ fn a_restored_parent_and_the_edit_over_it_resolve_nothing_whole() {
+         );
+     }
+ }
++
++
++// INTERROGATE REPRO, not for merge. Runs the differential edits with the cold
++// fallback disabled, which is what the design's re-decide-through-dependency-
++// indexes claim needs to hold, and counts answers that differ from a cold build.
++fn repro_one(
++    tree: &[(String, String)],
++    previous: Option<usize>,
++    edited_tree: &[(String, String)],
++    index: usize,
++    out: &mut (usize, usize, usize, Vec<String>, usize),
++) {
++    use super::sparse_increment::REPRO_FORCE_SPARSE;
++    use std::sync::atomic::Ordering;
++    let store = WorkerPublicationStore::default();
++    let mut owner =
++        CodeIndexProductionOwnerV1::new(worker_config(), store.clone()).expect("owner");
++    REPRO_FORCE_SPARSE.store(false, Ordering::SeqCst);
++    publish(&mut owner, tree, previous, false, 1_100_000);
++    // Which edits does today's code refuse?
++    let probe_store = WorkerPublicationStore::default();
++    let mut probe =
++        CodeIndexProductionOwnerV1::new(worker_config(), probe_store.clone()).expect("probe");
++    publish(&mut probe, tree, previous, false, 1_100_000);
++    let unforced = publish(&mut probe, edited_tree, Some(index), true, 1_200_000);
++    let reason = unforced.cold_reason();
++    let refused = matches!(
++        reason,
++        Some(
++            CodeIndexColdBuildReasonV1::MovesNameLookups
++                | CodeIndexColdBuildReasonV1::MovesGoMethodSets
++        )
++    );
++    if !refused {
++        return;
++    }
++    REPRO_FORCE_SPARSE.store(true, Ordering::SeqCst);
++    let forced = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
++        publish(&mut owner, edited_tree, Some(index), true, 1_200_000)
++    }));
++    REPRO_FORCE_SPARSE.store(false, Ordering::SeqCst);
++    let cold_store = WorkerPublicationStore::default();
++    let cold = publish(
++        &mut CodeIndexProductionOwnerV1::new(worker_config(), cold_store.clone()).expect("cold"),
++        edited_tree,
++        Some(index),
++        false,
++        1_200_000,
++    );
++    super::helpers::take_seal_reference_resolutions();
++    out.0 += 1;
++    match forced {
++        Err(_) => {
++            out.2 += 1;
++            if out.3.len() < 4 {
++                out.3.push(format!("{}: forced sparse build errored", edited_tree[index].0));
++            }
++        }
++        Ok(forced) => {
++            let got = restored_answers(&store, &forced);
++            let want = restored_answers(&cold_store, &cold);
++            if got != want {
++                out.1 += 1;
++                if out.3.len() < 3 {
++                    use std::collections::BTreeSet;
++                    let name = |list: &[(String, String)]| list.to_vec();
++                    let _ = name;
++                    let g: BTreeSet<String> = got.0.iter().map(|e| format!("{e:?}")).collect();
++                    let w: BTreeSet<String> = want.0.iter().map(|e| format!("{e:?}")).collect();
++                    let missing: Vec<&String> = w.difference(&g).collect();
++                    let extra: Vec<&String> = g.difference(&w).collect();
++                    let gu: BTreeSet<String> = got.1.iter().map(|e| format!("{e:?}")).collect();
++                    let wu: BTreeSet<String> = want.1.iter().map(|e| format!("{e:?}")).collect();
++                    let mu = wu.difference(&gu).count();
++                    let eu = gu.difference(&wu).count();
++                    out.3.push(format!(
++                        "{} ({:?}): edges forced={} cold={} missing_from_forced={} extra_in_forced={} order_only={} unresolved_missing={} unresolved_extra={}\n  first missing: {:?}\n  first extra: {:?}",
++                        edited_tree[index].0,
++                        reason.map(|r| r.as_str()),
++                        got.0.len(),
++                        want.0.len(),
++                        missing.len(),
++                        extra.len(),
++                        missing.is_empty() && extra.is_empty() && mu == 0 && eu == 0,
++                        mu,
++                        eu,
++                        missing.first(),
++                        extra.first()
++                    ));
++                }
++                let g: std::collections::BTreeSet<String> = got.0.iter().map(|e| format!("{:?}", e.kind)).collect();
++                let _ = g;
++                let gs: std::collections::BTreeSet<String> = got.0.iter().map(|e| format!("{e:?}")).collect();
++                let ws: std::collections::BTreeSet<String> = want.0.iter().map(|e| format!("{e:?}")).collect();
++                let gu: std::collections::BTreeSet<String> = got.1.iter().map(|e| format!("{e:?}")).collect();
++                let wu: std::collections::BTreeSet<String> = want.1.iter().map(|e| format!("{e:?}")).collect();
++                if gs != ws || gu != wu { out.4 += 1; }
++            }
++        }
++    }
++}
++
++#[test]
++fn repro_force_sparse_all_languages() {
++    std::panic::set_hook(Box::new(|_| {}));
++    for language in ["rust", "typescript", "python", "go", "java", "ruby"] {
++        let tree = fixture_files(&Path::new(FIXTURE_ROOT).join(language));
++        let store = WorkerPublicationStore::default();
++        let mut owner = CodeIndexProductionOwnerV1::new(worker_config(), store.clone())
++            .expect("production owner");
++        let base = publish(&mut owner, &tree, None, false, 1_000_000);
++        let base = store
++            .decode_active(&CodeIndexGenerationScopeV1::for_snapshot(base.snapshot()))
++            .expect("decode")
++            .expect("active");
++        let mut out = (0usize, 0usize, 0usize, Vec::new(), 0usize);
++        for index in 0..tree.len() {
++            let (path, source) = &tree[index];
++            if matches!(language_for(path), "toml" | "json") || path.ends_with("go.mod") {
++                continue;
++            }
++            let mut shifted = tree.clone();
++            shifted[index].1 = format!("\n\n{source}");
++            repro_one(&tree, None, &shifted, index, &mut out);
++            let file = base
++                .files
++                .iter()
++                .find(|file| &file.authority.logical_path == path)
++                .expect("fixture file sealed");
++            let mut names = file
++                .artifacts
++                .symbols
++                .iter()
++                .map(|symbol| symbol.simple_name.clone())
++                .filter(|name| name.chars().all(|c| c.is_alphanumeric() || c == '_'))
++                .collect::<Vec<_>>();
++            names.sort();
++            names.dedup();
++            for name in names {
++                let mut renamed = tree.clone();
++                renamed[index].1 = rename_identifier(source, &name, &format!("{name}Renamed"));
++                repro_one(&tree, None, &renamed, index, &mut out);
++                repro_one(&renamed, Some(index), &tree, index, &mut out);
++            }
++        }
++        println!(
++            "REPRO {language}: refused_edits={} forced_answers_differ={} of_which_set_differs={} forced_errored={}",
++            out.0, out.1, out.4, out.2
++        );
++        for example in &out.3 {
++            println!("REPRO   {example}");
++        }
++        println!(
++            "REPRO {language} done{}",
++            ""
++        );
++    }
++}
+diff --git a/crates/tracedecay-code-index/src/production/sparse_increment.rs b/crates/tracedecay-code-index/src/production/sparse_increment.rs
+index 09639b9ca3..ac2d4b73d8 100644
+--- a/crates/tracedecay-code-index/src/production/sparse_increment.rs
++++ b/crates/tracedecay-code-index/src/production/sparse_increment.rs
+@@ -76,6 +76,10 @@ impl CodeIndexColdBuildReasonV1 {
+     }
+ }
+ 
++#[cfg(test)]
++pub(super) static REPRO_FORCE_SPARSE: std::sync::atomic::AtomicBool =
++    std::sync::atomic::AtomicBool::new(false);
++
+ /// A changed file's share of a generation above which it seals cold: one in
+ /// this many, the same share a layered graph refresh carries.
+ const SPARSE_MAX_CHANGED_FILE_SHARE_DENOMINATOR: usize = 8;
+@@ -208,16 +212,25 @@ impl SparseBuildV1<'_> {
+         let edited = self.extract_edited(parent, &edited_rows, &manifest)?;
+         let artifact_bytes = edited_artifact_bytes(&edited);
+         memory.resize(count(artifact_bytes)?)?;
+-        if edited
+-            .iter()
+-            .any(|file| moves_name_lookups(&file.before, &file.after))
++        // INTERROGATE REPRO: models the design's claim that these edits can be
++        // re-decided through the dependency indexes instead of going cold.
++        #[cfg(test)]
++        let forced = REPRO_FORCE_SPARSE.load(std::sync::atomic::Ordering::SeqCst);
++        #[cfg(not(test))]
++        let forced = false;
++        if !forced
++            && edited
++                .iter()
++                .any(|file| moves_name_lookups(&file.before, &file.after))
+         {
+             return Ok(Err(CodeIndexColdBuildReasonV1::MovesNameLookups));
+         }
+-        if edited.iter().any(|file| {
+-            !file.before.artifacts.go_method_sets.is_empty()
+-                || !file.after.artifacts.go_method_sets.is_empty()
+-        }) {
++        if !forced
++            && edited.iter().any(|file| {
++                !file.before.artifacts.go_method_sets.is_empty()
++                    || !file.after.artifacts.go_method_sets.is_empty()
++            })
++        {
+             return Ok(Err(CodeIndexColdBuildReasonV1::MovesGoMethodSets));
+         }
+         lexical_page_source::checkpoint(control)?;
+diff --git a/crates/tracedecay-code-index/src/production/sparse_increment_tests.rs b/crates/tracedecay-code-index/src/production/sparse_increment_tests.rs
+index 01eb1dcb76..3a901532eb 100644
+--- a/crates/tracedecay-code-index/src/production/sparse_increment_tests.rs
++++ b/crates/tracedecay-code-index/src/production/sparse_increment_tests.rs
+@@ -1095,3 +1095,160 @@ fn carried_evidence_visitors_release_each_files_scratch_before_the_next_file() {
+     assert!(visited_edges >= 24);
+     assert!(visited_calls >= 24);
+ }
++
++
++// INTERROGATE REPRO, not for merge. Edits real commits make, with the cold
++// fallback disabled, against a cold build of the same tree.
++fn repro_scenario(label: &str, before: &[(&str, &str, &str)], after: &[(&str, &str, &str)]) {
++    use super::sparse_increment::REPRO_FORCE_SPARSE;
++    let store = MemorySealedPublicationStoreV1::default();
++    let mut incremental = owner(&store);
++    REPRO_FORCE_SPARSE.store(false, Ordering::SeqCst);
++    publish(&mut incremental, before, 1_100_000);
++
++    let today_store = MemorySealedPublicationStoreV1::default();
++    let mut today = owner(&today_store);
++    publish(&mut today, before, 1_100_000);
++    let today_build = publish(&mut today, after, 1_200_000);
++
++    REPRO_FORCE_SPARSE.store(true, Ordering::SeqCst);
++    let forced = publish(&mut incremental, after, 1_200_000);
++    REPRO_FORCE_SPARSE.store(false, Ordering::SeqCst);
++    let cold_store = MemorySealedPublicationStoreV1::default();
++    publish(&mut owner(&cold_store), after, 1_200_000);
++    let (got, want) = (answers(&store), answers(&cold_store));
++    let named = |list: &[CanonicalRelationEdgeV1], g: &RestoredAnswersV1| {
++        let _ = g;
++        list.iter()
++            .map(|e| format!("{:?}", (e.kind, e.from_occurrence.as_str(), e.to_occurrence.as_str())))
++            .collect::<std::collections::BTreeSet<_>>()
++    };
++    let (ge, we) = (named(&got.edges, &got), named(&want.edges, &want));
++    let (gu, wu) = (
++        got.unresolved_calls.iter().map(|u| format!("{u:?}")).collect::<std::collections::BTreeSet<_>>(),
++        want.unresolved_calls.iter().map(|u| format!("{u:?}")).collect::<std::collections::BTreeSet<_>>(),
++    );
++    println!(
++        "REPRO2 {label}: today cold_reason={:?} forced cold_reason={:?} edges forced={} cold={} missing={} extra={} unresolved missing={} extra={} verdict={}",
++        today_build.cold_reason().map(|r| r.as_str()),
++        forced.cold_reason().map(|r| r.as_str()),
++        got.edges.len(),
++        want.edges.len(),
++        we.difference(&ge).count(),
++        ge.difference(&we).count(),
++        wu.difference(&gu).count(),
++        gu.difference(&wu).count(),
++        if ge == we && gu == wu { "same" } else { "WRONG" },
++    );
++}
++
++const P: [(&str, &str, &str); 5] = [
++    ("x/p1.ts", "typescript", "export const p1 = 1;\n"),
++    ("x/p2.ts", "typescript", "export const p2 = 1;\n"),
++    ("x/p3.ts", "typescript", "export const p3 = 1;\n"),
++    ("x/p4.ts", "typescript", "export const p4 = 1;\n"),
++    ("x/p5.ts", "typescript", "export const p5 = 1;\n"),
++];
++
++#[test]
++fn repro_force_sparse_real_commit_shapes() {
++    // Go: a type gains a method. Satisfaction edge, no reference site.
++    let wrong =
++        "package calc\n\ntype Wrong struct{}\n\nfunc (Wrong) Add(a, b int) int { return a + b }\n";
++    repro_scenario("go method set", &go_tree(GO_WRONG, GO_UTIL), &go_tree(wrong, GO_UTIL));
++
++    // TypeScript: a barrel re-export is pointed at another file. main.ts is unchanged.
++    let ts = |barrel: &'static str| {
++        let mut tree = vec![
++            ("x/a.ts", "typescript", "export function helper() { return 1; }\n"),
++            ("x/b.ts", "typescript", "export function helper() { return 2; }\n"),
++            ("x/index.ts", "typescript", barrel),
++            ("x/main.ts", "typescript", "import { helper } from './index';\nexport function run() { return helper(); }\n"),
++        ];
++        tree.extend_from_slice(&P);
++        tree
++    };
++    repro_scenario(
++        "typescript barrel re-export moved",
++        &ts("export { helper } from './a';\n"),
++        &ts("export { helper } from './b';\n"),
++    );
++
++    // TypeScript: the importer itself gains a new import, callee binding changes.
++    let ts2 = |main: &'static str| {
++        let mut tree = vec![
++            ("x/a.ts", "typescript", "export function helper() { return 1; }\n"),
++            ("x/b.ts", "typescript", "export function helper() { return 2; }\n"),
++            ("x/main.ts", "typescript", main),
++            ("x/other.ts", "typescript", "import { helper } from './a';\nexport const o = helper();\n"),
++        ];
++        tree.extend_from_slice(&P);
++        tree
++    };
++    repro_scenario(
++        "typescript importer switches module",
++        &ts2("import { helper } from './a';\nexport function run() { return helper(); }\n"),
++        &ts2("import { helper } from './b';\nexport function run() { return helper(); }\n"),
++    );
++
++    // Python: package __init__ re-export moved. b.py is unchanged.
++    let py = |init: &'static str| {
++        vec![
++            ("pkg/__init__.py", "python", init),
++            ("pkg/one.py", "python", "def helper():\n    return 1\n"),
++            ("pkg/two.py", "python", "def helper():\n    return 2\n"),
++            ("pkg/b.py", "python", "from pkg import helper\n\ndef run():\n    return helper()\n"),
++            ("pkg/c.py", "python", "C = 1\n"),
++            ("pkg/d.py", "python", "D = 1\n"),
++            ("pkg/e.py", "python", "E = 1\n"),
++            ("pkg/f.py", "python", "F = 1\n"),
++            ("pkg/g.py", "python", "G = 1\n"),
++        ]
++    };
++    repro_scenario(
++        "python __init__ re-export moved",
++        &py("from pkg.one import helper\n"),
++        &py("from pkg.two import helper\n"),
++    );
++
++    // Rust: pub use re-export moved. main.rs is unchanged.
++    let rs = |lib: &'static str| {
++        vec![
++            ("src/lib.rs", RUST, lib),
++            ("src/one.rs", RUST, "pub fn helper() -> u32 { 1 }\n"),
++            ("src/two.rs", RUST, "pub fn helper() -> u32 { 2 }\n"),
++            ("src/main.rs", RUST, "pub fn run() -> u32 { crate::helper() }\n"),
++            ("src/a.rs", RUST, "pub fn a() {}\n"),
++            ("src/b.rs", RUST, "pub fn b() {}\n"),
++            ("src/c.rs", RUST, "pub fn c() {}\n"),
++            ("src/d.rs", RUST, "pub fn d() {}\n"),
++            ("src/e.rs", RUST, "pub fn e() {}\n"),
++        ]
++    };
++    repro_scenario(
++        "rust pub use re-export moved",
++        &rs("pub mod one;\npub mod two;\npub mod main;\npub use one::helper;\n"),
++        &rs("pub mod one;\npub mod two;\npub mod main;\npub use two::helper;\n"),
++    );
++
++    // Go: go.mod module path changes. Manifest edit; importers are unchanged.
++    let gm = |module: &'static str, imp: &'static str| {
++        vec![
++            ("go.mod", "go", module),
++            ("util/util.go", "go", "package util\n\nfunc Help() int { return 1 }\n"),
++            ("cmd/main.go", "go", imp),
++            ("a/a.go", "go", "package a\n\nfunc A() {}\n"),
++            ("b/b.go", "go", "package b\n\nfunc B() {}\n"),
++            ("c/c.go", "go", "package c\n\nfunc C() {}\n"),
++            ("d/d.go", "go", "package d\n\nfunc D() {}\n"),
++            ("e/e.go", "go", "package e\n\nfunc E() {}\n"),
++            ("f/f.go", "go", "package f\n\nfunc F() {}\n"),
++        ]
++    };
++    let main = "package main\n\nimport \"example.com/m/util\"\n\nfunc main() { util.Help() }\n";
++    repro_scenario(
++        "go.mod module path changed",
++        &gm("module example.com/m\n", main),
++        &gm("module example.com/renamed\n", main),
++    );
++}
