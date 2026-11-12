@@ -1465,7 +1465,11 @@ mod recent_first_discovery_tests {
         else {
             panic!("the first scan delivers");
         };
-        assert!(!released.has_changed());
+        assert!(
+            !released
+                .has_changed()
+                .expect("discovery release publisher remains open")
+        );
         hub.acknowledge("profile");
 
         // A consumer joining now replays the source's index, which another
@@ -1491,7 +1495,11 @@ mod recent_first_discovery_tests {
         hub.discover("profile", &source, bounds, first.next_frontier)
             .await
             .unwrap();
-        assert!(released.has_changed());
+        assert!(
+            released
+                .has_changed()
+                .expect("discovery release publisher remains open")
+        );
     }
 
     /// An idle scan one consumer ran is queued for every other consumer. A

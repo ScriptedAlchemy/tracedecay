@@ -93,8 +93,8 @@ impl LspRuntimeSpawner for NativeLspRuntime {
     }
 }
 
-/// Runs LSP broker work on the native runtime. Only for work that never
-/// reaches Tokio: the analyzer clients, the store, and in-process state.
+/// Runs LSP broker work on the selected Tokio runtime or the installed process
+/// runtime when called from a dedicated thread.
 pub fn native_lsp_runtime() -> Arc<dyn LspRuntimeSpawner> {
     Arc::new(NativeLspRuntime)
 }

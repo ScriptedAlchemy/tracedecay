@@ -42,7 +42,7 @@ async fn matches(connection: &TestConnection, query: &str) -> Result<i64, String
     .map_err(|error| error.to_string())
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn metadata_and_noop_updates_do_not_write_search_segments() -> Result<(), String> {
     let (_temp, connection) = fixture().await?;
     connection
@@ -128,7 +128,7 @@ async fn metadata_and_noop_updates_do_not_write_search_segments() -> Result<(), 
     Ok(())
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn changed_generated_text_fields_nulls_and_rowids_still_reindex() -> Result<(), String> {
     let (_temp, connection) = fixture().await?;
     for (statement, absent, present) in [

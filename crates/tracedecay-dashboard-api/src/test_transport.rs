@@ -3,18 +3,17 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use asupersync::net::TcpListener;
 use axum::Router;
+use tokio::net::TcpListener;
 use tracedecay_contracts::code_index_freshness::CodeIndexFreshnessReader;
 use tracedecay_domain::errors::Result;
 use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
 
 use crate::state::build_state_inner;
 use crate::{
-    ConnectionExecutor, DashboardAccessToken, DashboardApplicationRuntime,
-    DashboardAutomationAuthorityV1, DashboardAutomationWriter, DashboardDeliveryReadPortV1,
-    DashboardGitCorrelationReadPortV1, DashboardLcmReadPortV1,
-    DashboardProfileCodeIndexWorkerSettingsPort, DashboardProjectContext,
+    DashboardAccessToken, DashboardApplicationRuntime, DashboardAutomationAuthorityV1,
+    DashboardAutomationWriter, DashboardDeliveryReadPortV1, DashboardGitCorrelationReadPortV1,
+    DashboardLcmReadPortV1, DashboardProfileCodeIndexWorkerSettingsPort, DashboardProjectContext,
     DashboardSessionAuthoritiesV1, DashboardSessionMountV1, DashboardSessionResolutionV1,
     DashboardStateCompositionV1, PrAutoTrackManagedSummaryReader, bind_dashboard, code_read_api,
     router, serve_loopback, standalone_dashboard_automation_writer, with_dashboard_http_admission,
@@ -337,12 +336,7 @@ where
     );
     eprintln!("Code search covers this project only; rebound with --path to serve another.");
 
-    let runtime =
-        tracedecay_runtime_core::native_runtime::tokio_handle("dashboard_api.test_transport")
-            .ok_or_else(|| {
-                crate::state::config_error("the test dashboard found no Tokio runtime")
-            })?;
-    serve_loopback(ConnectionExecutor::Tokio(runtime), listener, app, shutdown).await;
+    serve_loopback(listener, app, shutdown).await;
     Ok(())
 }
 
@@ -350,7 +344,7 @@ where
 mod tests {
     use super::{DashboardAccessToken, DashboardTestEndpointV1};
 
-    #[asupersync::test]
+    #[tokio::test]
     async fn fixture_retains_the_advertised_listening_socket_before_serving() {
         let token = DashboardAccessToken::mint().unwrap();
         let endpoint = DashboardTestEndpointV1::bind("127.0.0.1", 0, token)

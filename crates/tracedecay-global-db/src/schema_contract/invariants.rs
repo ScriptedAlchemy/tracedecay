@@ -850,8 +850,8 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration;
 
-    use asupersync::sync::Notify;
     use tempfile::TempDir;
+    use tokio::sync::Notify;
 
     use super::{
         AUDIT_PAGE_ROWS, AuthorityInvariantTransactionProvider, FOREIGN_KEY_AUDIT_PROGRESS,
@@ -946,7 +946,7 @@ mod tests {
         (observation_rows, source_cursor_rows)
     }
 
-    #[asupersync::test]
+    #[tokio::test]
     async fn completed_audit_pages_survive_later_convergence_failure() {
         let (_directory, fixture) = open_registered().await;
         let transaction = fixture
@@ -1004,7 +1004,7 @@ mod tests {
         );
     }
 
-    #[asupersync::test]
+    #[tokio::test]
     async fn ordinary_write_completes_between_convergence_steps() {
         let (_directory, fixture) = open_registered().await;
         let transaction = fixture
@@ -1040,24 +1040,20 @@ mod tests {
         })
         .await;
 
-        asupersync::time::timeout(
-            asupersync::time::wall_now(),
-            std::time::Duration::from_secs(3),
-            async {
-                fixture
-                    .database()
-                    .writer_connection()
-                    .expect("ordinary registered writer")
-                    .execute(
-                        "INSERT INTO savings_ledger(
+        tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            fixture
+                .database()
+                .writer_connection()
+                .expect("ordinary registered writer")
+                .execute(
+                    "INSERT INTO savings_ledger(
                         ts, project_path, tool_name, before_tokens, after_tokens
                      ) VALUES (1, '/writer-availability', 'test', 2, 1)",
-                        (),
-                    )
-                    .await
-                    .expect("ordinary write while convergence is between steps");
-            },
-        )
+                    (),
+                )
+                .await
+                .expect("ordinary write while convergence is between steps");
+        })
         .await
         .expect("ordinary write must not wait for the full convergence pass");
 
@@ -1067,7 +1063,7 @@ mod tests {
             .expect("convergence resumes after ordinary admission");
     }
 
-    #[asupersync::test]
+    #[tokio::test]
     async fn stepped_convergence_preserves_single_transaction_checkpoint_result() {
         let (_directory, fixture) = open_registered().await;
         let transaction = fixture
@@ -1149,7 +1145,7 @@ mod tests {
         );
     }
 
-    #[asupersync::test]
+    #[tokio::test]
     async fn corruption_refuses_trust_after_durable_audit_progress() {
         let (_directory, fixture) = open_registered().await;
         let transaction = fixture
@@ -1209,7 +1205,7 @@ mod tests {
     /// On a store too large for the doctor budget, a whole-table audit
     /// statement is interrupted. That says nothing about the rows, so Doctor
     /// must not report it as a failed invariant.
-    #[asupersync::test]
+    #[tokio::test]
     async fn audit_past_its_budget_is_skipped_not_violated() {
         let (_directory, fixture) = open_registered().await;
         let transaction = fixture
@@ -1236,7 +1232,7 @@ mod tests {
         );
     }
 
-    #[asupersync::test]
+    #[tokio::test]
     async fn audit_within_its_budget_still_refuses_corrupt_rows() {
         let (_directory, fixture) = open_registered().await;
         let transaction = fixture
@@ -1272,7 +1268,7 @@ mod tests {
         assert_eq!(audit.verdict(), Some(false));
     }
 
-    #[asupersync::test]
+    #[tokio::test]
     async fn foreign_key_audit_finds_violations_by_child_table() {
         let directory = TempDir::new().unwrap();
         let database_path = directory.path().join("sessions.db");
@@ -1298,7 +1294,7 @@ mod tests {
         );
     }
 
-    #[asupersync::test]
+    #[tokio::test]
     async fn foreign_key_audit_resumes_after_last_durable_table() {
         let directory = TempDir::new().unwrap();
         let database_path = directory.path().join("sessions.db");

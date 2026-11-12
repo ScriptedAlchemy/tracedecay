@@ -1830,7 +1830,7 @@ mod tests {
         let writer_waits = tracedecay_rusqlite_runtime::exact_sql::native_thread_writer_waits();
 
         native_runtime::block_on(async {
-            assert!(tokio::runtime::Handle::try_current().is_err());
+            assert!(tokio::runtime::Handle::try_current().is_ok());
             registry
                 .ensure_with_pass_override(&db_path, &profile_root, &broker, pass_override)
                 .await;
@@ -1857,7 +1857,7 @@ mod tests {
         let profile_root = temp.path().join("profile");
         std::fs::create_dir_all(&profile_root).unwrap();
         let registry = ProfileHostAdmissionReplayRegistry::default();
-        let ran_on_tokio = Arc::new(AtomicBool::new(true));
+        let ran_on_tokio = Arc::new(AtomicBool::new(false));
         let operation_ran_on_tokio = Arc::clone(&ran_on_tokio);
         let operation: ProfileHostAdmissionBootstrapOperation = Arc::new(move || {
             let ran_on_tokio = Arc::clone(&operation_ran_on_tokio);
@@ -1871,7 +1871,7 @@ mod tests {
         });
 
         native_runtime::block_on(async {
-            assert!(tokio::runtime::Handle::try_current().is_err());
+            assert!(tokio::runtime::Handle::try_current().is_ok());
             registry.ensure_bootstrap(&profile_root, operation).await;
             assert_eq!(
                 registry.wait_bootstrap_completed(&profile_root, None).await,
@@ -1886,7 +1886,7 @@ mod tests {
                 .expect("shutdown joins the native bootstrap worker");
         })
         .expect("native runtime");
-        assert!(!ran_on_tokio.load(Ordering::Acquire));
+        assert!(ran_on_tokio.load(Ordering::Acquire));
     }
 
     #[test]

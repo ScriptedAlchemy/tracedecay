@@ -12,7 +12,7 @@ use tracedecay_runtime_core::storage::{
 
 use super::storage::{
     ProfileOfflineAuthority, RestoreWording, join_outcome_and_restore, remove_fixed_profile_path,
-    take_profile_offline,
+    remove_store_family, take_profile_offline,
 };
 
 const OPERATION: &str = "wipe --stale";
@@ -189,7 +189,7 @@ fn print_project_registrations(profile_root: &Path) -> Result<()> {
 
 /// What a reset deletes inside a store's directory.
 enum StoreMembers {
-    /// A database and every entry named after it.
+    /// The SQLite family and its registered store artifacts.
     DatabaseFamily(&'static str),
     /// These exact directories.
     Directories(&'static [&'static str]),
@@ -229,34 +229,6 @@ fn store_location(
     })
 }
 
-/// Removes `database` and every entry named after it in `directory`: its
-/// SQLite sidecars and spools (`<name>.db…`), its host-admission directory
-/// (`.<name>.db…`), and its session relation graph (`<name>.grafeo…`).
-fn remove_store_family(directory: &Path, database: &str) -> Result<usize> {
-    let stem = database.strip_suffix(".db").unwrap_or(database);
-    let owned_prefix = format!("{stem}.");
-    let hidden_prefix = format!(".{database}.");
-    let entries = std::fs::read_dir(directory).map_err(|error| TraceDecayError::Config {
-        message: format!("failed to list '{}': {error}", directory.display()),
-    })?;
-    let mut members = Vec::new();
-    for entry in entries {
-        let entry = entry.map_err(|error| TraceDecayError::Config {
-            message: format!("failed to list '{}': {error}", directory.display()),
-        })?;
-        let name = entry.file_name().to_string_lossy().into_owned();
-        if name.starts_with(&owned_prefix) || name.starts_with(&hidden_prefix) {
-            members.push(name);
-        }
-    }
-    let mut removed = 0;
-    for name in &members {
-        removed += usize::from(remove_fixed_profile_path(directory, name)?);
-        verify_store_path_absent(&directory.join(name))?;
-    }
-    Ok(removed)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -270,6 +242,10 @@ mod tests {
             "sessions.db-wal",
             "sessions.db-shm",
             "sessions.grafeo",
+            "sessions.verified",
+            "user-sessions.verified",
+            "tracedecay.verified",
+            "sessions.grafeo.corruption-lock",
             "tracedecay.db",
             "tracedecay.db-wal",
             "tracedecay.grafeo",
@@ -279,19 +255,25 @@ mod tests {
             "global.db-wal",
             "global.db-shm",
             "profile-identity.json",
+            "sessions.unrelated",
+            ".sessions.db.notes",
         ] {
             std::fs::write(root.join(file), file).expect("write store file");
         }
         for dir in [
             ".sessions.db.host-admission",
             "sessions.db.delivery-settlement-spool-v1",
+            "sessions.grafeo.wal",
+            "sessions.grafeo.spill",
+            "sessions.spill",
+            "sessions.sealed",
             "code-index-v1",
         ] {
             std::fs::create_dir(root.join(dir)).expect("create store directory");
             std::fs::write(root.join(dir).join("entry"), dir).expect("write store entry");
         }
 
-        assert_eq!(remove_store_family(root, "sessions.db").unwrap(), 6);
+        assert_eq!(remove_store_family(root, "sessions.db").unwrap(), 10);
         assert_eq!(remove_store_family(root, GLOBAL_DB_FILENAME).unwrap(), 3);
 
         let mut kept: Vec<String> = std::fs::read_dir(root)
@@ -302,15 +284,77 @@ mod tests {
         assert_eq!(
             kept,
             [
+                ".sessions.db.notes",
                 "code-index-v1",
                 "profile-identity.json",
+                "sessions.grafeo.corruption-lock",
+                "sessions.spill",
+                "sessions.unrelated",
                 "store_manifest.json",
                 "tracedecay.db",
                 "tracedecay.db-wal",
                 "tracedecay.grafeo",
+                "tracedecay.verified",
                 "user-sessions.db",
+                "user-sessions.verified",
             ]
         );
+    }
+
+    #[test]
+    fn profile_sessions_reset_removes_only_its_graph_verification_marker() {
+        let directory = tempfile::TempDir::new().unwrap();
+        let root = directory.path();
+        for name in [
+            "sessions.db",
+            "sessions.verified",
+            "user-sessions.db",
+            "user-sessions.verified",
+        ] {
+            std::fs::write(root.join(name), name).unwrap();
+        }
+
+        assert_eq!(
+            remove_store_family(root, USER_SESSIONS_DB_FILENAME).unwrap(),
+            2
+        );
+        assert!(!root.join("user-sessions.db").exists());
+        assert!(!root.join("user-sessions.verified").exists());
+        assert_eq!(
+            std::fs::read(root.join("sessions.db")).unwrap(),
+            b"sessions.db"
+        );
+        assert_eq!(
+            std::fs::read(root.join("sessions.verified")).unwrap(),
+            b"sessions.verified"
+        );
+    }
+
+    #[test]
+    fn unexpected_graph_verification_marker_kind_preserves_the_store() {
+        let directory = tempfile::TempDir::new().unwrap();
+        let root = directory.path();
+        std::fs::write(root.join("sessions.db"), b"store").unwrap();
+        let marker = root.join("sessions.verified");
+        std::fs::create_dir(&marker).unwrap();
+        std::fs::write(marker.join("foreign"), b"preserve").unwrap();
+
+        assert!(remove_store_family(root, SESSIONS_DB_FILENAME).is_err());
+        assert_eq!(std::fs::read(root.join("sessions.db")).unwrap(), b"store");
+        assert_eq!(std::fs::read(marker.join("foreign")).unwrap(), b"preserve");
+    }
+
+    #[test]
+    fn unexpected_sqlite_member_kind_preserves_the_whole_family() {
+        let directory = tempfile::TempDir::new().unwrap();
+        let root = directory.path();
+        std::fs::write(root.join("sessions.db"), b"main").unwrap();
+        let foreign = root.join("sessions.db-wal");
+        std::fs::create_dir(&foreign).unwrap();
+        std::fs::write(foreign.join("entry"), b"keep").unwrap();
+        assert!(remove_store_family(root, "sessions.db").is_err());
+        assert_eq!(std::fs::read(root.join("sessions.db")).unwrap(), b"main");
+        assert_eq!(std::fs::read(foreign.join("entry")).unwrap(), b"keep");
     }
 
     #[test]

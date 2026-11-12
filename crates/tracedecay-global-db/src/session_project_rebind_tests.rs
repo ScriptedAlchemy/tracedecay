@@ -227,7 +227,7 @@ async fn projected_text_contains(
     false
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn changed_project_key_rebinds_without_blocking_other_sessions() {
     let tmp = TempDir::new().unwrap();
     let profile = tmp.path().join("profile");
@@ -382,7 +382,7 @@ async fn stored_project(
     (session.project_key, session.project_path)
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn lcm_compression_before_the_rollout_stores_the_session_under_its_store_scope() {
     let tmp = TempDir::new().unwrap();
     let profile = tmp.path().join("profile");
@@ -488,7 +488,7 @@ async fn lcm_compression_before_the_rollout_stores_the_session_under_its_store_s
     );
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn a_rollout_starting_after_lcm_compression_keeps_its_own_start_time() {
     const ROLLOUT_STARTED_AT: i64 = 4_102_444_800;
     let tmp = TempDir::new().unwrap();
@@ -556,7 +556,7 @@ async fn a_rollout_starting_after_lcm_compression_keeps_its_own_start_time() {
     );
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn genuine_session_collision_is_recorded_and_later_sessions_project() {
     let tmp = TempDir::new().unwrap();
     let profile = tmp.path().join("profile");
@@ -673,7 +673,7 @@ fn session_fact_with_transcript(cwd: &str, transcript_path: &str) -> CanonicalOb
     }
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn a_retired_reoffer_keeps_its_terminal_session_collision() {
     let tmp = TempDir::new().unwrap();
     let project_root = tmp.path().join("repo");
@@ -844,7 +844,7 @@ async fn queue_attempts(
 /// rollout resumed from a linked worktree) is one session. Its messages must
 /// project and the session row keeps the first cwd instead of colliding on
 /// `project_path` for every later record.
-#[asupersync::test]
+#[tokio::test]
 async fn session_seen_from_another_cwd_projects_every_message() {
     let tmp = TempDir::new().unwrap();
     let profile = tmp.path().join("profile");

@@ -21,9 +21,8 @@ fn run_git(cwd: &Path, args: &[&str]) {
     assert!(status.success(), "git {args:?} failed in {}", cwd.display());
 }
 
-/// A Tokio caller awaits discovery that runs on the native runtime: a
-/// saturated Tokio blocking pool does not hold up the walk, and the caller's
-/// cancellation still ends its wait while the walk is in flight.
+/// A queued discovery must observe caller cancellation even while every
+/// blocking-pool thread is busy. Its admitted walk can finish afterwards.
 #[test]
 fn repository_discovery_can_be_cancelled_while_the_blocking_pool_is_busy() {
     let fixture = TempDir::new().expect("fixture");
@@ -63,15 +62,15 @@ fn repository_discovery_can_be_cancelled_while_the_blocking_pool_is_busy() {
             std::task::Poll::Ready(())
         })
         .await;
-        tokio::time::timeout(Duration::from_secs(10), walk.wait_entered())
-            .await
-            .expect("the walk must start while the Tokio blocking pool is saturated");
         cancellation.cancel();
         let outcome = discovery.await;
 
+        release_tx.send(()).expect("release blocking task");
+        tokio::time::timeout(Duration::from_secs(10), walk.wait_entered())
+            .await
+            .expect("the admitted walk starts once a blocking thread is available");
         walk.release();
         reset_repository_discovery_for_test(&repository);
-        release_tx.send(()).expect("release blocking task");
         blocker.await.expect("blocking task joined");
         assert_eq!(
             outcome,
@@ -81,7 +80,7 @@ fn repository_discovery_can_be_cancelled_while_the_blocking_pool_is_busy() {
     });
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn bounded_discovery_distinguishes_repository_and_non_repository() {
     let fixture = TempDir::new().expect("fixture");
     let repository = fixture.path().join("repository");
@@ -116,7 +115,7 @@ async fn bounded_discovery_distinguishes_repository_and_non_repository() {
     ));
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn linked_worktree_identity_preserves_worktree_git_dir_and_common_dir() {
     let fixture = TempDir::new().expect("fixture");
     let repository = fixture.path().join("repository");
@@ -169,7 +168,7 @@ async fn linked_worktree_identity_preserves_worktree_git_dir_and_common_dir() {
     assert!(identity.git_dir.ends_with("worktrees/linked"));
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn cancellation_is_typed_before_discovery_work_starts() {
     let fixture = TempDir::new().expect("fixture");
     let cancellation = CancellationToken::new();
@@ -188,7 +187,7 @@ async fn cancellation_is_typed_before_discovery_work_starts() {
     );
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn elapsed_deadline_is_typed_before_discovery_work_starts() {
     let fixture = TempDir::new().expect("fixture");
     let outcome = discover_repository_identity(

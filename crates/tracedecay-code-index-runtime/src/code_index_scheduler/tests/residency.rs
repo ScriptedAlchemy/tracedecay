@@ -1625,7 +1625,11 @@ async fn a_cold_build_refused_during_construction_stays_parked_until_reconstruct
     drop(headroom.borrow_and_update());
     memory.wait_for_headroom(1, limit.get());
     drop(foreign);
-    assert!(headroom.has_changed());
+    assert!(
+        headroom
+            .has_changed()
+            .expect("headroom publisher remains open")
+    );
     assert_cold_build_stays_parked(&registry, fixture.path()).await;
 
     // Leave room for the 1.5 GiB text build below the 14.4 GiB watermark.
@@ -1991,7 +1995,9 @@ async fn a_nested_successor_memory_refusal_survives_predecessor_projection_compl
     memory.wait_for_headroom(1, limit.get());
     drop(foreign);
     assert!(
-        !headroom.has_changed(),
+        !headroom
+            .has_changed()
+            .expect("headroom publisher remains open"),
         "an unrelated byte release cannot clear the external pressure refusal"
     );
     // Deliver and bank plain worker wakes without advancing the source epoch.

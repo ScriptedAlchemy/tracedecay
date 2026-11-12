@@ -429,7 +429,10 @@ mod tests {
     }
 
     #[test]
-    fn accepted_user_job_runs_without_a_tokio_runtime() {
+    fn accepted_user_job_runs_on_the_process_runtime() {
+        if !crate::test_support::alone_with_storage_wait_counters() {
+            return;
+        }
         let fixture = tokio::runtime::Runtime::new().expect("fixture runtime");
         let (_project, mut dash) = fixture.block_on(crate::events_api::dashboard_state_fixture(
             "project.dashboard-jobs-native",
@@ -446,15 +449,18 @@ mod tests {
             .expect("fixture job saved");
         let (ran, runs) = mpsc::channel();
         let ran = std::sync::Mutex::new(ran);
+        let process_runtime = native_runtime::handle().expect("process runtime").id();
         dash.automation_authority = Some(
             DashboardAutomationAuthorityV1::new(
                 dash.profile_root.clone(),
                 Arc::new(move |invocation| {
-                    let on_tokio = tokio::runtime::Handle::try_current().is_ok();
+                    let runtime = tokio::runtime::Handle::try_current()
+                        .ok()
+                        .map(|handle| handle.id());
                     let _ = ran
                         .lock()
                         .expect("run channel")
-                        .send((invocation.request, on_tokio));
+                        .send((invocation.request, runtime));
                     Box::pin(async {
                         Err(DashboardAutomationAuthorityErrorV1::unavailable(
                             "fixture run port",
@@ -484,13 +490,17 @@ mod tests {
         .expect("job run accepted");
 
         assert_eq!(status, StatusCode::ACCEPTED);
-        let (request, on_tokio) = runs
+        let (request, runtime) = runs
             .recv_timeout(Duration::from_secs(60))
             .expect("the accepted job reaches the run port");
         assert!(
             matches!(request, DashboardAutomationRunRequestV1::UserJob { job_id, .. } if job_id == "native-job")
         );
-        assert!(!on_tokio, "the job ran on a Tokio worker");
+        assert_eq!(
+            runtime,
+            Some(process_runtime),
+            "the accepted job stays on the process runtime"
+        );
         assert_eq!(
             native_runtime::native_thread_writer_waits(),
             writer_waits,
@@ -499,16 +509,19 @@ mod tests {
     }
 
     #[test]
-    fn scheduler_reconcile_runs_without_a_tokio_runtime() {
+    fn scheduler_reconcile_runs_on_the_process_runtime() {
         let fixture = tokio::runtime::Runtime::new().expect("fixture runtime");
         let (_project, mut dash) = fixture.block_on(crate::events_api::dashboard_state_fixture(
             "project.dashboard-reconcile-native",
         ));
         let (reconciled, reconciles) = mpsc::channel();
         let reconciled = std::sync::Mutex::new(reconciled);
+        let process_runtime = native_runtime::handle().expect("process runtime").id();
         dash.automation_scheduler_reconciler = Some(Arc::new(move || {
-            let on_tokio = tokio::runtime::Handle::try_current().is_ok();
-            let _ = reconciled.lock().expect("reconcile channel").send(on_tokio);
+            let runtime = tokio::runtime::Handle::try_current()
+                .ok()
+                .map(|handle| handle.id());
+            let _ = reconciled.lock().expect("reconcile channel").send(runtime);
             Box::pin(async {
                 tracedecay_contracts::retrieval::AutomationSchedulerReconcileOutcome::Started
             })
@@ -517,9 +530,13 @@ mod tests {
         native_runtime::block_on(async { dash.reconcile_automation_scheduler() })
             .expect("native block_on");
 
-        let on_tokio = reconciles
+        let runtime = reconciles
             .recv_timeout(Duration::from_secs(60))
             .expect("the reconcile reaches the daemon's reconciler");
-        assert!(!on_tokio, "the reconcile ran on a Tokio worker");
+        assert_eq!(
+            runtime,
+            Some(process_runtime),
+            "the reconcile stays on the process runtime"
+        );
     }
 }

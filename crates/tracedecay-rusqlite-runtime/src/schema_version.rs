@@ -11,6 +11,10 @@ use std::task::{Context, Poll};
 
 use crate::exact_sql::ExactSqlValue;
 
+/// SQLite header application ID for a store whose complete registered schema
+/// was installed in private staging before publication ("TDST").
+pub const REGISTERED_STORE_APPLICATION_ID: i32 = i32::from_be_bytes(*b"TDST");
+
 /// Ledger table. One row per component.
 pub const TABLE: &str = "tracedecay_schema_version";
 

@@ -19,7 +19,7 @@ use std::sync::{LazyLock, Mutex, MutexGuard, PoisonError};
 use std::task::Poll;
 use std::time::{Duration, Instant};
 
-use asupersync::Cx;
+use tokio::runtime::Handle;
 
 use crate::cancellation::{CancellationToken, MonotonicDeadline};
 
@@ -155,18 +155,21 @@ where
     Probe: FnOnce() -> Value + Send + 'static,
     Value: Send + 'static,
 {
-    let (answer, mut answered) = asupersync::channel::oneshot::channel();
+    let (answer, answered) = tokio::sync::oneshot::channel();
     // A probe the pool never runs drops its sender, which reads as `ProbeFailed`.
     if let Some(runtime) = crate::native_runtime::handle() {
-        let _ = runtime.spawn_blocking(move || {
-            let _ = answer.send_blocking(probe());
-        });
+        drop(crate::native_runtime::spawn_blocking_on(
+            &runtime,
+            move || {
+                let _ = answer.send(probe());
+            },
+        ));
     }
     within_discovery_budget(
         directory,
         deadline,
         &CancellationToken::new(),
-        move |cx| async move { answered.recv(&cx).await.ok() },
+        move |_| async move { answered.await.ok() },
     )
     .await
 }
@@ -180,7 +183,7 @@ enum IdentityResolutionResult {
     Unreadable,
 }
 
-type PublishedIdentity = asupersync::channel::watch::Receiver<Option<IdentityResolutionResult>>;
+type PublishedIdentity = tokio::sync::watch::Receiver<Option<IdentityResolutionResult>>;
 
 /// One resolution that is still running, and every caller's view of its answer.
 struct IdentityResolution {
@@ -225,7 +228,7 @@ fn join_identity_resolution(directory: &Path) -> PublishedIdentity {
     if let Some(resolution) = resolutions.get(directory) {
         return resolution.published.clone();
     }
-    let (publish, published) = asupersync::channel::watch::channel(None);
+    let (publish, published) = tokio::sync::watch::channel(None);
     resolutions.insert(
         directory.to_path_buf(),
         IdentityResolution {
@@ -246,12 +249,12 @@ fn join_identity_resolution(directory: &Path) -> PublishedIdentity {
         // starts a fresh resolution, which the retained topology answers
         // without a walk, instead of joining a resolution that is history.
         drop(retire);
-        let _ = publish.send(Some(result));
+        publish.send_replace(Some(result));
     };
     // The walk is a detached blocking task, not part of any caller's future,
     // so a caller that stops waiting leaves it running.
     if let Some(runtime) = crate::native_runtime::handle() {
-        let _ = runtime.spawn_blocking(resolve);
+        drop(crate::native_runtime::spawn_blocking_on(&runtime, resolve));
     }
     published
 }
@@ -308,8 +311,8 @@ async fn authority_identity_off_executor(
     cancellation: &CancellationToken,
 ) -> Result<IdentityResolutionResult, GitDiscoveryUnknown> {
     let mut published = join_identity_resolution(directory);
-    within_discovery_budget(directory, deadline, cancellation, move |cx| async move {
-        published_identity(&cx, &mut published).await
+    within_discovery_budget(directory, deadline, cancellation, move |_| async move {
+        published_identity(&mut published).await
     })
     .await
 }
@@ -329,14 +332,11 @@ async fn cli_identity_off_executor(
     let helper_cancellation = abandoned.0.clone();
     let helper_directory = directory.to_path_buf();
     within_discovery_budget(directory, deadline, cancellation, move |cx| async move {
-        match cx.spawn_blocking(move |_| {
+        crate::native_runtime::spawn_blocking_on(&cx, move || {
             cli_identity(&helper_directory, deadline, &helper_cancellation)
-        }) {
-            Ok(mut helper) => helper.join(&cx).await.ok(),
-            Err(_) => Some(GitRepositoryIdentityOutcome::Unknown(
-                GitDiscoveryUnknown::SpawnFailed,
-            )),
-        }
+        })
+        .await
+        .ok()
     })
     .await
     .unwrap_or_else(GitRepositoryIdentityOutcome::Unknown)
@@ -352,8 +352,7 @@ impl Drop for CancelOnDrop {
 }
 
 /// Race `answer` against `cancellation` and the discovery budget for
-/// `directory`, in that order, inside a native task: the Asupersync timer must
-/// not be polled by a foreign executor. `None` from `answer` means the work
+/// `directory`, in that order, inside a task on the retained Tokio runtime. `None` from `answer` means the work
 /// ended without one.
 async fn within_discovery_budget<Answer, AnswerFuture, Value>(
     directory: &Path,
@@ -362,23 +361,20 @@ async fn within_discovery_budget<Answer, AnswerFuture, Value>(
     answer: Answer,
 ) -> Result<Value, GitDiscoveryUnknown>
 where
-    Answer: FnOnce(Cx) -> AnswerFuture + Send + 'static,
+    Answer: FnOnce(Handle) -> AnswerFuture + Send + 'static,
     AnswerFuture: Future<Output = Option<Value>> + Send + 'static,
     Value: Send + 'static,
 {
-    let Some(cx) = crate::native_runtime::cx() else {
+    let Some(cx) = crate::native_runtime::handle() else {
         return Err(GitDiscoveryUnknown::ProbeFailed);
     };
     let directory = directory.to_path_buf();
     let cancellation = cancellation.clone();
-    let race = cx.spawn(move |cx| async move {
+    let race = cx.spawn(async move {
+        let cx = tokio::runtime::Handle::current();
         let mut answer = pin!(answer(cx.clone()));
         let mut cancelled = pin!(cancellation.cancelled());
-        let mut budget = pin!(repository_discovery_budget(
-            &cx,
-            &directory,
-            deadline.instant()
-        ));
+        let mut budget = pin!(repository_discovery_budget(&directory, deadline.instant()));
         poll_fn(|task| {
             if let Poll::Ready(answer) = answer.as_mut().poll(task) {
                 return Poll::Ready(answer.ok_or(GitDiscoveryUnknown::ProbeFailed));
@@ -393,13 +389,7 @@ where
         })
         .await
     });
-    match race {
-        Ok(mut race) => race
-            .join(&cx)
-            .await
-            .unwrap_or(Err(GitDiscoveryUnknown::ProbeFailed)),
-        Err(_) => Err(GitDiscoveryUnknown::ProbeFailed),
-    }
+    race.await.unwrap_or(Err(GitDiscoveryUnknown::ProbeFailed))
 }
 
 /// Completes at `deadline`, the wall-clock bound on one caller's wait for
@@ -409,9 +399,8 @@ where
 /// walk is parked: the project is discovery-blocked, and sleeping out the
 /// deadline would hold the caller open for the whole hang. A test that holds
 /// the discovery clock keeps the budget open until the walk finishes.
-async fn repository_discovery_budget(cx: &Cx, directory: &Path, deadline: Instant) {
-    let elapsed =
-        asupersync::time::sleep(cx.now(), deadline.saturating_duration_since(Instant::now()));
+async fn repository_discovery_budget(directory: &Path, deadline: Instant) {
+    let elapsed = tokio::time::sleep(deadline.saturating_duration_since(Instant::now()));
     #[cfg(any(test, feature = "test-helpers"))]
     {
         if crate::git_repository::repository_discovery_clock_held(directory) {
@@ -419,7 +408,7 @@ async fn repository_discovery_budget(cx: &Cx, directory: &Path, deadline: Instan
         }
         let mut elapsed = pin!(elapsed);
         let mut parked = pin!(crate::git_repository::repository_discovery_parked(
-            cx, directory
+            directory
         ));
         poll_fn(|task| {
             if elapsed.as_mut().poll(task).is_ready() || parked.as_mut().poll(task).is_ready() {
@@ -444,15 +433,12 @@ async fn repository_discovery_budget(cx: &Cx, directory: &Path, deadline: Instan
     level = "trace",
     skip_all
 )]
-async fn published_identity(
-    cx: &Cx,
-    published: &mut PublishedIdentity,
-) -> Option<IdentityResolutionResult> {
+async fn published_identity(published: &mut PublishedIdentity) -> Option<IdentityResolutionResult> {
     loop {
-        if let Some(result) = published.borrow_and_update_clone() {
+        if let Some(result) = published.borrow_and_update().clone() {
             return Some(result);
         }
-        published.changed(cx).await.ok()?;
+        published.changed().await.ok()?;
     }
 }
 
@@ -757,7 +743,7 @@ mod tests {
         assert!(status.success(), "git {args:?} failed in {}", cwd.display());
     }
 
-    #[asupersync::test]
+    #[tokio::test]
     async fn held_discovery_clock_covers_entry_expiry_without_disabling_cancellation() {
         let root = tempdir().unwrap();
         run_git(root.path(), &["init", "--quiet"]);
@@ -927,60 +913,61 @@ mod tests {
     /// The Git CLI fallback can queue behind a full blocking pool, where it
     /// observes neither the deadline nor cancellation. The caller's wait must
     /// still end at its deadline.
-    #[asupersync::test(blocking = 1)]
-    async fn a_cli_fallback_queued_behind_a_full_pool_still_meets_its_deadline() {
-        let cx = Cx::current().expect("test task context");
-        let tmp = tempdir().unwrap();
-        let repository = tmp.path().join("repository");
-        fs::create_dir_all(&repository).unwrap();
-        run_git(&repository, &["init", "-b", "main", "--quiet"]);
-        crate::git_repository::unreadable_repository_discovery_for_test(
-            &repository,
-            Duration::from_millis(100),
-        );
+    #[test]
+    fn a_cli_fallback_queued_behind_a_full_pool_still_meets_its_deadline() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .max_blocking_threads(1)
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let cx = tokio::runtime::Handle::try_current().expect("test task context");
+            let tmp = tempdir().unwrap();
+            let repository = tmp.path().join("repository");
+            fs::create_dir_all(&repository).unwrap();
+            run_git(&repository, &["init", "-b", "main", "--quiet"]);
+            crate::git_repository::unreadable_repository_discovery_for_test(
+                &repository,
+                Duration::from_millis(100),
+            );
 
-        let probed = repository.clone();
-        let mut discovery = cx
-            .spawn(move |_| async move {
+            let probed = repository.clone();
+            let discovery = cx.spawn(async move {
                 discover_repository_identity(
                     &probed,
                     budget(Duration::from_millis(400)),
                     &CancellationToken::new(),
                 )
                 .await
-            })
-            .expect("discovery task");
-        while crate::git_repository::repository_discovery_count_for_test(&repository) == 0 {
-            asupersync::runtime::yield_now().await;
-        }
-        // The walk holds the pool's only thread; this blocker queues next, so
-        // the CLI helper queues behind it.
-        let (release, held) = std::sync::mpsc::channel::<()>();
-        let _blocker = cx
-            .spawn_blocking(move |_| {
+            });
+            while crate::git_repository::repository_discovery_count_for_test(&repository) == 0 {
+                tokio::task::yield_now().await;
+            }
+            // The walk holds the pool's only thread; this blocker queues next, so
+            // the CLI helper queues behind it.
+            let (release, held) = std::sync::mpsc::channel::<()>();
+            let _blocker = crate::native_runtime::spawn_blocking_on(&cx, move || {
                 let _ = held.recv();
-            })
-            .expect("pool blocker");
+            });
 
-        let outcome =
-            asupersync::time::timeout(cx.now(), Duration::from_secs(5), discovery.join(&cx)).await;
-        drop(release);
-        crate::git_repository::reset_repository_discovery_for_test(&repository);
+            let outcome = tokio::time::timeout(Duration::from_secs(5), discovery).await;
+            drop(release);
+            crate::git_repository::reset_repository_discovery_for_test(&repository);
 
-        assert_eq!(
-            outcome
-                .expect("a queued CLI helper must not hold the caller past its deadline")
-                .expect("discovery join"),
-            GitRepositoryIdentityOutcome::Unknown(GitDiscoveryUnknown::DeadlineExceeded)
-        );
+            assert_eq!(
+                outcome
+                    .expect("a queued CLI helper must not hold the caller past its deadline")
+                    .expect("discovery join"),
+                GitRepositoryIdentityOutcome::Unknown(GitDiscoveryUnknown::DeadlineExceeded)
+            );
+        });
     }
 
     /// A probe abandoned at its deadline must still finish and publish, or the
     /// deferral never converges: every retry starts the walk over and a root on
     /// a slow volume stays deferred for as long as clients keep asking.
-    #[asupersync::test]
+    #[tokio::test]
     async fn a_probe_over_its_budget_publishes_for_the_next_resolution() {
-        let cx = Cx::current().expect("test task context");
         let tmp = tempdir().unwrap();
         let repository = tmp.path().join("repository");
         fs::create_dir_all(&repository).unwrap();
@@ -1008,7 +995,7 @@ mod tests {
 
         // Joining the abandoned walk waits for its publication without a
         // timer; a walk that already retired is answered by what it retained.
-        published_identity(&cx, &mut join_identity_resolution(&repository)).await;
+        published_identity(&mut join_identity_resolution(&repository)).await;
         crate::git_repository::hold_repository_discovery_clock_for_test(&repository);
         let converged = discover_repository_identity(
             &repository,
@@ -1032,23 +1019,22 @@ mod tests {
 
     /// An abandoned probe still finishes and publishes, and the caller gets
     /// the typed deferral instead of waiting the probe out.
-    #[asupersync::test]
+    #[tokio::test]
     async fn a_bounded_probe_over_its_budget_is_deferred_and_still_finishes() {
-        let cx = Cx::current().expect("test task context");
         let tmp = tempdir().unwrap();
-        let (finished, mut probe_finished) = asupersync::channel::oneshot::channel();
+        let (finished, probe_finished) = tokio::sync::oneshot::channel();
         let (release, released) = std::sync::mpsc::channel::<()>();
 
         let deferred = bounded_repository_probe(tmp.path(), budget(Duration::ZERO), move || {
             let _ = released.recv();
-            let _ = finished.send_blocking(());
+            let _ = finished.send(());
         })
         .await;
         release.send(()).unwrap();
 
         assert_eq!(deferred, Err(GitDiscoveryUnknown::DeadlineExceeded));
         assert!(
-            probe_finished.recv(&cx).await.is_ok(),
+            probe_finished.await.is_ok(),
             "the abandoned probe must run to completion"
         );
         assert_eq!(
@@ -1064,7 +1050,7 @@ mod tests {
     /// questions. Every route resolution still read HEAD through a complete
     /// repository discovery, so a deferred root on a slow volume was rediscovered
     /// from scratch on every retry and the deferral never converged.
-    #[asupersync::test]
+    #[tokio::test]
     async fn a_head_read_after_a_published_topology_does_not_walk_again() {
         let tmp = tempdir().unwrap();
         let repository = slow_volume_repository(tmp.path());
@@ -1094,7 +1080,7 @@ mod tests {
     /// directory instead of walking to it. A linked worktree is where that can
     /// go wrong: its HEAD lives beside its per-worktree Git directory, not in
     /// the common directory it shares with the main checkout.
-    #[asupersync::test]
+    #[tokio::test]
     async fn a_retained_topology_still_reports_the_linked_worktree_head() {
         let tmp = tempdir().unwrap();
         let main = tmp.path().join("main");
@@ -1151,7 +1137,7 @@ mod tests {
 
     /// A decided-but-negative answer is an observation, not a verdict about the
     /// root: nothing about it survives the resolution that produced it.
-    #[asupersync::test]
+    #[tokio::test]
     async fn a_typed_probe_failure_does_not_poison_the_root() {
         let tmp = tempdir().unwrap();
         let workspace = tmp.path().join("workspace");
