@@ -5,10 +5,9 @@
 use std::path::Path;
 use std::sync::{Arc, Weak};
 
-use tracedecay_contracts::ApplicationProblem;
-use tracedecay_contracts::ResolvedScope;
 use tracedecay_contracts::graph_tool::GraphToolResultV1;
 use tracedecay_contracts::retrieval::HookRuntimeResultV1;
+use tracedecay_contracts::{ApplicationProblem, CancellationStage, ResolvedScope, RetryDirective};
 use tracedecay_daemon_service::{
     DaemonInvocationService, GraphToolFuture, GraphToolInvocationV1, ProjectGraphToolPortV1,
     RegisteredGraphToolOwnerV1,
@@ -51,12 +50,46 @@ impl ProjectGraphToolPortV1 for McpGraphToolPort {
             {
                 return Err(ApplicationProblem::runtime_mounting());
             }
+            let operation = invocation.operation;
             server
                 .compute_graph_tool(invocation)
                 .await
-                .map_err(|error| graph_tool_error_problem(&error))
+                .map_err(|error| graph_tool_execution_problem(operation, &error))
         })
     }
+}
+
+/// Dispatch and worker timers can both settle an admitted read. A raw
+/// interruption returned by either must retain that read's terminal kind,
+/// not become an authority-unavailable refusal from before admission.
+/// Owner-supplied records/details and side-effect settlement stay authoritative.
+fn graph_tool_execution_problem(
+    operation: ApplicationSurfaceOperation,
+    error: &TraceDecayError,
+) -> ApplicationProblem {
+    if operation.owner_side_effect().is_none()
+        && error.project_route_problem_record().is_none()
+        && error.project_route_typed_detail().is_none()
+    {
+        match error.project_route_context().map(|(reason, _, _)| reason) {
+            Some("tool_dispatch_deadline_exceeded") => {
+                return ApplicationProblem::TimedOut {
+                    stage: CancellationStage::DuringRead,
+                    retry: RetryDirective::Never,
+                    legal_actions: Vec::new(),
+                };
+            }
+            Some("tool_dispatch_cancelled") => {
+                return ApplicationProblem::Cancelled {
+                    stage: CancellationStage::DuringRead,
+                    retry: RetryDirective::Never,
+                    legal_actions: Vec::new(),
+                };
+            }
+            _ => {}
+        }
+    }
+    graph_tool_error_problem(error)
 }
 
 impl McpServer {
@@ -248,5 +281,107 @@ impl McpServer {
             .map_err(|error| TraceDecayError::Config {
                 message: format!("the graph-tool owner failed to register: {error}"),
             })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use serde_json::json;
+    use tracedecay_contracts::{ApplicationProblem, CancellationStage, RequestId};
+    use tracedecay_domain::errors::TraceDecayError;
+    use tracedecay_mcp::server::{DispatchSettlement, dispatch_cancelled_error};
+    use tracedecay_mcp::tools::dispatch_ceiling::tool_dispatch_deadline_error;
+    use tracedecay_tool_catalog::ApplicationSurfaceOperation;
+
+    use super::graph_tool_execution_problem;
+    use crate::mcp::tools::graph_tool_error_problem;
+
+    #[test]
+    fn admitted_graph_read_interruptions_preserve_terminal_kind_and_stage() {
+        let operation = ApplicationSurfaceOperation::RenamePreview;
+        assert!(operation.owner_side_effect().is_none());
+        for (error, expected, kind) in [
+            (
+                tool_dispatch_deadline_error(operation.mcp_tool_name(), Duration::ZERO),
+                ApplicationProblem::timed_out(CancellationStage::DuringRead).unwrap(),
+                "timed_out",
+            ),
+            (
+                dispatch_cancelled_error(
+                    operation.mcp_tool_name(),
+                    DispatchSettlement::Settling,
+                    false,
+                ),
+                ApplicationProblem::cancelled(CancellationStage::DuringRead).unwrap(),
+                "cancelled",
+            ),
+        ] {
+            let problem = graph_tool_execution_problem(operation, &error);
+            assert_eq!(problem, expected);
+            let envelope = tracedecay_api::adapter_problem(
+                RequestId::new("request.graph-read.interrupted").unwrap(),
+                problem,
+            )
+            .unwrap();
+            let wire = serde_json::to_value(envelope).unwrap();
+            assert_eq!(wire["problem"]["kind"], kind);
+            assert_eq!(wire["problem"]["code"], kind);
+            assert_eq!(wire["problem"]["cancellation_stage"], "during_read");
+            assert_eq!(wire["problem"]["terminality"], "admitted_terminal");
+            assert_eq!(wire["problem"]["retry"], "never");
+            assert_eq!(wire["problem"]["legal_actions"], json!([]));
+        }
+    }
+
+    #[test]
+    fn graph_read_execution_preserves_owner_problem_records_and_details() {
+        let operation = ApplicationSurfaceOperation::RenamePreview;
+        let expected = ApplicationProblem::timed_out_before_admission();
+        let envelope = tracedecay_api::adapter_problem(
+            RequestId::new("request.graph-read.owner-refusal").unwrap(),
+            expected.clone(),
+        )
+        .unwrap();
+        let error = tool_dispatch_deadline_error(operation.mcp_tool_name(), Duration::ZERO)
+            .with_problem_record(serde_json::to_value(&envelope.problem).unwrap());
+        assert_eq!(graph_tool_execution_problem(operation, &error), expected);
+
+        let error = tracedecay_graph_query::map_code_graph_read_runtime_error(
+            tracedecay_graph_query::CodeGraphReadError::Rewarming {
+                retry_after_millis: 7_940,
+            },
+        );
+        let detail = error.project_route_typed_detail().unwrap().clone();
+        let expected = graph_tool_error_problem(&error);
+        let error = TraceDecayError::project_route_with_detail(
+            "tool_dispatch_deadline_exceeded",
+            true,
+            detail,
+        );
+        assert_eq!(graph_tool_execution_problem(operation, &error), expected);
+    }
+
+    #[test]
+    fn graph_read_interruption_mapping_does_not_reclassify_effects_or_other_failures() {
+        let effect = ApplicationSurfaceOperation::RunAffectedTests;
+        assert!(effect.owner_side_effect().is_some());
+        let timeout = tool_dispatch_deadline_error(effect.mcp_tool_name(), Duration::ZERO);
+        assert_eq!(
+            graph_tool_execution_problem(effect, &timeout),
+            graph_tool_error_problem(&timeout)
+        );
+        for reason in [
+            "tool_dispatch_effect_unknown",
+            "tool_dispatch_shutdown",
+            "verified-code-graph-read-unavailable",
+        ] {
+            let error = TraceDecayError::project_route(reason, true, "owner refusal");
+            assert_eq!(
+                graph_tool_execution_problem(ApplicationSurfaceOperation::RenamePreview, &error),
+                graph_tool_error_problem(&error)
+            );
+        }
     }
 }

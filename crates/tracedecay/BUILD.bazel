@@ -169,7 +169,7 @@ rust_test(
     compile_data = glob(["assets/**", "data/**", "fixtures/**", "resources/**", "tests/common/**", "tests/fixtures/**", "tests/mcp_suite/**", "vendor/**"], allow_empty = True) + ["//crates/tracedecay-agent-hosts:src_agents_hermes_templates", "//tests:shared_fixtures"],
     data = glob(["assets/**", "data/**", "fixtures/**", "resources/**", "tests/common/**", "tests/fixtures/**", "tests/mcp_suite/**", "vendor/**"], allow_empty = True) + ["//tests:support"] + ["//tests:fixtures"] + ["//crates/tracedecay-code-extraction:fixtures", "//plugin:agents"],
     rustc_env = {"CARGO_TARGET_TMPDIR": "/tmp"},
-    runfiles_env = {"TRACEDECAY_TEST_BIN": "//crates/tracedecay-cli:tracedecay__test"},
+    runfiles_env = {"TRACEDECAY_TEST_BIN": "//crates/tracedecay-cli:tracedecay__test", "TRACEDECAY_TEST_TYPESCRIPT_COMPILER": "//dashboard:typescript_compiler"},
 )
 
 rust_test(

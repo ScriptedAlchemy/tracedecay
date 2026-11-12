@@ -43,6 +43,10 @@ pub(crate) enum WriterCommand {
         lease: Arc<TransactionLeaseState>,
         authority: Option<Arc<dyn ExactSqlWriteAuthority>>,
     },
+    FinishInitialSchema {
+        reply: async_channel::Sender<Result<(), ExactSqlError>>,
+        authority: Arc<dyn ExactSqlWriteAuthority>,
+    },
     CheckpointWalTruncate {
         reply: async_channel::Sender<Result<ExactSqlRows, ExactSqlError>>,
         authority: Option<Arc<dyn ExactSqlWriteAuthority>>,
@@ -553,6 +557,43 @@ pub(crate) async fn run_writer_command(
             }
             terminal
         }
+        WriterCommand::FinishInitialSchema { reply, authority } => {
+            let result = authority
+                .verify(ExactSqlWriteIntent::Execute)
+                .and_then(|()| {
+                    with_exact_sql_guard(
+                        connection,
+                        ExactSqlAuthority::Canonical(ConnectionMode::Maintenance),
+                        Some(Arc::clone(shutdown_requested)),
+                        None,
+                        true,
+                        None,
+                        || {
+                            connection
+                                .pragma_update(
+                                    None,
+                                    "application_id",
+                                    crate::schema_version::REGISTERED_STORE_APPLICATION_ID,
+                                )
+                                .map_err(|error| {
+                                    sqlite_error("mark completed initial schema", error)
+                                })?;
+                            let checkpoint: (i64, i64, i64) = connection
+                                .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |row| {
+                                    Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+                                })
+                                .map_err(|error| {
+                                    sqlite_error("checkpoint completed initial schema", error)
+                                })?;
+                            if checkpoint != (0, 0, 0) {
+                                return Err(ExactSqlError::Busy);
+                            }
+                            Ok(())
+                        },
+                    )
+                });
+            DeferredReply::new(reply, result)
+        }
         WriterCommand::CheckpointWalTruncate { reply, authority } => {
             if let Err(error) =
                 verify_write_authority(authority.as_deref(), ExactSqlWriteIntent::Query)
@@ -607,6 +648,9 @@ pub(crate) fn reject_writer_command(command: WriterCommand) {
             let _ = reply.try_send(Err(ExactSqlError::WriterUnavailable));
         }
         WriterCommand::BeginTransaction { reply, .. } => {
+            let _ = reply.try_send(Err(ExactSqlError::WriterUnavailable));
+        }
+        WriterCommand::FinishInitialSchema { reply, .. } => {
             let _ = reply.try_send(Err(ExactSqlError::WriterUnavailable));
         }
         WriterCommand::CheckpointWalTruncate { reply, .. } => {

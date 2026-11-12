@@ -762,6 +762,51 @@ pub(super) fn open_lock_file(lock_path: &Path, private: bool) -> io::Result<fs::
     Ok(file)
 }
 
+fn private_directory_lock_path(path: &Path) -> io::Result<PathBuf> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| invalid_input("directory has no parent"))?;
+    let name = path
+        .file_name()
+        .ok_or_else(|| invalid_input("directory has no name"))?;
+    let lock_path = durable_directory_lock_path(&parent.canonicalize()?, name);
+    reject_symlink_components(&lock_path, "durable private store directory lock")?;
+    Ok(lock_path)
+}
+
+fn try_lock_directory_file(file: fs::File) -> io::Result<FileLease> {
+    file.try_lock().map_err(io::Error::from)?;
+    Ok(FileLease::held(file, SIDECAR_LEASE_LABEL))
+}
+
+/// Keep the coordination inode outside a disposable private directory so
+/// removal never splits contenders across two generations of the lock.
+pub(crate) fn try_lock_durable_directory(path: &Path) -> io::Result<FileLease> {
+    try_lock_directory_file(open_lock_file(&private_directory_lock_path(path)?, true)?)
+}
+
+/// Offline reset must preserve an existing lease inode and must not create
+/// a new one in a legacy store's namespace.
+pub(crate) fn try_lock_existing_durable_directory(path: &Path) -> io::Result<Option<FileLease>> {
+    match tracedecay_private_fs::open_private_file(&private_directory_lock_path(path)?) {
+        Ok(file) => try_lock_directory_file(file).map(Some),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
+/// Read-only admission never opens the coordination file for writing.
+pub(crate) fn durable_directory_lock_has_data(path: &Path) -> io::Result<bool> {
+    match fs::symlink_metadata(private_directory_lock_path(path)?) {
+        Ok(meta) if meta.is_file() => Ok(meta.len() != 0),
+        Ok(_) => Err(invalid_input(
+            "durable directory lock is not a regular file",
+        )),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error),
+    }
+}
+
 /// Non-blocking sidecar lock acquisition. Returns the held lock file on
 /// success, or `None` when another process/thread already holds it (the caller
 /// then skips its critical section). See the sidecar-lock module note above for

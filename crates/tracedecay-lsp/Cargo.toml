@@ -11,8 +11,6 @@ repository = "https://github.com/ScriptedAlchemy/tracedecay"
 async-channel.workspace = true
 constant_time_eq.workspace = true
 futures-util = { version = "0.3", features = ["sink"] }
-globset.workspace = true
-jsonc-parser = { workspace = true, features = ["serde"] }
 lsp-types = "0.97.0"
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true

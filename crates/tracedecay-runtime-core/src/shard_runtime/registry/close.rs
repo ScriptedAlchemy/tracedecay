@@ -689,6 +689,15 @@ mod tests {
         }
     }
 
+    /// An existing attachment needs an initialized SQLite header even when
+    /// the fixture intentionally has no tables.
+    fn seed_empty_sqlite(path: &Path) {
+        rusqlite::Connection::open(path)
+            .unwrap()
+            .execute_batch("PRAGMA user_version = 0")
+            .unwrap();
+    }
+
     async fn seed_final_graph_db(path: PathBuf) -> PathBuf {
         let connection = crate::db::engine::TestConnection::open(&path);
         crate::db::migrations::create_schema_connection(&connection)
@@ -710,7 +719,7 @@ mod tests {
         let authority =
             DatabaseAuthority::for_runtime(&path, "mount exact-close code runtime").unwrap();
         let profile_path = path.with_file_name("profile.db");
-        rusqlite::Connection::open(&profile_path).unwrap();
+        seed_empty_sqlite(&profile_path);
         let profile_path = profile_path.canonicalize().unwrap();
         let registry = StoreRuntimeRegistry::new(
             tokio::runtime::Handle::try_current().ok().unwrap(),
@@ -1037,7 +1046,7 @@ mod tests {
         let opened_identity = code.opened_file_identity().unwrap();
         let detached = path.with_extension("detached.db");
         let replacement = path.with_extension("replacement.db");
-        rusqlite::Connection::open(&replacement).unwrap();
+        seed_empty_sqlite(&replacement);
         std::fs::rename(&path, &detached).unwrap();
         std::fs::rename(&replacement, &path).unwrap();
         drop(code);
@@ -1284,11 +1293,11 @@ mod tests {
     async fn failed_exact_close_retains_a_faulted_evicting_runtime() {
         let temporary = tempfile::tempdir().unwrap();
         let path = temporary.path().join("runtime.db");
-        rusqlite::Connection::open(&path).unwrap();
+        seed_empty_sqlite(&path);
         let path = path.canonicalize().unwrap();
         let authority = DatabaseAuthority::for_runtime(&path, "mount failing exact-close").unwrap();
         let profile_path = path.with_file_name("profile.db");
-        rusqlite::Connection::open(&profile_path).unwrap();
+        seed_empty_sqlite(&profile_path);
         let profile_path = profile_path.canonicalize().unwrap();
         let registry = StoreRuntimeRegistry::with_config(
             tokio::runtime::Handle::try_current().ok().unwrap(),
