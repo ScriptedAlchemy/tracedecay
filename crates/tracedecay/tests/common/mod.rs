@@ -4,6 +4,8 @@ pub mod fixture;
 #[cfg(feature = "test-transport")]
 pub mod mcp_response;
 pub mod repository_layout;
+#[cfg(unix)]
+pub mod typescript_project;
 
 use std::ffi::{OsStr, OsString};
 use std::fs;

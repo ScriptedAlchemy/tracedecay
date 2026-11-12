@@ -2693,17 +2693,15 @@ mod activation_tests {
         let harness = RegisteredGlobalDbHarness::open("session-overlap-paging").await;
         let mut staged_rows = Vec::with_capacity(OVERLAPS_PAST_TRANSPORT_ROW_CAP as usize);
         for index in 0..OVERLAPS_PAST_TRANSPORT_ROW_CAP {
-            let session_id = format!("session.{index:05}");
-            let active = SessionRecord {
-                session_id: session_id.clone(),
-                ..session(None, None)
-            };
-            assert!(harness.registered.upsert_session(&active).await);
             staged_rows.push(SessionRecord {
-                session_id,
-                title: Some(format!("composer {index:05}")),
+                session_id: format!("session.{index:05}"),
                 ..session(None, None)
             });
+        }
+        // Fixture setup needs one durable batch, not a commit per overlap.
+        assert!(harness.registered.upsert_sessions(&staged_rows).await);
+        for (index, staged) in staged_rows.iter_mut().enumerate() {
+            staged.title = Some(format!("composer {index:05}"));
         }
         let transaction = harness.registered.begin_write_transaction().await.unwrap();
         transaction
