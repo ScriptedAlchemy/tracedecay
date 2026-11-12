@@ -169,11 +169,10 @@ fn stop_boundary_runs_over_the_first_analyzable_document() {
 #[test]
 fn intent_work_distinguishes_evaluation_refusal_from_unavailable_evidence() {
     use ContextScoutIntentPassOutcomeV1 as Pass;
-    use ContextScoutModelOutcomeV1 as Model;
     use ContextScoutSuppressionV1 as Suppression;
     use HookOrchestrationWorkOutcomeV1::{Completed, RetryableFailure};
 
-    for outcome in [Pass::Disabled, Pass::ProviderUnsupported] {
+    for outcome in [Pass::Disabled, Pass::ProviderUnsupported, Pass::NoCandidate] {
         assert_eq!(intent_pass_work_outcome(&outcome), Completed);
     }
     for outcome in [
@@ -187,31 +186,6 @@ fn intent_work_distinguishes_evaluation_refusal_from_unavailable_evidence() {
     ] {
         assert_eq!(intent_pass_work_outcome(&outcome), RetryableFailure);
     }
-    for model_outcome in [
-        Model::Succeeded,
-        Model::NotRequested,
-        Model::Disabled,
-        Model::Denied,
-        Model::TokenBudgetExceeded,
-    ] {
-        assert_eq!(
-            intent_pass_work_outcome(&Pass::NoCandidate { model_outcome }),
-            Completed
-        );
-    }
-    for model_outcome in [
-        Model::Unavailable,
-        Model::Disconnected,
-        Model::Cancelled,
-        Model::DeadlineExceeded,
-        Model::Backpressured,
-        Model::InvalidOutput,
-    ] {
-        assert_eq!(
-            intent_pass_work_outcome(&Pass::NoCandidate { model_outcome }),
-            RetryableFailure
-        );
-    }
     for reason in [
         Suppression::Disabled,
         Suppression::Paused,
@@ -221,10 +195,7 @@ fn intent_work_distinguishes_evaluation_refusal_from_unavailable_evidence() {
         Suppression::NoEligibleCandidate,
     ] {
         assert_eq!(
-            intent_pass_work_outcome(&Pass::Suppressed {
-                reason,
-                model_outcome: Model::NotRequested
-            }),
+            intent_pass_work_outcome(&Pass::Suppressed { reason }),
             Completed
         );
     }
@@ -238,10 +209,7 @@ fn intent_work_distinguishes_evaluation_refusal_from_unavailable_evidence() {
         Suppression::ModelOutputInvalid,
     ] {
         assert_eq!(
-            intent_pass_work_outcome(&Pass::Suppressed {
-                reason,
-                model_outcome: Model::NotRequested
-            }),
+            intent_pass_work_outcome(&Pass::Suppressed { reason }),
             RetryableFailure
         );
     }

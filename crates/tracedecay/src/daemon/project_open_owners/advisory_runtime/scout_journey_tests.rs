@@ -4,10 +4,6 @@ use std::time::{Duration, Instant};
 
 use super::*;
 
-use tracedecay_agent_hosts::agents::context_scout::decision_engine::{
-    DecisionAnswerV1, DecisionAnswersV1, DecisionEngineIdentityV1 as EngineIdentityV1,
-    DecisionEngineOutcomeV1, DecisionEnginePortV1, DecisionRequestV1,
-};
 use tracedecay_agent_hosts::agents::context_scout::intent_pass::intent_hint_emitted_event;
 use tracedecay_agent_hosts::agents::context_scout::owner::ProjectContextScoutOwnerV1;
 use tracedecay_agent_hosts::agents::context_scout::{
@@ -35,7 +31,7 @@ use tracedecay_contracts::{
 };
 use tracedecay_domain::configuration::{
     ConfigurationValueV1, ContextScoutIntentKindV1, ContextScoutIntentSettingsV1,
-    DecisionEngineSettingsV1, IntentWindowSettingsV1,
+    IntentWindowSettingsV1,
 };
 use tracedecay_domain::feedback::FeedbackContentIdentityV1;
 use tracedecay_domain::{
@@ -787,102 +783,9 @@ async fn stock_disabled_configuration_produces_nothing() {
     );
 }
 
-type DecisionEngineRequestGate = (
-    tokio::sync::oneshot::Sender<()>,
-    std::sync::mpsc::Receiver<()>,
-);
-
-/// In-process decision engine: answers every configured question, recalling
-/// the earlier session with `recall` and everything else with 0.05, and
-/// records each request it receives.
-struct RecordingDecisionEngine {
-    recall: f64,
-    requests: std::sync::atomic::AtomicUsize,
-    states: std::sync::Mutex<Vec<String>>,
-    request_gate: std::sync::Mutex<Option<DecisionEngineRequestGate>>,
-}
-
-impl RecordingDecisionEngine {
-    fn new(recall: f64) -> Arc<Self> {
-        Arc::new(Self {
-            recall,
-            requests: std::sync::atomic::AtomicUsize::new(0),
-            states: std::sync::Mutex::new(Vec::new()),
-            request_gate: std::sync::Mutex::new(None),
-        })
-    }
-
-    fn requests(&self) -> usize {
-        self.requests.load(std::sync::atomic::Ordering::SeqCst)
-    }
-
-    fn hold_next_request(
-        &self,
-    ) -> (
-        tokio::sync::oneshot::Receiver<()>,
-        std::sync::mpsc::Sender<()>,
-    ) {
-        let (entered, started) = tokio::sync::oneshot::channel();
-        let (release, held) = std::sync::mpsc::channel();
-        assert!(
-            self.request_gate
-                .lock()
-                .unwrap()
-                .replace((entered, held))
-                .is_none()
-        );
-        (started, release)
-    }
-}
-
-impl DecisionEnginePortV1 for RecordingDecisionEngine {
-    fn ask_blocking(&self, request: &DecisionRequestV1) -> DecisionEngineOutcomeV1 {
-        self.requests
-            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        self.states
-            .lock()
-            .expect("recorded states")
-            .push(request.state.clone());
-        if let Some((entered, release)) = self.request_gate.lock().unwrap().take() {
-            entered.send(()).unwrap();
-            release.recv_timeout(Duration::from_secs(5)).unwrap();
-        }
-        DecisionEngineOutcomeV1::Answered(DecisionAnswersV1 {
-            answers: request
-                .questions
-                .iter()
-                .map(|question| {
-                    let probability = if question.key == "session_recall" {
-                        self.recall
-                    } else {
-                        0.05
-                    };
-                    (question.key.clone(), DecisionAnswerV1::Noul(probability))
-                })
-                .collect(),
-            model: Some("kev-4b".to_owned()),
-            latency_micros: 1,
-        })
-    }
-
-    fn identity(&self) -> EngineIdentityV1 {
-        EngineIdentityV1 {
-            base_url_digest: [7; 32],
-            model: Some("kev-4b".to_owned()),
-        }
-    }
-}
-
 fn intent_settings() -> ContextScoutIntentSettingsV1 {
     ContextScoutIntentSettingsV1 {
         enabled: true,
-        engine: DecisionEngineSettingsV1 {
-            base_url: "http://127.0.0.1:9".to_owned(),
-            model: Some("kev-4b".to_owned()),
-            timeout_ms: 1_000,
-            max_concurrent: 1,
-            max_state_bytes: 8_192,
-        },
         window: IntentWindowSettingsV1 {
             max_user_turns: 3,
             max_messages: 12,
@@ -890,7 +793,6 @@ fn intent_settings() -> ContextScoutIntentSettingsV1 {
             max_age_secs: 600,
             freshen_budget_ms: 0,
         },
-        questions: ContextScoutIntentSettingsV1::reference_questions(),
         action_fact_score_permille: 700,
         ttl_secs: 600,
         min_delivery_gap_secs: 30,
@@ -941,8 +843,8 @@ fn intent_pin(intent: Option<ContextScoutIntentSettingsV1>) -> ContextScoutConfi
 
 const INTENT_SESSION: &str = "session-intent-journey";
 
-/// Everything one intent pass needs besides its sessions store and engine:
-/// a configured owner, the address registry over its database, an admitted
+/// Everything one intent pass needs besides its sessions store: a configured
+/// owner, the address registry over its database, an admitted
 /// prompt hook, and the authorized request context and pin.
 struct IntentJourneyFixture {
     _temporary: tempfile::TempDir,
@@ -1113,7 +1015,17 @@ impl IntentJourneyFixture {
         hook: &tracedecay_agent_hosts::agents::context_scout::address_registry::AdmittedContextScoutHookV1,
         sessions: &tracedecay_global_db::RegisteredGlobalDb,
         project_key: &str,
-        engine: &Arc<RecordingDecisionEngine>,
+    ) -> ContextScoutIntentPassOutcomeV1 {
+        self.pass_with_cancellation(hook, sessions, project_key, CancellationToken::new())
+            .await
+    }
+
+    async fn pass_with_cancellation(
+        &self,
+        hook: &tracedecay_agent_hosts::agents::context_scout::address_registry::AdmittedContextScoutHookV1,
+        sessions: &tracedecay_global_db::RegisteredGlobalDb,
+        project_key: &str,
+        cancellation: CancellationToken,
     ) -> ContextScoutIntentPassOutcomeV1 {
         run_context_scout_intent_pass(ContextScoutIntentPassV1 {
             owner: self.owner.as_ref(),
@@ -1128,10 +1040,9 @@ impl IntentJourneyFixture {
             context: &self.context,
             lifecycle: &self.lifecycle,
             code_generation_id: Some(typed_id("generation.scout.intent")),
-            engine: Some(Arc::clone(engine) as Arc<dyn DecisionEnginePortV1>),
             observed_at: now_utc_micros(),
             deadline: MonotonicDeadline::at(Instant::now() + Duration::from_secs(5)),
-            cancellation: CancellationToken::new(),
+            cancellation,
         })
         .await
     }
@@ -1246,11 +1157,20 @@ async fn seed_intent_session(
         now_secs - 20,
     )
     .await;
+    seed_transcript_message(
+        sessions,
+        3,
+        "assistant",
+        "Searching the earlier session for the retry decision.",
+        Some("Grep"),
+        now_secs - 10,
+    )
+    .await;
 }
 
-/// The daemon intent pass at a completed tool call over a seeded session: one batched engine request
-/// over the window, exactly one session-evidence suggestion at the session's
-/// intent address, a claim at the next stop boundary, a delivery that writes
+/// The daemon intent pass at a completed tool call derives action facts over
+/// the window and creates exactly one session-evidence suggestion at the
+/// session's intent address, a claim at the next stop boundary, a delivery that writes
 /// the `hint_emitted` row hint settlement resolves into `hint_outcome`, and a
 /// later pass that withholds the delivered intent as a duplicate.
 #[tokio::test]
@@ -1263,66 +1183,41 @@ async fn intent_pass_enqueues_one_session_suggestion_claimed_at_stop_and_settled
     let project_key = "/project/intent-journey";
     seed_intent_session(sessions, project_key).await;
 
-    let engine = RecordingDecisionEngine::new(0.9);
     let boundary = fixture.hook(71, completed_tool());
-    let ContextScoutIntentPassOutcomeV1::Enqueued { entry, lifecycle } = fixture
-        .pass(&boundary, sessions, project_key, &engine)
-        .await
+    let ContextScoutIntentPassOutcomeV1::Enqueued { entry, lifecycle } =
+        fixture.pass(&boundary, sessions, project_key).await
     else {
-        panic!("a recalled earlier session must enqueue one suggestion");
+        panic!("an observed search action must enqueue one suggestion");
     };
     let lifecycle = *lifecycle;
-    assert_eq!(
-        engine.requests(),
-        1,
-        "all questions share one engine request"
-    );
-    let states = engine.states.lock().expect("states").clone();
-    assert!(states[0].contains("User: Use the same backoff numbers"));
-    assert!(states[0].contains("Assistant: Updated the retry loop"));
 
     assert_eq!(Some(lifecycle.clone()), fixture.lifecycle.intent_scoped());
     assert_eq!(
         entry.route,
-        tracedecay_contracts::context_scout::ContextScoutRouteV1::DecisionEngine
+        tracedecay_contracts::context_scout::ContextScoutRouteV1::Deterministic
     );
     assert_eq!(
         entry.model_outcome,
-        tracedecay_contracts::context_scout::ContextScoutModelOutcomeV1::Succeeded
+        tracedecay_contracts::context_scout::ContextScoutModelOutcomeV1::NotRequested
     );
     assert_eq!(entry.model_receipt, None);
     let candidate = &entry.envelope.candidate;
     assert_eq!(candidate.category, ContextScoutCategoryV1::Retrieval);
     assert_eq!(
         candidate.suggestion_text,
-        tracedecay_policy::intent_catalog::suggestion_text(ContextScoutIntentKindV1::SessionRecall)
+        tracedecay_policy::intent_catalog::suggestion_text(ContextScoutIntentKindV1::Search)
     );
     let evidence = candidate.evidence.as_session().expect("session evidence");
-    assert_eq!(
-        evidence.decision.selected,
-        ContextScoutIntentKindV1::SessionRecall
-    );
+    assert_eq!(evidence.decision.selected, ContextScoutIntentKindV1::Search);
     assert_eq!(
         evidence.decision.source,
-        tracedecay_domain::configuration::IntentDecisionSourceV1::Model,
-        "prompt agreement must not be recorded as an observed action"
+        tracedecay_domain::configuration::IntentDecisionSourceV1::ActionFact
     );
-    assert!(evidence.decision.answers.contains(
-        &tracedecay_contracts::context_scout::ContextScoutIntentAnswerV1 {
-            intent: ContextScoutIntentKindV1::SessionRecall,
-            probability_permille: 900,
-            threshold_permille: 600,
-        }
-    ));
     assert_eq!(
-        evidence
-            .decision
-            .engine
-            .as_ref()
-            .and_then(|engine| engine.model.as_deref()),
-        Some("kev-4b")
+        evidence.decision.facts,
+        vec![ContextScoutIntentKindV1::Search]
     );
-    assert_eq!(evidence.window.message_count, 3);
+    assert_eq!(evidence.window.message_count, 4);
     assert_eq!(evidence.provider_id.as_str(), "claude");
     assert_eq!(evidence.session_id.as_str(), INTENT_SESSION);
     assert_eq!(
@@ -1337,7 +1232,7 @@ async fn intent_pass_enqueues_one_session_suggestion_claimed_at_stop_and_settled
     );
     let dedupe = canonical_sha256(&(
         "tracedecay.context-scout.intent-candidate.v1",
-        ContextScoutIntentKindV1::SessionRecall,
+        ContextScoutIntentKindV1::Search,
         boundary.envelope().protected_session_id,
     ))
     .expect("dedupe digest");
@@ -1413,7 +1308,7 @@ async fn intent_pass_enqueues_one_session_suggestion_claimed_at_stop_and_settled
     assert_eq!(emitted.provider, "hook_claude");
     assert_eq!(emitted.event_kind, "hint_emitted");
     assert_eq!(emitted.session_id.as_deref(), Some(INTENT_SESSION));
-    assert_eq!(emitted.hint_category.as_deref(), Some("session_recall"));
+    assert_eq!(emitted.hint_category.as_deref(), Some("search"));
     assert_eq!(
         emitted.hint_id.as_deref(),
         Some(hex::encode(guidance.guidance_id).as_str())
@@ -1421,23 +1316,23 @@ async fn intent_pass_enqueues_one_session_suggestion_claimed_at_stop_and_settled
     let metadata: serde_json::Value =
         serde_json::from_str(emitted.metadata_json.as_deref().expect("metadata"))
             .expect("metadata json");
-    assert_eq!(metadata["route"], "decision_engine");
-    assert_eq!(metadata["engine"]["model"], "kev-4b");
-    assert_eq!(metadata["answers"].as_array().map(Vec::len), Some(10));
+    assert_eq!(metadata["route"], "deterministic");
+    assert_eq!(metadata["decision_source"], "action_fact");
+    assert_eq!(metadata["facts"], serde_json::json!(["search"]));
     assert!(metadata["window_digest"].is_string());
     sessions
         .append_analytics_events(&[emitted])
         .await
         .expect("append hint_emitted");
 
-    // The model then searches earlier sessions: settlement credits the hint.
+    // A later canonical search settles the delivered suggestion as acted.
     let delivered_secs = receipt.delivered_at.0 / 1_000_000;
     seed_transcript_message(
         sessions,
-        3,
+        4,
         "assistant",
-        "Searching the earlier session.",
-        Some("mcp__tracedecay__tracedecay_message_search"),
+        "Searching the retry implementation.",
+        Some("mcp__tracedecay__tracedecay_grep"),
         delivered_secs + 5,
     )
     .await;
@@ -1454,14 +1349,10 @@ async fn intent_pass_enqueues_one_session_suggestion_claimed_at_stop_and_settled
     // A later pass in the session withholds the delivered intent.
     let next_boundary = fixture.hook(73, completed_tool());
     assert_eq!(
-        fixture
-            .pass(&next_boundary, sessions, project_key, &engine)
-            .await,
+        fixture.pass(&next_boundary, sessions, project_key).await,
         ContextScoutIntentPassOutcomeV1::Suppressed {
             reason:
                 tracedecay_agent_hosts::agents::context_scout::ContextScoutSuppressionV1::Duplicate,
-            model_outcome:
-                tracedecay_contracts::context_scout::ContextScoutModelOutcomeV1::Succeeded,
         }
     );
     let withheld = sessions
@@ -1474,7 +1365,7 @@ async fn intent_pass_enqueues_one_session_suggestion_claimed_at_stop_and_settled
         .await
         .expect("query withheld hints");
     assert_eq!(withheld.len(), 1);
-    assert_eq!(withheld[0].hint_category.as_deref(), Some("session_recall"));
+    assert_eq!(withheld[0].hint_category.as_deref(), Some("search"));
     assert_eq!(
         fixture
             .owner
@@ -1489,7 +1380,7 @@ async fn intent_pass_enqueues_one_session_suggestion_claimed_at_stop_and_settled
 }
 
 #[tokio::test]
-async fn negative_intent_answer_does_not_enqueue_a_prompt_keyword_suggestion() {
+async fn prompt_keywords_without_an_observed_action_do_not_enqueue_a_suggestion() {
     let fixture = IntentJourneyFixture::open(Some(intent_settings())).await;
     let harness = tracedecay_global_db::tests::harness::RegisteredGlobalDbHarness::open(
         "intent-negative-prompt",
@@ -1507,18 +1398,11 @@ async fn negative_intent_answer_does_not_enqueue_a_prompt_keyword_suggestion() {
         now_utc_micros().0 / 1_000_000,
     )
     .await;
-    let engine = RecordingDecisionEngine::new(0.05);
     let boundary = fixture.hook(79, completed_tool());
     assert_eq!(
-        fixture
-            .pass(&boundary, sessions, project_key, &engine)
-            .await,
-        ContextScoutIntentPassOutcomeV1::NoCandidate {
-            model_outcome:
-                tracedecay_contracts::context_scout::ContextScoutModelOutcomeV1::Succeeded,
-        }
+        fixture.pass(&boundary, sessions, project_key).await,
+        ContextScoutIntentPassOutcomeV1::NoCandidate
     );
-    assert_eq!(engine.requests(), 1);
     unregister_intent_owner(&fixture);
 }
 
@@ -1529,37 +1413,34 @@ fn unregister_intent_owner(fixture: &IntentJourneyFixture) {
     );
 }
 
-/// Without a configured, enabled intent pass, nothing is read or asked.
+/// Without a configured, enabled intent pass, no session window is evaluated.
 #[tokio::test]
-async fn absent_or_disabled_intent_configuration_never_asks_the_engine() {
+async fn absent_or_disabled_intent_configuration_is_typed_disabled() {
     let harness =
         tracedecay_global_db::tests::harness::RegisteredGlobalDbHarness::open("intent-disabled")
             .await;
     let sessions = harness.registered.as_ref();
-    let engine = RecordingDecisionEngine::new(0.9);
     let disabled = ContextScoutIntentSettingsV1 {
         enabled: false,
         ..intent_settings()
     };
     for intent in [None, Some(disabled)] {
         let fixture = IntentJourneyFixture::open(intent).await;
-        assert!(fixture.owner.intent_engine().await.is_none());
         let prompt = fixture.hook(81, completed_tool());
         assert_eq!(
             fixture
-                .pass(&prompt, sessions, "/project/intent-disabled", &engine)
+                .pass(&prompt, sessions, "/project/intent-disabled")
                 .await,
             ContextScoutIntentPassOutcomeV1::Disabled
         );
         unregister_intent_owner(&fixture);
     }
-    assert_eq!(engine.requests(), 0);
 }
 
 mod replay;
 
 #[tokio::test]
-async fn intent_waits_for_its_transcript_before_evaluation_and_disabled_never_asks() {
+async fn intent_waits_for_its_transcript_before_deterministic_evaluation() {
     let fixture = IntentJourneyFixture::open(Some(intent_settings())).await;
     let harness = tracedecay_global_db::tests::harness::RegisteredGlobalDbHarness::open(
         "intent-window-recovery",
@@ -1567,40 +1448,68 @@ async fn intent_waits_for_its_transcript_before_evaluation_and_disabled_never_as
     .await;
     let sessions = harness.registered.as_ref();
     let project_key = "/project/intent-window-recovery";
-    let engine = RecordingDecisionEngine::new(0.9);
     let boundary = fixture.hook(75, completed_tool());
-    let outcome = fixture
-        .pass(&boundary, sessions, project_key, &engine)
-        .await;
+    let outcome = fixture.pass(&boundary, sessions, project_key).await;
     assert_eq!(outcome, ContextScoutIntentPassOutcomeV1::WindowEmpty);
     assert_eq!(
         intent_pass_work_outcome(&outcome),
         HookOrchestrationWorkOutcomeV1::RetryableFailure
     );
-    assert_eq!(engine.requests(), 0);
     seed_intent_session(sessions, project_key).await;
-    let outcome = fixture
-        .pass(&boundary, sessions, project_key, &engine)
-        .await;
+    let outcome = fixture.pass(&boundary, sessions, project_key).await;
     assert!(matches!(
         outcome,
         ContextScoutIntentPassOutcomeV1::Enqueued { .. }
     ));
-    assert_eq!(engine.requests(), 1);
 
     let disabled = IntentJourneyFixture::open(None).await;
     let outcome = disabled
-        .pass(
-            &disabled.hook(76, completed_tool()),
-            sessions,
-            project_key,
-            &engine,
-        )
+        .pass(&disabled.hook(76, completed_tool()), sessions, project_key)
         .await;
     assert_eq!(outcome, ContextScoutIntentPassOutcomeV1::Disabled);
     assert_eq!(
         intent_pass_work_outcome(&outcome),
         HookOrchestrationWorkOutcomeV1::Completed
     );
-    assert_eq!(engine.requests(), 1);
+}
+
+#[tokio::test]
+async fn cancelled_intent_does_not_commit_a_candidate() {
+    let fixture = IntentJourneyFixture::open(Some(intent_settings())).await;
+    let harness =
+        tracedecay_global_db::tests::harness::RegisteredGlobalDbHarness::open("intent-cancelled")
+            .await;
+    let sessions = harness.registered.as_ref();
+    let project_key = "/project/intent-cancelled";
+    seed_intent_session(sessions, project_key).await;
+    let boundary = fixture.hook(77, completed_tool());
+    let cancellation = CancellationToken::new();
+    cancellation.cancel();
+    assert_eq!(
+        fixture
+            .pass_with_cancellation(&boundary, sessions, project_key, cancellation)
+            .await,
+        ContextScoutIntentPassOutcomeV1::Cancelled
+    );
+    let address = fixture
+        .registry
+        .bind(
+            &boundary,
+            &fixture.pin,
+            fixture.lifecycle.intent_scoped().expect("intent lifecycle"),
+        )
+        .await;
+    let tracedecay_agent_hosts::agents::context_scout::address_registry::ContextScoutAddressBindOutcomeV1::Existing(address) = address else {
+        panic!("cancelled pass must bind only its exact intent address");
+    };
+    assert!(
+        fixture
+            .owner
+            .recent_exact(address, 8)
+            .await
+            .expect("intent address state")
+            .pending
+            .is_empty()
+    );
+    unregister_intent_owner(&fixture);
 }
