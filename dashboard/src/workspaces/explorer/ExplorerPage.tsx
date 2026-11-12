@@ -30,7 +30,7 @@ import { RunRegister } from './panels.tsx';
  * the same endpoints' overview shapes.
  *
  * Hover inspects; click selects. The page composes: `controller.ts` owns the
- * run and the query state, `laneModel.ts` turns the wire into one typed
+ * search and the query state, `laneModel.ts` turns the wire into one typed
  * condition per lane, `Lane.tsx` draws a condition, `Inspector.tsx` grades a
  * result.
  */
@@ -43,8 +43,8 @@ export function ExplorerPage() {
   // it. Bound on the document, because focus while reading the inspector
   // usually sits on its scroll region, not on a control the page owns. A
   // `defaultPrevented` Escape is the search field clearing itself, which must
-  // not also close the panel. Escape never cancels a run: cancellation is the
-  // explicit control in the run register.
+  // not also close the panel. Escape never cancels a search: cancellation is the
+  // explicit control in the search register.
   const invokerRef = useRef<HTMLElement | null>(null);
   // Focus landing on a row inspects it, so handing focus back to the row that
   // opened the inspector would reopen it as a peek in the same keystroke that
@@ -129,11 +129,10 @@ export function ExplorerPage() {
           />
           {explorer.searching ? (
             <RunRegister
-              result={explorer.runResult}
-              run={explorer.run}
+              result={explorer.searchResult}
+              search={explorer.search}
               writability={explorer.writability}
-              progress={explorer.runProgress}
-              cancelling={explorer.cancelling}
+              progress={explorer.searchProgress}
               onCancel={explorer.cancel}
               className="lg:min-h-[calc(var(--touch-target-min)+2px)] lg:max-w-[40%]"
             />

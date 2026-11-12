@@ -1,10 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import {
-  DashboardEnvelopeV1Schema,
-  ExplorerQueryRunV1Schema,
   ExplorerSourceProgressV1Schema,
+  ExplorerStreamEventV1Schema,
   type DashboardEnvelopeV1,
-  type ExplorerQueryRunV1,
   type ExplorerSourceProgressV1,
 } from '../../contracts/generated.ts';
 import type { EnvelopeResult } from '../../data/query/envelope.ts';
@@ -19,12 +17,16 @@ import {
   lanePending,
   laneStateDetail,
   laneStateKind,
-  runIsTerminal,
-  runStateKind,
+  searchIsTerminal,
   searchLane,
+  searchStateKind,
   SEMANTIC_UNREGISTERED_DETAIL,
   semanticLane,
+  startedSearch,
+  withStreamEvent,
   type ExplorerLaneReadModel,
+  type ExplorerSearchResult,
+  type ExplorerSearchStatus,
 } from './laneModel.ts';
 
 const KNOWLEDGE_FACT_ID = `fact.${'a'.repeat(64)}.${'7'.padStart(64, '0')}`;
@@ -37,7 +39,6 @@ function progress(over: Record<string, unknown>): ExplorerSourceProgressV1 {
   return ExplorerSourceProgressV1Schema.parse({
     source_id: 'code_graph',
     source_label: 'Code graph',
-    phase: 'completed',
     outcome: 'ready',
     completed_units: 0,
     total_units: 0,
@@ -57,88 +58,54 @@ function progress(over: Record<string, unknown>): ExplorerSourceProgressV1 {
     watermark: null,
     error_code: null,
     message: null,
-    page: { offset: 0, limit: 50, total: 0, next_offset: null, rows: [], metadata: {} },
+    page: { limit: 50, total: 0, rows: [], metadata: {} },
     ...over,
   });
 }
 
-function run(over: Record<string, unknown> = {}): ExplorerQueryRunV1 {
-  return ExplorerQueryRunV1Schema.parse({
-    run_id: 'run-1',
-    request: { query: 'graph', limit: 50, offset: 0 },
-    request_revision: 'explorer-query-request-v1',
-    plan_revision: 'explorer-query-plan-v1',
-    merge_revision: 'source-local-no-merge-v1',
-    required_source_ids: ['code_graph', 'sessions', 'knowledge'],
-    ordering_policy: 'source_local_no_cross_source_merge',
-    explanation: 'test',
-    submitted_at_micros: 1,
-    completed_at_micros: 2,
-    elapsed_micros: 1,
-    state: 'completed',
-    finality: 'complete',
-    sources: [],
-    ...over,
-  });
-}
-
-function answered(payload: ExplorerQueryRunV1): EnvelopeResult<ExplorerQueryRunV1> {
-  return {
-    outcome: 'envelope',
-    envelope: DashboardEnvelopeV1Schema(ExplorerQueryRunV1Schema).parse({
-      schema_revision: 1,
-      scope: { project_id: 'p', storage_mode: 'profile_sharded', store_root: '/data' },
-      version: { entity_version: null, graph_version: null },
-      time: { valid_time_micros: null, observation_time_micros: 1 },
-      source_watermark: null,
-      authorization: { outcome: 'authorized' },
-      coverage: {
-        completeness: 'complete',
-        eligible: 3,
-        examined: 3,
-        matched: null,
-        excluded: null,
-        omitted: 0,
-        unknown: null,
-        denominator: 3,
-        unit: 'sources',
-        omission_reasons: [],
-      },
-      freshness: { state: 'unknown', observed_at_micros: null, watermark: null },
-      domain_state: 'ready',
-      legal_actions: [],
-      payload,
-    }),
-  };
+/** A search for `graph` that has published `sources` and stands at `status`. */
+function searching(
+  sources: ExplorerSourceProgressV1[] = [],
+  status: ExplorerSearchStatus = 'streaming',
+  query = 'graph',
+): ExplorerSearchResult {
+  return { outcome: 'search', search: { ...startedSearch(query), sources, status } };
 }
 
 function browseAnswered<T>(payload: T): EnvelopeResult<T> {
-  const result = answered(run());
-  if (result.outcome !== 'envelope') throw new Error('test envelope must be accepted');
-  const envelope = result.envelope;
-  return { outcome: 'envelope', envelope: { ...envelope, payload } as DashboardEnvelopeV1<T> };
+  const envelope = {
+    schema_revision: 1,
+    scope: { project_id: 'p', storage_mode: 'profile_sharded', store_root: '/data' },
+    version: { entity_version: null, graph_version: null },
+    time: { valid_time_micros: null, observation_time_micros: 1 },
+    source_watermark: null,
+    authorization: { outcome: 'authorized' },
+    coverage: {
+      completeness: 'complete',
+      eligible: 1,
+      examined: 1,
+      matched: null,
+      excluded: null,
+      omitted: 0,
+      unknown: null,
+      denominator: 1,
+      unit: 'rows',
+      omission_reasons: [],
+    },
+    freshness: { state: 'unknown', observed_at_micros: null, watermark: null },
+    domain_state: 'ready',
+    legal_actions: [],
+    payload,
+  };
+  return { outcome: 'envelope', envelope: envelope as unknown as DashboardEnvelopeV1<T> };
 }
 
 describe('laneFromSourceProgress', () => {
-  // Moved from model.test.ts, where these two shapes covered `plannerLaneState`.
-  // Both invariants are unchanged: a source that is still reading contributes
-  // no rows and no total, and a source that reports no matching total gets
-  // `null` rather than a stand-in zero.
-  it('retains pending and unknown-total source states without inventing rows or zero totals', () => {
-    expect(
-      laneFromSourceProgress(
-        'code',
-        progress({
-          phase: 'reading',
-          outcome: 'pending',
-          completed_units: null,
-          total_units: null,
-          page: null,
-        }),
-        [],
-      ),
-    ).toEqual({ state: 'pending', lane: 'code', phase: 'reading' });
-
+  // Both invariants are unchanged from the planner era: a source that
+  // reports no matching total gets `null` rather than a stand-in zero, and a
+  // source publishes only once it has concluded, so there is no pending
+  // source record to read.
+  it('retains an unknown-total source state without inventing rows or zero totals', () => {
     expect(
       laneFromSourceProgress(
         'knowledge',
@@ -148,10 +115,8 @@ describe('laneFromSourceProgress', () => {
           completed_units: 2,
           total_units: null,
           page: {
-            offset: 0,
             limit: 25,
             total: null,
-            next_offset: null,
             rows: [{ fact_id: KNOWLEDGE_FACT_ID, content: 'real fact' }],
             metadata: {},
           },
@@ -190,33 +155,10 @@ describe('laneFromSourceProgress', () => {
       hits: [],
       reportedTotal: 0,
       unreadableRows: 0,
-      hasMore: false,
       freshness: 'unknown',
       watermark: null,
     });
     expect(new Set([...states, readyEmpty.state]).size).toBe(4);
-  });
-
-  it('carries the page\u2019s own continuation as hasMore, and no continuation as null', () => {
-    const paged = laneFromSourceProgress(
-      'code',
-      progress({
-        page: {
-          offset: 0,
-          limit: 1,
-          total: 3,
-          next_offset: 1,
-          rows: [{ id: 'n1', name: 'first' }],
-          metadata: {},
-        },
-      }),
-      [],
-    );
-    expect(paged).toMatchObject({ state: 'ready', hasMore: true, reportedTotal: 3 });
-    // A source that never sent a page said nothing about continuation.
-    expect(laneFromSourceProgress('code', progress({ page: null }), [])).toMatchObject({
-      hasMore: null,
-    });
   });
 
   it('carries the source error code and message rather than flattening them', () => {
@@ -249,7 +191,6 @@ describe('laneFromSourceProgress', () => {
       hits: [],
       reportedTotal: null,
       unreadableRows: 0,
-      hasMore: null,
       freshness: 'unknown',
       watermark: null,
     });
@@ -269,10 +210,8 @@ describe('laneFromSourceProgress', () => {
       'code',
       progress({
         page: {
-          offset: 0,
           limit: 50,
           total: 3,
-          next_offset: null,
           rows: [
             { id: 'n1', name: 'readable' },
             'not an object',
@@ -294,10 +233,8 @@ describe('laneFromSourceProgress', () => {
       'code',
       progress({
         page: {
-          offset: 0,
           limit: 50,
           total: 1,
-          next_offset: null,
           rows: [{ id: 'n1', name: 'no_degree_here' }],
           metadata: {},
         },
@@ -340,10 +277,8 @@ describe('laneFromSourceProgress', () => {
         error_code: 'lcm_temporal_read_incomplete',
         message: null,
         page: {
-          offset: 0,
           limit: 50,
           total: null,
-          next_offset: null,
           rows: [{ message_id: 'm1', content: 'partial row' }],
           metadata: {},
         },
@@ -365,18 +300,14 @@ describe('searchLane', () => {
     const clientOffline = searchLane('code', { outcome: 'transport', state: 'offline' }, 'graph', []);
     const sourceUnavailable = searchLane(
       'code',
-      answered(
-        run({
-          sources: [
-            progress({
-              outcome: 'unavailable',
-              page: null,
-              error_code: 'graph_index_unavailable',
-              message: 'the code graph is not mounted',
-            }),
-          ],
+      searching([
+        progress({
+          outcome: 'unavailable',
+          page: null,
+          error_code: 'graph_index_unavailable',
+          message: 'the code graph is not mounted',
         }),
-      ),
+      ]),
       'graph',
       [],
     );
@@ -419,64 +350,50 @@ describe('searchLane', () => {
     expect(laneStateKind(withNeither)).toBe('unavailable');
   });
 
-  it('says a terminal run never named a source instead of showing it as reading', () => {
-    expect(searchLane('sessions', answered(run({ state: 'completed' })), 'graph', [])).toEqual({
+  it('says a concluded search never published a source instead of showing it as reading', () => {
+    expect(searchLane('sessions', searching([], 'completed'), 'graph', [])).toEqual({
       state: 'unanswered',
       lane: 'sessions',
     });
-    expect(searchLane('sessions', answered(run({ state: 'pending' })), 'graph', [])).toEqual({
+    expect(searchLane('sessions', searching([], 'streaming'), 'graph', [])).toEqual({
       state: 'pending',
       lane: 'sessions',
-      phase: null,
     });
+  });
+
+  it('settles an unpublished lane by how the search ended', () => {
+    expect(searchLane('sessions', searching([], 'cancelled'), 'graph', [])).toMatchObject({
+      state: 'cancelled',
+      errorCode: 'request_cancelled',
+    });
+    expect(searchLane('sessions', searching([], 'interrupted'), 'graph', [])).toEqual({
+      state: 'offline',
+      lane: 'sessions',
+    });
+    // A source that did publish is never overwritten by how the search ended.
+    expect(
+      searchLane('code', searching([progress({})], 'cancelled'), 'graph', []).state,
+    ).toBe('ready');
   });
 
   it('does not attribute an earlier query\u2019s answer to the query on screen', () => {
-    const earlier = answered(
-      run({
-        request: { query: 'other', limit: 50, offset: 0 },
-        sources: [progress({})],
-      }),
-    );
+    const earlier = searching([progress({})], 'completed', 'other');
 
-    expect(searchLane('code', earlier, 'graph', [])).toEqual({
-      state: 'pending',
-      lane: 'code',
-      phase: null,
-    });
+    expect(searchLane('code', earlier, 'graph', [])).toEqual({ state: 'pending', lane: 'code' });
   });
 
-  it('waits rather than guessing before any coordinator answer', () => {
-    expect(searchLane('code', undefined, 'graph', [])).toEqual({
-      state: 'pending',
-      lane: 'code',
-      phase: null,
-    });
+  it('waits rather than guessing before any search answer', () => {
+    expect(searchLane('code', undefined, 'graph', [])).toEqual({ state: 'pending', lane: 'code' });
   });
 
   it('keeps every lane condition distinct end to end', () => {
     const conditions: ExplorerLaneReadModel[] = [
       searchLane('code', { outcome: 'transport', state: 'offline' }, 'graph', []),
-      searchLane(
-        'code',
-        answered(run({ sources: [progress({ outcome: 'unavailable', page: null })] })),
-        'graph',
-        [],
-      ),
-      searchLane(
-        'code',
-        answered(run({ sources: [progress({ outcome: 'cancelled', page: null })] })),
-        'graph',
-        [],
-      ),
-      searchLane(
-        'code',
-        answered(run({ sources: [progress({ outcome: 'error', page: null })] })),
-        'graph',
-        [],
-      ),
-      searchLane('code', answered(run({ sources: [progress({})] })), 'graph', []),
-      searchLane('code', answered(run({ state: 'completed' })), 'graph', []),
+      searchLane('code', searching([progress({ outcome: 'unavailable', page: null })]), 'graph', []),
+      searchLane('code', searching([progress({ outcome: 'cancelled', page: null })]), 'graph', []),
+      searchLane('code', searching([progress({ outcome: 'error', page: null })]), 'graph', []),
+      searchLane('code', searching([progress({})]), 'graph', []),
+      searchLane('code', searching([], 'completed'), 'graph', []),
     ];
 
     expect(conditions.map((read) => read.state)).toEqual([
@@ -493,10 +410,45 @@ describe('searchLane', () => {
   });
 });
 
-describe('run state', () => {
-  it('keeps a timed-out coordinator run terminal and visibly timed out', () => {
-    expect(runIsTerminal('timed_out')).toBe(true);
-    expect(runStateKind('timed_out')).toBe('timed_out');
+describe('search stream', () => {
+  const event = (frame: unknown) => ExplorerStreamEventV1Schema.parse(frame);
+
+  it('folds each source as it arrives and the final frame once', () => {
+    const code = progress({});
+    const sessions = progress({ source_id: 'sessions', source_label: 'Sessions' });
+    let search = startedSearch('graph');
+    search = withStreamEvent(search, event({ event: 'source', source: code }));
+    expect(search.sources.map((source) => source.source_id)).toEqual(['code_graph']);
+    expect(search.status).toBe('streaming');
+    expect(searchIsTerminal(search.status)).toBe(false);
+
+    search = withStreamEvent(search, event({ event: 'source', source: sessions }));
+    search = withStreamEvent(
+      search,
+      event({ event: 'final', outcome: 'partial', elapsed_micros: 17 }),
+    );
+    expect(search.sources.map((source) => source.source_id)).toEqual(['code_graph', 'sessions']);
+    expect(search).toMatchObject({ status: 'partial', elapsedMicros: 17 });
+    expect(searchIsTerminal(search.status)).toBe(true);
+  });
+
+  it('replaces a repeated source frame instead of double-counting the lane', () => {
+    let search = startedSearch('graph');
+    for (const outcome of ['stale', 'ready'] as const) {
+      search = withStreamEvent(
+        search,
+        event({ event: 'source', source: progress({ outcome, page: null }) }),
+      );
+    }
+    expect(search.sources).toHaveLength(1);
+    expect(search.sources[0]?.outcome).toBe('ready');
+  });
+
+  it('keeps a timed-out search terminal and visibly timed out', () => {
+    expect(searchIsTerminal('timed_out')).toBe(true);
+    expect(searchStateKind('timed_out')).toBe('timed_out');
+    expect(searchStateKind('streaming')).toBe('loading');
+    expect(searchStateKind('interrupted')).toBe('offline');
   });
 });
 
@@ -604,10 +556,8 @@ describe('laneEvidence', () => {
       'code',
       progress({
         page: {
-          offset: 0,
           limit: 50,
           total: 12,
-          next_offset: null,
           rows: [{ id: 'n1', name: 'row' }],
           metadata: {},
         },
@@ -618,10 +568,8 @@ describe('laneEvidence', () => {
       'code',
       progress({
         page: {
-          offset: 0,
           limit: 50,
           total: null,
-          next_offset: null,
           rows: [{ id: 'n1', name: 'row' }],
           metadata: {},
         },
@@ -639,7 +587,7 @@ describe('laneEvidence', () => {
 describe('laneHits', () => {
   it('yields nothing for every lane that did not answer', () => {
     const notReady: ExplorerLaneReadModel[] = [
-      { state: 'pending', lane: 'code', phase: null },
+      { state: 'pending', lane: 'code' },
       { state: 'unavailable', lane: 'code', errorCode: null, detail: null },
       { state: 'cancelled', lane: 'code', errorCode: null, detail: null },
       { state: 'error', lane: 'code', errorCode: null, detail: null },

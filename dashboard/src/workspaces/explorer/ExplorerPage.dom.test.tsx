@@ -7,13 +7,37 @@ import { FIXTURES } from '../../../stories/fixtures/data.ts';
 import { useScope } from '../../data/scope/store.ts';
 import { ExplorerPage } from './ExplorerPage.tsx';
 
-type Route = { status: number; body: unknown };
+type Route =
+  | { status: number; body: unknown }
+  /** A search response: SSE frames, closed after the last unless `hold` keeps
+   * the response open the way a search with sources still reading does. */
+  | { status: number; frames: unknown[]; hold?: boolean };
+
+function searchResponse(route: { frames: unknown[]; hold?: boolean }, signal?: AbortSignal) {
+  const encoder = new TextEncoder();
+  return new Response(
+    new ReadableStream<Uint8Array>({
+      start(controller) {
+        for (const frame of route.frames) {
+          const { event } = frame as { event: string };
+          controller.enqueue(encoder.encode(`event: ${event}\ndata: ${JSON.stringify(frame)}\n\n`));
+        }
+        if (route.hold !== true) controller.close();
+        signal?.addEventListener('abort', () => {
+          controller.error(new DOMException('aborted', 'AbortError'));
+        });
+      },
+    }),
+    { status: 200, headers: { 'content-type': 'text/event-stream' } },
+  );
+}
 
 function serve(routes: Record<string, Route>) {
-  return vi.fn(async (input: RequestInfo | URL, _init?: RequestInit) => {
+  return vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = String(input);
     const hit = Object.entries(routes).find(([path]) => url.includes(path));
     const response = hit?.[1] ?? { status: 404, body: { error: 'not found' } };
+    if ('frames' in response) return searchResponse(response, init?.signal ?? undefined);
     return {
       ok: response.status >= 200 && response.status < 300,
       status: response.status,
@@ -98,7 +122,6 @@ function source(sourceId: SourceId, rows: Record<string, unknown>[], total: numb
   return {
     source_id: sourceId,
     source_label: SOURCE_LABELS[sourceId],
-    phase: 'completed',
     outcome: 'ready',
     completed_units: rows.length,
     total_units: total,
@@ -120,41 +143,37 @@ function source(sourceId: SourceId, rows: Record<string, unknown>[], total: numb
     error_code: null,
     message: null,
     page: {
-      offset: 0,
       limit: 50,
       total,
-      next_offset: null,
       rows,
       metadata: {},
     },
   };
 }
 
-/** A source the coordinator is still reading. */
-function reading(sourceId: SourceId) {
-  const base = source(sourceId, [], null);
-  return {
-    ...base,
-    phase: 'reading',
-    outcome: 'pending',
-    completed_units: null,
-    total_units: null,
-    page: null,
-  };
-}
+type Concluded = 'completed' | 'partial';
 
-type RunState = 'pending' | 'partial' | 'completed';
-
-function plannerEnvelope(
+/** One search response: each source as a frame, then the final frame unless
+ * the search is still streaming. */
+function streamRoute(
   sources: unknown[] = [
     source('code_graph', [CODE_ROW], 1),
     source('sessions', [MESSAGE_ROW, SUMMARY_ROW], 2),
     source('knowledge', [FACT_ROW], null),
   ],
-  state: RunState = 'partial',
-  query = 'graph',
-) {
-  const domainState = state === 'completed' ? 'ready' : state === 'pending' ? 'loading' : 'partial';
+  outcome: Concluded | null = 'partial',
+): Route {
+  return {
+    status: 200,
+    frames: [
+      ...sources.map((candidate) => ({ event: 'source', source: candidate })),
+      ...(outcome === null ? [] : [{ event: 'final', outcome, elapsed_micros: 9000 }]),
+    ],
+    hold: outcome === null,
+  };
+}
+
+function temporalRetrievalUnavailableEnvelope() {
   return {
     schema_revision: 1,
     scope: {
@@ -166,44 +185,7 @@ function plannerEnvelope(
     time: { valid_time_micros: null, observation_time_micros: 10 },
     source_watermark: null,
     authorization: { outcome: 'authorized' },
-    coverage: {
-      completeness: state === 'completed' ? 'complete' : 'partial',
-      eligible: 4,
-      examined: state === 'completed' ? 4 : 3,
-      matched: null,
-      excluded: null,
-      omitted: state === 'completed' ? 0 : 1,
-      unknown: null,
-      denominator: 4,
-      unit: 'sources',
-      omission_reasons: state === 'completed' ? [] : ['knowledge coverage is unknown'],
-    },
-    freshness: { state: 'unknown', observed_at_micros: null, watermark: null },
-    domain_state: domainState,
     legal_actions: [],
-    payload: {
-      run_id: 'explorer-run-fixture',
-      request: { query, limit: 50, offset: 0 },
-      request_revision: 'explorer-query-request-v1',
-      plan_revision: 'explorer-query-plan-v1',
-      merge_revision: 'source-local-no-merge-v1',
-      required_source_ids: ['code_graph', 'sessions', 'knowledge'],
-      ordering_policy: 'source_local_no_cross_source_merge',
-      explanation:
-        'Search the code graph, active-project session store, and bounded project fact authority in parallel; preserve each source own order and coverage.',
-      submitted_at_micros: 1,
-      completed_at_micros: state === 'pending' ? null : 10,
-      elapsed_micros: 9,
-      state,
-      finality: state === 'completed' ? 'complete' : state === 'pending' ? 'pending' : 'partial',
-      sources,
-    },
-  };
-}
-
-function temporalRetrievalUnavailableEnvelope() {
-  return {
-    ...plannerEnvelope(),
     coverage: {
       completeness: 'unknown',
       eligible: null,
@@ -231,10 +213,7 @@ const SEARCH_ROUTES = {
     status: 200,
     body: temporalRetrievalUnavailableEnvelope(),
   },
-  '/api/explorer/queries': {
-    status: 200,
-    body: plannerEnvelope(),
-  },
+  '/api/explorer/queries': streamRoute(),
   // Browse reads are the same canonical overview envelopes the visual-audit
   // fixtures serve, so a browse row here is one the daemon's contract admits.
   '/api/plugins/graph/overview': {
@@ -301,17 +280,14 @@ describe('ExplorerPage independent lane lifecycle', () => {
   it('draws four lanes, and a ready lane never makes an unavailable neighbour look ready', async () => {
     renderExplorer({
       ...SEARCH_ROUTES,
-      '/api/explorer/queries': {
-        status: 200,
-        body: plannerEnvelope(
+      '/api/explorer/queries': streamRoute(
           [
             source('code_graph', [CODE_ROW], 1),
             source('sessions', [MESSAGE_ROW, SUMMARY_ROW], 2),
             unavailable('knowledge', 'fact_store_unavailable', 'the fact authority is not mounted'),
           ],
           'partial',
-        ),
-      },
+      ),
     });
     await search();
     await screen.findByRole('button', { name: /graph_search/ });
@@ -363,16 +339,13 @@ describe('ExplorerPage independent lane lifecycle', () => {
     expect(within(lane('Semantic')).queryByText('EXACT')).toBeNull();
   });
 
-  it('keeps a lane the coordinator is still reading distinct from lanes that answered', async () => {
+  it('keeps a lane the search is still reading distinct from lanes that answered', async () => {
     renderExplorer({
       ...SEARCH_ROUTES,
-      '/api/explorer/queries': {
-        status: 200,
-        body: plannerEnvelope(
-          [source('code_graph', [CODE_ROW], 1), reading('sessions'), reading('knowledge')],
-          'pending',
-        ),
-      },
+      '/api/explorer/queries': streamRoute(
+          [source('code_graph', [CODE_ROW], 1)],
+        null,
+      ),
     });
     await search();
     await screen.findByRole('button', { name: /graph_search/ });
@@ -381,7 +354,7 @@ describe('ExplorerPage independent lane lifecycle', () => {
     expect(lane('Sessions').getAttribute('data-lane-state')).toBe('pending');
     expect(within(lane('Sessions')).getByText('Reading')).toBeTruthy();
     // Progress is counted in sources concluded, the only figure with a real
-    // denominator, and the explicit cancel is offered while the run is live.
+    // denominator, and the explicit cancel is offered while the search is live.
     expect(screen.getByRole('img', { name: '1 of 3 sources concluded' })).toBeTruthy();
     expect(screen.getByRole('button', { name: 'Cancel' })).toBeTruthy();
   });
@@ -389,13 +362,10 @@ describe('ExplorerPage independent lane lifecycle', () => {
   it('cancels only through the explicit control, never through Escape', async () => {
     const fetchImpl = serve({
       ...SEARCH_ROUTES,
-      '/api/explorer/queries': {
-        status: 200,
-        body: plannerEnvelope(
-          [source('code_graph', [CODE_ROW], 1), reading('sessions'), reading('knowledge')],
-          'pending',
-        ),
-      },
+      '/api/explorer/queries': streamRoute(
+          [source('code_graph', [CODE_ROW], 1)],
+        null,
+      ),
     });
     mount(fetchImpl);
     const user = await search();
@@ -406,18 +376,19 @@ describe('ExplorerPage independent lane lifecycle', () => {
     cancel.focus();
     await user.keyboard('{Escape}');
     expect(screen.getByRole('button', { name: 'Cancel' })).toBe(cancel);
-    expect(fetchImpl.mock.calls.some(([, init]) => init?.method === 'DELETE')).toBe(false);
+    const searchSignal = () =>
+      fetchImpl.mock.calls.find(([, init]) => init?.method === 'POST')?.[1]?.signal;
+    expect(searchSignal()?.aborted).toBe(false);
 
     await user.click(cancel);
+    // Closing the response is the cancellation: the server drops the reads it
+    // still had open, and the lanes that never published settle as cancelled.
     await waitFor(() => {
-      expect(
-        fetchImpl.mock.calls.some(
-          ([input, init]) =>
-            String(input).includes('/api/explorer/queries/explorer-run-fixture') &&
-            init?.method === 'DELETE',
-        ),
-      ).toBe(true);
+      expect(searchSignal()?.aborted).toBe(true);
     });
+    expect(lane('Sessions').getAttribute('data-lane-state')).toBe('cancelled');
+    expect(lane('Code').getAttribute('data-lane-state')).toBe('ready');
+    expect(screen.queryByRole('button', { name: 'Cancel' })).toBeNull();
   });
 });
 
@@ -440,20 +411,20 @@ describe('ExplorerPage scope truth', () => {
       within(lane('Code')).getAllByText(/Other project is not the active project/).length,
     ).toBeGreaterThan(0);
     expect(within(lane('Code')).getByText('Read-only scope')).toBeTruthy();
-    // The run register carries the same refusal rather than a pending admission.
+    // The run register carries the same refusal rather than a pending search.
     const register = document.querySelector('[data-run-register]');
     expect(register?.getAttribute('data-run-state')).toBe('locked');
-    expect(within(register as HTMLElement).getByText(/no run created/)).toBeTruthy();
+    expect(within(register as HTMLElement).getByText(/no search opened/)).toBeTruthy();
     expect(
       fetchImpl.mock.calls.some(([input]) => String(input).includes('/api/explorer/queries')),
     ).toBe(false);
   });
 
-  it('routes the run through the project gateway for an active selected project', async () => {
+  it('routes the search through the project gateway for an active selected project', async () => {
     useScope.getState().selectProject('proj_active', 'Active project', 'active');
     const fetchImpl = serve({
       ...SEARCH_ROUTES,
-      '/api/projects/proj_active/explorer/queries': { status: 200, body: plannerEnvelope() },
+      '/api/projects/proj_active/explorer/queries': streamRoute(),
     });
     mount(fetchImpl);
     await search();
@@ -523,14 +494,11 @@ describe('ExplorerPage inspection', () => {
     };
     renderExplorer({
       ...SEARCH_ROUTES,
-      '/api/explorer/queries': {
-        status: 200,
-        body: plannerEnvelope([
-          source('code_graph', [rowWithoutDegree], 1),
-          source('sessions', [], 0),
-          source('knowledge', [], 0),
-        ]),
-      },
+      '/api/explorer/queries': streamRoute([
+        source('code_graph', [rowWithoutDegree], 1),
+        source('sessions', [], 0),
+        source('knowledge', [], 0),
+      ]),
     });
     const user = await search();
 
@@ -555,14 +523,11 @@ describe('ExplorerPage inspection', () => {
   it('does not draw a measured signal bar without a denominator', async () => {
     renderExplorer({
       ...SEARCH_ROUTES,
-      '/api/explorer/queries': {
-        status: 200,
-        body: plannerEnvelope([
-          source('code_graph', [{ ...CODE_ROW, degree: 0 }], 1),
-          source('sessions', [MESSAGE_ROW, SUMMARY_ROW], 2),
-          source('knowledge', [FACT_ROW], null),
-        ]),
-      },
+      '/api/explorer/queries': streamRoute([
+        source('code_graph', [{ ...CODE_ROW, degree: 0 }], 1),
+        source('sessions', [MESSAGE_ROW, SUMMARY_ROW], 2),
+        source('knowledge', [FACT_ROW], null),
+      ]),
     });
     await search();
 

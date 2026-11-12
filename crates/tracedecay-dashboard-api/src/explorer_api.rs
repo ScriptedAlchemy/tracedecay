@@ -1,28 +1,31 @@
-//! Explorer planner/coordinator and session-context HTTP binding.
+//! Explorer search stream and session-context HTTP binding.
 //!
-//! The coordinator composes existing graph, session, and memory authorities.
-//! It preserves source-local ordering and coverage instead of manufacturing a
-//! cross-source rank. Query cancellation is bound to the opaque run identity
-//! stored here and reaches the live work through `CancellationToken`.
+//! One request owns one search. The three source reads are polled in place by
+//! the response body, so each source's result and coverage is published as it
+//! finishes, one final frame closes the stream, and dropping the body (a
+//! closed connection, a superseded search) drops every unfinished read. The
+//! coordinator preserves source-local ordering and coverage instead of
+//! manufacturing a cross-source rank.
 
-use std::collections::HashMap;
+use std::collections::VecDeque;
+use std::future::Future;
 use std::panic::AssertUnwindSafe;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::pin::Pin;
+use std::time::{Duration, Instant};
 
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
+use axum::response::sse::{Event, Sse};
 use axum::response::{IntoResponse, Json, Response};
-use futures_util::FutureExt;
-use futures_util::stream::{FuturesUnordered, StreamExt};
+use futures_util::stream::{FuturesUnordered, Stream, StreamExt};
+use futures_util::{FutureExt, stream};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use tokio::sync::RwLock;
+use tracedecay_contracts::{CancellationSignal, Deadline};
+use tracedecay_runtime_core::native_runtime;
 
 mod knowledge;
-mod lifecycle;
-
-use lifecycle::{admitted_deadline_elapsed, mark_cancelled, mark_timed_out};
 
 use super::lcm_api::{
     DashboardLcmCanonicalMessageV1, DashboardLcmCanonicalPageV1, DashboardLcmCanonicalStatsV1,
@@ -30,22 +33,15 @@ use super::lcm_api::{
     DashboardLcmReadStateV1, LcmMessageV1, LcmSummaryNodeV1, LcmTokenCountProvenanceV1,
     message_tool_use_id,
 };
-use super::read_model::{
-    DashboardCoverageV1, DashboardDomainStateV1, DashboardEnvelopeV1, DashboardFreshnessV1,
-    DashboardLegalActionKindV1, DashboardLegalActionRefV1, now_micros, scope_from_state,
-};
+use super::read_model::{DashboardCoverageV1, DashboardEnvelopeV1, now_micros, scope_from_state};
 use super::util::json_error;
 use super::{DashboardHttpRequestControlV1, DashboardState, RequestControl, graph_service};
-use crate::request_identity::{GlobalOpaqueIdentityKind, mint_global_opaque_id};
-use tracedecay_runtime_core::cancellation::CancellationToken;
-use tracedecay_runtime_core::native_runtime;
 
 const SOURCE_IDS: [ExplorerSourceIdV1; 3] = [
     ExplorerSourceIdV1::CodeGraph,
     ExplorerSourceIdV1::Sessions,
     ExplorerSourceIdV1::Knowledge,
 ];
-const MAX_QUERY_RUNS: usize = 256;
 const QUERY_LIMIT_DEFAULT: i64 = 25;
 const QUERY_LIMIT_MAX: i64 = 100;
 
@@ -55,8 +51,6 @@ pub struct ExplorerQueryRequestV1 {
     query: String,
     #[serde(default = "default_query_limit")]
     limit: i64,
-    #[serde(default)]
-    offset: i64,
 }
 
 const fn default_query_limit() -> i64 {
@@ -81,39 +75,19 @@ impl ExplorerSourceIdV1 {
     }
 }
 
+/// How the whole search ended, published once as the final frame. A search
+/// whose connection closed has no outcome: nothing is left to receive it.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
-pub(super) enum ExplorerRunStateV1 {
-    Pending,
+pub(super) enum ExplorerOutcomeV1 {
     Completed,
     Partial,
-    Cancelled,
     TimedOut,
     Error,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, JsonSchema)]
-#[serde(rename_all = "snake_case")]
-pub(super) enum ExplorerFinalityV1 {
-    Pending,
-    Complete,
-    Partial,
-    Cancelled,
-    TimedOut,
-    Error,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, JsonSchema)]
-#[serde(rename_all = "snake_case")]
-pub(super) enum ExplorerSourcePhaseV1 {
-    Queued,
-    Reading,
-    Completed,
-    Cancelled,
-}
-
-/// What one source truthfully concluded for this run. Every member has a real
-/// producer; none is speculative:
+/// What one source truthfully concluded for this search. Every member has a
+/// real producer; none is speculative:
 /// - `Partial`: the source answered with rows but its own read reported
 ///   omitted records (LCM temporal reads).
 /// - `Stale`: the source's store exists but does not match the current
@@ -122,7 +96,6 @@ pub(super) enum ExplorerSourcePhaseV1 {
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub(super) enum ExplorerSourceOutcomeV1 {
-    Pending,
     Ready,
     Partial,
     Stale,
@@ -134,10 +107,8 @@ pub(super) enum ExplorerSourceOutcomeV1 {
 
 #[derive(Clone, Debug, Serialize, JsonSchema)]
 pub(super) struct ExplorerResultPageV1 {
-    offset: i64,
     limit: i64,
     total: Option<u64>,
-    next_offset: Option<i64>,
     rows: Vec<Value>,
     metadata: Value,
 }
@@ -146,7 +117,6 @@ pub(super) struct ExplorerResultPageV1 {
 pub(super) struct ExplorerSourceProgressV1 {
     source_id: ExplorerSourceIdV1,
     source_label: &'static str,
-    phase: ExplorerSourcePhaseV1,
     outcome: ExplorerSourceOutcomeV1,
     completed_units: Option<u64>,
     total_units: Option<u64>,
@@ -159,23 +129,6 @@ pub(super) struct ExplorerSourceProgressV1 {
 }
 
 impl ExplorerSourceProgressV1 {
-    fn pending(source_id: ExplorerSourceIdV1) -> Self {
-        Self {
-            source_id,
-            source_label: source_id.label(),
-            phase: ExplorerSourcePhaseV1::Queued,
-            outcome: ExplorerSourceOutcomeV1::Pending,
-            completed_units: None,
-            total_units: None,
-            coverage: DashboardCoverageV1::unknown(),
-            freshness: "unknown",
-            watermark: None,
-            error_code: None,
-            message: None,
-            page: None,
-        }
-    }
-
     fn unavailable(
         source_id: ExplorerSourceIdV1,
         error_code: &'static str,
@@ -184,7 +137,6 @@ impl ExplorerSourceProgressV1 {
         Self {
             source_id,
             source_label: source_id.label(),
-            phase: ExplorerSourcePhaseV1::Completed,
             outcome: ExplorerSourceOutcomeV1::Unavailable,
             completed_units: None,
             total_units: None,
@@ -197,15 +149,17 @@ impl ExplorerSourceProgressV1 {
         }
     }
 
+    fn with_outcome(self, outcome: ExplorerSourceOutcomeV1) -> Self {
+        Self { outcome, ..self }
+    }
+
     fn error(
         source_id: ExplorerSourceIdV1,
         error_code: &'static str,
         message: impl Into<String>,
     ) -> Self {
-        Self {
-            outcome: ExplorerSourceOutcomeV1::Error,
-            ..Self::unavailable(source_id, error_code, message)
-        }
+        Self::unavailable(source_id, error_code, message)
+            .with_outcome(ExplorerSourceOutcomeV1::Error)
     }
 
     fn stale(
@@ -213,10 +167,8 @@ impl ExplorerSourceProgressV1 {
         error_code: &'static str,
         message: impl Into<String>,
     ) -> Self {
-        Self {
-            outcome: ExplorerSourceOutcomeV1::Stale,
-            ..Self::unavailable(source_id, error_code, message)
-        }
+        Self::unavailable(source_id, error_code, message)
+            .with_outcome(ExplorerSourceOutcomeV1::Stale)
     }
 
     fn timed_out(
@@ -224,69 +176,233 @@ impl ExplorerSourceProgressV1 {
         error_code: &'static str,
         message: impl Into<String>,
     ) -> Self {
+        Self::unavailable(source_id, error_code, message)
+            .with_outcome(ExplorerSourceOutcomeV1::TimedOut)
+    }
+
+    fn cancelled(
+        source_id: ExplorerSourceIdV1,
+        error_code: &'static str,
+        message: impl Into<String>,
+    ) -> Self {
+        Self::unavailable(source_id, error_code, message)
+            .with_outcome(ExplorerSourceOutcomeV1::Cancelled)
+    }
+}
+
+/// One frame of the search stream. The SSE event name is the `event` tag.
+#[derive(Clone, Debug, Serialize, JsonSchema)]
+#[serde(tag = "event", rename_all = "snake_case")]
+pub(super) enum ExplorerStreamEventV1 {
+    /// One source finished. Sources arrive in completion order, each once.
+    Source {
+        source: Box<ExplorerSourceProgressV1>,
+    },
+    /// The last frame: every source has been published.
+    Final {
+        outcome: ExplorerOutcomeV1,
+        elapsed_micros: i64,
+    },
+}
+
+impl ExplorerStreamEventV1 {
+    const fn name(&self) -> &'static str {
+        match self {
+            Self::Source { .. } => "source",
+            Self::Final { .. } => "final",
+        }
+    }
+
+    fn into_sse(self) -> Result<Event, axum::Error> {
+        Event::default().event(self.name()).json_data(&self)
+    }
+}
+
+type SourceRead = Pin<Box<dyn Future<Output = ExplorerSourceProgressV1> + Send>>;
+
+/// Cancels the request's signal when the stream is dropped, so reads that poll
+/// the request control (the graph and fact readers run off-thread) stop with
+/// the connection instead of finishing unobserved.
+struct CancelOnDrop(CancellationSignal);
+
+impl Drop for CancelOnDrop {
+    fn drop(&mut self) {
+        let _ = self
+            .0
+            .cancel(tracedecay_session_memory::context::application_observed_at());
+    }
+}
+
+/// The three-source search as a stream of frames. The unfinished reads live in
+/// this state, so dropping the stream drops them.
+struct SearchRun {
+    reads: FuturesUnordered<SourceRead>,
+    unfinished: Vec<ExplorerSourceIdV1>,
+    every_source_complete: bool,
+    any_source_answered: bool,
+    queued: VecDeque<ExplorerStreamEventV1>,
+    admitted_deadline: Deadline,
+    deadline: Pin<Box<dyn Future<Output = ()> + Send>>,
+    cancellation: CancellationSignal,
+    started_at_micros: i64,
+    finished: bool,
+    _cancel_on_drop: CancelOnDrop,
+}
+
+impl SearchRun {
+    fn new(
+        reads: impl IntoIterator<Item = (ExplorerSourceIdV1, SourceRead)>,
+        control: &DashboardHttpRequestControlV1,
+    ) -> Self {
+        let mut unfinished = Vec::new();
+        let reads: FuturesUnordered<SourceRead> = reads
+            .into_iter()
+            .map(|(source_id, read)| {
+                unfinished.push(source_id);
+                AssertUnwindSafe(read)
+                    .catch_unwind()
+                    .map(move |outcome| {
+                        outcome.unwrap_or_else(|_| {
+                            ExplorerSourceProgressV1::error(
+                                source_id,
+                                "source_task_failed",
+                                "explorer source read panicked",
+                            )
+                        })
+                    })
+                    .boxed()
+            })
+            .collect();
         Self {
-            outcome: ExplorerSourceOutcomeV1::TimedOut,
-            ..Self::unavailable(source_id, error_code, message)
+            reads,
+            unfinished,
+            every_source_complete: true,
+            any_source_answered: false,
+            queued: VecDeque::new(),
+            admitted_deadline: control.deadline(),
+            deadline: Box::pin(admitted_deadline_elapsed(control.deadline())),
+            cancellation: control.cancellation().clone(),
+            started_at_micros: now_micros(),
+            finished: false,
+            _cancel_on_drop: CancelOnDrop(control.cancellation().clone()),
+        }
+    }
+
+    fn settle(&mut self, source: &ExplorerSourceProgressV1) {
+        self.unfinished.retain(|id| *id != source.source_id);
+        self.every_source_complete &=
+            source.outcome == ExplorerSourceOutcomeV1::Ready && source.coverage.is_complete();
+        self.any_source_answered |= matches!(
+            source.outcome,
+            ExplorerSourceOutcomeV1::Ready | ExplorerSourceOutcomeV1::Partial
+        );
+    }
+
+    fn finish(&mut self, outcome: ExplorerOutcomeV1) {
+        self.finished = true;
+        self.queued.push_back(ExplorerStreamEventV1::Final {
+            outcome,
+            elapsed_micros: now_micros().saturating_sub(self.started_at_micros),
+        });
+    }
+
+    fn time_out(&mut self) {
+        self.reads.clear();
+        let _ = self
+            .cancellation
+            .cancel(tracedecay_session_memory::context::application_observed_at());
+        for source_id in std::mem::take(&mut self.unfinished) {
+            self.queued.push_back(ExplorerStreamEventV1::Source {
+                source: Box::new(ExplorerSourceProgressV1::timed_out(
+                    source_id,
+                    "request_deadline_elapsed",
+                    "dashboard request deadline elapsed",
+                )),
+            });
+        }
+        self.finish(ExplorerOutcomeV1::TimedOut);
+    }
+
+    fn stop_if_required(&mut self) -> bool {
+        if self.cancellation.is_cancelled() {
+            self.reads.clear();
+            self.finished = true;
+            return true;
+        }
+        if self
+            .admitted_deadline
+            .is_elapsed_at(tracedecay_session_memory::context::application_observed_at())
+            || self.deadline.as_mut().now_or_never().is_some()
+        {
+            self.time_out();
+            return true;
+        }
+        false
+    }
+
+    async fn next_event(&mut self) -> Option<ExplorerStreamEventV1> {
+        loop {
+            if !self.finished {
+                self.stop_if_required();
+            }
+            if let Some(event) = self.queued.pop_front() {
+                return Some(event);
+            }
+            if self.finished {
+                return None;
+            }
+            if self.unfinished.is_empty() {
+                let outcome = if self.every_source_complete {
+                    ExplorerOutcomeV1::Completed
+                } else if self.any_source_answered {
+                    ExplorerOutcomeV1::Partial
+                } else {
+                    ExplorerOutcomeV1::Error
+                };
+                self.finish(outcome);
+                continue;
+            }
+            tokio::select! {
+                biased;
+                () = self.cancellation.cancelled() => {
+                    self.reads.clear();
+                    self.finished = true;
+                    return None;
+                }
+                () = &mut self.deadline => self.time_out(),
+                Some(source) = self.reads.next() => {
+                    if self.stop_if_required() {
+                        continue;
+                    }
+                    self.settle(&source);
+                    return Some(ExplorerStreamEventV1::Source { source: Box::new(source) });
+                }
+            }
         }
     }
 }
 
-#[derive(Clone, Debug, Serialize, JsonSchema)]
-pub(super) struct ExplorerQueryRunV1 {
-    run_id: String,
-    request: ExplorerQueryRequestV1,
-    request_revision: &'static str,
-    plan_revision: &'static str,
-    merge_revision: &'static str,
-    required_source_ids: [ExplorerSourceIdV1; 3],
-    ordering_policy: &'static str,
-    explanation: &'static str,
-    submitted_at_micros: i64,
-    completed_at_micros: Option<i64>,
-    elapsed_micros: i64,
-    state: ExplorerRunStateV1,
-    finality: ExplorerFinalityV1,
-    sources: Vec<ExplorerSourceProgressV1>,
+fn search_events<R: IntoIterator<Item = (ExplorerSourceIdV1, SourceRead)>>(
+    reads: R,
+    control: &DashboardHttpRequestControlV1,
+) -> impl Stream<Item = ExplorerStreamEventV1> + Send + use<R> {
+    stream::unfold(SearchRun::new(reads, control), |mut run| async move {
+        run.next_event().await.map(|event| (event, run))
+    })
 }
 
-#[derive(Clone)]
-struct StoredExplorerRun {
-    owner: String,
-    cancellation: CancellationToken,
-    run: Arc<RwLock<ExplorerQueryRunV1>>,
-}
-
-static QUERY_RUNS: OnceLock<Mutex<HashMap<String, StoredExplorerRun>>> = OnceLock::new();
-
-fn query_runs() -> &'static Mutex<HashMap<String, StoredExplorerRun>> {
-    QUERY_RUNS.get_or_init(|| Mutex::new(HashMap::new()))
-}
-
-fn run_owner(state: &DashboardState) -> Option<String> {
-    state
-        .resolved_scope
-        .as_ref()
-        .map(|scope| scope.scope_digest.to_string())
-}
-
-fn new_run_id() -> Option<String> {
-    mint_global_opaque_id(GlobalOpaqueIdentityKind::ExplorerRun).ok()
+async fn admitted_deadline_elapsed(deadline: Deadline) {
+    let observed_at = tracedecay_session_memory::context::application_observed_at();
+    let remaining_micros = deadline.expires_at.0.saturating_sub(observed_at.0).max(0) as u64;
+    let due = Instant::now() + Duration::from_micros(remaining_micros);
+    // A search without a timer times out at once rather than run unbounded.
+    if let Err(error) = native_runtime::sleep_until(due).await {
+        tracing::error!(%error, "dashboard explorer deadline timer unavailable");
+    }
 }
 
 fn bad_request(message: impl Into<String>) -> Response {
     json_error(StatusCode::BAD_REQUEST, message).into_response()
-}
-
-fn not_found(run_id: &str) -> Response {
-    json_error(
-        StatusCode::NOT_FOUND,
-        format!("explorer query run not found: {run_id}"),
-    )
-    .into_response()
-}
-
-fn internal_error(message: impl Into<String>) -> Response {
-    json_error(StatusCode::INTERNAL_SERVER_ERROR, message).into_response()
 }
 
 fn validate_query(request: &mut ExplorerQueryRequestV1) -> Result<(), &'static str> {
@@ -297,119 +413,35 @@ fn validate_query(request: &mut ExplorerQueryRequestV1) -> Result<(), &'static s
     if !(1..=QUERY_LIMIT_MAX).contains(&request.limit) {
         return Err("limit must be between 1 and 100");
     }
-    if request.offset != 0 {
-        return Err("offset must be zero until every required source exposes a cursor");
-    }
     Ok(())
 }
 
-fn initial_run(run_id: String, request: ExplorerQueryRequestV1) -> ExplorerQueryRunV1 {
-    ExplorerQueryRunV1 {
-        run_id,
-        request,
-        request_revision: "explorer-query-request-v1",
-        plan_revision: "explorer-query-plan-v1",
-        merge_revision: "source-local-no-merge-v1",
-        required_source_ids: SOURCE_IDS,
-        ordering_policy: "source_local_no_cross_source_merge",
-        explanation: "Search the code graph, active-project session store, and bounded project fact authority in parallel; preserve each source's own order and coverage.",
-        submitted_at_micros: now_micros(),
-        completed_at_micros: None,
-        elapsed_micros: 0,
-        state: ExplorerRunStateV1::Pending,
-        finality: ExplorerFinalityV1::Pending,
-        sources: SOURCE_IDS
-            .into_iter()
-            .map(ExplorerSourceProgressV1::pending)
-            .collect(),
-    }
-}
-
-fn envelope_for_run(
+fn source_reads(
     state: &DashboardState,
-    run: ExplorerQueryRunV1,
-) -> DashboardEnvelopeV1<ExplorerQueryRunV1> {
-    let complete_sources = run
-        .sources
-        .iter()
-        .filter(|source| source.coverage.is_complete())
-        .count() as u64;
-    let coverage = if complete_sources == SOURCE_IDS.len() as u64 {
-        DashboardCoverageV1::complete(SOURCE_IDS.len() as u64, "sources")
-    } else {
-        DashboardCoverageV1::partial(
-            SOURCE_IDS.len() as u64,
-            complete_sources,
-            "sources",
-            vec!["one or more required sources has unknown or partial coverage".to_owned()],
-        )
-    };
-    let domain_state = match run.state {
-        ExplorerRunStateV1::Pending => DashboardDomainStateV1::Loading,
-        ExplorerRunStateV1::Completed => DashboardDomainStateV1::Ready,
-        ExplorerRunStateV1::Partial => DashboardDomainStateV1::Partial,
-        ExplorerRunStateV1::Cancelled => DashboardDomainStateV1::Cancelled,
-        ExplorerRunStateV1::TimedOut => DashboardDomainStateV1::TimedOut,
-        ExplorerRunStateV1::Error => DashboardDomainStateV1::Error,
-    };
-    let mut envelope = DashboardEnvelopeV1::new(
-        scope_from_state(state),
-        domain_state,
-        coverage,
-        DashboardFreshnessV1::unknown(),
-        run,
-    );
-    if envelope.payload.state == ExplorerRunStateV1::Pending {
-        envelope = envelope.with_legal_actions(vec![DashboardLegalActionRefV1::new(
-            DashboardLegalActionKindV1::RequestCancel,
-            "dashboard.explorer.query.cancel",
-        )]);
-    }
-    envelope
+    request: &ExplorerQueryRequestV1,
+    control: &DashboardHttpRequestControlV1,
+) -> Vec<(ExplorerSourceIdV1, SourceRead)> {
+    SOURCE_IDS
+        .into_iter()
+        .map(|source_id| {
+            let (state, request, control) = (state.clone(), request.clone(), control.clone());
+            let read: SourceRead = Box::pin(async move {
+                match source_id {
+                    ExplorerSourceIdV1::CodeGraph => code_source(&state, &request, &control).await,
+                    ExplorerSourceIdV1::Sessions => session_source(&state, &request, control).await,
+                    ExplorerSourceIdV1::Knowledge => {
+                        knowledge::knowledge_source(&state, &request, &control).await
+                    }
+                }
+            });
+            (source_id, read)
+        })
+        .collect()
 }
 
-fn remember_run(run: StoredExplorerRun, run_id: String) -> Result<(), &'static str> {
-    let mut runs = query_runs()
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    if runs.contains_key(&run_id) {
-        return Err("explorer query run identity collision");
-    }
-    if runs.len() >= MAX_QUERY_RUNS {
-        let oldest_terminal = runs
-            .iter()
-            .filter(|(_, stored)| {
-                stored
-                    .run
-                    .try_read()
-                    .is_ok_and(|run| run.state != ExplorerRunStateV1::Pending)
-            })
-            .min_by_key(|(_, stored)| {
-                stored
-                    .run
-                    .try_read()
-                    .map_or(i64::MIN, |run| run.submitted_at_micros)
-            })
-            .map(|(run_id, _)| run_id.clone());
-        let Some(oldest_terminal) = oldest_terminal else {
-            return Err("explorer query run capacity is exhausted");
-        };
-        runs.remove(&oldest_terminal);
-    }
-    runs.insert(run_id, run);
-    Ok(())
-}
-
-fn find_run(state: &DashboardState, run_id: &str) -> Option<StoredExplorerRun> {
-    let runs = query_runs()
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    runs.get(run_id)
-        .filter(|stored| run_owner(state).as_ref() == Some(&stored.owner))
-        .cloned()
-}
-
-pub async fn create_query(
+/// Streams one search. The response owns the reads: it is the only holder of
+/// the search, so there is nothing to look up, poll, or cancel afterwards.
+pub async fn search_stream(
     State(state): State<DashboardState>,
     RequestControl(control): RequestControl,
     Json(mut request): Json<ExplorerQueryRequestV1>,
@@ -419,242 +451,20 @@ pub async fn create_query(
             if let Err(message) = validate_query(&mut request) {
                 return bad_request(message);
             }
-            let Some(owner) = run_owner(&state) else {
+            if state.resolved_scope.is_none() {
                 return json_error(
                     StatusCode::SERVICE_UNAVAILABLE,
                     "exact registered project scope is unavailable",
                 )
                 .into_response();
-            };
-            let Some(run_id) = new_run_id() else {
-                return internal_error("could not allocate explorer query run identity");
-            };
-            let run = Arc::new(RwLock::new(initial_run(run_id.clone(), request.clone())));
-            let cancellation = CancellationToken::new();
-            if let Err(message) = remember_run(
-                StoredExplorerRun {
-                    owner,
-                    cancellation: cancellation.clone(),
-                    run: Arc::clone(&run),
-                },
-                run_id.clone(),
-            ) {
-                return internal_error(message);
             }
-            let initial = run.read().await.clone();
-            let response = envelope_for_run(&state, initial);
-            if let Err(error) = native_runtime::NativeTask::spawn(execute_query(
-                state,
-                request,
-                Arc::clone(&run),
-                cancellation,
-                control,
-            )) {
-                query_runs()
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .remove(&run_id);
-                return json_error(
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    format!("explorer query could not start: {error}"),
-                )
-                .into_response();
-            }
-            (StatusCode::ACCEPTED, Json(response)).into_response()
+            let reads = source_reads(&state, &request, &control);
+            Sse::new(search_events(reads, &control).map(ExplorerStreamEventV1::into_sse))
+                .into_response()
         },
-        tracing::trace_span!("dashboard_api.query.create"),
+        tracing::trace_span!("dashboard_api.query.stream"),
     )
     .await
-}
-
-pub async fn query_status(
-    State(state): State<DashboardState>,
-    Path(run_id): Path<String>,
-) -> Response {
-    tracing::Instrument::instrument(
-        async move {
-            let Some(stored) = find_run(&state, &run_id) else {
-                return not_found(&run_id);
-            };
-            let mut run = stored.run.read().await.clone();
-            run.elapsed_micros = run
-                .completed_at_micros
-                .unwrap_or_else(now_micros)
-                .saturating_sub(run.submitted_at_micros);
-            Json(envelope_for_run(&state, run)).into_response()
-        },
-        tracing::trace_span!("dashboard_api.query.status"),
-    )
-    .await
-}
-
-#[tracing::instrument(name = "dashboard_api.query.cancel", level = "trace", skip_all)]
-pub async fn cancel_query(
-    State(state): State<DashboardState>,
-    Path(run_id): Path<String>,
-) -> Response {
-    let Some(stored) = find_run(&state, &run_id) else {
-        return not_found(&run_id);
-    };
-    let mut run = stored.run.write().await;
-    if run.state != ExplorerRunStateV1::Pending {
-        return json_error(
-            StatusCode::CONFLICT,
-            format!("explorer query run is already terminal: {run_id}"),
-        )
-        .into_response();
-    }
-    stored.cancellation.cancel();
-    mark_cancelled(&mut run);
-    Json(envelope_for_run(&state, run.clone())).into_response()
-}
-
-#[tracing::instrument(name = "dashboard_api.query.execute", level = "trace", skip_all)]
-async fn execute_query(
-    state: DashboardState,
-    request: ExplorerQueryRequestV1,
-    run: Arc<RwLock<ExplorerQueryRunV1>>,
-    cancellation: CancellationToken,
-    control: DashboardHttpRequestControlV1,
-) {
-    let request_cancellation = control.cancellation().clone();
-    let deadline = control.deadline();
-    let deadline_wait = admitted_deadline_elapsed(deadline.clone());
-    tokio::pin!(deadline_wait);
-    {
-        let mut current = run.write().await;
-        for source in &mut current.sources {
-            source.phase = ExplorerSourcePhaseV1::Reading;
-        }
-    }
-
-    // Polled in place, so dropping `tasks` on any exit cancels the
-    // unfinished reads.
-    let mut tasks: FuturesUnordered<_> = SOURCE_IDS
-        .into_iter()
-        .map(|source_id| {
-            let source = execute_source(
-                state.clone(),
-                request.clone(),
-                source_id,
-                control.clone(),
-                cancellation.clone(),
-            );
-            AssertUnwindSafe(source).catch_unwind().map(move |outcome| {
-                outcome.unwrap_or_else(|_| {
-                    ExplorerSourceProgressV1::error(
-                        source_id,
-                        "source_task_failed",
-                        "explorer source read panicked",
-                    )
-                })
-            })
-        })
-        .collect();
-
-    let mut completed = 0;
-    while completed < SOURCE_IDS.len() {
-        tokio::select! {
-            biased;
-            () = &mut deadline_wait => {
-                let mut current = run.write().await;
-                if current.state == ExplorerRunStateV1::Pending {
-                    mark_timed_out(&mut current);
-                }
-                return;
-            }
-            () = cancellation.cancelled() => {
-                let mut current = run.write().await;
-                if current.state == ExplorerRunStateV1::Pending {
-                    mark_cancelled(&mut current);
-                }
-                return;
-            }
-            () = request_cancellation.cancelled() => {
-                let mut current = run.write().await;
-                if current.state == ExplorerRunStateV1::Pending {
-                    mark_cancelled(&mut current);
-                }
-                return;
-            }
-            source = tasks.next() => {
-                let Some(source) = source else {
-                    break;
-                };
-                completed += 1;
-                let mut current = run.write().await;
-                if current.state != ExplorerRunStateV1::Pending {
-                    return;
-                }
-                if let Some(slot) = current
-                    .sources
-                    .iter_mut()
-                    .find(|slot| slot.source_id == source.source_id)
-                {
-                    *slot = source;
-                }
-                current.elapsed_micros = now_micros().saturating_sub(current.submitted_at_micros);
-            }
-        }
-    }
-
-    let mut current = run.write().await;
-    if current.state != ExplorerRunStateV1::Pending {
-        return;
-    }
-    if deadline.is_elapsed_at(tracedecay_session_memory::context::application_observed_at()) {
-        mark_timed_out(&mut current);
-        return;
-    }
-    if cancellation.is_cancelled() || request_cancellation.is_cancelled() {
-        mark_cancelled(&mut current);
-        return;
-    }
-    let every_concluded = current
-        .sources
-        .iter()
-        .all(|source| matches!(source.outcome, ExplorerSourceOutcomeV1::Ready));
-    let complete = every_concluded
-        && current
-            .sources
-            .iter()
-            .all(|source| source.coverage.is_complete());
-    current.completed_at_micros = Some(now_micros());
-    current.elapsed_micros = current
-        .completed_at_micros
-        .unwrap_or(current.submitted_at_micros)
-        .saturating_sub(current.submitted_at_micros);
-    if complete {
-        current.state = ExplorerRunStateV1::Completed;
-        current.finality = ExplorerFinalityV1::Complete;
-    } else if current.sources.iter().any(|source| {
-        matches!(
-            source.outcome,
-            ExplorerSourceOutcomeV1::Ready | ExplorerSourceOutcomeV1::Partial
-        )
-    }) {
-        current.state = ExplorerRunStateV1::Partial;
-        current.finality = ExplorerFinalityV1::Partial;
-    } else {
-        current.state = ExplorerRunStateV1::Error;
-        current.finality = ExplorerFinalityV1::Error;
-    }
-}
-
-async fn execute_source(
-    state: DashboardState,
-    request: ExplorerQueryRequestV1,
-    source_id: ExplorerSourceIdV1,
-    control: DashboardHttpRequestControlV1,
-    cancellation: CancellationToken,
-) -> ExplorerSourceProgressV1 {
-    match source_id {
-        ExplorerSourceIdV1::CodeGraph => code_source(&state, &request, &control).await,
-        ExplorerSourceIdV1::Sessions => session_source(&state, &request, control).await,
-        ExplorerSourceIdV1::Knowledge => {
-            knowledge::knowledge_source(&state, &request, &control, cancellation).await
-        }
-    }
 }
 
 async fn code_source(
@@ -662,14 +472,8 @@ async fn code_source(
     request: &ExplorerQueryRequestV1,
     control: &DashboardHttpRequestControlV1,
 ) -> ExplorerSourceProgressV1 {
-    let read = match graph_service::search_payload(
-        state,
-        control,
-        &request.query,
-        request.limit,
-        request.offset,
-    )
-    .await
+    let read = match graph_service::search_payload(state, control, &request.query, request.limit, 0)
+        .await
     {
         Ok(read) => read,
         Err(error) => {
@@ -733,16 +537,11 @@ fn code_graph_error(error: crate::graph::CodeGraphReadError) -> ExplorerSourcePr
             "graph_generation_stale",
             detail,
         ),
-        CodeGraphReadError::Cancelled => {
-            let mut source = ExplorerSourceProgressV1::unavailable(
-                ExplorerSourceIdV1::CodeGraph,
-                "graph_read_cancelled",
-                "the graph read was cancelled",
-            );
-            source.phase = ExplorerSourcePhaseV1::Cancelled;
-            source.outcome = ExplorerSourceOutcomeV1::Cancelled;
-            source
-        }
+        CodeGraphReadError::Cancelled => ExplorerSourceProgressV1::cancelled(
+            ExplorerSourceIdV1::CodeGraph,
+            "graph_read_cancelled",
+            "the graph read was cancelled",
+        ),
         CodeGraphReadError::TimedOut => ExplorerSourceProgressV1::timed_out(
             ExplorerSourceIdV1::CodeGraph,
             "graph_read_timed_out",
@@ -798,15 +597,6 @@ async fn session_source(
             "daemon LCM retrieval authority is unavailable",
         );
     };
-    if request.offset != 0 {
-        // Temporal session reads paginate with the opaque daemon cursor only;
-        // there is no offset protocol to honor truthfully.
-        return ExplorerSourceProgressV1::unavailable(
-            ExplorerSourceIdV1::Sessions,
-            "lcm_cursor_required",
-            "session pagination requires the opaque temporal cursor",
-        );
-    }
     match authority
         .read(
             control,
@@ -897,7 +687,6 @@ fn ready_source(
     ExplorerSourceProgressV1 {
         source_id,
         source_label: source_id.label(),
-        phase: ExplorerSourcePhaseV1::Completed,
         outcome: ExplorerSourceOutcomeV1::Ready,
         completed_units: Some(completed),
         total_units: total,
@@ -907,10 +696,8 @@ fn ready_source(
         error_code: None,
         message: None,
         page: Some(ExplorerResultPageV1 {
-            offset: request.offset,
             limit: request.limit,
             total,
-            next_offset: None,
             rows,
             metadata,
         }),
@@ -1310,21 +1097,441 @@ const fn explorer_lcm_error_code(state: DashboardLcmReadStateV1) -> &'static str
 
 #[cfg(test)]
 #[allow(clippy::expect_used)]
-mod native_tests {
-    use std::time::{Duration, Instant};
+mod tests {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    use futures_util::{FutureExt, StreamExt};
+    use tokio::sync::oneshot;
+    use tracedecay_contracts::CancellationSignal;
+    use tracedecay_domain::UtcMicros;
 
     use super::*;
 
+    fn control_with_deadline(label: &str, deadline_in: i64) -> DashboardHttpRequestControlV1 {
+        let now = tracedecay_session_memory::context::application_observed_at();
+        DashboardHttpRequestControlV1::test_fixture_with(
+            label,
+            CancellationSignal::active(format!("cancel.{label}")).expect("cancellation"),
+            now,
+            UtcMicros(now.0 + deadline_in),
+        )
+    }
+
+    fn control(label: &str) -> DashboardHttpRequestControlV1 {
+        control_with_deadline(label, 60_000_000)
+    }
+
+    fn request() -> ExplorerQueryRequestV1 {
+        ExplorerQueryRequestV1 {
+            query: "cache".to_owned(),
+            limit: 5,
+        }
+    }
+
+    fn ready(source_id: ExplorerSourceIdV1, rows: usize) -> ExplorerSourceProgressV1 {
+        ready_source(
+            source_id,
+            &request(),
+            vec![json!({"id": "row"}); rows],
+            Some(rows as u64),
+            json!({}),
+            "rows",
+            Vec::new(),
+        )
+    }
+
+    fn immediate(source: ExplorerSourceProgressV1) -> (ExplorerSourceIdV1, SourceRead) {
+        (source.source_id, Box::pin(async move { source }))
+    }
+
+    fn held(
+        source: ExplorerSourceProgressV1,
+    ) -> (oneshot::Sender<()>, (ExplorerSourceIdV1, SourceRead)) {
+        let (release, released) = oneshot::channel();
+        let source_id = source.source_id;
+        let read: SourceRead = Box::pin(async move {
+            let _ = released.await;
+            source
+        });
+        (release, (source_id, read))
+    }
+
+    fn source_of(event: Option<ExplorerStreamEventV1>) -> ExplorerSourceProgressV1 {
+        match event {
+            Some(ExplorerStreamEventV1::Source { source }) => *source,
+            other => panic!("expected a source frame, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_finished_source_is_published_while_another_is_still_reading() {
+        let (release, sessions) = held(ready(ExplorerSourceIdV1::Sessions, 1));
+        let control = control("explorer-progressive");
+        let mut events = Box::pin(search_events(
+            [
+                immediate(ready(ExplorerSourceIdV1::CodeGraph, 2)),
+                sessions,
+                immediate(ready(ExplorerSourceIdV1::Knowledge, 3)),
+            ],
+            &control,
+        ));
+
+        let mut early = vec![
+            source_of(events.next().now_or_never().expect("first fast source")),
+            source_of(events.next().now_or_never().expect("second fast source")),
+        ]
+        .into_iter()
+        .map(|source| {
+            (
+                source.source_id,
+                source.page.map_or(0, |page| page.rows.len()),
+            )
+        })
+        .collect::<Vec<_>>();
+        early.sort_by_key(|(id, _)| *id as u8);
+        assert_eq!(
+            early,
+            vec![
+                (ExplorerSourceIdV1::CodeGraph, 2),
+                (ExplorerSourceIdV1::Knowledge, 3),
+            ]
+        );
+        assert!(
+            events.next().now_or_never().is_none(),
+            "the held source must not block or fabricate a frame"
+        );
+
+        release.send(()).expect("release the held source");
+        assert_eq!(
+            source_of(events.next().await).source_id,
+            ExplorerSourceIdV1::Sessions
+        );
+        assert!(matches!(
+            events.next().await,
+            Some(ExplorerStreamEventV1::Final {
+                outcome: ExplorerOutcomeV1::Completed,
+                ..
+            })
+        ));
+        assert!(events.next().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn failed_and_stale_sources_stay_distinct_from_an_empty_answer() {
+        let control = control("explorer-distinct");
+        let mut events = Box::pin(search_events(
+            [
+                immediate(ExplorerSourceProgressV1::stale(
+                    ExplorerSourceIdV1::CodeGraph,
+                    "graph_generation_stale",
+                    "stale",
+                )),
+                immediate(ready(ExplorerSourceIdV1::Sessions, 0)),
+                immediate(ExplorerSourceProgressV1::error(
+                    ExplorerSourceIdV1::Knowledge,
+                    "knowledge_query_failed",
+                    "failed",
+                )),
+            ],
+            &control,
+        ));
+        let mut outcomes = Vec::new();
+        for _ in 0..3 {
+            let source = source_of(events.next().await);
+            outcomes.push((source.source_id, source.outcome, source.page.is_some()));
+        }
+        outcomes.sort_by_key(|(id, _, _)| *id as u8);
+        assert_eq!(
+            outcomes,
+            vec![
+                (
+                    ExplorerSourceIdV1::CodeGraph,
+                    ExplorerSourceOutcomeV1::Stale,
+                    false
+                ),
+                (
+                    ExplorerSourceIdV1::Sessions,
+                    ExplorerSourceOutcomeV1::Ready,
+                    true
+                ),
+                (
+                    ExplorerSourceIdV1::Knowledge,
+                    ExplorerSourceOutcomeV1::Error,
+                    false
+                ),
+            ]
+        );
+        assert!(matches!(
+            events.next().await,
+            Some(ExplorerStreamEventV1::Final {
+                outcome: ExplorerOutcomeV1::Partial,
+                ..
+            })
+        ));
+    }
+
+    #[tokio::test]
+    async fn a_search_where_no_source_answers_ends_in_error() {
+        let control = control("explorer-no-answer");
+        let events = search_events(
+            [immediate(ExplorerSourceProgressV1::unavailable(
+                ExplorerSourceIdV1::Sessions,
+                "lcm_daemon_authority_unavailable",
+                "down",
+            ))],
+            &control,
+        )
+        .collect::<Vec<_>>()
+        .await;
+        assert!(matches!(
+            events.last(),
+            Some(ExplorerStreamEventV1::Final {
+                outcome: ExplorerOutcomeV1::Error,
+                ..
+            })
+        ));
+    }
+
+    struct ReadGuard(Arc<AtomicBool>);
+
+    impl Drop for ReadGuard {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::SeqCst);
+        }
+    }
+
+    #[tokio::test]
+    async fn dropping_the_stream_releases_unfinished_reads_and_cancels_the_request() {
+        let released = Arc::new(AtomicBool::new(false));
+        let guard = ReadGuard(Arc::clone(&released));
+        let pending: SourceRead = Box::pin(async move {
+            let _guard = guard;
+            std::future::pending::<ExplorerSourceProgressV1>().await
+        });
+        let control = control("explorer-drop");
+        let mut events = Box::pin(search_events(
+            [
+                immediate(ready(ExplorerSourceIdV1::CodeGraph, 1)),
+                (ExplorerSourceIdV1::Sessions, pending),
+            ],
+            &control,
+        ));
+        assert_eq!(
+            source_of(events.next().await).source_id,
+            ExplorerSourceIdV1::CodeGraph
+        );
+        assert!(events.next().now_or_never().is_none());
+        assert!(!released.load(Ordering::SeqCst));
+        assert!(!control.cancellation().is_cancelled());
+
+        drop(events);
+
+        assert!(
+            released.load(Ordering::SeqCst),
+            "the unfinished read must be dropped with the stream"
+        );
+        assert!(
+            control.cancellation().is_cancelled(),
+            "off-thread readers observe the request cancellation"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_elapsed_deadline_settles_unfinished_sources_as_timed_out() {
+        let control = control("explorer-deadline");
+        let released = Arc::new(AtomicBool::new(false));
+        let guard = ReadGuard(Arc::clone(&released));
+        let pending: SourceRead = Box::pin(async move {
+            let _guard = guard;
+            std::future::pending().await
+        });
+        let mut run = SearchRun::new(
+            [
+                immediate(ready(ExplorerSourceIdV1::CodeGraph, 1)),
+                (ExplorerSourceIdV1::Sessions, pending),
+            ],
+            &control,
+        );
+        let (expire, expired) = oneshot::channel();
+        run.deadline = Box::pin(async move {
+            expired.await.expect("release the admitted deadline");
+        });
+        assert_eq!(
+            source_of(run.next_event().await).source_id,
+            ExplorerSourceIdV1::CodeGraph
+        );
+        assert!(run.next_event().now_or_never().is_none());
+        assert!(!released.load(Ordering::SeqCst));
+        assert!(!control.cancellation().is_cancelled());
+        expire.send(()).expect("expire the admitted deadline");
+        let timed_out = source_of(run.next_event().await);
+        assert_eq!(timed_out.source_id, ExplorerSourceIdV1::Sessions);
+        assert_eq!(timed_out.outcome, ExplorerSourceOutcomeV1::TimedOut);
+        assert!(released.load(Ordering::SeqCst));
+        assert!(control.cancellation().is_cancelled());
+        assert!(matches!(
+            run.next_event().await,
+            Some(ExplorerStreamEventV1::Final {
+                outcome: ExplorerOutcomeV1::TimedOut,
+                ..
+            })
+        ));
+        assert!(run.next_event().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn a_final_source_crossing_the_deadline_cannot_publish_an_ordinary_terminal() {
+        for source in [
+            ready(ExplorerSourceIdV1::Sessions, 1),
+            ready(ExplorerSourceIdV1::Sessions, 1).with_outcome(ExplorerSourceOutcomeV1::Partial),
+            ExplorerSourceProgressV1::unavailable(
+                ExplorerSourceIdV1::Sessions,
+                "unavailable",
+                "unavailable",
+            ),
+            ExplorerSourceProgressV1::error(ExplorerSourceIdV1::Sessions, "failed", "failed"),
+        ] {
+            let control = control("explorer-final-source-deadline");
+            let (expire, expired) = oneshot::channel();
+            let read: SourceRead = Box::pin(async move {
+                expire.send(()).expect("expire during the source poll");
+                source
+            });
+            let mut run = SearchRun::new([(ExplorerSourceIdV1::Sessions, read)], &control);
+            run.deadline = Box::pin(async move {
+                expired.await.expect("deadline released");
+            });
+            assert_eq!(
+                source_of(run.next_event().await).outcome,
+                ExplorerSourceOutcomeV1::TimedOut
+            );
+            assert!(matches!(
+                run.next_event().await,
+                Some(ExplorerStreamEventV1::Final {
+                    outcome: ExplorerOutcomeV1::TimedOut,
+                    ..
+                })
+            ));
+            assert!(run.next_event().await.is_none());
+        }
+    }
+
+    #[tokio::test]
+    async fn expiry_between_the_last_source_frame_and_finalization_preserves_the_frame() {
+        let control = control("explorer-final-frame-deadline");
+        let (expire, expired) = oneshot::channel();
+        let mut run = SearchRun::new(
+            [immediate(ready(ExplorerSourceIdV1::Sessions, 1))],
+            &control,
+        );
+        run.deadline = Box::pin(async move {
+            expired.await.expect("deadline released");
+        });
+        let source = source_of(run.next_event().await);
+        assert_eq!(source.outcome, ExplorerSourceOutcomeV1::Ready);
+        assert_eq!(source.page.expect("published answer").rows.len(), 1);
+        expire.send(()).expect("expire before finalization");
+        assert!(matches!(
+            run.next_event().await,
+            Some(ExplorerStreamEventV1::Final {
+                outcome: ExplorerOutcomeV1::TimedOut,
+                ..
+            })
+        ));
+        assert!(run.next_event().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn cancellation_during_the_final_source_poll_closes_without_publishing() {
+        let control = control("explorer-final-source-cancellation");
+        let cancellation = control.cancellation().clone();
+        let read: SourceRead = Box::pin(async move {
+            assert!(
+                cancellation.cancel(tracedecay_session_memory::context::application_observed_at()),
+                "cancel during the source poll"
+            );
+            ready(ExplorerSourceIdV1::Sessions, 1)
+        });
+        let mut events = Box::pin(search_events(
+            [(ExplorerSourceIdV1::Sessions, read)],
+            &control,
+        ));
+        assert!(events.next().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn cancellation_between_the_last_source_frame_and_finalization_closes_the_stream() {
+        let control = control("explorer-final-frame-cancellation");
+        let mut events = Box::pin(search_events(
+            [immediate(ready(ExplorerSourceIdV1::Sessions, 1))],
+            &control,
+        ));
+        assert_eq!(
+            source_of(events.next().await).outcome,
+            ExplorerSourceOutcomeV1::Ready
+        );
+        assert!(
+            control
+                .cancellation()
+                .cancel(tracedecay_session_memory::context::application_observed_at()),
+            "cancel before finalization"
+        );
+        assert!(events.next().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn an_expired_admission_times_out_even_when_its_timer_has_not_been_polled_ready() {
+        let control = control_with_deadline("explorer-expired-admission", -1);
+        let mut run = SearchRun::new(
+            [immediate(ready(ExplorerSourceIdV1::Sessions, 1))],
+            &control,
+        );
+        run.deadline = Box::pin(std::future::pending());
+        assert_eq!(
+            source_of(run.next_event().await).outcome,
+            ExplorerSourceOutcomeV1::TimedOut
+        );
+        assert!(matches!(
+            run.next_event().await,
+            Some(ExplorerStreamEventV1::Final {
+                outcome: ExplorerOutcomeV1::TimedOut,
+                ..
+            })
+        ));
+        assert!(run.next_event().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn a_panicking_source_is_published_as_an_error_not_a_lost_stream() {
+        let control = control("explorer-panic");
+        let panicking: SourceRead = Box::pin(async { panic!("source blew up") });
+        let events = search_events([(ExplorerSourceIdV1::Sessions, panicking)], &control)
+            .collect::<Vec<_>>()
+            .await;
+        assert_eq!(
+            source_of(events.first().cloned()).error_code,
+            Some("source_task_failed")
+        );
+    }
+
     #[test]
-    fn explorer_query_settles_without_a_tokio_runtime() {
+    fn the_request_rejects_an_offset_it_can_no_longer_honor() {
+        let parsed: Result<ExplorerQueryRequestV1, _> =
+            serde_json::from_value(json!({"query": "cache", "limit": 5, "offset": 1}));
+        assert!(parsed.is_err());
+    }
+
+    #[test]
+    fn explorer_search_settles_without_a_tokio_runtime() {
         let fixture = tokio::runtime::Runtime::new().expect("fixture runtime");
         let (_project, dash) = fixture.block_on(crate::events_api::dashboard_state_fixture(
             "project.dashboard-explorer-native",
         ));
         let writer_waits = native_runtime::native_thread_writer_waits();
-        let state = native_runtime::block_on(async move {
+        let frames = native_runtime::block_on(async move {
             assert!(tokio::runtime::Handle::try_current().is_err());
-            let response = create_query(
+            let response = search_stream(
                 State(dash.clone()),
                 RequestControl(DashboardHttpRequestControlV1::test_fixture(
                     "dashboard-explorer-native",
@@ -1332,39 +1539,29 @@ mod native_tests {
                 Json(ExplorerQueryRequestV1 {
                     query: "fixture".to_owned(),
                     limit: 1,
-                    offset: 0,
                 }),
             )
             .await;
-            assert_eq!(response.status(), StatusCode::ACCEPTED);
+            assert_eq!(response.status(), StatusCode::OK);
             let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
                 .await
-                .expect("accepted body");
-            let accepted: Value = serde_json::from_slice(&body).expect("accepted json");
-            let run_id = accepted["payload"]["run_id"]
-                .as_str()
-                .expect("accepted run id")
-                .to_owned();
-            let run = find_run(&dash, &run_id).expect("remembered run").run;
-            native_runtime::timeout(Duration::from_secs(60), async {
-                loop {
-                    let state = run.read().await.state;
-                    if state != ExplorerRunStateV1::Pending {
-                        return state;
-                    }
-                    let _ = native_runtime::sleep_until(Instant::now() + Duration::from_millis(10))
-                        .await;
-                }
-            })
-            .await
-            .expect("the explorer run settles")
+                .expect("stream body");
+            String::from_utf8(body.to_vec()).expect("utf-8 stream")
         })
         .expect("native block_on");
-        assert_eq!(state, ExplorerRunStateV1::Partial);
+        assert_eq!(
+            frames.matches("event: source").count(),
+            3,
+            "every source publishes once: {frames}"
+        );
+        assert!(
+            frames.contains("event: final") && frames.contains("\"outcome\":\"partial\""),
+            "the stream ends in one final outcome: {frames}"
+        );
         assert_eq!(
             native_runtime::native_thread_writer_waits(),
             writer_waits,
-            "the explorer run parked no native thread on a writer"
+            "the explorer search parked no native thread on a writer"
         );
     }
 }

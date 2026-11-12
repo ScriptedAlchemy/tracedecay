@@ -156,7 +156,6 @@ export function Lane({
       <footer className="flex shrink-0 flex-wrap items-center justify-between gap-x-2 gap-y-0.5 border-t border-edge-subtle px-2.5 py-1 text-sm text-text-muted">
         <span className="td-value text-xs text-text-muted">
           {answered ? `${rows.length.toLocaleString()} shown` : '—'}
-          {answered && read.hasMore === true ? ' · more rows remain past this page' : ''}
           {/* The source's own freshness word and watermark, so a served page
             * says how current it is rather than looking current by default. */}
           {answered ? (
@@ -245,9 +244,9 @@ function LaneBody({
     switch (read.state) {
       case 'pending':
         return {
-          title: read.phase === 'queued' ? 'Queued' : 'Reading',
+          title: 'Reading',
           body: searching
-            ? `${spec.label} is ${read.phase ?? 'reading'}; nothing is shown until it answers.`
+            ? `${spec.label} is reading; nothing is shown until it answers.`
             : `Loading ${spec.browseLabel}.`,
         };
       case 'ready':
@@ -285,7 +284,7 @@ function LaneBody({
       case 'unavailable':
         return {
           title: 'Source unavailable',
-          body: `${spec.label} reported it cannot serve this run.${read.detail ? ` ${read.detail}` : ''} Nothing is substituted.`,
+          body: `${spec.label} reported it cannot serve this search.${read.detail ? ` ${read.detail}` : ''} Nothing is substituted.`,
         };
       case 'cancelled':
         return {
@@ -315,8 +314,8 @@ function LaneBody({
         };
       case 'unanswered':
         return {
-          title: 'Never named',
-          body: `The run concluded without naming ${spec.label}. No answer exists to show.`,
+          title: 'Never published',
+          body: `The search concluded without publishing ${spec.label}. No answer exists to show.`,
         };
       case 'unregistered':
         return {

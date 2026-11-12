@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { absenceVerdict } from './absence.ts';
-import { ExplorerQueryRunV1Schema } from '../../contracts/generated.ts';
+import { ExplorerSourceProgressV1Schema } from '../../contracts/generated.ts';
+import { startedSearch, type ExplorerSearchStatus } from './laneModel.ts';
 
 /**
  * Coverage fields a source may report. Defaults describe a source that examined
@@ -33,7 +34,6 @@ function source(id: keyof typeof SOURCE_LABELS, over: Record<string, unknown> = 
   return {
     source_id: id,
     source_label: SOURCE_LABELS[id],
-    phase: 'completed',
     outcome: 'ready',
     completed_units: 0,
     total_units: 5,
@@ -42,30 +42,19 @@ function source(id: keyof typeof SOURCE_LABELS, over: Record<string, unknown> = 
     watermark: null,
     error_code: null,
     message: null,
-    page: { offset: 0, limit: 50, total: 0, next_offset: null, rows: [], metadata: {} },
+    page: { limit: 50, total: 0, rows: [], metadata: {} },
     ...over,
   };
 }
 
-/** Parsed through the real schema, so a fixture that the contract would reject
- * cannot quietly prove anything here. */
-function run(sources: unknown[], finality: 'complete' | 'partial' = 'complete') {
-  return ExplorerQueryRunV1Schema.parse({
-    run_id: 'run-1',
-    request: { query: 'missing', limit: 50, offset: 0 },
-    request_revision: 'explorer-query-request-v1',
-    plan_revision: 'explorer-query-plan-v1',
-    merge_revision: 'source-local-no-merge-v1',
-    required_source_ids: ['code_graph', 'sessions', 'knowledge'],
-    ordering_policy: 'source_local_no_cross_source_merge',
-    explanation: 'test',
-    submitted_at_micros: 1,
-    completed_at_micros: 2,
-    elapsed_micros: 1,
-    state: finality === 'complete' ? 'completed' : 'partial',
-    finality,
-    sources,
-  });
+/** Sources parsed through the real schema, so a fixture that the contract
+ * would reject cannot quietly prove anything here. */
+function run(sources: unknown[], status: ExplorerSearchStatus = 'completed') {
+  return {
+    ...startedSearch('missing'),
+    sources: sources.map((candidate) => ExplorerSourceProgressV1Schema.parse(candidate)),
+    status,
+  };
 }
 
 describe('absenceVerdict', () => {
@@ -211,17 +200,24 @@ describe('absenceVerdict', () => {
     );
   });
 
-  it('refuses absence while the coordinator withholds canonical finality', () => {
-    const verdict = absenceVerdict(
-      run([source('code_graph'), source('sessions'), source('knowledge')], 'partial'),
-    );
-    expect(verdict.confirmed).toBe(false);
-    expect(verdict.confirmed === false && verdict.reason).toBe(
-      'the coordinator has not declared canonical finality',
-    );
+  it('refuses absence until the search concludes with every source complete', () => {
+    const all = [source('code_graph'), source('sessions'), source('knowledge')];
+    for (const status of ['streaming', 'partial', 'timed_out', 'interrupted'] as const) {
+      const verdict = absenceVerdict(run(all, status));
+      expect(verdict.confirmed).toBe(false);
+      expect(verdict.confirmed === false && verdict.reason).toBe(
+        'the search has not concluded with every source complete',
+      );
+    }
   });
 
-  it('refuses absence when no run has answered', () => {
+  it('refuses absence while a source has not answered, however complete the others are', () => {
+    const verdict = absenceVerdict(run([source('code_graph'), source('sessions')], 'streaming'));
+    expect(verdict.confirmed).toBe(false);
+    expect(verdict.confirmed === false && verdict.reason).toBe('1 source(s) have not answered');
+  });
+
+  it('refuses absence when no search has answered', () => {
     expect(absenceVerdict(undefined).confirmed).toBe(false);
   });
 });

@@ -13377,12 +13377,11 @@
       ],
       "type": "string"
     },
-    "ExplorerFinalityV1": {
+    "ExplorerOutcomeV1": {
+      "description": "How the whole search ended, published once as the final frame. A search\nwhose connection closed has no outcome: nothing is left to receive it.",
       "enum": [
-        "pending",
-        "complete",
+        "completed",
         "partial",
-        "cancelled",
         "timed_out",
         "error"
       ],
@@ -13396,96 +13395,13 @@
           "format": "int64",
           "type": "integer"
         },
-        "offset": {
-          "default": 0,
-          "format": "int64",
-          "type": "integer"
-        },
         "query": {
           "type": "string"
         }
       },
       "required": [
         "query",
-        "limit",
-        "offset"
-      ],
-      "type": "object"
-    },
-    "ExplorerQueryRunV1": {
-      "properties": {
-        "completed_at_micros": {
-          "format": "int64",
-          "type": [
-            "integer",
-            "null"
-          ]
-        },
-        "elapsed_micros": {
-          "format": "int64",
-          "type": "integer"
-        },
-        "explanation": {
-          "type": "string"
-        },
-        "finality": {
-          "$ref": "#/$defs/ExplorerFinalityV1"
-        },
-        "merge_revision": {
-          "type": "string"
-        },
-        "ordering_policy": {
-          "type": "string"
-        },
-        "plan_revision": {
-          "type": "string"
-        },
-        "request": {
-          "$ref": "#/$defs/ExplorerQueryRequestV1"
-        },
-        "request_revision": {
-          "type": "string"
-        },
-        "required_source_ids": {
-          "items": {
-            "$ref": "#/$defs/ExplorerSourceIdV1"
-          },
-          "maxItems": 3,
-          "minItems": 3,
-          "type": "array"
-        },
-        "run_id": {
-          "type": "string"
-        },
-        "sources": {
-          "items": {
-            "$ref": "#/$defs/ExplorerSourceProgressV1"
-          },
-          "type": "array"
-        },
-        "state": {
-          "$ref": "#/$defs/ExplorerRunStateV1"
-        },
-        "submitted_at_micros": {
-          "format": "int64",
-          "type": "integer"
-        }
-      },
-      "required": [
-        "run_id",
-        "request",
-        "request_revision",
-        "plan_revision",
-        "merge_revision",
-        "required_source_ids",
-        "ordering_policy",
-        "explanation",
-        "submitted_at_micros",
-        "completed_at_micros",
-        "elapsed_micros",
-        "state",
-        "finality",
-        "sources"
+        "limit"
       ],
       "type": "object"
     },
@@ -13555,17 +13471,6 @@
           "type": "integer"
         },
         "metadata": true,
-        "next_offset": {
-          "format": "int64",
-          "type": [
-            "integer",
-            "null"
-          ]
-        },
-        "offset": {
-          "format": "int64",
-          "type": "integer"
-        },
         "rows": {
           "items": true,
           "type": "array"
@@ -13580,25 +13485,12 @@
         }
       },
       "required": [
-        "offset",
         "limit",
         "total",
-        "next_offset",
         "rows",
         "metadata"
       ],
       "type": "object"
-    },
-    "ExplorerRunStateV1": {
-      "enum": [
-        "pending",
-        "completed",
-        "partial",
-        "cancelled",
-        "timed_out",
-        "error"
-      ],
-      "type": "string"
     },
     "ExplorerSessionCountsV1": {
       "properties": {
@@ -13675,24 +13567,14 @@
       "type": "string"
     },
     "ExplorerSourceOutcomeV1": {
-      "description": "What one source truthfully concluded for this run. Every member has a real\nproducer; none is speculative:\n- `Partial`: the source answered with rows but its own read reported\n  omitted records (LCM temporal reads).\n- `Stale`: the source's store exists but does not match the current\n  generation (verified graph stale reads, LCM stale projections).\n- `TimedOut`: the source's own read exceeded the admitted deadline.",
+      "description": "What one source truthfully concluded for this search. Every member has a\nreal producer; none is speculative:\n- `Partial`: the source answered with rows but its own read reported\n  omitted records (LCM temporal reads).\n- `Stale`: the source's store exists but does not match the current\n  generation (verified graph stale reads, LCM stale projections).\n- `TimedOut`: the source's own read exceeded the admitted deadline.",
       "enum": [
-        "pending",
         "ready",
         "partial",
         "stale",
         "timed_out",
         "unavailable",
         "error",
-        "cancelled"
-      ],
-      "type": "string"
-    },
-    "ExplorerSourcePhaseV1": {
-      "enum": [
-        "queued",
-        "reading",
-        "completed",
         "cancelled"
       ],
       "type": "string"
@@ -13738,9 +13620,6 @@
             }
           ]
         },
-        "phase": {
-          "$ref": "#/$defs/ExplorerSourcePhaseV1"
-        },
         "source_id": {
           "$ref": "#/$defs/ExplorerSourceIdV1"
         },
@@ -13765,7 +13644,6 @@
       "required": [
         "source_id",
         "source_label",
-        "phase",
         "outcome",
         "completed_units",
         "total_units",
@@ -13777,6 +13655,50 @@
         "page"
       ],
       "type": "object"
+    },
+    "ExplorerStreamEventV1": {
+      "description": "One frame of the search stream. The SSE event name is the `event` tag.",
+      "oneOf": [
+        {
+          "description": "One source finished. Sources arrive in completion order, each once.",
+          "properties": {
+            "event": {
+              "const": "source",
+              "type": "string"
+            },
+            "source": {
+              "$ref": "#/$defs/ExplorerSourceProgressV1"
+            }
+          },
+          "required": [
+            "event",
+            "source"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "The last frame: every source has been published.",
+          "properties": {
+            "elapsed_micros": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "event": {
+              "const": "final",
+              "type": "string"
+            },
+            "outcome": {
+              "$ref": "#/$defs/ExplorerOutcomeV1"
+            }
+          },
+          "required": [
+            "event",
+            "outcome",
+            "elapsed_micros"
+          ],
+          "type": "object"
+        }
+      ]
     },
     "FactArmCoverageV1": {
       "properties": {
@@ -36875,14 +36797,17 @@
     "envelope": {
       "$ref": "#/$defs/DashboardEnvelopeV1"
     },
-    "explorer_query_run": {
-      "$ref": "#/$defs/ExplorerQueryRunV1"
+    "explorer_query_request": {
+      "$ref": "#/$defs/ExplorerQueryRequestV1"
     },
     "explorer_read_context": {
       "$ref": "#/$defs/DashboardEnvelopeV13"
     },
     "explorer_session_size": {
       "$ref": "#/$defs/DashboardEnvelopeV12"
+    },
+    "explorer_stream_event": {
+      "$ref": "#/$defs/ExplorerStreamEventV1"
     },
     "fact_store_curate_request": {
       "$ref": "#/$defs/FactStoreCurateRequestV1"
@@ -37247,7 +37172,8 @@
     "storage_telemetry",
     "doctor_findings",
     "remote_operational_status",
-    "explorer_query_run",
+    "explorer_query_request",
+    "explorer_stream_event",
     "explorer_session_size",
     "explorer_read_context",
     "projects",

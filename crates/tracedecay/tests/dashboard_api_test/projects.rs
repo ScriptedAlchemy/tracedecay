@@ -29,7 +29,7 @@ pub(crate) async fn setup_target_project(fixture: &DashboardFixture) -> (PathBuf
     (target_root, target_cg)
 }
 
-fn project_id(cg: &TraceDecay) -> String {
+pub(crate) fn project_id(cg: &TraceDecay) -> String {
     cg.store_layout()
         .identity
         .project_id

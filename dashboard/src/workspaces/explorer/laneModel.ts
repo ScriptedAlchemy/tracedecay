@@ -17,12 +17,11 @@
 import type { EvidenceQuality } from '../../ui/EvidencePattern.tsx';
 import type { DomainStateKind } from '../../ui/StateChip';
 import type {
-  ExplorerQueryRunV1,
+  ExplorerOutcomeV1,
   ExplorerResultPageV1,
-  ExplorerRunStateV1,
   ExplorerSourceIdV1,
-  ExplorerSourcePhaseV1,
   ExplorerSourceProgressV1,
+  ExplorerStreamEventV1,
   DashboardDomainStateV1,
 } from '../../contracts/generated.ts';
 import type { EnvelopeResult } from '../../data/query/envelope.ts';
@@ -36,12 +35,15 @@ import {
   type SourceLaneId,
 } from './model.ts';
 
-/** Which coordinator source answers for each source lane. */
+/** Which search source answers for each source lane. */
 const LANE_SOURCE_ID: Record<SourceLaneId, ExplorerSourceIdV1> = {
   code: 'code_graph',
   sessions: 'sessions',
   knowledge: 'knowledge',
 };
+
+/** How many sources one search streams: every source lane has exactly one. */
+export const SEARCH_SOURCE_COUNT = Object.keys(LANE_SOURCE_ID).length;
 
 /**
  * Why the semantic lane has no rows, stated as the contract fact it is.
@@ -64,17 +66,13 @@ export const SEMANTIC_UNREGISTERED_DETAIL =
  * and every `switch` over `state` is `never`-checked, so a new wire outcome
  * fails the build instead of silently rendering as an error.
  *
- * A lane that is still working is `pending`, and it carries the wire's `phase`
- * so `queued` and `reading` stay apart.
+ * A lane that is still working is `pending`: the search publishes a source
+ * only once it has concluded, so there is nothing finer to report.
  */
 export type ExplorerLaneReadModel =
-  /** Still working. `phase` is the source's own; `null` when the pendingness
-   * is the client's (no coordinator answer yet, or a browse read in flight). */
-  | {
-      readonly state: 'pending';
-      readonly lane: LaneId;
-      readonly phase: ExplorerSourcePhaseV1 | null;
-    }
+  /** Still working: the source has not published yet, or a browse read is in
+   * flight. */
+  | { readonly state: 'pending'; readonly lane: LaneId }
   /** The source answered. Zero `hits` here means "answered with nothing",
    * which is a different fact from every other member of this union. */
   | {
@@ -88,9 +86,6 @@ export type ExplorerLaneReadModel =
        * dropped row shows up as a stated omission instead of shrinking the
        * result set silently. */
       readonly unreadableRows: number;
-      /** Whether the source said rows remain past this page; `null` when the
-       * read carries no pagination at all (the browse overviews). */
-      readonly hasMore: boolean | null;
       /** The source's own freshness word (`fresh`, `unknown`, …) and the
        * watermark it answered from, verbatim. Never inferred. */
       readonly freshness: string;
@@ -104,7 +99,6 @@ export type ExplorerLaneReadModel =
       readonly hits: readonly Hit[];
       readonly reportedTotal: number | null;
       readonly unreadableRows: number;
-      readonly hasMore: boolean | null;
       readonly freshness: string;
       readonly watermark: string | null;
       readonly errorCode: string | null;
@@ -131,7 +125,7 @@ export type ExplorerLaneReadModel =
       readonly errorCode: string | null;
       readonly detail: string | null;
     }
-  /** The source's read was cancelled. */
+  /** The source's read, or the whole search, was cancelled. */
   | {
       readonly state: 'cancelled';
       readonly lane: LaneId;
@@ -145,23 +139,23 @@ export type ExplorerLaneReadModel =
       readonly errorCode: string | null;
       readonly detail: string | null;
     }
-  /** The client could not reach the daemon at all. A connectivity condition on
+  /** The client could not reach the daemon at all, or lost it mid-search. A connectivity condition on
    * this side of the wire, never a statement about the source. */
   | { readonly state: 'offline'; readonly lane: LaneId }
   /** The daemon accepted no identity for this read. */
   | { readonly state: 'unauthorized'; readonly lane: LaneId }
   /** The daemon knows the identity and will not serve this scope. */
   | { readonly state: 'denied'; readonly lane: LaneId }
-  /** The project gateway serves the selected scope read-only, so the query
-   * run this lane needs cannot be created there. Nothing was dispatched;
+  /** The project gateway serves the selected scope read-only, so the search
+   * this lane needs cannot be opened there. Nothing was dispatched;
    * `detail` is the scope authority's own sentence. */
   | { readonly state: 'locked'; readonly lane: LaneId; readonly detail: string }
   /** The response did not decode against the contract. */
   | { readonly state: 'unsupported_schema'; readonly lane: LaneId }
-  /** The run reached a terminal state without ever naming this source. */
+  /** The search concluded without ever publishing this source. */
   | { readonly state: 'unanswered'; readonly lane: LaneId }
-  /** No production authority exists for this lane at all: the coordinator
-   * names no such source, so there is nothing to ask and nothing to poll.
+  /** No production authority exists for this lane at all: the search streams
+   * no such source, so there is nothing to ask.
    * Distinct from `unavailable`, which is a registered source declining. */
   | { readonly state: 'unregistered'; readonly lane: LaneId; readonly detail: string }
   /** The transport reported a domain state that carries no lane-level reading.
@@ -257,26 +251,64 @@ function hitsForLane(
   }
 }
 
-/** Whether the coordinator has stopped working on this run. */
-export function runIsTerminal(state: ExplorerRunStateV1): boolean {
-  switch (state) {
-    case 'pending':
-      return false;
-    case 'completed':
-    case 'partial':
-    case 'cancelled':
-    case 'timed_out':
-    case 'error':
-      return true;
+/**
+ * How a search stands. `streaming` is the only non-terminal member; the
+ * outcomes are the server's single final frame. `cancelled` and `interrupted`
+ * are the client's own readings: the person closed the response, or the
+ * response ended before its final frame.
+ */
+export type ExplorerSearchStatus = 'streaming' | 'cancelled' | 'interrupted' | ExplorerOutcomeV1;
+
+/** Everything one search response has published so far. */
+export interface ExplorerSearch {
+  readonly query: string;
+  readonly sources: readonly ExplorerSourceProgressV1[];
+  readonly status: ExplorerSearchStatus;
+  /** The server's elapsed time, known once the final frame has arrived. */
+  readonly elapsedMicros: number | null;
+}
+
+/** A search, or the transport failure that kept one from opening. */
+export type ExplorerSearchResult =
+  | { readonly outcome: 'search'; readonly search: ExplorerSearch }
+  | {
+      readonly outcome: 'transport';
+      readonly state: DashboardDomainStateV1;
+      readonly detail?: string;
+    };
+
+export function startedSearch(query: string): ExplorerSearch {
+  return { query, sources: [], status: 'streaming', elapsedMicros: null };
+}
+
+/** Fold one frame into the search. A source replaces any earlier frame for the
+ * same source, so a repeated frame cannot double-count a lane. */
+export function withStreamEvent(search: ExplorerSearch, event: ExplorerStreamEventV1): ExplorerSearch {
+  switch (event.event) {
+    case 'source':
+      return {
+        ...search,
+        sources: [
+          ...search.sources.filter((source) => source.source_id !== event.source.source_id),
+          event.source,
+        ],
+      };
+    case 'final':
+      return { ...search, status: event.outcome, elapsedMicros: event.elapsed_micros };
     default: {
-      const exhaustive: never = state;
+      const exhaustive: never = event;
       return exhaustive;
     }
   }
 }
 
+/** Whether the search has stopped working. */
+export function searchIsTerminal(status: ExplorerSearchStatus): boolean {
+  return status !== 'streaming';
+}
+
 /**
- * One coordinator-owned source, converted without manufacturing rows, totals,
+ * One published source, converted without manufacturing rows, totals,
  * or cross-source rank.
  */
 export function laneFromSourceProgress(
@@ -291,8 +323,6 @@ export function laneFromSourceProgress(
     return { state: 'unanswered', lane };
   }
   switch (source.outcome) {
-    case 'pending':
-      return { state: 'pending', lane, phase: source.phase };
     case 'ready': {
       // `page` is nullable on every outcome in the Rust type, so a `ready`
       // source that arrived without one has genuinely returned nothing to
@@ -306,7 +336,6 @@ export function laneFromSourceProgress(
           hits: [],
           reportedTotal: null,
           unreadableRows: 0,
-          hasMore: null,
           freshness: source.freshness,
           watermark: source.watermark,
         };
@@ -318,7 +347,6 @@ export function laneFromSourceProgress(
         hits,
         reportedTotal: page.total,
         unreadableRows: page.rows.length - hits.length,
-        hasMore: page.next_offset !== null,
         freshness: source.freshness,
         watermark: source.watermark,
       };
@@ -332,7 +360,6 @@ export function laneFromSourceProgress(
         hits,
         reportedTotal: page?.total ?? null,
         unreadableRows: page === null ? 0 : page.rows.length - hits.length,
-        hasMore: page === null ? null : page.next_offset !== null,
         freshness: source.freshness,
         watermark: source.watermark,
         errorCode: source.error_code,
@@ -372,7 +399,7 @@ export function laneFromTransport(
 ): ExplorerLaneReadModel {
   switch (domainState) {
     case 'loading':
-      return { state: 'pending', lane, phase: null };
+      return { state: 'pending', lane };
     case 'offline':
       return { state: 'offline', lane };
     case 'unauthorized':
@@ -413,31 +440,52 @@ export function laneFromTransport(
 }
 
 /**
- * The lane's condition during a search, read off one coordinator response.
+ * The lane's condition during a search, read off what the response has
+ * published so far.
  *
- * `submittedQuery` is checked because a run that answered for an earlier query
- * is not an answer for this one, showing its rows would attribute another
- * query's results to the text on screen.
+ * `submittedQuery` is checked because a search that answered for an earlier
+ * query is not an answer for this one, showing its rows would attribute
+ * another query's results to the text on screen.
  */
 export function searchLane(
   lane: SourceLaneId,
-  result: EnvelopeResult<ExplorerQueryRunV1> | undefined,
+  result: ExplorerSearchResult | undefined,
   submittedQuery: string,
   terms: readonly string[],
 ): ExplorerLaneReadModel {
-  if (result === undefined) return { state: 'pending', lane, phase: null };
+  if (result === undefined) return { state: 'pending', lane };
   if (result.outcome === 'transport') {
     return laneFromTransport(lane, result.state, result.detail ?? null);
   }
-  const run = result.envelope.payload;
-  if (run.request.query !== submittedQuery) return { state: 'pending', lane, phase: null };
-  const source = run.sources.find((candidate) => candidate.source_id === LANE_SOURCE_ID[lane]);
+  const { search } = result;
+  if (search.query !== submittedQuery) return { state: 'pending', lane };
+  const source = search.sources.find((candidate) => candidate.source_id === LANE_SOURCE_ID[lane]);
   if (source !== undefined) return laneFromSourceProgress(lane, source, terms);
-  // The coordinator has finished and never named this source. Leaving the lane
-  // on `pending` would show a spinner for a read that will never arrive.
-  return runIsTerminal(run.state)
-    ? { state: 'unanswered', lane }
-    : { state: 'pending', lane, phase: null };
+  // The source never published. What that means depends on how the search
+  // ended, and leaving the lane on `pending` would spin for a read that will
+  // never arrive.
+  switch (search.status) {
+    case 'streaming':
+      return { state: 'pending', lane };
+    case 'cancelled':
+      return {
+        state: 'cancelled',
+        lane,
+        errorCode: 'request_cancelled',
+        detail: 'the search was cancelled',
+      };
+    case 'interrupted':
+      return { state: 'offline', lane };
+    case 'completed':
+    case 'partial':
+    case 'timed_out':
+    case 'error':
+      return { state: 'unanswered', lane };
+    default: {
+      const exhaustive: never = search.status;
+      return exhaustive;
+    }
+  }
 }
 
 /**
@@ -454,7 +502,7 @@ export function browseLane<T>(
   rowsOf: (data: T) => readonly Record<string, unknown>[],
   terms: readonly string[],
 ): ExplorerLaneReadModel {
-  if (isPending) return { state: 'pending', lane, phase: null };
+  if (isPending) return { state: 'pending', lane };
   if (result === undefined) return { state: 'unanswered', lane };
   if (result.outcome === 'transport') {
     return laneFromTransport(lane, result.state, result.detail ?? null);
@@ -470,7 +518,6 @@ export function browseLane<T>(
     hits,
     reportedTotal: null,
     unreadableRows: rows.length - hits.length,
-    hasMore: null,
     freshness: freshness.state,
     watermark: freshness.watermark,
   };
@@ -545,11 +592,13 @@ export function laneStateKind(read: ExplorerLaneReadModel): DomainStateKind {
   }
 }
 
-/** The chip for the coordinator's own reading of a whole run. */
-export function runStateKind(state: ExplorerRunStateV1): DomainStateKind {
-  switch (state) {
-    case 'pending':
+/** The chip for a whole search. */
+export function searchStateKind(status: ExplorerSearchStatus): DomainStateKind {
+  switch (status) {
+    case 'streaming':
       return 'loading';
+    case 'interrupted':
+      return 'offline';
     case 'completed':
       return 'ready';
     case 'partial':
@@ -561,7 +610,7 @@ export function runStateKind(state: ExplorerRunStateV1): DomainStateKind {
     case 'error':
       return 'error';
     default: {
-      const exhaustive: never = state;
+      const exhaustive: never = status;
       return exhaustive;
     }
   }
@@ -579,7 +628,7 @@ export function runStateKind(state: ExplorerRunStateV1): DomainStateKind {
 export function laneStateDetail(read: ExplorerLaneReadModel): string | undefined {
   switch (read.state) {
     case 'pending':
-      return read.phase ?? undefined;
+      return undefined;
     case 'ready':
       return undefined;
     case 'partial':
@@ -602,7 +651,7 @@ export function laneStateDetail(read: ExplorerLaneReadModel): string | undefined
     case 'unregistered':
       return read.detail;
     case 'unanswered':
-      return 'the run never named this source';
+      return 'the search never published this source';
     case 'indeterminate':
       return read.detail ?? read.domainState;
     default: {

@@ -1,12 +1,13 @@
 import type { EvidenceQuality } from '../../ui/EvidencePattern.tsx';
-import type { ExplorerQueryRunV1, ExplorerSourceProgressV1 } from '../../contracts/generated.ts';
+import type { ExplorerSourceProgressV1 } from '../../contracts/generated.ts';
+import { SEARCH_SOURCE_COUNT, type ExplorerSearch } from './laneModel.ts';
 
 /**
  * Whether Explorer has earned the right to say a term is absent from the index.
  *
  * A global-absence claim is the strongest statement this surface can make: it
  * tells the reader the thing does not exist anywhere, and a reader who believes
- * it stops looking. So it is derived from the coordinator's own numbers rather
+ * it stops looking. So it is derived from the sources' own numbers rather
  * than from any scalar that merely asserts it.
  *
  * The reason a blocked verdict carries prose is that the states it blocks on are
@@ -48,7 +49,6 @@ function coverageBlocker(source: ExplorerSourceProgressV1): string | null {
       return `${label} answered from a stale store`;
     case 'timed_out':
       return `${label} timed out before answering`;
-    case 'pending':
     case 'unavailable':
     case 'error':
     case 'cancelled':
@@ -94,36 +94,36 @@ function coverageBlocker(source: ExplorerSourceProgressV1): string | null {
 }
 
 /**
- * The verdict for a whole coordinator run.
+ * The verdict for a whole search.
  *
- * Sources are checked before finality, because a source's own numbers are
- * evidence the surface can see, whereas finality is the coordinator's summary of
- * them, and when the two disagree the surface sides with the evidence.
+ * Sources are checked before the final outcome, because a source's own numbers
+ * are evidence the surface can see, whereas the outcome is the server's summary
+ * of them, and when the two disagree the surface sides with the evidence.
  */
-export function absenceVerdict(run: ExplorerQueryRunV1 | undefined): AbsenceVerdict {
-  if (run === undefined) {
+export function absenceVerdict(search: ExplorerSearch | undefined): AbsenceVerdict {
+  if (search === undefined) {
     return {
       confirmed: false,
       quality: 'unknown',
-      reason: 'no coordinator run has answered for this query',
+      reason: 'no search has answered for this query',
     };
   }
-  if (run.sources.length === 0) {
-    return {
-      confirmed: false,
-      quality: 'unknown',
-      reason: 'the coordinator named no required sources',
-    };
-  }
-  for (const source of run.sources) {
+  for (const source of search.sources) {
     const blocker = coverageBlocker(source);
     if (blocker !== null) return { confirmed: false, quality: 'unknown', reason: blocker };
   }
-  if (run.finality !== 'complete') {
+  if (search.sources.length < SEARCH_SOURCE_COUNT) {
     return {
       confirmed: false,
       quality: 'unknown',
-      reason: 'the coordinator has not declared canonical finality',
+      reason: `${SEARCH_SOURCE_COUNT - search.sources.length} source(s) have not answered`,
+    };
+  }
+  if (search.status !== 'completed') {
+    return {
+      confirmed: false,
+      quality: 'unknown',
+      reason: 'the search has not concluded with every source complete',
     };
   }
   return { confirmed: true, quality: 'measured' };

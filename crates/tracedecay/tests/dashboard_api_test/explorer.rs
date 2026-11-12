@@ -1,74 +1,89 @@
-use std::time::{Duration, Instant};
-
 use crate::dashboard_api_support::*;
 use serde_json::{Value, json};
 
-fn wait_for_query(agent: &ureq::Agent, base_url: &str, run_id: &str) -> Value {
-    let started = Instant::now();
-    let mut last_response = None;
-    for _ in 0..100 {
-        let (status, body) = get_json(agent, &format!("{base_url}/api/explorer/queries/{run_id}"));
-        assert_eq!(status, 200, "query status should resolve: {body}");
-        if matches!(
-            body["payload"]["state"].as_str(),
-            Some("completed" | "partial" | "cancelled" | "timed_out" | "error")
-        ) {
-            return body;
-        }
-        last_response = Some(body);
-        std::thread::sleep(Duration::from_millis(10));
+/// One search stream, read to its close: the response status and every
+/// `event:`/`data:` frame in arrival order.
+fn search_stream(agent: &ureq::Agent, base_url: &str, body: &Value) -> (u16, Vec<(String, Value)>) {
+    search_stream_at(agent, &format!("{base_url}/api/explorer/queries"), body)
+}
+
+fn search_stream_at(agent: &ureq::Agent, url: &str, body: &Value) -> (u16, Vec<(String, Value)>) {
+    let mut response = crate::common::http_call_with_retry(&format!("POST {url} (stream)"), || {
+        agent.post(url).send_json(body)
+    });
+    let status = response.status().as_u16();
+    let text = response
+        .body_mut()
+        .read_to_string()
+        .unwrap_or_else(|error| panic!("search stream body unreadable: {error}"));
+    if status != 200 {
+        return (
+            status,
+            vec![(
+                "error".to_owned(),
+                text.parse::<Value>().unwrap_or(Value::Null),
+            )],
+        );
     }
-    panic!(
-        "explorer query {run_id} did not reach a terminal state after {:?}; last response: {last_response:?}",
-        started.elapsed()
-    );
+    let frames = text
+        .split("\n\n")
+        .filter(|frame| frame.contains("event:"))
+        .map(|frame| {
+            let field = |name: &str| {
+                frame
+                    .lines()
+                    .find_map(|line| line.strip_prefix(name))
+                    .map(str::trim)
+                    .unwrap_or_else(|| panic!("frame lacks {name}: {frame}"))
+            };
+            let data: Value = serde_json::from_str(field("data:"))
+                .unwrap_or_else(|error| panic!("frame data is not JSON ({error}): {frame}"));
+            (field("event:").to_owned(), data)
+        })
+        .collect();
+    (status, frames)
 }
 
 #[test]
-fn explorer_query_coordinates_real_sources_without_inventing_a_merge() {
+fn explorer_search_streams_real_sources_without_inventing_a_merge() {
     let runtime = create_runtime();
     runtime.block_on(async {
         let fixture = start_dashboard_fixture(true).await;
         let agent = http_agent();
 
-        let (status, accepted) = post_json_body(
+        let (status, frames) = search_stream(
             &agent,
-            &format!("{}/api/explorer/queries", fixture.base_url),
-            &json!({"query": "cache", "limit": 25, "offset": 0}),
+            &fixture.base_url,
+            &json!({"query": "cache", "limit": 25}),
         );
-        assert_eq!(status, 202, "query should be admitted: {accepted}");
-        assert_eq!(accepted["schema_revision"], 1);
-        assert_eq!(accepted["domain_state"], "loading");
-        assert_eq!(accepted["payload"]["state"], "pending");
+        assert_eq!(status, 200, "search should stream: {frames:?}");
+        let (last_event, last) = frames.last().expect("the stream ends with a frame");
+        assert_eq!(last_event, "final", "{frames:?}");
         assert_eq!(
-            accepted["payload"]["required_source_ids"],
-            json!(["code_graph", "sessions", "knowledge"])
+            frames.iter().filter(|(event, _)| event == "final").count(),
+            1
         );
-        assert_eq!(
-            accepted["payload"]["ordering_policy"],
-            "source_local_no_cross_source_merge"
-        );
-        let run_id = accepted["payload"]["run_id"]
-            .as_str()
-            .unwrap_or_else(|| panic!("accepted query needs a run id: {accepted}"));
-
-        let completed = wait_for_query(&agent, &fixture.base_url, run_id);
         // Every source answers, but the canonical temporal search carries no
-        // denominator, so the run truthfully stays partial rather than
+        // denominator, so the search truthfully stays partial rather than
         // claiming complete coverage it cannot account for.
-        assert_eq!(completed["domain_state"], "partial", "{completed}");
-        assert_eq!(completed["payload"]["state"], "partial");
-        assert_eq!(completed["payload"]["finality"], "partial");
-        let sources = completed["payload"]["sources"]
-            .as_array()
-            .unwrap_or_else(|| panic!("query sources missing: {completed}"));
-        assert_eq!(sources.len(), 3);
+        assert_eq!(last["outcome"], "partial", "{last}");
+        assert!(last.get("merged_results").is_none());
+
+        let sources: Vec<&Value> = frames
+            .iter()
+            .filter(|(event, _)| event == "source")
+            .map(|(_, data)| &data["source"])
+            .collect();
+        assert_eq!(
+            sources.len(),
+            3,
+            "each source publishes exactly once: {frames:?}"
+        );
         for source_id in ["code_graph", "sessions", "knowledge"] {
             let source = sources
                 .iter()
                 .find(|source| source["source_id"] == source_id)
-                .unwrap_or_else(|| panic!("missing {source_id} source: {completed}"));
-            assert_eq!(source["phase"], "completed");
+                .unwrap_or_else(|| panic!("missing {source_id} source: {frames:?}"));
             assert_eq!(
                 source["outcome"], "ready",
                 "{source_id} source must be ready: {source}"
@@ -122,9 +137,126 @@ fn explorer_query_coordinates_real_sources_without_inventing_a_merge() {
                 })),
             "knowledge page should contain the seeded cache fact: {knowledge}"
         );
+    });
+}
+
+#[test]
+fn explorer_search_leaves_no_result_registry_to_poll_or_exhaust() {
+    let runtime = create_runtime();
+    runtime.block_on(async {
+        let fixture = start_dashboard_fixture(true).await;
+        let agent = http_agent();
+
+        // Exceed the retired 256-result capacity with distinct requests.
+        // Every response must own and release its result, not consume a slot.
+        for round in 0..300 {
+            let (status, frames) = search_stream(
+                &agent,
+                &fixture.base_url,
+                &json!({"query": format!("cache {round}"), "limit": 1}),
+            );
+            assert_eq!(status, 200, "round {round}: {frames:?}");
+            assert_eq!(
+                frames.iter().filter(|(event, _)| event == "source").count(),
+                3,
+                "round {round} must release all three source reads: {frames:?}"
+            );
+            assert_eq!(
+                frames.last().map(|(event, _)| event.as_str()),
+                Some("final")
+            );
+        }
+        for method_url in [format!(
+            "{}/api/explorer/queries/explorer-run.00",
+            fixture.base_url
+        )] {
+            let response = crate::common::http_call_with_retry("retired explorer status", || {
+                agent.get(&method_url).call()
+            });
+            let status = response.status().as_u16();
+            assert!(
+                matches!(status, 404 | 405),
+                "no per-search status route remains: {status}"
+            );
+            let response = crate::common::http_call_with_retry("retired explorer cancel", || {
+                agent.delete(&method_url).call()
+            });
+            assert!(
+                matches!(response.status().as_u16(), 404 | 405),
+                "no per-search cancel route remains"
+            );
+        }
+    });
+}
+
+#[test]
+fn explorer_search_rejects_an_empty_query_and_an_unsupported_offset() {
+    let runtime = create_runtime();
+    runtime.block_on(async {
+        let fixture = start_dashboard_fixture(true).await;
+        let agent = http_agent();
+
+        let (status, _) = search_stream(&agent, &fixture.base_url, &json!({"query": "  "}));
+        assert_eq!(status, 400);
+        let (status, _) = search_stream(
+            &agent,
+            &fixture.base_url,
+            &json!({"query": "cache", "offset": 5}),
+        );
         assert!(
-            completed["payload"].get("merged_results").is_none(),
-            "the coordinator must not invent a cross-source merge"
+            matches!(status, 400 | 422),
+            "a request carrying a retired offset field is refused: {status}"
+        );
+    });
+}
+
+#[test]
+fn explorer_search_requires_listener_authentication_and_same_origin_admission() {
+    let runtime = create_runtime();
+    runtime.block_on(async {
+        let fixture = start_dashboard_fixture(true).await;
+        let agent = http_agent();
+        let (_, authority) = fixture.base_url.rsplit_once('@').expect("fixture access");
+        let (status, frames) = search_stream_at(
+            &agent,
+            &format!("http://{authority}/api/explorer/queries"),
+            &json!({"query": "cache"}),
+        );
+        assert_eq!(status, 401, "{frames:?}");
+        assert!(frames.iter().all(|(event, _)| event == "error"));
+
+        let response = agent
+            .post(&format!("{}/api/explorer/queries", fixture.base_url))
+            .header("Origin", "http://attacker.example")
+            .send_json(json!({"query": "cache"}))
+            .expect("cross-origin request returns a refusal");
+        let (status, refusal) = response_to_json(response);
+        assert_eq!(status, 403, "{refusal}");
+        assert_eq!(refusal["error"], "dashboard_request_forbidden");
+    });
+}
+
+#[test]
+fn explorer_search_for_a_non_active_project_is_refused_at_the_gateway() {
+    let runtime = create_runtime();
+    runtime.block_on(async {
+        let fixture = start_dashboard_fixture(true).await;
+        let agent = http_agent();
+        let (_target_root, target_cg) = crate::projects::setup_target_project(&fixture).await;
+        let target_project_id = crate::projects::project_id(&target_cg);
+
+        let (status, frames) = search_stream_at(
+            &agent,
+            &format!(
+                "{}/api/projects/{target_project_id}/explorer/queries",
+                fixture.base_url
+            ),
+            &json!({"query": "target"}),
+        );
+        assert_eq!(status, 405, "{frames:?}");
+        assert!(
+            frames.iter().all(|(event, _)| event == "error"),
+            "a refused search streams no source frame: {frames:?}"
         );
     });
 }

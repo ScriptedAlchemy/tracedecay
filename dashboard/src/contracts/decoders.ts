@@ -312,18 +312,16 @@ import type {
   ExecutionTopologyMetricsV1,
   ExecutionTopologyViewV1,
   ExecutionWidthBucketV1,
-  ExplorerFinalityV1,
+  ExplorerOutcomeV1,
   ExplorerQueryRequestV1,
-  ExplorerQueryRunV1,
   ExplorerReadContextV1,
   ExplorerResultPageV1,
-  ExplorerRunStateV1,
   ExplorerSessionCountsV1,
   ExplorerSessionSizeV1,
   ExplorerSourceIdV1,
   ExplorerSourceOutcomeV1,
-  ExplorerSourcePhaseV1,
   ExplorerSourceProgressV1,
+  ExplorerStreamEventV1,
   FactArmCoverageV1,
   FactAssertionId,
   FactCategoryV1,
@@ -4677,49 +4675,17 @@ export const ExecutionTopologyViewV1Schema: z.ZodType<ExecutionTopologyViewV1, u
 bucket counts leave the projection. */
 export const ExecutionWidthBucketV1Schema: z.ZodEnum<{ "from17_to32": "from17_to32"; "from33_to64": "from33_to64"; "from3_to4": "from3_to4"; "from5_to8": "from5_to8"; "from9_to16": "from9_to16"; "one": "one"; "over64": "over64"; "two": "two"; "zero": "zero" }> = z.enum(["from17_to32", "from33_to64", "from3_to4", "from5_to8", "from9_to16", "one", "over64", "two", "zero"]);
 
-export const ExplorerFinalityV1Schema: z.ZodEnum<{ "cancelled": "cancelled"; "complete": "complete"; "error": "error"; "partial": "partial"; "pending": "pending"; "timed_out": "timed_out" }> = z.enum(["cancelled", "complete", "error", "partial", "pending", "timed_out"]);
+/** How the whole search ended, published once as the final frame. A search
+whose connection closed has no outcome: nothing is left to receive it. */
+export const ExplorerOutcomeV1Schema: z.ZodEnum<{ "completed": "completed"; "error": "error"; "partial": "partial"; "timed_out": "timed_out" }> = z.enum(["completed", "error", "partial", "timed_out"]);
 
 export const ExplorerQueryRequestV1Schema: z.ZodObject<{
   limit: z.ZodType<number, unknown>;
-  offset: z.ZodType<number, unknown>;
   query: z.ZodType<string, unknown>;
 }, z.core.$strict> = z.object({
   limit: z.number().int(),
-  offset: z.number().int(),
   query: z.string(),
 }).strict();
-
-export const ExplorerQueryRunV1Schema: z.ZodObject<{
-  completed_at_micros: z.ZodType<number | null, unknown>;
-  elapsed_micros: z.ZodType<number, unknown>;
-  explanation: z.ZodType<string, unknown>;
-  finality: z.ZodType<ExplorerFinalityV1, unknown>;
-  merge_revision: z.ZodType<string, unknown>;
-  ordering_policy: z.ZodType<string, unknown>;
-  plan_revision: z.ZodType<string, unknown>;
-  request: z.ZodType<ExplorerQueryRequestV1, unknown>;
-  request_revision: z.ZodType<string, unknown>;
-  required_source_ids: z.ZodType<Array<ExplorerSourceIdV1>, unknown>;
-  run_id: z.ZodType<string, unknown>;
-  sources: z.ZodType<Array<ExplorerSourceProgressV1>, unknown>;
-  state: z.ZodType<ExplorerRunStateV1, unknown>;
-  submitted_at_micros: z.ZodType<number, unknown>;
-}> = z.object({
-  completed_at_micros: z.number().int().nullable(),
-  elapsed_micros: z.number().int(),
-  explanation: z.string(),
-  finality: z.lazy(() => ExplorerFinalityV1Schema),
-  merge_revision: z.string(),
-  ordering_policy: z.string(),
-  plan_revision: z.string(),
-  request: z.lazy(() => ExplorerQueryRequestV1Schema),
-  request_revision: z.string(),
-  required_source_ids: z.array(z.lazy(() => ExplorerSourceIdV1Schema)),
-  run_id: z.string(),
-  sources: z.array(z.lazy(() => ExplorerSourceProgressV1Schema)),
-  state: z.lazy(() => ExplorerRunStateV1Schema),
-  submitted_at_micros: z.number().int(),
-});
 
 export const ExplorerReadContextV1Schema: z.ZodObject<{
   counts: z.ZodType<ExplorerSessionCountsV1, unknown>;
@@ -4750,20 +4716,14 @@ export const ExplorerReadContextV1Schema: z.ZodObject<{
 export const ExplorerResultPageV1Schema: z.ZodObject<{
   limit: z.ZodType<number, unknown>;
   metadata: z.ZodType<unknown, unknown>;
-  next_offset: z.ZodType<number | null, unknown>;
-  offset: z.ZodType<number, unknown>;
   rows: z.ZodType<Array<unknown>, unknown>;
   total: z.ZodType<number | null, unknown>;
 }> = z.object({
   limit: z.number().int(),
   metadata: z.unknown(),
-  next_offset: z.number().int().nullable(),
-  offset: z.number().int(),
   rows: z.array(z.unknown()),
   total: z.number().int().min(0).nullable(),
 });
-
-export const ExplorerRunStateV1Schema: z.ZodEnum<{ "cancelled": "cancelled"; "completed": "completed"; "error": "error"; "partial": "partial"; "pending": "pending"; "timed_out": "timed_out" }> = z.enum(["cancelled", "completed", "error", "partial", "pending", "timed_out"]);
 
 export const ExplorerSessionCountsV1Schema: z.ZodObject<{
   message_count: z.ZodType<number, unknown>;
@@ -4793,16 +4753,14 @@ export const ExplorerSessionSizeV1Schema: z.ZodObject<{
 
 export const ExplorerSourceIdV1Schema: z.ZodEnum<{ "code_graph": "code_graph"; "knowledge": "knowledge"; "sessions": "sessions" }> = z.enum(["code_graph", "knowledge", "sessions"]);
 
-/** What one source truthfully concluded for this run. Every member has a real
-producer; none is speculative:
+/** What one source truthfully concluded for this search. Every member has a
+real producer; none is speculative:
 - `Partial`: the source answered with rows but its own read reported
   omitted records (LCM temporal reads).
 - `Stale`: the source's store exists but does not match the current
   generation (verified graph stale reads, LCM stale projections).
 - `TimedOut`: the source's own read exceeded the admitted deadline. */
-export const ExplorerSourceOutcomeV1Schema: z.ZodEnum<{ "cancelled": "cancelled"; "error": "error"; "partial": "partial"; "pending": "pending"; "ready": "ready"; "stale": "stale"; "timed_out": "timed_out"; "unavailable": "unavailable" }> = z.enum(["cancelled", "error", "partial", "pending", "ready", "stale", "timed_out", "unavailable"]);
-
-export const ExplorerSourcePhaseV1Schema: z.ZodEnum<{ "cancelled": "cancelled"; "completed": "completed"; "queued": "queued"; "reading": "reading" }> = z.enum(["cancelled", "completed", "queued", "reading"]);
+export const ExplorerSourceOutcomeV1Schema: z.ZodEnum<{ "cancelled": "cancelled"; "error": "error"; "partial": "partial"; "ready": "ready"; "stale": "stale"; "timed_out": "timed_out"; "unavailable": "unavailable" }> = z.enum(["cancelled", "error", "partial", "ready", "stale", "timed_out", "unavailable"]);
 
 export const ExplorerSourceProgressV1Schema: z.ZodObject<{
   completed_units: z.ZodType<number | null, unknown>;
@@ -4812,7 +4770,6 @@ export const ExplorerSourceProgressV1Schema: z.ZodObject<{
   message: z.ZodType<string | null, unknown>;
   outcome: z.ZodType<ExplorerSourceOutcomeV1, unknown>;
   page: z.ZodType<ExplorerResultPageV1 | null, unknown>;
-  phase: z.ZodType<ExplorerSourcePhaseV1, unknown>;
   source_id: z.ZodType<ExplorerSourceIdV1, unknown>;
   source_label: z.ZodType<string, unknown>;
   total_units: z.ZodType<number | null, unknown>;
@@ -4825,12 +4782,21 @@ export const ExplorerSourceProgressV1Schema: z.ZodObject<{
   message: z.string().nullable(),
   outcome: z.lazy(() => ExplorerSourceOutcomeV1Schema),
   page: z.union([z.lazy(() => ExplorerResultPageV1Schema), z.null()]),
-  phase: z.lazy(() => ExplorerSourcePhaseV1Schema),
   source_id: z.lazy(() => ExplorerSourceIdV1Schema),
   source_label: z.string(),
   total_units: z.number().int().min(0).nullable(),
   watermark: z.string().nullable(),
 });
+
+/** One frame of the search stream. The SSE event name is the `event` tag. */
+export const ExplorerStreamEventV1Schema: z.ZodType<ExplorerStreamEventV1, unknown> = z.discriminatedUnion("event", [z.object({
+  elapsed_micros: z.number().int(),
+  event: z.literal("final"),
+  outcome: z.lazy(() => ExplorerOutcomeV1Schema),
+}), z.object({
+  event: z.literal("source"),
+  source: z.lazy(() => ExplorerSourceProgressV1Schema),
+})]);
 
 export const FactArmCoverageV1Schema: z.ZodObject<{
   completeness: z.ZodType<string, unknown>;

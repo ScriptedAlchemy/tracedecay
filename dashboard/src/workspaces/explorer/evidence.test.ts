@@ -32,12 +32,11 @@ describe('laneGrade', () => {
       hits: [],
       reportedTotal: 0,
       unreadableRows: 0,
-      hasMore: false,
       freshness: 'fresh',
       watermark: null,
     };
     const stale: ExplorerLaneReadModel = { state: 'stale', lane: 'code', errorCode: null, detail: null };
-    const pending: ExplorerLaneReadModel = { state: 'pending', lane: 'code', phase: 'reading' };
+    const pending: ExplorerLaneReadModel = { state: 'pending', lane: 'code' };
     const locked: ExplorerLaneReadModel = { state: 'locked', lane: 'code', detail: 'read-only' };
 
     expect(laneGrade(ready)).toBe('EXACT');

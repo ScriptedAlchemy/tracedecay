@@ -124,6 +124,64 @@ describe('AuthenticatedEventSource', () => {
     expect(errors).toHaveBeenCalledTimes(1);
   });
 
+  it('advances an id-only block across CRLF chunks and retains it for data and reconnect', async () => {
+    vi.useFakeTimers();
+    fetchMock.mockResolvedValueOnce(streamResponse([
+      'retry: 1\r', '\nid: 7\r', '\n\r', '\ndata: next\r', '\n\r', '\n',
+    ]));
+    fetchMock.mockImplementation(async () => openResponse());
+    const source = open();
+    const message = vi.fn();
+    source.onmessage = message;
+
+    await vi.advanceTimersByTimeAsync(0);
+    expect(message).toHaveBeenCalledTimes(1);
+    expect(message.mock.calls[0]![0].data).toBe('next');
+    expect(message.mock.calls[0]![0].lastEventId).toBe('7');
+    await vi.advanceTimersByTimeAsync(1);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(new Headers(fetchMock.mock.calls[1]![1]!.headers).get('last-event-id')).toBe('7');
+  });
+
+  it('resets the reconnect id with an empty id-only block split across CRLF chunks', async () => {
+    vi.useFakeTimers();
+    fetchMock
+      .mockResolvedValueOnce(streamResponse(['retry: 1\nid: 7\ndata: first\n\n']))
+      .mockResolvedValueOnce(streamResponse(['id:', '\r', '\n\r', '\ndata: next\r', '\n\r', '\n']));
+    fetchMock.mockImplementation(async () => openResponse());
+    const source = open();
+    const message = vi.fn();
+    source.onmessage = message;
+
+    await vi.advanceTimersByTimeAsync(1);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(new Headers(fetchMock.mock.calls[1]![1]!.headers).get('last-event-id')).toBe('7');
+    expect(message).toHaveBeenCalledTimes(2);
+    expect(message.mock.calls[1]![0].lastEventId).toBe('');
+    await vi.advanceTimersByTimeAsync(1);
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    expect(new Headers(fetchMock.mock.calls[2]![1]!.headers).has('last-event-id')).toBe(false);
+  });
+
+  it('updates reconnect headers for id-only responses without dispatching a message', async () => {
+    vi.useFakeTimers();
+    fetchMock
+      .mockResolvedValueOnce(streamResponse(['retry: 1\r', '\nid: 7\r', '\n\r', '\n']))
+      .mockResolvedValueOnce(streamResponse(['id:\r', '\n\r', '\n']));
+    fetchMock.mockImplementation(async () => openResponse());
+    const source = open();
+    const message = vi.fn();
+    source.onmessage = message;
+
+    await vi.advanceTimersByTimeAsync(1);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(new Headers(fetchMock.mock.calls[1]![1]!.headers).get('last-event-id')).toBe('7');
+    await vi.advanceTimersByTimeAsync(1);
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    expect(new Headers(fetchMock.mock.calls[2]![1]!.headers).has('last-event-id')).toBe(false);
+    expect(message).not.toHaveBeenCalled();
+  });
+
   it('close() aborts the in-flight request', async () => {
     fetchMock.mockImplementation(async () => openResponse());
     const source = open();

@@ -10,7 +10,6 @@ use super::{ExplorerQueryRequestV1, ExplorerSourceIdV1, ExplorerSourceProgressV1
 use crate::memory_service::MemoryFactsCoverageV1;
 use crate::read_model::DashboardCoverageCompletenessV1;
 use crate::{DashboardHttpRequestControlV1, DashboardState, memory_service};
-use tracedecay_runtime_core::cancellation::CancellationToken;
 
 fn coverage_summary(
     coverage: &MemoryFactsCoverageV1,
@@ -39,31 +38,15 @@ fn coverage_summary(
     )
 }
 
-fn require_first_page(offset: i64) -> Result<(), &'static str> {
-    (offset == 0)
-        .then_some(())
-        .ok_or("knowledge search requires a canonical cursor before pagination")
-}
-
 pub(super) async fn knowledge_source(
     state: &DashboardState,
     request: &ExplorerQueryRequestV1,
     control: &DashboardHttpRequestControlV1,
-    cancellation: CancellationToken,
 ) -> ExplorerSourceProgressV1 {
-    if let Err(message) = require_first_page(request.offset) {
-        return ExplorerSourceProgressV1::error(
-            ExplorerSourceIdV1::Knowledge,
-            "knowledge_cursor_required",
-            message,
-        );
-    }
     let request_cancellation = control.cancellation().clone();
-    let source_cancellation = cancellation.clone();
     let request_deadline = control.deadline();
     let read_control = FactReadControl::new(Arc::new(move || {
         request_cancellation.is_cancelled()
-            || source_cancellation.is_cancelled()
             || request_deadline
                 .is_elapsed_at(tracedecay_session_memory::context::application_observed_at())
     }));
@@ -87,7 +70,7 @@ pub(super) async fn knowledge_source(
                 "knowledge query exceeded the admitted request deadline",
             );
         }
-        Err(_) if control.cancellation().is_cancelled() || cancellation.is_cancelled() => {
+        Err(_) if control.cancellation().is_cancelled() => {
             return ExplorerSourceProgressV1::cancelled(
                 ExplorerSourceIdV1::Knowledge,
                 "knowledge_query_cancelled",
@@ -112,7 +95,7 @@ pub(super) async fn knowledge_source(
             "knowledge query exceeded the admitted request deadline",
         );
     }
-    if control.cancellation().is_cancelled() || cancellation.is_cancelled() {
+    if control.cancellation().is_cancelled() {
         return ExplorerSourceProgressV1::cancelled(
             ExplorerSourceIdV1::Knowledge,
             "knowledge_query_cancelled",
@@ -171,14 +154,5 @@ mod tests {
         );
         assert_eq!(total, None);
         assert_eq!(omissions.len(), 2);
-    }
-
-    #[test]
-    fn knowledge_search_rejects_offset_pagination_without_a_canonical_cursor() {
-        assert_eq!(require_first_page(0), Ok(()));
-        assert_eq!(
-            require_first_page(1),
-            Err("knowledge search requires a canonical cursor before pagination")
-        );
     }
 }

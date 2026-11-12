@@ -297,11 +297,7 @@ pub(super) fn project_api_router() -> Router<DashboardState> {
             "/api/settings/user/code-index-workers",
             patch(settings_api::patch_code_index_worker_settings),
         )
-        .route("/api/explorer/queries", post(explorer_api::create_query))
-        .route(
-            "/api/explorer/queries/{run_id}",
-            get(explorer_api::query_status).delete(explorer_api::cancel_query),
-        )
+        .route("/api/explorer/queries", post(explorer_api::search_stream))
         .route(
             "/api/explorer/sessions/{session_id}/size",
             get(explorer_api::session_size),
