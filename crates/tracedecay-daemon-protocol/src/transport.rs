@@ -1,4 +1,5 @@
 use std::fmt;
+use std::io::Read;
 use std::net::{IpAddr, SocketAddr};
 #[cfg(unix)]
 use std::os::unix::ffi::OsStrExt;
@@ -206,7 +207,27 @@ impl AsyncRead for DaemonClientReadHalf {
         context: &mut Context<'_>,
         buffer: &mut ReadBuf<'_>,
     ) -> Poll<std::io::Result<()>> {
-        match self.get_mut() {
+        let reader = self.get_mut();
+        // A failed liveness probe must not hide a reply already in the
+        // socket. Tokio's cached readiness can still be pending until the
+        // reactor runs, so inspect the nonblocking socket before waiting on it.
+        let available = {
+            let socket = match &*reader {
+                #[cfg(unix)]
+                Self::Unix(reader) => socket2::SockRef::from(reader.as_ref()),
+                Self::Tcp(reader) => socket2::SockRef::from(reader.as_ref()),
+            };
+            (&*socket).read(buffer.initialize_unfilled())
+        };
+        match available {
+            Ok(count) => {
+                buffer.advance(count);
+                return Poll::Ready(Ok(()));
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
+            Err(error) => return Poll::Ready(Err(error)),
+        }
+        match reader {
             #[cfg(unix)]
             Self::Unix(reader) => Pin::new(reader).poll_read(context, buffer),
             Self::Tcp(reader) => Pin::new(reader).poll_read(context, buffer),
@@ -532,7 +553,43 @@ pub fn default_loopback_endpoint() -> DaemonEndpoint {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::future::Future;
+    use std::io::Write;
+    use std::task::Waker;
     use tokio::io::{AsyncBufReadExt, BufReader};
+    use tracedecay_framing::BoundedLineReader;
+
+    #[tokio::test]
+    async fn loopback_reply_is_read_before_the_reactor_reports_readiness() {
+        let (listener, endpoint) = BrokerListener::bind(&default_loopback_endpoint())
+            .await
+            .unwrap();
+        let (client, _writer) = DaemonClientStream::connect(&endpoint)
+            .await
+            .unwrap()
+            .into_split();
+        let server = listener.accept().await.unwrap();
+        let mut reader = BoundedLineReader::new(BufReader::new(client));
+        let mut response = Box::pin(reader.read_mcp_line());
+        let mut context = Context::from_waker(Waker::noop());
+        assert!(response.as_mut().poll(&mut context).is_pending());
+
+        // No await occurs between delivery and the next read poll: the
+        // reactor cannot publish new readiness on this current-thread runtime.
+        let socket = match &server {
+            #[cfg(unix)]
+            BrokerStream::Unix(stream) => socket2::SockRef::from(stream),
+            BrokerStream::Tcp(stream) => socket2::SockRef::from(stream),
+        };
+        (&*socket)
+            .write_all(b"{\"jsonrpc\":\"2.0\",\"id\":1}\n")
+            .unwrap();
+        let response = response.as_mut().poll(&mut context);
+        assert!(
+            matches!(&response, Poll::Ready(Ok(Some(line))) if line == "{\"jsonrpc\":\"2.0\",\"id\":1}"),
+            "delivered reply must be readable without a reactor turn: {response:?}"
+        );
+    }
 
     #[test]
     fn loopback_endpoint_round_trips_and_rejects_remote_addresses() {
