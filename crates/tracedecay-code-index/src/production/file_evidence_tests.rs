@@ -33,16 +33,16 @@ impl CodeIndexAtomicPublicationPort for CountingStoreV1 {
         let reads = Arc::clone(&self.reads);
         let read_digests = Arc::clone(&self.read_digests);
         Ok(Some(CodeIndexSealedGenerationV1::new(
-            Arc::from(active.manifest_bytes()),
+            active.shared_manifest_bytes(),
             Arc::new(
-                move |request: SealedGenerationSegmentReadV1<'_>, buffer: &mut Vec<u8>| {
+                move |request: SealedGenerationSegmentReadV1<'_>| {
                     reads.fetch_add(1, Ordering::Relaxed);
                     let digest = match &request {
                         SealedGenerationSegmentReadV1::Whole { digest, .. }
                         | SealedGenerationSegmentReadV1::Range { digest, .. } => (*digest).clone(),
                     };
                     read_digests.lock().expect("read log").push(digest);
-                    read(request, buffer)
+                    read(request)
                 },
             ),
         )))
@@ -53,7 +53,7 @@ impl CodeIndexAtomicPublicationPort for CountingStoreV1 {
         scope: &CodeIndexGenerationScopeV1,
         expected_active_generation: Option<&CodeGenerationId>,
         generation: &CodeIndexSealedPublicationV1,
-    ) -> Result<Arc<[u8]>, CodeIndexPublicationStoreErrorV1> {
+    ) -> Result<Arc<tracedecay_runtime_core::db::CodeIndexStoredBytes>, CodeIndexPublicationStoreErrorV1> {
         self.inner
             .publish_atomically(scope, expected_active_generation, generation)
     }

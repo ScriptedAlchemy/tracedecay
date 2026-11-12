@@ -1803,7 +1803,7 @@ fn sealed_segment_graph_store(
     let manifest = tracedecay_code_index::graph_projection::build_sealed_code_graph_rows(
         projection.clone(),
         &source,
-        &mut |request, buffer| {
+        &mut |request| {
             let tracedecay_code_index::production::SealedGenerationSegmentReadV1::Whole {
                 digest,
                 ..
@@ -1811,12 +1811,22 @@ fn sealed_segment_graph_store(
             else {
                 panic!("the graph build reads whole file segments");
             };
-            *buffer = std::fs::read(segments_root.join(format!(
+            let bytes = std::fs::read(segments_root.join(format!(
                 "segment-{}.json",
                 tracedecay_domain::sha256_hex_suffix(digest.as_str()).expect("segment digest")
             )))
             .expect("sealed segment");
-            Ok(())
+            let limit = std::num::NonZeroU64::new(1024 * 1024 * 1024).unwrap();
+            let memory = Arc::new(tracedecay_runtime_core::resident_memory::ProcessResidentMemoryV1::with_pressure(
+                limit,
+                Arc::new(tracedecay_runtime_core::resident_memory::ResidentMemoryPressureV1::with_sampler(
+                    limit, Arc::new(|| None),
+                )),
+            ));
+            tracedecay_runtime_core::db::reserve_encoded_bytes(&memory, bytes.len(), |output| {
+                output.copy_from_slice(&bytes);
+                Ok(())
+            }).map_err(|error| tracedecay_code_index::production::CodeIndexProductionErrorV1::Contract(error.to_string()))
         },
         &projector_revision,
         tracedecay_graph_db::GraphGenerationRowSpill::create(scratch.join("rows"), projection)

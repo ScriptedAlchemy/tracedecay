@@ -90,3 +90,7 @@ tracedecay-runtime-core = { path = "../tracedecay-runtime-core", features = [
 tracedecay-application = { path = "../tracedecay-application", features = [
     "test-helpers",
 ] }
+
+[[test]]
+name = "registered_project_storage"
+required-features = ["lite", "test-helpers", "test-transport"]

@@ -86,10 +86,9 @@ impl CodeIndexAtomicPublicationPort for Publication {
         _scope: &CodeIndexGenerationScopeV1,
         _expected_active_generation: Option<&CodeGenerationId>,
         generation: &CodeIndexSealedPublicationV1,
-    ) -> Result<Arc<[u8]>, CodeIndexPublicationStoreErrorV1> {
-        generation
-            .encode(None, |_| Ok(()))
-            .map(Arc::from)
+    ) -> Result<Arc<tracedecay_runtime_core::db::CodeIndexStoredBytes>, CodeIndexPublicationStoreErrorV1> {
+        generation.encode(None, &encoded_memory(), |_| Ok(()))
+            .map(Arc::new)
             .map_err(|error| CodeIndexPublicationStoreErrorV1::Unavailable(error.to_string()))
     }
 }
@@ -195,11 +194,21 @@ fn config() -> CodeIndexProductionConfigV1 {
     }
 }
 
-fn seal(generation: &CodeIndexPublishedGenerationV1) -> (Vec<u8>, BTreeMap<String, Vec<u8>>) {
+fn encoded_memory() -> Arc<tracedecay_runtime_core::resident_memory::ProcessResidentMemoryV1> {
+    let limit = std::num::NonZeroU64::new(1024 * 1024 * 1024).unwrap();
+    Arc::new(tracedecay_runtime_core::resident_memory::ProcessResidentMemoryV1::with_pressure(
+        limit,
+        Arc::new(tracedecay_runtime_core::resident_memory::ResidentMemoryPressureV1::with_sampler(
+            limit, Arc::new(|| None),
+        )),
+    ))
+}
+
+fn seal(generation: &CodeIndexPublishedGenerationV1) -> (tracedecay_runtime_core::db::CodeIndexStoredBytes, BTreeMap<String, Vec<u8>>) {
     let mut segments = BTreeMap::new();
     let mut evidence = Vec::new();
     let manifest = generation
-        .encode_partitioned_sealed(|publication| {
+        .encode_partitioned_sealed(&encoded_memory(), |publication| {
             match publication {
                 SealedGenerationSegmentPublicationV1::File { digest, bytes }
                 | SealedGenerationSegmentPublicationV1::FileEvidence { digest, bytes }

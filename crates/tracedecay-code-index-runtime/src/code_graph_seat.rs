@@ -16,7 +16,6 @@
 //! stay on the registry implementation and are not restated here.
 
 use std::future::Future;
-use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::{Arc, atomic::AtomicBool};
 
@@ -28,10 +27,12 @@ use tracedecay_runtime_core::db::Database;
 use tracedecay_runtime_core::shard_runtime::registry::CanonicalCodeGraphStoreLeaseV1;
 
 /// Sealed-generation replay identity the seat port needs to retain a runtime.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug)]
 pub struct CodeGraphReplayBindingV1 {
-    pub generations_root: PathBuf,
     pub sealed_state_digest: SealedGraphStateDigest,
+    pub resident_memory: Arc<tracedecay_runtime_core::resident_memory::ProcessResidentMemoryV1>,
+    pub storage: tracedecay_runtime_core::db::CodeIndexSqliteStorage,
+    pub worktree_id: WorktreeId,
 }
 
 /// Process-memory admission authority invoked after a sealed build has

@@ -393,6 +393,55 @@ impl StoreRuntimeRegistry {
                 }
                 outcome => outcome,
             };
+            let outcome = match outcome {
+                Ok((published, locator, authority)) => {
+                    match cx.spawn_blocking(move |_| {
+                        let identity = published.opened_file_identity()
+                            .map_err(|message| StoreRuntimeRegistryFailure::PhysicalRuntimeFailed {
+                                operation: "capture opened SQLite file identity",
+                                message,
+                            })
+                            .and_then(|expected| {
+                                let identity = crate::db::RegisteredSqliteIdentity::acquire(locator.path())
+                                    .map_err(|source| StoreRuntimeRegistryFailure::SqliteFileIdentityInspectionFailed {
+                                        operation: "pin registered SQLite file identity",
+                                        source,
+                                    })?;
+                                if identity.opened_identity() != expected {
+                                    return Err(StoreRuntimeRegistryFailure::PhysicalRuntimeFailed {
+                                        operation: "pin registered SQLite file identity",
+                                        message: "database file identity changed during registry attachment".to_owned(),
+                                    });
+                                }
+                                Ok(Arc::new(identity))
+                            });
+                        match identity {
+                            Ok(identity) => Ok((published, locator, authority, identity)),
+                            Err(failure) => {
+                                close_unpublished_runtime(published).map_err(|message| {
+                                    StoreRuntimeRegistryFailure::PhysicalRuntimeFailed {
+                                        operation: "close unpinned registered SQLite runtime",
+                                        message: format!("{failure:?}; close failed: {message}"),
+                                    }
+                                })?;
+                                Err(failure)
+                            }
+                        }
+                    }) {
+                        Ok(mut pin) => pin.join(&cx).await
+                            .map_err(|error| StoreRuntimeRegistryFailure::PhysicalRuntimeFailed {
+                                operation: "pin registered SQLite runtime off worker",
+                                message: error.to_string(),
+                            })
+                            .and_then(|result| result),
+                        Err(error) => Err(StoreRuntimeRegistryFailure::PhysicalRuntimeFailed {
+                            operation: "admit registered SQLite identity pin",
+                            message: error.to_string(),
+                        }),
+                    }
+                }
+                Err(failure) => Err(failure),
+            };
             guard.complete(outcome);
         });
         if let Err(error) = spawned {
@@ -765,6 +814,7 @@ impl OpenAttemptGuard {
                 PublishedShardRuntime,
                 RuntimeLocatorRecord,
                 Option<crate::db::DatabaseAuthority>,
+                Arc<crate::db::RegisteredSqliteIdentity>,
             ),
             StoreRuntimeRegistryFailure,
         >,
@@ -780,7 +830,7 @@ impl OpenAttemptGuard {
         }
 
         match outcome {
-            Ok((published, locator, database_authority)) => {
+            Ok((published, locator, database_authority, file_identity)) => {
                 let opened_file_identity = match published.opened_file_identity() {
                     Ok(identity) => identity,
                     Err(message) => {
@@ -804,6 +854,7 @@ impl OpenAttemptGuard {
                             attachment,
                             locator,
                             opened_file_identity,
+                            file_identity,
                             database_authority,
                             database_attachments: std::sync::Mutex::new(
                                 std::collections::BTreeMap::new(),

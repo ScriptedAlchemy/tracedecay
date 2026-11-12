@@ -24,6 +24,7 @@
 //! arm rejects them.
 
 mod attachment;
+mod code_index;
 mod configuration;
 mod configuration_projection;
 mod configuration_receipt;
@@ -50,6 +51,7 @@ pub use attachment::{
     RepositoryRuntimePhysicalAttachment, RepositoryRuntimePhysicalSnapshot,
     RepositoryWriterRuntimeSnapshot,
 };
+pub use code_index::{CODE_INDEX_SCHEMA, CodeIndexSqliteStorage, CodeIndexStoredBytes};
 pub use configuration::ConfigurationExecutor;
 pub use configuration_projection::configuration_projection_statements;
 pub use configuration_receipt::{

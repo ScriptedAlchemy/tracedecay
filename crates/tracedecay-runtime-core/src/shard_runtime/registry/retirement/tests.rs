@@ -245,6 +245,9 @@ fn install_ready(
             authority.canonical_database_path(),
         )
         .unwrap(),
+        file_identity: Arc::new(crate::db::RegisteredSqliteIdentity::acquire(
+            authority.canonical_database_path(),
+        ).unwrap()),
         database_authority: Some(authority),
         database_attachments: std::sync::Mutex::new(std::collections::BTreeMap::new()),
         next_database_attachment_id: std::sync::atomic::AtomicU64::new(1),

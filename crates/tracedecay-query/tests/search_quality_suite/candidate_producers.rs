@@ -297,7 +297,7 @@ impl CodeIndexExecutionControlV1 for BudgetExhaustedAtObservation {
 /// address, and every published segment under its digest.
 #[derive(Clone)]
 pub(crate) struct RealLexicalSourceFixture {
-    manifest: Vec<u8>,
+    manifest: Arc<tracedecay_runtime_core::db::CodeIndexStoredBytes>,
     segments: Arc<BTreeMap<String, Vec<u8>>>,
     state_digest: ManifestDigest,
     pub(crate) metadata: CodeLexicalProjectionMetadataV1,
@@ -453,8 +453,11 @@ pub(crate) fn real_lexical_source_fixture_from_sources(
         .expect("a build without a parent runs cold");
     let mut segments = BTreeMap::new();
     let mut evidence_pack = Vec::new();
+    let memory = Arc::new(ProcessResidentMemoryV1::new(
+        tracedecay_runtime_core::resident_memory::detected_process_resident_memory_limit_v1(),
+    ));
     let manifest = generation
-        .encode_partitioned_sealed(|publication| {
+        .encode_partitioned_sealed(&memory, |publication| {
             match publication {
                 SealedGenerationSegmentPublicationV1::File { digest, bytes }
                 | SealedGenerationSegmentPublicationV1::FileEvidence { digest, bytes }
@@ -505,7 +508,7 @@ pub(crate) fn real_lexical_source_fixture_from_sources(
         }),
     };
     RealLexicalSourceFixture {
-        manifest,
+        manifest: Arc::new(manifest),
         segments: Arc::new(segments),
         state_digest,
         metadata,

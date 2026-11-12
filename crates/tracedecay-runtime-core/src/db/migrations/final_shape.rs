@@ -25,10 +25,28 @@ type SchemaInventory = BTreeMap<String, SchemaObject>;
 static EXPECTED_FINAL_SHAPE: LazyLock<std::result::Result<SchemaInventory, String>> =
     LazyLock::new(build_expected_final_shape);
 
+// v1.0.0-beta.92, c443aaa71d48457d07faa2737fac42164255371a.
+// This is the tagged complete relational inventory, not a subset admission.
+const RELEASED_V39_FINGERPRINT: &str =
+    "2ba1a42d94fc15a3a60f0024c7f98c76f68f63a1076549a78f8fe0c7c8db7d8e";
+
+static RELEASED_V39_SHAPE: LazyLock<std::result::Result<SchemaInventory, String>> =
+    LazyLock::new(|| {
+        let inventory = build_relational_shape(false)?;
+        let fingerprint = fingerprint_schema_objects(
+            inventory.iter().map(|(name, object)| (name.as_str(), object.sql.as_str())),
+        );
+        if fingerprint != RELEASED_V39_FINGERPRINT {
+            return Err("released v39 DDL no longer matches its tagged inventory".to_owned());
+        }
+        Ok(inventory)
+    });
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct GraphStoreSchemaAdmissionV1 {
     pub schema_version: i64,
     pub exact_final_shape: bool,
+    pub released_shape_can_converge: bool,
 }
 
 pub fn inspect_graph_store_schema(path: &Path) -> Result<GraphStoreSchemaAdmissionV1> {
@@ -73,13 +91,21 @@ pub fn inspect_graph_store_schema(path: &Path) -> Result<GraphStoreSchemaAdmissi
             Err(error) => return Err(error),
         }
     };
+    let released_shape_can_converge = schema_version == 39
+        && released_shape_inventory(&read_rusqlite_inventory(&connection)
+            .map_err(database_error)?)?;
     Ok(GraphStoreSchemaAdmissionV1 {
         schema_version,
         exact_final_shape,
+        released_shape_can_converge,
     })
 }
 
 fn build_expected_final_shape() -> std::result::Result<SchemaInventory, String> {
+    build_relational_shape(true)
+}
+
+fn build_relational_shape(include_code_index: bool) -> std::result::Result<SchemaInventory, String> {
     let connection = rusqlite::Connection::open_in_memory()
         .map_err(|error| format!("failed to open canonical in-memory schema: {error}"))?;
     connection
@@ -112,6 +138,10 @@ fn build_expected_final_shape() -> std::result::Result<SchemaInventory, String> 
         connection
             .execute_batch(schema)
             .map_err(|error| format!("failed to install canonical retained schema: {error}"))?;
+    }
+    if include_code_index {
+        connection.execute_batch(tracedecay_rusqlite_runtime::repository::CODE_INDEX_SCHEMA)
+            .map_err(|error| format!("failed to install canonical code-index schema: {error}"))?;
     }
     read_rusqlite_inventory(&connection)
 }
@@ -352,6 +382,18 @@ fn reset_required(reason: impl Into<String>) -> TraceDecayError {
 
 pub(super) async fn require_exact_final_shape(conn: &impl QueryExecutor) -> Result<()> {
     require_final_shape_inventory(&read_inventory(conn).await?)
+}
+
+pub(super) async fn require_released_v39_shape(conn: &impl QueryExecutor) -> Result<()> {
+    if !released_shape_inventory(&read_inventory(conn).await?)? {
+        return Err(reset_required("database does not carry the exact released v39 inventory"));
+    }
+    Ok(())
+}
+
+fn released_shape_inventory(actual: &SchemaInventory) -> Result<bool> {
+    let expected = RELEASED_V39_SHAPE.as_ref().map_err(|error| database_error(error.clone()))?;
+    Ok(actual == expected)
 }
 
 fn require_final_shape_inventory(actual: &SchemaInventory) -> Result<()> {

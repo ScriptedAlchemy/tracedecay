@@ -492,6 +492,7 @@ async fn epochs_are_monotonic_across_registries_and_respect_a_retained_floor() {
     assert!(!first.shares_runtime_with(&second));
 }
 
+#[cfg(unix)]
 #[test]
 fn exact_sql_authority_rechecks_opened_file_identity() {
     use tracedecay_rusqlite_runtime::exact_sql::{
@@ -507,19 +508,46 @@ fn exact_sql_authority_rechecks_opened_file_identity() {
     let current_identity = crate::db::sqlite_generation_identity(&database_path).unwrap();
     let authority = RuntimeDatabaseWriteAuthority {
         authority,
-        canonical_path: database_path.canonicalize().unwrap(),
+        file_identity: Arc::new(crate::db::RegisteredSqliteIdentity::acquire(&database_path).unwrap()),
         opened_file_identity: current_identity,
     };
 
-    let retained_path = directory.path().join("retained-original.db");
-    std::fs::rename(&database_path, retained_path).unwrap();
-    std::fs::write(&database_path, []).unwrap();
+    let staged = directory.path().join("staged-identity.db");
+    std::fs::write(&staged, []).unwrap();
+    std::fs::rename(&staged, &database_path).unwrap();
 
     assert!(matches!(
         ExactSqlWriteAuthority::verify(&authority, ExactSqlWriteIntent::Execute),
         Err(ExactSqlError::AuthorityDenied(message))
             if message == "database file identity changed after registry attachment"
     ));
+}
+
+#[cfg(windows)]
+#[test]
+fn exact_sql_identity_pin_refuses_replacement_without_statement_path_opens() {
+    use tracedecay_rusqlite_runtime::exact_sql::{ExactSqlWriteAuthority, ExactSqlWriteIntent};
+
+    let directory = tempfile::tempdir().unwrap();
+    let parent = directory.path().join("project");
+    std::fs::create_dir(&parent).unwrap();
+    let database_path = parent.join("identity.db");
+    std::fs::write(&database_path, []).unwrap();
+    let identity = Arc::new(crate::db::RegisteredSqliteIdentity::acquire(&database_path).unwrap());
+    let authority = RuntimeDatabaseWriteAuthority {
+        authority: crate::db::DatabaseAuthority::acquire_test(&database_path, "identity pin").unwrap(),
+        opened_file_identity: identity.opened_identity(),
+        file_identity: Arc::clone(&identity),
+    };
+    for _ in 0..128 {
+        ExactSqlWriteAuthority::verify(&authority, ExactSqlWriteIntent::Execute).unwrap();
+    }
+    assert!(std::fs::remove_file(&database_path).is_err());
+    assert!(std::fs::rename(&parent, directory.path().join("moved-project")).is_err());
+    drop(authority);
+    drop(identity);
+    std::fs::remove_file(&database_path).unwrap();
+    std::fs::write(&database_path, []).unwrap();
 }
 
 #[cfg(unix)]

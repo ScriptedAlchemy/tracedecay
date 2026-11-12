@@ -9,6 +9,7 @@
 //! ownership. Application-layer IDs cross this lower-level dependency boundary
 //! through validated lossless representations, never aliases.
 
+mod code_index;
 mod consistency;
 mod error;
 mod graph_publication;
@@ -23,6 +24,12 @@ mod telemetry;
 pub use consistency::{
     CommitSequenceV1, ConsistencyModeV1, FrozenWatermarkCoverageV1, FrozenWatermarkVectorV1,
     ShardWatermarkV1, WatermarkCoverageStatusV1,
+};
+pub use code_index::{
+    CODE_INDEX_REGION_BYTES, CodeIndexAllocationAdmission, CodeIndexGenerationKey,
+    CodeIndexGenerationPage, CodeIndexGenerationRecord,
+    CodeIndexPayloadIdentity, CodeIndexPublicationStage, CodeIndexPublishOutcome,
+    CodeIndexStorageError, CodeIndexStorageResult, CodeIndexStoredBytes,
 };
 pub use error::{
     CorruptionClassV1, RuntimeCancellationStageV1, SaturationScopeV1,

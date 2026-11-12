@@ -283,9 +283,16 @@ async fn verify_final_schema_before_existing_publication(
                 .to_owned(),
         });
     }
-    let connection = crate::db::engine::Connection::attach(handle);
-    crate::db::migrations::verify_final_schema_connection(&connection)
-        .await
+    let result = if request.access == StoreRuntimeAccessMode::ReadWrite {
+        let connection = authorized_schema_connection(
+            request, attachment, "converge exact released SQLite schema",
+        ).await?;
+        crate::db::migrations::converge_existing_schema_connection(&connection).await
+    } else {
+        let connection = crate::db::engine::Connection::attach(handle);
+        crate::db::migrations::verify_final_schema_connection(&connection).await
+    };
+    result
         .map_err(|error| match error {
             tracedecay_domain::errors::TraceDecayError::ResetRequired { authority, reason } => {
                 StoreRuntimeRegistryFailure::ResetRequired { authority, reason }
@@ -377,7 +384,7 @@ impl LifecyclePhysicalAttachment {
 
 struct InitializingSchemaAuthority {
     authority: crate::db::DatabaseAuthority,
-    canonical_path: PathBuf,
+    file_identity: Arc<crate::db::RegisteredSqliteIdentity>,
     opened_file_identity: u64,
 }
 
@@ -396,7 +403,7 @@ impl tracedecay_rusqlite_runtime::exact_sql::ExactSqlWriteAuthority
                 )
             })?;
         let identity =
-            crate::db::sqlite_generation_identity(&self.canonical_path).map_err(|source| {
+            self.file_identity.current_identity().map_err(|source| {
                 tracedecay_rusqlite_runtime::exact_sql::ExactSqlError::AuthorityDenied(
                     super::sqlite_file_identity_authority_denial(
                         "install final schema for initialized SQLite runtime",
@@ -456,7 +463,12 @@ async fn authorized_schema_connection(
         });
     }
     let authority = InitializingSchemaAuthority {
-        canonical_path: authority.canonical_database_path().to_path_buf(),
+        file_identity: Arc::new(crate::db::RegisteredSqliteIdentity::acquire(
+            authority.canonical_database_path(),
+        ).map_err(|source| StoreRuntimeRegistryFailure::SqliteFileIdentityInspectionFailed {
+            operation,
+            source,
+        })?),
         authority,
         opened_file_identity,
     };

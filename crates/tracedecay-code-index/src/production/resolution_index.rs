@@ -23,6 +23,7 @@ use flate2::write::DeflateEncoder;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tracedecay_domain::ManifestDigest;
+use tracedecay_runtime_core::db::CodeIndexStoredBytes;
 
 use super::partitioned_codec::{
     SealedGenerationSegmentPublicationV1, SealedGenerationSegmentReadV1, inflate_index_segment,
@@ -259,8 +260,8 @@ pub(super) fn seal_resolution_index(
     })
 }
 
-/// Reads one sealed index segment's bytes into the buffer it is handed.
-pub(super) type IndexSegmentReaderV1<'r> = dyn Fn(SealedGenerationSegmentReadV1<'_>, &mut Vec<u8>) -> Result<(), CodeIndexProductionErrorV1>
+/// Retains the encoded page's admission for the complete index decode.
+pub(super) type IndexSegmentReaderV1<'r> = dyn Fn(SealedGenerationSegmentReadV1<'_>) -> Result<CodeIndexStoredBytes, CodeIndexProductionErrorV1>
     + Sync
     + 'r;
 
@@ -291,13 +292,11 @@ impl<'r> ResolutionIndexReaderV1<'r> {
         &self,
         descriptor: &PartitionedIndexSegmentDescriptorV1,
     ) -> Result<T, CodeIndexProductionErrorV1> {
-        let mut bytes = Vec::new();
-        (self.read)(
+        let bytes = (self.read)(
             SealedGenerationSegmentReadV1::Whole {
                 digest: &descriptor.segment_digest,
                 size_bytes: descriptor.segment_size_bytes,
             },
-            &mut bytes,
         )?;
         verify_index_segment(
             &bytes,

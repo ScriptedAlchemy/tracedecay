@@ -64,6 +64,7 @@ pub use file_identity::{
     SqliteFileIdentityError, SqliteFileIdentityErrorCategory, SqliteFileIdentityOperation,
     sqlite_generation_identity,
 };
+pub(crate) use file_identity::RegisteredSqliteIdentity;
 pub use memory_connection::MemoryConnection;
 pub use metadata::BoundedMetadataValue;
 pub use retrieval_anchor_authority::{
@@ -76,3 +77,12 @@ pub use tracedecay_store::{
     AnchorDerivativeKindV1, AnchorDispositionAppendOutcomeV1, AnchorDispositionReasonClassV1,
     AnchorDispositionStateV1, RetrievalAnchorDerivativeV1, RetrievalAnchorDispositionRecordV1,
 };
+pub use tracedecay_store::runtime::CodeIndexStoredBytes;
+pub use purpose::reserve_encoded_bytes;
+pub use tracedecay_rusqlite_runtime::repository::CodeIndexSqliteStorage;
+pub use tracedecay_store::runtime::{
+    CODE_INDEX_REGION_BYTES, CodeIndexGenerationKey, CodeIndexGenerationRecord,
+    CodeIndexPayloadIdentity,
+    CodeIndexPublicationStage, CodeIndexPublishOutcome, CodeIndexStorageError,
+};
+pub use tracedecay_store::StoreOperationIdV1 as CodeIndexStorageOperationId;

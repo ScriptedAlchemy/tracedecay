@@ -13,6 +13,7 @@ use tracedecay_domain::{
     CodeGenerationId, CodeGenerationManifestV1, FileOccurrenceId, ManifestDigest,
     SanitizedCodeFileV1, SanitizedCodeSnapshotV1,
 };
+use tracedecay_runtime_core::db::CodeIndexStoredBytes;
 
 use super::file_evidence_rows::PersistedFileEvidenceV1;
 use super::partitioned_codec::{
@@ -30,9 +31,8 @@ use super::{
     VerifiedSealedTextGenerationMetadataV1,
 };
 
-/// Reads one sealed segment's bytes into the buffer it is handed. Shared by
-/// every worker a successor build fans out to.
-pub type SealedSegmentReaderV1 = dyn Fn(SealedGenerationSegmentReadV1<'_>, &mut Vec<u8>) -> Result<(), CodeIndexProductionErrorV1>
+/// Each concurrent worker owns its encoded bytes and reservation through decode.
+pub type SealedSegmentReaderV1 = dyn Fn(SealedGenerationSegmentReadV1<'_>) -> Result<CodeIndexStoredBytes, CodeIndexProductionErrorV1>
     + Send
     + Sync;
 
@@ -40,7 +40,7 @@ pub type SealedSegmentReaderV1 = dyn Fn(SealedGenerationSegmentReadV1<'_>, &mut 
 /// the authenticated manifest bytes and a reader over its segments.
 #[derive(Clone)]
 pub struct CodeIndexSealedGenerationV1 {
-    manifest_bytes: Arc<[u8]>,
+    manifest_bytes: Arc<CodeIndexStoredBytes>,
     read_segment: Arc<SealedSegmentReaderV1>,
 }
 
@@ -54,7 +54,10 @@ impl std::fmt::Debug for CodeIndexSealedGenerationV1 {
 }
 
 impl CodeIndexSealedGenerationV1 {
-    pub fn new(manifest_bytes: Arc<[u8]>, read_segment: Arc<SealedSegmentReaderV1>) -> Self {
+    pub fn new(
+        manifest_bytes: Arc<CodeIndexStoredBytes>,
+        read_segment: Arc<SealedSegmentReaderV1>,
+    ) -> Self {
         Self {
             manifest_bytes,
             read_segment,
@@ -63,6 +66,10 @@ impl CodeIndexSealedGenerationV1 {
 
     pub fn manifest_bytes(&self) -> &[u8] {
         &self.manifest_bytes
+    }
+
+    pub fn shared_manifest_bytes(&self) -> Arc<CodeIndexStoredBytes> {
+        Arc::clone(&self.manifest_bytes)
     }
 
     /// The authenticated manifest, snapshot, and statistics this generation
@@ -183,13 +190,11 @@ impl SealedParentGenerationV1 {
         generation_id: &CodeGenerationId,
         snapshot_digest: &ManifestDigest,
     ) -> Result<Arc<FileGenerationArtifactsV1>, CodeIndexProductionErrorV1> {
-        let mut bytes = Vec::new();
-        self.read()(
+        let bytes = self.read()(
             SealedGenerationSegmentReadV1::Whole {
                 digest: &descriptor.segment_digest,
                 size_bytes: descriptor.segment_size_bytes,
             },
-            &mut bytes,
         )?;
         let mut rebound = descriptor.clone();
         rebound.file_occurrence_id = file_occurrence_id.clone();
@@ -268,13 +273,11 @@ impl SealedParentGenerationV1 {
         let Some(descriptor) = self.file_evidence_descriptor(file_key) else {
             return Ok(None);
         };
-        let mut bytes = Vec::new();
-        self.read()(
+        let bytes = self.read()(
             SealedGenerationSegmentReadV1::Whole {
                 digest: &descriptor.segment_digest,
                 size_bytes: descriptor.segment_size_bytes,
             },
-            &mut bytes,
         )?;
         decode_file_evidence_segment(descriptor, &bytes).map(Some)
     }
@@ -283,9 +286,7 @@ impl SealedParentGenerationV1 {
         &self,
     ) -> Result<PartitionedGenerationEvidenceV1, CodeIndexProductionErrorV1> {
         let read = self.read();
-        decode_generation_evidence(&self.generation.generation_evidence, |request, buffer| {
-            read(request, buffer)
-        })
+        decode_generation_evidence(&self.generation.generation_evidence, read)
     }
 
     pub(super) fn resolution_index(

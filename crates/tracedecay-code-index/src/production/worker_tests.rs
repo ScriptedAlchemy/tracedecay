@@ -11,6 +11,21 @@ use super::*;
 
 pub(super) type WorkerPublicationStore = MemorySealedPublicationStoreV1;
 
+pub(super) fn encoded_fixture_bytes(bytes: &[u8]) -> CodeIndexStoredBytes {
+    use tracedecay_runtime_core::resident_memory::{
+        ProcessResidentMemoryV1, ResidentMemoryPressureV1,
+    };
+    let limit = std::num::NonZeroU64::new(1024 * 1024 * 1024).unwrap();
+    let memory = Arc::new(ProcessResidentMemoryV1::with_pressure(
+        limit,
+        Arc::new(ResidentMemoryPressureV1::with_sampler(limit, Arc::new(|| None))),
+    ));
+    tracedecay_runtime_core::db::reserve_encoded_bytes(&memory, bytes.len(), |output| {
+        output.copy_from_slice(bytes);
+        Ok(())
+    }).unwrap()
+}
+
 pub(super) fn worker_id<T>(value: &str) -> T
 where
     T: TryFrom<String>,
@@ -416,11 +431,15 @@ fn prior_sealed_generation_is_rejected_before_manifest_decode() {
 /// evidence pages assembled under their pack digest.
 pub(super) fn partitioned_seal(
     generation: &CodeIndexPublishedGenerationV1,
-) -> (Vec<u8>, std::collections::BTreeMap<String, Vec<u8>>) {
+) -> (tracedecay_runtime_core::db::CodeIndexStoredBytes, std::collections::BTreeMap<String, Vec<u8>>) {
     let mut segments = std::collections::BTreeMap::new();
     let mut evidence_pack = Vec::new();
     let manifest = generation
-        .encode_partitioned_sealed(|publication| {
+        .encode_partitioned_sealed(&Arc::new(
+            tracedecay_runtime_core::resident_memory::ProcessResidentMemoryV1::new(
+                tracedecay_runtime_core::resident_memory::detected_process_resident_memory_limit_v1(),
+            ),
+        ), |publication| {
             match publication {
                 SealedGenerationSegmentPublicationV1::File { digest, bytes }
                 | SealedGenerationSegmentPublicationV1::FileEvidence { digest, bytes }
@@ -458,7 +477,7 @@ pub(super) fn partitioned_restore(
     CodeIndexPublishedGenerationV1::decode_partitioned_sealed(
         manifest,
         &SharedDecodedContentPoolV1::default(),
-        |request, buffer| {
+        |request| {
             let (digest, offset, length) = match request {
                 SealedGenerationSegmentReadV1::Whole { digest, size_bytes } => {
                     (digest, 0, size_bytes)
@@ -473,9 +492,7 @@ pub(super) fn partitioned_restore(
             let bytes = &segments[digest.as_str()];
             let start = usize::try_from(offset).expect("segment offset");
             let end = start + usize::try_from(length).expect("segment length");
-            buffer.clear();
-            buffer.extend_from_slice(&bytes[start..end]);
-            Ok(())
+            Ok(encoded_fixture_bytes(&bytes[start..end]))
         },
     )
     .expect("generation restores")

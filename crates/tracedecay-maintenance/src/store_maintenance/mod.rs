@@ -13,10 +13,7 @@ use std::path::{Path, PathBuf};
 use crate::lease::ProjectStoreMaintenanceLeaseV1;
 use crate::telemetry::StoreTelemetrySamplingRegistry;
 use tracedecay_code_index_retention::code_index_generations::{
-    CodeGenerationRetentionErrorV1, CodeGenerationRetentionModeV1, CodeGenerationRetentionPlanV1,
-    CodeGenerationRetentionReportV1, CodeIndexScopeV1, code_index_scopes, code_index_store_root,
-    execute_code_generation_retention_cancellable,
-    prepare_next_code_generation_retention_cancellable,
+    CodeIndexScopeV1, code_index_scopes, code_index_store_root,
 };
 use tracedecay_code_index_runtime::code_index_scheduler::CodeIndexSchedulerRegistryV1;
 use tracedecay_domain::CodeGenerationId;
@@ -27,7 +24,7 @@ use tracedecay_runtime_core::native_runtime;
 
 mod graph_replay;
 mod scope_reconciliation;
-use graph_replay::{defer_graph_replay_pool_busy, log_code_generation_retention_degraded};
+use graph_replay::log_code_generation_retention_degraded;
 #[cfg(test)]
 pub(crate) mod registered_tests;
 pub use scope_reconciliation::{run_code_index_scope_reconciliation, scheduler_owner_roots};
@@ -59,13 +56,6 @@ impl CodeGenerationRetentionOutcomeV1 {
             (Self::Complete, Self::Complete) => Self::Complete,
         }
     }
-}
-
-fn defer_generation_store_busy(
-    observations: &crate::telemetry::StoreTelemetrySamplingRegistry,
-) -> CodeGenerationRetentionOutcomeV1 {
-    log_code_generation_retention_degraded(observations, "generation_store_busy");
-    CodeGenerationRetentionOutcomeV1::Failed
 }
 
 /// Exact liveness roots for one code-index scope beyond the active pointer,
@@ -140,180 +130,6 @@ pub async fn code_generation_protection(
     Ok(CodeGenerationProtectionV1 { serving, sources })
 }
 
-/// Recover any prior apply and build the next fully verified collection
-/// batch. Full digest verification routinely reads several GiB, so it runs on
-/// the blocking pool with the daemon shutdown token, which the planner checks
-/// after every bounded read chunk; it creates no journal before verification
-/// completes. `Err` carries the pass outcome, already logged.
-async fn plan_collection(
-    store_root: &Path,
-    protected_sources: &BTreeSet<CodeGenerationId>,
-    graph_replay_pool_root: &Path,
-    backoff_root: &Path,
-    observations: &StoreTelemetrySamplingRegistry,
-    cancellation: &CancellationToken,
-) -> Result<CodeGenerationRetentionPlanV1, CodeGenerationRetentionOutcomeV1> {
-    let plan_root = store_root.to_path_buf();
-    let plan_sources = protected_sources.clone();
-    let plan_cancellation = cancellation.clone();
-    let plan_pool_root = graph_replay_pool_root.to_path_buf();
-    let plan = native_runtime::spawn_blocking(move || {
-        prepare_next_code_generation_retention_cancellable(
-            &plan_root,
-            &plan_sources,
-            &|| plan_cancellation.is_cancelled(),
-            Some(&plan_pool_root),
-        )
-    })
-    .await;
-    match plan {
-        Ok(Ok(plan)) => Ok(plan),
-        Ok(Err(CodeGenerationRetentionErrorV1::Cancelled)) => {
-            log_code_generation_retention_degraded(observations, "retention_cancelled");
-            Err(CodeGenerationRetentionOutcomeV1::Failed)
-        }
-        Ok(Err(CodeGenerationRetentionErrorV1::GraphReplayPoolBusy)) => {
-            Err(defer_graph_replay_pool_busy(observations, backoff_root))
-        }
-        Ok(Err(CodeGenerationRetentionErrorV1::GenerationStoreBusy)) => {
-            Err(defer_generation_store_busy(observations))
-        }
-        Ok(Err(error)) => {
-            // The bare label proved undiagnosable on a live profile: without
-            // the typed error, a pointer CAS loss under rebuild churn is
-            // indistinguishable from unrecognized-file or storage failures.
-            observations.mark_loud_retention_log();
-            log_daemon_event(
-                "retention_degraded",
-                &[
-                    ("pass", "code_generations".to_string()),
-                    ("failure", "retention_plan_failed".to_string()),
-                    ("error", error.to_string()),
-                ],
-            );
-            Err(CodeGenerationRetentionOutcomeV1::Failed)
-        }
-        Err(_) => {
-            log_code_generation_retention_degraded(observations, "retention_task_panicked");
-            Err(CodeGenerationRetentionOutcomeV1::Failed)
-        }
-    }
-}
-
-/// Apply one fully verified batch and log what it reclaimed. `Err` carries
-/// the pass outcome, already logged.
-async fn execute_collection(
-    store_root: &Path,
-    plan: CodeGenerationRetentionPlanV1,
-    graph_replay_pool_root: &Path,
-    backoff_root: &Path,
-    observations: &StoreTelemetrySamplingRegistry,
-    cancellation: &CancellationToken,
-) -> Result<CodeGenerationRetentionReportV1, CodeGenerationRetentionOutcomeV1> {
-    // `current_timestamp()` counts seconds; wrapping it in `UtcMicros` stamped
-    // every deletion receipt with a seconds value in a micros-typed field
-    // (live receipts read as 1970). The receipt is durable journal evidence,
-    // so it takes the canonical micros clock.
-    let completed_at = tracedecay_contracts::clock::now_micros();
-    let execution_root = store_root.to_path_buf();
-    let execution_pool_root = graph_replay_pool_root.to_path_buf();
-    let execution_cancellation = cancellation.clone();
-    let report = native_runtime::spawn_blocking(move || {
-        execute_code_generation_retention_cancellable(
-            &execution_root,
-            plan,
-            CodeGenerationRetentionModeV1::Apply,
-            completed_at,
-            Some(&execution_pool_root),
-            &|| execution_cancellation.is_cancelled(),
-        )
-    })
-    .await;
-    match report {
-        Ok(Ok(report)) => {
-            let generation_reclaimed = report.receipt.as_ref().map_or_else(
-                || {
-                    report
-                        .deleted_generations
-                        .iter()
-                        .map(|generation| generation.size_bytes)
-                        .sum()
-                },
-                |receipt| receipt.reclaimed_bytes,
-            );
-            let text_artifact_reclaimed = report.text_artifact_receipt.as_ref().map_or_else(
-                || {
-                    report
-                        .deleted_text_artifacts
-                        .iter()
-                        .map(|artifact| artifact.size_bytes)
-                        .sum()
-                },
-                |receipt| receipt.reclaimed_bytes,
-            );
-            let reclaimed = generation_reclaimed.saturating_add(text_artifact_reclaimed);
-            if reclaimed > 0 {
-                log_daemon_event(
-                    "retention_code_generations",
-                    &[
-                        ("store", "code-index-v1".to_string()),
-                        ("bytes_reclaimed", reclaimed.to_string()),
-                        (
-                            "generations_collected",
-                            report.deleted_generations.len().to_string(),
-                        ),
-                        (
-                            "text_artifacts_collected",
-                            report.deleted_text_artifacts.len().to_string(),
-                        ),
-                    ],
-                );
-            }
-            Ok(report)
-        }
-        Ok(Err(CodeGenerationRetentionErrorV1::Cancelled)) => {
-            log_code_generation_retention_degraded(observations, "retention_cancelled");
-            Err(CodeGenerationRetentionOutcomeV1::Failed)
-        }
-        Ok(Err(CodeGenerationRetentionErrorV1::GraphReplayPoolBusy)) => {
-            Err(defer_graph_replay_pool_busy(observations, backoff_root))
-        }
-        Ok(Err(CodeGenerationRetentionErrorV1::GenerationStoreBusy)) => {
-            Err(defer_generation_store_busy(observations))
-        }
-        Ok(Err(error)) => {
-            // Same diagnosability contract as the plan failure: the apply
-            // step's typed error names the exact refusal (CAS loss, unsafe
-            // state, storage) instead of a bare retry label.
-            observations.mark_loud_retention_log();
-            log_daemon_event(
-                "retention_degraded",
-                &[
-                    ("pass", "code_generations".to_string()),
-                    ("failure", "retention_pass_failed".to_string()),
-                    ("error", error.to_string()),
-                ],
-            );
-            Err(CodeGenerationRetentionOutcomeV1::Failed)
-        }
-        Err(_) => {
-            log_code_generation_retention_degraded(observations, "retention_task_panicked");
-            Err(CodeGenerationRetentionOutcomeV1::Failed)
-        }
-    }
-}
-
-/// Whether an applied batch left more for the next census: something was
-/// collected (the rewritten index can free text artifacts the batch planned
-/// before the rewrite), or the segment sweep stopped at its batch bound. A
-/// census that finds nothing returns `Complete` one tick later at metadata
-/// cost only.
-fn collection_left_work(report: &CodeGenerationRetentionReportV1) -> bool {
-    report.generation_segment_batch_exhausted
-        || !report.deleted_generations.is_empty()
-        || !report.deleted_text_artifacts.is_empty()
-}
-
 /// Collect superseded code-index generations for one mounted project.
 ///
 /// Sealed generations are ordinary files, so no database retention or
@@ -347,14 +163,6 @@ pub async fn run_code_generation_retention(
     if !store_root.is_dir() {
         return CodeGenerationRetentionOutcomeV1::Complete;
     }
-    // Retired generations stay reachable for graph replay through the replay
-    // pool; retention hard-links each one there before its release event
-    // becomes durable, and the replay reconciler deletes pool entries once
-    // the graph confirms it no longer needs them.
-    let graph_replay_pool_root = lease
-        .graph_db()
-        .database_path()
-        .with_extension("graph-replay");
     let protection = match code_generation_protection(
         schedulers,
         lease.profile_database().as_ref(),
@@ -368,130 +176,92 @@ pub async fn run_code_generation_retention(
             return CodeGenerationRetentionOutcomeV1::Failed;
         }
     };
-    // A held replay pool makes every later phase of this pass fail closed:
-    // the release reconcile's pool acquisition would burn its whole
-    // graph-operation deadline discovering the holder (the live wedge logged
-    // that as `graph_replay_release_failed error=DeadlineExceeded` on every
-    // tick), and the collection executor would then contend for the same
-    // lock while holding the daemon writer gate. One non-blocking probe
-    // defers the pass for this tick instead, before the multi-GiB
-    // full-digest planning below is paid, and the executor's own checked
-    // acquire returns `GraphReplayPoolBusy` if a publisher wins the
-    // probe-to-execute window, so the writer gate is never pinned on a
-    // blocking flock. Both paths arm the same bounded release backoff.
-    if graph_replay::replay_pool_is_held(&graph_replay_pool_root) {
-        return defer_graph_replay_pool_busy(observations, lease.project_root());
-    }
-    let plan = match plan_collection(
-        &store_root,
-        &protection.sources,
-        &graph_replay_pool_root,
-        lease.project_root(),
-        observations,
-        cancellation,
-    )
-    .await
-    {
-        Ok(plan) => plan,
-        Err(outcome) => return outcome,
-    };
-    // A failed, deferred, or retained replay reconcile keeps its durable
-    // release evidence for a later graph-available pass. Deleting newly
-    // planned files stays safe, retention hard-links each retired generation
-    // into the replay pool before its release event becomes durable, so the
-    // graph can always finish its retirement later. The pass therefore keeps
-    // collecting instead of letting sealed generations and their multi-GiB
-    // text artifacts accumulate without bound whenever the graph is dark,
-    // wedged, or busy (a recurring `graph_replay_release_failed` used to
-    // abort every pass here and grew one store by tens of GiB in a single
-    // crash-rebuild night). A failure still reports degraded and fails the
-    // pass so the retry cadence stays short; a deferral fails the pass
-    // quietly under the bounded backoff.
-    let mut replay_reconcile_failed = false;
-    let mut release_backlog_remains = false;
-    let replay_reconcile_attemptable = match graph_replay::reconcile_graph_replay_releases(
-        lease,
-        &store_root,
-        observations,
-        cancellation,
-    )
-    .await
-    {
-        graph_replay::ReconcileOutcome::Complete | graph_replay::ReconcileOutcome::Retained => true,
-        graph_replay::ReconcileOutcome::MoreWork => {
-            release_backlog_remains = true;
-            true
-        }
-        // A deferred or failed attempt must not be repeated by the
-        // post-collection reconcile below: the graph runtime already proved
-        // it cannot serve this tick.
-        graph_replay::ReconcileOutcome::Deferred | graph_replay::ReconcileOutcome::Failed => {
-            replay_reconcile_failed = true;
-            false
+    let project = match &lease.graph_db().registered_binding().shard_id.scope {
+        tracedecay_store::StoreShardScopeV1::Project { project_id } => project_id.clone(),
+        _ => {
+            log_code_generation_retention_degraded(observations, "registered_project_authority_unavailable");
+            return CodeGenerationRetentionOutcomeV1::Failed;
         }
     };
-    // A superseded generation still named by the serving or text slot, or a
-    // text replacement still building, is released by a seat or descriptor
-    // publication that does not wake maintenance. Without the short cadence
-    // its bytes wait for the next full interval (a day by default).
-    let awaits_transient_release = plan.awaits_transient_release(&protection.serving);
-    if !plan.has_collectable_work() {
-        return if replay_reconcile_failed {
-            CodeGenerationRetentionOutcomeV1::Failed
-        } else if release_backlog_remains || awaits_transient_release {
-            CodeGenerationRetentionOutcomeV1::MoreWork
-        } else {
-            CodeGenerationRetentionOutcomeV1::Complete
-        };
-    }
-    if cancellation.is_cancelled() {
-        log_code_generation_retention_degraded(observations, "retention_cancelled");
-        return CodeGenerationRetentionOutcomeV1::Failed;
-    }
-    let report = match execute_collection(
-        &store_root,
-        plan,
-        &graph_replay_pool_root,
-        lease.project_root(),
-        observations,
-        cancellation,
-    )
-    .await
-    {
-        Ok(report) => report,
-        Err(outcome) => return outcome,
+    let storage = match lease.graph_db().project_code_index_storage(schedulers.process_resident_memory(), &project) {
+        Ok(storage) => storage,
+        Err(error) => {
+            log_code_generation_retention_degraded(observations, &error.to_string());
+            return CodeGenerationRetentionOutcomeV1::Failed;
+        }
     };
-    // The just-collected batch queued fresh release evidence; offer it to the
-    // graph immediately, but only when this tick's earlier reconcile was
-    // actually served. A deferred or failed runtime must not be probed twice
-    // in one tick.
-    let mut release_reconcile_failed = replay_reconcile_failed;
-    if replay_reconcile_attemptable {
-        match graph_replay::reconcile_graph_replay_releases(
-            lease,
-            &store_root,
-            observations,
-            cancellation,
+    let worktree = match tracedecay_runtime_core::scope_identity::worktree_id_for(&layout.project_root) {
+        Ok(worktree) => worktree,
+        Err(error) => {
+            log_code_generation_retention_degraded(observations, &error.to_string());
+            return CodeGenerationRetentionOutcomeV1::Failed;
+        }
+    };
+    let stage_cancellation = cancellation.clone();
+    let graph_storage = storage.clone();
+    let graph_worktree = worktree.clone();
+    let graph_protected = protection.sources.clone();
+    match native_runtime::spawn_blocking(move || {
+        tracedecay_code_index_retention::code_index_generations::retain_registered_code_index(
+            &storage, &worktree, &protection.sources, &|| stage_cancellation.is_cancelled(),
         )
-        .await
-        {
-            graph_replay::ReconcileOutcome::Complete | graph_replay::ReconcileOutcome::Retained => {
-            }
-            graph_replay::ReconcileOutcome::MoreWork => {
-                release_backlog_remains = true;
-            }
-            graph_replay::ReconcileOutcome::Deferred | graph_replay::ReconcileOutcome::Failed => {
-                release_reconcile_failed = true;
+    }).await {
+        Ok(Ok(true)) => {
+            match finish_registered_retirements(
+                &graph_storage, &graph_worktree, &graph_protected,
+                lease.store_runtime(), lease.graph_db(), &project, cancellation,
+            ).await {
+                Ok(()) => CodeGenerationRetentionOutcomeV1::MoreWork,
+                Err(error) => {
+                    log_code_generation_retention_degraded(observations, &error);
+                    CodeGenerationRetentionOutcomeV1::Failed
+                }
             }
         }
+        Ok(Ok(false)) => CodeGenerationRetentionOutcomeV1::Complete,
+        result => {
+            log_code_generation_retention_degraded(observations, &format!("{result:?}"));
+            CodeGenerationRetentionOutcomeV1::Failed
+        }
     }
-    if release_reconcile_failed {
-        CodeGenerationRetentionOutcomeV1::Failed
-    } else if release_backlog_remains || awaits_transient_release || collection_left_work(&report) {
-        CodeGenerationRetentionOutcomeV1::MoreWork
-    } else {
-        CodeGenerationRetentionOutcomeV1::Complete
+}
+
+async fn finish_registered_retirements(
+    storage: &tracedecay_runtime_core::db::CodeIndexSqliteStorage,
+    worktree: &tracedecay_domain::WorktreeId,
+    protected: &BTreeSet<CodeGenerationId>,
+    runtime: &tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1,
+    database: &tracedecay_runtime_core::db::Database,
+    project: &tracedecay_domain::ProjectId,
+    cancellation: &CancellationToken,
+) -> Result<(), String> {
+    let read_storage = storage.clone();
+    let read_worktree = worktree.clone();
+    let entries = native_runtime::spawn_blocking(move || {
+        read_storage.generation_page(&read_worktree, None)
+    }).await?.map_err(|error| error.to_string())?;
+    for entry in entries.records() {
+        if cancellation.is_cancelled() { return Err("retirement cancelled".to_owned()); }
+        if protected.contains(&entry.key.generation_id) { continue; }
+        let read_storage = storage.clone();
+        let key = entry.key.clone();
+        let pending = native_runtime::spawn_blocking(move || {
+            read_storage.pending_retirement(&key)
+        }).await?.map_err(|error| error.to_string())?;
+        let Some((operation, _receipt)) = pending else { continue; };
+        let digest = tracedecay_domain::sha256_hex_suffix(entry.manifest.digest.as_str())
+            .ok_or_else(|| "retirement digest is not canonical".to_owned())?;
+        if runtime.reconcile_deleted_code_generation_graph_replays(
+            project.clone(), database, &entry.key.generation_id,
+            &format!("generation-{digest}.json"), cancellation,
+        ).await.map_err(|error| error.to_string())? {
+            let storage = storage.clone();
+            let key = entry.key.clone();
+            native_runtime::spawn_blocking(move || storage.complete_retirement(&key, &operation))
+                .await?.map_err(|error| error.to_string())?;
+        }
     }
+    Ok(())
 }
 
 /// The checkout an unmounted scope belongs to, or `None` when the scope is
@@ -516,6 +286,7 @@ fn unmounted_scope_root(
 /// whether or not any of its worktrees is mounted in this daemon.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RegisteredProjectStoreV1 {
+    pub project_id: tracedecay_domain::ProjectId,
     /// `projects/<project id>/` under the profile root.
     pub data_root: PathBuf,
     /// The registry's canonical root: the primary checkout.
@@ -551,6 +322,8 @@ pub async fn run_registered_code_generation_retention(
     profile_database: &RegisteredGlobalDb,
     observations: &StoreTelemetrySamplingRegistry,
     cancellation: &CancellationToken,
+    project_database: &tracedecay_runtime_core::db::Database,
+    store_runtime: &tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1,
 ) -> CodeGenerationRetentionOutcomeV1 {
     let scopes = match code_index_scopes(&store.data_root) {
         Ok(scopes) => scopes,
@@ -567,10 +340,15 @@ pub async fn run_registered_code_generation_retention(
             return CodeGenerationRetentionOutcomeV1::Failed;
         }
     };
-    let graph_replay_pool_root = store
-        .data_root
-        .join(tracedecay_runtime_core::config::DB_FILENAME)
-        .with_extension("graph-replay");
+    let storage = match project_database.project_code_index_storage(
+        schedulers.process_resident_memory(), &store.project_id,
+    ) {
+        Ok(storage) => storage,
+        Err(error) => {
+            log_code_generation_retention_degraded(observations, &error.to_string());
+            return CodeGenerationRetentionOutcomeV1::Failed;
+        }
+    };
     let mut outcome = CodeGenerationRetentionOutcomeV1::Complete;
     for scope in scopes {
         if cancellation.is_cancelled() {
@@ -589,43 +367,40 @@ pub async fn run_registered_code_generation_retention(
                 continue;
             }
         };
-        if graph_replay::replay_pool_is_held(&graph_replay_pool_root) {
-            return outcome.with_pass(defer_graph_replay_pool_busy(observations, &root));
-        }
-        let plan = match plan_collection(
-            &scope.store_root,
-            &protection.sources,
-            &graph_replay_pool_root,
-            &root,
-            observations,
-            cancellation,
-        )
-        .await
-        {
-            Ok(plan) => plan,
-            Err(failed) => {
-                outcome = outcome.with_pass(failed);
+        let worktree = match tracedecay_runtime_core::scope_identity::worktree_id_for(&root) {
+            Ok(worktree) => worktree,
+            Err(error) => {
+                log_code_generation_retention_degraded(observations, &error.to_string());
+                outcome = outcome.with_pass(CodeGenerationRetentionOutcomeV1::Failed);
                 continue;
             }
         };
-        if !plan.has_collectable_work() {
-            continue;
-        }
-        match execute_collection(
-            &scope.store_root,
-            plan,
-            &graph_replay_pool_root,
-            &root,
-            observations,
-            cancellation,
-        )
-        .await
-        {
-            Ok(report) if collection_left_work(&report) => {
-                outcome = outcome.with_pass(CodeGenerationRetentionOutcomeV1::MoreWork);
+        let graph_worktree = worktree.clone();
+        let graph_protected = protection.sources.clone();
+        let staged_storage = storage.clone();
+        let stage_cancellation = cancellation.clone();
+        match native_runtime::spawn_blocking(move || {
+            tracedecay_code_index_retention::code_index_generations::retain_registered_code_index(
+                &staged_storage, &worktree, &protection.sources, &|| stage_cancellation.is_cancelled(),
+            )
+        }).await {
+            Ok(Ok(true)) => {
+                match finish_registered_retirements(
+                    &storage, &graph_worktree, &graph_protected, store_runtime,
+                    project_database, &store.project_id, cancellation,
+                ).await {
+                    Ok(()) => outcome = outcome.with_pass(CodeGenerationRetentionOutcomeV1::MoreWork),
+                    Err(error) => {
+                        log_code_generation_retention_degraded(observations, &error);
+                        outcome = outcome.with_pass(CodeGenerationRetentionOutcomeV1::Failed);
+                    }
+                }
             }
-            Ok(_) => {}
-            Err(failed) => outcome = outcome.with_pass(failed),
+            Ok(Ok(false)) => {}
+            result => {
+                log_code_generation_retention_degraded(observations, &format!("{result:?}"));
+                outcome = outcome.with_pass(CodeGenerationRetentionOutcomeV1::Failed);
+            }
         }
     }
     outcome

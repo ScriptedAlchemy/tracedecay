@@ -9,6 +9,9 @@ use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex, PoisonError};
 
 use tracedecay_domain::{CodeGenerationId, ManifestDigest};
+use tracedecay_runtime_core::resident_memory::{
+    ProcessResidentMemoryV1, detected_process_resident_memory_limit_v1,
+};
 
 use super::{
     CodeIndexAtomicPublicationPort, CodeIndexGenerationScopeV1, CodeIndexProductionErrorV1,
@@ -20,18 +23,31 @@ use super::{
 #[derive(Default)]
 struct MemorySealedStateV1 {
     segments: HashMap<ManifestDigest, Arc<[u8]>>,
-    active: BTreeMap<CodeIndexGenerationScopeV1, (CodeGenerationId, Arc<[u8]>)>,
-    manifests: HashMap<CodeGenerationId, Arc<[u8]>>,
+    active: BTreeMap<CodeIndexGenerationScopeV1, (CodeGenerationId, Arc<tracedecay_runtime_core::db::CodeIndexStoredBytes>)>,
+    manifests: HashMap<CodeGenerationId, Arc<tracedecay_runtime_core::db::CodeIndexStoredBytes>>,
     publications: u64,
 }
 
 /// Sealed generations held in memory, one active generation per scope.
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct MemorySealedPublicationStoreV1 {
     state: Arc<Mutex<MemorySealedStateV1>>,
+    resident_memory: Arc<ProcessResidentMemoryV1>,
+}
+
+impl Default for MemorySealedPublicationStoreV1 {
+    fn default() -> Self {
+        Self::with_resident_memory(Arc::new(ProcessResidentMemoryV1::new(
+            detected_process_resident_memory_limit_v1(),
+        )))
+    }
 }
 
 impl MemorySealedPublicationStoreV1 {
+    pub fn with_resident_memory(resident_memory: Arc<ProcessResidentMemoryV1>) -> Self {
+        Self { state: Arc::default(), resident_memory }
+    }
+
     fn state(&self) -> std::sync::MutexGuard<'_, MemorySealedStateV1> {
         self.state.lock().unwrap_or_else(PoisonError::into_inner)
     }
@@ -39,8 +55,9 @@ impl MemorySealedPublicationStoreV1 {
     /// A reader over every segment this store holds.
     pub fn segment_reader(&self) -> Arc<SealedSegmentReaderV1> {
         let state = Arc::clone(&self.state);
+        let memory = Arc::clone(&self.resident_memory);
         Arc::new(
-            move |request: SealedGenerationSegmentReadV1<'_>, buffer: &mut Vec<u8>| {
+            move |request: SealedGenerationSegmentReadV1<'_>| {
                 let state = state.lock().unwrap_or_else(PoisonError::into_inner);
                 let (digest, range) = match request {
                     SealedGenerationSegmentReadV1::Whole { digest, size_bytes } => {
@@ -68,16 +85,17 @@ impl MemorySealedPublicationStoreV1 {
                             "in-memory sealed segment read is out of range".to_owned(),
                         )
                     })?;
-                buffer.clear();
-                buffer.extend_from_slice(slice);
-                Ok(())
+                tracedecay_runtime_core::db::reserve_encoded_bytes(&memory, slice.len(), |output| {
+                    output.copy_from_slice(slice);
+                    Ok(())
+                }).map_err(|error| CodeIndexProductionErrorV1::Contract(error.to_string()))
             },
         )
     }
 
     /// The manifest of the generation `generation` names, when this store
     /// sealed it.
-    pub fn manifest_bytes(&self, generation: &CodeGenerationId) -> Option<Arc<[u8]>> {
+    pub fn manifest_bytes(&self, generation: &CodeGenerationId) -> Option<Arc<tracedecay_runtime_core::db::CodeIndexStoredBytes>> {
         self.state().manifests.get(generation).map(Arc::clone)
     }
 
@@ -115,7 +133,7 @@ impl MemorySealedPublicationStoreV1 {
         CodeIndexPublishedGenerationV1::decode_partitioned_sealed(
             manifest,
             &SharedDecodedContentPoolV1::default(),
-            |request, buffer| read(request, buffer),
+            |request| read(request),
         )
     }
 
@@ -139,7 +157,7 @@ impl MemorySealedPublicationStoreV1 {
     pub fn seal(
         &self,
         generation: &CodeIndexSealedPublicationV1,
-    ) -> Result<Arc<[u8]>, CodeIndexPublicationStoreErrorV1> {
+    ) -> Result<Arc<tracedecay_runtime_core::db::CodeIndexStoredBytes>, CodeIndexPublicationStoreErrorV1> {
         let parent = generation
             .manifest()
             .parent_generation
@@ -148,7 +166,7 @@ impl MemorySealedPublicationStoreV1 {
         let mut staged = Vec::<(ManifestDigest, Arc<[u8]>)>::new();
         let mut pack = Vec::new();
         let manifest = generation
-            .encode(parent.as_deref(), |publication| {
+            .encode(parent.as_ref().map(|bytes| bytes.as_bytes()), &self.resident_memory, |publication| {
                 match publication {
                     SealedGenerationSegmentPublicationV1::File { digest, bytes }
                     | SealedGenerationSegmentPublicationV1::FileEvidence { digest, bytes }
@@ -173,7 +191,7 @@ impl MemorySealedPublicationStoreV1 {
                 Ok(())
             })
             .map_err(|error| CodeIndexPublicationStoreErrorV1::Unavailable(error.to_string()))?;
-        let manifest: Arc<[u8]> = Arc::from(manifest);
+        let manifest = Arc::new(manifest);
         let mut state = self.state();
         state.segments.extend(staged);
         state.manifests.insert(
@@ -194,8 +212,9 @@ impl CodeIndexAtomicPublicationPort for MemorySealedPublicationStoreV1 {
             .active
             .get(scope)
             .map(|(_, bytes)| Arc::clone(bytes));
-        Ok(manifest
-            .map(|manifest| CodeIndexSealedGenerationV1::new(manifest, self.segment_reader())))
+        Ok(manifest.map(|manifest| {
+            CodeIndexSealedGenerationV1::new(manifest, self.segment_reader())
+        }))
     }
 
     fn publish_atomically(
@@ -203,7 +222,7 @@ impl CodeIndexAtomicPublicationPort for MemorySealedPublicationStoreV1 {
         scope: &CodeIndexGenerationScopeV1,
         expected_active_generation: Option<&CodeGenerationId>,
         generation: &CodeIndexSealedPublicationV1,
-    ) -> Result<Arc<[u8]>, CodeIndexPublicationStoreErrorV1> {
+    ) -> Result<Arc<tracedecay_runtime_core::db::CodeIndexStoredBytes>, CodeIndexPublicationStoreErrorV1> {
         let incumbent = || {
             self.state()
                 .active

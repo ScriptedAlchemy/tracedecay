@@ -198,7 +198,7 @@ fn read_active_generation(home: &Path, project: &Path) -> CodeIndexPublishedGene
     CodeIndexPublishedGenerationV1::decode_partitioned_sealed(
         &sealed,
         &SharedDecodedContentPoolV1::default(),
-        |request, buffer| {
+        |request| {
             let (digest, size_bytes, offset, length) = match request {
                 SealedGenerationSegmentReadV1::Whole { digest, size_bytes } => {
                     (digest, size_bytes, 0, size_bytes)
@@ -221,9 +221,17 @@ fn read_active_generation(home: &Path, project: &Path) -> CodeIndexPublishedGene
             );
             let start = usize::try_from(offset).expect("segment offset");
             let end = start + usize::try_from(length).expect("segment length");
-            buffer.clear();
-            buffer.extend_from_slice(&segment[start..end]);
-            Ok(())
+            let limit = std::num::NonZeroU64::new(1024 * 1024 * 1024).unwrap();
+            let memory = std::sync::Arc::new(tracedecay_runtime_core::resident_memory::ProcessResidentMemoryV1::with_pressure(
+                limit,
+                std::sync::Arc::new(tracedecay_runtime_core::resident_memory::ResidentMemoryPressureV1::with_sampler(
+                    limit, std::sync::Arc::new(|| None),
+                )),
+            ));
+            tracedecay_runtime_core::db::reserve_encoded_bytes(&memory, end - start, |output| {
+                output.copy_from_slice(&segment[start..end]);
+                Ok(())
+            }).map_err(|error| tracedecay_code_index::production::CodeIndexProductionErrorV1::Contract(error.to_string()))
         },
     )
     .expect("active generation must be sealed and compatible")

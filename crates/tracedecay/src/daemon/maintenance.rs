@@ -56,9 +56,14 @@ async fn registered_project_stores(
             if !data_root.is_dir() {
                 continue;
             }
+            let project_id = tracedecay_domain::ProjectId::new(project.project_id.clone())
+                .map_err(|error| tracedecay_domain::errors::TraceDecayError::Config {
+                    message: error.to_string(),
+                })?;
             stores.push((
                 project.project_id,
                 RegisteredProjectStoreV1 {
+                    project_id,
                     data_root,
                     canonical_root: PathBuf::from(project.canonical_root),
                 },
@@ -992,6 +997,22 @@ impl MaintenanceCoordinator {
                             .await
                         }
                         MaintenanceStoreWork::Registered(store) => {
+                            let Some(registry) = administration.mounted_session_runtime_registry().await else {
+                                return MaintenanceTickOutcome::Retry;
+                            };
+                            let database = match registry.project_memory(
+                                store.project_id.clone(), [store.canonical_root.clone()],
+                            ).await {
+                                Ok(database) => database,
+                                Err(error) => {
+                                    tracedecay_runtime_core::logging::log_daemon_event(
+                                        "retention_degraded",
+                                        &[("pass", "registered_code_generations".to_owned()),
+                                          ("failure", error.to_string())],
+                                    );
+                                    return MaintenanceTickOutcome::Retry;
+                                }
+                            };
                             run_registered_project_generation_maintenance(
                                 store,
                                 &mounted_store_roots,
@@ -999,6 +1020,8 @@ impl MaintenanceCoordinator {
                                 profile_database,
                                 &maintenance_observations,
                                 &self.cancellation,
+                                &database,
+                                &registry,
                             )
                             .await
                         }

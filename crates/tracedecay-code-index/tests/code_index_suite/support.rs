@@ -28,6 +28,26 @@ use tracedecay_graph_db::{
     GraphDbError, GraphGenerationManifest, GraphGenerationRowSpill, GraphProjectionIdentity,
     GraphProjectorRevision,
 };
+use tracedecay_code_index::production::CodeIndexStoredBytes;
+use tracedecay_runtime_core::resident_memory::{
+    ProcessResidentMemoryV1, ResidentMemoryPressureV1,
+};
+
+pub fn encoded_fixture_memory() -> Arc<ProcessResidentMemoryV1> {
+    let limit = std::num::NonZeroU64::new(1024 * 1024 * 1024).unwrap();
+    Arc::new(ProcessResidentMemoryV1::with_pressure(
+        limit,
+        Arc::new(ResidentMemoryPressureV1::with_sampler(limit, Arc::new(|| None))),
+    ))
+}
+
+pub fn encoded_fixture_bytes(bytes: &[u8]) -> CodeIndexStoredBytes {
+    let memory = encoded_fixture_memory();
+    tracedecay_runtime_core::db::reserve_encoded_bytes(&memory, bytes.len(), |output| {
+        output.copy_from_slice(bytes);
+        Ok(())
+    }).unwrap()
+}
 
 pub const RUST_SOURCE: &str = "//! Module documentation.\n\nuse std::collections::HashMap;\n\n/// Increment a value.\npub fn alpha(value: u32) -> u32 {\n    value + 1\n}\n\npub struct Holder {\n    map: HashMap<u32, u32>,\n}\n\nimpl Holder {\n    pub fn get(&self, key: u32) -> Option<u32> {\n        self.map.get(&key).copied()\n    }\n}\n\n// trailing window text\n";
 
@@ -103,7 +123,7 @@ pub fn cold_generation(
 /// pack under the commit digest.
 #[derive(Debug, PartialEq, Eq)]
 pub struct PartitionedSealV1 {
-    pub manifest: Vec<u8>,
+    pub manifest: CodeIndexStoredBytes,
     pub segments: BTreeMap<String, Vec<u8>>,
 }
 
@@ -112,7 +132,7 @@ impl PartitionedSealV1 {
         let mut segments = BTreeMap::new();
         let mut evidence_pack = Vec::new();
         let manifest = generation
-            .encode_partitioned_sealed(|publication| {
+            .encode_partitioned_sealed(&encoded_fixture_memory(), |publication| {
                 match publication {
                     SealedGenerationSegmentPublicationV1::File { digest, bytes }
                     | SealedGenerationSegmentPublicationV1::FileEvidence { digest, bytes }
@@ -154,15 +174,14 @@ impl PartitionedSealV1 {
         CodeIndexPublishedGenerationV1::decode_partitioned_sealed(
             manifest,
             &SharedDecodedContentPoolV1::default(),
-            |request, buffer| self.read_segment(request, buffer),
+            |request| self.read_segment(request),
         )
     }
 
     fn read_segment(
         &self,
         request: SealedGenerationSegmentReadV1<'_>,
-        buffer: &mut Vec<u8>,
-    ) -> Result<(), CodeIndexProductionErrorV1> {
+    ) -> Result<CodeIndexStoredBytes, CodeIndexProductionErrorV1> {
         let (digest, offset, length) = match request {
             SealedGenerationSegmentReadV1::Whole { digest, size_bytes } => (digest, 0, size_bytes),
             SealedGenerationSegmentReadV1::Range {
@@ -177,9 +196,7 @@ impl PartitionedSealV1 {
         })?;
         let start = usize::try_from(offset).expect("segment offset fits usize");
         let end = start + usize::try_from(length).expect("segment length fits usize");
-        buffer.clear();
-        buffer.extend_from_slice(&bytes[start..end]);
-        Ok(())
+        Ok(encoded_fixture_bytes(&bytes[start..end]))
     }
 
     /// The code graph this seal projects, built the way publication builds
@@ -207,7 +224,7 @@ impl PartitionedSealV1 {
         let spilled = build_sealed_code_graph_rows(
             projection,
             &source,
-            &mut |request, buffer| self.read_segment(request, buffer),
+            &mut |request| self.read_segment(request),
             revision,
             spill,
             &mut |_| Ok(()),
@@ -227,7 +244,7 @@ impl PartitionedSealV1 {
 
     /// The manifest's content address, the lexical source state digest.
     pub fn state_digest(&self) -> ManifestDigest {
-        ManifestDigest::from_sha256_bytes(&Sha256::digest(&self.manifest))
+        ManifestDigest::from_sha256_bytes(&Sha256::digest(self.manifest.as_bytes()))
             .expect("manifest digest is canonical")
     }
 
@@ -245,13 +262,11 @@ impl PartitionedSealV1 {
         VerifiedSealedLexicalPageSourceV1::open_partitioned_sealed(
             &self.manifest,
             self.state_digest(),
-            move |digest, _, buffer, _control| {
+            move |digest, _, _control| {
                 let bytes = segments.get(digest.as_str()).ok_or_else(|| {
                     CodeIndexProductionErrorV1::Contract("fixture segment is missing".to_owned())
                 })?;
-                buffer.clear();
-                buffer.extend_from_slice(bytes);
-                Ok(())
+                Ok(encoded_fixture_bytes(bytes))
             },
             maximum_page_chunks,
             maximum_page_bytes,
@@ -289,7 +304,7 @@ impl PartitionedSealV1 {
         let mut segments = self.segments.clone();
         segments.insert(tampered.as_str().to_owned(), bytes);
         Self {
-            manifest: reseal_manifest(envelope),
+            manifest: encoded_fixture_bytes(&reseal_manifest(envelope)),
             segments,
         }
     }

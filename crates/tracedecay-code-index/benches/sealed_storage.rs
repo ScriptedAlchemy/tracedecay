@@ -60,6 +60,18 @@ const REV_ENV: &str = "SEALED_STORAGE_REV";
 /// Matches `tracedecay_index_bench`: prime, so edits spread across languages.
 const EDIT_STRIDE: usize = 17;
 const EDIT_APPEND: &[u8] = b"\n// sealed-storage successor edit\n";
+
+fn encoded_benchmark_bytes(bytes: &[u8]) -> Result<
+    tracedecay_code_index::production::CodeIndexStoredBytes, CodeIndexProductionErrorV1,
+> {
+    let memory = Arc::new(tracedecay_runtime_core::resident_memory::ProcessResidentMemoryV1::new(
+        tracedecay_runtime_core::resident_memory::detected_process_resident_memory_limit_v1(),
+    ));
+    tracedecay_runtime_core::db::reserve_encoded_bytes(&memory, bytes.len(), |output| {
+        output.copy_from_slice(bytes);
+        Ok(())
+    }).map_err(|error| CodeIndexProductionErrorV1::Contract(error.to_string()))
+}
 /// The daemon's text-artifact page bounds; a real repository holds clone
 /// bodies larger than a smaller page admits.
 const LEXICAL_PAGE_CHUNKS: usize = 256;
@@ -560,7 +572,7 @@ fn digest_decoded(
     let generation = CodeIndexPublishedGenerationV1::decode_partitioned_sealed(
         &sealed.manifest,
         &SharedDecodedContentPoolV1::default(),
-        |request, buffer| {
+        |request| {
             let (bytes, offset, length) = match request {
                 SealedGenerationSegmentReadV1::Whole { digest, size_bytes } => {
                     (segment(digest)?, 0, size_bytes)
@@ -572,9 +584,7 @@ fn digest_decoded(
                     ..
                 } => (segment(digest)?, offset, length),
             };
-            buffer.clear();
-            buffer.extend_from_slice(&bytes[offset as usize..(offset + length) as usize]);
-            Ok(())
+            encoded_benchmark_bytes(&bytes[offset as usize..(offset + length) as usize])
         },
     )?;
     let restore_ms = started.elapsed().as_millis();
@@ -588,13 +598,11 @@ fn digest_decoded(
     let mut source = VerifiedSealedLexicalPageSourceV1::open_partitioned_sealed(
         &sealed.manifest,
         state_digest,
-        move |digest, _, buffer, _control| {
+        move |digest, _, _control| {
             let bytes = lexical_segments.get(digest.as_str()).ok_or_else(|| {
                 CodeIndexProductionErrorV1::Contract("segment is missing".to_owned())
             })?;
-            buffer.clear();
-            buffer.extend_from_slice(bytes);
-            Ok(())
+            encoded_benchmark_bytes(bytes)
         },
         LEXICAL_PAGE_CHUNKS,
         LEXICAL_PAGE_BYTES,

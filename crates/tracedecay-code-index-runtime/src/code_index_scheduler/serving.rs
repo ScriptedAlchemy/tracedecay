@@ -23,9 +23,10 @@ use tracedecay_code_extraction::{
 use tracedecay_code_index_retention::code_index_generations::{
     CodeGenerationStoreLockV1, DurableCodeTextArtifactDescriptorV1, DurablePublicationPointerV1,
     DurableSealedCodeGenerationIdentityV1, acquire_generation_segments_publication_lock,
-    attach_verified_text_artifact_under_lock, code_text_artifact_path,
+    code_text_artifact_path, plan_verified_text_artifact_attachment,
+    plan_verified_text_artifact_withdrawal,
     code_text_artifact_staging_root, code_text_artifacts_root, find_shared_text_artifact,
-    try_acquire_code_generation_store_lock, withdraw_verified_text_artifact_under_lock,
+    try_acquire_code_generation_store_lock,
 };
 use tracedecay_contracts::{
     code_index_freshness::{
@@ -1347,7 +1348,11 @@ impl DaemonCodeTextArtifactStoreV1 {
             })?)
             .map_err(text_artifact_unavailable)?;
         }
-        withdraw_verified_text_artifact_under_lock(&lock, &pointer, descriptor)
+        let expected = serde_json::to_vec(&pointer).map_err(text_artifact_unavailable)?;
+        let next = plan_verified_text_artifact_withdrawal(pointer, descriptor)
+            .map_err(text_artifact_unavailable)?;
+        let bytes = serde_json::to_vec(&next).map_err(text_artifact_unavailable)?;
+        self.publication.commit_observed_pointer(&lock, Some(&expected), &next, &bytes)
             .map_err(text_artifact_unavailable)?;
         if let Err(error) = self.remove_restore_witness(descriptor) {
             tracing::warn!(
@@ -1459,16 +1464,21 @@ impl DaemonCodeTextArtifactStoreV1 {
     {
         DaemonCodeIndexPublicationStoreV1::validate_generation_file(&identity.locator)
             .map_err(|error| RetrievalPortError::Contract(error.to_string()))?;
-        let path = self.publication.generations_root.join(&identity.locator);
-        let metadata = path.symlink_metadata().map_err(text_artifact_unavailable)?;
-        if !metadata.file_type().is_file() || metadata.len() != identity.size_bytes {
+        let pointer = self.publication.read_publication_pointer().map_err(text_artifact_unavailable)?
+            .ok_or_else(|| RetrievalPortError::AuthorityUnavailable("code-index head is absent".to_owned()))?;
+        let entry = pointer.generation_index.iter().find(|entry| {
+            entry.generation_file == identity.locator && entry.state_digest == identity.digest.as_str()
+        }).ok_or_else(|| RetrievalPortError::Contract("sealed source is not retained".to_owned()))?;
+        let generation = CodeGenerationId::new(entry.generation_id.clone()).map_err(text_artifact_unavailable)?;
+        let manifest_bytes = self.publication.read_sql_manifest(&generation, &identity.digest)
+            .map_err(text_artifact_unavailable)?;
+        if manifest_bytes.len() as u64 != identity.size_bytes {
             return Err(RetrievalPortError::Contract(
                 "durable sealed lexical source identity is corrupt".to_owned(),
             ));
         }
         checkpoint_text_artifact_control(control)?;
         progress(0, identity.size_bytes);
-        let manifest_bytes = std::fs::read(&path).map_err(text_artifact_unavailable)?;
         checkpoint_text_artifact_control(control)?;
         if DaemonCodeIndexPublicationStoreV1::state_digest(&manifest_bytes)
             != identity.digest.as_str()
@@ -1483,14 +1493,13 @@ impl DaemonCodeTextArtifactStoreV1 {
         VerifiedSealedLexicalPageSourceV1::open_partitioned_sealed(
             &manifest_bytes,
             identity.digest.clone(),
-            move |digest, expected_size, buffer, control| {
+            move |digest, expected_size, control| {
                 publication.read_retained_partitioned_segment(
                     &source_identity,
                     SealedGenerationSegmentReadV1::Whole {
                         digest,
                         size_bytes: expected_size,
                     },
-                    buffer,
                     control,
                 )
             },
@@ -1601,13 +1610,13 @@ impl DaemonCodeTextArtifactStoreV1 {
                     let _span =
                         tracing::trace_span!("query.artifact.store.pointer_commit").entered();
                     {
-                        attach_verified_text_artifact_under_lock(
-                            &lock,
-                            &pointer,
-                            sealed_identity,
-                            descriptor.clone(),
-                        )
-                        .map_err(text_artifact_unavailable)
+                        let expected = serde_json::to_vec(&pointer).map_err(text_artifact_unavailable)?;
+                        let next = plan_verified_text_artifact_attachment(
+                            pointer, sealed_identity, descriptor.clone(),
+                        ).map_err(text_artifact_unavailable)?;
+                        let bytes = serde_json::to_vec(&next).map_err(text_artifact_unavailable)?;
+                        self.publication.commit_observed_pointer(&lock, Some(&expected), &next, &bytes)
+                            .map_err(text_artifact_unavailable)
                     }
                 }?;
                 Ok(descriptor)
@@ -3005,7 +3014,11 @@ impl LatestCodeTextGenerationV1 {
                             .to_owned(),
                     )
                 })?;
-            attach_verified_text_artifact_under_lock(&lock, &pointer, &sealed_identity, descriptor)
+            let expected = serde_json::to_vec(&pointer).map_err(text_artifact_unavailable)?;
+            let next = plan_verified_text_artifact_attachment(pointer, &sealed_identity, descriptor)
+                .map_err(text_artifact_unavailable)?;
+            let bytes = serde_json::to_vec(&next).map_err(text_artifact_unavailable)?;
+            store.publication.commit_observed_pointer(&lock, Some(&expected), &next, &bytes)
                 .map_err(text_artifact_unavailable)?;
             Ok(Some(reader))
         })();

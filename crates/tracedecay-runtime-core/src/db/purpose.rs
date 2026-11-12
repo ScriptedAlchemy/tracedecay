@@ -1,7 +1,126 @@
+use std::num::NonZeroU64;
+use std::sync::Arc;
+
 use super::connection::Database;
+use crate::resident_memory::{
+    ProcessResidentMemoryV1, ResidentMemoryComponentIdV1, ResidentMemoryKeyV1,
+};
+pub use tracedecay_store::runtime::CodeIndexStoredBytes;
 use tracedecay_domain::errors::{Result, TraceDecayError};
+use tracedecay_store::runtime::{
+    CodeIndexAllocationAdmission, CodeIndexStorageError, CodeIndexStorageResult,
+    StoreShardScopeV1,
+};
+
+#[cfg(test)]
+mod tests;
+
+struct CodeIndexResidentAdmission {
+    resident_memory: Arc<ProcessResidentMemoryV1>,
+    key: Option<ResidentMemoryKeyV1>,
+}
+
+/// Materialize encoded bytes only after their capacity is charged. Non-SQL
+/// readers and in-memory benchmark fixtures use the same resident authority.
+pub fn reserve_encoded_bytes(
+    memory: &Arc<ProcessResidentMemoryV1>,
+    size: usize,
+    fill: impl FnOnce(&mut [u8]) -> Result<()>,
+) -> Result<CodeIndexStoredBytes> {
+    let requested = NonZeroU64::new(u64::try_from(size).map_err(|error| {
+        TraceDecayError::Database {
+            operation: "admit encoded code-index bytes".to_owned(),
+            message: error.to_string(),
+        }
+    })?.max(1)).ok_or_else(|| TraceDecayError::Database {
+        operation: "admit encoded code-index bytes".to_owned(),
+        message: "encoded allocation has no positive size".to_owned(),
+    })?;
+    let component = ResidentMemoryComponentIdV1::new("code-index-encoded-read")
+        .map_err(|error| TraceDecayError::Database {
+            operation: "admit encoded code-index bytes".to_owned(),
+            message: error.to_string(),
+        })?;
+    let reservation = memory.reserve_process_shared(component, requested)
+        .map_err(|error| TraceDecayError::Database {
+            operation: "admit encoded code-index bytes".to_owned(),
+            message: error.to_string(),
+        })?;
+    let mut bytes = Vec::new();
+    bytes.try_reserve_exact(size).map_err(|error| TraceDecayError::Database {
+        operation: "allocate encoded code-index bytes".to_owned(),
+        message: error.to_string(),
+    })?;
+    bytes.resize(size, 0);
+    fill(&mut bytes)?;
+    Ok(CodeIndexStoredBytes::from_reserved(bytes, Box::new(reservation)))
+}
+
+impl CodeIndexAllocationAdmission for CodeIndexResidentAdmission {
+    fn reserve(&self, bytes: u64) -> CodeIndexStorageResult<Box<dyn Send + Sync>> {
+        let requested = NonZeroU64::new(bytes).ok_or_else(|| {
+            CodeIndexStorageError::InvalidRequest("empty allocation reservation".to_owned())
+        })?;
+        match &self.key {
+            Some(key) => self.resident_memory.reserve(key.clone(), requested)
+                .map(|reservation| Box::new(reservation) as Box<dyn Send + Sync>),
+            None => {
+                let component = ResidentMemoryComponentIdV1::new("code-index-storage")
+                    .map_err(|error| CodeIndexStorageError::InvalidRequest(error.to_string()))?;
+                self.resident_memory.reserve_process_shared(component, requested)
+                    .map(|reservation| Box::new(reservation) as Box<dyn Send + Sync>)
+            }
+        }.map_err(|error| CodeIndexStorageError::AllocationRefused(error.to_string()))
+    }
+}
 
 impl Database {
+    /// Bind encoded index storage to this registered project's physical SQL
+    /// authority and the caller's existing exact-generation resident ledger.
+    pub fn code_index_storage(
+        &self,
+        resident_memory: Arc<ProcessResidentMemoryV1>,
+        key: ResidentMemoryKeyV1,
+    ) -> Result<tracedecay_rusqlite_runtime::repository::CodeIndexSqliteStorage> {
+        if !matches!(
+            &self.registered_binding().shard_id.scope,
+            StoreShardScopeV1::Project { project_id } if project_id == &key.project_id
+        ) {
+            return Err(TraceDecayError::Database {
+                message: "code-index storage requires the exact registered project database".to_owned(),
+                operation: "attach code-index storage".to_owned(),
+            });
+        }
+        Ok(tracedecay_rusqlite_runtime::repository::CodeIndexSqliteStorage::from_retained_exact_sql(
+            self.retained_exact_sql_for_purpose("attach code-index storage")?,
+            Arc::new(CodeIndexResidentAdmission { resident_memory, key: Some(key) }),
+            self.write_authority()?.token().to_owned(),
+        ))
+    }
+
+    /// Project-owned reads whose head must be decoded before a generation is
+    /// known charge the same process ledger, without fabricating a generation.
+    pub fn project_code_index_storage(
+        &self,
+        resident_memory: Arc<ProcessResidentMemoryV1>,
+        project_id: &tracedecay_domain::ProjectId,
+    ) -> Result<tracedecay_rusqlite_runtime::repository::CodeIndexSqliteStorage> {
+        if !matches!(
+            &self.registered_binding().shard_id.scope,
+            StoreShardScopeV1::Project { project_id: owner } if owner == project_id
+        ) {
+            return Err(TraceDecayError::Database {
+                message: "code-index storage requires the exact registered project database".to_owned(),
+                operation: "attach project code-index storage".to_owned(),
+            });
+        }
+        Ok(tracedecay_rusqlite_runtime::repository::CodeIndexSqliteStorage::from_retained_exact_sql(
+            self.retained_exact_sql_for_purpose("attach project code-index storage")?,
+            Arc::new(CodeIndexResidentAdmission { resident_memory, key: None }),
+            self.write_authority()?.token().to_owned(),
+        ))
+    }
+
     /// Retains the issuing database client with one exact-SQL purpose adapter.
     ///
     /// This is the only database-core path from write authority to retained

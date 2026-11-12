@@ -208,9 +208,12 @@ fn build_fixture() -> Fixture {
         .expect("build deterministic sealed generation");
     let mut segments = BTreeMap::new();
     let mut evidence_pack = Vec::new();
+    let memory = Arc::new(tracedecay_runtime_core::resident_memory::ProcessResidentMemoryV1::new(
+        tracedecay_runtime_core::resident_memory::detected_process_resident_memory_limit_v1(),
+    ));
     let manifest = generation
         .publication()
-        .encode(None, |publication| {
+        .encode(None, &memory, |publication| {
             match publication {
                 SealedGenerationSegmentPublicationV1::File { digest, bytes }
                 | SealedGenerationSegmentPublicationV1::FileEvidence { digest, bytes }

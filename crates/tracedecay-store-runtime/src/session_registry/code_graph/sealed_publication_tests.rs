@@ -184,11 +184,10 @@ fn publication_replay(
     )
     .expect("code graph projection");
     let rows = tracedecay_graph_db::GraphGenerationRows::from(
-        super::super::code_graph_manifest::spill_sealed_generation_graph_from_roots(
-            &runtime.generations_root,
-            &runtime.replay_root,
+        super::super::code_graph_manifest::spill_sealed_generation_graph(
+            &runtime.encoded_storage,
+            &runtime.encoded_generation,
             &runtime.sealed_state_digest,
-            &runtime.generation_id,
             projection.clone(),
             &projector_revision,
             test_row_spill(projection),
@@ -1180,47 +1179,46 @@ async fn sealed_generation_fixture(project: &str, source: &str) -> SealedGenerat
 
     let store_root = root.join("code-index-store");
     let scoped_store = scoped_code_index_store_root(&store_root, &canonical_project);
-    let mut scheduler = CodeIndexWorktreeSchedulerV1::open(
+    let identity = profile_identity::load_or_create(&profile_root).expect("profile identity");
+    let _database_scope = tracedecay_runtime_core::db::enter_daemon_database_scope(
+        &profile_root, 44, "sealed generation fixture",
+    ).expect("daemon database scope");
+    let registry = DaemonSessionRuntimeRegistryV1::open(identity).await
+        .expect("session runtime registry");
+    let project_database = registry.project_memory(
+        project_id.clone(), [canonical_project.clone()],
+    ).await.expect("project graph database");
+    let mut scheduler = CodeIndexWorktreeSchedulerV1::open_with_policy(
         project_id.clone(),
         &canonical_project,
         scoped_store.clone(),
         Arc::new(SharedCodeIndexBytePoolV1::default()),
+        tracedecay_code_index_runtime::code_index_scheduler::CodeIndexHintPolicyV1::default(),
+        tracedecay_code_index_runtime::registry_default_index_path_policy(),
+        Arc::clone(&project_database),
     )
     .expect("open worktree scheduler");
+    scheduler.bind_resident_memory(Arc::new(
+        tracedecay_runtime_core::resident_memory::ProcessResidentMemoryV1::new(
+            tracedecay_runtime_core::resident_memory::detected_process_resident_memory_limit_v1(),
+        ),
+    ));
     scheduler.reconcile_now().expect("seal the generation");
     let latest = scheduler.latest_complete().expect("complete generation");
     let repository_id = latest.generation().snapshot().repository.clone();
     let reference = latest.generation().snapshot().reference.clone();
     let worktree_id = scheduler.identity().worktree_id().clone();
     let generation_id = latest.generation().manifest().generation_id.clone();
-    drop(scheduler);
+    let binding = scheduler.code_graph_replay_binding(&generation_id).unwrap();
     let pointer: DurablePublicationPointerV1 = serde_json::from_slice(
-        &std::fs::read(scoped_store.join("active-code-generation-v1.json"))
-            .expect("active generation pointer"),
-    )
-    .expect("decode active generation pointer");
+        &binding.storage.read_head(&binding.worktree_id).unwrap().unwrap(),
+    ).unwrap();
+    drop(scheduler);
     let generations_root = scoped_store.join("code-generations-v1");
-    let sealed_state_digest =
-        tracedecay_graph_db::SealedGraphStateDigest::try_from(pointer.state_digest.clone())
-            .expect("sealed state digest");
     let digest_hex = sha256_hex_suffix(&pointer.state_digest)
         .expect("sha256 state digest")
         .to_owned();
 
-    let identity = profile_identity::load_or_create(&profile_root).expect("profile identity");
-    let _database_scope = tracedecay_runtime_core::db::enter_daemon_database_scope(
-        &profile_root,
-        44,
-        "sealed generation fixture",
-    )
-    .expect("daemon database scope");
-    let registry = DaemonSessionRuntimeRegistryV1::open(identity)
-        .await
-        .expect("session runtime registry");
-    let project_database = registry
-        .project_memory(project_id.clone(), [canonical_project.clone()])
-        .await
-        .expect("project graph database");
     let runtime = registry
         .retain_code_graph_runtime(
             project_id.clone(),
@@ -1229,10 +1227,7 @@ async fn sealed_generation_fixture(project: &str, source: &str) -> SealedGenerat
             reference.clone(),
             generation_id.clone(),
             Arc::clone(&project_database),
-            CodeGraphReplayBindingV1 {
-                generations_root: generations_root.clone(),
-                sealed_state_digest,
-            },
+            binding,
         )
         .await
         .expect("retain code graph runtime");

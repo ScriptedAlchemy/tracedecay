@@ -274,3 +274,113 @@ async fn stamped_final_store_with_missing_or_tampered_required_shape_is_reset_re
     assert!(object_sql(&path, "table", "unexpected_final_shape_object").is_some());
     assert_reset_required_without_repair(&path, "unexpected final-shape object").await;
 }
+
+fn remove_code_index_schema_and_stamp_released(path: &Path) {
+    tamper(
+        path,
+        "DROP TRIGGER code_index_replay_no_retiring_insert;
+         DROP TRIGGER code_index_heads_no_retiring_insert;
+         DROP TRIGGER code_index_heads_no_retiring_update;
+         DROP TABLE code_index_retirement_receipts;
+         DROP TABLE code_index_heads;
+         DROP TABLE code_index_generation_refs;
+         DROP TABLE code_index_generations;
+         DROP TABLE code_index_staging_pages;
+         DROP TABLE code_index_staging_refs;
+         DROP TABLE code_index_staging;
+         DROP TABLE code_index_regions;
+         DROP TABLE code_index_payloads;
+         UPDATE tracedecay_schema_version SET version = 39 WHERE component = 'graph';",
+    );
+}
+
+#[asupersync::test]
+async fn exact_released_project_schema_converges_preserving_memory_and_receipts() {
+    let (_directory, path) = fresh_current_store().await;
+    remove_code_index_schema_and_stamp_released(&path);
+    tamper(
+        &path,
+        r#"INSERT INTO memory_v2_facts
+           (fact_id, owner_kind, project_id, owner_json, identity_json, created_at)
+           VALUES ('durable-fact', 'project', 'registered-project',
+               '{"project":"registered-project"}', '{"identity":"fact"}', 123);
+           INSERT INTO memory_v2_operation_receipts
+           (owner_kind, project_id, operation_id, operation_kind, request_digest,
+               receipt_json, recorded_at)
+           VALUES ('project', 'registered-project', 'durable-operation', 'retrieval',
+               'exact-request-digest', '{"receipt":"byte-exact"}', 456);
+           INSERT INTO diagnostic_generation_publications
+           (generation_id, publication_revision, record_state, published_at)
+           VALUES ('durable-diagnostics', 1, 'current', 789);"#,
+    );
+    let before = store_snapshot(&path);
+    let admission = super::super::inspect_graph_store_schema(&path).unwrap();
+    assert_eq!(admission.schema_version, 39);
+    assert!(admission.released_shape_can_converge);
+    assert!(!admission.exact_final_shape);
+
+    let authority = DatabaseAuthority::acquire_test(&path, "released project convergence").unwrap();
+    let (database, _) =
+        Database::publish_test_runtime(&path, &authority, TestDatabaseRuntimeMode::Existing)
+            .await
+            .unwrap();
+    assert_eq!(
+        database
+            .query_scalar_i64("preserved memory", "SELECT created_at FROM memory_v2_facts")
+            .await
+            .unwrap(),
+        123
+    );
+    assert_eq!(
+        database
+            .query_scalar_i64(
+                "preserved receipt",
+                r#"SELECT COUNT(*) FROM memory_v2_operation_receipts
+                   WHERE operation_id = 'durable-operation'
+                   AND request_digest = 'exact-request-digest'
+                   AND receipt_json = '{"receipt":"byte-exact"}' AND recorded_at = 456"#,
+            )
+            .await
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        database
+            .query_scalar_i64(
+                "preserved diagnostics",
+                "SELECT published_at FROM diagnostic_generation_publications",
+            )
+            .await
+            .unwrap(),
+        789
+    );
+    drop(database);
+    let after = super::super::inspect_graph_store_schema(&path).unwrap();
+    assert!(after.exact_final_shape);
+    assert!(!after.released_shape_can_converge);
+    assert_eq!(after.schema_version, i64::from(SCHEMA_VERSION));
+    assert_ne!(store_snapshot(&path).schema_bytes, before.schema_bytes);
+}
+
+#[asupersync::test]
+async fn incomplete_released_inventory_is_refused_without_schema_or_row_repair() {
+    let (_directory, path) = fresh_current_store().await;
+    remove_code_index_schema_and_stamp_released(&path);
+    tamper(
+        &path,
+        "INSERT INTO metadata(key, value) VALUES ('preserved', 'byte-exact');
+         DROP INDEX idx_read_cache_session;",
+    );
+    assert_reset_required_without_repair(&path, "incomplete released v39").await;
+}
+
+#[asupersync::test]
+async fn mixed_released_and_unpublished_code_index_shape_is_refused() {
+    let (_directory, path) = fresh_current_store().await;
+    remove_code_index_schema_and_stamp_released(&path);
+    tamper(
+        &path,
+        "CREATE TABLE code_index_payloads (digest TEXT PRIMARY KEY, body BLOB);",
+    );
+    assert_reset_required_without_repair(&path, "mixed released and unpublished shape").await;
+}

@@ -174,7 +174,7 @@ fn restore_once(
     let restored = CodeIndexPublishedGenerationV1::decode_partitioned_sealed(
         manifest,
         &SharedDecodedContentPoolV1::default(),
-        |request, buffer| read_segment(segments, request, buffer),
+        |request| read_segment(segments, request),
     )
     .map_err(|error| error.to_string())?;
     let mut coverage = restored
@@ -192,8 +192,7 @@ fn restore_once(
 fn read_segment(
     segments: &Path,
     request: SealedGenerationSegmentReadV1<'_>,
-    buffer: &mut Vec<u8>,
-) -> Result<(), CodeIndexProductionErrorV1> {
+) -> Result<tracedecay_code_index::production::CodeIndexStoredBytes, CodeIndexProductionErrorV1> {
     let (digest, offset, length) = match request {
         SealedGenerationSegmentReadV1::Whole { digest, size_bytes } => (digest, 0, size_bytes),
         SealedGenerationSegmentReadV1::Range {
@@ -210,11 +209,17 @@ fn read_segment(
     let length = usize::try_from(length).map_err(|_| contract("segment range exceeds memory"))?;
     let mut file = File::open(segments.join(format!("segment-{name}.json")))
         .map_err(|error| contract(&format!("segment open failed: {error}")))?;
-    buffer.clear();
-    buffer.resize(length, 0);
-    file.seek(SeekFrom::Start(offset))
-        .and_then(|_| file.read_exact(buffer))
-        .map_err(|error| contract(&format!("segment read failed: {error}")))
+    let memory = std::sync::Arc::new(tracedecay_runtime_core::resident_memory::ProcessResidentMemoryV1::new(
+        tracedecay_runtime_core::resident_memory::detected_process_resident_memory_limit_v1(),
+    ));
+    tracedecay_runtime_core::db::reserve_encoded_bytes(&memory, length, |buffer| {
+        file.seek(SeekFrom::Start(offset))
+            .and_then(|_| file.read_exact(buffer))
+            .map_err(|error| tracedecay_domain::errors::TraceDecayError::Database {
+                operation: "benchmark encoded segment read".to_owned(),
+                message: error.to_string(),
+            })
+    }).map_err(|error| contract(&error.to_string()))
 }
 
 fn contract(message: &str) -> CodeIndexProductionErrorV1 {

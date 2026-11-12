@@ -70,6 +70,34 @@ fn mutate_verified_text_artifact_under_lock(
     mutation: VerifiedTextArtifactMutationV1<'_>,
 ) -> Result<DurablePublicationPointerV1, CodeGenerationRetentionErrorV1> {
     let store_root = lock.generation_store_root()?;
+    let mut pointer = read_active_pointer(store_root)?;
+    if &pointer != expected_pointer {
+        return Err(CodeGenerationRetentionErrorV1::Conflict(
+            "active generation pointer changed before text-artifact mutation".to_owned(),
+        ));
+    }
+    pointer = plan_verified_text_artifact(pointer, mutation)?;
+    let bytes = serde_json::to_vec(&pointer).map_err(|error| {
+        CodeGenerationRetentionErrorV1::UnsafeState(error.to_string())
+    })?;
+    if &read_active_pointer(store_root)? != expected_pointer {
+        return Err(CodeGenerationRetentionErrorV1::Conflict(
+            "active generation pointer changed before text-artifact mutation".to_owned(),
+        ));
+    }
+    atomic_write(
+        &store_root.join(ACTIVE_POINTER_FILE),
+        "code-generation-text-artifact-mutation",
+        &bytes,
+        DirectorySyncPolicy::Strict,
+    ).map_err(storage)?;
+    Ok(pointer)
+}
+
+fn plan_verified_text_artifact(
+    mut pointer: DurablePublicationPointerV1,
+    mutation: VerifiedTextArtifactMutationV1<'_>,
+) -> Result<DurablePublicationPointerV1, CodeGenerationRetentionErrorV1> {
     let (generation_id, sealed_identity, retain_text_head) = match &mutation {
         VerifiedTextArtifactMutationV1::Attach {
             sealed_identity,
@@ -88,12 +116,6 @@ fn mutate_verified_text_artifact_under_lock(
             (expected.generation_id.clone(), None, false)
         }
     };
-    let mut pointer = read_active_pointer(store_root)?;
-    if &pointer != expected_pointer {
-        return Err(CodeGenerationRetentionErrorV1::Conflict(
-            "active generation pointer changed before text-artifact mutation".to_owned(),
-        ));
-    }
     validate_durable_generation_index(&pointer)?;
     let entry = pointer
         .generation_index
@@ -157,23 +179,24 @@ fn mutate_verified_text_artifact_under_lock(
             "publication pointer exceeds its durable byte bound".to_owned(),
         ));
     }
-    // Re-read immediately before the rename. A pointer that is no longer the
-    // one this mutation observed — including a truncated file — must not be
-    // replaced by the in-memory copy.
-    let current = read_active_pointer(store_root)?;
-    if &current != expected_pointer {
-        return Err(CodeGenerationRetentionErrorV1::Conflict(
-            "active generation pointer changed before text-artifact mutation".to_owned(),
-        ));
-    }
-    atomic_write(
-        &store_root.join(ACTIVE_POINTER_FILE),
-        "code-generation-text-artifact-mutation",
-        &bytes,
-        DirectorySyncPolicy::Strict,
-    )
-    .map_err(storage)?;
     Ok(pointer)
+}
+
+pub fn plan_verified_text_artifact_attachment(
+    pointer: DurablePublicationPointerV1,
+    sealed_identity: &DurableSealedCodeGenerationIdentityV1,
+    descriptor: DurableCodeTextArtifactDescriptorV1,
+) -> Result<DurablePublicationPointerV1, CodeGenerationRetentionErrorV1> {
+    plan_verified_text_artifact(pointer, VerifiedTextArtifactMutationV1::Attach {
+        sealed_identity, descriptor,
+    })
+}
+
+pub fn plan_verified_text_artifact_withdrawal(
+    pointer: DurablePublicationPointerV1,
+    descriptor: &DurableCodeTextArtifactDescriptorV1,
+) -> Result<DurablePublicationPointerV1, CodeGenerationRetentionErrorV1> {
+    plan_verified_text_artifact(pointer, VerifiedTextArtifactMutationV1::Withdraw { expected: descriptor })
 }
 
 /// Durably attach a verified text artifact to its sealed generation entry.

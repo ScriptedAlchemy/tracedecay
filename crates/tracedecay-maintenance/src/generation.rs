@@ -111,6 +111,8 @@ pub async fn run_registered_project_generation_maintenance(
     profile_database: &tracedecay_global_db::RegisteredGlobalDb,
     maintenance_observations: &StoreTelemetrySamplingRegistry,
     cancellation: &tracedecay_runtime_core::cancellation::CancellationToken,
+    project_database: &tracedecay_runtime_core::db::Database,
+    store_runtime: &tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1,
 ) -> MaintenanceTickOutcome {
     let outcome = match run_registered_code_generation_retention(
         store,
@@ -119,6 +121,8 @@ pub async fn run_registered_project_generation_maintenance(
         profile_database,
         maintenance_observations,
         cancellation,
+        project_database,
+        store_runtime,
     )
     .await
     {

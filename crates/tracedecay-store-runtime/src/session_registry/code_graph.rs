@@ -51,11 +51,7 @@ mod sealed_publication_tests;
 mod seals;
 #[cfg(test)]
 mod shard_owner_retirement_tests;
-use seals::{
-    finalize_project_graph_replay_unlink, lock_project_graph_replay_pool,
-    prove_stable_sealed_source, revalidate_stable_sealed_source,
-    sealed_digest_from_generation_file, stage_project_graph_replay_unlink,
-};
+use seals::sealed_digest_from_generation_file;
 use tracedecay_runtime_core::resident_memory::release_process_allocator_memory_v1;
 
 const GRAPH_OPERATION_DEADLINE: Duration = Duration::from_secs(30);
@@ -687,17 +683,14 @@ pub(crate) struct RetainedCodeGraphRuntimeV1 {
     project_database: Arc<tracedecay_runtime_core::db::Database>,
     repository_id: RepositoryId,
     generation_id: CodeGenerationId,
-    generations_root: std::path::PathBuf,
-    replay_root: std::path::PathBuf,
+    encoded_storage: tracedecay_runtime_core::db::CodeIndexSqliteStorage,
+    encoded_generation: tracedecay_runtime_core::db::CodeIndexGenerationKey,
     sealed_state_digest: tracedecay_graph_db::SealedGraphStateDigest,
     lifecycle_cancelled: Arc<AtomicBool>,
     operation_task_owner: Arc<RuntimeOperationTaskOwnerV1>,
     /// Registry-owned per-project-publication-shard locks; see
     /// `DaemonSessionRuntimeRegistryV1::code_graph_publication_gates`.
     publication_locks: Arc<CodeGraphShardPublicationLocksV1>,
-    /// Segments this project shard's publications already proved, so a
-    /// successor's source proof reads only the segments its edit re-sealed.
-    verified_segments: Arc<super::verified_sealed_segments::VerifiedSealedSegmentsV1>,
     /// The measured-RSS admission cell sealed publication answers to. Bound
     /// from the manifest provider so every corpus-sized graph build obeys one
     /// authority; tests substitute an isolated cell.
@@ -1935,11 +1928,10 @@ impl RetainedCodeGraphRuntimeV1 {
             self.graph_registry
                 .generation_row_spill(registration(), projection.clone())
         };
-        super::code_graph_manifest::graph_rows_from_roots(
-            &self.generations_root,
-            &self.replay_root,
+        super::code_graph_manifest::graph_rows_from_sql(
+            &self.encoded_storage,
+            &self.encoded_generation,
             &self.sealed_state_digest,
-            &self.generation_id,
             projection.clone(),
             projector_revision,
             &layered_spill,
@@ -1992,27 +1984,26 @@ impl RetainedCodeGraphRuntimeV1 {
                 }
                 None => Ok(()),
             };
-            // Stable identity under the replay-pool lock, then release so
-            // retention/replay cleanup is not blocked by seal hashing.
-            let proof = prove_stable_sealed_source(
-                &self.generations_root,
-                &self.replay_root,
-                &self.sealed_state_digest,
-                &check,
-            )?;
-            {
-                let _span =
-                    tracing::trace_span!("daemon.session_registry.publish_snapshot.verify_source")
-                        .entered();
-                super::code_graph_manifest::verify_sealed_generation_source_from_roots(
-                    &self.generations_root,
-                    &self.replay_root,
-                    &self.sealed_state_digest,
-                    &self.verified_segments,
-                    &check,
-                )
-            }?;
-            revalidate_stable_sealed_source(&proof, &self.replay_root, &check)
+            check()?;
+            let digest = tracedecay_domain::ManifestDigest::new(self.sealed_state_digest.as_str())
+                .map_err(|error| GraphDbError::invalid(error.to_string()))?;
+            let manifest = self.encoded_storage.read_manifest(&self.encoded_generation, &digest)
+                .map_err(|error| GraphDbError::Corrupt { message: error.to_string() })?;
+            tracedecay_code_index::production::CodeIndexPublishedGenerationV1::verify_partitioned_sealed(
+                &manifest, |_, _| false, |request| {
+                    check().map_err(|error| tracedecay_code_index::production::CodeIndexProductionErrorV1::Contract(error.to_string()))?;
+                    let (digest, size_bytes, offset, length) = match request {
+                        tracedecay_code_index::production::SealedGenerationSegmentReadV1::Whole { digest, size_bytes } =>
+                            (digest, size_bytes, 0, size_bytes),
+                        tracedecay_code_index::production::SealedGenerationSegmentReadV1::Range { digest, size_bytes, offset, length } =>
+                            (digest, size_bytes, offset, length),
+                    };
+                    self.encoded_storage.read_range(&self.encoded_generation,
+                        &tracedecay_runtime_core::db::CodeIndexPayloadIdentity { digest: digest.clone(), size_bytes },
+                        offset, length).map_err(|error| tracedecay_code_index::production::CodeIndexProductionErrorV1::Contract(error.to_string()))
+                },
+            ).map_err(|error| GraphDbError::Corrupt { message: error.to_string() })?;
+            check()
         };
         // The generation's graph rows, built from its sealed segments the
         // first time an arm needs them and shared by every later use.
@@ -2261,10 +2252,7 @@ impl RetainedCodeGraphRuntimeV1 {
                 );
             }
             SealedPublicationClassificationV1::ResumeJournaled => {
-                let replay_pool_lock = verify_durable_source()?;
-                // Hashing already ran without the pool lock. Release before
-                // materialization so retention/replay cleanup can proceed.
-                drop(replay_pool_lock);
+                verify_durable_source()?;
                 match observe_code_graph_publication(
                     CodeGraphPublicationConflictStageV1::ActiveReplayPublish,
                     publish(&mut storage, &prepared.publication_key, rows()?),
@@ -2308,7 +2296,7 @@ impl RetainedCodeGraphRuntimeV1 {
         // The journal binds the rows' digest, so they are built first, before
         // the replay-pool lock is taken for the append.
         let publication_rows = rows()?;
-        let replay_pool_lock = verify_durable_source()?;
+        verify_durable_source()?;
         let input = canonical_sha256(&(
             "tracedecay.code-graph-publication-input.v1",
             &prepared.source,
@@ -2451,7 +2439,6 @@ impl RetainedCodeGraphRuntimeV1 {
                 }
             }
         }
-        drop(replay_pool_lock);
         let publication = observe_code_graph_publication(
             CodeGraphPublicationConflictStageV1::FinalPublish,
             publish(&mut storage, &replay.key, rows()?),
@@ -2679,9 +2666,6 @@ impl DaemonSessionRuntimeRegistryV1 {
                 attached.await;
             }
         }
-        let replay_root = project_database
-            .database_path()
-            .with_extension("graph-replay");
         // Bind the sealed replay route at seat time, not when a sealed
         // publication classifies. Every replay-hydrating path (verified-head
         // recovery and the maintenance staging release) resolves its source
@@ -2695,18 +2679,16 @@ impl DaemonSessionRuntimeRegistryV1 {
         // retained runtime instead of accumulating for the daemon lifetime.
         let manifest_route = self
             .graph_manifest_provider
-            .bind(
+            .bind_sql(
                 authority.binding().shard_id.clone(),
                 project_id,
                 repository_id.clone(),
-                replay_binding.generations_root.clone(),
-                replay_root.clone(),
+                replay_binding.storage.clone(),
             )
             .map_err(|error| {
                 session_registry_error("bind code graph replay route", error.to_string())
             })?;
         let publication_locks = self.retain_project_publication_locks(&project_shard);
-        let verified_segments = self.project_verified_segments(&project_shard);
         Ok(RetainedCodeGraphRuntimeV1 {
             graph_registry: self.graph_registry.clone(),
             resident_memory_pressure: Arc::clone(
@@ -2716,32 +2698,17 @@ impl DaemonSessionRuntimeRegistryV1 {
             authority,
             project_database,
             repository_id,
-            generation_id,
-            generations_root: replay_binding.generations_root,
-            replay_root,
+            generation_id: generation_id.clone(),
+            encoded_storage: replay_binding.storage,
+            encoded_generation: tracedecay_runtime_core::db::CodeIndexGenerationKey {
+                worktree_id: replay_binding.worktree_id,
+                generation_id: generation_id.clone(),
+            },
             sealed_state_digest: replay_binding.sealed_state_digest,
             lifecycle_cancelled: Arc::clone(&self.graph_lifecycle_cancelled),
             operation_task_owner: Arc::clone(&self.operation_task_owner),
             publication_locks,
-            verified_segments,
         })
-    }
-
-    /// The project shard's proven-segment record. Unlike the publication
-    /// locks it outlives every retained runtime, because each publication
-    /// mints a fresh runtime and the record exists to carry one publication's
-    /// proof to the next. It holds one generation's segments per root.
-    fn project_verified_segments(
-        &self,
-        project_shard: &StoreShardIdV1,
-    ) -> Arc<super::verified_sealed_segments::VerifiedSealedSegmentsV1> {
-        Arc::clone(
-            self.code_graph_verified_segments
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .entry(project_shard.clone())
-                .or_default(),
-        )
     }
 
     pub async fn release_one_sealed_generation_staging_rows(
@@ -2873,9 +2840,6 @@ impl DaemonSessionRuntimeRegistryV1 {
         cancellation: &tracedecay_runtime_core::cancellation::CancellationToken,
     ) -> std::result::Result<bool, GraphDbError> {
         let sealed_digest = sealed_digest_from_generation_file(generation_file)?;
-        let replay_root = project_database
-            .database_path()
-            .with_extension("graph-replay");
         let project_shard = StoreShardIdV1::project(
             self.identity.brain_id().clone(),
             self.identity.profile_id().clone(),
@@ -2935,19 +2899,6 @@ impl DaemonSessionRuntimeRegistryV1 {
         let cancellation = cancellation.clone();
         let generation = generation.clone();
         tracedecay_runtime_core::native_runtime::spawn_blocking(move || {
-            let pool_deadline = Instant::now() + GRAPH_OPERATION_DEADLINE;
-            let pool_check = || {
-                if cancellation.is_cancelled() {
-                    Err(GraphDbError::Cancelled)
-                } else if Instant::now() >= pool_deadline {
-                    Err(GraphDbError::DeadlineExceeded)
-                } else {
-                    Ok(())
-                }
-            };
-            let replay_pool_lock = lock_project_graph_replay_pool(&replay_root, &pool_check)?;
-
-            let staged_unlink;
             loop {
                 if cancellation.is_cancelled() {
                     return Err(GraphDbError::Cancelled);
@@ -3007,21 +2958,8 @@ impl DaemonSessionRuntimeRegistryV1 {
                 match graph_replay_reconcile_disposition(outcome, &generation, &sealed_digest)? {
                     GraphReplayReconcileDisposition::Retired => {}
                     GraphReplayReconcileDisposition::Retained => return Ok(false),
-                    GraphReplayReconcileDisposition::Absent => {
-                        staged_unlink =
-                            stage_project_graph_replay_unlink(&replay_root, &sealed_digest)?;
-                        break;
-                    }
+                    GraphReplayReconcileDisposition::Absent => break,
                 }
-            }
-            drop(replay_pool_lock);
-            if let Some(staged_unlink) = staged_unlink {
-                finalize_project_graph_replay_unlink(
-                    staged_unlink,
-                    &replay_root,
-                    &sealed_digest,
-                    &pool_check,
-                )?;
             }
             let mut cleanup_sequence = 0_u64;
             loop {

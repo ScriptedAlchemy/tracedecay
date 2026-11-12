@@ -177,7 +177,7 @@ pub(crate) fn decoded_generation(
 /// address (the daemon's lexical source state digest), and every published
 /// segment under its digest, with evidence pages assembled into their pack.
 pub(crate) struct PartitionedSealedV1 {
-    manifest: Vec<u8>,
+    manifest: tracedecay_runtime_core::db::CodeIndexStoredBytes,
     pub(crate) state_digest: ManifestDigest,
     segments: Arc<BTreeMap<String, Vec<u8>>>,
 }
@@ -198,8 +198,11 @@ pub(crate) fn seal_partitioned(
 ) -> Result<PartitionedSealedV1, String> {
     let mut segments = BTreeMap::new();
     let mut evidence_pack = Vec::new();
+    let memory = Arc::new(tracedecay_runtime_core::resident_memory::ProcessResidentMemoryV1::new(
+        tracedecay_runtime_core::resident_memory::detected_process_resident_memory_limit_v1(),
+    ));
     let manifest = generation
-        .encode_partitioned_sealed(|publication| {
+        .encode_partitioned_sealed(&memory, |publication| {
             match publication {
                 SealedGenerationSegmentPublicationV1::File { digest, bytes }
                 | SealedGenerationSegmentPublicationV1::FileEvidence { digest, bytes }

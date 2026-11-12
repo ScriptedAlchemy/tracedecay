@@ -33,6 +33,18 @@ const CORPUS_ROOT: &str = "../../benchmark_data/index-bench/corpus";
 const REPLICAS: usize = 10;
 const WARMUPS: usize = 2;
 const MEASURED: usize = 5;
+
+fn encoded_benchmark_bytes(bytes: &[u8]) -> Result<
+    tracedecay_code_index::production::CodeIndexStoredBytes, CodeIndexProductionErrorV1,
+> {
+    let memory = Arc::new(tracedecay_runtime_core::resident_memory::ProcessResidentMemoryV1::new(
+        tracedecay_runtime_core::resident_memory::detected_process_resident_memory_limit_v1(),
+    ));
+    tracedecay_runtime_core::db::reserve_encoded_bytes(&memory, bytes.len(), |output| {
+        output.copy_from_slice(bytes);
+        Ok(())
+    }).map_err(|error| CodeIndexProductionErrorV1::Contract(error.to_string()))
+}
 /// Env overrides so one build can also measure a frozen `git archive` of a
 /// real tree: `PARTITIONED_CODEC_BENCH_CORPUS`, `_REPLICAS`, `_WARMUPS`,
 /// `_MEASURED`.
@@ -68,7 +80,7 @@ impl CodeIndexExecutionControlV1 for ActiveControl {
 }
 
 struct EncodedFixture {
-    manifest: Vec<u8>,
+    manifest: tracedecay_runtime_core::db::CodeIndexStoredBytes,
     segments: Arc<BTreeMap<String, Vec<u8>>>,
 }
 
@@ -321,7 +333,10 @@ fn encode_once(
 ) -> Result<EncodedFixture, CodeIndexProductionErrorV1> {
     let mut segments = BTreeMap::new();
     let mut evidence_pack = Vec::new();
-    let manifest = generation.encode_partitioned_sealed(|publication| {
+    let memory = Arc::new(tracedecay_runtime_core::resident_memory::ProcessResidentMemoryV1::new(
+        tracedecay_runtime_core::resident_memory::detected_process_resident_memory_limit_v1(),
+    ));
+    let manifest = generation.encode_partitioned_sealed(&memory, |publication| {
         match publication {
             SealedGenerationSegmentPublicationV1::File { digest, bytes }
             | SealedGenerationSegmentPublicationV1::FileEvidence { digest, bytes }
@@ -358,7 +373,7 @@ fn decode_and_open(fixture: &EncodedFixture) -> Result<(), CodeIndexProductionEr
     let decoded = CodeIndexPublishedGenerationV1::decode_partitioned_sealed(
         &fixture.manifest,
         &SharedDecodedContentPoolV1::default(),
-        |request, buffer| {
+        |request| {
             let (digest, offset, length) = match request {
                 SealedGenerationSegmentReadV1::Whole { digest, size_bytes } => {
                     (digest, 0, size_bytes)
@@ -378,9 +393,7 @@ fn decode_and_open(fixture: &EncodedFixture) -> Result<(), CodeIndexProductionEr
             let end = start
                 + usize::try_from(length)
                     .map_err(|error| CodeIndexProductionErrorV1::Contract(error.to_string()))?;
-            buffer.clear();
-            buffer.extend_from_slice(&bytes[start..end]);
-            Ok(())
+            encoded_benchmark_bytes(&bytes[start..end])
         },
     )?;
     black_box(decoded);
@@ -398,13 +411,11 @@ fn open_lexical(
     VerifiedSealedLexicalPageSourceV1::open_partitioned_sealed(
         &fixture.manifest,
         source_digest,
-        move |digest, _, buffer, _control| {
+        move |digest, _, _control| {
             let bytes = segments.get(digest.as_str()).ok_or_else(|| {
                 CodeIndexProductionErrorV1::Contract("benchmark segment is missing".to_owned())
             })?;
-            buffer.clear();
-            buffer.extend_from_slice(bytes);
-            Ok(())
+            encoded_benchmark_bytes(bytes)
         },
         256,
         1024 * 1024,

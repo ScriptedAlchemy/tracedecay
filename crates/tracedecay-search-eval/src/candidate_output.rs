@@ -176,8 +176,11 @@ fn seal_lexical_artifact(
         |error: &dyn std::fmt::Display| CandidateOutputError::Contract(error.to_string());
     let mut segments = BTreeMap::new();
     let mut evidence_pack = Vec::new();
+    let memory = Arc::new(tracedecay_runtime_core::resident_memory::ProcessResidentMemoryV1::new(
+        tracedecay_runtime_core::resident_memory::detected_process_resident_memory_limit_v1(),
+    ));
     let manifest = generation
-        .encode_partitioned_sealed(|publication| {
+        .encode_partitioned_sealed(&memory, |publication| {
             match publication {
                 SealedGenerationSegmentPublicationV1::File { digest, bytes }
                 | SealedGenerationSegmentPublicationV1::FileEvidence { digest, bytes }

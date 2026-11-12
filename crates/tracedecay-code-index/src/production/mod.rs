@@ -108,6 +108,7 @@ pub use memory_store::MemorySealedPublicationStoreV1;
 mod sealed_parent;
 use sealed_parent::SealedParentGenerationV1;
 pub use sealed_parent::{CodeIndexSealedGenerationV1, SealedSegmentReaderV1};
+pub use tracedecay_runtime_core::db::CodeIndexStoredBytes;
 mod sparse_increment;
 use sparse_increment::SparseBuildV1;
 pub use sparse_increment::{CodeIndexColdBuildReasonV1, CodeIndexSparseGenerationV1};
@@ -422,7 +423,7 @@ pub trait CodeIndexAtomicPublicationPort {
         scope: &CodeIndexGenerationScopeV1,
         expected_active_generation: Option<&CodeGenerationId>,
         generation: &CodeIndexSealedPublicationV1,
-    ) -> Result<Arc<[u8]>, CodeIndexPublicationStoreErrorV1>;
+    ) -> Result<Arc<CodeIndexStoredBytes>, CodeIndexPublicationStoreErrorV1>;
 }
 
 /// One generation ready for a publication store to seal.
@@ -508,14 +509,15 @@ impl CodeIndexSealedPublicationV1 {
     pub fn encode(
         &self,
         parent_manifest_bytes: Option<&[u8]>,
+        memory: &Arc<tracedecay_runtime_core::resident_memory::ProcessResidentMemoryV1>,
         publish_segment: impl FnMut(
             SealedGenerationSegmentPublicationV1<'_>,
         ) -> Result<(), CodeIndexProductionErrorV1>,
-    ) -> Result<Vec<u8>, CodeIndexProductionErrorV1> {
+    ) -> Result<CodeIndexStoredBytes, CodeIndexProductionErrorV1> {
         match self {
             Self::Cold(generation, _) => generation
-                .encode_partitioned_sealed_with_parent(parent_manifest_bytes, publish_segment),
-            Self::Sparse(generation) => generation.replay(publish_segment),
+                .encode_partitioned_sealed_with_parent(parent_manifest_bytes, memory, publish_segment),
+            Self::Sparse(generation) => generation.replay(memory, publish_segment),
         }
     }
 }
@@ -526,7 +528,7 @@ impl CodeIndexSealedPublicationV1 {
 pub struct CodeIndexPublishedBuildV1 {
     publication: CodeIndexSealedPublicationV1,
     metadata: Arc<VerifiedSealedTextGenerationMetadataV1>,
-    manifest_bytes: Arc<[u8]>,
+    manifest_bytes: Arc<CodeIndexStoredBytes>,
     lane_digest: ManifestDigest,
 }
 
@@ -535,7 +537,7 @@ impl CodeIndexPublishedBuildV1 {
     /// `publication` as `manifest_bytes`.
     pub fn new(
         publication: CodeIndexSealedPublicationV1,
-        manifest_bytes: Arc<[u8]>,
+        manifest_bytes: Arc<CodeIndexStoredBytes>,
     ) -> Result<Self, CodeIndexProductionErrorV1> {
         let (metadata, lane_digest) =
             CodeIndexPublishedGenerationV1::partitioned_metadata_and_lane(&manifest_bytes)?;
@@ -568,7 +570,7 @@ impl CodeIndexPublishedBuildV1 {
         &self.metadata
     }
 
-    pub fn manifest_bytes(&self) -> &Arc<[u8]> {
+    pub fn manifest_bytes(&self) -> &Arc<CodeIndexStoredBytes> {
         &self.manifest_bytes
     }
 
@@ -1812,6 +1814,8 @@ pub enum CodeIndexInputErrorV1 {
 pub enum CodeIndexProductionErrorV1 {
     #[error("code indexing was interrupted: {0:?}")]
     Interrupted(CodeIndexInterruptionV1),
+    #[error("sealed code generation was retired during its read")]
+    SealedGenerationRetired,
     #[error("captured source input is invalid: {0}")]
     Input(#[from] CodeIndexInputErrorV1),
     #[error("sanitized intake rejected the snapshot: {0:?}")]

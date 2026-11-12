@@ -118,7 +118,7 @@ fn at_width<R>(
 /// Every sealed byte of `generation`: its partitioned manifest followed by
 /// each segment in content-address order.
 fn sealed_bytes(seal: &PartitionedSealV1) -> Vec<u8> {
-    let mut bytes = seal.manifest.clone();
+    let mut bytes = seal.manifest.as_bytes().to_vec();
     for segment in seal.segments.values() {
         bytes.extend_from_slice(segment);
     }

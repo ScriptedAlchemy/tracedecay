@@ -621,6 +621,18 @@ impl CodeIndexSchedulerRegistryV1 {
             let open_byte_pool = Arc::clone(&self.byte_pool);
             let open_resident_memory = Arc::clone(&self.resident_memory);
             let open_resident_owners = Arc::clone(&self.resident_owners);
+            let open_project_database = match &graph_activation {
+                CodeGraphActivationAuthorityV1::Persistent { project_database, .. } =>
+                    Arc::clone(project_database),
+                #[cfg(any(test, feature = "test-helpers"))]
+                CodeGraphActivationAuthorityV1::Memory { .. } => {
+                    let project = project_id.clone();
+                    let root = scoped_store_root.clone();
+                    native_runtime::spawn_blocking(move || {
+                        super::super::reconcile::registered_fixture_project_database(&project, &root)
+                    }).await.map_err(CodeIndexSchedulerErrorV1::Identity)??
+                }
+            };
             let (opened, reservation) = native_runtime::spawn_blocking(move || {
                 #[cfg(test)]
                 Self::pause_cold_mount_open_for_test(&open_project_root);
@@ -631,6 +643,7 @@ impl CodeIndexSchedulerRegistryV1 {
                     open_byte_pool,
                     CodeIndexHintPolicyV1::default(),
                     open_path_policy,
+                    open_project_database,
                 );
                 #[cfg(test)]
                 Self::finish_cold_mount_open_for_test(&open_project_root);

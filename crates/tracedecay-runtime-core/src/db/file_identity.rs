@@ -1,12 +1,12 @@
 use std::fmt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 #[cfg(any(unix, windows))]
 use sha2::{Digest, Sha256};
 #[cfg(unix)]
 use std::os::unix::fs::MetadataExt;
 #[cfg(windows)]
-use std::os::windows::fs::MetadataExt;
+use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
 
 /// The path-free filesystem operation that failed while deriving a stable
 /// `SQLite` identity.
@@ -162,25 +162,107 @@ pub fn sqlite_generation_identity(path: &Path) -> Result<u64, SqliteFileIdentity
 }
 
 #[cfg(windows)]
-fn stable_file_identity(file: &std::fs::File, path: &Path) -> std::io::Result<u64> {
-    let metadata = file.metadata()?;
+fn stable_file_identity(file: &std::fs::File, _path: &Path) -> std::io::Result<u64> {
+    let information = tracedecay_private_fs::windows_file::information(file)?;
     let mut hasher = Sha256::new();
-    if let Ok(information) = tracedecay_private_fs::windows_file::information(file) {
-        hasher.update(b"windows-file-id");
-        hasher.update(information.volume_serial_number.to_le_bytes());
-        hasher.update(information.file_index.to_le_bytes());
-    } else {
-        hasher.update(b"windows-file-id-fallback");
-        hasher.update(metadata.creation_time().to_le_bytes());
-        let canonical = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
-        hasher.update(crate::os_str_bytes::native_os_str_bytes(
-            canonical.as_os_str(),
-        ));
-    }
+    hasher.update(b"windows-file-id");
+    hasher.update(information.volume_serial_number.to_le_bytes());
+    hasher.update(information.file_index.to_le_bytes());
     let digest = hasher.finalize();
     let mut bytes = [0_u8; 8];
     bytes.copy_from_slice(&digest[..8]);
     Ok(u64::from_le_bytes(bytes).max(1))
+}
+
+/// Registry-owned physical identity witness. Windows pins the file and every
+/// ancestor without delete sharing, so verifying a statement never reopens its
+/// pathname and neither the file nor a path component can be replaced.
+pub(crate) struct RegisteredSqliteIdentity {
+    path: PathBuf,
+    identity: u64,
+    #[cfg(windows)]
+    _pins: Vec<std::fs::File>,
+}
+
+impl RegisteredSqliteIdentity {
+    pub(crate) fn acquire(path: &Path) -> Result<Self, SqliteFileIdentityError> {
+        #[cfg(windows)]
+        {
+            use windows_sys::Win32::Storage::FileSystem::{
+                FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_BACKUP_SEMANTICS,
+                FILE_FLAG_OPEN_REPARSE_POINT, FILE_READ_ATTRIBUTES, FILE_SHARE_READ,
+                FILE_SHARE_WRITE,
+            };
+
+            let mut paths = path.ancestors().collect::<Vec<_>>();
+            paths.reverse();
+            let mut pins = Vec::with_capacity(paths.len());
+            for component in paths {
+                if component.as_os_str().is_empty() {
+                    continue;
+                }
+                let file = std::fs::OpenOptions::new()
+                    .access_mode(FILE_READ_ATTRIBUTES)
+                    .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
+                    .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+                    .open(component)
+                    .map_err(|error| {
+                        SqliteFileIdentityError::io(SqliteFileIdentityOperation::Open, &error)
+                    })?;
+                let metadata = file.metadata().map_err(|error| {
+                    SqliteFileIdentityError::io(SqliteFileIdentityOperation::Inspect, &error)
+                })?;
+                if metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+                    || (component == path && !metadata.is_file())
+                    || (component != path && !metadata.is_dir())
+                {
+                    return Err(SqliteFileIdentityError::io(
+                        SqliteFileIdentityOperation::Identify,
+                        &std::io::Error::new(
+                            std::io::ErrorKind::InvalidData,
+                            "registered SQLite identity requires an exact regular-file path",
+                        ),
+                    ));
+                }
+                pins.push(file);
+            }
+            let file = pins.last().ok_or_else(|| {
+                SqliteFileIdentityError::io(
+                    SqliteFileIdentityOperation::Open,
+                    &std::io::Error::from(std::io::ErrorKind::InvalidInput),
+                )
+            })?;
+            let identity = stable_file_identity(file, path).map_err(|error| {
+                SqliteFileIdentityError::io(SqliteFileIdentityOperation::Identify, &error)
+            })?;
+            Ok(Self { path: path.to_owned(), identity, _pins: pins })
+        }
+        #[cfg(not(windows))]
+        {
+            Ok(Self {
+                path: path.to_owned(),
+                identity: sqlite_generation_identity(path)?,
+            })
+        }
+    }
+
+    pub(crate) fn current_identity(&self) -> Result<u64, SqliteFileIdentityError> {
+        #[cfg(windows)]
+        {
+            // The kernel denies replacement for the lifetime of the complete
+            // pinned path. In-place writes do not change physical identity.
+            let _ = &self.path;
+            Ok(self.identity)
+        }
+        #[cfg(not(windows))]
+        {
+            sqlite_generation_identity(&self.path)
+        }
+    }
+
+    pub(crate) fn opened_identity(&self) -> u64 {
+        self.identity
+    }
 }
 
 #[cfg(test)]

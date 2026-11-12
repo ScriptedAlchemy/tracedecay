@@ -234,14 +234,22 @@ impl CodeIndexSparseGenerationV1 {
     /// Publish every new segment in order and return the manifest.
     pub(super) fn replay(
         &self,
+        memory: &Arc<tracedecay_runtime_core::resident_memory::ProcessResidentMemoryV1>,
         mut publish_segment: impl FnMut(
             SealedGenerationSegmentPublicationV1<'_>,
         ) -> Result<(), CodeIndexProductionErrorV1>,
-    ) -> Result<Vec<u8>, CodeIndexProductionErrorV1> {
+    ) -> Result<tracedecay_runtime_core::db::CodeIndexStoredBytes, CodeIndexProductionErrorV1> {
         for segment in &self.segments {
             publish_segment(segment.publication())?;
         }
-        Ok(self.manifest_bytes.clone())
+        tracedecay_runtime_core::db::reserve_encoded_bytes(
+            memory, self.manifest_bytes.len(), |output| {
+                output.copy_from_slice(&self.manifest_bytes);
+                Ok(())
+            },
+        ).map_err(|error| CodeIndexProductionErrorV1::Publication(
+            CodeIndexPublicationStoreErrorV1::ResidentMemoryRefused(error.to_string()),
+        ))
     }
 }
 

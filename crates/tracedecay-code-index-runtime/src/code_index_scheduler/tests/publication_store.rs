@@ -2156,7 +2156,7 @@ fn restart_decode_census(
     let partitioned = CodeIndexPublishedGenerationV1::decode_partitioned_sealed(
         &generation_bytes,
         &SharedDecodedContentPoolV1::default(),
-        |request, buffer| {
+        |request| {
             let (digest, size, offset, length) = match request {
                 SealedGenerationSegmentReadV1::Whole { digest, size_bytes } => {
                     (digest, size_bytes, 0, size_bytes)
@@ -2198,14 +2198,21 @@ fn restart_decode_census(
                     "restart census segment length is invalid: {error}"
                 ))
             })?;
-            buffer.resize(length, 0);
-            file.seek(SeekFrom::Start(offset))
-                .and_then(|_| file.read_exact(buffer))
-                .map_err(|error| {
-                    CodeIndexProductionErrorV1::Contract(format!(
-                        "restart census segment read failed: {error}"
-                    ))
-                })
+            let limit = std::num::NonZeroU64::new(1024 * 1024 * 1024).unwrap();
+            let memory = Arc::new(tracedecay_runtime_core::resident_memory::ProcessResidentMemoryV1::with_pressure(
+                limit,
+                Arc::new(tracedecay_runtime_core::resident_memory::ResidentMemoryPressureV1::with_sampler(
+                    limit, Arc::new(|| None),
+                )),
+            ));
+            tracedecay_runtime_core::db::reserve_encoded_bytes(&memory, length, |buffer| {
+                file.seek(SeekFrom::Start(offset))
+                    .and_then(|_| file.read_exact(buffer))
+                    .map_err(|error| tracedecay_domain::errors::TraceDecayError::Database {
+                        operation: "restart encoded segment read".to_owned(),
+                        message: error.to_string(),
+                    })
+            }).map_err(|error| CodeIndexProductionErrorV1::Contract(error.to_string()))
         },
     );
     let generation = match partitioned {

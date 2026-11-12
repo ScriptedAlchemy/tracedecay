@@ -41,6 +41,7 @@ mod generation_transactions;
 mod graph_replay_release;
 mod journal;
 mod locking;
+mod registered_sql;
 mod receipt_store;
 mod scope_quarantine;
 mod scope_roots;
@@ -66,8 +67,10 @@ pub use scope_roots::{
 };
 pub use text_artifacts::{
     attach_verified_text_artifact_under_lock, find_shared_text_artifact,
+    plan_verified_text_artifact_attachment, plan_verified_text_artifact_withdrawal,
     withdraw_verified_text_artifact_under_lock,
 };
+pub use registered_sql::retain_registered_code_index;
 
 use generation_transactions::{
     GENERATION_RECEIPT_STORE, GENERATION_TRANSACTION_JOURNAL,
@@ -2363,11 +2366,25 @@ fn build_receipt(
     deleted_generations: Vec<CodeGenerationRetentionGenerationV1>,
     completed_at: UtcMicros,
 ) -> Result<CodeGenerationRetentionReceiptV1, CodeGenerationRetentionErrorV1> {
+    build_generation_receipt(
+        plan.active_generation_id.as_ref(),
+        &plan.vector_readable_sources,
+        deleted_generations,
+        completed_at,
+    )
+}
+
+fn build_generation_receipt(
+    active_generation_id: Option<&CodeGenerationId>,
+    vector_readable_sources: &BTreeSet<CodeGenerationId>,
+    deleted_generations: Vec<CodeGenerationRetentionGenerationV1>,
+    completed_at: UtcMicros,
+) -> Result<CodeGenerationRetentionReceiptV1, CodeGenerationRetentionErrorV1> {
     let reclaimed_bytes = total_bytes(&deleted_generations);
     let material = CodeGenerationRetentionReceiptMaterialV1 {
         schema: RECEIPT_SCHEMA,
-        active_generation_id: plan.active_generation_id.as_ref(),
-        vector_readable_sources: &plan.vector_readable_sources,
+        active_generation_id,
+        vector_readable_sources,
         rollback_floor: RECEIPT_ROLLBACK_FLOOR,
         deleted_generations: &deleted_generations,
         reclaimed_bytes,
@@ -2379,8 +2396,8 @@ fn build_receipt(
     Ok(CodeGenerationRetentionReceiptV1 {
         schema: RECEIPT_SCHEMA.to_owned(),
         receipt_digest,
-        active_generation_id: plan.active_generation_id.clone(),
-        vector_readable_sources: plan.vector_readable_sources.clone(),
+        active_generation_id: active_generation_id.cloned(),
+        vector_readable_sources: vector_readable_sources.clone(),
         rollback_floor: RECEIPT_ROLLBACK_FLOOR,
         deleted_generations,
         reclaimed_bytes,

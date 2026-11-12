@@ -205,6 +205,7 @@ struct StoreRuntimeLeaseSource {
     attachment: Arc<dyn PhysicalRuntimeAttachment>,
     locator: RuntimeLocatorRecord,
     opened_file_identity: u64,
+    file_identity: Arc<crate::db::RegisteredSqliteIdentity>,
     database_authority: Option<crate::db::DatabaseAuthority>,
     database_attachments:
         std::sync::Mutex<BTreeMap<DatabaseRuntimeAttachmentIdV1, DatabaseAttachmentState>>,
@@ -296,7 +297,7 @@ impl StoreRuntimeLeaseSource {
         &self,
         operation: &'static str,
     ) -> Result<u64, StoreRuntimeRegistryFailure> {
-        let current_file_identity = crate::db::sqlite_generation_identity(self.locator().path())
+        let current_file_identity = self.file_identity.current_identity()
             .map_err(
                 |source| StoreRuntimeRegistryFailure::SqliteFileIdentityInspectionFailed {
                     operation,
@@ -766,7 +767,7 @@ impl std::ops::Deref for StoreRuntimeOwnerAttachment {
 
 struct RuntimeDatabaseWriteAuthority {
     authority: crate::db::DatabaseAuthority,
-    canonical_path: PathBuf,
+    file_identity: Arc<crate::db::RegisteredSqliteIdentity>,
     opened_file_identity: u64,
 }
 
@@ -775,7 +776,7 @@ impl RuntimeDatabaseWriteAuthority {
         self.authority
             .require_active_write_scope(intent)
             .map_err(|error| error.to_string())?;
-        let current_file_identity = crate::db::sqlite_generation_identity(&self.canonical_path)
+        let current_file_identity = self.file_identity.current_identity()
             .map_err(|source| sqlite_file_identity_authority_denial(intent, source))?;
         if current_file_identity != self.opened_file_identity {
             return Err("database file identity changed after registry attachment".to_owned());
@@ -952,7 +953,7 @@ impl StoreRuntimeClientLease {
             "authorize registered incremental compaction",
         )?;
         let authority = Arc::new(RuntimeDatabaseWriteAuthority {
-            canonical_path: authority.canonical_database_path().to_path_buf(),
+            file_identity: Arc::clone(&self.inner.file_identity),
             authority,
             opened_file_identity,
         });
@@ -973,7 +974,7 @@ impl StoreRuntimeClientLease {
         let opened_file_identity =
             self.validate_database_write_authority(&authority, "authorize registered checkpoint")?;
         let authority = Arc::new(RuntimeDatabaseWriteAuthority {
-            canonical_path: authority.canonical_database_path().to_path_buf(),
+            file_identity: Arc::clone(&self.inner.file_identity),
             authority,
             opened_file_identity,
         });
@@ -1065,7 +1066,7 @@ impl StoreRuntimeClientLease {
             self.validate_opened_file_identity("authorize exact SQL channel")?;
 
         let authority = RuntimeDatabaseWriteAuthority {
-            canonical_path: authority.canonical_database_path().to_path_buf(),
+            file_identity: Arc::clone(&self.inner.file_identity),
             authority,
             opened_file_identity,
         };
@@ -1096,7 +1097,7 @@ impl StoreRuntimeClientLease {
         let opened_file_identity = self
             .validate_database_write_authority(&authority, "authorize registered runtime write")?;
         let authority = Arc::new(RuntimeDatabaseWriteAuthority {
-            canonical_path: authority.canonical_database_path().to_path_buf(),
+            file_identity: Arc::clone(&self.inner.file_identity),
             authority,
             opened_file_identity,
         });

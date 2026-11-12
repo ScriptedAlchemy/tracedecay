@@ -434,11 +434,10 @@ async fn assert_matches_cold_build(
     // runs in the layered generation's own namespace, and the cross-profile
     // check compares every served row.
     let cold_in_namespace = GraphGenerationRows::from(
-        super::super::code_graph_manifest::spill_sealed_generation_graph_from_roots(
-            &runtime.generations_root,
-            &runtime.replay_root,
+        super::super::code_graph_manifest::spill_sealed_generation_graph(
+            &runtime.encoded_storage,
+            &runtime.encoded_generation,
             &runtime.sealed_state_digest,
-            &generation,
             layered.projection().clone(),
             &GraphProjectorRevision::try_from(
                 tracedecay_code_index::graph_projection::CODE_GRAPH_PROJECTOR_REVISION.to_owned(),

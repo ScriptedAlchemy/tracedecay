@@ -43,6 +43,7 @@ use tracedecay_domain::{
     TestAttributionEvidenceClassV1, TreeId, UtcMicros, WorktreeId, sha256_hex_suffix,
 };
 use tracedecay_graph_db::{GraphDbError, GraphNamespace, GraphProjectorRevision};
+use tracedecay_runtime_core::db::CodeIndexStoredBytes;
 
 use crate::support::{PartitionedSealV1, RUST_SOURCE, cold_generation, id, reseal_manifest};
 
@@ -94,7 +95,7 @@ impl CodeIndexAtomicPublicationPort for SharedPublicationStore {
         scope: &CodeIndexGenerationScopeV1,
         expected_active_generation: Option<&CodeGenerationId>,
         generation: &CodeIndexSealedPublicationV1,
-    ) -> Result<Arc<[u8]>, CodeIndexPublicationStoreErrorV1> {
+    ) -> Result<Arc<CodeIndexStoredBytes>, CodeIndexPublicationStoreErrorV1> {
         self.sealed
             .publish_atomically(scope, expected_active_generation, generation)
     }
@@ -126,7 +127,7 @@ impl CodeIndexAtomicPublicationPort for PartialKeyPublicationStore {
         scope: &CodeIndexGenerationScopeV1,
         expected_active_generation: Option<&CodeGenerationId>,
         generation: &CodeIndexSealedPublicationV1,
-    ) -> Result<Arc<[u8]>, CodeIndexPublicationStoreErrorV1> {
+    ) -> Result<Arc<CodeIndexStoredBytes>, CodeIndexPublicationStoreErrorV1> {
         let pointer = self
             .pointer
             .lock()
@@ -2994,7 +2995,7 @@ fn collect_published_segments<'a>(
 
 fn partitioned_codec_fixture() -> (
     CodeIndexPublishedGenerationV1,
-    Vec<u8>,
+    CodeIndexStoredBytes,
     BTreeMap<String, Vec<u8>>,
 ) {
     let store = SharedPublicationStore::default();
@@ -3007,7 +3008,7 @@ fn partitioned_codec_fixture() -> (
     let mut segments = BTreeMap::new();
     let mut parent_file_segments = 0;
     let parent_manifest = first
-        .encode_partitioned_sealed(collect_published_segments(
+        .encode_partitioned_sealed(&super::support::encoded_fixture_memory(), collect_published_segments(
             &mut segments,
             &mut parent_file_segments,
         ))
@@ -3020,6 +3021,7 @@ fn partitioned_codec_fixture() -> (
     let manifest = second
         .encode_partitioned_sealed_with_parent(
             Some(&parent_manifest),
+            &super::support::encoded_fixture_memory(),
             collect_published_segments(&mut segments, &mut child_file_segments),
         )
         .expect("partitioned child encoding");
@@ -3290,9 +3292,8 @@ fn partitioned_codec_has_stable_bytes_and_round_trips() {
         "a census-less manifest reached the wrong rejection: {error}"
     );
 
-    // Decode at width two with three file segments: the third file read must
-    // reuse a slot from the first window, so the bound below covers cross-window
-    // buffer reuse and not just a single window. Width is sizing policy only.
+    // A multi-window decode must release each window's encoded reservations
+    // before materializing the next. Width remains sizing policy only.
     struct ForcedDecodeWidth;
     impl Drop for ForcedDecodeWidth {
         fn drop(&mut self) {
@@ -3326,20 +3327,24 @@ fn partitioned_codec_has_stable_bytes_and_round_trips() {
         !file_evidence_digests.is_empty(),
         "the fixture must seal file evidence"
     );
-    // Buffer address -> its capacity after the last read it served.
-    let mut file_buffers = BTreeMap::new();
-    let mut file_evidence_buffers = BTreeMap::new();
+    let limit = std::num::NonZeroU64::new(1024 * 1024 * 1024).unwrap();
+    let memory = Arc::new(tracedecay_runtime_core::resident_memory::ProcessResidentMemoryV1::with_pressure(
+        limit,
+        Arc::new(tracedecay_runtime_core::resident_memory::ResidentMemoryPressureV1::with_sampler(
+            limit, Arc::new(|| None),
+        )),
+    ));
+    let peak_file_bytes = Cell::new(0_u64);
+    let peak_file_evidence_bytes = Cell::new(0_u64);
+    let peak_evidence_bytes = Cell::new(0_u64);
     let largest_file_evidence = Cell::new(0_usize);
-    let evidence_buffer_address = Cell::new(None);
     let segment_reads = RefCell::new(BTreeSet::new());
     let largest_file_segment = Cell::new(0_usize);
     let largest_evidence_page = Cell::new(0_usize);
-    let evidence_buffer_capacity = Cell::new(0_usize);
     let restored = CodeIndexPublishedGenerationV1::decode_partitioned_sealed(
         &manifest,
         &SharedDecodedContentPoolV1::default(),
-        |request, buffer| {
-            let address = buffer as *const Vec<u8> as usize;
+        |request| {
             let (digest, offset, length, reading_file) = match request {
                 SealedGenerationSegmentReadV1::Whole { digest, size_bytes } => {
                     (digest, 0, size_bytes, true)
@@ -3356,33 +3361,25 @@ fn partitioned_codec_has_stable_bytes_and_round_trips() {
             })?;
             let start = usize::try_from(offset).expect("segment range offset");
             let end = start + usize::try_from(length).expect("segment range length");
-            buffer.clear();
-            // Exact growth, so a buffer's capacity records the largest read
-            // it served rather than the allocator's amortized doubling.
-            buffer.reserve_exact(end - start);
-            buffer.extend_from_slice(&bytes[start..end]);
-            if reading_file && file_evidence_digests.contains(digest.as_str()) {
-                largest_file_evidence.set(largest_file_evidence.get().max(bytes.len()));
-                file_evidence_buffers.insert(address, buffer.capacity());
-            } else if reading_file {
-                largest_file_segment.set(largest_file_segment.get().max(bytes.len()));
-                file_buffers.insert(address, buffer.capacity());
-            } else {
-                if let Some(first_address) = evidence_buffer_address.get() {
-                    assert_eq!(
-                        address, first_address,
-                        "the evidence phase must reuse one Vec"
-                    );
+            let encoded = tracedecay_runtime_core::db::reserve_encoded_bytes(&memory, end - start, |output| {
+                output.copy_from_slice(&bytes[start..end]);
+                let charged = memory.snapshot().used_bytes;
+                if reading_file && file_evidence_digests.contains(digest.as_str()) {
+                    largest_file_evidence.set(largest_file_evidence.get().max(bytes.len()));
+                    peak_file_evidence_bytes.set(peak_file_evidence_bytes.get().max(charged));
+                } else if reading_file {
+                    largest_file_segment.set(largest_file_segment.get().max(bytes.len()));
+                    peak_file_bytes.set(peak_file_bytes.get().max(charged));
                 } else {
-                    evidence_buffer_address.set(Some(address));
+                    largest_evidence_page.set(largest_evidence_page.get().max(end - start));
+                    peak_evidence_bytes.set(peak_evidence_bytes.get().max(charged));
                 }
-                largest_evidence_page.set(largest_evidence_page.get().max(end - start));
-                evidence_buffer_capacity.set(buffer.capacity());
-            }
+                Ok(())
+            }).map_err(|error| CodeIndexProductionErrorV1::Contract(error.to_string()))?;
             segment_reads
                 .borrow_mut()
                 .insert(digest.as_str().to_owned());
-            Ok(())
+            Ok(encoded)
         },
     )
     .expect("partitioned bytes decode");
@@ -3409,35 +3406,22 @@ fn partitioned_codec_has_stable_bytes_and_round_trips() {
         "decode must read every segment but graph pages and resolution index pages"
     );
     let largest_file_segment = largest_file_segment.get();
-    assert_eq!(
-        file_buffers.len(),
-        window,
-        "file reads must cycle through exactly one buffer per decode window slot"
-    );
     assert!(
-        file_buffers.values().max() >= Some(&largest_file_segment)
-            && file_buffers
-                .values()
-                .all(|&capacity| capacity <= largest_file_segment.next_power_of_two()),
-        "each file buffer must be bounded by the largest file segment"
-    );
-    assert!(
-        file_buffers.values().sum::<usize>() <= window * largest_file_segment.next_power_of_two(),
-        "the file allocation must be bounded by {window} decode slots x the largest file segment"
+        peak_file_bytes.get() >= largest_file_segment as u64
+            && peak_file_bytes.get() <= (window * largest_file_segment.next_power_of_two()) as u64,
+        "live encoded file charges must be bounded by the planned decode window"
     );
     let largest_file_evidence = largest_file_evidence.get();
     assert!(
-        file_evidence_buffers.len() <= window
-            && file_evidence_buffers
-                .values()
-                .all(|&capacity| capacity <= largest_file_evidence.next_power_of_two()),
-        "file evidence reads must reuse one buffer per decode window slot, bounded by the largest file evidence segment"
+        peak_file_evidence_bytes.get() >= largest_file_evidence as u64
+            && peak_file_evidence_bytes.get() <= (window * largest_file_evidence.next_power_of_two()) as u64,
+        "live file evidence charges must be bounded by the planned decode window"
     );
     assert!(
-        evidence_buffer_capacity.get() >= largest_evidence_page.get()
-            && evidence_buffer_capacity.get() <= largest_evidence_page.get().next_power_of_two(),
-        "the evidence allocation must be bounded by the largest evidence page"
+        peak_evidence_bytes.get() == largest_evidence_page.get() as u64,
+        "only one authenticated encoded evidence page may remain charged"
     );
+    assert_eq!(memory.snapshot().used_bytes, 0, "encoded reservations retire after decode");
     assert_eq!(
         sealed_clone_bindings(&restored),
         sealed_clone_bindings(&expected),
@@ -3455,7 +3439,7 @@ fn partitioned_codec_has_stable_bytes_and_round_trips() {
     // byte in any of them is refused. Text decode authenticates only the file
     // and evidence segments it consumes; graph pages stay lazy and authenticate
     // when the graph store reads them.
-    let read = |request: SealedGenerationSegmentReadV1<'_>, buffer: &mut Vec<u8>| {
+    let read = |request: SealedGenerationSegmentReadV1<'_>| {
         let (digest, offset, length) = match request {
             SealedGenerationSegmentReadV1::Whole { digest, size_bytes } => (digest, 0, size_bytes),
             SealedGenerationSegmentReadV1::Range {
@@ -3470,27 +3454,25 @@ fn partitioned_codec_has_stable_bytes_and_round_trips() {
         })?;
         let start = usize::try_from(offset).expect("segment range offset");
         let end = start + usize::try_from(length).expect("segment range length");
-        buffer.clear();
-        buffer.extend_from_slice(&bytes[start..end]);
-        Ok(())
+        Ok(super::support::encoded_fixture_bytes(&bytes[start..end]))
     };
     CodeIndexPublishedGenerationV1::verify_partitioned_sealed(&manifest, |_, _| false, read)
         .expect("the fixture's own segments must verify against its manifest");
     for (corrupted, _) in PARTITIONED_FORMAT_SEGMENTS {
-        let flip = |request: SealedGenerationSegmentReadV1<'_>, buffer: &mut Vec<u8>| {
+        let flip = |request: SealedGenerationSegmentReadV1<'_>| {
             let hit = match &request {
                 SealedGenerationSegmentReadV1::Whole { digest, .. }
                 | SealedGenerationSegmentReadV1::Range { digest, .. } => {
                     digest.as_str() == *corrupted
                 }
             };
-            read(request, buffer)?;
+            let mut bytes = read(request)?;
             if hit {
-                *buffer
+                *bytes.as_mut_bytes()
                     .first_mut()
                     .expect("an authenticated segment read is never empty") ^= 1;
             }
-            Ok(())
+            Ok(bytes)
         };
         assert!(
             CodeIndexPublishedGenerationV1::verify_partitioned_sealed(
@@ -3517,7 +3499,7 @@ fn partitioned_codec_has_stable_bytes_and_round_trips() {
     let mut reencoded_segments = BTreeMap::new();
     let mut reencoded_evidence_pack = Vec::new();
     let reencoded_manifest = restored
-        .encode_partitioned_sealed(|publication| {
+        .encode_partitioned_sealed(&super::support::encoded_fixture_memory(), |publication| {
             match publication {
                 SealedGenerationSegmentPublicationV1::File { digest, bytes }
                 | SealedGenerationSegmentPublicationV1::FileEvidence { digest, bytes }
@@ -3545,7 +3527,7 @@ fn partitioned_codec_has_stable_bytes_and_round_trips() {
             Ok(())
         })
         .expect("restored partitioned generation re-encodes");
-    assert_eq!(reencoded_manifest, manifest);
+    assert_eq!(reencoded_manifest.as_bytes(), manifest.as_bytes());
     for (digest, _) in PARTITIONED_FORMAT_SEGMENTS {
         assert_eq!(
             reencoded_segments.get(*digest),
@@ -3574,7 +3556,7 @@ fn partitioned_text_metadata_exposes_commitments_without_payload_reads() {
     let error = CodeIndexPublishedGenerationV1::decode_partitioned_sealed(
         &manifest,
         &SharedDecodedContentPoolV1::default(),
-        |_, _| {
+        |_| {
             Err(CodeIndexProductionErrorV1::Contract(
                 "payload segment requested".to_owned(),
             ))
@@ -3662,7 +3644,7 @@ fn retired_partitioned_carrier_is_refused_by_every_manifest_reader() {
     );
 
     let segment_reads = Cell::new(0_usize);
-    let read = |request: SealedGenerationSegmentReadV1<'_>, buffer: &mut Vec<u8>| {
+    let read = |request: SealedGenerationSegmentReadV1<'_>| {
         segment_reads.set(segment_reads.get() + 1);
         let (digest, offset, length) = match request {
             SealedGenerationSegmentReadV1::Whole { digest, size_bytes } => (digest, 0, size_bytes),
@@ -3678,9 +3660,7 @@ fn retired_partitioned_carrier_is_refused_by_every_manifest_reader() {
             .expect("historical segment bytes");
         let start = usize::try_from(offset).expect("segment offset");
         let end = start + usize::try_from(length).expect("segment length");
-        buffer.clear();
-        buffer.extend_from_slice(&bytes[start..end]);
-        Ok(())
+        Ok(super::support::encoded_fixture_bytes(&bytes[start..end]))
     };
 
     for refusal in [
@@ -3742,7 +3722,7 @@ fn a_retired_parent_manifest_yields_no_reuse_instead_of_refusing_the_child() {
         .expect("parent generation");
     let parent = store.generation(&parent);
     let parent_manifest = parent
-        .encode_partitioned_sealed(|_| Ok(()))
+        .encode_partitioned_sealed(&super::support::encoded_fixture_memory(), |_| Ok(()))
         .expect("parent encoding");
     let child = owner
         .build_and_publish(partitioned_codec_request(2, 1_200_000), &ActiveControl)
@@ -3754,7 +3734,7 @@ fn a_retired_parent_manifest_yields_no_reuse_instead_of_refusing_the_child() {
         let mut evidence_pack = Vec::new();
         let mut file_segments = 0_usize;
         let manifest = child
-            .encode_partitioned_sealed_with_parent(parent_manifest_bytes, |publication| {
+            .encode_partitioned_sealed_with_parent(parent_manifest_bytes, &super::support::encoded_fixture_memory(), |publication| {
                 match publication {
                     SealedGenerationSegmentPublicationV1::File { digest, bytes } => {
                         file_segments += 1;
@@ -3811,7 +3791,7 @@ fn a_retired_parent_manifest_yields_no_reuse_instead_of_refusing_the_child() {
         "reuse decides which segment bytes are published, never the manifest"
     );
 
-    let read = |request: SealedGenerationSegmentReadV1<'_>, buffer: &mut Vec<u8>| {
+    let read = |request: SealedGenerationSegmentReadV1<'_>| {
         let (digest, offset, length) = match request {
             SealedGenerationSegmentReadV1::Whole { digest, size_bytes } => (digest, 0, size_bytes),
             SealedGenerationSegmentReadV1::Range {
@@ -3826,9 +3806,7 @@ fn a_retired_parent_manifest_yields_no_reuse_instead_of_refusing_the_child() {
         })?;
         let start = usize::try_from(offset).expect("segment range offset");
         let end = start + usize::try_from(length).expect("segment range length");
-        buffer.clear();
-        buffer.extend_from_slice(&bytes[start..end]);
-        Ok(())
+        Ok(super::support::encoded_fixture_bytes(&bytes[start..end]))
     };
     CodeIndexPublishedGenerationV1::verify_partitioned_sealed(&manifest, |_, _| false, read)
         .expect("a child encoded without reuse must be self-sufficient");
@@ -3941,7 +3919,7 @@ fn partitioned_descriptor_readers_share_validation_without_sharing_authenticatio
         .expect("authenticate current manifest");
     assert_eq!(
         CodeIndexPublishedGenerationV1::partitioned_segment_identities_from_reader(
-            manifest.as_slice(),
+            manifest.as_bytes(),
         )
         .expect("read caller-authenticated descriptors"),
         Some(authenticated.clone()),
@@ -4072,7 +4050,7 @@ fn partitioned_encode_rewrites_file_segments_across_extractor_revisions() {
         .expect("revision parent generation");
     let parent = store.generation(&parent);
     let parent_manifest = parent
-        .encode_partitioned_sealed(|_| Ok(()))
+        .encode_partitioned_sealed(&super::support::encoded_fixture_memory(), |_| Ok(()))
         .expect("revision parent encoding");
     let mut parent_envelope: serde_json::Value =
         serde_json::from_slice(&parent_manifest).expect("parent manifest JSON");
@@ -4097,7 +4075,7 @@ fn partitioned_encode_rewrites_file_segments_across_extractor_revisions() {
     let child = store.generation(&child);
     let mut published_files = 0;
     child
-        .encode_partitioned_sealed_with_parent(Some(&historical_parent), |publication| {
+        .encode_partitioned_sealed_with_parent(Some(&historical_parent), &super::support::encoded_fixture_memory(), |publication| {
             if matches!(
                 publication,
                 SealedGenerationSegmentPublicationV1::File { .. }
@@ -4175,7 +4153,7 @@ fn partitioned_encode_publishes_only_the_edited_file_segment() {
         .expect("delta parent generation");
     let parent = store.generation(&parent);
     let parent_manifest = parent
-        .encode_partitioned_sealed(|_| Ok(()))
+        .encode_partitioned_sealed(&super::support::encoded_fixture_memory(), |_| Ok(()))
         .expect("delta parent encoding");
     let child = owner
         .build_and_publish(partitioned_codec_request(2, 1_200_000), &ActiveControl)
@@ -4186,7 +4164,7 @@ fn partitioned_encode_publishes_only_the_edited_file_segment() {
     let mut published_evidence_pages = BTreeSet::new();
     let mut committed_evidence_pages = None;
     let child_manifest = child
-        .encode_partitioned_sealed_with_parent(Some(&parent_manifest), |publication| {
+        .encode_partitioned_sealed_with_parent(Some(&parent_manifest), &super::support::encoded_fixture_memory(), |publication| {
             match publication {
                 SealedGenerationSegmentPublicationV1::File { digest, bytes } => {
                     published_files.push((digest.as_str().to_owned(), bytes.len()));
@@ -4349,7 +4327,7 @@ fn carried_forward_clone_bodies_admit_through_the_reused_sealed_segment() {
     let mut segments = BTreeMap::new();
     let mut parent_file_segments = 0;
     let parent_manifest = parent
-        .encode_partitioned_sealed(collect_published_segments(
+        .encode_partitioned_sealed(&super::support::encoded_fixture_memory(), collect_published_segments(
             &mut segments,
             &mut parent_file_segments,
         ))
@@ -4367,6 +4345,7 @@ fn carried_forward_clone_bodies_admit_through_the_reused_sealed_segment() {
     let child_manifest = child
         .encode_partitioned_sealed_with_parent(
             Some(&parent_manifest),
+            &super::support::encoded_fixture_memory(),
             collect_published_segments(&mut segments, &mut child_file_segments),
         )
         .expect("child encoding");
@@ -4428,13 +4407,11 @@ fn carried_forward_clone_bodies_admit_through_the_reused_sealed_segment() {
     let mut source = VerifiedSealedLexicalPageSourceV1::open_partitioned_sealed(
         &child_manifest,
         state_digest,
-        move |digest, _, buffer, _control| {
+        move |digest, _, _control| {
             let bytes = segments.get(digest.as_str()).ok_or_else(|| {
                 CodeIndexProductionErrorV1::Contract("published segment is missing".to_owned())
             })?;
-            buffer.clear();
-            buffer.extend_from_slice(bytes);
-            Ok(())
+            Ok(super::support::encoded_fixture_bytes(bytes))
         },
         64,
         1 << 20,

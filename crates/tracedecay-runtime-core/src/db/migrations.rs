@@ -1,8 +1,7 @@
 //! Schema creation for the tracedecay database.
 //!
-//! Fresh stores are created directly at the current relational shape. Any
-//! other stamp or shape is a typed reset-required refusal; nothing upgrades in
-//! place.
+//! Fresh stores use the current relational shape. Only the exact tagged v39
+//! relational inventory converges additively; unknown shapes require reset.
 
 use std::future::Future;
 use std::pin::Pin;
@@ -49,7 +48,8 @@ const ROOT_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS metadata (
 /// receipts, keeps full external-source receipts only while retained, and
 /// stores each external-source mutation without what its row already says.
 /// v39 drops the handoff grant table, which lives in the project session store.
-pub const SCHEMA_VERSION: u32 = 39;
+/// v40 stores encoded code-index payloads and generation publication in SQL.
+pub const SCHEMA_VERSION: u32 = 40;
 
 /// The runtime ledger's retired outbox and inbox tables, exactly as v39 stores
 /// carry them. Nothing reads or writes them, but a store cannot change shape
@@ -269,6 +269,12 @@ async fn create_schema_transaction(conn: &(impl Executor + Sync)) -> Result<()> 
             message: format!("failed to create retired runtime effects tables: {e}"),
             operation: "create_schema".to_string(),
         })?;
+    conn.execute_batch(tracedecay_rusqlite_runtime::repository::CODE_INDEX_SCHEMA)
+        .await
+        .map_err(|error| TraceDecayError::Database {
+            message: format!("failed to create code-index storage: {error}"),
+            operation: "create_schema".to_owned(),
+        })?;
     final_shape::require_exact_final_shape(conn).await?;
     record_graph_version(conn, SCHEMA_VERSION).await?;
     Ok(())
@@ -424,7 +430,55 @@ async fn ensure_schema_current_engine_connection(
     if current == 0 && !store_has_objects(conn).await? {
         return create_schema_engine_connection(conn).await;
     }
+    if current == 39 {
+        let transaction = conn.authorized_long_lease_transaction().await
+            .map_err(|error| TraceDecayError::Database {
+                operation: "converge released project store".to_owned(),
+                message: error.to_string(),
+            })?;
+        converge_released_v39(&transaction).await?;
+        transaction.commit().await.map_err(|error| TraceDecayError::Database {
+            operation: "converge released project store".to_owned(),
+            message: error.to_string(),
+        })?;
+    }
     verify_final_schema_connection(conn).await?;
+    adopt_graph_stamp(conn).await
+}
+
+/// Existing-runtime admission uses this writer-authorized path before exposing
+/// any client. Read-only mounts still cannot change an admitted store.
+pub(crate) async fn converge_existing_schema_connection(conn: &Connection) -> Result<()> {
+    if get_version(conn).await? == 39 {
+        let transaction = conn.transaction_with_behavior(
+            crate::db::engine::TransactionBehavior::Immediate,
+        ).await.map_err(|error| TraceDecayError::Database {
+            operation: "converge released project store".to_owned(),
+            message: error.to_string(),
+        })?;
+        converge_released_v39(&transaction).await?;
+        transaction.commit().await.map_err(|error| TraceDecayError::Database {
+            operation: "converge released project store".to_owned(),
+            message: error.to_string(),
+        })?;
+    }
+    verify_final_schema_connection(conn).await
+}
+
+async fn converge_released_v39(conn: &(impl Executor + Sync)) -> Result<()> {
+    // Recheck the complete stamp and inventory under the same writer lock that
+    // installs the additive objects. No memory row or prior receipt is touched.
+    if get_version(conn).await? != 39 {
+        return Err(unsupported_schema_version(get_version(conn).await?));
+    }
+    final_shape::require_released_v39_shape(conn).await?;
+    conn.execute_batch(tracedecay_rusqlite_runtime::repository::CODE_INDEX_SCHEMA)
+        .await.map_err(|error| TraceDecayError::Database {
+            operation: "converge released project store".to_owned(),
+            message: error.to_string(),
+        })?;
+    final_shape::require_exact_final_shape(conn).await?;
+    record_graph_version(conn, SCHEMA_VERSION).await?;
     adopt_graph_stamp(conn).await
 }
 
@@ -449,7 +503,7 @@ pub(crate) async fn ensure_schema_current_connection(conn: &Connection) -> Resul
     if current == 0 && !store_has_objects(conn).await? {
         return create_schema_connection(conn).await;
     }
-    verify_final_schema_connection(conn).await?;
+    converge_existing_schema_connection(conn).await?;
     adopt_graph_stamp(conn).await
 }
 

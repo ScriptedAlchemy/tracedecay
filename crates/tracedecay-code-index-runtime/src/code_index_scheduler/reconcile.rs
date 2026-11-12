@@ -82,6 +82,36 @@ use super::{HeldActiveDecodeV1, reconcile_panic_guard};
 use tracedecay_runtime_core::path_safety::canonical_existing_identity;
 
 const MAX_PENDING_HINTS: usize = 1_024;
+
+#[cfg(any(test, feature = "test-helpers"))]
+pub(super) fn registered_fixture_project_database(
+    project: &ProjectId, store_root: &Path,
+) -> Result<Arc<tracedecay_runtime_core::db::Database>, CodeIndexSchedulerErrorV1> {
+    use tracedecay_runtime_core::db::{
+        Database, DatabaseAuthority, TestDatabaseRuntimeMode, TestDatabaseRuntimeScope,
+    };
+    let shared_root = tracedecay_code_index_retention::code_index_generations::code_generation_segments_root(store_root)
+        .parent().ok_or_else(|| CodeIndexSchedulerErrorV1::Identity("fixture store has no parent".to_owned()))?
+        .to_owned();
+    let path = shared_root.join("registered-project.db");
+    std::fs::create_dir_all(&shared_root)?;
+    let mode = if path.try_exists()? { TestDatabaseRuntimeMode::Existing } else { TestDatabaseRuntimeMode::Initialize };
+    let authority = DatabaseAuthority::acquire_test(&path, "code-index registered fixture")
+        .map_err(|error| CodeIndexSchedulerErrorV1::Identity(error.to_string()))?;
+    let fixture = tracedecay_runtime_core::native_runtime::block_on(
+        Database::publish_registered_test_runtime_with_retirement_control(
+            &path, &authority, mode,
+            TestDatabaseRuntimeScope::Project { project_id: project.clone() },
+        ),
+    ).map_err(CodeIndexSchedulerErrorV1::Identity)?
+        .map_err(|error| CodeIndexSchedulerErrorV1::Identity(error.to_string()))?;
+    let (owner, runtime, _retirement) = fixture.into_parts();
+    drop(runtime);
+    let database = owner.issue_lease()
+        .map_err(|error| CodeIndexSchedulerErrorV1::Identity(format!("{error:?}")))?;
+    Ok(Arc::new(database))
+}
+
 const MAX_SUPERSEDED_RECONCILE_RETRIES: usize = 4;
 pub(super) const CODE_INDEX_WORKER_RESIDENT_COMPONENT_V1: &str = "code-index-build-workers-v1";
 
@@ -1262,6 +1292,7 @@ impl CodeIndexWorktreeSchedulerV1 {
         store_root: PathBuf,
         byte_pool: Arc<SharedCodeIndexBytePoolV1>,
     ) -> Result<Self, CodeIndexSchedulerErrorV1> {
+        let database = registered_fixture_project_database(&project_id, &store_root)?;
         let mut scheduler = Self::open_with_policy(
             project_id,
             project_root,
@@ -1269,6 +1300,7 @@ impl CodeIndexWorktreeSchedulerV1 {
             byte_pool,
             CodeIndexHintPolicyV1::default(),
             crate::config::registry_default_index_path_policy(),
+            database,
         )?;
         let limit = detected_process_resident_memory_limit_v1();
         scheduler.bind_resident_memory(Arc::new(ProcessResidentMemoryV1::with_pressure(
@@ -1288,6 +1320,7 @@ impl CodeIndexWorktreeSchedulerV1 {
         byte_pool: Arc<SharedCodeIndexBytePoolV1>,
         policy: CodeIndexHintPolicyV1,
         path_policy: IndexPathPolicyV1,
+        project_database: Arc<tracedecay_runtime_core::db::Database>,
     ) -> Result<Self, CodeIndexSchedulerErrorV1> {
         let project_root = canonical_existing_identity(project_root)?;
         // Resolve exact identity BEFORE any indexing work. Paths located this
@@ -1305,6 +1338,7 @@ impl CodeIndexWorktreeSchedulerV1 {
             &store_root,
             &project_root,
             sanitizer_revision.clone(),
+            project_database,
         )?
         .with_shutdown_signal(Arc::clone(&shutting_down))
         .with_decoded_content(byte_pool.decoded_content.clone());

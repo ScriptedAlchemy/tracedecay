@@ -102,12 +102,12 @@ fn sealed_restore_reencodes_identically_at_serial_and_parallel_widths() {
 #[test]
 fn sealed_restore_rejects_one_corrupt_manifest_byte() {
     let sealed = sealed_multi_file_generation();
-    let mut manifest = sealed.manifest.clone();
+    let mut manifest = super::support::encoded_fixture_bytes(sealed.manifest.as_bytes());
     let position = manifest
         .windows(5)
         .position(|window| window == b"gamma")
         .expect("the sealed manifest carries the fixture path");
-    manifest[position] = b'q';
+    manifest.as_mut_bytes()[position] = b'q';
 
     let error = sealed
         .restore(&manifest)

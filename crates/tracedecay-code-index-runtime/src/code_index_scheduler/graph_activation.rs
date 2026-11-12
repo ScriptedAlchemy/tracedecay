@@ -671,9 +671,11 @@ impl DaemonCodeIndexPublicationStoreV1 {
             ));
         }
         Ok(CodeGraphReplayBindingV1 {
-            generations_root: self.generations_root.clone(),
             sealed_state_digest: SealedGraphStateDigest::try_from(entry.state_digest.clone())
                 .map_err(Self::unavailable)?,
+            resident_memory: self.encoded_read_memory().map_err(Self::unavailable)?,
+            storage: self.sql_storage()?,
+            worktree_id: self.sql_generation(generation_id).worktree_id,
         })
     }
 }

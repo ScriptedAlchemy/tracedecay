@@ -186,6 +186,13 @@ fn verified_graph_db_schema(
 ) -> tracedecay_domain::errors::Result<(i64, bool)> {
     let admission =
         tracedecay_runtime_core::db::migrations::inspect_graph_store_schema(graph_db_path)?;
+    if admission.released_shape_can_converge {
+        return Err(tracedecay_domain::errors::TraceDecayError::Config {
+            message: "the project database has an exact released relational shape; \
+                open it with this binary to converge without deleting project memory"
+                .to_owned(),
+        });
+    }
     Ok((admission.schema_version, admission.exact_final_shape))
 }
 

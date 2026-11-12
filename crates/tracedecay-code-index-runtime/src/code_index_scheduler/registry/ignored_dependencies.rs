@@ -141,6 +141,9 @@ fn clone_production_error(error: &CodeIndexProductionErrorV1) -> CodeIndexProduc
         CodeIndexProductionErrorV1::Interrupted(error) => {
             CodeIndexProductionErrorV1::Interrupted(*error)
         }
+        CodeIndexProductionErrorV1::SealedGenerationRetired => {
+            CodeIndexProductionErrorV1::SealedGenerationRetired
+        }
         CodeIndexProductionErrorV1::Input(error) => {
             CodeIndexProductionErrorV1::Input(error.clone())
         }

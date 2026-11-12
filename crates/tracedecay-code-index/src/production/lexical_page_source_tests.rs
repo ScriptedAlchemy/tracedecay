@@ -69,7 +69,7 @@ impl CodeIndexExecutionControlV1 for ActiveControl {
 /// A partitioned sealed generation held in memory: the manifest, its content
 /// address, and every published file segment under its digest.
 struct SealedSourceFixture {
-    manifest: Vec<u8>,
+    manifest: Arc<tracedecay_runtime_core::db::CodeIndexStoredBytes>,
     segments: Arc<BTreeMap<ManifestDigest, Vec<u8>>>,
     state_digest: ManifestDigest,
     generation: Arc<CodeIndexPublishedGenerationV1>,
@@ -645,7 +645,11 @@ fn fixture_for_source_files(
     );
     let mut segments = BTreeMap::new();
     let manifest = generation
-        .encode_partitioned_sealed(|request| {
+        .encode_partitioned_sealed(&Arc::new(
+            tracedecay_runtime_core::resident_memory::ProcessResidentMemoryV1::new(
+                tracedecay_runtime_core::resident_memory::detected_process_resident_memory_limit_v1(),
+            ),
+        ), |request| {
             if let super::super::SealedGenerationSegmentPublicationV1::File { digest, bytes } =
                 request
             {
@@ -657,7 +661,7 @@ fn fixture_for_source_files(
     let state_digest = ManifestDigest::from_sha256_bytes(&Sha256::digest(&manifest))
         .expect("fixture manifest digest is canonical");
     SealedSourceFixture {
-        manifest,
+        manifest: Arc::new(manifest),
         segments: Arc::new(segments),
         state_digest,
         generation,
