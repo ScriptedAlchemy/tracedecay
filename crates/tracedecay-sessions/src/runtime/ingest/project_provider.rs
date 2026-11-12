@@ -293,6 +293,7 @@ impl<'a> ProjectProviderRun<'a> {
                 frontier_committable = false;
                 break;
             }
+            let _file_span = tracing::trace_span!("sessions.ingest.project.codex_file");
             let Some(pending) = sweep.observe_file(path).await.transpose() else {
                 continue;
             };

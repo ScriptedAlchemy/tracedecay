@@ -587,7 +587,7 @@ async fn shared_session_meta_with_provenance(
     cancellation: &ObservationCancellation,
 ) -> TranscriptIngestResult<Arc<CodexMetaWithProvenance>> {
     let identity_path = path.to_path_buf();
-    let key = tracedecay_runtime_core::native_runtime::spawn_blocking(move || {
+    let key = tracing::Instrument::instrument(tracedecay_runtime_core::native_runtime::spawn_blocking(move || {
         let canonical = std::fs::canonicalize(&identity_path).map_err(|source| {
             TranscriptIngestError::ScanIo {
                 operation: "resolve Codex session metadata identity",
@@ -600,7 +600,7 @@ async fn shared_session_meta_with_provenance(
             path: canonical,
             identity,
         })
-    })
+    }), tracing::trace_span!("sessions.hosts.codex.meta_key"))
     .await
     .map_err(|_| TranscriptIngestError::BlockingScanTaskFailed { provider: PROVIDER })??;
     let claim = loop {
@@ -629,6 +629,7 @@ async fn shared_session_meta_with_provenance(
                 .ok()
         })
         .ok_or(TranscriptIngestError::BlockingScanTaskFailed { provider: PROVIDER })?;
+    let _fill_span = tracing::trace_span!("sessions.hosts.codex.meta_fill");
     tokio::select! {
         settled = std::future::poll_fn(|context| fill.poll_join(context)) => {
             settled.map_err(|_| TranscriptIngestError::BlockingScanTaskFailed { provider: PROVIDER })?
@@ -691,7 +692,11 @@ async fn try_admit_codex_jsonl_observations(
             ..CodexJsonlAdmissionProgress::default()
         });
     }
-    let parsed_meta = shared_session_meta_with_provenance(path, cancellation).await?;
+    let parsed_meta = tracing::Instrument::instrument(
+        shared_session_meta_with_provenance(path, cancellation),
+        tracing::trace_span!("sessions.hosts.codex.session_meta"),
+    )
+    .await?;
     let native_thread_id = parsed_meta.native_thread_id.clone();
     let meta = parsed_meta.meta.clone();
     if !admission_scope.accepts_session(&meta.session_id) {
@@ -714,7 +719,11 @@ async fn try_admit_codex_jsonl_observations(
     // this rollout, and a peer that interleaves between them re-submits what
     // this pass is about to commit.
     let gate = codex_admission_gate(&scope, path);
-    let _admitting = gate.lock().await;
+    let _admitting = tracing::Instrument::instrument(
+        gate.lock(),
+        tracing::trace_span!("sessions.hosts.codex.admission_gate"),
+    )
+    .await;
     admit_codex_jsonl_page(context, canonical_source, max_new_bytes, max_frames).await
 }
 
