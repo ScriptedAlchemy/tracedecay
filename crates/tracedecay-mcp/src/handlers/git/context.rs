@@ -2175,7 +2175,7 @@ mod blocking_git_span_tests {
     }
 
     #[test]
-    fn a_git_span_runs_and_reports_a_panic_without_a_tokio_runtime() {
+    fn a_git_span_runs_and_reports_a_panic_from_a_plain_thread() {
         let (value, panicked) = tracedecay_runtime_core::native_runtime::block_on(async {
             (
                 blocking_git_span("test", || 7_u8).await,

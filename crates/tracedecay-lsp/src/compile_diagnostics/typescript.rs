@@ -1,6 +1,8 @@
-//! `tsc -p <tsconfig> --pretty false --noEmit` driver.
+//! The project's own `tsc`: its check, the configuration it resolves, and
+//! whether the projects a configuration references are built.
 //!
-//! tsc emits diagnostics as one-per-line text:
+//! A check is `tsc -p <tsconfig> --noEmit --pretty false`, and tsc emits its
+//! diagnostics one per line:
 //!
 //! ```text
 //! src/lib.ts(4,15): error TS2322: Type 'string' is not assignable to type 'number'.
@@ -9,23 +11,29 @@
 //! The parser extracts file, line, column, level, code, and message from
 //! that shape. Multi-line continuations are concatenated into the prior
 //! diagnostic; malformed diagnostic headers are failures, not continuations.
-//! Each project [`super::tsconfig`] discovers is checked with its own `-p`
-//! run rather than `tsc --build`, so a reference is checked as the project it
-//! is and nothing is emitted.
 //!
-//! The compiler is the project's own `node_modules/.bin/tsc`, so the check
-//! runs the TypeScript version the project pins rather than whatever happens
+//! Each project is checked with its own `-p` run rather than `tsc --build`,
+//! which would write the referenced projects' outputs into the checkout. tsc
+//! checks a project against the declarations its references emitted, so the
+//! producer asks the same compiler's `--build --dry` whether those are
+//! current ([`referenced_projects_out_of_date`]) before it trusts the check.
+//!
+//! The compiler is the project's own `node_modules/.bin/tsc`, so every run
+//! uses the TypeScript version the project pins rather than whatever happens
 //! to be on the daemon's `PATH`. A tsconfig without one is a typed
 //! missing-compiler state, not an empty success, because a caller that asks
 //! for diagnostics must learn that nothing checked the project.
 
-use std::path::Path;
-use std::process::Command;
-use std::sync::Arc;
+use std::collections::BTreeMap;
+use std::ffi::OsStr;
+use std::path::{Path, PathBuf};
+use std::process::{Command, Output};
+use std::sync::{Arc, Weak};
 use std::time::{Duration, Instant};
 
-use tokio::sync::Semaphore;
+use tokio::sync::{Mutex, OwnedMutexGuard, Semaphore};
 
+use super::tsconfig::normalize;
 use super::{Diagnostic, is_diagnostic_level};
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_runtime_core::background_cpu::ProcessBackgroundCpuV1;
@@ -36,10 +44,19 @@ use tracedecay_runtime_core::native_runtime;
 /// Limit simultaneous compiler children as well as their background CPU demand.
 const MAX_CONCURRENT_COMPILERS: usize = 4;
 
+/// A shared ownership token for one build-info path's serialization lock.
+/// Clones let abandoned async checks retain the lock in detached compiler
+/// supervision until its child has been killed and reaped.
+#[derive(Clone)]
+pub struct TypeScriptBuildInfoGuard {
+    _guard: Arc<OwnedMutexGuard<()>>,
+}
+
 /// Shared by project producers in one daemon generation.
 #[derive(Clone)]
 pub struct TypeScriptCompilerAdmission {
     permits: Arc<Semaphore>,
+    build_info_locks: Arc<Mutex<BTreeMap<PathBuf, Weak<Mutex<()>>>>>,
     background_cpu: Arc<ProcessBackgroundCpuV1>,
     cancellation: CancellationToken,
 }
@@ -49,6 +66,7 @@ impl TypeScriptCompilerAdmission {
     pub fn new(background_cpu: Arc<ProcessBackgroundCpuV1>) -> Self {
         Self {
             permits: Arc::new(Semaphore::new(MAX_CONCURRENT_COMPILERS)),
+            build_info_locks: Arc::new(Mutex::new(BTreeMap::new())),
             background_cpu,
             cancellation: CancellationToken::new(),
         }
@@ -59,13 +77,34 @@ impl TypeScriptCompilerAdmission {
         MAX_CONCURRENT_COMPILERS
     }
 
+    /// Serializes the complete use of one incremental build-info file, including
+    /// its revision binding. Producers sharing this admission may outlive their
+    /// route, but a retiring compiler must finish before its replacement can
+    /// delete or read the same compiler cache.
+    pub async fn serialize_build_info(&self, build_info: &Path) -> TypeScriptBuildInfoGuard {
+        let lock = {
+            let mut locks = self.build_info_locks.lock().await;
+            locks.retain(|_, lock| lock.strong_count() > 0);
+            if let Some(lock) = locks.get(build_info).and_then(Weak::upgrade) {
+                lock
+            } else {
+                let lock = Arc::new(Mutex::new(()));
+                locks.insert(build_info.to_path_buf(), Arc::downgrade(&lock));
+                lock
+            }
+        };
+        TypeScriptBuildInfoGuard {
+            _guard: Arc::new(lock.lock_owned().await),
+        }
+    }
+
     pub fn cancel(&self) {
         self.permits.close();
         self.cancellation.cancel();
     }
 }
 
-/// What one compiler child may consume once it holds a permit. A check that
+/// What one compiler child may consume once it holds a permit. A run that
 /// exceeds any bound fails; it never reports a clean project.
 #[derive(Clone, Copy)]
 struct CheckLimits {
@@ -84,65 +123,23 @@ const CHECK_LIMITS: CheckLimits = CheckLimits {
 /// command for a package with no workspace lockfile to install from.
 pub const TYPESCRIPT_INSTALL_COMMAND: &str = "npm install --save-dev typescript";
 
-/// Runs one resolved compiler over one tsconfig and parses its report.
-///
-/// The compiler runs from `project_root`, so tsc reports every path relative
-/// to the root the code index addresses files by, whichever package it checks.
-///
-/// tsc exits 0 for a clean project and 1 or 2 (`DiagnosticsPresent_*`) when it
-/// reported diagnostics. A nonzero exit without a readable diagnostic, any
-/// other exit, or a diagnostic without a file location means the project was
-/// not checked, and that is a typed failure rather than a clean page.
-///
-/// Producers sharing `admission` share its compiler capacity. A running check is
-/// bounded by a deadline and output limits, and exceeding one is a failure.
-///
-/// With `build_info`, the check is incremental against that
-/// `--tsBuildInfoFile`: tsc rechecks only what changed since the check that
-/// wrote it and records the program files it read there.
-#[tracing::instrument(
-    name = "compile_diagnostics.typescript.run_compiler",
-    level = "trace",
-    skip_all
-)]
-pub async fn run_compiler(
+/// Runs `compiler` with `args` from `project_root` once it holds one of
+/// `admission`'s permits and background CPU, within `limits`. Dropping the
+/// future or closing the admission kills and reaps the child.
+async fn run_admitted<I, S>(
     admission: &TypeScriptCompilerAdmission,
     compiler: &Path,
     project_root: &Path,
-    tsconfig: &Path,
-    build_info: Option<&Path>,
-) -> Result<Vec<Diagnostic>> {
-    run_compiler_within(
-        admission,
-        compiler,
-        project_root,
-        tsconfig,
-        build_info,
-        CHECK_LIMITS,
-    )
-    .await
-}
-
-async fn run_compiler_within(
-    admission: &TypeScriptCompilerAdmission,
-    compiler: &Path,
-    project_root: &Path,
-    tsconfig: &Path,
-    build_info: Option<&Path>,
+    args: I,
+    build_info_guard: Option<TypeScriptBuildInfoGuard>,
     limits: CheckLimits,
-) -> Result<Vec<Diagnostic>> {
+) -> Result<Output>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<OsStr>,
+{
     let mut cmd = Command::new(compiler);
-    cmd.arg("-p")
-        .arg(tsconfig)
-        .arg("--noEmit")
-        .arg("--pretty")
-        .arg("false");
-    if let Some(build_info) = build_info {
-        cmd.arg("--incremental")
-            .arg("--tsBuildInfoFile")
-            .arg(build_info);
-    }
-    cmd.current_dir(project_root);
+    cmd.args(args).current_dir(project_root);
     // Dropping this future cancels the token, and the runner then kills and
     // reaps tsc.
     let cancel = admission.cancellation.child_token();
@@ -160,11 +157,11 @@ async fn run_compiler_within(
         max_stderr_bytes: limits.max_stderr_bytes,
     };
     let background_cpu = Arc::clone(&admission.background_cpu);
-    // The permit travels with the blocking runner, which kills and reaps the
-    // child before returning, so it is held for the child's whole lifetime
-    // even when this future is dropped first.
-    let output = native_runtime::spawn_blocking(move || {
+    // The permit and build-info lock remain with the blocking runner until
+    // the child is killed and reaped, even when its async waiter is dropped.
+    native_runtime::spawn_blocking(move || {
         let _permit = permit;
+        let _build_info_guard = build_info_guard;
         let _cpu = background_cpu
             .acquire_cancellable(|| {
                 bounds
@@ -200,13 +197,90 @@ async fn run_compiler_within(
             }
             other => format!("`{}` did not finish: {other}", compiler.display()),
         },
-    })?;
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    if let Some(global) = stdout
+    })
+}
+
+/// The first report line that carries no file location (`error TS18003: …`);
+/// such lines describe the run itself failing, not a source finding.
+fn global_error(stdout: &str) -> Option<&str> {
+    stdout
         .lines()
         .map(str::trim)
         .find(|line| is_global_error(line))
-    {
+}
+
+/// Runs one resolved compiler over one tsconfig and parses its report.
+///
+/// The compiler runs from `project_root`, so tsc reports every path relative
+/// to the root the code index addresses files by, whichever package it checks.
+///
+/// tsc exits 0 for a clean project and 1 or 2 (`DiagnosticsPresent_*`) when it
+/// reported diagnostics. A nonzero exit without a readable diagnostic, any
+/// other exit, or a diagnostic without a file location means the project was
+/// not checked, and that is a typed failure rather than a clean page.
+///
+/// Producers sharing `admission` share its compiler capacity. A running check is
+/// bounded by a deadline and output limits, and exceeding one is a failure.
+///
+/// With `build_info`, the check is incremental against that
+/// `--tsBuildInfoFile`: tsc rechecks only what changed since the check that
+/// wrote it and records the program files it read there.
+#[tracing::instrument(
+    name = "compile_diagnostics.typescript.run_compiler",
+    level = "trace",
+    skip_all
+)]
+pub async fn run_compiler(
+    admission: &TypeScriptCompilerAdmission,
+    compiler: &Path,
+    project_root: &Path,
+    tsconfig: &Path,
+    build_info: Option<&Path>,
+    build_info_guard: Option<TypeScriptBuildInfoGuard>,
+) -> Result<Vec<Diagnostic>> {
+    run_compiler_within(
+        admission,
+        compiler,
+        project_root,
+        tsconfig,
+        build_info,
+        build_info_guard,
+        CHECK_LIMITS,
+    )
+    .await
+}
+
+async fn run_compiler_within(
+    admission: &TypeScriptCompilerAdmission,
+    compiler: &Path,
+    project_root: &Path,
+    tsconfig: &Path,
+    build_info: Option<&Path>,
+    build_info_guard: Option<TypeScriptBuildInfoGuard>,
+    limits: CheckLimits,
+) -> Result<Vec<Diagnostic>> {
+    let mut args = ["-p".as_ref(), tsconfig.as_os_str()]
+        .into_iter()
+        .chain(["--noEmit", "--pretty", "false"].map(OsStr::new))
+        .collect::<Vec<&OsStr>>();
+    if let Some(build_info) = build_info {
+        args.extend([
+            OsStr::new("--incremental"),
+            OsStr::new("--tsBuildInfoFile"),
+            build_info.as_os_str(),
+        ]);
+    }
+    let output = run_admitted(
+        admission,
+        compiler,
+        project_root,
+        args,
+        build_info_guard,
+        limits,
+    )
+    .await?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    if let Some(global) = global_error(&stdout) {
         return Err(TraceDecayError::Config {
             message: format!(
                 "`{}` could not check `{}`: {global}",
@@ -216,16 +290,7 @@ async fn run_compiler_within(
         });
     }
     if !matches!(output.status.code(), Some(0..=2)) {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(TraceDecayError::Config {
-            message: format!(
-                "`{}` exited with {} checking `{}`: {}",
-                compiler.display(),
-                output.status,
-                tsconfig.display(),
-                stderr.trim().lines().next().unwrap_or("no output")
-            ),
-        });
+        return Err(exited(compiler, &output, "checking", tsconfig));
     }
     let diagnostics = parse_tsc_output(&stdout)?;
     if !output.status.success() && diagnostics.is_empty() {
@@ -239,6 +304,182 @@ async fn run_compiler_within(
         });
     }
     Ok(diagnostics)
+}
+
+/// A run that exited without the report it was asked for, named by the
+/// first thing the compiler said: its stderr, else its own report.
+fn exited(compiler: &Path, output: &Output, doing: &str, subject: &Path) -> TraceDecayError {
+    let said = |stream: &[u8]| {
+        String::from_utf8_lossy(stream)
+            .lines()
+            .map(str::trim)
+            .find(|line| !line.is_empty())
+            .map(str::to_owned)
+    };
+    TraceDecayError::Config {
+        message: format!(
+            "`{}` exited with {} {doing} `{}`: {}",
+            compiler.display(),
+            output.status,
+            subject.display(),
+            said(&output.stderr)
+                .or_else(|| said(&output.stdout))
+                .unwrap_or_else(|| "no output".to_owned())
+        ),
+    }
+}
+
+/// The configuration the compiler resolved for one tsconfig: its
+/// `--showConfig` report.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TypeScriptConfiguration {
+    /// The settings after `extends`, the include and exclude the compiler
+    /// applies and the projects it references, as the compiler reports them.
+    /// Equal reports mean the compiler resolved the same configuration.
+    report: serde_json::Value,
+    /// The tsconfig of each referenced project, absolute.
+    references: Vec<PathBuf>,
+}
+
+impl TypeScriptConfiguration {
+    #[must_use]
+    pub fn references(&self) -> &[PathBuf] {
+        &self.references
+    }
+}
+
+/// Asks `compiler` how it resolves `tsconfig`.
+///
+/// The report is the configuration's identity, not its membership: which
+/// files a project holds is the program a check records
+/// ([`super::tsconfig::typescript_build_info_program`]), since typescript@5
+/// leaves out root files an absolute `include` names. typescript@5 refuses a
+/// configuration it cannot read, and that refusal is the compiler's reason,
+/// never an empty configuration; typescript@7 reports such a configuration
+/// without the error, which its check then reports.
+#[tracing::instrument(
+    name = "compile_diagnostics.typescript.resolve_configuration",
+    level = "trace",
+    skip_all
+)]
+pub async fn resolve_configuration(
+    admission: &TypeScriptCompilerAdmission,
+    compiler: &Path,
+    project_root: &Path,
+    tsconfig: &Path,
+) -> Result<TypeScriptConfiguration> {
+    let output = run_admitted(
+        admission,
+        compiler,
+        project_root,
+        [
+            OsStr::new("-p"),
+            tsconfig.as_os_str(),
+            OsStr::new("--showConfig"),
+        ],
+        None,
+        CHECK_LIMITS,
+    )
+    .await?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let refusal = |reason: &str| TraceDecayError::Config {
+        message: format!(
+            "`{}` could not resolve `{}`: {reason}",
+            compiler.display(),
+            tsconfig.display()
+        ),
+    };
+    if let Some(global) = global_error(&stdout) {
+        return Err(refusal(global));
+    }
+    if !output.status.success() {
+        return Err(exited(compiler, &output, "resolving", tsconfig));
+    }
+    let report: serde_json::Value = serde_json::from_str(&stdout).map_err(|_| {
+        refusal(
+            stdout
+                .lines()
+                .map(str::trim)
+                .find(|line| !line.is_empty())
+                .unwrap_or("no configuration report"),
+        )
+    })?;
+    if !report.is_object() {
+        return Err(refusal("the configuration report is not an object"));
+    }
+    let dir = tsconfig.parent().unwrap_or(project_root);
+    let references = match report.get("references") {
+        None => Vec::new(),
+        Some(references) => references
+            .as_array()
+            .ok_or_else(|| refusal("its references are not a list"))?
+            .iter()
+            .map(|reference| {
+                let path = reference
+                    .get("path")
+                    .and_then(serde_json::Value::as_str)
+                    .ok_or_else(|| refusal("a reference names no path"))?;
+                // A reference names a tsconfig or the directory holding one.
+                let target = normalize(&dir.join(path));
+                Ok(if target.extension().is_some_and(|ext| ext == "json") {
+                    target
+                } else {
+                    target.join("tsconfig.json")
+                })
+            })
+            .collect::<Result<_>>()?,
+    };
+    Ok(TypeScriptConfiguration { report, references })
+}
+
+/// What `compiler`'s `--build --dry` reports about `references`: `None` when
+/// it would build none of them, otherwise its own statement of each project
+/// it would build. tsc checks a referencing project against the declarations
+/// these projects emitted, so only current outputs make that check evidence
+/// about its sources. The dry build reads their build state and writes
+/// nothing.
+#[tracing::instrument(
+    name = "compile_diagnostics.typescript.referenced_projects_out_of_date",
+    level = "trace",
+    skip_all
+)]
+pub async fn referenced_projects_out_of_date(
+    admission: &TypeScriptCompilerAdmission,
+    compiler: &Path,
+    project_root: &Path,
+    references: &[PathBuf],
+) -> Result<Option<String>> {
+    // The statements below are matched in the locale they are requested in.
+    let mut args = vec![OsStr::new("--build")];
+    args.extend(references.iter().map(|reference| reference.as_os_str()));
+    args.extend(["--dry", "--pretty", "false", "--locale", "en"].map(OsStr::new));
+    let output = run_admitted(admission, compiler, project_root, args, None, CHECK_LIMITS).await?;
+    let subject = references.first().map_or(project_root, PathBuf::as_path);
+    if !output.status.success() {
+        return Err(exited(compiler, &output, "dry-building", subject));
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let pending = stdout
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        // Each status line leads with the time it was reported.
+        .map(|line| {
+            line.split_once(" - ")
+                .map_or(line, |(_, statement)| statement)
+        })
+        .filter(|statement| !is_current_build_statement(statement))
+        .collect::<Vec<_>>();
+    Ok((!pending.is_empty()).then(|| pending.join("; ")))
+}
+
+/// tsc's dry-build statements for a project whose outputs it would keep:
+/// up to date, or current but for their timestamps.
+fn is_current_build_statement(statement: &str) -> bool {
+    (statement.starts_with("Project '") && statement.ends_with("' is up to date"))
+        || (statement
+            .starts_with("A non-dry build would update timestamps for output of project '")
+            && statement.ends_with('\''))
 }
 
 struct CancelOnDrop(CancellationToken);
@@ -471,11 +712,26 @@ src/b.ts(2,2): warning TS6133: Second.
         native_runtime::block_on(future).expect("native runtime")
     }
 
-    #[cfg(unix)]
     fn admission() -> TypeScriptCompilerAdmission {
         TypeScriptCompilerAdmission::new(Arc::new(ProcessBackgroundCpuV1::new(
             std::num::NonZeroUsize::new(MAX_CONCURRENT_COMPILERS).unwrap(),
         )))
+    }
+
+    #[tokio::test]
+    async fn overlapping_checks_are_serialized_only_by_build_info_path() {
+        let admission = admission();
+        let build_info = Path::new("one.tsbuildinfo");
+        let held = admission.serialize_build_info(build_info).await;
+        let mut overlapping = Box::pin(admission.serialize_build_info(build_info));
+        assert!(futures_util::poll!(overlapping.as_mut()).is_pending());
+
+        let independent = admission
+            .serialize_build_info(Path::new("two.tsbuildinfo"))
+            .await;
+        drop(independent);
+        drop(held);
+        overlapping.await;
     }
 
     #[cfg(unix)]
@@ -498,6 +754,7 @@ src/b.ts(2,2): warning TS6133: Second.
                 &compiler,
                 project.path(),
                 &tsconfig,
+                None,
                 None,
             ))
             .unwrap_or_else(|error| panic!("exit {exit} is a checked project: {error}"));
@@ -530,6 +787,7 @@ src/b.ts(2,2): warning TS6133: Second.
                 project.path(),
                 &project.path().join("tsconfig.json"),
                 None,
+                None,
             ));
             assert!(result.is_err(), "exit {exit} and report {report:?}");
         }
@@ -546,6 +804,7 @@ src/b.ts(2,2): warning TS6133: Second.
             &compiler,
             project.path(),
             &project.path().join("tsconfig.json"),
+            None,
             None,
         ))
         .expect("clean compiler exit");
@@ -568,6 +827,7 @@ src/b.ts(2,2): warning TS6133: Second.
             &compiler,
             project.path(),
             &project.path().join("tsconfig.json"),
+            None,
             None,
         ))
         .expect_err("a file-less tsc error is not a clean project");
@@ -608,7 +868,8 @@ src/b.ts(2,2): warning TS6133: Second.
                 &compiler,
                 project.path(),
                 &tsconfig,
-                None
+                None,
+                None,
             ));
             let started = std::pin::pin!(async {
                 loop {
@@ -661,6 +922,98 @@ src/b.ts(2,2): warning TS6133: Second.
 
     #[cfg(unix)]
     #[test]
+    fn dropping_a_check_keeps_build_info_locked_until_the_child_is_reaped() {
+        let project = tempfile::tempdir().unwrap();
+        let compiler = project.path().join("tsc");
+        let pid_file = project.path().join("tsc.pid");
+        write_executable_script(
+            &compiler,
+            "#!/bin/sh\necho $$ > tsc.pid.tmp && mv tsc.pid.tmp tsc.pid\nexec sleep 60\n",
+        )
+        .unwrap();
+        let tsconfig = project.path().join("tsconfig.json");
+        let build_info = project.path().join("check.tsbuildinfo");
+        let admission = admission();
+        block(async {
+            let guard = admission.serialize_build_info(&build_info).await;
+            let check = Box::pin(run_compiler(
+                &admission,
+                &compiler,
+                project.path(),
+                &tsconfig,
+                Some(&build_info),
+                Some(guard),
+            ));
+            let started = std::pin::pin!(async {
+                loop {
+                    if let Ok(pid) = std::fs::read_to_string(&pid_file) {
+                        return pid.trim().to_owned();
+                    }
+                    native_runtime::sleep_until(Instant::now() + Duration::from_millis(10))
+                        .await
+                        .unwrap();
+                }
+            });
+            let (check, pid) = match futures_util::future::select(check, started).await {
+                futures_util::future::Either::Left((result, _)) => {
+                    panic!("the check finished before it was dropped: {result:?}")
+                }
+                futures_util::future::Either::Right((pid, check)) => (check, pid),
+            };
+            assert!(
+                Command::new("kill")
+                    .args(["-0", &pid])
+                    .output()
+                    .unwrap()
+                    .status
+                    .success()
+            );
+            let mut replacement = Box::pin(admission.serialize_build_info(&build_info));
+            assert!(futures_util::poll!(replacement.as_mut()).is_pending());
+            drop(check);
+            let deadline = Box::pin(native_runtime::sleep_until(
+                Instant::now() + Duration::from_secs(10),
+            ));
+            let deadline = match futures_util::future::select(replacement, deadline).await {
+                futures_util::future::Either::Left((guard, deadline)) => {
+                    assert!(
+                        !Command::new("kill")
+                            .args(["-0", &pid])
+                            .output()
+                            .unwrap()
+                            .status
+                            .success(),
+                        "the build-info lock was released before tsc {pid} was reaped"
+                    );
+                    drop(guard);
+                    deadline
+                }
+                futures_util::future::Either::Right(_) => {
+                    panic!("child settlement retained the build-info lock")
+                }
+            };
+            // The worker drops its build-info guard and compiler permit
+            // separately. Observe full settlement within the same deadline.
+            let settled = Box::pin(
+                Arc::clone(&admission.permits).acquire_many_owned(MAX_CONCURRENT_COMPILERS as u32),
+            );
+            match futures_util::future::select(settled, deadline).await {
+                futures_util::future::Either::Left((permits, _)) => {
+                    drop(permits.expect("compiler admission remains open"));
+                }
+                futures_util::future::Either::Right(_) => {
+                    panic!("child settlement retained a compiler permit")
+                }
+            }
+        });
+        assert_eq!(
+            admission.permits.available_permits(),
+            MAX_CONCURRENT_COMPILERS
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn dropping_a_waiting_check_never_spawns_and_releases_its_demand() {
         let project = tempfile::tempdir().unwrap();
         let compiler = project.path().join("tsc");
@@ -679,13 +1032,14 @@ src/b.ts(2,2): warning TS6133: Second.
                 project.path(),
                 &tsconfig,
                 None,
+                None,
             ));
             assert!(futures_util::poll!(waiting.as_mut()).is_pending());
             assert!(!project.path().join("ran").exists());
             drop(waiting);
             drop(held);
             assert!(
-                run_compiler(&admission, &compiler, project.path(), &tsconfig, None)
+                run_compiler(&admission, &compiler, project.path(), &tsconfig, None, None)
                     .await
                     .unwrap()
                     .is_empty()
@@ -721,6 +1075,7 @@ src/b.ts(2,2): warning TS6133: Second.
                 project.path(),
                 &tsconfig,
                 None,
+                None,
             ));
             assert!(futures_util::poll!(waiting.as_mut()).is_pending());
             admission.cancel();
@@ -733,7 +1088,7 @@ src/b.ts(2,2): warning TS6133: Second.
             );
             drop(held);
             assert!(
-                run_compiler(&admission, &compiler, project.path(), &tsconfig, None)
+                run_compiler(&admission, &compiler, project.path(), &tsconfig, None, None)
                     .await
                     .is_err()
             );
@@ -772,7 +1127,8 @@ src/b.ts(2,2): warning TS6133: Second.
                 &compiler,
                 project.path(),
                 &tsconfig,
-                None
+                None,
+                None,
             ))
             .unwrap()
             .is_empty()
@@ -809,6 +1165,7 @@ src/b.ts(2,2): warning TS6133: Second.
             project.path(),
             &tsconfig,
             None,
+            None,
             CheckLimits {
                 deadline: Duration::from_secs(30),
                 ..tiny_limits()
@@ -829,6 +1186,7 @@ src/b.ts(2,2): warning TS6133: Second.
             &compiler,
             project.path(),
             &project.path().join("tsconfig.json"),
+            None,
             None,
             CheckLimits {
                 deadline: Duration::from_secs(30),
@@ -858,6 +1216,7 @@ src/b.ts(2,2): warning TS6133: Second.
             project.path(),
             &tsconfig,
             None,
+            None,
             tiny_limits(),
         ))
         .expect_err("a stalled compiler never reports clean");
@@ -879,6 +1238,7 @@ src/b.ts(2,2): warning TS6133: Second.
             &compiler,
             project.path(),
             &project.path().join("tsconfig.json"),
+            None,
             None,
             CheckLimits {
                 deadline: Duration::from_secs(30),
@@ -909,8 +1269,9 @@ src/b.ts(2,2): warning TS6133: Second.
         let tsconfig = project.path().join("tsconfig.json");
         let admission = admission();
         let results = block(futures_util::future::join_all(
-            (0..MAX_CONCURRENT_COMPILERS * 3)
-                .map(|_| run_compiler(&admission, &compiler, project.path(), &tsconfig, None)),
+            (0..MAX_CONCURRENT_COMPILERS * 3).map(|_| {
+                run_compiler(&admission, &compiler, project.path(), &tsconfig, None, None)
+            }),
         ));
         assert!(results.iter().all(Result::is_ok), "{results:?}");
         let seen = std::fs::read_to_string(project.path().join("seen")).unwrap();

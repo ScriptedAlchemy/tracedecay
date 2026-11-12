@@ -1822,7 +1822,7 @@ fn spool_from_hook_while_held(root: &Path) {
     );
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn a_hook_behind_a_held_commit_lock_returns_and_its_event_replays_once() {
     let root = TestDir::new("hook-commit-held");
     let held = CommitLockV1::acquire(&root.0, COMMIT_WAIT).unwrap();
@@ -1837,7 +1837,7 @@ async fn a_hook_behind_a_held_commit_lock_returns_and_its_event_replays_once() {
     assert_eq!((pass.committed, admitted), (0, Vec::new()));
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn a_hook_behind_a_held_writer_lease_returns_and_its_event_replays_once() {
     let root = TestDir::new("hook-lease-held");
     let config = HookSpoolConfigV1::stock(NativeHostIdentityV1::CursorDesktop);

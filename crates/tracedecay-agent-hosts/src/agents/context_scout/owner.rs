@@ -36,9 +36,10 @@ use super::{
     ContextScoutModelExecutionV1, ContextScoutModelFuture, ContextScoutModelRequestV1,
     ContextScoutMutationBindingV1, ContextScoutMutationResultV1,
     ContextScoutMutationSettlementOutcomeV1, ContextScoutPublicMutationV1,
-    ContextScoutRecentReadOutcomeV1, ContextScoutRecentStateV1, ContextScoutRouteV1,
-    ContextScoutRuntimeOutcomeV1, ContextScoutSelectionInputV1, ContextScoutServiceStateV1,
-    ContextScoutStatusV1, ContextScoutSuppressionV1, ProjectContextScoutDurableStoreV1,
+    ContextScoutRecentDeliveryV1, ContextScoutRecentReadOutcomeV1, ContextScoutRecentStateV1,
+    ContextScoutRouteV1, ContextScoutRuntimeOutcomeV1, ContextScoutSelectionInputV1,
+    ContextScoutServiceStateV1, ContextScoutStatusV1, ContextScoutSuppressionV1,
+    ProjectContextScoutDurableStoreV1,
 };
 use tracedecay_runtime_core::db::Database;
 
@@ -814,6 +815,24 @@ impl ProjectContextScoutOwnerV1 {
                 Err(ContextScoutErrorV1::ConfigurationUnavailable)
             }
         }
+    }
+
+    /// Exact delivery proof for one durable address and envelope identity,
+    /// independent of the bounded recent-page projection.
+    pub async fn delivery_exact(
+        &self,
+        address: ContextScoutAddressV1,
+        envelope_id: [u8; 16],
+    ) -> Result<Option<ContextScoutRecentDeliveryV1>, ContextScoutErrorV1> {
+        let configuration = self.configuration.read().await;
+        let revision = configuration
+            .as_ref()
+            .ok_or(ContextScoutErrorV1::ConfigurationUnavailable)?
+            .control()
+            .configuration_revision;
+        self.store
+            .delivery_exact(address, revision, envelope_id)
+            .await
     }
 
     pub async fn explain_exact(

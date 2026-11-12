@@ -702,7 +702,7 @@ mod tests {
         }
     }
 
-    #[asupersync::test]
+    #[tokio::test]
     async fn an_unknown_or_empty_session_yields_an_empty_window() {
         let seed = Seed::open("window-empty").await;
         assert_eq!(
@@ -737,7 +737,7 @@ mod tests {
         }
     }
 
-    #[asupersync::test]
+    #[tokio::test]
     async fn the_last_user_turns_and_their_replies_are_kept_oldest_first() {
         let seed = Seed::open("window-turns").await;
         seed_conversation(&seed).await;
@@ -788,7 +788,7 @@ mod tests {
         assert_eq!(everything.messages.len(), 6);
     }
 
-    #[asupersync::test]
+    #[tokio::test]
     async fn the_message_cap_drops_the_oldest_first() {
         let seed = Seed::open("window-message-cap").await;
         seed_conversation(&seed).await;
@@ -809,7 +809,7 @@ mod tests {
         );
     }
 
-    #[asupersync::test]
+    #[tokio::test]
     async fn the_byte_cap_keeps_the_newest_messages() {
         let seed = Seed::open("window-byte-cap").await;
         seed_conversation(&seed).await;
@@ -842,7 +842,7 @@ mod tests {
         assert_eq!(texts(&tiny), vec!["third"]);
     }
 
-    #[asupersync::test]
+    #[tokio::test]
     async fn cursor_tool_calls_come_from_canonical_metadata() {
         let seed = Seed::open("window-cursor-tools").await;
         seed.session(PROVIDER, SESSION).await;
@@ -883,7 +883,7 @@ mod tests {
         );
     }
 
-    #[asupersync::test]
+    #[tokio::test]
     async fn non_assistant_metadata_cannot_forge_tool_activity() {
         let seed = Seed::open("window-untrusted-tool-metadata").await;
         seed.session(PROVIDER, SESSION).await;
@@ -921,7 +921,7 @@ mod tests {
         );
     }
 
-    #[asupersync::test]
+    #[tokio::test]
     async fn tool_events_alone_still_name_the_tools() {
         let calls = tool_calls_from_metadata(
             &json!({"tool_events": [
@@ -940,7 +940,7 @@ mod tests {
         assert!(tool_calls_from_metadata("not json").is_empty());
     }
 
-    #[asupersync::test]
+    #[tokio::test]
     async fn typed_fact_hosts_name_tools_through_the_tool_names_column() {
         let seed = Seed::open("window-claude-tools").await;
         seed.session("claude", SESSION).await;
@@ -987,7 +987,7 @@ mod tests {
     /// whose text is the argument payload and whose `tool_names` holds the
     /// tool (`terminal` / `exec_command`), as asserted by the ingest suites
     /// `transcript_ingest_suite/hermes.rs` and `codex_response_items.rs`.
-    #[asupersync::test]
+    #[tokio::test]
     async fn hermes_and_codex_tool_invocation_rows_become_tool_calls() {
         for (provider, tool, payload) in [
             ("hermes", "terminal", "cargo test billing"),
@@ -1026,7 +1026,7 @@ mod tests {
         }
     }
 
-    #[asupersync::test]
+    #[tokio::test]
     async fn freshness_follows_the_newest_message_age() {
         let seed = Seed::open("window-freshness").await;
         seed_conversation(&seed).await;
@@ -1082,7 +1082,7 @@ mod tests {
         );
     }
 
-    #[asupersync::test]
+    #[tokio::test]
     async fn the_digest_is_stable_and_tracks_content_and_identity() {
         let seed = Seed::open("window-digest").await;
         seed_conversation(&seed).await;

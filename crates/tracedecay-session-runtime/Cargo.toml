@@ -18,13 +18,12 @@ doctest = false
 test-helpers = []
 
 [dependencies]
-asupersync.workspace = true
 futures-util.workspace = true
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
 sha2.workspace = true
 tempfile.workspace = true
-tokio = { workspace = true, features = ["macros", "rt", "sync"] }
+tokio = { workspace = true, features = ["io-util", "macros", "net", "rt", "rt-multi-thread", "sync", "time"] }
 tracing.workspace = true
 tracedecay-contracts = { path = "../tracedecay-contracts" }
 tracedecay-code-index = { path = "../tracedecay-code-index", default-features = false }

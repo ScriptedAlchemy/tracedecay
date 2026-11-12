@@ -24,7 +24,7 @@ const RAW_MESSAGE_TEST_SCHEMA: &str = "CREATE TABLE lcm_raw_messages (
     source_offset INTEGER
 );";
 
-#[asupersync::test]
+#[tokio::test]
 async fn exact_identity_reader_rejects_tampered_inline_content() {
     let temp = tempfile::tempdir().expect("temporary directory");
     let conn = TestConnection::open(&temp.path().join("sessions.db"));
@@ -53,7 +53,7 @@ async fn exact_identity_reader_rejects_tampered_inline_content() {
     assert_eq!(result, Err(super::LcmError::PayloadIntegrityMismatch));
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn exact_identity_reader_rejects_missing_inline_content() {
     let temp = tempfile::tempdir().expect("temporary directory");
     let conn = TestConnection::open(&temp.path().join("sessions.db"));
@@ -82,7 +82,7 @@ async fn exact_identity_reader_rejects_missing_inline_content() {
     assert_eq!(result, Err(super::LcmError::PayloadIntegrityMismatch));
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn inline_upsert_preserves_the_storage_failure_cause() {
     let temp = tempfile::tempdir().expect("temporary directory");
     let conn = TestConnection::open(&temp.path().join("sessions.db"));
@@ -124,7 +124,7 @@ async fn inline_upsert_preserves_the_storage_failure_cause() {
     );
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn predecessor_range_skips_policy_anchor_roles() {
     let temp = tempfile::tempdir().expect("temporary directory");
     let conn = TestConnection::open(&temp.path().join("sessions.db"));
@@ -207,7 +207,7 @@ async fn predecessor_range_skips_policy_anchor_roles() {
     assert_eq!(row.get::<i64>(1).expect("to"), 1);
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn message_record_readers_restore_compacted_bodies_and_reject_missing_bytes() {
     let temp = tempfile::tempdir().unwrap();
     let conn = TestConnection::open(&temp.path().join("body-record.db"));
@@ -254,7 +254,7 @@ async fn message_record_readers_restore_compacted_bodies_and_reject_missing_byte
     );
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn privacy_rewrites_preserve_projection_location_authority() {
     let temp = tempfile::tempdir().expect("temporary directory");
     let conn = TestConnection::open(&temp.path().join("sessions.db"));

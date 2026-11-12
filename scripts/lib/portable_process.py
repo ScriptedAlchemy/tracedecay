@@ -326,7 +326,7 @@ def command_realpath(args: argparse.Namespace) -> int:
     return 0
 
 
-def _resident_memory_kib(pid: int) -> tuple[int | None, int | None]:
+def resident_memory_kib(pid: int) -> tuple[int | None, int | None]:
     """Current and peak resident set size of `pid` in KiB, when measurable.
 
     Linux exposes both through `/proc/<pid>/status` (`VmRSS`, `VmHWM`). Other
@@ -373,7 +373,7 @@ def _render_kib(value: int | None) -> str:
 
 
 def command_resident_memory(args: argparse.Namespace) -> int:
-    current, peak = _resident_memory_kib(args.pid)
+    current, peak = resident_memory_kib(args.pid)
     print(f"rss_kib={_render_kib(current)} peak_rss_kib={_render_kib(peak)}")
     return 0
 

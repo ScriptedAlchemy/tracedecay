@@ -1316,14 +1316,18 @@ mod native_tests {
     use super::*;
 
     #[test]
-    fn explorer_query_settles_without_a_tokio_runtime() {
+    fn explorer_query_settles_on_the_process_runtime() {
+        if !crate::test_support::alone_with_storage_wait_counters() {
+            return;
+        }
         let fixture = tokio::runtime::Runtime::new().expect("fixture runtime");
         let (_project, dash) = fixture.block_on(crate::events_api::dashboard_state_fixture(
             "project.dashboard-explorer-native",
         ));
         let writer_waits = native_runtime::native_thread_writer_waits();
+        let process_runtime = native_runtime::handle().expect("process runtime").id();
         let state = native_runtime::block_on(async move {
-            assert!(tokio::runtime::Handle::try_current().is_err());
+            assert_eq!(tokio::runtime::Handle::current().id(), process_runtime);
             let response = create_query(
                 State(dash.clone()),
                 RequestControl(DashboardHttpRequestControlV1::test_fixture(
