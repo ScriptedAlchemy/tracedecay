@@ -2428,7 +2428,9 @@ fn build_sealed_container_with_work(
         // The container writer takes a pathname. Resolve the held staging
         // handle to the path of the directory it owns, so a staging name
         // replaced by a link or a foreign directory cannot redirect the
-        // container into that tree.
+        // container into that tree. Linux retains that authority through
+        // /proc/self/fd; macOS and Windows still require a Grafeo open-file
+        // writer to close substitution of the resolved pathname itself.
         let container_path = staging
             .path()
             .map_err(|error| sealed_store_io_failure("container staging path failed", error))?

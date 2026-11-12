@@ -372,11 +372,11 @@ fn open_root_nofollow(root_path: &Path) -> io::Result<Dir> {
     parent.open_dir_nofollow(root_name)
 }
 
-/// A directory held open for a producer's writes. Every mutation is relative
-/// to this handle, so replacing the pathname cannot redirect bytes into a
-/// foreign tree. The one path-based writer resolves [`Self::path`] from the
-/// handle, which names the directory this handle owns rather than the
-/// substitutable entry name.
+/// A directory held open for a producer's writes. This type's own mutations
+/// are relative to the handle, so replacing the pathname cannot redirect them
+/// into a foreign tree. [`Self::path`] also lets a path-based writer start
+/// from the held directory rather than the substitutable entry name; its
+/// platform-specific authority is documented on that method.
 pub struct HeldDirectory {
     directory: Dir,
 }
@@ -395,9 +395,11 @@ pub struct DirectoryIdentity {
 }
 
 impl HeldDirectory {
-    /// Exclusively creates `name` beneath `root_path` and holds it. An
-    /// occupied name is never adopted: the caller owns only the entry it
-    /// created.
+    /// Exclusively creates `name` beneath `root_path`, refusing an entry that
+    /// occupied the name at creation, then opens the entry without following
+    /// a link and holds it. Directory creation and acquisition are separate
+    /// operating-system operations; a concurrent substitution between them
+    /// remains outside this primitive's authority.
     pub fn create_exclusive(root_path: &Path, name: &OsStr) -> io::Result<Self> {
         single_component(name)?;
         let root = open_root_nofollow(root_path)?;
@@ -472,9 +474,14 @@ impl HeldDirectory {
         parent.hard_link(source_name, &self.directory, name)
     }
 
-    /// Resolves this held directory to a path that names the same inode, so a
-    /// path-based writer can create a child without going through a
-    /// substitutable ancestor name.
+    /// Resolves this held directory to a path that names the same inode at
+    /// resolution time, so a path-based writer need not start from the
+    /// substitutable entry name. On Linux the `/proc/self/fd` path continues
+    /// to follow the held inode. `F_GETPATH` on macOS and
+    /// `GetFinalPathNameByHandleW` on Windows return a pathname snapshot:
+    /// substituting that resolved path before the consumer opens it remains a
+    /// race. Those platforms need an open-file consumer API for end-to-end
+    /// producer authority.
     pub fn path(&self) -> io::Result<std::path::PathBuf> {
         held_directory_path(&self.directory)
     }
