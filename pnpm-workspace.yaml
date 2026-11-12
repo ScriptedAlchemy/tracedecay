@@ -3,6 +3,7 @@ packages:
   - sdks/typescript
   - plugin/cursor-native-extension
   - plugin/chatgpt-extension
+  - tests/typescript5
 
 onlyBuiltDependencies:
   - esbuild

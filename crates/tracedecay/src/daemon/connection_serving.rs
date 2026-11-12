@@ -2292,9 +2292,10 @@ mod broker_dispatch_admission_tests {
         daemon_end
             .set_nonblocking(true)
             .expect("nonblocking daemon end");
-        let daemon_end = BrokerStream::Unix(
-            asupersync::net::unix::UnixStream::from_std(daemon_end).expect("daemon end"),
-        );
+        let daemon_end = native_runtime::block_on(async {
+            BrokerStream::Unix(tokio::net::UnixStream::from_std(daemon_end).expect("daemon end"))
+        })
+        .expect("process runtime");
         let (barrier, lifted) = tokio::sync::watch::channel(false);
         let invocation = DaemonInvocationState::default();
         let connection = NativeTask::spawn(with_connection_admission(permit, async move {

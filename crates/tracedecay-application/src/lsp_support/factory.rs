@@ -1108,7 +1108,7 @@ mod tests {
     }
 
     #[test]
-    fn context_projection_settles_without_a_tokio_runtime() {
+    fn context_projection_settles_from_a_plain_thread() {
         let factory = DaemonLspSessionFactory::new(
             Arc::new(RuntimeFeedback),
             Arc::new(UnavailableSemanticProvider),
@@ -1146,7 +1146,7 @@ mod tests {
         assert_eq!(outcome, ContextProjectionOutcome::Unsupported);
     }
 
-    /// Reports whether each feedback cycle ran on a Tokio worker.
+    /// Reports whether each feedback cycle has the process runtime available.
     struct SignalFeedback(std::sync::Mutex<std::sync::mpsc::Sender<bool>>);
 
     impl FeedbackCycleRuntimePort for SignalFeedback {
@@ -1163,7 +1163,7 @@ mod tests {
     }
 
     #[test]
-    fn feedback_cycles_and_document_diagnostics_settle_without_a_tokio_runtime() {
+    fn feedback_cycles_and_document_diagnostics_settle_from_a_plain_thread() {
         let (ran, cycles) = std::sync::mpsc::channel();
         let factory = DaemonLspSessionFactory::new(
             Arc::new(SignalFeedback(std::sync::Mutex::new(ran))),
@@ -1191,7 +1191,10 @@ mod tests {
         let on_tokio = cycles
             .recv_timeout(std::time::Duration::from_secs(10))
             .expect("the accepted feedback cycle ran");
-        assert!(!on_tokio, "the feedback cycle ran on a Tokio worker");
+        assert!(
+            on_tokio,
+            "the feedback cycle must enter the process runtime"
+        );
 
         let diagnostics = factory.diagnostic_port();
         assert!(matches!(

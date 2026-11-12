@@ -39,7 +39,7 @@ use tracedecay_mcp::handlers::dashboard_lcm::DashboardLcmReadAdapter;
 
 use code_reads::DashboardCodeReadAdapter;
 use tracedecay_dashboard_api::{
-    AutomationSchedulerReconciler, ConnectionExecutor, DEFAULT_PORT, DashboardApplicationRouters,
+    AutomationSchedulerReconciler, DEFAULT_PORT, DashboardApplicationRouters,
     DashboardApplicationRuntime, DashboardAutomationWriter,
     DashboardCodeIndexWorkerConfigurationV1, DashboardCodeIndexWorkerSettingsCommitFuture,
     DashboardCodeIndexWorkerSettingsCommitV1, DashboardCodeIndexWorkerSettingsErrorV1,
@@ -1133,7 +1133,7 @@ pub(super) async fn compute_dashboard(
             let task_completion = DashboardTaskCompletion(Arc::clone(&completed));
             let task = NativeTask::spawn(async move {
                 let _completion = task_completion;
-                serve_loopback(ConnectionExecutor::Native, listener, app, async move {
+                serve_loopback(listener, app, async move {
                     let _ = shutdown_rx.await;
                 })
                 .await;

@@ -3,7 +3,7 @@ use std::{
     time::Instant,
 };
 
-use asupersync::channel::oneshot;
+use tokio::sync::oneshot;
 use tracedecay_store::{
     OperationPriorityV1, RuntimeRequestProbeV1, RuntimeSubmitOutcomeV1, RuntimeSubmitRequestV1,
     StorageRuntimeErrorV1, StoreClientIdV1, StoreOperationIdV1,
@@ -57,7 +57,7 @@ impl SharedReply {
         if let Some(settled) = &state.settled {
             let result = settled.result.clone();
             drop(state);
-            let _ = follower.send_blocking(result);
+            let _ = follower.send(result);
             return;
         }
         state.followers.push(follower);
@@ -100,10 +100,10 @@ impl SharedReply {
         let followers = std::mem::take(&mut state.followers);
         drop(state);
         for follower in followers {
-            let _ = follower.send_blocking(result.clone());
+            let _ = follower.send(result.clone());
         }
         if let Some(leader) = leader {
-            let _ = leader.send_blocking(result);
+            let _ = leader.send(result);
         }
     }
 }
@@ -218,7 +218,7 @@ impl CheckpointCommand {
     }
 
     pub(super) fn settle(self, result: CheckpointRequestResult) {
-        let _ = self.reply.send_blocking(result);
+        let _ = self.reply.send(result);
     }
 
     pub(super) fn into_parts(
@@ -242,7 +242,7 @@ pub(super) struct CheckpointReply(oneshot::Sender<CheckpointRequestResult>);
 
 impl CheckpointReply {
     pub(super) fn settle(self, result: CheckpointRequestResult) {
-        let _ = self.0.send_blocking(result);
+        let _ = self.0.send(result);
     }
 }
 
@@ -266,6 +266,6 @@ impl IncrementalVacuumCommand {
     }
 
     pub(super) fn settle(self, result: Result<(), WriterActorError>) {
-        let _ = self.reply.send_blocking(result);
+        let _ = self.reply.send(result);
     }
 }

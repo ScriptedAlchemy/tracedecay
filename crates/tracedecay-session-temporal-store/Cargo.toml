@@ -42,7 +42,7 @@ tracedecay-store = { path = "../tracedecay-store" }
 tracedecay-temporal-query = { path = "../tracedecay-temporal-query" }
 
 [dev-dependencies]
-asupersync.workspace = true
+tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros", "time", "sync", "io-util", "net"] }
 tempfile.workspace = true
 tracedecay-graph-db = { path = "../tracedecay-graph-db", features = ["test-helpers"] }
 # Dev-dep cycle is allowed: this crate's unit tests need the registered

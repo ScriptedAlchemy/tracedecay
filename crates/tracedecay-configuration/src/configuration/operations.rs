@@ -823,7 +823,7 @@ mod tests {
         assert_eq!(result, Err(ConfigurationError::PolicyWideningForbidden));
     }
 
-    #[asupersync::test]
+    #[tokio::test]
     async fn retained_sync_settings_are_listed_and_resolve_to_their_default() {
         let registry = ConfigurationRegistry::core().unwrap();
         let store = Store {
@@ -910,7 +910,7 @@ mod tests {
     /// `not_found_or_not_authorized`, so every profile whose snapshot was
     /// written before a key was registered looked as though the setting did
     /// not exist at all.
-    #[asupersync::test]
+    #[tokio::test]
     async fn get_resolves_a_registered_setting_missing_from_the_snapshot_to_its_default() {
         let store = Store {
             current: ConfigurationCurrentStateV1 {
@@ -969,7 +969,7 @@ mod tests {
         );
     }
 
-    #[asupersync::test]
+    #[tokio::test]
     async fn protected_dry_run_persists_the_exact_operation_beside_its_redacted_plan() {
         let revision_id: ConfigurationRevisionId = id("configuration.revision.fixture");
         let scope_digest = digest('a');
@@ -1050,7 +1050,7 @@ mod tests {
 
     /// A preview answers exactly what apply's validator answers: a change
     /// apply refuses gets no plan, and the refusal is apply's typed reason.
-    #[asupersync::test]
+    #[tokio::test]
     async fn protected_dry_run_refuses_what_apply_refuses_with_the_same_reason() {
         let revision_id: ConfigurationRevisionId = id("configuration.revision.parity");
         let scope_digest = digest('a');
@@ -1128,7 +1128,7 @@ mod tests {
         );
     }
 
-    #[asupersync::test]
+    #[tokio::test]
     async fn protected_apply_restart_replays_original_receipt_after_plan_expiry() {
         let actor_id: ActorId = id("actor.configuration.replay");
         let revision_id: ConfigurationRevisionId = id("configuration.revision.replay.base");

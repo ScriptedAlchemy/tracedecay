@@ -1194,7 +1194,7 @@ mod table_growth_tests {
         (database, scope)
     }
 
-    #[asupersync::test]
+    #[tokio::test]
     async fn readers_see_the_growth_the_maintenance_pass_measured_on_a_large_store() {
         let temporary = tempfile::tempdir().expect("telemetry fixture root");
         let database_path = temporary.path().join("project.db");
@@ -1281,7 +1281,7 @@ mod table_growth_tests {
         (database, store, port)
     }
 
-    #[asupersync::test]
+    #[tokio::test]
     async fn store_size_reports_the_exact_page_pragmas() {
         let temporary = tempfile::tempdir().expect("telemetry fixture root");
         let (_database, store, port) =
@@ -1298,7 +1298,7 @@ mod table_growth_tests {
         assert!(sample.freelist_pages <= sample.page_count);
     }
 
-    #[asupersync::test]
+    #[tokio::test]
     async fn a_table_created_after_the_baseline_is_pending_rather_than_grown_from_zero() {
         let temporary = tempfile::tempdir().expect("telemetry fixture root");
         let (database, store, port) =
@@ -1340,7 +1340,7 @@ mod table_growth_tests {
         assert!(pending.current_bytes.get() > 0);
     }
 
-    #[asupersync::test]
+    #[tokio::test]
     async fn another_store_is_denied_without_bytes() {
         let temporary = tempfile::tempdir().expect("telemetry fixture root");
         let (_database, _store, port) =
@@ -1359,7 +1359,7 @@ mod table_growth_tests {
         );
     }
 
-    #[asupersync::test]
+    #[tokio::test]
     async fn a_telemetry_wait_yields_the_polling_thread() {
         let temporary = tempfile::tempdir().expect("telemetry fixture root");
         let (database, store, port) = fixture_port(
@@ -1412,7 +1412,7 @@ mod table_growth_tests {
         );
     }
 
-    #[asupersync::test]
+    #[tokio::test]
     async fn an_over_budget_store_is_not_walked_until_it_shrinks_or_the_mark_ages_out() {
         let temporary = tempfile::tempdir().expect("telemetry fixture root");
         let (_database, store, port) =
@@ -1487,7 +1487,7 @@ mod table_growth_tests {
         assert_eq!(port.table_growth_state().over_budget, None);
     }
 
-    #[asupersync::test]
+    #[tokio::test]
     async fn freed_pages_retry_a_timed_out_census_without_file_compaction() {
         let temporary = tempfile::tempdir().expect("telemetry fixture root");
         let (database, store, port) =
@@ -1575,7 +1575,7 @@ mod table_growth_restart_tests {
         OverBudgetTableSizeWalk, StoreTelemetrySamplingRegistry, storage_telemetry_request_context,
     };
 
-    #[asupersync::test]
+    #[tokio::test]
     async fn a_restarted_registry_reports_the_persisted_measurement() {
         let temporary = tempfile::tempdir().expect("profile root");
         let profile_root = temporary.path().join("profile");
@@ -1635,7 +1635,7 @@ mod table_growth_restart_tests {
                 .all(|sample| sample.previous_observed_at == observed_at)
         );
     }
-    #[asupersync::test]
+    #[tokio::test]
     async fn restart_reprobes_a_timed_out_census_without_losing_the_baseline() {
         let temporary = tempfile::tempdir().expect("profile root");
         let profile_root = temporary.path().join("profile");
@@ -1743,7 +1743,7 @@ mod store_file_identity_tests {
     }
 
     #[cfg(not(windows))]
-    #[asupersync::test]
+    #[tokio::test]
     async fn a_mounted_store_path_reports_replacement_and_removal() {
         let temporary = tempfile::tempdir().expect("identity fixture root");
         let database_path = temporary.path().join("project.db");
@@ -1785,7 +1785,7 @@ mod store_file_identity_tests {
     }
 
     #[cfg(windows)]
-    #[asupersync::test]
+    #[tokio::test]
     async fn a_mounted_windows_store_refuses_replacement_and_removal() {
         let temporary = tempfile::tempdir().expect("identity fixture root");
         let database_path = temporary.path().join("project.db");
@@ -1903,7 +1903,7 @@ mod registry_tests {
         );
     }
 
-    #[asupersync::test]
+    #[tokio::test]
     async fn shutdown_release_clears_retained_telemetry_handles() {
         let temporary = tempfile::tempdir().expect("telemetry registry fixture root");
         let database_path = temporary.path().join("project.db");

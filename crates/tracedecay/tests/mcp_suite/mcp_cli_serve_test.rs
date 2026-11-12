@@ -1116,13 +1116,15 @@ async fn no_explicit_path_prefers_discovered_cwd_over_initialize_roots() {
     let active = init_project_with_file(home.path(), "pub fn active_project_marker() {}\n").await;
     let _daemon = common::spawn_tracedecay_daemon(home.path());
 
-    let output = run_serve_runtime_with_initialize_root(
-        home.path(),
-        &nested_cwd,
-        None,
-        file_uri(active.path()),
-        "active",
-    );
+    // Serving a stdio host is blocking. Drive it off the test's current-thread
+    // Tokio worker so project initialization's retained async work can progress.
+    let home_path = home.path().to_path_buf();
+    let root_uri = file_uri(active.path());
+    let output = tokio::task::spawn_blocking(move || {
+        run_serve_runtime_with_initialize_root(&home_path, &nested_cwd, None, root_uri, "active")
+    })
+    .await
+    .expect("serve runtime host session");
 
     assert_eq!(
         canonical_path_string(Path::new(&runtime_project_root(&output.stdout, 2))),

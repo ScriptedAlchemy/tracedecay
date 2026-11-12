@@ -17,7 +17,7 @@ use super::{
     storage_telemetry_request_context,
 };
 
-#[asupersync::test]
+#[tokio::test]
 async fn logical_reclamation_retries_a_timed_out_census_without_shrinking_the_file() {
     let temporary = tempfile::tempdir().expect("telemetry reclamation fixture");
     let database_path = temporary.path().join("project.db");

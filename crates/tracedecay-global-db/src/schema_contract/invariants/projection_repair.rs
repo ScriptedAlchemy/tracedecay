@@ -409,7 +409,7 @@ mod tests {
     /// A row whose content survived but whose content hash did not still
     /// fails hydration with `PayloadIntegrityMismatch`. Content equality alone
     /// is not the row a fresh projection write stores.
-    #[asupersync::test]
+    #[tokio::test]
     async fn current_provenance_repairs_a_row_with_a_stale_hash() {
         let directory = TempDir::new().unwrap();
         let runtime = HostAdmissionTestRuntimeV1::profile(directory.path())
@@ -471,7 +471,7 @@ mod tests {
     /// The repair above is the shipped rendering, not any disagreement under
     /// current provenance. A body neither this binary nor a release wrote is
     /// tamper: the audit refuses it and does not rewrite the row.
-    #[asupersync::test]
+    #[tokio::test]
     async fn current_provenance_refuses_a_tampered_output_row() {
         let directory = TempDir::new().unwrap();
         let runtime = HostAdmissionTestRuntimeV1::profile(directory.path())
@@ -522,7 +522,7 @@ mod tests {
         );
     }
 
-    #[asupersync::test]
+    #[tokio::test]
     async fn current_provenance_restores_its_missing_session_row() {
         let directory = TempDir::new().unwrap();
         let runtime = HostAdmissionTestRuntimeV1::profile(directory.path())
@@ -607,7 +607,7 @@ mod tests {
     /// is stored beside is corruption, not a release: it stays refused, and the
     /// refusal names the field, the projector, and the row so an operator log
     /// says which output to look at.
-    #[asupersync::test]
+    #[tokio::test]
     async fn provenance_disagreeing_with_its_own_output_stays_refused() {
         let directory = TempDir::new().unwrap();
         let runtime = HostAdmissionTestRuntimeV1::profile(directory.path())

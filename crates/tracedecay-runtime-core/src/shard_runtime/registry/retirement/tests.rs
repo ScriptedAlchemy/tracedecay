@@ -189,7 +189,7 @@ fn project_shard(project: &str) -> StoreShardIdV1 {
 
 fn registry() -> StoreRuntimeRegistry {
     StoreRuntimeRegistry::new(
-        asupersync::runtime::Runtime::current_handle().unwrap(),
+        tokio::runtime::Handle::try_current().ok().unwrap(),
         Arc::new(UnusedResolver),
         Arc::new(UnusedPublisher),
     )
@@ -333,7 +333,7 @@ fn stale_owner_target(
     )
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn paired_graph_owner_target_reserves_and_restores_with_the_database_owner() {
     let directory = tempfile::tempdir().unwrap();
     let registry = registry();
@@ -402,7 +402,7 @@ async fn paired_graph_owner_target_reserves_and_restores_with_the_database_owner
     drop(graph_owner);
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn two_exact_owner_targets_survive_blocked_and_cancelled_retries() {
     let directory = tempfile::tempdir().unwrap();
     let registry = registry();
@@ -570,7 +570,7 @@ async fn two_exact_owner_targets_survive_blocked_and_cancelled_retries() {
     drop(second_graph_owner);
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn preflight_is_all_or_none_and_foreign_identity_never_transitions_the_live_entry() {
     let directory = tempfile::tempdir().unwrap();
     let registry = registry();
@@ -612,7 +612,7 @@ async fn preflight_is_all_or_none_and_foreign_identity_never_transitions_the_liv
     drop(lease);
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn owner_preflight_failure_rolls_back_every_target_before_committing_any() {
     let directory = tempfile::tempdir().unwrap();
     let registry = registry();
@@ -662,7 +662,7 @@ async fn owner_preflight_failure_rolls_back_every_target_before_committing_any()
     ));
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn stale_foreign_owner_identity_cannot_reclassify_the_canonical_attachment() {
     let directory = tempfile::tempdir().unwrap();
     let registry = registry();
@@ -689,7 +689,7 @@ async fn stale_foreign_owner_identity_cannot_reclassify_the_canonical_attachment
     ));
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn owner_commit_failure_is_terminal_truth_for_the_entire_batch() {
     let directory = tempfile::tempdir().unwrap();
     let registry = registry();
@@ -742,7 +742,7 @@ async fn owner_commit_failure_is_terminal_truth_for_the_entire_batch() {
     ));
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn client_clones_and_independent_clients_block_then_release_for_retry() {
     let directory = tempfile::tempdir().unwrap();
     let registry = registry();
@@ -778,7 +778,7 @@ async fn client_clones_and_independent_clients_block_then_release_for_retry() {
     drop(reservation);
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn independently_attached_database_facade_blocks_retirement() {
     let directory = tempfile::tempdir().unwrap();
     let registry = registry();
@@ -814,7 +814,7 @@ async fn independently_attached_database_facade_blocks_retirement() {
     drop(reservation);
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn operation_profile_and_graph_leases_block_and_dropping_reservation_restores_ready() {
     let directory = tempfile::tempdir().unwrap();
     let registry = registry();
@@ -896,7 +896,7 @@ async fn operation_profile_and_graph_leases_block_and_dropping_reservation_resto
     drop(lease);
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn postcommit_drain_failure_is_faulted_and_never_restored_to_ready() {
     let directory = tempfile::tempdir().unwrap();
     let registry = registry();
@@ -923,7 +923,7 @@ async fn postcommit_drain_failure_is_faulted_and_never_restored_to_ready() {
     ));
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn postcommit_irreversible_close_failure_is_durability_uncertain() {
     let directory = tempfile::tempdir().unwrap();
     let registry = registry();
@@ -950,7 +950,7 @@ async fn postcommit_irreversible_close_failure_is_durability_uncertain() {
     ));
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn reservations_are_one_shot_after_commit_or_cancellation() {
     let directory = tempfile::tempdir().unwrap();
 
@@ -1004,7 +1004,7 @@ async fn reservations_are_one_shot_after_commit_or_cancellation() {
     ));
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn retain_rejects_retiring_project_without_waiting_for_resolution() {
     let directory = tempfile::tempdir().unwrap();
     let registry = registry();

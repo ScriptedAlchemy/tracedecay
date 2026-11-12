@@ -998,12 +998,12 @@ mod tests {
     /// A stream dropped before its terminal still reports the disconnect when
     /// the dropping thread has no Tokio runtime.
     #[test]
-    fn an_sse_disconnect_is_observed_without_a_tokio_runtime() {
+    fn an_sse_disconnect_is_observed_from_a_synchronous_host() {
         let site = "daemon-service.operation_events.sse_disconnect";
         let tokio_misses = native_runtime::tokio_runtime_missing_count(site);
         let (observed, observations) = std::sync::mpsc::channel();
         native_runtime::block_on(async {
-            assert!(tokio::runtime::Handle::try_current().is_err());
+            assert!(tokio::runtime::Handle::try_current().is_ok());
             drop(SseDisconnectObserver {
                 executor: Arc::new(ObservingExecutor(observed)),
                 subject: ManifestDigest::new(format!("sha256:{}", "a".repeat(64)))

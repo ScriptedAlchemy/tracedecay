@@ -275,7 +275,7 @@ mod tests {
         }
     }
 
-    #[asupersync::test]
+    #[tokio::test]
     async fn publication_candidate_lookup_is_batched() {
         let directory = tempfile::tempdir().unwrap();
         let (database, _owner) = open_registered_test_database_fixture(

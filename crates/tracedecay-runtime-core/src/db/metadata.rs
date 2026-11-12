@@ -192,7 +192,7 @@ mod tests {
         (directory, database)
     }
 
-    #[asupersync::test]
+    #[tokio::test]
     async fn bounded_metadata_distinguishes_missing_exact_and_oversized_values() {
         let (_directory, database) = database("bounded-metadata-exact").await;
         database
@@ -226,7 +226,7 @@ mod tests {
         );
     }
 
-    #[asupersync::test]
+    #[tokio::test]
     async fn bounded_metadata_measures_utf8_bytes_and_never_projects_large_values() {
         let (_directory, database) = database("bounded-metadata-bytes").await;
         database
@@ -257,7 +257,7 @@ mod tests {
         );
     }
 
-    #[asupersync::test]
+    #[tokio::test]
     async fn bounded_metadata_rejects_in_limit_non_text_but_skips_oversized_non_text() {
         let (_directory, database) = database("bounded-metadata-non-text").await;
         database

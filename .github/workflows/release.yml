@@ -703,7 +703,7 @@ jobs:
 
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
-          node-version: "26.13.0"
+          node-version: "26.13.1"
 
       - name: Install reviewed npm
         run: npm install -g npm@12.2.0
@@ -808,7 +808,7 @@ jobs:
 
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
-          node-version: "26.13.0"
+          node-version: "26.13.1"
 
       # Prerelease SDK versions mirror the beta release convention: they take
       # the beta dist-tag and never take latest. Recovery re-runs are

@@ -231,7 +231,7 @@ fn reported(snapshot: &DiagnosticsSnapshot) -> Vec<(&str, &str)> {
 }
 
 #[test]
-fn language_refresh_settles_diagnostics_without_a_tokio_runtime() {
+fn language_refresh_settles_diagnostics_from_a_plain_thread() {
     let project = tempfile::tempdir().expect("project root");
     let authority = fake_analyzer_authority(project.path());
     let request = graph_request();
@@ -239,7 +239,7 @@ fn language_refresh_settles_diagnostics_without_a_tokio_runtime() {
     assert!(tokio::runtime::Handle::try_current().is_err());
     let snapshot = block_on(authority.refresh_language(&request, "fake"))
         .expect("native runtime")
-        .expect("the refresh settles off Tokio");
+        .expect("the refresh settles on the process runtime");
 
     assert_eq!(
         reported(&snapshot),
@@ -248,7 +248,7 @@ fn language_refresh_settles_diagnostics_without_a_tokio_runtime() {
 }
 
 #[test]
-fn idle_backfill_settles_diagnostics_without_a_tokio_runtime() {
+fn idle_backfill_settles_diagnostics_from_a_plain_thread() {
     let project = tempfile::tempdir().expect("project root");
     let authority = fake_analyzer_authority(project.path());
     let request = graph_request();
@@ -258,7 +258,7 @@ fn idle_backfill_settles_diagnostics_without_a_tokio_runtime() {
         let overview = authority
             .overview(request.clone())
             .await
-            .expect("the overview settles off Tokio");
+            .expect("the overview settles on the process runtime");
         assert!(
             overview.diagnostics.is_empty(),
             "the overview answers before the backfill runs"
@@ -268,7 +268,7 @@ fn idle_backfill_settles_diagnostics_without_a_tokio_runtime() {
             let snapshot = authority
                 .snapshot(&request)
                 .await
-                .expect("the snapshot settles off Tokio");
+                .expect("the snapshot settles on the process runtime");
             if !snapshot.diagnostics.is_empty() {
                 break snapshot;
             }

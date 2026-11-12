@@ -40,7 +40,7 @@ tracedecay-store = { path = "../tracedecay-store" }
 url.workspace = true
 
 [dev-dependencies]
-asupersync.workspace = true
+tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros", "time", "sync", "io-util", "net"] }
 hex.workspace = true
 tempfile.workspace = true
 tracedecay-daemon-identity = { path = "../tracedecay-daemon-identity" }

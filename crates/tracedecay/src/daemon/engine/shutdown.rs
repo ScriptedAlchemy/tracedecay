@@ -128,12 +128,19 @@ impl DaemonEngine {
                         automation_join.shutdown_automation_schedulers().await;
                     },
                 ),
-                ShutdownOwner::new("session_temporal_refresh", || {}, async move {
-                    session_refresh.shutdown().await;
-                    refresh_services
-                        .release_profile_session_refresh_services()
-                        .await;
-                }),
+                ShutdownOwner::new(
+                    "session_temporal_refresh",
+                    {
+                        let refresh_cancel = Arc::clone(&session_refresh);
+                        move || refresh_cancel.cancel_supervisors()
+                    },
+                    async move {
+                        session_refresh.shutdown().await;
+                        refresh_services
+                            .release_profile_session_refresh_services()
+                            .await;
+                    },
+                ),
                 ShutdownOwner::new(
                     "host_admission_replay",
                     {
@@ -313,5 +320,70 @@ impl DaemonEngine {
             .with_terminal_owner_phases(vec![vec![terminal_owner]])
         })
         .await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use tracedecay_daemon_service::shutdown::prepare_shutdown_owner_phases;
+    use tracedecay_domain::ProjectId;
+    use tracedecay_global_db::tests::harness::RegisteredGlobalDbTestRuntime;
+    use tracedecay_session_runtime::StoreOwnerKey;
+
+    use super::DaemonEngine;
+
+    #[tokio::test]
+    async fn session_refresh_is_cancelled_even_if_shutdown_joins_are_dropped() {
+        let directory = tempfile::tempdir().unwrap();
+        let profile_root = directory.path().join("profile");
+        let project_root = directory.path().join("project");
+        let project_id = ProjectId::new("project.refresh-shutdown").unwrap();
+        let fixture = RegisteredGlobalDbTestRuntime::project(
+            &profile_root,
+            &project_root,
+            project_id.clone(),
+        )
+        .await
+        .unwrap();
+        let database = fixture.project_database_arc().unwrap();
+        let store_root = database.db_path().parent().unwrap().to_path_buf();
+        let owner = StoreOwnerKey {
+            global_db_path: profile_root.join("global.db"),
+            profile_root,
+            project_id: Some(project_id.as_str().to_owned()),
+            graph_db_path: store_root.join("graph.db"),
+            store_root,
+        };
+        let engine = DaemonEngine::default();
+        let registry = Arc::clone(
+            engine
+                .store_administration
+                .session_temporal_refresh_schedulers(),
+        );
+        let wake = registry.ensure_project(owner.clone(), database).await;
+        let state = registry.project_state(&owner).await.unwrap();
+        assert_eq!(registry.project_worker_count().await, 1);
+        assert!(wake.status().is_available());
+
+        let owner_phases = engine.shutdown_owner_phases().await;
+        assert!(!state.is_cancelled());
+        let prepared = prepare_shutdown_owner_phases(owner_phases);
+        let cancelled_before_join = state.is_cancelled();
+
+        // An earlier phase can exhaust the shared deadline before this
+        // owner's join is polled. Cancellation must already have reached
+        // the real supervisor even if every prepared join is discarded.
+        drop(prepared);
+        tokio::time::timeout(Duration::from_secs(5), registry.shutdown())
+            .await
+            .expect("the cancelled refresh supervisor must join");
+        assert_eq!(registry.project_worker_count().await, 0);
+        assert!(
+            cancelled_before_join,
+            "refresh must be cancelled during preparation, not first inside its join"
+        );
     }
 }
