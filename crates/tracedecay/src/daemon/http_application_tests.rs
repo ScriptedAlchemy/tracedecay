@@ -417,11 +417,13 @@ async fn remote_deletion_malformed_body_and_content_type_use_typed_receipts() {
 async fn service_with_probe() -> (DaemonHttpApplicationService, Arc<AtomicUsize>) {
     let calls = Arc::new(AtomicUsize::new(0));
     let probe_calls = Arc::clone(&calls);
+    let selected_runtime = tokio::runtime::Handle::current().id();
     let canonical = Router::new().route(
         "/tests/results",
         post(move || {
             let calls = Arc::clone(&probe_calls);
             async move {
+                assert_eq!(tokio::runtime::Handle::current().id(), selected_runtime);
                 calls.fetch_add(1, Ordering::Relaxed);
                 StatusCode::NO_CONTENT
             }
@@ -1046,14 +1048,14 @@ async fn daemon_http_timed_out_cold_resolution_preserves_curate_request_identity
     service.shutdown().await.expect("shutdown HTTP service");
 }
 
-/// A Tokio runtime with neither the IO nor the time driver panics on any
-/// Tokio socket or timer, so this proves the loopback path uses neither.
+/// The listener and its handlers share the runtime selected by the caller.
 #[test]
-fn daemon_http_serves_loopback_without_tokio_io_or_time_drivers() {
+fn daemon_http_serves_loopback_on_the_selected_runtime() {
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
+        .enable_all()
         .build()
-        .expect("Tokio runtime without drivers");
+        .expect("Tokio runtime with IO and time drivers");
     runtime.block_on(async {
         let (service, calls) = service_with_probe().await;
         let endpoint = service.endpoint();

@@ -3,8 +3,7 @@
 use std::future::Future;
 use std::pin::Pin;
 
-use asupersync::channel::oneshot;
-use asupersync::{Budget, Cx};
+use tokio::sync::oneshot;
 
 use serde_json::Value;
 use tracedecay_domain::canonical_text::sha256_hex;
@@ -19,31 +18,20 @@ use super::primitives::{
     from_json, row_optional_string, row_string, storage_error, storage_message, to_json,
 };
 
-/// The runtime retains both the settlement task and its join while the caller
-/// holds only a receipt. Dropping that receipt cannot interrupt an admitted
-/// commit or its graph publication.
-struct FactSettlementReceipt<T> {
-    cx: Cx,
-    receipt: oneshot::Receiver<FactStoreResult<T>>,
-}
-
+/// The runtime owns settlement and its reaper. Dropping the receipt only
+/// abandons the wait; an admitted commit and its graph publication still finish.
 pub(in crate::fact_store) fn settle_fact_write<T, F, Fut>(
     operation: &'static str,
     work: F,
 ) -> Pin<Box<dyn Future<Output = FactStoreResult<T>> + Send>>
 where
     T: Send + 'static,
-    F: FnOnce(Cx) -> Fut + Send + 'static,
+    F: FnOnce() -> Fut + Send + 'static,
     Fut: Future<Output = FactStoreResult<T>> + Send + 'static,
 {
-    // `RuntimeHandle` stays in this synchronous admission. Holding it across
-    // the caller's await makes every `Send` proof enter `BrowserWorkerPump`'s
-    // self-reference (rust-lang/rust#159228).
     let admitted = admit_fact_settlement(operation, work);
     Box::pin(async move {
-        let FactSettlementReceipt { cx, mut receipt } = admitted?;
-        receipt
-            .recv(&cx)
+        admitted?
             .await
             .map_err(|error| storage_error(operation, error))?
     })
@@ -52,41 +40,29 @@ where
 fn admit_fact_settlement<T, F, Fut>(
     operation: &'static str,
     work: F,
-) -> FactStoreResult<FactSettlementReceipt<T>>
+) -> FactStoreResult<oneshot::Receiver<FactStoreResult<T>>>
 where
     T: Send + 'static,
-    F: FnOnce(Cx) -> Fut + Send + 'static,
+    F: FnOnce() -> Fut + Send + 'static,
     Fut: Future<Output = FactStoreResult<T>> + Send + 'static,
 {
     let runtime = tracedecay_runtime_core::native_runtime::handle()
-        .ok_or_else(|| storage_message(operation, "native settlement runtime is unavailable"))?;
-    let settlement_cx = runtime
-        .try_request_cx_with_budget(Budget::INFINITE)
-        .map_err(|error| storage_error(operation, error))?;
-    let receipt_cx = settlement_cx.clone();
+        .ok_or_else(|| storage_message(operation, "settlement runtime is unavailable"))?;
     let (completed, receipt) = oneshot::channel();
-    runtime
-        .try_spawn_with_cx(move |reaper_cx| async move {
-            let outcome = match settlement_cx.spawn(work) {
-                Ok(mut task) => task
-                    .join(&reaper_cx)
-                    .await
-                    .map_err(|error| storage_error(operation, error))
-                    .and_then(|outcome| outcome),
-                Err(error) => Err(storage_error(operation, error)),
-            };
-            if completed.send(&reaper_cx, outcome).is_err() {
-                tracing::trace!(
-                    operation,
-                    "fact settlement completed after its caller stopped waiting"
-                );
-            }
-        })
-        .map_err(|error| storage_error(operation, error))?;
-    Ok(FactSettlementReceipt {
-        cx: receipt_cx,
-        receipt,
-    })
+    let task = runtime.spawn(async move { work().await });
+    runtime.spawn(async move {
+        let outcome = task
+            .await
+            .map_err(|error| storage_error(operation, error))
+            .and_then(|outcome| outcome);
+        if completed.send(outcome).is_err() {
+            tracing::trace!(
+                operation,
+                "fact settlement completed after its caller stopped waiting"
+            );
+        }
+    });
+    Ok(receipt)
 }
 
 pub(super) async fn finish_read_snapshot<T>(
@@ -309,12 +285,12 @@ impl DatabaseFactStore<'_> {
     ) -> FactStoreResult<T> {
         let db = (*self.db).clone();
         let write_control = write_control.clone();
-        settle_fact_write(PROJECT_MEMORY_WRITE_OPERATION, move |cx| async move {
+        settle_fact_write(PROJECT_MEMORY_WRITE_OPERATION, move || async move {
             let result =
-                execute_project_memory_write(&cx, db.clone(), write_control, barrier_content, work)
+                execute_project_memory_write(db.clone(), write_control, barrier_content, work)
                     .await;
             if result.as_ref().is_ok_and(graph_source_changed) {
-                super::graph::publish_project_memory_graph_after_write(&cx, db).await;
+                super::graph::publish_project_memory_graph_after_write(db).await;
             }
             result
         })
@@ -323,7 +299,6 @@ impl DatabaseFactStore<'_> {
 }
 
 async fn execute_project_memory_write<T: Send + 'static>(
-    _cx: &Cx,
     db: Database,
     write_control: FactWriteControl,
     _barrier_content: Option<String>,
@@ -369,7 +344,6 @@ async fn execute_project_memory_write<T: Send + 'static>(
             // expires after the commit point reproducible.
             #[cfg(feature = "test-transport")]
             crate::fact_store::commit_barrier::wait_after_durable_fact_commit(
-                _cx,
                 _barrier_content.as_deref(),
             )
             .await;
@@ -412,46 +386,41 @@ mod write_control_tests {
     }
 
     #[test]
-    fn settlement_from_a_foreign_executor_runs_on_a_native_worker() {
-        let foreign = tokio::runtime::Builder::new_current_thread()
+    fn settlement_uses_the_callers_runtime() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
             .build()
-            .expect("foreign executor");
-        let on_native_worker = foreign
-            .block_on(settle_fact_write(
-                PROJECT_MEMORY_WRITE_OPERATION,
-                |_cx| async { Ok(Cx::current().is_some()) },
-            ))
-            .expect("settlement through the process runtime");
-        assert!(on_native_worker);
+            .expect("caller runtime");
+        let caller_thread = std::thread::current().id();
+        let settlement_thread = runtime
+            .block_on(async {
+                settle_fact_write(PROJECT_MEMORY_WRITE_OPERATION, || async {
+                    Ok(std::thread::current().id())
+                })
+                .await
+            })
+            .expect("settlement through the caller runtime");
+        assert_eq!(settlement_thread, caller_thread);
     }
 
-    #[asupersync::test]
-    async fn dropped_write_waiter_preserves_owned_durable_settlement(cx: &Cx) {
+    #[tokio::test]
+    async fn dropped_write_waiter_preserves_owned_durable_settlement() {
         let (_temp, db) = fixture("dropped-settlement-waiter").await;
-        let (entered_tx, mut entered_rx) = oneshot::channel();
-        let (release_tx, mut release_rx) = oneshot::channel();
-        let (committed_tx, mut committed_rx) = oneshot::channel();
+        let (entered_tx, entered_rx) = oneshot::channel();
+        let (release_tx, release_rx) = oneshot::channel();
+        let (committed_tx, committed_rx) = oneshot::channel();
         let control = FactWriteControl::new(Arc::new(|| false), Arc::new(|| true));
         let store = DatabaseFactStore::new(&db);
         {
             let write = store.project_memory_write(
                 &control,
                 move |()| {
-                    committed_tx
-                        .send_blocking(())
-                        .expect("publish committed write");
+                    committed_tx.send(()).expect("publish committed write");
                     false
                 },
                 move |transaction| {
                     Box::pin(async move {
-                        let work_cx = Cx::current().expect("owned native write context");
-                        entered_tx
-                            .send(&work_cx, ())
-                            .expect("publish admitted write");
-                        release_rx
-                            .recv(&work_cx)
-                            .await
-                            .expect("release admitted write");
+                        entered_tx.send(()).expect("publish admitted write");
+                        release_rx.await.expect("release admitted write");
                         transaction
                             .execute_batch(
                                 "CREATE TABLE settlement_probe(value TEXT NOT NULL);
@@ -466,9 +435,8 @@ mod write_control_tests {
                 },
             );
             let mut write = std::pin::pin!(write);
-            let mut entered = std::pin::pin!(entered_rx.recv(cx));
-            asupersync::time::timeout(
-                cx.now(),
+            let mut entered = std::pin::pin!(entered_rx);
+            tokio::time::timeout(
                 std::time::Duration::from_secs(5),
                 std::future::poll_fn(|task| {
                     assert!(
@@ -483,16 +451,12 @@ mod write_control_tests {
             .expect("write admission");
         }
         release_tx
-            .send(cx, ())
+            .send(())
             .expect("release accepted work after waiter drop");
-        asupersync::time::timeout(
-            cx.now(),
-            std::time::Duration::from_secs(5),
-            committed_rx.recv(cx),
-        )
-        .await
-        .expect("owned settlement timed out")
-        .expect("commit observed");
+        tokio::time::timeout(std::time::Duration::from_secs(5), committed_rx)
+            .await
+            .expect("owned settlement timed out")
+            .expect("commit observed");
         let snapshot = db
             .begin_memory_read_transaction("verify owned settlement")
             .await
@@ -506,7 +470,7 @@ mod write_control_tests {
         snapshot.commit().await.expect("finish snapshot");
     }
 
-    #[asupersync::test]
+    #[tokio::test]
     async fn interruption_before_admission_never_runs_write_work() {
         let (_temp, db) = fixture("pre-admission").await;
         let work_ran = Arc::new(AtomicBool::new(false));
@@ -530,7 +494,7 @@ mod write_control_tests {
         assert!(!work_ran.load(Ordering::Acquire));
     }
 
-    #[asupersync::test]
+    #[tokio::test]
     async fn denied_commit_gate_rolls_back_transaction() {
         let (_temp, db) = fixture("gate-rollback").await;
         let gate_polled = Arc::new(AtomicBool::new(false));

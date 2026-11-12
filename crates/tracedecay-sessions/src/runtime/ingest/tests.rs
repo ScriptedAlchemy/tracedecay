@@ -468,7 +468,11 @@ fn a_startup_sweep_releases_capacity_only_to_a_pass_it_turned_away() {
         panic!("an uncontended claim must acquire");
     };
     drop(own);
-    assert!(!startup_release.has_changed());
+    assert!(
+        !startup_release
+            .has_changed()
+            .expect("startup release publisher remains open")
+    );
 
     let StartupUserIngestClaim::Acquired(holder) = StartupUserIngestGuard::claim(profile.clone())
     else {
@@ -479,7 +483,11 @@ fn a_startup_sweep_releases_capacity_only_to_a_pass_it_turned_away() {
         StartupUserIngestClaim::Running
     ));
     drop(holder);
-    assert!(startup_release.has_changed());
+    assert!(
+        startup_release
+            .has_changed()
+            .expect("startup release publisher remains open")
+    );
 }
 
 #[test]

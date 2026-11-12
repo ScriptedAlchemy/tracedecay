@@ -196,7 +196,10 @@ fn health_request(
 
 fn seed_db(root: &TempDir, name: &str) -> PathBuf {
     let path = root.path().join(name);
-    Connection::open(&path).unwrap();
+    Connection::open(&path)
+        .unwrap()
+        .execute_batch("PRAGMA user_version = 0")
+        .unwrap();
     path.canonicalize().unwrap()
 }
 
@@ -252,7 +255,7 @@ async fn assert_health_route(handle: &StoreRuntimeClientLease, writer_expected: 
     ));
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn lifecycle_publisher_mounts_profile_project_and_session_health_routes() {
     let root = TempDir::new().unwrap();
     let resolver = Arc::new(FileResolver::default());
@@ -261,7 +264,7 @@ async fn lifecycle_publisher_mounts_profile_project_and_session_health_routes() 
     resolver.push(seed_db(&root, "sessions.db"));
 
     let registry = StoreRuntimeRegistry::with_config(
-        asupersync::runtime::Runtime::current_handle().unwrap(),
+        tokio::runtime::Handle::try_current().ok().unwrap(),
         resolver,
         Arc::new(LifecycleShardRuntimePublisher),
         StoreRuntimeRegistryConfig::new(2).unwrap(),
@@ -285,14 +288,21 @@ async fn lifecycle_publisher_mounts_profile_project_and_session_health_routes() 
     assert_health_route(&sessions, true).await;
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn read_only_open_mounts_readers_without_acquiring_a_writer() {
     let root = TempDir::new().unwrap();
     let resolver = Arc::new(FileResolver::default());
     resolver.push(seed_final_graph_db(&root, "profile.db").await);
-    resolver.push(seed_final_graph_db(&root, "project.db").await);
+    let database = seed_final_graph_db(&root, "project.db").await;
+    // A crash after clearing the preparation receipt can leave the private
+    // staging directory empty. Read-only admission accepts that completed
+    // state, but must not create the durable directory lock to inspect it.
+    // Any remaining entry is unproven and requires writable reconciliation.
+    let leftover = database.with_file_name("project.db.tracedecay-init");
+    tracedecay_private_fs::create_private_directory(&leftover).unwrap();
+    resolver.push(database);
     let registry = StoreRuntimeRegistry::new(
-        asupersync::runtime::Runtime::current_handle().unwrap(),
+        tokio::runtime::Handle::try_current().ok().unwrap(),
         resolver,
         Arc::new(LifecycleShardRuntimePublisher),
     )
@@ -324,99 +334,94 @@ async fn read_only_open_mounts_readers_without_acquiring_a_writer() {
     assert!(!physical.writer_present);
     assert!(physical.reader_handles > 0);
     assert_health_route(&project, false).await;
+    assert!(leftover.is_dir());
+    assert!(
+        !root
+            .path()
+            .join(".project.db.tracedecay-init.durable-directory.lock")
+            .exists()
+    );
 }
 
-/// The store file is a FIFO, so opening it waits until a writer opens the
-/// other end. Only a task on the runtime's single worker does that while the
-/// open waits; a fallback thread ends a wait that parked the worker, so the
-/// failure is an assertion rather than a hang.
 #[cfg(unix)]
-#[asupersync::test]
-async fn store_open_keeps_the_async_worker_serving_while_the_file_opens() {
-    use std::fs::OpenOptions;
-    use std::os::unix::fs::OpenOptionsExt;
-    use std::sync::atomic::AtomicBool;
-
+#[tokio::test]
+async fn store_open_refuses_a_fifo_before_opening_it() {
     let root = TempDir::new().unwrap();
-    let held = root.path().join("held.db");
+    let fifo = root.path().join("held.db");
     assert!(
         std::process::Command::new("mkfifo")
-            .arg(&held)
+            .arg(&fifo)
             .status()
             .unwrap()
             .success()
     );
-    let held = held.canonicalize().unwrap();
     let resolver = Arc::new(FileResolver::default());
-    resolver.push(held.clone());
+    resolver.push(fifo.canonicalize().unwrap());
     let registry = StoreRuntimeRegistry::new(
-        asupersync::runtime::Runtime::current_handle().unwrap(),
+        tokio::runtime::Handle::try_current().ok().unwrap(),
         resolver,
         Arc::new(LifecycleShardRuntimePublisher),
     )
     .unwrap();
-
-    let (released_by_worker, fallback_stop) = std::sync::mpsc::channel::<()>();
-    let fallback = {
-        let held = held.clone();
-        std::thread::spawn(move || {
-            let parked = fallback_stop.recv_timeout(Duration::from_secs(10)).is_err();
-            if parked {
-                drop(OpenOptions::new().write(true).open(&held));
-            }
-            parked
-        })
-    };
-    let settled = AtomicBool::new(false);
-    let open = async {
-        let outcome = registry
-            .open(StoreRuntimeOpenRequest::new(
-                profile_shard(),
-                incarnation(),
-                None,
-            ))
-            .await;
-        settled.store(true, Ordering::SeqCst);
-        outcome
-    };
-    let release = async {
-        let cx = asupersync::Cx::current().unwrap();
-        while !settled.load(Ordering::SeqCst) {
-            match OpenOptions::new()
-                .write(true)
-                .custom_flags(libc::O_NONBLOCK)
-                .open(&held)
-            {
-                Ok(_writer) => {
-                    released_by_worker.send(()).unwrap();
-                    return true;
-                }
-                Err(error) => assert_eq!(error.raw_os_error(), Some(libc::ENXIO)),
-            }
-            asupersync::time::sleep(cx.now(), Duration::from_millis(1)).await;
-        }
-        false
-    };
-    let (outcome, released) = asupersync::join!(open, release);
-    drop(released_by_worker);
-    let parked = fallback.join().unwrap();
-
-    assert!(
-        released && !parked,
-        "the store open parked the runtime's only worker until the fallback thread released the file"
-    );
-    assert!(
-        matches!(
-            outcome,
-            StoreRuntimeOpenResult::Failed(
-                StoreRuntimeRegistryFailure::PhysicalRuntimeFailed { .. }
-            )
-        ),
-        "a FIFO is not a SQLite store: {outcome:?}"
-    );
+    let outcome = registry
+        .open(StoreRuntimeOpenRequest::new(
+            profile_shard(),
+            incarnation(),
+            None,
+        ))
+        .await;
+    assert!(matches!(
+        outcome,
+        StoreRuntimeOpenResult::Failed(StoreRuntimeRegistryFailure::PhysicalRuntimeFailed {
+            message, ..
+        }) if message.contains("not a regular file")
+    ));
 }
 
-#[asupersync::test]
+#[test]
+fn store_open_keeps_the_async_worker_serving_while_attachment_waits() {
+    let executor = tokio::runtime::Builder::new_current_thread()
+        .max_blocking_threads(1)
+        .enable_all()
+        .build()
+        .unwrap();
+    executor.block_on(async {
+        let root = TempDir::new().unwrap();
+        let resolver = Arc::new(FileResolver::default());
+        resolver.push(seed_final_graph_db(&root, "profile.db").await);
+        let registry = StoreRuntimeRegistry::new(
+            tokio::runtime::Handle::current(),
+            resolver,
+            Arc::new(LifecycleShardRuntimePublisher),
+        )
+        .unwrap();
+
+        let (entered, ready) = tokio::sync::oneshot::channel();
+        let (release, held) = std::sync::mpsc::channel();
+        let blocker = tokio::task::spawn_blocking(move || {
+            entered.send(()).unwrap();
+            held.recv_timeout(Duration::from_secs(10)).is_ok()
+        });
+        ready.await.unwrap();
+
+        let open = open_published(
+            &registry,
+            StoreRuntimeOpenRequest::new(profile_shard(), incarnation(), None),
+        );
+        let serve = async {
+            tokio::task::yield_now().await;
+            release.send(()).unwrap();
+        };
+        let (opened, ()) = tokio::join!(open, serve);
+        assert!(
+            blocker.await.unwrap(),
+            "the async worker must release the pending attachment"
+        );
+        assert_health_route(&opened, true).await;
+    });
+}
+
+#[tokio::test]
 async fn read_only_open_refuses_nonfinal_schema_as_reset_required_before_publication() {
     let root = TempDir::new().unwrap();
     let profile_path = seed_final_graph_db(&root, "profile.db").await;
@@ -432,7 +437,7 @@ async fn read_only_open_refuses_nonfinal_schema_as_reset_required_before_publica
     resolver.push(profile_path);
     resolver.push(project_path);
     let registry = StoreRuntimeRegistry::new(
-        asupersync::runtime::Runtime::current_handle().unwrap(),
+        tokio::runtime::Handle::try_current().ok().unwrap(),
         resolver,
         Arc::new(LifecycleShardRuntimePublisher),
     )
@@ -476,7 +481,7 @@ async fn read_only_open_refuses_nonfinal_schema_as_reset_required_before_publica
     );
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn writable_existing_open_refuses_tampered_final_shape_before_publication() {
     let root = TempDir::new().unwrap();
     let profile_path = seed_db(&root, "profile.db");
@@ -490,7 +495,7 @@ async fn writable_existing_open_refuses_tampered_final_shape_before_publication(
     resolver.push(profile_path);
     resolver.push(project_path.clone());
     let registry = StoreRuntimeRegistry::new(
-        asupersync::runtime::Runtime::current_handle().unwrap(),
+        tokio::runtime::Handle::try_current().ok().unwrap(),
         resolver,
         Arc::new(LifecycleShardRuntimePublisher),
     )
@@ -541,7 +546,229 @@ async fn writable_existing_open_refuses_tampered_final_shape_before_publication(
     );
 }
 
-#[asupersync::test]
+#[tokio::test]
+async fn cancelled_schema_publication_retries_with_the_final_store() {
+    let root = TempDir::new().unwrap();
+    let path = root.path().canonicalize().unwrap().join("remote.db");
+    let authority =
+        crate::db::DatabaseAuthority::acquire_test(&path, "retry remote initialization").unwrap();
+    let shard = StoreShardIdV1::remote_node(
+        id::<BrainId>("brain.registry"),
+        id::<UserProfileId>("profile.registry"),
+        id::<BrainNodeId>("node.remote"),
+    );
+    let binding = StoreRuntimeBindingV1::new(
+        shard.clone(),
+        incarnation(),
+        StoreAuthorityEpochV1::new(1).unwrap(),
+    );
+    let verified = VerifiedStoreLocatorV1::new(
+        shard,
+        incarnation(),
+        canonical_store_locator_digest(&path).unwrap(),
+    );
+    let locator = RuntimeLocatorRecord::new(
+        StoreRuntimeKey::from_binding(&binding),
+        ResolvedStoreLocator::prospective(verified, path.clone()),
+    );
+    let request = |cancellation| {
+        ShardRuntimeBuildRequest::new(
+            binding.clone(),
+            locator.clone(),
+            StoreRuntimeOpenMode::Initialize,
+            StoreRuntimeAccessMode::ReadWrite,
+            Some(authority.clone()),
+            cancellation,
+        )
+    };
+    let cancelled = CancellationToken::new();
+    cancelled.cancel();
+    assert!(matches!(
+        LifecycleShardRuntimePublisher
+            .publish(request(cancelled))
+            .await,
+        Err(StoreRuntimeRegistryFailure::OpenCancelled { .. })
+    ));
+    assert!(!path.exists());
+    let published = LifecycleShardRuntimePublisher
+        .publish(request(CancellationToken::new()))
+        .await
+        .unwrap();
+    let reader =
+        Connection::open_with_flags(&path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+    let count: i64 = reader
+        .query_row("SELECT COUNT(*) FROM remote_node_identity", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(count, 0);
+    assert_eq!(
+        reader
+            .query_row("PRAGMA integrity_check", [], |row| row.get::<_, String>(0))
+            .unwrap(),
+        "ok"
+    );
+    drop(reader);
+    drop(published);
+}
+
+#[tokio::test]
+async fn stopped_schema_installation_resumes_committed_steps_in_a_new_process() {
+    use crate::ports::registered_schema;
+    use std::process::Command;
+    use tracedecay_domain::errors::TraceDecayError;
+
+    const PATH: &str = "TRACEDECAY_TEST_SCHEMA_RETRY_DATABASE";
+    const PHASE: &str = "TRACEDECAY_TEST_SCHEMA_RETRY_PHASE";
+    let Some(path) = std::env::var_os(PATH) else {
+        let name = format!(
+            "{}::stopped_schema_installation_resumes_committed_steps_in_a_new_process",
+            module_path!().split_once("::").unwrap().1
+        );
+        for first in ["cancel", "failure"] {
+            let root = TempDir::new().unwrap();
+            let path = root.path().canonicalize().unwrap().join("sessions.db");
+            for phase in ["fresh_start_error", first, "resumed_start_error", "resume"] {
+                let output = Command::new(std::env::current_exe().unwrap())
+                    .args(["--exact", &name, "--nocapture"])
+                    .env(PATH, &path)
+                    .env(PHASE, phase)
+                    .output()
+                    .unwrap();
+                assert!(
+                    output.status.success()
+                        && String::from_utf8_lossy(&output.stdout).contains("1 passed"),
+                    "{phase}: {} {}",
+                    String::from_utf8_lossy(&output.stdout),
+                    String::from_utf8_lossy(&output.stderr)
+                );
+            }
+            let residues = std::fs::read_dir(root.path())
+                .unwrap()
+                .filter_map(|entry| {
+                    let name = entry.unwrap().file_name();
+                    name.to_string_lossy()
+                        .starts_with(".tracedecay-schema-")
+                        .then_some(name)
+                })
+                .collect::<Vec<_>>();
+            assert!(residues.is_empty(), "{residues:?}");
+        }
+        return;
+    };
+    registered_schema::register(|installation| {
+        Box::pin(async move {
+            let phase = std::env::var(PHASE).unwrap();
+            if phase == "resume" {
+                installation.execute_batch("CREATE TABLE completed(value INTEGER); INSERT INTO completed SELECT value FROM saved;").await.unwrap();
+                Ok(())
+            } else {
+                installation
+                    .execute_batch(
+                        "CREATE TABLE saved(value INTEGER); INSERT INTO saved VALUES (17);",
+                    )
+                    .await
+                    .unwrap();
+                if phase == "cancel" {
+                    installation.cancellation().cancel();
+                    Err(TraceDecayError::store_open_cancelled("registered schema"))
+                } else {
+                    let error = installation
+                        .execute_batch("INSERT INTO missing_table VALUES (42);")
+                        .await
+                        .unwrap_err();
+                    Err(TraceDecayError::Database {
+                        operation: "incomplete registered schema".to_owned(),
+                        message: error.to_string(),
+                    })
+                }
+            }
+        })
+    });
+    let path = PathBuf::from(path);
+    let authority =
+        crate::db::DatabaseAuthority::acquire_test(&path, "retry registered schema").unwrap();
+    let shard = profile_shard();
+    let binding = StoreRuntimeBindingV1::new(
+        shard.clone(),
+        incarnation(),
+        StoreAuthorityEpochV1::new(1).unwrap(),
+    );
+    let verified = VerifiedStoreLocatorV1::new(
+        shard,
+        incarnation(),
+        canonical_store_locator_digest(&path).unwrap(),
+    );
+    let locator = RuntimeLocatorRecord::new(
+        StoreRuntimeKey::from_binding(&binding),
+        ResolvedStoreLocator::prospective(verified, path.clone()),
+    );
+    let request = ShardRuntimeBuildRequest::new(
+        binding,
+        locator,
+        StoreRuntimeOpenMode::Initialize,
+        StoreRuntimeAccessMode::ReadWrite,
+        Some(authority),
+        CancellationToken::new(),
+    );
+    if matches!(
+        std::env::var(PHASE).unwrap().as_str(),
+        "fresh_start_error" | "resumed_start_error"
+    ) {
+        let mut admission = tracedecay_store::AdmissionConfigV1::default();
+        admission.per_shard_queue.max_operations = 0;
+        let error = super::super::ports::initialize_staged_runtime(&request, admission)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(error, StoreRuntimeRegistryFailure::PhysicalRuntimeFailed { ref message, .. } if message.contains("invalid writer admission")),
+            "{error:?}"
+        );
+        assert!(!path.exists());
+        return;
+    }
+    let published = LifecycleShardRuntimePublisher.publish(request).await;
+    match std::env::var(PHASE).unwrap().as_str() {
+        "cancel" => assert!(
+            matches!(
+                published,
+                Err(StoreRuntimeRegistryFailure::OpenCancelled { .. })
+            ),
+            "{:?}",
+            published.err()
+        ),
+        "failure" => assert!(
+            matches!(published, Err(StoreRuntimeRegistryFailure::PhysicalRuntimeFailed { ref message, .. }) if message.contains("missing_table")),
+            "{:?}",
+            published.err()
+        ),
+        "resume" => {
+            let runtime = published.unwrap();
+            let reader =
+                Connection::open_with_flags(&path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+                    .unwrap();
+            assert_eq!(
+                reader
+                    .query_row("SELECT value FROM completed", [], |row| row
+                        .get::<_, i64>(0))
+                    .unwrap(),
+                17
+            );
+            assert_eq!(
+                reader
+                    .query_row("PRAGMA integrity_check", [], |row| row.get::<_, String>(0))
+                    .unwrap(),
+                "ok"
+            );
+            drop(runtime);
+            return;
+        }
+        phase => panic!("unexpected schema test phase {phase}"),
+    }
+    assert!(!path.exists());
+}
+
+#[tokio::test]
 async fn remote_node_initialization_installs_only_the_final_registered_schema() {
     let root = TempDir::new().unwrap();
     let profile_path = root.path().join("profile.db");
@@ -550,7 +777,7 @@ async fn remote_node_initialization_installs_only_the_final_registered_schema() 
     resolver.push(profile_path.clone());
     resolver.push(remote_path.clone());
     let registry = StoreRuntimeRegistry::new(
-        asupersync::runtime::Runtime::current_handle().unwrap(),
+        tokio::runtime::Handle::try_current().ok().unwrap(),
         resolver,
         Arc::new(LifecycleShardRuntimePublisher),
     )
@@ -616,7 +843,7 @@ async fn remote_node_initialization_installs_only_the_final_registered_schema() 
     );
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn distinct_logical_shards_cannot_publish_two_writers_for_one_database() {
     let root = TempDir::new().unwrap();
     let resolver = Arc::new(FileResolver::default());
@@ -624,7 +851,7 @@ async fn distinct_logical_shards_cannot_publish_two_writers_for_one_database() {
     let shared_path = seed_final_graph_db(&root, "shared-project.db").await;
     resolver.push(shared_path.clone());
     let registry = StoreRuntimeRegistry::new(
-        asupersync::runtime::Runtime::current_handle().unwrap(),
+        tokio::runtime::Handle::try_current().ok().unwrap(),
         resolver,
         Arc::new(LifecycleShardRuntimePublisher),
     )
@@ -710,7 +937,7 @@ fn user_version(path: &Path) -> u32 {
 /// A store at an older released schema is never upgraded in place, even by a
 /// write-authorized open: admission fails with the typed fresh-start refusal
 /// and leaves the stamp untouched.
-#[asupersync::test]
+#[tokio::test]
 async fn existing_store_at_an_older_schema_is_refused_even_with_write_authority() {
     let root = TempDir::new().unwrap();
     let resolver = Arc::new(FileResolver::default());
@@ -719,7 +946,7 @@ async fn existing_store_at_an_older_schema_is_refused_even_with_write_authority(
     rewind_to_pre_digest_shape(&project_path).await;
     resolver.push(project_path.clone());
     let registry = StoreRuntimeRegistry::new(
-        asupersync::runtime::Runtime::current_handle().unwrap(),
+        tokio::runtime::Handle::try_current().ok().unwrap(),
         resolver,
         Arc::new(LifecycleShardRuntimePublisher),
     )
@@ -861,7 +1088,6 @@ async fn commit_diagnostics_with_writer(
     name: &str,
 ) {
     let writer = tracedecay_rusqlite_runtime::PersistentWriter::start(
-        &crate::native_runtime::handle().unwrap(),
         tracedecay_rusqlite_runtime::ExistingWriterLocator::new(
             binding.clone(),
             VerifiedStoreLocatorV1::new(
@@ -877,14 +1103,7 @@ async fn commit_diagnostics_with_writer(
     )
     .unwrap();
     let (request, probe) = diagnostics_submit(binding, name);
-    let outcome = writer
-        .submit(
-            &crate::native_runtime::cx().unwrap(),
-            request,
-            Arc::new(probe),
-        )
-        .await
-        .unwrap();
+    let outcome = writer.submit(request, Arc::new(probe)).await.unwrap();
     assert!(
         matches!(
             outcome,
@@ -902,7 +1121,7 @@ async fn commit_diagnostics_with_writer(
 /// daemon of the same incarnation, or a sibling runtime on the file) fences
 /// every writer below that authority. The reopen converges above it instead of
 /// publishing a runtime whose every submit would be fenced.
-#[asupersync::test]
+#[tokio::test]
 async fn reopening_a_store_behind_its_persisted_writer_authority_converges_above_it() {
     let root = TempDir::new().unwrap();
     let resolver = Arc::new(FileResolver::default());
@@ -924,7 +1143,7 @@ async fn reopening_a_store_behind_its_persisted_writer_authority_converges_above
         incarnation(),
         tracedecay_store::StoreAuthorityEpochV1::new(1 << 40).unwrap(),
     );
-    let runtime = asupersync::runtime::Runtime::current_handle().unwrap();
+    let runtime = tokio::runtime::Handle::try_current().ok().unwrap();
     commit_diagnostics_with_writer(&project_path, &ahead, "previous-authority").await;
 
     let registry =
@@ -976,7 +1195,7 @@ async fn reopening_a_store_behind_its_persisted_writer_authority_converges_above
 /// A graph-first owner cannot be rebound while any of its graph leases remain
 /// live. Reopening refuses once with the exact writer fence, then succeeds
 /// above the ledger after the ordinary graph close releases that authority.
-#[asupersync::test]
+#[tokio::test]
 async fn a_stale_graph_writer_authority_refuses_once_then_reopens_after_graph_close() {
     let root = TempDir::new().unwrap();
     let resolver = Arc::new(FileResolver::default());
@@ -992,7 +1211,7 @@ async fn a_stale_graph_writer_authority_refuses_once_then_reopens_after_graph_cl
     resolver.push(project_path.clone());
     resolver.push(graph_path);
     let registry = StoreRuntimeRegistry::new(
-        asupersync::runtime::Runtime::current_handle().unwrap(),
+        tokio::runtime::Handle::try_current().ok().unwrap(),
         resolver.clone(),
         Arc::new(LifecycleShardRuntimePublisher),
     )

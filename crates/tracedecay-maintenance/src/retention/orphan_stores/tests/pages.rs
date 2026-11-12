@@ -1,6 +1,6 @@
 use super::*;
 
-#[asupersync::test]
+#[tokio::test]
 async fn sweep_collects_orphan_store_and_retires_row() {
     let tmp = tempfile::TempDir::new().unwrap();
     let profile_root = tmp.path().join("profile");
@@ -81,7 +81,7 @@ async fn sweep_collects_orphan_store_and_retires_row() {
 /// A store minted for a linked worktree outlives the worktree: the repository,
 /// and so the git common directory the registry recorded, stays live. The
 /// store has no enrolled checkout left, so the sweep plans it for collection.
-#[asupersync::test]
+#[tokio::test]
 async fn sweep_plans_a_deleted_worktrees_store_while_its_repository_lives() {
     let tmp = tempfile::TempDir::new().unwrap();
     let profile_root = tmp.path().join("profile");
@@ -132,7 +132,7 @@ async fn sweep_plans_a_deleted_worktrees_store_while_its_repository_lives() {
 /// The collection plan is only an inspection receipt.  Replacing its directory
 /// with byte-identical contents in the same timestamp second must still abort
 /// the apply rather than retire a newly-created store identity.
-#[asupersync::test]
+#[tokio::test]
 async fn sweep_preserves_immature_sibling_store_identity() {
     let tmp = tempfile::TempDir::new().unwrap();
     let profile_root = tmp.path().join("profile");
@@ -186,7 +186,7 @@ async fn sweep_preserves_immature_sibling_store_identity() {
     );
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn sweep_atomically_relinks_moved_store_to_registered_live_project() {
     let tmp = tempfile::TempDir::new().unwrap();
     let profile_root = tmp.path().join("profile");
@@ -259,7 +259,7 @@ async fn sweep_atomically_relinks_moved_store_to_registered_live_project() {
     );
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn sweep_resumes_manifest_forward_after_interrupted_relink() {
     let tmp = tempfile::TempDir::new().unwrap();
     let profile_root = tmp.path().join("profile");
@@ -313,7 +313,7 @@ async fn sweep_resumes_manifest_forward_after_interrupted_relink() {
     );
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn sweep_leaves_relinkable_store_unchanged_without_exact_target_registration() {
     let tmp = tempfile::TempDir::new().unwrap();
     let profile_root = tmp.path().join("profile");
@@ -362,7 +362,7 @@ async fn sweep_leaves_relinkable_store_unchanged_without_exact_target_registrati
     assert_eq!(unchanged_manifest.project_id.as_deref(), Some("proj_old"));
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn registered_store_census_resumes_across_bounded_project_pages() {
     let tmp = tempfile::TempDir::new().unwrap();
     let profile_root = tmp.path().join("profile");
@@ -400,7 +400,7 @@ async fn registered_store_census_resumes_across_bounded_project_pages() {
 /// A store whose graph database carries durable `memory_facts` rows must
 /// never be collected, even when every registry/manifest/payload revival
 /// check passes and the store is otherwise a textbook orphan.
-#[asupersync::test]
+#[tokio::test]
 async fn census_finds_unregistered_project_dir_and_ignores_registered_ones() {
     let tmp = tempfile::TempDir::new().unwrap();
     let profile_root = tmp.path().join("profile");
@@ -435,7 +435,7 @@ async fn census_finds_unregistered_project_dir_and_ignores_registered_ones() {
 }
 
 /// Maintenance collects expired unregistered directories across bounded ticks.
-#[asupersync::test]
+#[tokio::test]
 async fn the_maintenance_cold_store_page_collects_an_unregistered_project_dir() {
     let tmp = tempfile::TempDir::new().unwrap();
     let profile_root = tmp.path().join("profile");
@@ -514,7 +514,7 @@ async fn the_maintenance_cold_store_page_collects_an_unregistered_project_dir() 
     );
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn sweep_unregistered_stores_protects_unverifiable_payload_and_retains_young() {
     let tmp = tempfile::TempDir::new().unwrap();
     let profile_root = tmp.path().join("profile");
@@ -584,7 +584,7 @@ async fn sweep_unregistered_stores_protects_unverifiable_payload_and_retains_you
 /// abandoned: its owner can still write into it until it is retired and
 /// joined. Such a store waits out the retention window like one whose root
 /// is present or whose manifest is missing.
-#[asupersync::test]
+#[tokio::test]
 async fn unregistered_store_with_a_vanished_manifest_root_waits_out_the_window() {
     let tmp = tempfile::TempDir::new().unwrap();
     let profile_root = tmp.path().join("profile");
@@ -659,7 +659,7 @@ async fn unregistered_store_with_a_vanished_manifest_root_waits_out_the_window()
 /// A registered project id must never be treated as an unregistered
 /// candidate, and re-registering between census and collection must abort
 /// the delete for that finding (closing the revival window).
-#[asupersync::test]
+#[tokio::test]
 async fn sweep_unregistered_stores_aborts_when_directory_gets_registered_first() {
     let tmp = tempfile::TempDir::new().unwrap();
     let profile_root = tmp.path().join("profile");
@@ -746,7 +746,7 @@ fn cancelled_mtime_and_size_walks_stop_before_descending() {
     assert!(data_root.join("a/b/c/payload.bin").is_file());
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn unregistered_store_sweep_applies_one_cursor_page_at_a_time() {
     let tmp = tempfile::TempDir::new().unwrap();
     let profile_root = tmp.path().join("profile");
@@ -821,7 +821,7 @@ async fn unregistered_store_sweep_applies_one_cursor_page_at_a_time() {
 
 /// A deadline already elapsed at entry must not inspect or advance a cursor
 /// page. `DeadlineExceeded` is distinct from a successful empty page.
-#[asupersync::test]
+#[tokio::test]
 async fn unregistered_store_sweep_elapsed_deadline_does_not_advance_page_state() {
     let tmp = tempfile::TempDir::new().unwrap();
     let profile_root = tmp.path().join("profile");
@@ -951,7 +951,7 @@ fn portable_inventory_keeps_partial_progress_across_cancelled_pages() {
 
 /// Cancellation is a typed page result and must prevent both inspection and
 /// collection; it is not an empty successful census.
-#[asupersync::test]
+#[tokio::test]
 async fn unregistered_store_sweep_returns_cancelled_without_mutation() {
     let tmp = tempfile::TempDir::new().unwrap();
     let profile_root = tmp.path().join("profile");
@@ -985,7 +985,7 @@ async fn unregistered_store_sweep_returns_cancelled_without_mutation() {
 /// A deadline is distinct from cancellation and must also leave the current
 /// page untouched. It is surfaced to the maintenance coordinator so it does
 /// not checkpoint partial unregistered work as successful progress.
-#[asupersync::test]
+#[tokio::test]
 async fn unregistered_store_sweep_returns_deadline_without_mutation() {
     let tmp = tempfile::TempDir::new().unwrap();
     let profile_root = tmp.path().join("profile");

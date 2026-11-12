@@ -625,13 +625,11 @@ async fn cline_like_user_scope_includes_only_unregistered_tasks() {
     assert_eq!(session.project_path, "user");
 }
 
-/// The daemon's session refresh worker runs the user pass on a native thread
-/// with no Tokio runtime entered, so a pass that writes sessions must not
-/// reach Tokio from the polling thread.
+/// The daemon's session refresh worker writes through the installed runtime.
 #[test]
-fn user_pass_writes_sessions_without_an_entered_tokio_runtime() {
+fn user_pass_writes_sessions_on_the_process_runtime() {
     tracedecay_runtime_core::native_runtime::block_on(async {
-        assert!(tokio::runtime::Handle::try_current().is_err());
+        assert!(tokio::runtime::Handle::try_current().is_ok());
         let tmp = TempDir::new().unwrap();
         let (home, project) = setup(&tmp);
         let projectless = tmp.path().join("general-chat");

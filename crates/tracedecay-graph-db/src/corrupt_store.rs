@@ -220,8 +220,8 @@ fn delete_container_family(container: &Path) -> Result<(), GraphDbError> {
 
     for sidecar in [
         wal_sidecar_path(container),
-        container.with_extension("verified"),
-        container.with_extension("spill"),
+        crate::verified_marker::marker_path(container),
+        crate::location::spill_directory(container),
     ] {
         remove_family_member(&sidecar)?;
     }
@@ -257,10 +257,8 @@ fn remove_family_member(member: &Path) -> Result<(), GraphDbError> {
 }
 
 /// `graph.grafeo` -> `graph.grafeo.wal`, matching Grafeo's sidecar layout.
-fn wal_sidecar_path(container: &Path) -> PathBuf {
-    let mut sidecar = container.as_os_str().to_owned();
-    sidecar.push(".wal");
-    PathBuf::from(sidecar)
+pub(crate) fn wal_sidecar_path(container: &Path) -> PathBuf {
+    container.with_added_extension("wal")
 }
 
 fn container_file_name(container: &Path) -> Result<&str, GraphDbError> {
@@ -297,6 +295,7 @@ mod tests {
         )
         .unwrap();
         std::fs::write(container.with_extension("verified"), b"marker").unwrap();
+        std::fs::create_dir(root.join("graph.grafeo.spill")).unwrap();
         container
     }
 

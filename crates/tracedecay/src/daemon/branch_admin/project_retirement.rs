@@ -814,17 +814,17 @@ mod tests {
         let capacity_admission = Arc::clone(&capacity_gate).lock_owned().await;
         let release_capacity = Arc::new(tokio::sync::Notify::new());
         let (started_tx, started_rx) = tokio::sync::oneshot::channel();
-        let ran_without_tokio = Arc::new(AtomicBool::new(false));
+        let ran_on_runtime = Arc::new(AtomicBool::new(false));
         let mut admission = administration
             .acquire_project_server_retirement_admission()
             .await;
         let completion = admission.spawn_and_track_fallible(owner("project-capacity"), {
             let release_capacity = Arc::clone(&release_capacity);
-            let ran_without_tokio = Arc::clone(&ran_without_tokio);
+            let ran_on_runtime = Arc::clone(&ran_on_runtime);
             async move {
                 let _capacity_admission = capacity_admission;
-                ran_without_tokio.store(
-                    tokio::runtime::Handle::try_current().is_err(),
+                ran_on_runtime.store(
+                    tokio::runtime::Handle::try_current().is_ok(),
                     Ordering::Release,
                 );
                 let _ = started_tx.send(());
@@ -836,8 +836,8 @@ mod tests {
         drop(completion);
         started_rx.await.expect("capacity retirement started");
         assert!(
-            ran_without_tokio.load(Ordering::Acquire),
-            "capacity retirement must run on the native runtime without entering Tokio"
+            ran_on_runtime.load(Ordering::Acquire),
+            "capacity retirement must run on the installed runtime"
         );
         assert!(
             Arc::clone(&capacity_gate).try_lock_owned().is_err(),
@@ -1128,7 +1128,10 @@ mod tests {
     /// The tracker of a Tokio-owned retirement runs on the native runtime, so
     /// a caller with no Tokio runtime can track and settle it.
     #[test]
-    fn a_tokio_retirement_is_tracked_and_settled_without_a_tokio_runtime() {
+    fn a_tokio_retirement_is_tracked_and_settled_from_a_synchronous_host() {
+        if !crate::test_support::alone_with_runtime_hazards() {
+            return;
+        }
         let tokio = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(1)
             .build()
@@ -1139,7 +1142,7 @@ mod tests {
         });
         let hazards = crate::test_support::native_runtime_hazards();
         let receipt = native_runtime::block_on(async {
-            assert!(tokio::runtime::Handle::try_current().is_err());
+            assert!(tokio::runtime::Handle::try_current().is_ok());
             let administration = StoreAdministration::default();
             let retirements = &administration.project_server_retirements;
             track_retirement_task(retirements, owner("project-a"), task).await;

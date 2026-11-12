@@ -1170,7 +1170,7 @@ mod tests {
 
     // The held destructor below parks one worker thread for the whole test, so
     // the second shard's abort needs a spare worker to run on.
-    #[asupersync::test(flavor = "multi_thread", workers = 4)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn cancelled_shutdown_retains_incomplete_future_drop_and_independent_retirement() {
         struct HeldDrop {
             started: Arc<Notify>,
@@ -1253,8 +1253,7 @@ mod tests {
         })
         .await;
         assert!(!dropped.load(Ordering::Acquire));
-        asupersync::time::timeout(
-            asupersync::time::wall_now(),
+        tokio::time::timeout(
             std::time::Duration::from_secs(2),
             maintenance.retire(&second),
         )
@@ -1267,7 +1266,7 @@ mod tests {
         assert!(dropped.load(Ordering::Acquire));
     }
 
-    #[asupersync::test]
+    #[tokio::test]
     async fn shutdown_and_exact_retirement_preserve_failed_join() {
         let maintenance = RegisteredSchemaConvergenceMaintenance::new();
         let shard = StoreShardIdV1::profile_sessions(

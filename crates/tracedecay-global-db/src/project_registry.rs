@@ -2535,7 +2535,7 @@ pub async fn registered_enrollment_roots(
 mod root_remap_tests {
     use crate::tests::harness::RegisteredGlobalDbHarness;
 
-    #[asupersync::test]
+    #[tokio::test]
     async fn replacement_file_at_former_root_allows_registry_remap() {
         let harness = RegisteredGlobalDbHarness::open("registry-replacement-file-remap").await;
         let db = &harness.registered;
@@ -2586,7 +2586,7 @@ mod root_remap_tests {
     }
 
     #[cfg(unix)]
-    #[asupersync::test]
+    #[tokio::test]
     async fn uninspectable_former_root_refuses_registry_remap_without_writes() {
         let harness = RegisteredGlobalDbHarness::open("registry-uninspectable-root-remap").await;
         let db = &harness.registered;

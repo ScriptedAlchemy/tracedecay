@@ -387,6 +387,108 @@ async fn restart_requeues_expired_claim_and_keeps_receipt_feedback_idempotent() 
 }
 
 #[tokio::test]
+async fn exact_delivery_lookup_is_not_hidden_by_pending_or_other_guidance() {
+    let (_temporary, database) = database().await;
+    let project_id = [8; 16];
+    let store =
+        ProjectContextScoutDurableStoreV1::from_project_database(database, project_id).unwrap();
+    let mut delivered = entry(project_id, 1);
+    delivered.envelope.candidate.expires_at = UtcMicros(4_000_000_000_000_000);
+    assert_eq!(
+        store.enqueue(delivered.clone()).await,
+        ContextScoutDurableStoreOutcomeV1::Stored
+    );
+    let claim = match store
+        .claim(delivered.work.address, UtcMicros(10), lease(50, 100))
+        .await
+    {
+        ContextScoutDurableClaimOutcomeV1::Claimed(claimed) => claimed,
+        other => panic!("expected delivery claim, got {other:?}"),
+    };
+    let receipt = ContextScoutDeliveryReceiptV1 {
+        receipt_id: context_scout_delivery_receipt_id([41; 16], delivered.envelope.envelope_id),
+        envelope_id: delivered.envelope.envelope_id,
+        delivered_at: UtcMicros(30),
+        outcome: ContextScoutDeliveryOutcomeV1::Attempted,
+    };
+    assert_eq!(
+        store.record_delivery(&claim, &receipt).await,
+        ContextScoutDurableStoreOutcomeV1::Stored
+    );
+
+    let mut pending = delivered.clone();
+    pending.work.generation = 2;
+    pending.work.input_watermark = [15; 32];
+    pending.envelope.envelope_id = [99; 16];
+    pending.envelope.input_watermark = [15; 32];
+    pending.envelope.candidate.dedupe_key = [19; 32];
+    assert_eq!(
+        store.enqueue(pending.clone()).await,
+        ContextScoutDurableStoreOutcomeV1::Stored
+    );
+    let recent = store
+        .recent(
+            delivered.work.address,
+            delivered.envelope.configuration_revision,
+            UtcMicros(31),
+            1,
+        )
+        .await;
+    assert!(matches!(
+        recent,
+        ContextScoutRecentReadOutcomeV1::Ready(ContextScoutRecentStateV1 {
+            pending: recent_pending,
+            deliveries,
+            ..
+        }) if recent_pending == vec![pending] && deliveries.is_empty()
+    ));
+
+    assert_eq!(
+        store
+            .delivery_exact(
+                delivered.work.address,
+                delivered.envelope.configuration_revision,
+                delivered.envelope.envelope_id,
+            )
+            .await
+            .unwrap(),
+        Some(ContextScoutRecentDeliveryV1 {
+            entry: delivered.clone(),
+            receipt,
+            feedback: None,
+        })
+    );
+    let other_address = ContextScoutAddressV1 {
+        logical_message_id: [90; 16],
+        ..delivered.work.address
+    };
+    assert_eq!(
+        store
+            .delivery_exact(
+                other_address,
+                delivered.envelope.configuration_revision,
+                delivered.envelope.envelope_id,
+            )
+            .await
+            .unwrap(),
+        None,
+        "guidance at another lifecycle address is not intent proof"
+    );
+    assert_eq!(
+        store
+            .delivery_exact(
+                delivered.work.address,
+                delivered.envelope.configuration_revision,
+                [98; 16],
+            )
+            .await
+            .unwrap(),
+        None,
+        "another envelope is not the Stop's deterministic intent proof"
+    );
+}
+
+#[tokio::test]
 async fn delivery_requires_the_current_claim_after_lease_takeover() {
     let (_temporary, database) = database().await;
     let project_id = [8; 16];

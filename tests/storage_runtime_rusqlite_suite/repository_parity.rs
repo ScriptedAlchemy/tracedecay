@@ -89,7 +89,6 @@ fn assert_family_mount(binding: StoreRuntimeBindingV1, path: &std::path::Path) {
     );
     let attachment = RepositoryPhysicalAttachmentFactory
         .attach(
-            &tracedecay_rusqlite_runtime::native_runtime::handle().expect("native runtime"),
             binding.clone(),
             locator,
             path.to_path_buf(),
@@ -146,7 +145,12 @@ fn profile_project_and_session_production_mounts_serve_health_data_ports() {
 
     for (family, shard_id) in families {
         let path = directory.path().join(format!("{family}.db"));
-        Connection::open(&path).unwrap();
+        // Materialize a header without adding schema objects: a bare open
+        // leaves an incomplete zero-byte store, now correctly rejected.
+        Connection::open(&path)
+            .unwrap()
+            .execute_batch("PRAGMA user_version = 0")
+            .unwrap();
         let path = path.canonicalize().unwrap();
         assert_family_mount(family_binding(shard_id), &path);
     }

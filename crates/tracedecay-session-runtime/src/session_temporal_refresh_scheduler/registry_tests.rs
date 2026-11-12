@@ -384,8 +384,7 @@ async fn a_drain_dropped_while_joining_keeps_join_authority() {
 /// keeps running until that poll returns, so the drain must still wait until
 /// the worker has dropped what it holds before it reports completion.
 ///
-/// Runs without Tokio, so a supervisor or worker that still reached Tokio
-/// would panic instead of draining.
+/// Drives the production process runtime from a synchronous caller.
 #[test]
 fn a_drain_past_the_grace_joins_the_aborted_worker() {
     native_runtime::block_on(async {

@@ -269,7 +269,7 @@ async fn seed_payload_metadata(
     Ok(payload_ref.payload_ref)
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn payload_batch_replay_checks_every_duplicate_reference() -> Result<(), String> {
     let store = test_store().await?;
     insert_session(&store.conn, &store.storage_root, "session-a").await?;
@@ -311,7 +311,7 @@ async fn payload_batch_replay_checks_every_duplicate_reference() -> Result<(), S
     Ok(())
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn only_live_placeholders_in_the_owner_row_reference_a_payload() -> Result<(), String> {
     let store = test_store().await?;
     let live = seed_payload_metadata(&store, "message-1", "live body").await?;
@@ -353,7 +353,7 @@ async fn only_live_placeholders_in_the_owner_row_reference_a_payload() -> Result
     Ok(())
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn delete_external_payload_aborts_when_still_referenced() -> Result<(), String> {
     let store = test_store().await?;
     let payload_ref = seed_payload(&store, "message-1", "body to delete").await?;
@@ -381,7 +381,7 @@ async fn delete_external_payload_aborts_when_still_referenced() -> Result<(), St
     Ok(())
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn delete_external_payload_applies_db_then_file_and_is_idempotent() -> Result<(), String> {
     let store = test_store().await?;
     let payload_ref = seed_payload(&store, "message-1", "body to delete").await?;
@@ -426,7 +426,7 @@ async fn delete_external_payload_applies_db_then_file_and_is_idempotent() -> Res
     Ok(())
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn payload_delete_rollback_preserves_metadata_and_file() -> Result<(), String> {
     let store = test_store().await?;
     let payload_ref = seed_payload(&store, "message-1", "body to preserve").await?;
@@ -484,7 +484,7 @@ async fn payload_delete_rollback_preserves_metadata_and_file() -> Result<(), Str
     Ok(())
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn committed_payload_delete_drain_failure_returns_pending_then_retries() -> Result<(), String>
 {
     let store = test_store().await?;
@@ -533,7 +533,7 @@ async fn committed_payload_delete_drain_failure_returns_pending_then_retries() -
     Ok(())
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn corrupt_tombstone_does_not_block_healthy_pending_delete() -> Result<(), String> {
     let store = test_store().await?;
     let dir = payload::payload_dir(&store.storage_root);
@@ -597,7 +597,7 @@ async fn corrupt_tombstone_does_not_block_healthy_pending_delete() -> Result<(),
     Ok(())
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn committed_orphan_tombstone_preserves_same_size_replacement() -> Result<(), String> {
     let store = test_store().await?;
     let dir = payload::payload_dir(&store.storage_root);
@@ -658,7 +658,7 @@ async fn committed_orphan_tombstone_preserves_same_size_replacement() -> Result<
     Ok(())
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn delete_external_payload_db_only_leaves_orphan_for_crash_convergence() -> Result<(), String>
 {
     let store = test_store().await?;
@@ -708,7 +708,7 @@ async fn delete_external_payload_db_only_leaves_orphan_for_crash_convergence() -
     Ok(())
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn applied_gc_reaps_in_place_without_copying_the_database() -> Result<(), String> {
     let store = test_store().await?;
     let payload_ref = seed_payload(&store, "message-1", "body to reap").await?;
@@ -760,7 +760,7 @@ async fn applied_gc_reaps_in_place_without_copying_the_database() -> Result<(), 
     Ok(())
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn delete_external_payload_hash_gate_preserves_corrupted_payload() -> Result<(), String> {
     let store = test_store().await?;
     let payload_ref = seed_payload(&store, "message-1", "trusted body").await?;
@@ -789,7 +789,7 @@ async fn delete_external_payload_hash_gate_preserves_corrupted_payload() -> Resu
 }
 
 #[cfg(unix)]
-#[asupersync::test]
+#[tokio::test]
 async fn delete_external_payload_rejects_symlink_payload_at_hash_gate() -> Result<(), String> {
     let store = test_store().await?;
     let payload_ref = seed_payload(&store, "message-1", "trusted body").await?;
@@ -825,7 +825,7 @@ async fn delete_external_payload_rejects_symlink_payload_at_hash_gate() -> Resul
     Ok(())
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn delete_external_payload_rejects_invalid_refs() -> Result<(), String> {
     let temp = tempfile::tempdir().map_err(|err| format!("create tempdir: {err}"))?;
     let conn = TestConnection::open(&temp.path().join("sessions.db"));
@@ -852,7 +852,7 @@ async fn delete_external_payload_rejects_invalid_refs() -> Result<(), String> {
     Ok(())
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn gc_on_store_without_payload_dir_reports_empty_run() -> Result<(), String> {
     let store = test_store().await?;
     assert!(!payload::payload_dir(&store.storage_root).exists());
@@ -882,7 +882,7 @@ async fn gc_on_store_without_payload_dir_reports_empty_run() -> Result<(), Strin
     Ok(())
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn gc_reports_missing_payloads_when_payload_dir_was_deleted() -> Result<(), String> {
     let store = test_store().await?;
     let payload_ref = seed_payload(&store, "msg-1", "externalized content").await?;
@@ -910,7 +910,7 @@ async fn gc_reports_missing_payloads_when_payload_dir_was_deleted() -> Result<()
     Ok(())
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn unreferenced_payload_reaps_after_grace_from_reference_removal() -> Result<(), String> {
     let store = test_store().await?;
     let payload_ref = seed_payload(&store, "message-1", "body to delete").await?;
@@ -965,7 +965,7 @@ async fn unreferenced_payload_reaps_after_grace_from_reference_removal() -> Resu
     Ok(())
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn run_payload_gc_dry_run_does_not_mutate() -> Result<(), String> {
     let store = test_store().await?;
     let payload_ref = seed_payload(&store, "message-1", "body to delete").await?;
@@ -1001,7 +1001,7 @@ async fn run_payload_gc_dry_run_does_not_mutate() -> Result<(), String> {
     Ok(())
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn orphan_phase_honors_mtime_grace_then_reaps() -> Result<(), String> {
     let store = test_store().await?;
     let payload_ref = seed_payload(&store, "message-1", "orphan body").await?;
@@ -1052,7 +1052,7 @@ async fn orphan_phase_honors_mtime_grace_then_reaps() -> Result<(), String> {
     Ok(())
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn missing_metadata_defaults_to_report_only_and_opt_in_tombstones_after_window()
 -> Result<(), String> {
     let store = test_store().await?;
@@ -1185,7 +1185,7 @@ async fn mark_state(store: &TestStore, payload_ref: &str) -> Result<Option<Strin
 /// Once due, a candidate its owner still references only loses its mark, and
 /// one its owner dropped is reaped; a payload whose owner never changed is
 /// never visited.
-#[asupersync::test]
+#[tokio::test]
 async fn owner_row_changes_record_candidates_that_gc_verifies() -> Result<(), String> {
     let store = test_store().await?;
     let kept = seed_payload(&store, "message-kept", "kept body").await?;
@@ -1249,7 +1249,7 @@ async fn owner_row_changes_record_candidates_that_gc_verifies() -> Result<(), St
 /// A live placeholder that arrives in a new row naming a payload with neither
 /// metadata nor a file is tombstoned by the next applied pass, which then
 /// moves past that row.
-#[asupersync::test]
+#[tokio::test]
 async fn new_rows_with_dangling_placeholders_are_tombstoned_once() -> Result<(), String> {
     let store = test_store().await?;
     insert_session(&store.conn, &store.storage_root, "session-a").await?;
@@ -1312,7 +1312,7 @@ async fn new_rows_with_dangling_placeholders_are_tombstoned_once() -> Result<(),
     Ok(())
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn missing_metadata_clears_mark_when_file_reappears() -> Result<(), String> {
     let store = test_store().await?;
     let payload_ref = seed_payload(&store, "message-1", "restored body").await?;
@@ -1371,7 +1371,7 @@ async fn missing_metadata_clears_mark_when_file_reappears() -> Result<(), String
     Ok(())
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn run_payload_gc_isolates_corrupted_ref_errors_while_reaping_orphans() -> Result<(), String>
 {
     let store = test_store().await?;
@@ -1432,7 +1432,7 @@ async fn run_payload_gc_isolates_corrupted_ref_errors_while_reaping_orphans() ->
     Ok(())
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn unreadable_payload_path_never_reaps_live_metadata() -> Result<(), String> {
     let store = test_store().await?;
     let payload_ref = seed_payload(&store, "message-1", "live metadata").await?;
@@ -1778,7 +1778,7 @@ async fn drain_round_trips_for_tombstones(count: usize) -> Result<usize, String>
 /// trips. Each extra tombstone still costs its own tombstone clear, and that
 /// marginal is pinned below; a per-tombstone existence probe would raise it by
 /// one and fail the gate, whatever the statements happen to say.
-#[asupersync::test]
+#[tokio::test]
 async fn pending_delete_drain_probes_metadata_once_for_the_whole_set() -> Result<(), String> {
     /// Round trips one additional tombstone adds: the `gc_meta` clear that
     /// retires that tombstone. The batched existence probe is *not* here, it
@@ -1803,7 +1803,7 @@ async fn pending_delete_drain_probes_metadata_once_for_the_whole_set() -> Result
 /// M11 equivalence: a tombstone whose metadata row is still present must be
 /// preserved (not unlinked) and a tombstone whose row is gone must be reaped,
 /// in the same drain, the batched probe must not conflate the two.
-#[asupersync::test]
+#[tokio::test]
 async fn pending_delete_drain_batches_mixed_metadata_presence() -> Result<(), String> {
     let store = test_store().await?;
     let dir = payload::payload_dir(&store.storage_root);
@@ -1940,7 +1940,7 @@ async fn unreferenced_reap_round_trips(count: usize) -> Result<usize, String> {
 /// either. That is a batch-only property: `delete_external_payload_in_transaction`
 /// still clears a single payload's own mark, and no batching removes that,
 /// `delete_external_payload_applies_db_then_file_and_is_idempotent` gates it.
-#[asupersync::test]
+#[tokio::test]
 async fn unreferenced_reap_pays_pass_level_reads_once_for_the_batch() -> Result<(), String> {
     /// Round trips one additional reaped payload adds, measured. It covers the
     /// work that is irreducibly that payload's own: loading its metadata row,
@@ -1970,7 +1970,7 @@ async fn unreferenced_reap_pays_pass_level_reads_once_for_the_batch() -> Result<
 
 /// A payload its owner row still references aborts with `StillReferenced` in
 /// the same transaction that just reaped an unreferenced one.
-#[asupersync::test]
+#[tokio::test]
 async fn batched_delete_still_rejects_a_referenced_payload() -> Result<(), String> {
     let store = test_store().await?;
     let reaped = seed_payload(&store, "message-reaped", "reap me").await?;
@@ -2022,7 +2022,7 @@ async fn batched_delete_still_rejects_a_referenced_payload() -> Result<(), Strin
 /// in its owner row only. A live placeholder quoted into another row, prose
 /// naming the ref, and an already-tombstoned placeholder are text, not
 /// references, and stay as they are.
-#[asupersync::test]
+#[tokio::test]
 async fn delete_tombstones_only_the_owner_row() -> Result<(), String> {
     let store = test_store().await?;
     let payload_ref = seed_payload(&store, "message-live", "body to tombstone").await?;

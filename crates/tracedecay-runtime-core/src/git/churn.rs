@@ -37,10 +37,8 @@ async fn off_executor<T: Send + 'static>(
     read: impl FnOnce() -> Result<T> + Send + 'static,
 ) -> Result<T> {
     let cx =
-        crate::native_runtime::cx().ok_or_else(|| churn_error("native runtime unavailable"))?;
-    cx.spawn_blocking(move |_| read())
-        .map_err(|error| churn_error(error.to_string()))?
-        .join(&cx)
+        crate::native_runtime::handle().ok_or_else(|| churn_error("native runtime unavailable"))?;
+    crate::native_runtime::spawn_blocking_on(&cx, read)
         .await
         .map_err(|error| churn_error(error.to_string()))?
 }
