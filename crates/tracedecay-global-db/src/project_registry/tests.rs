@@ -256,7 +256,7 @@ async fn project_id_by_alias(db: &RegisteredGlobalDb, alias: &Path) -> Option<St
         .map(|context| context.project.project_id)
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn moved_checkout_old_root_alias_resolves_to_same_project() {
     let harness = RegisteredGlobalDbHarness::open("moved-checkout-identity").await;
     let (original, replacement) = project_roots(&harness, "moved");
@@ -289,7 +289,7 @@ async fn moved_checkout_old_root_alias_resolves_to_same_project() {
     );
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn failed_reregistration_rolls_back_without_leaking_replacement_alias() {
     let harness = RegisteredGlobalDbHarness::open("moved-checkout-rollback").await;
     let (original, replacement) = project_roots(&harness, "rollback");
@@ -361,7 +361,7 @@ async fn failed_reregistration_rolls_back_without_leaking_replacement_alias() {
 }
 
 #[cfg(unix)]
-#[asupersync::test]
+#[tokio::test]
 async fn moved_project_alias_survives_runtime_restart_and_missing_symlink_tail() {
     let temporary = tempfile::tempdir().expect("temporary project registry");
     let profile_root = temporary.path().join("profile");
@@ -415,7 +415,7 @@ async fn moved_project_alias_survives_runtime_restart_and_missing_symlink_tail()
     assert_eq!(old_project, current_project);
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn project_registry_indexes_migrate_on_reopen_and_cover_actual_read_shapes() {
     let harness = RegisteredGlobalDbHarness::open("project-registry-read-index-migration").await;
     harness
@@ -463,7 +463,7 @@ async fn project_registry_indexes_migrate_on_reopen_and_cover_actual_read_shapes
     );
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn listing_ten_thousand_projects_uses_one_set_based_statement() {
     let (_directory, connection) = large_registry_fixture().await;
     let query = CountingQuery {
@@ -486,7 +486,7 @@ async fn listing_ten_thousand_projects_uses_one_set_based_statement() {
     );
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn current_common_dir_alias_does_not_hide_a_stale_primary_root_alias() {
     let harness = RegisteredGlobalDbHarness::open("project-registry-stale-primary-alias").await;
     let storage_root = harness
@@ -533,7 +533,7 @@ async fn current_common_dir_alias_does_not_hide_a_stale_primary_root_alias() {
     );
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn linked_worktree_refresh_lists_the_current_root_for_shared_identity() {
     let harness = RegisteredGlobalDbHarness::open("project-registry-linked-worktree").await;
     let storage_root = harness
@@ -571,7 +571,7 @@ async fn linked_worktree_refresh_lists_the_current_root_for_shared_identity() {
     );
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn project_path_listing_orders_recency_then_project_id_deterministically() {
     let harness = RegisteredGlobalDbHarness::open("project-registry-deterministic-list").await;
     let storage_root = harness
@@ -629,7 +629,7 @@ async fn project_path_listing_orders_recency_then_project_id_deterministically()
     );
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn dashboard_membership_returns_only_requested_registered_projects() {
     let harness = RegisteredGlobalDbHarness::open("dashboard-project-membership").await;
     let storage_root = harness
@@ -732,7 +732,7 @@ fn root_commit_alias(root: &Path) -> String {
     anchors[0].alias_key()
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn upsert_adopts_the_project_a_root_commit_anchor_names() {
     let harness = RegisteredGlobalDbHarness::open("project-registry-anchor-adoption").await;
     let (original, clone) = cloned_repository(&harness, "anchor-adoption");
@@ -767,7 +767,7 @@ async fn upsert_adopts_the_project_a_root_commit_anchor_names() {
     );
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn full_clone_adopts_a_shallow_first_project_and_enriches_its_history() {
     let harness = RegisteredGlobalDbHarness::open("project-registry-shallow-first").await;
     let (original, full) = cloned_repository(&harness, "shallow-first");
@@ -844,7 +844,7 @@ async fn full_clone_adopts_a_shallow_first_project_and_enriches_its_history() {
     );
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn clone_activity_keeps_the_verified_primary_root_listable() {
     let harness = RegisteredGlobalDbHarness::open("project-registry-clone-recency").await;
     let (original, clone) = cloned_repository(&harness, "clone-recency");
@@ -883,7 +883,7 @@ async fn clone_activity_keeps_the_verified_primary_root_listable() {
     );
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn anchors_do_not_keep_a_missing_project_alive_but_its_store_does() {
     let harness = RegisteredGlobalDbHarness::open("project-registry-anchor-reap").await;
     let root = harness
@@ -980,7 +980,7 @@ async fn anchors_do_not_keep_a_missing_project_alive_but_its_store_does() {
 
 // APFS rejects the non-UTF-8 directory name before registry admission.
 #[cfg(target_os = "linux")]
-#[asupersync::test]
+#[tokio::test]
 async fn native_path_aliases_protect_roots_from_lossy_registry_reaping() {
     let harness = RegisteredGlobalDbHarness::open("project-registry-native-reap").await;
     let root = harness
@@ -1012,7 +1012,7 @@ async fn native_path_aliases_protect_roots_from_lossy_registry_reaping() {
     );
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn an_anchor_keeps_the_project_that_first_recorded_it() {
     let harness = RegisteredGlobalDbHarness::open("project-registry-anchor-stays").await;
     let (original, clone) = cloned_repository(&harness, "anchor-stays");
@@ -1044,7 +1044,7 @@ async fn an_anchor_keeps_the_project_that_first_recorded_it() {
     );
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn an_identical_history_without_a_remote_stays_its_own_project() {
     let harness = RegisteredGlobalDbHarness::open("project-registry-anchor-no-remote").await;
     let storage_root = harness
@@ -1067,7 +1067,7 @@ async fn an_identical_history_without_a_remote_stays_its_own_project() {
     );
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn a_clone_tracking_another_remote_does_not_adopt_through_history() {
     let harness = RegisteredGlobalDbHarness::open("project-registry-anchor-fork").await;
     let (original, fork) = cloned_repository(&harness, "anchor-fork");
@@ -1089,7 +1089,7 @@ async fn a_clone_tracking_another_remote_does_not_adopt_through_history() {
     );
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn registering_a_named_checkout_again_does_not_walk_its_history() {
     let harness = RegisteredGlobalDbHarness::open("project-registry-anchor-walks").await;
     let (original, _clone) = cloned_repository(&harness, "anchor-walks");
@@ -1107,7 +1107,7 @@ async fn registering_a_named_checkout_again_does_not_walk_its_history() {
     );
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn stale_reap_plan_preserves_an_adopted_clone() {
     let harness = RegisteredGlobalDbHarness::open("registry-reap-adopted-clone").await;
     let (original, clone) = cloned_repository(&harness, "reap-adoption");
@@ -1151,7 +1151,7 @@ async fn stale_reap_plan_preserves_an_adopted_clone() {
     );
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn stale_reap_plan_preserves_a_new_store() {
     let harness = RegisteredGlobalDbHarness::open("registry-reap-new-store").await;
     let (root, _) = project_roots(&harness, "reap-store");
@@ -1185,7 +1185,7 @@ async fn stale_reap_plan_preserves_a_new_store() {
     );
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn stale_reap_plan_preserves_rebound_aliases_and_counts_deletions() {
     let harness = RegisteredGlobalDbHarness::open("registry-reap-rebound-alias").await;
     let (root, live) = project_roots(&harness, "reap-rebound");

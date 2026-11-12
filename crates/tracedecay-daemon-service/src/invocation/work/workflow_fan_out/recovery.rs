@@ -416,7 +416,7 @@ mod tests {
     use super::super::super::super::work_attempt_exec::WorkAttemptProcessRegistryV1;
 
     #[test]
-    fn a_reconcile_page_dispatches_a_child_without_a_tokio_runtime() {
+    fn a_reconcile_page_dispatches_a_child_from_a_synchronous_host() {
         let registry = Arc::new(WorkAttemptProcessRegistryV1::default());
         let identity = WorkAttemptIdentityV1::new(
             id("task.fan-out-page"),
@@ -428,7 +428,7 @@ mod tests {
         let (ran, child_ran) = std::sync::mpsc::channel();
 
         let dispatched = tracedecay_runtime_core::native_runtime::block_on(async {
-            assert!(tokio::runtime::Handle::try_current().is_err());
+            assert!(tokio::runtime::Handle::try_current().is_ok());
             registry.spawn_for_worktree(&identity, &worktree_id, move |_cancellation| async move {
                 let _ = ran.send(());
             })

@@ -6,6 +6,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use thiserror::Error;
+use tokio_util::task::AbortOnDropHandle;
 use tracedecay_contracts::clock::now_micros;
 use tracedecay_domain::{
     CanonicalObservationIdV1, ManifestDigest, ObservationContractError,
@@ -753,10 +754,11 @@ where
         let total = requests.len();
         let mut pending = requests.into_iter().enumerate();
         let limit = self.batch_concurrency.get().min(total);
-        let cx = tracedecay_runtime_core::native_runtime::cx()
+        let runtime = tracedecay_runtime_core::native_runtime::handle()
             .ok_or(ObservationApplicationError::PreparationWorkerStopped)?;
-        // Dropping a `join` cancels sections still queued on the pool; running
-        // ones finish detached.
+        // Dropping the guarded handles abandons the wait. A queued blocking
+        // section observes cancellation before it starts; a running one
+        // finishes detached.
         let mut tasks = FuturesUnordered::new();
         let mut prepared = (0..total).map(|_| None).collect::<Vec<_>>();
 
@@ -770,8 +772,12 @@ where
                 }
                 let sanitizer = self.sanitizer.clone();
                 let background_cpu = self.background_cpu.clone();
-                let mut task = cx
-                    .spawn_blocking(move |_cx| {
+                let task = tracedecay_runtime_core::native_runtime::spawn_blocking_on(
+                    &runtime,
+                    move || {
+                        if request.cancellation.is_cancelled() {
+                            return (index, Err(ObservationApplicationError::Cancelled));
+                        }
                         let capture = match background_cpu {
                             Some(authority) => authority.with_permit(|| {
                                 Self::prepare_capture_with_sanitizer(&sanitizer, request)
@@ -779,10 +785,9 @@ where
                             None => Self::prepare_capture_with_sanitizer(&sanitizer, request),
                         };
                         (index, capture)
-                    })
-                    .map_err(|_| ObservationApplicationError::PreparationWorkerStopped)?;
-                let cx = cx.clone();
-                tasks.push(async move { task.join(&cx).await });
+                    },
+                );
+                tasks.push(AbortOnDropHandle::new(task));
             }
 
             let Some(joined) = tasks.next().await else {

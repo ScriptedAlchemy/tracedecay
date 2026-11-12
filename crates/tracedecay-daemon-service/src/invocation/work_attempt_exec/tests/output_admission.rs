@@ -125,7 +125,7 @@ async fn execute(
 
 #[test]
 fn recovery_completed_before_admission_retains_output_in_the_same_mount() {
-    without_tokio(async {
+    on_installed_runtime(async {
         let (_directory, lease, convergence, _held) = recovering_store().await;
         let (_other_directory, other_store) = provider_artifact_store().await;
         let root = tempfile::tempdir().unwrap();
@@ -185,7 +185,7 @@ fn recovery_completed_before_admission_retains_output_in_the_same_mount() {
 
 #[test]
 fn canonical_binding_fences_recovering_work_without_terminal_failure() {
-    without_tokio(async {
+    on_installed_runtime(async {
         let (_directory, lease, _convergence, _held) = recovering_store().await;
         let root = tempfile::tempdir().unwrap();
         let fixture = leased_attempt(
@@ -223,7 +223,7 @@ fn canonical_binding_fences_recovering_work_without_terminal_failure() {
 
 #[test]
 fn still_recovering_admission_executes_no_effect_and_leaves_retryable_work() {
-    without_tokio(async {
+    on_installed_runtime(async {
         let (_directory, lease, _convergence, _held) = recovering_store().await;
         for protocol in [
             WorkProviderProtocol::ClaudeStreamJson,
@@ -300,7 +300,7 @@ fn still_recovering_admission_executes_no_effect_and_leaves_retryable_work() {
 
 #[test]
 fn cancellation_wins_output_admission_during_recovery_without_launching() {
-    without_tokio(async {
+    on_installed_runtime(async {
         let (_directory, lease, _convergence, _held) = recovering_store().await;
         for protocol in [
             WorkProviderProtocol::ClaudeStreamJson,

@@ -2,8 +2,7 @@
 //!
 //! A std thread owns the blocking reader or writer and meets the async side on
 //! a bounded `async_channel`, whose futures wake through ordinary `Waker`s. Any
-//! executor can await them, so stdio needs neither Tokio's blocking pool nor a
-//! native-runtime `Cx`.
+//! executor can await them without allocating a Tokio blocking-pool worker.
 
 use std::io::{self, BufReader, Read, Write};
 

@@ -1,9 +1,11 @@
 //! Compiler diagnostics for the TypeScript producer.
 //!
 //! The daemon's generation-bound producer discovers each tsconfig
-//! ([`tsconfig`]), runs the project's own compiler over it, and parses the
-//! report ([`typescript`]) into [`Diagnostic`]s that it publishes against the
-//! sealed code-index generation.
+//! ([`tsconfig`]) and asks the project's own compiler ([`typescript`]) how it
+//! resolves it, whether its references are built, and what it reports. The
+//! report becomes [`Diagnostic`]s it publishes against the sealed code-index
+//! generation, and the program the check recorded is the project's
+//! membership.
 
 pub mod tsconfig;
 pub mod typescript;

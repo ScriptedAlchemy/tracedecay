@@ -1,4 +1,3 @@
-use asupersync::Budget;
 use std::{sync::Arc, time::Duration};
 
 use tracedecay_store::{OperationPriorityV1, StoreRuntimeBindingV1};
@@ -179,11 +178,18 @@ impl Connection {
         let statement = statement(sql, params)?;
         let runtime = Arc::clone(&self.runtime);
         let priority = self.read_priority;
-        let rows = run_blocking("SQL reader", join_error, move || {
+        let rows = run_blocking(join_error, move || {
             runtime.query_with_priority(statement, priority, READER_WAIT)
         })
         .await??;
         Ok(Rows::from_exact(rows))
+    }
+
+    pub(crate) async fn finish_initial_schema(&self) -> Result<()> {
+        self.runtime
+            .finish_initial_schema()
+            .await
+            .map_err(Into::into)
     }
 
     pub async fn checkpoint_wal_truncate(&self) -> Result<Rows> {
@@ -204,14 +210,9 @@ impl Connection {
 
     pub async fn release_connection_memory(&self) -> Result<MemoryReleaseOutcome> {
         let runtime = Arc::clone(&self.runtime);
-        let settlement = crate::native_runtime::handle()
-            .ok_or(Error::RuntimeContextUnavailable)?
-            .try_request_cx_with_budget(Budget::INFINITE)
-            .map_err(|error| Error::Runtime(format!("failed to admit memory release: {error}")))?;
-        let mut task = settlement
-            .spawn(move |cx| async move { runtime.release_connection_memory_async(&cx).await })
-            .map_err(|error| Error::Runtime(format!("failed to spawn memory release: {error}")))?;
-        std::future::poll_fn(|context| task.poll_join(context))
+        let settlement = crate::native_runtime::handle().ok_or(Error::RuntimeContextUnavailable)?;
+        settlement
+            .spawn(async move { runtime.release_connection_memory_async().await })
             .await
             .map_err(join_error)?
             .map_err(Into::into)
@@ -238,7 +239,7 @@ impl Connection {
     pub async fn read_snapshot(&self) -> Result<ReadSnapshot> {
         let runtime = Arc::clone(&self.runtime);
         let priority = self.read_priority;
-        run_blocking("SQL snapshot", join_error, move || {
+        run_blocking(join_error, move || {
             runtime.begin_read_snapshot_with_priority(priority, READER_WAIT)
         })
         .await?
@@ -248,7 +249,7 @@ impl Connection {
 
     pub(crate) async fn health_read_snapshot(&self) -> Result<ReadSnapshot> {
         let runtime = Arc::clone(&self.runtime);
-        run_blocking("SQL health snapshot", join_error, move || {
+        run_blocking(join_error, move || {
             runtime.begin_health_read_snapshot(HEALTH_READER_WAIT)
         })
         .await?
@@ -327,24 +328,20 @@ impl Connection {
     }
 }
 
-fn join_error(error: asupersync::runtime::JoinError) -> super::Error {
+fn join_error(error: tokio::task::JoinError) -> super::Error {
     super::Error::Runtime(format!("exact SQL worker task failed: {error}"))
 }
 
-/// Runs `work` on the native blocking pool and joins it through a request
-/// context. Boxed: a future that holds the context across the join sits
-/// dozens of levels deep, and every SQL caller would repeat that `Send` proof
-/// (rust-lang/rust#159228).
+/// Runs `work` on the storage-aware blocking pool and joins its result.
+/// Boxed so every SQL caller does not repeat the deeply nested future
+/// `Send` proof (rust-lang/rust#159228).
 pub(super) fn run_blocking<T: Send + 'static>(
-    admission: &'static str,
-    join_failure: fn(asupersync::runtime::JoinError) -> Error,
+    join_failure: fn(tokio::task::JoinError) -> Error,
     work: impl FnOnce() -> T + Send + 'static,
 ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<T>> + Send>> {
     Box::pin(async move {
-        let cx = crate::native_runtime::cx().ok_or(Error::RuntimeContextUnavailable)?;
-        cx.spawn_blocking(move |_cx| work())
-            .map_err(|error| Error::Runtime(format!("failed to admit {admission}: {error}")))?
-            .join(&cx)
+        let cx = crate::native_runtime::handle().ok_or(Error::RuntimeContextUnavailable)?;
+        crate::native_runtime::spawn_blocking_on(&cx, work)
             .await
             .map_err(join_failure)
     })
@@ -379,7 +376,7 @@ mod tests {
         }
     }
 
-    #[asupersync::test]
+    #[tokio::test]
     async fn long_lease_entrypoint_requires_attached_write_authority() {
         let directory = tempfile::TempDir::new().unwrap();
         let plain =

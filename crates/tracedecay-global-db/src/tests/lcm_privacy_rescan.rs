@@ -226,7 +226,7 @@ fn payload_dir_holds(storage_root: &std::path::Path, needle: &str) -> bool {
     })
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn entropy_algorithm_upgrade_invalidates_completed_inline_and_external_rescans() {
     // The rules-only revision shipped before name-position-aware entropy.
     const PRIOR_REVISION: &str = "privacy.lcm-payload.v1+rules.a0ee654364a595f4";
@@ -271,7 +271,7 @@ async fn entropy_algorithm_upgrade_invalidates_completed_inline_and_external_res
     );
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn at_rest_rescan_remediates_legacy_rows_and_settles_watermark() {
     let harness = RegisteredGlobalDbHarness::open("lcm-privacy-rescan").await;
     let storage_root = harness
@@ -423,7 +423,7 @@ async fn at_rest_rescan_remediates_legacy_rows_and_settles_watermark() {
     assert_eq!(repeat.protected_rows, 0);
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn rescan_hydrates_canonical_inline_bodies() {
     let harness = RegisteredGlobalDbHarness::open("privacy-canonical-body").await;
     let storage_root = harness
@@ -480,7 +480,7 @@ async fn rescan_hydrates_canonical_inline_bodies() {
     assert_eq!(message.content, text);
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn rescan_remediates_external_metadata_even_when_body_is_unavailable() {
     for unavailable in [false, true] {
         let harness = RegisteredGlobalDbHarness::open("privacy-external-metadata").await;
@@ -535,7 +535,7 @@ async fn rescan_remediates_external_metadata_even_when_body_is_unavailable() {
     }
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn rescan_keeps_provider_metadata_when_reexternalizing_a_dirty_body() {
     let harness = RegisteredGlobalDbHarness::open("privacy-external-provider-metadata").await;
     seed_session(&harness, "provider-session").await;

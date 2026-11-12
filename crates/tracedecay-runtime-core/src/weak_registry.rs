@@ -98,7 +98,7 @@ impl<K: Eq + Hash, V> WeakRegistry<K, V> {
     }
 }
 
-type SingleFlightSlot<V> = Arc<asupersync::sync::Mutex<Weak<V>>>;
+type SingleFlightSlot<V> = Arc<tokio::sync::Mutex<Weak<V>>>;
 
 /// Async get-or-open over weak entries with one single-flight slot per key.
 ///
@@ -135,11 +135,6 @@ impl<K: Eq + Hash, V> SingleFlightWeakRegistry<K, V> {
         Fut: std::future::Future<Output = std::result::Result<V, E>>,
         E: From<tracedecay_domain::errors::TraceDecayError>,
     {
-        let cx = crate::native_runtime::cx().ok_or_else(|| {
-            tracedecay_domain::errors::TraceDecayError::Config {
-                message: "single-flight open requires a native task context".into(),
-            }
-        })?;
         let slot = {
             let mut slots = self.slots.lock().unwrap_or_else(PoisonError::into_inner);
             // Holding the map lock stops anyone cloning a slot, so a slot only
@@ -150,11 +145,7 @@ impl<K: Eq + Hash, V> SingleFlightWeakRegistry<K, V> {
             });
             Arc::clone(slots.entry(key).or_default())
         };
-        let mut live = asupersync::sync::OwnedMutexGuard::lock(slot, &cx)
-            .await
-            .map_err(|error| tracedecay_domain::errors::TraceDecayError::Config {
-                message: format!("single-flight open lock unavailable: {error}"),
-            })?;
+        let mut live = slot.lock_owned().await;
         if let Some(value) = live.upgrade() {
             return Ok(value);
         }
@@ -167,11 +158,11 @@ impl<K: Eq + Hash, V> SingleFlightWeakRegistry<K, V> {
 #[cfg(test)]
 mod single_flight_tests {
     use super::*;
-    use asupersync::channel::oneshot;
     use std::future::Future;
     use std::pin::pin;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::task::{Context, Poll, Waker};
+    use tokio::sync::oneshot;
     use tracedecay_domain::errors::TraceDecayError;
 
     fn poll_once<F: Future>(future: std::pin::Pin<&mut F>) -> Poll<F::Output> {
@@ -180,17 +171,17 @@ mod single_flight_tests {
 
     #[test]
     fn same_key_joins_share_an_open_without_blocking_other_keys() {
-        let runtime = asupersync::runtime::RuntimeBuilder::new()
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
             .worker_threads(2)
             .build()
             .unwrap();
         runtime.block_on(async {
-            let cx = asupersync::Cx::current().unwrap();
             let registry = SingleFlightWeakRegistry::<&str, usize>::new();
             let opens = AtomicUsize::new(0);
-            let (release_tx, mut release_rx) = oneshot::channel::<()>();
+            let (release_tx, release_rx) = oneshot::channel::<()>();
             let mut first = pin!(registry.get_or_open("a", || async {
-                release_rx.recv(&cx).await.unwrap();
+                release_rx.await.unwrap();
                 Ok::<_, TraceDecayError>(opens.fetch_add(1, Ordering::SeqCst))
             }));
             assert!(poll_once(first.as_mut()).is_pending());
@@ -203,7 +194,7 @@ mod single_flight_tests {
                 .await
                 .unwrap();
             assert_eq!(*other, 3);
-            release_tx.send(&cx, ()).unwrap();
+            release_tx.send(()).unwrap();
             let first = first.await.unwrap();
             let joined = joiner.await.unwrap();
             assert!(Arc::ptr_eq(&first, &joined));
@@ -213,7 +204,8 @@ mod single_flight_tests {
 
     #[test]
     fn failed_and_cancelled_opens_leave_the_key_available() {
-        let runtime = asupersync::runtime::RuntimeBuilder::new()
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
             .worker_threads(2)
             .build()
             .unwrap();
@@ -244,7 +236,8 @@ mod single_flight_tests {
 
     #[test]
     fn dropped_values_reopen_and_idle_slots_are_swept() {
-        let runtime = asupersync::runtime::RuntimeBuilder::new()
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
             .worker_threads(2)
             .build()
             .unwrap();

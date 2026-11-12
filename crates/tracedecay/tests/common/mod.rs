@@ -4,6 +4,8 @@ pub mod fixture;
 #[cfg(feature = "test-transport")]
 pub mod mcp_response;
 pub mod repository_layout;
+#[cfg(unix)]
+pub mod typescript_project;
 
 use std::ffi::{OsStr, OsString};
 use std::fs;
@@ -1595,6 +1597,13 @@ impl LcmTestRuntime {
                 .await
                 .expect("registered LCM test runtime"),
         }
+    }
+
+    pub async fn shutdown(self) {
+        self.runtime
+            .shutdown()
+            .await
+            .expect("registered LCM test runtime shutdown");
     }
 
     pub async fn upsert_session(&self, session: &SessionRecord) -> bool {

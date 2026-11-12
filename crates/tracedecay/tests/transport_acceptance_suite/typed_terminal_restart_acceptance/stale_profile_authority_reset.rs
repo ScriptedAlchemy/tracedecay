@@ -201,6 +201,7 @@ fn released_profile_authority_resets_alone_and_projects_register_again() {
         removed,
         [
             &PathBuf::from("global.db"),
+            &PathBuf::from("global.db-journal"),
             &PathBuf::from("global.db-shm"),
             &PathBuf::from("global.db-wal")
         ],

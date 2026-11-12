@@ -12,8 +12,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use asupersync::io::{AsyncWriteExt, BufReader};
 use serde_json::{Value, json};
+use tokio::io::{AsyncWriteExt, BufReader};
 use tracedecay_daemon_protocol::connection::write_daemon_handshake_preamble;
 use tracedecay_daemon_protocol::{
     DaemonClientReadHalf, DaemonClientStream, DaemonClientWriteHalf, DaemonEndpoint,

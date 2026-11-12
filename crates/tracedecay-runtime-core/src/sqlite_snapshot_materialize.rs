@@ -32,19 +32,13 @@ const FOLD_INTERRUPT_POLL_INTERVAL: Duration = Duration::from_millis(1);
     skip_all
 )]
 pub async fn materialize(path: &Path, control: SnapshotReadControl) -> io::Result<()> {
-    let cx = crate::native_runtime::cx().ok_or_else(|| {
+    let cx = crate::native_runtime::handle().ok_or_else(|| {
         io::Error::other(tracedecay_domain::errors::TraceDecayError::Config {
-            message: "snapshot materialization requires a native task context".into(),
+            message: "snapshot materialization requires a Tokio runtime".into(),
         })
     })?;
     let path = path.to_path_buf();
-    cx.spawn_blocking(move |_| materialize_on_thread(&path, &control))
-        .map_err(|error| {
-            io::Error::other(format!(
-                "snapshot materialization admission failed: {error}"
-            ))
-        })?
-        .join(&cx)
+    crate::native_runtime::spawn_blocking_on(&cx, move || materialize_on_thread(&path, &control))
         .await
         .map_err(|error| {
             io::Error::other(format!("snapshot materialization task failed: {error}"))

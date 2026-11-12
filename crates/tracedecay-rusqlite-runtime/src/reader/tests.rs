@@ -355,7 +355,7 @@ fn pinned_reader_accepts_an_equivalent_hard_link_spelling() {
 fn checkpoint_pressure_blocks_general_reads_but_preserves_health() {
     let store = TestStore::new();
     let (pressure_tx, pressure_rx) =
-        asupersync::channel::watch::channel(crate::CheckpointPressure::BlockGeneral {
+        tokio::sync::watch::channel(crate::CheckpointPressure::BlockGeneral {
             wal: crate::CheckpointWal {
                 frames: 64,
                 bytes: 256 * 1024 * 1024,
