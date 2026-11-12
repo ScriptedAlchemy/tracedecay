@@ -293,8 +293,13 @@ mod published_artifact_ceiling {
     use tracedecay_domain::errors::TraceDecayError;
     use tracedecay_lcm::LCM_SCHEMA_VERSION;
     use tracedecay_runtime_core::cancellation::CancellationToken;
-    use tracedecay_runtime_core::db::TestDatabaseRuntimeScope;
+    use tracedecay_runtime_core::db::{
+        RegisteredTestRuntimeRetirementControlV1, TestDatabaseRuntimeScope,
+    };
     use tracedecay_runtime_core::db::engine;
+    use tracedecay_runtime_core::shard_runtime::registry::{
+        StoreRuntimeClientLease, StoreRuntimeRetirementOutcome, StoreRuntimeRetirementResult,
+    };
     use tracedecay_rusqlite_runtime::workflow::{
         WORKFLOW_SCHEMA_DEFINITION_DIGEST_V1, WORKFLOW_TABLE_CONTRACTS_V1,
     };
@@ -881,7 +886,7 @@ mod published_artifact_ceiling {
     ) -> (
         RegisteredGlobalDbOwnerV1,
         crate::schema_stages::RegisteredSchemaConvergence,
-        impl Sized,
+        (StoreRuntimeClientLease, RegisteredTestRuntimeRetirementControlV1),
     ) {
         let (database, runtime, retirement) = publish_daemon_runtime(path).await.into_parts();
         let (owner, convergence) = RegisteredGlobalDbOwnerV1::admit_and_attach_for_daemon(
@@ -1006,7 +1011,7 @@ mod published_artifact_ceiling {
             path: &Path,
             cancel_at: usize,
         ) -> (Result<(), TraceDecayError>, usize) {
-            let (owner, convergence, _held) = admit_for_daemon(path).await;
+            let (owner, convergence, (runtime, retirement)) = admit_for_daemon(path).await;
             let lease = owner.issue_lease().unwrap();
             let cancellation = CancellationToken::new();
             let mut recovery = Box::pin(lease.converge_schema(convergence, &cancellation));
@@ -1026,6 +1031,29 @@ mod published_artifact_ceiling {
             {
                 assert_workflow_recovering(&lease).await;
             }
+            // Each sampled cancellation reopens this path. Join the exact
+            // published runtime before the next admission can acquire it.
+            drop((lease, owner, runtime));
+            let mut reservation = match retirement
+                .registry()
+                .reserve_retirement_batch(vec![retirement.retirement_target()])
+            {
+                StoreRuntimeRetirementResult::Reserved(reservation) => reservation,
+                StoreRuntimeRetirementResult::Blocked(refusal) => {
+                    panic!("completed convergence retained runtime clients: {refusal:?}")
+                }
+            };
+            let committed = tracedecay_runtime_core::native_runtime::spawn_blocking(move || {
+                reservation.commit()
+            })
+            .await
+            .unwrap()
+            .unwrap();
+            assert!(
+                matches!(committed.outcomes(), [StoreRuntimeRetirementOutcome::Closed { .. }]),
+                "fixture runtime must close before reopening: {:?}",
+                committed.outcomes()
+            );
             (outcome, polls)
         }
 
