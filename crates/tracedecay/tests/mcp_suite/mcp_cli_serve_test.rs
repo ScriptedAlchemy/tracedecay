@@ -1106,13 +1106,7 @@ async fn no_explicit_path_prefers_discovered_cwd_over_initialize_roots() {
     let home_path = home.path().to_path_buf();
     let root_uri = file_uri(active.path());
     let output = tokio::task::spawn_blocking(move || {
-        run_serve_runtime_with_initialize_root(
-            &home_path,
-            &nested_cwd,
-            None,
-            root_uri,
-            "active",
-        )
+        run_serve_runtime_with_initialize_root(&home_path, &nested_cwd, None, root_uri, "active")
     })
     .await
     .expect("serve runtime host session");
