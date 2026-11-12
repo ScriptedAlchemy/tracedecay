@@ -503,14 +503,50 @@ fn moved_nongit_open_options(
     }
 }
 
+#[cfg(unix)]
+async fn first_touch_with_adoption(
+    registry: &tracedecay_global_db::RegisteredGlobalDb,
+    profile_root: &std::path::Path,
+    target: &std::path::Path,
+    adoption: &tracedecay_project::project::MovedStoreAdoption,
+) -> tracedecay_domain::errors::Result<tracedecay_runtime_core::storage::StoreLayout> {
+    tracedecay_project::project::TraceDecay::resolve_first_touch_configuration_layout_with_adoption(
+        target,
+        &moved_nongit_open_options(profile_root),
+        registry,
+        adoption,
+    )
+    .await
+}
+
+#[cfg(unix)]
+async fn registered_root(
+    registry: &tracedecay_global_db::RegisteredGlobalDb,
+    project_id: &str,
+) -> std::path::PathBuf {
+    std::path::PathBuf::from(
+        registry
+            .project_registry_context_by_id(project_id)
+            .await
+            .expect("registry lookup")
+            .expect("project stays registered")
+            .project
+            .canonical_root,
+    )
+}
+
+#[cfg(unix)]
+fn named(project_id: &str) -> tracedecay_project::project::MovedStoreAdoption {
+    tracedecay_project::project::MovedStoreAdoption::AdoptNamed(project_id.to_owned())
+}
+
 /// After the working-tree enrollment file was removed, a moved non-git
 /// project cannot be found by path-derived id. Rebinding its registry row is
-/// an operator decision: ambient first-touch mints fresh, explicit init
-/// without flags refuses with the candidate, and `--yes` (`AdoptUnique`)
-/// completes the remap with store data intact.
+/// an operator decision: ambient first-touch mints fresh, and only a named
+/// adoption completes the remap with store data intact.
 #[cfg(unix)]
 #[tokio::test]
-async fn moved_nongit_project_is_readopted_only_when_confirmed() {
+async fn moved_nongit_project_is_readopted_only_when_named() {
     let home = TempDir::new().expect("isolated home");
     let root = home.path().canonicalize().expect("canonical home");
     let profile_root = root.join(".tracedecay");
@@ -520,8 +556,7 @@ async fn moved_nongit_project_is_readopted_only_when_confirmed() {
     let layout = enroll_nongit_project_on_disk(&original, &profile_root, project_id);
     let graph_bytes_before = std::fs::read(&layout.graph_db_path).expect("graph bytes");
 
-    let _database_scope =
-        enter_test_daemon_database_scope(&profile_root, "moved nongit unique re-adoption");
+    let _database_scope = enter_test_daemon_database_scope(&profile_root, "moved nongit adoption");
     let engine = test_daemon_engine_for_profile(&profile_root);
     let registry = engine
         .store_administration
@@ -537,17 +572,14 @@ async fn moved_nongit_project_is_readopted_only_when_confirmed() {
     std::fs::rename(&original, &moved).expect("move nongit project");
     let moved_canonical = moved.canonicalize().expect("canonical moved root");
 
-    // Ambient first-touch (`Never`) mints a fresh path-derived identity and
-    // must not touch the moved project's registration.
-    let ambient =
-        tracedecay_project::project::TraceDecay::resolve_first_touch_configuration_layout_with_adoption(
-            &moved,
-            &moved_nongit_open_options(&profile_root),
-            registry.as_ref(),
-            &tracedecay_project::project::MovedStoreAdoption::Never,
-        )
-        .await
-        .expect("ambient first-touch mints fresh");
+    let ambient = first_touch_with_adoption(
+        &registry,
+        &profile_root,
+        &moved,
+        &tracedecay_project::project::MovedStoreAdoption::Never,
+    )
+    .await
+    .expect("ambient first-touch mints fresh");
     assert_eq!(
         ambient.identity.project_id.as_deref(),
         Some(
@@ -555,46 +587,16 @@ async fn moved_nongit_project_is_readopted_only_when_confirmed() {
         ),
         "ambient first-touch must mint the path-derived identity, never adopt"
     );
-
-    // Explicit init without adoption flags refuses with the candidate and
-    // the explicit choices instead of silently remapping or silently
-    // splitting identity.
-    let offer = tracedecay_project::project::TraceDecay::resolve_first_touch_configuration_layout_with_adoption(
-        &moved,
-        &moved_nongit_open_options(&profile_root),
-        registry.as_ref(),
-        &tracedecay_project::project::MovedStoreAdoption::OfferCandidates,
-    )
-    .await
-    .expect_err("explicit init without flags must refuse when a candidate exists");
-    let message = offer.to_string();
-    assert!(
-        message.contains(project_id)
-            && message.contains("--adopt-project")
-            && message.contains("--fresh"),
-        "refusal must name the candidate and both explicit choices, got {message}"
-    );
-    let unmoved = registry
-        .project_registry_context_by_id(project_id)
-        .await
-        .expect("registry lookup")
-        .expect("refusal must not touch the registration");
     assert_eq!(
-        std::path::Path::new(&unmoved.project.canonical_root),
-        original.as_path(),
-        "a refusal must leave the registry row untouched"
+        registered_root(&registry, project_id).await,
+        original,
+        "a fresh mint must leave the moved project's registration untouched"
     );
 
-    // `init --yes` confirms adopting the unique candidate.
     let store_layout =
-        tracedecay_project::project::TraceDecay::resolve_first_touch_configuration_layout_with_adoption(
-            &moved,
-            &moved_nongit_open_options(&profile_root),
-            registry.as_ref(),
-            &tracedecay_project::project::MovedStoreAdoption::AdoptUnique,
-        )
-        .await
-        .expect("confirmed unique moved nongit project must be adopted");
+        first_touch_with_adoption(&registry, &profile_root, &moved, &named(project_id))
+            .await
+            .expect("named moved nongit project must be adopted");
     assert_eq!(
         store_layout.identity.project_id.as_deref(),
         Some(project_id),
@@ -604,19 +606,14 @@ async fn moved_nongit_project_is_readopted_only_when_confirmed() {
         store_layout.graph_db_path, layout.graph_db_path,
         "adoption must keep the existing profile shard"
     );
-    let remapped = registry
-        .project_registry_context_by_id(project_id)
-        .await
-        .expect("registry lookup")
-        .expect("adopted project remains registered");
     assert_eq!(
-        std::path::Path::new(&remapped.project.canonical_root),
-        moved_canonical.as_path(),
+        registered_root(&registry, project_id).await,
+        moved_canonical,
         "registry canonical root must follow the move"
     );
-    let graph_bytes_after = std::fs::read(&layout.graph_db_path).expect("graph bytes after");
     assert_eq!(
-        graph_bytes_before, graph_bytes_after,
+        std::fs::read(&layout.graph_db_path).expect("graph bytes after"),
+        graph_bytes_before,
         "adoption must leave store data intact"
     );
     assert!(
@@ -687,24 +684,21 @@ async fn ambient_first_touch_never_adopts_a_moved_nongit_store() {
     );
 }
 
-/// Two moved non-git stores can claim a brand-new root. A confirmed adoption
-/// (`--yes`) must refuse instead of picking a winner, and the stale stores
-/// must not brick a fresh init: opting out of adoption mints a new identity.
+/// A profile full of unrelated stale and unreadable records neither blocks a
+/// named adoption nor an ordinary init: neither path reads any record but the
+/// one it names.
 #[cfg(unix)]
 #[tokio::test]
-async fn moved_nongit_adoption_is_refused_when_ambiguous() {
+async fn named_adoption_and_fresh_init_ignore_unrelated_stale_and_corrupt_records() {
     let home = TempDir::new().expect("isolated home");
     let root = home.path().canonicalize().expect("canonical home");
     let profile_root = root.join(".tracedecay");
-    let original_a = root.join("nongit-a");
-    let original_b = root.join("nongit-b");
-    std::fs::create_dir_all(&original_a).expect("create project a");
-    std::fs::create_dir_all(&original_b).expect("create project b");
-    enroll_nongit_project_on_disk(&original_a, &profile_root, "proj_nongit_ambig_a");
-    enroll_nongit_project_on_disk(&original_b, &profile_root, "proj_nongit_ambig_b");
+    let wanted_original = root.join("wanted-original");
+    std::fs::create_dir_all(&wanted_original).expect("create wanted project");
+    let wanted_id = "proj_nongit_wanted";
+    let wanted_layout = enroll_nongit_project_on_disk(&wanted_original, &profile_root, wanted_id);
 
-    let _database_scope =
-        enter_test_daemon_database_scope(&profile_root, "moved nongit ambiguous adoption");
+    let _database_scope = enter_test_daemon_database_scope(&profile_root, "named adoption census");
     let engine = test_daemon_engine_for_profile(&profile_root);
     let registry = engine
         .store_administration
@@ -712,76 +706,79 @@ async fn moved_nongit_adoption_is_refused_when_ambiguous() {
         .await
         .expect("profile registry");
     registry
-        .upsert_code_project("proj_nongit_ambig_a", &original_a, None, None, None)
+        .upsert_code_project(wanted_id, &wanted_original, None, None, None)
         .await
-        .expect("register a");
-    registry
-        .upsert_code_project("proj_nongit_ambig_b", &original_b, None, None, None)
-        .await
-        .expect("register b");
+        .expect("register wanted project");
 
-    std::fs::rename(&original_a, root.join("nongit-a-moved")).expect("move a");
-    std::fs::rename(&original_b, root.join("nongit-b-moved")).expect("move b");
-    let target = root.join("nongit-new");
-    std::fs::create_dir_all(&target).expect("create adoption target");
+    for index in 0..3 {
+        let stale = root.join(format!("stale-{index}"));
+        std::fs::create_dir_all(&stale).expect("create stale project");
+        let stale_id = format!("proj_nongit_stale_{index}");
+        let stale_layout = enroll_nongit_project_on_disk(&stale, &profile_root, &stale_id);
+        registry
+            .upsert_code_project(&stale_id, &stale, None, None, None)
+            .await
+            .expect("register stale project");
+        std::fs::remove_dir_all(&stale).expect("delete stale project directory");
+        if index == 0 {
+            std::fs::write(
+                stale_layout
+                    .manifest_path
+                    .as_deref()
+                    .expect("manifest path"),
+                b"not a manifest",
+            )
+            .expect("corrupt unrelated manifest");
+        }
+    }
 
-    let error = tracedecay_project::project::TraceDecay::resolve_first_touch_configuration_layout_with_adoption(
-        &target,
-        &moved_nongit_open_options(&profile_root),
-        registry.as_ref(),
-        &tracedecay_project::project::MovedStoreAdoption::AdoptUnique,
-    )
-    .await
-    .expect_err("ambiguous moved nongit adoption must refuse");
-    let message = error.to_string();
-    assert!(
-        message.contains("ambiguous") && message.contains("--adopt-project"),
-        "refusal must name the adopt flag, got {message}"
-    );
-    assert!(
-        message.contains("proj_nongit_ambig_a") && message.contains("proj_nongit_ambig_b"),
-        "refusal must name both candidates, got {message}"
-    );
-
-    // The stale stores must not brick a genuinely new project: opting out of
-    // adoption (`--fresh`, and every ambient first-touch) mints fresh.
-    let fresh = tracedecay_project::project::TraceDecay::resolve_first_touch_configuration_layout_with_adoption(
-        &target,
-        &moved_nongit_open_options(&profile_root),
-        registry.as_ref(),
+    let wanted_moved = root.join("wanted-moved");
+    std::fs::rename(&wanted_original, &wanted_moved).expect("move wanted project");
+    let fresh_dir = root.join("brand-new");
+    std::fs::create_dir_all(&fresh_dir).expect("create fresh directory");
+    first_touch_with_adoption(
+        &registry,
+        &profile_root,
+        &fresh_dir,
         &tracedecay_project::project::MovedStoreAdoption::Never,
     )
     .await
-    .expect("fresh init must stay possible with stale moved stores present");
-    let target_canonical = target.canonicalize().expect("canonical target");
+    .expect("ordinary init must not read unrelated stale or corrupt records");
+
+    let adopted =
+        first_touch_with_adoption(&registry, &profile_root, &wanted_moved, &named(wanted_id))
+            .await
+            .expect("named adoption must ignore unrelated stale and corrupt records");
+    assert_eq!(adopted.identity.project_id.as_deref(), Some(wanted_id));
+    assert_eq!(adopted.graph_db_path, wanted_layout.graph_db_path);
     assert_eq!(
-        fresh.identity.project_id.as_deref(),
-        Some(
-            tracedecay_runtime_core::storage::default_profile_project_id(&target_canonical)
-                .as_str()
-        ),
-        "opting out of adoption must mint the path-derived identity"
+        registered_root(&registry, wanted_id).await,
+        wanted_moved.canonicalize().expect("canonical moved root")
     );
 }
 
-/// `--adopt-project` selects exactly one moved non-git store when first-touch
-/// would otherwise be ambiguous.
+/// Naming the wrong identity, a project whose recorded root still exists, or a
+/// store that belongs to an unrelated root refuses and mutates nothing.
 #[cfg(unix)]
 #[tokio::test]
-async fn moved_nongit_adoption_honors_explicit_project_id() {
+async fn named_adoption_refuses_wrong_identity_live_root_and_foreign_store() {
     let home = TempDir::new().expect("isolated home");
     let root = home.path().canonicalize().expect("canonical home");
     let profile_root = root.join(".tracedecay");
-    let original_a = root.join("nongit-a");
-    let original_b = root.join("nongit-b");
-    std::fs::create_dir_all(&original_a).expect("create project a");
-    std::fs::create_dir_all(&original_b).expect("create project b");
-    let layout_a = enroll_nongit_project_on_disk(&original_a, &profile_root, "proj_nongit_flag_a");
-    enroll_nongit_project_on_disk(&original_b, &profile_root, "proj_nongit_flag_b");
-    let graph_bytes_before = std::fs::read(&layout_a.graph_db_path).expect("graph bytes");
+    let live = root.join("live-project");
+    let foreign_original = root.join("foreign-original");
+    let foreign_store_root = root.join("foreign-store-root");
+    for dir in [&live, &foreign_original] {
+        std::fs::create_dir_all(dir).expect("create project");
+    }
+    enroll_nongit_project_on_disk(&live, &profile_root, "proj_nongit_live");
+    // Registered at `foreign_original`, but its manifest records an unrelated root.
+    std::fs::create_dir_all(&foreign_store_root).expect("create foreign store root");
+    let foreign_layout =
+        enroll_nongit_project_on_disk(&foreign_store_root, &profile_root, "proj_nongit_foreign");
 
     let _database_scope =
-        enter_test_daemon_database_scope(&profile_root, "moved nongit flagged adoption");
+        enter_test_daemon_database_scope(&profile_root, "named adoption refusals");
     let engine = test_daemon_engine_for_profile(&profile_root);
     let registry = engine
         .store_administration
@@ -789,44 +786,47 @@ async fn moved_nongit_adoption_honors_explicit_project_id() {
         .await
         .expect("profile registry");
     registry
-        .upsert_code_project("proj_nongit_flag_a", &original_a, None, None, None)
+        .upsert_code_project("proj_nongit_live", &live, None, None, None)
         .await
-        .expect("register a");
+        .expect("register live project");
     registry
-        .upsert_code_project("proj_nongit_flag_b", &original_b, None, None, None)
+        .upsert_code_project("proj_nongit_foreign", &foreign_original, None, None, None)
         .await
-        .expect("register b");
+        .expect("register foreign project");
+    std::fs::remove_dir_all(&foreign_original).expect("vanish the foreign registered root");
 
-    std::fs::rename(&original_a, root.join("nongit-a-moved")).expect("move a");
-    std::fs::rename(&original_b, root.join("nongit-b-moved")).expect("move b");
-    let target = root.join("nongit-new");
-    std::fs::create_dir_all(&target).expect("create adoption target");
+    let target = root.join("adoption-target");
+    std::fs::create_dir_all(&target).expect("create target");
+    let manifest_path = foreign_layout.manifest_path.clone().expect("manifest path");
+    let manifest_before = std::fs::read(&manifest_path).expect("manifest bytes");
 
-    let store_layout =
-        tracedecay_project::project::TraceDecay::resolve_first_touch_configuration_layout_with_adoption(
-            &target,
-            &moved_nongit_open_options(&profile_root),
-            registry.as_ref(),
-            &tracedecay_project::project::MovedStoreAdoption::AdoptNamed("proj_nongit_flag_a".to_owned()),
-        )
-        .await
-        .expect("flagged adoption must select the named project");
+    for (requested, expected) in [
+        ("proj_nongit_missing", "not a registered project"),
+        ("proj_nongit_live", "still exists"),
+        (
+            "proj_nongit_foreign",
+            "records neither its previous root nor this root",
+        ),
+    ] {
+        let error = first_touch_with_adoption(&registry, &profile_root, &target, &named(requested))
+            .await
+            .expect_err("a mismatched named adoption must refuse");
+        let message = error.to_string();
+        assert!(
+            message.contains(requested) && message.contains(expected),
+            "refusal for {requested} must say '{expected}', got {message}"
+        );
+    }
+
+    assert_eq!(registered_root(&registry, "proj_nongit_live").await, live);
     assert_eq!(
-        store_layout.identity.project_id.as_deref(),
-        Some("proj_nongit_flag_a")
+        registered_root(&registry, "proj_nongit_foreign").await,
+        foreign_original
     );
-    let remapped = registry
-        .project_registry_context_by_id("proj_nongit_flag_a")
-        .await
-        .expect("registry lookup")
-        .expect("adopted project remains registered");
     assert_eq!(
-        std::path::Path::new(&remapped.project.canonical_root),
-        target.canonicalize().expect("canonical target").as_path()
-    );
-    assert_eq!(
-        std::fs::read(&layout_a.graph_db_path).expect("graph bytes after"),
-        graph_bytes_before
+        std::fs::read(&manifest_path).expect("manifest bytes after"),
+        manifest_before,
+        "refusals must not rewrite store evidence"
     );
 }
 
@@ -880,12 +880,11 @@ async fn moved_nongit_adoption_refuses_conflicting_registered_root() {
 
 /// A remap interrupted between the store-side evidence write and the registry
 /// commit leaves the shard manifest naming the new root while the registry
-/// still names the gone previous root. That manifest is the journal record:
-/// the next explicit init resumes the remap without flags, positive linkage
-/// written under the earlier explicit adoption, and commits the registry.
+/// still names the gone previous root. Re-running the same named adoption
+/// resumes from that manifest and commits the registry.
 #[cfg(unix)]
 #[tokio::test]
-async fn interrupted_moved_nongit_remap_resumes_on_next_explicit_init() {
+async fn interrupted_named_adoption_resumes_when_rerun_with_same_id() {
     let home = TempDir::new().expect("isolated home");
     let root = home.path().canonicalize().expect("canonical home");
     let profile_root = root.join(".tracedecay");
@@ -910,37 +909,33 @@ async fn interrupted_moved_nongit_remap_resumes_on_next_explicit_init() {
 
     let moved = root.join("nongit-moved");
     std::fs::rename(&original, &moved).expect("move nongit project");
-    // Simulate the interruption: the remap wrote the shard manifest for the
-    // new root but crashed before the registry upsert.
     let torn_layout =
         tracedecay_runtime_core::storage::profile_sharded_layout(&moved, &profile_root, project_id)
             .expect("layout for the interrupted remap");
     tracedecay_runtime_core::storage::write_store_manifest(&torn_layout)
         .expect("journal manifest write");
 
-    let resumed =
-        tracedecay_project::project::TraceDecay::resolve_first_touch_configuration_layout_with_adoption(
-            &moved,
-            &moved_nongit_open_options(&profile_root),
-            registry.as_ref(),
-            &tracedecay_project::project::MovedStoreAdoption::OfferCandidates,
-        )
-        .await
-        .expect("a torn remap must resume from its manifest journal record");
-    assert_eq!(
-        resumed.identity.project_id.as_deref(),
+    let ambient = first_touch_with_adoption(
+        &registry,
+        &profile_root,
+        &moved,
+        &tracedecay_project::project::MovedStoreAdoption::Never,
+    )
+    .await
+    .expect("ordinary init after a torn remap stays fresh");
+    assert_ne!(
+        ambient.identity.project_id.as_deref(),
         Some(project_id),
-        "resume must restore the registered identity, never mint an alias"
+        "only the named re-run resumes the remap"
     );
-    let remapped = registry
-        .project_registry_context_by_id(project_id)
+
+    let resumed = first_touch_with_adoption(&registry, &profile_root, &moved, &named(project_id))
         .await
-        .expect("registry lookup")
-        .expect("resumed project remains registered");
-    let moved_canonical = moved.canonicalize().expect("canonical moved root");
+        .expect("re-running the named adoption must resume from the manifest journal record");
+    assert_eq!(resumed.identity.project_id.as_deref(), Some(project_id));
     assert_eq!(
-        std::path::Path::new(&remapped.project.canonical_root),
-        moved_canonical.as_path(),
+        registered_root(&registry, project_id).await,
+        moved.canonicalize().expect("canonical moved root"),
         "resume must commit the registry to the new root"
     );
     assert_eq!(
@@ -950,12 +945,11 @@ async fn interrupted_moved_nongit_remap_resumes_on_next_explicit_init() {
     );
 }
 
-/// A present-but-unreadable store manifest must fail candidate evaluation
-/// with a typed error, not silently drop the candidate: a corrupt manifest
-/// could otherwise remove the true candidate and make a wrong one unique.
+/// A present-but-unreadable manifest for the named project is a typed error,
+/// not a silent non-match.
 #[cfg(unix)]
 #[tokio::test]
-async fn unreadable_moved_store_evidence_is_a_typed_refusal() {
+async fn unreadable_named_store_evidence_is_a_typed_refusal() {
     let home = TempDir::new().expect("isolated home");
     let root = home.path().canonicalize().expect("canonical home");
     let profile_root = root.join(".tracedecay");
@@ -979,25 +973,21 @@ async fn unreadable_moved_store_evidence_is_a_typed_refusal() {
 
     let moved = root.join("nongit-moved");
     std::fs::rename(&original, &moved).expect("move nongit project");
-    let manifest_path = layout
-        .manifest_path
-        .as_deref()
-        .expect("profile-sharded layout carries a manifest path");
-    std::fs::write(manifest_path, b"not a manifest").expect("corrupt the manifest");
-
-    let error = tracedecay_project::project::TraceDecay::resolve_first_touch_configuration_layout_with_adoption(
-        &moved,
-        &moved_nongit_open_options(&profile_root),
-        registry.as_ref(),
-        &tracedecay_project::project::MovedStoreAdoption::AdoptUnique,
+    std::fs::write(
+        layout.manifest_path.as_deref().expect("manifest path"),
+        b"not a manifest",
     )
-    .await
-    .expect_err("unreadable evidence must be a typed error, not a silent non-match");
+    .expect("corrupt the manifest");
+
+    let error = first_touch_with_adoption(&registry, &profile_root, &moved, &named(project_id))
+        .await
+        .expect_err("unreadable evidence must be a typed error, not a silent non-match");
     let message = error.to_string();
     assert!(
         message.contains("moved-store adoption evidence") && message.contains("--fresh"),
         "the refusal must name the evidence failure and the fresh-mint escape, got {message}"
     );
+    assert_eq!(registered_root(&registry, project_id).await, original);
 }
 
 #[cfg(unix)]

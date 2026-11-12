@@ -69,6 +69,32 @@ fn daemon_handshake_defaults_missing_moved_store_adoption_to_never() {
     );
 }
 
+/// Older clients sent `offer_candidates` and `adopt_unique`, and a newer
+/// client may send variants this build lacks; all must degrade to `Never`.
+#[test]
+fn daemon_handshake_decodes_unknown_moved_store_adoption_as_never() {
+    let handshake = test_handshake_defaults();
+    for retired in ["offer_candidates", "adopt_unique", "adopt_future_mode"] {
+        let mut encoded = serde_json::to_value(&handshake).expect("encode handshake");
+        encoded["moved_store_adoption"] = serde_json::json!(retired);
+        let decoded = DaemonHandshake::from_line(&encoded.to_string())
+            .expect("unknown adoption variant must still decode");
+        assert_eq!(
+            decoded.moved_store_adoption,
+            tracedecay_project::project::MovedStoreAdoption::Never,
+            "{retired} must degrade to no adoption"
+        );
+    }
+    let mut named = serde_json::to_value(&handshake).expect("encode handshake");
+    named["moved_store_adoption"] = serde_json::json!({"adopt_named": "proj_x"});
+    assert_eq!(
+        DaemonHandshake::from_line(&named.to_string())
+            .expect("named adoption decodes")
+            .moved_store_adoption,
+        tracedecay_project::project::MovedStoreAdoption::AdoptNamed("proj_x".to_owned())
+    );
+}
+
 #[test]
 fn daemon_handshake_requires_client_identity() {
     let encoded = serde_json::json!({

@@ -55,9 +55,8 @@ Examples:
   tracedecay init                                Enroll and request the first index
   tracedecay init --wait                         Enroll and hold until the first generation is ready
   tracedecay init /path/to/repo                  Enroll another repository
-  tracedecay init /new/path --adopt-project proj_abc123
-  tracedecay init /new/path --yes                Adopt the unique moved non-git store
-  tracedecay init /new/path --fresh              Mint a new identity, never adopt
+  tracedecay init /new/path --adopt-project proj_abc123   Adopt a moved non-git project
+  tracedecay init /new/path --fresh              Mint a new identity (the default)
 
 Related: tracedecay daemon (the daemon init requires), tracedecay sync
 (incremental refresh), tracedecay status, tracedecay wipe (delete local \

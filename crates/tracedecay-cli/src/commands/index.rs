@@ -116,30 +116,31 @@ fn init_daemon_available(profile: &ProfileRoot) -> bool {
 }
 
 /// Maps explicit `tracedecay init` flags to the adoption request the daemon
-/// honors. Only init escalates past `Never`: `--adopt-project` names the
-/// project, bare `--yes` confirms a unique candidate, `--fresh` opts out of
-/// adoption entirely, and no flags means candidates are offered in a typed
-/// refusal instead of silently remapped.
+/// honors. Only `--adopt-project <id>` escalates past `Never`. `--fresh` names
+/// the default. `--yes` alone used to adopt a unique candidate and now has no
+/// adoption meaning, so it is refused instead of silently minting a fresh
+/// identity for an operator who expected adoption.
 fn moved_store_adoption_request(
     adopt_project: Option<String>,
     fresh: bool,
     assume_yes: bool,
 ) -> tracedecay_domain::errors::Result<tracedecay_project::project::MovedStoreAdoption> {
-    if fresh && adopt_project.is_some() {
-        return Err(tracedecay_domain::errors::TraceDecayError::Config {
+    use tracedecay_project::project::MovedStoreAdoption;
+    match (adopt_project, fresh, assume_yes) {
+        (Some(_), true, _) => Err(tracedecay_domain::errors::TraceDecayError::Config {
             message: "--fresh mints a new project identity and contradicts --adopt-project; \
                       pass exactly one"
                 .to_owned(),
-        });
+        }),
+        (Some(project_id), false, _) => Ok(MovedStoreAdoption::AdoptNamed(project_id)),
+        (None, _, true) => Err(tracedecay_domain::errors::TraceDecayError::Config {
+            message: "`tracedecay init --yes` no longer adopts a moved project; name the \
+                      registered project with --adopt-project <proj_id> (see `tracedecay \
+                      projects list`), or omit --yes to mint a new project identity"
+                .to_owned(),
+        }),
+        (None, _, false) => Ok(MovedStoreAdoption::Never),
     }
-    Ok(match (adopt_project, fresh, assume_yes) {
-        (Some(project_id), _, _) => {
-            tracedecay_project::project::MovedStoreAdoption::AdoptNamed(project_id)
-        }
-        (None, true, _) => tracedecay_project::project::MovedStoreAdoption::Never,
-        (None, false, true) => tracedecay_project::project::MovedStoreAdoption::AdoptUnique,
-        (None, false, false) => tracedecay_project::project::MovedStoreAdoption::OfferCandidates,
-    })
 }
 
 /// A refused store surfaces from init as the typed ResetRequired state. The
@@ -1241,4 +1242,42 @@ pub(crate) async fn handle_sync(
         ),
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod adoption_request_tests {
+    use super::moved_store_adoption_request;
+    use tracedecay_project::project::MovedStoreAdoption;
+
+    #[test]
+    fn only_a_named_project_requests_adoption() {
+        assert_eq!(
+            moved_store_adoption_request(Some("proj_a".to_owned()), false, false).unwrap(),
+            MovedStoreAdoption::AdoptNamed("proj_a".to_owned())
+        );
+        assert_eq!(
+            moved_store_adoption_request(Some("proj_a".to_owned()), false, true).unwrap(),
+            MovedStoreAdoption::AdoptNamed("proj_a".to_owned())
+        );
+        assert_eq!(
+            moved_store_adoption_request(None, false, false).unwrap(),
+            MovedStoreAdoption::Never
+        );
+        assert_eq!(
+            moved_store_adoption_request(None, true, false).unwrap(),
+            MovedStoreAdoption::Never
+        );
+    }
+
+    #[test]
+    fn yes_alone_and_fresh_with_a_name_are_refused() {
+        let yes = moved_store_adoption_request(None, false, true).unwrap_err();
+        assert!(yes.to_string().contains("--adopt-project"), "{yes}");
+        let contradiction =
+            moved_store_adoption_request(Some("proj_a".to_owned()), true, false).unwrap_err();
+        assert!(
+            contradiction.to_string().contains("--fresh"),
+            "{contradiction}"
+        );
+    }
 }

@@ -11,21 +11,19 @@ use tracedecay_domain::errors::Result;
 /// no longer resolves at its recorded root.
 ///
 /// Old daemons ignore the handshake field carrying this value and new daemons
-/// default a missing field to [`Self::Never`], so mixed-version pairs always
-/// degrade to the safe no-adoption behavior.
+/// default a missing field to [`Self::Never`]. A variant name this build does
+/// not know, such as the retired `offer_candidates` and `adopt_unique` sent by
+/// older clients, also decodes as [`Self::Never`], so mixed-version pairs
+/// always degrade to the safe no-adoption behavior.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MovedStoreAdoption {
-    /// Mint a fresh identity without consulting moved-store candidates.
+    /// Mint a fresh identity without consulting the registry for a moved store.
     #[default]
+    #[serde(other)]
     Never,
-    /// Explicit `tracedecay init` without adoption flags: mint fresh when no
-    /// moved store could claim this root; otherwise refuse with the candidates.
-    OfferCandidates,
-    /// `tracedecay init --yes`: adopt when candidates identify exactly one
-    /// moved store; anything ambiguous remains a typed refusal.
-    AdoptUnique,
-    /// `tracedecay init --adopt-project <id>`: adopt exactly this project.
+    /// `tracedecay init --adopt-project <id>`: adopt exactly this registered
+    /// project, verified against its own registry row and store manifest.
     AdoptNamed(String),
 }
 
