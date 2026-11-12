@@ -19,9 +19,89 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use cap_fs_ext::DirExt;
 #[cfg(not(windows))]
 use cap_fs_ext::OpenOptionsMaybeDirExt;
-#[cfg(windows)]
 use cap_fs_ext::{FollowSymlinks, OpenOptionsFollowExt};
-use cap_std::fs::{Dir, File, OpenOptions};
+pub use cap_std::fs::Dir;
+use cap_std::fs::{File, OpenOptions};
+
+/// Pins the parent of a cross-directory publication. On Windows the no-delete
+/// sharing mode also keeps its resolved Win32 pathname usable for rename.
+pub fn pin_parent(path: &std::path::Path) -> io::Result<Dir> {
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        use windows_sys::Win32::Storage::FileSystem::{
+            FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_READ,
+            FILE_SHARE_WRITE,
+        };
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
+            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+            .open(path)?;
+        if !file.metadata()?.is_dir() {
+            return Err(io::Error::new(
+                io::ErrorKind::NotADirectory,
+                "publication parent is not a directory",
+            ));
+        }
+        Ok(Dir::from_std_file(file))
+    }
+    #[cfg(not(windows))]
+    {
+        Dir::open_ambient_dir(path, cap_std::ambient_authority())
+    }
+}
+
+pub fn open_regular_nofollow(directory: &Dir, name: &OsStr) -> io::Result<std::fs::File> {
+    open_regular(directory, name, false)
+}
+
+pub fn open_writable_regular_nofollow(directory: &Dir, name: &OsStr) -> io::Result<std::fs::File> {
+    open_regular(directory, name, true)
+}
+
+fn open_regular(directory: &Dir, name: &OsStr, writable: bool) -> io::Result<std::fs::File> {
+    let mut options = OpenOptions::new();
+    options
+        .read(true)
+        .write(writable)
+        .follow(FollowSymlinks::No);
+    #[cfg(windows)]
+    {
+        use cap_std::fs::OpenOptionsExt;
+        use windows_sys::Win32::Storage::FileSystem::{
+            FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
+        };
+        options.share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE);
+    }
+    #[cfg(unix)]
+    {
+        use cap_std::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NONBLOCK);
+    }
+    let file = directory.open_with(name, &options)?.into_std();
+    if !file.metadata()?.is_file() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "expected a regular file",
+        ));
+    }
+    Ok(file)
+}
+
+pub fn create_private_file(directory: &Dir, name: &OsStr) -> io::Result<std::fs::File> {
+    #[cfg(windows)]
+    {
+        crate::create_private_file(&dir_entry_path(directory, name)?)
+    }
+    #[cfg(not(windows))]
+    {
+        use cap_std::fs::OpenOptionsExt;
+        let mut options = OpenOptions::new();
+        options.read(true).write(true).create_new(true).mode(0o600);
+        Ok(directory.open_with(name, &options)?.into_std())
+    }
+}
 
 #[cfg(unix)]
 use crate::framed_log::normalize_no_follow_error;
@@ -74,6 +154,7 @@ fn look_again_on_not_found<T>(mut attempt: impl FnMut() -> io::Result<T>) -> io:
 
 /// Atomically renames one directory entry between already-open parent
 /// capabilities without allowing an occupied destination to be replaced.
+/// Both names must be single, unnormalized directory entries, not paths.
 /// Platforms without a suitable primitive fail closed: retaining bytes is
 /// always preferable to risking a replacement.
 pub fn rename_noreplace(
@@ -82,6 +163,8 @@ pub fn rename_noreplace(
     to_parent: &Dir,
     to: &OsStr,
 ) -> io::Result<()> {
+    require_entry_name(from)?;
+    require_entry_name(to)?;
     #[cfg(all(target_os = "linux", target_env = "gnu"))]
     {
         crate::rename_noreplace::rename_noreplace_at(
@@ -129,17 +212,8 @@ fn dir_entry_path(parent: &Dir, name: &OsStr) -> io::Result<std::path::PathBuf> 
 /// Windows uses the shared namespace-durable rename authority, including its
 /// NTFS fallback for replacement while delete-sharing readers remain open.
 pub fn replace_file(parent: &Dir, source: &OsStr, destination: &OsStr) -> io::Result<()> {
-    for name in [source, destination] {
-        let mut components = std::path::Path::new(name).components();
-        if !matches!(components.next(), Some(std::path::Component::Normal(_)))
-            || components.next().is_some()
-        {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "file replacement requires sibling entry names",
-            ));
-        }
-    }
+    require_entry_name(source)?;
+    require_entry_name(destination)?;
     #[cfg(windows)]
     {
         let source = dir_entry_path(parent, source)?;
@@ -152,6 +226,25 @@ pub fn replace_file(parent: &Dir, source: &OsStr, destination: &OsStr) -> io::Re
     }
     #[cfg(not(windows))]
     parent.rename(source, parent, destination)
+}
+
+/// Native *at renames still resolve absolute paths, parent traversal and
+/// intermediate symlinks. A held parent only confines a single entry name.
+/// Compare the original spelling as well: Path components normalize trailing
+/// separators and interior dots, but the native syscall receives those bytes.
+fn require_entry_name(name: &OsStr) -> io::Result<()> {
+    let mut components = std::path::Path::new(name).components();
+    if matches!(components.next(), Some(std::path::Component::Normal(entry)) if entry == name)
+        && components.next().is_none()
+        && !name.as_encoded_bytes().contains(&0)
+    {
+        Ok(())
+    } else {
+        Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "directory operation requires a single entry name",
+        ))
+    }
 }
 
 /// Resolves an open directory capability back to its live filesystem path so
@@ -220,17 +313,6 @@ pub fn sync_directory(directory: &Dir) -> io::Result<()> {
     }
 }
 
-fn single_component(name: &OsStr) -> io::Result<()> {
-    let mut parts = Path::new(name).components();
-    if !matches!(parts.next(), Some(std::path::Component::Normal(_))) || parts.next().is_some() {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "directory operation requires one entry name",
-        ));
-    }
-    Ok(())
-}
-
 /// Persist a new producer-owned staging receipt through a held directory.
 ///
 /// An exclusive marker creation is the only authority for removing an
@@ -243,7 +325,7 @@ pub fn write_exclusive_pending_receipt_nofollow(
     filename: &OsStr,
     contents: &[u8],
 ) -> io::Result<()> {
-    single_component(filename)?;
+    require_entry_name(filename)?;
     let directory = open_root_nofollow(directory_path)?;
     let mut options = OpenOptions::new();
     options.write(true).create_new(true);
@@ -295,7 +377,7 @@ pub fn atomic_replace_child_file_nofollow(
     filename: &OsStr,
     contents: &[u8],
 ) -> io::Result<()> {
-    single_component(filename)?;
+    require_entry_name(filename)?;
     let directory = open_root_nofollow(directory_path)?;
     atomic_replace_file_in_dir(&directory, filename, contents)
 }
@@ -401,7 +483,7 @@ impl HeldDirectory {
     /// operating-system operations; a concurrent substitution between them
     /// remains outside this primitive's authority.
     pub fn create_exclusive(root_path: &Path, name: &OsStr) -> io::Result<Self> {
-        single_component(name)?;
+        require_entry_name(name)?;
         let root = open_root_nofollow(root_path)?;
         root.create_dir(name)?;
         root.open_dir_nofollow(name)
@@ -410,7 +492,7 @@ impl HeldDirectory {
 
     /// Opens an existing child of `root_path` without following a link.
     pub fn open_nofollow(root_path: &Path, name: &OsStr) -> io::Result<Self> {
-        single_component(name)?;
+        require_entry_name(name)?;
         let root = open_root_nofollow(root_path)?;
         root.open_dir_nofollow(name)
             .map(|directory| Self { directory })
@@ -418,7 +500,7 @@ impl HeldDirectory {
 
     /// Writes a new file exclusively, relative to this handle.
     pub fn write_new_file(&self, name: &OsStr, contents: &[u8]) -> io::Result<()> {
-        single_component(name)?;
+        require_entry_name(name)?;
         let mut options = OpenOptions::new();
         options.write(true).create_new(true);
         let mut file = self.directory.open_with(name, &options)?;
@@ -460,7 +542,7 @@ impl HeldDirectory {
     /// parent is opened without following a link, so neither side is an
     /// ambient pathname.
     pub fn hard_link_from(&self, source: &Path, name: &OsStr) -> io::Result<()> {
-        single_component(name)?;
+        require_entry_name(name)?;
         let source_parent = source.parent().ok_or_else(|| {
             io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -503,8 +585,8 @@ pub fn install_held_child_directory_noreplace(
     staging_name: &OsStr,
     generation_name: &OsStr,
 ) -> io::Result<()> {
-    single_component(staging_name)?;
-    single_component(generation_name)?;
+    require_entry_name(staging_name)?;
+    require_entry_name(generation_name)?;
     let root = open_root_nofollow(root_path)?;
     let entry = root.open_dir_nofollow(staging_name)?;
     let entry_identity = directory_identity(&entry)?;
@@ -673,7 +755,7 @@ fn census_receipted_children<K: Ord + Copy>(
     let mut counted = std::collections::HashMap::<(u64, u64), (K, u64)>::new();
     for name in entries {
         let name = name?;
-        single_component(&name)?;
+        require_entry_name(&name)?;
         // A real generation that cannot be opened may still own gigabytes.
         // Do not report complete zero-byte coverage by treating I/O failure
         // as an unknown entry; preserve the failure for partial reporting.
@@ -804,7 +886,7 @@ fn directory_bytes_from_held_dir<K: Ord + Copy>(
 /// sealed-root or child symlink. Missing entries are idempotent; other failures
 /// remain errors so callers can retain retry ownership.
 pub fn remove_child_directory_nofollow(root_path: &Path, name: &OsStr) -> io::Result<bool> {
-    single_component(name)?;
+    require_entry_name(name)?;
     let root = match open_root_nofollow(root_path) {
         Ok(root) => root,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
@@ -829,8 +911,8 @@ pub fn remove_receipted_child_directory_nofollow(
     maximum: usize,
     authorized: impl FnOnce(&[u8]) -> bool,
 ) -> io::Result<bool> {
-    single_component(child_name)?;
-    single_component(receipt_name)?;
+    require_entry_name(child_name)?;
+    require_entry_name(receipt_name)?;
     let root = match open_root_nofollow(root_path) {
         Ok(root) => root,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
@@ -2233,3 +2315,6 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+mod namespace_tests;

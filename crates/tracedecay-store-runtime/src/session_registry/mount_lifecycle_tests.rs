@@ -460,23 +460,23 @@ async fn republishing_a_writer_restores_a_lost_project_writer_fence_before_failo
     assert_eq!((republished, failover), (Ok(()), Ok((1, 2, true))));
 }
 
-/// The remote HTTP routes run writer publication and failover on the native
-/// blocking pool, so neither may reach Tokio from there.
+/// Writer publication and failover share the installed runtime when entered
+/// from a synchronous caller and when handed to its blocking pool.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn remote_writer_publication_and_failover_settle_without_an_entered_tokio_runtime() {
+async fn remote_writer_publication_and_failover_settle_from_a_synchronous_caller() {
     let fixture = provisioned_writer_fixture().await;
     let promotion = fixture.promotion("request.cancel-test.native-failover");
     let outcome = std::thread::scope(|scope| {
         scope
             .spawn(|| {
                 tracedecay_runtime_core::native_runtime::block_on(async {
-                    assert!(tokio::runtime::Handle::try_current().is_err());
+                    assert!(tokio::runtime::Handle::try_current().is_ok());
                     let published = fixture.publish().await;
                     let promote_recovery = Arc::clone(&fixture.recovery);
                     let promote_caller = fixture.caller.clone();
                     let failover =
                         tracedecay_runtime_core::native_runtime::on_blocking_pool(async move {
-                            assert!(tokio::runtime::Handle::try_current().is_err());
+                            assert!(tokio::runtime::Handle::try_current().is_ok());
                             promote_recovery
                                 .promote(
                                     &promotion,
@@ -825,7 +825,7 @@ async fn corrupt_derived_graph_preserves_relational_owner_lifecycle() {
     drop(first_database);
     first_registry.cancel_terminal_tasks();
     first_registry
-        .shutdown_terminal_tasks(&tracedecay_runtime_core::native_runtime::cx().unwrap())
+        .shutdown_terminal_tasks()
         .await
         .expect("first terminal tasks shut down");
     first_registry.cancel_memory_graph_reconciliation_tasks();
@@ -930,7 +930,7 @@ async fn corrupt_session_relation_graph_preserves_relational_session_database() 
     drop(first_database);
     first_registry.cancel_terminal_tasks();
     first_registry
-        .shutdown_terminal_tasks(&tracedecay_runtime_core::native_runtime::cx().unwrap())
+        .shutdown_terminal_tasks()
         .await
         .expect("first terminal tasks shut down");
     first_registry
@@ -978,7 +978,7 @@ async fn corrupt_session_relation_graph_preserves_relational_session_database() 
     drop(reopened);
     reopened_registry.cancel_terminal_tasks();
     reopened_registry
-        .shutdown_terminal_tasks(&tracedecay_runtime_core::native_runtime::cx().unwrap())
+        .shutdown_terminal_tasks()
         .await
         .expect("detached session relation graph task shuts down");
     reopened_registry

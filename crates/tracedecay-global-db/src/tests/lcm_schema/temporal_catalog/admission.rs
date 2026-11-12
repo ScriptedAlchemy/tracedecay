@@ -60,7 +60,7 @@ async fn assert_session_temporal_version_refused(db_path: &Path, found_version: 
     }
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn temporal_schema_accepts_only_fresh_or_exact_final_stores() {
     let tmp = TempDir::new().unwrap();
     let db_path = tmp.path().join(".tracedecay").join("sessions.db");
@@ -103,15 +103,31 @@ async fn temporal_schema_accepts_only_fresh_or_exact_final_stores() {
     drop(conn);
     drop(raw_db);
 
-    let db = open_global_db(&db_path)
+    // Removing an application table does not make a previously opened SQLite
+    // namespace freshly owned. Existing sidecars remain unclaimed.
+    let error = match open_global_db(&db_path).await {
+        Ok(_) => panic!("unpublished existing SQLite must not be reinitialized"),
+        Err(error) => error,
+    };
+    assert!(
+        error.to_string().contains("sidecar ownership is ambiguous"),
+        "unpublished SQLite sidecars must remain unclaimed: {error}"
+    );
+    assert!(
+        !table_exists(&db_path, "tracedecay_schema_version").await,
+        "refusal must not publish a schema marker into an unowned database"
+    );
+
+    let fresh_path = tmp.path().join(".tracedecay").join("fresh.db");
+    let db = open_global_db(&fresh_path)
         .await
-        .expect("a fresh store should receive the final temporal schema");
+        .expect("a new prospective store should receive the final temporal schema");
     drop(db);
-    let initial_catalog = temporal_schema_object_catalog(&db_path).await;
-    let initial_version = temporal_schema_version(&db_path).await;
+    let initial_catalog = temporal_schema_object_catalog(&fresh_path).await;
+    let initial_version = temporal_schema_version(&fresh_path).await;
 
     let restart_path = tmp.path().join(".tracedecay").join("restart.db");
-    copy_database_for_temporal_restart(&db_path, &restart_path).await;
+    copy_database_for_temporal_restart(&fresh_path, &restart_path).await;
     let reopened = open_global_db(&restart_path)
         .await
         .expect("idempotent temporal reopen should succeed");
@@ -126,7 +142,7 @@ async fn temporal_schema_accepts_only_fresh_or_exact_final_stores() {
     );
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn temporal_schema_malformed_marker_requires_reset_without_mutation() {
     let tmp = TempDir::new().unwrap();
     let db_path = tmp.path().join(".tracedecay").join("sessions.db");
@@ -167,7 +183,7 @@ async fn temporal_schema_malformed_marker_requires_reset_without_mutation() {
     );
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn temporal_schema_lower_marker_requires_reset_without_repairing_guards() {
     let tmp = TempDir::new().unwrap();
     let db_path = tmp.path().join(".tracedecay").join("sessions.db");
@@ -206,7 +222,7 @@ async fn temporal_schema_lower_marker_requires_reset_without_repairing_guards() 
     );
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn temporal_schema_replaces_an_empty_earlier_authority_with_the_final_contract() {
     let tmp = TempDir::new().unwrap();
     let fresh_path = tmp.path().join("fresh").join("sessions.db");
@@ -265,7 +281,7 @@ async fn temporal_schema_replaces_an_empty_earlier_authority_with_the_final_cont
     );
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn temporal_schema_rejects_transition_storage_without_mutating_it() {
     let tmp = TempDir::new().unwrap();
     let db_path = tmp.path().join(".tracedecay").join("sessions.db");
@@ -312,7 +328,7 @@ async fn temporal_schema_rejects_transition_storage_without_mutating_it() {
     );
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn temporal_schema_rejects_foreign_summary_namespace_tables_without_mutation() {
     let tmp = TempDir::new().unwrap();
     let db_path = tmp.path().join(".tracedecay").join("sessions.db");
@@ -363,7 +379,7 @@ async fn temporal_schema_rejects_foreign_summary_namespace_tables_without_mutati
     );
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn final_store_missing_temporal_marker_requires_reset_without_mutation() {
     let tmp = TempDir::new().unwrap();
     let db_path = tmp.path().join(".tracedecay").join("sessions.db");
@@ -425,7 +441,7 @@ async fn final_store_missing_temporal_marker_requires_reset_without_mutation() {
     );
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn temporal_schema_is_not_installed_into_a_nonempty_store() {
     let tmp = TempDir::new().unwrap();
     let db_path = tmp.path().join(".tracedecay").join("sessions.db");
@@ -459,8 +475,8 @@ async fn temporal_schema_is_not_installed_into_a_nonempty_store() {
     );
 }
 
-#[asupersync::test]
-async fn writer_ledger_alone_does_not_refuse_a_fresh_store() {
+#[tokio::test]
+async fn unpublished_writer_ledger_is_preserved_and_fresh_publication_still_works() {
     let tmp = TempDir::new().unwrap();
     let db_path = tmp.path().join(".tracedecay").join("sessions.db");
     seed_writer_ledger(&db_path).await;
@@ -469,17 +485,36 @@ async fn writer_ledger_alone_does_not_refuse_a_fresh_store() {
         "the seeded store must hold writer ledger tables"
     );
 
-    let db = open_global_db(&db_path)
+    let error = match open_global_db(&db_path).await {
+        Ok(_) => panic!("an unpublished writer-ledger database is not a fresh store"),
+        Err(error) => error,
+    };
+    assert!(
+        error.to_string().contains("sidecar ownership is ambiguous"),
+        "unpublished writer-ledger sidecars must not be claimed: {error}"
+    );
+    assert!(
+        table_exists(&db_path, "td_runtime_writer_idempotency_v2").await,
+        "refusal must preserve the existing writer ledger"
+    );
+    assert!(
+        !table_exists(&db_path, "tracedecay_schema_version").await,
+        "refusal must not install a schema into an unowned store"
+    );
+
+    let fresh_path = tmp.path().join("fresh").join("sessions.db");
+    let db = open_global_db(&fresh_path)
         .await
-        .expect("a store that holds only the writer ledger must receive the final temporal schema");
+        .expect("new prospective publication must install the final schema and writer ledger");
     drop(db);
     assert!(
-        table_exists(&db_path, "tracedecay_schema_version").await,
-        "writer ledger metadata must not block the final schema marker"
+        table_exists(&fresh_path, "tracedecay_schema_version").await
+            && table_exists(&fresh_path, "td_runtime_writer_idempotency_v2").await,
+        "a freshly owned family must publish the full schema and writer ledger"
     );
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn writer_ledger_does_not_hide_a_nonempty_unmarked_store() {
     let tmp = TempDir::new().unwrap();
     let db_path = tmp.path().join(".tracedecay").join("sessions.db");
@@ -517,7 +552,7 @@ async fn writer_ledger_does_not_hide_a_nonempty_unmarked_store() {
     );
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn final_schema_admission_rejects_extra_temporal_column_metadata() {
     let tmp = TempDir::new().unwrap();
     let db_path = tmp.path().join(".tracedecay").join("sessions.db");
@@ -559,7 +594,7 @@ async fn final_schema_admission_rejects_extra_temporal_column_metadata() {
     );
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn final_schema_admission_rejects_missing_temporal_occurrence_time_index() {
     let tmp = TempDir::new().unwrap();
     let db_path = tmp.path().join(".tracedecay").join("sessions.db");
@@ -596,7 +631,7 @@ async fn final_schema_admission_rejects_missing_temporal_occurrence_time_index()
     );
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn final_schema_admission_rejects_missing_graph_publication_table() {
     let tmp = TempDir::new().unwrap();
     let db_path = tmp.path().join(".tracedecay").join("sessions.db");
@@ -631,7 +666,7 @@ async fn final_schema_admission_rejects_missing_graph_publication_table() {
     );
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn final_schema_admission_rejects_incompatible_graph_publication_column_metadata() {
     let tmp = TempDir::new().unwrap();
     let db_path = tmp.path().join(".tracedecay").join("sessions.db");
@@ -673,7 +708,7 @@ async fn final_schema_admission_rejects_incompatible_graph_publication_column_me
     );
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn final_schema_admission_rejects_extra_graph_publication_table() {
     let tmp = TempDir::new().unwrap();
     let db_path = tmp.path().join(".tracedecay").join("sessions.db");
@@ -714,7 +749,7 @@ async fn final_schema_admission_rejects_extra_graph_publication_table() {
     );
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn final_schema_admission_rejects_mixed_case_extra_temporal_table() {
     let tmp = TempDir::new().unwrap();
     let db_path = tmp.path().join(".tracedecay").join("sessions.db");
@@ -755,7 +790,7 @@ async fn final_schema_admission_rejects_mixed_case_extra_temporal_table() {
     );
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn final_schema_admission_rejects_mixed_case_extra_graph_publication_table() {
     let tmp = TempDir::new().unwrap();
     let db_path = tmp.path().join(".tracedecay").join("sessions.db");
@@ -796,7 +831,7 @@ async fn final_schema_admission_rejects_mixed_case_extra_graph_publication_table
     );
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn final_schema_admission_rejects_extra_index_on_canonical_graph_table() {
     let tmp = TempDir::new().unwrap();
     let db_path = tmp.path().join(".tracedecay").join("sessions.db");
@@ -834,7 +869,7 @@ async fn final_schema_admission_rejects_extra_index_on_canonical_graph_table() {
     );
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn temporal_schema_refuses_future_version_without_mutation() {
     let tmp = TempDir::new().unwrap();
     let db_path = tmp.path().join(".tracedecay").join("sessions.db");

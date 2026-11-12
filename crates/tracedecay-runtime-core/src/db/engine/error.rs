@@ -60,7 +60,7 @@ impl fmt::Display for Error {
                 "column {column} integer {value} is out of range for {target}"
             ),
             Self::RuntimeContextUnavailable => {
-                formatter.write_str("SQLite operation requires an Asupersync runtime context")
+                formatter.write_str("SQLite operation requires a Tokio runtime context")
             }
             Self::Runtime(message) => write!(formatter, "SQLite runtime failed: {message}"),
             Self::Sqlite {

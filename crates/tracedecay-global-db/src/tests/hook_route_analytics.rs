@@ -19,7 +19,7 @@ fn event(project: &str, hint: Option<&str>) -> AnalyticsEventInsert {
     }
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn replay_returns_first_hook_route_row_without_mutating_observation() {
     let harness = RegisteredGlobalDbHarness::open("hook-route-first-receipt").await;
     let event = event("project.route", Some("root-a:1"));
@@ -62,7 +62,7 @@ async fn replay_returns_first_hook_route_row_without_mutating_observation() {
     );
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn concurrent_registered_handles_share_one_hook_route_receipt() {
     let harness = RegisteredGlobalDbHarness::open("hook-route-concurrent").await;
     let mut handles = Vec::new();
@@ -85,7 +85,7 @@ async fn concurrent_registered_handles_share_one_hook_route_receipt() {
     );
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn distinct_routes_and_sequences_append_and_other_events_keep_ordinary_semantics() {
     let harness = RegisteredGlobalDbHarness::open("hook-route-scope").await;
     let db = &harness.registered;

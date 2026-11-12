@@ -656,7 +656,7 @@ mod tests {
         assert_eq!(normalize_default(Some("(')')")).as_deref(), Some("')'"));
     }
 
-    #[asupersync::test]
+    #[tokio::test]
     async fn table_contract_metadata_is_read_in_a_constant_query_count() {
         let directory = tempfile::tempdir().unwrap();
         let (database, _owner) = open_registered_test_database_fixture(
@@ -677,7 +677,7 @@ mod tests {
         );
     }
 
-    #[asupersync::test]
+    #[tokio::test]
     async fn trigger_contracts_use_one_query_and_preserve_first_failure() {
         let directory = tempfile::tempdir().unwrap();
         let (database, _owner) = open_registered_test_database_fixture(

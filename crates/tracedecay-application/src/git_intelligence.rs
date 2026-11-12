@@ -2531,15 +2531,21 @@ mod tests {
         let root = fixture.path().canonicalize().unwrap();
         let mut block =
             tracedecay_runtime_core::git_repository::block_repository_discovery_for_test(&root);
-        let owner = tokio::task::spawn_blocking({
-            let adapter = fixture.adapter();
-            move || adapter.status()
-        });
+        let owner = tracedecay_runtime_core::native_runtime::spawn_blocking_on(
+            &tokio::runtime::Handle::current(),
+            {
+                let adapter = fixture.adapter();
+                move || adapter.status()
+            },
+        );
         block.wait_entered().await;
-        let joined = tokio::task::spawn_blocking({
-            let adapter = fixture.adapter();
-            move || adapter.status()
-        });
+        let joined = tracedecay_runtime_core::native_runtime::spawn_blocking_on(
+            &tokio::runtime::Handle::current(),
+            {
+                let adapter = fixture.adapter();
+                move || adapter.status()
+            },
+        );
         tracedecay_runtime_core::git_repository::wait_for_topology_callers_for_test(
             &root,
             1,

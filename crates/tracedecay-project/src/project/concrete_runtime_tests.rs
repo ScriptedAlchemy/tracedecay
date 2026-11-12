@@ -60,7 +60,7 @@ impl CodeGraphProjectionReadPort for FixtureCodeGraphProjection {
     }
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn source_reads_reuse_the_cross_session_cache() {
     crate::runtime_ports::register_runtime_ports(
         crate::runtime_ports::fixture_daemon_client_ports(),
