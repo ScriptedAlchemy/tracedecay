@@ -4,6 +4,8 @@ use serde_json::json;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tracedecay_daemon_protocol::{DaemonClientIdentity, DaemonHandshake};
+#[cfg(unix)]
+use tracedecay_daemon_service::shutdown::ShutdownStatus;
 
 #[cfg(unix)]
 fn test_client_instance_id(value: u128) -> String {
@@ -513,8 +515,7 @@ async fn rejected_auth_preface_reads_typed_refusal_then_clean_eof() {
     let server_task = tokio::spawn(async move {
         Box::pin(
             crate::daemon::connection_serving::serve_authenticated_socket_client_with_class(
-                tracedecay_daemon_protocol::transport::BrokerStream::from_tokio_unix(server)
-                    .expect("daemon end of the test socket"),
+                tracedecay_daemon_protocol::transport::BrokerStream::Unix(server),
                 engine,
                 "daemon-minted-token".to_string(),
                 super::super::core_admission::DaemonClientAdmissionClass::General,
@@ -755,6 +756,22 @@ async fn catalog_refresh_rejects_untrusted_ids_and_stops_at_capacity() {
 }
 
 #[cfg(unix)]
+async fn shutdown_catalog_generation(engine: crate::daemon::engine::DaemonEngine) {
+    let receipt = engine.shutdown_all().await;
+    assert!(
+        receipt.in_flight == ShutdownStatus::Clean
+            && receipt.clients == ShutdownStatus::Clean
+            && receipt
+                .background
+                .owners
+                .iter()
+                .all(|owner| owner.status == ShutdownStatus::Clean)
+            && receipt.project_servers.is_clean(),
+        "catalog generation owners must shut down cleanly: {receipt:?}"
+    );
+}
+
+#[cfg(unix)]
 #[tokio::test]
 async fn daemon_refreshes_once_only_after_generation_change() {
     let profile = TempDir::new().unwrap();
@@ -791,7 +808,7 @@ async fn daemon_refreshes_once_only_after_generation_change() {
     );
 
     let same_generation = daemon_round_trip(
-        engine,
+        engine.clone(),
         &handshake,
         json!({"jsonrpc": "2.0", "id": 2, "method": "ping"}),
     )
@@ -803,6 +820,9 @@ async fn daemon_refreshes_once_only_after_generation_change() {
     );
     assert_eq!(same_generation[0]["id"], json!(2));
 
+    // A new generation may reopen this profile only after the previous
+    // generation's retained store owners and background tasks have joined.
+    Box::pin(shutdown_catalog_generation(engine)).await;
     let next_generation = test_daemon_engine_for_profile(&profile_root);
     prewarm_test_profile_runtime(&next_generation.store_administration).await;
     let first = daemon_round_trip(
@@ -825,13 +845,14 @@ async fn daemon_refreshes_once_only_after_generation_change() {
     assert_eq!(first[1]["id"], json!(3));
 
     let second = daemon_round_trip(
-        next_generation,
+        next_generation.clone(),
         &handshake,
         json!({"jsonrpc": "2.0", "id": 4, "method": "ping"}),
     )
     .await;
     assert_eq!(second.len(), 1, "the refresh must not loop");
     assert_eq!(second[0]["id"], json!(4));
+    Box::pin(shutdown_catalog_generation(next_generation)).await;
 }
 
 #[cfg(unix)]
@@ -931,8 +952,7 @@ async fn saturated_daemon_refuses_wire_drifted_handshake_instead_of_resetting() 
     let (client, server) = tokio::net::UnixStream::pair().expect("unix stream pair");
     let server_task = tokio::spawn(async move {
         crate::daemon::core_admission::reject_saturated_daemon_client(
-            tracedecay_daemon_protocol::BrokerStream::from_tokio_unix(server)
-                .expect("daemon end of the test socket"),
+            tracedecay_daemon_protocol::BrokerStream::Unix(server),
             crate::daemon::core_admission::DaemonClientSaturationResponse {
                 kind: crate::daemon::core_admission::DaemonClientSaturationKind::ClientCapacityReached,
                 retryable: true,

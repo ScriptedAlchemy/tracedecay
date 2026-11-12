@@ -363,13 +363,13 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use asupersync::channel::oneshot;
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt as _;
     use std::path::Path;
     use std::sync::Arc;
     use std::sync::Mutex as StdMutex;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use tokio::sync::oneshot;
     use tracedecay_domain::SessionId;
 
     use crate::{
@@ -531,7 +531,7 @@ mod tests {
         Sha256::digest(session.as_bytes()).into()
     }
 
-    #[asupersync::test]
+    #[tokio::test]
     async fn live_failure_spools_then_replay_preserves_lifecycle_for_suggestion() {
         let root = TestRoot::new("lifecycle-suggestion");
         let now = UtcMicros(1_000);
@@ -650,7 +650,7 @@ mod tests {
         writer
     }
 
-    #[asupersync::test]
+    #[tokio::test]
     async fn a_drain_woken_while_the_appender_holds_the_lease_replays_its_record() {
         let data_root = TestRoot::new("wake-held");
         let current = UtcMicros(10);
@@ -673,7 +673,7 @@ mod tests {
     /// A loaded runner's fsync can outlast a hook's whole synchronous budget.
     /// The appender's commit holds the commit lock across that sync while the
     /// drain's acknowledgement queues behind it.
-    #[asupersync::test]
+    #[tokio::test]
     async fn a_drain_acknowledging_behind_a_slow_appender_commit_replays_its_record() {
         let data_root = TestRoot::new("slow-commit");
         let current = UtcMicros(10);
@@ -699,7 +699,7 @@ mod tests {
         assert_eq!(pending_records(data_root.path(), current), 0);
     }
 
-    #[asupersync::test]
+    #[tokio::test]
     async fn a_writer_holding_the_lease_at_acknowledgement_delays_it_without_retaining() {
         let data_root = TestRoot::new("ack-held");
         let current = UtcMicros(10);
@@ -734,7 +734,7 @@ mod tests {
     }
 
     #[cfg(unix)]
-    #[asupersync::test]
+    #[tokio::test]
     async fn a_spool_that_cannot_reopen_for_acknowledgement_fails_the_pass_and_keeps_the_record() {
         let data_root = TestRoot::new("ack-unsafe");
         let current = UtcMicros(10);
@@ -769,8 +769,8 @@ mod tests {
         assert_eq!(pending_records(data_root.path(), current), 1);
     }
 
-    #[asupersync::test]
-    async fn async_admission_does_not_hold_the_spool_writer_lease(cx: &asupersync::Cx) {
+    #[tokio::test]
+    async fn async_admission_does_not_hold_the_spool_writer_lease() {
         let data_root = TestRoot::new("lease");
         let current = UtcMicros(10);
         let binding = binding(7);
@@ -787,7 +787,7 @@ mod tests {
                 .unwrap();
         }
 
-        let (entered_tx, mut entered_rx) = oneshot::channel();
+        let (entered_tx, entered_rx) = oneshot::channel();
         let (release_tx, release_rx) = oneshot::channel();
         let entered_tx = Arc::new(StdMutex::new(Some(entered_tx)));
         let release_rx = Arc::new(StdMutex::new(Some(release_rx)));
@@ -798,17 +798,16 @@ mod tests {
                 let sender = entered_tx.lock().unwrap().take();
                 let receiver = release_rx.lock().unwrap().take();
                 if let Some(sender) = sender {
-                    let _ = sender.send_blocking(());
+                    let _ = sender.send(());
                 }
-                if let Some(mut receiver) = receiver {
-                    let cx = asupersync::Cx::current().expect("admission runs on the test task");
-                    let _ = receiver.recv(&cx).await;
+                if let Some(receiver) = receiver {
+                    let _ = receiver.await;
                 }
                 admitted()
             }
         });
         let mut drain = std::pin::pin!(drain);
-        let mut entered = std::pin::pin!(entered_rx.recv(cx));
+        let mut entered = std::pin::pin!(entered_rx);
         std::future::poll_fn(|task| {
             assert!(
                 drain.as_mut().poll(task).is_pending(),
@@ -826,12 +825,12 @@ mod tests {
         );
         drop(concurrent);
 
-        let _ = release_tx.send(cx, ());
+        let _ = release_tx.send(());
         let report = drain.await;
         assert_eq!(report.committed, 1);
     }
 
-    #[asupersync::test]
+    #[tokio::test]
     async fn a_stale_binding_tombstones_without_ever_reaching_admission() {
         let root = TestRoot::new("stale");
         let now = UtcMicros(1_000);
@@ -862,7 +861,7 @@ mod tests {
         assert_eq!(pending_records(root.path(), now), 0);
     }
 
-    #[asupersync::test]
+    #[tokio::test]
     async fn an_exact_duplicate_acknowledges_and_a_conflict_tombstones() {
         let root = TestRoot::new("idempotent");
         let now = UtcMicros(1_000);
@@ -889,7 +888,7 @@ mod tests {
         assert_eq!(pending_records(root.path(), now), 0);
     }
 
-    #[asupersync::test]
+    #[tokio::test]
     async fn an_unavailable_daemon_retains_every_record_for_a_later_pass() {
         let root = TestRoot::new("retain");
         let now = UtcMicros(1_000);
@@ -917,7 +916,7 @@ mod tests {
         assert_eq!(pending_records(root.path(), now), 0);
     }
 
-    #[asupersync::test]
+    #[tokio::test]
     async fn a_missing_binding_leaves_every_record_pending() {
         let root = TestRoot::new("unbound");
         let now = UtcMicros(1_000);
@@ -930,7 +929,7 @@ mod tests {
         assert_eq!(pending_records(root.path(), now), 1);
     }
 
-    #[asupersync::test]
+    #[tokio::test]
     async fn a_sibling_worktree_record_waits_for_its_own_binding() {
         let root = TestRoot::new("sibling-binding");
         let now = UtcMicros(1_000);
@@ -975,7 +974,7 @@ mod tests {
         assert_eq!(pending_records(root.path(), now), 0);
     }
 
-    #[asupersync::test]
+    #[tokio::test]
     async fn a_foreign_project_id_leaves_every_record_pending() {
         let root = TestRoot::new("foreign-project");
         let now = UtcMicros(1_000);
@@ -999,7 +998,7 @@ mod tests {
         assert_eq!(pending_records(root.path(), now), 1);
     }
 
-    #[asupersync::test]
+    #[tokio::test]
     async fn kimi_and_opencode_replay_preserve_native_session_and_provider_order() {
         let seen = Arc::new(StdMutex::new(Vec::new()));
         for (host, session, sequence) in [
@@ -1066,7 +1065,7 @@ mod tests {
         assert_eq!(seen[1].2.as_str(), "session.opencode.replay");
     }
 
-    #[asupersync::test]
+    #[tokio::test]
     async fn an_expired_record_is_tombstoned_rather_than_replayed() {
         let root = TestRoot::new("expired");
         let queued_at = UtcMicros(1_000);
@@ -1111,7 +1110,7 @@ mod tests {
     /// that never acknowledges (the crash-before-ACK shape) must re-offer the
     /// identical record identities on the next pass, and an acknowledged
     /// record must never be offered a third time.
-    #[asupersync::test]
+    #[tokio::test]
     async fn retained_records_replay_under_the_same_identity_without_double_delivery() {
         let root = TestRoot::new("replay-identity");
         let now = UtcMicros(1_000);

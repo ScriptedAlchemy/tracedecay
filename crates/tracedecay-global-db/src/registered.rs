@@ -124,6 +124,10 @@ impl From<Option<RefusedAuthorityV1>> for SessionAuthorityV1 {
     }
 }
 
+// Short-lived store owners have no periodic daemon compactor. Keep their
+// one admission reclaim bounded; daemon admission performs no foreground reclaim.
+const SHORT_LIVED_RECLAIM_PAGES: u64 = 4096;
+
 /// The sole map owner for one registered global-database publication.
 ///
 /// It can issue independently counted client leases, but cannot be cloned or
@@ -213,6 +217,18 @@ impl RegisteredGlobalDbOwnerV1 {
             }
             RegisteredSchemaAttachmentV1::SessionsRefused(refused) => Some(refused),
         };
+        // A short-lived client has no later daemon maintenance turn. Reclaim
+        // pages released by earlier writes after schema convergence, without
+        // introducing the same foreground work into daemon admission. Refused
+        // authorities remain byte-preserving until their typed reset.
+        if refused_authority.is_none() {
+            // Defer only optional SQLite maintenance contention. A revoked
+            // write authority or closed writer must still fail admission.
+            registered
+                .database
+                .reclaim_short_lived_pages(SHORT_LIVED_RECLAIM_PAGES)
+                .await?;
+        }
         drop(registered);
         Ok(Self {
             database,
@@ -1282,7 +1298,7 @@ mod tests {
         }
     }
 
-    #[asupersync::test]
+    #[tokio::test]
     async fn registered_database_lease_keeps_runtime_alive_after_map_owner_drops() {
         let fixture = crate::tests::harness::RegisteredGlobalDbRetirementHarnessV1::open(
             "registered-global-db-lease-foreign-survival",
@@ -1373,7 +1389,7 @@ mod tests {
         assert_eq!(reopened.locator().verified(), retirement.locator());
     }
 
-    #[asupersync::test]
+    #[tokio::test]
     async fn weak_registered_owner_issuer_mints_fresh_guarded_command_leases() {
         let fixture = crate::tests::harness::RegisteredGlobalDbRetirementHarnessV1::open(
             "weak-registered-global-db-owner-issuer",
@@ -1398,7 +1414,7 @@ mod tests {
         assert!(!first.shares_client_with(&second));
     }
 
-    #[asupersync::test]
+    #[tokio::test]
     async fn transcript_progress_proofs_follow_owner_and_issued_client_lifetimes() {
         let fixture = crate::tests::harness::RegisteredGlobalDbRetirementHarnessV1::open(
             "transcript-progress-proof-lifetimes",
@@ -1451,7 +1467,7 @@ mod tests {
         ));
     }
 
-    #[asupersync::test]
+    #[tokio::test]
     async fn registered_project_graph_binding_retains_only_the_database_weak_proxy() {
         crate::register_registered_schema_installer();
         let directory = tempfile::tempdir().expect("registered weak graph proxy directory");

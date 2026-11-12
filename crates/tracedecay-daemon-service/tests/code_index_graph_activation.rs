@@ -437,6 +437,7 @@ async fn persistent_graph_activation_publishes_a_small_generation() {
             None,
             replay_binding,
             Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            Arc::new(|_| {}),
         )
         .await
         .expect("small persistent generation must activate");
@@ -561,6 +562,7 @@ async fn persistent_callers_cursor_keeps_generation_a_without_repointing_generat
             None,
             replay_a,
             Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            Arc::new(|_| {}),
         )
         .await
         .expect("activate generation A");
@@ -899,7 +901,10 @@ async fn restart_status_case(corrupt_graph: bool, dirty_before_restart: bool) {
         .await
         .expect("retain seeded graph runtime");
     let seeded_graph = retained
-        .publish_verified_snapshot(Arc::new(std::sync::atomic::AtomicBool::new(false)))
+        .publish_verified_snapshot(
+            Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            Arc::new(|_| {}),
+        )
         .expect("publish graph head before restart");
     drop(seeded_graph);
     drop(retained);
@@ -908,7 +913,7 @@ async fn restart_status_case(corrupt_graph: bool, dirty_before_restart: bool) {
     // project graph store until it is joined, and a restart opened beside it
     // cannot take the store's write lock.
     graph_runtime
-        .shutdown_terminal_tasks(&tracedecay_runtime_core::native_runtime::cx().unwrap())
+        .shutdown_terminal_tasks()
         .await
         .expect("join graph terminal tasks before restart");
     graph_runtime
@@ -1672,7 +1677,10 @@ async fn restart_with_published_graph_head(
         .expect("retain seeded graph runtime");
     drop(
         retained
-            .publish_verified_snapshot(Arc::new(std::sync::atomic::AtomicBool::new(false)))
+            .publish_verified_snapshot(
+                Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                Arc::new(|_| {}),
+            )
             .expect("publish graph head before restart"),
     );
     drop(retained);
@@ -1680,7 +1688,7 @@ async fn restart_with_published_graph_head(
     // The daemon's terminal order: the publication's staging sweep holds the
     // project graph store until it is joined.
     graph_runtime
-        .shutdown_terminal_tasks(&tracedecay_runtime_core::native_runtime::cx().unwrap())
+        .shutdown_terminal_tasks()
         .await
         .expect("join graph terminal tasks before restart");
     graph_runtime
@@ -2416,7 +2424,6 @@ async fn initial_publisher_parks_and_releases_its_graph(
         .await
         .expect("mounted owner activity");
     let mut headroom = owners.subscribe_headroom();
-    let cx = tracedecay_runtime_core::native_runtime::cx().expect("native task context");
     tokio::time::timeout(Duration::from_secs(30), async {
         loop {
             if activity.worker_phase()
@@ -2432,7 +2439,7 @@ async fn initial_publisher_parks_and_releases_its_graph(
             }
             tokio::select! {
                 changed = activity.changed() => changed.expect("live owner activity"),
-                changed = headroom.changed(&cx) => changed.expect("live resident owners"),
+                changed = headroom.changed() => changed.expect("live resident owners"),
             }
         }
     })

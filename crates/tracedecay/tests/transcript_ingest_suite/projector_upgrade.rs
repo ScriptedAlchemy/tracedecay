@@ -101,7 +101,7 @@ fn shape_store_as_shipped(db_path: &Path) {
 /// so the next open recreates it empty.
 fn reset_store(db_path: &Path) {
     std::fs::remove_file(db_path).unwrap();
-    for suffix in ["-wal", "-shm"] {
+    for suffix in ["-wal", "-shm", "-journal"] {
         let mut sidecar = db_path.as_os_str().to_owned();
         sidecar.push(suffix);
         match std::fs::remove_file(sidecar) {

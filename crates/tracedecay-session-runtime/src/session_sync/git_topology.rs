@@ -57,8 +57,10 @@ impl SessionSyncProjectContext {
             &self.project_id,
         ) {
             Ok(scope) => scope,
-            Err(_) => {
-                return GitTopologySyncOutcome::Finished(Err(GitTopologySyncFailure::Unavailable));
+            Err(error) => {
+                return GitTopologySyncOutcome::Finished(Err(
+                    unavailable("resolve project scope")(error),
+                ));
             }
         };
         let Some(runtime) = project_sessions.project_graph_runtime() else {
@@ -72,8 +74,10 @@ impl SessionSyncProjectContext {
         let runtime: Arc<dyn VerifiedGraphRuntimePortV1> = Arc::new(runtime.clone());
         let scope_sets = match project_sessions.authorized_scope_set_storage() {
             Ok(scope_sets) => scope_sets,
-            Err(_) => {
-                return GitTopologySyncOutcome::Finished(Err(GitTopologySyncFailure::Unavailable));
+            Err(error) => {
+                return GitTopologySyncOutcome::Finished(Err(unavailable(
+                    "open scope-set storage",
+                )(error)));
             }
         };
         let project_root = self.project_root.clone();
@@ -97,7 +101,7 @@ impl SessionSyncProjectContext {
             result = &mut worker => {
                 GitTopologySyncOutcome::Finished(match result {
                     Ok(result) => result,
-                    Err(_) => Err(GitTopologySyncFailure::Unavailable),
+                    Err(error) => Err(unavailable("join topology publisher")(error)),
                 })
             }
             interruption = service.wait_for_interruption(request) => {

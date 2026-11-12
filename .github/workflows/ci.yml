@@ -144,6 +144,7 @@ jobs:
       - name: Build tracedecay binary
         uses: ./.github/actions/build-cli
         with:
+          release-download-token: ${{ github.token }}
           config: ci
           dest: target/debug
           cache-key: ci-linux-debug
@@ -194,9 +195,8 @@ jobs:
       id-token: write
     name: Repository gates
     runs-on: ubuntu-latest
-    # The rustfmt build's crate_universe splice clones git-pinned crates from
-    # scratch. asupersync's full history alone took over 7 minutes on a hosted
-    # runner, so 15 minutes no longer fits.
+    # Dependency resolution may clone the workspace's git-pinned crates on
+    # a cold hosted runner before the formatting and repository gates run.
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -249,6 +249,7 @@ jobs:
       - uses: ./.github/actions/setup-bazel
         id: bazel
         with:
+          release-download-token: ${{ github.token }}
           cache-key: ci-format-linux
           tailscale-client-id: >-
             ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
@@ -269,7 +270,6 @@ jobs:
           //scripts:gen_builds_test
           //scripts:unused_tool_context_measure_test
           //scripts:sqlite_plan_stability_check_test
-          //scripts:ambient_tokio_check_test
           //scripts:rusqlite_storage_boundary_test
           //scripts:packaged_lsp_bridge_test
           //scripts:configure_ci_fleet_test
@@ -324,11 +324,6 @@ jobs:
       - name: Check SQL plans stay index-backed under QPSG
         run: python3 scripts/check-sqlite-plan-stability.py
 
-      # `daemon run` drives its futures on native workers, which have no
-      # ambient Tokio runtime; production code names its Tokio handle.
-      - name: Check production code has no ambient Tokio call
-        run: python3 scripts/check-ambient-tokio.py
-
       - name: Check rusqlite stays inside storage owners
         run: python3 scripts/check-rusqlite-storage-boundary.py
 
@@ -369,6 +364,7 @@ jobs:
       - uses: ./.github/actions/setup-bazel
         id: bazel
         with:
+          release-download-token: ${{ github.token }}
           cache-key: ci-macos-test
           tailscale-client-id: >-
             ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
@@ -466,6 +462,7 @@ jobs:
       - uses: ./.github/actions/setup-bazel
         id: bazel
         with:
+          release-download-token: ${{ github.token }}
           cache-key: ci-linux-test-v2
           # Tailscale binds each client to this repository, workflow, and actor ID.
           # Fork PRs never receive a fleet identity.
@@ -701,6 +698,7 @@ jobs:
       - uses: ./.github/actions/setup-bazel
         id: bazel
         with:
+          release-download-token: ${{ github.token }}
           # The previous PDB-producing cache restored an 11 GiB archive.
           # Start a new generation for the changed compile/link configuration.
           cache-key: ci-windows-test-v2
@@ -716,8 +714,7 @@ jobs:
         shell: bash
         # Compile and link every target, but defer unused test runfiles trees.
         # Bazel still materializes runfiles required by build-time tools.
-        # Four concurrent Rust actions exhausted the hosted runner's commit
-        # limit while mapping asupersync metadata (Windows error 1455).
+        # Keep local Rust concurrency within the hosted runner's commit limit.
         run: bazel build --config=ci-windows --jobs=${{ steps.bazel.outputs.fleet-enabled == 'true' && '16' || '2' }} --nobuild_runfile_links //...
 
       - name: Build and test native targets
@@ -836,6 +833,7 @@ jobs:
       - uses: ./.github/actions/setup-bazel
         id: bazel
         with:
+          release-download-token: ${{ github.token }}
           cache-key: ci-linux-clippy
           # Tailscale binds each client to this repository, workflow, and actor ID.
           # Fork PRs never receive a fleet identity.
@@ -911,6 +909,7 @@ jobs:
         id: cli
         uses: ./.github/actions/build-cli
         with:
+          release-download-token: ${{ github.token }}
           config: release
           dest: target/x86_64-unknown-linux-gnu/release
           cache-key: release-x86_64-unknown-linux-gnu
@@ -969,6 +968,7 @@ jobs:
       - uses: ./.github/actions/setup-bazel
         id: bazel
         with:
+          release-download-token: ${{ github.token }}
           cache-key: ci-dashboard
 
       - name: Check frontend types, tests, and artifacts

@@ -309,6 +309,8 @@ pub struct ToolCallRegistryOptions<'a> {
         Option<Arc<dyn tracedecay_daemon_protocol::DaemonInvocationExecutor>>,
     pub(crate) daemon_invocation_service:
         Option<&'a tracedecay_daemon_service::DaemonInvocationService>,
+    pub(crate) operation_events:
+        Option<tracedecay_application::operation_stream::OperationEventAuthority>,
     pub(crate) dashboard_delivery_settlement_authority:
         Option<Arc<tracedecay_application::observability::DeliverySettlementAuthorityV1>>,
     pub application_request_id: Option<tracedecay_contracts::RequestId>,
@@ -388,6 +390,7 @@ impl Default for ToolCallRegistryOptions<'_> {
             application_invocation_executor: None,
             dashboard_application_invocation_executor: None,
             daemon_invocation_service: None,
+            operation_events: None,
             dashboard_delivery_settlement_authority: None,
             application_request_id: None,
             application_deadline: None,

@@ -18,9 +18,9 @@ const REAPED_FAILURE_CAPACITY: usize = 16;
 /// admission instead of waiting for shutdown. Reaping never awaits a live
 /// task: `try_join_next` only returns results that are already ready.
 ///
-/// Tasks run on the native runtime. No spawned future needs an ambient Tokio
-/// runtime, and their storage calls are async, so none parks a native worker
-/// on the SQLite writer.
+/// Tasks run on the selected Tokio runtime, falling back to the installed
+/// process runtime for callers on dedicated threads. Their storage calls are
+/// async, so none parks a worker on the SQLite writer.
 #[derive(Default)]
 pub struct McpBackgroundTaskOwner {
     admission: std::sync::Mutex<McpBackgroundTaskAdmission>,
@@ -412,11 +412,12 @@ mod background_task_owner_tests {
         }
     }
 
-    /// Runs `test` as a native root with no Tokio runtime entered: the owner
-    /// spawns onto, and shutdown joins, native tasks only.
+    /// Starts from a plain thread, then drives the owner's tasks and shutdown
+    /// on the installed process runtime.
     fn on_native<F: std::future::Future<Output = ()>>(test: F) {
+        assert!(tokio::runtime::Handle::try_current().is_err());
         native_runtime::block_on(async {
-            assert!(tokio::runtime::Handle::try_current().is_err());
+            assert!(tokio::runtime::Handle::try_current().is_ok());
             test.await;
         })
         .expect("native runtime");

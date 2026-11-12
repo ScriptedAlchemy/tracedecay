@@ -1095,7 +1095,10 @@ async fn cancel_stops_the_automation_loop_while_the_scheduler_map_is_held() {
 /// on the native runtime.
 #[cfg(unix)]
 #[test]
-fn the_automation_loop_starts_and_exits_without_a_tokio_runtime() {
+fn the_automation_loop_starts_and_exits_from_a_synchronous_host() {
+    if !crate::test_support::alone_with_runtime_hazards() {
+        return;
+    }
     let tokio = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
@@ -1139,7 +1142,7 @@ fn the_automation_loop_starts_and_exits_without_a_tokio_runtime() {
 
     let hazards = crate::test_support::native_runtime_hazards();
     let decision = tracedecay_runtime_core::native_runtime::block_on(async {
-        assert!(tokio::runtime::Handle::try_current().is_err());
+        assert!(tokio::runtime::Handle::try_current().is_ok());
         let outcome = engine
             .ensure_automation_scheduler(key.clone(), project.clone(), handshake.clone())
             .await;
@@ -1168,12 +1171,15 @@ fn the_automation_loop_starts_and_exits_without_a_tokio_runtime() {
     tokio.block_on(engine.shutdown_all());
 }
 
-/// Project-open activation runs on the native runtime: with no Tokio runtime
-/// it reconciles reserved automation effects, probes the project's automation
-/// configuration and starts its loop.
+/// Project-open activation from a synchronous host enters the installed
+/// runtime, reconciles reserved automation effects, probes the project's
+/// automation configuration and starts its loop.
 #[cfg(unix)]
 #[test]
-fn project_open_activation_starts_the_automation_loop_without_a_tokio_runtime() {
+fn project_open_activation_starts_the_automation_loop_from_a_synchronous_host() {
+    if !crate::test_support::alone_with_runtime_hazards() {
+        return;
+    }
     let tokio = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
@@ -1218,7 +1224,7 @@ fn project_open_activation_starts_the_automation_loop_without_a_tokio_runtime() 
 
     let hazards = crate::test_support::native_runtime_hazards();
     tracedecay_runtime_core::native_runtime::block_on(async {
-        assert!(tokio::runtime::Handle::try_current().is_err());
+        assert!(tokio::runtime::Handle::try_current().is_ok());
         super::super::project_open_orchestration::spawn_lifecycle_automation_scheduler_activation(
             engine.lifecycle.clone(),
             crate::daemon::project_open_owners::reconcile_project_open_automation_effects(

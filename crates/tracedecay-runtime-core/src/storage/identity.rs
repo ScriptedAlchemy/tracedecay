@@ -196,15 +196,16 @@ pub async fn repository_identity_anchors_off_executor(
     project_root: &Path,
     origin: Option<&str>,
 ) -> Vec<IdentityAnchor> {
-    let Some(cx) = crate::native_runtime::cx() else {
+    let Some(cx) = crate::native_runtime::handle() else {
         return repository_identity_anchors(project_root, origin);
     };
     let root = project_root.to_path_buf();
     let owned_origin = origin.map(str::to_owned);
-    match cx.spawn_blocking(move |_| repository_identity_anchors(&root, owned_origin.as_deref())) {
-        Ok(mut task) => task.join(&cx).await.unwrap_or_default(),
-        Err(_) => repository_identity_anchors(project_root, origin),
-    }
+    crate::native_runtime::spawn_blocking_on(&cx, move || {
+        repository_identity_anchors(&root, owned_origin.as_deref())
+    })
+    .await
+    .unwrap_or_default()
 }
 
 /// The repository-wide identity marker shared by every checkout of a

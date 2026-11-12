@@ -29,12 +29,12 @@ use tracedecay_graph_db::{
     GraphProjectorRevision, SealedCodeGenerationReplay, SealedGraphStateDigest,
 };
 use tracedecay_store::{
-    GraphGenerationIdV1, GraphProjectionIdV1, GraphProjectionIdentityV1,
-    GraphPublicationIdempotencyKeyV1, GraphPublicationInputDigestV1, GraphPublicationKeyV1,
-    GraphPublicationOperationContextV1, GraphPublicationReplayLookupV1, GraphPublicationReplayV1,
-    GraphPublicationStoreV1, GraphReplayAppendOutcomeV1, RetainedGraphStoreLeaseV1,
-    RuntimeCancellationIdV1, RuntimeCancellationIdentityV1, RuntimeDeadlineIdV1, RuntimeDeadlineV1,
-    RuntimeRequestControlV1,
+    GraphGenerationIdV1, GraphNativeWorkKindV1, GraphNativeWorkObserverV1, GraphNativeWorkV1,
+    GraphProjectionIdV1, GraphProjectionIdentityV1, GraphPublicationIdempotencyKeyV1,
+    GraphPublicationInputDigestV1, GraphPublicationKeyV1, GraphPublicationOperationContextV1,
+    GraphPublicationReplayLookupV1, GraphPublicationReplayV1, GraphPublicationStoreV1,
+    GraphReplayAppendOutcomeV1, RetainedGraphStoreLeaseV1, RuntimeCancellationIdV1,
+    RuntimeCancellationIdentityV1, RuntimeDeadlineIdV1, RuntimeDeadlineV1, RuntimeRequestControlV1,
 };
 
 use sha2::{Digest as _, Sha256};
@@ -571,7 +571,7 @@ async fn unreadable_pending_replay_is_discarded_before_fresh_publication() {
     });
 
     let snapshot = runtime
-        .publish_verified_snapshot(Arc::new(AtomicBool::new(false)))
+        .publish_verified_snapshot_with_admission(Arc::new(AtomicBool::new(false)), None, None)
         .expect("fresh publication discards the permanently incompatible predecessor");
     assert_eq!(snapshot.verified_head().key, fresh_key);
     with_publication_context("inspect-historical-pending-replay", |context| {
@@ -740,7 +740,11 @@ async fn a_pending_predecessor_pooled_by_retention_yields_to_the_next_generation
             }
         })
     };
-    let published = successor_runtime.publish_verified_snapshot(Arc::clone(&cancelled));
+    let published = successor_runtime.publish_verified_snapshot_with_admission(
+        Arc::clone(&cancelled),
+        None,
+        None,
+    );
     drop(finished);
     watchdog.join().expect("publication watchdog");
     let snapshot = published.expect("the successor publishes past its pooled pending predecessor");
@@ -877,7 +881,11 @@ async fn sealed_generation_publishes_and_republishes_without_eager_replay_payloa
 
     std::fs::write(&canonical_seal, &mutated_seal).expect("mutate sealed generation in place");
     assert!(matches!(
-        runtime.publish_verified_snapshot(Arc::new(AtomicBool::new(false))),
+        runtime.publish_verified_snapshot_with_admission(
+            Arc::new(AtomicBool::new(false)),
+            None,
+            None
+        ),
         Err(GraphDbError::Corrupt { .. })
     ));
     assert_unverified_publication_state(&runtime, false);
@@ -887,7 +895,11 @@ async fn sealed_generation_publishes_and_republishes_without_eager_replay_payloa
     std::fs::rename(&canonical_seal, &retained_seal).expect("retain original sealed inode");
     std::fs::write(&canonical_seal, &mutated_seal).expect("replace canonical sealed inode");
     assert!(matches!(
-        runtime.publish_verified_snapshot(Arc::new(AtomicBool::new(false))),
+        runtime.publish_verified_snapshot_with_admission(
+            Arc::new(AtomicBool::new(false)),
+            None,
+            None
+        ),
         Err(GraphDbError::Corrupt { .. })
     ));
     assert_unverified_publication_state(&runtime, false);
@@ -901,7 +913,11 @@ async fn sealed_generation_publishes_and_republishes_without_eager_replay_payloa
         std::fs::rename(&canonical_seal, &retained_seal).expect("retain symlink target evidence");
         symlink(&retained_seal, &canonical_seal).expect("swap canonical seal for symlink");
         assert!(matches!(
-            runtime.publish_verified_snapshot(Arc::new(AtomicBool::new(false))),
+            runtime.publish_verified_snapshot_with_admission(
+                Arc::new(AtomicBool::new(false)),
+                None,
+                None
+            ),
             Err(GraphDbError::Corrupt { .. })
         ));
         assert_unverified_publication_state(&runtime, false);
@@ -914,7 +930,11 @@ async fn sealed_generation_publishes_and_republishes_without_eager_replay_payloa
     std::fs::write(&canonical_seal, &mutated_seal)
         .expect("mutate source before active replay completion");
     assert!(matches!(
-        runtime.publish_verified_snapshot(Arc::new(AtomicBool::new(false))),
+        runtime.publish_verified_snapshot_with_admission(
+            Arc::new(AtomicBool::new(false)),
+            None,
+            None
+        ),
         Err(GraphDbError::Corrupt { .. })
     ));
     assert_unverified_publication_state(&runtime, true);
@@ -928,7 +948,7 @@ async fn sealed_generation_publishes_and_republishes_without_eager_replay_payloa
     // manufactured stage-boundary `DeadlineExceeded`, no scheduler retry
     // pass, no conflict against its own journal.
     let snapshot = runtime
-        .publish_verified_snapshot(Arc::new(AtomicBool::new(false)))
+        .publish_verified_snapshot_with_admission(Arc::new(AtomicBool::new(false)), None, None)
         .expect("first activation must resume the journaled replay and publish in one call");
     let expected_generation = tracedecay_code_index::graph_projection::code_graph_generation_id(
         &generation_id,
@@ -985,7 +1005,7 @@ async fn sealed_generation_publishes_and_republishes_without_eager_replay_payloa
         .await
         .expect("retain code graph runtime again");
     let resumed = retried
-        .publish_verified_snapshot(Arc::new(AtomicBool::new(false)))
+        .publish_verified_snapshot_with_admission(Arc::new(AtomicBool::new(false)), None, None)
         .expect("a repeated activation must resume the exact publication");
     assert_eq!(resumed.generation(), &expected_generation);
     assert_eq!(resumed.verified_head(), &head);
@@ -1062,7 +1082,7 @@ async fn sealed_generation_publishes_and_republishes_without_eager_replay_payloa
         .await
         .expect("retain next code graph runtime");
     let next_snapshot = next_runtime
-        .publish_verified_snapshot(Arc::new(AtomicBool::new(false)))
+        .publish_verified_snapshot_with_admission(Arc::new(AtomicBool::new(false)), None, None)
         .expect("a fresh small projection must publish in one call");
     assert_eq!(
         next_snapshot.generation().as_str(),
@@ -1252,6 +1272,85 @@ async fn sealed_generation_fixture(project: &str, source: &str) -> SealedGenerat
     }
 }
 
+/// The real sealed graph writer runs under a new commit probe after its
+/// journal lookup. Native work must reach the code-index observer through
+/// that second context, not disappear between journal and durable publication.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn sealed_graph_writer_reports_native_work_through_journal_commit_boundary() {
+    let fixture = sealed_generation_fixture(
+        "project.native-graph-work",
+        "pub fn observed_graph_symbol() -> usize { 43 }\n",
+    )
+    .await;
+    let observed = Arc::new(Mutex::new(Vec::<GraphNativeWorkV1>::new()));
+    let observer: GraphNativeWorkObserverV1 = {
+        let observed = Arc::clone(&observed);
+        Arc::new(move |work| {
+            observed
+                .lock()
+                .expect("native graph observation lock")
+                .push(work);
+        })
+    };
+    let first_snapshot = fixture
+        .runtime
+        .publish_verified_snapshot_with_admission(
+            Arc::new(AtomicBool::new(false)),
+            None,
+            Some(Arc::clone(&observer)),
+        )
+        .expect("real sealed graph publication");
+    let first_head = first_snapshot.verified_head().clone();
+    let first = observed.lock().expect("first native graph events").clone();
+    let Some((
+        GraphNativeWorkV1::CompactSegmentVerified {
+            entities,
+            relations,
+            canonical_bytes,
+        },
+        windows,
+    )) = first.split_last()
+    else {
+        panic!("native row windows must precede the verified durable segment: {first:?}");
+    };
+    assert!(*canonical_bytes > 0);
+    for (expected_kind, count) in [
+        (GraphNativeWorkKindV1::Entities, entities),
+        (GraphNativeWorkKindV1::Relations, relations),
+    ] {
+        assert!(
+            *count > 0,
+            "the fixture must write both entities and relations"
+        );
+        assert!(windows.iter().any(|work| matches!(
+            work, GraphNativeWorkV1::CompactRowsEncoded { kind, completed_rows, total_rows, total_relations }
+                if *kind == expected_kind && completed_rows == count && total_rows == count && total_relations == relations
+        )), "missing complete {expected_kind:?} window before segment verification: {first:?}");
+    }
+    assert!(
+        !windows
+            .iter()
+            .any(|work| matches!(work, GraphNativeWorkV1::CompactSegmentVerified { .. })),
+        "the installed segment must be reported exactly once"
+    );
+
+    drop(first_snapshot);
+    let resumed = fixture
+        .runtime
+        .publish_verified_snapshot_with_admission(
+            Arc::new(AtomicBool::new(false)),
+            None,
+            Some(observer),
+        )
+        .expect("same sealed graph publication reuses the durable head");
+    assert_eq!(resumed.verified_head(), &first_head);
+    assert_eq!(
+        *observed.lock().expect("replay native graph events"),
+        first,
+        "replaying the already verified head must report no new native work"
+    );
+}
+
 /// The graph store is the only owner of symbol, file, and import records:
 /// sealing writes no second copy of them beside the generation, and the
 /// interactive catalog is derived from the sealed projection itself.
@@ -1268,7 +1367,7 @@ async fn sealing_keeps_symbol_records_only_in_the_graph_store() {
     .await;
     let snapshot = fixture
         .runtime
-        .publish_verified_snapshot(Arc::new(AtomicBool::new(false)))
+        .publish_verified_snapshot_with_admission(Arc::new(AtomicBool::new(false)), None, None)
         .expect("seal the code graph");
 
     let file_names = |root: &Path| {
@@ -1366,7 +1465,7 @@ async fn an_oversized_symbol_record_seals_and_serves_whole() {
     let fixture = sealed_generation_fixture("project.long-record", &source).await;
     let snapshot = fixture
         .runtime
-        .publish_verified_snapshot(Arc::new(AtomicBool::new(false)))
+        .publish_verified_snapshot_with_admission(Arc::new(AtomicBool::new(false)), None, None)
         .expect("seal a code graph with an oversized record");
     let store =
         tracedecay_code_index::graph_projection::CodeGraphProjectionStore::from_verified_snapshot(
@@ -1434,7 +1533,7 @@ async fn graph_reads_during_engine_warm_up_are_typed_pending_and_warmed_reads_su
     .await;
     let snapshot = fixture
         .runtime
-        .publish_verified_snapshot(Arc::new(AtomicBool::new(false)))
+        .publish_verified_snapshot_with_admission(Arc::new(AtomicBool::new(false)), None, None)
         .expect("seal the code graph");
     let store =
         CodeGraphProjectionStore::from_verified_snapshot(snapshot, fixture.generation_id.clone())
@@ -1512,7 +1611,7 @@ async fn a_released_serving_engine_closes_and_rewarms_on_the_next_read() {
     .await;
     let snapshot = fixture
         .runtime
-        .publish_verified_snapshot(Arc::new(AtomicBool::new(false)))
+        .publish_verified_snapshot_with_admission(Arc::new(AtomicBool::new(false)), None, None)
         .expect("seal the code graph");
     let store =
         CodeGraphProjectionStore::from_verified_snapshot(snapshot, fixture.generation_id.clone())
@@ -1589,7 +1688,7 @@ async fn a_read_waiting_on_a_finishing_rewarm_wakes_when_it_ends() {
     .await;
     let snapshot = fixture
         .runtime
-        .publish_verified_snapshot(Arc::new(AtomicBool::new(false)))
+        .publish_verified_snapshot_with_admission(Arc::new(AtomicBool::new(false)), None, None)
         .expect("seal the code graph");
     let store =
         CodeGraphProjectionStore::from_verified_snapshot(snapshot, fixture.generation_id.clone())
@@ -1679,7 +1778,7 @@ async fn serving_graph_owners_charge_the_heap_they_hold() {
         sealed_generation_fixture("project.graph-owner-accounting", &accounting_source(600)).await;
     let snapshot = fixture
         .runtime
-        .publish_verified_snapshot(Arc::new(AtomicBool::new(false)))
+        .publish_verified_snapshot_with_admission(Arc::new(AtomicBool::new(false)), None, None)
         .expect("seal the code graph");
     let store =
         CodeGraphProjectionStore::from_verified_snapshot(snapshot, fixture.generation_id.clone())
@@ -2048,7 +2147,9 @@ async fn concurrent_sealed_publishers_share_one_gate_and_converge_on_one_head() 
         .lock()
         .expect("hold the publication gate");
     let outcome = std::thread::scope(|scope| {
-        let worker = scope.spawn(|| reconcile.publish_verified_snapshot(Arc::clone(&cancelled)));
+        let worker = scope.spawn(|| {
+            reconcile.publish_verified_snapshot_with_admission(Arc::clone(&cancelled), None, None)
+        });
         cancelled.store(true, Ordering::Release);
         drop(held);
         worker.join().expect("join the cancelled publisher")
@@ -2060,10 +2161,20 @@ async fn concurrent_sealed_publishers_share_one_gate_and_converge_on_one_head() 
     // generation concurrently: the loser waits out the winner, then resumes
     // the winner's exact publication instead of conflicting.
     let (seat_outcome, reconcile_outcome) = std::thread::scope(|scope| {
-        let seat_worker =
-            scope.spawn(|| seat.publish_verified_snapshot(Arc::new(AtomicBool::new(false))));
-        let reconcile_worker =
-            scope.spawn(|| reconcile.publish_verified_snapshot(Arc::new(AtomicBool::new(false))));
+        let seat_worker = scope.spawn(|| {
+            seat.publish_verified_snapshot_with_admission(
+                Arc::new(AtomicBool::new(false)),
+                None,
+                None,
+            )
+        });
+        let reconcile_worker = scope.spawn(|| {
+            reconcile.publish_verified_snapshot_with_admission(
+                Arc::new(AtomicBool::new(false)),
+                None,
+                None,
+            )
+        });
         (
             seat_worker.join().expect("join the seat publisher"),
             reconcile_worker
@@ -2253,7 +2364,8 @@ async fn sealed_publication_refuses_over_the_resident_memory_watermark() {
 
     set_sample(&sample, pressure.low_watermark_bytes());
     let not_cancelled = Arc::new(AtomicBool::new(false));
-    let refused = runtime.publish_verified_snapshot(Arc::clone(&not_cancelled));
+    let refused =
+        runtime.publish_verified_snapshot_with_admission(Arc::clone(&not_cancelled), None, None);
     // The projection peak is process-global and other cases reset it; this
     // cell's own sampler is what saw the crossing.
     assert!(
@@ -2297,7 +2409,7 @@ async fn sealed_publication_refuses_over_the_resident_memory_watermark() {
     // keeps its own identity: the caller cancelled, so it is told so.
     let cancelled = Arc::new(AtomicBool::new(true));
     assert!(matches!(
-        runtime.publish_verified_snapshot(cancelled),
+        runtime.publish_verified_snapshot_with_admission(cancelled, None, None),
         Err(GraphDbError::Cancelled)
     ));
 
@@ -2306,7 +2418,7 @@ async fn sealed_publication_refuses_over_the_resident_memory_watermark() {
     set_sample(&sample, pressure.low_watermark_bytes());
     std::thread::sleep(RESIDENT_MEMORY_CHECKPOINT_SAMPLE_INTERVAL_V1);
     let published = runtime
-        .publish_verified_snapshot(Arc::new(AtomicBool::new(false)))
+        .publish_verified_snapshot_with_admission(Arc::new(AtomicBool::new(false)), None, None)
         .expect("nominal measured RSS publishes the sealed generation");
     let projector_revision = GraphProjectorRevision::try_from(
         tracedecay_code_index::graph_projection::CODE_GRAPH_PROJECTOR_REVISION.to_owned(),
@@ -2398,7 +2510,7 @@ async fn sealed_publication_samples_resident_memory_per_interval_not_per_row() {
 
     let started = Instant::now();
     let snapshot = runtime
-        .publish_verified_snapshot(Arc::new(AtomicBool::new(false)))
+        .publish_verified_snapshot_with_admission(Arc::new(AtomicBool::new(false)), None, None)
         .expect("the sealed generation publishes");
     let elapsed = started.elapsed();
     let samples = samples.load(Ordering::Acquire);
@@ -2990,7 +3102,11 @@ async fn concurrent_worktree_scopes_publish_with_one_corpus_build_and_bounded_rs
             workers.push(thread_scope.spawn(move || {
                 worker_barrier.wait();
                 let started = Instant::now();
-                let result = runtime.publish_verified_snapshot(Arc::new(AtomicBool::new(false)));
+                let result = runtime.publish_verified_snapshot_with_admission(
+                    Arc::new(AtomicBool::new(false)),
+                    None,
+                    None,
+                );
                 let elapsed_ms =
                     u64::try_from(started.elapsed().as_millis()).expect("publish milliseconds");
                 (scope_index, result, elapsed_ms)
@@ -3077,23 +3193,14 @@ async fn concurrent_worktree_scopes_publish_with_one_corpus_build_and_bounded_rs
 
 #[test]
 fn off_thread_staging_release_retains_its_permit_and_leases_until_terminal_drain() {
-    let executor = asupersync::runtime::RuntimeBuilder::multi_thread()
+    let executor = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
         .worker_threads(2)
-        .blocking_threads(1, 1)
-        .enable_time()
-        .enable_platform_reactor(true)
+        .max_blocking_threads(1)
         .build()
         .expect("isolated blocking-pool runtime");
-    // The registry's remote replay authority binds the daemon's Tokio
-    // runtime, so the fixture provides one beside the native executor.
-    let daemon_runtime = tokio::runtime::Builder::new_multi_thread()
-        .worker_threads(1)
-        .enable_all()
-        .build()
-        .expect("daemon Tokio runtime");
-    let _daemon_context = daemon_runtime.enter();
     executor.block_on(async {
-        let cx = asupersync::Cx::current().expect("native fixture execution context");
+        let executor_handle = tokio::runtime::Handle::current();
         let temporary = tempfile::tempdir().expect("temporary fixture parent");
         let root = temporary
             .path()
@@ -3198,14 +3305,12 @@ fn off_thread_staging_release_retains_its_permit_and_leases_until_terminal_drain
         // Occupy the actual blocking-pool slot. Dropping the sender on any
         // assertion failure also releases this worker, so teardown cannot hang.
         let (release, blocked) = std::sync::mpsc::channel::<()>();
-        let (started, mut entered) = asupersync::channel::oneshot::channel();
-        let mut blocker = cx
-            .spawn_blocking(move |_| {
-                started.send_blocking(()).unwrap();
-                let _ = blocked.recv();
-            })
-            .expect("native blocking-pool admission");
-        entered.recv(&cx).await.unwrap();
+        let (started, entered) = tokio::sync::oneshot::channel();
+        let blocker = executor_handle.spawn_blocking(move || {
+            started.send(()).unwrap();
+            let _ = blocked.recv();
+        });
+        entered.await.unwrap();
         std::thread::scope(|scope| {
             scope
                 .spawn(|| runtime.release_sealed_staging_rows(build, projection))
@@ -3225,13 +3330,13 @@ fn off_thread_staging_release_retains_its_permit_and_leases_until_terminal_drain
 
         // Poll the operation owner itself: terminal shutdown has other blocking
         // phases, which must not make a detached release falsely pass this test.
-        let mut operation_drain = std::pin::pin!(runtime.operation_task_owner.shutdown(&cx));
+        let mut operation_drain = std::pin::pin!(runtime.operation_task_owner.shutdown());
         std::future::poll_fn(|cx| {
             assert!(std::future::Future::poll(operation_drain.as_mut(), cx).is_pending());
             std::task::Poll::Ready(())
         })
         .await;
-        let mut terminal_drain = std::pin::pin!(registry.shutdown_terminal_tasks(&cx));
+        let mut terminal_drain = std::pin::pin!(registry.shutdown_terminal_tasks());
         std::future::poll_fn(|cx| {
             assert!(std::future::Future::poll(terminal_drain.as_mut(), cx).is_pending());
             std::task::Poll::Ready(())
@@ -3244,7 +3349,7 @@ fn off_thread_staging_release_retains_its_permit_and_leases_until_terminal_drain
                 .is_err()
         );
         release.send(()).unwrap();
-        blocker.join(&cx).await.unwrap();
+        blocker.await.unwrap();
         operation_drain.await.expect("accepted sweep is joined");
         terminal_drain
             .await
@@ -3286,7 +3391,7 @@ async fn catalog_builds_reserve_the_heap_they_hold() {
     let snapshot = || {
         fixture
             .runtime
-            .publish_verified_snapshot(Arc::new(AtomicBool::new(false)))
+            .publish_verified_snapshot_with_admission(Arc::new(AtomicBool::new(false)), None, None)
             .expect("seal the code graph")
     };
     let warm = |store: &CodeGraphProjectionStore| {

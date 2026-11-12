@@ -11,12 +11,36 @@ pub mod git;
 pub mod host_admission;
 
 /// Tokio-dependent paths this process skipped, plus synchronous writer waits
-/// that parked a native worker. An off-Tokio test asserts this does not move.
+/// that parked an async worker. Runtime tests assert this does not move.
 #[cfg(test)]
 pub(crate) fn native_runtime_hazards() -> u64 {
     tracedecay_runtime_core::native_runtime::tokio_runtime_missing_count(
         "daemon-service.shutdown.runner",
     ) + tracedecay_rusqlite_runtime::exact_sql::native_thread_writer_waits()
+}
+
+/// Runtime hazard counters belong to the process. Measure one test alone so
+/// another test's synchronous fixture setup cannot change its observed delta.
+#[cfg(test)]
+pub(crate) fn alone_with_runtime_hazards() -> bool {
+    const CHILD: &str = "TRACEDECAY_RUNTIME_HAZARD_TEST_CHILD";
+    let thread = std::thread::current();
+    let test = thread.name().expect("libtest names its test thread");
+    if std::env::var(CHILD).as_deref() == Ok(test) {
+        return true;
+    }
+    let output = std::process::Command::new(std::env::current_exe().expect("test executable"))
+        .args([test, "--exact", "--test-threads=1", "--nocapture"])
+        .env(CHILD, test)
+        .output()
+        .expect("run the runtime-hazard test in its own process");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.status.success() && stdout.contains("1 passed"),
+        "{test} failed in its child process:\n{stdout}\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    false
 }
 
 /// Park after core publication when `TRACEDECAY_TEST_HOLD_AFTER_CORE_PUBLISH`

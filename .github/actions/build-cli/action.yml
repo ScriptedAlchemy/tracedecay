@@ -4,6 +4,9 @@ description: >-
   path for the steps that package, upload, or spawn it.
 
 inputs:
+  release-download-token:
+    description: Optional read-only job token for public GitHub release downloads.
+    default: ""
   config:
     description: >-
       Bazel config. `dist` is the shipping-tuned compile (thin LTO, strip,
@@ -37,6 +40,7 @@ runs:
       id: bazel
       if: inputs.prepared-build != 'true'
       with:
+        release-download-token: ${{ inputs.release-download-token }}
         remote-download-outputs: toplevel
         cache-key: ${{ inputs.cache-key }}
         tailscale-client-id: ${{ inputs.tailscale-client-id }}

@@ -374,7 +374,7 @@ async fn search_opens_with_a_freshness_verdict_from_typed_state_case() {
     assert_eq!(payload["freshness"]["state"], "possibly_stale");
     assert_eq!(
         payload["freshness"]["indexing"]["summary"],
-        "state=refreshing rebuild_in_flight=true served_generation=generation.mcp-verified-graph-fixture.1 latest_generation=generation.mcp-verified-graph-fixture.2"
+        "state=refreshing rebuild_in_flight=true served_generation=generation.mcp-verified-graph-fixture.1 latest_generation=generation.mcp-verified-graph-fixture.2 progress=unreported"
     );
     assert_eq!(
         payload["freshness"]["indexing"]["latest_generation"],

@@ -7,7 +7,11 @@ use tracedecay_maintenance::retention::footprint::{
     MAX_FOOTPRINT_ENTRIES, WalkTerminationV1, WalkedEntryV1, walk_regular_files_with_budget,
 };
 use tracedecay_runtime_core::config::{GLOBAL_DB_FILENAME, ProfileRoot};
-use tracedecay_runtime_core::storage::{USER_MEMORY_DB_FILENAME, USER_SESSIONS_DB_FILENAME};
+use tracedecay_runtime_core::shard_runtime::registry::lock_offline_sqlite_family_for_reset;
+use tracedecay_runtime_core::storage::{
+    SESSIONS_DB_FILENAME, USER_MEMORY_DB_FILENAME, USER_SESSIONS_DB_FILENAME,
+    graph_store_data_paths,
+};
 
 use tracedecay_global_db::profile_registry_maintenance::{
     ProfileRegistryMaintenanceRuntime, remove_store_directory, verify_store_path_absent,
@@ -33,27 +37,109 @@ const PROFILE_SQLITE_DATABASES: [&str; 3] = [
     USER_SESSIONS_DB_FILENAME,
     USER_MEMORY_DB_FILENAME,
 ];
-const PROFILE_DATABASE_PATHS: [&str; 14] = [
-    "projects",
-    "remote",
-    "agent_managed",
-    "user-sessions.grafeo",
-    "user-sessions.grafeo.wal",
-    "user-memory.grafeo",
-    "user-memory.grafeo.wal",
-    ".user-sessions.db.host-admission",
-    tracedecay_hooks::PROFILE_HOOK_ADMISSIONS_DIR,
-    tracedecay_runtime_core::storage::RESPONSE_HANDLES_DIRECTORY,
-    "lcm-payloads",
-    "hook_analytics.jsonl",
-    "hook_analytics.jsonl.lock",
-    "maintenance",
+#[derive(Clone, Copy)]
+enum StoreMemberKind {
+    File,
+    Directory,
+}
+
+use StoreMemberKind::{Directory, File};
+
+const PROFILE_DATABASE_PATHS: [(&str, StoreMemberKind); 9] = [
+    ("projects", Directory),
+    ("remote", Directory),
+    ("agent_managed", Directory),
+    (tracedecay_hooks::PROFILE_HOOK_ADMISSIONS_DIR, Directory),
+    (
+        tracedecay_runtime_core::storage::RESPONSE_HANDLES_DIRECTORY,
+        Directory,
+    ),
+    ("lcm-payloads", Directory),
+    ("hook_analytics.jsonl", File),
+    ("hook_analytics.jsonl.lock", File),
+    ("maintenance", Directory),
 ];
 
-fn sqlite_family_member(database: &Path, suffix: &str) -> PathBuf {
-    let mut member = database.as_os_str().to_os_string();
-    member.push(suffix);
-    member.into()
+fn lock_offline_store_family(
+    directory: &Path,
+    database: &str,
+) -> tracedecay_domain::errors::Result<Option<tracedecay_private_fs::FileLease>> {
+    let path = directory.join(database);
+    lock_offline_sqlite_family_for_reset(&path)
+        .map_err(|error| wipe_io("lock offline SQLite family", &path, &error))
+}
+
+/// Exact data files and directories belonging to the relational shard.
+/// Sidecars and projections go before the SQLite main so an interrupted
+/// reset can still rediscover its stale authority.
+fn sqlite_store_data_members(database: &str) -> Vec<(PathBuf, StoreMemberKind)> {
+    let sessions = database == SESSIONS_DB_FILENAME || database == USER_SESSIONS_DB_FILENAME;
+    let mut members = Vec::new();
+    if sessions || database == USER_MEMORY_DB_FILENAME {
+        let (files, directories) =
+            graph_store_data_paths(&Path::new(database).with_extension("grafeo"));
+        members.extend(directories.into_iter().map(|path| (path, Directory)));
+        members.extend(files.into_iter().map(|path| (path, File)));
+    }
+    if sessions {
+        members.push((format!(".{database}.host-admission").into(), Directory));
+        members.push((
+            format!("{database}.delivery-settlement-spool-v1").into(),
+            Directory,
+        ));
+    }
+    members.extend(
+        ["-wal", "-shm", "-journal", ""]
+            .map(|suffix| (PathBuf::from(format!("{database}{suffix}")), File)),
+    );
+    members
+}
+
+/// Under the exclusive offline lease, refuse every ambiguous member before
+/// the first removal, including a directory in the place of a regular file.
+fn remove_checked_profile_members(
+    directory: &Path,
+    members: &[(PathBuf, StoreMemberKind)],
+) -> tracedecay_domain::errors::Result<usize> {
+    for (name, kind) in members {
+        let path = directory.join(name);
+        tracedecay_runtime_core::storage::reject_symlink_components(&path, "offline store data")
+            .map_err(|error| wipe_io("validate store data", &path, &error))?;
+        match std::fs::symlink_metadata(&path) {
+            Ok(meta)
+                if match kind {
+                    File => meta.is_file(),
+                    Directory => meta.is_dir(),
+                } => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Ok(_) => {
+                return Err(tracedecay_domain::errors::TraceDecayError::Config {
+                    message: format!(
+                        "unexpected file type for offline store data '{}'",
+                        path.display()
+                    ),
+                });
+            }
+            Err(error) => return Err(wipe_io("inspect offline store data", &path, &error)),
+        }
+    }
+    let mut removed = 0;
+    for (name, _) in members {
+        removed += usize::from(remove_fixed_profile_path(directory, name)?);
+        verify_store_path_absent(&directory.join(name))?;
+    }
+    Ok(removed)
+}
+
+/// The offline lifecycle authority admits deletion of the stale store
+/// itself. Similar names, private initialization data and stable coordination
+/// locks are not members of its data family.
+pub(super) fn remove_store_family(
+    directory: &Path,
+    database: &str,
+) -> tracedecay_domain::errors::Result<usize> {
+    let _initialization = lock_offline_store_family(directory, database)?;
+    remove_checked_profile_members(directory, &sqlite_store_data_members(database))
 }
 
 fn wipe_io(
@@ -121,7 +207,7 @@ fn validate_complete_wipe_profile_root(
 
 pub(super) fn remove_fixed_profile_path(
     profile_root: &Path,
-    name: &str,
+    name: impl AsRef<Path>,
 ) -> tracedecay_domain::errors::Result<bool> {
     use tracedecay_private_fs::framed_log::{DirectorySyncPolicy, sync_directory};
 
@@ -318,32 +404,15 @@ pub(crate) fn take_profile_offline(
 fn wipe_complete_profile_database_state(
     profile_root: &Path,
 ) -> tracedecay_domain::errors::Result<usize> {
-    let mut removed = 0usize;
-    for name in PROFILE_DATABASE_PATHS {
-        removed += usize::from(remove_fixed_profile_path(profile_root, name)?);
-    }
+    let mut leases = Vec::new();
+    let mut members = PROFILE_DATABASE_PATHS
+        .map(|(name, is_directory)| (PathBuf::from(name), is_directory))
+        .to_vec();
     for database in PROFILE_SQLITE_DATABASES {
-        let database = profile_root.join(database);
-        for suffix in ["-wal", "-shm", "-journal", ""] {
-            let member = sqlite_family_member(&database, suffix);
-            removed += usize::from(
-                tracedecay_runtime_core::storage::PrivateStoreIo::remove_file_durable(&member)
-                    .map_err(|error| {
-                        wipe_io("remove profile SQLite family member", &member, &error)
-                    })?,
-            );
-        }
+        leases.push(lock_offline_store_family(profile_root, database)?);
+        members.extend(sqlite_store_data_members(database));
     }
-    for name in PROFILE_DATABASE_PATHS {
-        verify_store_path_absent(&profile_root.join(name))?;
-    }
-    for database in PROFILE_SQLITE_DATABASES {
-        let database = profile_root.join(database);
-        for suffix in ["-wal", "-shm", "-journal", ""] {
-            verify_store_path_absent(&sqlite_family_member(&database, suffix))?;
-        }
-    }
-    Ok(removed)
+    remove_checked_profile_members(profile_root, &members)
 }
 
 /// Handles the `wipe` and `wipe --all` commands.

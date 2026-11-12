@@ -607,8 +607,8 @@ async fn seed_github_diagnostic(database: &Database, observed_at: UtcMicros) {
         .expect("published diagnostic");
 }
 
-/// Runs off Tokio: the daemon serves these projections and expansions on the
-/// native runtime.
+/// Starts from a plain thread and serves projections and expansions on the
+/// installed process runtime.
 #[test]
 fn concrete_feedback_source_projects_expands_and_clears_a_saved_github_finding() {
     assert!(tokio::runtime::Handle::try_current().is_err());

@@ -75,8 +75,9 @@ async fn seed_fixture(profile: &tempfile::TempDir) -> RegisteredGlobalDbTestRunt
 }
 
 fn session_activity_reads(criterion: &mut Criterion) {
-    let executor = asupersync::runtime::RuntimeBuilder::current_thread()
-        .blocking_threads(0, 512)
+    let executor = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .max_blocking_threads(512)
         .build()
         .expect("build benchmark runtime");
     let profile = tempfile::tempdir().expect("temporary benchmark profile");
@@ -136,7 +137,7 @@ fn session_activity_reads(criterion: &mut Criterion) {
     group.finish();
 }
 
-struct BenchExecutor<'a>(&'a asupersync::runtime::Runtime);
+struct BenchExecutor<'a>(&'a tokio::runtime::Runtime);
 
 impl criterion::async_executor::AsyncExecutor for BenchExecutor<'_> {
     fn block_on<T>(&self, future: impl Future<Output = T>) -> T {

@@ -368,6 +368,7 @@ async fn lifecycle_less_boundary_settles_and_resumes_on_its_sessions_lifecycle()
                         let _ = completed.send(());
                     }
                 })),
+                false,
             ),
             HookOrchestrationAdmissionV1::Enqueued
         );
@@ -387,7 +388,8 @@ async fn lifecycle_less_boundary_settles_and_resumes_on_its_sessions_lifecycle()
                 1,
                 false,
                 None,
-                None
+                None,
+                false,
             ),
             HookOrchestrationAdmissionV1::UnsupportedTrigger
         );
@@ -440,7 +442,7 @@ async fn lifecycle_less_boundary_settles_and_resumes_on_its_sessions_lifecycle()
 }
 
 #[test]
-fn admission_without_a_tokio_runtime_runs_the_cycle_natively() {
+fn admission_from_a_synchronous_host_runs_the_cycle_natively() {
     use tracedecay_runtime_core::native_runtime;
     let (ran, mut runs) = tokio::sync::mpsc::unbounded_channel();
     let runtime = BoundedHookOrchestratorV1::new(1, move |_, _| {
@@ -453,16 +455,16 @@ fn admission_without_a_tokio_runtime_runs_the_cycle_natively() {
     })
     .unwrap();
     native_runtime::block_on(async {
-        assert!(tokio::runtime::Handle::try_current().is_err());
+        assert!(tokio::runtime::Handle::try_current().is_ok());
         assert_eq!(
             runtime.admit(native_request(191)),
             HookOrchestrationAdmissionV1::Enqueued
         );
         let entered_tokio = native_runtime::timeout(std::time::Duration::from_secs(5), runs.recv())
             .await
-            .expect("the cycle runs without a Tokio runtime")
+            .expect("the cycle runs on the installed runtime")
             .expect("the cycle reports its context");
-        assert!(!entered_tokio, "the cycle must run on the native runtime");
+        assert!(entered_tokio, "the cycle must run on the installed runtime");
         assert!(runtime.shutdown().await);
     })
     .expect("native runtime");
@@ -622,16 +624,15 @@ async fn intent_boundaries_run_in_their_own_lane_and_supersede_only_intent_work(
         &runtime
     ));
     let intent = HookOrchestrationTriggerV1::IntentBoundary;
-    // Work runs on the native runtime; wait for exactly `remaining` running
-    // cycles so no admission races a permit that is still being released.
-    let settle_to = |remaining: usize| {
-        for _ in 0..5_000 {
-            if runtime.active_tasks() == remaining {
-                return;
+    // Let the runtime release completed permits before the next admission.
+    let settle_to = async |remaining: usize| {
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while runtime.active_tasks() != remaining {
+                tokio::time::sleep(std::time::Duration::from_millis(1)).await;
             }
-            std::thread::sleep(std::time::Duration::from_millis(1));
-        }
-        panic!("orchestrator never settled to {remaining} running cycles");
+        })
+        .await
+        .unwrap_or_else(|_| panic!("orchestrator never settled to {remaining} running cycles"));
     };
     let in_session = |event_id: u8, event: HookEventV2, session: u8| {
         let mut envelope = boundary(event_id, event);
@@ -655,6 +656,7 @@ async fn intent_boundaries_run_in_their_own_lane_and_supersede_only_intent_work(
                     let _ = parked.send(());
                 }
             })),
+            false,
         ),
         HookOrchestrationAdmissionV1::Enqueued
     );
@@ -666,7 +668,7 @@ async fn intent_boundaries_run_in_their_own_lane_and_supersede_only_intent_work(
         ))
     );
     parked_completion.await.unwrap();
-    settle_to(0);
+    settle_to(0).await;
 
     // A completed tool call bearing the session's lifecycle runs its intent
     // pass and, like any lifecycle-bearing hook, resumes the parked boundary.
@@ -679,6 +681,7 @@ async fn intent_boundaries_run_in_their_own_lane_and_supersede_only_intent_work(
             false,
             None,
             None,
+            false,
         ),
         HookOrchestrationAdmissionV1::Enqueued
     );
@@ -695,7 +698,7 @@ async fn intent_boundaries_run_in_their_own_lane_and_supersede_only_intent_work(
     ] {
         assert!(started.contains(&expected), "{expected:?} in {started:?}");
     }
-    settle_to(1);
+    settle_to(1).await;
 
     // With that intent pass still running, another session's saved edit is
     // admitted at once: intent work holds only intent permits.
@@ -708,6 +711,7 @@ async fn intent_boundaries_run_in_their_own_lane_and_supersede_only_intent_work(
             false,
             None,
             None,
+            false,
         ),
         HookOrchestrationAdmissionV1::Enqueued
     );
@@ -718,7 +722,7 @@ async fn intent_boundaries_run_in_their_own_lane_and_supersede_only_intent_work(
             "started"
         ))
     );
-    settle_to(1);
+    settle_to(1).await;
     // The intent lane is bounded on its own: another session's intent pass
     // is backpressured while the first one runs.
     assert_eq!(
@@ -730,6 +734,7 @@ async fn intent_boundaries_run_in_their_own_lane_and_supersede_only_intent_work(
             false,
             None,
             None,
+            false,
         ),
         HookOrchestrationAdmissionV1::Backpressured
     );
@@ -745,6 +750,7 @@ async fn intent_boundaries_run_in_their_own_lane_and_supersede_only_intent_work(
             false,
             None,
             None,
+            false,
         ),
         HookOrchestrationAdmissionV1::Enqueued
     );
@@ -779,6 +785,7 @@ async fn intent_boundaries_run_in_their_own_lane_and_supersede_only_intent_work(
                     let _ = stopped.send(());
                 }
             })),
+            false,
         ),
         HookOrchestrationAdmissionV1::Enqueued
     );
@@ -801,7 +808,7 @@ async fn intent_boundaries_run_in_their_own_lane_and_supersede_only_intent_work(
         .await
         .expect("the stop boundary's feedback completion fires");
     release.notify_one();
-    settle_to(0);
+    settle_to(0).await;
 
     unregister_hook_orchestration_runtime(envelope.project_id, envelope.worktree_id, &runtime);
     assert!(runtime.shutdown().await);

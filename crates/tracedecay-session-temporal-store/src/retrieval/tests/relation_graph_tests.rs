@@ -286,7 +286,7 @@ async fn seed_production_summary(
         .expect("published summary")
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn copy_lineage_comes_from_grafeo_without_a_sql_relation_table() {
     let directory = tempdir().expect("temporary directory");
     let runtime = HostAdmissionTestRuntimeV1::profile(directory.path())
@@ -378,7 +378,7 @@ async fn copy_lineage_comes_from_grafeo_without_a_sql_relation_table() {
     assert_eq!(copy.copied_from_occurrence_id, graph_source);
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn summary_sources_and_predecessor_come_from_grafeo() {
     let directory = tempdir().expect("temporary directory");
     let runtime = HostAdmissionTestRuntimeV1::profile(directory.path())
@@ -456,7 +456,7 @@ async fn summary_sources_and_predecessor_come_from_grafeo() {
     );
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn provider_filter_uses_grafeo_retained_summary_anchors() {
     let directory = tempdir().expect("temporary directory");
     let runtime = HostAdmissionTestRuntimeV1::profile(directory.path())
@@ -581,7 +581,7 @@ async fn active_generation(
         .value()
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn current_temporal_reads_serve_summaries_while_raw_revision_work_is_only_queued() {
     const PROVIDER: &str = "cursor";
     const SESSION_ID: &str = "queued-revision-session";
@@ -688,7 +688,7 @@ async fn current_temporal_reads_serve_summaries_while_raw_revision_work_is_only_
     );
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn current_temporal_reads_hide_a_partially_invalidated_summary_across_restart() {
     const PROVIDER: &str = "cursor";
     const SESSION_ID: &str = "dirty-summary-session";
@@ -864,7 +864,7 @@ async fn current_temporal_reads_hide_a_partially_invalidated_summary_across_rest
     );
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn anchor_lookups_that_resolve_a_summary_read_its_summary_relations() {
     let directory = tempdir().expect("temporary directory");
     let runtime = HostAdmissionTestRuntimeV1::profile(directory.path())

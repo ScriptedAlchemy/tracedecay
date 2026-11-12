@@ -35,7 +35,7 @@ use tracedecay_application::diagnose::{Severity, parse_cargo_output};
 use tracedecay_application::diagnostics_publication::CodeIndexPublicationIdentityPortV1;
 use tracedecay_application::diagnostics_store::DiagnosticsStore;
 use tracedecay_application::operation_stream::{
-    OperationEmitter, OperationEventError, operation_event_authority,
+    OperationEmitter, OperationEventAuthority, OperationEventError,
 };
 use tracedecay_code_index::is_test_file;
 use tracedecay_contracts::feedback::TestResultProjectionV1;
@@ -461,6 +461,7 @@ fn severity_wire(s: Severity) -> DiagnoseSeverityV1 {
 /// the requesting session the run is attributed to when the request named one.
 pub struct ManagedTestRunRecording {
     pub store: RegisteredGlobalDbLeaseV1,
+    pub events: OperationEventAuthority,
     pub session_id: Option<String>,
 }
 
@@ -719,7 +720,9 @@ impl ManagedTestRun {
         else {
             return Ok(());
         };
-        publish_test_run_terminal(
+        // Once recording is refused, preserve the store failure even when a
+        // concurrent lifecycle shutdown also prevents terminal publication.
+        if let Err(publish_error) = publish_test_run_terminal(
             &self.emitter,
             test_run_receipt(
                 self.started_at,
@@ -728,15 +731,21 @@ impl ManagedTestRun {
                 0,
             ),
         )
-        .await?;
+        .await
+        {
+            tracing::warn!(
+                error = %publish_error,
+                "could not publish failed managed test-run start receipt"
+            );
+        }
         Err(test_run_record_error(error))
     }
 
     /// Settles the durable record with the run's exit status and outcome
     /// counts, then publishes the terminal receipt. Readers rely on that
     /// order: a run whose live stream terminated has its outcome recorded
-    /// unless recording it failed. The receipt is published either way, so
-    /// no subscriber waits on a run that already ended.
+    /// unless recording it failed. A refused durable write publishes a failed
+    /// live terminal, never an unverifiable success, so subscribers stop waiting.
     #[tracing::instrument(name = "mcp.workflow.affected_tests.finish", level = "trace", skip_all)]
     pub(super) async fn finish(
         &self,
@@ -766,8 +775,32 @@ impl ManagedTestRun {
             .record_managed_test_run_outcome(&self.operation_id(), &outcome)
             .await
             .map_err(test_run_record_error);
-        publish_test_run_terminal(&self.emitter, receipt.clone()).await?;
+        // A completed test process is not a completed durable run if its
+        // outcome could not be recorded. Close the live stream with failure,
+        // rather than publishing success that no reader can verify.
+        let stream_receipt = if recorded.is_ok() {
+            receipt.clone()
+        } else {
+            test_run_receipt(
+                self.started_at,
+                &self.deadline,
+                OperationTermination::Failed,
+                bytes_consumed,
+            )
+        };
+        // A refused stream publication cannot obscure a durable-store failure.
+        // When the durable write succeeds, publication errors still propagate.
+        let published = publish_test_run_terminal(&self.emitter, stream_receipt).await;
+        if let (Err(record_error), Err(publish_error)) = (&recorded, &published) {
+            tracing::warn!(
+                operation_id = %self.operation_id(),
+                storage_error = %record_error,
+                publication_error = %publish_error,
+                "managed test-run outcome and failed terminal publication both refused"
+            );
+        }
         recorded?;
+        published?;
         Ok(receipt)
     }
 
@@ -807,7 +840,9 @@ async fn begin_test_run(
         })?;
     let document_content_digests =
         managed_test_document_content_digests(&root, changed_paths).await?;
-    let emitter = operation_event_authority()
+    let emitter = admission
+        .recording
+        .events
         .begin_managed_test_run(root_uri.clone(), request_id, admission.deadline.clone())
         .await
         .map_err(|error| test_run_event_error(&error))?;

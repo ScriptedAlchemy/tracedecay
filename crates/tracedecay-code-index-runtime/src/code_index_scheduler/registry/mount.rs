@@ -671,6 +671,10 @@ impl CodeIndexSchedulerRegistryV1 {
         let generation_recovery = opened.generation_recovery();
         let active_generation_encoded_bytes = opened.active_generation_encoded_bytes();
         let build_progress = opened.build_progress_slot();
+        let preseal_attempt_progress = opened.preseal_attempt_progress_slot();
+        let native_graph_progress = Arc::new(RwLock::new(
+            super::graph_progress::CodeIndexNativeGraphProgressSlotStateV1::default(),
+        ));
         let historical_generation_owner = opened.historical_generation_owner();
         let source_freshness = opened.freshness_fence();
         let last_reconciled_at_micros = opened.last_reconciled_at_micros_slot();
@@ -713,6 +717,7 @@ impl CodeIndexSchedulerRegistryV1 {
         let worker_scheduler = Arc::clone(&scheduler);
         let worker_reconcile_in_progress = Arc::clone(&reconcile_in_progress);
         let worker_build_progress = Arc::clone(&build_progress);
+        let worker_native_graph_progress = Arc::clone(&native_graph_progress);
         let worker_serving_generation = Arc::clone(&serving_generation);
         let worker_complete_generation_requested = Arc::clone(&complete_generation_requested);
         let worker_text_generation = Arc::clone(&text_generation);
@@ -910,7 +915,7 @@ impl CodeIndexSchedulerRegistryV1 {
                     .park_headroom
                     .released_by_others(&mut worker_owner_headroom)
                     > worker_owner_headroom_seen
-                    || worker_admission_headroom.has_changed();
+                    || matches!(worker_admission_headroom.has_changed(), Ok(true));
                 if headroom_moved
                     && worker_memory_retry.allow_reconstruction(&worker_control_epoch)
                     && worktree_waits_for_memory(
@@ -988,7 +993,7 @@ impl CodeIndexSchedulerRegistryV1 {
                         .park_headroom
                         .released_by_others(&mut worker_owner_headroom),
                 );
-                worker_admission_headroom.mark_seen();
+                drop(worker_admission_headroom.borrow_and_update());
                 super::CodeIndexWorkerPhaseV1::enter(
                     &worker_phase_signal,
                     super::CodeIndexWorkerPhaseV1::Working,
@@ -2315,6 +2320,13 @@ impl CodeIndexSchedulerRegistryV1 {
                                         &worker_phase_signal,
                                         super::CodeIndexWorkerPhaseV1::PublishingGraph,
                                     );
+                                    let graph_attempt = super::graph_progress::CodeIndexNativeGraphProgressGuardV1::begin(
+                                        Arc::clone(&worker_native_graph_progress),
+                                        progress_daemon_incarnation,
+                                        progress_producer_incarnation,
+                                        text.metadata().manifest().generation_id.as_str().to_owned(),
+                                        replay_binding.sealed_state_digest.as_str().to_owned(),
+                                    );
                                     let published = worker_graph_activation
                                         .publish_sealed_graph(
                                             &worker_project_id,
@@ -2324,6 +2336,7 @@ impl CodeIndexSchedulerRegistryV1 {
                                             replay_binding,
                                             admission,
                                             Arc::clone(&worker_shutting_down),
+                                            graph_attempt.observer(),
                                         )
                                         .await;
                                     super::CodeIndexWorkerPhaseV1::enter(
@@ -2680,6 +2693,13 @@ impl CodeIndexSchedulerRegistryV1 {
                         .unwrap_or_else(std::sync::PoisonError::into_inner)
                         .as_ref()
                         .and_then(|serving| serving.interactive_graph_store().ok());
+                    let graph_attempt = super::graph_progress::CodeIndexNativeGraphProgressGuardV1::begin_for_activation(
+                        Arc::clone(&worker_native_graph_progress),
+                        progress_daemon_incarnation,
+                        progress_producer_incarnation,
+                        latest.generation().manifest().generation_id.as_str().to_owned(),
+                        replay_binding.sealed_state_digest.as_str().to_owned(),
+                    );
                     let activation = worker_graph_activation
                         .activate(
                             &worker_project_id,
@@ -2689,6 +2709,7 @@ impl CodeIndexSchedulerRegistryV1 {
                             predecessor,
                             replay_binding.clone(),
                             Arc::clone(&worker_shutting_down),
+                            graph_attempt.observer(),
                         )
                         .await;
                     super::CodeIndexWorkerPhaseV1::enter(
@@ -3971,7 +3992,7 @@ impl CodeIndexSchedulerRegistryV1 {
                     &supervised_park,
                     &supervised_phase,
                     &supervised_serving_changed,
-                    &panic.to_string(),
+                    panic.as_ref(),
                 );
             }
         });
@@ -4003,16 +4024,10 @@ impl CodeIndexSchedulerRegistryV1 {
         let headroom_memory_retry = Arc::downgrade(&memory_retry);
         let headroom_source_epoch = Arc::downgrade(&epoch);
         spawn_detached("code_index_headroom_watcher", async move {
-            let Some(cx) = tracedecay_runtime_core::native_runtime::cx() else {
-                tracing::error!(
-                    "native runtime unavailable; memory headroom no longer wakes this worktree"
-                );
-                return;
-            };
             loop {
                 let (changed, owner_released) = tokio::select! {
-                    changed = owner_headroom.changed(&cx) => (changed, true),
-                    changed = admission_headroom.changed(&cx) => (changed, false),
+                    changed = owner_headroom.changed() => (changed, true),
+                    changed = admission_headroom.changed() => (changed, false),
                 };
                 let (
                     Ok(()),
@@ -4080,6 +4095,8 @@ impl CodeIndexSchedulerRegistryV1 {
             generation_recovery,
             serving_source_witness,
             build_progress,
+            preseal_attempt_progress,
+            native_graph_progress,
             serving_generation_epoch,
             serving_generation_changed,
             serving_generation_installation,

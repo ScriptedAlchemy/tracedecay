@@ -1490,7 +1490,9 @@ async fn scheduler_sleep(project_path: &Path, duration: Duration) -> bool {
     false
 }
 
-async fn automation_scheduler_has_work_for_project(cg: &TraceDecay) -> Result<bool> {
+pub(in crate::daemon) async fn automation_scheduler_has_work_for_project(
+    cg: &TraceDecay,
+) -> Result<bool> {
     let configuration = effective_automation_config_for_project(cg).await?;
     automation_scheduler_has_work(cg, &configuration.settings).await
 }

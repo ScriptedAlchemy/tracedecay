@@ -13,10 +13,8 @@ use serde_json::{Value, json};
 use super::journey_test_support::tool_answer;
 use crate::test_support::git::git;
 
-const WARMING_CODE: &str = "feedback.advisory-cycle.unavailable";
-
-/// Calls the explicit advisory cycle until it answers with anything other
-/// than the retryable pre-mount state, or the bound expires.
+/// Calls the explicit advisory cycle until its authority admits the request
+/// or returns a terminal refusal, within the existing settlement bound.
 async fn settled_advisory_cycle(
     harness: &ProductionProjectCompositionHarnessV1,
     project: &Path,
@@ -36,12 +34,20 @@ async fn settled_advisory_cycle(
             .await
             .expect("advisory cycle call");
         let (refused, answer) = tool_answer(&response);
-        if !refused || answer["problem"]["code"] != json!(WARMING_CODE) {
+        let problem = &answer["problem"];
+        // The owner can mount before its generation finishes revalidation.
+        // Follow the same typed pre-admission retry decision in both states;
+        // invalid documents and failed mounts still return immediately.
+        let retryable_admission = problem["kind"] == json!("unavailable")
+            && problem["retryable"] == json!(true)
+            && problem["retry_scope"] == json!("same_request")
+            && problem["terminality"] == json!("pre_admission");
+        if !refused || !retryable_admission {
             return (refused, answer);
         }
         assert!(
             Instant::now() < deadline,
-            "the advisory cycle stayed in its pre-mount state: {answer}"
+            "the advisory cycle stayed unavailable before admission: {answer}"
         );
         tokio::time::sleep(Duration::from_millis(250)).await;
     }
@@ -420,6 +426,7 @@ async fn hook_work_completes(
                     let _ = completed.send(());
                 }
             })),
+            false,
         ),
         tracedecay_daemon_service::HookOrchestrationAdmissionV1::Enqueued,
     );

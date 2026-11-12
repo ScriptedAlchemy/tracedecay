@@ -3,11 +3,9 @@ use std::future::Future;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 
-use asupersync::Cx;
-use asupersync::channel::watch;
-use asupersync::runtime::{JoinError, RuntimeHandle, SpawnError, TaskHandle};
-use asupersync::sync::Notify;
-use asupersync::types::Budget;
+use tokio::runtime::Handle;
+use tokio::sync::{Notify, watch};
+use tokio::task::{JoinError, JoinHandle};
 
 #[derive(Debug, Clone, thiserror::Error)]
 pub enum RuntimeOperationAdmissionError {
@@ -15,28 +13,20 @@ pub enum RuntimeOperationAdmissionError {
     Closed,
     #[error("runtime operation settlement task identity space is exhausted")]
     IdentityExhausted,
-    #[error("runtime operation settlement requires a native blocking pool")]
-    BlockingPoolUnavailable,
-    #[error("runtime operation settlement spawn failed: {0}")]
-    Spawn(#[from] SpawnError),
 }
 
 #[derive(Debug, Clone)]
 pub struct RuntimeOperationTaskJoinFailure {
     pub task_id: u64,
-    pub error: JoinError,
+    pub error: Arc<JoinError>,
 }
 
 #[derive(Debug, Clone, thiserror::Error)]
 pub enum RuntimeOperationShutdownError {
-    #[error("runtime operation settlement reaper spawn failed: {0}")]
-    ReaperAdmission(SpawnError),
     #[error("runtime operation settlement tasks failed to join: {0:?}")]
     JoinFailures(Vec<RuntimeOperationTaskJoinFailure>),
-    #[error("runtime operation settlement shutdown wait was cancelled")]
-    WaitCancelled,
     #[error("runtime operation settlement shutdown completion unavailable: {0}")]
-    CompletionUnavailable(watch::RecvError),
+    CompletionUnavailable(watch::error::RecvError),
 }
 
 type ShutdownCompletion = Option<Result<(), RuntimeOperationShutdownError>>;
@@ -52,13 +42,10 @@ enum RuntimeOperationTaskLifecycleV1 {
 struct RuntimeOperationTaskStateV1 {
     lifecycle: RuntimeOperationTaskLifecycleV1,
     next_task_id: u64,
-    /// Handles the owner, or its shutdown reaper, still has to join.
-    tasks: BTreeMap<u64, TaskHandle<()>>,
+    tasks: BTreeMap<u64, JoinHandle<()>>,
 }
 
-/// Admitted settlement closures that have not finished running. A counter
-/// outside the state mutex lets a closure that is dropped unrun, inside a
-/// failed spawn, retire without taking that mutex.
+/// Every admitted closure holds its finalizer until it finishes or is dropped.
 #[derive(Default)]
 struct RuntimeOperationSettlementV1 {
     running: AtomicUsize,
@@ -74,7 +61,7 @@ struct RuntimeOperationTaskFinalizerV1 {
 
 impl Drop for RuntimeOperationTaskFinalizerV1 {
     fn drop(&mut self) {
-        // A panicked closure keeps its handle, so shutdown reports the panic.
+        // Preserve panicked/cancelled handles so shutdown can report failures.
         if self.completed
             && let Some(state) = self.state.upgrade()
         {
@@ -89,43 +76,39 @@ impl Drop for RuntimeOperationTaskFinalizerV1 {
     }
 }
 
-/// Owns settlement in the daemon's execution context, independently of request waiters.
-/// Admission and handle publication share the shutdown fence's mutex boundary.
-/// Successful shutdown waits for accepted closures. Drop requests cancellation;
-/// running native blocking closures remain nonpreemptible.
+/// Owns settlement independently of request waiters. Admission and handle
+/// publication share the shutdown fence's mutex boundary. A started reaper
+/// retains every task even if its caller or this owner stops waiting.
+/// Drop before shutdown aborts async tasks; running blocking closures finish.
 pub struct RuntimeOperationTaskOwnerV1 {
-    cx: Cx,
+    runtime: Handle,
     state: Arc<Mutex<RuntimeOperationTaskStateV1>>,
     settlement: Arc<RuntimeOperationSettlementV1>,
 }
 
 impl RuntimeOperationTaskOwnerV1 {
-    pub fn new(runtime: RuntimeHandle) -> Result<Self, RuntimeOperationAdmissionError> {
-        let cx = runtime.try_request_cx_with_budget(Budget::INFINITE)?;
-        if cx.blocking_pool_handle().is_none() {
-            return Err(RuntimeOperationAdmissionError::BlockingPoolUnavailable);
-        }
-        Ok(Self {
-            cx,
+    pub fn new(runtime: Handle) -> Self {
+        Self {
+            runtime,
             state: Arc::new(Mutex::new(RuntimeOperationTaskStateV1 {
                 lifecycle: RuntimeOperationTaskLifecycleV1::Accepting,
                 next_task_id: 0,
                 tasks: BTreeMap::new(),
             })),
             settlement: Arc::default(),
-        })
+        }
     }
 
     pub fn retain<F, Fut>(&self, settlement: F) -> Result<(), RuntimeOperationAdmissionError>
     where
-        F: FnOnce(Cx) -> Fut + Send + 'static,
+        F: FnOnce(Handle) -> Fut + Send + 'static,
         Fut: Future<Output = ()> + Send + 'static,
     {
         self.admit(|finalizer| {
-            self.cx.spawn(move |cx| async move {
-                // Bind the whole finalizer so the task owns it, not one field.
+            let runtime = self.runtime.clone();
+            self.runtime.spawn(async move {
                 let mut finalizer = finalizer;
-                settlement(cx).await;
+                settlement(runtime).await;
                 finalizer.completed = true;
             })
         })
@@ -136,7 +119,7 @@ impl RuntimeOperationTaskOwnerV1 {
         F: FnOnce() + Send + 'static,
     {
         self.admit(|finalizer| {
-            self.cx.spawn_blocking(move |_| {
+            crate::native_runtime::spawn_blocking_on(&self.runtime, move || {
                 let mut finalizer = finalizer;
                 settlement();
                 finalizer.completed = true;
@@ -146,7 +129,7 @@ impl RuntimeOperationTaskOwnerV1 {
 
     fn admit(
         &self,
-        spawn: impl FnOnce(RuntimeOperationTaskFinalizerV1) -> Result<TaskHandle<()>, SpawnError>,
+        spawn: impl FnOnce(RuntimeOperationTaskFinalizerV1) -> JoinHandle<()>,
     ) -> Result<(), RuntimeOperationAdmissionError> {
         let mut state = self
             .state
@@ -165,19 +148,23 @@ impl RuntimeOperationTaskOwnerV1 {
             settlement: Arc::clone(&self.settlement),
             task_id,
             completed: false,
-        })?;
+        });
         state.next_task_id = task_id;
         state.tasks.insert(task_id, task);
         Ok(())
     }
 
-    /// Waits until every admitted settlement has finished running, without
-    /// fencing admission.
+    /// Waits for admitted settlement without fencing later admission.
     pub async fn settled(&self) {
-        self.settlement
-            .idle
-            .wait_until(|| self.settlement.running.load(Ordering::Acquire) == 0)
-            .await;
+        loop {
+            // Construct before checking: notify_waiters retains its generation
+            // even when notification happens before the first poll.
+            let idle = self.settlement.idle.notified();
+            if self.settlement.running.load(Ordering::Acquire) == 0 {
+                return;
+            }
+            idle.await;
+        }
     }
 
     pub fn begin_shutdown(&self) {
@@ -190,8 +177,7 @@ impl RuntimeOperationTaskOwnerV1 {
         }
     }
 
-    /// Keeps the reaper and its completion receiver owned after a waiter is dropped.
-    pub async fn shutdown(&self, waiter_cx: &Cx) -> Result<(), RuntimeOperationShutdownError> {
+    pub async fn shutdown(&self) -> Result<(), RuntimeOperationShutdownError> {
         let mut completion = {
             let mut state = self
                 .state
@@ -202,54 +188,38 @@ impl RuntimeOperationTaskOwnerV1 {
             } else {
                 state.lifecycle = RuntimeOperationTaskLifecycleV1::Fenced;
                 let (publish_completion, completion) = watch::channel(None);
-                // The handles stay in owner state until the reaper runs, so a
-                // refused reaper leaves them for a later shutdown to join.
-                let reaper_state = Arc::clone(&self.state);
-                self.cx
-                    .spawn(move |_| async move {
-                        let mut tasks = std::mem::take(
-                            &mut reaper_state
-                                .lock()
-                                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                                .tasks,
-                        );
-                        let mut failures = Vec::new();
-                        while let Some((task_id, mut task)) = tasks.pop_first() {
-                            // `poll_join` never aborts the joined task when the
-                            // reaper itself is cancelled.
-                            if let Err(error) =
-                                std::future::poll_fn(|context| task.poll_join(context)).await
-                            {
-                                failures.push(RuntimeOperationTaskJoinFailure { task_id, error });
-                            }
+                let tasks = std::mem::take(&mut state.tasks);
+                self.runtime.spawn(async move {
+                    let mut failures = Vec::new();
+                    for (task_id, task) in tasks {
+                        if let Err(error) = task.await {
+                            failures.push(RuntimeOperationTaskJoinFailure {
+                                task_id,
+                                error: Arc::new(error),
+                            });
                         }
-                        let result = if failures.is_empty() {
-                            Ok(())
-                        } else {
-                            Err(RuntimeOperationShutdownError::JoinFailures(failures))
-                        };
-                        publish_completion.send(Some(result))
-                    })
-                    .map_err(RuntimeOperationShutdownError::ReaperAdmission)?;
+                    }
+                    let result = if failures.is_empty() {
+                        Ok(())
+                    } else {
+                        Err(RuntimeOperationShutdownError::JoinFailures(failures))
+                    };
+                    publish_completion.send_replace(Some(result));
+                });
                 state.lifecycle = RuntimeOperationTaskLifecycleV1::Draining {
                     completion: completion.clone(),
                 };
                 completion
             }
         };
-
         loop {
-            if let Some(result) = completion.borrow_and_clone() {
+            if let Some(result) = completion.borrow_and_update().clone() {
                 return result;
             }
-            if let Err(error) = completion.changed(waiter_cx).await {
-                if let Some(result) = completion.borrow_and_clone() {
-                    return result;
-                }
-                return Err(match error {
-                    watch::RecvError::Cancelled => RuntimeOperationShutdownError::WaitCancelled,
-                    failure => RuntimeOperationShutdownError::CompletionUnavailable(failure),
-                });
+            if let Err(error) = completion.changed().await {
+                return completion.borrow().clone().unwrap_or(Err(
+                    RuntimeOperationShutdownError::CompletionUnavailable(error),
+                ));
             }
         }
     }
@@ -262,12 +232,11 @@ impl Drop for RuntimeOperationTaskOwnerV1 {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         match state.lifecycle {
-            // A started reaper joins every retained handle, owner or not.
             RuntimeOperationTaskLifecycleV1::Draining { .. } => {}
             RuntimeOperationTaskLifecycleV1::Accepting
             | RuntimeOperationTaskLifecycleV1::Fenced => {
                 state.lifecycle = RuntimeOperationTaskLifecycleV1::Fenced;
-                state.tasks.values().for_each(TaskHandle::abort);
+                state.tasks.values().for_each(JoinHandle::abort);
             }
         }
     }
@@ -276,266 +245,173 @@ impl Drop for RuntimeOperationTaskOwnerV1 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use asupersync::channel::oneshot;
-    use asupersync::runtime::RuntimeBuilder;
-    use std::future::Future;
-    use std::sync::atomic::{AtomicBool, Ordering};
-    use std::task::Poll;
+    use std::sync::atomic::AtomicBool;
+    use tokio::sync::oneshot;
 
-    #[test]
-    fn accepted_settlement_survives_request_region_and_shutdown_waiter_cancellation() {
-        let runtime = RuntimeBuilder::current_thread()
-            .blocking_threads(1, 1)
-            .build()
-            .unwrap();
-        runtime.block_on(async {
-            let cx = Cx::current().unwrap();
-            let request_region = cx
-                .open_child_region(asupersync::cx::child_region::ChildRegionSpec::inherit())
-                .await
-                .unwrap();
-            let settled = Arc::new(AtomicBool::new(false));
-            let (release, blocked) = std::sync::mpsc::channel();
-            let (started, mut entered) = oneshot::channel();
-            let (accepted, mut admission) = oneshot::channel();
-            // Cancellation is cooperative, so the request parks on a receive
-            // that observes it rather than on a future that never wakes.
-            let (_parked_sender, mut parked) = oneshot::channel::<()>();
-            let observed = Arc::clone(&settled);
-            let mut requester = request_region
-                .cx()
-                .spawn(move |request_cx| async move {
-                    let execution_runtime = asupersync::runtime::Runtime::current_handle().unwrap();
-                    let owner =
-                        Arc::new(RuntimeOperationTaskOwnerV1::new(execution_runtime).unwrap());
-                    owner
-                        .retain_blocking(move || {
-                            started.send_blocking(()).unwrap();
-                            blocked.recv().unwrap();
-                            observed.store(true, Ordering::Release);
-                        })
-                        .unwrap();
-                    assert!(
-                        accepted
-                            .send(&request_cx, (owner, request_cx.clone()))
-                            .is_ok()
-                    );
-                    parked.recv(&request_cx).await
-                })
-                .unwrap();
-            let (owner, cancelled_request_cx) = admission.recv(&cx).await.unwrap();
-            entered.recv(&cx).await.unwrap();
-            request_region
-                .cancel(asupersync::types::CancelReason::user("request cancelled"))
-                .unwrap();
-            assert!(matches!(
-                requester.join(&cx).await,
-                Ok(Err(oneshot::RecvError::Cancelled)) | Err(JoinError::Cancelled(_))
-            ));
-            request_region.close().await.unwrap();
-            assert!(matches!(
-                owner.shutdown(&cancelled_request_cx).await,
-                Err(RuntimeOperationShutdownError::WaitCancelled)
-            ));
-            {
-                let mut shutdown = std::pin::pin!(owner.shutdown(&cx));
-                std::future::poll_fn(|context| {
-                    assert!(shutdown.as_mut().poll(context).is_pending());
-                    Poll::Ready(())
-                })
-                .await;
-            }
-            assert!(!settled.load(Ordering::Acquire));
-            assert!(matches!(
-                owner.retain_blocking(|| {}),
-                Err(RuntimeOperationAdmissionError::Closed)
-            ));
-            release.send(()).unwrap();
-            owner.shutdown(&cx).await.unwrap();
-            assert!(settled.load(Ordering::Acquire));
-            owner.shutdown(&cx).await.unwrap();
-        });
-    }
-
-    #[test]
-    fn shutdown_preserves_typed_panic_failure() {
-        let runtime = RuntimeBuilder::current_thread()
-            .blocking_threads(1, 1)
-            .build()
-            .unwrap();
-        runtime.block_on(async {
-            let cx = Cx::current().unwrap();
-            let owner = RuntimeOperationTaskOwnerV1::new(runtime.handle()).unwrap();
-            owner
-                .retain_blocking(|| panic!("settlement panic"))
-                .unwrap();
-            let RuntimeOperationShutdownError::JoinFailures(failures) =
-                owner.shutdown(&cx).await.unwrap_err()
-            else {
-                panic!("shutdown must report the native settlement join failure");
-            };
-            assert_eq!(failures.len(), 1);
-            assert_eq!(failures[0].task_id, 1);
-            assert!(matches!(failures[0].error, JoinError::Panicked(_)));
-            assert!(matches!(
-                owner.shutdown(&cx).await,
-                Err(RuntimeOperationShutdownError::JoinFailures(_))
-            ));
-        });
-    }
-
-    #[test]
-    fn fenced_admission_never_polls_rejected_work() {
-        let runtime = RuntimeBuilder::current_thread()
-            .blocking_threads(1, 1)
-            .build()
-            .unwrap();
-        runtime.block_on(async {
-            let cx = Cx::current().unwrap();
-            let owner = RuntimeOperationTaskOwnerV1::new(runtime.handle()).unwrap();
-            let polled = Arc::new(AtomicBool::new(false));
-            let observed = Arc::clone(&polled);
-            owner.begin_shutdown();
-            assert!(matches!(
-                owner.retain_blocking(move || observed.store(true, Ordering::Release)),
-                Err(RuntimeOperationAdmissionError::Closed)
-            ));
-            owner.shutdown(&cx).await.unwrap();
-            assert!(!polled.load(Ordering::Acquire));
-        });
-    }
-
-    #[test]
-    fn retained_context_admits_settlement_from_plain_threads() {
-        let runtime = RuntimeBuilder::current_thread()
-            .blocking_threads(1, 1)
-            .build()
-            .unwrap();
-        runtime.block_on(async {
-            let cx = Cx::current().unwrap();
-            let owner = Arc::new(RuntimeOperationTaskOwnerV1::new(runtime.handle()).unwrap());
-            let settled = Arc::new(AtomicBool::new(false));
-            let admitted_owner = Arc::clone(&owner);
-            let observed = Arc::clone(&settled);
-            std::thread::spawn(move || {
-                assert!(Cx::current().is_none());
-                admitted_owner.retain_blocking(move || observed.store(true, Ordering::Release))
-            })
-            .join()
-            .unwrap()
-            .unwrap();
-            owner.shutdown(&cx).await.unwrap();
-            assert!(settled.load(Ordering::Acquire));
-        });
-    }
-
-    #[test]
-    fn async_factory_receives_runtime_wired_context() {
-        let runtime = RuntimeBuilder::current_thread()
-            .blocking_threads(1, 1)
-            .build()
-            .unwrap();
-        runtime.block_on(async {
-            let cx = Cx::current().unwrap();
-            let owner = RuntimeOperationTaskOwnerV1::new(runtime.handle()).unwrap();
-            let (completed, mut result) = oneshot::channel();
-            owner
-                .retain(move |child| async move {
-                    let mut nested = child.spawn(|_| async { 73_u32 }).unwrap();
-                    let value = nested.join(&child).await.unwrap();
-                    completed.send(&child, value).unwrap();
-                })
-                .unwrap();
-            assert_eq!(result.recv(&cx).await.unwrap(), 73);
-            owner.shutdown(&cx).await.unwrap();
-        });
-    }
-
-    #[test]
-    fn dropping_owner_after_shutdown_began_keeps_accepted_settlement() {
-        let runtime = RuntimeBuilder::current_thread()
-            .blocking_threads(1, 1)
-            .build()
-            .unwrap();
-        runtime.block_on(async {
-            let cx = Cx::current().unwrap();
-            let owner = RuntimeOperationTaskOwnerV1::new(runtime.handle()).unwrap();
-            let (release, mut gate) = oneshot::channel::<()>();
-            let (settled, mut done) = oneshot::channel();
-            owner
-                .retain(move |child| async move {
-                    gate.recv(&child).await.unwrap();
-                    assert!(settled.send(&child, 7_u32).is_ok());
-                })
-                .unwrap();
-            {
-                let mut shutdown = std::pin::pin!(owner.shutdown(&cx));
-                std::future::poll_fn(|context| {
-                    assert!(shutdown.as_mut().poll(context).is_pending());
-                    Poll::Ready(())
-                })
-                .await;
-            }
-            drop(owner);
-            assert!(release.send(&cx, ()).is_ok());
-            assert_eq!(
-                done.recv(&cx).await.unwrap(),
-                7,
-                "settlement accepted before shutdown must finish after its owner drops"
-            );
-        });
-    }
-
-    #[test]
-    fn settled_waits_for_running_settlement_and_keeps_admission_open() {
-        let runtime = RuntimeBuilder::current_thread()
-            .blocking_threads(1, 1)
-            .build()
-            .unwrap();
-        runtime.block_on(async {
-            let cx = Cx::current().unwrap();
-            let owner = RuntimeOperationTaskOwnerV1::new(runtime.handle()).unwrap();
-            let settled = Arc::new(AtomicBool::new(false));
-            let (release, blocked) = std::sync::mpsc::channel::<()>();
-            let (started, mut entered) = oneshot::channel();
-            let observed = Arc::clone(&settled);
-            owner
+    #[tokio::test]
+    async fn accepted_settlement_survives_request_and_shutdown_waiter_cancellation() {
+        let owner = Arc::new(RuntimeOperationTaskOwnerV1::new(Handle::current()));
+        let settled = Arc::new(AtomicBool::new(false));
+        let (release, blocked) = std::sync::mpsc::channel();
+        let (started, entered) = oneshot::channel();
+        let (accepted, admission) = oneshot::channel();
+        let request_owner = Arc::clone(&owner);
+        let completed = Arc::clone(&settled);
+        let requester = tokio::spawn(async move {
+            request_owner
                 .retain_blocking(move || {
-                    started.send_blocking(()).unwrap();
+                    started.send(()).unwrap();
                     blocked.recv().unwrap();
-                    observed.store(true, Ordering::Release);
+                    completed.store(true, Ordering::Release);
                 })
                 .unwrap();
-            entered.recv(&cx).await.unwrap();
-            {
-                let mut waiting = std::pin::pin!(owner.settled());
-                std::future::poll_fn(|context| {
-                    assert!(waiting.as_mut().poll(context).is_pending());
-                    Poll::Ready(())
-                })
-                .await;
-            }
-            release.send(()).unwrap();
-            owner.settled().await;
-            assert!(settled.load(Ordering::Acquire));
-            owner
-                .retain_blocking(|| {})
-                .expect("settling never fences admission");
-            owner.shutdown(&cx).await.unwrap();
+            accepted.send(()).unwrap();
+            std::future::pending::<()>().await;
         });
+        admission.await.unwrap();
+        entered.await.unwrap();
+        requester.abort();
+        assert!(requester.await.unwrap_err().is_cancelled());
+        let waiter_owner = Arc::clone(&owner);
+        let (waiting, began) = oneshot::channel();
+        let waiter = tokio::spawn(async move {
+            let shutdown = waiter_owner.shutdown();
+            tokio::pin!(shutdown);
+            std::future::poll_fn(|context| {
+                assert!(shutdown.as_mut().poll(context).is_pending());
+                std::task::Poll::Ready(())
+            })
+            .await;
+            waiting.send(()).unwrap();
+            shutdown.await
+        });
+        began.await.unwrap();
+        waiter.abort();
+        assert!(waiter.await.unwrap_err().is_cancelled());
+        assert!(!settled.load(Ordering::Acquire));
+        release.send(()).unwrap();
+        owner.shutdown().await.unwrap();
+        assert!(settled.load(Ordering::Acquire));
     }
 
-    #[test]
-    fn construction_rejects_native_runtime_without_blocking_pool() {
-        let runtime = RuntimeBuilder::current_thread()
-            .blocking_threads(0, 0)
-            .build()
+    #[tokio::test]
+    async fn shutdown_preserves_typed_panic_failure() {
+        let owner = RuntimeOperationTaskOwnerV1::new(Handle::current());
+        owner
+            .retain(|_| async { panic!("settlement failed") })
             .unwrap();
-        runtime.block_on(async {
-            assert!(matches!(
-                RuntimeOperationTaskOwnerV1::new(runtime.handle()),
-                Err(RuntimeOperationAdmissionError::BlockingPoolUnavailable)
-            ));
-        });
+        let RuntimeOperationShutdownError::JoinFailures(failures) =
+            owner.shutdown().await.unwrap_err()
+        else {
+            panic!("shutdown must report the task panic")
+        };
+        assert_eq!(failures.len(), 1);
+        assert!(failures[0].error.is_panic());
+    }
+
+    #[tokio::test]
+    async fn fenced_admission_never_polls_rejected_work() {
+        let owner = RuntimeOperationTaskOwnerV1::new(Handle::current());
+        owner.begin_shutdown();
+        let polled = Arc::new(AtomicBool::new(false));
+        let observed = Arc::clone(&polled);
+        assert!(matches!(
+            owner.retain(move |_| async move { observed.store(true, Ordering::Release) }),
+            Err(RuntimeOperationAdmissionError::Closed)
+        ));
+        owner.shutdown().await.unwrap();
+        assert!(!polled.load(Ordering::Acquire));
+    }
+
+    #[tokio::test]
+    async fn retained_handle_admits_settlement_from_plain_threads() {
+        let owner = Arc::new(RuntimeOperationTaskOwnerV1::new(Handle::current()));
+        let thread_owner = Arc::clone(&owner);
+        let (answer, receipt) = oneshot::channel();
+        std::thread::spawn(move || {
+            assert!(Handle::try_current().is_err());
+            thread_owner
+                .retain(move |_| async move { answer.send(17).unwrap() })
+                .unwrap();
+        })
+        .join()
+        .unwrap();
+        assert_eq!(receipt.await.unwrap(), 17);
+        owner.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn async_factory_receives_runtime_handle() {
+        let owner = RuntimeOperationTaskOwnerV1::new(Handle::current());
+        let (answer, receipt) = oneshot::channel();
+        owner
+            .retain(move |runtime| async move {
+                let value = runtime.spawn(async { 19 }).await.unwrap();
+                answer.send(value).unwrap();
+            })
+            .unwrap();
+        assert_eq!(receipt.await.unwrap(), 19);
+        owner.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn dropping_owner_after_shutdown_began_keeps_accepted_settlement() {
+        let owner = RuntimeOperationTaskOwnerV1::new(Handle::current());
+        let (release, blocked) = oneshot::channel();
+        let (answer, receipt) = oneshot::channel();
+        owner
+            .retain(move |_| async move {
+                blocked.await.unwrap();
+                answer.send(23).unwrap();
+            })
+            .unwrap();
+        {
+            let shutdown = owner.shutdown();
+            tokio::pin!(shutdown);
+            std::future::poll_fn(|context| {
+                assert!(shutdown.as_mut().poll(context).is_pending());
+                std::task::Poll::Ready(())
+            })
+            .await;
+        }
+        drop(owner);
+        release.send(()).unwrap();
+        assert_eq!(receipt.await.unwrap(), 23);
+    }
+
+    #[tokio::test]
+    async fn settled_waits_for_running_settlement_and_keeps_admission_open() {
+        let owner = RuntimeOperationTaskOwnerV1::new(Handle::current());
+        let (release, blocked) = oneshot::channel();
+        owner
+            .retain(move |_| async move { blocked.await.unwrap() })
+            .unwrap();
+        {
+            let settled = owner.settled();
+            tokio::pin!(settled);
+            std::future::poll_fn(|context| {
+                assert!(settled.as_mut().poll(context).is_pending());
+                std::task::Poll::Ready(())
+            })
+            .await;
+            release.send(()).unwrap();
+            settled.await;
+        }
+        owner.retain(|_| async {}).unwrap();
+        owner.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn dropping_owner_before_shutdown_aborts_owned_tasks() {
+        let owner = RuntimeOperationTaskOwnerV1::new(Handle::current());
+        let (dropped, receipt) = oneshot::channel::<()>();
+        owner
+            .retain(move |_| async move {
+                let _dropped = dropped;
+                std::future::pending::<()>().await;
+            })
+            .unwrap();
+        drop(owner);
+        assert!(receipt.await.is_err());
     }
 }

@@ -1579,8 +1579,8 @@ mod tests {
         assert_owner_keeps_replay(&data_root, &newer).await;
     }
 
-    /// Project opens register from native workers, which have no Tokio
-    /// runtime; the reopened owner must still take the data root over.
+    /// A project open may register from a plain OS thread; the reopened
+    /// owner must still take the data root over on the installed runtime.
     #[tokio::test]
     async fn a_registration_off_tokio_takes_over_replay() {
         let (fixture, older, newer) = replay_owner_fixture().await;

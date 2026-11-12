@@ -70,7 +70,7 @@ impl DaemonClientDeadline {
         F: std::future::Future<Output = Result<T>>,
     {
         let remaining = self.deadline.saturating_duration_since(Instant::now());
-        match asupersync::time::timeout(asupersync::time::wall_now(), remaining, fut).await {
+        match tokio::time::timeout(remaining, fut).await {
             Ok(result) => result,
             Err(_) => Err(tracedecay_daemon_protocol::daemon_response_stalled_during(
                 stage,

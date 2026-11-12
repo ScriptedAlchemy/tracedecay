@@ -24,6 +24,7 @@ use tracedecay_store::{
 use super::*;
 use crate::{
     StorageOperationExecutor,
+    admission::QueueItem,
     checkpoint::{
         CheckpointBlockers, CheckpointDecision, CheckpointInterruption, CheckpointMode,
         CheckpointOutcome, CheckpointPressure, CheckpointReport, CheckpointResult, WalPressure,
@@ -34,10 +35,6 @@ use crate::{
 };
 
 static NEXT_DATABASE: AtomicU64 = AtomicU64::new(0);
-
-fn cx() -> Cx {
-    crate::native_runtime::cx().expect("native runtime context")
-}
 
 struct TestDatabase(PathBuf);
 
@@ -316,6 +313,58 @@ impl RuntimeRequestProbeV1 for Probe {
 }
 
 #[test]
+fn faulted_writer_retires_without_waiting_for_registered_client_senders() {
+    let database = TestDatabase::new();
+    let request = Arc::new(request(metadata(
+        "operation.faulted-retirement",
+        "key.faulted-retirement",
+        'f',
+    )));
+    let writer = start(&database, &request, Arc::new(AtomicU64::new(0)));
+    let permit = writer
+        .admission
+        .reserve(&request.envelope().metadata)
+        .expect("faulted retirement fixture fits admission");
+    let (reply, mut response) = oneshot::channel();
+    let accepted = AcceptedRequest::new(
+        Arc::clone(&request),
+        Arc::new(Probe::new(&request, None)),
+        Arc::new(UnrestrictedRuntimeWriteAuthority),
+        reply,
+        permit,
+    );
+    writer.telemetry.admitted(accepted.admission_bytes());
+    let sender = writer.sender.lock().unwrap().as_ref().unwrap().clone();
+    writer
+        .state
+        .store(WriterState::Faulted as u8, Ordering::Release);
+    assert!(sender.try_send(accepted).is_ok());
+
+    // The sender is intentionally retained: the old fault path settled the
+    // request, then parked forever waiting for every client to disconnect.
+    let deadline = std::time::Instant::now() + Duration::from_secs(3);
+    while !writer.worker_exited() && std::time::Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert!(
+        writer.worker_exited(),
+        "faulted writer retained its SQLite connection while clients remained registered"
+    );
+    assert_eq!(
+        response
+            .try_recv()
+            .expect("accepted request receives a fault reply"),
+        Ok(RuntimeSubmitOutcomeV1::Unavailable {
+            reason: UnavailableReasonV1::Faulted,
+        })
+    );
+    assert_eq!(writer.telemetry_snapshot().queue.queued_operations, 0);
+    assert_eq!(writer.telemetry_snapshot().queue.queued_bytes, 0);
+    drop(sender);
+    writer.shutdown_and_join().unwrap();
+}
+
+#[test]
 fn writer_start_leaves_schema_unchanged_before_the_first_request() {
     let database = TestDatabase::new();
     let request = request(metadata("operation.schema.open", "key.schema.open", 'o'));
@@ -356,7 +405,6 @@ where
         LocatorDigest::new(format!("sha256:{}", "c".repeat(64))).unwrap(),
     );
     PersistentWriter::start(
-        &crate::native_runtime::handle().expect("native runtime"),
         ExistingWriterLocator::new(binding, locator, database.0.clone()).unwrap(),
         AdmissionConfigV1::default(),
         executor,
@@ -438,15 +486,13 @@ fn actor_commits_before_reply_and_releases_admission() {
     let runtime = tokio::runtime::Builder::new_current_thread()
         .build()
         .unwrap();
-    let outcome = runtime
-        .block_on(writer.submit(&cx(), request, probe))
-        .unwrap();
+    let outcome = runtime.block_on(writer.submit(request, probe)).unwrap();
     let RuntimeSubmitOutcomeV1::Committed { receipt } = outcome else {
         panic!("writer must commit through the runtime ledger");
     };
     assert_eq!(receipt.commit_sequence.0, 1);
     runtime
-        .block_on(checkpoint_status.changed(&cx()))
+        .block_on(checkpoint_status.changed())
         .expect("writer publishes a scheduled WAL sample");
     assert!(matches!(
         checkpoint_status.borrow().latest.as_ref(),
@@ -492,7 +538,7 @@ fn competing_write_authority_fails_instead_of_reporting_retryable_saturation() {
         .unwrap();
 
     let failure = runtime
-        .block_on(writer.submit(&cx(), blocked.clone(), Arc::new(Probe::new(&blocked, None))))
+        .block_on(writer.submit(blocked.clone(), Arc::new(Probe::new(&blocked, None))))
         .unwrap_err();
     assert!(matches!(
         failure,
@@ -509,11 +555,7 @@ fn competing_write_authority_fails_instead_of_reporting_retryable_saturation() {
     ));
     assert!(matches!(
         runtime
-            .block_on(writer.submit(
-                &cx(),
-                recovered.clone(),
-                Arc::new(Probe::new(&recovered, None)),
-            ))
+            .block_on(writer.submit(recovered.clone(), Arc::new(Probe::new(&recovered, None)),))
             .unwrap(),
         RuntimeSubmitOutcomeV1::Committed { .. }
     ));
@@ -581,7 +623,6 @@ fn queued_compatible_writes_commit_in_one_transaction() {
                 .build()
                 .unwrap();
             runtime.block_on(holder_writer.submit(
-                &cx(),
                 holder_request.clone(),
                 Arc::new(Probe::new(&holder_request, None)),
             ))
@@ -601,11 +642,9 @@ fn queued_compatible_writes_commit_in_one_transaction() {
                     let runtime = tokio::runtime::Builder::new_current_thread()
                         .build()
                         .unwrap();
-                    runtime.block_on(batch_writer.submit(
-                        &cx(),
-                        request.clone(),
-                        Arc::new(Probe::new(&request, None)),
-                    ))
+                    runtime.block_on(
+                        batch_writer.submit(request.clone(), Arc::new(Probe::new(&request, None))),
+                    )
                 })
             })
             .collect::<Vec<_>>();
@@ -618,7 +657,9 @@ fn queued_compatible_writes_commit_in_one_transaction() {
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
                 let sender = sender.as_ref().expect("writer admission stays open");
-                sender.telemetry_snapshot(0).queued_messages
+                // Submission uses try_send under this lock, and the holder
+                // blocks the receiver: occupied capacity is the queued batch.
+                sender.max_capacity() - sender.capacity()
             };
             if waiting >= QUEUED_WRITES {
                 break;
@@ -713,7 +754,7 @@ fn failed_first_write_leaves_no_schema_and_can_retry() {
         .unwrap();
     let probe = Arc::new(Probe::new(&request, None));
     assert!(matches!(
-        runtime.block_on(writer.submit(&cx(), request.clone(), probe)),
+        runtime.block_on(writer.submit(request.clone(), probe)),
         Err(WriterActorError::StorageFailure(_))
     ));
     let connection = Connection::open(&database.0).unwrap();
@@ -728,7 +769,7 @@ fn failed_first_write_leaves_no_schema_and_can_retry() {
     let retry_probe = Arc::new(Probe::new(&request, None));
     assert!(matches!(
         runtime
-            .block_on(writer.submit(&cx(), request, retry_probe))
+            .block_on(writer.submit(request, retry_probe))
             .unwrap(),
         RuntimeSubmitOutcomeV1::Committed { .. }
     ));

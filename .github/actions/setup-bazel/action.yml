@@ -10,6 +10,9 @@ description: >
   declared Bazel inputs.
 
 inputs:
+  release-download-token:
+    description: Optional read-only job token for public GitHub release downloads.
+    default: ""
   cache-key:
     description: Disk-cache name; jobs with the same runner image and flags share it.
     required: true
@@ -122,8 +125,7 @@ runs:
         REDIRECT_TEMP: ${{ inputs.windows-redirect-temp }}
       run: '& "$env:GITHUB_ACTION_PATH/tune_windows.ps1" -RedirectTemp:($env:REDIRECT_TEMP -eq "true")'
 
-    # crate_universe's cargo checks out git dependencies under D:/b; asupersync
-    # carries paths past MAX_PATH there, which libgit2 refuses without this.
+    # Git dependencies and generated build paths can exceed Windows MAX_PATH.
     - name: Allow long git paths
       if: runner.os == 'Windows'
       shell: bash
@@ -269,7 +271,7 @@ runs:
     - name: Stage pinned Bazel inputs from the GitHub release API
       id: release-distfiles
       env:
-        GH_TOKEN: ${{ github.token }}
+        GH_TOKEN: ${{ inputs.release-download-token }}
       if: runner.environment == 'github-hosted' && inputs.verify-launcher-cache != 'true'
       shell: bash
       run: |
@@ -282,7 +284,7 @@ runs:
         bash "$GITHUB_ACTION_PATH/stage_release_distfiles.sh" "$distdir"
         printf 'bazelrc=common --distdir="%s"\n' "$distdir" >> "$GITHUB_OUTPUT"
 
-    - uses: bazel-contrib/setup-bazel@104e3eea9447cdaa4b00d0fb46191a3985d26ab3 # 0.19.1
+    - uses: bazel-contrib/setup-bazel@f34d6a05eae3c24acab7fa54587492daeaeffdab # 0.19.2
       with:
         bazelisk-cache: true
         repository-cache: false

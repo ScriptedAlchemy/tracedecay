@@ -13,8 +13,8 @@
 use std::fmt::Write as _;
 
 use tracedecay_contracts::code_index_freshness::{
-    CodeIndexBuildPhaseV1, CodeIndexFreshnessPayloadV1, CodeIndexStalenessStateV1,
-    CodeIndexWorktreeFreshnessV1,
+    CodeIndexBuildBlockedReasonV1, CodeIndexBuildPhaseV1, CodeIndexFreshnessPayloadV1,
+    CodeIndexPresealWorkPhaseV1, CodeIndexStalenessStateV1, CodeIndexWorktreeFreshnessV1,
 };
 use tracedecay_contracts::retrieval::{
     CodeGraphReadFreshnessV1, PrimitiveFreshnessStateV1, PrimitiveIndexingStateV1,
@@ -62,6 +62,26 @@ fn phase_label(phase: CodeIndexBuildPhaseV1) -> &'static str {
         CodeIndexBuildPhaseV1::Verification => "verification",
         CodeIndexBuildPhaseV1::GraphPublication => "graph_publication",
         CodeIndexBuildPhaseV1::Ready => "ready",
+    }
+}
+
+fn preseal_phase_label(phase: CodeIndexPresealWorkPhaseV1) -> &'static str {
+    match phase {
+        CodeIndexPresealWorkPhaseV1::Capture => "capture",
+        CodeIndexPresealWorkPhaseV1::ParseEvidence => "parse_evidence",
+        CodeIndexPresealWorkPhaseV1::Resolution => "resolution",
+    }
+}
+
+fn blocked_reason_label(reason: CodeIndexBuildBlockedReasonV1) -> &'static str {
+    match reason {
+        CodeIndexBuildBlockedReasonV1::ResidentMemory => "resident_memory",
+        CodeIndexBuildBlockedReasonV1::SourceUnavailable => "source_unavailable",
+        CodeIndexBuildBlockedReasonV1::ArtifactStoreUnavailable => "artifact_store_unavailable",
+        CodeIndexBuildBlockedReasonV1::RetryBackoff => "retry_backoff",
+        CodeIndexBuildBlockedReasonV1::PublicationAuthorityCorrupt => {
+            "publication_authority_corrupt"
+        }
     }
 }
 
@@ -200,14 +220,99 @@ pub(super) fn search_freshness(
         if let Some(hints) = state.hook_hint_count.filter(|count| *count > 0) {
             let _ = write!(summary, " pending_hook_hints={hints}");
         }
-        if let Some(progress) = &state.progress {
+        if let Some(attempt) = &state.preseal_attempt {
             let _ = write!(
                 summary,
-                " progress={} {}/{} files",
+                " preseal_phase={} preseal_owner={}:{}:{} preseal_epoch={} \
+                 preseal_completed={} preseal_total={} preseal_last_progress_micros={} \
+                 preseal_active={}",
+                preseal_phase_label(attempt.phase),
+                attempt.daemon_incarnation,
+                attempt.producer_incarnation,
+                attempt.attempt_sequence,
+                attempt.progress_epoch,
+                attempt.completed_items,
+                attempt
+                    .total_items
+                    .map_or_else(|| "unknown".to_owned(), |n| n.to_string()),
+                attempt
+                    .last_progress_micros
+                    .map_or_else(|| "unreported".to_owned(), |micros| micros.to_string()),
+                attempt.active,
+            );
+        }
+        if let Some(graph) = &state.native_graph_progress {
+            // These are owned writer callbacks. Encoding is explicitly not a
+            // graph commit; native staging receipts and verified installs are.
+            let _ = write!(
+                summary,
+                " native_graph_generation={} native_graph_owner={}:{}:{} \
+                 native_graph_epoch={} native_graph_phase={:?} \
+                 native_encoded_entities={} native_encoded_relations={} \
+                 native_committed_pages={} native_committed_mutations={} \
+                 native_committed_bytes={} native_verified_segments={} \
+                 native_verified_bytes={} native_last_progress_micros={} \
+                 native_graph_active={}",
+                graph.generation_id,
+                graph.daemon_incarnation,
+                graph.producer_incarnation,
+                graph.attempt_sequence,
+                graph.progress_epoch,
+                graph.phase,
+                graph.encoded_entities,
+                graph.encoded_relations,
+                graph.committed_stage_pages,
+                graph.committed_stage_mutations,
+                graph.committed_stage_bytes,
+                graph.committed_compact_segments,
+                graph.committed_compact_bytes,
+                graph
+                    .last_progress_micros
+                    .map_or_else(|| "unreported".to_owned(), |micros| micros.to_string()),
+                graph.active,
+            );
+        }
+        if let Some(progress) = &state.progress {
+            // Keep the producer's identity and clock. Reading a response is
+            // not work, and an epoch is comparable only within its owner.
+            // These are text-artifact commits, not native graph writes even
+            // when graph publication is the phase currently being observed.
+            let _ = write!(
+                summary,
+                " progress={} {}/{} files progress_generation={} \
+                 progress_owner={}:{} progress_epoch={} last_progress_micros={} \
+                 committed_text_pages={} committed_text_chunks={} \
+                 committed_text_imports={} committed_text_payload_bytes={} blocked={}",
                 phase_label(progress.phase),
                 progress.completed_files,
-                progress.total_files
+                progress.total_files,
+                progress.generation_id,
+                progress.daemon_incarnation,
+                progress.producer_incarnation,
+                progress.progress_epoch,
+                progress.last_progress_micros,
+                progress.committed_pages,
+                progress.committed_chunks,
+                progress.committed_imports,
+                progress.committed_payload_bytes,
+                progress.blocked_reason.map_or("none", blocked_reason_label)
             );
+        } else if state.rebuild_in_flight {
+            if state
+                .native_graph_progress
+                .as_ref()
+                .is_some_and(|graph| graph.active && graph.last_progress_micros.is_some())
+            {
+                summary.push_str(" progress=native_graph");
+            } else if state
+                .preseal_attempt
+                .as_ref()
+                .is_some_and(|attempt| attempt.active && attempt.last_progress_micros.is_some())
+            {
+                summary.push_str(" progress=preseal");
+            } else {
+                summary.push_str(" progress=unreported");
+            }
         }
     }
     if !stale_lanes.is_empty() {
@@ -299,6 +404,52 @@ mod tests {
         }))
     }
 
+    fn committed_progress() -> CodeIndexBuildProgressV1 {
+        CodeIndexBuildProgressV1 {
+            generation_id: "generation.next".to_owned(),
+            daemon_incarnation: 3,
+            producer_incarnation: 7,
+            progress_epoch: 11,
+            sealed_source_digest: format!("sha256:{}", "a".repeat(64)),
+            phase: CodeIndexBuildPhaseV1::BulkCommit,
+            committed_pages: 2,
+            committed_chunks: 13,
+            committed_imports: 3,
+            committed_payload_bytes: 2048,
+            completed_files: 250,
+            total_files: 500,
+            completed_lexical_units: 250,
+            total_lexical_units: 500,
+            current_batch_pages: 0,
+            current_batch_payload_bytes: 0,
+            elapsed_micros: 100,
+            last_commit_latency_micros: Some(12),
+            files_per_second: None,
+            lexical_units_per_second: None,
+            estimated_remaining_seconds: None,
+            last_progress_micros: 120,
+            blocked_reason: None,
+        }
+    }
+
+    fn rendering_progress(progress: CodeIndexBuildProgressV1) -> String {
+        let state = CodeIndexWorktreeFreshnessV1 {
+            worktree_root: "/fixture".to_owned(),
+            staleness_state: Some(CodeIndexStalenessStateV1::Indexing),
+            rebuild_in_flight: true,
+            coverage: CodeIndexFreshnessCoverageV1::Complete,
+            progress: Some(progress),
+            ..CodeIndexWorktreeFreshnessV1::default()
+        };
+        freshness_lines(&search_freshness(
+            ServedGenerationV1::Unavailable {
+                reason: "generation_unavailable",
+            },
+            &CodeIndexSearchCoverageV1::unavailable("generation_rebuilding"),
+            &WorktreeFreshnessSourceV1::Worktree(Box::new(state)),
+        ))
+    }
+
     #[test]
     fn settled_generation_is_fresh_when_lanes_and_scheduler_agree() {
         let freshness = search_freshness(
@@ -347,7 +498,7 @@ mod tests {
                 .as_ref()
                 .map(|indexing| indexing.summary.as_str()),
             Some(
-                "state=refreshing rebuild_in_flight=true served_generation=generation.1 latest_generation=generation.1"
+                "state=refreshing rebuild_in_flight=true served_generation=generation.1 latest_generation=generation.1 progress=unreported"
             )
         );
 
@@ -379,39 +530,15 @@ mod tests {
 
     #[test]
     fn unavailable_search_reports_the_indexing_state_with_progress() {
-        let mut state = CodeIndexWorktreeFreshnessV1 {
+        let state = CodeIndexWorktreeFreshnessV1 {
             worktree_root: "/fixture".to_owned(),
             staleness_state: Some(CodeIndexStalenessStateV1::Indexing),
             rebuild_in_flight: true,
             hook_hint_count: Some(3),
             coverage: CodeIndexFreshnessCoverageV1::Complete,
+            progress: Some(committed_progress()),
             ..CodeIndexWorktreeFreshnessV1::default()
         };
-        state.progress = Some(CodeIndexBuildProgressV1 {
-            generation_id: "generation.next".to_owned(),
-            daemon_incarnation: 1,
-            producer_incarnation: 1,
-            progress_epoch: 1,
-            sealed_source_digest: "sha256:fixture".to_owned(),
-            phase: CodeIndexBuildPhaseV1::BulkCommit,
-            committed_pages: 0,
-            committed_chunks: 0,
-            committed_imports: 0,
-            committed_payload_bytes: 0,
-            completed_files: 250,
-            total_files: 500,
-            completed_lexical_units: 0,
-            total_lexical_units: 0,
-            current_batch_pages: 0,
-            current_batch_payload_bytes: 0,
-            elapsed_micros: 0,
-            last_commit_latency_micros: None,
-            files_per_second: None,
-            lexical_units_per_second: None,
-            estimated_remaining_seconds: None,
-            last_progress_micros: 0,
-            blocked_reason: None,
-        });
         let freshness = search_freshness(
             ServedGenerationV1::Unavailable {
                 reason: "generation_unavailable",
@@ -423,10 +550,138 @@ mod tests {
         let indexing = freshness.indexing.expect("indexing line");
         assert_eq!(
             indexing.summary,
-            "state=indexing rebuild_in_flight=true served_generation=none pending_hook_hints=3 progress=bulk_commit 250/500 files unavailable=generation_unavailable"
+            "state=indexing rebuild_in_flight=true served_generation=none \
+             pending_hook_hints=3 progress=bulk_commit 250/500 files \
+             progress_generation=generation.next progress_owner=3:7 progress_epoch=11 \
+             last_progress_micros=120 committed_text_pages=2 committed_text_chunks=13 \
+             committed_text_imports=3 committed_text_payload_bytes=2048 blocked=none \
+             unavailable=generation_unavailable"
         );
         assert_eq!(indexing.reason.as_deref(), Some("generation_unavailable"));
         assert_eq!(indexing.stale_lanes.len(), 0);
+    }
+
+    #[test]
+    fn observed_preseal_progress_is_not_an_invented_generation() {
+        let state = CodeIndexWorktreeFreshnessV1 {
+            rebuild_in_flight: true,
+            preseal_attempt: Some(
+                tracedecay_contracts::code_index_freshness::CodeIndexPresealAttemptProgressV1 {
+                    daemon_incarnation: 4,
+                    producer_incarnation: 9,
+                    attempt_sequence: 3,
+                    progress_epoch: 14,
+                    phase: CodeIndexPresealWorkPhaseV1::Capture,
+                    completed_items: 24,
+                    total_items: Some(100),
+                    last_progress_micros: Some(1_234_567),
+                    active: true,
+                },
+            ),
+            ..CodeIndexWorktreeFreshnessV1::default()
+        };
+        let rendered = freshness_lines(&search_freshness(
+            ServedGenerationV1::Unavailable {
+                reason: "generation_unavailable",
+            },
+            &CodeIndexSearchCoverageV1::unavailable("generation_rebuilding"),
+            &WorktreeFreshnessSourceV1::Worktree(Box::new(state)),
+        ));
+        assert!(rendered.contains("preseal_phase=capture preseal_owner=4:9:3"));
+        assert!(rendered.contains("preseal_epoch=14 preseal_completed=24"));
+        assert!(rendered.contains("preseal_total=100 preseal_last_progress_micros=1234567"));
+        assert!(rendered.contains("preseal_active=true progress=preseal"));
+        assert!(!rendered.contains("progress_generation="));
+        assert!(!rendered.contains("committed_text_pages="));
+    }
+
+    #[test]
+    fn cold_unreported_work_has_no_fabricated_progress_authority() {
+        let freshness = search_freshness(
+            ServedGenerationV1::Unavailable {
+                reason: "generation_unavailable",
+            },
+            &CodeIndexSearchCoverageV1::unavailable("generation_rebuilding"),
+            &worktree("indexing", true, None),
+        );
+        assert_eq!(
+            freshness_lines(&freshness),
+            "freshness: possibly_stale\n\
+             indexing: state=indexing rebuild_in_flight=true served_generation=none \
+             progress=unreported unavailable=generation_unavailable\n"
+        );
+    }
+
+    #[test]
+    fn repeated_reads_do_not_turn_elapsed_time_into_progress() {
+        let mut progress = committed_progress();
+        let first = rendering_progress(progress.clone());
+        progress.elapsed_micros = 900_000_000;
+        progress.files_per_second = Some(0.1);
+        progress.estimated_remaining_seconds = Some(2_500);
+        assert_eq!(rendering_progress(progress.clone()), first);
+        assert_eq!(rendering_progress(progress.clone()), first);
+
+        progress.committed_pages += 1;
+        progress.committed_chunks += 2;
+        progress.committed_payload_bytes += 1024;
+        progress.progress_epoch += 1;
+        progress.last_progress_micros = 900_000_120;
+        let advanced = rendering_progress(progress);
+        assert_ne!(advanced, first);
+        assert!(advanced.contains("progress_epoch=12 last_progress_micros=900000120"));
+        assert!(advanced.contains("committed_text_pages=3 committed_text_chunks=15"));
+        assert!(advanced.contains("committed_text_payload_bytes=3072"));
+    }
+
+    #[test]
+    fn blocked_and_recovered_reports_preserve_work_and_name_the_real_phase() {
+        let mut progress = committed_progress();
+        progress.phase = CodeIndexBuildPhaseV1::GraphPublication;
+        progress.completed_files = progress.total_files;
+        progress.completed_lexical_units = progress.total_lexical_units;
+        progress.blocked_reason = Some(CodeIndexBuildBlockedReasonV1::ResidentMemory);
+        progress.progress_epoch += 1;
+        let blocked = rendering_progress(progress.clone());
+        assert!(blocked.contains("progress=graph_publication 500/500 files"));
+        assert!(blocked.contains("progress_epoch=12 last_progress_micros=120"));
+        assert!(blocked.contains("committed_text_pages=2 committed_text_chunks=13"));
+        assert!(blocked.contains("blocked=resident_memory"));
+        assert_eq!(rendering_progress(progress.clone()), blocked);
+
+        progress.blocked_reason = None;
+        progress.progress_epoch += 1;
+        let recovered = rendering_progress(progress.clone());
+        assert!(recovered.contains("progress_epoch=13 last_progress_micros=120"));
+        assert!(recovered.contains("blocked=none"));
+        assert_ne!(recovered, blocked);
+
+        progress.phase = CodeIndexBuildPhaseV1::Ready;
+        progress.progress_epoch += 1;
+        let ready = rendering_progress(progress);
+        assert!(ready.contains("progress=ready 500/500 files"));
+        assert!(ready.contains("progress_epoch=14 last_progress_micros=120"));
+        assert!(!ready.contains("blocked=resident_memory"));
+    }
+
+    #[test]
+    fn restart_and_remount_keep_epoch_scope_visible() {
+        let mut progress = committed_progress();
+        let original = rendering_progress(progress.clone());
+        progress.daemon_incarnation += 1;
+        progress.producer_incarnation = 1;
+        progress.progress_epoch = 1;
+        let restarted = rendering_progress(progress.clone());
+        assert_ne!(restarted, original);
+        assert!(restarted.contains("progress_owner=4:1 progress_epoch=1"));
+        assert!(restarted.contains("last_progress_micros=120 committed_text_pages=2"));
+
+        progress.producer_incarnation += 1;
+        progress.generation_id = "generation.replacement".to_owned();
+        let remounted = rendering_progress(progress);
+        assert_ne!(remounted, restarted);
+        assert!(remounted.contains("progress_generation=generation.replacement"));
+        assert!(remounted.contains("progress_owner=4:2 progress_epoch=1"));
     }
 
     #[test]
@@ -504,5 +759,52 @@ mod tests {
             None,
             "a park every wake re-checks is not terminal"
         );
+    }
+    #[test]
+    fn native_graph_summary_does_not_conflate_encoded_rows_and_committed_pages() {
+        let state = CodeIndexWorktreeFreshnessV1 {
+            rebuild_in_flight: true,
+            native_graph_progress: Some(
+                tracedecay_contracts::code_index_freshness::CodeIndexNativeGraphProgressV1 {
+                    generation_id: "generation.native".to_owned(),
+                    sealed_graph_digest: "sha256:real".to_owned(),
+                    daemon_incarnation: 3,
+                    producer_incarnation: 5,
+                    attempt_sequence: 8,
+                    progress_epoch: 12,
+                    phase: Some(
+                        tracedecay_contracts::code_index_freshness::CodeIndexNativeGraphPhaseV1::CompactEncoding,
+                    ),
+                    encoded_entities: 512,
+                    total_entities: Some(1024),
+                    encoded_relations: 17,
+                    total_relations: Some(200),
+                    committed_stage_pages: 0,
+                    committed_stage_mutations: 0,
+                    committed_stage_bytes: 0,
+                    committed_compact_segments: 0,
+                    committed_compact_bytes: 0,
+                    last_progress_micros: Some(123),
+                    active: true,
+                },
+            ),
+            ..CodeIndexWorktreeFreshnessV1::default()
+        };
+        let rendered = freshness_lines(&search_freshness(
+            ServedGenerationV1::Unavailable {
+                reason: "generation_unavailable",
+            },
+            &CodeIndexSearchCoverageV1::unavailable("generation_rebuilding"),
+            &WorktreeFreshnessSourceV1::Worktree(Box::new(state)),
+        ));
+        assert!(rendered.contains("native_graph_generation=generation.native"));
+        assert!(rendered.contains("native_graph_owner=3:5:8"));
+        assert!(rendered.contains("native_graph_epoch=12"));
+        assert!(rendered.contains("native_encoded_entities=512 native_encoded_relations=17"));
+        assert!(rendered.contains("native_committed_pages=0"));
+        assert!(rendered.contains("native_verified_segments=0"));
+        assert!(rendered.contains("native_last_progress_micros=123"));
+        assert!(rendered.contains("progress=native_graph"));
+        assert!(!rendered.contains("committed_text_pages="));
     }
 }

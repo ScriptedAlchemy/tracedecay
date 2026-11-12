@@ -42,18 +42,20 @@ fn ephemeral_safe_fixture_base(test_path: &str) -> Option<PathBuf> {
         assert!(!tracedecay_global_db::is_ephemeral_path(&root));
         return Some(root);
     }
-    // Worker scratch paths and macOS's per-user temporary directory can leave
-    // too little room for the nested child home and its Unix daemon socket.
-    // Use a short, private root on Unix. The private child TMPDIR
-    // still defines the ephemeral boundary, with durable fixtures beside it.
-    let scratch = if cfg!(unix) {
-        TempDir::new_in("/tmp")
+    // Linux fleet scratch can exceed the Unix socket path limit. Darwin's
+    // sandbox grants writes to the user's temporary directory, not /tmp.
+    let parent = if cfg!(target_os = "linux") {
+        PathBuf::from("/tmp")
     } else {
-        TempDir::new()
-    }
-    .expect("isolated temp-policy fixture");
-    let temporary = scratch.path().join("temporary");
-    let durable = scratch.path().join("durable");
+        std::env::temp_dir()
+    };
+    let scratch = tempfile::Builder::new()
+        .prefix("f")
+        .tempdir_in(parent)
+        .expect("isolated temp-policy fixture");
+    // These components also prefix the child's 104-byte Darwin socket address.
+    let temporary = scratch.path().join("t");
+    let durable = scratch.path().join("d");
     std::fs::create_dir(&temporary).unwrap();
     std::fs::create_dir(&durable).unwrap();
     crate::common::rerun_test_in_child(
@@ -664,12 +666,18 @@ fn git_sync_failure(message: &str, output: &Output) -> String {
     )
 }
 
-fn assert_mounted_git_sync(output: &Output, dry_run: bool) {
+fn assert_mounted_git_sync(output: &Output, dry_run: bool, daemon_log: &Path) {
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
         output.status.success(),
-        "sessions git-sync should succeed\nstdout:\n{stdout}\nstderr:\n{stderr}"
+        "sessions git-sync should succeed\nstdout:\n{stdout}\nstderr:\n{stderr}\ntopology diagnostics:\n{}",
+        std::fs::read_to_string(daemon_log)
+            .expect("read isolated daemon log")
+            .lines()
+            .filter(|line| line.contains("git_topology_publication_unavailable"))
+            .collect::<Vec<_>>()
+            .join("\n")
     );
     assert!(
         stdout.starts_with("session git sync completed (session-sync."),
@@ -723,10 +731,13 @@ fn sessions_git_sync_on_a_cold_daemon_waits_for_the_project_mount() {
     let hold = canonical_temp_path(home.path()).join("hold-after-core-publish");
     std::fs::write(&hold, b"hold").unwrap();
     let entered = PathBuf::from(format!("{}.entered", hold.display()));
-    let _daemon = crate::common::spawn_tracedecay_daemon_with(home.path(), {
+    let daemon_log = home.path().join("git-sync-daemon.log");
+    let _daemon = crate::common::spawn_tracedecay_daemon_logged(home.path(), &daemon_log, {
         let hold = hold.clone();
         move |command| {
-            command.env("TRACEDECAY_TEST_HOLD_AFTER_CORE_PUBLISH", &hold);
+            command
+                .env("TRACEDECAY_TEST_HOLD_AFTER_CORE_PUBLISH", &hold)
+                .env("RUST_LOG", "warn");
         }
     });
 
@@ -775,11 +786,16 @@ fn sessions_git_sync_on_a_cold_daemon_waits_for_the_project_mount() {
     assert_mounted_git_sync(
         &wait_for_git_sync(&mut child, &mut stdout, &mut stderr),
         true,
+        &daemon_log,
     );
 
     let mut command = tracedecay_command_without_daemon(home.path(), &project_root);
     command.args(["sessions", "git-sync"]);
-    assert_mounted_git_sync(&run_with_timeout(command, cli_timeout()), false);
+    assert_mounted_git_sync(
+        &run_with_timeout(command, cli_timeout()),
+        false,
+        &daemon_log,
+    );
 }
 
 fn dashboard_session_authority(capabilities_url: &str) -> String {
@@ -1052,7 +1068,10 @@ fn write_empty_sqlite_fixture(path: &Path) {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).unwrap();
     }
-    drop(rusqlite::Connection::open(path).expect("empty SQLite fixture"));
+    rusqlite::Connection::open(path)
+        .expect("empty SQLite fixture")
+        .execute_batch("PRAGMA user_version = 0")
+        .expect("materialize an initialized empty-schema SQLite fixture");
 }
 
 async fn register_profile_sharded_store(
@@ -1259,15 +1278,15 @@ fn init_wait_holds_until_first_generation_is_ready() {
     );
 }
 
-/// Unix daemon endpoints must fit even when the runner's temporary directory
-/// has a long sandbox prefix. The profile remains private to the fixture.
-fn daemon_contract_home() -> TempDir {
-    if cfg!(unix) {
-        TempDir::new_in("/tmp")
-    } else {
-        TempDir::new()
-    }
-    .expect("private daemon fixture home")
+/// Allocate a short socket path within the caller's private fixture root.
+fn daemon_contract_home(root: &Path) -> TempDir {
+    // The outer scratch already isolates this home. Keep its component one byte
+    // so the default socket fits even in the native worker scratch directory.
+    tempfile::Builder::new()
+        .prefix("h")
+        .rand_bytes(0)
+        .tempdir_in(root)
+        .expect("private daemon fixture home")
 }
 
 fn assert_project_storage_absent(home: &Path, project: &Path) {
@@ -1309,7 +1328,7 @@ fn init_without_a_running_daemon_refuses_before_any_index_write() {
     ) else {
         return;
     };
-    let home = daemon_contract_home();
+    let home = daemon_contract_home(&durable);
     let project = tempfile::Builder::new()
         .prefix("no-daemon-init-project-")
         .tempdir_in(durable)
@@ -1351,7 +1370,7 @@ fn status_and_query_reads_refuse_typed_daemon_unavailable_without_one() {
     ) else {
         return;
     };
-    let home = daemon_contract_home();
+    let home = daemon_contract_home(&durable);
     let project = tempfile::Builder::new()
         .prefix("no-daemon-read-project-")
         .tempdir_in(durable)
@@ -1519,7 +1538,7 @@ fn pricing_and_usage_reads_make_no_http_request() {
     ) else {
         return;
     };
-    let home = daemon_contract_home();
+    let home = daemon_contract_home(&durable);
     let project = tempfile::Builder::new()
         .prefix("local-usage-project-")
         .tempdir_in(durable)
@@ -2644,7 +2663,19 @@ fn wipe_all_is_schema_independent_and_removes_every_profile_database_root() {
         let wal = PathBuf::from(wal);
         std::fs::create_dir(&wal).unwrap();
         std::fs::write(wal.join("segment"), b"graph wal").unwrap();
+        std::fs::write(path.with_extension("verified"), b"marker").unwrap();
+        for directory in [
+            path.with_extension("sealed"),
+            path.with_added_extension("spill"),
+        ] {
+            std::fs::create_dir(&directory).unwrap();
+            std::fs::write(directory.join("member"), b"owned projection data").unwrap();
+        }
+        std::fs::write(path.with_added_extension("corruption-lock"), b"keep lock").unwrap();
     }
+    let unrelated = profile.join("user-sessions.spill");
+    std::fs::create_dir(&unrelated).unwrap();
+    std::fs::write(unrelated.join("member"), b"foreign directory").unwrap();
     let host_admission = profile.join(".user-sessions.db.host-admission");
     std::fs::create_dir(&host_admission).unwrap();
     std::fs::write(host_admission.join("pending"), b"admission spool").unwrap();
@@ -2666,6 +2697,46 @@ fn wipe_all_is_schema_independent_and_removes_every_profile_database_root() {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(&path, b"profile state").unwrap();
     }
+
+    let lease_path = profile.join(".user-memory.db.tracedecay-init.durable-directory.lock");
+    let initializer = tracedecay_private_fs::create_private_file(&lease_path).unwrap();
+    initializer.try_lock().unwrap();
+    let mut busy = tracedecay_command_without_daemon(home.path(), project.path());
+    busy.args(["wipe", "--all", "--yes"]);
+    let refused = run_with_timeout(busy, cli_timeout());
+    assert!(!refused.status.success(), "{refused:?}");
+    assert!(
+        String::from_utf8_lossy(&refused.stderr).contains("lock offline SQLite family"),
+        "{refused:?}"
+    );
+    for database in &database_paths {
+        assert!(database.is_file());
+    }
+    drop(initializer);
+
+    // A wrong-kind marker in the last top-level store must be discovered
+    // before even the earlier profile, remote or project data is touched.
+    let ambiguous = profile.join("user-memory.verified");
+    std::fs::remove_file(&ambiguous).unwrap();
+    std::fs::create_dir(&ambiguous).unwrap();
+    let mut refusal = tracedecay_command_without_daemon(home.path(), project.path());
+    refusal.args(["wipe", "--all", "--yes"]);
+    let refused = run_with_timeout(refusal, cli_timeout());
+    assert!(!refused.status.success(), "{refused:?}");
+    let stderr = String::from_utf8_lossy(&refused.stderr);
+    assert!(
+        stderr.contains("unexpected file type") && stderr.contains("user-memory.verified"),
+        "{stderr}"
+    );
+    for database in &database_paths {
+        assert_eq!(
+            std::fs::read(database).unwrap(),
+            b"not a compatible SQLite schema"
+        );
+    }
+    assert!(ambiguous.is_dir());
+    std::fs::remove_dir(&ambiguous).unwrap();
+    std::fs::write(ambiguous, b"marker").unwrap();
 
     let mut command = tracedecay_command_without_daemon(home.path(), project.path());
     command.args(["wipe", "--all", "--yes"]);
@@ -2709,7 +2780,23 @@ fn wipe_all_is_schema_independent_and_removes_every_profile_database_root() {
         wal.push(".wal");
         assert_namespace_absent(&path, "wipe --all left a Grafeo store");
         assert_namespace_absent(&PathBuf::from(wal), "wipe --all left a Grafeo WAL");
+        for member in [
+            path.with_extension("verified"),
+            path.with_extension("sealed"),
+            path.with_added_extension("spill"),
+        ] {
+            assert_namespace_absent(&member, "wipe --all left graph data");
+        }
+        assert_eq!(
+            std::fs::read(path.with_added_extension("corruption-lock")).unwrap(),
+            b"keep lock"
+        );
     }
+    assert!(lease_path.is_file());
+    assert_eq!(
+        std::fs::read(unrelated.join("member")).unwrap(),
+        b"foreign directory"
+    );
     assert_namespace_absent(
         &host_admission,
         "wipe --all left the profile host-admission database companion",
@@ -2836,7 +2923,7 @@ fn list_all_reports_orphan_manifest_reconstructable_store() {
     ) else {
         return;
     };
-    let home = TempDir::new().unwrap();
+    let home = daemon_contract_home(&std::env::temp_dir());
     let project = tempfile::Builder::new()
         .prefix("list-orphan-project-")
         .tempdir_in(durable)

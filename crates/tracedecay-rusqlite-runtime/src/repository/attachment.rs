@@ -1,4 +1,3 @@
-use asupersync::{Cx, runtime::RuntimeHandle};
 use std::{
     error::Error,
     fmt,
@@ -19,7 +18,7 @@ use tracedecay_store::{
 use crate::{
     CheckpointOutcome, CheckpointRequest, ExistingWriterLocator, PersistentWriter,
     RuntimeWriteAuthority, WriterActorError, WriterStartError, WriterState,
-    connection::{OpenedDatabaseFile, OpenedDatabaseFileError},
+    connection::{OpenedDatabaseFile, OpenedDatabaseFileError, opened_file_identity},
     exact_sql::{ExactSqlError, ExactSqlHandle},
     ledger::{self, LedgerError},
     reader::{
@@ -54,8 +53,8 @@ impl RepositoryPhysicalAttachmentFactory {
         path: PathBuf,
         admission: AdmissionConfigV1,
     ) -> Result<RepositoryRuntimePhysicalAttachment, RepositoryAttachmentStartError> {
-        let opened_database =
-            OpenedDatabaseFile::pin(&path).map_err(RepositoryAttachmentStartError::Identity)?;
+        let opened_database = OpenedDatabaseFile::pin_initialized(&path)
+            .map_err(RepositoryAttachmentStartError::Identity)?;
         let reader_locator = ExistingReaderLocator::new(binding.clone(), locator, path.clone())
             .map_err(RepositoryAttachmentStartError::Reader)?;
         let reader_locator = reader_locator.with_opened_database(
@@ -90,12 +89,15 @@ impl RepositoryPhysicalAttachmentFactory {
                 readers: Some(readers),
                 admission_open: true,
                 drained: false,
+                workers_closing: false,
                 closed: false,
                 file_lost: false,
                 lost_readers: None,
                 lost_writer: None,
                 #[cfg(test)]
                 after_lost_notice: None,
+                #[cfg(test)]
+                before_worker_join: None,
                 close_failure: None,
                 retained_file_pin: Some(opened_database),
             })),
@@ -105,28 +107,25 @@ impl RepositoryPhysicalAttachmentFactory {
 
     pub fn attach(
         &self,
-        runtime: &RuntimeHandle,
         binding: StoreRuntimeBindingV1,
         locator: VerifiedStoreLocatorV1,
         path: PathBuf,
         admission: AdmissionConfigV1,
     ) -> Result<RepositoryRuntimePhysicalAttachment, RepositoryAttachmentStartError> {
-        self.attach_with_start_hook(runtime, binding, locator, path, admission, &mut |_| {})
+        self.attach_with_start_hook(binding, locator, path, admission, &mut |_| {})
     }
 
     fn attach_with_start_hook(
         &self,
-        runtime: &RuntimeHandle,
         binding: StoreRuntimeBindingV1,
         locator: VerifiedStoreLocatorV1,
         path: PathBuf,
         admission: AdmissionConfigV1,
         start_hook: &mut dyn FnMut(AttachmentWorkerStartStage),
     ) -> Result<RepositoryRuntimePhysicalAttachment, RepositoryAttachmentStartError> {
-        let opened_database =
-            OpenedDatabaseFile::pin(&path).map_err(RepositoryAttachmentStartError::Identity)?;
+        let opened_database = OpenedDatabaseFile::pin_initialized(&path)
+            .map_err(RepositoryAttachmentStartError::Identity)?;
         self.attach_opened(
-            runtime,
             binding,
             locator,
             path,
@@ -137,34 +136,43 @@ impl RepositoryPhysicalAttachmentFactory {
         )
     }
 
+    /// Initialization owns its sole set of raw descriptors across the entire
+    /// worker start. On a handled failure, only a fully released worker set
+    /// can return those original reservations to the external publisher.
     #[tracing::instrument(name = "rusqlite.attachment.initialize", level = "trace", skip_all)]
-    pub fn initialize(
+    pub fn start_reserved_initialization(
         &self,
-        runtime: &RuntimeHandle,
         binding: StoreRuntimeBindingV1,
         locator: VerifiedStoreLocatorV1,
         path: PathBuf,
         admission: AdmissionConfigV1,
-    ) -> Result<RepositoryRuntimePhysicalAttachment, RepositoryAttachmentStartError> {
-        let opened_database = OpenedDatabaseFile::create_new(&path)
-            .map_err(RepositoryAttachmentStartError::Identity)?;
-        self.attach_opened(
-            runtime,
-            binding,
-            locator,
-            path,
-            admission,
-            opened_database,
-            true,
-            &mut |_| {},
-        )
+        mut resumed: Option<InitializationFiles>,
+    ) -> Result<RepositoryRuntimePhysicalAttachment, RepositoryInitializationStartFailure> {
+        let opened = if resumed.is_some() {
+            OpenedDatabaseFile::resume_initialization(&path, &mut resumed)
+        } else {
+            OpenedDatabaseFile::create_new(&path)
+        }
+        .map_err(|error| {
+            RepositoryInitializationStartFailure::before_workers(error, resumed.take())
+        })?;
+        start_with_reserved_files(opened, |worker_pin| {
+            self.attach_opened(
+                binding,
+                locator,
+                path,
+                admission,
+                worker_pin,
+                true,
+                &mut |_| {},
+            )
+        })
     }
 
     #[allow(clippy::too_many_arguments)]
     #[tracing::instrument(name = "rusqlite.attachment.attach", level = "trace", skip_all)]
     fn attach_opened(
         &self,
-        runtime: &RuntimeHandle,
         binding: StoreRuntimeBindingV1,
         locator: VerifiedStoreLocatorV1,
         path: PathBuf,
@@ -228,7 +236,6 @@ impl RepositoryPhysicalAttachmentFactory {
         let notice_state = Arc::clone(&lost_state);
         start_hook(AttachmentWorkerStartStage::BeforeWriter);
         let writer_result = PersistentWriter::start_with_checkpoint_blockers(
-            runtime,
             writer_locator,
             admission.clone(),
             ConcreteRepositoryWriteExecutor::default(),
@@ -310,12 +317,15 @@ impl RepositoryPhysicalAttachmentFactory {
             readers: Some(readers),
             admission_open: true,
             drained: false,
+            workers_closing: false,
             closed: false,
             file_lost: false,
             lost_readers: None,
             lost_writer: None,
             #[cfg(test)]
             after_lost_notice: None,
+            #[cfg(test)]
+            before_worker_join: None,
             close_failure: None,
             retained_file_pin,
         }));
@@ -341,10 +351,65 @@ fn repository_start_failure(
     created: bool,
     failure: RepositoryAttachmentStartError,
 ) -> RepositoryAttachmentStartError {
-    if created && let Err(error) = opened_database.discard_created(database_path) {
-        return RepositoryAttachmentStartError::Identity(error);
+    if created {
+        // No portable syscall atomically unlinks a pathname *only if* it still
+        // identifies our inode. Even a second identity check followed by an
+        // unlink can destroy a concurrent replacement, including WAL/SHM and
+        // rollback journal files. Preserve the failed store for explicit
+        // reconciliation instead of deleting unknown operator bytes.
+        tracing::warn!(
+            path = %database_path.display(),
+            "failed SQLite initialization preserved its database and sidecars"
+        );
     }
+    drop(opened_database);
     failure
+}
+
+fn start_with_reserved_files(
+    opened: OpenedDatabaseFile,
+    start: impl FnOnce(
+        OpenedDatabaseFile,
+    )
+        -> Result<RepositoryRuntimePhysicalAttachment, RepositoryAttachmentStartError>,
+) -> Result<RepositoryRuntimePhysicalAttachment, RepositoryInitializationStartFailure> {
+    let started = opened
+        .try_clone()
+        .map_err(RepositoryAttachmentStartError::Identity)
+        .and_then(start);
+    started.map_err(|error| RepositoryInitializationStartFailure {
+        error,
+        files: opened
+            .take_idle_initialization_files()
+            .map(|files| (opened.identity(), files)),
+    })
+}
+
+pub type InitializationFiles = (std::fs::File, [std::fs::File; 3]);
+
+#[derive(Debug)]
+pub struct RepositoryInitializationStartFailure {
+    pub error: RepositoryAttachmentStartError,
+    pub files: Option<(u64, InitializationFiles)>,
+}
+
+impl RepositoryInitializationStartFailure {
+    fn before_workers(
+        mut error: OpenedDatabaseFileError,
+        originals: Option<InitializationFiles>,
+    ) -> Self {
+        let files = originals.and_then(|files| match opened_file_identity(&files.0) {
+            Ok(identity) => Some((identity, files)),
+            Err(inaccessible) => {
+                error = inaccessible;
+                None
+            }
+        });
+        Self {
+            error: RepositoryAttachmentStartError::Identity(error),
+            files,
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -390,6 +455,9 @@ struct RepositoryRuntimePhysicalState {
     readers: Option<ReaderPool<RepositoryRuntimeReadExecutor>>,
     admission_open: bool,
     drained: bool,
+    /// Worker owners are temporarily outside the state lock while joining.
+    /// Empty live/lost slots do not prove their SQLite connections have closed.
+    workers_closing: bool,
     closed: bool,
     file_lost: bool,
     /// The reader pool of a lost file, kept until its workers have exited so
@@ -403,6 +471,9 @@ struct RepositoryRuntimePhysicalState {
     /// connection open for as long as it blocks.
     #[cfg(test)]
     after_lost_notice: Option<Box<dyn FnOnce() + Send>>,
+    /// Test-only: holds the extracted workers before the out-of-lock join.
+    #[cfg(test)]
+    before_worker_join: Option<Box<dyn FnOnce() + Send>>,
     close_failure: Option<String>,
     /// Kept until all SQLite workers exit: closing any raw fd for the inode
     /// while SQLite holds POSIX locks can release those locks process-wide.
@@ -444,10 +515,13 @@ impl RepositoryRuntimePhysicalAttachment {
     }
 
     /// Whether a lost file has no open connection left: the writer task
-    /// finished and every reader worker exited. Also true for an attachment
-    /// whose file was never lost.
+    /// finished and every reader worker exited, including owners currently
+    /// joining outside the state lock. Otherwise true when no close is pending.
     pub fn lost_file_closed(&self) -> bool {
         let mut state = self.lock_state();
+        if state.workers_closing {
+            return false;
+        }
         if state
             .lost_readers
             .as_ref()
@@ -479,8 +553,80 @@ impl RepositoryRuntimePhysicalAttachment {
         self.lock_state().opened_file_identity
     }
 
+    /// Retire initialization's SQLite readers before the writer's final WAL
+    /// checkpoint. A live reader snapshot can make TRUNCATE report BUSY even
+    /// after every schema write has committed. Keep the writer and all original
+    /// file pins alive until the checkpoint has completed.
+    pub fn close_initialization_readers(&self) -> Result<(), String> {
+        if crate::storage_pool::on_pool() {
+            return Err("initialization readers cannot close on a storage pool thread".to_owned());
+        }
+        let _serial = self
+            .drain_serial
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        {
+            let state = self.lock_state();
+            if !state.admission_open || state.closed || state.initialization_file.is_none() {
+                return Err(
+                    "only an unpublished live initialization may close its readers".to_owned(),
+                );
+            }
+            let readers = state
+                .readers
+                .as_ref()
+                .ok_or_else(|| "initialization readers have already closed".to_owned())?;
+            // Fence both general and reserved health acquisitions before
+            // checking for the last retained snapshot.
+            readers.begin_shutdown_drain();
+        }
+        let started = Instant::now();
+        loop {
+            let mut state = self.lock_state();
+            if state.file_lost {
+                return Err(
+                    "SQLite initialization lost its database while draining readers".to_owned(),
+                );
+            }
+            let quiescent = state.readers.as_ref().is_some_and(ReaderPool::is_quiescent);
+            if quiescent && let Some(readers) = state.readers.take() {
+                match readers.try_into_shutdown() {
+                    Ok(readers) => {
+                        state.workers_closing = true;
+                        drop(state);
+                        // Exclusive ownership fences late weak upgrades before
+                        // joining. Keep every file pin until the joins finish.
+                        readers.join();
+                        let mut state = self.lock_state();
+                        state.workers_closing = false;
+                        if state.file_lost {
+                            return Err(
+                                "SQLite initialization lost its database while joining readers"
+                                    .to_owned(),
+                            );
+                        }
+                        return Ok(());
+                    }
+                    Err(readers) => state.readers = Some(readers),
+                }
+            }
+            if started.elapsed() >= ATTACHMENT_DRAIN_TIMEOUT {
+                // Keep the draining readers owned by the attachment so its
+                // ordinary failure teardown can still join every worker.
+                return Err(format!(
+                    "initialization readers did not quiesce within {ATTACHMENT_DRAIN_TIMEOUT:?}"
+                ));
+            }
+            drop(state);
+            thread::sleep(ATTACHMENT_DRAIN_POLL);
+        }
+    }
+
     pub fn commit_initialization(&self) -> Result<(), String> {
         let mut state = self.lock_state();
+        if !state.admission_open || state.closed {
+            return Err("repository initialization is no longer open".to_owned());
+        }
         let opened = state
             .initialization_file
             .as_ref()
@@ -494,6 +640,29 @@ impl RepositoryRuntimePhysicalAttachment {
         Ok(())
     }
 
+    /// Hands the exclusive original reservations to the publisher after all
+    /// SQLite workers have exited. No raw descriptor is closed during a live
+    /// POSIX SQLite transaction.
+    pub fn close_pinned_initialization(
+        &self,
+    ) -> Result<(std::fs::File, [std::fs::File; 3]), String> {
+        self.commit_initialization()?;
+        self.drain()?;
+        let files = {
+            let state = self.lock_state();
+            if state.file_lost {
+                return Err("initial schema lost its database generation".to_owned());
+            }
+            state
+                .retained_file_pin
+                .as_ref()
+                .and_then(OpenedDatabaseFile::take_completed_files)
+                .ok_or_else(|| "initial schema has no original sidecar reservations".to_owned())?
+        };
+        self.close_and_join()?;
+        Ok(files)
+    }
+
     pub fn abort_initialization(&self) -> Result<(), String> {
         self.drain()?;
         self.close_and_join()?;
@@ -501,9 +670,24 @@ impl RepositoryRuntimePhysicalAttachment {
         let Some(opened) = state.initialization_file.take() else {
             return Ok(());
         };
-        opened
-            .discard_created(&state.database_path)
-            .map_err(|error| error.to_string())
+        // Aborting publication does not prove ownership of any current
+        // pathname. Preserve the database and every sidecar, just as on a
+        // worker-start failure; another process may have replaced them.
+        tracing::warn!(
+            path = %state.database_path.display(),
+            "aborted SQLite initialization preserved its database and sidecars"
+        );
+        if state.file_lost {
+            // Drain can finish while a lost-file worker is still returning.
+            // Reuse the ordinary lost-worker teardown rather than closing a
+            // raw descriptor that could discard that worker's POSIX locks.
+            state.retained_file_pin = Some(opened);
+            drop(state);
+            let _ = self.lost_file_closed();
+        } else {
+            opened.release_after_workers_exit();
+        }
+        Ok(())
     }
 
     pub fn exact_sql_handle(&self) -> Result<ExactSqlHandle, ExactSqlError> {
@@ -581,7 +765,6 @@ impl RepositoryRuntimePhysicalAttachment {
 
     pub async fn dispatch_submit(
         &self,
-        cx: &Cx,
         request: RuntimeSubmitRequestV1,
         probe: Arc<dyn RuntimeRequestProbeV1>,
         authority: Arc<dyn RuntimeWriteAuthority>,
@@ -602,7 +785,7 @@ impl RepositoryRuntimePhysicalAttachment {
                 .ok_or(RepositoryDispatchError::Closed)?
         };
         writer
-            .submit_authorized(cx, request, probe, authority)
+            .submit_authorized(request, probe, authority)
             .await
             .map_err(|error| match error {
                 WriterActorError::StorageFailure(error) => {
@@ -614,7 +797,6 @@ impl RepositoryRuntimePhysicalAttachment {
 
     pub async fn run_bounded_incremental_compaction(
         &self,
-        cx: &Cx,
         max_pages: u32,
         authority: Arc<dyn RuntimeWriteAuthority>,
     ) -> Result<(), RepositoryDispatchError> {
@@ -629,14 +811,13 @@ impl RepositoryRuntimePhysicalAttachment {
                 .ok_or(RepositoryDispatchError::Closed)?
         };
         writer
-            .bounded_incremental_vacuum(cx, max_pages, authority)
+            .bounded_incremental_vacuum(max_pages, authority)
             .await
-            .map_err(|error| RepositoryDispatchError::Writer(error.to_string()))
+            .map_err(compaction_dispatch_error)
     }
 
     pub async fn run_checkpoint(
         &self,
-        cx: &Cx,
         request: CheckpointRequest,
         authority: Arc<dyn RuntimeWriteAuthority>,
     ) -> Result<CheckpointOutcome, RepositoryDispatchError> {
@@ -655,7 +836,7 @@ impl RepositoryRuntimePhysicalAttachment {
             .trigger_authorized(request, authority)
             .map_err(|error| RepositoryDispatchError::Writer(error.to_string()))?;
         ticket
-            .wait(cx)
+            .wait()
             .await
             .map_err(|error| RepositoryDispatchError::Writer(error.to_string()))
     }
@@ -716,6 +897,9 @@ impl RepositoryRuntimePhysicalAttachment {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let mut state = self.lock_state();
+        if let Some(message) = &state.close_failure {
+            return Err(message.clone());
+        }
         if state.closed {
             return Ok(());
         }
@@ -732,15 +916,32 @@ impl RepositoryRuntimePhysicalAttachment {
         drop(state);
 
         let started = Instant::now();
-        loop {
-            let state = self.lock_state();
+        let (writer, readers) = loop {
+            let mut state = self.lock_state();
             let writer_quiescent = state.writer.as_ref().is_none_or(|writer| {
                 Arc::strong_count(writer) == 1
                     && writer.telemetry_snapshot().queue.queued_operations == 0
             });
             let readers_quiescent = state.readers.as_ref().is_none_or(ReaderPool::is_quiescent);
             if writer_quiescent && readers_quiescent {
-                break;
+                match state.writer.take().map(Arc::try_unwrap).transpose() {
+                    Ok(writer) => match state
+                        .readers
+                        .take()
+                        .map(ReaderPool::try_into_shutdown)
+                        .transpose()
+                    {
+                        Ok(readers) => {
+                            state.workers_closing = true;
+                            break (writer, readers);
+                        }
+                        Err(readers) => {
+                            state.writer = writer.map(Arc::new);
+                            state.readers = Some(readers);
+                        }
+                    },
+                    Err(writer) => state.writer = Some(writer),
+                }
             }
             if started.elapsed() >= ATTACHMENT_DRAIN_TIMEOUT {
                 let queued = state.writer.as_ref().map_or(0, |writer| {
@@ -756,27 +957,29 @@ impl RepositoryRuntimePhysicalAttachment {
             }
             drop(state);
             thread::sleep(ATTACHMENT_DRAIN_POLL);
-        }
-
-        let mut state = self.lock_state();
-        let writer = match state.writer.take().map(Arc::try_unwrap).transpose() {
-            Ok(writer) => writer,
-            Err(writer) => {
-                state.writer = Some(writer);
-                return Err("repository writer is still serving a request".to_owned());
-            }
         };
-        let readers = state.readers.take();
-        drop(state);
-        drop(readers);
-        if let Some(writer) = writer
-            && let Err(error) = writer.shutdown_and_join()
+
+        #[cfg(test)]
         {
+            let hook = self.lock_state().before_worker_join.take();
+            if let Some(hook) = hook {
+                hook();
+            }
+        }
+        if let Some(readers) = readers {
+            readers.join();
+        }
+        // Neither the joins nor the writer's lost-file callback run under the
+        // attachment lock. Health checks still see their in-flight ownership.
+        let joined = writer.map_or(Ok(()), PersistentWriter::shutdown_and_join);
+        let mut state = self.lock_state();
+        state.workers_closing = false;
+        if let Err(error) = joined {
             let message = format!("join repository writer: {error}");
-            self.lock_state().close_failure = Some(message.clone());
+            state.close_failure = Some(message.clone());
             return Err(message);
         }
-        self.lock_state().drained = true;
+        state.drained = true;
         Ok(())
     }
 
@@ -792,7 +995,7 @@ impl RepositoryRuntimePhysicalAttachment {
         if state.admission_open {
             return Err("repository physical attachment must drain before close".to_owned());
         }
-        if !state.drained {
+        if !state.drained || state.workers_closing {
             return Err("repository physical attachment has not completed drain".to_owned());
         }
         if state.writer.is_some() || state.readers.is_some() {
@@ -835,12 +1038,24 @@ impl Drop for RepositoryRuntimePhysicalAttachment {
     }
 }
 
+// Only a failed SQLite vacuum or saturated maintenance channel is deferrable.
+// A lost writer, revoked authority or failed reply is fatal to admission.
+fn compaction_dispatch_error(error: WriterActorError) -> RepositoryDispatchError {
+    match error {
+        WriterActorError::IncrementalVacuumBusy | WriterActorError::IncrementalVacuumNoSpace => {
+            RepositoryDispatchError::CompactionDeferred(error.to_string())
+        }
+        other => RepositoryDispatchError::Writer(other.to_string()),
+    }
+}
+
 #[derive(Debug)]
 pub enum RepositoryDispatchError {
     Closed,
     Reader(ReaderAcquireError),
     ReaderWorker(String),
     Writer(String),
+    CompactionDeferred(String),
     WriterRuntime(StorageRuntimeErrorV1),
 }
 
@@ -851,6 +1066,9 @@ impl fmt::Display for RepositoryDispatchError {
             Self::Reader(error) => write!(formatter, "repository read failed: {error}"),
             Self::ReaderWorker(error) => write!(formatter, "repository snapshot failed: {error}"),
             Self::Writer(error) => write!(formatter, "repository write failed: {error}"),
+            Self::CompactionDeferred(reason) => {
+                write!(formatter, "SQLite compaction deferred: {reason}")
+            }
             Self::WriterRuntime(error) => write!(formatter, "repository write failed: {error}"),
         }
     }
@@ -860,7 +1078,10 @@ impl Error for RepositoryDispatchError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
             Self::Reader(error) => Some(error),
-            Self::Closed | Self::ReaderWorker(_) | Self::Writer(_) => None,
+            Self::Closed
+            | Self::ReaderWorker(_)
+            | Self::Writer(_)
+            | Self::CompactionDeferred(_) => None,
             Self::WriterRuntime(error) => Some(error),
         }
     }
@@ -955,36 +1176,64 @@ fn infrastructure(operation: impl Into<String>) -> StorageRuntimeErrorV1 {
 
 #[cfg(test)]
 mod tests {
+    mod shutdown;
+
     use std::{fs, sync::mpsc, thread, time::Duration};
 
     use tempfile::TempDir;
     use tracedecay_domain::LocatorDigest;
     use tracedecay_store::{AdmissionConfigV1, StoreIncarnationV1};
 
+    #[cfg(unix)]
+    use crate::connection::path_identity_tests::probe_external_connection;
     use crate::exact_sql::{ExactSqlError, ExactSqlStatement, ExactSqlValue};
 
-    use asupersync::channel::watch;
+    use tokio::sync::watch;
 
     use super::*;
 
-    fn native_runtime() -> RuntimeHandle {
-        crate::native_runtime::handle().expect("native runtime")
-    }
-
-    fn cx() -> Cx {
-        crate::native_runtime::cx().expect("native runtime context")
+    #[test]
+    fn vacuum_dispatch_does_not_hide_writer_or_authority_failure() {
+        let revoked = compaction_dispatch_error(WriterActorError::AuthorityDenied {
+            stage: crate::RuntimeWriteAuthorityStage::BeforeAdmission,
+        });
+        assert!(
+            matches!(revoked, RepositoryDispatchError::Writer(_)),
+            "lost write authority must deny admission"
+        );
+        let closed = compaction_dispatch_error(WriterActorError::ReplyDropped);
+        assert!(
+            matches!(closed, RepositoryDispatchError::Writer(_)),
+            "a stopped writer must deny admission"
+        );
+        let blocked = compaction_dispatch_error(WriterActorError::IncrementalVacuumBusy);
+        assert!(
+            matches!(blocked, RepositoryDispatchError::CompactionDeferred(_)),
+            "an occupied maintenance queue or busy SQLite transaction may defer"
+        );
+        let disk_full = compaction_dispatch_error(WriterActorError::IncrementalVacuumNoSpace);
+        assert!(
+            matches!(disk_full, RepositoryDispatchError::CompactionDeferred(_)),
+            "an optional vacuum must not turn disk pressure into a store-open failure"
+        );
+        let sqlite = compaction_dispatch_error(WriterActorError::IncrementalVacuumFailed(
+            "database is read-only".to_owned(),
+        ));
+        assert!(
+            matches!(sqlite, RepositoryDispatchError::Writer(_)),
+            "database and worker failures must deny admission"
+        );
     }
 
     async fn wait_for<T>(
-        cx: &Cx,
         receiver: &mut watch::Receiver<T>,
         mut predicate: impl FnMut(&T) -> bool,
-    ) -> Result<(), watch::RecvError> {
+    ) -> Result<(), watch::error::RecvError> {
         loop {
             if predicate(&receiver.borrow_and_update()) {
                 return Ok(());
             }
-            receiver.changed(cx).await?;
+            receiver.changed().await?;
         }
     }
 
@@ -1026,6 +1275,687 @@ mod tests {
             .unwrap();
     }
 
+    #[test]
+    fn initialization_reader_shutdown_releases_pinned_wal_snapshot_before_finalization() {
+        let directory = TempDir::new().unwrap();
+        let path = directory.path().join("schema.sqlite3");
+        let binding = binding();
+        let attachment = Arc::new(
+            RepositoryPhysicalAttachmentFactory
+                .start_reserved_initialization(
+                    binding.clone(),
+                    locator(&binding),
+                    path.clone(),
+                    AdmissionConfigV1::default(),
+                    None,
+                )
+                .unwrap(),
+        );
+        let handle = attachment.exact_sql_handle().unwrap();
+        handle
+            .execute_batch(
+                "CREATE TABLE durable (value INTEGER NOT NULL); INSERT INTO durable VALUES (1)"
+                    .to_owned(),
+            )
+            .unwrap();
+        let snapshot = handle.begin_read_snapshot(Duration::from_secs(1)).unwrap();
+        snapshot
+            .query(statement("SELECT COUNT(*) FROM durable", vec![]))
+            .unwrap();
+        handle
+            .execute_batch("INSERT INTO durable VALUES (2)".to_owned())
+            .unwrap();
+
+        let (started_tx, started_rx) = mpsc::sync_channel(1);
+        let (finished_tx, finished_rx) = mpsc::sync_channel(1);
+        let closing = Arc::clone(&attachment);
+        let join = thread::spawn(move || {
+            started_tx.send(()).unwrap();
+            finished_tx
+                .send(closing.close_initialization_readers())
+                .unwrap();
+        });
+        started_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert!(
+            matches!(
+                finished_rx.recv_timeout(Duration::from_millis(50)),
+                Err(mpsc::RecvTimeoutError::Timeout)
+            ),
+            "a live SQLite read snapshot must hold finalization's reader fence"
+        );
+        drop(snapshot);
+        assert_eq!(
+            finished_rx.recv_timeout(Duration::from_secs(10)).unwrap(),
+            Ok(())
+        );
+        join.join().unwrap();
+
+        assert!(
+            handle
+                .begin_read_snapshot(Duration::from_millis(50))
+                .is_err(),
+            "no reader may reopen between the final checkpoint and publication"
+        );
+        assert!(
+            attachment.snapshot().writer_present,
+            "the serialized SQLite writer must outlive its readers"
+        );
+        let files = attachment.close_pinned_initialization().unwrap();
+        drop(files);
+        let reopened = rusqlite::Connection::open(&path).unwrap();
+        let rows: i64 = reopened
+            .query_row("SELECT COUNT(*) FROM durable", [], |row| row.get(0))
+            .unwrap();
+        let integrity: String = reopened
+            .query_row("PRAGMA integrity_check", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(rows, 2);
+        assert_eq!(integrity, "ok");
+    }
+
+    #[test]
+    fn abort_initialization_preserves_committed_bytes_and_releases_shared_pins() {
+        let directory = TempDir::new().unwrap();
+        let path = directory.path().join("aborted.sqlite3");
+        let binding = binding();
+        let attachment = RepositoryPhysicalAttachmentFactory
+            .start_reserved_initialization(
+                binding.clone(),
+                locator(&binding),
+                path.clone(),
+                AdmissionConfigV1::default(),
+                None,
+            )
+            .unwrap();
+        let held_pin = attachment
+            .lock_state()
+            .initialization_file
+            .as_ref()
+            .unwrap()
+            .try_clone()
+            .unwrap();
+        let handle = attachment.exact_sql_handle().unwrap();
+        handle
+            .execute_batch("CREATE TABLE abort_probe (value INTEGER)".to_owned())
+            .unwrap();
+        handle
+            .execute(statement("INSERT INTO abort_probe VALUES (42)", vec![]))
+            .unwrap();
+
+        attachment.abort_initialization().unwrap();
+        assert!(
+            path.is_file(),
+            "abort must not unlink the initialized store"
+        );
+        assert!(held_pin.try_clone().is_err());
+        {
+            let state = attachment.lock_state();
+            assert!(state.closed && state.drained);
+            assert!(state.initialization_file.is_none());
+            assert!(state.retained_file_pin.is_none());
+        }
+        assert!(attachment.commit_initialization().is_err());
+        assert_eq!(
+            handle
+                .execute(statement("INSERT INTO abort_probe VALUES (99)", vec![]))
+                .unwrap_err(),
+            ExactSqlError::WriterUnavailable
+        );
+        let reopened = rusqlite::Connection::open_with_flags(
+            &path,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .unwrap();
+        assert_eq!(
+            reopened
+                .query_row("SELECT value FROM abort_probe", [], |row| {
+                    row.get::<_, i64>(0)
+                })
+                .unwrap(),
+            42
+        );
+        assert_eq!(
+            reopened
+                .query_row("PRAGMA integrity_check", [], |row| row.get::<_, String>(0))
+                .unwrap(),
+            "ok"
+        );
+        drop(reopened);
+        let preserved = fs::read(&path).unwrap();
+        attachment.abort_initialization().unwrap();
+        drop(attachment);
+        assert_eq!(fs::read(&path).unwrap(), preserved);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn abort_initialization_preserves_foreign_cross_process_replacements() {
+        let directory = TempDir::new().unwrap();
+        let path = directory.path().join("aborted.sqlite3");
+        let binding = binding();
+        let attachment = RepositoryPhysicalAttachmentFactory
+            .start_reserved_initialization(
+                binding.clone(),
+                locator(&binding),
+                path.clone(),
+                AdmissionConfigV1::default(),
+                None,
+            )
+            .unwrap();
+        let held_pin = attachment
+            .lock_state()
+            .initialization_file
+            .as_ref()
+            .unwrap()
+            .try_clone()
+            .unwrap();
+        attachment.drain().unwrap();
+        attachment.close_and_join().unwrap();
+        assert!(attachment.commit_initialization().is_err());
+        let original = fs::read(&path).unwrap();
+        // SQLite has finished with these fixture files. Populate all three
+        // names so the separate process replaces real inodes, not absences.
+        for suffix in ["-wal", "-shm", "-journal"] {
+            let mut sidecar = path.as_os_str().to_os_string();
+            sidecar.push(suffix);
+            fs::write(std::path::Path::new(&sidecar), b"owned fixture").unwrap();
+        }
+        let (_, module) = module_path!().split_once("::").unwrap();
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                &format!("{module}::failed_initialization_foreign_replacement_child"),
+                "--nocapture",
+            ])
+            .env("TRACEDECAY_FAILED_SQLITE_REPLACEMENT", &path)
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            output.status.success()
+                && stdout.contains("1 passed")
+                && stdout.contains("foreign-sqlite-replacement-complete"),
+            "separate-process replacement failed: {stdout} {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        attachment.abort_initialization().unwrap();
+        assert!(held_pin.try_clone().is_err());
+        attachment.abort_initialization().unwrap();
+        drop(attachment);
+        assert_eq!(fs::read(&path).unwrap(), b"foreign database");
+        assert_eq!(fs::read(path.with_extension("owned")).unwrap(), original);
+        for suffix in ["-wal", "-shm", "-journal"] {
+            let mut sidecar = path.as_os_str().to_os_string();
+            sidecar.push(suffix);
+            assert_eq!(
+                fs::read(std::path::Path::new(&sidecar)).unwrap(),
+                format!("foreign {suffix}").as_bytes()
+            );
+            sidecar.push(".owned");
+            assert_eq!(
+                fs::read(std::path::Path::new(&sidecar)).unwrap(),
+                b"owned fixture"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn abort_initialization_retains_the_pin_until_a_lost_writer_exits() {
+        let directory = TempDir::new().unwrap();
+        let path = directory.path().join("lost-initialization.sqlite3");
+        let binding = binding();
+        let attachment = RepositoryPhysicalAttachmentFactory
+            .start_reserved_initialization(
+                binding.clone(),
+                locator(&binding),
+                path.clone(),
+                AdmissionConfigV1::default(),
+                None,
+            )
+            .unwrap();
+        let held_pin = attachment
+            .lock_state()
+            .initialization_file
+            .as_ref()
+            .unwrap()
+            .try_clone()
+            .unwrap();
+        let (hold, held) = mpsc::channel::<()>();
+        attachment.lock_state().after_lost_notice = Some(Box::new(move || {
+            let _ = held.recv();
+        }));
+        fs::remove_file(&path).unwrap();
+        let deadline = Instant::now() + crate::FILE_PROBE_INTERVAL + Duration::from_secs(10);
+        while !attachment
+            .lock_state()
+            .lost_readers
+            .as_ref()
+            .is_some_and(ReaderPool::workers_exited)
+        {
+            assert!(Instant::now() < deadline, "lost readers never exited");
+            thread::sleep(Duration::from_millis(20));
+        }
+        assert!(attachment.file_lost());
+        attachment.abort_initialization().unwrap();
+        assert!(attachment.lock_state().initialization_file.is_none());
+        assert!(attachment.lock_state().retained_file_pin.is_some());
+        assert!(held_pin.try_clone().is_ok());
+        assert!(!attachment.lost_file_closed());
+
+        hold.send(()).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while attachment.lock_state().retained_file_pin.is_some() {
+            let _ = attachment.snapshot();
+            assert!(Instant::now() < deadline, "lost initialization pin leaked");
+            thread::sleep(Duration::from_millis(5));
+        }
+        assert!(attachment.lost_file_closed());
+        assert!(held_pin.try_clone().is_err());
+    }
+
+    #[test]
+    fn malformed_existing_sqlite_refuses_before_touching_sidecars() {
+        let binding = binding();
+        for size in [512_usize, 513, 1025, 4096] {
+            for suffix in ["-wal", "-shm", "-journal"] {
+                let directory = TempDir::new().unwrap();
+                let path = directory.path().join("sessions.db");
+                let mut bytes = vec![0_u8; size];
+                bytes[..16].copy_from_slice(b"SQLite format 3\0");
+                fs::write(&path, &bytes).unwrap();
+
+                let mut sidecar = path.as_os_str().to_os_string();
+                sidecar.push(suffix);
+                let sidecar = PathBuf::from(sidecar);
+                let sentinel = format!("foreign {suffix} bytes");
+                fs::write(&sidecar, sentinel.as_bytes()).unwrap();
+
+                let result = RepositoryPhysicalAttachmentFactory.attach(
+                    binding.clone(),
+                    locator(&binding),
+                    path.clone(),
+                    AdmissionConfigV1::default(),
+                );
+                assert!(matches!(
+                    result,
+                    Err(RepositoryAttachmentStartError::Identity(
+                        OpenedDatabaseFileError::InvalidHeader
+                    ))
+                ));
+                assert_eq!(fs::read(&path).unwrap(), bytes);
+                assert_eq!(fs::read(&sidecar).unwrap(), sentinel.as_bytes());
+            }
+        }
+    }
+
+    /// The factory must refuse foreign sidecars before starting SQLite, and a
+    /// failed first creation must not become an existing database on retry.
+    /// Test the actual attachment entry points rather than just the pin helper.
+    #[test]
+    fn occupied_sidecar_refuses_initialization_and_existing_attachment_retries() {
+        let binding = binding();
+        for suffix in ["-wal", "-shm", "-journal"] {
+            let directory = TempDir::new().unwrap();
+            let path = directory.path().join("sessions.db");
+            let mut sidecar = path.as_os_str().to_os_string();
+            sidecar.push(suffix);
+            let sidecar = PathBuf::from(sidecar);
+            let sentinel = format!("unowned {suffix} content");
+            fs::write(&sidecar, sentinel.as_bytes()).unwrap();
+
+            let initialized = RepositoryPhysicalAttachmentFactory.start_reserved_initialization(
+                binding.clone(),
+                locator(&binding),
+                path.clone(),
+                AdmissionConfigV1::default(),
+                None,
+            );
+            assert!(matches!(
+                initialized,
+                Err(RepositoryInitializationStartFailure {
+                    error: RepositoryAttachmentStartError::Identity(
+                        OpenedDatabaseFileError::Reserve
+                    ),
+                    files: None,
+                })
+            ));
+            assert_eq!(fs::metadata(&path).unwrap().len(), 0);
+            assert_eq!(fs::read(&sidecar).unwrap(), sentinel.as_bytes());
+
+            let existing = RepositoryPhysicalAttachmentFactory.attach(
+                binding.clone(),
+                locator(&binding),
+                path.clone(),
+                AdmissionConfigV1::default(),
+            );
+            assert!(matches!(
+                existing,
+                Err(RepositoryAttachmentStartError::Identity(
+                    OpenedDatabaseFileError::InvalidHeader
+                ))
+            ));
+            let read_only = RepositoryPhysicalAttachmentFactory.attach_read_only(
+                binding.clone(),
+                locator(&binding),
+                path.clone(),
+                AdmissionConfigV1::default(),
+            );
+            assert!(matches!(
+                read_only,
+                Err(RepositoryAttachmentStartError::Identity(
+                    OpenedDatabaseFileError::InvalidHeader
+                ))
+            ));
+            assert_eq!(fs::metadata(&path).unwrap().len(), 0);
+            assert_eq!(fs::read(&sidecar).unwrap(), sentinel.as_bytes());
+        }
+    }
+
+    #[test]
+    fn reader_start_failure_returns_idle_initialization_files_for_retry() {
+        use std::process::Command;
+
+        const CHILD: &str = "TRACEDECAY_TEST_SQLITE_READER_START_LIMIT";
+        if std::env::var_os(CHILD).is_none() {
+            let name = format!(
+                "{}::reader_start_failure_returns_idle_initialization_files_for_retry",
+                module_path!().split_once("::").unwrap().1
+            );
+            let result = Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", &name, "--nocapture"])
+                .env(CHILD, "1")
+                .output()
+                .unwrap();
+            assert!(
+                result.status.success()
+                    && String::from_utf8_lossy(&result.stdout).contains("1 passed"),
+                "{} {}",
+                String::from_utf8_lossy(&result.stdout),
+                String::from_utf8_lossy(&result.stderr)
+            );
+            return;
+        }
+        // Bundled SQLite may default process-wide allocation tracking off.
+        // This isolated child has not opened SQLite yet.
+        // SAFETY: SQLITE_CONFIG_MEMSTATUS consumes a single C int.
+        let configured =
+            unsafe { rusqlite::ffi::sqlite3_config(rusqlite::ffi::SQLITE_CONFIG_MEMSTATUS, 1_i32) };
+        assert_eq!(configured, rusqlite::ffi::SQLITE_OK);
+        let directory = TempDir::new().unwrap();
+        let path = directory.path().join("sessions.db");
+        let binding = binding();
+
+        let files = OpenedDatabaseFile::create_new(&path).unwrap();
+        let factory = RepositoryPhysicalAttachmentFactory;
+        let outcome = start_with_reserved_files(files, |worker_pin| {
+            factory.attach_opened(
+                binding.clone(),
+                locator(&binding),
+                path.clone(),
+                AdmissionConfigV1::default(),
+                worker_pin,
+                true,
+                &mut |stage| {
+                    // SQLite's process-wide supported memory ceiling makes the
+                    // next reader open report SQLITE_NOMEM. The writer has
+                    // already reported successful startup in this isolated process.
+                    if stage == AttachmentWorkerStartStage::BeforeReaders {
+                        // SAFETY: sqlite3_hard_heap_limit64 takes no pointers.
+                        unsafe {
+                            rusqlite::ffi::sqlite3_hard_heap_limit64(1);
+                        }
+                    } else if stage == AttachmentWorkerStartStage::AfterReaders {
+                        // SAFETY: zero disables the limit before worker shutdown.
+                        unsafe {
+                            rusqlite::ffi::sqlite3_hard_heap_limit64(0);
+                        }
+                    }
+                },
+            )
+        });
+        let failure = match outcome {
+            Ok(_) => panic!("reader started under exhausted SQLite budget"),
+            Err(error) => error,
+        };
+        assert!(
+            matches!(failure.error, RepositoryAttachmentStartError::Reader(_)),
+            "{}",
+            failure.error
+        );
+        let mut cause: &(dyn Error + 'static) = &failure.error;
+        while let Some(next) = cause.source() {
+            if cause.is::<rusqlite::Error>() {
+                break;
+            }
+            cause = next;
+        }
+        assert_eq!(
+            cause
+                .downcast_ref::<rusqlite::Error>()
+                .and_then(rusqlite::Error::sqlite_error_code),
+            Some(rusqlite::ErrorCode::OutOfMemory)
+        );
+        let (identity, files) = failure
+            .files
+            .expect("writer and readers returned all original file handles");
+        let reopened = factory
+            .start_reserved_initialization(
+                binding.clone(),
+                locator(&binding),
+                path.clone(),
+                AdmissionConfigV1::default(),
+                Some(files),
+            )
+            .unwrap();
+        assert!(reopened.snapshot().healthy);
+        assert_eq!(reopened.opened_file_identity(), identity);
+        reopened.drain().unwrap();
+        reopened.close_and_join().unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn reserved_sidecar_substitution_child() {
+        let Some(path) = std::env::var_os("TRACEDECAY_RESERVED_SIDECAR_SUBSTITUTION") else {
+            return;
+        };
+        let suffix = std::env::var("TRACEDECAY_RESERVED_SIDECAR_SUFFIX").unwrap();
+        let path = std::path::PathBuf::from(path);
+        let mut sidecar = path.as_os_str().to_os_string();
+        sidecar.push(&suffix);
+        let sidecar = std::path::PathBuf::from(sidecar);
+        let mut owned = sidecar.as_os_str().to_os_string();
+        owned.push(".owned");
+        fs::rename(&sidecar, std::path::PathBuf::from(owned)).unwrap();
+        fs::write(&sidecar, format!("foreign {suffix}")).unwrap();
+        println!("reserved-sidecar-substitution-complete");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn initialization_refuses_cross_process_sidecar_substitution_and_retries() {
+        for suffix in ["-wal", "-shm", "-journal"] {
+            let directory = TempDir::new().unwrap();
+            let path = directory.path().join("sessions.db");
+            let binding = binding();
+
+            let files = OpenedDatabaseFile::create_new(&path).unwrap();
+            let factory = RepositoryPhysicalAttachmentFactory;
+            let outcome = start_with_reserved_files(files, |worker_pin| {
+                factory.attach_opened(
+                    binding.clone(),
+                    locator(&binding),
+                    path.clone(),
+                    AdmissionConfigV1::default(),
+                    worker_pin,
+                    true,
+                    &mut |stage| {
+                        if stage != AttachmentWorkerStartStage::BeforeWriter {
+                            return;
+                        }
+                        let name = format!(
+                            "{}::reserved_sidecar_substitution_child",
+                            module_path!().split_once("::").unwrap().1
+                        );
+                        let output = std::process::Command::new(std::env::current_exe().unwrap())
+                            .args(["--exact", &name, "--nocapture"])
+                            .env("TRACEDECAY_RESERVED_SIDECAR_SUBSTITUTION", &path)
+                            .env("TRACEDECAY_RESERVED_SIDECAR_SUFFIX", suffix)
+                            .output()
+                            .unwrap();
+                        assert!(
+                            output.status.success()
+                                && String::from_utf8_lossy(&output.stdout)
+                                    .contains("reserved-sidecar-substitution-complete"),
+                            "sidecar substitution failed: {} {}",
+                            String::from_utf8_lossy(&output.stdout),
+                            String::from_utf8_lossy(&output.stderr)
+                        );
+                    },
+                )
+            });
+            let failure = match outcome {
+                Ok(_) => panic!("{suffix} substitution passed SQLite attachment startup"),
+                Err(error) => error,
+            };
+            assert!(
+                matches!(
+                    &failure.error,
+                    RepositoryAttachmentStartError::Writer(
+                        WriterStartError::OpenedDatabaseIdentity(OpenedDatabaseFileError::Replaced)
+                    )
+                ),
+                "{suffix}: {}",
+                failure.error
+            );
+            let (_, files) = failure.files.expect("failed workers returned reservations");
+
+            let mut sidecar = path.as_os_str().to_os_string();
+            sidecar.push(suffix);
+            let sidecar = std::path::PathBuf::from(sidecar);
+            assert_eq!(
+                fs::read(&sidecar).unwrap(),
+                format!("foreign {suffix}").as_bytes(),
+                "SQLite opened or overwrote the substituted sidecar before refusal"
+            );
+            let mut owned = sidecar.as_os_str().to_os_string();
+            owned.push(".owned");
+            let owned = std::path::PathBuf::from(owned);
+            assert!(owned.is_file());
+            fs::remove_file(&sidecar).unwrap();
+            fs::rename(&owned, &sidecar).unwrap();
+
+            let reopened = factory
+                .start_reserved_initialization(
+                    binding.clone(),
+                    locator(&binding),
+                    path.clone(),
+                    AdmissionConfigV1::default(),
+                    Some(files),
+                )
+                .expect("restoring the reserved inode permits initialization retry");
+            assert!(reopened.snapshot().healthy);
+            reopened.abort_initialization().unwrap();
+        }
+    }
+
+    #[test]
+    fn failed_initialization_preserves_created_database_and_sidecars() {
+        let directory = TempDir::new().unwrap();
+        let path = directory.path().join("failed.db");
+        let opened = OpenedDatabaseFile::create_new(&path).unwrap();
+        let error = repository_start_failure(
+            opened,
+            &path,
+            true,
+            RepositoryAttachmentStartError::Identity(OpenedDatabaseFileError::Inspect),
+        );
+        assert!(matches!(
+            error,
+            RepositoryAttachmentStartError::Identity(OpenedDatabaseFileError::Inspect)
+        ));
+        assert!(path.is_file());
+        for suffix in ["-wal", "-shm", "-journal"] {
+            let mut sidecar = path.as_os_str().to_os_string();
+            sidecar.push(suffix);
+            assert!(std::path::Path::new(&sidecar).is_file());
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn failed_initialization_foreign_replacement_child() {
+        let Some(path) = std::env::var_os("TRACEDECAY_FAILED_SQLITE_REPLACEMENT") else {
+            return;
+        };
+        let path = std::path::PathBuf::from(path);
+        fs::rename(&path, path.with_extension("owned")).unwrap();
+        fs::write(&path, b"foreign database").unwrap();
+        for suffix in ["-wal", "-shm", "-journal"] {
+            let mut sidecar = path.as_os_str().to_os_string();
+            sidecar.push(suffix);
+            let sidecar = std::path::PathBuf::from(sidecar);
+            let mut displaced = sidecar.as_os_str().to_os_string();
+            displaced.push(".owned");
+            fs::rename(&sidecar, std::path::PathBuf::from(displaced)).unwrap();
+            fs::write(&sidecar, format!("foreign {suffix}")).unwrap();
+        }
+        println!("foreign-sqlite-replacement-complete");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn failed_initialization_cannot_delete_foreign_cross_process_replacements() {
+        let directory = TempDir::new().unwrap();
+        let path = directory.path().join("failed.db");
+        let opened = OpenedDatabaseFile::create_new(&path).unwrap();
+        let (_, module) = module_path!().split_once("::").unwrap();
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                &format!("{module}::failed_initialization_foreign_replacement_child"),
+                "--nocapture",
+            ])
+            .env("TRACEDECAY_FAILED_SQLITE_REPLACEMENT", &path)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success()
+                && String::from_utf8_lossy(&output.stdout)
+                    .contains("foreign-sqlite-replacement-complete"),
+            "separate-process filesystem replacement failed: {} {}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        let error = repository_start_failure(
+            opened,
+            &path,
+            true,
+            RepositoryAttachmentStartError::Identity(OpenedDatabaseFileError::Inspect),
+        );
+        assert!(matches!(
+            error,
+            RepositoryAttachmentStartError::Identity(OpenedDatabaseFileError::Inspect)
+        ));
+        assert_eq!(fs::read(&path).unwrap(), b"foreign database");
+        assert!(path.with_extension("owned").is_file());
+        for suffix in ["-wal", "-shm", "-journal"] {
+            let mut sidecar = path.as_os_str().to_os_string();
+            sidecar.push(suffix);
+            let sidecar = std::path::PathBuf::from(sidecar);
+            assert_eq!(
+                fs::read(&sidecar).unwrap(),
+                format!("foreign {suffix}").as_bytes()
+            );
+            let mut displaced = sidecar.as_os_str().to_os_string();
+            displaced.push(".owned");
+            assert!(std::path::Path::new(&displaced).is_file());
+        }
+    }
+
     /// Unix-only: on Windows the writer's pin denies the swap-back rename
     /// outright, so this race cannot occur there;
     /// `connection::tests::windows_pinned_file_blocks_replacement_until_authority_closes`
@@ -1042,7 +1972,6 @@ mod tests {
         let path = path.canonicalize().unwrap();
         let binding = binding();
         let result = RepositoryPhysicalAttachmentFactory.attach_with_start_hook(
-            &native_runtime(),
             binding.clone(),
             locator(&binding),
             path.clone(),
@@ -1113,13 +2042,104 @@ mod tests {
         create_identity_database(&path, "seed");
         RepositoryPhysicalAttachmentFactory
             .attach(
-                &native_runtime(),
                 binding.clone(),
                 locator(binding),
                 path.canonicalize().unwrap(),
                 AdmissionConfigV1::default(),
             )
             .unwrap()
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn existing_physical_attachments_preserve_an_independent_writers_locks() {
+        let directory = TempDir::new().unwrap();
+        let path = directory.path().join("sessions.db");
+        let writer = rusqlite::Connection::open(&path).unwrap();
+        writer
+            .execute_batch(
+                "PRAGMA journal_mode=DELETE;
+             CREATE TABLE sample(value INTEGER);
+             INSERT INTO sample VALUES(3);
+             BEGIN IMMEDIATE;
+             UPDATE sample SET value=7",
+            )
+            .unwrap();
+        let binding = binding();
+        let factory = RepositoryPhysicalAttachmentFactory;
+        let read_only = factory
+            .attach_read_only(
+                binding.clone(),
+                locator(&binding),
+                path.clone(),
+                AdmissionConfigV1::default(),
+            )
+            .unwrap();
+        probe_external_connection(&path, "write", true);
+        read_only.drain().unwrap();
+        read_only.close_and_join().unwrap();
+        probe_external_connection(&path, "write", true);
+
+        let mut invalid = AdmissionConfigV1::default();
+        invalid.readers.min_per_hot_shard = 0;
+        assert!(matches!(
+            factory.attach_read_only(binding.clone(), locator(&binding), path.clone(), invalid),
+            Err(RepositoryAttachmentStartError::Reader(
+                ReaderStartError::InvalidReaderBudget(_)
+            ))
+        ));
+        probe_external_connection(&path, "write", true);
+        writer.execute_batch("COMMIT").unwrap();
+        probe_external_connection(&path, "write", false);
+
+        // Dropping the route alias exercises the real writer's lost-file
+        // notification while an independent connection keeps the DB open
+        // through its physical pathname, with its WAL family intact.
+        let route = directory.path().join("route.db");
+        std::os::unix::fs::symlink(&path, &route).unwrap();
+        let writable = factory
+            .attach(
+                binding.clone(),
+                locator(&binding),
+                route.clone(),
+                AdmissionConfigV1::default(),
+            )
+            .unwrap();
+        writer
+            .execute_batch("BEGIN IMMEDIATE; UPDATE sample SET value=11")
+            .unwrap();
+        probe_external_connection(&path, "write", true);
+        fs::remove_file(route).unwrap();
+        let deadline =
+            std::time::Instant::now() + crate::FILE_PROBE_INTERVAL + Duration::from_secs(10);
+        while !(writable.file_lost() && writable.lost_file_closed()) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "physical attachment did not close the lost route"
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
+        writable.drain().unwrap();
+        writable.close_and_join().unwrap();
+        probe_external_connection(&path, "write", true);
+        probe_external_connection(&path, "journal", true);
+        writer.execute_batch("ROLLBACK").unwrap();
+        drop(writer);
+        probe_external_connection(&path, "write", false);
+        probe_external_connection(&path, "journal", false);
+        let checked = rusqlite::Connection::open(&path).unwrap();
+        assert_eq!(
+            checked
+                .query_row("SELECT value FROM sample", [], |row| row.get::<_, i64>(0))
+                .unwrap(),
+            7
+        );
+        assert_eq!(
+            checked
+                .query_row("PRAGMA integrity_check", [], |row| row.get::<_, String>(0))
+                .unwrap(),
+            "ok"
+        );
     }
 
     /// The attachment's original identity descriptor must not be dropped
@@ -1187,12 +2207,12 @@ mod tests {
 
         let created_path = directory.path().join("created.sqlite3");
         let created = RepositoryPhysicalAttachmentFactory
-            .initialize(
-                &native_runtime(),
+            .start_reserved_initialization(
                 binding.clone(),
                 locator(&binding),
                 created_path.clone(),
                 AdmissionConfigV1::default(),
+                None,
             )
             .unwrap();
         assert!(
@@ -1272,7 +2292,7 @@ mod tests {
             assert_eq!(rows.rows[0].values, vec![ExactSqlValue::Integer(2)]);
             attachment
         };
-        native_runtime();
+        crate::native_runtime::handle().expect("native runtime");
         let before = threads();
         let attachments = (0..64).map(exercise).collect::<Vec<_>>();
         let started = threads()
@@ -1375,7 +2395,7 @@ mod tests {
             "a pool task's writer join must report the wait it refused, got {join:?}"
         );
         let closing = std::time::Instant::now();
-        while !writer_status.is_closed() {
+        while writer_status.has_changed().is_ok() {
             assert!(
                 closing.elapsed() < Duration::from_secs(10),
                 "the writer whose join was refused must still close"
@@ -1565,7 +2585,6 @@ mod tests {
         for cycle in 0_i64..3 {
             let attachment = factory
                 .attach(
-                    &native_runtime(),
                     binding.clone(),
                     locator.clone(),
                     path.clone(),
@@ -1715,13 +2734,7 @@ mod tests {
         admission.wal.soft_limit_bytes = 8 * 1024;
         admission.wal.hard_limit_bytes = 16 * 1024;
         let attachment = RepositoryPhysicalAttachmentFactory
-            .attach(
-                &native_runtime(),
-                binding.clone(),
-                locator(&binding),
-                path,
-                admission,
-            )
+            .attach(binding.clone(), locator(&binding), path, admission)
             .unwrap();
         let handle = attachment.exact_sql_handle().unwrap();
         handle
@@ -1758,7 +2771,6 @@ mod tests {
         let mut status = checkpoint.status_subscription();
         runtime
             .block_on(wait_for(
-                &cx(),
                 &mut checkpoint.pressure_subscription(),
                 |pressure| matches!(pressure, crate::CheckpointPressure::BlockGeneral { .. }),
             ))
@@ -1794,7 +2806,7 @@ mod tests {
         // Every hard-drain retry publishes a checkpoint status, so wait for
         // one instead of assuming the 100 ms retry timer fired in time.
         let writer_snapshot = loop {
-            status.mark_seen();
+            drop(status.borrow_and_update());
             let writer_snapshot = attachment
                 .snapshot()
                 .writer
@@ -1803,7 +2815,7 @@ mod tests {
                 break writer_snapshot;
             }
             runtime
-                .block_on(status.changed(&cx()))
+                .block_on(status.changed())
                 .expect("the writer keeps retrying the hard drain");
         };
         assert!(matches!(
@@ -1818,7 +2830,7 @@ mod tests {
         completed_rx.recv().unwrap().unwrap();
         queued.join().unwrap();
         runtime
-            .block_on(wait_for(&cx(), &mut status, |status| {
+            .block_on(wait_for(&mut status, |status| {
                 matches!(checkpoint.pressure(), crate::CheckpointPressure::Open)
                     && status.latest.as_ref().is_some_and(|outcome| match outcome {
                         crate::CheckpointOutcome::BelowSoft { wal }
@@ -1856,13 +2868,7 @@ mod tests {
         admission.wal.soft_limit_bytes = 8 * 1024;
         admission.wal.hard_limit_bytes = 16 * 1024;
         let attachment = RepositoryPhysicalAttachmentFactory
-            .attach(
-                &native_runtime(),
-                binding.clone(),
-                locator(&binding),
-                path,
-                admission,
-            )
+            .attach(binding.clone(), locator(&binding), path, admission)
             .unwrap();
         let handle = attachment.exact_sql_handle().unwrap();
         handle
@@ -1894,7 +2900,7 @@ mod tests {
             .unwrap();
         let mut pressure = checkpoint.pressure_subscription();
         runtime
-            .block_on(wait_for(&cx(), &mut pressure, |pressure| {
+            .block_on(wait_for(&mut pressure, |pressure| {
                 matches!(pressure, crate::CheckpointPressure::BlockGeneral { .. })
             }))
             .expect("the over-hard-limit write must publish hard checkpoint pressure");
@@ -1926,7 +2932,7 @@ mod tests {
             "the queued write must not grow the physical WAL while the log cannot restart"
         );
         runtime
-            .block_on(wait_for(&cx(), &mut pressure, |pressure| {
+            .block_on(wait_for(&mut pressure, |pressure| {
                 matches!(
                     pressure,
                     crate::CheckpointPressure::BlockGeneral { blockers, .. }
@@ -1940,7 +2946,7 @@ mod tests {
         queued.join().unwrap();
         let mut status = checkpoint.status_subscription();
         runtime
-            .block_on(wait_for(&cx(), &mut status, |status| {
+            .block_on(wait_for(&mut status, |status| {
                 status.latest.as_ref().is_some_and(|outcome| match outcome {
                     crate::CheckpointOutcome::BelowSoft { wal }
                     | crate::CheckpointOutcome::Complete { wal, .. } => wal.bytes <= 8 * 1024,
@@ -1974,13 +2980,7 @@ mod tests {
         admission.wal.soft_limit_bytes = 8 * 1024;
         admission.wal.hard_limit_bytes = 16 * 1024;
         let attachment = RepositoryPhysicalAttachmentFactory
-            .attach(
-                &native_runtime(),
-                binding.clone(),
-                locator(&binding),
-                path,
-                admission,
-            )
+            .attach(binding.clone(), locator(&binding), path, admission)
             .unwrap();
         let handle = attachment.exact_sql_handle().unwrap();
         handle
@@ -2013,7 +3013,7 @@ mod tests {
             .unwrap();
         let mut pressure = checkpoint.pressure_subscription();
         runtime
-            .block_on(wait_for(&cx(), &mut pressure, |pressure| {
+            .block_on(wait_for(&mut pressure, |pressure| {
                 matches!(pressure, crate::CheckpointPressure::BlockGeneral { .. })
             }))
             .expect("the over-hard-limit write must publish hard checkpoint pressure");
@@ -2033,8 +3033,7 @@ mod tests {
             .expect("the queued write commits while the reader still holds its snapshot");
         writer.join().unwrap();
         let mut status = checkpoint.status_subscription();
-        let context = cx();
-        let converged = wait_for(&context, &mut status, |status| {
+        let converged = wait_for(&mut status, |status| {
             matches!(checkpoint.pressure(), crate::CheckpointPressure::Open)
                 && status.latest.as_ref().is_some_and(|outcome| match outcome {
                     crate::CheckpointOutcome::BelowSoft { wal }

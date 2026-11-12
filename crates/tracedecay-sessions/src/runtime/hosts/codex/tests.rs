@@ -1218,6 +1218,7 @@ mod recent_first_discovery_tests {
     use serde_json::json;
     use tempfile::TempDir;
     use tracedecay_domain::ProjectId;
+    use tracedecay_private_fs::ChangeStamp;
     use tracedecay_runtime_core::native_runtime::{
         LONG_POLL, NativeTask, NativeTaskOutcome, block_on, long_native_polls,
     };
@@ -1231,9 +1232,13 @@ mod recent_first_discovery_tests {
         CodexDiscoverySourceKey, CodexDiscoveryState, CodexExactSessionPathAuthority,
         CodexIndexedPath, CodexReplayIndex, EXACT_HOOK_DISCOVERY_UNITS_PER_CALL,
         IDLE_FULL_VALIDATION_CYCLES, MAX_EXACT_HOOK_SESSION_REQUESTS,
-        MAX_EXACT_HOOK_SOURCE_AUTHORITIES, MAX_SCAN_DEPTH, indexed_replay_pass,
+        MAX_EXACT_HOOK_SOURCE_AUTHORITIES, MAX_SCAN_DEPTH, codex_corpus_identity,
+        codex_directory_changed, codex_directory_stat_identity, codex_directory_witness,
+        directory_entry_fingerprint, directory_stat_witness, indexed_replay_pass,
         replay_index_entries_visited_for_test, reset_replay_index_entries_visited_for_test,
     };
+    #[cfg(unix)]
+    use crate::runtime::hosts::codex::{DirectoryStatWitness, codex_directory_changed_since};
     use crate::runtime::ingest::quarantine::SourceSweep;
     use crate::runtime::jsonl_observation_admission::{
         SHARED_JSONL_PIN_GATES, install_test_shared_jsonl_preparation_authority,
@@ -1460,7 +1465,11 @@ mod recent_first_discovery_tests {
         else {
             panic!("the first scan delivers");
         };
-        assert!(!released.has_changed());
+        assert!(
+            !released
+                .has_changed()
+                .expect("discovery release publisher remains open")
+        );
         hub.acknowledge("profile");
 
         // A consumer joining now replays the source's index, which another
@@ -1486,7 +1495,11 @@ mod recent_first_discovery_tests {
         hub.discover("profile", &source, bounds, first.next_frontier)
             .await
             .unwrap();
-        assert!(released.has_changed());
+        assert!(
+            released
+                .has_changed()
+                .expect("discovery release publisher remains open")
+        );
     }
 
     /// An idle scan one consumer ran is queued for every other consumer. A
@@ -2613,6 +2626,169 @@ mod recent_first_discovery_tests {
         assert!(
             rediscovered,
             "bounded idle authority must eventually validate files outside its active window"
+        );
+    }
+
+    #[test]
+    fn hot_codex_directory_is_detected_even_when_rotation_starts_on_hot_prefix() {
+        let temp = TempDir::new().unwrap();
+        let home = temp.path();
+        let newest = write_dated_rollout(home, ("2026", "08", "29"), "current");
+        write_dated_rollout(home, ("2026", "08", "01"), "older");
+        let source = CodexSource::with_home(home);
+        let bounds = TranscriptDiscoveryBounds::from_discovered_units(8);
+        let mut state = CodexDiscoveryState::default();
+        let mut frontier = CodexDiscoveryFrontier::initial();
+        let mut admitted = BTreeSet::new();
+        for _ in 0..64 {
+            let pass = retained_pass(&source, &mut state, bounds, frontier);
+            admitted.extend(pass.report.paths);
+            frontier = pass.next_frontier;
+            if frontier.is_complete() {
+                break;
+            }
+        }
+        assert!(frontier.is_complete(), "the initial corpus must converge");
+        assert!(admitted.contains(&newest));
+
+        let idle = state.idle.as_mut().expect("completed idle authority");
+        let hot_index = idle
+            .directories
+            .iter()
+            .position(|directory| directory.path == newest.parent().unwrap())
+            .expect("newest bucket must be retained");
+        assert!(
+            hot_index < super::super::IDLE_HOT_DIRECTORIES,
+            "the newly changed bucket must be in the hot prefix"
+        );
+        idle.next = hot_index;
+
+        let added = newest.parent().unwrap().join("rollout-after-idle.jsonl");
+        std::fs::write(&added, b"{}").unwrap();
+        spin_until_jsonl_change_settled(&added);
+        let detection = retained_pass(&source, &mut state, bounds, frontier);
+        assert!(
+            !detection.next_frontier.is_complete(),
+            "the hot probe must invalidate a changed bucket before rotation skips its duplicate"
+        );
+
+        frontier = detection.next_frontier;
+        let mut found = detection.report.paths.contains(&added);
+        for _ in 0..64 {
+            let pass = retained_pass(&source, &mut state, bounds, frontier);
+            found |= pass.report.paths.contains(&added);
+            frontier = pass.next_frontier;
+            if found {
+                break;
+            }
+        }
+        assert!(found, "the changed hot bucket must deliver the new rollout");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn unsettled_directory_stat_does_not_change_with_each_sample() {
+        let temp = TempDir::new().unwrap();
+        let bucket = temp.path().join(".codex/sessions/2026/11/08");
+        std::fs::create_dir_all(&bucket).unwrap();
+        std::fs::write(bucket.join("rollout-existing.jsonl"), b"{}\n").unwrap();
+        let metadata = std::fs::metadata(&bucket).unwrap();
+        let first_stamp = ChangeStamp::Unvouched(1);
+        let next_stamp = ChangeStamp::Unvouched(2);
+
+        // Each native Unvouched stamp is deliberately different. The raw
+        // file-content identity must not accidentally become stable.
+        let first_sample = codex_corpus_identity(&bucket, &metadata, first_stamp).unwrap();
+        let next_sample = codex_corpus_identity(&bucket, &metadata, next_stamp).unwrap();
+        assert_ne!(first_sample, next_sample);
+
+        // Directory change detection, unlike file-content authority, must
+        // not force a fresh traversal on every sample of identical metadata.
+        let first = codex_directory_stat_identity(&bucket, &metadata, first_stamp).unwrap();
+        let second = codex_directory_stat_identity(&bucket, &metadata, next_stamp).unwrap();
+        assert_eq!(
+            first, second,
+            "identical native directory metadata must survive repeated unsettled probes"
+        );
+
+        // The settled transition still invalidates an unsettled snapshot:
+        // a prior coarse-window name check cannot vouch for a later write.
+        let settled =
+            codex_directory_stat_identity(&bucket, &metadata, ChangeStamp::Settled(0)).unwrap();
+        assert_ne!(first, settled);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn unsettled_bucket_native_change_invalidates_even_with_same_entry_names() {
+        let temp = TempDir::new().unwrap();
+        let bucket = temp.path().join(".codex/sessions/2026/11/08");
+        std::fs::create_dir_all(&bucket).unwrap();
+        std::fs::write(bucket.join("rollout-existing.jsonl"), b"{}\n").unwrap();
+
+        // Supply the native coarse-clock sample directly: scheduler delay
+        // after the write must not decide which clock branch this exercises.
+        let metadata = std::fs::metadata(&bucket).unwrap();
+        let stat =
+            codex_directory_stat_identity(&bucket, &metadata, ChangeStamp::Unvouched(0)).unwrap();
+        let mut stored = codex_directory_witness(&bucket).unwrap().unwrap();
+        stored.stat = stat;
+        stored.entries = Some(directory_entry_fingerprint(&bucket).unwrap());
+        assert!(
+            !codex_directory_changed_since(
+                &bucket,
+                Some(DirectoryStatWitness {
+                    stat,
+                    settled: false
+                }),
+                Some(stored),
+            )
+            .unwrap(),
+            "an unchanged unsettled directory retains its name witness"
+        );
+        // Model a different previously observed stat (such as a directory
+        // metadata update) while the eligible entry names remain identical.
+        stored.stat[0] ^= 1;
+
+        assert!(
+            codex_directory_changed_since(
+                &bucket,
+                Some(DirectoryStatWitness {
+                    stat,
+                    settled: false
+                }),
+                Some(stored),
+            )
+            .unwrap(),
+            "a changed native identity must invalidate even when the entry-name fingerprint is unchanged"
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn settled_codex_bucket_skips_name_scans_and_detects_new_rollouts() {
+        let temp = TempDir::new().unwrap();
+        let home = temp.path();
+        let historical = write_dated_rollout(home, ("2025", "11", "01"), "settled");
+        let bucket = historical.parent().unwrap();
+
+        // The rollout fixture waits for the native change-time witness to
+        // settle, so the parent directory is also outside that time quantum.
+        assert!(
+            directory_stat_witness(bucket).unwrap().unwrap().settled,
+            "historical directory must have a settled change-time witness"
+        );
+        let witness = codex_directory_witness(bucket).unwrap().unwrap();
+        assert!(
+            witness.entries.is_none(),
+            "a settled historical bucket must not enumerate names twice"
+        );
+        assert!(!codex_directory_changed(bucket, Some(witness)).unwrap());
+
+        std::fs::write(bucket.join("rollout-new.jsonl"), b"{}\n").unwrap();
+        assert!(
+            codex_directory_changed(bucket, Some(witness)).unwrap(),
+            "a new rollout must invalidate the cheap settled-directory witness"
         );
     }
 

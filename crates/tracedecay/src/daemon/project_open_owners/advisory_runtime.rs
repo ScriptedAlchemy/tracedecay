@@ -114,10 +114,9 @@ use tracedecay_daemon_service::{
     DaemonAdvisoryCycleMountFuture, DaemonAdvisoryCycleMountV1,
     DaemonFeedbackProximityInvocationFuture, DaemonFeedbackProximityInvocationRequest,
     HookOrchestrationRequestV1, HookOrchestrationTriggerV1, HookOrchestrationWorkOutcomeV1,
-    advisory_cycle_invocation_result, daemon_operation_event_authority,
-    daemon_owned_project_source_access_at, feedback_proximity_invocation_result,
-    project_open_source_access_authority, register_hook_orchestration_runtime,
-    unregister_hook_orchestration_runtime,
+    advisory_cycle_invocation_result, daemon_owned_project_source_access_at,
+    feedback_proximity_invocation_result, project_open_source_access_authority,
+    register_hook_orchestration_runtime, unregister_hook_orchestration_runtime,
 };
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_mcp::handlers::hook_runtime::daemon_mint_hook_v2_file_id;
@@ -136,6 +135,7 @@ mod tests;
 #[derive(Clone)]
 struct ProjectOpenAdvisoryFeedbackCycleV1 {
     producer: Arc<ProjectOpenScoutProducerV1>,
+    operation_events: tracedecay_application::operation_stream::OperationEventAuthority,
     root_uri: String,
     feedback_scope: FeedbackScopeV1,
     github_review_read: Option<(GitHubPullRequestIdV1, GitHubReviewReadOperationV1)>,
@@ -327,7 +327,8 @@ impl ProjectOpenAdvisoryFeedbackCycleV1 {
         )
         .await;
         let expires_at = UtcMicros(observed_at.0.saturating_add(5 * 60 * 1_000_000));
-        let operation = daemon_operation_event_authority()
+        let operation = self
+            .operation_events
             .begin(
                 &invocation.context,
                 OperationKind::FeedbackDiagnostics,
@@ -2384,6 +2385,7 @@ async fn register_production_advisory_owner(
     });
     let advisory_cycle = Arc::new(ProjectOpenAdvisoryFeedbackCycleV1 {
         producer,
+        operation_events: invocation.service.operation_events(),
         root_uri: state.admitted_root_uri.clone(),
         feedback_scope: feedback_scope.clone(),
         github_review_read,

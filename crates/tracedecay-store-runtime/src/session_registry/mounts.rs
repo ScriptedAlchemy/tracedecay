@@ -172,20 +172,13 @@ impl DaemonSessionRuntimeRegistryV1 {
         ));
         let (operation_task_owner, registry) =
             {
-                // The handle's Send proof is the asupersync self-cycle. Consume it
-                // before the first await so the constructor future does not capture it.
                 let operation_runtime = tracedecay_runtime_core::native_runtime::handle()
                     .ok_or_else(|| TraceDecayError::Config {
                         message: "session runtime registry requires a native execution runtime"
                             .to_owned(),
                     })?;
-                let operation_task_owner = Arc::new(
-                    RuntimeOperationTaskOwnerV1::new(operation_runtime.clone()).map_err(
-                        |error| TraceDecayError::Config {
-                            message: error.to_string(),
-                        },
-                    )?,
-                );
+                let operation_task_owner =
+                    Arc::new(RuntimeOperationTaskOwnerV1::new(operation_runtime.clone()));
                 let registry_resolver: Arc<dyn StoreRuntimeResolver> = resolver.clone();
                 let registry = StoreRuntimeRegistry::new(
                     operation_runtime,

@@ -221,7 +221,13 @@ async fn lsp_runtime_fixture() -> RuntimeFixture {
     let daemon_log = std::fs::File::create(&daemon_events).expect("create isolated LSP daemon log");
     let daemon = common::spawn_tracedecay_daemon_with(environment.home(), |command| {
         environment.apply_toolchain_env(command);
-        command.env("RUST_LOG", "info").stderr(daemon_log);
+        command
+            .env(
+                "RUST_LOG",
+                "info,tracedecay_daemon_service::invocation=trace",
+            )
+            .env("TRACEDECAY_SPAN_TIMINGS", "1")
+            .stderr(daemon_log);
     });
     let output = common::tracedecay_command_with_home(environment.home())
         .arg("init")
@@ -340,10 +346,6 @@ async fn git_runtime_fixture() -> RuntimeFixture {
     )
     .expect("write staged Git change");
     git(&project, &["add", "src/main.rs"]);
-    // Git reads answer a typed retryable `mounting` problem until project open
-    // installs the owner's authority; the journeys start from a served project.
-    await_published_code_index(environment.home(), &project);
-
     let handshake = crate::common::handshake_for_current_client(
         environment.profile(),
         Some(project.clone()),
@@ -409,7 +411,11 @@ fn lsp_control() -> (Deadline, CancellationSignal) {
     )
 }
 
-async fn poll_lsp_response(session: &mut DaemonLspSessionClient, response_id: u64) -> Value {
+async fn poll_lsp_response(
+    fixture: &RuntimeFixture,
+    session: &mut DaemonLspSessionClient,
+    response_id: u64,
+) -> Value {
     // Semantic requests are answered asynchronously: while an operation is in
     // flight the gateway writes no frame at all, so silence means "not yet"
     // rather than "never" and a client has to keep reading. The old bound of
@@ -430,7 +436,15 @@ async fn poll_lsp_response(session: &mut DaemonLspSessionClient, response_id: u6
                 session
                     .acknowledge_daemon_frame(operation_deadline, cancellation)
                     .await
-                    .expect("acknowledge daemon LSP frame");
+                    .unwrap_or_else(|error| {
+                        panic!(
+                            "acknowledge daemon LSP frame while awaiting response {response_id}: \
+                             {error:?}; frame id={:?}, method={:?}; daemon log tail:\n{}",
+                            value.get("id"),
+                            value.get("method"),
+                            fixture.daemon_log_tail(),
+                        )
+                    });
                 if value.get("id").and_then(Value::as_u64) == Some(response_id) {
                     return value;
                 }
@@ -454,6 +468,7 @@ async fn send_lsp(session: &mut DaemonLspSessionClient, value: Value) {
 }
 
 async fn request_lsp_navigation(
+    fixture: &RuntimeFixture,
     session: &mut DaemonLspSessionClient,
     request_id: u64,
     method: &str,
@@ -477,7 +492,7 @@ async fn request_lsp_navigation(
                 }),
             )
             .await;
-            let response = poll_lsp_response(session, attempt_id).await;
+            let response = poll_lsp_response(fixture, session, attempt_id).await;
             if response["error"]["code"].as_i64() != Some(-32802)
                 || response["error"]["data"]["retriggerRequest"].as_bool() != Some(true)
             {
@@ -491,7 +506,11 @@ async fn request_lsp_navigation(
     .unwrap_or_else(|_| panic!("{method} did not return a terminal navigation response within 90s"))
 }
 
-async fn shutdown_lsp(session: &mut DaemonLspSessionClient, request_id: u64) {
+async fn shutdown_lsp(
+    fixture: &RuntimeFixture,
+    session: &mut DaemonLspSessionClient,
+    request_id: u64,
+) {
     let shutdown_request = serde_json::json!({
         "jsonrpc": "2.0",
         "id": request_id,
@@ -508,7 +527,7 @@ async fn shutdown_lsp(session: &mut DaemonLspSessionClient, request_id: u64) {
         FrameSend::Sent => {}
         FrameSend::Backpressured => panic!("daemon LSP shutdown frame was backpressured"),
     }
-    let shutdown = poll_lsp_response(session, request_id).await;
+    let shutdown = poll_lsp_response(fixture, session, request_id).await;
     assert_eq!(shutdown["result"], Value::Null);
     let exit_notification = serde_json::json!({
         "jsonrpc": "2.0",
@@ -548,6 +567,7 @@ async fn shutdown_lsp(session: &mut DaemonLspSessionClient, request_id: u64) {
 }
 
 async fn poll_lsp_context(
+    fixture: &RuntimeFixture,
     session: &mut DaemonLspSessionClient,
     document_uri: &str,
     kind: &str,
@@ -568,7 +588,7 @@ async fn poll_lsp_context(
             }),
         )
         .await;
-        let response = poll_lsp_response(session, request_id).await;
+        let response = poll_lsp_response(fixture, session, request_id).await;
         if response.get("result").is_some() {
             return response;
         }
@@ -1945,19 +1965,19 @@ async fn production_primitive_code_routes_have_cli_mcp_http_parity() {
 #[tokio::test(flavor = "multi_thread")]
 async fn git_preview_and_apply_have_real_cli_mcp_runtime_parity() {
     let fixture = git_runtime_fixture().await;
-    let status = resolve_mcp_application_surface(
+    let status = admitted_mcp_invocation(
+        &fixture.client,
         ApplicationSurfaceOperation::GitStatus,
-        RequestId::new("request.git-parity.status").expect("status request id"),
-        parse_application_surface_request(
-            ApplicationSurfaceOperation::GitStatus,
-            serde_json::json!({}),
-        )
-        .expect("Git status request"),
-        RequestedOutputFormat::Json,
-        Some(&fixture.client),
+        "request.git-parity.status",
+        || {
+            parse_application_surface_request(
+                ApplicationSurfaceOperation::GitStatus,
+                serde_json::json!({}),
+            )
+            .expect("Git status request")
+        },
     )
-    .await
-    .expect("Git status dispatch");
+    .await;
     let scope = status
         .result
         .as_ref()
@@ -2529,7 +2549,7 @@ async fn production_lsp_negotiates_and_projects_canonical_context() {
         }),
     )
     .await;
-    let initialized = poll_lsp_response(&mut session, 1).await;
+    let initialized = poll_lsp_response(&fixture, &mut session, 1).await;
     assert_eq!(
         initialized["result"]["capabilities"]["positionEncoding"], "utf-16",
         "unexpected initialize response: {initialized}"
@@ -2594,7 +2614,8 @@ async fn production_lsp_negotiates_and_projects_canonical_context() {
     )
     .await;
 
-    let projection = poll_lsp_context(&mut session, &document_uri, "diagnostics", 2).await;
+    let projection =
+        poll_lsp_context(&fixture, &mut session, &document_uri, "diagnostics", 2).await;
     // The gateway compares roots by parsed path rather than by raw string,
     // because a directory URI legitimately arrives with or without a trailing
     // slash, so the projection is checked the same way it is admitted. The
@@ -2676,7 +2697,8 @@ async fn production_lsp_negotiates_and_projects_canonical_context() {
             }),
         ),
     ] {
-        let navigation = request_lsp_navigation(&mut session, request_id, method, params).await;
+        let navigation =
+            request_lsp_navigation(&fixture, &mut session, request_id, method, params).await;
         assert!(
             navigation.get("result").is_some(),
             "{method} must return a standard LSP result: {navigation}"
@@ -2696,7 +2718,7 @@ async fn production_lsp_negotiates_and_projects_canonical_context() {
         }),
     )
     .await;
-    let undeclared_standard_method = poll_lsp_response(&mut session, 405).await;
+    let undeclared_standard_method = poll_lsp_response(&fixture, &mut session, 405).await;
     assert_eq!(undeclared_standard_method["error"]["code"], -32601);
     assert_eq!(
         undeclared_standard_method["error"]["data"]["reason"], "capabilityNotNegotiated",
@@ -2713,7 +2735,7 @@ async fn production_lsp_negotiates_and_projects_canonical_context() {
         }),
     )
     .await;
-    let arbitrary_method = poll_lsp_response(&mut session, 406).await;
+    let arbitrary_method = poll_lsp_response(&fixture, &mut session, 406).await;
     assert_eq!(arbitrary_method["error"]["code"], -32601);
     assert_eq!(
         arbitrary_method["error"]["data"]["reason"],
@@ -2733,7 +2755,7 @@ async fn production_lsp_negotiates_and_projects_canonical_context() {
         }),
     )
     .await;
-    let arbitrary_payload = poll_lsp_response(&mut session, 407).await;
+    let arbitrary_payload = poll_lsp_response(&fixture, &mut session, 407).await;
     assert_eq!(arbitrary_payload["error"]["code"], -32602);
 
     let status = std::process::Command::new(common::git_program())
@@ -2750,7 +2772,14 @@ async fn production_lsp_negotiates_and_projects_canonical_context() {
 
     let mut related_lsp_handles = Vec::new();
     for (kind, first_request_id) in [("postEditImpact", 102), ("affectedTests", 202)] {
-        let related = poll_lsp_context(&mut session, &document_uri, kind, first_request_id).await;
+        let related = poll_lsp_context(
+            &fixture,
+            &mut session,
+            &document_uri,
+            kind,
+            first_request_id,
+        )
+        .await;
         assert_eq!(
             related["result"]["rootUri"],
             projection["result"]["rootUri"]
@@ -2831,7 +2860,8 @@ async fn production_lsp_negotiates_and_projects_canonical_context() {
         "managed run must report no failures: {managed_run}"
     );
 
-    let test_results = poll_lsp_context(&mut session, &document_uri, "testRunResults", 302).await;
+    let test_results =
+        poll_lsp_context(&fixture, &mut session, &document_uri, "testRunResults", 302).await;
     assert_eq!(
         test_results["result"]["rootUri"],
         projection["result"]["rootUri"]
@@ -3068,7 +3098,7 @@ async fn production_lsp_negotiates_and_projects_canonical_context() {
             }),
         )
         .await;
-        let expanded = poll_lsp_response(&mut session, 402).await;
+        let expanded = poll_lsp_response(&fixture, &mut session, 402).await;
         assert_eq!(expanded["result"]["coverage"], "complete");
         assert_eq!(
             expanded["result"]["evidence"]["Ok"]["outcome"]["value"]["payload"],
@@ -3112,7 +3142,7 @@ async fn production_lsp_negotiates_and_projects_canonical_context() {
         }),
     )
     .await;
-    let incompatible_initialize = poll_lsp_response(&mut incompatible, 501).await;
+    let incompatible_initialize = poll_lsp_response(&fixture, &mut incompatible, 501).await;
     assert!(
         incompatible_initialize["result"]["capabilities"]["experimental"]["tracedecay"].is_null(),
         "an incompatible revision must not be negotiated"
@@ -3139,13 +3169,13 @@ async fn production_lsp_negotiates_and_projects_canonical_context() {
         }),
     )
     .await;
-    let incompatible_context = poll_lsp_response(&mut incompatible, 502).await;
+    let incompatible_context = poll_lsp_response(&fixture, &mut incompatible, 502).await;
     assert_eq!(incompatible_context["error"]["code"], -32601);
     assert_eq!(
         incompatible_context["error"]["data"]["reason"],
         "capabilityNotNegotiated"
     );
-    shutdown_lsp(&mut incompatible, 503).await;
+    shutdown_lsp(&fixture, &mut incompatible, 503).await;
 
     let other_project = TempDir::new().expect("cross-scope project");
     initialize_project(fixture.home(), other_project.path());
@@ -3201,7 +3231,7 @@ async fn production_lsp_negotiates_and_projects_canonical_context() {
         }),
     )
     .await;
-    let cross_scope_initialize = poll_lsp_response(&mut cross_scope, 601).await;
+    let cross_scope_initialize = poll_lsp_response(&fixture, &mut cross_scope, 601).await;
     assert_eq!(
         cross_scope_initialize["result"]["capabilities"]["experimental"]["tracedecay"]["revision"],
         TRACEDECAY_CONTEXT_REVISION
@@ -3226,14 +3256,14 @@ async fn production_lsp_negotiates_and_projects_canonical_context() {
             }),
         )
         .await;
-        let cross_scope_expansion = poll_lsp_response(&mut cross_scope, 602).await;
+        let cross_scope_expansion = poll_lsp_response(&fixture, &mut cross_scope, 602).await;
         assert_eq!(cross_scope_expansion["error"]["code"], -32601);
         assert!(
             cross_scope_expansion.get("result").is_none(),
             "cross-project handles must not reveal evidence"
         );
     }
-    shutdown_lsp(&mut cross_scope, 603).await;
+    shutdown_lsp(&fixture, &mut cross_scope, 603).await;
 
     let unregistered_project = TempDir::new().expect("unregistered workspace project");
     let unregistered_root_uri = url::Url::from_directory_path(unregistered_project.path())
@@ -3260,6 +3290,7 @@ async fn production_lsp_negotiates_and_projects_canonical_context() {
         .await
         .expect("reconnect production LSP session");
     let after_reconnect = request_lsp_navigation(
+        &fixture,
         &mut session,
         701,
         "textDocument/documentSymbol",
@@ -3320,7 +3351,7 @@ async fn production_lsp_negotiates_and_projects_canonical_context() {
         }),
     )
     .await;
-    let mut dirty_projection = poll_lsp_response(&mut session, 10_000).await;
+    let mut dirty_projection = poll_lsp_response(&fixture, &mut session, 10_000).await;
     assert_eq!(
         dirty_projection["error"]["code"],
         -32802,
@@ -3346,7 +3377,7 @@ async fn production_lsp_negotiates_and_projects_canonical_context() {
             }),
         )
         .await;
-        dirty_projection = poll_lsp_response(&mut session, 10_001).await;
+        dirty_projection = poll_lsp_response(&fixture, &mut session, 10_001).await;
     }
     assert_eq!(
         dirty_projection["error"]["code"], -32802,
@@ -3356,7 +3387,7 @@ async fn production_lsp_negotiates_and_projects_canonical_context() {
         dirty_projection["error"]["data"]["coverage"], "lsp-code-index-source-revision-unavailable",
         "a saved source edit must still lose commit eligibility: {dirty_projection}"
     );
-    shutdown_lsp(&mut session, 702).await;
+    shutdown_lsp(&fixture, &mut session, 702).await;
 }
 
 #[tokio::test]

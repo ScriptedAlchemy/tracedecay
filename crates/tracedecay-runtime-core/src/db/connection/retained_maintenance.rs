@@ -1,3 +1,5 @@
+use crate::shard_runtime::registry::StoreRuntimeRegistryFailure;
+
 use super::{
     Arc, CheckpointBlockers, CheckpointOutcome, CheckpointRequest, DATABASE_HEALTH_GATE, Database,
     DatabaseAuthorityRole, DatabaseHealth, DatabaseStorageTelemetryHandle, Result, TraceDecayError,
@@ -115,9 +117,6 @@ impl Database {
     }
 
     pub(crate) async fn checkpoint_unguarded(&self) -> Result<()> {
-        let cx = crate::native_runtime::cx().ok_or_else(|| TraceDecayError::Config {
-            message: "database checkpoint requires an Asupersync context".to_owned(),
-        })?;
         let authority = self.write_authority()?;
         let request = CheckpointRequest::new(
             CheckpointBlockers::default(),
@@ -126,7 +125,7 @@ impl Database {
         let outcome = self
             .client
             .runtime()
-            .run_checkpoint(&cx, request, authority)
+            .run_checkpoint(request, authority)
             .await
             .map_err(|error| TraceDecayError::Database {
                 message: format!("registered checkpoint failed: {error:?}"),
@@ -157,17 +156,9 @@ impl Database {
     }
 
     async fn health_on_fresh_reader(&self, operation: &str) -> Result<DatabaseHealth> {
-        let cx = crate::native_runtime::cx().ok_or_else(|| TraceDecayError::Config {
-            message: "database health check requires an Asupersync context".to_owned(),
-        })?;
         let queued_at = std::time::Instant::now();
         let health_gate = DATABASE_HEALTH_GATE.get_or_init(Arc::default);
-        let _health_guard = asupersync::sync::OwnedMutexGuard::lock(Arc::clone(health_gate), &cx)
-            .await
-            .map_err(|error| TraceDecayError::Database {
-                message: format!("database health admission failed: {error}"),
-                operation: operation.to_owned(),
-            })?;
+        let _health_guard = Arc::clone(health_gate).lock_owned().await;
         let wait_ms = u64::try_from(queued_at.elapsed().as_millis()).unwrap_or(u64::MAX);
         tracing::debug!(
             event = "database_health_check",
@@ -219,39 +210,63 @@ impl Database {
         // and a worker rendezvous (each bounded below); run it on the blocking
         // pool so a busy store cannot capture an async executor thread.
         let runtime = self.client.runtime().clone();
-        let cx = crate::native_runtime::cx().ok_or_else(|| TraceDecayError::Config {
-            message: "store-size sampling requires an Asupersync context".to_owned(),
+        let cx = crate::native_runtime::handle().ok_or_else(|| TraceDecayError::Config {
+            message: "store-size sampling requires a Tokio runtime".to_owned(),
         })?;
-        cx.spawn_blocking(move |_cx| runtime.storage_page_counts(std::time::Duration::from_secs(5)))
-            .map_err(|error| TraceDecayError::Database {
-                message: format!("store-size sampling admission failed: {error}"),
-                operation: "sample SQLite-store pages".to_owned(),
-            })?
-            .join(&cx)
-            .await
-            .map_err(|error| TraceDecayError::Database {
-                message: format!("store-size sampling task failed: {error}"),
-                operation: "sample SQLite-store pages".to_owned(),
-            })?
-            .map_err(|error| TraceDecayError::Database {
-                message: format!("failed to sample SQLite-store pages: {error:?}"),
-                operation: "sample SQLite-store pages".to_owned(),
-            })
+        crate::native_runtime::spawn_blocking_on(&cx, move || {
+            runtime.storage_page_counts(std::time::Duration::from_secs(5))
+        })
+        .await
+        .map_err(|error| TraceDecayError::Database {
+            message: format!("store-size sampling task failed: {error}"),
+            operation: "sample SQLite-store pages".to_owned(),
+        })?
+        .map_err(|error| TraceDecayError::Database {
+            message: format!("failed to sample SQLite-store pages: {error:?}"),
+            operation: "sample SQLite-store pages".to_owned(),
+        })
     }
 
     /// Runs bounded incremental vacuum through the canonical writer lane.
     pub async fn run_incremental_vacuum(&self, pages: u64) -> Result<()> {
-        let cx = crate::native_runtime::cx().ok_or_else(|| TraceDecayError::Config {
-            message: "database compaction requires an Asupersync context".to_owned(),
-        })?;
+        self.incremental_vacuum_attempt(pages)
+            .await?
+            .map_err(compaction_error)
+    }
+
+    /// Short-lived store admission may defer optional page reclamation, but
+    /// cannot serve a store whose writer or write authority has failed.
+    pub async fn reclaim_short_lived_pages(&self, pages: u64) -> Result<()> {
+        match self.incremental_vacuum_attempt(pages).await? {
+            Ok(()) => Ok(()),
+            Err(StoreRuntimeRegistryFailure::CompactionDeferred { message }) => {
+                tracing::warn!(
+                    reason = %message,
+                    pages,
+                    "short-lived registered-store reclamation deferred"
+                );
+                Ok(())
+            }
+            Err(error) => Err(compaction_error(error)),
+        }
+    }
+
+    async fn incremental_vacuum_attempt(
+        &self,
+        pages: u64,
+    ) -> Result<std::result::Result<(), StoreRuntimeRegistryFailure>> {
         let authority = self.write_authority()?;
-        self.client
+        Ok(self
+            .client
             .runtime()
-            .run_bounded_incremental_compaction(&cx, pages, authority)
-            .await
-            .map_err(|error| TraceDecayError::Database {
-                message: format!("failed to compact SQLite store: {error:?}"),
-                operation: "run bounded SQLite-store compaction".to_owned(),
-            })
+            .run_bounded_incremental_compaction(pages, authority)
+            .await)
+    }
+}
+
+fn compaction_error(error: StoreRuntimeRegistryFailure) -> TraceDecayError {
+    TraceDecayError::Database {
+        message: format!("failed to compact SQLite store: {error:?}"),
+        operation: "run bounded SQLite-store compaction".to_owned(),
     }
 }

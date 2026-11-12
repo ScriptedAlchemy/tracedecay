@@ -339,7 +339,7 @@ mod tests {
 
     /// The `managed_test_runs` table as released stores created it, before
     /// admission recorded document digests.
-    #[asupersync::test]
+    #[tokio::test]
     async fn a_started_run_settles_its_outcome_once_and_reads_back_newest_first() {
         let harness = RegisteredGlobalDbHarness::open("managed-test-runs-settle").await;
         let db = &harness.registered;
