@@ -165,7 +165,7 @@ async fn queue_state(harness: &RegisteredGlobalDbHarness) -> (i64, i64, i64) {
     )
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn rearm_writer_work_scales_with_deferred_rows() {
     async fn writer_steps(rows: i64) -> u64 {
         let harness = RegisteredGlobalDbHarness::open("rearm-dense-queue").await;
@@ -188,7 +188,7 @@ async fn rearm_writer_work_scales_with_deferred_rows() {
     );
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn rearm_walks_deferred_retries_in_bounded_batches() {
     let harness = RegisteredGlobalDbHarness::open("rearm-bounded-batches").await;
     seed_queue(&harness, 9, 3).await;
@@ -230,7 +230,7 @@ async fn rearm_walks_deferred_retries_in_bounded_batches() {
     );
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn expired_retry_deadlines_survive_restarts_without_rearm_writes() {
     let harness = RegisteredGlobalDbHarness::open("rearm-expired-deadlines").await;
     seed_queue(&harness, 8, 0).await;
@@ -336,7 +336,7 @@ async fn expired_retry_deadlines_survive_restarts_without_rearm_writes() {
     assert!(rows.next().await.unwrap().is_none());
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn rearm_ignores_parked_terminal_collisions_without_empty_write_batches() {
     let harness = RegisteredGlobalDbHarness::open("rearm-terminal-collisions").await;
     seed_queue(&harness, 9, 3).await;
@@ -424,7 +424,7 @@ async fn rearm_ignores_parked_terminal_collisions_without_empty_write_batches() 
     assert_eq!(queue_state(&harness).await, (12, 6, 12));
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn rearm_rejects_nonpositive_windows_before_acquiring_the_writer() {
     let harness = RegisteredGlobalDbHarness::open("rearm-invalid-window").await;
     seed_queue(&harness, 5, 0).await;
@@ -453,7 +453,7 @@ async fn rearm_rejects_nonpositive_windows_before_acquiring_the_writer() {
     assert_eq!(queue_state(&harness).await, (5, 0, 5));
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn sparse_retry_rearm_writer_work_is_bounded_by_updated_rows() {
     async fn writer_steps(prefix: i64, fixture: &'static str) -> u64 {
         let harness = RegisteredGlobalDbHarness::open(fixture).await;
@@ -500,7 +500,7 @@ async fn sparse_retry_rearm_writer_work_is_bounded_by_updated_rows() {
     );
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn rearm_reader_snapshot_cannot_clear_a_new_retry_generation() {
     let harness = RegisteredGlobalDbHarness::open("rearm-stale-candidates").await;
     seed_queue(&harness, 4, 0).await;
@@ -589,7 +589,7 @@ async fn rearm_reader_snapshot_cannot_clear_a_new_retry_generation() {
     assert!(rows.next().await.unwrap().is_none());
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn retry_rearm_does_not_erase_a_live_retry_between_windows() {
     let harness = RegisteredGlobalDbHarness::open("rearm-live-between-windows").await;
     seed_queue(&harness, 2, 1).await;
@@ -664,7 +664,7 @@ async fn retry_rearm_does_not_erase_a_live_retry_between_windows() {
     assert!(rows.next().await.unwrap().is_none());
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn rearm_leaves_later_observations_with_reused_queue_rowids_deferred() {
     let harness = RegisteredGlobalDbHarness::open("rearm-reused-queue-tail").await;
     seed_queue(&harness, 4, 0).await;
@@ -753,7 +753,7 @@ async fn rearm_leaves_later_observations_with_reused_queue_rowids_deferred() {
     assert_eq!(new.get::<i64>(1).unwrap(), FAR_FUTURE_MICROS);
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn retry_recovery_releases_wal_reader_between_pages() {
     let harness = RegisteredGlobalDbHarness::open("rearm-release-wal-reader").await;
     seed_queue(&harness, 9, 0).await;
@@ -800,7 +800,7 @@ async fn retry_recovery_releases_wal_reader_between_pages() {
     assert_eq!(queue_state(&harness).await, (9, 0, 9));
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn retry_rearm_respects_mount_ownership_across_restart_and_existing_schema() {
     let harness = RegisteredGlobalDbHarness::open("rearm-mount-owner").await;
     seed_queue(&harness, 2, 0).await;
@@ -871,7 +871,7 @@ async fn retry_rearm_respects_mount_ownership_across_restart_and_existing_schema
     );
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn failed_rearm_owner_write_preserves_the_previous_retry() {
     let harness = RegisteredGlobalDbHarness::open("rearm-owner-rollback").await;
     seed_queue(&harness, 1, 0).await;
@@ -916,7 +916,7 @@ async fn failed_rearm_owner_write_preserves_the_previous_retry() {
     );
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn daemon_admission_defers_rearm_to_background_convergence() {
     let harness = RegisteredGlobalDbHarness::open("rearm-daemon-admission").await;
     seed_queue(&harness, 5, 0).await;
@@ -946,7 +946,7 @@ async fn daemon_admission_defers_rearm_to_background_convergence() {
 // A rewrite for one source must not visit the entire projection queue while
 // holding the SQLite writer. The real queue grows with all imported sources,
 // but only records offered by this source may have their revival fence moved.
-#[asupersync::test]
+#[tokio::test]
 async fn source_rewrite_begin_writer_work_is_independent_of_unrelated_queue_rows() {
     async fn writer_steps(queue_rows: i64, label: &'static str) -> u64 {
         let harness = RegisteredGlobalDbHarness::open(label).await;

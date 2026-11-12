@@ -17,10 +17,13 @@ use tracedecay_contracts::code_index_freshness::{
 use tracedecay_runtime_core::native_runtime;
 
 #[test]
-fn spawned_loop_is_cancellable_and_joinable_without_a_tokio_runtime() {
+fn spawned_loop_is_cancellable_and_joinable_from_a_synchronous_host() {
+    if !crate::test_support::alone_with_runtime_hazards() {
+        return;
+    }
     let hazards = crate::test_support::native_runtime_hazards();
     native_runtime::block_on(async {
-        assert!(tokio::runtime::Handle::try_current().is_err());
+        assert!(tokio::runtime::Handle::try_current().is_ok());
         let schedulers = CodeIndexSchedulerRegistryV1::new(1);
         let task = spawn_with_administration(StoreAdministration::default(), schedulers)
             .expect("the native runtime admits the loop");
@@ -35,16 +38,19 @@ fn spawned_loop_is_cancellable_and_joinable_without_a_tokio_runtime() {
     assert_eq!(crate::test_support::native_runtime_hazards(), hazards);
 }
 
-/// The tick's reconcile mounts the PR head through the code-index scheduler
-/// with no Tokio runtime entered.
+/// A tick admitted by a synchronous host reconciles the PR head through the
+/// code-index scheduler on the installed runtime.
 #[test]
-fn reconcile_activates_a_pr_head_without_a_tokio_runtime() {
+fn reconcile_activates_a_pr_head_from_a_synchronous_host() {
+    if !crate::test_support::alone_with_runtime_hazards() {
+        return;
+    }
     let repo = tempfile::tempdir().unwrap();
     let origin = tempfile::tempdir().unwrap();
     init_repo_with_pr_11_head(repo.path(), origin.path());
     let hazards = crate::test_support::native_runtime_hazards();
     native_runtime::block_on(async {
-        assert!(tokio::runtime::Handle::try_current().is_err());
+        assert!(tokio::runtime::Handle::try_current().is_ok());
         assert_pr_11_head_reconciles(repo.path()).await;
     })
     .expect("native runtime");

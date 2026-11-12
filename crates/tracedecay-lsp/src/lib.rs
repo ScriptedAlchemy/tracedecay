@@ -57,12 +57,15 @@ pub use capabilities::{
 };
 pub use compile_diagnostics::Diagnostic;
 pub use compile_diagnostics::tsconfig::{
-    SearchedTsconfig, TypeScriptFileOwner, TypeScriptProject, TypeScriptProjectConfigInputs,
-    typescript_build_info_program, typescript_file_owner, typescript_install_command,
-    typescript_projects,
+    TypeScriptProgram, TypeScriptProject, TypeScriptProjectDiscoveryError,
+    is_typescript_package_manifest, typescript_build_info_program, typescript_install_command,
+    typescript_project, typescript_projects,
 };
 pub use compile_diagnostics::typescript::{
-    TYPESCRIPT_INSTALL_COMMAND, TypeScriptCompilerAdmission,
+    TYPESCRIPT_INSTALL_COMMAND, TypeScriptBuildInfoGuard, TypeScriptCompilerAdmission,
+    TypeScriptConfiguration,
+    referenced_projects_out_of_date as typescript_referenced_projects_out_of_date,
+    resolve_configuration as resolve_typescript_configuration,
     run_compiler as run_typescript_compiler,
 };
 pub use context::{

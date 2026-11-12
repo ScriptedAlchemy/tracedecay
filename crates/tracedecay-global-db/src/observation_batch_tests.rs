@@ -351,7 +351,7 @@ fn colliding_rewrite(
     anchored_write(observation, expected_cursor)
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn n_persist_observation_calls_open_n_writer_transactions() {
     let tmp = TempDir::new().unwrap();
     let runtime = HostAdmissionTestRuntimeV1::profile(tmp.path())
@@ -374,7 +374,7 @@ async fn n_persist_observation_calls_open_n_writer_transactions() {
     assert_eq!(after.operations - before.operations, BATCH_SIZE as i64);
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn persist_observations_opens_one_writer_transaction_for_the_batch() {
     let tmp = TempDir::new().unwrap();
     let runtime = HostAdmissionTestRuntimeV1::profile(tmp.path())
@@ -420,7 +420,7 @@ async fn persist_observations_opens_one_writer_transaction_for_the_batch() {
     );
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn intra_batch_exact_duplicate_is_hydrated_as_a_duplicate() {
     let tmp = TempDir::new().unwrap();
     let runtime = HostAdmissionTestRuntimeV1::profile(tmp.path())
@@ -583,7 +583,7 @@ async fn assert_batch_settles_like_sequential_writes(
     (batch, batch_effect)
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn intra_batch_identity_rewrite_settles_like_sequential_writes() {
     let session_id = SessionId::new("session.observation-batch.intra-rewrite").unwrap();
     let first = sequential_writes(&session_id, 1)
@@ -603,7 +603,7 @@ async fn intra_batch_identity_rewrite_settles_like_sequential_writes() {
     );
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn intra_batch_receipt_collision_settles_like_sequential_writes() {
     let session_id = SessionId::new("session.observation-batch.intra-receipt").unwrap();
     let mut writes = sequential_writes(&session_id, 2);
@@ -634,7 +634,7 @@ async fn intra_batch_receipt_collision_settles_like_sequential_writes() {
     assert_eq!(effect.retained, vec![true, false]);
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn intra_batch_alias_collision_settles_like_sequential_writes() {
     let session_id = SessionId::new("session.observation-batch.intra-alias").unwrap();
     let mut writes = sequential_writes(&session_id, 2);
@@ -750,7 +750,7 @@ async fn assert_shared_alias_is_refused(
     assert_eq!(effect.retained, vec![true, false]);
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn codex_revert_rollout_shares_the_thread_rollout_alias() {
     let (batch, effect) = assert_batch_settles_like_sequential_writes(vec![
         THREAD_ROLLOUT.write(),
@@ -767,7 +767,7 @@ async fn codex_revert_rollout_shares_the_thread_rollout_alias() {
     assert_eq!(effect.retained, vec![true, true]);
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn keyed_sources_of_another_provider_do_not_share_an_alias() {
     let thread = SharedRecordSource {
         provider: BATCH_PROVIDER,
@@ -781,7 +781,7 @@ async fn keyed_sources_of_another_provider_do_not_share_an_alias() {
     assert_shared_alias_is_refused(thread, revert).await;
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn unkeyed_codex_source_does_not_share_an_alias() {
     let unkeyed = SharedRecordSource {
         source_key: None,
@@ -792,7 +792,7 @@ async fn unkeyed_codex_source_does_not_share_an_alias() {
     assert_shared_alias_is_refused(unkeyed, REVERT_ROLLOUT).await;
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn codex_rollouts_with_different_retention_do_not_share_an_alias() {
     let revert = SharedRecordSource {
         retention_class: "retention.observation-batch.other",
@@ -802,7 +802,7 @@ async fn codex_rollouts_with_different_retention_do_not_share_an_alias() {
     assert_shared_alias_is_refused(THREAD_ROLLOUT, revert).await;
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn codex_rollouts_under_different_authorities_do_not_share_an_alias() {
     let revert = SharedRecordSource {
         authority: "observation-batch-other",
@@ -823,7 +823,7 @@ async fn codex_rollouts_under_different_authorities_do_not_share_an_alias() {
     assert_shared_alias_is_refused(THREAD_ROLLOUT, revert).await;
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn non_codex_alias_collision_stays_typed_over_a_corrupt_alias_owner() {
     let (_tmp, runtime, store) = open_profile_store().await;
     let owner = SharedRecordSource {
@@ -858,7 +858,7 @@ async fn non_codex_alias_collision_stays_typed_over_a_corrupt_alias_owner() {
     );
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn codex_sibling_over_a_retention_released_owner_is_a_typed_alias_collision() {
     const DAY_MICROS: i64 = 24 * 60 * 60 * 1_000_000;
 
@@ -953,7 +953,7 @@ async fn codex_sibling_over_a_retention_released_owner_is_a_typed_alias_collisio
     ));
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn persist_observations_dispatches_one_runtime_command_independent_of_batch_size() {
     let mut expected_snapshot_probes = None;
     for count in [1, BATCH_SIZE, ABOVE_WRITER_COALESCING_LIMIT] {
@@ -1001,7 +1001,7 @@ async fn persist_observations_dispatches_one_runtime_command_independent_of_batc
     }
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn persist_observations_partitions_large_windows_by_exact_admission_bytes() {
     let tmp = TempDir::new().unwrap();
     let runtime = HostAdmissionTestRuntimeV1::profile(tmp.path())
@@ -1036,7 +1036,7 @@ async fn persist_observations_partitions_large_windows_by_exact_admission_bytes(
     );
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn failed_batch_preflight_commits_no_valid_prefix() {
     let tmp = TempDir::new().unwrap();
     let runtime = HostAdmissionTestRuntimeV1::profile(tmp.path())
@@ -1088,7 +1088,7 @@ async fn failed_batch_preflight_commits_no_valid_prefix() {
     );
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn persist_observations_keeps_cursor_cas_collision_and_file_identity() {
     let tmp = TempDir::new().unwrap();
     let runtime = HostAdmissionTestRuntimeV1::profile(tmp.path())
@@ -1174,7 +1174,7 @@ async fn persist_observations_keeps_cursor_cas_collision_and_file_identity() {
     assert_eq!(cursor.resume_fingerprint(), Some(0xcafe_babe));
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn persist_observations_recovers_a_peer_commit_as_exact_duplicate() {
     let tmp = TempDir::new().unwrap();
     let runtime = HostAdmissionTestRuntimeV1::profile(tmp.path())
@@ -1189,7 +1189,7 @@ async fn persist_observations_recovers_a_peer_commit_as_exact_duplicate() {
     let right_store = store.clone();
     let left_writes = writes.clone();
     let right_writes = writes;
-    let (left, right) = asupersync::join!(
+    let (left, right) = tokio::join!(
         left_store.persist_observations(left_writes),
         right_store.persist_observations(right_writes),
     );

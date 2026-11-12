@@ -7,6 +7,28 @@ use grafeo_engine::config::{DurabilityMode, StorageFormat};
 
 use crate::{GraphCancellation, GraphDbError};
 
+/// Regular files and directories owned by one graph container. Offline store
+/// reset discards its sealed projections along with the relational authority.
+/// Persistent coordination locks are outside the data family.
+pub fn graph_store_data_paths(container: &Path) -> ([PathBuf; 2], [PathBuf; 3]) {
+    (
+        [
+            crate::verified_marker::marker_path(container),
+            container.to_owned(),
+        ],
+        [
+            crate::corrupt_store::wal_sidecar_path(container),
+            spill_directory(container),
+            crate::sealed_store::sealed_store_root(container),
+        ],
+    )
+}
+
+pub(crate) fn spill_directory(container: &Path) -> PathBuf {
+    // Grafeo derives the default spill directory from the complete filename.
+    container.with_added_extension("spill")
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum GraphDbLocation {
     #[cfg(any(test, feature = "test-helpers", feature = "eval-helpers"))]

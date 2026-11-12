@@ -1,3 +1,4 @@
+use futures_util::FutureExt;
 use std::sync::{Arc, Mutex};
 use tracedecay_application::work::RegisteredWorkApplicationServicesV1;
 
@@ -39,6 +40,31 @@ async fn project_runtime(
     RegisteredGlobalDbTestRuntime::project(profile, project, id::<ProjectId>(PROJECT))
         .await
         .expect("registered project store opens")
+}
+
+/// Global storage-wait telemetry belongs to the process, so a test measuring
+/// its delta must not share it with other tests' synchronous fixture setup.
+/// Reuse this executable to keep those assertions isolated without another
+/// integration-test binary or serializing the rest of the suite.
+pub(crate) fn alone_with_storage_wait_counters() -> bool {
+    const CHILD: &str = "TRACEDECAY_STORAGE_WAIT_TEST_CHILD";
+    let thread = std::thread::current();
+    let test = thread.name().expect("libtest names its test thread");
+    if std::env::var(CHILD).as_deref() == Ok(test) {
+        return true;
+    }
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([test, "--exact", "--test-threads=1", "--nocapture"])
+        .env(CHILD, test)
+        .output()
+        .expect("run the storage-wait test in its own process");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.status.success() && stdout.contains("1 passed"),
+        "{test} failed in its child process:\n{stdout}\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    false
 }
 
 /// Runs `job` on a native runtime worker and returns its output with the
@@ -96,6 +122,9 @@ fn duplicate_command(
 
 #[tokio::test]
 async fn duplicate_adjudication_awaited_on_a_native_worker_parks_no_native_thread() {
+    if !alone_with_storage_wait_counters() {
+        return;
+    }
     let profile = tempfile::tempdir().expect("profile");
     let project = tempfile::tempdir().expect("project");
     let runtime = project_runtime(profile.path(), project.path()).await;
@@ -189,6 +218,9 @@ impl WorkLeakEvidencePortV1 for OwnerlessAttemptScan {
 
 #[tokio::test]
 async fn leak_adjudication_awaited_on_a_native_worker_parks_no_native_thread() {
+    if !alone_with_storage_wait_counters() {
+        return;
+    }
     let profile = tempfile::tempdir().expect("profile");
     let project = tempfile::tempdir().expect("project");
     let runtime = project_runtime(profile.path(), project.path()).await;
@@ -265,11 +297,17 @@ fn placement_target() -> WorkPlacementTargetV1 {
     .unwrap()
 }
 
-/// A Git observer stand-in that reports a clean target and records the name
-/// of every thread it ran on.
+/// A Git observer stand-in that reports a clean target and records whether
+/// nested blocking work runs inline on its thread.
 #[derive(Clone, Default)]
 struct RecordingObserver {
-    threads: Arc<Mutex<Vec<Option<String>>>>,
+    threads: Arc<Mutex<Vec<ObservationThread>>>,
+}
+
+#[derive(Clone, Debug)]
+struct ObservationThread {
+    name: Option<String>,
+    blocking_work_ran_inline: bool,
 }
 
 impl RecordingObserver {
@@ -277,10 +315,15 @@ impl RecordingObserver {
         &self,
         _target: &WorkPlacementTargetV1,
     ) -> Result<WorkPlacementObservationV1, ApplicationProblem> {
-        self.threads
-            .lock()
-            .unwrap()
-            .push(std::thread::current().name().map(str::to_owned));
+        let current = std::thread::current();
+        let nested = tracedecay_rusqlite_runtime::native_runtime::spawn_blocking(|| {
+            std::thread::current().id()
+        })
+        .now_or_never();
+        self.threads.lock().unwrap().push(ObservationThread {
+            name: current.name().map(str::to_owned),
+            blocking_work_ran_inline: nested == Some(Ok(current.id())),
+        });
         Ok(WorkPlacementObservationV1 {
             dirty_tracked_paths: 0,
             untracked_paths: 0,
@@ -302,7 +345,7 @@ impl RecordingObserver {
         move |target| recorder.observe(target)
     }
 
-    fn threads(&self) -> Vec<Option<String>> {
+    fn threads(&self) -> Vec<ObservationThread> {
         self.threads.lock().unwrap().clone()
     }
 }
@@ -328,6 +371,9 @@ fn release_command(run: &str, expected_authority_version: u64) -> ReleaseWorkPla
 
 #[tokio::test]
 async fn placement_admit_and_release_awaited_on_a_native_worker_observe_off_the_writer() {
+    if !alone_with_storage_wait_counters() {
+        return;
+    }
     let profile = tempfile::tempdir().expect("profile");
     let project = tempfile::tempdir().expect("project");
     let runtime = project_runtime(profile.path(), project.path()).await;
@@ -374,13 +420,13 @@ async fn placement_admit_and_release_awaited_on_a_native_worker_observe_off_the_
         2,
         "admit and release each observed the target once"
     );
-    assert!(
-        threads.iter().all(|name| name
-            .as_deref()
-            .is_some_and(|name| name.contains("-blocking-"))),
-        "the Git observation ran on the blocking pool, never the writer or the native worker: \
-         {threads:?}"
-    );
+    for thread in &threads {
+        assert!(
+            thread.blocking_work_ran_inline,
+            "the Git observation ran on the blocking pool, never the writer or the native worker: {:?}",
+            thread.name
+        );
+    }
     assert_eq!(
         database
             .work_storage()

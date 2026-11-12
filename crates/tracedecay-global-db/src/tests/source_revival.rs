@@ -331,7 +331,7 @@ async fn clear_temporal_reset(registered: &RegisteredGlobalDb, write: &AnchoredO
         .unwrap();
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn a_reoffered_retired_record_projects_again_across_rebuild_and_restart() {
     let tmp = TempDir::new().unwrap();
     let runtime = RegisteredGlobalDbTestRuntime::profile(tmp.path())
@@ -417,7 +417,7 @@ async fn a_reoffered_retired_record_projects_again_across_rebuild_and_restart() 
     assert_eq!(projected_messages(registered).await, ["message.batch.0"]);
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn a_newer_layout_retires_a_revived_record_again() {
     let tmp = TempDir::new().unwrap();
     let runtime = HostAdmissionTestRuntimeV1::profile(tmp.path())
@@ -448,7 +448,7 @@ async fn a_newer_layout_retires_a_revived_record_again() {
     assert_eq!(projected_messages(registered).await, ["message.batch.0"]);
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn a_reoffered_record_settles_if_another_source_claimed_its_retired_output() {
     let tmp = TempDir::new().unwrap();
     let runtime = RegisteredGlobalDbTestRuntime::profile(tmp.path())
@@ -537,7 +537,7 @@ async fn a_reoffered_record_settles_if_another_source_claimed_its_retired_output
     );
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn a_foreign_source_cannot_revive_a_retired_record() {
     let tmp = TempDir::new().unwrap();
     let runtime = HostAdmissionTestRuntimeV1::profile(tmp.path())
@@ -578,7 +578,7 @@ async fn a_foreign_source_cannot_revive_a_retired_record() {
     assert_eq!(projected_messages(registered).await, ["message.batch.0"]);
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn a_failed_presence_batch_does_not_authorize_revival() {
     let tmp = TempDir::new().unwrap();
     let runtime = HostAdmissionTestRuntimeV1::profile(tmp.path())
@@ -628,7 +628,7 @@ async fn a_failed_presence_batch_does_not_authorize_revival() {
     assert_eq!(projected_messages(registered).await, ["message.batch.0"]);
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn a_record_retired_before_its_drain_projects_once_offered_again() {
     let tmp = TempDir::new().unwrap();
     let runtime = HostAdmissionTestRuntimeV1::profile(tmp.path())
@@ -665,7 +665,7 @@ async fn a_record_retired_before_its_drain_projects_once_offered_again() {
     assert_eq!(projected_messages(registered).await, ["message.batch.0"]);
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn a_rebuild_that_staged_a_retirement_activates_the_revival() {
     // Three alias pages and one build page fill the first rebuild call's
     // step budget, so it stages the retirement and stops before activation.
@@ -706,7 +706,7 @@ async fn a_rebuild_that_staged_a_retirement_activates_the_revival() {
     assert!(messages.iter().any(|message| message == "message.batch.0"));
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn a_rebuild_does_not_restore_a_revived_record_retired_again() {
     let tmp = TempDir::new().unwrap();
     let runtime = RegisteredGlobalDbTestRuntime::profile(tmp.path())
@@ -751,7 +751,7 @@ async fn a_rebuild_does_not_restore_a_revived_record_retired_again() {
     assert_eq!(rebuilt.skipped_observations(), 1);
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn retirement_cancels_pending_revival_and_retained_prefix_preserves_acceptance() {
     let tmp = TempDir::new().unwrap();
     let runtime = RegisteredGlobalDbTestRuntime::profile(tmp.path())
@@ -787,7 +787,7 @@ async fn retirement_cancels_pending_revival_and_retained_prefix_preserves_accept
     assert_eq!(projected_messages(registered).await, ["message.batch.0"]);
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn a_failed_accepted_batch_rolls_back_revival_and_coverage() {
     let tmp = TempDir::new().unwrap();
     let runtime = RegisteredGlobalDbTestRuntime::profile(tmp.path())
@@ -907,7 +907,7 @@ async fn a_failed_accepted_batch_rolls_back_revival_and_coverage() {
     );
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn an_exact_accepted_reoffer_revives_without_a_transport_receipt() {
     let tmp = TempDir::new().unwrap();
     let runtime = RegisteredGlobalDbTestRuntime::profile(tmp.path())

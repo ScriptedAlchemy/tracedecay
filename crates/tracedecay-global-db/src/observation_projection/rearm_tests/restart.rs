@@ -24,7 +24,7 @@ async fn retry_deadlines(harness: &RegisteredGlobalDbHarness) -> Vec<(i64, i64)>
     deadlines
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn retry_rearm_resumes_committed_windows_after_failure_and_restart() {
     let harness = RegisteredGlobalDbHarness::open("rearm-interrupted-recovery").await;
     seed_queue(&harness, 9, 0).await;
@@ -125,7 +125,7 @@ async fn retry_rearm_resumes_committed_windows_after_failure_and_restart() {
 /// A recovery can spend a long time between its original clock read and later
 /// candidate pages. Deadlines that matured meanwhile must not be rewritten:
 /// they are already eligible for ordinary projection without restart rearm.
-#[asupersync::test]
+#[tokio::test]
 async fn retry_rearm_skips_deadlines_that_mature_during_recovery() {
     let harness = RegisteredGlobalDbHarness::open("rearm-midwalk-deadlines").await;
     seed_queue(&harness, 4, 0).await;

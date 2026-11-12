@@ -650,7 +650,7 @@ mod tests {
         }
     }
 
-    #[asupersync::test]
+    #[tokio::test]
     async fn generic_protocol_service_delegates_once_to_application_port() {
         let calls = Arc::new(AtomicUsize::new(0));
         let service = RemoteProtocolServiceV1::new(Arc::new(FakeProtocolPort {

@@ -57,7 +57,7 @@ async fn canonical_source_connection(path: &std::path::Path) -> TestConnection {
     connection
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn missing_relation_projection_is_hydration_unavailable_not_provider_denial() {
     let directory = tempfile::tempdir().expect("temporary directory");
     let connection = canonical_source_connection(&directory.path().join("unavailable.db")).await;
@@ -79,7 +79,7 @@ async fn missing_relation_projection_is_hydration_unavailable_not_provider_denia
     assert_eq!(error, HydrationError::Unavailable);
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn cancelled_provider_evidence_traversal_preserves_control_error() {
     let directory = tempfile::tempdir().expect("temporary directory");
     let connection = canonical_source_connection(&directory.path().join("cancelled.db")).await;

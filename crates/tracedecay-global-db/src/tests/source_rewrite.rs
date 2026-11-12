@@ -26,7 +26,7 @@ use crate::tests::harness::{
 /// read and exercises repeated, independently committed writer pages.
 const UNOFFERED_RECORDS: i64 = 10_003;
 
-#[asupersync::test]
+#[tokio::test]
 async fn rewrite_completion_retires_unoffered_records_beyond_the_query_cap() {
     let harness = RegisteredGlobalDbHarness::open("source-rewrite-unoffered-cap").await;
     let source =
@@ -129,7 +129,7 @@ async fn rewrite_completion_retires_unoffered_records_beyond_the_query_cap() {
 /// An exact multiple of the bounded page must retire its final records and
 /// clear the pending marker in the same productive writer transaction. A
 /// lookahead row may be read, but must never be retired in the previous page.
-#[asupersync::test]
+#[tokio::test]
 async fn rewrite_completion_exact_page_boundaries_need_no_empty_writer() {
     for (unoffered, fixture) in [
         (128_i64, "source-rewrite-exact-128"),
@@ -235,7 +235,7 @@ async fn table_count(conn: &impl QueryExecutor, sql: &str) -> i64 {
 /// One source page can retire many effects of the same session. The
 /// temporal reset is a session-level invalidation, not a per-record writer
 /// upsert; an unchanged second update must be impossible in this page.
-#[asupersync::test]
+#[tokio::test]
 async fn rewrite_completion_coalesces_temporal_reset_for_one_session() {
     let directory = TempDir::new().unwrap();
     let runtime = HostAdmissionTestRuntimeV1::profile(directory.path())
@@ -334,7 +334,7 @@ async fn rewrite_completion_coalesces_temporal_reset_for_one_session() {
 /// page commits must remain durable for the next daemon invocation.
 /// Reopening the registered store must resume from those committed pages,
 /// preserving the reoffered survivor and retiring each obsolete record once.
-#[asupersync::test]
+#[tokio::test]
 async fn rewrite_completion_resumes_committed_pages_after_failure_and_restart() {
     // More real projected records than one page: prior page commits must
     // remain durable when the final page's provenance collision aborts.
@@ -593,7 +593,7 @@ async fn rewrite_completion_resumes_committed_pages_after_failure_and_restart() 
 /// records, accepted revivals, or the unchanged pending rewrite marker.
 /// SQL triggers reject every redundant UPDATE, while a real generation
 /// transition must still advance all three authorities.
-#[asupersync::test]
+#[tokio::test]
 async fn repeated_source_rewrite_begin_preserves_already_advanced_prefix() {
     let directory = TempDir::new().unwrap();
     let runtime = HostAdmissionTestRuntimeV1::profile(directory.path())
@@ -743,7 +743,7 @@ async fn repeated_source_rewrite_begin_preserves_already_advanced_prefix() {
 /// record, even for reoffers identical to the already durable generation.
 /// The JSON batch must preserve last-offer ordering, exact identity and
 /// rollback while reducing writer commands to bounded pages.
-#[asupersync::test]
+#[tokio::test]
 async fn source_presence_pages_are_atomic_and_unchanged_reoffers_do_not_write() {
     const RECORDS: usize = 257;
     let harness = RegisteredGlobalDbHarness::open("source-presence-batched").await;
@@ -902,7 +902,7 @@ async fn source_presence_pages_are_atomic_and_unchanged_reoffers_do_not_write() 
 /// presence entries. Repeating their retirement must not perform an UPDATE
 /// and receipt read for every already-disposed observation. This exercises
 /// real projected records and the canonical disposition/queue authorities.
-#[asupersync::test]
+#[tokio::test]
 async fn rewrite_completion_skips_settled_records_without_revival() {
     async fn completed_writer_statements(records: usize) -> u64 {
         let directory = TempDir::new().unwrap();
@@ -1124,7 +1124,7 @@ async fn source_rewrite_steps_with_survivor_prefix(unoffered: usize) -> u64 {
     after.sqlite_vm.vm_steps - before.sqlite_vm.vm_steps
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn source_rewrite_pages_do_not_rescan_the_same_survivor_prefix() {
     let one_page_steps = source_rewrite_steps_with_survivor_prefix(127).await;
     let eight_page_steps = source_rewrite_steps_with_survivor_prefix(1_023).await;

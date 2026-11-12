@@ -172,25 +172,17 @@ impl Database {
         &self,
     ) -> std::pin::Pin<
         Box<
-            dyn std::future::Future<Output = Result<asupersync::sync::OwnedSemaphorePermit>>
-                + Send
-                + '_,
+            dyn std::future::Future<Output = Result<tokio::sync::OwnedSemaphorePermit>> + Send + '_,
         >,
     > {
         Box::pin(async move {
-            let cx = crate::native_runtime::cx().ok_or_else(|| TraceDecayError::Config {
-                message: "database writer admission requires an Asupersync context".to_owned(),
-            })?;
-            asupersync::sync::OwnedSemaphorePermit::acquire(
-                std::sync::Arc::clone(&self.inner.writer),
-                &cx,
-                1,
-            )
-            .await
-            .map_err(|error| TraceDecayError::Database {
-                message: format!("database writer admission failed: {error}"),
-                operation: "acquire database writer lane".to_owned(),
-            })
+            std::sync::Arc::clone(&self.inner.writer)
+                .acquire_owned()
+                .await
+                .map_err(|error| TraceDecayError::Database {
+                    message: format!("database writer admission failed: {error}"),
+                    operation: "acquire database writer lane".to_owned(),
+                })
         })
     }
 

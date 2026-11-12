@@ -73,7 +73,7 @@ impl DaemonInvocationClient {
             () = &mut cancellation_wait => Err(DaemonInvocationError::Cancelled {
                 stage: CancellationStage::BeforeAdmission,
             }),
-            () = asupersync::time::sleep(asupersync::time::wall_now(), remaining) => Err(DaemonInvocationError::TimedOut {
+            () = tokio::time::sleep(remaining) => Err(DaemonInvocationError::TimedOut {
                 stage: CancellationStage::BeforeAdmission,
             }),
         }
@@ -108,7 +108,7 @@ impl DaemonInvocationClient {
             let interrupted = tokio::select! {
                 result = &mut invocation => ControlledConnectionOutcome::Completed(result),
                 () = &mut cancellation_wait => ControlledConnectionOutcome::Cancelled,
-                () = asupersync::time::sleep(asupersync::time::wall_now(), remaining) => ControlledConnectionOutcome::TimedOut,
+                () = tokio::time::sleep(remaining) => ControlledConnectionOutcome::TimedOut,
             };
             match interrupted {
                 ControlledConnectionOutcome::Completed(result) => {
@@ -117,9 +117,8 @@ impl DaemonInvocationClient {
                 interrupted @ (ControlledConnectionOutcome::Cancelled
                 | ControlledConnectionOutcome::TimedOut) => {
                     let authoritative_settlement_deadline =
-                        asupersync::time::wall_now() + self.response_grace;
-                    let _ = asupersync::time::timeout(
-                        asupersync::time::wall_now(),
+                        tokio::time::Instant::now() + self.response_grace;
+                    let _ = tokio::time::timeout(
                         Duration::from_millis(250),
                         self.cancel_invocation(&target_request_id),
                     )
@@ -127,7 +126,7 @@ impl DaemonInvocationClient {
                     match policy {
                         InvocationCancellationPolicy::ReadOnly => interrupted,
                         InvocationCancellationPolicy::AuthoritativeEffect => {
-                            match asupersync::time::timeout_at(
+                            match tokio::time::timeout_at(
                                 authoritative_settlement_deadline,
                                 &mut invocation,
                             )
@@ -201,7 +200,7 @@ impl DaemonInvocationClient {
         tokio::select! {
             result = result.into_response() => result.map_err(classify_invoke_transport_error),
             () = wait_for_cancellation(cancellation) => Err(DaemonInvocationError::Cancelled { stage }),
-            () = asupersync::time::sleep(asupersync::time::wall_now(), remaining) => Err(DaemonInvocationError::TimedOut { stage }),
+            () = tokio::time::sleep(remaining) => Err(DaemonInvocationError::TimedOut { stage }),
         }
     }
 

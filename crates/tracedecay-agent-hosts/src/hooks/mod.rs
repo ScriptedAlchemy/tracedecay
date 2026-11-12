@@ -716,7 +716,7 @@ pub(crate) async fn await_within_stop_budget<T>(
     if let Some(telemetry) = telemetry {
         telemetry.note_timeout_budget(budget);
     }
-    match asupersync::time::timeout(asupersync::time::wall_now(), budget, work).await {
+    match tokio::time::timeout(budget, work).await {
         Ok(value) => {
             if let Some(telemetry) = telemetry {
                 telemetry.note_timed_out(false);

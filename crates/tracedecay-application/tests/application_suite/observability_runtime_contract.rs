@@ -147,7 +147,7 @@ async fn bounded_producer_persists_through_registered_authority_and_cancels_clos
 }
 
 #[test]
-fn bounded_producer_starts_and_delivers_without_a_tokio_runtime() {
+fn bounded_producer_starts_and_delivers_from_a_plain_thread() {
     use tracedecay_runtime_core::native_runtime::block_on;
 
     assert!(tokio::runtime::Handle::try_current().is_err());

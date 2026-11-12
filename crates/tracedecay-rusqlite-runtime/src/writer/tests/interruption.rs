@@ -10,9 +10,7 @@ fn cancelled_before_admission_never_enters_the_queue() {
     let runtime = tokio::runtime::Builder::new_current_thread()
         .build()
         .unwrap();
-    let outcome = runtime
-        .block_on(writer.submit(&cx(), request, probe))
-        .unwrap();
+    let outcome = runtime.block_on(writer.submit(request, probe)).unwrap();
     assert!(matches!(
         outcome,
         RuntimeSubmitOutcomeV1::CancelledBeforeCommit {
@@ -195,7 +193,7 @@ fn cancelled_first_write_leaves_no_schema_and_can_retry() {
         .unwrap();
     assert!(matches!(
         runtime
-            .block_on(writer.submit(&cx(), request.clone(), probe))
+            .block_on(writer.submit(request.clone(), probe))
             .unwrap(),
         RuntimeSubmitOutcomeV1::CancelledBeforeCommit { .. }
     ));
@@ -211,7 +209,7 @@ fn cancelled_first_write_leaves_no_schema_and_can_retry() {
     let retry_probe = Arc::new(Probe::new(&request, None));
     assert!(matches!(
         runtime
-            .block_on(writer.submit(&cx(), request, retry_probe))
+            .block_on(writer.submit(request, retry_probe))
             .unwrap(),
         RuntimeSubmitOutcomeV1::Committed { .. }
     ));

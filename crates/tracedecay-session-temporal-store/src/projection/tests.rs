@@ -312,7 +312,7 @@ async fn ready_single_observation_completion(
     (tmp, runtime, request, generation)
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn checked_in_codex_goal_materializes_one_generation_bound_occurrence() {
     let tmp = TempDir::new().unwrap();
     let runtime = HostAdmissionTestRuntimeV1::profile(tmp.path())
@@ -364,7 +364,7 @@ async fn checked_in_codex_goal_materializes_one_generation_bound_occurrence() {
     );
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn relation_batch_persists_restarts_and_completes_without_duplicates() {
     let tmp = TempDir::new().unwrap();
     let session_id = fixture_session("session.projector.relation-restart");
@@ -474,7 +474,7 @@ async fn relation_batch_persists_restarts_and_completes_without_duplicates() {
     }
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn all_skipped_refresh_persists_reopens_and_completes_idempotently() {
     let tmp = TempDir::new().unwrap();
     let session_id = fixture_session("session.projector.all-skipped");
@@ -584,7 +584,7 @@ async fn all_skipped_refresh_persists_reopens_and_completes_idempotently() {
     }
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn refresh_at_committed_frontier_needs_no_new_observation_effect() {
     let tmp = TempDir::new().unwrap();
     let runtime = HostAdmissionTestRuntimeV1::profile(tmp.path())
@@ -609,19 +609,19 @@ async fn refresh_at_committed_frontier_needs_no_new_observation_effect() {
     );
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn refresh_frontier_without_observation_effects_cannot_activate() {
     assert_unsupported_frontier_cannot_activate(FrontierPrefix::Absent, false).await;
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn skipped_prefix_cannot_prove_an_unsupported_target_frontier() {
     for foreign_target in [false, true] {
         assert_unsupported_frontier_cannot_activate(FrontierPrefix::Skipped, foreign_target).await;
     }
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn message_prefix_cannot_prove_an_unsupported_target_frontier() {
     assert_unsupported_frontier_cannot_activate(FrontierPrefix::Message, false).await;
 }
@@ -733,7 +733,7 @@ async fn assert_unsupported_frontier_cannot_activate(prefix: FrontierPrefix, for
     );
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn terminal_receipt_rejects_corrupted_derived_evidence() {
     let tmp = TempDir::new().unwrap();
     let runtime = HostAdmissionTestRuntimeV1::profile(tmp.path())
@@ -804,7 +804,7 @@ async fn terminal_receipt_rejects_corrupted_derived_evidence() {
     assert!(matches!(error, SessionStoreError::Storage { .. }));
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn grouped_completion_revalidates_evidence_after_staging() {
     let tmp = TempDir::new().unwrap();
     let runtime = HostAdmissionTestRuntimeV1::profile(tmp.path())
@@ -920,7 +920,7 @@ async fn grouped_completion_revalidates_evidence_after_staging() {
     );
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn refresh_begin_reports_busy_only_for_a_running_operation() {
     let tmp = TempDir::new().unwrap();
     let runtime = HostAdmissionTestRuntimeV1::profile(tmp.path())
@@ -989,7 +989,7 @@ async fn refresh_begin_reports_busy_only_for_a_running_operation() {
     );
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn cancelled_terminal_persistence_rolls_back_candidate_state() {
     let tmp = TempDir::new().unwrap();
     let runtime = HostAdmissionTestRuntimeV1::profile(tmp.path())
@@ -1072,7 +1072,7 @@ async fn cancelled_terminal_persistence_rolls_back_candidate_state() {
     );
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn cancellation_at_final_precommit_checkpoint_rolls_back_all_projection_writes() {
     const WORK_LIMIT: usize = 4_096;
 
@@ -1151,7 +1151,7 @@ async fn cancellation_at_final_precommit_checkpoint_rolls_back_all_projection_wr
     );
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn cancellation_at_completion_precommit_rolls_back_and_the_retry_completes() {
     const WORK_LIMIT: usize = 4_096;
     // Sync point, not a performance budget: one less than the successful
@@ -1275,7 +1275,7 @@ async fn cancellation_at_completion_precommit_rolls_back_and_the_retry_completes
     );
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn copied_from_lineage_is_not_auto_emitted_by_materializer() {
     let tmp = TempDir::new().unwrap();
     let runtime = HostAdmissionTestRuntimeV1::profile(tmp.path())
@@ -1317,7 +1317,7 @@ async fn copied_from_lineage_is_not_auto_emitted_by_materializer() {
     assert_eq!(progress.committed_records(), batch.item_count() as u64);
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn relation_derivation_backs_off_to_the_total_batch_limit() {
     let tmp = TempDir::new().unwrap();
     let runtime = HostAdmissionTestRuntimeV1::profile(tmp.path())
@@ -1422,7 +1422,7 @@ fn assertion_identity_includes_both_anchors() {
     assert_eq!(first_id.len(), 71);
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn parent_resolver_rejects_ambiguous_session_message_ids() {
     let mut resolver = ParentMessageResolver::default();
     resolver.register("message.shared", "occurrence.a");
@@ -1440,7 +1440,7 @@ async fn parent_resolver_rejects_ambiguous_session_message_ids() {
     );
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn parent_resolver_pages_live_sized_observation_history() {
     let directory = TempDir::new().unwrap();
     let connection = TestConnection::open(&directory.path().join("resolver-pages.db"));
@@ -1527,7 +1527,7 @@ async fn parent_resolver_pages_live_sized_observation_history() {
     assert_eq!(resolver.resolve("message.missing"), None);
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn parent_resolver_has_bounded_cancellable_session_traversal() {
     const UNRELATED_OBSERVATIONS: i64 = 2_048;
 
@@ -1676,7 +1676,7 @@ fn parent_resolver_prefers_a_persisted_cross_batch_predecessor() {
     );
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn explicit_copy_survives_reconstruction_in_the_native_relation_graph() {
     let tmp = TempDir::new().unwrap();
     let runtime = HostAdmissionTestRuntimeV1::profile(tmp.path())
@@ -1802,7 +1802,7 @@ async fn explicit_copy_survives_reconstruction_in_the_native_relation_graph() {
     );
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn multi_batch_refresh_progress_survives_restart_under_guard() {
     const OBSERVATION_COUNT: u64 = 501;
 
@@ -2009,7 +2009,7 @@ async fn open_effect_store(name: &str) -> (TempDir, TestConnection) {
 /// Case 2, idempotent replay. Re-projecting an observation at or below the
 /// checkpoint conflicts on the primary key, and the conflict branch's
 /// field-by-field comparison must converge instead of erroring.
-#[asupersync::test]
+#[tokio::test]
 async fn canonical_effect_replay_converges_on_an_identical_row() {
     let (_directory, connection) = open_effect_store("effect-identical-replay").await;
     let session_id = fixture_session("session.projector.effect-replay");
@@ -2032,7 +2032,7 @@ async fn canonical_effect_replay_converges_on_an_identical_row() {
     );
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn live_collision_preserves_an_immutable_positive_output_effect() {
     let (_directory, connection) = open_effect_store("effect-live-collision").await;
     let session_id = fixture_session("session.projector.effect-live-collision");
@@ -2060,7 +2060,7 @@ async fn live_collision_preserves_an_immutable_positive_output_effect() {
     );
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn live_collision_rejects_a_mismatched_positive_output_authority() {
     let (_directory, connection) = open_effect_store("effect-live-collision-mismatch").await;
     let session_id = fixture_session("session.projector.effect-live-collision-mismatch");
@@ -2096,7 +2096,7 @@ async fn live_collision_rejects_a_mismatched_positive_output_authority() {
 /// Case 3, conflict with a divergent payload. The durable row satisfies the
 /// insert guard (same observation, sequence, and receipt) yet disagrees on the
 /// projected effect, so the conflict-only read-back must still reject it.
-#[asupersync::test]
+#[tokio::test]
 async fn canonical_effect_replay_rejects_a_divergent_durable_row() {
     let (_directory, connection) = open_effect_store("effect-divergent-row").await;
     let session_id = fixture_session("session.projector.effect-divergent");
@@ -2227,7 +2227,7 @@ async fn seed_output_session_with_history_only_effects(
 /// HEAD grouped every historical effect for a pending session. Discovery must
 /// visit only output-producing rows past the frontier, not the history-only
 /// prefix on the same session.
-#[asupersync::test]
+#[tokio::test]
 async fn explicit_discovery_visits_only_output_effects_past_frontier() {
     let tmp = TempDir::new().unwrap();
     let runtime = HostAdmissionTestRuntimeV1::profile(tmp.path())
@@ -2270,7 +2270,7 @@ async fn explicit_discovery_visits_only_output_effects_past_frontier() {
 /// Discovery reads only effects past its cursor, so an effect that commits
 /// while its session's refresh is running must be rediscovered once that
 /// refresh ends, and an unchanged store must yield no request.
-#[asupersync::test]
+#[tokio::test]
 async fn discovery_cursor_rediscovers_effects_that_arrived_during_a_refresh() {
     let tmp = TempDir::new().unwrap();
     let runtime = HostAdmissionTestRuntimeV1::profile(tmp.path())
@@ -2358,7 +2358,7 @@ async fn discovery_cursor_rediscovers_effects_that_arrived_during_a_refresh() {
     );
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn explicit_discovery_rediscovery_is_bounded_and_non_mutating() {
     let tmp = TempDir::new().unwrap();
     let runtime = HostAdmissionTestRuntimeV1::profile(tmp.path())
@@ -2569,7 +2569,7 @@ async fn refresh_through(
     }
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn publication_requires_applied_current_receipt_and_source_coverage() {
     let tmp = TempDir::new().unwrap();
     let runtime = HostAdmissionTestRuntimeV1::profile(tmp.path())
@@ -2763,7 +2763,7 @@ fn live_observation(
     )
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn incremental_refresh_receipts_and_relations_equal_a_from_scratch_recomputation() {
     const MESSAGES: u64 = 13;
     let tmp = TempDir::new().unwrap();
@@ -2906,7 +2906,7 @@ async fn page_occurrence_ids(
         .collect())
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn readers_see_whole_generations_while_an_append_builds_and_after_it_is_cancelled() {
     let tmp = TempDir::new().unwrap();
     let runtime = HostAdmissionTestRuntimeV1::profile(tmp.path())
@@ -3091,7 +3091,7 @@ fn sqlite_family_bytes(path: &std::path::Path) -> u64 {
     })
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn persist_caps_occurrence_index_text_and_measures_user_sessions_per_n() {
     const PAYLOAD_CHARS: usize = 80_000;
     const SESSION_COUNTS: [usize; 3] = [4, 8, 16];
@@ -3249,7 +3249,7 @@ async fn persist_caps_occurrence_index_text_and_measures_user_sessions_per_n() {
     }
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn occurrence_replay_accepts_existing_full_text_and_rejects_changed_content() {
     let tmp = TempDir::new().unwrap();
     let runtime = HostAdmissionTestRuntimeV1::profile(tmp.path())
@@ -3465,7 +3465,7 @@ async fn print_user_sessions_dbstat(snapshot: &impl QueryExecutor, family_bytes:
     );
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn realistic_user_sessions_dbstat_names_dominant_bytes() {
     const SESSION_COUNTS: [usize; 2] = [4, 8];
     const TURNS: usize = 32;
@@ -3571,7 +3571,7 @@ async fn realistic_user_sessions_dbstat_names_dominant_bytes() {
     }
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn grouped_receipt_savepoint_failure_aborts_the_group() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let runtime = HostAdmissionTestRuntimeV1::profile(tmp.path())
@@ -3647,7 +3647,7 @@ async fn fixture_receipt_state(
 /// transaction boundary failure as a failed base savepoint: the whole
 /// group rolls back, including an earlier item whose refused-batch
 /// fallback already committed a begin under its own savepoint.
-#[asupersync::test]
+#[tokio::test]
 async fn grouped_begin_alone_savepoint_failure_aborts_the_group() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let runtime = HostAdmissionTestRuntimeV1::profile(tmp.path())
