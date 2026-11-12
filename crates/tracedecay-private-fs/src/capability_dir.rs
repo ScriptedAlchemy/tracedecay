@@ -394,6 +394,234 @@ pub fn install_child_directory_noreplace_nofollow(
     rename_noreplace(&root, staging_name, &root, generation_name)
 }
 
+/// A directory held open for a producer's writes. Every mutation is relative
+/// to this handle, so replacing the pathname cannot redirect bytes into a
+/// foreign tree. The one path-based writer resolves [`Self::path`] from the
+/// handle, which names the directory this handle owns rather than the
+/// substitutable entry name.
+pub struct HeldDirectory {
+    directory: Dir,
+}
+
+/// Durable identity of a held directory, compared across a rename.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct DirectoryIdentity {
+    #[cfg(unix)]
+    device: u64,
+    #[cfg(unix)]
+    inode: u64,
+    #[cfg(windows)]
+    volume_serial_number: u32,
+    #[cfg(windows)]
+    file_index: u64,
+}
+
+impl HeldDirectory {
+    /// Exclusively creates `name` beneath `root_path` and holds it. An
+    /// occupied name is never adopted: the caller owns only the entry it
+    /// created.
+    pub fn create_exclusive(root_path: &Path, name: &OsStr) -> io::Result<Self> {
+        single_component(name)?;
+        let root = open_root_nofollow(root_path)?;
+        root.create_dir(name)?;
+        root.open_dir_nofollow(name)
+            .map(|directory| Self { directory })
+    }
+
+    /// Opens an existing child of `root_path` without following a link.
+    pub fn open_nofollow(root_path: &Path, name: &OsStr) -> io::Result<Self> {
+        single_component(name)?;
+        let root = open_root_nofollow(root_path)?;
+        root.open_dir_nofollow(name)
+            .map(|directory| Self { directory })
+    }
+
+    /// Writes a new file exclusively, relative to this handle.
+    pub fn write_new_file(&self, name: &OsStr, contents: &[u8]) -> io::Result<()> {
+        single_component(name)?;
+        let mut options = OpenOptions::new();
+        options.write(true).create_new(true);
+        let mut file = self.directory.open_with(name, &options)?;
+        file.write_all(contents).and_then(|()| file.sync_all())
+    }
+
+    /// Creates an anonymous file in this directory: created exclusively and
+    /// unlinked immediately, so it leaves no entry behind.
+    pub fn anonymous_file(&self) -> io::Result<File> {
+        static NEXT_SPOOL: AtomicU64 = AtomicU64::new(0);
+        let (name, file) = (0..8)
+            .find_map(|_| {
+                let sequence = NEXT_SPOOL.fetch_add(1, Ordering::Relaxed);
+                let name = OsString::from(format!(
+                    ".spool-{}-{:016x}-{sequence:016x}",
+                    std::process::id(),
+                    crate::process_instance_nonce(),
+                ));
+                let mut options = OpenOptions::new();
+                options.read(true).write(true).create_new(true);
+                match self.directory.open_with(&name, &options) {
+                    Ok(file) => Some(Ok((name, file))),
+                    Err(error) if error.kind() == io::ErrorKind::AlreadyExists => None,
+                    Err(error) => Some(Err(error)),
+                }
+            })
+            .transpose()?
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::AlreadyExists,
+                    "could not exclusively stage an anonymous spool",
+                )
+            })?;
+        self.directory.remove_file(&name)?;
+        Ok(file)
+    }
+
+    /// Hard-links `source` to `name` relative to this handle. The source's
+    /// parent is opened without following a link, so neither side is an
+    /// ambient pathname.
+    pub fn hard_link_from(&self, source: &Path, name: &OsStr) -> io::Result<()> {
+        single_component(name)?;
+        let source_parent = source.parent().ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "hard-link source has no parent",
+            )
+        })?;
+        let source_name = source.file_name().ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidInput, "hard-link source has no name")
+        })?;
+        let parent = open_root_nofollow(source_parent)?;
+        parent.hard_link(source_name, &self.directory, name)
+    }
+
+    /// Resolves this held directory to a path that names the same inode, so a
+    /// path-based writer can create a child without going through a
+    /// substitutable ancestor name.
+    pub fn path(&self) -> io::Result<std::path::PathBuf> {
+        held_directory_path(&self.directory)
+    }
+
+    /// The directory's own durable identity.
+    pub fn identity(&self) -> io::Result<DirectoryIdentity> {
+        directory_identity(&self.directory)
+    }
+}
+
+/// Install a held staging directory as the generation artifact without
+/// replacing an occupied destination. The entry at `staging_name` must still
+/// be the held directory, and the installed entry must remain that same
+/// directory, so a replacement between the producer's writes and publication
+/// is refused rather than installed.
+pub fn install_held_child_directory_noreplace(
+    root_path: &Path,
+    staging: &HeldDirectory,
+    staging_name: &OsStr,
+    generation_name: &OsStr,
+) -> io::Result<()> {
+    single_component(staging_name)?;
+    single_component(generation_name)?;
+    let root = open_root_nofollow(root_path)?;
+    let entry = root.open_dir_nofollow(staging_name)?;
+    let entry_identity = directory_identity(&entry)?;
+    drop(entry);
+    if entry_identity != staging.identity()? {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "sealed staging entry is not the held producer directory",
+        ));
+    }
+    rename_noreplace(&root, staging_name, &root, generation_name)?;
+    let installed = root.open_dir_nofollow(generation_name)?;
+    let installed_identity = directory_identity(&installed)?;
+    drop(installed);
+    if installed_identity != staging.identity()? {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "sealed generation entry is not the held producer directory",
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn directory_identity(directory: &Dir) -> io::Result<DirectoryIdentity> {
+    use cap_std::fs::MetadataExt;
+    let metadata = directory.dir_metadata()?;
+    Ok(DirectoryIdentity {
+        device: metadata.dev(),
+        inode: metadata.ino(),
+    })
+}
+
+#[cfg(windows)]
+fn directory_identity(directory: &Dir) -> io::Result<DirectoryIdentity> {
+    let information = crate::windows_file::information(directory)?;
+    Ok(DirectoryIdentity {
+        volume_serial_number: information.volume_serial_number,
+        file_index: information.file_index,
+    })
+}
+
+#[cfg(not(any(unix, windows)))]
+fn directory_identity(_directory: &Dir) -> io::Result<DirectoryIdentity> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "directory identity is unavailable on this platform",
+    ))
+}
+
+#[cfg(windows)]
+fn held_directory_path(directory: &Dir) -> io::Result<std::path::PathBuf> {
+    dir_path(directory)
+}
+
+#[cfg(target_os = "linux")]
+fn held_directory_path(directory: &Dir) -> io::Result<std::path::PathBuf> {
+    use std::os::fd::AsRawFd;
+    Ok(std::path::PathBuf::from(format!(
+        "/proc/self/fd/{}",
+        directory.as_raw_fd()
+    )))
+}
+
+#[cfg(target_os = "macos")]
+fn held_directory_path(directory: &Dir) -> io::Result<std::path::PathBuf> {
+    use std::os::fd::AsRawFd;
+    use std::os::unix::ffi::OsStringExt;
+    let descriptor = directory.as_raw_fd();
+    let mut buffer = vec![0_u8; libc::PATH_MAX as usize];
+    // SAFETY: `buffer` is writable for `PATH_MAX` bytes and `descriptor` is an
+    // open directory descriptor owned by `directory`.
+    let result = unsafe {
+        libc::fcntl(
+            descriptor,
+            libc::F_GETPATH,
+            buffer.as_mut_ptr().cast::<libc::c_char>(),
+        )
+    };
+    if result < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let length = buffer.iter().position(|byte| *byte == 0).ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            "held directory path was not NUL-terminated",
+        )
+    })?;
+    buffer.truncate(length);
+    Ok(std::path::PathBuf::from(std::ffi::OsString::from_vec(
+        buffer,
+    )))
+}
+
+#[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
+fn held_directory_path(_directory: &Dir) -> io::Result<std::path::PathBuf> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "held directory path resolution is unavailable on this platform",
+    ))
+}
+
 /// Bound deduplication metadata independently of the size of the store.
 /// The Doctor caller reports partial coverage instead of trusting a census
 /// whose inode inventory would otherwise grow without limit.

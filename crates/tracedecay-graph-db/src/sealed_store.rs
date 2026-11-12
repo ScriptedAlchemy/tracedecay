@@ -44,7 +44,6 @@
 //! digest before the store serves a read.
 
 use std::collections::{BTreeMap, HashMap};
-use std::io::Write;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -55,7 +54,9 @@ use grafeo_core::graph::compact::IncrementalCompactStoreBuilder;
 use grafeo_engine::GrafeoDB;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
-use tracedecay_private_fs::capability_dir::install_child_directory_noreplace_nofollow;
+use tracedecay_private_fs::capability_dir::{
+    HeldDirectory, install_held_child_directory_noreplace,
+};
 use tracedecay_store::runtime::{
     GraphNativeWorkKindV1, GraphNativeWorkV1, GraphRecoveredGenerationDigestV1,
 };
@@ -1063,10 +1064,14 @@ struct PreparedSealedRelation {
 
 impl SealedCompactRows {
     /// Spools pushed column values to an anonymous file in `staging`, so
-    /// the build holds the row topology rather than every value.
-    fn new(staging: &Path) -> Result<Self, GraphDbError> {
-        let spool = tempfile::tempfile_in(staging)
-            .map_err(|error| sealed_store_io_failure("column spool", error))?;
+    /// the build holds the row topology rather than every value. The spool is
+    /// created and unlinked through the held directory, so a replaced staging
+    /// pathname cannot place it in a foreign tree.
+    fn new(staging: &HeldDirectory) -> Result<Self, GraphDbError> {
+        let spool = staging
+            .anonymous_file()
+            .map_err(|error| sealed_store_io_failure("column spool", error))?
+            .into_std();
         Ok(Self {
             builder: IncrementalCompactStoreBuilder::spooling_to(spool),
             next_node: 0,
@@ -2008,27 +2013,19 @@ pub(crate) enum SealedRowSource<'a> {
 /// concurrent writer can adopt the winner only after the caller reopens and
 /// verifies its digest; existence alone is not a new durable write.
 fn install_staged_sealed_store(
-    staging: &Path,
-    directory: &Path,
+    staging: &HeldDirectory,
+    root: &Path,
+    staging_name: &std::ffi::OsStr,
+    artifact_name: &std::ffi::OsStr,
     locator: &GenerationLocator,
     expected_digest: &str,
 ) -> Result<bool, GraphDbError> {
-    let root = staging
-        .parent()
-        .ok_or_else(|| GraphDbError::unavailable("sealed staging root missing"))?;
-    if directory.parent() != Some(root) {
-        return Err(GraphDbError::unavailable("sealed install roots differ"));
-    }
-    let staging_name = staging
-        .file_name()
-        .ok_or_else(|| GraphDbError::unavailable("sealed staging name missing"))?;
-    let artifact_name = directory
-        .file_name()
-        .ok_or_else(|| GraphDbError::unavailable("sealed artifact name missing"))?;
-    match install_child_directory_noreplace_nofollow(root, staging_name, artifact_name) {
+    let staging_path = root.join(staging_name);
+    let directory = root.join(artifact_name);
+    match install_held_child_directory_noreplace(root, staging, staging_name, artifact_name) {
         Ok(()) => Ok(true),
         Err(error) => {
-            discard_failed_sealed_staging(staging, locator, expected_digest);
+            discard_failed_sealed_staging(&staging_path, locator, expected_digest);
             if directory.exists() {
                 // A winner may have installed the same generation. The
                 // caller still requires a full identity/digest reopen proof.
@@ -2111,13 +2108,14 @@ fn build_or_open_sealed_store_with_work(
             retire_sealed_directory_checked(&directory, &locator, Some(expected.as_str()))?;
         }
     }
-    let staging = root.join(format!(
+    let staging_name = std::ffi::OsString::from(format!(
         ".staging-{}",
         directory
             .file_name()
             .and_then(|name| name.to_str())
             .unwrap_or("sealed")
     ));
+    let staging = root.join(&staging_name);
     // create_dir_all may accept a symlinked sealed root, so verify the actual
     // root before creating the staging entry or writing a container.
     std::fs::create_dir_all(&root)
@@ -2133,8 +2131,10 @@ fn build_or_open_sealed_store_with_work(
     }
     // A deterministic staging name is not proof of ownership. An earlier
     // interrupted build or a foreign directory must not be deleted on retry.
-    // create_dir is exclusive, so an occupied name fails closed.
-    std::fs::create_dir(&staging)
+    // Exclusive creation refuses an occupied name, and every byte below is
+    // written through the held handle or the path it resolves to, so replacing
+    // the staging name cannot redirect a producer write into a foreign tree.
+    let staging_directory = HeldDirectory::create_exclusive(&root, &staging_name)
         .map_err(|error| sealed_store_io_failure("staging directory create failed", error))?;
     let owner = SealedStagingOwnerV1 {
         producer: row_spill_owner().to_string(),
@@ -2144,39 +2144,36 @@ fn build_or_open_sealed_store_with_work(
         .map_err(|error| GraphDbError::unavailable(format!("staging owner encode: {error}")))?;
     // Exclusive creation refuses a pre-existing marker. Flush before writing
     // rows so a killed producer leaves verifiable deletion authority.
-    let marker_path = staging.join(SEALED_STAGING_OWNER_FILE);
-    let mut marker = std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&marker_path)
-        .map_err(|error| sealed_store_io_failure("staging owner create failed", error))?;
-    marker
-        .write_all(&owner_bytes)
-        .and_then(|()| marker.sync_all())
+    staging_directory
+        .write_new_file(
+            std::ffi::OsStr::new(SEALED_STAGING_OWNER_FILE),
+            &owner_bytes,
+        )
         .map_err(|error| sealed_store_io_failure("staging owner persist failed", error))?;
-    drop(marker);
-    let receipt = stage_sealed_artifact(rows, identity, expected, &staging, check, observe)
-        .inspect_err(|_| discard_failed_sealed_staging(&staging, &locator, expected.as_str()))?;
+    let receipt =
+        stage_sealed_artifact(rows, identity, expected, &staging_directory, check, observe)
+            .inspect_err(|_| {
+                discard_failed_sealed_staging(&staging, &locator, expected.as_str())
+            })?;
     let encoded = serde_json::to_vec_pretty(&receipt)
         .map_err(|error| GraphDbError::unavailable(format!("sealed receipt encode: {error}")))
         .inspect_err(|_| discard_failed_sealed_staging(&staging, &locator, expected.as_str()))?;
-    let mut receipt_file = std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(staging.join(SEALED_STORE_RECEIPT_FILE))
-        .map_err(|error| sealed_store_io_failure("receipt create failed", error))
-        .inspect_err(|_| discard_failed_sealed_staging(&staging, &locator, expected.as_str()))?;
-    let receipt_write = receipt_file
-        .write_all(&encoded)
-        .and_then(|()| receipt_file.sync_all());
-    drop(receipt_file);
-    receipt_write
+    staging_directory
+        .write_new_file(std::ffi::OsStr::new(SEALED_STORE_RECEIPT_FILE), &encoded)
         .map_err(|error| sealed_store_io_failure("receipt persist failed", error))
         .inspect_err(|_| discard_failed_sealed_staging(&staging, &locator, expected.as_str()))?;
     // Only the writer that installed this directory reports a new durable
     // segment; losing the race still requires the winner's digest proof.
-    let installed_here =
-        install_staged_sealed_store(&staging, &directory, &locator, expected.as_str())?;
+    let installed_here = install_staged_sealed_store(
+        &staging_directory,
+        &root,
+        &staging_name,
+        directory
+            .file_name()
+            .ok_or_else(|| GraphDbError::unavailable("sealed artifact name missing"))?,
+        &locator,
+        expected.as_str(),
+    )?;
     let match_result = {
         let _span = tracing::trace_span!("code_index.seal.verify").entered();
         open_sealed_store_checked(
@@ -2237,7 +2234,7 @@ fn stage_sealed_artifact(
     rows: SealedRowSource<'_>,
     identity: &GraphGenerationManifestIdentity,
     expected: &GraphRecoveredGenerationDigestV1,
-    staging: &Path,
+    staging: &HeldDirectory,
     check: &dyn Fn() -> Result<(), GraphDbError>,
     observe: Option<&dyn Fn(GraphNativeWorkV1)>,
 ) -> Result<SealedStoreReceiptV1, GraphDbError> {
@@ -2275,7 +2272,8 @@ fn stage_sealed_artifact(
                 crate::row_index::ENTITY_ROW_OFFSETS_FILE,
             ),
         ] {
-            std::fs::hard_link(source, staging.join(name))
+            staging
+                .hard_link_from(source, std::ffi::OsStr::new(name))
                 .map_err(|error| sealed_store_io_failure("base file link failed", error))?;
         }
     }
@@ -2316,7 +2314,7 @@ fn stage_sealed_artifact(
 fn build_sealed_container_with_work(
     rows: SealedRowSource<'_>,
     identity: &GraphGenerationManifestIdentity,
-    staging: &Path,
+    staging: &HeldDirectory,
     check: &dyn Fn() -> Result<(), GraphDbError>,
     observe: Option<&dyn Fn(GraphNativeWorkV1)>,
 ) -> Result<(usize, usize), GraphDbError> {
@@ -2424,8 +2422,16 @@ fn build_sealed_container_with_work(
     check()?;
     {
         let _span = tracing::trace_span!("code_index.seal.write").entered();
-        sealed.write_container(&staging.join(SEALED_STORE_DATABASE_FILE))
-    }?;
+        // The container writer takes a pathname. Resolve the held staging
+        // handle to the path of the directory it owns, so a staging name
+        // replaced by a link or a foreign directory cannot redirect the
+        // container into that tree.
+        let container_path = staging
+            .path()
+            .map_err(|error| sealed_store_io_failure("container staging path failed", error))?
+            .join(SEALED_STORE_DATABASE_FILE);
+        sealed.write_container(&container_path)?;
+    }
     Ok((entity_count, relation_count))
 }
 
@@ -3687,15 +3693,26 @@ mod build_tests {
     use rayon::ThreadPoolBuilder;
 
     use super::{
-        MAX_SEALED_RECEIPT_BYTES, NativeCompactEncodeBoundaryV1, SEALED_STAGING_OWNER_FILE,
-        SEALED_STORE_DATABASE_FILE, SEALED_STORE_RECEIPT_FILE, SealedCompactRows, SealedRowSource,
-        SealedStagingOwnerV1, build_or_open_sealed_store, build_or_open_sealed_store_with_work,
-        build_sealed_container_with_work, census_sealed_store, initial_sealed_staging_owner,
-        persist_sealed_store_check, push_manifest_rows, retire_sealed_directory_checked,
-        sealed_artifact_database_options, sealed_copy_proof, sealed_generation_directory,
-        sealed_store_root, sweep_abandoned_sealed_staging,
+        HeldDirectory, MAX_SEALED_RECEIPT_BYTES, NativeCompactEncodeBoundaryV1,
+        SEALED_STAGING_OWNER_FILE, SEALED_STORE_DATABASE_FILE, SEALED_STORE_RECEIPT_FILE,
+        SealedCompactRows, SealedRowSource, SealedStagingOwnerV1, build_or_open_sealed_store,
+        build_or_open_sealed_store_with_work, build_sealed_container_with_work,
+        census_sealed_store, initial_sealed_staging_owner, persist_sealed_store_check,
+        push_manifest_rows, retire_sealed_directory_checked, sealed_artifact_database_options,
+        sealed_copy_proof, sealed_generation_directory, sealed_store_root,
+        sweep_abandoned_sealed_staging,
     };
     use tracedecay_store::runtime::{GraphNativeWorkKindV1, GraphNativeWorkV1};
+
+    /// Opens a test-owned directory as the held capability the production
+    /// builder uses, so the tests exercise the same write authority.
+    fn held(directory: &std::path::Path) -> HeldDirectory {
+        HeldDirectory::open_nofollow(
+            directory.parent().expect("held directory parent"),
+            directory.file_name().expect("held directory name"),
+        )
+        .expect("open the test staging directory")
+    }
 
     use crate::location::PersistentGraphStoreState;
     use crate::{
@@ -4091,7 +4108,7 @@ mod build_tests {
             build_sealed_container_with_work(
                 SealedRowSource::Manifest(&manifest),
                 &identity,
-                staging.path(),
+                &held(staging.path()),
                 check,
                 None,
             )
@@ -4126,7 +4143,7 @@ mod build_tests {
         let pool = ThreadPoolBuilder::new().num_threads(1).build().unwrap();
         let counts = pool
             .install(|| {
-                let mut writer = SealedCompactRows::new(staging.path())?;
+                let mut writer = SealedCompactRows::new(&held(staging.path()))?;
                 push_manifest_rows(
                     &fixture,
                     &identity,
@@ -4172,7 +4189,7 @@ mod build_tests {
         let calls = AtomicUsize::new(0);
         let staging = tempfile::tempdir().unwrap();
         let result = pool.install(|| {
-            let mut writer = SealedCompactRows::new(staging.path())?;
+            let mut writer = SealedCompactRows::new(&held(staging.path()))?;
             push_manifest_rows(
                 &fixture,
                 &identity,
@@ -4211,7 +4228,7 @@ mod build_tests {
         build_sealed_container_with_work(
             SealedRowSource::Manifest(&manifest),
             &identity,
-            staging.path(),
+            &held(staging.path()),
             check,
             None,
         )
@@ -4294,7 +4311,7 @@ mod build_tests {
         build_sealed_container_with_work(
             SealedRowSource::Manifest(&manifest),
             &identity,
-            staging.path(),
+            &held(staging.path()),
             check,
             None,
         )
@@ -5007,6 +5024,86 @@ mod build_tests {
         assert_eq!(store.recovered_digest(), expected.as_str());
     }
 
+    /// A staging directory replaced by a symlink after the owner marker is
+    /// written must not redirect the live producer's container write into the
+    /// foreign target. The builder keeps running after the substitution, so
+    /// this exercises writer ownership rather than deletion authority.
+    #[cfg(unix)]
+    #[test]
+    fn live_seal_refuses_a_staging_symlink_substituted_after_the_owner_marker() {
+        let temp = tempfile::tempdir().unwrap();
+        let database_path = temp.path().join("source.grafeo");
+        let manifest = manifest(24, 12);
+        let identity = manifest.identity();
+        let expected = manifest.expected_recovered_digest(&|| Ok(())).unwrap();
+        let root = sealed_store_root(&database_path);
+        let directory = sealed_generation_directory(&root, &identity.physical_namespace().unwrap());
+        let staging = root.join(format!(
+            ".staging-{}",
+            directory.file_name().unwrap().to_str().unwrap()
+        ));
+        let moved = root.join("original-stage");
+        let foreign = temp.path().join("foreign");
+        std::fs::create_dir(&foreign).unwrap();
+        std::fs::write(foreign.join("sentinel"), b"foreign").unwrap();
+        let swapped = std::cell::Cell::new(false);
+        let substitute = || {
+            if !swapped.replace(true) {
+                assert!(
+                    staging.join(SEALED_STAGING_OWNER_FILE).is_file(),
+                    "the owner marker must exist before the substitution"
+                );
+                std::fs::rename(&staging, &moved).unwrap();
+                std::os::unix::fs::symlink(&foreign, &staging).unwrap();
+            }
+            Ok(())
+        };
+        let result = build_or_open_sealed_store(
+            SealedRowSource::Manifest(&manifest),
+            &identity,
+            &expected,
+            &database_path,
+            &substitute,
+        );
+        assert!(
+            result.is_err(),
+            "a staging symlink substituted mid-build must refuse the seal"
+        );
+        assert_eq!(
+            std::fs::read(foreign.join("sentinel")).unwrap(),
+            b"foreign",
+            "the foreign directory's own bytes must survive"
+        );
+        assert!(
+            !foreign.join(SEALED_STORE_DATABASE_FILE).exists(),
+            "the live producer must not write its container into the foreign target"
+        );
+        assert!(
+            !foreign.join(SEALED_STORE_RECEIPT_FILE).exists(),
+            "the live producer must not write its receipt into the foreign target"
+        );
+        assert!(
+            std::fs::symlink_metadata(&staging)
+                .unwrap()
+                .file_type()
+                .is_symlink(),
+            "the substituted link is not ours to remove"
+        );
+        assert!(!directory.exists(), "no generation may be installed");
+
+        std::fs::remove_file(&staging).unwrap();
+        std::fs::remove_dir_all(&moved).unwrap();
+        let (store, _) = build_or_open_sealed_store(
+            SealedRowSource::Manifest(&manifest),
+            &identity,
+            &expected,
+            &database_path,
+            &|| Ok(()),
+        )
+        .expect("a genuine staging directory must still seal");
+        assert_eq!(store.recovered_digest(), expected.as_str());
+    }
+
     /// The sealed container is written once, complete, after every row has
     /// been encoded: no engine, WAL, or partial container exists under the
     /// staging directory while rows stream. A build cancelled mid-copy leaves
@@ -5363,9 +5460,19 @@ mod build_tests {
             identity.projection.clone(),
             identity.generation.clone(),
         );
-        let installed_by_loser =
-            super::install_staged_sealed_store(&staging, &directory, &locator, expected.as_str())
-                .expect("candidate exists after the install collision");
+        let staging_name = staging.file_name().unwrap().to_owned();
+        let artifact_name = directory.file_name().unwrap().to_owned();
+        let held_staging =
+            HeldDirectory::open_nofollow(&root, &staging_name).expect("open the losing staging");
+        let installed_by_loser = super::install_staged_sealed_store(
+            &held_staging,
+            &root,
+            &staging_name,
+            &artifact_name,
+            &locator,
+            expected.as_str(),
+        )
+        .expect("candidate exists after the install collision");
         assert!(
             !installed_by_loser,
             "the losing writer committed no new native segment"
