@@ -3393,10 +3393,6 @@ mod recent_first_discovery_tests {
         let eligible = archive.join("rollout-eligible.jsonl");
         std::fs::write(&eligible, b"{}\n").unwrap();
         let expected = directory_entry_fingerprint(&archive).unwrap();
-        assert!(
-            !directory_stat_witness(&archive).unwrap().unwrap().settled,
-            "the fixture must exercise the coarse-clock name-witness path"
-        );
 
         let source = CodexSource::with_home(temp.path());
         let bounds = TranscriptDiscoveryBounds::from_discovered_units(1);
@@ -3404,11 +3400,11 @@ mod recent_first_discovery_tests {
         let mut frontier = CodexDiscoveryFrontier::initial();
         let first = retained_pass(&source, &mut state, bounds, frontier);
         assert!(first.report.is_truncated());
-        let scan = state.scan.as_ref().expect("unfinished structural scan");
+        let scan = state.scan.as_mut().expect("unfinished structural scan");
         let CodexScanPhase::Directories {
             current: Some(current),
             ..
-        } = &scan.phase
+        } = &mut scan.phase
         else {
             panic!("the archive must retain a live directory iterator");
         };
@@ -3421,6 +3417,10 @@ mod recent_first_discovery_tests {
                 .is_none(),
             "no eager whole-archive fingerprint before bounded traversal"
         );
+        // Model an initially unsettled native witness after the structural
+        // pass so scheduler delay cannot select the settled no-name-fingerprint
+        // path. The bounded iterator assembles the same complete fingerprint.
+        current.fingerprint.get_or_insert_with(Default::default);
         frontier = first.next_frontier;
 
         let mut covered = BTreeSet::new();
