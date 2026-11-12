@@ -114,6 +114,7 @@ fn one_scoped_reset_clears_the_profile_authority_and_every_project_sessions_stor
         .collect();
     let mut expected_removed = vec![
         PathBuf::from("global.db"),
+        PathBuf::from("global.db-journal"),
         PathBuf::from("global.db-shm"),
         PathBuf::from("global.db-wal"),
     ];
@@ -122,6 +123,7 @@ fn one_scoped_reset_clears_the_profile_authority_and_every_project_sessions_stor
         expected_removed.extend([
             store.join(".sessions.db.host-admission/meta.json"),
             store.join("sessions.db"),
+            store.join("sessions.db-journal"),
             store.join("sessions.db-shm"),
             store.join("sessions.db-wal"),
             store.join("sessions.db.delivery-settlement-spool-v1/writer.v1.lock"),

@@ -10,9 +10,8 @@ use tracedecay_daemon_protocol::{DaemonHandshake, PROJECT_SERVER_RESPONSE_REVOKE
 use tracedecay_runtime_core::git_discovery::REPOSITORY_DISCOVERY_DEFERRED_REASON_CODE;
 use tracedecay_runtime_core::path_safety::canonical_existing_identity;
 
-use asupersync::io::AsyncWriteExt;
-use asupersync::time::wall_now;
 use serde::{Deserialize, Serialize};
+use tokio::io::AsyncWriteExt;
 
 use super::repeat_reads::RepeatReads;
 use super::repeated_queries::RepeatedQueries;
@@ -315,7 +314,7 @@ async fn drain_daemon_request_after_disconnect(
     daemon_request: impl Future<Output = Result<Vec<String>>>,
     drain_bound: Duration,
 ) -> Result<Vec<String>> {
-    asupersync::time::timeout(wall_now(), drain_bound, daemon_request)
+    tokio::time::timeout(drain_bound, daemon_request)
         .await
         .unwrap_or_else(|_| {
             Err(TraceDecayError::Config {
@@ -831,7 +830,7 @@ async fn send_daemon_request_with_project_open_retry(
         else {
             break;
         };
-        asupersync::time::sleep(wall_now(), remaining.min(PROJECT_OPEN_RETRY_INTERVAL)).await;
+        tokio::time::sleep(remaining.min(PROJECT_OPEN_RETRY_INTERVAL)).await;
         if cancellation.borrow().is_some() {
             break;
         }
@@ -906,8 +905,7 @@ async fn send_daemon_request_with_liveness_poll(
     )
     .await?;
     let (reader, mut writer) = stream.into_split();
-    let mut reader =
-        tracedecay_framing::BoundedLineReader::new(asupersync::io::BufReader::new(reader));
+    let mut reader = tracedecay_framing::BoundedLineReader::new(tokio::io::BufReader::new(reader));
 
     let write = async {
         write_daemon_preamble(&mut writer, &connection, handshake).await?;
@@ -986,7 +984,7 @@ async fn read_forwarding_cancellation<W>(
     writer: &mut W,
 ) -> Result<Option<String>>
 where
-    W: asupersync::io::AsyncWrite + Unpin,
+    W: tokio::io::AsyncWrite + Unpin,
 {
     tokio::pin!(read);
     loop {

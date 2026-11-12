@@ -12,7 +12,89 @@ use std::io;
 use cap_fs_ext::DirExt;
 #[cfg(not(windows))]
 use cap_fs_ext::OpenOptionsMaybeDirExt;
-use cap_std::fs::{Dir, File, OpenOptions};
+use cap_fs_ext::{FollowSymlinks, OpenOptionsFollowExt};
+pub use cap_std::fs::Dir;
+use cap_std::fs::{File, OpenOptions};
+
+/// Pins the parent of a cross-directory publication. On Windows the no-delete
+/// sharing mode also keeps its resolved Win32 pathname usable for rename.
+pub fn pin_parent(path: &std::path::Path) -> io::Result<Dir> {
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        use windows_sys::Win32::Storage::FileSystem::{
+            FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_READ,
+            FILE_SHARE_WRITE,
+        };
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
+            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+            .open(path)?;
+        if !file.metadata()?.is_dir() {
+            return Err(io::Error::new(
+                io::ErrorKind::NotADirectory,
+                "publication parent is not a directory",
+            ));
+        }
+        Ok(Dir::from_std_file(file))
+    }
+    #[cfg(not(windows))]
+    {
+        Dir::open_ambient_dir(path, cap_std::ambient_authority())
+    }
+}
+
+pub fn open_regular_nofollow(directory: &Dir, name: &OsStr) -> io::Result<std::fs::File> {
+    open_regular(directory, name, false)
+}
+
+pub fn open_writable_regular_nofollow(directory: &Dir, name: &OsStr) -> io::Result<std::fs::File> {
+    open_regular(directory, name, true)
+}
+
+fn open_regular(directory: &Dir, name: &OsStr, writable: bool) -> io::Result<std::fs::File> {
+    let mut options = OpenOptions::new();
+    options
+        .read(true)
+        .write(writable)
+        .follow(FollowSymlinks::No);
+    #[cfg(windows)]
+    {
+        use cap_std::fs::OpenOptionsExt;
+        use windows_sys::Win32::Storage::FileSystem::{
+            FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
+        };
+        options.share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE);
+    }
+    #[cfg(unix)]
+    {
+        use cap_std::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NONBLOCK);
+    }
+    let file = directory.open_with(name, &options)?.into_std();
+    if !file.metadata()?.is_file() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "expected a regular file",
+        ));
+    }
+    Ok(file)
+}
+
+pub fn create_private_file(directory: &Dir, name: &OsStr) -> io::Result<std::fs::File> {
+    #[cfg(windows)]
+    {
+        crate::create_private_file(&dir_entry_path(directory, name)?)
+    }
+    #[cfg(not(windows))]
+    {
+        use cap_std::fs::OpenOptionsExt;
+        let mut options = OpenOptions::new();
+        options.read(true).write(true).create_new(true).mode(0o600);
+        Ok(directory.open_with(name, &options)?.into_std())
+    }
+}
 
 /// How many times a create-or-open that reports the entry missing is asked
 /// again before the answer is believed. xnu bounds its own retry of the same
@@ -62,6 +144,7 @@ fn look_again_on_not_found<T>(mut attempt: impl FnMut() -> io::Result<T>) -> io:
 
 /// Atomically renames one directory entry between already-open parent
 /// capabilities without allowing an occupied destination to be replaced.
+/// Both names must be single, unnormalized directory entries, not paths.
 /// Platforms without a suitable primitive fail closed: retaining bytes is
 /// always preferable to risking a replacement.
 pub fn rename_noreplace(
@@ -70,6 +153,8 @@ pub fn rename_noreplace(
     to_parent: &Dir,
     to: &OsStr,
 ) -> io::Result<()> {
+    require_entry_name(from)?;
+    require_entry_name(to)?;
     #[cfg(all(target_os = "linux", target_env = "gnu"))]
     {
         use std::os::fd::AsRawFd;
@@ -121,17 +206,8 @@ fn dir_entry_path(parent: &Dir, name: &OsStr) -> io::Result<std::path::PathBuf> 
 /// Windows uses the shared namespace-durable rename authority, including its
 /// NTFS fallback for replacement while delete-sharing readers remain open.
 pub fn replace_file(parent: &Dir, source: &OsStr, destination: &OsStr) -> io::Result<()> {
-    for name in [source, destination] {
-        let mut components = std::path::Path::new(name).components();
-        if !matches!(components.next(), Some(std::path::Component::Normal(_)))
-            || components.next().is_some()
-        {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "file replacement requires sibling entry names",
-            ));
-        }
-    }
+    require_entry_name(source)?;
+    require_entry_name(destination)?;
     #[cfg(windows)]
     {
         let source = dir_entry_path(parent, source)?;
@@ -144,6 +220,25 @@ pub fn replace_file(parent: &Dir, source: &OsStr, destination: &OsStr) -> io::Re
     }
     #[cfg(not(windows))]
     parent.rename(source, parent, destination)
+}
+
+/// Native *at renames still resolve absolute paths, parent traversal and
+/// intermediate symlinks. A held parent only confines a single entry name.
+/// Compare the original spelling as well: Path components normalize trailing
+/// separators and interior dots, but the native syscall receives those bytes.
+fn require_entry_name(name: &OsStr) -> io::Result<()> {
+    let mut components = std::path::Path::new(name).components();
+    if matches!(components.next(), Some(std::path::Component::Normal(entry)) if entry == name)
+        && components.next().is_none()
+        && !name.as_encoded_bytes().contains(&0)
+    {
+        Ok(())
+    } else {
+        Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "publication requires single directory entry names",
+        ))
+    }
 }
 
 /// Resolves an open directory capability back to its live filesystem path so
@@ -453,3 +548,6 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+mod namespace_tests;

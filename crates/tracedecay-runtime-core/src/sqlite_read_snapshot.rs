@@ -302,7 +302,7 @@ fn backup_offline_wal_family_without_shm(
     Ok(true)
 }
 
-fn fold_staging_to_standalone(
+pub(crate) fn fold_staging_to_standalone(
     staging: Connection,
     staging_path: &Path,
     checkpoint: impl Fn() -> io::Result<()>,
@@ -546,16 +546,16 @@ impl SnapshotSet {
         policy: SnapshotSourcePolicy,
         control: SnapshotReadControl,
     ) -> io::Result<Self> {
-        let cx = crate::native_runtime::cx().ok_or_else(|| {
+        let cx = crate::native_runtime::handle().ok_or_else(|| {
             io::Error::other(tracedecay_domain::errors::TraceDecayError::Config {
-                message: "snapshot capture requires a native task context".into(),
+                message: "snapshot capture requires a Tokio runtime".into(),
             })
         })?;
         let owned_paths = paths.to_vec();
         let owned_root = root.to_path_buf();
         let preparation_control = control.clone();
-        let (scratch, prepared, copied_bytes) = cx
-            .spawn_blocking(move |_| {
+        let (scratch, prepared, copied_bytes) =
+            crate::native_runtime::spawn_blocking_on(&cx, move || {
                 preparation_control.checkpoint()?;
                 let scratch = Arc::new(create_scratch_directory(
                     &owned_root,
@@ -583,10 +583,6 @@ impl SnapshotSet {
                 }
                 Ok((scratch, prepared, copied_bytes))
             })
-            .map_err(|error| {
-                io::Error::other(format!("snapshot preparation admission failed: {error}"))
-            })?
-            .join(&cx)
             .await
             .map_err(|error| {
                 io::Error::other(format!("snapshot preparation task failed: {error}"))
@@ -811,24 +807,21 @@ async fn finish_one(
     scratch: Arc<ScratchDirectory>,
     control: SnapshotReadControl,
 ) -> io::Result<SnapshotDatabase> {
-    let cx = crate::native_runtime::cx().ok_or_else(|| {
+    let cx = crate::native_runtime::handle().ok_or_else(|| {
         io::Error::other(tracedecay_domain::errors::TraceDecayError::Config {
-            message: "snapshot copy requires a native task context".into(),
+            message: "snapshot copy requires a Tokio runtime".into(),
         })
     })?;
     let copy_control = control.clone();
-    let (prepared, scratch) = cx
-        .spawn_blocking(move |_| {
-            let (prepared, scratch) = copy_snapshot_family(prepared, scratch, &copy_control)?;
-            if !matches!(prepared.mode, SnapshotMode::DirectImmutable) {
-                materialize::materialize_on_thread(&prepared.target, &copy_control)?;
-            }
-            Ok::<_, io::Error>((prepared, scratch))
-        })
-        .map_err(|error| io::Error::other(format!("snapshot copy admission failed: {error}")))?
-        .join(&cx)
-        .await
-        .map_err(|error| io::Error::other(format!("snapshot copy task failed: {error}")))??;
+    let (prepared, scratch) = crate::native_runtime::spawn_blocking_on(&cx, move || {
+        let (prepared, scratch) = copy_snapshot_family(prepared, scratch, &copy_control)?;
+        if !matches!(prepared.mode, SnapshotMode::DirectImmutable) {
+            materialize::materialize_on_thread(&prepared.target, &copy_control)?;
+        }
+        Ok::<_, io::Error>((prepared, scratch))
+    })
+    .await
+    .map_err(|error| io::Error::other(format!("snapshot copy task failed: {error}")))??;
     control.checkpoint()?;
     // `identity_path` is the real file on disk; `attach_path` is the URI used
     // to ATTACH it. They are never interchangeable, the URI is percent-encoded
@@ -1382,7 +1375,7 @@ mod tests {
         }
     }
 
-    #[asupersync::test]
+    #[tokio::test]
     async fn snapshot_reads_wal_rows_without_touching_source_bytes_or_mtime() {
         let temp = TempDir::new().unwrap();
         let path = temp.path().join("source.db");
@@ -1426,7 +1419,7 @@ mod tests {
         assert_eq!(durable_family_witness(&path).unwrap(), before);
     }
 
-    #[asupersync::test]
+    #[tokio::test]
     async fn foreign_snapshot_is_private_and_leaves_checkpointed_source_untouched() {
         let temp = TempDir::new().unwrap();
         let path = temp.path().join("foreign.db");
@@ -1471,7 +1464,7 @@ mod tests {
         assert_eq!(durable_family_witness(&path).unwrap(), before);
     }
 
-    #[asupersync::test]
+    #[tokio::test]
     async fn foreign_wal_snapshot_reads_wal_frames_and_leaves_live_durable_family_untouched() {
         let temp = TempDir::new().unwrap();
         let path = temp.path().join("foreign.db");
@@ -1550,7 +1543,7 @@ mod tests {
         holder
     }
 
-    #[asupersync::test]
+    #[tokio::test]
     async fn foreign_snapshot_succeeds_while_a_readonly_transaction_holds_the_source() {
         let temp = TempDir::new().unwrap();
         let path = temp.path().join("user-sessions.db");
@@ -1601,7 +1594,7 @@ mod tests {
     }
 
     #[cfg(not(windows))]
-    #[asupersync::test]
+    #[tokio::test]
     async fn owned_checkpointed_snapshot_does_not_checkpoint_a_held_source() {
         let temp = TempDir::new().unwrap();
         let path = temp.path().join("user-sessions.db");
@@ -1644,7 +1637,7 @@ mod tests {
     }
 
     #[cfg(not(windows))]
-    #[asupersync::test]
+    #[tokio::test]
     async fn checkpointed_database_reads_directly_without_copy_or_metadata_change() {
         let temp = TempDir::new().unwrap();
         let path = temp.path().join("source.db");
@@ -1681,7 +1674,7 @@ mod tests {
     }
 
     #[cfg(not(windows))]
-    #[asupersync::test]
+    #[tokio::test]
     async fn direct_immutable_attach_token_verifies_the_filesystem_identity() {
         let temp = TempDir::new().unwrap();
         let path = temp.path().join("source.db");
@@ -1698,7 +1691,7 @@ mod tests {
         );
     }
 
-    #[asupersync::test]
+    #[tokio::test]
     async fn snapshot_executor_cannot_mutate_main_or_attached_inputs() {
         let temp = TempDir::new().unwrap();
         let source = temp.path().join("source.db");
@@ -1765,7 +1758,7 @@ mod tests {
     }
 
     #[cfg(windows)]
-    #[asupersync::test]
+    #[tokio::test]
     async fn checkpointed_snapshot_does_not_lock_source_against_copying() {
         let temp = TempDir::new().unwrap();
         let path = temp.path().join("source.db");
@@ -1801,7 +1794,7 @@ mod tests {
     }
 
     #[cfg(unix)]
-    #[asupersync::test]
+    #[tokio::test]
     async fn nested_missing_scratch_root_is_created_private() {
         use std::os::unix::fs::PermissionsExt as _;
 
@@ -1834,7 +1827,7 @@ mod tests {
     /// directory has to be usable. The scratch root's own owner and mode are
     /// what keep it private.
     #[cfg(unix)]
-    #[asupersync::test]
+    #[tokio::test]
     async fn nested_scratch_root_accepts_a_symlinked_ancestor() {
         use std::os::unix::fs::symlink;
 
@@ -1857,7 +1850,7 @@ mod tests {
     }
 
     #[cfg(unix)]
-    #[asupersync::test]
+    #[tokio::test]
     async fn scratch_root_rejects_a_symlinked_target() {
         use std::os::unix::fs::symlink;
 
@@ -1884,7 +1877,7 @@ mod tests {
     }
 
     #[cfg(unix)]
-    #[asupersync::test]
+    #[tokio::test]
     async fn scratch_is_private_and_next_capture_cleans_crash_debris() {
         use std::os::unix::fs::PermissionsExt;
 

@@ -7,20 +7,22 @@
 //! automatic producer for that case: it discovers the project's TypeScript
 //! projects (each package's tsconfig in a monorepo) as bounded background
 //! work after admission, runs only while at least one of them has its own
-//! `node_modules/.bin/tsc`, and never installs anything.
+//! `node_modules/.bin/tsc`, and never installs anything. When none does, it
+//! publishes that discovery, so reads name the missing compiler or tsconfig
+//! from the producer's record rather than from a reading of the checkout.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use tracedecay_application::diagnostics_producer::{
     CompilerProducerRunV1, TypeScriptProducerStateV1, TypeScriptProducerStatusHandleV1,
-    run_typescript_producer_v1,
+    publish_typescript_discovery_v1, run_typescript_producer_v1,
 };
 use tracedecay_application::diagnostics_store::DiagnosticsStore;
 use tracedecay_code_index_runtime::code_index_scheduler::CodeIndexOwnerSignalsV1;
 use tracedecay_contracts::now_micros;
 use tracedecay_domain::CodeGenerationId;
-use tracedecay_lsp::{TypeScriptProject, typescript_projects};
+use tracedecay_lsp::{TypeScriptProject, TypeScriptProjectDiscoveryError, typescript_projects};
 use tracedecay_runtime_core::logging::log_daemon_event;
 
 use crate::daemon::invocation_state::DaemonInvocationState;
@@ -31,9 +33,9 @@ const BUILD_INFO_DIR: &str = "typescript-build-info";
 
 /// Spawns the TypeScript producer for `project_root`. Returns `false` when
 /// nothing was spawned: a route that indexes no code by contract, so there is
-/// never a generation to publish against. The spawned task ends at once when
-/// no TypeScript project under the root has a compiler; reads then describe
-/// the missing compiler from the filesystem.
+/// never a generation to publish against. The spawned task publishes its
+/// discovery and ends at once when no TypeScript project under the root has a
+/// compiler; reads then describe the missing compiler from that record.
 pub(super) fn spawn_typescript_diagnostics_producer(
     owner: &crate::mcp::McpServer,
     invocation: DaemonInvocationState,
@@ -59,28 +61,41 @@ pub(super) fn spawn_typescript_diagnostics_producer(
     let mut state = TypeScriptProducerStateV1::new(status, admission);
     owner.spawn_background_task(tracing::Instrument::instrument(
         async move {
-            let Some(projects) = discover_projects(&project_root).await else {
-                return;
-            };
-            let compilers = projects
-                .iter()
-                .filter(|project| project.compiler.is_some())
-                .count();
-            if compilers == 0 {
-                log_producer_event(&project_root, "no_compiler");
-                return;
-            }
-            log_daemon_event(
-                "typescript_diagnostics_producer",
-                &[
-                    ("project", project_root.display().to_string()),
-                    ("outcome", "admitted".to_owned()),
-                    ("projects", projects.len().to_string()),
-                    ("compilers", compilers.to_string()),
-                ],
-            );
             let schedulers = invocation.code_index_schedulers.clone();
             let mut signals = CodeIndexOwnerSignalsV1::subscribe(&schedulers, &project_root).await;
+            // Subscribe before discovery so a seal during a failed walk still
+            // wakes this owner after the tree becomes readable again.
+            if let Some(projects) = discover_projects(&project_root).await {
+                let compilers = projects
+                    .iter()
+                    .filter(|project| project.compiler.is_some())
+                    .count();
+                let uncheckable =
+                    publish_typescript_discovery_v1(&project_root, &projects, &mut state).await;
+                if compilers == 0 {
+                    log_producer_event(
+                        &project_root,
+                        if projects.is_empty() {
+                            "no_tsconfig"
+                        } else {
+                            "no_compiler"
+                        },
+                    );
+                    if let Some(run) = uncheckable {
+                        log_producer_run(&project_root, &run);
+                    }
+                    return;
+                }
+                log_daemon_event(
+                    "typescript_diagnostics_producer",
+                    &[
+                        ("project", project_root.display().to_string()),
+                        ("outcome", "admitted".to_owned()),
+                        ("projects", projects.len().to_string()),
+                        ("compilers", compilers.to_string()),
+                    ],
+                );
+            }
             let build_info_dir = graph.store_layout().data_root.join(BUILD_INFO_DIR);
             // One producer run per generation, whatever its outcome: the root's
             // signals also wake on serving and pass changes, and a project
@@ -98,22 +113,21 @@ pub(super) fn spawn_typescript_diagnostics_producer(
                     Ok(Some(identity)) => {
                         attempted_for = Some(identity.generation_id().clone());
                         // A generation can add, drop, or retarget tsconfigs.
-                        let Some(projects) = discover_projects(&project_root).await else {
-                            return;
-                        };
-                        let database = graph.dashboard_database_guard();
-                        let store = DiagnosticsStore::new(database.as_ref().clone());
-                        let run = run_typescript_producer_v1(
-                            &project_root,
-                            &projects,
-                            &identity,
-                            &store,
-                            &build_info_dir,
-                            &mut state,
-                            now_micros(),
-                        )
-                        .await;
-                        log_producer_run(&project_root, &run);
+                        if let Some(projects) = discover_projects(&project_root).await {
+                            let database = graph.dashboard_database_guard();
+                            let store = DiagnosticsStore::new(database.as_ref().clone());
+                            let run = run_typescript_producer_v1(
+                                &project_root,
+                                &projects,
+                                &identity,
+                                &store,
+                                &build_info_dir,
+                                &mut state,
+                                now_micros(),
+                            )
+                            .await;
+                            log_producer_run(&project_root, &run);
+                        }
                     }
                     Ok(_) => {}
                     Err(error) => log_daemon_event(
@@ -135,8 +149,8 @@ pub(super) fn spawn_typescript_diagnostics_producer(
 }
 
 /// Walks the tree off the async runtime; `None` (logged) when the walk could
-/// not complete, which ends the producer rather than publishing a snapshot
-/// that silently skips projects.
+/// not complete. The owner retains its subscription and retries on a later
+/// sealed generation instead of publishing a partial project list.
 async fn discover_projects(project_root: &Path) -> Option<Vec<TypeScriptProject>> {
     let root = project_root.to_path_buf();
     match tracedecay_runtime_core::native_runtime::spawn_blocking(move || {
@@ -144,19 +158,38 @@ async fn discover_projects(project_root: &Path) -> Option<Vec<TypeScriptProject>
     })
     .await
     {
-        Ok(projects) => Some(projects),
+        Ok(walked) => discovery_outcome(project_root, walked),
         Err(error) => {
-            log_daemon_event(
-                "typescript_diagnostics_producer",
-                &[
-                    ("project", project_root.display().to_string()),
-                    ("outcome", "discovery_failed".to_owned()),
-                    ("detail", error),
-                ],
-            );
+            log_discovery_failed(project_root, &error);
             None
         }
     }
+}
+
+/// The projects a completed walk admits. A walk that failed its tree is not a
+/// smaller discovery: `None` is logged, and discovery is what must be retried.
+fn discovery_outcome(
+    project_root: &Path,
+    walked: Result<Vec<TypeScriptProject>, TypeScriptProjectDiscoveryError>,
+) -> Option<Vec<TypeScriptProject>> {
+    match walked {
+        Ok(projects) => Some(projects),
+        Err(error) => {
+            log_discovery_failed(project_root, &error.to_string());
+            None
+        }
+    }
+}
+
+fn log_discovery_failed(project_root: &Path, detail: &str) {
+    log_daemon_event(
+        "typescript_diagnostics_producer",
+        &[
+            ("project", project_root.display().to_string()),
+            ("outcome", "discovery_failed".to_owned()),
+            ("detail", detail.to_owned()),
+        ],
+    );
 }
 
 fn log_producer_event(project_root: &Path, outcome: &str) {
@@ -208,4 +241,65 @@ fn log_producer_run(project_root: &Path, run: &CompilerProducerRunV1) {
             ("detail", detail),
         ],
     );
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use std::fs;
+    use std::os::unix::fs::PermissionsExt;
+    use std::path::Path;
+
+    use tracedecay_lsp::typescript_projects;
+
+    use super::discovery_outcome;
+
+    /// A subtree the walk cannot read is a failed discovery, never a smaller
+    /// project list that reads as `no_tsconfig`/`no_compiler`, and discovery
+    /// recovers once the tree is readable again.
+    #[test]
+    fn an_unreadable_subdirectory_fails_discovery_and_the_next_walk_recovers() {
+        let temporary = tempfile::tempdir().expect("fixture root");
+        let root = temporary.path();
+        fs::create_dir_all(root.join("packages/app")).expect("readable package");
+        fs::write(root.join("packages/app/tsconfig.json"), "{}").expect("readable tsconfig");
+        let blocked = root.join("packages/blocked");
+        fs::create_dir_all(blocked.join("nested")).expect("blocked package");
+        fs::write(blocked.join("nested/tsconfig.json"), "{}").expect("blocked tsconfig");
+        fs::set_permissions(&blocked, fs::Permissions::from_mode(0o000))
+            .expect("drop traversal permission");
+
+        let walked = typescript_projects(root);
+        // The probe runs under the same permissions as the walk; a privileged
+        // runner bypasses them, so the unreadable case cannot be staged there.
+        if fs::read_dir(&blocked).is_err() {
+            let error = walked.expect_err("an unreadable subtree fails the walk");
+            assert_eq!(error.root(), root);
+            assert!(
+                error.to_string().contains(&root.display().to_string()),
+                "a failed walk names its root: {error}"
+            );
+            assert!(
+                discovery_outcome(root, Err(error)).is_none(),
+                "a failed walk is never published as a discovery"
+            );
+        }
+
+        fs::set_permissions(&blocked, fs::Permissions::from_mode(0o700))
+            .expect("restore traversal permission");
+        let recovered =
+            discovery_outcome(root, typescript_projects(root)).expect("a readable walk admits");
+        assert_eq!(
+            recovered
+                .iter()
+                .map(|project| project.tsconfig.strip_prefix(root).expect("under the root"))
+                .collect::<Vec<_>>(),
+            [
+                "packages/app/tsconfig.json",
+                "packages/blocked/nested/tsconfig.json"
+            ]
+            .map(Path::new)
+            .to_vec(),
+            "discovery recovers every project, including the one it could not read"
+        );
+    }
 }

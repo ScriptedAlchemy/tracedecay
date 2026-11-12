@@ -1518,10 +1518,12 @@ async fn remote_tls_listener_expires_saturated_non_reading_responses() {
         .expect("shutdown TLS egress service");
 }
 
-/// The listener serves each connection on the native runtime, so a remote
-/// handler runs with no Tokio runtime entered.
+/// The remote listener and its handlers share the installed Tokio runtime.
 #[tokio::test]
-async fn remote_tls_connections_are_served_off_tokio() {
+async fn remote_tls_connections_are_served_on_the_installed_runtime() {
+    if !crate::test_support::alone_with_runtime_hazards() {
+        return;
+    }
     let temporary = tempfile::tempdir().expect("remote TLS runtime fixture");
     let (tls, certificate) = remote_tls_fixture(&temporary);
     let credentials = Arc::new(
@@ -1562,8 +1564,8 @@ async fn remote_tls_connections_are_served_off_tokio() {
 
     assert!(response.starts_with("HTTP/1.1 200"), "{response}");
     assert!(
-        response.ends_with("native"),
-        "the remote handler must run off Tokio: {response}"
+        response.ends_with("tokio"),
+        "the remote handler must have the installed Tokio runtime: {response}"
     );
     service
         .shutdown()

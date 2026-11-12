@@ -224,7 +224,7 @@ fn test_store(database: &RegisteredGlobalDb) -> GlobalDbNativeIntegrationStore<'
     GlobalDbNativeIntegrationStore::new(database)
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn preview_commitments_are_immutable_and_conflicts_are_rejected() {
     let database = open_database().await;
     let store = test_store(database.registered.as_ref());
@@ -256,7 +256,7 @@ async fn preview_commitments_are_immutable_and_conflicts_are_rejected() {
     );
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn issued_approvals_persist_and_conflicting_reissue_is_rejected() {
     let database = open_database().await;
     let store = test_store(database.registered.as_ref());
@@ -293,7 +293,7 @@ async fn issued_approvals_persist_and_conflicting_reissue_is_rejected() {
     );
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn begin_consumes_the_approval_exactly_once() {
     let database = open_database().await;
     let store = test_store(database.registered.as_ref());
@@ -353,7 +353,7 @@ fn preview_with_expiry(preview_id: &str, expires_at: UtcMicros) -> NativeIntegra
     value.seal().expect("resealed preview")
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn status_compare_and_swap_rejects_stale_revisions_and_identity_rebinds() {
     let database = open_database().await;
     let store = test_store(database.registered.as_ref());
@@ -425,7 +425,7 @@ async fn status_compare_and_swap_rejects_stale_revisions_and_identity_rebinds() 
     );
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn terminal_receipts_replay_and_survive_restart() {
     let database = open_database().await;
     let store = test_store(database.registered.as_ref());
@@ -500,7 +500,7 @@ async fn terminal_receipts_replay_and_survive_restart() {
     );
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn needs_inspection_quarantines_the_repository_until_recovery() {
     let database = open_database().await;
     let store = test_store(database.registered.as_ref());
@@ -539,7 +539,7 @@ async fn needs_inspection_quarantines_the_repository_until_recovery() {
     );
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn pending_transactions_expose_unfinished_work_for_restart_recovery() {
     let database = open_database().await;
     let store = test_store(database.registered.as_ref());

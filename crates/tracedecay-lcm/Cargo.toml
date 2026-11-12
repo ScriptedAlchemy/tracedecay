@@ -27,7 +27,7 @@ tracedecay-temporal-query = { path = "../tracedecay-temporal-query" }
 tracedecay-tokenizer = { path = "../tracedecay-tokenizer" }
 
 [dev-dependencies]
-asupersync.workspace = true
+tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros", "time", "sync", "io-util", "net"] }
 # `test_support` seeds fixtures through a raw SQLite handle.
 rusqlite.workspace = true
 tempfile.workspace = true

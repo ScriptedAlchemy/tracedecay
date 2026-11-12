@@ -3,7 +3,6 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 
-use asupersync::Cx;
 use tracing::Instrument;
 
 use tracedecay_domain::canonical_text::sha256_hex;
@@ -117,8 +116,7 @@ pub(super) async fn project_memory_graph(
     query: ProjectMemoryGraphQueryV1,
     read_control: &FactReadControl,
 ) -> FactStoreResult<ProjectMemoryGraphPageV1> {
-    let cx =
-        tracedecay_runtime_core::native_runtime::cx().ok_or(FactStoreError::GraphUnavailable)?;
+    tracedecay_runtime_core::native_runtime::handle().ok_or(FactStoreError::GraphUnavailable)?;
     let owner = query.owner().clone();
     // This read verifies or reconciles, then reads through the same graph
     // owner as the post-write pass, so it is admitted through the same
@@ -163,7 +161,6 @@ pub(super) async fn project_memory_graph(
     let mut unavailable_head_retries = 0u8;
     let verified_snapshot = loop {
         match verified_head_matching(
-            &cx,
             db,
             &projection_identity,
             &expected_generation,
@@ -187,13 +184,9 @@ pub(super) async fn project_memory_graph(
             }
             _ => {
                 ensure_not_cancelled(read_control)?;
-                let snapshot = reconcile_project_memory_graph_pass(
-                    &cx,
-                    db,
-                    Some(read_control),
-                    Some(&inline_pass),
-                )
-                .await?;
+                let snapshot =
+                    reconcile_project_memory_graph_pass(db, Some(read_control), Some(&inline_pass))
+                        .await?;
                 if snapshot.projection() != &projection_identity
                     || snapshot.generation() != &expected_generation
                 {
@@ -212,119 +205,116 @@ pub(super) async fn project_memory_graph(
     let namespace_for_read = namespace.clone();
     let projection_for_read = projection.clone();
     let projection_identity_for_read = projection_identity;
-    let page = cx
-        .spawn_blocking(move |_cx| {
-            let _inline_pass = inline_pass;
-            let cancellation: Arc<dyn tracedecay_graph_db::GraphCancellation> =
-                Arc::new(SharedGraphCancellation(control_for_read));
-            let max_page = max_relations.checked_add(1).ok_or_else(|| {
-                tracedecay_graph_db::GraphDbError::budget_exhausted_count(
-                    GraphBudgetKind::Read,
-                    max_relations,
-                )
-            })?;
-            let relations = if roots.is_empty() {
-                let projection_page =
-                    snapshot_for_read.read_projection(GraphProjectionReadRequest {
-                        namespace: namespace_for_read,
-                        projection: projection_for_read,
-                        after_entity: None,
-                        after_relation: None,
-                        max_entities: 0,
-                        max_relations: max_page,
-                        cancellation,
-                    })?;
-                if projection_page.next_relation.is_some() {
-                    return Err(tracedecay_graph_db::GraphDbError::budget_exhausted_count(
-                        GraphBudgetKind::Read,
-                        max_relations,
-                    ));
-                }
-                projection_page
-                    .relations
-                    .into_iter()
-                    .map(|relation| ProjectedRelation {
-                        source: relation.from,
-                        target: relation.to,
-                        kind: relation.kind,
-                    })
-                    .collect()
-            } else {
-                let relation_kinds = relation_kinds()?;
-                let relation_sentinel = max_relations.checked_add(1).ok_or_else(|| {
-                    tracedecay_graph_db::GraphDbError::budget_exhausted_count(
-                        GraphBudgetKind::Read,
-                        max_relations,
-                    )
+    let page = tracedecay_runtime_core::native_runtime::spawn_blocking(move || {
+        let _inline_pass = inline_pass;
+        let cancellation: Arc<dyn tracedecay_graph_db::GraphCancellation> =
+            Arc::new(SharedGraphCancellation(control_for_read));
+        let max_page = max_relations.checked_add(1).ok_or_else(|| {
+            tracedecay_graph_db::GraphDbError::budget_exhausted_count(
+                GraphBudgetKind::Read,
+                max_relations,
+            )
+        })?;
+        let relations = if roots.is_empty() {
+            let projection_page =
+                snapshot_for_read.read_projection(GraphProjectionReadRequest {
+                    namespace: namespace_for_read,
+                    projection: projection_for_read,
+                    after_entity: None,
+                    after_relation: None,
+                    max_entities: 0,
+                    max_relations: max_page,
+                    cancellation,
                 })?;
-                let entity_sentinel = relation_sentinel.checked_add(1).ok_or_else(|| {
-                    tracedecay_graph_db::GraphDbError::budget_exhausted_count(
-                        GraphBudgetKind::Read,
-                        max_relations,
-                    )
-                })?;
-                let mut accepted_entities = BTreeSet::new();
-                for root in roots {
-                    let start = fact_entity_id(&root)?;
-                    let result = snapshot_for_read.traverse(TraversalRequest {
-                        namespace: namespace_for_read.clone(),
-                        start,
-                        relation_kinds: relation_kinds.clone(),
-                        direction: GraphTraversalDirection::Both,
-                        max_depth: relation_sentinel,
-                        max_visits: entity_sentinel,
-                        max_results: entity_sentinel,
-                        cancellation: Arc::clone(&cancellation),
-                    })?;
-                    if result.visits.len() == entity_sentinel {
-                        return Err(tracedecay_graph_db::GraphDbError::budget_exhausted_count(
-                            GraphBudgetKind::Read,
-                            max_relations,
-                        ));
-                    }
-                    accepted_entities
-                        .extend(result.visits.into_iter().map(|visit| visit.entity.identity));
-                }
-                let starts = accepted_entities.iter().cloned().collect::<Vec<_>>();
-                let relation_ids = snapshot_for_read.outgoing_relation_ids(
-                    &starts,
-                    &relation_kinds,
-                    relation_sentinel,
-                    Arc::clone(&cancellation),
-                )?;
-                let relation_ids = relation_ids.into_iter().flatten().collect::<BTreeSet<_>>();
-                let mut relations = Vec::with_capacity(relation_ids.len());
-                for relation_id in relation_ids {
-                    let reference =
-                        GraphRelationRef::new(projection_identity_for_read.clone(), relation_id);
-                    let relation = snapshot_for_read
-                        .relation(&reference, Arc::clone(&cancellation))?
-                        .ok_or_else(|| {
-                            tracedecay_graph_db::GraphDbError::conflict(
-                                "memory_graph.project_relations.missing_relation",
-                            )
-                        })?;
-                    relations.push(ProjectedRelation {
-                        source: relation.from.identity,
-                        target: relation.to.identity,
-                        kind: relation.kind,
-                    });
-                }
-                validate_rooted_relations(&accepted_entities, relations, max_relations)?
-            };
-            if relations.len() > max_relations {
+            if projection_page.next_relation.is_some() {
                 return Err(tracedecay_graph_db::GraphDbError::budget_exhausted_count(
                     GraphBudgetKind::Read,
                     max_relations,
                 ));
             }
-            Ok::<_, tracedecay_graph_db::GraphDbError>(relations)
-        })
-        .map_err(|error| storage_error(OPERATION, error))?
-        .join(&cx)
-        .await
-        .map_err(|error| storage_error(OPERATION, error))?
-        .map_err(|error| graph_error(&owner, error))?;
+            projection_page
+                .relations
+                .into_iter()
+                .map(|relation| ProjectedRelation {
+                    source: relation.from,
+                    target: relation.to,
+                    kind: relation.kind,
+                })
+                .collect()
+        } else {
+            let relation_kinds = relation_kinds()?;
+            let relation_sentinel = max_relations.checked_add(1).ok_or_else(|| {
+                tracedecay_graph_db::GraphDbError::budget_exhausted_count(
+                    GraphBudgetKind::Read,
+                    max_relations,
+                )
+            })?;
+            let entity_sentinel = relation_sentinel.checked_add(1).ok_or_else(|| {
+                tracedecay_graph_db::GraphDbError::budget_exhausted_count(
+                    GraphBudgetKind::Read,
+                    max_relations,
+                )
+            })?;
+            let mut accepted_entities = BTreeSet::new();
+            for root in roots {
+                let start = fact_entity_id(&root)?;
+                let result = snapshot_for_read.traverse(TraversalRequest {
+                    namespace: namespace_for_read.clone(),
+                    start,
+                    relation_kinds: relation_kinds.clone(),
+                    direction: GraphTraversalDirection::Both,
+                    max_depth: relation_sentinel,
+                    max_visits: entity_sentinel,
+                    max_results: entity_sentinel,
+                    cancellation: Arc::clone(&cancellation),
+                })?;
+                if result.visits.len() == entity_sentinel {
+                    return Err(tracedecay_graph_db::GraphDbError::budget_exhausted_count(
+                        GraphBudgetKind::Read,
+                        max_relations,
+                    ));
+                }
+                accepted_entities
+                    .extend(result.visits.into_iter().map(|visit| visit.entity.identity));
+            }
+            let starts = accepted_entities.iter().cloned().collect::<Vec<_>>();
+            let relation_ids = snapshot_for_read.outgoing_relation_ids(
+                &starts,
+                &relation_kinds,
+                relation_sentinel,
+                Arc::clone(&cancellation),
+            )?;
+            let relation_ids = relation_ids.into_iter().flatten().collect::<BTreeSet<_>>();
+            let mut relations = Vec::with_capacity(relation_ids.len());
+            for relation_id in relation_ids {
+                let reference =
+                    GraphRelationRef::new(projection_identity_for_read.clone(), relation_id);
+                let relation = snapshot_for_read
+                    .relation(&reference, Arc::clone(&cancellation))?
+                    .ok_or_else(|| {
+                        tracedecay_graph_db::GraphDbError::conflict(
+                            "memory_graph.project_relations.missing_relation",
+                        )
+                    })?;
+                relations.push(ProjectedRelation {
+                    source: relation.from.identity,
+                    target: relation.to.identity,
+                    kind: relation.kind,
+                });
+            }
+            validate_rooted_relations(&accepted_entities, relations, max_relations)?
+        };
+        if relations.len() > max_relations {
+            return Err(tracedecay_graph_db::GraphDbError::budget_exhausted_count(
+                GraphBudgetKind::Read,
+                max_relations,
+            ));
+        }
+        Ok::<_, tracedecay_graph_db::GraphDbError>(relations)
+    })
+    .await
+    .map_err(|error| storage_message(OPERATION, error))?
+    .map_err(|error| graph_error(&owner, error))?;
 
     ensure_not_cancelled(read_control)?;
     let hydrated = hydrate_page(db, owner.clone(), &hydration_roots, page, read_control).await?;
@@ -381,11 +371,11 @@ pub(super) fn schedule_project_memory_graph_reconciliation(
         let Some(db) = weak_db.upgrade() else {
             return true;
         };
-        let Some(cx) = tracedecay_runtime_core::native_runtime::cx() else {
+        let Some(_) = tracedecay_runtime_core::native_runtime::handle() else {
             tracing::warn!("project memory reconciliation runtime is unavailable");
             return false;
         };
-        match reconcile_project_memory_graph_pass(&cx, &db, None, None).await {
+        match reconcile_project_memory_graph_pass(&db, None, None).await {
             Ok(_) => true,
             Err(error) => {
                 tracing::warn!(
@@ -423,7 +413,6 @@ pub(super) fn schedule_project_memory_graph_reconciliation(
 /// operation or snapshot lease. The scheduled worker and the post-write
 /// task pass `None`: their own join/admission already spans the whole pass.
 fn reconcile_project_memory_graph_pass<'a>(
-    cx: &'a Cx,
     db: &'a Database,
     read_control: Option<&'a FactReadControl>,
     inline_pass: Option<&'a Arc<MemoryGraphReconciliationInlinePassV1>>,
@@ -491,8 +480,8 @@ fn reconcile_project_memory_graph_pass<'a>(
             ensure_source_read_active(read_control)?;
             let runtime = issue_memory_graph_operation(db)?;
             let publish_admission = inline_pass.cloned();
-            let snapshot = match cx
-                .spawn_blocking(move |_cx| {
+            let snapshot =
+                match tracedecay_runtime_core::native_runtime::spawn_blocking(move || {
                     let _span =
                         tracing::trace_span!("runtime_core.memory_graph.publish_apply").entered();
                     let _inline_pass = publish_admission;
@@ -500,48 +489,44 @@ fn reconcile_project_memory_graph_pass<'a>(
                         .runtime()
                         .reconcile_verified_manifest(&manifest, idempotency_key)
                 })
-                .map_err(|error| storage_error(OPERATION, error))?
-                .join(cx)
                 .await
-                .map_err(|error| storage_error(OPERATION, error))?
-            {
-                Ok(snapshot) => snapshot,
-                Err(error) => {
-                    // The typed mapping below collapses the graph error into unit
-                    // variants for wire states; record the full message first so a
-                    // persistently failing reconciliation names its cause in
-                    // operator logs instead of a bare kind.
-                    tracing::warn!(%error, "memory graph verified-manifest publication failed");
-                    let mapped = graph_error(&owner, error);
-                    if matches!(mapped, FactStoreError::GraphConflict)
-                        && let Some(snapshot) = verified_head_matching(
-                            cx,
-                            db,
-                            &projection,
-                            &expected_generation,
-                            &owner,
-                            head_read_control.clone(),
-                            inline_pass.cloned(),
-                        )
-                        .await?
-                    {
-                        finish_reconciliation_watermark(
-                            db,
-                            &owner,
-                            watermark,
-                            source_stamp,
-                            read_control,
-                        )
-                        .await?;
-                        return Ok(snapshot);
+                .map_err(|error| storage_message(OPERATION, error))?
+                {
+                    Ok(snapshot) => snapshot,
+                    Err(error) => {
+                        // The typed mapping below collapses the graph error into unit
+                        // variants for wire states; record the full message first so a
+                        // persistently failing reconciliation names its cause in
+                        // operator logs instead of a bare kind.
+                        tracing::warn!(%error, "memory graph verified-manifest publication failed");
+                        let mapped = graph_error(&owner, error);
+                        if matches!(mapped, FactStoreError::GraphConflict)
+                            && let Some(snapshot) = verified_head_matching(
+                                db,
+                                &projection,
+                                &expected_generation,
+                                &owner,
+                                head_read_control.clone(),
+                                inline_pass.cloned(),
+                            )
+                            .await?
+                        {
+                            finish_reconciliation_watermark(
+                                db,
+                                &owner,
+                                watermark,
+                                source_stamp,
+                                read_control,
+                            )
+                            .await?;
+                            return Ok(snapshot);
+                        }
+                        return Err(mapped);
                     }
-                    return Err(mapped);
-                }
-            };
+                };
             if snapshot.projection() != &projection || snapshot.generation() != &expected_generation
             {
                 if let Some(snapshot) = verified_head_matching(
-                    cx,
                     db,
                     &projection,
                     &expected_generation,
@@ -603,7 +588,6 @@ async fn finish_reconciliation_watermark(
 /// dropped mid-read cannot release the shutdown join while the detached
 /// head recovery still holds its graph operation or produced snapshot lease.
 async fn verified_head_matching(
-    cx: &Cx,
     db: &Database,
     projection: &GraphProjectionIdentity,
     expected_generation: &tracedecay_graph_db::GraphGenerationId,
@@ -613,18 +597,15 @@ async fn verified_head_matching(
 ) -> FactStoreResult<Option<tracedecay_graph_db::VerifiedGraphSnapshot>> {
     let runtime = issue_memory_graph_operation(db)?;
     let projection_for_read = projection.clone();
-    let snapshot = cx
-        .spawn_blocking(move |_cx| {
-            let _inline_pass = inline_pass;
-            runtime
-                .runtime()
-                .verified_snapshot(&projection_for_read, read_control)
-        })
-        .map_err(|error| storage_error(OPERATION, error))?
-        .join(cx)
-        .await
-        .map_err(|error| storage_error(OPERATION, error))?
-        .map_err(|error| graph_error(owner, error))?;
+    let snapshot = tracedecay_runtime_core::native_runtime::spawn_blocking(move || {
+        let _inline_pass = inline_pass;
+        runtime
+            .runtime()
+            .verified_snapshot(&projection_for_read, read_control)
+    })
+    .await
+    .map_err(|error| storage_message(OPERATION, error))?
+    .map_err(|error| graph_error(owner, error))?;
     Ok(snapshot.filter(|snapshot| {
         snapshot.projection() == projection && snapshot.generation() == expected_generation
     }))
@@ -637,7 +618,7 @@ fn issue_memory_graph_operation(
         .map_err(|_| FactStoreError::GraphUnavailable)
 }
 
-pub(super) async fn publish_project_memory_graph_after_write(cx: &Cx, db: Database) {
+pub(super) async fn publish_project_memory_graph_after_write(db: Database) {
     // This pass runs in the write's detached task, not the scheduled worker.
     // Admitting it through the coordinator lets daemon shutdown cancel and
     // join it before closing the graph owner it publishes through; a refused
@@ -647,7 +628,7 @@ pub(super) async fn publish_project_memory_graph_after_write(cx: &Cx, db: Databa
         schedule_project_memory_graph_reconciliation(db);
         return;
     };
-    match reconcile_project_memory_graph_pass(cx, &db, None, None).await {
+    match reconcile_project_memory_graph_pass(&db, None, None).await {
         Ok(_) => {}
         Err(error) => {
             tracing::warn!(
@@ -1455,7 +1436,7 @@ mod tests {
         fact_id
     }
 
-    #[asupersync::test]
+    #[tokio::test]
     async fn cancelled_source_load_records_materialized_source_work() {
         let (_directory, database) = database("cancelled-source-telemetry").await;
         seed_source_fact(&database, "cancelled-source-telemetry").await;

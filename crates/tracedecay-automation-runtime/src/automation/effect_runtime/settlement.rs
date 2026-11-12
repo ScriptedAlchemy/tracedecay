@@ -27,6 +27,7 @@ use tracedecay_contracts::{
 use tracedecay_domain::configuration::ConfigurationRevisionId;
 use tracedecay_domain::{FactOwnerV1, ManifestDigest, RunId, UtcMicros};
 use tracedecay_private_fs::framed_log::{DirectorySyncPolicy, sync_parent_directory};
+use tracedecay_runtime_core::native_runtime;
 use tracedecay_store::{FactReadControl, ProjectMemoryAutomationRunReceiptsV1};
 
 use crate::automation::backend::{AgentTaskKind, task_key};
@@ -110,13 +111,13 @@ impl<T: Send + 'static> RetainedSettlementWaiter<T> {
     /// settlement runs whether or not the waiter is ever polled.
     fn start(owner: impl FnOnce() -> T + Send + 'static) -> Self {
         let (sender, result) = tokio::sync::oneshot::channel();
-        let queued = tracedecay_runtime_core::native_runtime::handle().and_then(|runtime| {
-            runtime.spawn_blocking(move || {
+        let queued = native_runtime::handle().map(|runtime| {
+            native_runtime::spawn_blocking_on(&runtime, move || {
                 let _ = sender.send(owner());
             })
         });
         if queued.is_none() {
-            tracing::error!("native blocking pool refused retained automation settlement");
+            tracing::error!("native runtime unavailable for retained automation settlement");
         }
         Self { result }
     }

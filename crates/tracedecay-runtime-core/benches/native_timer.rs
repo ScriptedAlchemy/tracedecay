@@ -1,9 +1,8 @@
 //! Per-call cost of native timers awaited from a Tokio worker.
 //!
-//! `native_runtime::sleep_until` runs each timer on its own native task so a
-//! foreign executor never polls an Asupersync timer. These cases price that
-//! spawn against Tokio's timer and a direct Asupersync timer, to decide which
-//! loops may use it:
+//! `native_runtime` keeps timers usable by foreign executors. These cases
+//! compare that ownership boundary with direct Tokio timers, to measure its
+//! per-call cost in native async loops:
 //!
 //! ```sh
 //! bazel test //crates/tracedecay-runtime-core:native_timer --test_arg=--bench
@@ -65,11 +64,6 @@ fn native_timers(c: &mut Criterion) {
             tokio::time::timeout(FAR, ready_after_one_yield())
         }));
     });
-    group.bench_function("asupersync_timeout_completes_before_deadline", |b| {
-        b.iter_custom(per_call(&runtime, || {
-            asupersync::time::timeout(asupersync::time::wall_now(), FAR, ready_after_one_yield())
-        }));
-    });
     group.bench_function("native_sleep_until_past_deadline", |b| {
         b.iter_custom(per_call(&runtime, || {
             native_runtime::sleep_until(Instant::now())
@@ -85,10 +79,8 @@ fn native_timers(c: &mut Criterion) {
             tokio::time::sleep_until(tokio::time::Instant::now())
         }));
     });
-    group.bench_function("asupersync_sleep_zero", |b| {
-        b.iter_custom(per_call(&runtime, || {
-            asupersync::time::sleep(asupersync::time::wall_now(), Duration::ZERO)
-        }));
+    group.bench_function("tokio_sleep_zero", |b| {
+        b.iter_custom(per_call(&runtime, || tokio::time::sleep(Duration::ZERO)));
     });
     group.finish();
 }

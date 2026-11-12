@@ -33,7 +33,7 @@ fn topology_event(scope: &str, hint_id: &str, timestamp: i64) -> AnalyticsEventI
     }
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn accepted_events_mark_days_stale_and_rebuild_settles_only_its_exact_claim() {
     let harness = RegisteredGlobalDbHarness::open("observability-rollup-dirty-cas").await;
     let first_id = harness
@@ -119,7 +119,7 @@ async fn accepted_events_mark_days_stale_and_rebuild_settles_only_its_exact_clai
     assert_eq!(page.fragments.len(), 1);
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn dirty_day_lease_is_exclusive_then_reclaimable_after_expiry() {
     let harness = RegisteredGlobalDbHarness::open("observability-rollup-dirty-lease").await;
     let watermark = harness
@@ -199,7 +199,7 @@ async fn dirty_day_lease_is_exclusive_then_reclaimable_after_expiry() {
     );
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn a_claimant_reclaims_the_dirty_day_lease_an_abandoned_pass_left() {
     let harness = RegisteredGlobalDbHarness::open("observability-rollup-dirty-reclaim").await;
     let watermark = harness
@@ -252,7 +252,7 @@ async fn a_claimant_reclaims_the_dirty_day_lease_an_abandoned_pass_left() {
     );
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn a_claimant_reclaims_the_empty_day_lease_an_abandoned_pass_left() {
     let harness = RegisteredGlobalDbHarness::open("observability-rollup-empty-reclaim").await;
     harness
@@ -316,7 +316,7 @@ async fn a_claimant_reclaims_the_empty_day_lease_an_abandoned_pass_left() {
     );
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn empty_day_frontier_starts_after_mount_advances_atomically_and_recovers_publication() {
     let harness = RegisteredGlobalDbHarness::open("observability-rollup-empty-frontier").await;
     let frontier = harness
@@ -482,7 +482,7 @@ fn rebuild(
     }
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn internal_fragment_query_returns_canonical_merge_state_without_cell_suppression() {
     let harness = RegisteredGlobalDbHarness::open("observability-rollup-fragment").await;
     harness
@@ -515,7 +515,7 @@ async fn internal_fragment_query_returns_canonical_merge_state_without_cell_supp
     );
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn capped_day_is_terminal_without_payload_until_a_new_source_marks_it_stale() {
     let harness = RegisteredGlobalDbHarness::open("observability-rollup-capped-day").await;
     let watermark = harness
@@ -586,7 +586,7 @@ async fn capped_day_is_terminal_without_payload_until_a_new_source_marks_it_stal
     assert!(stale.fragments.is_empty());
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn detail_compaction_is_bounded_exact_cas_and_generation_monotone() {
     let harness = RegisteredGlobalDbHarness::open("observability-rollup-detail-compaction").await;
     let mut publication = rebuild(
@@ -651,7 +651,7 @@ async fn detail_compaction_is_bounded_exact_cas_and_generation_monotone() {
     );
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn rollup_rebuild_is_idempotent_version_monotone_and_late_correctable() {
     let harness = RegisteredGlobalDbHarness::open("observability-rollup-correction").await;
     let initial = rebuild(
@@ -741,7 +741,7 @@ async fn rollup_rebuild_is_idempotent_version_monotone_and_late_correctable() {
     );
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn observability_retention_expires_rollups_past_the_horizon_only() {
     let harness = RegisteredGlobalDbHarness::open("observability-rollup-query-cap-retention").await;
     harness
@@ -824,7 +824,7 @@ async fn observability_retention_expires_rollups_past_the_horizon_only() {
 
 /// A scope idle past the horizon must resume at the first retained day rather
 /// than close each expired day as known-empty from already-pruned events.
-#[asupersync::test]
+#[tokio::test]
 async fn observability_retention_moves_a_lagging_frontier_to_the_first_retained_day() {
     let harness = RegisteredGlobalDbHarness::open("observability-rollup-lagging-frontier").await;
     for scope in ["scope:idle", "scope:current"] {

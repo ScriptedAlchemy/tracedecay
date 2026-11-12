@@ -221,7 +221,7 @@ mod tests {
     }
 
     #[test]
-    fn a_scan_completes_and_expires_without_a_tokio_runtime() {
+    fn a_scan_completes_and_expires_from_a_plain_thread() {
         let (cancelled_tx, cancelled_rx) = std::sync::mpsc::channel();
         let (value, expired) = tracedecay_runtime_core::native_runtime::block_on(async {
             let value = run_bounded_search_with_capacity(

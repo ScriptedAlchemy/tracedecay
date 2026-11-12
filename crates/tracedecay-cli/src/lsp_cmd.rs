@@ -178,9 +178,7 @@ async fn pump_stdio_bridge(
                     bridge_config_error("LSP bridge received a non-UTF-8 JSON-RPC payload")
                 })?);
             }
-            () = asupersync::time::sleep(
-                asupersync::time::wall_now(),
-                std::time::Duration::from_millis(25),
+            () = tokio::time::sleep(std::time::Duration::from_millis(25),
             ) => {}
         }
     }

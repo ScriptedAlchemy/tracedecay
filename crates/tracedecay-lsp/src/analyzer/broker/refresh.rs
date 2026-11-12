@@ -595,7 +595,7 @@ mod tests {
     #[test]
     fn native_refresh_waits_release_capacity_after_drop_and_deadline() {
         native_runtime::block_on(async {
-            assert!(tokio::runtime::Handle::try_current().is_err());
+            assert!(tokio::runtime::Handle::try_current().is_ok());
             let capacity = BrokerRefreshCapacity::new();
             let reservation = capacity.reserve(1).expect("queued reservation");
             let held = capacity
