@@ -2026,9 +2026,12 @@ fn install_staged_sealed_store(
         Ok(()) => Ok(true),
         Err(error) => {
             discard_failed_sealed_staging(&staging_path, locator, expected_digest);
-            if directory.exists() {
-                // A winner may have installed the same generation. The
-                // caller still requires a full identity/digest reopen proof.
+            if error.kind() == std::io::ErrorKind::AlreadyExists && directory.exists() {
+                // Only an occupied destination is a concurrent-writer
+                // collision. An identity mismatch, including one detected
+                // after the rename, must never be reclassified as adoption.
+                // The caller still requires a full identity/digest reopen
+                // proof for a genuine collision.
                 Ok(false)
             } else {
                 Err(sealed_store_io_failure("artifact install failed", error))
@@ -5486,6 +5489,64 @@ mod build_tests {
         assert_eq!(reopened.recovered_digest(), expected.as_str());
         assert_eq!((reopened.entity_count, reopened.relation_count), (7, 9));
         let _ = reopened.database().close();
+    }
+
+    #[test]
+    fn sealed_install_identity_mismatch_is_not_an_occupied_destination_collision() {
+        let temp = tempfile::tempdir().expect("persistent sealed graph root");
+        let database_path = temp.path().join("source.grafeo");
+        let manifest = manifest(3, 2);
+        let identity = manifest.identity();
+        let expected = manifest
+            .expected_recovered_digest(&|| Ok(()))
+            .expect("generation digest");
+        let root = sealed_store_root(&database_path);
+        std::fs::create_dir_all(&root).expect("sealed root");
+        let directory = sealed_generation_directory(
+            &root,
+            &identity.physical_namespace().expect("physical namespace"),
+        );
+        std::fs::create_dir(&directory).expect("occupied generation");
+        std::fs::write(directory.join("sentinel"), b"installed").unwrap();
+
+        let staging_name = std::ffi::OsString::from(format!(
+            ".staging-{}",
+            directory.file_name().unwrap().to_str().unwrap()
+        ));
+        let staging = root.join(&staging_name);
+        let held_staging = HeldDirectory::create_exclusive(&root, &staging_name)
+            .expect("create the producer staging directory");
+        held_staging
+            .write_new_file(std::ffi::OsStr::new("owned"), b"producer")
+            .expect("write producer evidence");
+        let moved = root.join("moved-producer");
+        std::fs::rename(&staging, &moved).expect("move the producer aside");
+        std::fs::create_dir(&staging).expect("substitute a foreign real directory");
+        std::fs::write(staging.join("sentinel"), b"foreign").unwrap();
+
+        let artifact_name = directory.file_name().unwrap().to_owned();
+        let locator = crate::lease::GenerationLocator::new(
+            identity.projection.clone(),
+            identity.generation.clone(),
+        );
+        let error = super::install_staged_sealed_store(
+            &held_staging,
+            &root,
+            &staging_name,
+            &artifact_name,
+            &locator,
+            expected.as_str(),
+        )
+        .expect_err("an identity mismatch is not a concurrent-writer collision");
+        assert!(error.to_string().contains("artifact install failed"));
+
+        assert_eq!(std::fs::read(staging.join("sentinel")).unwrap(), b"foreign");
+        assert_eq!(std::fs::read(moved.join("owned")).unwrap(), b"producer");
+        assert_eq!(
+            std::fs::read(directory.join("sentinel")).unwrap(),
+            b"installed"
+        );
+        assert!(!directory.join("owned").exists());
     }
 
     /// Two builds of the same staged rows write byte-identical section
