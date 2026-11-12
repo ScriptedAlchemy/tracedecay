@@ -35,7 +35,8 @@ use crate::handlers::token_budget::{SectionCut, cut, estimated_tokens, quotas, t
 
 use super::context_markdown::verified_plan_context;
 use super::context_path::{
-    context_call_path, mark_path_source_budget_omissions, validate_call_path,
+    ContextCallPathProjection, context_call_path, mark_path_source_budget_omissions,
+    validate_call_path,
 };
 use super::context_support::{
     ContextMemoryOutcome, context_memory_analytics, context_memory_options, context_memory_outcome,
@@ -764,7 +765,7 @@ where
         max_code_blocks,
         path_nodes: path_projection
             .iter()
-            .flat_map(|path| path.nodes())
+            .flat_map(ContextCallPathProjection::nodes)
             .map(|node| node.symbol.node_id.clone())
             .collect(),
         graph_admission: graph.as_ref().ok().map(|graph| {
