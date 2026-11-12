@@ -1707,6 +1707,132 @@ mod tests {
     }
 
     #[test]
+    fn held_directory_create_exclusive_refuses_an_occupied_name() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("sealed");
+        std::fs::create_dir(&root).unwrap();
+        let name = OsStr::new(".staging-generation");
+        let held = HeldDirectory::create_exclusive(&root, name).unwrap();
+        held.write_new_file(OsStr::new("sealed.json"), b"owned")
+            .unwrap();
+
+        let error = HeldDirectory::create_exclusive(&root, name)
+            .err()
+            .expect("an occupied staging name is never adopted");
+        assert_eq!(error.kind(), io::ErrorKind::AlreadyExists);
+        assert_eq!(
+            std::fs::read(root.join(name).join("sealed.json")).unwrap(),
+            b"owned"
+        );
+    }
+
+    #[test]
+    fn held_directory_anonymous_file_leaves_no_entry() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("sealed");
+        std::fs::create_dir(&root).unwrap();
+        let held = HeldDirectory::create_exclusive(&root, OsStr::new("staging")).unwrap();
+
+        let mut spool = held.anonymous_file().unwrap();
+        spool.write_all(b"column values").unwrap();
+        spool.sync_all().unwrap();
+
+        assert_eq!(
+            std::fs::read_dir(root.join("staging")).unwrap().count(),
+            0,
+            "an anonymous spool must not leave a directory entry"
+        );
+    }
+
+    #[test]
+    fn held_directory_hard_link_from_links_relative_to_the_handle() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("sealed");
+        let source = temp.path().join("source");
+        std::fs::create_dir(&root).unwrap();
+        std::fs::create_dir(&source).unwrap();
+        std::fs::write(source.join("payload"), b"linked").unwrap();
+        let held = HeldDirectory::create_exclusive(&root, OsStr::new("staging")).unwrap();
+
+        held.hard_link_from(&source.join("payload"), OsStr::new("payload"))
+            .unwrap();
+
+        assert_eq!(
+            std::fs::read(root.join("staging").join("payload")).unwrap(),
+            b"linked"
+        );
+    }
+
+    /// A held directory keeps writing into the directory it created after the
+    /// entry name is replaced by a link to a foreign tree. The path-based
+    /// writer resolves the handle, not the substitutable name.
+    #[cfg(unix)]
+    #[test]
+    fn held_directory_writes_survive_a_pathname_substitution() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("sealed");
+        let foreign = temp.path().join("foreign");
+        std::fs::create_dir(&root).unwrap();
+        std::fs::create_dir(&foreign).unwrap();
+        std::fs::write(foreign.join("sentinel"), b"foreign").unwrap();
+        let name = OsStr::new(".staging-generation");
+        let held = HeldDirectory::create_exclusive(&root, name).unwrap();
+        held.write_new_file(OsStr::new("owner.json"), b"owned")
+            .unwrap();
+
+        let moved = root.join("moved-generation");
+        std::fs::rename(root.join(name), &moved).unwrap();
+        symlink(&foreign, root.join(name)).unwrap();
+
+        held.write_new_file(OsStr::new("sealed.json"), b"receipt")
+            .unwrap();
+        let resolved = std::fs::canonicalize(held.path().unwrap()).unwrap();
+        assert_eq!(
+            resolved.file_name(),
+            Some(OsStr::new("moved-generation")),
+            "the held handle must resolve to the directory it owns"
+        );
+        assert_eq!(
+            std::fs::read(moved.join("sealed.json")).unwrap(),
+            b"receipt"
+        );
+        assert_eq!(std::fs::read(foreign.join("sentinel")).unwrap(), b"foreign");
+        assert!(
+            !foreign.join("sealed.json").exists(),
+            "a substituted name must not receive the producer's bytes"
+        );
+    }
+
+    /// Installation compares the held identity before and after the rename, so
+    /// a staging entry replaced by a link is refused and the foreign tree is
+    /// preserved.
+    #[cfg(unix)]
+    #[test]
+    fn held_directory_install_refuses_a_substituted_staging_entry() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("sealed");
+        let foreign = temp.path().join("foreign");
+        std::fs::create_dir(&root).unwrap();
+        std::fs::create_dir(&foreign).unwrap();
+        std::fs::write(foreign.join("sentinel"), b"foreign").unwrap();
+        let staging_name = OsStr::new(".staging-generation");
+        let generation_name = OsStr::new("generation");
+        let held = HeldDirectory::create_exclusive(&root, staging_name).unwrap();
+        held.write_new_file(OsStr::new("sealed.json"), b"owned")
+            .unwrap();
+
+        let moved = root.join("moved-generation");
+        std::fs::rename(root.join(staging_name), &moved).unwrap();
+        symlink(&foreign, root.join(staging_name)).unwrap();
+
+        install_held_child_directory_noreplace(&root, &held, staging_name, generation_name)
+            .expect_err("a substituted staging entry must not be installed");
+        assert!(!root.join(generation_name).exists());
+        assert_eq!(std::fs::read(foreign.join("sentinel")).unwrap(), b"foreign");
+        assert_eq!(std::fs::read(moved.join("sealed.json")).unwrap(), b"owned");
+    }
+
+    #[test]
     fn rename_noreplace_moves_between_parents_and_refuses_occupied_destinations() {
         let root = tempfile::tempdir().expect("create rename fixture");
         std::fs::create_dir(root.path().join("source")).expect("create source parent");
