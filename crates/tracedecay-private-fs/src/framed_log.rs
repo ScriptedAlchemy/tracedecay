@@ -70,19 +70,12 @@ pub fn sync_parent_directory(path: &Path, policy: DirectorySyncPolicy) -> io::Re
 /// New files whose contents become durable together, before any is renamed
 /// into place.
 ///
-/// On Linux each member's writeback starts as soon as it is written, and
-/// [`Self::sync`] then fsyncs the members concurrently. Concurrent fsyncs
-/// share a commit on a journaling filesystem and on ZFS's intent log alike,
-/// but on ZFS one fsync after another pays one intent-log commit each, so a
-/// seal of a hundred segments waited out a hundred commits. The cost stays
-/// proportional to the batch's own bytes. `syncfs(2)` also paid one
-/// commit, but waited for every dirty inode on the filesystem, so a one-file
-/// seal stalled for seconds behind unrelated writers. Other platforms fsync
-/// each file as it is written.
+/// [`Self::sync`] flushes only the members, with bounded concurrency so the
+/// filesystem can coalesce their durability barriers. Linux also starts
+/// each member's writeback as soon as it is written.
 #[derive(Default)]
 pub struct DurableFileBatch {
     /// Paths rather than open handles, so a large seal holds no descriptors.
-    #[cfg(target_os = "linux")]
     members: Vec<PathBuf>,
 }
 
@@ -102,13 +95,11 @@ impl DurableFileBatch {
             if started != 0 {
                 return Err(io::Error::last_os_error());
             }
-            self.members.push(path.to_path_buf());
-            Ok(())
         }
         #[cfg(not(target_os = "linux"))]
-        {
-            sync_owned_file(path, file)
-        }
+        let _ = file;
+        self.members.push(path.to_path_buf());
+        Ok(())
     }
 
     /// Make every member file's contents durable.
@@ -118,41 +109,33 @@ impl DurableFileBatch {
         skip_all
     )]
     pub fn sync(&self) -> io::Result<()> {
-        #[cfg(target_os = "linux")]
-        {
-            let next = std::sync::atomic::AtomicUsize::new(0);
-            let syncer = || -> io::Result<()> {
-                while let Some(member) = self.members.get(next.fetch_add(1, Ordering::Relaxed)) {
-                    sync_file_at(member)?;
-                }
-                Ok(())
-            };
-            let syncers = self.members.len().min(DURABLE_BATCH_CONCURRENT_SYNCS);
-            std::thread::scope(|scope| {
-                let helpers = (1..syncers)
-                    .map(|_| scope.spawn(syncer))
-                    .collect::<Vec<_>>();
-                let mut outcome = syncer();
-                for helper in helpers {
-                    let helped = helper
-                        .join()
-                        .unwrap_or_else(|panic| std::panic::resume_unwind(panic));
-                    outcome = outcome.and(helped);
-                }
-                outcome
-            })
-        }
-        #[cfg(not(target_os = "linux"))]
-        {
+        let next = std::sync::atomic::AtomicUsize::new(0);
+        let syncer = || -> io::Result<()> {
+            while let Some(member) = self.members.get(next.fetch_add(1, Ordering::Relaxed)) {
+                sync_file_at(member)?;
+            }
             Ok(())
-        }
+        };
+        let syncers = self.members.len().min(DURABLE_BATCH_CONCURRENT_SYNCS);
+        std::thread::scope(|scope| {
+            let helpers = (1..syncers)
+                .map(|_| scope.spawn(syncer))
+                .collect::<Vec<_>>();
+            let mut outcome = syncer();
+            for helper in helpers {
+                let helped = helper
+                    .join()
+                    .unwrap_or_else(|panic| std::panic::resume_unwind(panic));
+                outcome = outcome.and(helped);
+            }
+            outcome
+        })
     }
 }
 
 /// Barriers one batch keeps in flight together: enough for the filesystem to
 /// fold them into a shared log commit, bounded so a large seal does not
 /// spawn a thread per segment.
-#[cfg(target_os = "linux")]
 const DURABLE_BATCH_CONCURRENT_SYNCS: usize = 32;
 
 /// Flush an already-written file's contents so its bytes are durable.

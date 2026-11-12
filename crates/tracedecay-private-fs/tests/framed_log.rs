@@ -5,14 +5,11 @@ use std::io::ErrorKind;
 #[cfg(unix)]
 use std::os::unix::ffi::OsStrExt;
 
-#[cfg(target_os = "linux")]
 use std::io::Write;
 
-#[cfg(target_os = "linux")]
 use std::time::{Duration, Instant};
 
 use tracedecay_private_fs::framed_log::{DirectorySyncPolicy, atomic_write_prepared, read_bounded};
-#[cfg(target_os = "linux")]
 use tracedecay_private_fs::framed_log::{DurableFileBatch, sync_latency};
 
 #[test]
@@ -266,7 +263,6 @@ mod windows_publication {
 /// Observe the barriers themselves: a filesystem can coalesce unrelated
 /// writeback with a member's fsync, so their relative elapsed times cannot
 /// establish which files the batch requested to flush.
-#[cfg(target_os = "linux")]
 #[test]
 fn durable_batch_sync_flushes_only_its_members() {
     let root = tempfile::tempdir().expect("batch fixture root");
@@ -308,7 +304,6 @@ fn durable_batch_sync_flushes_only_its_members() {
 /// batch that syncs its members one after another pays one commit per member.
 /// The members' barriers must be in flight together, so a seal of many
 /// segments waits about one barrier, not one per segment.
-#[cfg(target_os = "linux")]
 #[test]
 fn durable_batch_sync_overlaps_member_barriers_on_a_slow_disk() {
     const MEMBERS: u32 = 16;
