@@ -1502,14 +1502,14 @@ async fn cancelled_intent_does_not_commit_a_candidate() {
     let tracedecay_agent_hosts::agents::context_scout::address_registry::ContextScoutAddressBindOutcomeV1::Existing(address) = address else {
         panic!("cancelled pass must bind only its exact intent address");
     };
-    assert!(
+    assert_eq!(
         fixture
             .owner
             .recent_exact(address, 8)
             .await
             .expect("intent address state")
-            .pending
-            .is_empty()
+            .pending,
+        Vec::new()
     );
     unregister_intent_owner(&fixture);
 }
