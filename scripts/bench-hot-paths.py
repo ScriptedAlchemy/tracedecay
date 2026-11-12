@@ -16,15 +16,16 @@ Lanes (each sample row names its lane and operation):
   request         sequential warm reads: status, search, grep, callers, context,
                   plan context; wall time per call and the daemon's CPU delta
   memory          daemon RSS split (anon/file), threads, profile size on disk
-  edit_reconcile  one appended line, `tracedecay sync`, until a new generation
+  edit_reconcile  one semantic symbol edit, `tracedecay sync`, until a new generation
                   is current and ready; elapsed time and peak daemon RSS
 
 Session capture/read has its own fixture-backed harness,
 `scripts/run-session-temporal-benchmark.sh --run`; this script records that
 lane as delegated rather than measuring a lookalike.
 
-Daemon CPU and memory come from /proc, so they are typed `unsupported` off
-Linux instead of reported as zero.
+Daemon CPU and anonymous/file memory come from Linux /proc. Current RSS and
+sampled peak RSS are also supported on macOS via the existing process-memory
+reader's `ps` fallback; unsupported readings stay unavailable, never zero.
 
 Usage:
   bazel build --config=release //crates/tracedecay-cli:tracedecay
@@ -42,8 +43,8 @@ from dataclasses import dataclass
 import json
 import os
 import platform
+import re
 import shutil
-import signal
 import statistics
 import subprocess
 import sys
@@ -51,17 +52,52 @@ import tempfile
 import threading
 import time
 from pathlib import Path
+from typing import Callable
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT / "scripts" / "lib"))
 
-from portable_process import dies_with_this_process  # noqa: E402
+from portable_process import dies_with_this_process, resident_memory_kib, stop_owned_process  # noqa: E402
 
 LINUX = sys.platform.startswith("linux")
+MACOS = sys.platform == "darwin"
 CLOCK_TICKS = os.sysconf("SC_CLK_TCK") if LINUX else None
 
 SEED_SYMBOLS = ["DaemonHandshake", "default_socket_path", "call_default_tool", "TraceDecay"]
 CONTEXT_TASK = "how does the daemon serve tool calls"
+
+SOURCE_PROOF_FIELDS = (
+    "reused_segments", "hashed_segments", "hashed_bytes", "range_reads", "range_bytes",
+)
+
+
+def sealed_source_work(log_path: Path, start_offset: int) -> dict[str, int] | None:
+    """Count authenticated source work from completed daemon proof events only.
+
+    This deliberately reports unavailable, not zero, if the active binary
+    lacks telemetry. All proof events observed during this measured window
+    contribute, including independently scheduled concurrent generations.
+    """
+    totals = {field: 0 for field in SOURCE_PROOF_FIELDS}
+    proofs = 0
+    try:
+        with log_path.open("rb") as stream:
+            stream.seek(start_offset)
+            for line in stream:
+                if b"tracedecay::sealed_source_proof" not in line or b"event=sealed_source_proof" not in line:
+                    continue
+                counters = {}
+                for field in SOURCE_PROOF_FIELDS:
+                    match = re.search(rb"\b" + field.encode() + rb"=(\d+)(?=\s|$)", line)
+                    if match is None:
+                        return None
+                    counters[field] = int(match.group(1))
+                for field, value in counters.items():
+                    totals[field] += value
+                proofs += 1
+    except OSError:
+        return None
+    return {"proofs": proofs, **totals} if proofs else None
 
 
 class HarnessError(Exception):
@@ -105,6 +141,11 @@ def proc_cpu_ms(pid: int) -> float | None:
 
 
 def proc_status(pid: int) -> dict[str, int] | None:
+    if MACOS:
+        # Reuse the platform process-memory authority: ps reports RSS in KiB,
+        # but does not expose Linux-style private/file split or process HWM.
+        current, _ = resident_memory_kib(pid)
+        return {"VmRSS": current} if current is not None else None
     if not LINUX:
         return None
     wanted = {"VmRSS", "VmHWM", "RssAnon", "RssFile", "RssShmem", "Threads"}
@@ -138,10 +179,10 @@ class DaemonRssSampler:
     def _poll(self) -> None:
         while not self._stop.is_set():
             self._sample()
-            self._stop.wait(0.1)
+            self._stop.wait(0.5 if MACOS else 0.1)
 
     def start(self) -> None:
-        if not LINUX:
+        if not (LINUX or MACOS):
             return
         self._sample()
         self._thread = threading.Thread(target=self._poll, name="daemon-rss-sampler", daemon=True)
@@ -209,6 +250,10 @@ class Run:
             TRACEDECAY_DAEMON_SOCKET=str(self.socket),
             TRACEDECAY_GLOBAL_DB=str(self.profile / "global.db"),
             TRACEDECAY_DISABLE_GLOBAL_DB="1",
+            # One per-generation source-work event; retain warnings elsewhere.
+            # A stable filter makes before/after runs comparable without
+            # turning on high-volume tracing spans during timed indexing.
+            RUST_LOG="warn,tracedecay::sealed_source_proof=info",
         )
         return env
 
@@ -252,7 +297,16 @@ class Run:
         if not call.ok:
             return None
         try:
-            return json.loads(json.loads(call.stdout)["content"][0]["text"])
+            envelope = json.loads(call.stdout)
+            if not isinstance(envelope, dict):
+                return None
+            # structuredContent is the complete typed answer; text can be a
+            # truncated preview even when the status call succeeded.
+            structured = envelope.get("structuredContent")
+            if isinstance(structured, dict):
+                return structured
+            text_payload = json.loads(envelope["content"][0]["text"])
+            return text_payload if isinstance(text_payload, dict) else None
         except (ValueError, KeyError, IndexError, TypeError):
             return None
 
@@ -307,17 +361,21 @@ class Run:
         self.record("daemon_start", "first_status_answered", answer=code or "ok",
                     wall_ms=(time.perf_counter() - start) * 1000)
 
-    def wait_for_ready(self, lane: str, previous_generation: str | None) -> dict[str, object]:
+    def wait_for_ready(
+        self, lane: str, previous_generation: str | None,
+        verify_generation: Callable[[str], bool] | None = None,
+    ) -> dict[str, object]:
         pid = self.daemon_pid()
         start = time.perf_counter()
         deadline = time.monotonic() + self.index_timeout
-        peak_rss_kb = 0
+        peak_rss_kb = None
         polls = 0
+        unverified = ""
         while True:
             self.daemon_pid()
             status = proc_status(pid)
-            if status:
-                peak_rss_kb = max(peak_rss_kb, status.get("VmRSS", 0))
+            if status and "VmRSS" in status:
+                peak_rss_kb = max(peak_rss_kb or 0, status["VmRSS"])
             payload = self.status_payload()
             polls += 1
             if payload is not None:
@@ -330,17 +388,63 @@ class Run:
                 if (
                     freshness.get("status") == "current"
                     and serving.get("state") == "ready"
+                    and isinstance(generation, str)
+                    and bool(generation)
                     and generation != previous_generation
                 ):
-                    return {
-                        "wall_ms": (time.perf_counter() - start) * 1000,
-                        "peak_daemon_rss_kb": peak_rss_kb if LINUX else None,
-                        "generation_id": generation,
-                        "status_polls": polls,
-                    }
+                    # A newer current/ready generation can belong to unrelated
+                    # work. Count this pass only after its own served graph
+                    # proves the edited symbol under the very same identity.
+                    if verify_generation is None or verify_generation(generation):
+                        if time.monotonic() <= deadline:
+                            return {
+                                "wall_ms": (time.perf_counter() - start) * 1000,
+                                "peak_daemon_rss_kb": peak_rss_kb,
+                                "generation_id": generation,
+                                "status_polls": polls,
+                            }
+                    else:
+                        unverified = (
+                            f"; edited symbol absent from ready graph at {generation}, "
+                            "or search returned a different generation"
+                        )
             if time.monotonic() > deadline:
-                raise HarnessError(f"{lane}: no current, ready generation within {self.index_timeout} s")
+                raise HarnessError(
+                    f"{lane}: no current, ready verified generation within "
+                    f"{self.index_timeout} s{unverified}"
+                )
             time.sleep(1)
+
+    def edited_symbol_in_generation(self, symbol: str, generation: str) -> bool:
+        """Accept only an exact-symbol hit served from this ready generation."""
+        search = self.tool("tracedecay_search", {"query": symbol, "limit": 10, "format": "json"})
+        if not search.ok:
+            return False
+        try:
+            served = json.loads(search.stdout)["structuredContent"]
+            if not isinstance(served, dict) or served.get("code_generation") != generation:
+                return False
+            hits = served.get("results")
+        except (ValueError, KeyError, TypeError):
+            return False
+        if not isinstance(hits, list) or not any(
+            isinstance(hit, dict)
+            and isinstance(hit.get("display"), dict)
+            and hit["display"].get("name") == symbol
+            for hit in hits
+        ):
+            return False
+        # Re-check readiness *after* search: a concurrent publication can
+        # switch the served generation between the two RPCs.
+        payload = self.status_payload() or {}
+        freshness = payload.get("code_index_freshness") or {}
+        worktree = freshness.get("worktree") or {}
+        serving = worktree.get("code_graph_serving") or {}
+        return (
+            freshness.get("status") == "current"
+            and serving.get("state") == "ready"
+            and worktree.get("latest_generation_id") == generation
+        )
 
     def lane_index(self) -> None:
         log("index (init until a current generation serves a ready graph)")
@@ -432,56 +536,121 @@ class Run:
                 "owners": {row.get("kind"): row.get("bytes") for row in memory.get("owners") or []},
             }
         if status is None:
-            self.record("memory", phase, unsupported="daemon /proc counters are Linux-only",
+            self.record("memory", phase, unsupported=(
+                "daemon RSS sampling unavailable" if (LINUX or MACOS)
+                else "daemon RSS sampling unsupported on this platform"
+            ),
                         profile_bytes=tree_bytes(self.profile), status_memory=retained)
             return
-        self.record("memory", phase, rss_kb=status.get("VmRSS"), hwm_kb=status.get("VmHWM"),
+        self.record("memory", phase, rss_kb=status.get("VmRSS"),
+                    rss_source="linux_proc" if LINUX else "macos_ps",
+                    hwm_kb=status.get("VmHWM"),
                     anon_kb=status.get("RssAnon"), file_kb=status.get("RssFile"),
                     threads=status.get("Threads"), profile_bytes=tree_bytes(self.profile),
                     status_memory=retained)
 
+    @staticmethod
+    def semantic_edit_source(target: Path, nonce: int) -> tuple[str, str]:
+        """Append a unique parseable symbol so the measured edit changes the graph."""
+        symbol = f"tracedecay_bench_hot_paths_edit_{nonce}"
+        if target.suffix == ".rs":
+            return symbol, f"\npub fn {symbol}() -> u64 {{ {nonce}u64 }}\n"
+        return symbol, f"\ndef {symbol}():\n    return {nonce}\n"
+
     def lane_edit_reconcile(self) -> None:
-        log("edit_reconcile (one appended line until a new generation is ready)")
-        tracked = subprocess.run(["git", "-C", str(self.repo), "ls-files", "*.rs", "*.py"],
-                                 capture_output=True, text=True, check=True).stdout.split()
-        if not tracked:
-            self.record("edit_reconcile", "edit_to_ready", unavailable="no tracked .rs or .py file")
+        log("edit_reconcile (one semantic source edit until a new generation is ready)")
+        # Git's -z mode preserves whitespace and newlines in tracked paths.
+        # A tracked symlink may point outside the disposable clone: never
+        # append to one, even if its target is a regular source file.
+        listing = subprocess.run(
+            ["git", "-C", str(self.repo), "ls-files", "-z", "--", "*.rs", "*.py"],
+            capture_output=True, check=True,
+        ).stdout
+        repo_root = self.repo.resolve()
+        selected = None
+        for raw_name in listing.split(b"\0"):
+            if not raw_name:
+                continue
+            name = os.fsdecode(raw_name)
+            candidate = self.repo / name
+            if (
+                not candidate.is_symlink()
+                and candidate.is_file()
+                and candidate.resolve().is_relative_to(repo_root)
+            ):
+                selected = (name, candidate)
+                break
+        if selected is None:
+            self.record("edit_reconcile", "edit_to_ready", unavailable="no tracked regular .rs or .py file")
             return
-        target = self.repo / tracked[0]
-        marker = "//" if target.suffix == ".rs" else "#"
-        with target.open("a", encoding="utf-8") as handle:
-            handle.write(f"\n{marker} bench-hot-paths edit {time.time_ns()}\n")
+        tracked_file, target = selected
+        symbol, edit = self.semantic_edit_source(target, time.time_ns())
+        # Another daemon refresh may have advanced the generation since
+        # indexing. Fence the edit against the latest ready generation, not
+        # the possibly stale generation recorded at initial enrollment.
+        payload = self.status_payload() or {}
+        freshness = payload.get("code_index_freshness") or {}
+        worktree = freshness.get("worktree") or {}
+        serving = worktree.get("code_graph_serving") or {}
+        previous_generation = worktree.get("latest_generation_id")
+        if (
+            freshness.get("status") != "current"
+            or serving.get("state") != "ready"
+            or not isinstance(previous_generation, str)
+            or not previous_generation
+        ):
+            raise HarnessError("edit_reconcile: no current ready generation before editing")
+        # Observe only source proofs that finish after this edit's baseline.
+        # A missing event remains unknown, never an invented zero-hash pass.
+        proof_log = self.run_dir / "daemon.log"
+        proof_offset = proof_log.stat().st_size
+        # The file watcher may begin its pass as soon as the edit lands.
+        # Arm the timer and RSS sampler *before* modifying the source; a
+        # sync-only measurement misses work that starts during the write.
         start = time.perf_counter()
         rss_sampler = DaemonRssSampler(self.daemon_pid())
         rss_sampler.start()
         try:
+            with target.open("a", encoding="utf-8") as handle:
+                handle.write(edit)
             sync = self.client(["sync"])
             if not sync.ok:
                 raise HarnessError(f"`tracedecay sync` failed: {sync.stderr[-2000:].decode(errors='replace')}")
-            ready = self.wait_for_ready("edit_reconcile", self.generation)
+            ready = self.wait_for_ready(
+                "edit_reconcile", previous_generation,
+                lambda generation: self.edited_symbol_in_generation(symbol, generation),
+            )
+            ready_at = time.perf_counter()
         finally:
             peak_rss_kb = rss_sampler.stop()
         if peak_rss_kb is None:
             ready.pop("peak_daemon_rss_kb", None)
             ready["unsupported"] = (
-                "daemon /proc counters are Linux-only" if not LINUX else "daemon VmRSS is unavailable"
+                "daemon RSS sampling unavailable" if (LINUX or MACOS)
+                else "daemon RSS sampling unsupported on this platform"
             )
         else:
             ready["peak_daemon_rss_kb"] = peak_rss_kb
+            ready["peak_rss_source"] = "linux_proc" if LINUX else "macos_ps"
+        self.generation = ready["generation_id"]
+        work = sealed_source_work(proof_log, proof_offset)
+        self.record(
+            "edit_reconcile", "sealed_source_work",
+            **(work if work is not None else {
+                "unavailable": "no complete sealed source proof telemetry in measured window"
+            }),
+        )
         self.record("edit_reconcile", "sync_request", wall_ms=sync.wall_ms)
-        self.record("edit_reconcile", "edited_file", path=tracked[0])
+        self.record("edit_reconcile", "edited_file", path=tracked_file, symbol=symbol)
         self.record("edit_reconcile", "edit_to_ready",
-                    **{**ready, "wall_ms": (time.perf_counter() - start) * 1000})
+                    **{**ready, "wall_ms": (ready_at - start) * 1000})
 
     def stop_daemon(self) -> None:
-        if self.daemon is None or self.daemon.poll() is not None:
-            return
-        os.killpg(self.daemon.pid, signal.SIGTERM)
-        try:
-            self.daemon.wait(timeout=30)
-        except subprocess.TimeoutExpired:
-            os.killpg(self.daemon.pid, signal.SIGKILL)
-            self.daemon.wait(timeout=10)
+        if self.daemon is not None:
+            # The launcher may have exited while its graph/build descendants
+            # still own this private run directory. Reap the entire session,
+            # not just the daemon leader, before deleting its storage.
+            stop_owned_process(self.daemon, 30)
 
     def execute(self) -> None:
         log(f"cloning {self.source_repo} into the run directory")
