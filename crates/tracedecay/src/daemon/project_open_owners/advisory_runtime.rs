@@ -18,12 +18,13 @@ use tracedecay_application::advisory::github_runtime::{
     record_github_source_reading_v1, resolve_registered_github_read_only_credential_v1,
 };
 use tracedecay_application::advisory::{
-    AdvisoryCycleControl, AdvisoryCycleOutcome, AdvisoryCycleRequest, AdvisoryHookDeliveryV1,
-    AdvisoryHookNoticeQueueV1, AdvisoryProductionOpenV1, AdvisoryProductionStartupRegistrationV1,
-    AdvisoryRuntimeOpenV1, CiCodeAnchorStoreV1, CiRetainedProviderObservationAuthorityV1,
-    CiSourceAccessAuthorityV1, GitHubCiRepositoryTargetV1, GitHubHttpReadConfigV1,
-    GitHubReadOnlyCredentialV1, GitHubReadPermissionV1, GitHubRepositoryTargetV1,
-    GitHubReviewProviderIdentityV1, GitHubReviewRefreshOutcomeV1, GitHubReviewRuntimeOwnerConfigV1,
+    AdvisoryCycleControl, AdvisoryCycleOutcome, AdvisoryCycleRequest, AdvisoryGitHubReadV1,
+    AdvisoryHookDeliveryV1, AdvisoryHookNoticeQueueV1, AdvisoryProductionOpenV1,
+    AdvisoryProductionStartupRegistrationV1, AdvisoryRuntimeOpenV1, CiCodeAnchorStoreV1,
+    CiRetainedProviderObservationAuthorityV1, CiSourceAccessAuthorityV1,
+    GitHubCiRepositoryTargetV1, GitHubHttpReadConfigV1, GitHubReadOnlyCredentialV1,
+    GitHubReadPermissionV1, GitHubRepositoryTargetV1, GitHubReviewProviderIdentityV1,
+    GitHubReviewRefreshOutcomeV1, GitHubReviewRuntimeOwnerConfigV1,
     ProductionCiFailureDiscoveryOutcomeV1, ProductionCiProviderConfigV1,
     ProjectCiCodeAnchorStoreV1, ProjectCiRetainedObservationStoreV1,
     discover_production_ci_failure_request_v1, github_anchor_authorities_arc_v1,
@@ -152,7 +153,9 @@ struct ProjectOpenAdvisoryCycleExecutionV1 {
     feedback_cycle: Arc<FeedbackCycleRuntime>,
 }
 
-/// Local editor/hook feedback must not wait for remote refresh. The explicit
+/// Local editor/hook feedback must not wait for remote refresh: it reads the
+/// GitHub review state an earlier refresh retained, revalidated for the exact
+/// current scope and grant, and never polls CI discovery. The explicit
 /// advisory operation keeps its existing GitHub and CI refresh semantics.
 #[derive(Clone, Copy)]
 enum AdvisoryRemoteReadMode {
@@ -166,7 +169,7 @@ async fn advisory_remote_requests<DiscoverCi>(
     ci_configured: bool,
     discover_ci: DiscoverCi,
 ) -> (
-    Option<GitHubReviewReadRequestV1>,
+    Option<AdvisoryGitHubReadV1>,
     ProductionCiFailureDiscoveryOutcomeV1,
 )
 where
@@ -174,7 +177,7 @@ where
 {
     match mode {
         AdvisoryRemoteReadMode::LocalFeedback => (
-            None,
+            github.map(AdvisoryGitHubReadV1::Retained),
             if ci_configured {
                 // A configured remote source was deliberately not queried in
                 // this local cycle; it has not established a clean result.
@@ -183,7 +186,9 @@ where
                 ProductionCiFailureDiscoveryOutcomeV1::NotConfigured
             },
         ),
-        AdvisoryRemoteReadMode::ExplicitRefresh => (github, discover_ci.await),
+        AdvisoryRemoteReadMode::ExplicitRefresh => {
+            (github.map(AdvisoryGitHubReadV1::Refresh), discover_ci.await)
+        }
     }
 }
 

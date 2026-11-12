@@ -14,7 +14,7 @@ fn feedback_scope() -> FeedbackScopeV1 {
 }
 
 /// A blocked CI discovery must not even be polled for an editor/hook run.
-/// The matching GitHub request is also excluded from local admission.
+/// The configured GitHub request is served only from retained state.
 #[tokio::test]
 async fn local_advisory_feedback_does_not_poll_remote_refresh() {
     let github_request = GitHubReviewReadRequestV1 {
@@ -29,13 +29,14 @@ async fn local_advisory_feedback_does_not_poll_remote_refresh() {
     );
     let (github, ci) = advisory_remote_requests(
         AdvisoryRemoteReadMode::LocalFeedback,
-        Some(github_request),
+        Some(github_request.clone()),
         true,
         forbidden_ci,
     )
     .await;
-    assert!(
-        github.is_none(),
+    assert_eq!(
+        github,
+        Some(AdvisoryGitHubReadV1::Retained(github_request)),
         "local feedback must not request GitHub refresh"
     );
     assert!(matches!(
@@ -97,7 +98,7 @@ async fn explicit_advisory_refresh_waits_for_its_own_remote_discovery() {
         .send(ProductionCiFailureDiscoveryOutcomeV1::Denied)
         .expect("remote read still awaited");
     let (github, ci) = refresh.await;
-    assert_eq!(github, Some(github_request));
+    assert_eq!(github, Some(AdvisoryGitHubReadV1::Refresh(github_request)));
     assert!(matches!(ci, ProductionCiFailureDiscoveryOutcomeV1::Denied));
 }
 

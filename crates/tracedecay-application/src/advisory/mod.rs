@@ -110,9 +110,9 @@ pub use proximity_runtime::{
 };
 pub use runtime::{
     AdvisoryContributionsV1, AdvisoryCycleControl, AdvisoryCycleOutcome, AdvisoryCycleRequest,
-    AdvisoryDaemonRegistrationV1, AdvisoryProviderAuthoritiesV1, AdvisoryProviderStateV1,
-    AdvisoryProviderV1, AdvisoryRuntime, AdvisoryRuntimeOpenErrorV1, AdvisoryRuntimeOpenV1,
-    open_advisory_daemon_registration,
+    AdvisoryDaemonRegistrationV1, AdvisoryGitHubReadV1, AdvisoryProviderAuthoritiesV1,
+    AdvisoryProviderStateV1, AdvisoryProviderV1, AdvisoryRuntime, AdvisoryRuntimeOpenErrorV1,
+    AdvisoryRuntimeOpenV1, open_advisory_daemon_registration,
 };
 
 /// Every adapter preserves the already-admitted project/repository/worktree/

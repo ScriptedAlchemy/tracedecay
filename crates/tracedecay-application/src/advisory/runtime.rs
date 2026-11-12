@@ -61,8 +61,8 @@ mod registration;
 pub use cycle::AdvisoryRuntime;
 pub use model::{
     AdvisoryContributionsV1, AdvisoryCycleControl, AdvisoryCycleOutcome, AdvisoryCycleRequest,
-    AdvisoryProviderAuthoritiesV1, AdvisoryProviderStateV1, AdvisoryProviderV1,
-    AdvisoryRuntimeOpenErrorV1, AdvisoryRuntimeOpenV1,
+    AdvisoryGitHubReadV1, AdvisoryProviderAuthoritiesV1, AdvisoryProviderStateV1,
+    AdvisoryProviderV1, AdvisoryRuntimeOpenErrorV1, AdvisoryRuntimeOpenV1,
 };
 pub use registration::{AdvisoryDaemonRegistrationV1, open_advisory_daemon_registration};
 

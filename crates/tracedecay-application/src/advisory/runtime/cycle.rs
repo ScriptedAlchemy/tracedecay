@@ -156,10 +156,18 @@ where
             ));
         }
 
-        if let Some(provider_request) = request.github.as_ref() {
+        if let Some(github_read) = request.github.as_ref() {
+            let provider_request = github_read.request();
+            // A retained read performs no provider I/O, so it reports no
+            // GitHub ingress telemetry for this local cycle; the refresh that
+            // retained the state owns that attribution.
+            let refreshing = matches!(github_read, AdvisoryGitHubReadV1::Refresh(_));
             if let Some(github) = self.github.as_ref() {
-                let outcome =
-                    await_provider(&mut control, github.refresh(context, provider_request)).await;
+                let read = match github_read {
+                    AdvisoryGitHubReadV1::Retained(_) => github.retained(context, provider_request),
+                    AdvisoryGitHubReadV1::Refresh(_) => github.refresh(context, provider_request),
+                };
+                let outcome = await_provider(&mut control, read).await;
                 let outcome = match outcome {
                     Ok(outcome) => outcome,
                     Err(interruption) => {
@@ -173,11 +181,13 @@ where
                 // Retain the PR identity, review votes, and conversation beside
                 // usable inline-review evidence. These reads contribute no
                 // advisory findings; unavailable provider reads stop enrichment.
-                if matches!(
-                    provider_request.operation,
-                    GitHubReviewReadOperationV1::GraphQlQueryPullRequestReviewThreads
-                        | GitHubReviewReadOperationV1::RestListPullRequestReviewComments
-                ) && outcome.has_usable_observation()
+                if refreshing
+                    && matches!(
+                        provider_request.operation,
+                        GitHubReviewReadOperationV1::GraphQlQueryPullRequestReviewThreads
+                            | GitHubReviewReadOperationV1::RestListPullRequestReviewComments
+                    )
+                    && outcome.has_usable_observation()
                 {
                     for operation in [
                         GitHubReviewReadOperationV1::RestGetPullRequest,
@@ -215,7 +225,9 @@ where
                 match outcome {
                     GitHubReviewRefreshOutcomeV1::Stored(state) => {
                         let ingress = &state.state.latest_attempt.ingress;
-                        self.observe_github(&request.feedback.input, ingress);
+                        if refreshing {
+                            self.observe_github(&request.feedback.input, ingress);
+                        }
                         contributions.capture(
                             AdvisoryProviderV1::GitHub,
                             ingress.advisory_findings(request.validity),
@@ -229,30 +241,36 @@ where
                         ));
                     }
                     GitHubReviewRefreshOutcomeV1::Denied => {
-                        self.observe_github_terminal(
-                            &request.feedback.input,
-                            FeedbackOutcomeV1::Denied,
-                        );
+                        if refreshing {
+                            self.observe_github_terminal(
+                                &request.feedback.input,
+                                FeedbackOutcomeV1::Denied,
+                            );
+                        }
                         contributions.set_state(
                             AdvisoryProviderV1::GitHub,
                             ProviderEvaluationStateV1::Unavailable,
                         );
                     }
                     GitHubReviewRefreshOutcomeV1::Unavailable => {
-                        self.observe_github_terminal(
-                            &request.feedback.input,
-                            FeedbackOutcomeV1::Unavailable,
-                        );
+                        if refreshing {
+                            self.observe_github_terminal(
+                                &request.feedback.input,
+                                FeedbackOutcomeV1::Unavailable,
+                            );
+                        }
                         contributions.set_state(
                             AdvisoryProviderV1::GitHub,
                             ProviderEvaluationStateV1::Unavailable,
                         );
                     }
                     GitHubReviewRefreshOutcomeV1::Stale => {
-                        self.observations.observe_source_event(
-                            &request.feedback.input,
-                            FeedbackSourceEventV1::GitHubStale { item_count: 0 },
-                        );
+                        if refreshing {
+                            self.observations.observe_source_event(
+                                &request.feedback.input,
+                                FeedbackSourceEventV1::GitHubStale { item_count: 0 },
+                            );
+                        }
                         contributions.set_state(
                             AdvisoryProviderV1::GitHub,
                             ProviderEvaluationStateV1::Stale,
@@ -260,10 +278,12 @@ where
                     }
                 }
             } else {
-                self.observe_github_terminal(
-                    &request.feedback.input,
-                    FeedbackOutcomeV1::Unavailable,
-                );
+                if refreshing {
+                    self.observe_github_terminal(
+                        &request.feedback.input,
+                        FeedbackOutcomeV1::Unavailable,
+                    );
+                }
                 contributions.set_state(
                     AdvisoryProviderV1::GitHub,
                     ProviderEvaluationStateV1::Unavailable,

@@ -181,10 +181,27 @@ impl AdvisoryContributionsV1 {
     }
 }
 
+/// How one cycle obtains GitHub review evidence. Editor and hook feedback
+/// reads only revalidated retained state, so a slow or failing provider read
+/// cannot hold local diagnostics; explicit advisory demand refreshes it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum AdvisoryGitHubReadV1 {
+    Retained(GitHubReviewReadRequestV1),
+    Refresh(GitHubReviewReadRequestV1),
+}
+
+impl AdvisoryGitHubReadV1 {
+    pub fn request(&self) -> &GitHubReviewReadRequestV1 {
+        match self {
+            Self::Retained(request) | Self::Refresh(request) => request,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AdvisoryCycleRequest {
     pub feedback: FeedbackCycleExecutionRequest,
-    pub github: Option<GitHubReviewReadRequestV1>,
+    pub github: Option<AdvisoryGitHubReadV1>,
     pub ci: ProductionCiFailureDiscoveryOutcomeV1,
     pub proximity: Option<ProximityEvaluationRequestV1>,
     pub validity: AdvisoryFindingValidityWindowV1,
@@ -202,6 +219,7 @@ impl AdvisoryCycleRequest {
             || self
                 .github
                 .as_ref()
+                .map(AdvisoryGitHubReadV1::request)
                 .is_some_and(|request| request.validate().is_err() || request.scope != *scope)
             || !self.ci.validate_for(scope)
             || self

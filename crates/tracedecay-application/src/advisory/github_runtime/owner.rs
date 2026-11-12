@@ -336,6 +336,15 @@ where
         }
     }
 
+    /// Retained review state for local feedback: no provider or stack read.
+    pub fn retained<'a>(
+        &'a self,
+        context: &'a RequestContext,
+        request: &'a GitHubReviewReadRequestV1,
+    ) -> FeedbackPortFuture<'a, GitHubReviewRefreshOutcomeV1> {
+        self.coordinator.retained(context, request)
+    }
+
     pub fn authorize<'a>(
         &'a self,
         context: &'a RequestContext,
