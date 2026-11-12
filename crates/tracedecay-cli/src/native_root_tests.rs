@@ -1,7 +1,4 @@
-use super::{
-    Cli, CommandOutcome, CommandRuntime, HostBundleCliOptions, command_runtime, dispatch_command,
-    run_startup_preamble,
-};
+use super::{Cli, CommandOutcome, HostBundleCliOptions, dispatch_command, run_startup_preamble};
 use clap::Parser;
 use std::iter;
 use tracedecay_dashboard_api::cloud::ReleaseLookupError;
@@ -9,8 +6,7 @@ use tracedecay_domain::errors::Result;
 use tracedecay_runtime_core::config::ProfileRoot;
 use tracedecay_runtime_core::native_runtime;
 
-/// Runs one command the way `run` does, on a native root with no Tokio
-/// runtime in the process.
+/// Runs one command the way `run` does, on the single installed Tokio runtime.
 fn run_on_native_root(profile: &ProfileRoot, args: &[&str]) -> Result<CommandOutcome> {
     let cli = Cli::try_parse_from(iter::once("tracedecay").chain(args.iter().copied()))
         .expect("command must parse");
@@ -21,15 +17,10 @@ fn run_on_native_root(profile: &ProfileRoot, args: &[&str]) -> Result<CommandOut
         adopt: cli.adopt,
     };
     let command = cli.command.expect("subcommand must be present");
-    assert_eq!(
-        command_runtime(Some(&command)),
-        CommandRuntime::Native,
-        "{args:?}"
-    );
     native_runtime::block_on(Box::pin(async {
         assert!(
-            tokio::runtime::Handle::try_current().is_err(),
-            "the native root must run without Tokio"
+            tokio::runtime::Handle::try_current().is_ok(),
+            "the process runtime must provide Tokio I/O and task execution"
         );
         run_startup_preamble(profile, &command);
         dispatch_command(profile, command, host_bundle).await
@@ -38,7 +29,7 @@ fn run_on_native_root(profile: &ProfileRoot, args: &[&str]) -> Result<CommandOut
 }
 
 #[test]
-fn client_families_complete_on_the_native_root_without_tokio() {
+fn client_families_complete_on_the_installed_runtime() {
     crate::product_runtime::register_for_tests();
     let home = tempfile::tempdir().expect("temp home");
     let profile = ProfileRoot::under_home(home.path());
@@ -96,7 +87,7 @@ fn client_families_complete_on_the_native_root_without_tokio() {
 }
 
 #[test]
-fn project_and_runtime_families_complete_on_the_native_root_without_tokio() {
+fn project_and_runtime_families_complete_on_the_installed_runtime() {
     crate::product_runtime::register_for_tests();
     let home = tempfile::tempdir().expect("temp home");
     let profile = ProfileRoot::under_home(home.path());
@@ -166,7 +157,7 @@ fn project_and_runtime_families_complete_on_the_native_root_without_tokio() {
     let wipe = run_on_native_root(&profile, &["wipe", "--all", "--yes"]);
     assert!(matches!(wipe, Ok(CommandOutcome::Success)), "{wipe:?}");
     native_runtime::block_on(Box::pin(async {
-        assert!(tokio::runtime::Handle::try_current().is_err());
+        assert!(tokio::runtime::Handle::try_current().is_ok());
         crate::commands::handle_no_command(&profile).await
     }))
     .expect("native root")

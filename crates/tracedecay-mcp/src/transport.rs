@@ -429,7 +429,7 @@ mod tests {
         use std::pin::Pin;
         use std::task::{Context, Poll};
 
-        use asupersync::io::{AsyncRead, BufReader, ReadBuf};
+        use tokio::io::{AsyncRead, BufReader, ReadBuf};
 
         use tracedecay_framing::{
             BoundedLineReader, MAX_MCP_JSONRPC_FRAME_BYTES, WIRE_RECORD_TOO_LARGE,

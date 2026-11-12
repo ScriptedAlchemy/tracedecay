@@ -3,13 +3,17 @@
 
 from __future__ import annotations
 
+import importlib.util
 import json
 import os
+import signal
 import subprocess
 import sys
 import tempfile
 import textwrap
+import time
 import unittest
+from unittest import mock
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -51,6 +55,24 @@ FAKE_TRACEDECAY = textwrap.dedent(
     elif argv[:1] in (["init"], ["sync"]):
         value = load()
         value["generation"] += 1
+        # Emulate immutable indexed generation state. Later searches read this
+        # snapshot, not the live filesystem, which would hide a stale graph.
+        symbols = {}
+        if os.environ.get("FAKE_SKIP_EDIT_SYMBOL") != "1":
+            for root, dirs, names in os.walk("."):
+                dirs[:] = [d for d in dirs if not os.path.islink(os.path.join(root, d))]
+                for name in names:
+                    path = os.path.join(root, name)
+                    if not name.endswith((".rs", ".py")) or os.path.islink(path):
+                        continue
+                    with open(path, encoding="utf-8") as indexed_source:
+                        for line in indexed_source:
+                            for prefix in ("pub fn tracedecay_bench_hot_paths_edit_",
+                                           "def tracedecay_bench_hot_paths_edit_"):
+                                if line.startswith(prefix):
+                                    indexed_symbol = line.split("(", 1)[0].split()[-1]
+                                    symbols[indexed_symbol] = os.path.relpath(path, ".")
+        value["indexed_symbols"] = symbols
         save(value)
     elif argv[:1] == ["tool"]:
         generation = load()["generation"]
@@ -58,21 +80,31 @@ FAKE_TRACEDECAY = textwrap.dedent(
             reply({"problem": {"code": "project_not_enrolled"}}, ok=False)
         tool = argv[1]
         if tool == "tracedecay_status":
-            reply({
+            status = {
                 "code_index_freshness": {"status": "current", "worktree": {
                     "latest_generation_id": f"generation.{generation}",
                     "code_graph_serving": {"state": "ready"}}},
                 "memory": {"retained_bytes": 4096,
                            "owners": [{"kind": "graph_engine", "bytes": 4096}]},
-            })
+            }
+            # The real CLI keeps the full response in structuredContent.
+            # A preview-only text field must not hide readiness or generation.
+            reply(status, content_payload={"handle": "rh_status", "preview": "{..."}, structured=status)
         if tool == "tracedecay_search":
             args = json.loads(argv[argv.index("--args") + 1])
-            payload = {"results": []}
+            payload = {"code_generation": f"generation.{generation}", "results": []}
             if args["query"] in {"DaemonHandshake", "default_socket_path", "call_default_tool"}:
                 payload["results"].append({
                     "candidate": {"anchor_id": "code-symbol:node.fake"},
                     "final_ordinal": 0,
                     "node_id": "node.fake",
+                })
+            indexed_path = load().get("indexed_symbols", {}).get(args["query"])
+            if indexed_path is not None:
+                payload["results"].append({
+                    "candidate": {"anchor_id": "code-symbol:node.edited"},
+                    "node_id": "node.edited",
+                    "display": {"name": args["query"], "path": indexed_path},
                 })
             body = json.dumps(payload)
             reply(payload, content_payload={
@@ -119,10 +151,12 @@ class BenchHotPathsTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.scratch.cleanup()
 
-    def bench(self, *extra: str, env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
+    def bench(
+        self, *extra: str, env: dict[str, str] | None = None, index_timeout: int = 20,
+    ) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
             [sys.executable, str(BENCH), "--bin", str(self.binary), "--target-repo", str(self.repo),
-             "--out", str(self.out), "--samples", "2", "--index-timeout", "20", *extra],
+             "--out", str(self.out), "--samples", "2", "--index-timeout", str(index_timeout), *extra],
             env={**os.environ, "TMPDIR": str(self.tmp), **(env or {})},
             capture_output=True, text=True, timeout=120, check=False,
         )
@@ -154,18 +188,460 @@ class BenchHotPathsTests(unittest.TestCase):
         self.assertEqual(single[("index", "init_to_ready")]["generation_id"], "generation.1")
         self.assertEqual(single[("edit_reconcile", "edit_to_ready")]["generation_id"], "generation.2")
         self.assertEqual(single[("edit_reconcile", "edited_file")]["path"], "src/lib.rs")
+        self.assertRegex(single[("edit_reconcile", "edited_file")]["symbol"],
+                         r"^tracedecay_bench_hot_paths_edit_\d+$")
         edit_ready = single[("edit_reconcile", "edit_to_ready")]
-        if sys.platform.startswith("linux"):
+        self.assertEqual(
+            single[("edit_reconcile", "sealed_source_work")]["unavailable"],
+            "no complete sealed source proof telemetry in measured window",
+            "an uninstrumented binary cannot claim zero source authentication work",
+        )
+        if sys.platform.startswith("linux") or sys.platform == "darwin":
             self.assertIsInstance(edit_ready["peak_daemon_rss_kb"], int)
             self.assertGreater(edit_ready["peak_daemon_rss_kb"], 0)
         else:
-            self.assertEqual(edit_ready["unsupported"], "daemon /proc counters are Linux-only")
+            self.assertEqual(edit_ready["unsupported"], "daemon RSS sampling unsupported on this platform")
         self.assertEqual(single[("memory", "after_requests")]["status_memory"]["owners"], {"graph_engine": 4096})
         self.assertEqual(single[("request", "callers_node")]["node_id"], "node.fake")
         self.assertEqual(single[("request", "callers_node")]["seed_symbol"], "DaemonHandshake")
         self.assertEqual(single[("daemon", "alive_after_run")]["ok"], True)
         self.assertEqual(list(self.tmp.iterdir()), [])
         self.assertEqual((self.repo / "src" / "lib.rs").read_text(), "pub fn answer() -> u32 { 42 }\n")
+
+
+    def test_macos_rss_samples_the_real_process_reader_without_fabricated_peak(self) -> None:
+        # The original 2.3-GB issue was observed on macOS, where /proc is absent.
+        # Drive the actual portable process reader's ps fallback and the
+        # benchmark's sampled high-water mark with deterministic process output.
+        spec = importlib.util.spec_from_file_location("bench_hot_paths_macos_rss", BENCH)
+        self.assertIsNotNone(spec)
+        self.assertIsNotNone(spec.loader)
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = module
+        try:
+            spec.loader.exec_module(module)
+            completed = [
+                subprocess.CompletedProcess(["ps"], 0, stdout=f"{rss}\n", stderr="")
+                for rss in (6400, 12800, 7600)
+            ]
+
+            class IdleThread:
+                def __init__(self, *args, **kwargs) -> None:
+                    self.started = False
+
+                def start(self) -> None:
+                    self.started = True
+
+                def join(self) -> None:
+                    self.started = False
+
+            with mock.patch.object(module, "LINUX", False), mock.patch.object(
+                module, "MACOS", True
+            ), mock.patch("portable_process.Path.read_text", side_effect=OSError("no procfs")), mock.patch(
+                "portable_process.subprocess.run", side_effect=completed
+            ) as ps, mock.patch.object(module.threading, "Thread", IdleThread):
+                sampler = module.DaemonRssSampler(42)
+                sampler.start()
+                self.assertTrue(sampler._thread.started)
+                sampler._sample()
+                self.assertEqual(sampler.stop(), 12800)
+                self.assertFalse(sampler._thread.started)
+                self.assertEqual(ps.call_count, 3)
+                for call in ps.call_args_list:
+                    self.assertEqual(call.args[0], ["ps", "-o", "rss=", "-p", "42"])
+
+            with mock.patch.object(module, "LINUX", False), mock.patch.object(
+                module, "MACOS", True
+            ), mock.patch.object(module, "resident_memory_kib", return_value=(None, None)):
+                self.assertIsNone(module.proc_status(42), "a failed ps read is not zero RSS")
+        finally:
+            sys.modules.pop(spec.name, None)
+
+    def test_stop_daemon_reaps_descendants_after_launcher_exits(self) -> None:
+        # A crashed daemon can leave an indexing child running in its session.
+        # The old poll()-based early return removed its private profile while
+        # that child was still alive. Exercise a real separate process group.
+        spec = importlib.util.spec_from_file_location("bench_hot_paths_shutdown", BENCH)
+        self.assertIsNotNone(spec)
+        self.assertIsNotNone(spec.loader)
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = module
+        try:
+            spec.loader.exec_module(module)
+            launcher = (
+                "import subprocess, sys; "
+                "child = subprocess.Popen([sys.executable, '-c', "
+                "'import time; time.sleep(60)'], "
+                "stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, "
+                "stderr=subprocess.DEVNULL); "
+                "print(child.pid, flush=True)"
+            )
+            daemon = subprocess.Popen(
+                [sys.executable, "-c", launcher],
+                start_new_session=True,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            try:
+                self.assertIsNotNone(daemon.stdout)
+                child_pid = int(daemon.stdout.readline().decode().strip())
+                self.assertGreater(child_pid, 0)
+                daemon.wait(timeout=5)
+                self.assertIsNotNone(daemon.poll(), "launcher must exit first")
+                controls = sys.modules["portable_process"]
+                self.assertTrue(
+                    controls._group_alive(daemon.pid),
+                    "the launcher exited but an independently running descendant remains",
+                )
+                run = module.Run.__new__(module.Run)
+                run.daemon = daemon
+                run.stop_daemon()
+                self.assertFalse(
+                    controls._group_alive(daemon.pid),
+                    "cleanup must terminate the live descendant, not skip an exited leader",
+                )
+            finally:
+                # The failing predecessor must not leak a 60-second child.
+                try:
+                    os.killpg(daemon.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                daemon.wait(timeout=5)
+        finally:
+            sys.modules.pop(spec.name, None)
+
+    def test_edit_never_follows_tracked_symlinks_and_preserves_spaced_names(self) -> None:
+        # A Git checkout can contain a tracked symlink to a path outside the
+        # benchmark's private clone. The old first-file append would mutate
+        # that external path. A quoted, spaced Git path also broke .split().
+        outside = self.root / "operator-source.py"
+        outside.write_text("print('untouched')\n")
+        if os.name != "nt":
+            (self.repo / "a0-external.py").symlink_to(outside)
+        safe = self.repo / "a1 spaced.rs"
+        safe.write_text("pub fn safe() {}\n")
+        subprocess.run(["git", "-C", str(self.repo), "add", "-A"], check=True)
+        subprocess.run(
+            ["git", "-C", str(self.repo), "-c", "user.name=t", "-c", "user.email=t@t",
+             "commit", "-qm", "track escaped source candidates"],
+            check=True,
+        )
+
+        result = self.bench()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        selected = next(
+            row for row in self.rows()
+            if (row["lane"], row["op"]) == ("edit_reconcile", "edited_file")
+        )
+        self.assertEqual(selected["path"], "a1 spaced.rs")
+        self.assertEqual(outside.read_text(), "print('untouched')\n")
+        self.assertEqual(safe.read_text(), "pub fn safe() {}\n")
+        self.assertEqual(list(self.tmp.iterdir()), [])
+
+
+    def test_a_generation_without_the_edited_symbol_is_rejected(self) -> None:
+        # A later ready generation is not evidence of the semantic edit when
+        # its own indexed snapshot lacks the newly introduced declaration.
+        # The harness must exhaust its own bounded wait; keep that wait short
+        # so the negative case does not dominate the suite's wall time.
+        result = self.bench(env={"FAKE_SKIP_EDIT_SYMBOL": "1"}, index_timeout=2)
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertIn("edited symbol", result.stderr)
+        self.assertIn("absent from ready graph", result.stderr)
+        self.assertEqual(list(self.tmp.iterdir()), [])
+
+    def test_edit_timer_and_rss_observer_cover_the_file_mutation(self) -> None:
+        # The live daemon can start indexing on the filesystem notification
+        # before `sync` returns. Reproduce an observable slow edit and
+        # prove both clocks are armed before the source is touched.
+        spec = importlib.util.spec_from_file_location("bench_hot_paths_timing", BENCH)
+        self.assertIsNotNone(spec)
+        self.assertIsNotNone(spec.loader)
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = module
+        try:
+            spec.loader.exec_module(module)
+            run = module.Run.__new__(module.Run)
+            run.repo = self.repo
+            run.run_dir = self.root / "run"
+            run.run_dir.mkdir()
+            (run.run_dir / "daemon.log").touch()
+            run.generation = "generation.1"
+            # Another refresh advanced the daemon after indexing, before
+            # the measured edit. Its current generation is the true fence.
+            run.status_payload = lambda: {
+                "code_index_freshness": {
+                    "status": "current",
+                    "worktree": {
+                        "latest_generation_id": "generation.7",
+                        "code_graph_serving": {"state": "ready"},
+                    },
+                }
+            }
+            events = []
+            rows = []
+            run.daemon_pid = lambda: 1234
+            run.record = lambda lane, op, **data: rows.append((lane, op, data))
+
+            def sync(argv):
+                self.assertEqual(argv, ["sync"])
+                events.append("sync")
+                return module.Call(True, b"", b"", 0.5, 0.0, 0)
+
+            def ready(lane, previous_generation, verify_generation=None):
+                self.assertEqual((lane, previous_generation), ("edit_reconcile", "generation.7"))
+                self.assertIsNotNone(verify_generation)
+                events.append("ready")
+                run.status_payload = lambda: {
+                    "code_index_freshness": {
+                        "status": "current",
+                        "worktree": {
+                            "latest_generation_id": "generation.8",
+                            "code_graph_serving": {"state": "ready"},
+                        },
+                    }
+                }
+                self.assertTrue(verify_generation("generation.8"))
+                return {"generation_id": "generation.8"}
+
+            run.client = sync
+            run.wait_for_ready = ready
+
+            def verify_indexed_symbol(name, args):
+                self.assertEqual(name, "tracedecay_search")
+                self.assertRegex(args["query"], r"^tracedecay_bench_hot_paths_edit_\d+$")
+                self.assertIn(args["query"], (self.repo / "src" / "lib.rs").read_text())
+                events.append("symbol_visible")
+                payload = {"structuredContent": {
+                    "code_generation": "generation.8",
+                    "results": [{"display": {"name": args["query"], "path": "src/lib.rs"}}],
+                }}
+                return module.Call(True, json.dumps(payload).encode(), b"", 0.1, 0, 0)
+
+            run.tool = verify_indexed_symbol
+
+            class RecordingSampler:
+                def __init__(self, pid):
+                    assert pid == 1234
+
+                def start(self):
+                    events.append("sampler_started")
+
+                def stop(self):
+                    events.append("sampler_stopped")
+                    return 2048
+
+            target = self.repo / "src" / "lib.rs"
+            original_open = Path.open
+
+            def slow_edit_open(path, mode="r", *args, **kwargs):
+                if path == target and mode == "a":
+                    self.assertIn("sampler_started", events)
+                    events.append("edit_started")
+                    time.sleep(0.1)
+                return original_open(path, mode, *args, **kwargs)
+
+            with mock.patch.object(module, "DaemonRssSampler", RecordingSampler), mock.patch.object(
+                Path, "open", slow_edit_open
+            ):
+                run.lane_edit_reconcile()
+            self.assertEqual(
+                events, ["sampler_started", "edit_started", "sync", "ready", "symbol_visible", "sampler_stopped"]
+            )
+            measured = next(data for lane, op, data in rows if (lane, op) == ("edit_reconcile", "edit_to_ready"))
+            self.assertGreaterEqual(
+                measured["wall_ms"], 90.0,
+                "the incremental-pass wall time must include file mutation before sync",
+            )
+            self.assertEqual(measured["peak_daemon_rss_kb"], 2048)
+            self.assertRegex(target.read_text(), r"pub fn tracedecay_bench_hot_paths_edit_\d+\(\) -> u64")
+            py_symbol, python_edit = module.Run.semantic_edit_source(Path("sample.py"), 123)
+            self.assertEqual(py_symbol, "tracedecay_bench_hot_paths_edit_123")
+            compile("def existing():\n    return 1\n" + python_edit, "sample.py", "exec")
+            self.assertEqual(run.generation, "generation.8")
+
+            # A missing generation must be refused before writing a source
+            # file or starting the sampler; it is not evidence of readiness.
+            before = target.read_bytes()
+            events_before = list(events)
+            run.status_payload = lambda: {
+                "code_index_freshness": {
+                    "status": "current",
+                    "worktree": {
+                        "latest_generation_id": None,
+                        "code_graph_serving": {"state": "ready"},
+                    },
+                }
+            }
+            with self.assertRaisesRegex(
+                module.HarnessError, "no current ready generation before editing"
+            ):
+                run.lane_edit_reconcile()
+            self.assertEqual(target.read_bytes(), before)
+            self.assertEqual(events, events_before)
+
+            # A ready response with no generation ID cannot finish a later
+            # pass. A subsequent actual generation must be observed instead.
+            missing = run.status_payload()
+            valid = {
+                "code_index_freshness": {
+                    "status": "current",
+                    "worktree": {
+                        "latest_generation_id": "generation.9",
+                        "code_graph_serving": {"state": "ready"},
+                    },
+                }
+            }
+            responses = iter((missing, valid))
+            run.status_payload = lambda: next(responses)
+            run.index_timeout = 10
+            del run.wait_for_ready
+            with mock.patch.object(module, "proc_status", return_value=None), mock.patch.object(
+                module.time, "sleep", return_value=None
+            ):
+                result = run.wait_for_ready("edit_reconcile", "generation.8")
+            self.assertEqual(result["generation_id"], "generation.9")
+            self.assertEqual(result["status_polls"], 2)
+        finally:
+            sys.modules.pop(spec.name, None)
+
+    def test_edit_waits_for_its_own_served_generation_before_stopping_rss(self) -> None:
+        # A concurrent refresh can publish a ready generation before this
+        # edit's search becomes visible. Even a matching symbol hit is not
+        # proof if it was served by another (or unspecified) generation.
+        spec = importlib.util.spec_from_file_location("bench_hot_paths_generation", BENCH)
+        self.assertIsNotNone(spec)
+        self.assertIsNotNone(spec.loader)
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = module
+        try:
+            spec.loader.exec_module(module)
+            run = module.Run.__new__(module.Run)
+            run.repo = self.repo
+            run.run_dir = self.root / "run"
+            run.run_dir.mkdir()
+            (run.run_dir / "daemon.log").touch()
+            run.index_timeout = 5
+            run.generation = "generation.7"
+            run.daemon_pid = lambda: 4321
+            events: list[str] = []
+            records: list[tuple[str, str, dict]] = []
+            run.record = lambda lane, op, **data: records.append((lane, op, data))
+            run.client = lambda argv: (
+                events.append("sync") or module.Call(True, b"", b"", 0.5, 0.0, 0)
+            )
+
+            def status(generation: str) -> dict:
+                return {"code_index_freshness": {
+                    "status": "current",
+                    "worktree": {
+                        "latest_generation_id": generation,
+                        "code_graph_serving": {"state": "ready"},
+                    },
+                }}
+
+            # Pre-edit baseline 7; three unrelated ready observations at 8;
+            # finally the edited graph at 9, with its post-search status fence.
+            responses = iter(map(status, [
+                "generation.7", "generation.8", "generation.8",
+                "generation.8", "generation.9", "generation.9",
+            ]))
+            run.status_payload = lambda: next(responses)
+            attempted: list[str] = []
+
+            def search(name: str, args: dict) -> module.Call:
+                self.assertEqual(name, "tracedecay_search")
+                self.assertRegex(args["query"], r"^tracedecay_bench_hot_paths_edit_\d+$")
+                self.assertIn(args["query"], (self.repo / "src" / "lib.rs").read_text())
+                attempt = len(attempted)
+                generation = ["generation.8", "generation.8", "generation.8", "generation.9"][attempt]
+                attempted.append(generation)
+                events.append(f"search:{attempt + 1}")
+                hit = {"display": {"name": args["query"], "path": "src/lib.rs"}}
+                served = [
+                    {"code_generation": "generation.8", "results": []},
+                    {"code_generation": "generation.9", "results": [hit]},
+                    {"results": [hit]},
+                    {"code_generation": "generation.9", "results": [hit]},
+                ][attempt]
+                return module.Call(
+                    True, json.dumps({"structuredContent": served}).encode(),
+                    b"", 0.5, 0.0, 0,
+                )
+
+            run.tool = search
+
+            class RecordingSampler:
+                def __init__(self, pid: int) -> None:
+                    assert pid == 4321
+
+                def start(self) -> None:
+                    events.append("sampler_started")
+
+                def stop(self) -> int:
+                    events.append("sampler_stopped")
+                    return 8192
+
+            with mock.patch.object(module, "DaemonRssSampler", RecordingSampler), mock.patch.object(
+                module, "proc_status", return_value={"VmRSS": 4096}
+            ), mock.patch.object(module.time, "sleep", return_value=None):
+                run.lane_edit_reconcile()
+
+            self.assertEqual(
+                attempted,
+                ["generation.8", "generation.8", "generation.8", "generation.9"],
+                "unrelated, mismatched and missing search generation cannot complete a pass",
+            )
+            self.assertLess(events.index("sampler_started"), events.index("sync"))
+            self.assertLess(events.index("search:4"), events.index("sampler_stopped"))
+            measured = next(
+                data for lane, op, data in records
+                if (lane, op) == ("edit_reconcile", "edit_to_ready")
+            )
+            self.assertEqual(measured["generation_id"], "generation.9")
+            self.assertEqual(measured["status_polls"], 4)
+            self.assertEqual(measured["peak_daemon_rss_kb"], 8192)
+            self.assertEqual(run.generation, "generation.9")
+        finally:
+            sys.modules.pop(spec.name, None)
+
+    def test_source_work_parser_counts_actual_proofs_and_refuses_partial_events(self) -> None:
+        spec = importlib.util.spec_from_file_location("bench_source_telemetry", BENCH)
+        self.assertIsNotNone(spec)
+        self.assertIsNotNone(spec.loader)
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = module
+        try:
+            spec.loader.exec_module(module)
+            log_path = self.root / "daemon.log"
+            prefix = b"stale previous generation\n"
+            log_path.write_bytes(prefix + (
+                b"INFO unrelated event=sealed_source_proof hashed_segments=900\n"
+                b"INFO tracedecay::sealed_source_proof: event=sealed_source_proof "
+                b"reused_segments=14 hashed_segments=2 hashed_bytes=4096 "
+                b"range_reads=3 range_bytes=8192 elapsed_ms=44\n"
+                b"INFO tracedecay::sealed_source_proof: event=sealed_source_proof "
+                b"reused_segments=15 hashed_segments=1 hashed_bytes=1024 "
+                b"range_reads=1 range_bytes=256 elapsed_ms=12\n"
+            ))
+            self.assertEqual(
+                module.sealed_source_work(log_path, len(prefix)),
+                {"proofs": 2, "reused_segments": 29, "hashed_segments": 3,
+                 "hashed_bytes": 5120, "range_reads": 4, "range_bytes": 8448},
+            )
+            self.assertIsNone(module.sealed_source_work(log_path, log_path.stat().st_size))
+            with log_path.open("ab") as stream:
+                stream.write(
+                    b"INFO tracedecay::sealed_source_proof: event=sealed_source_proof "
+                    b"reused_segments=17 hashed_segments=0 hashed_bytes=0 range_reads=0\n"
+                )
+            self.assertIsNone(
+                module.sealed_source_work(log_path, len(prefix)),
+                "an incomplete event cannot silently undercount hash or range work",
+            )
+        finally:
+            sys.modules.pop(spec.name, None)
 
     def test_an_unknown_seed_records_callers_unavailable_without_failing_the_run(self) -> None:
         result = self.bench("--seed-symbol", "missing_symbol")

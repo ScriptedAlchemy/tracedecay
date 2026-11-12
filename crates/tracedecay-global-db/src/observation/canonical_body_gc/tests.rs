@@ -119,7 +119,7 @@ async fn drain(store: &Store, limit: usize) -> (u64, u64) {
     panic!("bounded fixture must converge");
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn bootstrap_and_owner_release_preserve_shared_bodies_until_the_final_reference() {
     let store = Store::open().await;
     let shared =
@@ -184,7 +184,7 @@ async fn bootstrap_and_owner_release_preserve_shared_bodies_until_the_final_refe
     assert!(!released.has_more);
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn bootstrap_survives_interruption_and_tracks_owners_changed_between_pages() {
     let store = Store::open().await;
     let old = StoredCanonicalBody::pack("old complete body ".repeat(1024).as_bytes()).unwrap();
@@ -268,7 +268,7 @@ async fn bootstrap_survives_interruption_and_tracks_owners_changed_between_pages
     );
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn damaged_guards_and_unresolvable_old_references_block_collection() {
     let store = Store::open().await;
     let orphan = StoredCanonicalBody::pack(b"unreferenced body").unwrap();
@@ -316,7 +316,7 @@ async fn damaged_guards_and_unresolvable_old_references_block_collection() {
     assert!(body_exists(store.conn(), &orphan.content_hash).await);
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn registered_collection_commits_and_lost_authority_rolls_back_deleted_bodies() {
     let mut harness =
         crate::tests::harness::RegisteredGlobalDbHarness::open("canonical-body-gc").await;
@@ -345,7 +345,7 @@ async fn registered_collection_commits_and_lost_authority_rolls_back_deleted_bod
     assert!(database.run_canonical_body_gc(1).await.is_err());
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn registered_legacy_bootstrap_and_live_references_survive_restarts() {
     let mut harness =
         crate::tests::harness::RegisteredGlobalDbHarness::open("canonical-body-gc-restart").await;
@@ -455,7 +455,7 @@ async fn registered_legacy_bootstrap_and_live_references_survive_restarts() {
     );
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn nonpositive_legacy_owner_ids_cannot_be_skipped_by_bootstrap() {
     for raw_owner in [true, false] {
         let store = Store::open().await;

@@ -129,7 +129,7 @@ async fn schema_snapshot(
     snapshot
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn short_lived_admission_reclaims_freed_pages_without_daemon_maintenance() {
     crate::register_registered_schema_installer();
     let directory = TempDir::new().unwrap();
@@ -188,7 +188,7 @@ async fn short_lived_admission_reclaims_freed_pages_without_daemon_maintenance()
     drop((lease, owner));
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn partial_workflow_store_requires_reset_without_mutation() {
     assert_workflow_schema_reset_without_mutation(
         "CREATE TABLE workflow_schema (
@@ -202,7 +202,7 @@ async fn partial_workflow_store_requires_reset_without_mutation() {
     .await;
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn name_complete_workflow_store_with_missing_columns_requires_reset_without_mutation() {
     assert_workflow_schema_reset_without_mutation(
         "CREATE TABLE workflow_definitions (definition_id TEXT);
@@ -215,7 +215,7 @@ async fn name_complete_workflow_store_with_missing_columns_requires_reset_withou
     .await;
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn constraintless_workflow_lookalike_requires_reset_without_mutation() {
     assert_workflow_schema_reset_without_mutation(
         "CREATE TABLE workflow_definitions (
@@ -261,7 +261,7 @@ async fn constraintless_workflow_lookalike_requires_reset_without_mutation() {
     .await;
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn extra_workflow_schema_identity_requires_reset_without_mutation() {
     let mut schema = String::new();
     for table in WORKFLOW_TABLE_CONTRACTS_V1 {
@@ -505,7 +505,7 @@ mod published_artifact_ceiling {
         reason.to_owned()
     }
 
-    #[asupersync::test]
+    #[tokio::test]
     async fn admission_upgrades_the_published_shape_and_keeps_every_record() {
         let store = PublishedStore::create().await;
         let before = store.state();
@@ -546,7 +546,7 @@ mod published_artifact_ceiling {
             .expect_err("the byte-length constraint survives the upgrade");
     }
 
-    #[asupersync::test]
+    #[tokio::test]
     async fn reopening_an_upgraded_store_changes_nothing_and_keeps_later_writes() {
         let store = PublishedStore::create().await;
         assert!(store.admit().await.is_none());
@@ -563,7 +563,7 @@ mod published_artifact_ceiling {
     /// A trigger that would block the identity swap is visible before anything
     /// runs, so the census can name it too: the store is refused untouched, and
     /// takes the upgrade once it is gone.
-    #[asupersync::test]
+    #[tokio::test]
     async fn identity_blocking_trigger_refuses_until_it_is_gone() {
         let store = PublishedStore::create().await;
         store.run(
@@ -603,7 +603,7 @@ mod published_artifact_ceiling {
 
     /// Each case differs from the proven shape in one way and must be refused
     /// with nothing changed.
-    #[asupersync::test]
+    #[tokio::test]
     async fn shapes_other_than_the_published_one_are_refused_untouched() {
         let reformatted =
             PUBLISHED_TABLE_SQL.replace("byte_length <= 4194304", "byte_length<=4194304");
@@ -776,7 +776,7 @@ mod published_artifact_ceiling {
 
     /// Another authority's refusal is the store's verdict, so nothing of this
     /// store changes on the way to its reset.
-    #[asupersync::test]
+    #[tokio::test]
     async fn store_refused_by_another_authority_keeps_the_published_shape() {
         let store = PublishedStore::create().await;
         let previous = LCM_SCHEMA_VERSION - 1;
@@ -857,7 +857,7 @@ mod published_artifact_ceiling {
 
     /// The census asks what attach would decide. It must admit a store the
     /// real attach can upgrade, and must not leave that upgrade behind.
-    #[asupersync::test(flavor = "multi_thread")]
+    #[tokio::test(flavor = "multi_thread")]
     async fn attach_refusal_inspection_admits_without_upgrading() {
         let daemon_store = DaemonPublishedStore::create().await;
         let store = &daemon_store.store;
@@ -914,7 +914,7 @@ mod published_artifact_ceiling {
     /// store, answers typed recovering from workflow storage, and keeps every
     /// other authority serving; convergence then completes the move for clients
     /// issued before it committed, and the old table's pages leave the file.
-    #[asupersync::test(flavor = "multi_thread")]
+    #[tokio::test(flavor = "multi_thread")]
     async fn daemon_admission_defers_the_copy_to_convergence() {
         let daemon_store = DaemonPublishedStore::create().await;
         let store = &daemon_store.store;
@@ -1000,7 +1000,7 @@ mod published_artifact_ceiling {
     /// Convergence observes shutdown at every statement. At each sampled point
     /// the store is either wholly published or wholly final, a cancelled store
     /// stays typed recovering, and the next open finishes the job.
-    #[asupersync::test(flavor = "multi_thread")]
+    #[tokio::test(flavor = "multi_thread")]
     async fn background_upgrade_is_atomic_at_every_cancellation_point() {
         async fn converge_cancelled_at(
             path: &Path,
@@ -1071,7 +1071,7 @@ mod published_artifact_ceiling {
 
     /// Retirement aborts the worker, which drops the upgrade wherever it is
     /// parked. Nothing of it may survive, and the next open starts over.
-    #[asupersync::test(flavor = "multi_thread")]
+    #[tokio::test(flavor = "multi_thread")]
     async fn dropping_the_background_upgrade_mid_copy_rolls_it_back() {
         let daemon_store = DaemonPublishedStore::create().await;
         let store = &daemon_store.store;
@@ -1109,7 +1109,7 @@ mod published_artifact_ceiling {
     /// WAL readers see the store as it was for as long as the copy runs. Readers
     /// are what the upgrade must never hold up, so this parks it between two
     /// batches with the writer lane held.
-    #[asupersync::test(flavor = "multi_thread")]
+    #[tokio::test(flavor = "multi_thread")]
     async fn reads_serve_while_the_upgrade_holds_the_writer() {
         let daemon_store = DaemonPublishedStore::create().await;
         let store = &daemon_store.store;
@@ -1171,7 +1171,7 @@ mod published_artifact_ceiling {
     /// A store changed between admission and convergence is proven again under
     /// the write lock: it is held in its typed reset state, untouched, and
     /// clients issued before the verdict see it too.
-    #[asupersync::test(flavor = "multi_thread")]
+    #[tokio::test(flavor = "multi_thread")]
     async fn background_refusal_holds_the_store_in_its_reset_state() {
         let daemon_store = DaemonPublishedStore::create().await;
         let store = &daemon_store.store;
@@ -1196,7 +1196,7 @@ mod published_artifact_ceiling {
 
     /// A failure that can clear says nothing about the store: workflow storage
     /// stays recovering, nothing changed, and the next attempt finishes.
-    #[asupersync::test(flavor = "multi_thread")]
+    #[tokio::test(flavor = "multi_thread")]
     async fn held_lock_at_convergence_keeps_the_store_recovering() {
         let daemon_store = DaemonPublishedStore::create().await;
         let store = &daemon_store.store;
@@ -1368,7 +1368,7 @@ mod published_artifact_ceiling {
     /// transaction rolls back. A refused statement is the store's typed reset;
     /// a held database or a full disk is not, so a passing condition never asks
     /// for one.
-    #[asupersync::test(flavor = "multi_thread")]
+    #[tokio::test(flavor = "multi_thread")]
     async fn failure_at_any_upgrade_step_rolls_back_with_the_right_typed_state() {
         let daemon_store = DaemonPublishedStore::create().await;
         let store = &daemon_store.store;
@@ -1462,7 +1462,7 @@ mod published_artifact_ceiling {
     /// Classification runs before the write lock. A peer that finished the
     /// upgrade in between leaves nothing to do; one that changed the store into
     /// another shape in between gets the refusal, not a blind rewrite.
-    #[asupersync::test(flavor = "multi_thread")]
+    #[tokio::test(flavor = "multi_thread")]
     async fn the_write_lock_proof_decides_after_a_stale_classification() {
         let daemon_store = DaemonPublishedStore::create().await;
         let store = &daemon_store.store;
@@ -1504,7 +1504,7 @@ mod published_artifact_ceiling {
 
     /// A peer holding the write lock delays admission and says nothing about
     /// the store: the attach fails retryably, and the next one admits.
-    #[asupersync::test(flavor = "multi_thread")]
+    #[tokio::test(flavor = "multi_thread")]
     async fn held_write_lock_delays_admission_without_a_reset() {
         let daemon_store = DaemonPublishedStore::create().await;
         let store = &daemon_store.store;
@@ -1540,7 +1540,7 @@ mod published_artifact_ceiling {
 
     /// A store whose schema refuses the rename keeps serving its other
     /// authorities, and the census names the same refusal attach reaches.
-    #[asupersync::test(flavor = "multi_thread")]
+    #[tokio::test(flavor = "multi_thread")]
     async fn census_and_attach_agree_on_a_schema_that_refuses_the_move() {
         let daemon_store = DaemonPublishedStore::create().await;
         let store = &daemon_store.store;
@@ -1571,7 +1571,7 @@ mod published_artifact_ceiling {
     /// Asking whether a store can upgrade costs no payload IO: the census
     /// leaves the WAL at its prior size however much the store holds, while the
     /// same store's convergence still moves every row.
-    #[asupersync::test(flavor = "multi_thread")]
+    #[tokio::test(flavor = "multi_thread")]
     async fn census_writes_no_payload_bytes() {
         let daemon_store = DaemonPublishedStore::create().await;
         let store = &daemon_store.store;
@@ -1618,7 +1618,7 @@ mod published_artifact_ceiling {
 
     /// An observation refusal surfaces late in the stage sequence, after the
     /// workflow stage. It still leaves the published shape in place.
-    #[asupersync::test]
+    #[tokio::test]
     async fn observation_refusal_keeps_the_published_shape() {
         let store = PublishedStore::create().await;
         store.run(
@@ -1636,7 +1636,7 @@ mod published_artifact_ceiling {
 
     /// The classification page boundary must not hide a bad row, and a store
     /// past one page still upgrades whole.
-    #[asupersync::test]
+    #[tokio::test]
     async fn row_classification_reaches_every_page() {
         const PAGED_ROWS: &str = "
             WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 4200)
@@ -1660,7 +1660,7 @@ mod published_artifact_ceiling {
 
     /// A store that already carries the final contract is complete, with no
     /// upgrade work, whatever version label the binary that wrote it carried.
-    #[asupersync::test(flavor = "multi_thread")]
+    #[tokio::test(flavor = "multi_thread")]
     async fn final_shape_store_has_nothing_to_upgrade() {
         let daemon_store = DaemonPublishedStore::create().await;
         let store = &daemon_store.store;
@@ -1689,7 +1689,7 @@ mod published_artifact_ceiling {
 
     /// The profile authority holds no workflow rows and never reads these
     /// tables, so it keeps them exactly as found.
-    #[asupersync::test]
+    #[tokio::test]
     async fn profile_authority_is_not_upgraded() {
         let store = PublishedStore::create_at("global.db", TestDatabaseRuntimeScope::Profile).await;
         let before = store.state();

@@ -700,6 +700,7 @@ pub fn admit_registered_hook_orchestration(
     explicit: bool,
     admission_order: Option<u64>,
     completion: Option<Arc<dyn Fn(HookOrchestrationSettlementV1) + Send + Sync + 'static>>,
+    intent_delivery_settled: bool,
 ) -> HookOrchestrationAdmissionV1 {
     // Any other hook of a session that now carries a lifecycle is the event a
     // boundary parked for that session waits on.
@@ -726,7 +727,9 @@ pub fn admit_registered_hook_orchestration(
         runtime.resume_parked(request.hook.envelope(), lifecycle);
     }
     request.admission_order = admission_order;
-    let intent_companion = request.intent_companion();
+    let intent_companion = request
+        .intent_companion()
+        .filter(|_| !intent_delivery_settled);
     request.completion = completion;
     let admission = runtime.admit(request);
     // The stop boundary's own admission is what the hook reports; its intent
@@ -1621,12 +1624,12 @@ mod lsp_lease_tests {
 
     use super::{LspLeaseTaskRegistry, LspSessionId};
 
-    /// A disconnected session's lease task runs on the native runtime: it
-    /// starts, finishes, and shuts down with no Tokio runtime anywhere.
+    /// A synchronous host can start, finish and shut down a disconnected
+    /// session's lease task on the installed runtime.
     #[test]
-    fn lease_tasks_run_without_a_tokio_runtime() {
+    fn lease_tasks_run_from_a_synchronous_host() {
         native_runtime::block_on(async {
-            assert!(tokio::runtime::Handle::try_current().is_err());
+            assert!(tokio::runtime::Handle::try_current().is_ok());
             let registry = Arc::new(LspLeaseTaskRegistry::default());
             let (ran, lease_ran) = tokio::sync::oneshot::channel();
             registry

@@ -322,6 +322,9 @@ async fn invoke_registered(
 /// a parked worker drives no other task.
 #[tokio::test]
 async fn work_and_workflow_dispatch_never_park_a_native_worker_on_the_writer() {
+    if !crate::test_support::alone_with_runtime_hazards() {
+        return;
+    }
     let fixture = RegisteredWorkFixture::start("native-writer-waits").await;
     let wall_clock = tracedecay_contracts::now_micros();
     let workflow = |request_id: &str, request| {

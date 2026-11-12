@@ -198,7 +198,7 @@ async fn run_apply(
     .map_err(|error| error.to_string())
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn authority_loss_before_commit_rolls_back_retention_mutations() -> Result<(), String> {
     let store = test_store().await?;
     let durable = insert_message(&store.conn, 1, 90, "must survive").await?;
@@ -259,7 +259,7 @@ async fn authority_loss_before_commit_rolls_back_retention_mutations() -> Result
 // retention-expired (plan 23 hydration state); it is never confused with an
 // ownership violation, which would make every summary older than the window
 // unreadable under a misleading error.
-#[asupersync::test]
+#[tokio::test]
 async fn expansion_survives_sources_dropped_by_retention() -> Result<(), String> {
     let store = test_store().await?;
     let conn = &store.conn;
@@ -316,7 +316,7 @@ async fn expansion_survives_sources_dropped_by_retention() -> Result<(), String>
 
 // A raw row that is present but owned by a different session is still a hard
 // ownership violation: degrading on absence must not weaken that boundary.
-#[asupersync::test]
+#[tokio::test]
 async fn expansion_still_rejects_foreign_session_sources() -> Result<(), String> {
     let store = test_store().await?;
     let conn = &store.conn;
@@ -349,7 +349,7 @@ async fn expansion_still_rejects_foreign_session_sources() -> Result<(), String>
 
 // (b) retention window is honored: a projection-durable row inside the window
 // is not dropped.
-#[asupersync::test]
+#[tokio::test]
 async fn drop_honors_retention_window() -> Result<(), String> {
     let store = test_store().await?;
     let conn = &store.conn;
@@ -367,7 +367,7 @@ async fn drop_honors_retention_window() -> Result<(), String> {
 }
 
 // (b) dry run counts eligible reclaim without mutating anything.
-#[asupersync::test]
+#[tokio::test]
 async fn dry_run_counts_without_mutating() -> Result<(), String> {
     let store = test_store().await?;
     let conn = &store.conn;
@@ -399,7 +399,7 @@ async fn dry_run_counts_without_mutating() -> Result<(), String> {
     Ok(())
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn backlog_read_reports_real_eligible_bytes_and_watermark() -> Result<(), String> {
     let store = test_store().await?;
     let content = "retention backlog café ☕";
@@ -430,7 +430,7 @@ async fn backlog_read_reports_real_eligible_bytes_and_watermark() -> Result<(), 
     Ok(())
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn backlog_read_emits_clean_zero_record_for_configured_window() -> Result<(), String> {
     let store = test_store().await?;
     let records = read_session_retention_backlog(
@@ -451,7 +451,7 @@ async fn backlog_read_emits_clean_zero_record_for_configured_window() -> Result<
 
 // One content copy: a durable row's body is stored once, and dropping the row
 // removes its FTS entries with it.
-#[asupersync::test]
+#[tokio::test]
 async fn drop_removes_the_single_content_copy_and_its_index() -> Result<(), String> {
     let store = test_store().await?;
     let conn = &store.conn;
@@ -490,7 +490,7 @@ async fn drop_removes_the_single_content_copy_and_its_index() -> Result<(), Stri
 
 // Compaction only changes projection-durable rows, and retains complete text
 // through the canonical verified reader without creating a plain payload file.
-#[asupersync::test]
+#[tokio::test]
 async fn offload_compacts_durable_content_without_creating_payload_files() -> Result<(), String> {
     let store = test_store().await?;
     let conn = &store.conn;
@@ -544,7 +544,7 @@ async fn offload_compacts_durable_content_without_creating_payload_files() -> Re
     Ok(())
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn offload_keeps_small_bodies_inline_and_uses_byte_threshold() -> Result<(), String> {
     let store = test_store().await?;
     let small = "é".repeat(INLINE_BODY_BYTES / 2 - 1);
@@ -589,7 +589,7 @@ async fn offload_keeps_small_bodies_inline_and_uses_byte_threshold() -> Result<(
     Ok(())
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn small_offload_restores_verified_text_and_releases_file_only_after_gc_grace()
 -> Result<(), String> {
     let store = test_store().await?;
@@ -680,7 +680,7 @@ async fn small_offload_restores_verified_text_and_releases_file_only_after_gc_gr
     Ok(())
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn offload_restoration_rejects_corruption_staleness_and_lost_authority() -> Result<(), String>
 {
     for failure in ["payload", "receipt", "stale", "metadata", "authority"] {
@@ -790,7 +790,7 @@ async fn offload_restoration_rejects_corruption_staleness_and_lost_authority() -
     Ok(())
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn large_offloads_share_verified_canonical_text_and_release_files_after_grace()
 -> Result<(), String> {
     let store = test_store().await?;
@@ -880,7 +880,7 @@ async fn large_offloads_share_verified_canonical_text_and_release_files_after_gr
     Ok(())
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn canonical_compaction_counts_utf8_snippets_and_marginal_shared_body_cost()
 -> Result<(), String> {
     let store = test_store().await?;
@@ -973,7 +973,7 @@ async fn canonical_compaction_counts_utf8_snippets_and_marginal_shared_body_cost
     Ok(())
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn restoration_revisits_old_cursor_and_stops_before_exceeding_byte_budget()
 -> Result<(), String> {
     let store = test_store().await?;
@@ -1084,7 +1084,7 @@ async fn restoration_revisits_old_cursor_and_stops_before_exceeding_byte_budget(
     Ok(())
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn scoped_single_row_retention_finishes_when_no_lineage_remains() -> Result<(), String> {
     let store = test_store().await?;
     let config = LcmRetentionConfig {
@@ -1103,7 +1103,7 @@ async fn scoped_single_row_retention_finishes_when_no_lineage_remains() -> Resul
     Ok(())
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn canonical_compaction_commit_denial_preserves_original_inline_body() -> Result<(), String> {
     let store = test_store().await?;
     let content = "complete retained body\n".repeat(1024);
@@ -1157,7 +1157,7 @@ async fn canonical_compaction_commit_denial_preserves_original_inline_body() -> 
     Ok(())
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn corrupt_shared_body_cannot_replace_plaintext_or_external_source() -> Result<(), String> {
     let store = test_store().await?;
     let content = "verified source text\n".repeat(1024);
@@ -1249,7 +1249,7 @@ async fn corrupt_shared_body_cannot_replace_plaintext_or_external_source() -> Re
     Ok(())
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn small_offload_restoration_is_bounded_scoped_and_leaves_protected_payloads()
 -> Result<(), String> {
     let store = test_store().await?;
@@ -1335,7 +1335,7 @@ async fn small_offload_restoration_is_bounded_scoped_and_leaves_protected_payloa
     Ok(())
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn offload_cas_preserves_revived_row_and_rolls_back_canonical_body() -> Result<(), String> {
     let store = test_store().await?;
     let original = "stale content".repeat(1024);
@@ -1406,7 +1406,7 @@ async fn offload_cas_preserves_revived_row_and_rolls_back_canonical_body() -> Re
 /// A pass resumes from the previous one's cursors, yet still drops a durable
 /// row that aged past the window since, and an old row a summary first
 /// covered since.
-#[asupersync::test]
+#[tokio::test]
 async fn later_passes_act_on_rows_that_aged_or_became_durable_since() -> Result<(), String> {
     let store = test_store().await?;
     let conn = &store.conn;
@@ -1456,7 +1456,7 @@ async fn later_passes_act_on_rows_that_aged_or_became_durable_since() -> Result<
 }
 
 // (e) reclaimed space is measurable via page/free-list metrics.
-#[asupersync::test]
+#[tokio::test]
 async fn reports_measurable_reclaim_metrics() -> Result<(), String> {
     let store = test_store().await?;
     let conn = &store.conn;
@@ -1478,7 +1478,7 @@ async fn reports_measurable_reclaim_metrics() -> Result<(), String> {
 }
 
 // Disabled config is an inert no-op even in Apply mode.
-#[asupersync::test]
+#[tokio::test]
 async fn disabled_config_is_a_no_op() -> Result<(), String> {
     let store = test_store().await?;
     let conn = &store.conn;

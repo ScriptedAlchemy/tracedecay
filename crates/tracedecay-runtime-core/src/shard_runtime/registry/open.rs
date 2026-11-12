@@ -2,8 +2,8 @@ use std::fmt;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use asupersync::Cx;
-use asupersync::channel::watch;
+use tokio::runtime::Handle;
+use tokio::sync::watch;
 use tracedecay_store::{
     RuntimeMaintenanceStateV1, RuntimePublicationIdV1, StoreAuthorityEpochV1,
     StoreRuntimeBindingV1, StoreRuntimeRegistryPublicationV1,
@@ -66,30 +66,16 @@ pub(crate) struct StoreRuntimeOpenJoin {
 
 impl StoreRuntimeOpenJoin {
     pub(super) async fn wait(mut self) -> StoreRuntimeOpenResult {
-        let Some(cx) = crate::native_runtime::cx() else {
-            return StoreRuntimeOpenResult::Failed(
-                StoreRuntimeRegistryFailure::RuntimeUnavailable {
-                    operation: "wait for registered runtime open",
-                },
-            );
-        };
         loop {
             let current = self.updates.borrow().clone();
             match current {
                 OpenState::Opening => {
-                    if let Err(error) = self.updates.changed(&cx).await {
-                        return StoreRuntimeOpenResult::Failed(match error {
-                            watch::RecvError::Cancelled => {
-                                StoreRuntimeRegistryFailure::WaitCancelled {
-                                    operation: "wait for registered runtime open",
-                                }
-                            }
-                            watch::RecvError::Closed | watch::RecvError::PolledAfterCompletion => {
-                                StoreRuntimeRegistryFailure::OpenTaskAbandoned {
-                                    key: self.key.clone(),
-                                }
-                            }
-                        });
+                    if self.updates.changed().await.is_err() {
+                        return StoreRuntimeOpenResult::Failed(
+                            StoreRuntimeRegistryFailure::OpenTaskAbandoned {
+                                key: self.key.clone(),
+                            },
+                        );
                     }
                 }
                 OpenState::Published => {
@@ -369,14 +355,7 @@ impl StoreRuntimeRegistry {
                     let current_mismatch = authority.is_some() && current != Some(expected);
                     match opened {
                         Ok(opened) if opened != expected || current_mismatch => {
-                            let close = match cx.spawn_blocking(move |_| {
-                                close_unpublished_runtime(published)
-                            }) {
-                                Ok(mut close) => close.join(&cx).await
-                                    .map_err(|error| error.to_string())
-                                    .and_then(|result| result),
-                                Err(error) => Err(error.to_string()),
-                            };
+                            let close = crate::native_runtime::spawn_blocking_on(&cx, move || close_unpublished_runtime(published)).await.map_err(|error| error.to_string()).and_then(|result| result);
                             Err(StoreRuntimeRegistryFailure::PhysicalRuntimeFailed {
                                 operation: "publish identity-bound registered runtime open",
                                 message: format!(
@@ -386,14 +365,7 @@ impl StoreRuntimeRegistry {
                         }
                         Ok(_) => Ok((published, locator, authority)),
                         Err(message) => {
-                            let close = match cx.spawn_blocking(move |_| {
-                                close_unpublished_runtime(published)
-                            }) {
-                                Ok(mut close) => close.join(&cx).await
-                                    .map_err(|error| error.to_string())
-                                    .and_then(|result| result),
-                                Err(error) => Err(error.to_string()),
-                            };
+                            let close = crate::native_runtime::spawn_blocking_on(&cx, move || close_unpublished_runtime(published)).await.map_err(|error| error.to_string()).and_then(|result| result);
                             Err(StoreRuntimeRegistryFailure::PhysicalRuntimeFailed {
                                 operation: "capture identity-bound opened SQLite file identity",
                                 message: format!("{message}; unpublished close={close:?}"),
@@ -424,13 +396,6 @@ impl StoreRuntimeRegistry {
 
     #[tracing::instrument(name = "runtime_core.registry.open", level = "trace", skip_all)]
     pub async fn open(&self, request: StoreRuntimeOpenRequest) -> StoreRuntimeOpenResult {
-        let Some(cx) = crate::native_runtime::cx() else {
-            return StoreRuntimeOpenResult::Failed(
-                StoreRuntimeRegistryFailure::RuntimeUnavailable {
-                    operation: "open registered runtime",
-                },
-            );
-        };
         let mut converged_on_persisted_authority = false;
         loop {
             if let Some(path) = request
@@ -440,18 +405,13 @@ impl StoreRuntimeRegistry {
             {
                 while let Some(mut released) = self.destructive_wait(path) {
                     while !*released.borrow_and_update() {
-                        if let Err(error) = released.changed(&cx).await {
-                            return StoreRuntimeOpenResult::Failed(match error {
-                                watch::RecvError::Cancelled => {
-                                    StoreRuntimeRegistryFailure::WaitCancelled {
-                                        operation: "wait for destructive store maintenance",
-                                    }
-                                }
-                                error => StoreRuntimeRegistryFailure::PhysicalRuntimeFailed {
+                        if let Err(error) = released.changed().await {
+                            return StoreRuntimeOpenResult::Failed(
+                                StoreRuntimeRegistryFailure::PhysicalRuntimeFailed {
                                     operation: "wait for destructive store maintenance",
                                     message: error.to_string(),
                                 },
-                            });
+                            );
                         }
                     }
                 }
@@ -512,7 +472,6 @@ impl StoreRuntimeRegistry {
     /// so none can publish or hold a physical handle afterwards.
     pub(super) async fn cancel_and_join_opens_for_shutdown(
         &self,
-        cx: &Cx,
     ) -> Result<(), StoreRuntimeRegistryFailure> {
         self.cancel_opens_for_shutdown();
         let openings = self
@@ -530,20 +489,8 @@ impl StoreRuntimeRegistry {
                 if !matches!(*updates.borrow_and_update(), OpenState::Opening) {
                     break;
                 }
-                match updates.changed(cx).await {
-                    Ok(()) => {}
-                    Err(watch::RecvError::Closed) => break,
-                    Err(watch::RecvError::Cancelled) => {
-                        return Err(StoreRuntimeRegistryFailure::WaitCancelled {
-                            operation: "drain registered runtime opens for shutdown",
-                        });
-                    }
-                    Err(error) => {
-                        return Err(StoreRuntimeRegistryFailure::PhysicalRuntimeFailed {
-                            operation: "drain registered runtime opens for shutdown",
-                            message: error.to_string(),
-                        });
-                    }
+                if updates.changed().await.is_err() {
+                    break;
                 }
             }
         }
@@ -629,18 +576,15 @@ impl StoreRuntimeRegistry {
 /// Closes a runtime that finished opening after shutdown cancelled it, so the
 /// open ends with nothing published and no physical handle left behind.
 async fn close_cancelled_open(
-    cx: &Cx,
+    cx: &Handle,
     key: &StoreRuntimeKey,
     published: PublishedShardRuntime,
 ) -> StoreRuntimeRegistryFailure {
-    let close = match cx.spawn_blocking(move |_| close_unpublished_runtime(published)) {
-        Ok(mut close) => close
-            .join(cx)
+    let close =
+        crate::native_runtime::spawn_blocking_on(cx, move || close_unpublished_runtime(published))
             .await
             .map_err(|error| error.to_string())
-            .and_then(|result| result),
-        Err(error) => Err(error.to_string()),
-    };
+            .and_then(|result| result);
     match close {
         Ok(()) => StoreRuntimeRegistryFailure::OpenCancelled {
             key: Box::new(key.clone()),
@@ -819,9 +763,7 @@ impl OpenAttemptGuard {
                             self.key.clone(),
                             RegistryEntry::Ready(ReadyRuntime { owner }),
                         );
-                        if let Err(error) = self.updates.send(OpenState::Published) {
-                            tracing::error!(%error, "failed to publish registered runtime open completion");
-                        }
+                        self.updates.send_replace(OpenState::Published);
                     }
                     Err(failure) => self.fail(&mut state, failure),
                 }
@@ -833,9 +775,7 @@ impl OpenAttemptGuard {
 
     fn fail(&self, state: &mut RegistryState, failure: StoreRuntimeRegistryFailure) {
         state.entries.remove(&self.key);
-        if let Err(error) = self.updates.send(OpenState::Failed(failure)) {
-            tracing::error!(%error, "failed to publish registered runtime open failure");
-        }
+        self.updates.send_replace(OpenState::Failed(failure));
     }
 }
 

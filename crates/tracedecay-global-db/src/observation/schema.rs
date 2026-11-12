@@ -322,7 +322,7 @@ mod tests {
     /// A store written before the unified identity, holding a Claude row whose
     /// id was derived on `tracedecay.claude.observation.v1` and whose JSON
     /// still carries `idempotency_key`, is refused. The row is left unchanged.
-    #[asupersync::test]
+    #[tokio::test]
     async fn pre_unified_identity_rows_require_a_typed_reset() {
         let directory = tempfile::TempDir::new().unwrap();
         let path = directory.path().join("sessions.db");
@@ -400,7 +400,7 @@ mod tests {
 
     /// A store this binary created keeps a unified-identity row and reads it
     /// back as that same id.
-    #[asupersync::test]
+    #[tokio::test]
     async fn fresh_observation_store_accepts_unified_identity_rows() {
         let directory = tempfile::TempDir::new().unwrap();
         let path = directory.path().join("sessions.db");

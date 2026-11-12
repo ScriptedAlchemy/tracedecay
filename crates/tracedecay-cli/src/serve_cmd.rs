@@ -225,14 +225,13 @@ mod tests {
     use super::*;
     use tracedecay_runtime_core::native_runtime;
 
-    /// `serve` reads the hint setting on its own thread's native root, so the
-    /// read must settle with no Tokio runtime entered.
+    /// `serve` reads the hint setting through the installed process runtime.
     #[test]
-    fn repeated_query_hints_read_settles_without_an_entered_tokio_runtime() {
+    fn repeated_query_hints_read_settles_on_the_process_runtime() {
         let home = tempfile::tempdir().expect("temporary home");
         let profile = ProfileRoot::under_home(home.path());
         let read_failed = native_runtime::block_on(Box::pin(async move {
-            assert!(tokio::runtime::Handle::try_current().is_err());
+            assert!(tokio::runtime::Handle::try_current().is_ok());
             crate::commands::repeated_query_hints_enabled(&profile)
                 .await
                 .is_err()

@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 use tracedecay_global_db::tests::harness::RegisteredGlobalDbHarness;
 
-#[asupersync::test]
+#[tokio::test]
 async fn temporal_health_adapter_is_read_only_and_clean_on_canonical_schema() {
     let runtime = RegisteredGlobalDbHarness::open("doctor temporal health adapter").await;
     let db = runtime.registered.as_ref();
@@ -56,7 +56,7 @@ fn temporal_family_manifest(db_path: &Path) -> BTreeMap<String, (u64, Option<Sys
     manifest
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn temporal_health_detects_index_and_column_migration_gaps() {
     let runtime = RegisteredGlobalDbHarness::open("doctor temporal migration gap test").await;
     let db = runtime.registered.as_ref();
@@ -91,7 +91,7 @@ async fn temporal_health_detects_index_and_column_migration_gaps() {
     );
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn temporal_health_does_not_block_on_a_saturated_general_reader_lane() {
     let runtime = RegisteredGlobalDbHarness::open("doctor temporal health concurrent reader").await;
     let db = runtime.registered.as_ref();

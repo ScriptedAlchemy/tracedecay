@@ -178,13 +178,8 @@ where
     E: StorageOperationExecutor + Send + 'static,
 {
     let locator = writer_locator(database, binding);
-    PersistentWriter::start(
-        &tracedecay_rusqlite_runtime::native_runtime::handle().expect("native runtime"),
-        locator,
-        AdmissionConfigV1::default(),
-        executor,
-    )
-    .expect("start persistent acceptance writer")
+    PersistentWriter::start(locator, AdmissionConfigV1::default(), executor)
+        .expect("start persistent acceptance writer")
 }
 
 pub(crate) fn writer_locator(

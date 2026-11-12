@@ -20,7 +20,7 @@ fn checkpoint_control_surfaces_typed_deadline_and_admission_signal() {
             checkpoint
                 .trigger(CheckpointRequest::new(CheckpointBlockers::default(), probe))
                 .unwrap()
-                .wait(&cx())
+                .wait()
                 .await
         })
         .unwrap();
@@ -65,7 +65,7 @@ fn checkpoint_rechecks_the_same_authority_before_publication() {
                     authority,
                 )
                 .unwrap()
-                .wait(&cx()),
+                .wait(),
         )
         .unwrap();
 
@@ -110,7 +110,7 @@ fn checkpoint_authority_loss_is_typed_and_never_published() {
             authority,
         );
         let error = match result {
-            Ok(ticket) => runtime.block_on(ticket.wait(&cx())).unwrap_err(),
+            Ok(ticket) => runtime.block_on(ticket.wait()).unwrap_err(),
             Err(error) => error,
         };
 

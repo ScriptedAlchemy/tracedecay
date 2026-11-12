@@ -227,8 +227,7 @@ async fn aborted_socket_curator_preparation_keeps_its_writer_owned_through_shutd
     let registry = engine.invocation.service.project_runtimes.clone();
 
     let (mut client, server) = tokio::net::UnixStream::pair().expect("curator socket pair");
-    let server = tracedecay_daemon_protocol::BrokerStream::from_tokio_unix(server)
-        .expect("native curator socket");
+    let server = tracedecay_daemon_protocol::BrokerStream::Unix(server);
     let serving = Box::pin(
         crate::daemon::connection_serving::serve_authenticated_socket_client_with_class(
             server,

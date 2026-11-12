@@ -190,8 +190,7 @@ impl SourceEditDurability {
             deadline_ms: u64::try_from(SOURCE_EDIT_ADMISSION_DEADLINE.as_millis())
                 .unwrap_or(u64::MAX),
         };
-        let queued = asupersync::time::timeout(
-            asupersync::time::wall_now(),
+        let queued = tokio::time::timeout(
             deadline.saturating_duration_since(Instant::now()),
             source_edit_owner(&self.root).lock_owned(),
         )

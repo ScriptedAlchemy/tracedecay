@@ -1054,15 +1054,15 @@ mod tests {
         assert!(receipt.project_servers.is_clean());
     }
 
-    /// The coordinator itself runs natively; the runner it owns still needs
-    /// Tokio, so a caller without one gets a typed receipt, not a panic.
+    /// A synchronous host drives the coordinator and runner on the one
+    /// installed runtime and receives the ordinary terminal receipt.
     #[test]
-    fn a_shutdown_without_a_tokio_runtime_fails_with_a_typed_receipt() {
+    fn a_synchronous_host_completes_shutdown_on_the_installed_runtime() {
         const SITE: &str = "daemon-service.shutdown.runner";
         let lifecycle = DaemonLifecycle::default();
         let missing = native_runtime::tokio_runtime_missing_count(SITE);
         let receipt = native_runtime::block_on(async {
-            assert!(tokio::runtime::Handle::try_current().is_err());
+            assert!(tokio::runtime::Handle::try_current().is_ok());
             coordinate_daemon_shutdown(&lifecycle, Instant::now() + Duration::from_secs(5), async {
                 DaemonShutdownPlan::new(Vec::new(), |_| async { ShutdownTaskReceipt::default() })
             })
@@ -1070,14 +1070,10 @@ mod tests {
         })
         .expect("native runtime");
 
-        assert_eq!(
-            receipt.in_flight,
-            ShutdownStatus::Failed("daemon shutdown runner found no Tokio runtime".to_owned())
-        );
-        assert_eq!(
-            native_runtime::tokio_runtime_missing_count(SITE) - missing,
-            1
-        );
+        assert_eq!(receipt.in_flight, ShutdownStatus::Clean);
+        assert_eq!(receipt.clients, ShutdownStatus::Clean);
+        assert!(receipt.project_servers.is_clean());
+        assert_eq!(native_runtime::tokio_runtime_missing_count(SITE), missing);
     }
 
     #[tokio::test]
