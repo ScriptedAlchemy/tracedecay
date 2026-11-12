@@ -181,11 +181,49 @@ impl AdvisoryContributionsV1 {
     }
 }
 
+/// How one cycle obtains remote GitHub and CI evidence. A local editor or
+/// hook cycle attaches only what the project already retained; an explicit
+/// refresh caller owns the network reads, the deadline, and the cancellation.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum AdvisoryRemoteEvidenceV1 {
+    Retained {
+        github: Option<GitHubReviewReadRequestV1>,
+    },
+    Refresh {
+        github: Option<GitHubReviewReadRequestV1>,
+        ci: ProductionCiFailureDiscoveryOutcomeV1,
+    },
+}
+
+impl AdvisoryRemoteEvidenceV1 {
+    fn github(&self) -> Option<&GitHubReviewReadRequestV1> {
+        match self {
+            Self::Retained { github } | Self::Refresh { github, .. } => github.as_ref(),
+        }
+    }
+
+    pub(super) fn requests_github(&self) -> bool {
+        self.github().is_some()
+    }
+
+    pub(super) fn requests_ci(&self) -> bool {
+        matches!(self, Self::Refresh { ci, .. } if ci.is_configured())
+    }
+
+    fn validate_for(&self, scope: &FeedbackScopeV1) -> bool {
+        self.github()
+            .is_none_or(|request| request.validate().is_ok() && request.scope == *scope)
+            && match self {
+                Self::Retained { .. } => true,
+                Self::Refresh { ci, .. } => ci.validate_for(scope),
+            }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AdvisoryCycleRequest {
     pub feedback: FeedbackCycleExecutionRequest,
-    pub github: Option<GitHubReviewReadRequestV1>,
-    pub ci: ProductionCiFailureDiscoveryOutcomeV1,
+    pub remote: AdvisoryRemoteEvidenceV1,
     pub proximity: Option<ProximityEvaluationRequestV1>,
     pub validity: AdvisoryFindingValidityWindowV1,
 }
@@ -199,11 +237,7 @@ impl AdvisoryCycleRequest {
         if self.feedback.input.request.scope != *scope
             || self.validity.valid_at < self.feedback.input.observed_at
             || self.validity.valid_at >= self.validity.expires_at
-            || self
-                .github
-                .as_ref()
-                .is_some_and(|request| request.validate().is_err() || request.scope != *scope)
-            || !self.ci.validate_for(scope)
+            || !self.remote.validate_for(scope)
             || self
                 .proximity
                 .as_ref()

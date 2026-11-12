@@ -14,8 +14,10 @@ use super::network::{
 };
 use super::store::ProjectGitHubReviewStoreV1;
 use super::{
-    GitHubReadOnlyRuntimeTransportV1, GitHubReviewRefreshCoordinatorV1,
-    GitHubReviewRefreshOutcomeV1, GitHubSourceAccessAuthorityV1,
+    GitHubReadOnlyRuntimeTransportV1, GitHubReviewAtomicRefreshStoreV1,
+    GitHubReviewRefreshCoordinatorV1, GitHubReviewRefreshOutcomeV1,
+    GitHubReviewRefreshStoreReadOutcomeV1, GitHubSourceAccessAuthorityV1,
+    GitHubProviderLifecycleV1,
 };
 use crate::advisory::{
     GitHubCurrentBranchRemapper, GitHubReadOnlyAdmissionError, GitHubReadOnlyConnector,
@@ -242,6 +244,26 @@ where
                 }
             }
             outcome
+        })
+    }
+
+    /// Reads the state this project already retained for `request`. It never
+    /// reaches the network and never writes, so a local caller can attach
+    /// review evidence without owning a refresh.
+    pub fn retained<'a>(
+        &'a self,
+        context: &'a RequestContext,
+        request: &'a GitHubReviewReadRequestV1,
+    ) -> FeedbackPortFuture<'a, GitHubReviewRefreshStoreReadOutcomeV1> {
+        Box::pin(async move {
+            if self.source_access.authorize(context, request).await != GitHubProviderLifecycleV1::Ready {
+                return GitHubReviewRefreshStoreReadOutcomeV1::Unavailable;
+            }
+            let retained = self.coordinator.store().load(context, request).await;
+            if self.source_access.authorize(context, request).await != GitHubProviderLifecycleV1::Ready {
+                return GitHubReviewRefreshStoreReadOutcomeV1::Unavailable;
+            }
+            retained
         })
     }
 

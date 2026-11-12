@@ -980,6 +980,10 @@ where
     S: GitHubReviewAtomicRefreshStoreV1 + Sync,
     A: GitHubSourceAccessAuthorityV1,
 {
+    fn store(&self) -> &S {
+        &self.store
+    }
+
     pub fn refresh<'a>(
         &'a self,
         context: &'a RequestContext,
@@ -1927,5 +1931,78 @@ mod tests {
         assert_eq!(calls.get.load(Ordering::SeqCst), 0);
         assert_eq!(calls.query.load(Ordering::SeqCst), 1);
         assert!(calls.last_query.lock().unwrap().is_some());
+    }
+
+    /// The first remote scan parks at `release` after announcing `entered`;
+    /// later scans answer at once.
+    struct HeldRead {
+        entered: tokio::sync::Notify,
+        release: tokio::sync::Notify,
+        scans: Vec<GitHubReviewReadResponseV1>,
+        calls: AtomicUsize,
+    }
+
+    impl GitHubReviewReadPort for &HeldRead {
+        fn read<'a>(
+            &'a self,
+            _context: &'a RequestContext,
+            _request: &'a GitHubReviewReadRequestV1,
+        ) -> FeedbackPortFuture<'a, GitHubReviewReadPortOutcomeV1> {
+            let call = self.calls.fetch_add(1, Ordering::SeqCst);
+            Box::pin(async move {
+                if call == 0 {
+                    self.entered.notify_one();
+                    self.release.notified().await;
+                }
+                read(self.scans[call.min(self.scans.len() - 1)].clone())
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn retained_read_answers_while_a_remote_refresh_is_held_open() {
+        let (context, request) =
+            context_and_request(GitHubReviewReadOperationV1::RestListPullRequestReviewComments);
+        let first = complete_response(&request);
+        let mut second = first.clone();
+        second.ingress.fetched_at = UtcMicros(first.ingress.fetched_at.0 + 1);
+        let store = RefreshStore::default();
+        let seed = Reads::new(vec![read(first.clone()), read(second.clone())]);
+        assert!(matches!(
+            GitHubReviewRefreshCoordinatorV1::new(&seed, &store, Ready)
+                .refresh(&context, &request)
+                .await,
+            GitHubReviewRefreshOutcomeV1::Stored(_)
+        ));
+
+        let mut third = second.clone();
+        third.ingress.fetched_at = UtcMicros(second.ingress.fetched_at.0 + 1);
+        let mut fourth = third.clone();
+        fourth.ingress.fetched_at = UtcMicros(third.ingress.fetched_at.0 + 1);
+        let held = HeldRead {
+            entered: tokio::sync::Notify::new(),
+            release: tokio::sync::Notify::new(),
+            scans: vec![third, fourth],
+            calls: AtomicUsize::new(0),
+        };
+        let coordinator = GitHubReviewRefreshCoordinatorV1::new(&held, &store, Ready);
+        let mut refresh = std::pin::pin!(coordinator.refresh(&context, &request));
+
+        tokio::select! {
+            _ = &mut refresh => panic!("the refresh must park at its remote read"),
+            () = held.entered.notified() => {}
+        }
+        let retained = coordinator.store().load(&context, &request).await;
+        let GitHubReviewRefreshStoreReadOutcomeV1::State(state) = retained else {
+            panic!("the retained state must answer while the remote read is held open");
+        };
+        assert!(state.last_complete.is_some());
+        assert_eq!(held.calls.load(Ordering::SeqCst), 1);
+
+        held.release.notify_one();
+        assert!(matches!(
+            refresh.await,
+            GitHubReviewRefreshOutcomeV1::Stored(_)
+        ));
     }
 }

@@ -122,3 +122,10 @@ async fn a_provider_pending_at_the_cycle_deadline_times_out() {
     );
     assert!(matches!(outcome, Err(AdvisoryCycleInterruption::TimedOut)));
 }
+
+#[test]
+fn retained_remote_evidence_never_requests_a_ci_refresh() {
+    let retained = AdvisoryRemoteEvidenceV1::Retained { github: None };
+    assert!(!retained.requests_github());
+    assert!(!retained.requests_ci());
+}

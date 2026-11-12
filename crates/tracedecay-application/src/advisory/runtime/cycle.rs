@@ -9,8 +9,8 @@ use super::*;
 pub struct AdvisoryRuntime<GR, GA, CS, CE, PE, PC> {
     feedback_scope: FeedbackScopeV1,
     feedback_cycle: Arc<FeedbackCycleRuntime>,
-    github: Option<Arc<GitHubReviewRuntimeOwnerV1<GR, GA>>>,
-    ci: ConcreteCiFailureLocalizationOwnerV1<CS, CE>,
+    pub(super) github: Option<Arc<GitHubReviewRuntimeOwnerV1<GR, GA>>>,
+    pub(super) ci: ConcreteCiFailureLocalizationOwnerV1<CS, CE>,
     proximity: ConcreteProximityRuntimeOwnerV1<PE, PC>,
     observations: Arc<dyn FeedbackObservationEmitterV1 + Send + Sync>,
 }
@@ -123,8 +123,8 @@ where
         let mut contributions = AdvisoryContributionsV1::absent();
         mark_unrequested_remote_providers(
             &mut contributions,
-            request.github.is_some(),
-            request.ci.is_configured(),
+            request.remote.requests_github(),
+            request.remote.requests_ci(),
         );
 
         if !context_matches_scope(context, &self.feedback_scope) {
@@ -156,228 +156,63 @@ where
             ));
         }
 
-        if let Some(provider_request) = request.github.as_ref() {
-            if let Some(github) = self.github.as_ref() {
-                let outcome =
-                    await_provider(&mut control, github.refresh(context, provider_request)).await;
-                let outcome = match outcome {
-                    Ok(outcome) => outcome,
-                    Err(interruption) => {
-                        return Ok(self.finish_interruption(
-                            &request.feedback.input,
-                            interruption,
-                            contributions,
-                        ));
-                    }
-                };
-                // Retain the allowlisted pull-request identity read beside a
-                // usable review refresh so Delivery can serve PR title, state,
-                // and diff shape. It contributes no advisory findings and a
-                // rate-limited or denied review refresh never spends a second
-                // provider read.
-                if matches!(
-                    provider_request.operation,
-                    GitHubReviewReadOperationV1::GraphQlQueryPullRequestReviewThreads
-                        | GitHubReviewReadOperationV1::RestListPullRequestReviewComments
-                ) && matches!(
-                    outcome,
-                    GitHubReviewRefreshOutcomeV1::Stored(_) | GitHubReviewRefreshOutcomeV1::Stale
-                ) {
-                    let identity_request = GitHubReviewReadRequestV1 {
-                        operation: GitHubReviewReadOperationV1::RestGetPullRequest,
-                        scope: provider_request.scope.clone(),
-                        pull_request_id: provider_request.pull_request_id.clone(),
-                    };
-                    match await_provider(&mut control, github.refresh(context, &identity_request))
+        match &request.remote {
+            AdvisoryRemoteEvidenceV1::Retained { github } => {
+                if let Some(github_request) = github {
+                    if let Err(interruption) = self
+                        .attach_retained_github(
+                            context,
+                            &mut control,
+                            request.validity,
+                            github_request,
+                            &mut contributions,
+                        )
                         .await
                     {
-                        Ok(
-                            GitHubReviewRefreshOutcomeV1::Stored(_)
-                            | GitHubReviewRefreshOutcomeV1::Stale,
-                        ) => {}
-                        Ok(identity_outcome) => {
-                            tracing::warn!(
-                                event = "github_pull_request_identity_refresh_not_stored",
-                                outcome = ?identity_outcome,
-                                "the pull-request identity read was not retained; Delivery keeps serving without a PR identity"
-                            );
-                        }
-                        Err(interruption) => {
-                            return Ok(self.finish_interruption(
-                                &request.feedback.input,
-                                interruption,
-                                contributions,
-                            ));
-                        }
-                    }
-                }
-                match outcome {
-                    GitHubReviewRefreshOutcomeV1::Stored(state) => {
-                        let ingress = &state.state.latest_attempt.ingress;
-                        self.observe_github(&request.feedback.input, ingress);
-                        contributions.capture(
-                            AdvisoryProviderV1::GitHub,
-                            ingress.advisory_findings(request.validity),
-                        );
-                    }
-                    GitHubReviewRefreshOutcomeV1::Cancelled => {
-                        return Ok(self.finish_interruption(
-                            &request.feedback.input,
-                            AdvisoryCycleInterruption::Cancelled,
-                            contributions,
-                        ));
-                    }
-                    GitHubReviewRefreshOutcomeV1::Denied => {
-                        self.observe_github_terminal(
-                            &request.feedback.input,
-                            FeedbackOutcomeV1::Denied,
-                        );
-                        contributions.set_state(
-                            AdvisoryProviderV1::GitHub,
-                            ProviderEvaluationStateV1::Unavailable,
-                        );
-                    }
-                    GitHubReviewRefreshOutcomeV1::Unavailable => {
-                        self.observe_github_terminal(
-                            &request.feedback.input,
-                            FeedbackOutcomeV1::Unavailable,
-                        );
-                        contributions.set_state(
-                            AdvisoryProviderV1::GitHub,
-                            ProviderEvaluationStateV1::Unavailable,
-                        );
-                    }
-                    GitHubReviewRefreshOutcomeV1::Stale => {
-                        self.observations.observe_source_event(
-                            &request.feedback.input,
-                            FeedbackSourceEventV1::GitHubStale { item_count: 0 },
-                        );
-                        contributions.set_state(
-                            AdvisoryProviderV1::GitHub,
-                            ProviderEvaluationStateV1::Stale,
-                        );
-                    }
-                }
-            } else {
-                self.observe_github_terminal(
-                    &request.feedback.input,
-                    FeedbackOutcomeV1::Unavailable,
-                );
-                contributions.set_state(
-                    AdvisoryProviderV1::GitHub,
-                    ProviderEvaluationStateV1::Unavailable,
-                );
-            }
-        }
-
-        match &request.ci {
-            ProductionCiFailureDiscoveryOutcomeV1::Found(provider_request) => {
-                let outcome =
-                    await_provider(&mut control, self.ci.localize(context, provider_request)).await;
-                let outcome = match outcome {
-                    Ok(outcome) => outcome,
-                    Err(interruption) => {
                         return Ok(self.finish_interruption(
                             &request.feedback.input,
                             interruption,
                             contributions,
                         ));
                     }
-                };
-                match outcome {
-                    CiFailureLocalizationPortOutcomeV1::Localized(localization) => {
-                        self.observe_ci(&request.feedback.input, &localization);
-                        contributions.capture(
-                            AdvisoryProviderV1::Ci,
-                            localization.advisory_findings(request.validity),
-                        );
-                    }
-                    CiFailureLocalizationPortOutcomeV1::Denied => {
-                        self.observe_ci_terminal(
-                            &request.feedback.input,
-                            FeedbackOutcomeV1::Denied,
-                            FeedbackCoverageV1::Known,
-                            None,
-                        );
-                        contributions.set_state(
-                            AdvisoryProviderV1::Ci,
-                            ProviderEvaluationStateV1::Unavailable,
-                        );
-                    }
-                    CiFailureLocalizationPortOutcomeV1::RateLimited(checkpoint) => {
-                        self.observe_ci_terminal(
-                            &request.feedback.input,
-                            FeedbackOutcomeV1::RateLimited,
-                            FeedbackCoverageV1::Unknown,
-                            Some(tracedecay_domain::feedback::CiFailureSourceDegradationV1::RateLimited(
-                                checkpoint,
-                            )),
-                        );
-                        contributions
-                            .set_state(AdvisoryProviderV1::Ci, ProviderEvaluationStateV1::Partial);
-                    }
-                    CiFailureLocalizationPortOutcomeV1::Failed(cause) => {
-                        self.observe_ci_terminal(
-                            &request.feedback.input,
-                            FeedbackOutcomeV1::Failed,
-                            FeedbackCoverageV1::Unknown,
-                            Some(
-                                tracedecay_domain::feedback::CiFailureSourceDegradationV1::Failed(
-                                    cause,
-                                ),
-                            ),
-                        );
-                        contributions
-                            .set_state(AdvisoryProviderV1::Ci, ProviderEvaluationStateV1::Failed);
-                    }
-                    CiFailureLocalizationPortOutcomeV1::Unavailable => {
-                        self.observe_ci_terminal(
-                            &request.feedback.input,
-                            FeedbackOutcomeV1::Unavailable,
-                            FeedbackCoverageV1::Unknown,
-                            None,
-                        );
-                        contributions.set_state(
-                            AdvisoryProviderV1::Ci,
-                            ProviderEvaluationStateV1::Unavailable,
-                        );
-                    }
                 }
             }
-            discovery => {
-                if let Some((state, outcome, coverage)) = ci_discovery_terminal_state(discovery) {
-                    let degradation = match discovery {
-                        ProductionCiFailureDiscoveryOutcomeV1::RateLimited(checkpoint) => Some(
-                            tracedecay_domain::feedback::CiFailureSourceDegradationV1::RateLimited(
-                                checkpoint.clone(),
-                            ),
-                        ),
-                        ProductionCiFailureDiscoveryOutcomeV1::Failed(cause) => Some(
-                            tracedecay_domain::feedback::CiFailureSourceDegradationV1::Failed(
-                                *cause,
-                            ),
-                        ),
-                        _ => None,
-                    };
-                    self.observe_ci_terminal(
+            AdvisoryRemoteEvidenceV1::Refresh { github, ci } => {
+                if let Some(github_request) = github {
+                    if let Err(interruption) = self
+                        .refresh_github(
+                            context,
+                            &mut control,
+                            &request.feedback.input,
+                            request.validity,
+                            github_request,
+                            &mut contributions,
+                        )
+                        .await
+                    {
+                        return Ok(self.finish_interruption(
+                            &request.feedback.input,
+                            interruption,
+                            contributions,
+                        ));
+                    }
+                }
+                if let Err(interruption) = self
+                    .refresh_ci(
+                        context,
+                        &mut control,
                         &request.feedback.input,
-                        outcome,
-                        coverage,
-                        degradation,
-                    );
-                    contributions.set_state(AdvisoryProviderV1::Ci, state);
-                } else {
-                    // Found is handled above; fail closed if the terminal map regresses.
-                    self.observe_ci_terminal(
+                        request.validity,
+                        ci,
+                        &mut contributions,
+                    )
+                    .await
+                {
+                    return Ok(self.finish_interruption(
                         &request.feedback.input,
-                        FeedbackOutcomeV1::Unavailable,
-                        FeedbackCoverageV1::Unknown,
-                        None,
-                    );
-                    contributions.set_state(
-                        AdvisoryProviderV1::Ci,
-                        ProviderEvaluationStateV1::Unavailable,
-                    );
+                        interruption,
+                        contributions,
+                    ));
                 }
             }
         }
@@ -481,7 +316,7 @@ where
         }
     }
 
-    fn observe_github(
+    pub(super) fn observe_github(
         &self,
         input: &tracedecay_domain::feedback::FeedbackEvaluationInputV1,
         ingress: &GitHubReviewIngressResultV1,
@@ -551,7 +386,7 @@ where
         }
     }
 
-    fn observe_github_terminal(
+    pub(super) fn observe_github_terminal(
         &self,
         input: &tracedecay_domain::feedback::FeedbackEvaluationInputV1,
         outcome: FeedbackOutcomeV1,
@@ -566,7 +401,7 @@ where
         );
     }
 
-    fn observe_ci(
+    pub(super) fn observe_ci(
         &self,
         input: &tracedecay_domain::feedback::FeedbackEvaluationInputV1,
         localization: &CiFailureLocalizationResultV1,
@@ -605,7 +440,7 @@ where
         );
     }
 
-    fn observe_ci_terminal(
+    pub(super) fn observe_ci_terminal(
         &self,
         input: &tracedecay_domain::feedback::FeedbackEvaluationInputV1,
         outcome: FeedbackOutcomeV1,
