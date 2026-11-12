@@ -25,7 +25,8 @@ cannot read.
 
 ## Design
 
-One daemon-owned path, one channel (Context Scout), two signal sources.
+One daemon-owned path, one channel (Context Scout), two deterministic
+signal sources: observed tool actions and prompt inferences.
 
 ```
 HOST HOOK (content-free boundary; ack budget 25 ms, dispatch.rs HOOK_ADMISSION_ACK_BUDGET_MICROS)
@@ -42,8 +43,8 @@ INTENT PASS (async, coalesced per session by BoundedHookOrchestratorV1)
   3. bounded freshen (re-read every 50 ms up to freshen_budget_ms until the
      boundary's turn is ingested; the pass never drives ingest) + read window
      (agents/context_scout/session_window.rs over lcm_raw_messages)
-  4. action facts (deterministic, from tool calls in the window; tracedecay-policy/src/intent_action_facts.rs)
-     || decision engine (one batched request, all configured questions; agents/context_scout/decision_engine.rs)
+  4. action facts from assistant tool calls in the newest turn, and prompt
+     inferences from its user prompt (tracedecay-policy/src/intent_action_facts.rs)
   5. deterministic policy (tracedecay-policy/src/intent_decision.rs) -> <= 1 candidate
      (evidence = Session, category Retrieval) -> delivery window (IntentBoundary -> Immediate)
   6. owner.prepare_configured -> select_deterministic_context_scout -> store.enqueue
@@ -70,50 +71,39 @@ Classification never runs inside the admission ack budget. Delivery is
 any kind claims it (a delivery inside `min_delivery_gap_secs` is withheld
 as `suppressed_budget`). Phase 2 adds, for prompt hooks with a configured
 `prompt_lookup_deadline_ms`, one bounded second round-trip inside the same
-hook (plan 22 "the host performs one bounded lookup"). A fast engine
-delivers in the same prompt; a slow one degrades to the next boundary.
+hook (plan 22 "the host performs one bounded lookup"). A pass that finishes
+inside it delivers in the same prompt; a slower one degrades to the next
+boundary.
 
-### Decision engine (pluggable)
+### No decision model
 
-One typed-question client speaking the shared `/v1/systemone` shape
-(`state` + `noul`/`choice`/`score` questions -> per-answer probabilities),
-served by laya-serve, Kev, Ollama >= 0.35, llama.cpp `llama-server` and
-others. Engine URL, model, timeout, concurrency, the question set
-(instruction strings per intent), per-intent thresholds and margins, and
-the window size live in the Scout settings snapshot
-(`ContextScoutSettingsV1.intent`), so swapping models or re-tuning
-thresholds is a configuration change. Disabled, unreachable, timed out,
-refused, malformed, backpressured and low-confidence are distinct typed
-outcomes recorded in the candidate's receipt. With no engine, only action
-facts (and, until phase 3, the keyword prompt predicates) produce
-candidates. A model never chooses receptivity.
-
-Measured on the frozen 121-case multi-turn set
-(`evals/intent_engine/`): macro-F1 at a fixed 0.6 threshold is
-Intern-Decision-4B 0.80, Kev-4B 0.69, Laya 0.42, but at that threshold
-Intern raises a false hint on 35% of no-intent cases against Kev's 11%,
-and Intern cannot separate session recall. Kev-4B is the recommended
-default (mid-range thresholds, best session recall, native
-`/v1/systemone`, cheapest fine-tuning); Intern-Decision-4B is the
-alternative pending a larger re-test.
+The intent pass asks no model. An earlier revision asked a pluggable
+decision-model engine (`/v1/systemone`) one yes/no question per intent; it
+was removed in favor of the deterministic signals alone, together with its
+client, settings (engine URL, model, question set, thresholds), receipts,
+and evals. The window size, action-fact score, TTL, delivery gap, and
+prompt lookup deadline remain operator settings in
+`ContextScoutSettingsV1.intent`. Settings or durable Scout state still
+carrying the removed engine fields are refused, not migrated.
 
 ### Intent taxonomy
 
-Model-judged (one `noul` question each): session_recall, memory_store,
-call_graph, impact, review_changes, build_diagnostics, atomic_edit
-(refactor), type_orientation, project_context, unexpected_changes.
-Action facts only: search, file_read, file_lookup, broad_read,
-tool_descriptor_read, semantic_search, explore_subagent,
-subagent_start_context, edit_redundancy; memory_store, review_changes,
-build_diagnostics and project_context are also fact-backed. Catalog text
+Prompt inferences: session_recall, memory_store, call_graph, impact,
+review_changes, build_diagnostics, atomic_edit (refactor),
+type_orientation, project_context, unexpected_changes. Observed action
+facts: search, file_read, file_lookup, broad_read, tool_descriptor_read,
+semantic_search, explore_subagent, subagent_start_context,
+edit_redundancy; memory_store, review_changes, build_diagnostics and
+project_context are also fact-backed. Catalog text
 (message, context, expected tools, skill) moves verbatim from
 `CATEGORY_SPECS` into `tracedecay-policy/src/intent_catalog.rs`;
 `evals/agent_adoption/grade.py` and hint settlement depend on those strings.
 
-Selection: a question yields a candidate iff `p >= threshold` and, when a
-margin is set, `p - second_best >= margin`; relevance = `round(p *
-u16::MAX)`; action facts score `action_fact_score_permille`; a kind both
-judged and fact-backed takes the max. `dedupe_key =
+Selection: undelivered observed facts first, then undelivered prompt
+inferences, each in classification priority order; an intent that is both
+is recorded as an observed fact. Every candidate scores
+`action_fact_score_permille`, and the receipt names its source
+(`action_fact` or `prompt_inference`). `dedupe_key =
 sha256("tracedecay.context-scout.intent-candidate.v1", kind,
 protected_session_id)`: at most one suggestion per kind per session. The
 existing `select_deterministic_context_scout` picks the single highest.
@@ -129,14 +119,10 @@ retired.
 ### Feedback
 
 Delivery receipts for Session-evidence entries write an analytics
-`hint_emitted` row (category = intent key, metadata = route, engine,
-answers, thresholds, window digest, facts), so the existing settlement
-(`hooks/hint_outcomes.rs`, `ingest.rs`) writes `hint_outcome` acted/ignored
-and the dashboard keeps working. An export script rehydrates windows
-through `lcm_load_session` (checking the window digest) into Kev-format
-fine-tuning JSONL. Thresholds are per engine model and are re-swept on the
-frozen set whenever the model changes; decision models rank well but
-overstate the top probability, so thresholds never transfer.
+`hint_emitted` row (category = intent key, metadata = route, decision
+source, facts, prompt inferences, window digest), so the existing
+settlement (`hooks/hint_outcomes.rs`, `ingest.rs`) writes `hint_outcome`
+acted/ignored and the dashboard keeps working.
 
 ## Contracts
 
@@ -147,9 +133,9 @@ overstate the top probability, so thresholds never transfer.
 - `ContextScoutSessionEvidenceV1` (scope, provider, session, protected
   session id, window summary, prompt-excerpt digest, authority, redaction
   = metadata only, intent receipt, claim digest).
-- Additive variants: `ContextScoutModelBackendV1::DecisionEngine`,
-  `ContextScoutRouteV1::DecisionEngine`,
-  `ContextScoutModelOutcomeV1::Backpressured`,
+- `ContextScoutIntentReceiptV1 { facts, prompt_inferences, selected,
+  source }`.
+- Variants: `ContextScoutRouteV1::SessionIntent`,
   `ContextScoutSuppressionV1::PendingSibling`,
   `ContextScoutTriggerV1::IntentBoundary`;
   `ContextScoutEvidenceProjectionV1.session_window: Option<..>`
@@ -176,8 +162,7 @@ overstate the top probability, so thresholds never transfer.
 - **P0** Rework PR #4089: keep the phrase removals and regression cases;
   drop the hook-local engine client. Done (`31372ed4`).
 - **P1** Daemon intent pass behind configuration, no host changes:
-  contracts, settings, policy crate move, decision-engine client,
-  session-window reader, `IntentBoundary` orchestration,
+  contracts, settings, policy crate move, session-window reader, `IntentBoundary` orchestration,
   `run_production_intent_cycle`, owner `PendingSibling` and window arm,
   delivery-time analytics, journey tests.
 - **P2** Hosts and the prompt hot path: `prompt_excerpt`,
@@ -195,15 +180,13 @@ overstate the top probability, so thresholds never transfer.
    required.
 2. Prompt hooks send a transient, bounded excerpt (classified in memory,
    never persisted).
-3. Keyword prompt predicates stay as the no-engine fallback, in the policy
-   crate, until the engine proves reliable.
+3. Keyword prompt predicates are the prompt inference source, in the
+   policy crate; no decision model judges intent.
 4. The escalation re-hint is dropped.
 5. Hermes's in-process nudge is replaced by a daemon lookup.
 
 ## Unverified at design time
 
 Historical-ingestor cadence per provider; Kimi, Droid and Hermes
-acceptance of hook stdout / `additional_context`; `choice` and `score`
-answer key shapes across every server (laya-serve verified from source;
-Kev and Intern-Decision verified in `evals/intent_engine/`); the LCM
-provider label for Cursor versus `hook_key()`.
+acceptance of hook stdout / `additional_context`; the LCM provider label
+for Cursor versus `hook_key()`.

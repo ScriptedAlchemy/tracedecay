@@ -122,9 +122,9 @@ pub enum ContextScoutRouteV1 {
     Deterministic,
     ModelAssisted,
     DeterministicFallback,
-    /// Produced by the session intent pass: decision-engine answers combined
-    /// with deterministic action facts.
-    DecisionEngine,
+    /// Produced by the session intent pass from deterministic action facts
+    /// and prompt inferences over the session's own transcript.
+    SessionIntent,
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
@@ -133,7 +133,6 @@ pub enum ContextScoutModelBackendV1 {
     Disabled,
     CodexAppServer,
     Unsupported,
-    DecisionEngine,
 }
 
 #[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
@@ -150,8 +149,6 @@ pub enum ContextScoutModelOutcomeV1 {
     DeadlineExceeded,
     TokenBudgetExceeded,
     InvalidOutput,
-    /// The engine's concurrency bound was full; the request was not sent.
-    Backpressured,
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
@@ -445,34 +442,14 @@ pub struct ContextScoutSessionWindowV1 {
     pub newest_timestamp: Option<i64>,
 }
 
-/// Identity of the decision engine that answered. The endpoint is retained
-/// only as a digest.
-#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct DecisionEngineIdentityV1 {
-    pub base_url_digest: ManifestDigest,
-    pub model: Option<String>,
-}
-
-/// One engine answer for one configured intent question.
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct ContextScoutIntentAnswerV1 {
-    pub intent: ContextScoutIntentKindV1,
-    pub probability_permille: u16,
-    pub threshold_permille: u16,
-}
-
-/// Why the intent pass selected one intent: the engine outcome and answers,
-/// the observed action facts, and the source carrying the selection. A
-/// PromptFallback source names a prompt interpretation without an answer.
+/// Why the intent pass selected one intent: the deterministic action facts
+/// observed in the window's newest turn, the deterministic interpretations of
+/// its newest prompt, and the source carrying the selection.
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct ContextScoutIntentReceiptV1 {
-    pub engine: Option<DecisionEngineIdentityV1>,
-    pub outcome: ContextScoutModelOutcomeV1,
-    pub answers: Vec<ContextScoutIntentAnswerV1>,
     pub facts: Vec<ContextScoutIntentKindV1>,
+    pub prompt_inferences: Vec<ContextScoutIntentKindV1>,
     pub selected: ContextScoutIntentKindV1,
     pub source: IntentDecisionSourceV1,
 }

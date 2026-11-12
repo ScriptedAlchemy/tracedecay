@@ -38,8 +38,8 @@ pub fn action_facts(input: &ActionFactInputV1<'_>) -> Vec<ContextScoutIntentKind
 }
 
 /// Tool activity and authenticated output, excluding semantic interpretations
-/// of prompt or command text. The intent pass uses this evidence independently
-/// of its model answers; hook-local fallback classification remains separate.
+/// of prompt or command text. The intent pass records this evidence apart from
+/// its prompt inferences; hook-local fallback classification remains separate.
 pub fn observed_action_facts(input: &ActionFactInputV1<'_>) -> Vec<ContextScoutIntentKindV1> {
     classify(input, |rule| rule.observed)
 }

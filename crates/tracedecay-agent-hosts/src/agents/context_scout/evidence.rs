@@ -3,8 +3,8 @@ use tracedecay_contracts::context_scout::ContextScoutEvidenceSourceKindV1;
 use tracedecay_contracts::context_scout::{
     ContextScoutCandidateEvidenceV1, ContextScoutEvidenceAvailabilityV1,
     ContextScoutEvidenceEnvelopeV1, ContextScoutEvidenceSourceReceiptV1, ContextScoutIntentKindV1,
-    ContextScoutIntentReceiptV1, ContextScoutModelOutcomeV1, ContextScoutRedactionReceiptV1,
-    ContextScoutSessionEvidenceV1, ContextScoutSessionWindowV1, IntentDecisionSourceV1,
+    ContextScoutIntentReceiptV1, ContextScoutRedactionReceiptV1, ContextScoutSessionEvidenceV1,
+    ContextScoutSessionWindowV1, IntentDecisionSourceV1,
 };
 use tracedecay_contracts::{
     AuthorityReceipt, CoverageCompleteness, OmissionReason, ResolvedScope,
@@ -21,7 +21,6 @@ use super::{ContextScoutErrorV1, MAX_SCOUT_EVIDENCE};
 const EVIDENCE_CLAIM_DIGEST_DOMAIN: &str = "tracedecay.context-scout.evidence-claim.v1";
 const SESSION_EVIDENCE_CLAIM_DIGEST_DOMAIN: &str =
     "tracedecay.context-scout.session-evidence-claim.v1";
-pub(super) const MAX_DECISION_ENGINE_MODEL_BYTES: usize = 256;
 
 trait ContextScoutRedactionReceiptExt {
     fn validate(&self, authority: &AuthorityReceipt) -> Result<(), ContextScoutErrorV1>;
@@ -340,7 +339,7 @@ pub struct ContextScoutSessionClaimInputV1 {
 }
 
 pub trait ContextScoutSessionEvidenceExt: Sized {
-    /// Canonicalizes (sorted receipts, answers, and facts), digests, and
+    /// Canonicalizes (sorted receipts, facts, and prompt inferences), digests, and
     /// validates one session-evidence claim.
     fn claim(input: ContextScoutSessionClaimInputV1) -> Result<Self, ContextScoutErrorV1>;
     fn validate(&self) -> Result<(), ContextScoutErrorV1>;
@@ -363,8 +362,8 @@ impl ContextScoutSessionEvidenceExt for ContextScoutSessionEvidenceV1 {
             claimed_at,
         } = input;
         canonicalize_redaction(&mut redaction);
-        decision.answers.sort_by_key(|answer| answer.intent);
         decision.facts.sort();
+        decision.prompt_inferences.sort();
         let mut evidence = Self {
             authorized_scope,
             provider_id,
@@ -451,62 +450,26 @@ fn session_claim_digest(
     .map_err(|_| ContextScoutErrorV1::InvalidEvidence)
 }
 
-/// A receipt is canonical (answers and facts strictly ordered by intent),
-/// bounded, and names its selected intent through the source it claims: a
-/// `Model` selection was answered at or above its threshold, an `ActionFact`
-/// selection is an observed fact, and `Both` is both. A `PromptFallback`
-/// selection names an inference with no usable answer for that intent. Engine
-/// answers exist only from an identified engine that succeeded.
+/// A receipt is canonical (facts and prompt inferences each strictly ordered
+/// by intent), bounded, and names its selected intent through the source it
+/// claims: an `ActionFact` selection is an observed fact, and a
+/// `PromptInference` selection is a prompt inference that no observed fact
+/// already carries.
 fn validate_intent_receipt(
     receipt: &ContextScoutIntentReceiptV1,
 ) -> Result<(), ContextScoutErrorV1> {
     let max_intents = ContextScoutIntentKindV1::ALL.len();
-    if receipt.answers.len() > max_intents
-        || receipt.facts.len() > max_intents
-        || receipt
-            .answers
-            .windows(2)
-            .any(|pair| pair[0].intent >= pair[1].intent)
-        || receipt.facts.windows(2).any(|pair| pair[0] >= pair[1])
-        || receipt
-            .answers
-            .iter()
-            .any(|answer| answer.probability_permille > 1_000 || answer.threshold_permille > 1_000)
-    {
+    let canonical = |intents: &[ContextScoutIntentKindV1]| {
+        intents.len() <= max_intents && intents.windows(2).all(|pair| pair[0] < pair[1])
+    };
+    if !canonical(&receipt.facts) || !canonical(&receipt.prompt_inferences) {
         return Err(ContextScoutErrorV1::InvalidEvidence);
     }
-    if let Some(engine) = &receipt.engine {
-        engine
-            .base_url_digest
-            .validate()
-            .map_err(|_| ContextScoutErrorV1::InvalidEvidence)?;
-        if engine.model.as_deref().is_some_and(|model| {
-            model.trim().is_empty()
-                || model.len() > MAX_DECISION_ENGINE_MODEL_BYTES
-                || model.chars().any(char::is_control)
-        }) {
-            return Err(ContextScoutErrorV1::InvalidEvidence);
-        }
-    }
-    let succeeded = receipt.outcome == ContextScoutModelOutcomeV1::Succeeded;
-    if (succeeded || !receipt.answers.is_empty()) && !(succeeded && receipt.engine.is_some()) {
-        return Err(ContextScoutErrorV1::InvalidEvidence);
-    }
-    let model_selected = receipt.answers.iter().any(|answer| {
-        answer.intent == receipt.selected
-            && answer.probability_permille >= answer.threshold_permille
-    });
-    let fact_selected = receipt.facts.contains(&receipt.selected);
+    let observed = receipt.facts.contains(&receipt.selected);
     let consistent = match receipt.source {
-        IntentDecisionSourceV1::Model => model_selected,
-        IntentDecisionSourceV1::ActionFact => fact_selected,
-        IntentDecisionSourceV1::Both => model_selected && fact_selected,
-        IntentDecisionSourceV1::PromptFallback => {
-            !fact_selected
-                && !receipt
-                    .answers
-                    .iter()
-                    .any(|answer| answer.intent == receipt.selected)
+        IntentDecisionSourceV1::ActionFact => observed,
+        IntentDecisionSourceV1::PromptInference => {
+            !observed && receipt.prompt_inferences.contains(&receipt.selected)
         }
     };
     if !consistent {
@@ -649,10 +612,6 @@ pub(super) fn fixture_context_scout_evidence() -> ContextScoutEvidenceEnvelopeV1
 
 #[cfg(test)]
 pub(super) fn fixture_context_scout_session_claim() -> ContextScoutSessionClaimInputV1 {
-    use tracedecay_contracts::context_scout::{
-        ContextScoutIntentAnswerV1, DecisionEngineIdentityV1,
-    };
-
     let code = fixture_context_scout_evidence();
     ContextScoutSessionClaimInputV1 {
         authorized_scope: code.authorized_scope,
@@ -672,29 +631,16 @@ pub(super) fn fixture_context_scout_session_claim() -> ContextScoutSessionClaimI
         redaction: code.redaction,
         availability: ContextScoutEvidenceAvailabilityV1::Complete,
         decision: ContextScoutIntentReceiptV1 {
-            engine: Some(DecisionEngineIdentityV1 {
-                base_url_digest: tracedecay_domain::test_fixtures::digest('8'),
-                model: Some("intent-small".to_owned()),
-            }),
-            outcome: ContextScoutModelOutcomeV1::Succeeded,
-            answers: vec![
-                ContextScoutIntentAnswerV1 {
-                    intent: ContextScoutIntentKindV1::SessionRecall,
-                    probability_permille: 910,
-                    threshold_permille: 600,
-                },
-                ContextScoutIntentAnswerV1 {
-                    intent: ContextScoutIntentKindV1::CallGraph,
-                    probability_permille: 120,
-                    threshold_permille: 600,
-                },
-            ],
             facts: vec![
-                ContextScoutIntentKindV1::Search,
                 ContextScoutIntentKindV1::SessionRecall,
+                ContextScoutIntentKindV1::Search,
+            ],
+            prompt_inferences: vec![
+                ContextScoutIntentKindV1::Impact,
+                ContextScoutIntentKindV1::CallGraph,
             ],
             selected: ContextScoutIntentKindV1::SessionRecall,
-            source: IntentDecisionSourceV1::Both,
+            source: IntentDecisionSourceV1::ActionFact,
         },
         claimed_at: UtcMicros(2),
     }
@@ -708,8 +654,6 @@ pub(super) fn fixture_context_scout_session_evidence() -> ContextScoutSessionEvi
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
-    use tracedecay_contracts::context_scout::ContextScoutIntentAnswerV1;
-
     use super::*;
 
     fn rejected(mutate: impl FnOnce(&mut ContextScoutSessionClaimInputV1)) {
@@ -725,24 +669,20 @@ mod tests {
     fn session_claim_canonicalizes_and_validates() {
         let evidence = fixture_context_scout_session_evidence();
         assert_eq!(
-            evidence
-                .decision
-                .answers
-                .iter()
-                .map(|answer| answer.intent)
-                .collect::<Vec<_>>(),
-            vec![
-                ContextScoutIntentKindV1::CallGraph,
-                ContextScoutIntentKindV1::SessionRecall
-            ],
-            "claim sorts answers by intent"
-        );
-        assert_eq!(
             evidence.decision.facts,
             vec![
                 ContextScoutIntentKindV1::Search,
                 ContextScoutIntentKindV1::SessionRecall
-            ]
+            ],
+            "claim sorts facts by intent"
+        );
+        assert_eq!(
+            evidence.decision.prompt_inferences,
+            vec![
+                ContextScoutIntentKindV1::CallGraph,
+                ContextScoutIntentKindV1::Impact
+            ],
+            "claim sorts prompt inferences by intent"
         );
         ContextScoutSessionEvidenceExt::validate(&evidence).unwrap();
         assert_eq!(
@@ -762,7 +702,7 @@ mod tests {
             Err(ContextScoutErrorV1::InvalidEvidence)
         );
         let mut tampered = evidence.clone();
-        tampered.decision.answers[1].probability_permille = 950;
+        tampered.decision.selected = ContextScoutIntentKindV1::Search;
         assert_eq!(
             ContextScoutSessionEvidenceExt::validate(&tampered),
             Err(ContextScoutErrorV1::InvalidEvidence)
@@ -804,80 +744,48 @@ mod tests {
 
     #[test]
     fn intent_receipt_source_must_name_its_evidence() {
-        // Model selection needs a qualifying answer.
-        rejected(|claim| {
-            claim.decision.selected = ContextScoutIntentKindV1::CallGraph;
-            claim.decision.source = IntentDecisionSourceV1::Model;
-        });
-        // ActionFact selection needs the fact.
+        // ActionFact selection needs the observed fact.
         rejected(|claim| {
             claim.decision.selected = ContextScoutIntentKindV1::Impact;
             claim.decision.source = IntentDecisionSourceV1::ActionFact;
         });
-        // Both needs both.
+        // PromptInference selection needs the inference.
         rejected(|claim| {
+            claim.decision.selected = ContextScoutIntentKindV1::MemoryStore;
+            claim.decision.source = IntentDecisionSourceV1::PromptInference;
+        });
+        // An observed fact is never relabeled as a prompt inference.
+        rejected(|claim| {
+            claim
+                .decision
+                .prompt_inferences
+                .push(ContextScoutIntentKindV1::Search);
             claim.decision.selected = ContextScoutIntentKindV1::Search;
+            claim.decision.source = IntentDecisionSourceV1::PromptInference;
         });
-        // Answers exist only from an identified, successful engine.
-        rejected(|claim| claim.decision.engine = None);
-        rejected(|claim| claim.decision.outcome = ContextScoutModelOutcomeV1::DeadlineExceeded);
-        // Repeated answers or facts are not canonical.
-        rejected(|claim| {
-            claim.decision.answers.push(ContextScoutIntentAnswerV1 {
-                intent: ContextScoutIntentKindV1::CallGraph,
-                probability_permille: 100,
-                threshold_permille: 600,
-            });
-        });
+        // Repeated facts or inferences are not canonical.
         rejected(|claim| {
             claim.decision.facts.push(ContextScoutIntentKindV1::Search);
         });
-        rejected(|claim| claim.decision.answers[0].probability_permille = 1_001);
         rejected(|claim| {
-            claim.decision.engine.as_mut().unwrap().model = Some(" ".to_owned());
-        });
-        // A fact-only pass with a backpressured engine is valid.
-        let mut fact_only = fixture_context_scout_session_claim();
-        fact_only.decision.engine = None;
-        fact_only.decision.outcome = ContextScoutModelOutcomeV1::Backpressured;
-        fact_only.decision.answers.clear();
-        fact_only.decision.selected = ContextScoutIntentKindV1::Search;
-        fact_only.decision.source = IntentDecisionSourceV1::ActionFact;
-        ContextScoutSessionEvidenceV1::claim(fact_only).unwrap();
-    }
-
-    #[test]
-    fn prompt_fallback_receipt_cannot_override_a_model_answer_or_claim_a_fact() {
-        rejected(|claim| {
-            claim.decision.selected = ContextScoutIntentKindV1::CallGraph;
-            claim.decision.source = IntentDecisionSourceV1::PromptFallback;
-        });
-        rejected(|claim| {
-            claim.decision.selected = ContextScoutIntentKindV1::Impact;
-            claim.decision.source = IntentDecisionSourceV1::ActionFact;
-        });
-        rejected(|claim| {
-            claim.decision.selected = ContextScoutIntentKindV1::Search;
-            claim.decision.source = IntentDecisionSourceV1::PromptFallback;
-        });
-        let mut unanswered = fixture_context_scout_session_claim();
-        unanswered.decision.selected = ContextScoutIntentKindV1::Impact;
-        unanswered.decision.source = IntentDecisionSourceV1::PromptFallback;
-        ContextScoutSessionEvidenceV1::claim(unanswered.clone()).unwrap();
-
-        unanswered.decision.engine = None;
-        unanswered.decision.outcome = ContextScoutModelOutcomeV1::Backpressured;
-        unanswered.decision.answers.clear();
-        let fallback = ContextScoutSessionEvidenceV1::claim(unanswered).unwrap();
-        let encoded = serde_json::to_value(&fallback).unwrap();
-        assert_eq!(encoded["decision"]["source"], "prompt_fallback");
-        assert!(
-            !fallback
+            claim
                 .decision
-                .facts
-                .contains(&fallback.decision.selected)
-        );
-        fallback.validate().unwrap();
+                .prompt_inferences
+                .push(ContextScoutIntentKindV1::Impact);
+        });
+
+        let mut inferred = fixture_context_scout_session_claim();
+        inferred.decision.selected = ContextScoutIntentKindV1::Impact;
+        inferred.decision.source = IntentDecisionSourceV1::PromptInference;
+        let inferred = ContextScoutSessionEvidenceV1::claim(inferred).unwrap();
+        let encoded = serde_json::to_value(&inferred).unwrap();
+        assert_eq!(encoded["decision"]["source"], "prompt_inference");
+        inferred.validate().unwrap();
+
+        // A receipt still carrying the removed decision-engine fields is refused.
+        let mut legacy = serde_json::to_value(fixture_context_scout_session_evidence()).unwrap();
+        legacy["decision"]["engine"] = serde_json::Value::Null;
+        assert!(serde_json::from_value::<ContextScoutSessionEvidenceV1>(legacy).is_err());
     }
 
     #[test]

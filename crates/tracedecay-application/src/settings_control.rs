@@ -43,28 +43,22 @@ pub struct ProjectSettingsPatchV1 {
     pub sync: Option<SyncSettingsPatchV1>,
     #[serde(default)]
     pub context_scout: Option<bool>,
-    /// Replaces the Context Scout intent-pass block. Enabling it with no
-    /// questions starts from [`ContextScoutIntentSettingsV1::reference_questions`];
-    /// the engine URL and model are never defaulted.
+    /// Replaces the Context Scout intent-pass block; the whole block is
+    /// validated before it is planned.
     #[serde(default)]
     pub context_scout_intent: Option<ContextScoutIntentSettingsV1>,
 }
 
-/// The intent block a patch writes: an enabled block with no questions takes
-/// the reference question set, then the whole block is validated.
-pub fn normalized_context_scout_intent(
-    mut intent: ContextScoutIntentSettingsV1,
-) -> Result<ContextScoutIntentSettingsV1, SettingsValidationIssueV1> {
-    if intent.enabled && intent.questions.is_empty() {
-        intent.questions = ContextScoutIntentSettingsV1::reference_questions();
-    }
+/// Validates the intent block a patch writes.
+pub fn validate_context_scout_intent(
+    intent: &ContextScoutIntentSettingsV1,
+) -> Result<(), SettingsValidationIssueV1> {
     intent.validate().map_err(|error| {
         issue(
             "context_scout_intent",
             &format!("context_scout_intent is invalid: {error}"),
         )
-    })?;
-    Ok(intent)
+    })
 }
 
 /// The effective Context Scout value in one configuration snapshot.
@@ -147,8 +141,8 @@ pub fn preview_project_settings(
         validate_globs("exclude", globs, &mut issues);
     }
     let context_scout_intent = match patch.context_scout_intent.clone() {
-        Some(intent) => match normalized_context_scout_intent(intent) {
-            Ok(intent) => Some(intent),
+        Some(intent) => match validate_context_scout_intent(&intent) {
+            Ok(()) => Some(intent),
             Err(problem) => {
                 issues.push(problem);
                 None
@@ -427,13 +421,6 @@ mod tests {
     fn intent_block() -> ContextScoutIntentSettingsV1 {
         ContextScoutIntentSettingsV1 {
             enabled: true,
-            engine: tracedecay_domain::configuration::DecisionEngineSettingsV1 {
-                base_url: "http://127.0.0.1:8088".to_owned(),
-                model: Some("intent-small".to_owned()),
-                timeout_ms: 250,
-                max_concurrent: 2,
-                max_state_bytes: 64 * 1024,
-            },
             window: tracedecay_domain::configuration::IntentWindowSettingsV1 {
                 max_user_turns: 3,
                 max_messages: 12,
@@ -441,7 +428,6 @@ mod tests {
                 max_age_secs: 1_800,
                 freshen_budget_ms: 150,
             },
-            questions: Vec::new(),
             action_fact_score_permille: 700,
             ttl_secs: 600,
             min_delivery_gap_secs: 30,
@@ -450,7 +436,7 @@ mod tests {
     }
 
     #[test]
-    fn context_scout_intent_patch_fills_reference_questions_and_validates() {
+    fn context_scout_intent_patch_validates() {
         let project_id = ProjectId::new("project.settings.scout").unwrap();
         let revision = ConfigurationRevisionId::new("configuration.revision.scout").unwrap();
         let current = pinned_defaults(&project_id, &revision);
@@ -478,24 +464,11 @@ mod tests {
             panic!("the patch must write the typed Context Scout value")
         };
         assert_eq!(settings.state, ContextScoutConfigurationStateV1::Active);
-        let intent = settings.intent.as_ref().expect("intent block written");
-        assert_eq!(
-            intent.questions,
-            ContextScoutIntentSettingsV1::reference_questions()
-        );
-        assert_eq!(intent.engine.base_url, "http://127.0.0.1:8088");
+        assert_eq!(settings.intent.as_ref(), Some(&intent_block()));
         settings.validate().expect("planned value stays canonical");
 
-        // A disabled block keeps an empty question set as given.
-        let disabled = normalized_context_scout_intent(ContextScoutIntentSettingsV1 {
-            enabled: false,
-            ..intent_block()
-        })
-        .unwrap();
-        assert!(disabled.questions.is_empty());
-
         let mut invalid = intent_block();
-        invalid.engine.timeout_ms = 5_001;
+        invalid.action_fact_score_permille = 1_001;
         let Err(ProjectSettingsPreviewErrorV1::Validation(issues)) = preview_project_settings(
             &project_id,
             &current,

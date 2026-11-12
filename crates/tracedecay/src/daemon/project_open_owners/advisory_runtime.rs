@@ -48,9 +48,7 @@ use tracedecay_application::lsp_runtime::DaemonLspSessionFactory;
 use tracedecay_application::operation_stream::OperationKind;
 use tracedecay_code_index_runtime::code_index_scheduler::CodeIndexSchedulerRegistryV1;
 use tracedecay_code_index_runtime::project_reads::code_index_disabled_for_scope;
-use tracedecay_contracts::context_scout::{
-    ContextScoutDeliveryOutcomeV1, ContextScoutModelOutcomeV1,
-};
+use tracedecay_contracts::context_scout::ContextScoutDeliveryOutcomeV1;
 use tracedecay_contracts::feedback::observations::{
     FeedbackDeliveryRouteV1, FeedbackOperationV1, FeedbackOutcomeV1, FeedbackSourceEventV1,
 };
@@ -1429,20 +1427,9 @@ fn intent_pass_work_outcome(
         | ContextScoutIntentPassOutcomeV1::Unavailable
         // Enqueue alone is insufficient: the caller must mount its exact claim.
         | ContextScoutIntentPassOutcomeV1::Enqueued { .. } => false,
-        ContextScoutIntentPassOutcomeV1::NoCandidate { model_outcome } => match model_outcome {
-            ContextScoutModelOutcomeV1::Succeeded
-            | ContextScoutModelOutcomeV1::NotRequested
-            | ContextScoutModelOutcomeV1::Disabled
-            | ContextScoutModelOutcomeV1::Denied
-            | ContextScoutModelOutcomeV1::TokenBudgetExceeded => true,
-            ContextScoutModelOutcomeV1::Unavailable
-            | ContextScoutModelOutcomeV1::Disconnected
-            | ContextScoutModelOutcomeV1::Cancelled
-            | ContextScoutModelOutcomeV1::DeadlineExceeded
-            | ContextScoutModelOutcomeV1::Backpressured
-            | ContextScoutModelOutcomeV1::InvalidOutput => false,
-        },
-        ContextScoutIntentPassOutcomeV1::Suppressed { reason, .. } => match reason {
+        // The deterministic evidence was evaluated and named nothing.
+        ContextScoutIntentPassOutcomeV1::NoCandidate => true,
+        ContextScoutIntentPassOutcomeV1::Suppressed { reason } => match reason {
             ContextScoutSuppressionV1::Disabled
             | ContextScoutSuppressionV1::Paused
             | ContextScoutSuppressionV1::QuietOrUnreceptive
@@ -1469,8 +1456,8 @@ fn intent_pass_work_outcome(
 /// retains its durable debt until the pass evaluates or truthfully refuses it.
 /// Stop companions use this same pass without a durable completion callback.
 /// The pass pins the current configuration, mints the project's hook-runtime
-/// authority, reads the session window, asks the installed decision engine,
-/// and mounts the claim authority of the suggestion it enqueued.
+/// authority, reads the session window, derives its deterministic intent
+/// evidence, and mounts the claim authority of the suggestion it enqueued.
 #[expect(
     clippy::too_many_lines,
     reason = "The intent cycle is one pinned, authorized pass over the opened project."
@@ -1506,7 +1493,7 @@ async fn run_production_intent_cycle(
         log_scout_intent_outcome(project_root, &request, "configuration_pin_unavailable");
         return HookOrchestrationWorkOutcomeV1::RetryableFailure;
     };
-    // Disabled or absent: no window read, no engine request, no authority.
+    // Disabled or absent: no window read, no authority.
     if !scout_configuration
         .intent_settings()
         .is_some_and(|settings| settings.enabled)
@@ -1519,8 +1506,6 @@ async fn run_production_intent_cycle(
         );
         return HookOrchestrationWorkOutcomeV1::Completed;
     }
-    // Installing the pinned configuration also builds the decision engine
-    // when its settings digest changed since the last install.
     if install_project_open_context_scout_configuration(
         producer.scout_owner.as_ref(),
         scout_configuration.clone(),
@@ -1592,10 +1577,7 @@ async fn run_production_intent_cycle(
         .configuration()
         .intent_settings()
         .map_or(Duration::ZERO, |settings| {
-            Duration::from_millis(
-                u64::from(settings.window.freshen_budget_ms)
-                    .saturating_add(u64::from(settings.engine.timeout_ms)),
-            )
+            Duration::from_millis(u64::from(settings.window.freshen_budget_ms))
         })
         .saturating_add(INTENT_PASS_STORE_BUDGET);
     let project_key = tracedecay_global_db::RegisteredGlobalDb::canonical_project_key(project_root);
@@ -1612,7 +1594,6 @@ async fn run_production_intent_cycle(
         context: &context,
         lifecycle: &lifecycle,
         code_generation_id,
-        engine: producer.scout_owner.intent_engine().await,
         observed_at,
         deadline: MonotonicDeadline::at(Instant::now() + deadline),
         cancellation: work_cancellation,
@@ -1624,13 +1605,6 @@ async fn run_production_intent_cycle(
         lifecycle: intent_lifecycle,
     } = outcome
     else {
-        if let ContextScoutIntentPassOutcomeV1::NoCandidate { model_outcome } = &outcome {
-            tracing::debug!(
-                event = "context_scout_intent_evaluation",
-                ?model_outcome,
-                "intent evaluation returned no candidate"
-            );
-        }
         log_scout_intent_outcome(project_root, &request, outcome.as_str());
         return settlement;
     };
@@ -1664,8 +1638,7 @@ async fn run_production_intent_cycle(
     }
 }
 
-/// Store reads and writes the intent pass performs around its freshen wait
-/// and engine exchange.
+/// Store reads and writes the intent pass performs around its freshen wait.
 const INTENT_PASS_STORE_BUDGET: Duration = Duration::from_secs(1);
 
 /// The request context one intent pass acts under: the daemon-owned project

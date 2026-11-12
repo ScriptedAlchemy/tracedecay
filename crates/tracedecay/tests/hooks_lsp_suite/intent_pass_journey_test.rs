@@ -1,12 +1,9 @@
-//! The daemon-owned Context Scout intent pass through a spawned daemon, real
-//! Claude Code hook commands, and a loopback decision engine.
+//! The daemon-owned Context Scout intent pass through a spawned daemon and
+//! real Claude Code hook commands.
 
-use std::io::{BufRead, BufReader, Read, Write};
-use std::net::{Ipv4Addr, TcpListener};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
-use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde_json::{Value, json};
@@ -14,8 +11,7 @@ use tracedecay_contracts::context_scout::ContextScoutAddressV1;
 use tracedecay_contracts::retrieval::StatusHookReplayV1;
 use tracedecay_domain::configuration::{
     CONTEXT_SCOUT_SETTINGS_SETTING_KEY, ContextScoutConfigurationStateV1, ContextScoutIntentKindV1,
-    ContextScoutIntentSettingsV1, ContextScoutSettingsV1, DecisionEngineSettingsV1,
-    IntentWindowSettingsV1,
+    ContextScoutIntentSettingsV1, ContextScoutSettingsV1, IntentWindowSettingsV1,
 };
 use tracedecay_policy::intent_catalog::suggestion_text;
 
@@ -24,80 +20,12 @@ use super::common::{
     tool_json_structured_content, tracedecay_bin, tracedecay_command_with_home,
 };
 
+/// The intent the transcript's newest prompt deterministically names.
 const YES_INTENT: ContextScoutIntentKindV1 = ContextScoutIntentKindV1::SessionRecall;
 const PROJECT_ID: &str = "project.intent-pass-journey";
 const ABSENT_SESSION: &str = "00000000-0000-4000-8000-00000000a001";
 const ENABLED_SESSION: &str = "00000000-0000-4000-8000-00000000b001";
 const WAIT: Duration = Duration::from_secs(180);
-
-/// A loopback `/v1/systemone` server answering yes for [`YES_INTENT`] and no
-/// for every other question, counting the requests it answered.
-struct FakeDecisionEngine {
-    url: String,
-    requests: Arc<AtomicUsize>,
-}
-
-impl FakeDecisionEngine {
-    fn start() -> Self {
-        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
-        let url = format!("http://{}", listener.local_addr().unwrap());
-        let requests = Arc::new(AtomicUsize::new(0));
-        let seen = Arc::clone(&requests);
-        std::thread::spawn(move || {
-            for stream in listener.incoming() {
-                let Ok(stream) = stream else { return };
-                answer(stream, &seen);
-            }
-        });
-        Self { url, requests }
-    }
-
-    fn requests(&self) -> usize {
-        self.requests.load(Ordering::SeqCst)
-    }
-}
-
-fn answer(mut stream: std::net::TcpStream, seen: &AtomicUsize) {
-    let mut reader = BufReader::new(stream.try_clone().unwrap());
-    let mut request_line = String::new();
-    let _ = reader.read_line(&mut request_line);
-    let mut content_length = 0;
-    loop {
-        let mut line = String::new();
-        if reader.read_line(&mut line).unwrap_or(0) == 0 || line == "\r\n" {
-            break;
-        }
-        if let Some(value) = line.to_ascii_lowercase().strip_prefix("content-length:") {
-            content_length = value.trim().parse().unwrap_or(0);
-        }
-    }
-    let mut body = vec![0; content_length];
-    let _ = reader.read_exact(&mut body);
-    let request: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
-    let answers = request["questions"]
-        .as_object()
-        .into_iter()
-        .flat_map(|questions| questions.keys())
-        .map(|key| {
-            let probability = if key == YES_INTENT.as_key() {
-                0.95
-            } else {
-                0.02
-            };
-            (key.clone(), json!({"type": "noul", "noul": probability}))
-        })
-        .collect::<serde_json::Map<_, _>>();
-    if request_line.starts_with("POST /v1/systemone ") {
-        seen.fetch_add(1, Ordering::SeqCst);
-    }
-    let response = json!({"model": "intent-journey", "answers": answers}).to_string();
-    let _ = write!(
-        stream,
-        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\
-         Content-Length: {}\r\nConnection: close\r\n\r\n{response}",
-        response.len()
-    );
-}
 
 /// RFC 3339 UTC with millisecond precision, the timestamp Claude Code writes.
 fn rfc3339(at: SystemTime) -> String {
@@ -275,18 +203,11 @@ fn stop(project: &Path, session: &str, transcript: &Path) -> Value {
     })
 }
 
-fn enabled_settings(engine_url: &str) -> ContextScoutSettingsV1 {
+fn enabled_settings() -> ContextScoutSettingsV1 {
     ContextScoutSettingsV1 {
         state: ContextScoutConfigurationStateV1::Active,
         intent: Some(ContextScoutIntentSettingsV1 {
             enabled: true,
-            engine: DecisionEngineSettingsV1 {
-                base_url: engine_url.to_owned(),
-                model: Some("intent-journey".to_owned()),
-                timeout_ms: 2_000,
-                max_concurrent: 2,
-                max_state_bytes: 65_536,
-            },
             window: IntentWindowSettingsV1 {
                 max_user_turns: 3,
                 max_messages: 12,
@@ -294,7 +215,6 @@ fn enabled_settings(engine_url: &str) -> ContextScoutSettingsV1 {
                 max_age_secs: 3_600,
                 freshen_budget_ms: 200,
             },
-            questions: ContextScoutIntentSettingsV1::reference_questions(),
             action_fact_score_permille: 700,
             ttl_secs: 600,
             min_delivery_gap_secs: 0,
@@ -432,7 +352,6 @@ fn claude_stop_delivers_the_intent_suggestion_the_daemon_judged_at_the_tool_boun
     git_fixture(&project);
     let absent_transcript = write_claude_transcript(home, &project, ABSENT_SESSION);
     let enabled_transcript = write_claude_transcript(home, &project, ENABLED_SESSION);
-    let engine = FakeDecisionEngine::start();
     let log = home.join("daemon.log");
     let _daemon = spawn_tracedecay_daemon_logged(home, &log, |_command| {});
     assert!(
@@ -493,11 +412,6 @@ fn claude_stop_delivers_the_intent_suggestion_the_daemon_judged_at_the_tool_boun
         "without an intent block every intent pass ends disabled: {:?}",
         intent_outcomes(&log, ABSENT_SESSION)
     );
-    assert_eq!(
-        engine.requests(),
-        0,
-        "without an intent block the decision engine is never asked"
-    );
     assert!(
         !absent_stop.contains(&suggestion_text(YES_INTENT)),
         "without an intent block the stop boundary delivers no intent suggestion: {absent_stop}"
@@ -526,7 +440,7 @@ fn claude_stop_delivers_the_intent_suggestion_the_daemon_judged_at_the_tool_boun
         &json!({
             "layer": {"kind": "project", "project_id": PROJECT_ID},
             "key": CONTEXT_SCOUT_SETTINGS_SETTING_KEY,
-            "value": {"kind": "context_scout_settings", "value": enabled_settings(&engine.url)},
+            "value": {"kind": "context_scout_settings", "value": enabled_settings()},
             "expected_revision": revision,
             "idempotency_key": "configuration.idempotency.intent-pass-journey",
         }),
@@ -553,11 +467,6 @@ fn claude_stop_delivers_the_intent_suggestion_the_daemon_judged_at_the_tool_boun
         ["mounted"],
         "the tool boundary's intent pass enqueues one suggestion and mounts its claim: {}",
         std::fs::read_to_string(&log).unwrap_or_default()
-    );
-    assert_eq!(
-        engine.requests(),
-        1,
-        "the tool boundary asks the decision engine exactly once"
     );
 
     let stop_event = stop(&project, ENABLED_SESSION, &enabled_transcript);
@@ -666,15 +575,15 @@ fn claude_stop_delivers_the_intent_suggestion_the_daemon_judged_at_the_tool_boun
         1,
         "the session receives the suggestion exactly once"
     );
-    let decisions_before_duplicate = engine.requests();
+    let passes_before_duplicate = intent_outcomes(&log, ENABLED_SESSION).len();
     let duplicate = run_hook(home, &project, "hook-stop", &stop_event);
     assert!(
         !delivers(&hook_context(&duplicate)),
         "a completed retry delivers no second suggestion: {duplicate:?}"
     );
     assert_eq!(
-        engine.requests(),
-        decisions_before_duplicate,
+        intent_outcomes(&log, ENABLED_SESSION).len(),
+        passes_before_duplicate,
         "completed retries do not rerun the intent producer: {duplicate:?}\ndaemon: {}\nrecent: {}",
         std::fs::read_to_string(&log).unwrap_or_default(),
         delivery_evidence(home, &project, &stop_contexts),

@@ -31,7 +31,6 @@ use tracedecay_runtime_core::cancellation::{CancellationToken, MonotonicDeadline
 use tracedecay_tokenizer::o200k_base;
 
 pub mod address_registry;
-pub mod decision_engine;
 pub mod intent_pass;
 pub mod model;
 pub mod owner;
@@ -1282,20 +1281,18 @@ impl ContextScoutDurableQueueEntryExt for ContextScoutDurableQueueEntryV1 {
                 | ContextScoutModelOutcomeV1::InvalidOutput,
                 None,
             ) => {}
-            // The intent pass records its engine outcome in the session
-            // evidence's decision receipt, never in a Codex model receipt.
-            (ContextScoutRouteV1::DecisionEngine, outcome, None)
-                if self
-                    .envelope
-                    .candidate
-                    .evidence
-                    .as_session()
-                    .is_some_and(|evidence| evidence.decision.outcome == outcome) => {}
+            // The intent pass asks no model; its receipt is the session
+            // evidence's deterministic decision.
+            (
+                ContextScoutRouteV1::SessionIntent,
+                ContextScoutModelOutcomeV1::NotRequested,
+                None,
+            ) => {}
             _ => return Err(ContextScoutErrorV1::InvalidCandidate),
         }
         // Session evidence is produced only by the intent pass.
         if self.envelope.candidate.evidence.as_session().is_some()
-            != (self.route == ContextScoutRouteV1::DecisionEngine)
+            != (self.route == ContextScoutRouteV1::SessionIntent)
         {
             return Err(ContextScoutErrorV1::InvalidCandidate);
         }
@@ -1599,14 +1596,13 @@ where
         mode: ContextScoutRuntimeModeV1,
         model_execution: ContextScoutModelExecutionV1,
     ) -> Result<ContextScoutRuntimeOutcomeV1, ContextScoutErrorV1> {
-        let selection = if let Some(model_outcome) = intent_pass_model_outcome(input)? {
-            // Intent-pass candidates were judged by the decision engine when
-            // they were built; selection among them is deterministic, and the
-            // route records the engine outcome their receipts carry.
+        let selection = if is_intent_pass_selection(input)? {
+            // Intent-pass candidates carry deterministic session evidence;
+            // selection among them is deterministic and asks no model.
             ContextScoutSelectionV1 {
-                route: ContextScoutRouteV1::DecisionEngine,
+                route: ContextScoutRouteV1::SessionIntent,
                 decision: select_deterministic_context_scout(input, limits)?,
-                model_outcome,
+                model_outcome: ContextScoutModelOutcomeV1::NotRequested,
                 model_receipt: None,
             }
         } else {
@@ -1624,7 +1620,7 @@ where
             }
         };
         self.last_route = Some(selection.route);
-        if selection.route != ContextScoutRouteV1::DecisionEngine {
+        if selection.route != ContextScoutRouteV1::SessionIntent {
             self.last_model_outcome = Some(selection.model_outcome);
             self.last_model_receipt.clone_from(&selection.model_receipt);
         }
@@ -1725,19 +1721,19 @@ where
 /// The engine outcome of an intent-pass selection, `None` for code-evidence
 /// selections. One intent pass offers session evidence only, all of it from
 /// one engine exchange; mixing evidence kinds is a malformed input.
-fn intent_pass_model_outcome(
+/// Whether every candidate carries intent-pass session evidence. A mix of
+/// session and code evidence is refused; an empty input is not intent work.
+fn is_intent_pass_selection(
     input: &ContextScoutSelectionInputV1,
-) -> Result<Option<ContextScoutModelOutcomeV1>, ContextScoutErrorV1> {
-    let mut outcomes = input.candidates.iter().map(|candidate| {
-        candidate
-            .evidence
-            .as_session()
-            .map(|evidence| evidence.decision.outcome)
-    });
-    let Some(first) = outcomes.next() else {
-        return Ok(None);
+) -> Result<bool, ContextScoutErrorV1> {
+    let mut sessions = input
+        .candidates
+        .iter()
+        .map(|candidate| candidate.evidence.as_session().is_some());
+    let Some(first) = sessions.next() else {
+        return Ok(false);
     };
-    if outcomes.any(|outcome| outcome != first) {
+    if sessions.any(|session| session != first) {
         return Err(ContextScoutErrorV1::InvalidCandidate);
     }
     Ok(first)

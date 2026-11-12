@@ -1,33 +1,26 @@
 //! The Context Scout session intent pass.
 //!
 //! One admitted prompt, tool, or stop boundary reads a bounded window of the
-//! session's own ingested transcript ([`super::session_window`]), asks the
-//! configured decision engine one batched set of yes/no intent questions
-//! ([`super::decision_engine`]), derives deterministic action facts from the
-//! window's newest turn, and turns the policy decision into at most one
-//! session-evidence suggestion at the session's intent-scoped address. The
-//! window body is transient: only its digest and store-id bounds enter the
-//! durable claim, and the engine receives it once.
+//! session's own ingested transcript ([`super::session_window`]), derives
+//! deterministic action facts and prompt inferences from the window's newest
+//! turn, and turns the policy decision into at most one session-evidence
+//! suggestion at the session's intent-scoped address. The window body is
+//! transient: only its digest and store-id bounds enter the durable claim.
 //!
-//! Every early return is a typed outcome. A model never chooses receptivity:
-//! quiet mode, spacing, duplicates, and the one-pending-per-session rule are
-//! decided here and in the owner, after the engine answered.
+//! Every early return is a typed outcome. Quiet mode, spacing, duplicates, and
+//! the one-pending-per-session rule are decided here and in the owner.
 
-use std::collections::BTreeSet;
-use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use tracedecay_contracts::context_scout::{
     ContextScoutAddressV1, ContextScoutCandidateV1, ContextScoutCategoryV1,
     ContextScoutDeliveryReceiptV1, ContextScoutDeliveryWindowV1, ContextScoutDurableQueueEntryV1,
-    ContextScoutEvidenceAvailabilityV1, ContextScoutIntentAnswerV1, ContextScoutIntentReceiptV1,
-    ContextScoutModelOutcomeV1, ContextScoutRedactionReceiptV1, ContextScoutSessionEvidenceV1,
-    ContextScoutSessionWindowV1, DecisionEngineIdentityV1 as ReceiptEngineIdentityV1,
+    ContextScoutEvidenceAvailabilityV1, ContextScoutIntentReceiptV1,
+    ContextScoutRedactionReceiptV1, ContextScoutRouteV1, ContextScoutSessionEvidenceV1,
+    ContextScoutSessionWindowV1,
 };
 use tracedecay_contracts::{AuthorityReceipt, PolicyDecisionRef, RequestContext};
-use tracedecay_domain::configuration::{
-    ContextScoutIntentKindV1, ContextScoutIntentSettingsV1, INTENT_MAX_PERMILLE,
-};
+use tracedecay_domain::configuration::{ContextScoutIntentKindV1, ContextScoutIntentSettingsV1};
 use tracedecay_domain::{
     CodeGenerationId, ComponentVersion, ManifestDigest, NativeHostIdentityV1, ProviderId,
     UtcMicros, canonical_sha256,
@@ -38,7 +31,7 @@ use tracedecay_policy::intent_action_facts::{
 };
 use tracedecay_policy::intent_catalog::suggestion_text;
 use tracedecay_policy::intent_decision::{
-    IntentCandidateV1, IntentDecisionInputV1, IntentDecisionV1, decide_intents,
+    IntentCandidateV1, IntentDecisionInputV1, decide_intents,
 };
 use tracedecay_runtime_core::cancellation::{CancellationToken, MonotonicDeadline};
 use tracedecay_runtime_core::native_runtime;
@@ -48,16 +41,10 @@ use super::address_registry::{
     AdmittedContextScoutHookV1, ContextScoutAddressBindOutcomeV1, ContextScoutAuthorityPinV1,
     ContextScoutLifecycleAddressV1, ProjectContextScoutAddressRegistryV1,
 };
-use super::decision_engine::{
-    DecisionAnswerV1, DecisionEngineOutcomeV1, DecisionEnginePortV1, DecisionQuestionKindV1,
-    DecisionQuestionV1, DecisionRequestV1,
-};
-use super::evidence::MAX_DECISION_ENGINE_MODEL_BYTES;
 use super::owner::{ContextScoutIntentSessionStateV1, ProjectContextScoutOwnerV1};
 use super::session_window::{
     SessionWindowFreshnessV1, SessionWindowLimitsV1, SessionWindowOutcomeV1,
     SessionWindowRequestV1, SessionWindowRoleV1, SessionWindowV1, read_session_window,
-    render_window_state,
 };
 use super::{
     ContextScoutDeliverySelectionInputV1, ContextScoutDurableStoreOutcomeV1,
@@ -102,9 +89,6 @@ pub struct ContextScoutIntentPassV1<'a> {
     /// The project's current ready code generation. Session evidence is
     /// pinned to it, so a project without one refuses the pass.
     pub code_generation_id: Option<CodeGenerationId>,
-    /// The engine of the installed configuration; `None` when the configured
-    /// engine was refused.
-    pub engine: Option<Arc<dyn DecisionEnginePortV1>>,
     pub observed_at: UtcMicros,
     pub deadline: MonotonicDeadline,
     pub cancellation: CancellationToken,
@@ -125,13 +109,11 @@ pub enum ContextScoutIntentPassOutcomeV1 {
     WindowEmpty,
     WindowStale,
     Cancelled,
-    /// The engine and action facts named nothing to suggest.
-    NoCandidate {
-        model_outcome: ContextScoutModelOutcomeV1,
-    },
+    /// Neither an action fact nor a prompt inference named anything to
+    /// suggest.
+    NoCandidate,
     Suppressed {
         reason: ContextScoutSuppressionV1,
-        model_outcome: ContextScoutModelOutcomeV1,
     },
     Enqueued {
         entry: Box<ContextScoutDurableQueueEntryV1>,
@@ -153,7 +135,7 @@ impl ContextScoutIntentPassOutcomeV1 {
             Self::WindowEmpty => "window_empty",
             Self::WindowStale => "window_stale",
             Self::Cancelled => "cancelled",
-            Self::NoCandidate { .. } => "no_candidate",
+            Self::NoCandidate => "no_candidate",
             Self::Suppressed { .. } => "suppressed",
             Self::Enqueued { .. } => "enqueued",
             Self::Unavailable => "unavailable",
@@ -203,11 +185,9 @@ pub fn intent_hint_emitted_event(
     let metadata = serde_json::json!({
         "source": "context_scout_intent_pass",
         "route": entry.route,
-        "engine": decision.engine,
-        "model_outcome": decision.outcome,
         "decision_source": decision.source,
-        "answers": decision.answers,
         "facts": decision.facts,
+        "prompt_inferences": decision.prompt_inferences,
         "window_digest": evidence.window.window_digest,
         "window_message_count": evidence.window.message_count,
         "relevance_score": entry.envelope.candidate.relevance_score,
@@ -323,7 +303,7 @@ async fn reconcile_intent_commit(
     }
 }
 
-/// Runs one intent pass. The engine is asked at most once.
+/// Runs one intent pass.
 #[tracing::instrument(
     name = "hosts.agent.context_scout.intent_pass",
     level = "trace",
@@ -348,7 +328,6 @@ pub async fn run_context_scout_intent_pass(
                 .await;
             return ContextScoutIntentPassOutcomeV1::Suppressed {
                 reason: ContextScoutSuppressionV1::Paused,
-                model_outcome: ContextScoutModelOutcomeV1::NotRequested,
             };
         }
         ContextScoutServiceStateV1::Active => {}
@@ -419,37 +398,19 @@ pub async fn run_context_scout_intent_pass(
         return ContextScoutIntentPassOutcomeV1::Cancelled;
     }
 
-    let engine_identity = pass.engine.as_ref().map(|engine| engine.identity());
-    // Keep actual tool activity separate from prompt interpretation. Only an
-    // unanswered intent may use the latter as its deterministic fallback.
+    // Recorded tool activity and prompt interpretation stay apart in the
+    // receipt so a selection always names the evidence that carried it.
     let (facts, prompt_inferences) = window_intent_signals(&window);
-    let engine_outcome = match ask_engine(&pass, settings, &window).await {
-        EngineCallV1::Cancelled => return ContextScoutIntentPassOutcomeV1::Cancelled,
-        EngineCallV1::Finished(outcome) => outcome,
-    };
-    let model_outcome = engine_outcome.model_outcome();
-    let answers = engine_outcome.answers();
-
     let decision = decide_intents(&IntentDecisionInputV1 {
-        answers: answers.as_deref(),
         facts: &facts,
         prompt_inferences: &prompt_inferences,
-        questions: &settings.questions,
         action_fact_score_permille: settings.action_fact_score_permille,
         delivered: &session.delivered_intents,
     });
-    let selected = match decision {
-        IntentDecisionV1::Candidates(candidates) if !candidates.is_empty() => candidates[0],
-        IntentDecisionV1::Candidates(_)
-        | IntentDecisionV1::BelowThreshold { .. }
-        | IntentDecisionV1::NoSignal => {
-            let duplicate = delivered_duplicate(
-                answers.as_deref(),
-                &facts,
-                &prompt_inferences,
-                settings,
-                &session,
-            );
+    let selected = match decision.first() {
+        Some(selected) => *selected,
+        None => {
+            let duplicate = delivered_duplicate(&facts, &prompt_inferences, settings, &session);
             let suppression = duplicate.map(|_| ContextScoutSuppressionV1::Duplicate);
             pass.owner
                 .record_intent_outcome(
@@ -460,10 +421,9 @@ pub async fn run_context_scout_intent_pass(
                 record_withheld(&pass, "suppressed_duplicate", intent, &provider_id, None).await;
                 return ContextScoutIntentPassOutcomeV1::Suppressed {
                     reason: ContextScoutSuppressionV1::Duplicate,
-                    model_outcome,
                 };
             }
-            return ContextScoutIntentPassOutcomeV1::NoCandidate { model_outcome };
+            return ContextScoutIntentPassOutcomeV1::NoCandidate;
         }
     };
     // A pending suggestion for this intent is owed whether or not this
@@ -483,7 +443,6 @@ pub async fn run_context_scout_intent_pass(
         .await;
         return ContextScoutIntentPassOutcomeV1::Suppressed {
             reason: ContextScoutSuppressionV1::Duplicate,
-            model_outcome,
         };
     }
 
@@ -520,7 +479,6 @@ pub async fn run_context_scout_intent_pass(
         .await;
         return ContextScoutIntentPassOutcomeV1::Suppressed {
             reason: ContextScoutSuppressionV1::QuietOrUnreceptive,
-            model_outcome,
         };
     }
 
@@ -531,9 +489,8 @@ pub async fn run_context_scout_intent_pass(
             provider_id: provider_id.clone(),
             window: &window,
             code_generation_id,
-            engine_identity: engine_identity.as_ref(),
-            engine_outcome: &engine_outcome,
             facts: &facts,
+            prompt_inferences: &prompt_inferences,
             selected,
         },
     ) else {
@@ -595,10 +552,7 @@ pub async fn run_context_scout_intent_pass(
                 )
                 .await;
             }
-            ContextScoutIntentPassOutcomeV1::Suppressed {
-                reason,
-                model_outcome,
-            }
+            ContextScoutIntentPassOutcomeV1::Suppressed { reason }
         }
         ContextScoutRuntimeOutcomeV1::Enqueued { .. }
         | ContextScoutRuntimeOutcomeV1::Unavailable => ContextScoutIntentPassOutcomeV1::Unavailable,
@@ -651,114 +605,8 @@ async fn read_boundary_window(
     }
 }
 
-enum EngineCallV1 {
-    Finished(EngineOutcomeV1),
-    Cancelled,
-}
-
-/// What the pass knows about the engine exchange.
-enum EngineOutcomeV1 {
-    /// No question is configured, so the engine was not asked.
-    NotRequested,
-    /// The configured engine was refused when the configuration installed.
-    Unavailable,
-    /// The pass deadline elapsed before the engine answered.
-    DeadlineExceeded,
-    Asked(DecisionEngineOutcomeV1),
-}
-
-impl EngineOutcomeV1 {
-    fn model_outcome(&self) -> ContextScoutModelOutcomeV1 {
-        match self {
-            Self::NotRequested => ContextScoutModelOutcomeV1::NotRequested,
-            Self::Unavailable => ContextScoutModelOutcomeV1::Unavailable,
-            Self::DeadlineExceeded => ContextScoutModelOutcomeV1::DeadlineExceeded,
-            Self::Asked(outcome) => match outcome {
-                DecisionEngineOutcomeV1::Answered(_) => ContextScoutModelOutcomeV1::Succeeded,
-                DecisionEngineOutcomeV1::Unreachable => ContextScoutModelOutcomeV1::Unavailable,
-                DecisionEngineOutcomeV1::TimedOut => ContextScoutModelOutcomeV1::DeadlineExceeded,
-                DecisionEngineOutcomeV1::Refused { .. } => ContextScoutModelOutcomeV1::Denied,
-                DecisionEngineOutcomeV1::Malformed => ContextScoutModelOutcomeV1::InvalidOutput,
-                DecisionEngineOutcomeV1::Backpressured => ContextScoutModelOutcomeV1::Backpressured,
-            },
-        }
-    }
-
-    /// Yes/no probabilities per intent, `None` unless the engine answered.
-    /// Keys that name no intent are not answers.
-    fn answers(&self) -> Option<Vec<(ContextScoutIntentKindV1, f64)>> {
-        let Self::Asked(DecisionEngineOutcomeV1::Answered(answers)) = self else {
-            return None;
-        };
-        Some(
-            answers
-                .answers
-                .iter()
-                .filter_map(|(key, answer)| match answer {
-                    DecisionAnswerV1::Noul(probability) => {
-                        Some((ContextScoutIntentKindV1::from_key(key)?, *probability))
-                    }
-                    DecisionAnswerV1::Choice { .. } | DecisionAnswerV1::Score(_) => None,
-                })
-                .collect(),
-        )
-    }
-
-    fn reported_model(&self) -> Option<&str> {
-        match self {
-            Self::Asked(DecisionEngineOutcomeV1::Answered(answers)) => answers.model.as_deref(),
-            _ => None,
-        }
-    }
-}
-
-/// Asks every configured question in one exchange, bounded by the pass
-/// deadline and cancellation. The engine's own timeout bounds the request.
-async fn ask_engine(
-    pass: &ContextScoutIntentPassV1<'_>,
-    settings: &ContextScoutIntentSettingsV1,
-    window: &SessionWindowV1,
-) -> EngineCallV1 {
-    if settings.questions.is_empty() {
-        return EngineCallV1::Finished(EngineOutcomeV1::NotRequested);
-    }
-    let Some(engine) = pass.engine.clone() else {
-        return EngineCallV1::Finished(EngineOutcomeV1::Unavailable);
-    };
-    let request = DecisionRequestV1 {
-        state: render_window_state(
-            window,
-            None,
-            usize::try_from(settings.engine.max_state_bytes).unwrap_or(usize::MAX),
-        ),
-        questions: settings
-            .questions
-            .iter()
-            .map(|question| DecisionQuestionV1 {
-                key: question.intent.as_key().to_owned(),
-                kind: DecisionQuestionKindV1::Noul,
-                instructions: question.instructions.clone(),
-            })
-            .collect(),
-    };
-    let asked = native_runtime::spawn_blocking(move || engine.ask_blocking(&request));
-    tokio::select! {
-        biased;
-        () = pass.cancellation.cancelled() => EngineCallV1::Cancelled,
-        answered = native_runtime::timeout_at(pass.deadline.instant(), asked) => {
-            EngineCallV1::Finished(match answered {
-                Ok(Ok(outcome)) => EngineOutcomeV1::Asked(outcome),
-                // A lost blocking worker reads as an unreachable engine.
-                Ok(Err(_)) => EngineOutcomeV1::Asked(DecisionEngineOutcomeV1::Unreachable),
-                Err(_) => EngineOutcomeV1::DeadlineExceeded,
-            })
-        }
-    }
-}
-
-/// Signals of the boundary's turn. Prompt interpretation is kept apart from
-/// recorded tool activity so a negative model answer can suppress inference
-/// without discarding an observed action. Earlier turns were judged already.
+/// Signals of the boundary's turn: recorded tool activity, and separately the
+/// interpretation of its prompt. Earlier turns were judged already.
 fn window_intent_signals(
     window: &SessionWindowV1,
 ) -> (Vec<ContextScoutIntentKindV1>, Vec<ContextScoutIntentKindV1>) {
@@ -829,7 +677,6 @@ fn tool_call_facts(
 /// The intent an already-delivered suggestion withheld: the decision with
 /// the session's deliveries ignored would have named it first.
 fn delivered_duplicate(
-    answers: Option<&[(ContextScoutIntentKindV1, f64)]>,
     facts: &[ContextScoutIntentKindV1],
     prompt_inferences: &[ContextScoutIntentKindV1],
     settings: &ContextScoutIntentSettingsV1,
@@ -838,29 +685,23 @@ fn delivered_duplicate(
     if session.delivered_intents.is_empty() {
         return None;
     }
-    match decide_intents(&IntentDecisionInputV1 {
-        answers,
+    decide_intents(&IntentDecisionInputV1 {
         facts,
         prompt_inferences,
-        questions: &settings.questions,
         action_fact_score_permille: settings.action_fact_score_permille,
-        delivered: &BTreeSet::new(),
-    }) {
-        IntentDecisionV1::Candidates(candidates) => candidates
-            .first()
-            .map(|candidate| candidate.intent)
-            .filter(|intent| session.delivered_intents.contains(intent)),
-        IntentDecisionV1::BelowThreshold { .. } | IntentDecisionV1::NoSignal => None,
-    }
+        delivered: &std::collections::BTreeSet::new(),
+    })
+    .first()
+    .map(|candidate| candidate.intent)
+    .filter(|intent| session.delivered_intents.contains(intent))
 }
 
 struct IntentEvidenceV1<'a> {
     provider_id: ProviderId,
     window: &'a SessionWindowV1,
     code_generation_id: CodeGenerationId,
-    engine_identity: Option<&'a super::decision_engine::DecisionEngineIdentityV1>,
-    engine_outcome: &'a EngineOutcomeV1,
     facts: &'a [ContextScoutIntentKindV1],
+    prompt_inferences: &'a [ContextScoutIntentKindV1],
     selected: IntentCandidateV1,
 }
 
@@ -874,44 +715,10 @@ fn intent_candidate(
         provider_id,
         window,
         code_generation_id,
-        engine_identity,
-        engine_outcome,
         facts,
+        prompt_inferences,
         selected,
     } = evidence;
-    let model_outcome = engine_outcome.model_outcome();
-    let answers = if model_outcome == ContextScoutModelOutcomeV1::Succeeded {
-        let answered = engine_outcome.answers().unwrap_or_default();
-        settings
-            .questions
-            .iter()
-            .filter_map(|question| {
-                let probability = answered
-                    .iter()
-                    .find(|(intent, _)| *intent == question.intent)
-                    .map(|(_, probability)| *probability)
-                    .filter(|probability| probability.is_finite())?;
-                Some(ContextScoutIntentAnswerV1 {
-                    intent: question.intent,
-                    probability_permille: probability_permille(probability),
-                    threshold_permille: question.threshold_permille,
-                })
-            })
-            .collect()
-    } else {
-        Vec::new()
-    };
-    let engine = match engine_identity {
-        Some(identity) => Some(ReceiptEngineIdentityV1 {
-            base_url_digest: ManifestDigest::from_sha256_bytes(&identity.base_url_digest).ok()?,
-            model: engine_outcome
-                .reported_model()
-                .filter(|model| receipt_model_is_valid(model))
-                .map(str::to_owned)
-                .or_else(|| identity.model.clone()),
-        }),
-        None => None,
-    };
     let policy = PolicyDecisionRef::new(
         INTENT_POLICY_ID,
         pass.context.grant().revision,
@@ -941,10 +748,8 @@ fn intent_candidate(
         redaction,
         availability: ContextScoutEvidenceAvailabilityV1::Complete,
         decision: ContextScoutIntentReceiptV1 {
-            engine,
-            outcome: model_outcome,
-            answers,
             facts: facts.to_vec(),
+            prompt_inferences: prompt_inferences.to_vec(),
             selected: selected.intent,
             source: selected.source,
         },
@@ -1022,7 +827,7 @@ async fn record_withheld(
         metadata_json: Some(
             serde_json::json!({
                 "source": "context_scout_intent_pass",
-                "route": "decision_engine",
+                "route": ContextScoutRouteV1::SessionIntent,
             })
             .to_string(),
         ),
@@ -1030,17 +835,6 @@ async fn record_withheld(
     if let Err(error) = analytics.analytics.append_analytics_events(&[event]).await {
         tracing::debug!(%error, event_kind, "Context Scout intent analytics not recorded");
     }
-}
-
-fn receipt_model_is_valid(model: &str) -> bool {
-    !model.trim().is_empty()
-        && model.len() <= MAX_DECISION_ENGINE_MODEL_BYTES
-        && !model.chars().any(char::is_control)
-}
-
-#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-fn probability_permille(probability: f64) -> u16 {
-    (probability.clamp(0.0, 1.0) * f64::from(INTENT_MAX_PERMILLE)).round() as u16
 }
 
 fn digest_bytes(
@@ -1057,11 +851,10 @@ mod tool_signal_tests {
     use std::collections::BTreeSet;
 
     use tracedecay_domain::configuration::{
-        ContextScoutIntentKindV1 as Kind, IntentDecisionSourceV1, IntentQuestionSettingsV1,
+        ContextScoutIntentKindV1 as Kind, IntentDecisionSourceV1,
     };
     use tracedecay_policy::intent_decision::{
-        IntentBestAnswerV1, IntentCandidateV1, IntentDecisionInputV1, IntentDecisionV1,
-        decide_intents,
+        IntentCandidateV1, IntentDecisionInputV1, decide_intents,
     };
 
     use super::super::session_window::{
@@ -1118,29 +911,16 @@ mod tool_signal_tests {
         assert_eq!(facts, vec![Kind::SubagentStartContext]);
         assert!(!inferences.contains(&Kind::SubagentStartContext));
 
-        // An actual handoff is action evidence even when a semantic question
-        // received a usable negative answer.
-        let questions = [IntentQuestionSettingsV1 {
-            intent: Kind::SubagentStartContext,
-            instructions: "Was a handoff requested?".to_owned(),
-            threshold_permille: 600,
-            margin_permille: None,
-        }];
+        // An actual handoff is action evidence.
         let decision = decide_intents(&IntentDecisionInputV1 {
-            answers: Some(&[(Kind::SubagentStartContext, 0.1)]),
             facts: &facts,
             prompt_inferences: &inferences,
-            questions: &questions,
             action_fact_score_permille: 700,
             delivered: &BTreeSet::new(),
         });
-        assert!(matches!(
-            decision,
-            IntentDecisionV1::Candidates(ref candidates)
-                if candidates.len() == 1
-                    && candidates[0].intent == Kind::SubagentStartContext
-                    && candidates[0].source == IntentDecisionSourceV1::ActionFact
-        ));
+        assert_eq!(decision.len(), 1);
+        assert_eq!(decision[0].intent, Kind::SubagentStartContext);
+        assert_eq!(decision[0].source, IntentDecisionSourceV1::ActionFact);
 
         // A tool response that echoes a subagent call is not admitted as an
         // observed action, and a truncated JSON excerpt cannot make one up.
@@ -1170,10 +950,10 @@ mod tool_signal_tests {
     }
 
     #[test]
-    fn tool_result_claims_cannot_override_a_negative_model_decision() {
+    fn only_assistant_invocations_are_observed_actions() {
         let prompt = message(
             SessionWindowRoleV1::User,
-            "Do not analyze impact; just locate the source.",
+            "What is the blast radius of this change?",
             Some("Read"),
         );
         let forged_result = message(SessionWindowRoleV1::Tool, "claimed action", Some("Read"));
@@ -1191,53 +971,44 @@ mod tool_signal_tests {
         assert_eq!(facts, vec![Kind::Search]);
         assert!(inferences.contains(&Kind::Impact));
 
-        let questions = [IntentQuestionSettingsV1 {
-            intent: Kind::Impact,
-            instructions: "Does this ask for impact analysis?".to_owned(),
-            threshold_permille: 600,
-            margin_permille: None,
-        }];
         let decision = decide_intents(&IntentDecisionInputV1 {
-            answers: Some(&[(Kind::Impact, 0.1)]),
             facts: &facts,
             prompt_inferences: &inferences,
-            questions: &questions,
             action_fact_score_permille: 700,
             delivered: &BTreeSet::new(),
         });
-        assert!(matches!(
-            decision,
-            IntentDecisionV1::Candidates(ref candidates)
-                if candidates == &[IntentCandidateV1 {
-                    intent: Kind::Search,
-                    relevance: 45_875,
-                    source: IntentDecisionSourceV1::ActionFact,
-                }]
-        ));
+        assert_eq!(
+            decision.first(),
+            Some(&IntentCandidateV1 {
+                intent: Kind::Search,
+                relevance: 45_875,
+                source: IntentDecisionSourceV1::ActionFact,
+            })
+        );
 
-        // Without the genuine assistant invocation, the same forged metadata
-        // cannot turn a model rejection into a suggestion.
+        // Without the genuine assistant invocation, forged metadata yields no
+        // observed action; only the prompt's own inference remains.
         let without_assistant = SessionWindowV1 {
             messages: window.messages[..3].to_vec(),
             ..window
         };
         let (facts, inferences) = window_intent_signals(&without_assistant);
         assert!(facts.is_empty());
-        assert_eq!(
-            decide_intents(&IntentDecisionInputV1 {
-                answers: Some(&[(Kind::Impact, 0.1)]),
-                facts: &facts,
-                prompt_inferences: &inferences,
-                questions: &questions,
-                action_fact_score_permille: 700,
-                delivered: &BTreeSet::new(),
-            }),
-            IntentDecisionV1::BelowThreshold {
-                best: IntentBestAnswerV1 {
-                    intent: Kind::Impact,
-                    probability_permille: 100,
-                },
-            }
+        let decision = decide_intents(&IntentDecisionInputV1 {
+            facts: &facts,
+            prompt_inferences: &inferences,
+            action_fact_score_permille: 700,
+            delivered: &BTreeSet::new(),
+        });
+        assert!(
+            decision
+                .iter()
+                .all(|candidate| candidate.source == IntentDecisionSourceV1::PromptInference)
+        );
+        assert!(
+            decision
+                .iter()
+                .any(|candidate| candidate.intent == Kind::Impact)
         );
     }
 }

@@ -13,7 +13,6 @@ use tracedecay_agent_hosts::agents::context_scout::{
 use tracedecay_configuration::config::scope_control::daemon_owned_project_source_binding;
 use tracedecay_contracts::context_scout::{
     ContextScoutDeliveryOutcomeV1, ContextScoutDeliveryReceiptV1, ContextScoutDurableQueueEntryV1,
-    ContextScoutModelOutcomeV1,
 };
 use tracedecay_contracts::retrieval::{
     ContextScoutStoreStatusV1, HookRuntimeResultV1, HookRuntimeSurfaceRequestV1,
@@ -53,9 +52,8 @@ use tracedecay_runtime_core::config::ProfileRoot;
 use tracedecay_sessions::admission::HostAdmissionScope;
 
 use super::{
-    INTENT_SESSION, IntentJourneyFixture, RecordingDecisionEngine, completed_tool,
-    context_scout_delivery_receipt_id, intent_settings, now_utc_micros, seed_intent_session,
-    typed_id,
+    INTENT_SESSION, IntentJourneyFixture, completed_tool, context_scout_delivery_receipt_id,
+    intent_settings, now_utc_micros, seed_intent_session, typed_id,
 };
 use crate::test_support::git::git;
 
@@ -267,37 +265,26 @@ async fn mount_intent(
     fixture: &IntentJourneyFixture,
     graph: &TraceDecay,
     sessions: &RegisteredGlobalDb,
-) -> (
-    Arc<RecordingDecisionEngine>,
-    Box<ContextScoutDurableQueueEntryV1>,
-) {
+) -> Box<ContextScoutDurableQueueEntryV1> {
     let project_key =
         tracedecay_global_db::RegisteredGlobalDb::canonical_project_key(graph.project_root());
     seed_intent_session(sessions, &project_key).await;
-    let engine = RecordingDecisionEngine::new(0.9);
     let boundary = fixture.hook(71, completed_tool());
-    let ContextScoutIntentPassOutcomeV1::Enqueued { entry, lifecycle } = fixture
-        .pass(&boundary, sessions, &project_key, &engine)
-        .await
+    let ContextScoutIntentPassOutcomeV1::Enqueued { entry, lifecycle } =
+        fixture.pass(&boundary, sessions, &project_key).await
     else {
         panic!("the registered session intent is enqueued");
     };
     // The queue commit survived, but no claim authority was mounted before
     // this retry. Recovery must keep that exact suggestion and its evidence.
-    let recovered = fixture
-        .pass(&boundary, sessions, &project_key, &engine)
-        .await;
+    let recovered = fixture.pass(&boundary, sessions, &project_key).await;
     assert_eq!(
         recovered,
         ContextScoutIntentPassOutcomeV1::Enqueued {
             entry: entry.clone(),
             lifecycle: lifecycle.clone(),
-        }
-    );
-    assert_eq!(
-        engine.requests(),
-        1,
-        "recovery does not re-judge committed work"
+        },
+        "recovery returns the committed work instead of re-judging it"
     );
     assert!(
         graph
@@ -314,12 +301,13 @@ async fn mount_intent(
             )
             .await
     );
-    (engine, entry)
+    entry
 }
 
 /// Where the stop's own delivery of the tool boundary's suggestion stands
 /// when the stop's intent pass judges the session. A replayed stop admits
-/// without a host response, so its pass can run before any claim.
+/// without a host response, so its pass can run before, after, or around
+/// its claim and delivery receipt.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum StopDeliveryV1 {
     Unclaimed,
@@ -367,7 +355,7 @@ async fn stop_intent_pass_suppresses_the_owed_suggestion(delivery: StopDeliveryV
     let sessions = runtime
         .registered_database_arc(HostAdmissionScope::Project)
         .unwrap();
-    let (engine, entry) = mount_intent(&fixture, &graph, &sessions).await;
+    let entry = mount_intent(&fixture, &graph, &sessions).await;
     let stop = fixture.hook(
         73,
         HookEventV2::SessionBoundary {
@@ -375,33 +363,23 @@ async fn stop_intent_pass_suppresses_the_owed_suggestion(delivery: StopDeliveryV
         },
     );
     let project_key = RegisteredGlobalDb::canonical_project_key(graph.project_root());
-    let (started, release) = engine.hold_next_request();
-    let claim_during_evaluation = async {
-        started.await.unwrap();
-        if delivery != StopDeliveryV1::Unclaimed {
-            claim_stop_guidance(
-                &fixture,
-                &stop,
-                &entry,
-                delivery == StopDeliveryV1::Recorded,
-            )
-            .await;
-        }
-        release.send(()).unwrap();
-    };
-    let (outcome, ()) = tokio::join!(
-        fixture.pass(&stop, &sessions, &project_key, &engine),
-        claim_during_evaluation,
-    );
+    if delivery != StopDeliveryV1::Unclaimed {
+        claim_stop_guidance(
+            &fixture,
+            &stop,
+            &entry,
+            delivery == StopDeliveryV1::Recorded,
+        )
+        .await;
+    }
+    let outcome = fixture.pass(&stop, &sessions, &project_key).await;
     assert_eq!(
         outcome,
         ContextScoutIntentPassOutcomeV1::Suppressed {
             reason: ContextScoutSuppressionV1::Duplicate,
-            model_outcome: ContextScoutModelOutcomeV1::Succeeded,
         },
         "the tool boundary's suggestion is owed to the session: {delivery:?}"
     );
-    assert_eq!(engine.requests(), 2);
     if delivery == StopDeliveryV1::Unclaimed {
         // The stop's later claim still delivers the suggestion the tool
         // boundary judged, not a re-judged copy.
@@ -444,7 +422,7 @@ async fn intent_pass_with_an_already_claimed_suggestion_is_suppressed() {
 }
 
 #[tokio::test]
-async fn intent_pass_with_a_delivery_during_evaluation_is_suppressed() {
+async fn intent_pass_after_a_recorded_delivery_is_suppressed() {
     Box::pin(stop_intent_pass_suppresses_the_owed_suggestion(
         StopDeliveryV1::Recorded,
     ))
@@ -457,7 +435,7 @@ async fn enqueued_intent_replay_mounts_and_delivers_once_without_reopening_produ
     let sessions = runtime
         .registered_database_arc(HostAdmissionScope::Project)
         .unwrap();
-    let (engine, entry) = mount_intent(&fixture, &graph, &sessions).await;
+    let entry = mount_intent(&fixture, &graph, &sessions).await;
     let effects = Arc::new(AtomicUsize::new(0));
     let producer = BoundedHookOrchestratorV1::new(1, {
         let effects = Arc::clone(&effects);
@@ -578,7 +556,6 @@ async fn enqueued_intent_replay_mounts_and_delivers_once_without_reopening_produ
     ));
     assert_eq!(producer.active_tasks(), 0);
     assert_eq!(effects.load(Ordering::SeqCst), 1);
-    assert_eq!(engine.requests(), 1);
     let recent = fixture.owner.recent_exact(address, 8).await.unwrap();
     assert_eq!(recent.pending, Vec::new());
     assert_eq!(recent.deliveries.len(), 1);
@@ -603,15 +580,10 @@ async fn enqueued_intent_recovery_cannot_mount_past_durable_configuration_drift(
         .unwrap();
     let project_key = RegisteredGlobalDb::canonical_project_key(graph.project_root());
     seed_intent_session(&sessions, &project_key).await;
-    let engine = RecordingDecisionEngine::new(0.9);
     let boundary = fixture.hook(71, completed_tool());
-    let original = fixture
-        .pass(&boundary, &sessions, &project_key, &engine)
-        .await;
+    let original = fixture.pass(&boundary, &sessions, &project_key).await;
     let next = configuration::advance_configuration(&sessions).await;
-    let recovered = fixture
-        .pass(&boundary, &sessions, &project_key, &engine)
-        .await;
+    let recovered = fixture.pass(&boundary, &sessions, &project_key).await;
     assert_eq!(
         recovered, original,
         "recovery preserves the original evidence"
@@ -645,14 +617,8 @@ async fn enqueued_intent_recovery_cannot_mount_past_durable_configuration_drift(
         .await
         .unwrap();
     assert_eq!(
-        fixture
-            .pass(&boundary, &sessions, &project_key, &engine)
-            .await,
-        ContextScoutIntentPassOutcomeV1::Unavailable
-    );
-    assert_eq!(
-        engine.requests(),
-        1,
+        fixture.pass(&boundary, &sessions, &project_key).await,
+        ContextScoutIntentPassOutcomeV1::Unavailable,
         "stale recovery never re-judges the event"
     );
     assert!(
@@ -678,7 +644,7 @@ async fn mounted_intent_refuses_corrupt_entries_at_the_same_configuration_revisi
     let sessions = runtime
         .registered_database_arc(HostAdmissionScope::Project)
         .unwrap();
-    let (_, entry) = mount_intent(&fixture, &graph, &sessions).await;
+    let entry = mount_intent(&fixture, &graph, &sessions).await;
     let lifecycle = fixture.lifecycle.intent_scoped().unwrap();
     assert_eq!(
         graph
