@@ -555,6 +555,7 @@ mod tests {
     use super::*;
     use std::future::Future;
     use std::io::Write;
+    use std::mem::MaybeUninit;
     use std::task::Waker;
     use tokio::io::{AsyncBufReadExt, BufReader};
     use tracedecay_framing::BoundedLineReader;
@@ -570,9 +571,13 @@ mod tests {
             .into_split();
         let server = listener.accept().await.unwrap();
         let mut reader = BoundedLineReader::new(BufReader::new(client));
-        let mut response = Box::pin(reader.read_mcp_line());
         let mut context = Context::from_waker(Waker::noop());
-        assert!(response.as_mut().poll(&mut context).is_pending());
+        assert!(
+            Box::pin(reader.read_mcp_line())
+                .as_mut()
+                .poll(&mut context)
+                .is_pending()
+        );
 
         // No await occurs between delivery and the next read poll: the
         // reactor cannot publish new readiness on this current-thread runtime.
@@ -581,10 +586,30 @@ mod tests {
             BrokerStream::Unix(stream) => socket2::SockRef::from(stream),
             BrokerStream::Tcp(stream) => socket2::SockRef::from(stream),
         };
-        (&*socket)
-            .write_all(b"{\"jsonrpc\":\"2.0\",\"id\":1}\n")
-            .unwrap();
-        let response = response.as_mut().poll(&mut context);
+        const REPLY: &[u8] = b"{\"jsonrpc\":\"2.0\",\"id\":1}\n";
+        (&*socket).write_all(REPLY).unwrap();
+        // TCP can queue the write before delivering it even on loopback.
+        // Peek at the kernel queue without driving Tokio or consuming bytes.
+        let socket = match reader.get_mut().get_ref() {
+            #[cfg(unix)]
+            DaemonClientReadHalf::Unix(reader) => socket2::SockRef::from(reader.as_ref()),
+            DaemonClientReadHalf::Tcp(reader) => socket2::SockRef::from(reader.as_ref()),
+        };
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            match socket.peek(&mut [MaybeUninit::uninit(); REPLY.len()]) {
+                Ok(count) if count == REPLY.len() => break,
+                Ok(_) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
+                Err(error) => panic!("inspect delivered loopback reply: {error}"),
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "loopback reply was not delivered"
+            );
+            std::thread::yield_now();
+        }
+        let response = Box::pin(reader.read_mcp_line()).as_mut().poll(&mut context);
         assert!(
             matches!(&response, Poll::Ready(Ok(Some(line))) if line == "{\"jsonrpc\":\"2.0\",\"id\":1}"),
             "delivered reply must be readable without a reactor turn: {response:?}"
