@@ -293,10 +293,10 @@ mod published_artifact_ceiling {
     use tracedecay_domain::errors::TraceDecayError;
     use tracedecay_lcm::LCM_SCHEMA_VERSION;
     use tracedecay_runtime_core::cancellation::CancellationToken;
+    use tracedecay_runtime_core::db::engine;
     use tracedecay_runtime_core::db::{
         RegisteredTestRuntimeRetirementControlV1, TestDatabaseRuntimeScope,
     };
-    use tracedecay_runtime_core::db::engine;
     use tracedecay_runtime_core::shard_runtime::registry::{
         StoreRuntimeClientLease, StoreRuntimeRetirementOutcome, StoreRuntimeRetirementResult,
     };
@@ -886,7 +886,10 @@ mod published_artifact_ceiling {
     ) -> (
         RegisteredGlobalDbOwnerV1,
         crate::schema_stages::RegisteredSchemaConvergence,
-        (StoreRuntimeClientLease, RegisteredTestRuntimeRetirementControlV1),
+        (
+            StoreRuntimeClientLease,
+            RegisteredTestRuntimeRetirementControlV1,
+        ),
     ) {
         let (database, runtime, retirement) = publish_daemon_runtime(path).await.into_parts();
         let (owner, convergence) = RegisteredGlobalDbOwnerV1::admit_and_attach_for_daemon(
@@ -1050,7 +1053,10 @@ mod published_artifact_ceiling {
             .unwrap()
             .unwrap();
             assert!(
-                matches!(committed.outcomes(), [StoreRuntimeRetirementOutcome::Closed { .. }]),
+                matches!(
+                    committed.outcomes(),
+                    [StoreRuntimeRetirementOutcome::Closed { .. }]
+                ),
                 "fixture runtime must close before reopening: {:?}",
                 committed.outcomes()
             );
