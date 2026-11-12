@@ -54,13 +54,28 @@ pub(crate) fn on_native_thread() -> bool {
     !ON_BLOCKING_POOL.get() && native_handle().is_some()
 }
 
+/// Whether the caller runs on the storage-aware blocking pool, where a
+/// synchronous storage wait may park its thread.
+#[must_use]
+pub fn on_storage_blocking_pool() -> bool {
+    ON_BLOCKING_POOL.get()
+}
+
 /// Runs `future` to completion on the calling thread, with the tasks it
-/// spawns running on the process runtime's workers. For dedicated threads
-/// outside any native runtime: from a native thread it returns an error rather
-/// than park a worker.
+/// spawns running on the process runtime's workers.
+///
+/// A multi-thread Tokio worker moves its task to a blocking thread first, so
+/// the worker is not parked. A current-thread runtime cannot do that and is
+/// refused rather than deadlocking its only worker.
 pub fn block_on<F: Future>(future: F) -> Result<F::Output, String> {
-    if on_native_thread() {
-        return Err("native block_on called from a native runtime thread".to_owned());
+    if ON_BLOCKING_POOL.get() {
+        return Ok(process_runtime()?.block_on(future));
+    }
+    if let Ok(handle) = Handle::try_current() {
+        if handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread {
+            return Ok(tokio::task::block_in_place(|| handle.block_on(future)));
+        }
+        return Err("native block_on called from a current-thread runtime".to_owned());
     }
     Ok(process_runtime()?.block_on(future))
 }
@@ -1566,12 +1581,15 @@ mod tests {
         }
     }
 
-    /// #3994: on two workers, task A wakes on its socket, so the idle reactor
-    /// leader runs it, then spins for [`SPIN`], inline in that poll or on the
-    /// blocking pool. Task B's socket becomes readable 10 ms into the spin.
-    /// Returns how long after that B woke.
+    /// #3994: on two workers, task A wakes on its socket, then spins for
+    /// [`SPIN`] on the blocking pool. Task B's socket becomes readable 10 ms
+    /// into the spin. Returns how long after that B woke.
+    ///
+    /// Tokio owns its I/O driver on one worker, so a long poll left inline
+    /// would hold the reactor and delay B; the blocking pool is the supported
+    /// boundary for work that may hold a worker past [`LONG_POLL`].
     #[cfg(unix)]
-    fn socket_wake_behind_a_spinning_task(spin_on_blocking_pool: bool) -> Duration {
+    fn socket_wake_behind_a_spinning_task() -> Duration {
         use std::io::Write;
         use tokio::io::AsyncReadExt;
         use tokio::net::UnixStream;
@@ -1591,11 +1609,7 @@ mod tests {
                 let mut rx = UnixStream::from_std(rx).expect("native socket");
                 rx.read_exact(&mut [0_u8; 1]).await.expect("read");
                 let _ = woke.send((name, Instant::now()));
-                if spin_on_blocking_pool {
-                    spawn_blocking(move || spin(then)).await.expect("pool spin");
-                } else {
-                    spin(then);
-                }
+                spawn_blocking(move || spin(then)).await.expect("pool spin");
             })
         };
         let _a = spawn_reader('a', a_rx, SPIN);
@@ -1615,18 +1629,8 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn a_long_poll_does_not_delay_another_tasks_socket_wake() {
-        let latency = socket_wake_behind_a_spinning_task(false);
-        assert!(
-            latency < WAKE_BOUND,
-            "b woke {latency:?} after its socket became readable, behind a's {SPIN:?} poll"
-        );
-    }
-
-    #[cfg(unix)]
-    #[test]
     fn work_on_the_blocking_pool_does_not_delay_another_tasks_socket_wake() {
-        let latency = socket_wake_behind_a_spinning_task(true);
+        let latency = socket_wake_behind_a_spinning_task();
         assert!(
             latency < WAKE_BOUND,
             "b woke {latency:?} after its socket became readable, behind a's {SPIN:?} pool spin"
@@ -1764,19 +1768,27 @@ mod tests {
     }
 
     #[test]
-    fn dedicated_thread_blocks_on_native_settlement() {
-        let refused_on_worker = std::thread::spawn(|| {
-            block_on(async {
-                let runtime = handle().expect("block_on runtime");
-                runtime
-                    .spawn(async { block_on(async {}).is_err() })
-                    .await
-                    .unwrap()
+    fn block_on_moves_a_worker_task_to_a_blocking_thread() {
+        let runtime = default_builder()
+            .worker_threads(1)
+            .build()
+            .expect("test runtime");
+        let (started, started_rx) = std::sync::mpsc::channel();
+        let (release, released) = std::sync::mpsc::channel();
+        let blocked = runtime.spawn(async move {
+            let _ = started.send(());
+            block_on(async move {
+                released.recv().expect("release the blocked task");
             })
-        })
-        .join()
-        .expect("dedicated thread")
-        .expect("process runtime");
-        assert!(refused_on_worker, "block_on must not park a native worker");
+            .expect("block_on");
+        });
+        started_rx.recv().expect("the blocked task starts");
+        // The only worker must still run this task while the first is blocked.
+        runtime.spawn(async move {
+            release.send(()).expect("release the blocked task");
+        });
+        runtime
+            .block_on(blocked)
+            .expect("the blocked task finishes");
     }
 }

@@ -597,11 +597,13 @@ async fn run_memory_graph_reconciliation_worker<Operation, OperationFuture>(
     }
 }
 
-/// A wake generation makes notifications observable even when they arrive
-/// before the worker starts waiting.
+/// Arms the notification before checking `ready`, so a wake that lands
+/// between the check and the first poll is not lost.
 async fn wait_for_reconciliation_state(notify: &Notify, mut ready: impl FnMut() -> bool) {
     loop {
         let notified = notify.notified();
+        let mut notified = std::pin::pin!(notified);
+        notified.as_mut().enable();
         if ready() {
             return;
         }

@@ -1144,9 +1144,6 @@ impl fmt::Debug for StoreRuntimeClientLease {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum StoreRuntimeRegistryFailure {
-    RuntimeUnavailable {
-        operation: &'static str,
-    },
     ResetRequired {
         authority: String,
         reason: String,

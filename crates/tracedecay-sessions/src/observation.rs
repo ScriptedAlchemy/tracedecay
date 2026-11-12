@@ -756,8 +756,9 @@ where
         let limit = self.batch_concurrency.get().min(total);
         let runtime = tracedecay_runtime_core::native_runtime::handle()
             .ok_or(ObservationApplicationError::PreparationWorkerStopped)?;
-        // Dropping the guarded handles cancels work still queued on the pool;
-        // running sections finish detached.
+        // Dropping the guarded handles abandons the wait. A queued blocking
+        // section observes cancellation before it starts; a running one
+        // finishes detached.
         let mut tasks = FuturesUnordered::new();
         let mut prepared = (0..total).map(|_| None).collect::<Vec<_>>();
 
@@ -774,6 +775,9 @@ where
                 let task = tracedecay_runtime_core::native_runtime::spawn_blocking_on(
                     &runtime,
                     move || {
+                        if request.cancellation.is_cancelled() {
+                            return (index, Err(ObservationApplicationError::Cancelled));
+                        }
                         let capture = match background_cpu {
                             Some(authority) => authority.with_permit(|| {
                                 Self::prepare_capture_with_sanitizer(&sanitizer, request)

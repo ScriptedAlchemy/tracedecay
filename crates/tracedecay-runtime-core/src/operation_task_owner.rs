@@ -157,9 +157,11 @@ impl RuntimeOperationTaskOwnerV1 {
     /// Waits for admitted settlement without fencing later admission.
     pub async fn settled(&self) {
         loop {
-            // Construct before checking: notify_waiters retains its generation
-            // even when notification happens before the first poll.
+            // Arm before checking: `notify_waiters` stores no permit, so a
+            // notification between the check and the first poll would be lost.
             let idle = self.settlement.idle.notified();
+            let mut idle = std::pin::pin!(idle);
+            idle.as_mut().enable();
             if self.settlement.running.load(Ordering::Acquire) == 0 {
                 return;
             }

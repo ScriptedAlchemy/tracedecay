@@ -154,7 +154,17 @@ impl<T> Drop for CommandReceiver<T> {
 }
 
 pub(crate) async fn timeout<F: Future>(duration: Duration, future: F) -> Option<F::Output> {
-    tokio::time::timeout(duration, future).await.ok()
+    // Callers include synchronous waits and inline deferred returns on plain
+    // threads, where no Tokio runtime is entered. The pool owns a timer
+    // driver, so bind the timer to it instead of panicking for lack of an
+    // ambient runtime.
+    let Ok(pool) = pool() else {
+        return None;
+    };
+    crate::native_runtime::in_tokio_context(pool.handle().clone(), async move {
+        tokio::time::timeout(duration, future).await.ok()
+    })
+    .await
 }
 
 pub(crate) async fn sleep(duration: Duration) {
