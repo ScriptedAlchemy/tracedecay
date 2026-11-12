@@ -63,6 +63,86 @@ async fn poll_once<F: Future>(mut future: Pin<&mut F>) -> Poll<F::Output> {
 }
 
 #[test]
+fn schema_finalization_waits_for_writer_capacity_without_losing_its_reply() {
+    current_thread().block_on(async {
+        let fixture = fixture('a', 'a');
+        let mut handle = ExactSqlHandle::attach(&fixture.writer, &fixture.readers)
+            .unwrap()
+            .with_write_authority(Arc::new(AtomicWriteAuthority(Arc::new(AtomicBool::new(
+                true,
+            )))))
+            .unwrap();
+        // Occupy the only slot before polling the real finalization future.
+        // This reproduces a full exact-SQL channel without scheduling races.
+        let (sender, mut receiver) = actor_mpsc::channel(1);
+        let (first_reply, _first_response) = async_channel::bounded(1);
+        let authority = handle.write_authority.clone().unwrap();
+        assert!(
+            sender
+                .try_send(WriterCommand::FinishInitialSchema {
+                    reply: first_reply,
+                    authority,
+                })
+                .is_ok()
+        );
+        handle.writer = Some(sender);
+
+        let mut finishing = Box::pin(handle.finish_initial_schema());
+        assert!(poll_once(finishing.as_mut()).await.is_pending());
+        let first = receiver.try_recv().unwrap();
+        match first {
+            WriterCommand::FinishInitialSchema { reply, .. } => {
+                assert!(reply.try_send(Ok(())).is_ok());
+            }
+            _ => panic!("the occupied slot must hold the first schema barrier"),
+        }
+
+        // Releasing capacity admits the queued finalization in FIFO order;
+        // success still requires the writer's own completion reply.
+        assert!(poll_once(finishing.as_mut()).await.is_pending());
+        let second = receiver.try_recv().unwrap();
+        match second {
+            WriterCommand::FinishInitialSchema { reply, .. } => {
+                assert!(reply.try_send(Ok(())).is_ok());
+            }
+            _ => panic!("the deferred schema barrier was not admitted"),
+        }
+        finishing.await.unwrap();
+    });
+}
+
+#[test]
+fn schema_finalization_refuses_a_closed_writer_after_capacity_wait() {
+    current_thread().block_on(async {
+        let fixture = fixture('a', 'a');
+        let mut handle = ExactSqlHandle::attach(&fixture.writer, &fixture.readers)
+            .unwrap()
+            .with_write_authority(Arc::new(AtomicWriteAuthority(Arc::new(AtomicBool::new(
+                true,
+            )))))
+            .unwrap();
+        let (sender, receiver) = actor_mpsc::channel(1);
+        let (reply, _response) = async_channel::bounded(1);
+        assert!(
+            sender
+                .try_send(WriterCommand::FinishInitialSchema {
+                    reply,
+                    authority: handle.write_authority.clone().unwrap(),
+                })
+                .is_ok()
+        );
+        handle.writer = Some(sender);
+        let mut finishing = Box::pin(handle.finish_initial_schema());
+        assert!(poll_once(finishing.as_mut()).await.is_pending());
+        drop(receiver);
+        assert!(matches!(
+            finishing.await,
+            Err(ExactSqlError::WriterUnavailable)
+        ));
+    });
+}
+
+#[test]
 fn synchronous_adapters_remain_safe_inside_current_thread_tokio() {
     let _serial = NATIVE_WAIT_COUNTER
         .lock()

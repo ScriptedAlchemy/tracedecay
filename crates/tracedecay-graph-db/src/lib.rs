@@ -51,6 +51,7 @@ pub use limits::{
     MAX_VERIFIED_GENERATION_BATCH_LIVE_BYTES, MAX_VERIFIED_GENERATION_BATCH_MUTATIONS,
     MAX_VERIFIED_GENERATION_ENTITIES, MAX_VERIFIED_GENERATION_RELATIONS,
 };
+pub use location::graph_store_data_paths;
 #[cfg(any(feature = "test-helpers", feature = "eval-helpers"))]
 pub use location::{GraphDbLocation, GraphDbOpenOptions, GraphDurability, GraphFormatVersion};
 #[cfg(not(any(feature = "test-helpers", feature = "eval-helpers")))]

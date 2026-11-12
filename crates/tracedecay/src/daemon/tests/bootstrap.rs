@@ -1772,6 +1772,20 @@ async fn explicit_init_retries_after_joining_an_ordinary_missing_database_open()
     let client_identity = test_client_identity_for(profile_root.clone());
     let layout = initialize_test_project(&project, &client_identity).await;
     std::fs::remove_file(&layout.graph_db_path).expect("remove generated project database");
+    // The fixture models a genuinely absent SQLite basename, not an
+    // incomplete store with orphan WAL, SHM or journal entries. The fixture
+    // project was closed by initialize_test_project above, so its test-owned
+    // sidecars can be retired here. Production admission must instead refuse
+    // unknown sidecars rather than erase them during retry.
+    for suffix in ["-wal", "-shm", "-journal"] {
+        let mut name = layout.graph_db_path.as_os_str().to_os_string();
+        name.push(suffix);
+        match std::fs::remove_file(std::path::PathBuf::from(name)) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => panic!("remove isolated SQLite fixture sidecar: {error}"),
+        }
+    }
     let missing_graph_db_path = layout.graph_db_path.clone();
 
     let _database_scope =

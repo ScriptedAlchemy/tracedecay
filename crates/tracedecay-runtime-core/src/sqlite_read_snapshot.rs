@@ -302,7 +302,7 @@ fn backup_offline_wal_family_without_shm(
     Ok(true)
 }
 
-fn fold_staging_to_standalone(
+pub(crate) fn fold_staging_to_standalone(
     staging: Connection,
     staging_path: &Path,
     checkpoint: impl Fn() -> io::Result<()>,
