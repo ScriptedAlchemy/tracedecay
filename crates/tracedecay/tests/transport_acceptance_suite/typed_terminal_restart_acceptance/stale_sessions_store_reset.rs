@@ -284,7 +284,7 @@ fn mcp_initialize_and_list_tools(home: &Path, project: &Path) -> (Value, Value) 
 fn code_read_outcome(home: &Path, project: &Path, tool: &str, args: &Value) -> Value {
     let envelope = super::typed_envelope(&super::tool_call(home, project, tool, args));
     if envelope["problem"].is_object() {
-        return json!({ "problem": envelope["problem"]["kind"] });
+        return json!({ "problem": envelope["problem"] });
     }
     envelope["outcome"]["outcome"].clone()
 }

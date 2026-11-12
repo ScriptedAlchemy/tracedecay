@@ -184,6 +184,10 @@ fn an_edit_carries_the_parent_text_artifact_byte_identical_to_a_cold_build() {
         fixture.commit_all(&format!("edit {round}"));
         published(scheduler.reconcile_now().expect("publish the successor"));
         let successor = scheduler.latest_complete().expect("successor generation");
+        // Retire cached descriptors before changing sealed path identities.
+        // Hidden parent bytes must not remain readable through an open handle.
+        scheduler.publication.retained_segment_reclaimer()()
+            .expect("release segment handles before hiding parent files");
         for segment in &parent_segments {
             std::fs::rename(
                 segment,
@@ -272,6 +276,10 @@ fn an_added_or_removed_file_carries_the_parent_text_artifact_byte_identical_to_a
         fixture.commit_all(&format!("roster change {round}"));
         published(scheduler.reconcile_now().expect("publish the successor"));
         let successor = scheduler.latest_complete().expect("successor generation");
+        // Retire cached descriptors before changing sealed path identities.
+        // Hidden parent bytes must not remain readable through an open handle.
+        scheduler.publication.retained_segment_reclaimer()()
+            .expect("release segment handles before hiding parent files");
         for segment in &parent_segments {
             std::fs::rename(
                 segment,
