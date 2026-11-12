@@ -715,10 +715,9 @@ fn block_on<F: Future>(future: F) -> F::Output {
     }
 }
 
-/// Records whether its enrollment ran on the storage-aware blocking pool,
-/// where the enrollment commit's store-writer wait may park its thread.
+/// Nested blocking work runs inline on the storage-aware blocking pool.
 struct EnrollmentThreadProbe {
-    ran_on_blocking_pool: Arc<std::sync::Mutex<Option<bool>>>,
+    nested_work_stayed_on_thread: Arc<std::sync::Mutex<Option<bool>>>,
 }
 
 impl RemoteEnrollmentProtocolPortV1 for EnrollmentThreadProbe {
@@ -731,8 +730,12 @@ impl RemoteEnrollmentProtocolPortV1 for EnrollmentThreadProbe {
         RemoteProtocolResponseV1<EnrollmentCredentialRecordV1>,
         tracedecay_contracts::ApplicationContractError,
     > {
-        *self.ran_on_blocking_pool.lock().unwrap() =
-            Some(tracedecay_rusqlite_runtime::native_runtime::on_storage_blocking_pool());
+        let caller = std::thread::current().id();
+        let nested = block_on(tracedecay_rusqlite_runtime::native_runtime::spawn_blocking(
+            || std::thread::current().id(),
+        ))
+        .expect("nested blocking work");
+        *self.nested_work_stayed_on_thread.lock().unwrap() = Some(caller == nested);
         unavailable_response(request)
     }
 }
@@ -741,14 +744,14 @@ impl RemoteEnrollmentProtocolPortV1 for EnrollmentThreadProbe {
 /// operation route does, so a native worker never waits on the store writer.
 #[test]
 fn enrollment_route_runs_its_port_off_native_runtime_threads() {
-    let ran_on_blocking_pool = Arc::new(std::sync::Mutex::new(None));
+    let nested_work_stayed_on_thread = Arc::new(std::sync::Mutex::new(None));
     let operations = Arc::new(UnreachedProtocolPort {
         calls: Arc::new(AtomicUsize::new(0)),
         controlled_deadline: None,
     });
     let router = remote_protocol_router(
         Arc::new(EnrollmentThreadProbe {
-            ran_on_blocking_pool: Arc::clone(&ran_on_blocking_pool),
+            nested_work_stayed_on_thread: Arc::clone(&nested_work_stayed_on_thread),
         }),
         RemoteOperationProtocolPortsV1 {
             capture: operations.clone(),
@@ -806,7 +809,7 @@ fn enrollment_route_runs_its_port_off_native_runtime_threads() {
 
     assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
     assert_eq!(
-        *ran_on_blocking_pool.lock().unwrap(),
+        *nested_work_stayed_on_thread.lock().unwrap(),
         Some(true),
         "the enrollment port must run on the storage-aware blocking pool"
     );

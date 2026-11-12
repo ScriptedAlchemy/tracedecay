@@ -54,18 +54,11 @@ pub(crate) fn on_native_thread() -> bool {
     !ON_BLOCKING_POOL.get() && native_handle().is_some()
 }
 
-/// Whether the caller runs on the storage-aware blocking pool, where a
-/// synchronous storage wait may park its thread.
-#[must_use]
-pub fn on_storage_blocking_pool() -> bool {
-    ON_BLOCKING_POOL.get()
-}
-
 /// Runs `future` to completion on the calling thread, with the tasks it
 /// spawns running on the process runtime's workers.
 ///
-/// A multi-thread Tokio worker moves its task to a blocking thread first, so
-/// the worker is not parked. A current-thread runtime cannot do that and is
+/// A multi-thread Tokio worker hands scheduling to another thread while it
+/// runs the blocking task. A current-thread runtime cannot do that and is
 /// refused rather than deadlocking its only worker.
 pub fn block_on<F: Future>(future: F) -> Result<F::Output, String> {
     if ON_BLOCKING_POOL.get() {
@@ -1768,7 +1761,7 @@ mod tests {
     }
 
     #[test]
-    fn block_on_moves_a_worker_task_to_a_blocking_thread() {
+    fn block_on_keeps_a_single_worker_runtime_progressing() {
         let runtime = default_builder()
             .worker_threads(1)
             .build()
@@ -1778,11 +1771,15 @@ mod tests {
         let blocked = runtime.spawn(async move {
             let _ = started.send(());
             block_on(async move {
-                released.recv().expect("release the blocked task");
+                released
+                    .recv_timeout(Duration::from_secs(5))
+                    .expect("the other task must release the blocked task");
             })
             .expect("block_on");
         });
-        started_rx.recv().expect("the blocked task starts");
+        started_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("the blocked task starts");
         // The only worker must still run this task while the first is blocked.
         runtime.spawn(async move {
             release.send(()).expect("release the blocked task");
@@ -1790,5 +1787,16 @@ mod tests {
         runtime
             .block_on(blocked)
             .expect("the blocked task finishes");
+    }
+
+    #[test]
+    fn block_on_refuses_a_current_thread_runtime() {
+        let runtime = Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("test runtime");
+        runtime.block_on(async {
+            assert!(block_on(async {}).is_err());
+        });
     }
 }
