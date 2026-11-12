@@ -134,10 +134,10 @@ impl FactStore for DatabaseFactStore<'_> {
             Some(retained) => {
                 let db = (*self.db).clone();
                 let write_control = write_control.clone();
-                envelope::settle_fact_write(COMMIT_OPERATION, move |cx| async move {
+                envelope::settle_fact_write(COMMIT_OPERATION, move || async move {
                     let outcome = runtime::commit_fact(&retained, batch, &write_control).await?;
                     if matches!(&outcome, FactCommitOutcome::Committed(_)) {
-                        graph::publish_project_memory_graph_after_write(&cx, db.clone()).await;
+                        graph::publish_project_memory_graph_after_write(db.clone()).await;
                     }
                     Ok(outcome)
                 })

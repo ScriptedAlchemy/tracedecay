@@ -1624,12 +1624,12 @@ mod lsp_lease_tests {
 
     use super::{LspLeaseTaskRegistry, LspSessionId};
 
-    /// A disconnected session's lease task runs on the native runtime: it
-    /// starts, finishes, and shuts down with no Tokio runtime anywhere.
+    /// A synchronous host can start, finish and shut down a disconnected
+    /// session's lease task on the installed runtime.
     #[test]
-    fn lease_tasks_run_without_a_tokio_runtime() {
+    fn lease_tasks_run_from_a_synchronous_host() {
         native_runtime::block_on(async {
-            assert!(tokio::runtime::Handle::try_current().is_err());
+            assert!(tokio::runtime::Handle::try_current().is_ok());
             let registry = Arc::new(LspLeaseTaskRegistry::default());
             let (ran, lease_ran) = tokio::sync::oneshot::channel();
             registry

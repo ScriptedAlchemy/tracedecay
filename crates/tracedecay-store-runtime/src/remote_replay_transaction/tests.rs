@@ -210,7 +210,7 @@ async fn replay_and_fence_read_awaited_on_a_native_worker_never_park_it() {
 
     let task = NativeTask::spawn(async move {
         assert!(
-            native_runtime::Runtime::current_handle().is_some(),
+            tokio::runtime::Handle::try_current().is_ok(),
             "the replay must be awaited on a native worker"
         );
         let replay = authority.commit(&frame, &task_writer).await;

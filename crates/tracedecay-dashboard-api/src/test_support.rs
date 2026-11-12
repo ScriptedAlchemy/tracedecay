@@ -1,4 +1,4 @@
-//! Fixtures for states built without a project runtime.
+//! Dashboard fixtures and process-isolated runtime checks.
 
 use std::path::Path;
 
@@ -6,6 +6,30 @@ use tracedecay_automation_runtime::automation::host_io::{
     HostIo, ManagedSkillExportReport, PluginFile,
 };
 use tracedecay_domain::errors::Result;
+
+/// Storage-wait counters belong to the process. Run their measurements alone
+/// so another test's fixture setup cannot change the observed delta.
+#[allow(clippy::expect_used)]
+pub(crate) fn alone_with_storage_wait_counters() -> bool {
+    const CHILD: &str = "TRACEDECAY_STORAGE_WAIT_TEST_CHILD";
+    let thread = std::thread::current();
+    let test = thread.name().expect("libtest names its test thread");
+    if std::env::var(CHILD).as_deref() == Ok(test) {
+        return true;
+    }
+    let output = std::process::Command::new(std::env::current_exe().expect("test executable"))
+        .args([test, "--exact", "--test-threads=1", "--nocapture"])
+        .env(CHILD, test)
+        .output()
+        .expect("run the storage-wait test in its own process");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.status.success() && stdout.contains("1 passed"),
+        "{test} failed in its child process:\n{stdout}\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    false
+}
 
 /// Installs the registered global/session schema into the kernel's fail-closed
 /// port for this crate's test process.

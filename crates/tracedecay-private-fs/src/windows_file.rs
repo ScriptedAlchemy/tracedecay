@@ -5,7 +5,8 @@ use std::mem::MaybeUninit;
 use std::os::windows::io::AsRawHandle;
 
 use windows_sys::Win32::Storage::FileSystem::{
-    BY_HANDLE_FILE_INFORMATION, GetFileInformationByHandle,
+    BY_HANDLE_FILE_INFORMATION, FILE_STANDARD_INFO, FileStandardInfo, GetFileInformationByHandle,
+    GetFileInformationByHandleEx,
 };
 
 #[derive(Clone, Copy)]
@@ -20,6 +21,27 @@ pub struct FileInformation {
 /// the volume serial number and file index on nightly.
 pub fn information<H: AsRawHandle>(file: &H) -> io::Result<FileInformation> {
     identity_information(raw_information(file)?)
+}
+
+/// A name that SQLite has marked for deletion cannot be reopened on Windows
+/// until every remaining handle, including our creation reservation, closes.
+pub fn deletion_pending(file: &impl AsRawHandle) -> io::Result<bool> {
+    let mut info = MaybeUninit::<FILE_STANDARD_INFO>::uninit();
+    // SAFETY: the live handle is borrowed, and FileStandardInfo writes exactly
+    // one FILE_STANDARD_INFO into the correctly sized aligned destination.
+    let ok = unsafe {
+        GetFileInformationByHandleEx(
+            file.as_raw_handle().cast(),
+            FileStandardInfo,
+            info.as_mut_ptr().cast(),
+            std::mem::size_of::<FILE_STANDARD_INFO>() as u32,
+        )
+    };
+    if ok == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: the successful call initialized the requested structure.
+    Ok(unsafe { info.assume_init() }.DeletePending)
 }
 
 /// Reads only the hard-link count from an open Windows file handle.

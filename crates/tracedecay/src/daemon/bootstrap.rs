@@ -1230,37 +1230,58 @@ async fn log_accept_error_and_backoff(error: &TraceDecayError) {
     }
 }
 
-/// The process signals that stop the daemon: interrupt, terminate, quit and,
-/// on Unix, hangup. The streams are registered once, before the accept loop,
-/// and each counts its deliveries, so a signal that lands while the loop is
-/// between polls is returned by the next `recv` instead of being lost.
-///
-/// The first stream starts Asupersync's process-wide dispatcher, which
-/// handles every signal kind it knows. A handled SIGHUP or SIGQUIT no longer
-/// ends the process by default, so both stop the daemon here.
-struct ShutdownSignals(Vec<tracedecay_runtime_core::signal::Signal>);
+/// Registered once before the accept loop. A signal delivered between polls
+/// remains pending for the next receive; repeated deliveries may coalesce.
+#[cfg(unix)]
+struct ShutdownSignals(Vec<tokio::signal::unix::Signal>);
 
+#[cfg(unix)]
 impl ShutdownSignals {
     fn listen() -> std::io::Result<Self> {
-        use tracedecay_runtime_core::signal::SignalKind;
         [
-            SignalKind::interrupt(),
-            SignalKind::terminate(),
-            SignalKind::quit(),
-            #[cfg(unix)]
-            SignalKind::hangup(),
+            tokio::signal::unix::SignalKind::interrupt(),
+            tokio::signal::unix::SignalKind::terminate(),
+            tokio::signal::unix::SignalKind::quit(),
+            tokio::signal::unix::SignalKind::hangup(),
         ]
         .into_iter()
-        .map(tracedecay_runtime_core::signal::signal)
+        .map(tokio::signal::unix::signal)
         .collect::<std::io::Result<_>>()
         .map(Self)
     }
 
-    /// Resolves once any shutdown signal has been delivered since the last
-    /// `recv`. Cancel-safe: dropping the future loses no delivery.
     async fn recv(&mut self) {
         futures_util::future::select_all(self.0.iter_mut().map(|signal| Box::pin(signal.recv())))
             .await;
+    }
+}
+
+#[cfg(windows)]
+struct ShutdownSignals {
+    interrupt: tokio::signal::windows::CtrlC,
+    terminate: tokio::signal::windows::CtrlBreak,
+    close: tokio::signal::windows::CtrlClose,
+    shutdown: tokio::signal::windows::CtrlShutdown,
+}
+
+#[cfg(windows)]
+impl ShutdownSignals {
+    fn listen() -> std::io::Result<Self> {
+        Ok(Self {
+            interrupt: tokio::signal::windows::ctrl_c()?,
+            terminate: tokio::signal::windows::ctrl_break()?,
+            close: tokio::signal::windows::ctrl_close()?,
+            shutdown: tokio::signal::windows::ctrl_shutdown()?,
+        })
+    }
+
+    async fn recv(&mut self) {
+        tokio::select! {
+            _ = self.interrupt.recv() => {}
+            _ = self.terminate.recv() => {}
+            _ = self.close.recv() => {}
+            _ = self.shutdown.recv() => {}
+        }
     }
 }
 
@@ -1366,13 +1387,14 @@ mod tests {
         );
     }
 
-    /// Runs on the native runtime with no Tokio runtime, so the streams need no
-    /// Tokio signal driver. The signal lands before anything awaits `recv`,
+    /// The signal lands after registration but before anything awaits `recv`,
     /// as it does when the accept loop is between `select!` polls.
     #[cfg(any(target_os = "macos", all(target_os = "linux", target_env = "gnu")))]
     #[test]
     fn a_shutdown_signal_delivered_between_polls_is_not_lost() {
-        let mut signals = ShutdownSignals::listen().expect("shutdown signal streams");
+        let mut signals = native_runtime::block_on(async { ShutdownSignals::listen() })
+            .expect("process runtime")
+            .expect("shutdown signal streams");
         // SAFETY: `raise` only sends SIGHUP to this thread, and the streams
         // above installed its handler, so the process keeps running.
         assert_eq!(unsafe { libc::raise(libc::SIGHUP) }, 0, "raise SIGHUP");

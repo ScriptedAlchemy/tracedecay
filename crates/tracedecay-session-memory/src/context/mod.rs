@@ -482,10 +482,9 @@ async fn race_application_request_wait<T>(
     on_interruption: impl FnOnce(),
 ) -> Result<T, RequestInterruption> {
     let mut cancelled = std::pin::pin!(cancelled);
-    let mut deadline = std::pin::pin!(asupersync::time::sleep(
-        asupersync::time::wall_now(),
-        std::time::Duration::from_micros(remaining_micros),
-    ));
+    let mut deadline = std::pin::pin!(tokio::time::sleep(std::time::Duration::from_micros(
+        remaining_micros
+    ),));
     let mut future = std::pin::pin!(future);
     let result = std::future::poll_fn(|task| {
         if let Poll::Ready(value) = future.as_mut().poll(task) {
@@ -845,8 +844,8 @@ mod tests {
         );
     }
 
-    #[asupersync::test]
-    async fn application_interruptible_observes_live_transport_cancellation(cx: &asupersync::Cx) {
+    #[tokio::test]
+    async fn application_interruptible_observes_live_transport_cancellation() {
         let scope = project_identity().application_scope().unwrap();
         let application = application_context(
             scope.clone(),
@@ -856,12 +855,10 @@ mod tests {
         );
         let cancellation = CancellationToken::new();
         let trigger = cancellation.clone();
-        let mut trigger_task = cx
-            .spawn(move |_cx| async move {
-                asupersync::runtime::yield_now().await;
-                trigger.cancel();
-            })
-            .expect("spawn cancellation trigger");
+        let trigger_task = tokio::spawn(async move {
+            tokio::task::yield_now().await;
+            trigger.cancel();
+        });
 
         let result = run_application_request_interruptible(
             &application,
@@ -871,10 +868,7 @@ mod tests {
         )
         .await;
 
-        trigger_task
-            .join(cx)
-            .await
-            .expect("join cancellation trigger");
+        trigger_task.await.expect("join cancellation trigger");
         assert_eq!(result, Err(RequestInterruption::Cancelled));
         assert!(
             !application.cancellation().is_cancelled(),

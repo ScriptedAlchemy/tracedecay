@@ -13,7 +13,7 @@ description = "TraceDecay session parsing and retrieval primitives"
 test-helpers = []
 
 [dependencies]
-asupersync.workspace = true
+tokio-util.workspace = true
 base64.workspace = true
 futures-util.workspace = true
 gix = { version = "=0.89.0", default-features = false, features = ["revision", "blob-diff", "parallel", "sha1", "sha256", "status"] }
@@ -24,7 +24,7 @@ serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
 sha2.workspace = true
 thiserror.workspace = true
-tokio = { workspace = true, features = ["macros", "rt", "sync"] }
+tokio = { workspace = true, features = ["io-util", "macros", "net", "rt", "rt-multi-thread", "sync", "time"] }
 tracing.workspace = true
 tracedecay-contracts = { path = "../tracedecay-contracts" }
 tracedecay-capture = { path = "../tracedecay-capture" }

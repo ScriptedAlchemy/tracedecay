@@ -1266,6 +1266,7 @@ fn verify_checked_seal_bundle_with_evidence_barrier(
     check: &dyn Fn() -> Result<(), GraphDbError>,
     evidence_barrier: impl FnOnce(),
 ) -> Result<(), GraphDbError> {
+    let started = std::time::Instant::now();
     let (file, manifest) = verify_checked_seal(path, expected_digest, check)?;
     let Some(manifest) = manifest else {
         return Ok(());
@@ -1274,12 +1275,26 @@ fn verify_checked_seal_bundle_with_evidence_barrier(
     let mut evidence_barrier = Some(evidence_barrier);
     let mut interruption = None;
     let proof = std::cell::RefCell::new(verified.begin(segments_root));
+    // Count actual source authentication work, not SQLite/graph query time
+    // or the number of manifests consulted. Only completed proofs are logged.
+    let reused_segments = std::cell::Cell::new(0_u64);
+    let hashed_segments = std::cell::Cell::new(0_u64);
+    let hashed_bytes = std::cell::Cell::new(0_u64);
+    let range_reads = std::cell::Cell::new(0_u64);
+    let range_bytes = std::cell::Cell::new(0_u64);
     let verified =
         tracedecay_code_index::production::CodeIndexPublishedGenerationV1::verify_partitioned_sealed(
         &manifest,
         |digest, expected_size| {
-            segment_path(segments_root, digest)
-                .is_ok_and(|path| proof.borrow_mut().already_verified(digest, expected_size, &path))
+            let reused = segment_path(segments_root, digest).is_ok_and(|path| {
+                proof
+                    .borrow_mut()
+                    .already_verified(digest, expected_size, &path)
+            });
+            if reused {
+                reused_segments.set(reused_segments.get().saturating_add(1));
+            }
+            reused
         },
         |request, buffer| {
             // Failed pre-I/O checks cannot expose a prior verified component.
@@ -1306,10 +1321,12 @@ fn verify_checked_seal_bundle_with_evidence_barrier(
                             buffer,
                         )?;
                         proof.borrow_mut().hashed(digest, fingerprint);
+                        hashed_segments.set(hashed_segments.get().saturating_add(1));
+                        hashed_bytes.set(hashed_bytes.get().saturating_add(size_bytes));
                         Ok(())
                     }
                     tracedecay_code_index::production::SealedGenerationSegmentReadV1::Range {
-                        ..
+                        length, ..
                     } => {
                         if pinned_evidence.is_none() {
                             let roots = [segments_root.to_path_buf()];
@@ -1329,7 +1346,10 @@ fn verify_checked_seal_bundle_with_evidence_barrier(
                             })?,
                             request,
                             buffer,
-                        )
+                        )?;
+                        range_reads.set(range_reads.get().saturating_add(1));
+                        range_bytes.set(range_bytes.get().saturating_add(length));
+                        Ok(())
                     }
                 }
             })();
@@ -1367,6 +1387,18 @@ fn verify_checked_seal_bundle_with_evidence_barrier(
     }
     (check)()?;
     proof.into_inner().commit();
+    tracing::info!(
+        target: "tracedecay::sealed_source_proof",
+        event = %"sealed_source_proof",
+        seal_sha256 = expected_digest,
+        reused_segments = reused_segments.get(),
+        hashed_segments = hashed_segments.get(),
+        hashed_bytes = hashed_bytes.get(),
+        range_reads = range_reads.get(),
+        range_bytes = range_bytes.get(),
+        elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
+        "verified sealed source authentication work"
+    );
     Ok(())
 }
 
@@ -3932,9 +3964,192 @@ mod tests {
             &std::fs::read(fixture.scope_root.join("active-code-generation-v1.json")).unwrap(),
         )
         .unwrap();
+        let successor_digest =
+            SealedGraphStateDigest::try_from(pointer.state_digest.clone()).unwrap();
         let successor_path = generations_root.join(pointer.generation_file);
         let mut successor: serde_json::Value =
             serde_json::from_slice(&std::fs::read(&successor_path).unwrap()).unwrap();
+
+        // A real one-file successor inherits unchanged source segments.
+        // Count production proof read callbacks rather than elapsed time:
+        // re-verifying the whole generation must fail even with warm OS caches.
+        let parent_file_digests = first_manifest["generation"]["file_segments"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|segment| segment["segment_digest"].as_str().unwrap())
+            .collect::<std::collections::BTreeSet<_>>();
+        let inherited_files = successor["generation"]["file_segments"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|segment| {
+                parent_file_digests.contains(segment["segment_digest"].as_str().unwrap())
+            })
+            .count();
+        assert!(
+            inherited_files > 0,
+            "a one-file edit must retain sealed files"
+        );
+        let count_proof_reads = |record: &VerifiedSealedSegmentsV1| {
+            let reads = AtomicUsize::new(0);
+            assert_eq!(
+                verify_sealed_generation_source_from_roots(
+                    &generations_root,
+                    replay_root,
+                    &successor_digest,
+                    record,
+                    &|| {
+                        reads.fetch_add(1, Ordering::SeqCst);
+                        Ok(())
+                    },
+                ),
+                Ok(())
+            );
+            reads.load(Ordering::SeqCst)
+        };
+        let cold_reads = count_proof_reads(&VerifiedSealedSegmentsV1::default());
+        let trace = tracedecay_runtime_core::logging::FormattedTracingCapture::start();
+        let warm_reads = count_proof_reads(&verified);
+        let observed = trace.text();
+        drop(trace);
+        let observed_field = |name: &str| -> u64 {
+            observed
+                .split(&format!("{name}="))
+                .nth(1)
+                .and_then(|field| field.split_whitespace().next())
+                .and_then(|value| value.parse().ok())
+                .unwrap_or_else(|| {
+                    panic!("missing numeric {name} in sealed proof trace: {observed}")
+                })
+        };
+        assert!(
+            observed.contains("event=sealed_source_proof"),
+            "real sealed source proof must expose source-work telemetry: {observed}"
+        );
+        assert!(
+            observed_field("hashed_segments") > 0,
+            "the newly edited source must be authenticated on the warm successor"
+        );
+        if cfg!(unix) {
+            assert!(
+                observed_field("reused_segments") >= inherited_files as u64,
+                "inherited file source must be counted as reused, not rehashed"
+            );
+        } else {
+            assert_eq!(
+                observed_field("reused_segments"),
+                0,
+                "unsupported platforms must not report source fingerprint reuse"
+            );
+        }
+        if cfg!(unix) {
+            assert!(
+                cold_reads >= warm_reads + inherited_files,
+                "a one-file successor still re-verified inherited files: \
+                 cold={cold_reads}, warm={warm_reads}, inherited={inherited_files}"
+            );
+        } else {
+            assert_eq!(
+                cold_reads, warm_reads,
+                "without reliable file fingerprints both passes must read all segments"
+            );
+        }
+
+        // A new segment must still be authenticated after the successor is
+        // warm. A proof that skips *all* segments could satisfy the read-count
+        // delta but would silently accept a corrupted edited file.
+        let changed_segment = successor["generation"]["file_segments"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|segment| {
+                !parent_file_digests.contains(segment["segment_digest"].as_str().unwrap())
+            })
+            .expect("a one-file successor must seal a changed file");
+        let changed_digest = tracedecay_domain::ManifestDigest::new(
+            changed_segment["segment_digest"]
+                .as_str()
+                .unwrap()
+                .to_owned(),
+        )
+        .unwrap();
+        let changed_path = super::segment_path(&fixture.segments_root, &changed_digest).unwrap();
+        let original_bytes = std::fs::read(&changed_path).unwrap();
+        assert!(!original_bytes.is_empty());
+        let successor_record = VerifiedSealedSegmentsV1::default();
+        assert_eq!(
+            verify_sealed_generation_source_from_roots(
+                &generations_root,
+                replay_root,
+                &successor_digest,
+                &successor_record,
+                &|| Ok(()),
+            ),
+            Ok(())
+        );
+        // The check callback also runs for manifest and lifecycle checks,
+        // so a positive count alone does not prove a segment was rehashed.
+        let warmed_reads = count_proof_reads(&successor_record);
+        let original_permissions = std::fs::metadata(&changed_path).unwrap().permissions();
+        let mut writable_permissions = original_permissions.clone();
+        #[allow(clippy::permissions_set_readonly_false)]
+        writable_permissions.set_readonly(false);
+        std::fs::set_permissions(&changed_path, writable_permissions).unwrap();
+        let mut tampered_bytes = original_bytes.clone();
+        tampered_bytes[0] ^= 1;
+        std::fs::write(&changed_path, tampered_bytes).unwrap();
+        let corrupt_changed = verify_sealed_generation_source_from_roots(
+            &generations_root,
+            replay_root,
+            &successor_digest,
+            &successor_record,
+            &|| Ok(()),
+        );
+        assert!(
+            matches!(corrupt_changed, Err(GraphDbError::Corrupt { .. })),
+            "a warmed successor accepted a corrupt changed segment: {corrupt_changed:?}"
+        );
+        std::fs::write(&changed_path, original_bytes).unwrap();
+        std::fs::set_permissions(&changed_path, original_permissions).unwrap();
+
+        // A failed proof must not evict the last complete source proof.
+        // Rechecking the repaired changed segment is necessary, but rehashing
+        // every untouched inherited segment would make recovery cold again.
+        let recovered_reads = count_proof_reads(&successor_record);
+        if cfg!(unix) {
+            assert!(
+                recovered_reads > warmed_reads,
+                "recovery did not re-authenticate repaired source: warmed={warmed_reads}, recovered={recovered_reads}"
+            );
+        } else {
+            // Without fingerprint reuse, a warm proof still rehashes every
+            // segment. The corruption refusal above checks edited source.
+            assert_eq!(
+                recovered_reads, warmed_reads,
+                "a platform without fingerprints must rehash every segment"
+            );
+        }
+        let rewarmed_reads = count_proof_reads(&successor_record);
+        assert_eq!(
+            rewarmed_reads, warmed_reads,
+            "successful recovery must restore the stable warm proof cost"
+        );
+        let recovery_cold_reads = count_proof_reads(&VerifiedSealedSegmentsV1::default());
+        if cfg!(unix) {
+            assert!(
+                recovery_cold_reads >= recovered_reads + inherited_files,
+                "a corrupt one-file successor evicted authenticated parent segments: \
+                 cold={recovery_cold_reads}, recovered={recovered_reads}, \
+                 inherited={inherited_files}"
+            );
+        } else {
+            assert_eq!(
+                recovery_cold_reads, recovered_reads,
+                "platforms without reliable fingerprints must rehash every segment"
+            );
+        }
+
         let inherited = successor["generation"]["file_segments"]
             .as_array_mut()
             .unwrap()
