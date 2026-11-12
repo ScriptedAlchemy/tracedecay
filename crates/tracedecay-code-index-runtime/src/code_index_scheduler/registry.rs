@@ -4172,6 +4172,47 @@ pub struct ScopedFeedbackDocumentIdentityV1 {
 }
 
 impl CodeIndexSchedulerRegistryV1 {
+    /// Restore the current publication's retained text owner without its
+    /// projected query owners, as a fresh mount observes a sealed generation
+    /// before exact and lexical serving finish.
+    #[cfg(any(test, feature = "test-helpers"))]
+    pub async fn restore_sealed_text_projection_for_test(&self, project_root: &Path) -> bool {
+        let Ok(project_root) = canonical_existing_identity(project_root) else {
+            return false;
+        };
+        let mounted = self.mounted.lock().await;
+        let Some(worktree) = mounted.get(&project_root) else {
+            return false;
+        };
+        let Some(current) = worktree
+            .text_generation
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+        else {
+            return false;
+        };
+        let generation_id = current.metadata().manifest().generation_id.clone();
+        let retained = worktree
+            .historical_generation_owner
+            .published_text_generation(&generation_id)
+            .expect("read the current publication's retained text owner")
+            .expect("current publication retains its text owner");
+        *worktree
+            .serving_generation
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+        *worktree
+            .serving_source_witness
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+        *worktree
+            .text_generation
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(retained);
+        true
+    }
+
     pub async fn latest_feedback_generation_for_scope(
         &self,
         project_root: &Path,
@@ -4199,7 +4240,10 @@ impl CodeIndexSchedulerRegistryV1 {
         {
             return Some(generation.text_generation_handle());
         }
-        self.latest_text_serving_freshness_for_scope(scope)
+        // Exact and lexical query owners are unrelated to this manifest read:
+        // a current sealed generation remains valid feedback identity while
+        // their projection is warming or has been released for residency.
+        self.retained_text_owner_freshness_for_scope(scope)
             .await
             .and_then(|(generation, current)| current.then_some(generation))
     }

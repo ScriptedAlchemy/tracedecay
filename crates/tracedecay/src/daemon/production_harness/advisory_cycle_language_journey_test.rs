@@ -318,6 +318,40 @@ async fn settled_checkout_with_language_less_file(
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn sealed_generation_identity_does_not_wait_for_query_projection() {
+    let isolation = tempfile::TempDir::new().expect("production harness isolation");
+    let (harness, project) = settled_checkout_with_language_less_file(isolation.path()).await;
+    let schedulers = &harness
+        .resources
+        .as_ref()
+        .expect("mounted production resources")
+        .invocation
+        .code_index_schedulers;
+    assert!(
+        schedulers
+            .restore_sealed_text_projection_for_test(&project)
+            .await,
+        "the settled fixture has a current publication"
+    );
+    let retained = schedulers
+        .retained_text_owner_for_root(&project)
+        .await
+        .expect("the sealed manifest remains mounted");
+    assert!(
+        !retained.query_owners_are_ready(),
+        "the fixture must withhold exact and lexical query owners"
+    );
+
+    let (refused, answer) = settled_advisory_cycle(&harness, &project, "src/lib.rs").await;
+    assert!(
+        !refused,
+        "manifest-only advisory identity must not wait for exact and lexical query owners: {answer}"
+    );
+    assert_eq!(answer["outcome"]["outcome"], json!("evidence"), "{answer}");
+    harness.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn language_less_document_is_a_terminal_advisory_request() {
     let isolation = tempfile::TempDir::new().expect("production harness isolation");
     let (harness, project) = settled_checkout_with_language_less_file(isolation.path()).await;
