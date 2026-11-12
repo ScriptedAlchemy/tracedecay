@@ -1238,8 +1238,6 @@ mod recent_first_discovery_tests {
         directory_scan_witness, directory_stat_witness, indexed_replay_pass,
         replay_index_entries_visited_for_test, reset_replay_index_entries_visited_for_test,
     };
-    #[cfg(unix)]
-    use crate::runtime::hosts::codex::{DirectoryStatWitness, codex_directory_changed_since};
     use crate::runtime::ingest::quarantine::SourceSweep;
     use crate::runtime::jsonl_observation_admission::{
         SHARED_JSONL_PIN_GATES, install_test_shared_jsonl_preparation_authority,
