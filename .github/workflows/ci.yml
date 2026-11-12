@@ -712,10 +712,11 @@ jobs:
       - name: Build and type-check the Windows workspace
         if: ${{ github.event_name != 'workflow_dispatch' }}
         shell: bash
-        # Compile and link every target, but defer unused test runfiles trees.
-        # Bazel still materializes runfiles required by build-time tools.
+        # Compile and link every target with runfiles trees materialized.
+        # Build-time tools such as aspect_rules_js js_binary read RUNFILES
+        # from their runfiles tree, so deferring the trees fails the build.
         # Keep local Rust concurrency within the hosted runner's commit limit.
-        run: bazel build --config=ci-windows --jobs=${{ steps.bazel.outputs.fleet-enabled == 'true' && '16' || '2' }} --nobuild_runfile_links //...
+        run: bazel build --config=ci-windows --jobs=${{ steps.bazel.outputs.fleet-enabled == 'true' && '16' || '2' }} //...
 
       - name: Build and test native targets
         if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_os }}
