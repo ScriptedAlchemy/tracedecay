@@ -3,6 +3,7 @@ dashboard/node_modules
 sdks/typescript/node_modules
 plugin/cursor-native-extension/node_modules
 plugin/chatgpt-extension/node_modules
+tests/typescript5/node_modules
 target
 .pnpm
 .worktrees

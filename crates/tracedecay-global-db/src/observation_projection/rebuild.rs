@@ -2687,7 +2687,7 @@ mod activation_tests {
             .unwrap();
     }
 
-    #[asupersync::test]
+    #[tokio::test]
     async fn overlap_reconciliation_pages_past_the_transport_row_cap() {
         const GENERATION: &str = "generation.session-overlap-paging";
         let harness = RegisteredGlobalDbHarness::open("session-overlap-paging").await;
@@ -2752,7 +2752,7 @@ mod activation_tests {
         );
     }
 
-    #[asupersync::test]
+    #[tokio::test]
     async fn activation_refuses_an_unowned_message_and_rolls_back() {
         const GENERATION: &str = "generation.foreign-output";
         let harness = RegisteredGlobalDbHarness::open("foreign-rebuild-output").await;
@@ -2815,7 +2815,7 @@ mod activation_tests {
         );
     }
 
-    #[asupersync::test]
+    #[tokio::test]
     async fn output_preflight_rejects_unowned_changes_without_retaining_temp_storage() {
         const GENERATION: &str = "generation.output-preflight";
         let harness = RegisteredGlobalDbHarness::open("output-preflight-no-temp").await;
@@ -2988,7 +2988,7 @@ mod activation_tests {
         );
     }
 
-    #[asupersync::test]
+    #[tokio::test]
     async fn output_preflight_verifies_canonical_bodies_past_one_page() {
         const GENERATION: &str = "generation.canonical-output-preflight";
         let harness = RegisteredGlobalDbHarness::open("canonical-output-preflight").await;
@@ -3154,7 +3154,7 @@ mod activation_tests {
         assert!(foreign_keys.next().await.unwrap().is_none());
     }
 
-    #[asupersync::test]
+    #[tokio::test]
     async fn activation_names_the_session_field_instead_of_a_message_collision() {
         let harness = RegisteredGlobalDbHarness::open("session-collision-field").await;
         let active = session(Some("/private/old-transcript.jsonl"), None);
@@ -3201,7 +3201,7 @@ mod activation_tests {
         assert_eq!(persisted, "/private/old-transcript.jsonl");
     }
 
-    #[asupersync::test]
+    #[tokio::test]
     async fn activation_merges_a_compatible_session_and_inserts_a_new_one() {
         let harness = RegisteredGlobalDbHarness::open("session-collision-merge").await;
         let active = session(None, None);

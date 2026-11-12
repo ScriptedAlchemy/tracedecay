@@ -125,8 +125,7 @@ runs:
         REDIRECT_TEMP: ${{ inputs.windows-redirect-temp }}
       run: '& "$env:GITHUB_ACTION_PATH/tune_windows.ps1" -RedirectTemp:($env:REDIRECT_TEMP -eq "true")'
 
-    # crate_universe's cargo checks out git dependencies under D:/b; asupersync
-    # carries paths past MAX_PATH there, which libgit2 refuses without this.
+    # Git dependencies and generated build paths can exceed Windows MAX_PATH.
     - name: Allow long git paths
       if: runner.os == 'Windows'
       shell: bash

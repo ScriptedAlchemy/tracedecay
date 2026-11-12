@@ -1,0 +1,10 @@
+{
+  "name": "@tracedecay/typescript5-compiler",
+  "version": "0.0.0",
+  "private": true,
+  "description": "The typescript@5 compiler TypeScript diagnostics tests run beside typescript@7, as projects still pin it.",
+  "license": "MIT",
+  "devDependencies": {
+    "typescript": "5.9.3"
+  }
+}

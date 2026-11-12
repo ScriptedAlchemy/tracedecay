@@ -628,7 +628,7 @@ impl RemoteQueryClockPortV1 for UnavailableClock {
     }
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn clock_failure_is_typed_rather_than_a_fabricated_stamp() {
     // A host clock before the Unix epoch or past `i64::MAX` microseconds must
     // reach the caller as a clock failure, never as a deadline or receipt
@@ -689,7 +689,7 @@ fn unavailable_service() -> RemoteExactObservationQueryServiceV1 {
     )
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn protocol_failure_uses_server_clock_and_never_returns_partial_success() {
     let adapter = RemoteExactObservationQueryProtocolAdapterV1::new(unavailable_service());
     let response = adapter

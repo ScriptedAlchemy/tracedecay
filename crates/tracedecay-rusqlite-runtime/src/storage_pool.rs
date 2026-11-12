@@ -1,7 +1,7 @@
 //! The fixed pool that runs every attached SQLite file's writer and readers.
 //!
 //! Each writer and each reader worker is a task here, not a thread of its own.
-//! A task holds a `tracedecay-store-{i}` thread only while it runs SQL, so the
+//! A task holds a `tracedecay-store` thread only while it runs SQL, so the
 //! thread count is the configured size whatever the number of attached files.
 
 use std::{
@@ -9,22 +9,19 @@ use std::{
     future::Future,
     panic::AssertUnwindSafe,
     pin::{Pin, pin},
-    sync::{Arc, Mutex, OnceLock, PoisonError},
+    sync::{Arc, OnceLock},
     task::{Context, Poll, Wake, Waker},
     thread::{self, Thread},
     time::{Duration, Instant},
 };
 
-use asupersync::{
-    Cx,
-    runtime::{Runtime, RuntimeBuilder},
-};
 use futures_util::FutureExt;
+use tokio::runtime::{Builder, Runtime};
 
 /// Overrides the pool size, clamped to [`STORE_THREAD_RANGE`].
 pub const STORE_THREADS_ENV: &str = "TRACEDECAY_STORE_THREADS";
 
-/// The name every pool thread carries, followed by `-{index}`.
+/// The name every pool thread carries.
 pub const STORE_THREAD_PREFIX: &str = "tracedecay-store";
 
 const STORE_THREAD_RANGE: std::ops::RangeInclusive<usize> = 2..=16;
@@ -62,10 +59,11 @@ pub fn store_threads() -> usize {
 
 fn pool() -> Result<&'static Runtime, String> {
     POOL.get_or_init(|| {
-        RuntimeBuilder::multi_thread()
+        Builder::new_multi_thread()
+            .enable_all()
+            .disable_lifo_slot()
             .worker_threads(store_threads())
-            .thread_name_prefix(STORE_THREAD_PREFIX)
-            .blocking_threads(0, 0)
+            .thread_name(STORE_THREAD_PREFIX)
             .on_thread_start(|| ON_POOL.set(true))
             .build()
             .map_err(|error| format!("storage runtime failed to start: {error}"))
@@ -118,31 +116,15 @@ where
     let Ok(pool) = pool() else {
         return Err(work);
     };
-    // `try_spawn` drops a refused future; the slot keeps it recoverable.
-    let slot = Arc::new(Mutex::new(Some(work)));
-    let task_slot = Arc::clone(&slot);
     let (done, finished) = async_channel::bounded(1);
-    let task = async move {
-        let work = task_slot
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .take();
-        if let Some(work) = work {
-            let panicked = AssertUnwindSafe(TaskLocals::new(work))
-                .catch_unwind()
-                .await
-                .is_err();
-            let _ = done.try_send(panicked);
-        }
-    };
-    match pool.handle().try_spawn(task) {
-        Ok(_detached) => Ok(PoolTask { finished }),
-        Err(_) => Err(slot
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .take()
-            .expect("a refused task never ran its work")),
-    }
+    pool.spawn(async move {
+        let panicked = AssertUnwindSafe(TaskLocals::new(work))
+            .catch_unwind()
+            .await
+            .is_err();
+        let _ = done.try_send(panicked);
+    });
+    Ok(PoolTask { finished })
 }
 
 pub(crate) fn adopt(work: impl Future<Output = ()> + Send + 'static) {
@@ -172,8 +154,17 @@ impl<T> Drop for CommandReceiver<T> {
 }
 
 pub(crate) async fn timeout<F: Future>(duration: Duration, future: F) -> Option<F::Output> {
-    let now = Cx::current().map_or_else(asupersync::time::wall_now, |cx| cx.now());
-    asupersync::time::timeout(now, duration, future).await.ok()
+    // Callers include synchronous waits and inline deferred returns on plain
+    // threads, where no Tokio runtime is entered. The pool owns a timer
+    // driver, so bind the timer to it instead of panicking for lack of an
+    // ambient runtime.
+    let Ok(pool) = pool() else {
+        return None;
+    };
+    crate::native_runtime::in_tokio_context(pool.handle().clone(), async move {
+        tokio::time::timeout(duration, future).await.ok()
+    })
+    .await
 }
 
 pub(crate) async fn sleep(duration: Duration) {

@@ -1772,6 +1772,20 @@ async fn explicit_init_retries_after_joining_an_ordinary_missing_database_open()
     let client_identity = test_client_identity_for(profile_root.clone());
     let layout = initialize_test_project(&project, &client_identity).await;
     std::fs::remove_file(&layout.graph_db_path).expect("remove generated project database");
+    // The fixture models a genuinely absent SQLite basename, not an
+    // incomplete store with orphan WAL, SHM or journal entries. The fixture
+    // project was closed by initialize_test_project above, so its test-owned
+    // sidecars can be retired here. Production admission must instead refuse
+    // unknown sidecars rather than erase them during retry.
+    for suffix in ["-wal", "-shm", "-journal"] {
+        let mut name = layout.graph_db_path.as_os_str().to_os_string();
+        name.push(suffix);
+        match std::fs::remove_file(std::path::PathBuf::from(name)) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => panic!("remove isolated SQLite fixture sidecar: {error}"),
+        }
+    }
     let missing_graph_db_path = layout.graph_db_path.clone();
 
     let _database_scope =
@@ -3229,8 +3243,8 @@ async fn project_registry_read_does_not_wait_for_a_blocked_project_open() {
     engine.shutdown_all().await;
 }
 
-// The publication wait runs under the request's executor, which need not be
-// Tokio: under `native_runtime::block_on` no Tokio runtime is entered.
+// A synchronous host enters the installed runtime for the publication wait;
+// both immediate publication and deadline expiry must settle there.
 #[test]
 fn foreground_project_open_wait_is_bounded_and_accepts_quick_publication() {
     let project_path = std::path::PathBuf::from("/projects/uncontended");

@@ -1238,6 +1238,8 @@ mod recent_first_discovery_tests {
         directory_scan_witness, directory_stat_witness, indexed_replay_pass,
         replay_index_entries_visited_for_test, reset_replay_index_entries_visited_for_test,
     };
+    #[cfg(unix)]
+    use crate::runtime::hosts::codex::{DirectoryStatWitness, codex_directory_changed_since};
     use crate::runtime::ingest::quarantine::SourceSweep;
     use crate::runtime::jsonl_observation_admission::{
         SHARED_JSONL_PIN_GATES, install_test_shared_jsonl_preparation_authority,
@@ -1464,7 +1466,11 @@ mod recent_first_discovery_tests {
         else {
             panic!("the first scan delivers");
         };
-        assert!(!released.has_changed());
+        assert!(
+            !released
+                .has_changed()
+                .expect("discovery release publisher remains open")
+        );
         hub.acknowledge("profile");
 
         // A consumer joining now replays the source's index, which another
@@ -1490,7 +1496,11 @@ mod recent_first_discovery_tests {
         hub.discover("profile", &source, bounds, first.next_frontier)
             .await
             .unwrap();
-        assert!(released.has_changed());
+        assert!(
+            released
+                .has_changed()
+                .expect("discovery release publisher remains open")
+        );
     }
 
     /// An idle scan one consumer ran is queued for every other consumer. A

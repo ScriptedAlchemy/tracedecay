@@ -93,10 +93,9 @@ async fn cancellation_returns_before_a_read_worker_settles_but_shutdown_joins_it
     assert!(worker_finished.load(Ordering::Acquire));
 }
 
-/// A Tokio runtime without a timer driver: a dispatch deadline still timed by
-/// Tokio panics here instead of passing on the wrong clock.
-fn runtime_without_tokio_timers() -> tokio::runtime::Runtime {
-    tokio::runtime::Builder::new_multi_thread()
+/// Uses the same enabled timer driver and scheduler policy as production.
+fn runtime() -> tokio::runtime::Runtime {
+    native_runtime::default_builder()
         .worker_threads(2)
         .build()
         .expect("tokio runtime")
@@ -127,7 +126,7 @@ const ROUNDING: Duration = Duration::from_millis(1);
 
 #[test]
 fn canonical_effect_waits_past_its_deadline_for_the_authoritative_result() {
-    runtime_without_tokio_timers().block_on(async {
+    runtime().block_on(async {
         let owner = Arc::new(());
         let authority = RetainedDispatchAuthority::new(Arc::downgrade(&owner));
         let cancellation = tracedecay_contracts::CancellationSignal::active("effect.deadline")
@@ -172,7 +171,7 @@ fn canonical_effect_waits_past_its_deadline_for_the_authoritative_result() {
 
 #[test]
 fn deadline_answers_for_a_worker_that_never_settles() {
-    runtime_without_tokio_timers().block_on(async {
+    runtime().block_on(async {
         let owner = Arc::new(());
         let authority = RetainedDispatchAuthority::new(Arc::downgrade(&owner));
         let cancellation = tracedecay_contracts::CancellationSignal::active("read.deadline")
@@ -221,7 +220,7 @@ fn deadline_answers_for_a_worker_that_never_settles() {
 
 #[test]
 fn cancelled_settlement_stops_waiting_at_the_deadline() {
-    runtime_without_tokio_timers().block_on(async {
+    runtime().block_on(async {
         let owner = Arc::new(());
         let authority = RetainedDispatchAuthority::new(Arc::downgrade(&owner));
         let cancellation = tracedecay_contracts::CancellationSignal::active("read.cancelled")

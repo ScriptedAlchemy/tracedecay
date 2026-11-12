@@ -35,7 +35,7 @@ async fn state(
         .expect("read recipient state")
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn registered_stack_signal_limit_counts_utf8_bytes_not_characters() {
     let harness = RegisteredGlobalDbHarness::open("github-stack-utf8-byte-limit").await;
     // SQLite length(TEXT) counts characters; the on-disk and Rust limits
@@ -107,7 +107,7 @@ async fn registered_stack_signal_limit_counts_utf8_bytes_not_characters() {
     );
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn registered_sql_cannot_forge_a_retired_signal_identity() {
     let harness = RegisteredGlobalDbHarness::open("github-stack-no-forged-retirement").await;
     let record = signal("signal.github-stack-forged-retirement", 10);
@@ -179,7 +179,7 @@ async fn registered_sql_cannot_forge_a_retired_signal_identity() {
     );
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn pending_delivery_survives_restart_and_settles_only_after_acknowledgement() {
     let harness = RegisteredGlobalDbHarness::open("github-stack-delivery-restart").await;
     let record = signal("signal.github-stack-restart", 10);
@@ -247,7 +247,7 @@ async fn pending_delivery_survives_restart_and_settles_only_after_acknowledgemen
     );
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn saturation_is_per_recipient_and_defers_the_exact_overflow_recipient() {
     let harness = RegisteredGlobalDbHarness::open("github-stack-delivery-saturation").await;
     for index in 0..MAX_GITHUB_STACK_ACTIVE_PENDING_V1 {
@@ -303,7 +303,7 @@ async fn saturation_is_per_recipient_and_defers_the_exact_overflow_recipient() {
     );
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn settling_a_recipient_promotes_only_its_oldest_deferred_row() {
     let harness = RegisteredGlobalDbHarness::open("github-stack-delivery-promotion").await;
     let both = vec![RECIPIENT.to_owned(), "actor.other".to_owned()];
@@ -377,7 +377,7 @@ async fn stored_signal_payload_bytes(harness: &RegisteredGlobalDbHarness, signal
         .expect("decode stored payload bytes")
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn noncanonical_retirement_marker_cannot_reopen_an_expired_signal() {
     let harness = RegisteredGlobalDbHarness::open("github-stack-retirement-marker-shape").await;
     let record = signal("signal.github-stack-retirement-whitespace", 10);
@@ -563,7 +563,7 @@ async fn noncanonical_retirement_marker_cannot_reopen_an_expired_signal() {
     );
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn terminal_compaction_preserves_pending_peers_and_refuses_replay_collision() {
     let harness = RegisteredGlobalDbHarness::open("github-stack-terminal-compaction").await;
     let mut record = signal("signal.github-stack-old", 10);
@@ -679,7 +679,7 @@ async fn terminal_compaction_preserves_pending_peers_and_refuses_replay_collisio
     );
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn compaction_is_bounded_and_raw_sql_cannot_delete_unsettled_delivery() {
     let harness = RegisteredGlobalDbHarness::open("github-stack-bounded-retirement").await;
     let count = crate::MAX_GITHUB_STACK_RETIRE_BATCH_V1 + 3;
@@ -749,7 +749,7 @@ async fn compaction_is_bounded_and_raw_sql_cannot_delete_unsettled_delivery() {
     );
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn retention_frontier_bounds_writer_work_and_resumes_past_deferred_backlog() {
     const BLOCKED: usize = 4_096;
     let harness = RegisteredGlobalDbHarness::open("github-stack-retirement-frontier").await;
@@ -895,7 +895,7 @@ async fn retention_frontier_bounds_writer_work_and_resumes_past_deferred_backlog
     );
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn terminal_retirement_cannot_be_accelerated_past_the_issued_window() {
     let harness = RegisteredGlobalDbHarness::open("github-stack-terminal-freshness").await;
     let mut fresh = signal(
@@ -953,7 +953,7 @@ async fn terminal_retirement_cannot_be_accelerated_past_the_issued_window() {
     );
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn failed_terminal_recipient_retirement_rolls_back_payload_compaction() {
     let harness = RegisteredGlobalDbHarness::open("github-stack-retire-rollback").await;
     let record = signal("signal.github-stack-rollback", 10);

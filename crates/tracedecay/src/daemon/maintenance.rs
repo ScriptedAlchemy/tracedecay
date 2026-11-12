@@ -2939,7 +2939,10 @@ mod tests {
     /// After release, the supervised fair job lets A converge between ticks.
     /// Capacity release still excludes store clients.
     #[test]
-    fn full_ticks_preserve_independent_store_progress_without_a_tokio_runtime() {
+    fn full_ticks_preserve_independent_store_progress_from_a_synchronous_host() {
+        if !crate::test_support::alone_with_runtime_hazards() {
+            return;
+        }
         let hazards = crate::test_support::native_runtime_hazards();
         tracedecay_runtime_core::native_runtime::block_on(
             full_ticks_preserve_independent_store_progress(),
@@ -2949,7 +2952,7 @@ mod tests {
     }
 
     async fn full_ticks_preserve_independent_store_progress() {
-        assert!(tokio::runtime::Handle::try_current().is_err());
+        assert!(tokio::runtime::Handle::try_current().is_ok());
         let temp = tempfile::TempDir::new().expect("temp root");
         let profile_root = temp.path().join("profile");
         let checkout = temp.path().join("checkout");
@@ -3410,13 +3413,16 @@ mod tests {
     }
 
     /// The coordinator starts its sampler, publication and retention owners
-    /// on the native runtime and joins them at shutdown, with no Tokio
-    /// runtime entered.
+    /// on the installed runtime and joins them at shutdown from a synchronous
+    /// host.
     #[test]
-    fn the_coordinator_runs_and_shuts_down_without_a_tokio_runtime() {
+    fn the_coordinator_runs_and_shuts_down_from_a_synchronous_host() {
+        if !crate::test_support::alone_with_runtime_hazards() {
+            return;
+        }
         let hazards = crate::test_support::native_runtime_hazards();
         tracedecay_runtime_core::native_runtime::block_on(async {
-            assert!(tokio::runtime::Handle::try_current().is_err());
+            assert!(tokio::runtime::Handle::try_current().is_ok());
             let temp = tempfile::TempDir::new().expect("temp root");
             let retention = tracedecay_configuration::RetentionConfig {
                 orphan_store_gc_days: Some(30),

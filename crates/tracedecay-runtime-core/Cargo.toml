@@ -20,7 +20,8 @@ test-transport = ["tracedecay-rusqlite-runtime/test-transport"]
 test-helpers = ["dep:tracing-subscriber"]
 
 [dependencies]
-asupersync.workspace = true
+tokio = { workspace = true, features = ["rt", "rt-multi-thread", "sync", "time", "macros"] }
+tokio-util = { version = "0.7", features = ["rt"] }
 tracedecay-capture = { path = "../tracedecay-capture" }
 tracedecay-domain = { path = "../tracedecay-domain" }
 tracedecay-graph-db = { path = "../tracedecay-graph-db" }

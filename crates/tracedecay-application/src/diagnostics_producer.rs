@@ -9,13 +9,19 @@
 //!
 //! A monorepo is many TypeScript projects (one tsconfig per package). Every
 //! generation carries one snapshot of all their merged findings, but a project
-//! is rechecked only when the generation changed a file that can change what
-//! tsc reports for it or its installed compiler changed; the rest republish
-//! their previous result without running tsc. Each run's outcome is published to the owning project's status handle, and each
-//! tsconfig's check within it, so a read can name the real state of the
-//! project that owns the file it asked about (still running, compiler failed,
-//! compiler missing, nothing resolved) instead of a bare "no producer" or a
-//! clean page nothing checked.
+//! is rechecked only when its installed compiler, the configuration that
+//! compiler resolves, or a file its last check's program read could have
+//! changed what tsc reports for it; the rest republish their previous result.
+//! Which files a project holds is never read from its configuration: it is the
+//! program the compiler recorded checking. A project that references others
+//! is checked only while the compiler's own dry build finds their outputs
+//! current, because tsc checks it against those outputs.
+//!
+//! Each run's outcome is published to the owning project's status handle with
+//! every tsconfig's check and program, so a read can name the real state of
+//! the project whose program holds the file it asked about (still running,
+//! compiler failed, compiler missing, nothing resolved) instead of a bare "no
+//! producer" or a clean page nothing checked ([`availability`]).
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Read;
@@ -27,9 +33,10 @@ use futures_util::StreamExt;
 use sha2::{Digest, Sha256};
 use tracedecay_domain::{ContentDigest, UtcMicros};
 use tracedecay_lsp::{
-    SearchedTsconfig, TypeScriptCompilerAdmission, TypeScriptFileOwner, TypeScriptProject,
-    TypeScriptProjectConfigInputs, run_typescript_compiler, typescript_build_info_program,
-    typescript_file_owner, typescript_install_command, typescript_projects,
+    TypeScriptCompilerAdmission, TypeScriptConfiguration, TypeScriptProgram, TypeScriptProject,
+    is_typescript_package_manifest, resolve_typescript_configuration, run_typescript_compiler,
+    typescript_build_info_program, typescript_install_command, typescript_project,
+    typescript_referenced_projects_out_of_date,
 };
 use tracedecay_runtime_core::native_runtime;
 
@@ -41,21 +48,28 @@ use crate::diagnostics_publication::{
 };
 use crate::diagnostics_store::DiagnosticsStore;
 
+mod availability;
 mod status;
 
+#[cfg(all(test, unix))]
+mod compiler_conformance_tests;
 #[cfg(all(test, unix))]
 mod installed_compiler_tests;
 #[cfg(all(test, unix))]
 mod overlap_tests;
 
+pub use availability::{
+    SearchedTsconfigV1, TypeScriptDiagnosticsAvailabilityV1, typescript_diagnostics_availability,
+};
 use status::TypeScriptProducerStatusWriterV1;
 pub use status::{
     CompilerProducerRunV1, TypeScriptProducerStatusHandleV1, TypeScriptProducerStatusV1,
-    TypeScriptProjectCheckV1,
+    TypeScriptProgramMembershipV1, TypeScriptProjectCheckV1, TypeScriptProjectStatusV1,
 };
 
 /// What one project root's producer remembers between generations: the file
-/// digests of the generation it last checked and how each project fared.
+/// digests of the generation it last checked and what each project's compiler
+/// established about it then.
 pub struct TypeScriptProducerStateV1 {
     status: TypeScriptProducerStatusWriterV1,
     admission: TypeScriptCompilerAdmission,
@@ -81,30 +95,45 @@ impl TypeScriptProducerStateV1 {
     }
 }
 
+/// What the compiler established about one tsconfig the last time it ran.
 #[derive(Clone)]
-enum ProjectResult {
+struct ProjectResult {
+    compiler_revision: Option<[u8; 32]>,
+    /// How the compiler resolved the tsconfig; `None` when it could not.
+    configuration: Option<TypeScriptConfiguration>,
+    outcome: ProjectOutcome,
+}
+
+#[derive(Clone)]
+enum ProjectOutcome {
     Checked {
         reported: Vec<Diagnostic>,
-        /// Logical paths of the program files the check read; `None` when its
-        /// build-info named none inside the project root.
-        program: Option<BTreeSet<String>>,
-        compiler_revision: Option<[u8; 32]>,
+        /// The program the check recorded; `None` when its build-info could
+        /// not be read or named none of its roots inside the project root.
+        membership: Option<TypeScriptProgramMembershipV1>,
     },
     Failed {
         reason: String,
-        compiler_revision: Option<[u8; 32]>,
     },
 }
 
 impl ProjectResult {
-    fn compiler_revision(&self) -> Option<[u8; 32]> {
-        match self {
-            Self::Checked {
-                compiler_revision, ..
-            }
-            | Self::Failed {
-                compiler_revision, ..
-            } => *compiler_revision,
+    fn failed(
+        compiler_revision: Option<[u8; 32]>,
+        configuration: Option<TypeScriptConfiguration>,
+        reason: String,
+    ) -> Self {
+        Self {
+            compiler_revision,
+            configuration,
+            outcome: ProjectOutcome::Failed { reason },
+        }
+    }
+
+    fn membership(&self) -> Option<&TypeScriptProgramMembershipV1> {
+        match &self.outcome {
+            ProjectOutcome::Checked { membership, .. } => membership.as_ref(),
+            ProjectOutcome::Failed { .. } => None,
         }
     }
 }
@@ -349,13 +378,15 @@ fn bind_build_info(build_info: &Path, compiler_revision: Option<[u8; 32]>) -> st
 /// Publishes the merged findings of each project's own TypeScript compiler as
 /// the compiler pillar's clean-generation snapshot for `identity`.
 ///
-/// A project is rechecked, incrementally against its build-info in
-/// `build_info_dir`, only when `identity` changed a file that can change what
-/// tsc reports for it since the generation `state` last checked, or when its
-/// installed compiler is not the one that produced that result; every other
-/// project republishes its previous result without running tsc. The outcome
-/// and each tsconfig's check are published to the status handle `state` was
-/// built with, which [`typescript_diagnostics_availability`] reads.
+/// `projects` are the tsconfigs found under the root; the compiler adds the
+/// ones they reference. Each is rechecked, incrementally against its
+/// build-info in `build_info_dir`, unless its installed compiler and the
+/// configuration that compiler resolves are those of its previous result and
+/// `identity` changed nothing its previous program, its references' programs
+/// or its package manifests could have read; every other project republishes
+/// its previous result. The outcome, each tsconfig's check and the program it
+/// recorded are published to the status handle `state` was built with, which
+/// [`typescript_diagnostics_availability`] reads.
 ///
 /// A clean project publishes an empty snapshot, which is what lets a read
 /// answer "no diagnostics" as evidence instead of as a missing producer.
@@ -373,176 +404,473 @@ pub async fn run_typescript_producer_v1(
     state: &mut TypeScriptProducerStateV1,
     observed_at: UtcMicros,
 ) -> CompilerProducerRunV1 {
-    let mut checks = BTreeMap::new();
     let files = identity
         .file_digests()
         .map(|(path, digest)| (path.to_owned(), digest.clone()))
         .collect::<BTreeMap<_, _>>();
-    let changed = state
+    let changes = state
         .checked_files
         .as_ref()
-        .map(|previous| changed_paths(previous, &files));
-    let compilers = projects
-        .iter()
-        .filter_map(|project| project.compiler.clone())
-        .collect::<BTreeSet<_>>();
-    let compiler_revisions =
-        native_runtime::spawn_blocking(move || installed_compiler_revisions(compilers))
-            .await
-            .unwrap_or_else(|error| {
-                // Every revision is then unknown, which forbids reuse.
-                tracing::warn!(%error, "TypeScript compiler revisions were not computed");
-                BTreeMap::new()
-            });
+        .map(|previous| GenerationChanges::between(previous, &files));
+    let resolved = resolve_projects(project_root, projects, state, changes.as_ref()).await;
+
     let mut results = BTreeMap::new();
     let mut stale = Vec::new();
-    for project in projects {
-        let Some(compiler) = &project.compiler else {
-            continue;
-        };
-        let revision = compiler_revisions.get(compiler).copied().flatten();
-        match (state.projects.get(&project.tsconfig), &changed) {
-            (Some(previous), Some(changed))
-                if revision.is_some()
-                    && previous.compiler_revision() == revision
-                    && !needs_check(project_root, &project.tsconfig, previous, changed) =>
-            {
-                results.insert(project.tsconfig.clone(), previous.clone());
+    for (tsconfig, project) in &resolved.checkable {
+        let configuration = match &project.configuration {
+            Ok(configuration) => configuration,
+            Err(reason) => {
+                results.insert(
+                    tsconfig.clone(),
+                    ProjectResult::failed(project.revision, None, reason.clone()),
+                );
+                continue;
             }
-            _ => stale.push((project.tsconfig.clone(), compiler.clone(), revision)),
+        };
+        match (state.projects.get(tsconfig), &changes) {
+            (Some(previous), Some(changes))
+                if project.revision.is_some()
+                    && previous.compiler_revision == project.revision
+                    && previous.configuration.as_ref() == Some(configuration)
+                    && !changes.affect(
+                        project_root,
+                        tsconfig,
+                        previous,
+                        configuration,
+                        &state.projects,
+                    ) =>
+            {
+                results.insert(tsconfig.clone(), previous.clone());
+            }
+            _ => stale.push(StaleProject {
+                tsconfig: tsconfig.clone(),
+                compiler: project.compiler.clone(),
+                compiler_revision: project.revision,
+                configuration: configuration.clone(),
+            }),
         }
     }
-    let reused = results.len();
-    let checked = stale.len();
+    // A configuration the compiler refused was established this run too.
+    let reused = results.len()
+        - resolved
+            .checkable
+            .values()
+            .filter(|project| project.configuration.is_err())
+            .count();
+    let checked = resolved.checkable.len() - reused;
     results.extend(check_projects(project_root, build_info_dir, stale, &state.admission).await);
     state.checked_files = Some(files);
 
     let mut parsed = Vec::new();
     let mut failures = Vec::new();
+    let mut statuses = BTreeMap::new();
+    for tsconfig in &resolved.missing {
+        statuses.insert(
+            tsconfig.clone(),
+            TypeScriptProjectStatusV1::CompilerMissing {
+                install_command: typescript_install_command(
+                    project_root,
+                    tsconfig.parent().unwrap_or(project_root),
+                ),
+            },
+        );
+    }
     for (tsconfig, result) in &results {
-        let check = match result {
-            ProjectResult::Checked { reported, .. } => {
+        let Some(project) = resolved.checkable.get(tsconfig) else {
+            continue;
+        };
+        let compiler = project.compiler.clone();
+        let references = result
+            .configuration
+            .as_ref()
+            .map(|configuration| configuration.references().to_vec())
+            .unwrap_or_default();
+        let status = match &result.outcome {
+            ProjectOutcome::Checked {
+                reported,
+                membership,
+            } => {
                 parsed.extend(reported.iter().cloned());
-                TypeScriptProjectCheckV1::Checked
+                TypeScriptProjectStatusV1::Checked {
+                    compiler,
+                    membership: membership.clone(),
+                    references,
+                }
             }
-            ProjectResult::Failed { reason, .. } => {
+            ProjectOutcome::Failed { reason } => {
                 failures.push(reason.clone());
-                TypeScriptProjectCheckV1::Failed {
+                TypeScriptProjectStatusV1::Failed {
+                    compiler,
                     reason: reason.clone(),
+                    references,
                 }
             }
         };
-        checks.insert(tsconfig.clone(), check);
+        statuses.insert(tsconfig.clone(), status);
     }
     state.projects = results;
     let Some(publication) = state.status.begin_publication().await else {
         return CompilerProducerRunV1::Superseded;
     };
+    let any_checked = statuses
+        .values()
+        .any(|status| matches!(status, TypeScriptProjectStatusV1::Checked { .. }));
     let run = match (
         compiler_diagnostic_analyzer_revision_v1(),
         compiler_diagnostic_configuration_revision_v1(),
     ) {
-        (Ok(analyzer_revision), Ok(configuration_revision)) => {
-            if checks
-                .values()
-                .any(|check| *check == TypeScriptProjectCheckV1::Checked)
+        (Ok(analyzer_revision), Ok(configuration_revision)) if any_checked => {
+            match publish_compiler_diagnostics_for_identity_v1(
+                project_root,
+                identity,
+                store,
+                &parsed,
+                analyzer_revision,
+                configuration_revision,
+                observed_at,
+            )
+            .await
             {
-                match publish_compiler_diagnostics_for_identity_v1(
-                    project_root,
-                    identity,
-                    store,
-                    &parsed,
-                    analyzer_revision,
-                    configuration_revision,
-                    observed_at,
-                )
-                .await
-                {
-                    CompilerDiagnosticPublicationOutcomeV1::Published {
-                        generation,
-                        report,
-                        unresolved,
-                    } => CompilerProducerRunV1::Published {
-                        generation,
-                        inserted: report.inserted,
-                        unresolved: unresolved.len(),
-                        checked,
-                        reused,
-                    },
-                    CompilerDiagnosticPublicationOutcomeV1::NoResolvableDiagnostics {
-                        unresolved,
-                    } => CompilerProducerRunV1::NoResolvableDiagnostics {
+                CompilerDiagnosticPublicationOutcomeV1::Published {
+                    generation,
+                    report,
+                    unresolved,
+                } => CompilerProducerRunV1::Published {
+                    generation,
+                    inserted: report.inserted,
+                    unresolved: unresolved.len(),
+                    checked,
+                    reused,
+                },
+                CompilerDiagnosticPublicationOutcomeV1::NoResolvableDiagnostics { unresolved } => {
+                    CompilerProducerRunV1::NoResolvableDiagnostics {
                         unresolved: unresolved.iter().map(ToString::to_string).collect(),
-                    },
-                    CompilerDiagnosticPublicationOutcomeV1::CodeIndexIdentityUnavailable
-                    | CompilerDiagnosticPublicationOutcomeV1::CodeIndexGenerationUnavailable => {
-                        CompilerProducerRunV1::CodeIndexGenerationUnavailable
-                    }
-                    CompilerDiagnosticPublicationOutcomeV1::Failed { reason } => {
-                        CompilerProducerRunV1::PublicationFailed { reason }
                     }
                 }
-            } else {
-                CompilerProducerRunV1::CompilerFailed {
-                    reason: if failures.is_empty() {
-                        "no TypeScript project under the project root has a compiler installed"
-                            .to_owned()
-                    } else {
-                        failures.join("; ")
-                    },
+                CompilerDiagnosticPublicationOutcomeV1::CodeIndexIdentityUnavailable
+                | CompilerDiagnosticPublicationOutcomeV1::CodeIndexGenerationUnavailable => {
+                    CompilerProducerRunV1::CodeIndexGenerationUnavailable
+                }
+                CompilerDiagnosticPublicationOutcomeV1::Failed { reason } => {
+                    CompilerProducerRunV1::PublicationFailed { reason }
                 }
             }
         }
+        (Ok(_), Ok(_)) => CompilerProducerRunV1::CompilerFailed {
+            reason: if failures.is_empty() {
+                NO_COMPILER_INSTALLED.to_owned()
+            } else {
+                failures.join("; ")
+            },
+        },
         _ => CompilerProducerRunV1::PublicationFailed {
             reason: "compiler pillar identity is unavailable".to_owned(),
         },
     };
-    publication.publish(TypeScriptProducerStatusV1::new(run.clone(), checks));
+    publication.publish(TypeScriptProducerStatusV1::new(
+        Some(run.clone()),
+        Some(identity.generation_id().clone()),
+        statuses,
+    ));
     run
 }
 
-/// Logical paths whose content differs between two generations, including
-/// files one of them lacks.
-fn changed_paths(
-    previous: &BTreeMap<String, ContentDigest>,
-    current: &BTreeMap<String, ContentDigest>,
-) -> BTreeSet<String> {
-    let added_or_edited = current
+/// Publishes what discovery alone establishes, before any check: each
+/// tsconfig's compiler about to run or its missing one, and, when none has a
+/// compiler, that nothing will be checked. A status retained from this
+/// owner's completed check is kept while a compiler is there to replace it.
+/// Returns the run it published when no tsconfig can be checked.
+pub async fn publish_typescript_discovery_v1(
+    project_root: &Path,
+    projects: &[TypeScriptProject],
+    state: &mut TypeScriptProducerStateV1,
+) -> Option<CompilerProducerRunV1> {
+    let checkable = projects.iter().any(|project| project.compiler.is_some());
+    if checkable && state.status.has_status() {
+        return None;
+    }
+    let statuses = projects
         .iter()
-        .filter(|(path, digest)| previous.get(*path) != Some(*digest))
-        .map(|(path, _)| path.clone());
-    let removed = previous
-        .keys()
-        .filter(|path| !current.contains_key(*path))
-        .cloned();
-    added_or_edited.chain(removed).collect()
+        .map(|project| {
+            let status = match &project.compiler {
+                Some(compiler) => TypeScriptProjectStatusV1::Checking {
+                    compiler: compiler.clone(),
+                },
+                None => TypeScriptProjectStatusV1::CompilerMissing {
+                    install_command: typescript_install_command(
+                        project_root,
+                        project.tsconfig.parent().unwrap_or(project_root),
+                    ),
+                },
+            };
+            (project.tsconfig.clone(), status)
+        })
+        .collect();
+    let run = (!checkable).then(|| CompilerProducerRunV1::CompilerFailed {
+        reason: NO_COMPILER_INSTALLED.to_owned(),
+    });
+    // A superseded producer's later publications are refused the same way.
+    let publication = state.status.begin_publication().await?;
+    publication.publish(TypeScriptProducerStatusV1::new(run.clone(), None, statuses));
+    run
 }
 
-/// Whether a change can alter what tsc reports for a project since its last
-/// result: a program file its check read, or one of its config inputs. A
-/// failed check read no program, so only its config inputs retry it.
-fn needs_check(
+const NO_COMPILER_INSTALLED: &str =
+    "no TypeScript project under the project root has a compiler installed";
+
+/// The project set the compiler resolved for one generation: the discovered
+/// tsconfigs and every configuration under the root they reference.
+struct ResolvedProjects {
+    checkable: BTreeMap<PathBuf, CheckableProject>,
+    /// Tsconfigs with no compiler installed for them.
+    missing: BTreeSet<PathBuf>,
+}
+
+struct CheckableProject {
+    compiler: PathBuf,
+    revision: Option<[u8; 32]>,
+    /// How the compiler resolved the tsconfig, or why it could not.
+    configuration: Result<TypeScriptConfiguration, String>,
+}
+
+/// Asks each project's compiler how it resolves its tsconfig, following the
+/// references it reports to projects under the root. A configuration is
+/// reused only when its compiler is unchanged and the generation changed
+/// nothing at all, since any file may be one it reads.
+async fn resolve_projects(
     project_root: &Path,
-    tsconfig: &Path,
-    previous: &ProjectResult,
-    changed: &BTreeSet<String>,
+    discovered: &[TypeScriptProject],
+    state: &TypeScriptProducerStateV1,
+    changes: Option<&GenerationChanges>,
+) -> ResolvedProjects {
+    let mut resolved = ResolvedProjects {
+        checkable: BTreeMap::new(),
+        missing: BTreeSet::new(),
+    };
+    let mut revisions = BTreeMap::new();
+    let mut pending = discovered.to_vec();
+    while !pending.is_empty() {
+        let compilers = pending
+            .iter()
+            .filter_map(|project| project.compiler.clone())
+            .filter(|compiler| !revisions.contains_key(compiler))
+            .collect::<BTreeSet<_>>();
+        revisions.extend(
+            native_runtime::spawn_blocking(move || installed_compiler_revisions(compilers))
+                .await
+                .unwrap_or_else(|error| {
+                    // Every revision is then unknown, which forbids reuse.
+                    tracing::warn!(%error, "TypeScript compiler revisions were not computed");
+                    BTreeMap::new()
+                }),
+        );
+        let mut queries = Vec::new();
+        for TypeScriptProject { tsconfig, compiler } in pending.drain(..) {
+            let Some(compiler) = compiler else {
+                resolved.missing.insert(tsconfig);
+                continue;
+            };
+            let revision = revisions.get(&compiler).copied().flatten();
+            let unchanged = state.projects.get(&tsconfig).and_then(|previous| {
+                (revision.is_some()
+                    && previous.compiler_revision == revision
+                    && changes.is_some_and(GenerationChanges::is_empty))
+                .then(|| previous.configuration.clone())
+                .flatten()
+            });
+            queries.push((tsconfig, compiler, revision, unchanged));
+        }
+        let configured = futures_util::stream::iter(queries)
+            .map(|(tsconfig, compiler, revision, unchanged)| async move {
+                let configuration = match unchanged {
+                    Some(configuration) => Ok(configuration),
+                    None => resolve_typescript_configuration(
+                        &state.admission,
+                        &compiler,
+                        project_root,
+                        &tsconfig,
+                    )
+                    .await
+                    .map_err(|error| error.to_string()),
+                };
+                (
+                    tsconfig,
+                    CheckableProject {
+                        compiler,
+                        revision,
+                        configuration,
+                    },
+                )
+            })
+            .buffer_unordered(state.admission.concurrency())
+            .collect::<Vec<_>>()
+            .await;
+        resolved.checkable.extend(configured);
+        let references = resolved
+            .checkable
+            .values()
+            .filter_map(|project| project.configuration.as_ref().ok())
+            .flat_map(TypeScriptConfiguration::references)
+            .filter(|reference| {
+                reference.starts_with(project_root)
+                    && !resolved.checkable.contains_key(*reference)
+                    && !resolved.missing.contains(*reference)
+            })
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        let root = project_root.to_path_buf();
+        pending = native_runtime::spawn_blocking(move || {
+            references
+                .into_iter()
+                .map(|reference| typescript_project(&root, reference))
+                .collect::<Vec<_>>()
+        })
+        .await
+        .unwrap_or_else(|error| {
+            tracing::warn!(%error, "referenced TypeScript projects were not resolved");
+            Vec::new()
+        });
+    }
+    resolved
+}
+
+/// What one generation changed since the last checked one, by logical path.
+struct GenerationChanges {
+    /// Added, edited and removed files.
+    changed: BTreeSet<String>,
+    /// Whether a file was added that tsc could take as a source or resolve an
+    /// import to. tsc resolves modules and expands `include` only to these
+    /// extensions and package manifests, so another file can neither enter a
+    /// program nor redirect one of its imports.
+    added_module_candidate: bool,
+}
+
+/// Every extension tsc reads as a source, declaration or importable module.
+const MODULE_EXTENSIONS: [&str; 9] = ["ts", "tsx", "mts", "cts", "js", "jsx", "mjs", "cjs", "json"];
+
+impl GenerationChanges {
+    fn between(
+        previous: &BTreeMap<String, ContentDigest>,
+        current: &BTreeMap<String, ContentDigest>,
+    ) -> Self {
+        let mut changed = BTreeSet::new();
+        let mut added_module_candidate = false;
+        for (path, digest) in current {
+            match previous.get(path) {
+                Some(previous) if previous == digest => {}
+                Some(_) => {
+                    changed.insert(path.clone());
+                }
+                None => {
+                    added_module_candidate |= Path::new(path)
+                        .extension()
+                        .and_then(|extension| extension.to_str())
+                        .is_some_and(|extension| MODULE_EXTENSIONS.contains(&extension));
+                    changed.insert(path.clone());
+                }
+            }
+        }
+        changed.extend(
+            previous
+                .keys()
+                .filter(|path| !current.contains_key(*path))
+                .cloned(),
+        );
+        Self {
+            changed,
+            added_module_candidate,
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.changed.is_empty()
+    }
+
+    /// Whether these changes can alter what tsc reports for a project whose
+    /// compiler and resolved configuration are those of `previous`: an added
+    /// module candidate, a file its program or a referenced project's
+    /// program read, or a package manifest governing the tsconfig or one of
+    /// those files. A program the producer could not record cannot rule a
+    /// change out, and neither can a reference it has no program for. Nor can
+    /// a failed check: typescript@7 reports a configuration it could not read
+    /// without the error, so any change may be the one that repairs it.
+    fn affect(
+        &self,
+        project_root: &Path,
+        tsconfig: &Path,
+        previous: &ProjectResult,
+        configuration: &TypeScriptConfiguration,
+        projects: &BTreeMap<PathBuf, ProjectResult>,
+    ) -> bool {
+        if self.changed.is_empty() {
+            return false;
+        }
+        if self.added_module_candidate {
+            return true;
+        }
+        let mut read = Vec::new();
+        match &previous.outcome {
+            ProjectOutcome::Checked {
+                membership: Some(membership),
+                ..
+            } => read.push(membership),
+            ProjectOutcome::Checked {
+                membership: None, ..
+            }
+            | ProjectOutcome::Failed { .. } => return true,
+        }
+        let mut references = configuration.references().to_vec();
+        let mut visited = BTreeSet::new();
+        while let Some(reference) = references.pop() {
+            if !visited.insert(reference.clone()) {
+                continue;
+            }
+            let Some(membership) = projects.get(&reference).and_then(ProjectResult::membership)
+            else {
+                return true;
+            };
+            read.push(membership);
+            if let Some(configuration) = projects
+                .get(&reference)
+                .and_then(|result| result.configuration.as_ref())
+            {
+                references.extend_from_slice(configuration.references());
+            }
+        }
+        let tsconfig = tsconfig
+            .to_str()
+            .and_then(|tsconfig| code_index_logical_path(project_root, tsconfig));
+        self.changed.iter().any(|path| {
+            read.iter()
+                .any(|membership| membership.files.contains(path))
+                || is_governing_manifest(path, tsconfig.as_deref(), &read)
+        })
+    }
+}
+
+/// A changed package manifest or lockfile decides how imports resolve and
+/// which module format sources have below its directory.
+fn is_governing_manifest(
+    path: &str,
+    tsconfig: Option<&str>,
+    read: &[&TypeScriptProgramMembershipV1],
 ) -> bool {
-    if changed.is_empty() {
+    let (dir, name) = path.rsplit_once('/').unwrap_or(("", path));
+    if !is_typescript_package_manifest(name) {
         return false;
     }
-    let program = match previous {
-        ProjectResult::Checked { program: None, .. } => return true,
-        ProjectResult::Checked {
-            program: Some(program),
-            ..
-        } => Some(program),
-        ProjectResult::Failed { .. } => None,
-    };
-    let config = TypeScriptProjectConfigInputs::load(project_root, tsconfig);
-    changed.iter().any(|path| {
-        program.is_some_and(|program| program.contains(path))
-            || config.affected_by(&project_root.join(path))
-    })
+    let governs = |file: &str| dir.is_empty() || file.starts_with(&format!("{dir}/"));
+    tsconfig.is_none_or(governs)
+        || read
+            .iter()
+            .any(|membership| membership.files.iter().any(|file| governs(file)))
+}
+
+struct StaleProject {
+    tsconfig: PathBuf,
+    compiler: PathBuf,
+    compiler_revision: Option<[u8; 32]>,
+    configuration: TypeScriptConfiguration,
 }
 
 /// The lazy window bounds waiting futures; the shared admission accounts for
@@ -550,7 +878,7 @@ fn needs_check(
 async fn check_projects(
     project_root: &Path,
     build_info_dir: &Path,
-    stale: Vec<(PathBuf, PathBuf, Option<[u8; 32]>)>,
+    stale: Vec<StaleProject>,
     admission: &TypeScriptCompilerAdmission,
 ) -> BTreeMap<PathBuf, ProjectResult> {
     if stale.is_empty() {
@@ -567,77 +895,152 @@ async fn check_projects(
         );
         return stale
             .into_iter()
-            .map(|(tsconfig, _, compiler_revision)| {
+            .map(|project| {
                 (
-                    tsconfig,
-                    ProjectResult::Failed {
-                        reason: reason.clone(),
-                        compiler_revision,
-                    },
+                    project.tsconfig,
+                    ProjectResult::failed(
+                        project.compiler_revision,
+                        Some(project.configuration),
+                        reason.clone(),
+                    ),
                 )
             })
             .collect();
     }
     futures_util::stream::iter(stale)
-        .map(|(tsconfig, compiler, compiler_revision)| {
-            let build_info = build_info_dir.join(build_info_file_name(&tsconfig));
+        .map(|project| {
+            let build_info = build_info_dir.join(build_info_file_name(&project.tsconfig));
             let root = project_root.to_path_buf();
             async move {
-                let check = async {
-                    let build_info_guard = admission.serialize_build_info(&build_info).await;
-                    let bound = build_info.clone();
-                    let bind_guard = build_info_guard.clone();
-                    if let Err(error) = native_runtime::spawn_blocking(move || {
-                        let _build_info_guard = bind_guard;
-                        bind_build_info(&bound, compiler_revision)
-                    })
-                    .await
-                    .unwrap_or_else(|error| Err(std::io::Error::other(error)))
-                    {
-                        // Nothing ran under this compiler, so the next run retries.
-                        return ProjectResult::Failed {
-                            reason: format!(
-                                "cannot bind the TypeScript build-info '{}' to the installed \
-                                 compiler: {error}",
-                                build_info.display()
-                            ),
-                            compiler_revision: None,
-                        };
-                    }
-                    match run_typescript_compiler(
-                        admission,
-                        &compiler,
-                        &root,
-                        &tsconfig,
-                        Some(&build_info),
-                        Some(build_info_guard.clone()),
-                    )
-                    .await
-                    {
-                        Ok(reported) => ProjectResult::Checked {
-                            reported: reported.into_iter().map(compiler_diagnostic).collect(),
-                            program: program_paths(&root, &build_info),
-                            compiler_revision,
-                        },
-                        Err(error) => ProjectResult::Failed {
-                            reason: error.to_string(),
-                            compiler_revision,
-                        },
-                    }
-                };
-                let result = AssertUnwindSafe(check)
-                    .catch_unwind()
-                    .await
-                    .unwrap_or_else(|_| ProjectResult::Failed {
-                        reason: "the TypeScript check panicked".to_owned(),
-                        compiler_revision,
-                    });
+                let tsconfig = project.tsconfig.clone();
+                let compiler_revision = project.compiler_revision;
+                let configuration = project.configuration.clone();
+                let result =
+                    AssertUnwindSafe(check_project(admission, &root, &build_info, project))
+                        .catch_unwind()
+                        .await
+                        .unwrap_or_else(|_| {
+                            ProjectResult::failed(
+                                compiler_revision,
+                                Some(configuration),
+                                "the TypeScript check panicked".to_owned(),
+                            )
+                        });
                 (tsconfig, result)
             }
         })
         .buffer_unordered(admission.concurrency())
         .collect()
         .await
+}
+
+async fn check_project(
+    admission: &TypeScriptCompilerAdmission,
+    project_root: &Path,
+    build_info: &Path,
+    project: StaleProject,
+) -> ProjectResult {
+    let StaleProject {
+        tsconfig,
+        compiler,
+        compiler_revision,
+        configuration,
+    } = project;
+    let build_info_guard = admission.serialize_build_info(build_info).await;
+    let bound = build_info.to_path_buf();
+    let bind_guard = build_info_guard.clone();
+    if let Err(error) = native_runtime::spawn_blocking(move || {
+        let _build_info_guard = bind_guard;
+        bind_build_info(&bound, compiler_revision)
+    })
+    .await
+    .unwrap_or_else(|error| Err(std::io::Error::other(error)))
+    {
+        // Nothing ran under this compiler, so the next run retries.
+        return ProjectResult::failed(
+            None,
+            Some(configuration),
+            format!(
+                "cannot bind the TypeScript build-info '{}' to the installed compiler: {error}",
+                build_info.display()
+            ),
+        );
+    }
+    let reported = match run_typescript_compiler(
+        admission,
+        &compiler,
+        project_root,
+        &tsconfig,
+        Some(build_info),
+        Some(build_info_guard.clone()),
+    )
+    .await
+    {
+        Ok(reported) => reported,
+        Err(error) => {
+            return ProjectResult::failed(
+                compiler_revision,
+                Some(configuration),
+                error.to_string(),
+            );
+        }
+    };
+    let (root, recorded) = (project_root.to_path_buf(), build_info.to_path_buf());
+    let membership_guard = build_info_guard.clone();
+    let membership = native_runtime::spawn_blocking(move || {
+        let _build_info_guard = membership_guard;
+        typescript_build_info_program(&recorded)
+            .and_then(|program| program_membership(&root, &program))
+    })
+    .await
+    .unwrap_or_else(|error| {
+        tracing::warn!(%error, "the TypeScript program was not read");
+        None
+    });
+    // A project with no root of its own, such as a solution config, reads
+    // nothing its references emit.
+    let reads_references = !configuration.references().is_empty()
+        && membership
+            .as_ref()
+            .is_none_or(|membership| !membership.roots.is_empty());
+    if reads_references {
+        match typescript_referenced_projects_out_of_date(
+            admission,
+            &compiler,
+            project_root,
+            configuration.references(),
+        )
+        .await
+        {
+            Ok(None) => {}
+            Ok(Some(statement)) => {
+                return ProjectResult::failed(
+                    compiler_revision,
+                    Some(configuration),
+                    format!(
+                        "tsc checks it against what its referenced projects emit, and those \
+                         outputs are missing or out of date ({statement}); build them with \
+                         `tsc --build`"
+                    ),
+                );
+            }
+            Err(error) => {
+                return ProjectResult::failed(
+                    compiler_revision,
+                    Some(configuration),
+                    error.to_string(),
+                );
+            }
+        }
+    }
+    ProjectResult {
+        compiler_revision,
+        configuration: Some(configuration),
+        outcome: ProjectOutcome::Checked {
+            reported: reported.into_iter().map(compiler_diagnostic).collect(),
+            membership,
+        },
+    }
 }
 
 /// One build-info file per tsconfig path, so linked worktrees sharing a store
@@ -648,12 +1051,24 @@ fn build_info_file_name(tsconfig: &Path) -> String {
     format!("{}.tsbuildinfo", hex::encode(digest))
 }
 
-fn program_paths(project_root: &Path, build_info: &Path) -> Option<BTreeSet<String>> {
-    let program = typescript_build_info_program(build_info)?
-        .iter()
-        .filter_map(|file| code_index_logical_path(project_root, file.to_str()?))
-        .collect::<BTreeSet<_>>();
-    (!program.is_empty()).then_some(program)
+/// The recorded program's files inside the project root, by logical path.
+/// `None` when it names roots but none of them there, since then nothing
+/// says which of the root's files it holds.
+fn program_membership(
+    project_root: &Path,
+    program: &TypeScriptProgram,
+) -> Option<TypeScriptProgramMembershipV1> {
+    let logical = |files: &[PathBuf]| {
+        files
+            .iter()
+            .filter_map(|file| code_index_logical_path(project_root, file.to_str()?))
+            .collect::<BTreeSet<_>>()
+    };
+    let roots = logical(&program.roots);
+    (program.roots.is_empty() || !roots.is_empty()).then(|| TypeScriptProgramMembershipV1 {
+        roots,
+        files: logical(&program.files),
+    })
 }
 
 /// Re-addresses one `tsc` report line as a compiler-pillar diagnostic. tsc
@@ -673,112 +1088,32 @@ fn compiler_diagnostic(reported: tracedecay_lsp::Diagnostic) -> Diagnostic {
     }
 }
 
-/// The typed state a read can report about the TypeScript producer for the
-/// project that owns what it asked about.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum TypeScriptDiagnosticsAvailabilityV1 {
-    /// The owning project has a compiler; how its last check went and the
-    /// producer's most recent run, if it has run.
-    Configured {
-        tsconfig: PathBuf,
-        compiler: PathBuf,
-        check: Option<TypeScriptProjectCheckV1>,
-        last_run: Option<CompilerProducerRunV1>,
-    },
-    /// The owning tsconfig exists but no `node_modules/.bin/tsc` is installed
-    /// for it; `install_command` installs the workspace's dependencies.
-    CompilerMissing {
-        tsconfig: PathBuf,
-        install_command: &'static str,
-    },
-    /// No tsconfig owns the file; where the owner search looked, nearest
-    /// first. Empty for a workspace read, which searched the whole tree.
-    NoTsconfig { searched: Vec<SearchedTsconfig> },
-}
-
-/// Resolves what a read can truthfully say about the TypeScript producer: the
-/// project owning `file` (or, for a workspace read, the first checkable one),
-/// its filesystem state, and the owner's last published run.
-#[must_use]
-pub fn typescript_diagnostics_availability(
-    project_root: &Path,
-    file: Option<&Path>,
-    status: &TypeScriptProducerStatusHandleV1,
-) -> TypeScriptDiagnosticsAvailabilityV1 {
-    let project = match file {
-        Some(file) => match typescript_file_owner(project_root, file) {
-            TypeScriptFileOwner::Owned(project) => project,
-            TypeScriptFileOwner::Unowned { searched } => {
-                return TypeScriptDiagnosticsAvailabilityV1::NoTsconfig { searched };
-            }
-        },
-        None => {
-            let projects = typescript_projects(project_root);
-            let checkable = projects.iter().find(|project| project.compiler.is_some());
-            let Some(project) = checkable.or(projects.first()).cloned() else {
-                return TypeScriptDiagnosticsAvailabilityV1::NoTsconfig {
-                    searched: Vec::new(),
-                };
-            };
-            project
-        }
-    };
-    let TypeScriptProject { tsconfig, compiler } = project;
-    match compiler {
-        Some(compiler) => {
-            let status = status.current();
-            TypeScriptDiagnosticsAvailabilityV1::Configured {
-                check: status
-                    .as_ref()
-                    .and_then(|status| status.checks.get(&tsconfig).cloned()),
-                last_run: status.map(|status| status.run.clone()),
-                tsconfig,
-                compiler,
-            }
-        }
-        None => TypeScriptDiagnosticsAvailabilityV1::CompilerMissing {
-            install_command: typescript_install_command(
-                project_root,
-                tsconfig.parent().unwrap_or(project_root),
-            ),
-            tsconfig,
-        },
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeMap;
+    use std::collections::{BTreeMap, BTreeSet};
     use std::path::Path;
 
     #[cfg(unix)]
-    use std::path::PathBuf;
-    #[cfg(unix)]
     use std::sync::Arc;
 
-    #[cfg(unix)]
-    use tracedecay_domain::UtcMicros;
-    #[cfg(unix)]
     use tracedecay_domain::test_fixtures::id;
-    #[cfg(unix)]
-    use tracedecay_lsp::{TypeScriptCompilerAdmission, typescript_projects};
+    use tracedecay_lsp::TypeScriptCompilerAdmission;
     #[cfg(unix)]
     use tracedecay_runtime_core::background_cpu::ProcessBackgroundCpuV1;
     #[cfg(unix)]
     use tracedecay_runtime_core::test_executable::write_executable_script;
 
+    #[cfg(unix)]
+    use super::TypeScriptProducerStateV1;
+    #[cfg(unix)]
+    use super::installed_compiler_tests::InstalledCompilerProject;
     use super::{
         CompilerProducerRunV1, TypeScriptDiagnosticsAvailabilityV1,
-        TypeScriptProducerStatusHandleV1, TypeScriptProducerStatusV1, TypeScriptProjectCheckV1,
+        TypeScriptProducerStatusHandleV1, TypeScriptProducerStatusV1,
+        TypeScriptProgramMembershipV1, TypeScriptProjectCheckV1, TypeScriptProjectStatusV1,
         compiler_diagnostic, typescript_diagnostics_availability,
     };
-    #[cfg(unix)]
-    use super::{TypeScriptProducerStateV1, run_typescript_producer_v1};
     use crate::diagnose::Severity;
-    #[cfg(unix)]
-    use crate::diagnostics_publication::CodeIndexPublicationIdentityV1;
-    #[cfg(unix)]
-    use crate::diagnostics_store::DiagnosticsStore;
 
     #[cfg(unix)]
     fn admission() -> TypeScriptCompilerAdmission {
@@ -817,207 +1152,335 @@ mod tests {
         assert_eq!(warning.code, None);
     }
 
-    /// A read about a file reports the check of the tsconfig that owns it,
-    /// not whichever package happened to publish.
-    #[tokio::test]
-    async fn availability_reports_the_owning_tsconfigs_own_check() {
-        let root = tempfile::tempdir().expect("project root");
-        let root = root.path();
-        for package in ["app", "lib"] {
-            let dir = root.join("packages").join(package);
-            std::fs::create_dir_all(dir.join("src")).expect("package");
-            std::fs::write(dir.join("tsconfig.json"), "{}").expect("tsconfig");
-        }
-        let bin = root.join("node_modules/.bin");
-        std::fs::create_dir_all(&bin).expect("bin");
-        std::fs::write(bin.join(if cfg!(windows) { "tsc.cmd" } else { "tsc" }), "").expect("tsc");
-        let lib = root.join("packages/lib/tsconfig.json");
-        let failed = TypeScriptProjectCheckV1::Failed {
-            reason: "TS5083: Cannot read file".to_owned(),
-        };
-        let status = TypeScriptProducerStatusHandleV1::default();
+    fn membership(files: &[&str]) -> Option<TypeScriptProgramMembershipV1> {
+        let files = files
+            .iter()
+            .map(|file| (*file).to_owned())
+            .collect::<BTreeSet<_>>();
+        Some(TypeScriptProgramMembershipV1::new(files.clone(), files))
+    }
+
+    async fn published(
+        status: &TypeScriptProducerStatusHandleV1,
+        snapshot: TypeScriptProducerStatusV1,
+    ) {
         status
             .start_producer()
             .begin_publication()
             .await
             .unwrap()
-            .publish(TypeScriptProducerStatusV1::new(
-                CompilerProducerRunV1::CodeIndexGenerationUnavailable,
+            .publish(snapshot);
+    }
+
+    /// A read about a file reports the check of the project whose recorded
+    /// program holds it, else the state of the nearest tsconfig that might,
+    /// not whichever package happened to publish.
+    #[tokio::test]
+    async fn availability_reports_the_holding_or_nearest_projects_own_check() {
+        let root = Path::new("/workspace");
+        let compiler = root.join("node_modules/.bin/tsc");
+        let app = root.join("packages/app/tsconfig.json");
+        let lib = root.join("packages/lib/tsconfig.json");
+        let failed = TypeScriptProjectCheckV1::Failed {
+            reason: "TS5083: Cannot read file".to_owned(),
+        };
+        let status = TypeScriptProducerStatusHandleV1::default();
+        assert_eq!(
+            typescript_diagnostics_availability(root, None, &status, None),
+            TypeScriptDiagnosticsAvailabilityV1::NoProducer
+        );
+        let writer = status.start_producer();
+        assert_eq!(
+            typescript_diagnostics_availability(root, None, &status, None),
+            TypeScriptDiagnosticsAvailabilityV1::Discovering,
+            "an appointed producer has not published what it found yet"
+        );
+        drop(writer);
+        let generation: tracedecay_domain::CodeGenerationId = id("generation.availability");
+        published(
+            &status,
+            TypeScriptProducerStatusV1::new(
+                Some(CompilerProducerRunV1::CodeIndexGenerationUnavailable),
+                Some(generation.clone()),
                 BTreeMap::from([
                     (
-                        root.join("packages/app/tsconfig.json"),
-                        TypeScriptProjectCheckV1::Checked,
+                        app.clone(),
+                        TypeScriptProjectStatusV1::Checked {
+                            compiler: compiler.clone(),
+                            membership: membership(&["packages/app/src/a.ts", "shared/util.ts"]),
+                            references: Vec::new(),
+                        },
                     ),
-                    (lib.clone(), failed.clone()),
-                ]),
-            ));
-
-        let TypeScriptDiagnosticsAvailabilityV1::Configured {
-            tsconfig, check, ..
-        } = typescript_diagnostics_availability(
-            root,
-            Some(Path::new("packages/lib/src/a.ts")),
-            &status,
-        )
-        else {
-            panic!("lib owns its sources and the root compiler checks it");
-        };
-        assert_eq!((tsconfig, check), (lib, Some(failed)));
-    }
-
-    /// A monorepo of two checkable packages and one whose check fails. The
-    /// stand-in compiler logs each tsconfig it is pointed at, reports one
-    /// finding per package, and records that package's source as the program
-    /// in the build-info it is handed, as tsc does.
-    #[cfg(unix)]
-    struct ProducerFixture {
-        _temp: tempfile::TempDir,
-        root: PathBuf,
-        build_info_dir: PathBuf,
-        log: PathBuf,
-        conn: tracedecay_runtime_core::db::engine::TestConnection,
-    }
-
-    #[cfg(unix)]
-    impl ProducerFixture {
-        fn new() -> Self {
-            let temp = tempfile::tempdir().expect("tempdir");
-            let root = temp.path().join("project");
-            for package in ["app", "lib", "broken"] {
-                let dir = root.join("packages").join(package);
-                std::fs::create_dir_all(dir.join("src")).expect("package");
-                std::fs::write(dir.join("tsconfig.json"), "{ \"include\": [\"src\"] }")
-                    .expect("tsconfig");
-                std::fs::write(
-                    dir.join("src/index.ts"),
-                    format!("export const {package} = 1;\n"),
-                )
-                .expect("source");
-            }
-            std::fs::write(root.join("README.md"), "# fixture\n").expect("readme");
-            let log = temp.path().join("tsc.log");
-            let bin = root.join("node_modules/.bin");
-            std::fs::create_dir_all(&bin).expect("bin");
-            std::fs::create_dir_all(root.join("node_modules/typescript/bin"))
-                .expect("installed TypeScript package");
-            std::fs::write(
-                root.join("node_modules/typescript/package.json"),
-                r#"{"name":"typescript","version":"5.9.3","bin":{"tsc":"./bin/tsc"}}"#,
-            )
-            .expect("installed TypeScript manifest");
-            std::fs::write(root.join("node_modules/typescript/bin/tsc"), "")
-                .expect("installed TypeScript entry");
-            write_executable_script(
-                &bin.join("tsc"),
-                format!(
-                    "#!/bin/sh\n\
-                     echo \"$2\" >> {log}\n\
-                     dir=$(dirname \"$2\")\n\
-                     package=$(basename \"$dir\")\n\
-                     [ \"$6 $7\" = \"--incremental --tsBuildInfoFile\" ] || exit 9\n\
-                     printf '{{\"fileNames\":[\"%s/src/index.ts\"]}}' \"$dir\" > \"$8\"\n\
-                     if [ \"$package\" = broken ]; then echo \"error TS5083: Cannot read file.\"; exit 1; fi\n\
-                     echo \"packages/$package/src/index.ts(1,1): error TS2322: $package finding.\"\n\
-                     exit 2\n",
-                    log = log.display()
-                ),
-            ).expect("write script");
-            let conn = tracedecay_runtime_core::db::engine::TestConnection::open(
-                &temp.path().join("diagnostics.db"),
-            );
-            Self {
-                build_info_dir: temp.path().join("store/typescript-build-info"),
-                _temp: temp,
-                root,
-                log,
-                conn,
-            }
-        }
-
-        /// The code-index identity of the files on disk now.
-        fn identity(&self, generation: &str) -> CodeIndexPublicationIdentityV1 {
-            let files = [
-                "README.md",
-                "packages/app/src/index.ts",
-                "packages/lib/src/index.ts",
-                "packages/broken/src/index.ts",
-            ]
-            .map(|path| {
-                let bytes = std::fs::read(self.root.join(path)).expect("fixture file");
-                (
-                    path.to_owned(),
-                    id(&format!("file.{}", path.replace('/', "."))),
-                    tracedecay_code_index::intake::content_digest(&bytes),
-                )
-            });
-            CodeIndexPublicationIdentityV1::new(
-                id(generation),
-                id("repository.fixture"),
-                Some(id("worktree.fixture")),
-                Some(id("ref.main")),
-                None,
-                files,
-            )
-        }
-
-        /// Package names tsc checked since the last call.
-        fn checked(&self) -> Vec<String> {
-            let log = std::fs::read_to_string(&self.log).unwrap_or_default();
-            std::fs::write(&self.log, "").expect("reset log");
-            let mut checked = log
-                .lines()
-                .map(|tsconfig| {
-                    tsconfig
-                        .trim_end_matches("/tsconfig.json")
-                        .rsplit('/')
-                        .next()
-                        .expect("package")
-                        .to_owned()
-                })
-                .collect::<Vec<_>>();
-            checked.sort();
-            checked
-        }
-
-        async fn run(
-            &self,
-            generation: &str,
-            state: &mut TypeScriptProducerStateV1,
-        ) -> CompilerProducerRunV1 {
-            let store = DiagnosticsStore::new_runtime(&self.conn);
-            run_typescript_producer_v1(
-                &self.root,
-                &typescript_projects(&self.root),
-                &self.identity(generation),
-                &store,
-                &self.build_info_dir,
-                state,
-                UtcMicros(1_700_000_000_000_000),
-            )
-            .await
-        }
-
-        async fn findings(&self, generation: &str) -> Vec<(String, String)> {
-            let store = DiagnosticsStore::new_runtime(&self.conn);
-            let mut findings = store
-                .current_records(&id(generation))
-                .await
-                .expect("current records")
-                .into_iter()
-                .map(|record| {
                     (
-                        record.file_occurrence_id.as_str().to_owned(),
-                        record.message,
-                    )
-                })
-                .collect::<Vec<_>>();
-            findings.sort();
-            findings
-        }
+                        lib.clone(),
+                        TypeScriptProjectStatusV1::Failed {
+                            compiler: compiler.clone(),
+                            reason: "TS5083: Cannot read file".to_owned(),
+                            references: Vec::new(),
+                        },
+                    ),
+                ]),
+            ),
+        )
+        .await;
+
+        let owner = |file: &str, generation| match typescript_diagnostics_availability(
+            root,
+            Some(Path::new(file)),
+            &status,
+            generation,
+        ) {
+            TypeScriptDiagnosticsAvailabilityV1::Configured {
+                tsconfig, check, ..
+            } => Some((tsconfig, check)),
+            TypeScriptDiagnosticsAvailabilityV1::NoTsconfig { .. } => None,
+            other => panic!("{file}: {other:?}"),
+        };
+        assert_eq!(
+            owner("packages/lib/src/b.ts", Some(&generation)),
+            Some((lib, Some(failed))),
+            "lib's failed check may hold its sources"
+        );
+        assert_eq!(
+            owner("shared/util.ts", Some(&generation)),
+            Some((app.clone(), Some(TypeScriptProjectCheckV1::Checked))),
+            "app's program read the shared file"
+        );
+        assert_eq!(
+            owner("packages/app/src/new.ts", None),
+            Some((app.clone(), Some(TypeScriptProjectCheckV1::Checked))),
+            "a program recorded for another generation does not rule a file out"
+        );
+        let TypeScriptDiagnosticsAvailabilityV1::NoTsconfig { searched } =
+            typescript_diagnostics_availability(
+                root,
+                Some(Path::new("packages/app/src/new.ts")),
+                &status,
+                Some(&generation),
+            )
+        else {
+            panic!("app's program for this generation does not hold it");
+        };
+        assert_eq!(
+            searched
+                .iter()
+                .map(|candidate| (candidate.path.to_str().unwrap(), candidate.present))
+                .collect::<Vec<_>>(),
+            [
+                ("packages/app/src/tsconfig.json", false),
+                ("packages/app/tsconfig.json", true),
+                ("packages/tsconfig.json", false),
+                ("tsconfig.json", false),
+            ]
+        );
+        let TypeScriptDiagnosticsAvailabilityV1::Configured { tsconfig, .. } =
+            typescript_diagnostics_availability(root, None, &status, None)
+        else {
+            panic!("a workspace read names the first project with a compiler");
+        };
+        assert_eq!(tsconfig, app);
+    }
+
+    #[tokio::test]
+    async fn unrelated_failed_reference_leaves_file_membership_unknown() {
+        let root = Path::new("/workspace");
+        let solution = root.join("tsconfig.json");
+        let app = root.join("packages/app/tsconfig.json");
+        let compiler = root.join("node_modules/.bin/tsc");
+        let generation: tracedecay_domain::CodeGenerationId = id("generation.failed-reference");
+        let status = TypeScriptProducerStatusHandleV1::default();
+        published(
+            &status,
+            TypeScriptProducerStatusV1::new(
+                Some(CompilerProducerRunV1::CompilerFailed {
+                    reason: "referenced check failed".to_owned(),
+                }),
+                Some(generation.clone()),
+                BTreeMap::from([
+                    (
+                        solution,
+                        TypeScriptProjectStatusV1::Checked {
+                            compiler: compiler.clone(),
+                            membership: membership(&[]),
+                            references: vec![app.clone()],
+                        },
+                    ),
+                    (
+                        app.clone(),
+                        TypeScriptProjectStatusV1::Failed {
+                            compiler,
+                            reason: "TS5083: Cannot read file".to_owned(),
+                            references: Vec::new(),
+                        },
+                    ),
+                ]),
+            ),
+        )
+        .await;
+
+        assert_eq!(
+            typescript_diagnostics_availability(
+                root,
+                Some(Path::new("scripts/release.ts")),
+                &status,
+                Some(&generation),
+            ),
+            TypeScriptDiagnosticsAvailabilityV1::MembershipUnknown {
+                reference: app.clone(),
+                reason: "TS5083: Cannot read file".to_owned(),
+            },
+        );
+        assert!(matches!(
+            typescript_diagnostics_availability(
+                root,
+                Some(Path::new("packages/app/src/main.ts")),
+                &status,
+                Some(&generation),
+            ),
+            TypeScriptDiagnosticsAvailabilityV1::Configured {
+                tsconfig,
+                check: Some(TypeScriptProjectCheckV1::Failed { .. }),
+                ..
+            } if tsconfig == app
+        ));
+    }
+
+    /// Every generation publishes all three projects' results, but tsc checks
+    /// only a project the generation changed an input of: the edited package
+    /// after a one-file edit, nothing that checked cleanly after an edit no
+    /// program read. The failed package is retried on any change until it
+    /// checks, and an unchanged generation runs no compiler at all.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn only_projects_a_generation_changed_are_rechecked() {
+        let project = monorepo();
+        project.log_compiler_runs();
+        let mut state = TypeScriptProducerStateV1::new(
+            TypeScriptProducerStatusHandleV1::default(),
+            admission(),
+        );
+        let both = vec![
+            ("packages.app.src.index.ts".to_owned(), "TS2322".to_owned()),
+            ("packages.lib.src.index.ts".to_owned(), "TS2322".to_owned()),
+        ];
+
+        assert_eq!(
+            project.run("generation.producer.1", &mut state).await,
+            published_run("generation.producer.1", 3, 0)
+        );
+        assert_eq!(project.checked(), CHECKED_ALL);
+        assert_eq!(
+            project.located_findings("generation.producer.1").await,
+            both
+        );
+
+        std::fs::write(
+            project.root.join("packages/app/src/index.ts"),
+            "export const app: string = 2;\n",
+        )
+        .unwrap();
+        assert_eq!(
+            project.run("generation.producer.2", &mut state).await,
+            published_run("generation.producer.2", 2, 1)
+        );
+        assert_eq!(
+            project.checked(),
+            [
+                "packages/app/tsconfig.json",
+                "packages/broken/tsconfig.json"
+            ]
+        );
+        assert_eq!(
+            project.located_findings("generation.producer.2").await,
+            both
+        );
+
+        project.edit_readme("# edited\n");
+        assert_eq!(
+            project.run("generation.producer.3", &mut state).await,
+            published_run("generation.producer.3", 1, 2)
+        );
+        assert_eq!(project.checked(), ["packages/broken/tsconfig.json"]);
+        assert_eq!(
+            project.located_findings("generation.producer.3").await,
+            both
+        );
+
+        assert_eq!(
+            project.run("generation.producer.4", &mut state).await,
+            published_run("generation.producer.4", 0, 3)
+        );
+        assert_eq!(project.runs(), 0, "nothing changed, so no compiler ran");
+
+        std::fs::write(
+            project.root.join("packages/broken/tsconfig.json"),
+            r#"{"include":["src"]}"#,
+        )
+        .unwrap();
+        project.run("generation.producer.5", &mut state).await;
+        assert_eq!(project.checked(), ["packages/broken/tsconfig.json"]);
+        project.edit_readme("# repaired\n");
+        assert_eq!(
+            project.run("generation.producer.6", &mut state).await,
+            published_run("generation.producer.6", 0, 3),
+            "the repaired package checks cleanly and is reused like the others"
+        );
     }
 
     #[cfg(unix)]
-    fn published(generation: &str, checked: usize, reused: usize) -> CompilerProducerRunV1 {
+    const CHECKED_ALL: [&str; 3] = [
+        "packages/app/tsconfig.json",
+        "packages/broken/tsconfig.json",
+        "packages/lib/tsconfig.json",
+    ];
+
+    /// Two packages with one real finding each and one whose base config is
+    /// missing.
+    #[cfg(unix)]
+    fn monorepo() -> InstalledCompilerProject {
+        InstalledCompilerProject::with_files(&[
+            ("README.md", "# fixture\n"),
+            ("packages/app/tsconfig.json", r#"{"include":["src"]}"#),
+            (
+                "packages/app/src/index.ts",
+                "export const app: string = 1;\n",
+            ),
+            ("packages/lib/tsconfig.json", r#"{"include":["src"]}"#),
+            (
+                "packages/lib/src/index.ts",
+                "export const lib: string = 1;\n",
+            ),
+            (
+                "packages/broken/tsconfig.json",
+                r#"{"extends":"./base.json","include":["src"]}"#,
+            ),
+            ("packages/broken/src/index.ts", "export const broken = 1;\n"),
+        ])
+    }
+
+    #[cfg(unix)]
+    const CHECKED_CLEAN: [&str; 2] = ["packages/app/tsconfig.json", "packages/lib/tsconfig.json"];
+
+    /// The two checkable packages of [`monorepo`] alone.
+    #[cfg(unix)]
+    fn clean_monorepo() -> InstalledCompilerProject {
+        InstalledCompilerProject::with_files(&[
+            ("README.md", "# fixture\n"),
+            ("packages/app/tsconfig.json", r#"{"include":["src"]}"#),
+            (
+                "packages/app/src/index.ts",
+                "export const app: string = 1;\n",
+            ),
+            ("packages/lib/tsconfig.json", r#"{"include":["src"]}"#),
+            (
+                "packages/lib/src/index.ts",
+                "export const lib: string = 1;\n",
+            ),
+        ])
+    }
+
+    #[cfg(unix)]
+    fn published_run(generation: &str, checked: usize, reused: usize) -> CompilerProducerRunV1 {
         CompilerProducerRunV1::Published {
             generation: id(generation),
             inserted: 2,
@@ -1027,128 +1490,76 @@ mod tests {
         }
     }
 
-    /// Every generation publishes all three projects' results, but tsc runs
-    /// only for a project the generation changed an input of: the edited
-    /// package after a one-file edit, nothing after an edit no project reads.
-    /// The failed package is not retried until its own inputs change.
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn only_projects_a_generation_changed_are_rechecked() {
-        let fixture = ProducerFixture::new();
-        let mut state = TypeScriptProducerStateV1::new(
-            TypeScriptProducerStatusHandleV1::default(),
-            admission(),
-        );
-        let both = vec![
-            (
-                "file.packages.app.src.index.ts".to_owned(),
-                "app finding.".to_owned(),
-            ),
-            (
-                "file.packages.lib.src.index.ts".to_owned(),
-                "lib finding.".to_owned(),
-            ),
-        ];
-
-        assert_eq!(
-            fixture.run("generation.producer.1", &mut state).await,
-            published("generation.producer.1", 3, 0)
-        );
-        assert_eq!(fixture.checked(), ["app", "broken", "lib"]);
-        assert_eq!(fixture.findings("generation.producer.1").await, both);
-
-        std::fs::write(
-            fixture.root.join("packages/app/src/index.ts"),
-            "export const app = 2;\n",
-        )
-        .expect("edit app");
-        assert_eq!(
-            fixture.run("generation.producer.2", &mut state).await,
-            published("generation.producer.2", 1, 2)
-        );
-        assert_eq!(fixture.checked(), ["app"]);
-        assert_eq!(fixture.findings("generation.producer.2").await, both);
-
-        std::fs::write(fixture.root.join("README.md"), "# edited\n").expect("edit readme");
-        assert_eq!(
-            fixture.run("generation.producer.3", &mut state).await,
-            published("generation.producer.3", 0, 3)
-        );
-        assert_eq!(fixture.checked(), Vec::<String>::new());
-        assert_eq!(fixture.findings("generation.producer.3").await, both);
-
-        std::fs::write(
-            fixture.root.join("packages/broken/src/index.ts"),
-            "export const broken = 2;\n",
-        )
-        .expect("edit broken");
-        assert_eq!(
-            fixture.run("generation.producer.4", &mut state).await,
-            published("generation.producer.4", 1, 2)
-        );
-        assert_eq!(fixture.checked(), ["broken"]);
-    }
-
     /// TypeScript is installed outside the indexed sources, so upgrading the
     /// compiler must invalidate clean reuse even when no source digest changes.
     #[cfg(unix)]
     #[tokio::test]
     async fn compiler_upgrade_or_missing_evidence_rechecks_unchanged_sources() {
-        let fixture = ProducerFixture::new();
+        let project = clean_monorepo();
+        project.log_compiler_runs();
         let mut state = TypeScriptProducerStateV1::new(
             TypeScriptProducerStatusHandleV1::default(),
             admission(),
         );
-        let manifest = fixture.root.join("node_modules/typescript/package.json");
+        let manifest = project.typescript.join("package.json");
+        let installed = std::fs::read_to_string(&manifest).unwrap();
+        let replace_manifest = |text: &str| {
+            std::fs::remove_file(&manifest).unwrap();
+            std::fs::write(&manifest, text).unwrap();
+        };
 
-        fixture.run("generation.compiler.1", &mut state).await;
-        assert_eq!(fixture.checked(), ["app", "broken", "lib"]);
-        fixture.run("generation.compiler.2", &mut state).await;
-        assert_eq!(fixture.checked(), Vec::<String>::new());
+        project.run("generation.compiler.1", &mut state).await;
+        assert_eq!(project.checked(), CHECKED_CLEAN);
+        project.edit_readme("# second\n");
+        project.run("generation.compiler.2", &mut state).await;
+        assert_eq!(project.checked(), Vec::<String>::new());
 
-        std::fs::write(
-            &manifest,
-            r#"{"name":"typescript","version":"5.10.0","bin":{"tsc":"./bin/tsc"}}"#,
-        )
-        .expect("upgrade compiler");
-        fixture.run("generation.compiler.3", &mut state).await;
+        replace_manifest(&format!("{installed}\n"));
+        project.edit_readme("# third\n");
+        project.run("generation.compiler.3", &mut state).await;
         assert_eq!(
-            fixture.checked(),
-            ["app", "broken", "lib"],
-            "a TypeScript version change must not reuse earlier compiler evidence"
+            project.checked(),
+            CHECKED_CLEAN,
+            "a changed compiler package must not reuse earlier compiler evidence"
         );
-        fixture.run("generation.compiler.4", &mut state).await;
-        assert_eq!(fixture.checked(), Vec::<String>::new());
+        project.edit_readme("# fourth\n");
+        project.run("generation.compiler.4", &mut state).await;
+        assert_eq!(project.checked(), Vec::<String>::new());
 
-        std::fs::write(&manifest, "{ malformed").expect("corrupt manifest");
-        fixture.run("generation.compiler.5", &mut state).await;
-        assert_eq!(
-            fixture.checked(),
-            ["app", "broken", "lib"],
-            "unknown installed compiler evidence must not authorize clean reuse"
+        // The launcher reads this manifest to find the native compiler, so the
+        // compiler now fails too; either way nothing is reused.
+        replace_manifest("{ malformed");
+        project.edit_readme("# fifth\n");
+        let run = project.run("generation.compiler.5", &mut state).await;
+        assert!(
+            matches!(run, CompilerProducerRunV1::CompilerFailed { .. }),
+            "unknown installed compiler evidence must not authorize clean reuse: {run:?}"
         );
-        std::fs::remove_file(&manifest).expect("remove manifest");
-        fixture.run("generation.compiler.6", &mut state).await;
-        assert_eq!(fixture.checked(), ["app", "broken", "lib"]);
+        assert!(
+            project.runs() >= CHECKED_CLEAN.len(),
+            "every project ran again"
+        );
     }
 
     #[cfg(unix)]
     #[tokio::test]
     async fn compiler_launcher_replacement_invalidates_reuse() {
-        let fixture = ProducerFixture::new();
+        let project = clean_monorepo();
+        project.log_compiler_runs();
         let mut state = TypeScriptProducerStateV1::new(
             TypeScriptProducerStatusHandleV1::default(),
             admission(),
         );
-        fixture.run("generation.compiler.1", &mut state).await;
-        assert_eq!(fixture.checked(), ["app", "broken", "lib"]);
-        let compiler = fixture.root.join("node_modules/.bin/tsc");
-        let mut script = std::fs::read_to_string(&compiler).expect("existing compiler");
+        project.run("generation.launcher.1", &mut state).await;
+        assert_eq!(project.checked(), CHECKED_CLEAN);
+        let mut script = std::fs::read_to_string(project.launcher()).unwrap();
         script.push_str("\n# replacement launcher\n");
-        std::fs::write(&compiler, script).expect("replace launcher");
+        std::fs::remove_file(project.launcher()).unwrap();
+        write_executable_script(&project.launcher(), script).unwrap();
 
-        fixture.run("generation.compiler.2", &mut state).await;
-        assert_eq!(fixture.checked(), ["app", "broken", "lib"]);
+        project.edit_readme("# second\n");
+        project.run("generation.launcher.2", &mut state).await;
+        assert_eq!(project.checked(), CHECKED_CLEAN);
     }
 
     /// A producer run reports to the handle of the owner it was built for. A
@@ -1157,44 +1568,52 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn a_successor_owner_does_not_inherit_the_predecessors_status() {
-        let fixture = ProducerFixture::new();
+        let project = monorepo();
         let predecessor = TypeScriptProducerStatusHandleV1::default();
         let mut state = TypeScriptProducerStateV1::new(predecessor.clone(), admission());
-        let run = fixture.run("generation.producer.1", &mut state).await;
+        let run = project.run("generation.successor.1", &mut state).await;
         assert_eq!(
-            predecessor.current().map(|status| status.run().clone()),
+            predecessor
+                .current()
+                .and_then(|status| status.run().cloned()),
             Some(run)
         );
 
-        let successor = TypeScriptProducerStatusHandleV1::default();
         let file = Path::new("packages/app/src/index.ts");
+        let successor = TypeScriptProducerStatusHandleV1::default();
+        let _successor_producer = TypeScriptProducerStateV1::new(successor.clone(), admission());
+        assert_eq!(
+            typescript_diagnostics_availability(&project.root, Some(file), &successor, None),
+            TypeScriptDiagnosticsAvailabilityV1::Discovering
+        );
         let TypeScriptDiagnosticsAvailabilityV1::Configured {
-            check, last_run, ..
-        } = typescript_diagnostics_availability(&fixture.root, Some(file), &successor)
+            tsconfig, check, ..
+        } = typescript_diagnostics_availability(
+            &project.root,
+            Some(file),
+            &predecessor,
+            Some(&id("generation.successor.1")),
+        )
         else {
             panic!("app is checkable");
         };
-        assert_eq!((check, last_run), (None, None));
-        let TypeScriptDiagnosticsAvailabilityV1::Configured { check, .. } =
-            typescript_diagnostics_availability(&fixture.root, Some(file), &predecessor)
-        else {
-            panic!("app is checkable");
-        };
-        assert_eq!(check, Some(TypeScriptProjectCheckV1::Checked));
+        assert_eq!(
+            (tsconfig, check),
+            (
+                project.root.join("packages/app/tsconfig.json"),
+                Some(TypeScriptProjectCheckV1::Checked)
+            )
+        );
     }
 
     #[cfg(unix)]
     #[tokio::test]
     async fn isolated_producers_share_compiler_admission_and_keep_partial_findings() {
-        let fixtures = [
-            ProducerFixture::new(),
-            ProducerFixture::new(),
-            ProducerFixture::new(),
-        ];
+        let projects = [monorepo(), monorepo(), monorepo()];
         let counter = tempfile::tempdir().unwrap();
-        for fixture in &fixtures {
-            let compiler = fixture.root.join("node_modules/.bin/tsc");
-            let script = std::fs::read_to_string(&compiler).unwrap();
+        for project in &projects {
+            project.log_compiler_runs();
+            let script = std::fs::read_to_string(project.launcher()).unwrap();
             let script = script.replacen(
                 "#!/bin/sh\n",
                 &format!(
@@ -1208,10 +1627,11 @@ mod tests {
                 ),
                 1,
             );
-            write_executable_script(&compiler, script).unwrap();
+            std::fs::remove_file(project.launcher()).unwrap();
+            write_executable_script(&project.launcher(), script).unwrap();
         }
         let admission = admission();
-        let mut states = fixtures
+        let mut states = projects
             .iter()
             .map(|_| {
                 TypeScriptProducerStateV1::new(
@@ -1221,27 +1641,30 @@ mod tests {
             })
             .collect::<Vec<_>>();
         let runs = futures_util::future::join_all(
-            fixtures
+            projects
                 .iter()
                 .zip(states.iter_mut())
-                .map(|(fixture, state)| fixture.run("generation.shared", state)),
+                .map(|(project, state)| project.run("generation.shared", state)),
         )
         .await;
         assert!(
             runs.iter()
-                .all(|run| run == &published("generation.shared", 3, 0)),
+                .all(|run| run == &published_run("generation.shared", 3, 0)),
             "{runs:?}"
         );
-        for fixture in &fixtures {
-            assert_eq!(fixture.checked(), ["app", "broken", "lib"]);
-            assert_eq!(fixture.findings("generation.shared").await.len(), 2);
+        for project in &projects {
+            assert_eq!(project.checked(), CHECKED_ALL);
+            assert_eq!(project.located_findings("generation.shared").await.len(), 2);
         }
         let counts = std::fs::read_to_string(counter.path().join("seen")).unwrap();
         let counts = counts
             .lines()
             .map(|line| line.trim().parse::<usize>().unwrap())
             .collect::<Vec<_>>();
-        assert_eq!(counts.len(), 9);
+        assert!(
+            counts.len() >= CHECKED_ALL.len() * projects.len(),
+            "{counts:?}"
+        );
         assert!(
             counts.iter().all(|count| *count <= admission.concurrency()),
             "{counts:?}"
@@ -1251,6 +1674,83 @@ mod tests {
             std::fs::read_dir(counter.path()).unwrap().count(),
             1,
             "every child removed its active marker",
+        );
+    }
+
+    /// Without a compiler nothing says what a tsconfig holds, so a read names
+    /// the nearest one's missing compiler rather than claiming it owns the
+    /// file, and with no tsconfig at all there is nothing to install for.
+    #[tokio::test]
+    async fn discovery_alone_reports_missing_compilers_without_claiming_membership() {
+        let root = tempfile::tempdir().unwrap();
+        let root = root.path();
+        for (path, text) in [
+            ("pnpm-lock.yaml", "lockfileVersion: '9.0'\n"),
+            ("packages/app/tsconfig.json", "{}"),
+            ("packages/lib/tsconfig.json", "{}"),
+        ] {
+            std::fs::create_dir_all(root.join(path).parent().unwrap()).unwrap();
+            std::fs::write(root.join(path), text).unwrap();
+        }
+        let status = TypeScriptProducerStatusHandleV1::default();
+        let mut state = super::TypeScriptProducerStateV1::new(
+            status.clone(),
+            TypeScriptCompilerAdmission::new(std::sync::Arc::new(
+                tracedecay_runtime_core::background_cpu::ProcessBackgroundCpuV1::new(
+                    std::num::NonZeroUsize::new(1).unwrap(),
+                ),
+            )),
+        );
+        let run = super::publish_typescript_discovery_v1(
+            root,
+            &tracedecay_lsp::typescript_projects(root).expect("tsconfig discovery"),
+            &mut state,
+        )
+        .await;
+        assert!(
+            matches!(run, Some(CompilerProducerRunV1::CompilerFailed { .. })),
+            "{run:?}"
+        );
+        for (file, tsconfig) in [
+            (
+                Some("packages/lib/src/index.ts"),
+                "packages/lib/tsconfig.json",
+            ),
+            (None, "packages/app/tsconfig.json"),
+        ] {
+            assert_eq!(
+                typescript_diagnostics_availability(root, file.map(Path::new), &status, None),
+                TypeScriptDiagnosticsAvailabilityV1::CompilerMissing {
+                    tsconfig: root.join(tsconfig),
+                    install_command: "pnpm install",
+                },
+                "{file:?}"
+            );
+        }
+        let TypeScriptDiagnosticsAvailabilityV1::NoTsconfig { searched } =
+            typescript_diagnostics_availability(
+                root,
+                Some(Path::new("scripts/release.ts")),
+                &status,
+                None,
+            )
+        else {
+            panic!("no tsconfig is near the script");
+        };
+        assert!(
+            searched.iter().all(|candidate| !candidate.present),
+            "{searched:?}"
+        );
+
+        let empty = TypeScriptProducerStatusHandleV1::default();
+        let mut state =
+            super::TypeScriptProducerStateV1::new(empty.clone(), state.admission.clone());
+        super::publish_typescript_discovery_v1(root, &[], &mut state).await;
+        assert_eq!(
+            typescript_diagnostics_availability(root, None, &empty, None),
+            TypeScriptDiagnosticsAvailabilityV1::NoTsconfig {
+                searched: Vec::new()
+            }
         );
     }
 }

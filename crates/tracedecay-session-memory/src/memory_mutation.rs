@@ -135,10 +135,7 @@ where
         ))?;
     let mut future = std::pin::pin!(future);
     let mut cancelled = std::pin::pin!(context.cancellation_signal.cancelled());
-    let mut deadline = std::pin::pin!(asupersync::time::sleep(
-        asupersync::time::wall_now(),
-        remaining
-    ));
+    let mut deadline = std::pin::pin!(tokio::time::sleep(remaining));
     let settlement = std::future::poll_fn(|task| {
         if let Poll::Ready(outcome) = future.as_mut().poll(task) {
             return Poll::Ready(Ok(outcome));

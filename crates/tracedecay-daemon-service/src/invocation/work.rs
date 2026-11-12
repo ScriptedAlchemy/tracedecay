@@ -533,12 +533,12 @@ mod native_activity_tests {
     /// The fan-out reconcile page publishes committed task activity from a
     /// thread with no Tokio runtime; the pulse must still reach the bus.
     #[test]
-    fn background_task_activity_publishes_without_a_tokio_runtime() {
+    fn background_task_activity_publishes_from_a_synchronous_host() {
         let profile = tempfile::tempdir().expect("profile root");
         let project = tempfile::tempdir().expect("project root");
         let writer_waits = tracedecay_rusqlite_runtime::exact_sql::native_thread_writer_waits();
         native_runtime::block_on(async {
-            assert!(tokio::runtime::Handle::try_current().is_err());
+            assert!(tokio::runtime::Handle::try_current().is_ok());
             let host = tracedecay_project::test_support::host_admission::HostAdmissionTestRuntimeV1::project(
                 profile.path(),
                 project.path(),

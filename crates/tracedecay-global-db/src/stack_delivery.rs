@@ -1161,7 +1161,7 @@ mod plan_tests {
     use super::{GitHubStackDeliveryStateV1, state_count_sql};
     use crate::tests::harness::RegisteredGlobalDbHarness;
 
-    #[asupersync::test]
+    #[tokio::test]
     async fn state_counts_search_their_partial_indexes() {
         let harness = RegisteredGlobalDbHarness::open("github-stack-delivery-count-plan").await;
         let snapshot = harness.registered.read_snapshot().await.unwrap();

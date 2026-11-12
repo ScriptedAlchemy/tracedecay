@@ -1361,7 +1361,7 @@ mod tests {
         ));
     }
 
-    #[asupersync::test]
+    #[tokio::test]
     async fn the_async_entry_point_answers_off_the_executor() {
         let server = fake_decision_engine(200, &single_noul_body("q", 0.25), Duration::ZERO);
         let outcome = client(&server.url).ask(request("s", vec![noul("q")])).await;

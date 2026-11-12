@@ -8,9 +8,9 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 use tracedecay_daemon_protocol::{DaemonHandshake, PROJECT_SERVER_RESPONSE_REVOKED_REASON_CODE};
 
-use asupersync::io::AsyncWriteExt;
-use asupersync::time::{sleep, timeout, wall_now};
 use serde_json::json;
+use tokio::io::AsyncWriteExt;
+use tokio::time::{sleep, timeout};
 use tracedecay_daemon_control::{default_socket_path, with_unavailable_daemon_advice};
 use tracedecay_daemon_identity::{
     DAEMON_AUTHORITY_UNAVAILABLE, ResolvedDaemonConnection, client_connection,
@@ -101,7 +101,6 @@ pub(crate) async fn ensure_daemon_connection_live(
     connection.ensure_authority_current(request_label)?;
 
     timeout(
-        wall_now(),
         DAEMON_TOOL_HEALTH_CONNECT_TIMEOUT,
         DaemonClientStream::connect(connection.endpoint()),
     )
@@ -129,7 +128,7 @@ pub(crate) async fn next_daemon_response_line<R>(
     liveness_poll_interval: Duration,
 ) -> Result<Option<String>>
 where
-    R: asupersync::io::AsyncBufRead + Unpin,
+    R: tokio::io::AsyncBufRead + Unpin,
 {
     tracedecay_daemon_protocol::poll_daemon_response_line(
         reader,
@@ -141,7 +140,7 @@ where
 }
 
 pub(crate) async fn write_daemon_preamble(
-    writer: &mut (impl asupersync::io::AsyncWrite + Unpin),
+    writer: &mut (impl tokio::io::AsyncWrite + Unpin),
     connection: &ResolvedDaemonConnection,
     handshake: &DaemonHandshake,
 ) -> Result<()> {
@@ -291,7 +290,7 @@ pub(crate) async fn call_tool_with_liveness_poll(
     };
     attach_stateless_request_context(&mut request);
 
-    let mut reader = BoundedLineReader::new(asupersync::io::BufReader::new(reader));
+    let mut reader = BoundedLineReader::new(tokio::io::BufReader::new(reader));
     let write = async {
         write_daemon_preamble(&mut writer, &connection, handshake).await?;
         writer
@@ -521,7 +520,7 @@ async fn call_tool_with_project_open_retry(
         let Some(wait) = project_open_retry_wait(tool_name, &result, deadline) else {
             return result;
         };
-        sleep(wall_now(), wait).await;
+        sleep(wait).await;
     }
 }
 
@@ -556,7 +555,7 @@ pub async fn call_default_tool(
         return result
             .map_err(|error| with_unavailable_daemon_advice(profile, &socket_path, error));
     };
-    sleep(wall_now(), wait).await;
+    sleep(wait).await;
     call_tool_with_project_open_retry(
         &socket_path,
         handshake,
