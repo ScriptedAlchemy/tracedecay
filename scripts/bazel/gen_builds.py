@@ -184,6 +184,11 @@ RUNTIME_BINARIES = (
         r'var_os\("TRACEDECAY_TEST_TYPESCRIPT_COMPILER"\)',
     ),
     (
+        "TRACEDECAY_TEST_TYPESCRIPT5_COMPILER",
+        "//tests/typescript5:typescript5_compiler",
+        r'var_os\("TRACEDECAY_TEST_TYPESCRIPT5_COMPILER"\)',
+    ),
+    (
         "TRACEDECAY_TYPESCRIPT_SDK_DIST",
         "//sdks/typescript:dist",
         r'var_os\("TRACEDECAY_TYPESCRIPT_SDK_DIST"\)',

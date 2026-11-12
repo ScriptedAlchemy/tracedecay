@@ -28,6 +28,6 @@ tracedecay-session-memory = { path = "../tracedecay-session-memory" }
 tracing.workspace = true
 
 [dev-dependencies]
-asupersync.workspace = true
+tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros", "time", "sync", "io-util", "net"] }
 tempfile.workspace = true
 tracedecay-runtime-core = { path = "../tracedecay-runtime-core", features = ["test-helpers"] }

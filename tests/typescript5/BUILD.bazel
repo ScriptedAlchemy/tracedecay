@@ -1,0 +1,12 @@
+load("@npm//:defs.bzl", "npm_link_all_packages")
+load("@npm//tests/typescript5:typescript/package_json.bzl", tsc_bin = "bin")
+
+npm_link_all_packages(name = "node_modules")
+
+tsc_bin.tsc_binary(
+    name = "typescript5_compiler",
+    testonly = True,
+    # The daemon invokes this compiler from each isolated project's directory.
+    env = {"BAZEL_BINDIR": "."},
+    visibility = ["//visibility:public"],
+)

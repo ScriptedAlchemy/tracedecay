@@ -3,8 +3,8 @@
 //! A supervisor thread spawns the child and owns its `wait`; one thread each
 //! owns stdin, stdout, and stderr. They meet the async client over
 //! `async_channel`s, whose futures wake through ordinary `Waker`s, so any
-//! executor can drive the client and no pipe depends on a reactor. Asupersync
-//! child pipes are Unix-only, so std threads are also what Windows runs.
+//! executor can drive the client and no pipe depends on a reactor. The same
+//! supervisor and pipe ownership model runs on Unix and Windows.
 
 use std::future::poll_fn;
 use std::io::{self, Write};

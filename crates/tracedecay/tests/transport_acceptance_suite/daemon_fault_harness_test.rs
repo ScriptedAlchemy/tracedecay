@@ -213,7 +213,7 @@ async fn observation_store_statement_faults_roll_back_and_retry_exactly_once() {
         let candidate = observation(stage);
 
         let initialized = open_lcm_db(&tmp).await;
-        drop(initialized);
+        initialized.shutdown().await;
         set_statement_fault(&tmp, stage, table, true).await;
         let db = open_lcm_db(&tmp).await;
         let store = observation_store(&db);
@@ -225,7 +225,8 @@ async fn observation_store_statement_faults_roll_back_and_retry_exactly_once() {
             matches!(error, ObservationStoreError::Storage { .. }),
             "{stage} fault returned the wrong error: {error:?}"
         );
-        drop((store, db));
+        drop(store);
+        db.shutdown().await;
 
         assert_eq!(observation_state_counts(&tmp).await, [0, 0, 0, 0]);
         let restarted = open_lcm_db(&tmp).await;
@@ -255,7 +256,8 @@ async fn observation_store_statement_faults_roll_back_and_retry_exactly_once() {
             "{stage} fault leaked replay state after restart"
         );
 
-        drop((restarted_store, restarted));
+        drop(restarted_store);
+        restarted.shutdown().await;
         set_statement_fault(&tmp, stage, table, false).await;
         let retry = open_lcm_db(&tmp).await;
         let retry_store = observation_store(&retry);
@@ -268,7 +270,8 @@ async fn observation_store_statement_faults_roll_back_and_retry_exactly_once() {
             other => panic!("{stage} retry must commit once, got {other:?}"),
         };
         assert_eq!(committed.sequence(), 1);
-        drop((retry_store, retry));
+        drop(retry_store);
+        retry.shutdown().await;
 
         let replayed = open_lcm_db(&tmp).await;
         let replayed_store = observation_store(&replayed);
@@ -297,7 +300,8 @@ async fn observation_store_statement_faults_roll_back_and_retry_exactly_once() {
                 .unwrap(),
             Some(cursor(stage, 100))
         );
-        drop((replayed_store, replayed));
+        drop(replayed_store);
+        replayed.shutdown().await;
         assert_eq!(
             observation_state_counts(&tmp).await,
             [1, 1, 1, 1],

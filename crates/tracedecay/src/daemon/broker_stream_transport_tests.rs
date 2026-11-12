@@ -10,11 +10,9 @@ async fn rmcp_selected_target_retirement_between_handler_and_send_suppresses_res
     let active_lifecycle = tracedecay_mcp::server::ProjectServerResponseLifecycle::default();
     let target_lifecycle = tracedecay_mcp::server::ProjectServerResponseLifecycle::default();
     let selected_responses = crate::mcp::server::RmcpSelectedProjectResponseAuthority::default();
-    let mut transport = BrokerStreamTransport::new(
-        BrokerStream::from_tokio_unix(server).expect("daemon end of the test socket"),
-    )
-    .with_project_response_lifecycle(active_lifecycle.clone())
-    .with_rmcp_selected_project_responses(selected_responses.clone());
+    let mut transport = BrokerStreamTransport::new(BrokerStream::Unix(server))
+        .with_project_response_lifecycle(active_lifecycle.clone())
+        .with_rmcp_selected_project_responses(selected_responses.clone());
     let (client_reader, mut client_writer) = client.into_split();
 
     client_writer
@@ -96,11 +94,9 @@ async fn rmcp_selected_target_response_does_not_fall_back_to_retired_active_serv
     let active_lifecycle = tracedecay_mcp::server::ProjectServerResponseLifecycle::default();
     let target_lifecycle = tracedecay_mcp::server::ProjectServerResponseLifecycle::default();
     let selected_responses = crate::mcp::server::RmcpSelectedProjectResponseAuthority::default();
-    let mut transport = BrokerStreamTransport::new(
-        BrokerStream::from_tokio_unix(server).expect("daemon end of the test socket"),
-    )
-    .with_project_response_lifecycle(active_lifecycle.clone())
-    .with_rmcp_selected_project_responses(selected_responses.clone());
+    let mut transport = BrokerStreamTransport::new(BrokerStream::Unix(server))
+        .with_project_response_lifecycle(active_lifecycle.clone())
+        .with_rmcp_selected_project_responses(selected_responses.clone());
     let (client_reader, mut client_writer) = client.into_split();
 
     client_writer

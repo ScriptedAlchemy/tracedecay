@@ -915,7 +915,7 @@ impl CodeIndexSchedulerRegistryV1 {
                     .park_headroom
                     .released_by_others(&mut worker_owner_headroom)
                     > worker_owner_headroom_seen
-                    || worker_admission_headroom.has_changed();
+                    || matches!(worker_admission_headroom.has_changed(), Ok(true));
                 if headroom_moved
                     && worker_memory_retry.allow_reconstruction(&worker_control_epoch)
                     && worktree_waits_for_memory(
@@ -993,7 +993,7 @@ impl CodeIndexSchedulerRegistryV1 {
                         .park_headroom
                         .released_by_others(&mut worker_owner_headroom),
                 );
-                worker_admission_headroom.mark_seen();
+                drop(worker_admission_headroom.borrow_and_update());
                 super::CodeIndexWorkerPhaseV1::enter(
                     &worker_phase_signal,
                     super::CodeIndexWorkerPhaseV1::Working,
@@ -3992,7 +3992,7 @@ impl CodeIndexSchedulerRegistryV1 {
                     &supervised_park,
                     &supervised_phase,
                     &supervised_serving_changed,
-                    &panic.to_string(),
+                    panic.as_ref(),
                 );
             }
         });
@@ -4024,16 +4024,10 @@ impl CodeIndexSchedulerRegistryV1 {
         let headroom_memory_retry = Arc::downgrade(&memory_retry);
         let headroom_source_epoch = Arc::downgrade(&epoch);
         spawn_detached("code_index_headroom_watcher", async move {
-            let Some(cx) = tracedecay_runtime_core::native_runtime::cx() else {
-                tracing::error!(
-                    "native runtime unavailable; memory headroom no longer wakes this worktree"
-                );
-                return;
-            };
             loop {
                 let (changed, owner_released) = tokio::select! {
-                    changed = owner_headroom.changed(&cx) => (changed, true),
-                    changed = admission_headroom.changed(&cx) => (changed, false),
+                    changed = owner_headroom.changed() => (changed, true),
+                    changed = admission_headroom.changed() => (changed, false),
                 };
                 let (
                     Ok(()),

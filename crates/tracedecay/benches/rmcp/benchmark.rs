@@ -132,7 +132,7 @@ impl BenchmarkConnection {
         server: Arc<McpServer>,
     ) -> Result<Self, String> {
         // rmcp's client runs on Tokio I/O, so this harness dials with Tokio
-        // rather than the Asupersync `DaemonClientStream`.
+        // rather than the native `DaemonClientStream`.
         #[cfg(not(unix))]
         let DaemonEndpoint::Loopback(address) = endpoint;
         #[cfg(unix)]

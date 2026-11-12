@@ -1,4 +1,11 @@
-use std::{env, fs, path::Path, process::Command, time::Duration};
+use std::{
+    env,
+    fs::{self, OpenOptions},
+    os::{fd::AsRawFd, unix::fs::FileExt},
+    path::Path,
+    process::Command,
+    time::Duration,
+};
 
 use rusqlite::{Connection, Error, ErrorCode, OpenFlags};
 use tempfile::TempDir;
@@ -14,7 +21,7 @@ const PROBE_COMPLETE: &str = "tracedecay-path-identity-probe-complete";
 // shares inode/lock bookkeeping within a process and can hide a lost OS lock.
 // Execute only the child test in a fresh process, with a marker to reject a
 // successful test harness invocation that accidentally selected zero tests.
-fn probe_external_connection(path: &Path, operation: &str, blocked: bool) {
+pub(crate) fn probe_external_connection(path: &Path, operation: &str, blocked: bool) {
     probe_external_connection_expectation(
         path,
         operation,
@@ -155,6 +162,133 @@ fn worker_identity_checks_keep_cross_process_writer_exclusion() {
         live_path_identity(&directory),
         Err(OpenedDatabaseFileError::NotFile)
     );
+}
+
+/// A zero-byte existing SQLite file may belong to a live connection holding
+/// a rollback writer reservation. Rejecting that unfinished attachment must
+/// not open and close a second raw descriptor and unlock the other writer.
+#[test]
+fn rejecting_empty_attachment_does_not_release_another_writer_lock() {
+    let temp = TempDir::new().expect("tempdir");
+    let path = temp.path().join("empty-locked.db");
+    let writer = Connection::open(&path).expect("open SQLite connection");
+    writer
+        .execute_batch("BEGIN IMMEDIATE")
+        .expect("reserve the SQLite writer lock without initializing pages");
+    assert_eq!(fs::metadata(&path).unwrap().len(), 0);
+    probe_external_connection(&path, "write", true);
+
+    assert!(matches!(
+        OpenedDatabaseFile::pin_initialized(&path),
+        Err(OpenedDatabaseFileError::InvalidHeader)
+    ));
+    probe_external_connection(&path, "write", true);
+
+    writer
+        .execute_batch("ROLLBACK")
+        .expect("release writer reservation");
+    probe_external_connection(&path, "write", false);
+}
+
+/// SQLite's immutable header inspection during existing-store admission must
+/// not release an unrelated live connection's process-owned POSIX locks.
+/// A separate process is essential: same-process SQLite handles can mask loss.
+/// Releasing an existing-store identity pin must not cancel locks owned by
+/// a different live SQLite writer in this process. O_RDONLY descriptors do
+/// exactly that on Linux even if they never acquired a lock themselves.
+#[cfg(any(target_os = "linux", target_os = "android"))]
+#[test]
+fn releasing_existing_store_pin_preserves_unrelated_writer_locks() {
+    for journal_mode in ["DELETE", "WAL"] {
+        let temp = TempDir::new().expect("tempdir");
+        let path = temp.path().join("sessions.db");
+        let writer = Connection::open(&path).expect("initialize database");
+        writer
+            .execute_batch("CREATE TABLE sample(value INTEGER); INSERT INTO sample VALUES (1);")
+            .expect("initialize committed schema");
+        writer
+            .pragma_update(None, "journal_mode", journal_mode)
+            .expect("select journal mode");
+        if journal_mode == "WAL" {
+            writer
+                .execute_batch("PRAGMA wal_checkpoint(TRUNCATE)")
+                .expect("checkpoint the initial schema");
+        }
+        let pin = OpenedDatabaseFile::pin_initialized(&path)
+            .expect("pin fully initialized existing database");
+
+        writer
+            .execute_batch("BEGIN IMMEDIATE; UPDATE sample SET value = 2;")
+            .expect("hold an unrelated writer reservation");
+        probe_external_connection(&path, "write", true);
+        pin.release_after_workers_exit();
+        probe_external_connection(&path, "write", true);
+
+        writer.execute_batch("COMMIT").expect("commit");
+        drop(writer);
+        probe_external_connection(&path, "write", false);
+        assert_committed_data(&path);
+    }
+}
+
+#[test]
+fn admitting_initialized_store_keeps_existing_writer_locks() {
+    for journal_mode in ["DELETE", "WAL"] {
+        let temp = TempDir::new().expect("tempdir");
+        let path = temp.path().join("live-existing.db");
+        let writer = Connection::open(&path).expect("initialize existing SQLite file");
+        writer
+            .execute_batch("CREATE TABLE sample(value INTEGER); INSERT INTO sample VALUES (1);")
+            .expect("commit initial sample");
+        writer
+            .pragma_update(None, "journal_mode", journal_mode)
+            .expect("select journal mode");
+        if journal_mode == "WAL" {
+            // Keep the committed schema on the main file for the immutable
+            // inspection: it deliberately does not consume live WAL frames.
+            writer
+                .execute_batch("PRAGMA wal_checkpoint(TRUNCATE)")
+                .expect("checkpoint initial schema");
+        }
+        writer
+            .execute_batch("BEGIN IMMEDIATE; UPDATE sample SET value = 2;")
+            .expect("hold writer reservation");
+        probe_external_connection(&path, "write", true);
+
+        // This is the production existing-store admission path, not a
+        // substitute read-only connection opened by the test itself.
+        let opened = OpenedDatabaseFile::pin_initialized(&path)
+            .expect("inspect and pin a fully initialized main database");
+        opened
+            .verify_current_path(&path)
+            .expect("original database remains bound");
+        probe_external_connection(&path, "write", true);
+        probe_external_connection_expectation(&path, "read", "read:1");
+
+        writer.execute_batch("COMMIT").expect("commit update");
+        // The pinned raw descriptor is intentionally closed only after the
+        // writer exits, so its own close cannot independently release locks.
+        drop(writer);
+        opened.release_after_workers_exit();
+        probe_external_connection(&path, "write", false);
+        assert_committed_data(&path);
+    }
+}
+
+#[test]
+fn header_magic_without_a_complete_sqlite_page_is_refused() {
+    let temp = TempDir::new().expect("tempdir");
+    for length in [16, 100, 511] {
+        let path = temp.path().join(format!("short-{length}.db"));
+        let mut bytes = vec![0_u8; length];
+        bytes[..16].copy_from_slice(b"SQLite format 3\0");
+        fs::write(&path, &bytes).expect("write incomplete SQLite header");
+        assert!(matches!(
+            OpenedDatabaseFile::pin_initialized(&path),
+            Err(OpenedDatabaseFileError::InvalidHeader)
+        ));
+        assert_eq!(fs::read(&path).unwrap(), bytes);
+    }
 }
 
 #[test]
@@ -376,6 +510,148 @@ fn path_checks_keep_pinned_identity_and_reject_missing_or_replaced_files() {
         pinned.verify_current_path(&path),
         Err(OpenedDatabaseFileError::Replaced),
     );
+}
+
+const RESERVED_LOCK_PROBE_PATH: &str = "TRACEDECAY_SQLITE_RESERVED_LOCK_PROBE_PATH";
+const RESERVED_LOCK_PROBE_EXPECTATION: &str = "TRACEDECAY_SQLITE_RESERVED_LOCK_PROBE_EXPECTATION";
+const RESERVED_LOCK_PROBE_COMPLETE: &str = "tracedecay-sqlite-reserved-lock-probe-complete";
+
+/// Inspect SQLite's POSIX RESERVED byte from a different process. This avoids
+/// an SQLite schema read after we deliberately corrupt the fixture header.
+#[test]
+fn external_reserved_lock_probe() {
+    let Some(path) = env::var_os(RESERVED_LOCK_PROBE_PATH) else {
+        return;
+    };
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(path)
+        .unwrap();
+    let mut reservation = libc::flock {
+        l_type: libc::F_WRLCK as libc::c_short,
+        l_whence: libc::SEEK_SET as libc::c_short,
+        l_start: 0x4000_0001,
+        l_len: 1,
+        l_pid: 0,
+    };
+    // SAFETY: the file owns a valid descriptor and reservation is initialized
+    // and writable for the F_SETLK request.
+    let result = unsafe { libc::fcntl(file.as_raw_fd(), libc::F_SETLK, &mut reservation) };
+    match env::var(RESERVED_LOCK_PROBE_EXPECTATION).unwrap().as_str() {
+        "blocked" => {
+            assert_eq!(result, -1, "SQLite writer's RESERVED lock was lost");
+            let error = std::io::Error::last_os_error().raw_os_error();
+            assert!(
+                error == Some(libc::EACCES) || error == Some(libc::EAGAIN),
+                "unexpected advisory-lock refusal: {error:?}"
+            );
+        }
+        "allowed" => assert_eq!(
+            result,
+            0,
+            "RESERVED byte remained locked after the writer closed: {}",
+            std::io::Error::last_os_error()
+        ),
+        other => panic!("unknown reserved lock expectation: {other}"),
+    }
+    println!("{RESERVED_LOCK_PROBE_COMPLETE}");
+}
+
+fn probe_reserved_lock(path: &Path, blocked: bool) {
+    let (_, module) = module_path!().split_once("::").unwrap();
+    let output = Command::new(env::current_exe().unwrap())
+        .args([
+            "--exact",
+            &format!("{module}::external_reserved_lock_probe"),
+            "--nocapture",
+        ])
+        .env(RESERVED_LOCK_PROBE_PATH, path)
+        .env(
+            RESERVED_LOCK_PROBE_EXPECTATION,
+            if blocked { "blocked" } else { "allowed" },
+        )
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.status.success()
+            && stdout.contains("1 passed")
+            && stdout.contains(RESERVED_LOCK_PROBE_COMPLETE),
+        "cross-process lock probe failed: {stdout}\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// Opening an already valid database for attachment must not close an
+/// unrelated raw descriptor and discard a live writer's POSIX RESERVED lock.
+/// Closing one attachment must preserve the independent writer’s transaction.
+#[test]
+fn valid_existing_store_admission_preserves_other_writer_locks() {
+    let temp = TempDir::new().unwrap();
+    let path = temp.path().join("sessions.db");
+    let writer = Connection::open(&path).unwrap();
+    writer
+        .execute_batch(
+            "PRAGMA journal_mode = DELETE;
+             CREATE TABLE sample(value INTEGER);
+             INSERT INTO sample VALUES (1);
+             BEGIN IMMEDIATE;
+             UPDATE sample SET value = 2;",
+        )
+        .unwrap();
+
+    probe_reserved_lock(&path, true);
+    let opened = OpenedDatabaseFile::pin_initialized(&path)
+        .expect("admit an initialized database while another writer is live");
+    assert_eq!(opened.identity(), live_path_identity(&path).unwrap());
+    probe_reserved_lock(&path, true);
+
+    opened.release_after_workers_exit();
+    probe_reserved_lock(&path, true);
+    writer.execute_batch("COMMIT").unwrap();
+    drop(writer);
+    probe_reserved_lock(&path, false);
+    assert_committed_data(&path);
+}
+
+#[test]
+fn malformed_existing_store_refusal_keeps_other_sqlite_writer_locks() {
+    let temp = TempDir::new().unwrap();
+    let path = temp.path().join("sessions.db");
+    let writer = Connection::open(&path).unwrap();
+    writer
+        .execute_batch(
+            "PRAGMA journal_mode = DELETE;
+             CREATE TABLE sample(value INTEGER);
+             INSERT INTO sample VALUES (1);",
+        )
+        .unwrap();
+    // Retain this descriptor through the original writer's entire lifetime:
+    // closing it early would itself discard the POSIX locks under test.
+    let mutation = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&path)
+        .unwrap();
+    writer
+        .execute_batch("BEGIN IMMEDIATE; UPDATE sample SET value = 2;")
+        .unwrap();
+    probe_reserved_lock(&path, true);
+
+    // Corrupt only a disposable fixture, in place and without closing a raw
+    // descriptor. The main file remains page-aligned but is no longer SQLite.
+    mutation.write_all_at(b"Not SQLite data!", 0).unwrap();
+    probe_reserved_lock(&path, true);
+    assert!(matches!(
+        OpenedDatabaseFile::pin_initialized(&path),
+        Err(OpenedDatabaseFileError::InvalidHeader)
+    ));
+    probe_reserved_lock(&path, true);
+
+    drop(writer);
+    drop(mutation);
+    probe_reserved_lock(&path, false);
 }
 
 /// Closing a verified read snapshot must not release another SQLite

@@ -4,10 +4,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
-use asupersync::Cx;
-use asupersync::cx::cap;
-use asupersync::sync::Notify;
-use asupersync::types::CancelKind;
+use tokio_util::sync::CancellationToken as RuntimeCancellationToken;
 
 /// A deadline expressed on the monotonic clock.
 ///
@@ -37,46 +34,14 @@ impl MonotonicDeadline {
 #[derive(Clone, Debug)]
 pub struct CancellationToken {
     token_id: Option<Arc<str>>,
-    inner: Arc<CancellationScope>,
+    inner: Arc<RuntimeCancellationToken>,
 }
-
-/// Request admission can precede a runtime scope. The detached context owns
-/// cancellation without granting runtime capabilities, and ancestry keeps
-/// parent cancellation observable after intermediate handles are dropped.
-#[derive(Debug)]
-struct CancellationScope {
-    context: Cx<cap::None>,
-    parent: Option<Arc<Self>>,
-    changed: Arc<Notify>,
-}
-
-// `parent` is `Arc<Self>`. Auto-trait proof does not cache that cycle and
-// overflows (rust-lang/rust#159228). The parent field below stops at this
-// impl; the context is checked on its own.
-unsafe impl Send for CancellationScope {}
-unsafe impl Sync for CancellationScope {}
-
-const _: fn(&CancellationScope) = |value| {
-    fn assert_send_sync<T: Send + Sync>(_: &T) {}
-    let CancellationScope {
-        context,
-        parent,
-        changed,
-    } = value;
-    assert_send_sync(context);
-    assert_send_sync(parent);
-    assert_send_sync(changed);
-};
 
 impl Default for CancellationToken {
     fn default() -> Self {
         Self {
             token_id: None,
-            inner: Arc::new(CancellationScope {
-                context: Cx::detached_cancel_context(),
-                parent: None,
-                changed: Arc::new(Notify::new()),
-            }),
+            inner: Arc::new(RuntimeCancellationToken::new()),
         }
     }
 }
@@ -136,29 +101,17 @@ impl CancellationToken {
     pub fn child_token(&self) -> Self {
         Self {
             token_id: self.token_id.clone(),
-            inner: Arc::new(CancellationScope {
-                context: Cx::detached_cancel_context(),
-                parent: Some(Arc::clone(&self.inner)),
-                changed: Arc::clone(&self.inner.changed),
-            }),
+            inner: Arc::new(self.inner.child_token()),
         }
     }
 
     pub fn cancel(&self) {
-        self.inner.context.cancel_fast(CancelKind::User);
-        self.inner.changed.notify_waiters();
+        self.inner.cancel();
     }
 
     #[must_use]
     pub fn is_cancelled(&self) -> bool {
-        let mut scope = Some(self.inner.as_ref());
-        while let Some(current) = scope {
-            if current.context.is_cancelled() {
-                return true;
-            }
-            scope = current.parent.as_deref();
-        }
-        false
+        self.inner.is_cancelled()
     }
 
     /// Whether two handles observe the same underlying cancellation state.
@@ -169,9 +122,7 @@ impl CancellationToken {
 
     /// Resolves once the token is cancelled.
     pub async fn cancelled(&self) {
-        // Native wait_until arms its notification generation before checking
-        // the predicate, so cancellation cannot race between checking and parking.
-        self.inner.changed.wait_until(|| self.is_cancelled()).await;
+        self.inner.cancelled().await;
     }
 }
 
@@ -184,8 +135,8 @@ mod tests {
     use std::task::Poll;
     use std::time::Duration;
 
-    use asupersync::sync::Notify;
-    use asupersync::time::timeout;
+    use tokio::sync::Notify;
+    use tokio::time::timeout;
 
     use super::CancellationToken;
 
@@ -226,8 +177,8 @@ mod tests {
         );
     }
 
-    #[asupersync::test]
-    async fn cancellation_wakes_current_and_future_clone_waiters(cx: &Cx) {
+    #[tokio::test]
+    async fn cancellation_wakes_current_and_future_clone_waiters() {
         let token = CancellationToken::new();
         let registered = Arc::new(AtomicUsize::new(0));
         let registration = Arc::new(Notify::new());
@@ -236,48 +187,49 @@ mod tests {
             let token = token.clone();
             let registered = Arc::clone(&registered);
             let registration = Arc::clone(&registration);
-            waiters.push(
-                cx.spawn(move |_| async move {
-                    let mut waiting = pin!(token.cancelled());
-                    poll_fn(|task_cx| {
-                        assert!(waiting.as_mut().poll(task_cx).is_pending());
-                        Poll::Ready(())
-                    })
-                    .await;
-                    registered.fetch_add(1, Ordering::Release);
-                    registration.notify_waiters();
-                    waiting.await;
-                    value
+            waiters.push(tokio::spawn(async move {
+                let mut waiting = pin!(token.cancelled());
+                poll_fn(|task_cx| {
+                    assert!(waiting.as_mut().poll(task_cx).is_pending());
+                    Poll::Ready(())
                 })
-                .expect("native waiter task should be admitted"),
-            );
+                .await;
+                registered.fetch_add(1, Ordering::Release);
+                registration.notify_waiters();
+                waiting.await;
+                value
+            }));
         }
 
-        timeout(
-            cx.now(),
-            Duration::from_secs(1),
-            registration.wait_until(|| registered.load(Ordering::Acquire) == 2),
-        )
+        timeout(Duration::from_secs(1), async {
+            loop {
+                let notified = registration.notified();
+                if registered.load(Ordering::Acquire) == 2 {
+                    break;
+                }
+                notified.await;
+            }
+        })
         .await
         .expect("both cancellation waiters should register");
         token.cancel();
         token.cancel();
 
-        for (mut waiter, expected) in waiters.into_iter().zip([7, 11]) {
-            let value = timeout(cx.now(), Duration::from_secs(1), waiter.join(cx))
+        for (waiter, expected) in waiters.into_iter().zip([7, 11]) {
+            let value = timeout(Duration::from_secs(1), waiter)
                 .await
                 .expect("registered waiter should wake")
                 .expect("native waiter task should finish");
             assert_eq!(value, expected);
         }
-        timeout(cx.now(), Duration::from_secs(1), token.cancelled())
+        timeout(Duration::from_secs(1), token.cancelled())
             .await
             .expect("future waiter should complete");
         assert!(token.is_cancelled());
     }
 
-    #[asupersync::test]
-    async fn child_cancellation_preserves_identity_and_observes_parent_cancellation(cx: &Cx) {
+    #[tokio::test]
+    async fn child_cancellation_preserves_identity_and_observes_parent_cancellation() {
         let parent =
             CancellationToken::for_admitted_application_request("cancellation.request.semantic")
                 .expect("valid admitted cancellation identity");
@@ -302,19 +254,19 @@ mod tests {
         drop(child);
         parent.cancel();
 
-        timeout(cx.now(), Duration::from_secs(1), waiting)
+        timeout(Duration::from_secs(1), waiting)
             .await
             .expect("parent cancellation should wake descendants through a dropped child");
         assert!(grandchild.is_cancelled());
         let late_child = parent.child_token();
         assert!(late_child.is_cancelled());
-        timeout(cx.now(), Duration::from_secs(1), late_child.cancelled())
+        timeout(Duration::from_secs(1), late_child.cancelled())
             .await
             .expect("children created after cancellation should complete immediately");
     }
 
-    #[asupersync::test]
-    async fn child_cancellation_does_not_cancel_the_parent_or_siblings(cx: &Cx) {
+    #[tokio::test]
+    async fn child_cancellation_does_not_cancel_the_parent_or_siblings() {
         let parent = CancellationToken::new();
         let child = parent.child_token();
         let sibling = parent.child_token();
@@ -335,28 +287,28 @@ mod tests {
         assert!(!parent.is_cancelled());
         assert!(!sibling.is_cancelled());
         assert!(
-            timeout(cx.now(), Duration::from_millis(20), parent_waiting)
+            timeout(Duration::from_millis(20), parent_waiting)
                 .await
                 .is_err(),
             "the parent cancellation waiter must stay pending"
         );
         assert!(
-            timeout(cx.now(), Duration::from_millis(20), sibling_waiting)
+            timeout(Duration::from_millis(20), sibling_waiting)
                 .await
                 .is_err(),
             "the sibling cancellation waiter must stay pending"
         );
-        timeout(cx.now(), Duration::from_secs(1), grandchild.cancelled())
+        timeout(Duration::from_secs(1), grandchild.cancelled())
             .await
             .expect("child cancellation should reach its own descendants");
         parent.cancel();
-        timeout(cx.now(), Duration::from_secs(1), sibling.cancelled())
+        timeout(Duration::from_secs(1), sibling.cancelled())
             .await
             .expect("dropping a pending waiter must not prevent later cancellation");
     }
 
-    #[asupersync::test]
-    async fn cancellation_racing_the_first_poll_is_never_lost(cx: &Cx) {
+    #[tokio::test]
+    async fn cancellation_racing_the_first_poll_is_never_lost() {
         for _ in 0..64 {
             let token = CancellationToken::new();
             let child = token.child_token();
@@ -368,7 +320,7 @@ mod tests {
             });
             let mut waiting = pin!(child.cancelled());
             start.wait();
-            timeout(cx.now(), Duration::from_secs(1), waiting.as_mut())
+            timeout(Duration::from_secs(1), waiting.as_mut())
                 .await
                 .expect("cancellation racing first poll must wake its waiter");
             cancel.join().expect("cancelling thread should finish");

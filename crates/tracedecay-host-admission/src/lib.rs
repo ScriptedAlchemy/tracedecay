@@ -72,8 +72,8 @@ pub struct HostAdmissionBroker {
     /// one request is pending however many admissions raise it.
     replay_requested: AtomicBool,
     progress_revision: Arc<AtomicU64>,
-    progress_changed: Arc<asupersync::sync::Notify>,
-    replay_wake: asupersync::sync::Notify,
+    progress_changed: Arc<tokio::sync::Notify>,
+    replay_wake: tokio::sync::Notify,
 }
 
 struct QueuedAppend {
@@ -118,8 +118,8 @@ impl HostAdmissionBroker {
             replay: futures_util::lock::Mutex::new(()),
             replay_requested: AtomicBool::new(false),
             progress_revision: Arc::new(AtomicU64::new(0)),
-            progress_changed: Arc::new(asupersync::sync::Notify::new()),
-            replay_wake: asupersync::sync::Notify::new(),
+            progress_changed: Arc::new(tokio::sync::Notify::new()),
+            replay_wake: tokio::sync::Notify::new(),
         }
     }
 
@@ -211,9 +211,15 @@ impl HostAdmissionBroker {
     }
 
     pub async fn wait_for_replay_request(&self) {
-        self.replay_wake
-            .wait_until(|| self.replay_requested.swap(false, Ordering::AcqRel))
-            .await;
+        loop {
+            let notified = self.replay_wake.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            if self.replay_requested.swap(false, Ordering::AcqRel) {
+                return;
+            }
+            notified.await;
+        }
     }
 
     /// Capture before reading pending state. Each waiter owns its revision;
@@ -223,9 +229,15 @@ impl HostAdmissionBroker {
     }
 
     pub async fn wait_for_progress(&self, observed: u64) {
-        self.progress_changed
-            .wait_until(|| self.progress_revision() != observed)
-            .await;
+        loop {
+            let notified = self.progress_changed.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            if self.progress_revision() != observed {
+                return;
+            }
+            notified.await;
+        }
     }
 
     /// Inspect bounded canonical payloads without the replay lease or copies.

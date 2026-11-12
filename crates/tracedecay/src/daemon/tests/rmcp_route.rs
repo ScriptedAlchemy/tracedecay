@@ -457,8 +457,7 @@ async fn serve_proxy_host_session_is_served_only_over_rmcp() {
             tokio::spawn(async move {
                 Box::pin(
                     crate::daemon::connection_serving::serve_authenticated_socket_client_with_class(
-                        tracedecay_daemon_protocol::BrokerStream::from_tokio_unix(stream)
-                            .expect("daemon end of the test socket"),
+                        tracedecay_daemon_protocol::BrokerStream::Unix(stream),
                         engine,
                         token,
                         crate::daemon::core_admission::DaemonClientAdmissionClass::General,
@@ -1333,8 +1332,7 @@ async fn serve_proxy_cancels_running_and_queued_requests_without_host_disconnect
             tokio::spawn(async move {
                 Box::pin(
                     crate::daemon::connection_serving::serve_authenticated_socket_client_with_class(
-                        tracedecay_daemon_protocol::BrokerStream::from_tokio_unix(stream)
-                            .expect("daemon end of the test socket"),
+                        tracedecay_daemon_protocol::BrokerStream::Unix(stream),
                         engine,
                         token,
                         crate::daemon::core_admission::DaemonClientAdmissionClass::General,

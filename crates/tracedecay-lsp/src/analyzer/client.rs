@@ -23,6 +23,7 @@ use lsp_types::{
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use tokio_util::task::AbortOnDropHandle;
 use tracedecay_daemon_protocol::{ConnectionLocalRequestSequence, FramePoll};
 use tracedecay_domain::ContentDigest;
 use tracedecay_runtime_core::native_runtime;
@@ -761,17 +762,15 @@ impl StdioLspClient {
             }
         })?;
         let path = path.to_path_buf();
-        let cx = tracedecay_runtime_core::native_runtime::cx().ok_or_else(|| {
+        let runtime = tracedecay_runtime_core::native_runtime::handle().ok_or_else(|| {
             LspSemanticRequestError::Transport {
                 class: "native runtime unavailable for semantic document read".to_owned(),
             }
         })?;
-        let mut read = cx
-            .spawn_blocking(move |_| read_semantic_document(&path))
-            .map_err(|error| LspSemanticRequestError::InvalidResponse {
-                class: format!("failed to schedule semantic document read: {error}"),
-            })?;
-        let text = native_runtime::timeout_at(timeouts.request_deadline(), read.join(&cx))
+        let read = AbortOnDropHandle::new(native_runtime::spawn_blocking_on(&runtime, move || {
+            read_semantic_document(&path)
+        }));
+        let text = native_runtime::timeout_at(timeouts.request_deadline(), read)
             .await
             .map_err(|error| match error {
                 native_runtime::TimeoutError::Elapsed => LspSemanticRequestError::TimedOut,

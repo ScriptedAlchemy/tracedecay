@@ -7,7 +7,7 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use asupersync::io::AsyncWriteExt;
+use tokio::io::AsyncWriteExt;
 
 use crate::handshake::DaemonHandshake;
 use crate::transport::{
@@ -190,7 +190,7 @@ pub async fn poll_daemon_response_line<R, F, Fut>(
     mut ensure_live: F,
 ) -> Result<Option<String>>
 where
-    R: asupersync::io::AsyncBufRead + Unpin,
+    R: tokio::io::AsyncBufRead + Unpin,
     F: FnMut() -> Fut,
     Fut: std::future::Future<Output = Result<()>>,
 {
@@ -198,7 +198,7 @@ where
         tokio::select! {
             biased;
             result = line_reader.read_mcp_line() => return response_line(result, request_label),
-            () = asupersync::time::sleep(asupersync::time::wall_now(), liveness_poll_interval) => {}
+            () = tokio::time::sleep(liveness_poll_interval) => {}
         }
         let probe = ensure_live();
         tokio::pin!(probe);
@@ -245,7 +245,7 @@ pub async fn next_daemon_response_line<R>(
     liveness_poll_interval: Duration,
 ) -> Result<Option<String>>
 where
-    R: asupersync::io::AsyncBufRead + Unpin,
+    R: tokio::io::AsyncBufRead + Unpin,
 {
     poll_daemon_response_line(reader, request_label, liveness_poll_interval, || {
         ensure_daemon_connection_live(connection, request_label)
@@ -260,7 +260,7 @@ where
 /// because its connection type is the authority record, not the protocol
 /// connection.
 pub async fn write_daemon_handshake_preamble(
-    writer: &mut (impl asupersync::io::AsyncWrite + Unpin),
+    writer: &mut (impl tokio::io::AsyncWrite + Unpin),
     auth_token: &str,
     handshake: &DaemonHandshake,
 ) -> Result<()> {
@@ -377,7 +377,7 @@ where
         let connection = match resolve() {
             Ok(connection) => connection,
             Err(error) if retry_resolution(&error) && Instant::now() < deadline => {
-                asupersync::time::sleep(asupersync::time::wall_now(), poll_interval).await;
+                tokio::time::sleep(poll_interval).await;
                 continue;
             }
             Err(error) => return Err(error),
@@ -398,7 +398,7 @@ where
                         }
                     });
                 }
-                asupersync::time::sleep(asupersync::time::wall_now(), poll_interval).await;
+                tokio::time::sleep(poll_interval).await;
             }
             Err(error) => return Err(error),
         }
@@ -433,7 +433,6 @@ mod tests {
 
     /// A daemon whose listen backlog is full must surface as the typed
     /// saturated refusal at once instead of a connect that never settles.
-    /// Delete with the `connect_unix` workaround on asupersync 0.6.0.
     #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn full_listen_backlog_fails_fast_as_saturated() {
@@ -527,7 +526,7 @@ mod tests {
         // The stopped daemon keeps the request connection open, so only the
         // probe can end a read that still blocks.
         let held_connection = std::cell::RefCell::new(None);
-        let mut reader = BoundedLineReader::new(asupersync::io::BufReader::new(client));
+        let mut reader = BoundedLineReader::new(tokio::io::BufReader::new(client));
         poll_daemon_response_line(&mut reader, "tracedecay_status", Duration::ZERO, || {
             let stopping = daemon.borrow_mut().take();
             let socket = socket.clone();

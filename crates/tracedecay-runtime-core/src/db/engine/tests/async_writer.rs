@@ -1,8 +1,3 @@
-use asupersync::{
-    Cx,
-    channel::{mpsc as async_mpsc, oneshot},
-    runtime::RuntimeBuilder,
-};
 use std::{
     future::{Future, poll_fn},
     sync::{
@@ -13,6 +8,7 @@ use std::{
     task::Poll,
     time::Duration,
 };
+use tokio::sync::{mpsc as async_mpsc, oneshot};
 
 use crate::db::engine::{TestConnection, WriteStatement};
 use tracedecay_rusqlite_runtime::exact_sql::{
@@ -77,30 +73,28 @@ async fn fixture() -> (
 
 #[test]
 fn ordinary_writer_progress_does_not_require_a_blocking_pool_slot() {
-    let runtime = RuntimeBuilder::current_thread()
-        .blocking_threads(1, 1)
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .max_blocking_threads(1)
         .build()
         .unwrap();
     runtime.block_on(async {
         let (_directory, connection, _gate, _accepted, _release) = fixture().await;
-        let cx = Cx::current().unwrap();
-        let (entered, mut ready) = oneshot::channel();
+        let cx = tokio::runtime::Handle::try_current().ok().unwrap();
+        let (entered, ready) = oneshot::channel();
         let (release, held) = mpsc::channel();
-        let mut blocker = cx
-            .spawn_blocking(move |_cx| {
-                entered.send_blocking(()).unwrap();
-                held.recv().unwrap();
-            })
-            .unwrap();
-        ready.recv(&cx).await.unwrap();
-        let result = asupersync::time::timeout(
-            Cx::current().unwrap().now(),
+        let blocker = crate::native_runtime::spawn_blocking_on(&cx, move || {
+            entered.send(()).unwrap();
+            held.recv().unwrap();
+        });
+        ready.await.unwrap();
+        let result = tokio::time::timeout(
             Duration::from_secs(1),
             connection.execute("INSERT INTO items VALUES (1, 1)", ()),
         )
         .await;
         release.send(()).unwrap();
-        blocker.join(&cx).await.unwrap();
+        blocker.await.unwrap();
         assert_eq!(
             result
                 .expect("writer acknowledgement must bypass occupied blocking pool")
@@ -110,7 +104,7 @@ fn ordinary_writer_progress_does_not_require_a_blocking_pool_slot() {
     });
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn cancelled_statement_batch_retains_work_and_writer_interleaving() {
     let (_directory, connection, gate, mut accepted, release) = fixture().await;
     gate.remaining.store(2, Ordering::Release);
@@ -129,10 +123,10 @@ async fn cancelled_statement_batch_retains_work_and_writer_interleaving() {
             .await
             .is_pending()
     );
-    accepted.recv(&Cx::current().unwrap()).await.unwrap();
+    accepted.recv().await.unwrap();
     drop(caller);
     release.send(()).unwrap();
-    accepted.recv(&Cx::current().unwrap()).await.unwrap();
+    accepted.recv().await.unwrap();
     let mut competitor = Box::pin(connection.execute("INSERT INTO items(value) VALUES (9)", ()));
     assert!(
         poll_fn(|cx| Poll::Ready(competitor.as_mut().poll(cx)))
@@ -141,32 +135,28 @@ async fn cancelled_statement_batch_retains_work_and_writer_interleaving() {
     );
     release.send(()).unwrap();
     competitor.await.unwrap();
-    let values = asupersync::time::timeout(
-        Cx::current().unwrap().now(),
-        Duration::from_secs(1),
-        async {
-            loop {
-                let mut rows = connection
-                    .query("SELECT value FROM items ORDER BY id", ())
-                    .await
-                    .unwrap();
-                let mut values = Vec::new();
-                while let Some(row) = rows.next().await.unwrap() {
-                    values.push(row.get::<i64>(0).unwrap());
-                }
-                if values.len() == 4 {
-                    break values;
-                }
-                asupersync::runtime::yield_now().await;
+    let values = tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            let mut rows = connection
+                .query("SELECT value FROM items ORDER BY id", ())
+                .await
+                .unwrap();
+            let mut values = Vec::new();
+            while let Some(row) = rows.next().await.unwrap() {
+                values.push(row.get::<i64>(0).unwrap());
             }
-        },
-    )
+            if values.len() == 4 {
+                break values;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
     .await
     .unwrap();
     assert_eq!(values, vec![1, 2, 9, 3]);
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn cancelled_transaction_call_keeps_serialization_until_acknowledgement() {
     let (_directory, connection, gate, mut accepted, release) = fixture().await;
     let transaction = Arc::new(connection.transaction().await.unwrap());
@@ -182,27 +172,24 @@ async fn cancelled_transaction_call_keeps_serialization_until_acknowledgement() 
             .await
             .is_pending()
     );
-    accepted.recv(&Cx::current().unwrap()).await.unwrap();
+    accepted.recv().await.unwrap();
     drop(first);
-    let cx = Cx::current().unwrap();
+    let cx = tokio::runtime::Handle::try_current().ok().unwrap();
     let mut pending = Vec::new();
     for id in [2, 3] {
         let transaction = Arc::clone(&transaction);
-        pending.push(
-            cx.spawn(move |_cx| async move {
-                transaction
-                    .execute("INSERT INTO items VALUES (?1, ?1)", [id])
-                    .await
-            })
-            .unwrap(),
-        );
+        pending.push(cx.spawn(async move {
+            transaction
+                .execute("INSERT INTO items VALUES (?1, ?1)", [id])
+                .await
+        }));
     }
     // Poll both callers while the first command still owns the actor. Their
     // retained operations queue on the transaction gate, never on a full slot.
-    asupersync::runtime::yield_now().await;
+    tokio::task::yield_now().await;
     release.send(()).unwrap();
-    for mut task in pending {
-        assert_eq!(task.join(&cx).await.unwrap().unwrap(), 1);
+    for task in pending {
+        assert_eq!(task.await.unwrap().unwrap(), 1);
     }
     let transaction = Arc::into_inner(transaction).expect("all transaction callers completed");
     transaction.commit().await.unwrap();
@@ -216,7 +203,7 @@ async fn cancelled_transaction_call_keeps_serialization_until_acknowledgement() 
     );
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn cancelled_caller_waiting_on_the_transaction_gate_keeps_its_operation() {
     let (_directory, connection, gate, mut accepted, release) = fixture().await;
     let transaction = Arc::new(connection.transaction().await.unwrap());
@@ -229,21 +216,18 @@ async fn cancelled_caller_waiting_on_the_transaction_gate_keeps_its_operation() 
             .await
             .is_pending()
     );
-    let cx = Cx::current().unwrap();
-    accepted.recv(&cx).await.unwrap();
+    let cx = tokio::runtime::Handle::try_current().ok().unwrap();
+    accepted.recv().await.unwrap();
     let waiter = Arc::clone(&transaction);
-    let mut queued = cx
-        .spawn(
-            move |_cx| async move { waiter.execute("INSERT INTO items VALUES (2, 2)", ()).await },
-        )
-        .unwrap();
+    let queued =
+        cx.spawn(async move { waiter.execute("INSERT INTO items VALUES (2, 2)", ()).await });
     // The spawned caller reaches the gate and queues behind the first command.
-    asupersync::runtime::yield_now().await;
+    tokio::task::yield_now().await;
     queued.abort();
-    asupersync::runtime::yield_now().await;
+    tokio::task::yield_now().await;
     release.send(()).unwrap();
     assert_eq!(first.await.unwrap(), 1);
-    let _ = queued.join(&cx).await;
+    let _ = queued.await;
     let transaction = Arc::into_inner(transaction).expect("all transaction callers completed");
     transaction.commit().await.unwrap();
     let mut rows = connection
@@ -261,7 +245,7 @@ async fn cancelled_caller_waiting_on_the_transaction_gate_keeps_its_operation() 
     );
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn transaction_caller_dropped_at_each_statement_finishes_only_the_started_operation() {
     // The writer checks write authority before and after each transaction
     // statement, so statement `n` holds at checks `2n - 1` and `2n`.
@@ -306,7 +290,7 @@ async fn transaction_caller_dropped_at_each_statement_finishes_only_the_started_
                 if accepted.try_recv().is_ok() {
                     break;
                 }
-                asupersync::runtime::yield_now().await;
+                tokio::task::yield_now().await;
             }
         }
         drop(caller);

@@ -133,7 +133,7 @@ pub mod text;
 pub mod timeutil;
 pub mod tracedecay;
 pub mod weak_registry;
-pub use asupersync::{Cx, signal};
+
 pub use operation_task_owner::RuntimeOperationTaskOwnerV1;
 pub mod worktree;
 

@@ -1,5 +1,6 @@
-//! The producer against the pinned compiler installed the way pnpm installs
-//! it, when that installed compiler changes without a version change.
+//! The pinned compilers installed the way pnpm installs them, and the
+//! producer against one when that installed compiler changes without a
+//! version change.
 
 use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
@@ -38,6 +39,37 @@ const PNPM_SHIM: &str = "#!/bin/sh\n\
     fi\n\
     exec node \"$basedir/../typescript/bin/tsc\" \"$@\"\n";
 
+/// A maintained TypeScript release Bazel installs for these tests.
+#[derive(Clone, Copy, Debug)]
+pub(super) enum PinnedTypeScript {
+    /// typescript@7: a launcher for the native compiler in a platform
+    /// package it depends on.
+    Seven,
+    /// typescript@5: the compiler as JavaScript in the package itself.
+    Five,
+}
+
+impl PinnedTypeScript {
+    fn major(self) -> &'static str {
+        match self {
+            Self::Seven => "7.",
+            Self::Five => "5.",
+        }
+    }
+
+    fn launcher(self) -> PathBuf {
+        let launcher = match self {
+            Self::Seven => std::env::var_os("TRACEDECAY_TEST_TYPESCRIPT_COMPILER")
+                .expect("set TRACEDECAY_TEST_TYPESCRIPT_COMPILER to the installed pinned tsc"),
+            Self::Five => std::env::var_os("TRACEDECAY_TEST_TYPESCRIPT5_COMPILER")
+                .expect("set TRACEDECAY_TEST_TYPESCRIPT5_COMPILER to the installed pinned tsc"),
+        };
+        PathBuf::from(launcher)
+            .canonicalize()
+            .expect("installed pinned tsc")
+    }
+}
+
 /// Node, the `typescript` package and each declared dependency installed for
 /// it, as the pinned compiler's own Node resolves them.
 struct PinnedCompiler {
@@ -47,7 +79,7 @@ struct PinnedCompiler {
 }
 
 impl PinnedCompiler {
-    fn resolve() -> Self {
+    fn resolve(release: PinnedTypeScript) -> Self {
         const RESOLVE: &str = "--node_options=\
             const fs = require('fs'), path = require('path');\
             const typescript = path.dirname(path.dirname(fs.realpathSync(process.argv[1])));\
@@ -66,14 +98,8 @@ impl PinnedCompiler {
             dependencies: Vec<(String, PathBuf)>,
         }
 
-        let launcher = PathBuf::from(
-            std::env::var_os("TRACEDECAY_TEST_TYPESCRIPT_COMPILER")
-                .expect("set TRACEDECAY_TEST_TYPESCRIPT_COMPILER to the installed pinned tsc"),
-        )
-        .canonicalize()
-        .expect("installed pinned tsc");
         let probe = tempfile::tempdir().expect("probe directory");
-        let output = Command::new(launcher)
+        let output = Command::new(release.launcher())
             .current_dir(probe.path())
             .args(["--node_options=--print", RESOLVE])
             .output()
@@ -131,24 +157,46 @@ fn patch(file: &Path, appended: &str) {
 /// One TypeScript project whose `node_modules` holds the pinned compiler in
 /// pnpm's layout: the packages in its virtual store, dependencies linked
 /// beside the package that declares them, and the `.bin` shim.
-struct InstalledCompilerProject {
+pub(super) struct InstalledCompilerProject {
     _temp: tempfile::TempDir,
-    root: PathBuf,
-    typescript: PathBuf,
-    build_info_dir: PathBuf,
+    pub(super) root: PathBuf,
+    pub(super) typescript: PathBuf,
+    pub(super) build_info_dir: PathBuf,
     connection: TestConnection,
 }
 
 impl InstalledCompilerProject {
     fn new() -> Self {
-        let pinned = PinnedCompiler::resolve();
+        Self::with_files(&[
+            ("tsconfig.json", r#"{"include":["src/**/*.ts"]}"#),
+            ("src/index.ts", SOURCE),
+            ("README.md", "# first\n"),
+        ])
+    }
+
+    /// A project of `files` (relative path, contents) beside the installed
+    /// pinned typescript@7.
+    pub(super) fn with_files(files: &[(&str, &str)]) -> Self {
+        Self::installing(PinnedTypeScript::Seven, files)
+    }
+
+    /// A project of `files` (relative path, contents) beside `release`.
+    pub(super) fn installing(release: PinnedTypeScript, files: &[(&str, &str)]) -> Self {
+        let pinned = PinnedCompiler::resolve(release);
+        assert!(
+            version(&pinned.typescript).starts_with(release.major()),
+            "{release:?} resolved typescript@{}",
+            version(&pinned.typescript)
+        );
         let temp = tempfile::tempdir().expect("isolated compiler project");
         let root = temp.path().join("project");
-        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::create_dir_all(&root).unwrap();
         let root = root.canonicalize().unwrap();
-        std::fs::write(root.join("tsconfig.json"), r#"{"include":["src/**/*.ts"]}"#).unwrap();
-        std::fs::write(root.join("src/index.ts"), SOURCE).unwrap();
-        std::fs::write(root.join("README.md"), "# first\n").unwrap();
+        for (path, contents) in files {
+            let path = root.join(path);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, contents).unwrap();
+        }
 
         let store = root.join("node_modules/.pnpm");
         let linked = store.join(format!(
@@ -205,19 +253,102 @@ impl InstalledCompilerProject {
         library
     }
 
-    fn edit_readme(&self, text: &str) {
+    pub(super) fn edit_readme(&self, text: &str) {
         std::fs::write(self.root.join("README.md"), text).unwrap();
     }
 
-    fn identity(&self, generation: &str) -> CodeIndexPublicationIdentityV1 {
-        let files = ["README.md", "src/index.ts"].map(|path| {
-            let bytes = std::fs::read(self.root.join(path)).unwrap();
-            (
-                path.to_owned(),
-                id(&format!("file.{}", path.replace('/', "."))),
-                tracedecay_code_index::intake::content_digest(&bytes),
-            )
-        });
+    /// The installed launcher, which [`Self::log_compiler_runs`] wraps.
+    pub(super) fn launcher(&self) -> PathBuf {
+        self.root.join("node_modules/.bin/tsc")
+    }
+
+    /// Makes the installed launcher record the arguments of every run before
+    /// it starts the compiler, as a user's wrapper script would.
+    pub(super) fn log_compiler_runs(&self) {
+        let shim = std::fs::read_to_string(self.launcher()).unwrap();
+        let logged = shim.replacen(
+            "#!/bin/sh\n",
+            &format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\n",
+                self.compiler_log().display()
+            ),
+            1,
+        );
+        std::fs::remove_file(self.launcher()).unwrap();
+        write_executable_script(&self.launcher(), logged).unwrap();
+    }
+
+    fn compiler_log(&self) -> PathBuf {
+        self._temp.path().join("tsc.log")
+    }
+
+    /// The tsconfigs, relative to the root, the compiler checked since the
+    /// last call; configuration and build-state queries are not checks.
+    pub(super) fn checked(&self) -> Vec<String> {
+        let log = std::fs::read_to_string(self.compiler_log()).unwrap_or_default();
+        std::fs::write(self.compiler_log(), "").unwrap();
+        let mut checked = log
+            .lines()
+            .filter(|run| run.split(' ').any(|arg| arg == "--noEmit"))
+            .map(|run| {
+                let mut args = run.split(' ');
+                args.find(|arg| *arg == "-p").unwrap();
+                Path::new(args.next().unwrap())
+                    .strip_prefix(&self.root)
+                    .unwrap()
+                    .to_str()
+                    .unwrap()
+                    .to_owned()
+            })
+            .collect::<Vec<_>>();
+        checked.sort();
+        checked
+    }
+
+    /// Every compiler run since the last call to [`Self::checked`] or this.
+    pub(super) fn runs(&self) -> usize {
+        let log = std::fs::read_to_string(self.compiler_log()).unwrap_or_default();
+        std::fs::write(self.compiler_log(), "").unwrap();
+        log.lines().count()
+    }
+
+    /// The project's sources as the code index seals them: every file
+    /// outside installed packages and the compiler's build outputs.
+    pub(super) fn identity(&self, generation: &str) -> CodeIndexPublicationIdentityV1 {
+        fn sources(dir: &Path, found: &mut Vec<PathBuf>) {
+            for entry in std::fs::read_dir(dir).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    if !matches!(
+                        path.file_name().and_then(|name| name.to_str()),
+                        Some("node_modules" | "dist")
+                    ) {
+                        sources(&path, found);
+                    }
+                } else if path.extension() != Some("tsbuildinfo".as_ref()) {
+                    found.push(path);
+                }
+            }
+        }
+        let mut paths = Vec::new();
+        sources(&self.root, &mut paths);
+        let files = paths
+            .into_iter()
+            .map(|file| {
+                let path = file
+                    .strip_prefix(&self.root)
+                    .unwrap()
+                    .to_str()
+                    .unwrap()
+                    .to_owned();
+                let bytes = std::fs::read(&file).unwrap();
+                (
+                    path.clone(),
+                    id(&format!("file.{}", path.replace('/', "."))),
+                    tracedecay_code_index::intake::content_digest(&bytes),
+                )
+            })
+            .collect::<Vec<_>>();
         CodeIndexPublicationIdentityV1::new(
             id(generation),
             id("repository.installed-compiler"),
@@ -228,14 +359,14 @@ impl InstalledCompilerProject {
         )
     }
 
-    async fn run(
+    pub(super) async fn run(
         &self,
         generation: &str,
         state: &mut TypeScriptProducerStateV1,
     ) -> CompilerProducerRunV1 {
         run_typescript_producer_v1(
             &self.root,
-            &typescript_projects(&self.root),
+            &typescript_projects(&self.root).expect("tsconfig discovery"),
             &self.identity(generation),
             &DiagnosticsStore::new_runtime(&self.connection),
             &self.build_info_dir,
@@ -245,7 +376,7 @@ impl InstalledCompilerProject {
         .await
     }
 
-    async fn findings(&self, generation: &str) -> Vec<(String, String)> {
+    pub(super) async fn findings(&self, generation: &str) -> Vec<(String, String)> {
         DiagnosticsStore::new_runtime(&self.connection)
             .current_records(&id(generation))
             .await
@@ -254,9 +385,28 @@ impl InstalledCompilerProject {
             .map(|record| (record.code, record.message))
             .collect()
     }
+
+    /// Each published finding as the logical path it is on and its code.
+    pub(super) async fn located_findings(&self, generation: &str) -> Vec<(String, String)> {
+        let mut findings = DiagnosticsStore::new_runtime(&self.connection)
+            .current_records(&id(generation))
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|record| {
+                let file = record.file_occurrence_id.as_str();
+                (
+                    file.strip_prefix("file.").unwrap_or(file).to_owned(),
+                    record.code,
+                )
+            })
+            .collect::<Vec<_>>();
+        findings.sort();
+        findings
+    }
 }
 
-fn producer_state() -> TypeScriptProducerStateV1 {
+pub(super) fn producer_state() -> TypeScriptProducerStateV1 {
     TypeScriptProducerStateV1::new(
         TypeScriptProducerStatusHandleV1::default(),
         TypeScriptCompilerAdmission::new(Arc::new(ProcessBackgroundCpuV1::new(
@@ -285,7 +435,20 @@ fn missing_property() -> Vec<(String, String)> {
 /// generation changed no source the project reads.
 #[tokio::test]
 async fn a_same_version_compiler_change_is_checked_afresh() {
-    let project = InstalledCompilerProject::new();
+    for release in [PinnedTypeScript::Seven, PinnedTypeScript::Five] {
+        same_version_compiler_change(release).await;
+    }
+}
+
+async fn same_version_compiler_change(release: PinnedTypeScript) {
+    let project = InstalledCompilerProject::installing(
+        release,
+        &[
+            ("tsconfig.json", r#"{"include":["src/**/*.ts"]}"#),
+            ("src/index.ts", SOURCE),
+            ("README.md", "# first\n"),
+        ],
+    );
     let mut state = producer_state();
     assert_eq!(
         project.run("generation.installed.1", &mut state).await,
