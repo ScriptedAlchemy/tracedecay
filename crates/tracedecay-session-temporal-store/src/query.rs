@@ -488,7 +488,7 @@ mod tests {
         }
     }
 
-    #[asupersync::test]
+    #[tokio::test]
     async fn observation_hydration_batches_distinct_bodies_and_preserves_integrity() {
         use tracedecay_domain::{
             ComponentVersion, DurableObservationV1, ObservationId, ObservationIdentityMaterialV1,

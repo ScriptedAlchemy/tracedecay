@@ -172,7 +172,6 @@ name = "storage_runtime_rusqlite_suite"
 path = "../../tests/storage_runtime_rusqlite_suite/main.rs"
 
 [dependencies]
-asupersync.workspace = true
 axum.workspace = true
 tower.workspace = true
 constant_time_eq.workspace = true
@@ -225,7 +224,7 @@ serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
 ureq = { workspace = true, features = ["json"] }
 url.workspace = true
-tokio = { workspace = true, features = ["macros", "net", "rt", "sync", "time"] }
+tokio = { workspace = true, features = ["io-util", "macros", "net", "rt", "rt-multi-thread", "sync", "time"] }
 tokio-stream = { workspace = true, features = ["sync"] }
 tracing.workspace = true
 sha2.workspace = true

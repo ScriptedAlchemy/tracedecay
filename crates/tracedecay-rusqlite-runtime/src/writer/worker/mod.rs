@@ -16,12 +16,9 @@ use std::{
     time::{Duration, Instant},
 };
 
-use asupersync::{
-    Cx,
-    channel::{mpsc, watch},
-};
 use futures_util::FutureExt;
 use rusqlite::TransactionBehavior;
+use tokio::sync::{mpsc, watch};
 use tracedecay_store::{
     AdmissionConfigV1, OperationPriorityV1, RuntimeBatchCompatibilityV1, RuntimeInterruptionV1,
     RuntimeRequestProbeV1, StoreOperationIdV1, StoreRuntimeBindingV1, UnavailableReasonV1,
@@ -226,7 +223,6 @@ impl PendingBatchDwell {
 
 #[allow(clippy::too_many_arguments)]
 async fn dwell_for_batch(
-    cx: &Cx,
     mut pending: PendingBatchDwell,
     receiver: &mut mpsc::Receiver<AcceptedRequest>,
     exact_sql_receiver: &mut mpsc::Receiver<ExactSqlWriterCommand>,
@@ -253,7 +249,6 @@ async fn dwell_for_batch(
             return;
         }
         let wake = wait_for_work(
-            cx,
             receiver,
             exact_sql_receiver,
             incremental_vacuum_receiver,
@@ -310,7 +305,6 @@ async fn dwell_for_batch(
 }
 
 pub(super) struct Worker {
-    pub(super) cx: Cx,
     pub(super) path: PathBuf,
     #[cfg(unix)]
     pub(super) canonical_path: PathBuf,
@@ -673,7 +667,6 @@ impl Worker {
                     continue;
                 }
                 let wake = wait_for_work(
-                    &self.cx,
                     &mut self.receiver,
                     &mut self.exact_sql_receiver,
                     &mut self.incremental_vacuum_receiver,
@@ -819,7 +812,6 @@ impl Worker {
                 // write arrives to run the checkpoint after its batch.
                 let checkpoint_retry = checkpoint.retry_due(Instant::now());
                 let wake = wait_for_work(
-                    &self.cx,
                     &mut self.receiver,
                     &mut self.exact_sql_receiver,
                     &mut self.incremental_vacuum_receiver,
@@ -869,7 +861,6 @@ impl Worker {
                     let _ = enqueue(&mut queue, &mut inflight, item, &self.telemetry);
                 }
                 dwell_for_batch(
-                    &self.cx,
                     pending,
                     &mut self.receiver,
                     &mut self.exact_sql_receiver,
@@ -1075,9 +1066,9 @@ impl Worker {
     fn publish_checkpoint_result(&self, result: CheckpointResult) {
         self.telemetry.checkpoint(checkpoint_sample(&result));
         if let Some(pressure) = checkpoint_pressure_signal(&result) {
-            let _ = self.checkpoint_pressure.send(pressure);
+            let _ = self.checkpoint_pressure.send_replace(pressure);
         }
-        let _ = self.checkpoint_status.send(CheckpointStatus {
+        let _ = self.checkpoint_status.send_replace(CheckpointStatus {
             latest: Some(CheckpointOutcome::from_internal(result)),
         });
     }
@@ -1422,10 +1413,9 @@ mod auxiliary_scheduling_tests {
         time::{Duration, Instant},
     };
 
-    use asupersync::{
-        Budget,
-        channel::{mpsc, oneshot},
-        runtime::RuntimeBuilder,
+    use tokio::{
+        runtime::Builder,
+        sync::{mpsc, oneshot},
     };
     use tracedecay_store::{
         OperationPriorityV1, RuntimeCancellationIdentityV1, RuntimeDeadlineV1,
@@ -1600,7 +1590,7 @@ mod auxiliary_scheduling_tests {
         let (late, _) = accepted_request_with_reply("operation.fault-late", "key.fault-late");
         assert!(matches!(
             sender.try_send(late),
-            Err(mpsc::SendError::Disconnected(_))
+            Err(mpsc::error::TrySendError::Closed(_))
         ));
     }
 
@@ -1646,7 +1636,7 @@ mod auxiliary_scheduling_tests {
         let (late, _) = accepted_request_with_reply("operation.lost-late", "key.lost-late");
         assert!(matches!(
             sender.try_send(late),
-            Err(mpsc::SendError::Disconnected(_))
+            Err(mpsc::error::TrySendError::Closed(_))
         ));
     }
 
@@ -1828,11 +1818,10 @@ mod auxiliary_scheduling_tests {
 
     #[test]
     fn dwell_collects_a_compatible_arrival_before_dispatch() {
-        let runtime = RuntimeBuilder::current_thread().build().expect("runtime");
-        let cx = runtime
-            .handle()
-            .try_request_cx_with_budget(Budget::INFINITE)
-            .expect("context");
+        let runtime = Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
         // The foreground window is at most 2 ms of wall time, which a loaded
         // machine spends before the dwell starts. Stamping both requests in
         // the future keeps the window open the way a paused clock did.
@@ -1878,7 +1867,6 @@ mod auxiliary_scheduling_tests {
         let mut vacuum_closed = false;
         let mut checkpoint_closed = false;
         runtime.block_on(dwell_for_batch(
-            &cx,
             pending,
             &mut write_rx,
             &mut exact_sql_rx,

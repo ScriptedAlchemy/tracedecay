@@ -11,7 +11,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use asupersync::channel::watch;
+use tokio::sync::watch;
 use tracedecay_store::{
     OperationPriorityV1, ReaderBudgetV1, RuntimeReadRequestV1, RuntimeRequestProbeV1,
     SaturationScopeV1, StoreRuntimeBindingV1, UnavailableReasonV1,
@@ -89,7 +89,7 @@ pub(crate) struct ReaderCheckpointBlockers {
     /// Active snapshots whose lease already ended: the worker's rollback
     /// outran [`SNAPSHOT_END_GRACE`] and is finishing on a return task.
     released: Arc<(Mutex<BTreeSet<u64>>, Condvar)>,
-    finished: Arc<asupersync::sync::Notify>,
+    finished: Arc<tokio::sync::Notify>,
 }
 
 impl ReaderCheckpointBlockers {
@@ -206,13 +206,22 @@ impl CheckpointBlockerSource for ReaderCheckpointBlockers {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone();
         Box::pin(async move {
-            let settled = finished.wait_until(|| {
-                released
-                    .0
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .is_disjoint(&awaited)
-            });
+            let settled = async {
+                loop {
+                    let notified = finished.notified();
+                    tokio::pin!(notified);
+                    notified.as_mut().enable();
+                    if released
+                        .0
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .is_disjoint(&awaited)
+                    {
+                        return;
+                    }
+                    notified.await;
+                }
+            };
             let _ = crate::storage_pool::timeout(DEFERRED_SNAPSHOT_END_LIMIT, settled).await;
         })
     }

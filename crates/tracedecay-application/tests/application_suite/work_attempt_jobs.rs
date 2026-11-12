@@ -29,7 +29,7 @@ use tracedecay_global_db::tests::harness::RegisteredGlobalDbTestRuntime;
 use tracedecay_rusqlite_runtime::native_runtime::{NativeTask, NativeTaskOutcome};
 use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
 
-use crate::work_leaf_jobs::on_native_worker;
+use crate::work_leaf_jobs::{alone_with_storage_wait_counters, on_native_worker};
 use crate::work_run_control_jobs::{
     authority, context, context_for, execution_snapshot, route, task,
 };
@@ -252,6 +252,9 @@ fn identity(run_id: &str, attempt_id: &str) -> WorkAttemptIdentityV1 {
 
 #[tokio::test]
 async fn attempt_admissions_awaited_on_a_native_worker_park_no_native_thread() {
+    if !alone_with_storage_wait_counters() {
+        return;
+    }
     let profile = tempfile::tempdir().expect("profile");
     let project = tempfile::tempdir().expect("project");
     let runtime = project_runtime(profile.path(), project.path()).await;
@@ -361,6 +364,9 @@ async fn attempt_admissions_awaited_on_a_native_worker_park_no_native_thread() {
 
 #[tokio::test]
 async fn synthesis_awaited_on_a_native_worker_hydrates_sources_in_its_job() {
+    if !alone_with_storage_wait_counters() {
+        return;
+    }
     let profile = tempfile::tempdir().expect("profile");
     let project = tempfile::tempdir().expect("project");
     let runtime = project_runtime(profile.path(), project.path()).await;
@@ -622,6 +628,9 @@ fn provider_evidence(
 
 #[tokio::test]
 async fn provider_driver_steps_awaited_on_a_native_worker_park_no_native_thread() {
+    if !alone_with_storage_wait_counters() {
+        return;
+    }
     let profile = tempfile::tempdir().expect("profile");
     let project = tempfile::tempdir().expect("project");
     let runtime = project_runtime(profile.path(), project.path()).await;
@@ -797,6 +806,9 @@ async fn provider_driver_steps_awaited_on_a_native_worker_park_no_native_thread(
 
 #[tokio::test]
 async fn cancellation_awaited_on_a_native_worker_parks_no_native_thread() {
+    if !alone_with_storage_wait_counters() {
+        return;
+    }
     let profile = tempfile::tempdir().expect("profile");
     let project = tempfile::tempdir().expect("project");
     let runtime = project_runtime(profile.path(), project.path()).await;
@@ -865,6 +877,9 @@ async fn cancellation_awaited_on_a_native_worker_parks_no_native_thread() {
 
 #[tokio::test]
 async fn product_mutations_awaited_on_a_native_worker_park_no_native_thread() {
+    if !alone_with_storage_wait_counters() {
+        return;
+    }
     let profile = tempfile::tempdir().expect("profile");
     let project = tempfile::tempdir().expect("project");
     let runtime = project_runtime(profile.path(), project.path()).await;

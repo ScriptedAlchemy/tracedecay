@@ -1303,7 +1303,7 @@ mod probe_tests {
     use crate::handle::SessionTemporalExec;
     use tracedecay_runtime_core::db::engine::TestConnection;
 
-    #[asupersync::test]
+    #[tokio::test]
     async fn row_probe_reports_observed_findings_when_its_page_is_incomplete() {
         let tmp = tempfile::TempDir::new().expect("tempdir");
         let connection = TestConnection::open(&tmp.path().join("doctor-page.db"));
@@ -1362,7 +1362,7 @@ mod probe_tests {
         );
     }
 
-    #[asupersync::test]
+    #[tokio::test]
     async fn a_failed_probe_naming_a_locked_table_is_partial_not_locked() {
         let tmp = tempfile::TempDir::new().expect("tempdir");
         let connection = TestConnection::open(&tmp.path().join("doctor-locked-name.db"));
@@ -1413,7 +1413,7 @@ mod registered_tests {
     use crate::handle::{SessionTemporalAccess, SessionTemporalExec, SessionTemporalRegisteredDb};
     use tracedecay_global_db::tests::harness::RegisteredGlobalDbHarness;
 
-    #[asupersync::test]
+    #[tokio::test]
     async fn oversized_session_temporal_store_still_reports_schema_findings() {
         const OLD_SYNCHRONOUS_HEALTH_BUDGET_BYTES: u64 = 64 * 1024 * 1024;
         let harness =
@@ -1449,7 +1449,7 @@ mod registered_tests {
         }));
     }
 
-    #[asupersync::test]
+    #[tokio::test]
     async fn registered_doctor_reports_an_unbound_relation_graph_as_partial() {
         let harness =
             RegisteredGlobalDbHarness::open_without_relation_graph("doctor-unbound-relation-graph")

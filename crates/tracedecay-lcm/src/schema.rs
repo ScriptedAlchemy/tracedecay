@@ -644,7 +644,7 @@ mod tests {
         Ok(())
     }
 
-    #[asupersync::test]
+    #[tokio::test]
     async fn previous_schema_profile_refuses_typed_without_upgrading() -> Result<(), String> {
         const PREVIOUS: i64 = LCM_SCHEMA_VERSION - 1;
         let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
@@ -696,7 +696,7 @@ mod tests {
         Ok(())
     }
 
-    #[asupersync::test]
+    #[tokio::test]
     async fn incompatible_profile_requires_reset_without_mutating_schema() -> Result<(), String> {
         let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
         let conn = TestConnection::open(&temp.path().join("sessions.db"));
@@ -771,7 +771,7 @@ mod tests {
         Ok(())
     }
 
-    #[asupersync::test]
+    #[tokio::test]
     async fn fresh_schema_never_carries_forward_legacy_session_content() -> Result<(), String> {
         let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
         let conn = TestConnection::open(&temp.path().join("sessions.db"));
@@ -863,7 +863,7 @@ mod tests {
     /// A fresh install carries every status performance index, and the
     /// superseded plain payload owner index is gone, its replacement covers
     /// the same leading columns.
-    #[asupersync::test]
+    #[tokio::test]
     async fn schema_installs_current_indexes() -> Result<(), String> {
         let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
         let conn = TestConnection::open(&temp.path().join("sessions.db"));
@@ -920,7 +920,7 @@ mod tests {
         Ok(())
     }
 
-    #[asupersync::test]
+    #[tokio::test]
     async fn raw_message_load_propagates_poisoned_storage_kind() -> Result<(), String> {
         let (_temp, conn) = lcm_reader_test_connection().await?;
         insert_reader_test_message(&conn, "safe content", "poisoned", None).await?;
@@ -933,7 +933,7 @@ mod tests {
         Ok(())
     }
 
-    #[asupersync::test]
+    #[tokio::test]
     async fn raw_message_load_rejects_mismatched_sanitization_receipt() -> Result<(), String> {
         let (_temp, conn) = lcm_reader_test_connection().await?;
         let sanitization = sanitize_lcm_payload_text("receipt-bound content")
@@ -954,7 +954,7 @@ mod tests {
         Ok(())
     }
 
-    #[asupersync::test]
+    #[tokio::test]
     async fn raw_message_load_propagates_database_failure() -> Result<(), String> {
         let (_temp, conn) = lcm_reader_test_connection().await?;
         conn.execute_batch("DROP TABLE lcm_raw_messages")
@@ -969,7 +969,7 @@ mod tests {
         Ok(())
     }
 
-    #[asupersync::test]
+    #[tokio::test]
     async fn raw_retrieval_columns_derive_exactly_what_the_application_derives()
     -> Result<(), String> {
         let temp = tempfile::tempdir().map_err(|error| error.to_string())?;

@@ -390,7 +390,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn the_shutdown_coordinator_runs_off_tokio() {
+    async fn the_shutdown_coordinator_runs_on_the_installed_runtime() {
         let lifecycle = DaemonLifecycle::default();
         let DaemonShutdownClaim::Run { attempt, .. } = lifecycle.claim_shutdown_coordination()
         else {
@@ -404,7 +404,7 @@ mod tests {
             .expect("the claimed attempt starts its coordinator");
 
         assert!(
-            !observed.await.expect("the coordinator ran"),
+            observed.await.expect("the coordinator ran"),
             "the coordinator task runs on the native runtime"
         );
         lifecycle.wait_for_finished_shutdown_coordinator().await;

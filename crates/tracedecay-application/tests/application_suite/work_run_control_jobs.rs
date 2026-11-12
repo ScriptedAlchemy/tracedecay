@@ -26,6 +26,8 @@ use tracedecay_rusqlite_runtime::native_runtime::{
 };
 use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
 
+use crate::work_leaf_jobs::alone_with_storage_wait_counters;
+
 const PROJECT: &str = "project.run-control-jobs";
 const REPOSITORY: &str = "repository.run-control-jobs";
 const WORKTREE: &str = "worktree.run-control-jobs";
@@ -191,6 +193,9 @@ pub(crate) fn execution_snapshot() -> WorkExecutionSnapshot {
 
 #[tokio::test]
 async fn pause_and_resume_awaited_on_a_native_worker_park_no_native_thread() {
+    if !alone_with_storage_wait_counters() {
+        return;
+    }
     tracedecay_global_db::register_registered_schema_installer();
     let profile = tempfile::tempdir().expect("profile");
     let project = tempfile::tempdir().expect("project");

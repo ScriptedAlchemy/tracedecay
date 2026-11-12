@@ -26,7 +26,7 @@ tracing.workspace = true
 test-helpers = []
 
 [dev-dependencies]
-asupersync.workspace = true
+tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros", "time", "sync", "io-util", "net"] }
 tempfile.workspace = true
 # Isolated crate tests need a grammar bundle so the patched Rust grammar
 # registers (`ts_provider` only serves Rust alongside a bundle). Production

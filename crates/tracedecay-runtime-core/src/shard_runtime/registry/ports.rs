@@ -5,7 +5,6 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 
-use asupersync::runtime::RuntimeHandle;
 use sha2::{Digest, Sha256};
 
 use tracedecay_rusqlite_runtime::reader::ReaderAcquireError;
@@ -139,20 +138,12 @@ impl ShardRuntimePublisher for LifecycleShardRuntimePublisher {
             runtime
                 .transition(RuntimeMaintenanceStateV1::Opening)
                 .map_err(runtime_lifecycle_failure)?;
-            let executor = crate::native_runtime::handle().ok_or(
-                StoreRuntimeRegistryFailure::RuntimeUnavailable {
-                    operation: "publish physical registered runtime",
-                },
-            )?;
             let published_identity = if request.locator.is_prospective() {
-                Some(
-                    initialize_staged_runtime(&executor, &request, AdmissionConfigV1::default())
-                        .await?,
-                )
+                Some(initialize_staged_runtime(&request, AdmissionConfigV1::default()).await?)
             } else {
                 None
             };
-            let attachment = attach_runtime(&executor, &request, published_identity).await?;
+            let attachment = attach_runtime(&request, published_identity).await?;
             publish_lifecycle_runtime(request, runtime, attachment).await
         })
     }
@@ -169,11 +160,9 @@ fn physical_failure(
 }
 
 async fn attach_runtime(
-    executor: &RuntimeHandle,
     request: &ShardRuntimeBuildRequest,
     published_identity: Option<u64>,
 ) -> Result<LifecyclePhysicalAttachment, StoreRuntimeRegistryFailure> {
-    let executor = executor.clone();
     let request = request.clone();
     crate::native_runtime::spawn_blocking(move || {
         const OPERATION: &str = "attach published SQLite generation";
@@ -188,7 +177,7 @@ async fn attach_runtime(
             }
         }
         let attachment = LifecycleShardRuntimeAttachment::new(RepositoryPhysicalAttachmentFactory)
-            .attach(&executor, &request, AdmissionConfigV1::default())?;
+            .attach(&request, AdmissionConfigV1::default())?;
         if published_identity
             .is_some_and(|expected| expected != attachment.0.opened_file_identity())
         {
@@ -209,7 +198,6 @@ async fn attach_runtime(
 }
 
 pub(super) async fn initialize_staged_runtime(
-    executor: &RuntimeHandle,
     request: &ShardRuntimeBuildRequest,
     admission: AdmissionConfigV1,
 ) -> Result<u64, StoreRuntimeRegistryFailure> {
@@ -240,7 +228,6 @@ pub(super) async fn initialize_staged_runtime(
             .map_err(|error| physical_failure(OPERATION, error))?,
     )
     .into();
-    let executor = executor.clone();
     let binding = request.binding.clone();
     let locator = request.locator.verified().clone();
     let started = crate::native_runtime::spawn_blocking(move || -> std::io::Result<_> {
@@ -251,7 +238,6 @@ pub(super) async fn initialize_staged_runtime(
         let interrupted = stage.resume_interrupted(locator_digest)?;
         let attachment = RepositoryPhysicalAttachmentFactory
             .start_reserved_initialization(
-                &executor,
                 binding,
                 locator,
                 stage.database(),
@@ -467,7 +453,6 @@ impl LifecycleShardRuntimeAttachment {
 
     fn attach(
         &self,
-        runtime: &RuntimeHandle,
         request: &ShardRuntimeBuildRequest,
         admission: AdmissionConfigV1,
     ) -> Result<LifecyclePhysicalAttachment, StoreRuntimeRegistryFailure> {
@@ -488,7 +473,6 @@ impl LifecycleShardRuntimeAttachment {
             )
         } else {
             self.repository.attach(
-                runtime,
                 request.binding.clone(),
                 request.locator.verified().clone(),
                 request.locator.path().to_path_buf(),
@@ -773,15 +757,14 @@ impl PhysicalRuntimeAttachment for RepositoryRuntimePhysicalAttachment {
         )
     }
 
-    fn run_bounded_incremental_compaction<'a>(
-        &'a self,
-        cx: &'a asupersync::Cx,
+    fn run_bounded_incremental_compaction(
+        &self,
         max_pages: u32,
         authority: Arc<dyn tracedecay_rusqlite_runtime::RuntimeWriteAuthority>,
-    ) -> StoreRuntimeRegistryFuture<'a, Result<(), StoreRuntimeRegistryFailure>> {
+    ) -> StoreRuntimeRegistryFuture<'_, Result<(), StoreRuntimeRegistryFailure>> {
         Box::pin(async move {
             RepositoryRuntimePhysicalAttachment::run_bounded_incremental_compaction(
-                self, cx, max_pages, authority,
+                self, max_pages, authority,
             )
             .await
             .map_err(|error| match error {
@@ -796,17 +779,16 @@ impl PhysicalRuntimeAttachment for RepositoryRuntimePhysicalAttachment {
         })
     }
 
-    fn run_checkpoint<'a>(
-        &'a self,
-        cx: &'a asupersync::Cx,
+    fn run_checkpoint(
+        &self,
         request: tracedecay_rusqlite_runtime::CheckpointRequest,
         authority: Arc<dyn tracedecay_rusqlite_runtime::RuntimeWriteAuthority>,
     ) -> StoreRuntimeRegistryFuture<
-        'a,
+        '_,
         Result<tracedecay_rusqlite_runtime::CheckpointOutcome, StoreRuntimeRegistryFailure>,
     > {
         Box::pin(async move {
-            RepositoryRuntimePhysicalAttachment::run_checkpoint(self, cx, request, authority)
+            RepositoryRuntimePhysicalAttachment::run_checkpoint(self, request, authority)
                 .await
                 .map_err(|error| StoreRuntimeRegistryFailure::PhysicalRuntimeFailed {
                     operation: "run repository checkpoint",
@@ -815,28 +797,25 @@ impl PhysicalRuntimeAttachment for RepositoryRuntimePhysicalAttachment {
         })
     }
 
-    fn dispatch_submit<'a>(
-        &'a self,
-        cx: &'a asupersync::Cx,
+    fn dispatch_submit(
+        &self,
         request: RuntimeSubmitRequestV1,
         probe: Arc<dyn RuntimeRequestProbeV1>,
         authority: Arc<dyn tracedecay_rusqlite_runtime::RuntimeWriteAuthority>,
-    ) -> StoreRuntimeRegistryFuture<'a, Result<RuntimeSubmitOutcomeV1, StoreRuntimeRegistryFailure>>
+    ) -> StoreRuntimeRegistryFuture<'_, Result<RuntimeSubmitOutcomeV1, StoreRuntimeRegistryFailure>>
     {
         Box::pin(async move {
-            RepositoryRuntimePhysicalAttachment::dispatch_submit(
-                self, cx, request, probe, authority,
-            )
-            .await
-            .map_err(|error| match error {
-                RepositoryDispatchError::WriterRuntime(error) => {
-                    StoreRuntimeRegistryFailure::StorageRuntime(Box::new(error))
-                }
-                error => StoreRuntimeRegistryFailure::PhysicalRuntimeFailed {
-                    operation: "dispatch repository submit",
-                    message: error.to_string(),
-                },
-            })
+            RepositoryRuntimePhysicalAttachment::dispatch_submit(self, request, probe, authority)
+                .await
+                .map_err(|error| match error {
+                    RepositoryDispatchError::WriterRuntime(error) => {
+                        StoreRuntimeRegistryFailure::StorageRuntime(Box::new(error))
+                    }
+                    error => StoreRuntimeRegistryFailure::PhysicalRuntimeFailed {
+                        operation: "dispatch repository submit",
+                        message: error.to_string(),
+                    },
+                })
         })
     }
 

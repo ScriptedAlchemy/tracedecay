@@ -717,9 +717,8 @@ async fn prepared_generation_uses_bounded_parallelism_and_retained_bytes() {
     // A prefetch that waited on a demand build rebuilds its page when that
     // page has already left the process-global cache, so the demand tasks
     // alone do not cover every build this test started.
-    let cx = tracedecay_runtime_core::native_runtime::cx().expect("native runtime");
-    for mut prefetch in prefetches {
-        let _ = prefetch.join(&cx).await.expect("prefetch task");
+    for prefetch in prefetches {
+        let _ = prefetch.await.expect("prefetch task");
     }
 
     assert_eq!(

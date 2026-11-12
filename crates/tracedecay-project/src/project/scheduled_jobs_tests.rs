@@ -5,7 +5,7 @@ use tracedecay_automation_runtime::automation::jobs::{AutomationJob, JobDelivery
 
 use super::{TraceDecay, TraceDecayOpenOptions};
 
-#[asupersync::test]
+#[tokio::test]
 async fn project_reads_share_admission_until_the_job_document_changes() {
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path().join("project");

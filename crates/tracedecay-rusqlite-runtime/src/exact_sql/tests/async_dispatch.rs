@@ -144,6 +144,9 @@ fn schema_finalization_refuses_a_closed_writer_after_capacity_wait() {
 
 #[test]
 fn synchronous_adapters_remain_safe_inside_current_thread_tokio() {
+    let _serial = NATIVE_WAIT_COUNTER
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     current_thread().block_on(async {
         let fixture = fixture('a', 'a');
         let handle = ExactSqlHandle::attach(&fixture.writer, &fixture.readers).unwrap();
@@ -202,6 +205,9 @@ fn synchronous_adapters_remain_safe_inside_current_thread_tokio() {
 
 #[test]
 fn async_execute_drop_before_poll_does_not_admit_a_write() {
+    let _serial = NATIVE_WAIT_COUNTER
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     current_thread().block_on(async {
         let fixture = fixture('a', 'a');
         let handle = ExactSqlHandle::attach(&fixture.writer, &fixture.readers).unwrap();
@@ -233,6 +239,9 @@ fn async_execute_drop_before_poll_does_not_admit_a_write() {
 
 #[test]
 fn async_execute_drop_after_acceptance_preserves_the_admitted_effect() {
+    let _serial = NATIVE_WAIT_COUNTER
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     current_thread().block_on(async {
         let fixture = fixture('a', 'a');
         let base = ExactSqlHandle::attach(&fixture.writer, &fixture.readers).unwrap();
@@ -270,6 +279,9 @@ fn async_execute_drop_after_acceptance_preserves_the_admitted_effect() {
 
 #[test]
 fn async_transactions_commit_rollback_and_drop_have_durable_boundaries() {
+    let _serial = NATIVE_WAIT_COUNTER
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     current_thread().block_on(async {
         let fixture = fixture('a', 'a');
         let handle = ExactSqlHandle::attach(&fixture.writer, &fixture.readers).unwrap();
@@ -347,6 +359,9 @@ fn async_transactions_commit_rollback_and_drop_have_durable_boundaries() {
 
 #[test]
 fn async_transaction_queue_saturation_refuses_only_the_unadmitted_command() {
+    let _serial = NATIVE_WAIT_COUNTER
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     current_thread().block_on(async {
         let fixture = fixture('a', 'a');
         let base = ExactSqlHandle::attach(&fixture.writer, &fixture.readers).unwrap();
@@ -394,6 +409,9 @@ fn async_transaction_queue_saturation_refuses_only_the_unadmitted_command() {
 
 #[test]
 fn async_begin_drop_while_queued_releases_the_abandoned_transaction() {
+    let _serial = NATIVE_WAIT_COUNTER
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     current_thread().block_on(async {
         let fixture = fixture('a', 'a');
         let handle = ExactSqlHandle::attach(&fixture.writer, &fixture.readers).unwrap();
@@ -435,6 +453,9 @@ fn async_begin_drop_while_queued_releases_the_abandoned_transaction() {
 
 #[test]
 fn async_commit_drop_after_admission_preserves_committed_data() {
+    let _serial = NATIVE_WAIT_COUNTER
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     current_thread().block_on(async {
         let fixture = fixture('a', 'a');
         let base = ExactSqlHandle::attach(&fixture.writer, &fixture.readers).unwrap();
@@ -477,6 +498,9 @@ fn async_commit_drop_after_admission_preserves_committed_data() {
 
 #[test]
 fn admitted_execute_returning_completes_after_reply_waiter_is_abandoned() {
+    let _serial = NATIVE_WAIT_COUNTER
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     current_thread().block_on(async {
         let fixture = fixture('a', 'a');
         let base = ExactSqlHandle::attach(&fixture.writer, &fixture.readers).unwrap();
@@ -530,7 +554,7 @@ fn admitted_execute_returning_completes_after_reply_waiter_is_abandoned() {
     });
 }
 
-/// Serializes the tests that read the process-wide wait counter.
+/// Serializes tests that read or deliberately change the process-wide wait counters.
 static NATIVE_WAIT_COUNTER: Mutex<()> = Mutex::new(());
 
 #[test]
@@ -939,6 +963,9 @@ fn abandoned_commit_retains_completion_until_writer_settlement() {
         }
     }
     for commit_succeeds in [true, false] {
+        let _serial = NATIVE_WAIT_COUNTER
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         current_thread().block_on(async {
             let fixture = fixture('a', 'a');
             let base = ExactSqlHandle::attach(&fixture.writer, &fixture.readers).unwrap();

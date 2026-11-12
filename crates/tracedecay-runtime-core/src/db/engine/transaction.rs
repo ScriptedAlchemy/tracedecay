@@ -1,8 +1,7 @@
 use std::future::Future;
 use std::sync::Arc;
 
-use asupersync::Budget;
-use asupersync::sync::{Mutex, OwnedMutexGuard};
+use tokio::sync::{Mutex, OwnedMutexGuard};
 
 use tracedecay_rusqlite_runtime::exact_sql::{
     ExactSqlJobTransaction, ExactSqlTransaction as RuntimeTransaction,
@@ -43,20 +42,13 @@ impl Transaction {
     {
         let runtime = Arc::clone(&self.runtime);
         crate::native_runtime::settle(async move {
-            let gate = match OwnedMutexGuard::try_lock(Arc::clone(&runtime)) {
+            let gate = match Arc::clone(&runtime).try_lock_owned() {
                 Ok(gate) => gate,
                 Err(_) => {
-                    // Not the caller's `Cx`: cancelling the caller must not
-                    // cancel an operation it already handed over.
-                    let cx = crate::native_runtime::handle()
-                        .ok_or(Error::RuntimeContextUnavailable)?
-                        .try_request_cx_with_budget(Budget::INFINITE)
-                        .map_err(|error| {
-                            Error::Runtime(format!("failed to admit SQL settlement: {error}"))
-                        })?;
-                    OwnedMutexGuard::lock(runtime, &cx).await.map_err(|error| {
-                        Error::Runtime(format!("SQL transaction gate failed: {error}"))
-                    })?
+                    // Queued operations must have an executor that can finish
+                    // settlement if their caller stops waiting at the gate.
+                    crate::native_runtime::handle().ok_or(Error::RuntimeContextUnavailable)?;
+                    runtime.lock_owned().await
                 }
             };
             operation(gate).await
@@ -259,7 +251,7 @@ mod tests {
         }
     }
 
-    #[asupersync::test]
+    #[tokio::test]
     async fn only_long_lease_transaction_exposes_authority_revalidated_batches() {
         let directory = tempfile::TempDir::new().unwrap();
         let connection = TestConnection::open_with_write_authority(

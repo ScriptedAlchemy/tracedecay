@@ -60,7 +60,7 @@ async fn assert_session_temporal_version_refused(db_path: &Path, found_version: 
     }
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn temporal_schema_accepts_only_fresh_or_exact_final_stores() {
     let tmp = TempDir::new().unwrap();
     let db_path = tmp.path().join(".tracedecay").join("sessions.db");
@@ -142,7 +142,7 @@ async fn temporal_schema_accepts_only_fresh_or_exact_final_stores() {
     );
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn temporal_schema_malformed_marker_requires_reset_without_mutation() {
     let tmp = TempDir::new().unwrap();
     let db_path = tmp.path().join(".tracedecay").join("sessions.db");
@@ -183,7 +183,7 @@ async fn temporal_schema_malformed_marker_requires_reset_without_mutation() {
     );
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn temporal_schema_lower_marker_requires_reset_without_repairing_guards() {
     let tmp = TempDir::new().unwrap();
     let db_path = tmp.path().join(".tracedecay").join("sessions.db");
@@ -222,7 +222,7 @@ async fn temporal_schema_lower_marker_requires_reset_without_repairing_guards() 
     );
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn temporal_schema_replaces_an_empty_earlier_authority_with_the_final_contract() {
     let tmp = TempDir::new().unwrap();
     let fresh_path = tmp.path().join("fresh").join("sessions.db");
@@ -281,7 +281,7 @@ async fn temporal_schema_replaces_an_empty_earlier_authority_with_the_final_cont
     );
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn temporal_schema_rejects_transition_storage_without_mutating_it() {
     let tmp = TempDir::new().unwrap();
     let db_path = tmp.path().join(".tracedecay").join("sessions.db");
@@ -328,7 +328,7 @@ async fn temporal_schema_rejects_transition_storage_without_mutating_it() {
     );
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn temporal_schema_rejects_foreign_summary_namespace_tables_without_mutation() {
     let tmp = TempDir::new().unwrap();
     let db_path = tmp.path().join(".tracedecay").join("sessions.db");
@@ -379,7 +379,7 @@ async fn temporal_schema_rejects_foreign_summary_namespace_tables_without_mutati
     );
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn final_store_missing_temporal_marker_requires_reset_without_mutation() {
     let tmp = TempDir::new().unwrap();
     let db_path = tmp.path().join(".tracedecay").join("sessions.db");
@@ -441,7 +441,7 @@ async fn final_store_missing_temporal_marker_requires_reset_without_mutation() {
     );
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn temporal_schema_is_not_installed_into_a_nonempty_store() {
     let tmp = TempDir::new().unwrap();
     let db_path = tmp.path().join(".tracedecay").join("sessions.db");
@@ -475,7 +475,7 @@ async fn temporal_schema_is_not_installed_into_a_nonempty_store() {
     );
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn unpublished_writer_ledger_is_preserved_and_fresh_publication_still_works() {
     let tmp = TempDir::new().unwrap();
     let db_path = tmp.path().join(".tracedecay").join("sessions.db");
@@ -514,7 +514,7 @@ async fn unpublished_writer_ledger_is_preserved_and_fresh_publication_still_work
     );
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn writer_ledger_does_not_hide_a_nonempty_unmarked_store() {
     let tmp = TempDir::new().unwrap();
     let db_path = tmp.path().join(".tracedecay").join("sessions.db");
@@ -552,7 +552,7 @@ async fn writer_ledger_does_not_hide_a_nonempty_unmarked_store() {
     );
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn final_schema_admission_rejects_extra_temporal_column_metadata() {
     let tmp = TempDir::new().unwrap();
     let db_path = tmp.path().join(".tracedecay").join("sessions.db");
@@ -594,7 +594,7 @@ async fn final_schema_admission_rejects_extra_temporal_column_metadata() {
     );
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn final_schema_admission_rejects_missing_temporal_occurrence_time_index() {
     let tmp = TempDir::new().unwrap();
     let db_path = tmp.path().join(".tracedecay").join("sessions.db");
@@ -631,7 +631,7 @@ async fn final_schema_admission_rejects_missing_temporal_occurrence_time_index()
     );
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn final_schema_admission_rejects_missing_graph_publication_table() {
     let tmp = TempDir::new().unwrap();
     let db_path = tmp.path().join(".tracedecay").join("sessions.db");
@@ -666,7 +666,7 @@ async fn final_schema_admission_rejects_missing_graph_publication_table() {
     );
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn final_schema_admission_rejects_incompatible_graph_publication_column_metadata() {
     let tmp = TempDir::new().unwrap();
     let db_path = tmp.path().join(".tracedecay").join("sessions.db");
@@ -708,7 +708,7 @@ async fn final_schema_admission_rejects_incompatible_graph_publication_column_me
     );
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn final_schema_admission_rejects_extra_graph_publication_table() {
     let tmp = TempDir::new().unwrap();
     let db_path = tmp.path().join(".tracedecay").join("sessions.db");
@@ -749,7 +749,7 @@ async fn final_schema_admission_rejects_extra_graph_publication_table() {
     );
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn final_schema_admission_rejects_mixed_case_extra_temporal_table() {
     let tmp = TempDir::new().unwrap();
     let db_path = tmp.path().join(".tracedecay").join("sessions.db");
@@ -790,7 +790,7 @@ async fn final_schema_admission_rejects_mixed_case_extra_temporal_table() {
     );
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn final_schema_admission_rejects_mixed_case_extra_graph_publication_table() {
     let tmp = TempDir::new().unwrap();
     let db_path = tmp.path().join(".tracedecay").join("sessions.db");
@@ -831,7 +831,7 @@ async fn final_schema_admission_rejects_mixed_case_extra_graph_publication_table
     );
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn final_schema_admission_rejects_extra_index_on_canonical_graph_table() {
     let tmp = TempDir::new().unwrap();
     let db_path = tmp.path().join(".tracedecay").join("sessions.db");
@@ -869,7 +869,7 @@ async fn final_schema_admission_rejects_extra_index_on_canonical_graph_table() {
     );
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn temporal_schema_refuses_future_version_without_mutation() {
     let tmp = TempDir::new().unwrap();
     let db_path = tmp.path().join(".tracedecay").join("sessions.db");

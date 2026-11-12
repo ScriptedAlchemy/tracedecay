@@ -10,11 +10,39 @@ use tracedecay_domain::errors::TraceDecayError;
 use tracedecay_runtime_core::cancellation::CancellationToken;
 use tracedecay_runtime_core::db::{
     DaemonDatabaseScope, Database, DatabaseAuthority, RegisteredTestRuntimeFixtureV1,
-    TestDatabaseRuntimeMode, TestDatabaseRuntimeScope,
+    RegisteredTestRuntimeRetirementControlV1, TestDatabaseRuntimeMode, TestDatabaseRuntimeScope,
+};
+use tracedecay_runtime_core::shard_runtime::registry::{
+    StoreRuntimeRetirementOutcome, StoreRuntimeRetirementResult,
 };
 
 use super::harness::TEST_RUNTIME_NONCE;
 use crate::RegisteredGlobalDbOwnerV1;
+
+async fn retire_runtime(retirement: RegisteredTestRuntimeRetirementControlV1) {
+    let mut reservation = match retirement
+        .registry()
+        .reserve_retirement_batch(vec![retirement.retirement_target()])
+    {
+        StoreRuntimeRetirementResult::Reserved(reservation) => reservation,
+        StoreRuntimeRetirementResult::Blocked(refusal) => {
+            panic!("completed schema admission retained runtime clients: {refusal:?}")
+        }
+    };
+    let committed =
+        tracedecay_runtime_core::native_runtime::spawn_blocking(move || reservation.commit())
+            .await
+            .unwrap()
+            .unwrap();
+    assert!(
+        matches!(
+            committed.outcomes(),
+            [StoreRuntimeRetirementOutcome::Closed { .. }]
+        ),
+        "fixture runtime must close before inspecting or reopening its store: {:?}",
+        committed.outcomes()
+    );
+}
 
 /// A newly owned profile-sessions store. Prospective publication installs
 /// the schema before daemon admission; an unmarked existing SQLite file
@@ -92,7 +120,7 @@ impl RegisteredStore {
     /// points across admission. Returns the outcome and how many polls
     /// admission took.
     async fn attach_cancelled_at(&self, cancel_at: usize) -> (Result<(), TraceDecayError>, usize) {
-        let (owner, _runtime, _retirement) = self.publish().await.into_parts();
+        let (owner, runtime, retirement) = self.publish().await.into_parts();
         let cancellation = CancellationToken::new();
         let mut admission = Box::pin(RegisteredGlobalDbOwnerV1::admit_and_attach_for_daemon(
             owner,
@@ -110,11 +138,16 @@ impl RegisteredStore {
             }
         })
         .await;
+        // The next sample reopens this path. Dropping the admission future
+        // releases its owner; exact retirement then joins the physical workers.
+        drop(admission);
+        drop(runtime);
+        retire_runtime(retirement).await;
         (outcome, polls)
     }
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn unpublished_existing_wal_is_refused_without_deleting_foreign_bytes() {
     let store = RegisteredStore::create();
     let raw = rusqlite::Connection::open(&store.path).unwrap();
@@ -150,7 +183,7 @@ async fn unpublished_existing_wal_is_refused_without_deleting_foreign_bytes() {
     assert_eq!(std::fs::read(&wal).unwrap(), foreign_wal);
 }
 
-#[asupersync::test(flavor = "multi_thread")]
+#[tokio::test(flavor = "multi_thread")]
 async fn cancelled_daemon_attach_preserves_published_schema_and_reopens() {
     let reference = RegisteredStore::create();
     let (outcome, total_polls) = reference.attach_cancelled_at(usize::MAX).await;
@@ -171,7 +204,9 @@ async fn cancelled_daemon_attach_preserves_published_schema_and_reopens() {
         let store = RegisteredStore::create();
         // Cancellation cannot modify the already-published schema or
         // prevent the next admission from reopening the same family.
-        drop(store.publish().await);
+        let (owner, runtime, retirement) = store.publish().await.into_parts();
+        drop((owner, runtime));
+        retire_runtime(retirement).await;
         let before_admission = store.external_schema_objects();
         assert_eq!(before_admission, installed);
         let (outcome, _) = store.attach_cancelled_at(cancel_at).await;

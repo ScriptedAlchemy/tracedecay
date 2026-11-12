@@ -195,9 +195,8 @@ jobs:
       id-token: write
     name: Repository gates
     runs-on: ubuntu-latest
-    # The rustfmt build's crate_universe splice clones git-pinned crates from
-    # scratch. asupersync's full history alone took over 7 minutes on a hosted
-    # runner, so 15 minutes no longer fits.
+    # Dependency resolution may clone the workspace's git-pinned crates on
+    # a cold hosted runner before the formatting and repository gates run.
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -271,7 +270,6 @@ jobs:
           //scripts:gen_builds_test
           //scripts:unused_tool_context_measure_test
           //scripts:sqlite_plan_stability_check_test
-          //scripts:ambient_tokio_check_test
           //scripts:rusqlite_storage_boundary_test
           //scripts:packaged_lsp_bridge_test
           //scripts:configure_ci_fleet_test
@@ -325,11 +323,6 @@ jobs:
       # bound partial-index predicate or LIKE pattern silently scans.
       - name: Check SQL plans stay index-backed under QPSG
         run: python3 scripts/check-sqlite-plan-stability.py
-
-      # `daemon run` drives its futures on native workers, which have no
-      # ambient Tokio runtime; production code names its Tokio handle.
-      - name: Check production code has no ambient Tokio call
-        run: python3 scripts/check-ambient-tokio.py
 
       - name: Check rusqlite stays inside storage owners
         run: python3 scripts/check-rusqlite-storage-boundary.py
@@ -721,8 +714,7 @@ jobs:
         shell: bash
         # Compile and link every target, but defer unused test runfiles trees.
         # Bazel still materializes runfiles required by build-time tools.
-        # Four concurrent Rust actions exhausted the hosted runner's commit
-        # limit while mapping asupersync metadata (Windows error 1455).
+        # Keep local Rust concurrency within the hosted runner's commit limit.
         run: bazel build --config=ci-windows --jobs=${{ steps.bazel.outputs.fleet-enabled == 'true' && '16' || '2' }} --nobuild_runfile_links //...
 
       - name: Build and test native targets

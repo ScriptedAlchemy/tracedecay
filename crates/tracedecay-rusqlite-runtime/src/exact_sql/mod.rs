@@ -9,8 +9,8 @@ use std::{
     time::{Duration, Instant},
 };
 
-use asupersync::{Cx, channel::mpsc as actor_mpsc};
 use rusqlite::{Connection, TransactionBehavior, params_from_iter};
+use tokio::sync::mpsc as actor_mpsc;
 use tracedecay_store::{
     OperationPriorityV1, StoreRuntimeBindingV1, UnavailableReasonV1, VerifiedStoreLocatorV1,
 };
@@ -112,9 +112,10 @@ pub struct ExactSqlHandle {
 /// reaches the writer through these one-shot replies, so its caller must run
 /// where a thread may park: a
 /// blocking-pool thread (`native_runtime::spawn_blocking`,
+/// `native_runtime::spawn_blocking_on`,
 /// `native_runtime::off_native_thread`, `NativeTask::spawn_off_native_thread`)
 /// or a dedicated thread. A wait on a native runtime thread (a worker or a
-/// `block_on` caller; its blocking pool carries no runtime handle) parks that
+/// `block_on` caller; scoped markers identify its blocking work) parks that
 /// thread and every task queued on it, so each one is counted in
 /// [`native_thread_writer_waits`] and the first at each call site is logged.
 #[track_caller]
@@ -623,16 +624,15 @@ impl ExactSqlHandle {
             .clone()
             .ok_or(ExactSqlError::AuthorityMismatch)?;
         let (reply, response) = async_channel::bounded(1);
-        let cx = crate::native_runtime::cx().ok_or(ExactSqlError::WriterUnavailable)?;
         // Schema publication is a serialized writer barrier, not an ordinary
         // best-effort request. A busy bounded channel must not strand a
         // prepared SQLite family when its existing work can still drain.
         self.writer
             .as_ref()
             .ok_or(ExactSqlError::WriterUnavailable)?
-            .send(&cx, WriterCommand::FinishInitialSchema { reply, authority })
+            .send(WriterCommand::FinishInitialSchema { reply, authority })
             .await
-            .map_err(map_writer_send_error)?;
+            .map_err(|_| ExactSqlError::WriterUnavailable)?;
         response
             .recv()
             .await
@@ -719,16 +719,11 @@ impl ExactSqlHandle {
     /// awaits the same serialized command protocol as ordinary writes.
     pub async fn release_connection_memory_async(
         &self,
-        cx: &Cx,
     ) -> Result<MemoryReleaseOutcome, ExactSqlError> {
         let release_readers = Arc::clone(&self.release_reader_memory);
-        let mut task = cx
-            .spawn_blocking(move |_| release_readers())
-            .map_err(|error| ExactSqlError::ReaderUnavailable(error.to_string()))?;
-        let readers = task
-            .join(cx)
+        let readers = crate::native_runtime::spawn_blocking(move || release_readers())
             .await
-            .map_err(|error| ExactSqlError::ReaderUnavailable(error.to_string()))??;
+            .map_err(ExactSqlError::ReaderUnavailable)??;
         let writer = if self.writer.is_some() {
             match self
                 .dispatch_writer_async(SqlRequest::ExecuteBatch("PRAGMA shrink_memory".to_owned()))
@@ -1689,12 +1684,10 @@ fn sqlite_error(operation: &'static str, error: rusqlite::Error) -> ExactSqlErro
     }
 }
 
-fn map_writer_send_error(error: actor_mpsc::SendError<WriterCommand>) -> ExactSqlError {
+fn map_writer_send_error(error: actor_mpsc::error::TrySendError<WriterCommand>) -> ExactSqlError {
     match error {
-        actor_mpsc::SendError::Full(_) => ExactSqlError::Busy,
-        actor_mpsc::SendError::Disconnected(_) | actor_mpsc::SendError::Cancelled(_) => {
-            ExactSqlError::WriterUnavailable
-        }
+        actor_mpsc::error::TrySendError::Full(_) => ExactSqlError::Busy,
+        actor_mpsc::error::TrySendError::Closed(_) => ExactSqlError::WriterUnavailable,
     }
 }
 

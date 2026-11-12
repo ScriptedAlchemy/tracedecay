@@ -297,7 +297,7 @@ impl<R> BoundedLineReader<R> {
 
 impl<R> BoundedLineReader<R>
 where
-    R: asupersync::io::AsyncBufRead + Unpin,
+    R: tokio::io::AsyncBufRead + Unpin,
 {
     /// Read one MCP/daemon JSON-RPC line with the dedicated frame ceiling.
     ///
@@ -374,7 +374,7 @@ mod tests {
     use std::io::Cursor;
     use std::task::{Context, Waker};
 
-    use asupersync::io::{AsyncRead, BufReader, ReadBuf};
+    use tokio::io::{AsyncRead, BufReader, ReadBuf};
 
     /// Generates `total` bytes in small chunks without pre-materializing the
     /// full hostile value for the product reader to copy from.
@@ -495,7 +495,7 @@ mod tests {
         }
     }
 
-    impl asupersync::io::AsyncBufRead for Script {
+    impl tokio::io::AsyncBufRead for Script {
         fn poll_fill_buf(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<&[u8]>> {
             self.get_mut().fill().map(Ok)
         }

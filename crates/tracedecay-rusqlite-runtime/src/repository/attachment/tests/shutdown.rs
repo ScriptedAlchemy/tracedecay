@@ -14,7 +14,7 @@ use tracedecay_store::AdmissionConfigV1;
 use super::super::RepositoryPhysicalAttachmentFactory;
 #[cfg(unix)]
 use super::super::close_lost_file;
-use super::{binding, locator, native_runtime};
+use super::{binding, locator};
 #[cfg(unix)]
 use crate::connection::path_identity_tests::probe_external_connection;
 
@@ -75,7 +75,6 @@ fn exercise_late_reader_owner(mode: CloseMode) {
     let attachment = Arc::new(
         RepositoryPhysicalAttachmentFactory
             .start_reserved_initialization(
-                &native_runtime(),
                 binding.clone(),
                 locator(&binding),
                 path.clone(),
@@ -179,7 +178,6 @@ fn lost_notice_during_out_of_lock_join_preserves_pins_and_writer_exclusion() {
     let attachment = Arc::new(
         RepositoryPhysicalAttachmentFactory
             .start_reserved_initialization(
-                &native_runtime(),
                 binding.clone(),
                 locator(&binding),
                 path.clone(),

@@ -587,7 +587,7 @@ mod tests {
     /// A store at a pre-final projection shape is refused with the
     /// fresh-start remedy. This binary creates stores at the final shape and
     /// no longer steps an older one forward.
-    #[asupersync::test]
+    #[tokio::test]
     async fn legacy_projection_shape_is_refused_with_a_fresh_start_remedy() {
         let temp = TempDir::new().unwrap();
         let path = temp.path().join("global.db");
@@ -623,7 +623,7 @@ mod tests {
         );
     }
 
-    #[asupersync::test]
+    #[tokio::test]
     async fn performance_indexes_install_outside_schema_transaction() {
         let temp = TempDir::new().unwrap();
         let path = temp.path().join("global.db");

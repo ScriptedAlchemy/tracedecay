@@ -23,10 +23,7 @@ serde_json.workspace = true
 ring = "0.17.14"
 sha2 = "0.11.0"
 thiserror.workspace = true
-asupersync.workspace = true
-# `native_runtime::tokio_handle` hands the daemon's Tokio runtime to the sites
-# that still need one.
-tokio = { version = "1", default-features = false, features = ["rt"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "sync", "time", "net", "io-util"] }
 tracedecay-domain = { path = "../tracedecay-domain" }
 tracedecay-contracts = { path = "../tracedecay-contracts" }
 tracedecay-store = { path = "../tracedecay-store" }

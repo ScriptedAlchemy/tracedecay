@@ -54,6 +54,8 @@ mod runtime_identity;
 mod scheduler_config;
 mod scheduler_shutdown;
 mod socket;
+#[cfg(unix)]
+mod terminal_housekeeping;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum ObservedMcpRoute {
@@ -380,8 +382,7 @@ async fn serve_authenticated_test_client(
 ) -> tracedecay_domain::errors::Result<()> {
     Box::pin(
         crate::daemon::connection_serving::serve_authenticated_socket_client_with_class(
-            tracedecay_daemon_protocol::BrokerStream::from_tokio_unix(stream)
-                .expect("daemon end of the test socket"),
+            tracedecay_daemon_protocol::BrokerStream::Unix(stream),
             engine,
             TEST_AUTH_TOKEN.to_owned(),
             crate::daemon::core_admission::DaemonClientAdmissionClass::General,
@@ -617,23 +618,23 @@ fn spawn_noncooperative_native_test_task() -> (
     let task_release = release.clone();
     let (started_tx, started_rx) = tokio::sync::oneshot::channel();
     let (completed_tx, completed_rx) = tokio::sync::oneshot::channel();
-    let runtime: &'static tracedecay_runtime_core::native_runtime::Runtime = Box::leak(Box::new(
-        tracedecay_runtime_core::native_runtime::RuntimeBuilder::multi_thread()
+    let runtime: &'static tokio::runtime::Runtime = Box::leak(Box::new(
+        tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
             .worker_threads(1)
             .build()
             .expect("dedicated native runtime"),
     ));
-    let (task, probe) = runtime.block_on(async move {
-        probed_native_test_task(async move {
-            let _ = started_tx.send(());
-            let (released, changed) = &*task_release.state;
-            let mut ready = released.lock().unwrap_or_else(PoisonError::into_inner);
-            while !*ready {
-                ready = changed.wait(ready).unwrap_or_else(PoisonError::into_inner);
-            }
-            drop(ready);
-            let _ = completed_tx.send(());
-        })
+    let _entered = runtime.enter();
+    let (task, probe) = probed_native_test_task(async move {
+        let _ = started_tx.send(());
+        let (released, changed) = &*task_release.state;
+        let mut ready = released.lock().unwrap_or_else(PoisonError::into_inner);
+        while !*ready {
+            ready = changed.wait(ready).unwrap_or_else(PoisonError::into_inner);
+        }
+        drop(ready);
+        let _ = completed_tx.send(());
     });
     (task, probe, started_rx, completed_rx, release)
 }
