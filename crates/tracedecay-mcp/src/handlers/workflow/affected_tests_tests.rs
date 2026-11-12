@@ -1180,7 +1180,7 @@ async fn request_cancellation_cancels_the_waiting_managed_run() {
 }
 
 #[test]
-fn changed_file_digests_read_sources_without_a_tokio_runtime() {
+fn changed_file_digests_read_sources_from_a_plain_thread() {
     let root = tempfile::tempdir().unwrap();
     std::fs::write(root.path().join("lib.rs"), "pub fn util() {}\n").unwrap();
     let digests =

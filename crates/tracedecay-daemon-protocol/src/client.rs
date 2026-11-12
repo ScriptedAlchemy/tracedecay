@@ -10,7 +10,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use asupersync::io::{AsyncWriteExt, BufReader};
+use tokio::io::{AsyncWriteExt, BufReader};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tracedecay_framing::BoundedLineReader;
 
@@ -1095,7 +1095,7 @@ pub async fn refusal_behind_failed_write<T, R>(
     handshake: &crate::handshake::DaemonHandshake,
 ) -> tracedecay_domain::errors::Result<T>
 where
-    R: asupersync::io::AsyncBufRead + Unpin,
+    R: tokio::io::AsyncBufRead + Unpin,
 {
     let Err(tracedecay_domain::errors::TraceDecayError::Io(io)) = &written else {
         return written;

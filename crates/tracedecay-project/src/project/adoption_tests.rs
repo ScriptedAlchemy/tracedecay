@@ -42,7 +42,7 @@ fn moved_nongit_open_options(profile_root: &std::path::Path) -> super::TraceDeca
 /// an operator decision: ordinary first-touch mints fresh and only the
 /// named adoption completes the remap with store data intact.
 #[cfg(unix)]
-#[asupersync::test]
+#[tokio::test]
 async fn moved_nongit_project_is_readopted_only_when_named() {
     let home = TempDir::new().expect("isolated home");
     let root = home.path().canonicalize().expect("canonical home");
@@ -151,7 +151,7 @@ async fn moved_nongit_project_is_readopted_only_when_named() {
 /// agent tools touching a scratch directory) always mints the path-derived
 /// identity and leaves the stale registration alone.
 #[cfg(unix)]
-#[asupersync::test]
+#[tokio::test]
 async fn ambient_first_touch_never_adopts_a_moved_nongit_store() {
     let home = TempDir::new().expect("isolated home");
     let root = home.path().canonicalize().expect("canonical home");
@@ -210,7 +210,7 @@ async fn ambient_first_touch_never_adopts_a_moved_nongit_store() {
 /// Unrelated stale stores, including unreadable ones, do not participate in
 /// ordinary init or make a missing explicit project id resolve to another id.
 #[cfg(unix)]
-#[asupersync::test]
+#[tokio::test]
 async fn fresh_init_and_missing_named_adoption_ignore_unrelated_stores() {
     let home = TempDir::new().expect("isolated home");
     let root = home.path().canonicalize().expect("canonical home");
@@ -303,7 +303,7 @@ async fn fresh_init_and_missing_named_adoption_ignore_unrelated_stores() {
 /// Named adoption must not inspect an unrelated, unreadable store even when
 /// both projects have moved and their registry roots are missing.
 #[cfg(unix)]
-#[asupersync::test]
+#[tokio::test]
 async fn moved_nongit_adoption_honors_explicit_project_id() {
     let home = TempDir::new().expect("isolated home");
     let root = home.path().canonicalize().expect("canonical home");
@@ -386,7 +386,7 @@ async fn moved_nongit_adoption_honors_explicit_project_id() {
 /// A new root that already resolves to a different registered project cannot
 /// be aliased onto a moved store.
 #[cfg(unix)]
-#[asupersync::test]
+#[tokio::test]
 async fn moved_nongit_adoption_refuses_conflicting_registered_root() {
     let home = TempDir::new().expect("isolated home");
     let root = home.path().canonicalize().expect("canonical home");
@@ -437,7 +437,7 @@ async fn moved_nongit_adoption_refuses_conflicting_registered_root() {
 /// retrying the same named adoption resumes from that exact record and
 /// commits the registry without discovering other missing projects.
 #[cfg(unix)]
-#[asupersync::test]
+#[tokio::test]
 async fn interrupted_moved_nongit_remap_resumes_on_named_retry() {
     let home = TempDir::new().expect("isolated home");
     let root = home.path().canonicalize().expect("canonical home");
@@ -516,7 +516,7 @@ async fn interrupted_moved_nongit_remap_resumes_on_named_retry() {
 
 /// The selected project's unreadable manifest remains a typed refusal.
 #[cfg(unix)]
-#[asupersync::test]
+#[tokio::test]
 async fn unreadable_moved_store_evidence_is_a_typed_refusal() {
     let home = TempDir::new().expect("isolated home");
     let root = home.path().canonicalize().expect("canonical home");
@@ -563,7 +563,7 @@ async fn unreadable_moved_store_evidence_is_a_typed_refusal() {
 }
 
 #[cfg(unix)]
-#[asupersync::test]
+#[tokio::test]
 async fn named_adoption_refuses_foreign_store_evidence_without_mutation() {
     let home = TempDir::new().expect("isolated home");
     let root = home.path().canonicalize().expect("canonical home");

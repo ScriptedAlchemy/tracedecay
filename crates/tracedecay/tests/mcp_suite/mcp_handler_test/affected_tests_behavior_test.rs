@@ -50,9 +50,14 @@ where
                 let pause = self.0.pause.lock().unwrap().take();
                 if let Some(pause) = pause {
                     self.0.leader_entered.notify_one();
-                    pause
-                        .recv_timeout(Duration::from_secs(5))
-                        .expect("the identical read must join the held leader");
+                    // Dispatch can run on an executor worker even when its
+                    // caller started on the blocking pool. Hand that worker
+                    // back while the fixture holds the leader for its follower.
+                    tokio::task::block_in_place(|| {
+                        pause
+                            .recv_timeout(Duration::from_secs(5))
+                            .expect("the identical read must join the held leader");
+                    });
                 } else {
                     self.0.release();
                 }
@@ -520,7 +525,7 @@ fn coalescing_counts(stats: &Value) -> (u64, u64) {
 /// A side-effecting owner call is never answered from an identical call in
 /// flight beside it: two identical concurrent runs are two managed test runs.
 /// Two identical concurrent reads still enter the identical-read coalescer.
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn identical_concurrent_test_runs_each_run_while_identical_reads_still_ride() {
     if !crate::common::in_child_test() {
         crate::common::rerun_test_in_child(

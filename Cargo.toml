@@ -67,10 +67,6 @@ edition = "2024"
 version = "1.0.0-beta.100"
 
 [workspace.dependencies]
-# asupersync probes support for Outcome's Try implementations and leaves them
-# inactive on stable. native-runtime remains explicit because defaults are off.
-# Switch back to `version = "=0.6.0"` once 0.6.0 is published to crates.io (#3874).
-asupersync = { git = "https://github.com/Dicklesworthstone/asupersync", rev = "ef8b34aed8dc684f8e0e689df4ee969840e82cda", default-features = false, features = ["proc-macros", "native-runtime", "nightly-outcome-try"] }
 # grafeo 0.5.43 from our fork (ScriptedAlchemy/grafeo, main). The
 # published crates carry a tiered-storage
 # arena whose `HotVersionRef` addresses a single 1 MiB chunk, which caps an
@@ -133,6 +129,7 @@ tempfile = "3"
 thiserror = "2"
 tokio = "1"
 tokio-stream = "0.1"
+tokio-util = { version = "0.7", default-features = false, features = ["rt"] }
 toml = "1"
 tower = "0.5"
 tracing = "0.1"

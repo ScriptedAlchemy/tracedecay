@@ -121,16 +121,6 @@ py_test(
     tags = ["local", "manual"],
 )
 
-py_test(
-    name = "ambient_tokio_check_test",
-    size = "small",
-    srcs = [
-        "check-ambient-tokio.py",
-        "test-check-ambient-tokio.py",
-    ],
-    main = "test-check-ambient-tokio.py",
-)
-
 py_binary(
     name = "packaged_lsp_bridge",
     srcs = [

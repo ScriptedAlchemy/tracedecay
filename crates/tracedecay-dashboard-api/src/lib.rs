@@ -146,10 +146,7 @@ pub use http_admission::{
 };
 pub use request_deadline::dashboard_http_request_deadline_micros;
 pub use routes::router;
-pub use server::{
-    ConnectionExecutor, bind_dashboard, serve_http_connection, serve_loopback,
-    validate_dashboard_host,
-};
+pub use server::{bind_dashboard, serve_http_connection, serve_loopback, validate_dashboard_host};
 pub use state::{
     AdmittedDoctorReportV1, AutomationSchedulerReconcileFuture, AutomationSchedulerReconciler,
     DashboardAutomationObservationFuture, DashboardAutomationObservationRecorderV1, DashboardState,

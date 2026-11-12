@@ -1646,7 +1646,7 @@ mod tests {
         }
     }
 
-    #[asupersync::test]
+    #[tokio::test]
     async fn failed_attempt_cleanup_reaches_the_caller_with_both_causes() {
         let spool = AttemptSpool {
             abandon: Err(RemoteCapturePersistenceErrorV1::Unavailable),
@@ -1673,7 +1673,7 @@ mod tests {
         );
     }
 
-    #[asupersync::test]
+    #[tokio::test]
     async fn successful_attempt_cleanup_preserves_the_operation_error() {
         let spool = AttemptSpool { abandon: Ok(()) };
         let error = with_replay_attempt(&spool, "remote.event.cleanup", UtcMicros(11), |_| {
@@ -1687,7 +1687,7 @@ mod tests {
         assert_eq!(error, RemoteReplayApplicationErrorV1::InvalidSpoolState);
     }
 
-    #[asupersync::test]
+    #[tokio::test]
     async fn successful_operation_never_abandons_the_attempt() {
         let spool = AttemptSpool {
             abandon: Err(RemoteCapturePersistenceErrorV1::Unavailable),

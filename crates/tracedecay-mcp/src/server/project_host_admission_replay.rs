@@ -187,7 +187,7 @@ impl ProjectHostAdmissionReplayWorker {
                 match classify_replay_pass(pending_before, pending_after, &outcome) {
                     ReplayPassDecision::ProgressPending => {
                         consecutive_retryable = 0;
-                        asupersync::runtime::yield_now().await;
+                        tokio::task::yield_now().await;
                     }
                     ReplayPassDecision::Backoff => {
                         consecutive_retryable = consecutive_retryable.saturating_add(1);
@@ -259,7 +259,7 @@ mod tests {
     }
 
     #[test]
-    fn retryable_passes_back_off_on_native_timers_with_no_tokio_runtime_entered() {
+    fn retryable_passes_back_off_on_process_timers_from_a_plain_thread() {
         assert!(tokio::runtime::Handle::try_current().is_err());
         let temp = tempfile::TempDir::new().unwrap();
         let (runtime, _) = tracedecay_host_admission::HostAdmissionRuntime::open(

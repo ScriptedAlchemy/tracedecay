@@ -880,8 +880,8 @@ pub async fn events(State(state): State<DashboardState>, headers: HeaderMap) -> 
 }
 
 /// Sends a keep-alive comment after each `interval` without an event, as
-/// axum's `KeepAlive` does, but on a native timer: axum's arms a Tokio timer,
-/// which panics on a runtime without one.
+/// axum's `KeepAlive` does. An unavailable timer closes the stream instead of
+/// panicking or leaving the wait unbounded.
 fn keep_alive_sse(
     rx: tokio::sync::mpsc::Receiver<Result<Event, Infallible>>,
     interval: Duration,
@@ -1249,10 +1249,11 @@ mod tests {
     }
 
     #[test]
-    fn event_stream_keeps_alive_without_a_tokio_timer() {
+    fn event_stream_keeps_alive_on_the_selected_timer() {
         let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
             .build()
-            .expect("tokio runtime without a time driver");
+            .expect("tokio runtime with a time driver");
         runtime.block_on(async {
             let (tx, rx) = tokio::sync::mpsc::channel(1);
             let mut body = keep_alive_sse(rx, Duration::from_millis(20))
@@ -1276,6 +1277,35 @@ mod tests {
                 None,
                 "the stream ends with its producer"
             );
+        });
+    }
+
+    #[test]
+    fn event_stream_closes_when_the_selected_timer_is_unavailable() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .expect("tokio runtime without a time driver");
+        runtime.block_on(async {
+            let (tx, rx) = tokio::sync::mpsc::channel(1);
+            let mut body = keep_alive_sse(rx, Duration::from_millis(20))
+                .into_response()
+                .into_body()
+                .into_data_stream();
+            tx.send(Ok(Event::default().data("first")))
+                .await
+                .expect("stream open");
+            assert_eq!(
+                next_frame(&mut body).await.as_deref(),
+                Some("data: first\n\n"),
+                "an available event does not need a timer"
+            );
+            assert!(!tx.is_closed(), "the producer is still connected");
+            assert_eq!(
+                next_frame(&mut body).await,
+                None,
+                "a missing time driver must not leave the stream waiting forever"
+            );
+            assert!(tx.is_closed(), "the ended stream releases its receiver");
         });
     }
 
@@ -1842,7 +1872,7 @@ mod tests {
     }
 
     #[test]
-    fn shared_source_poller_publishes_without_a_tokio_runtime() {
+    fn shared_source_poller_publishes_on_the_process_runtime() {
         let tokio = tokio::runtime::Runtime::new().expect("fixture runtime");
         let (_project, dash) =
             tokio.block_on(dashboard_state_fixture("project.dashboard-events-native"));
@@ -1862,13 +1892,17 @@ mod tests {
     }
 
     #[test]
-    fn event_stream_sends_its_first_frame_without_a_tokio_runtime() {
+    fn event_stream_sends_its_first_frame_on_the_process_runtime() {
+        if !crate::test_support::alone_with_storage_wait_counters() {
+            return;
+        }
         let tokio = tokio::runtime::Runtime::new().expect("fixture runtime");
         let (_project, dash) =
             tokio.block_on(dashboard_state_fixture("project.dashboard-events-stream"));
         let writer_waits = native_runtime::native_thread_writer_waits();
+        let process_runtime = native_runtime::handle().expect("process runtime").id();
         let first = native_runtime::block_on(async {
-            assert!(tokio::runtime::Handle::try_current().is_err());
+            assert_eq!(tokio::runtime::Handle::current().id(), process_runtime);
             let mut body = events(State(dash), HeaderMap::new())
                 .await
                 .into_response()

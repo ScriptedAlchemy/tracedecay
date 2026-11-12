@@ -27,7 +27,7 @@ impl CodeGraphReadAdmissionPort for DelayedAdmission {
         let scope = self.scope.clone();
         let delay = self.delay;
         Box::pin(async move {
-            asupersync::time::sleep(asupersync::time::wall_now(), delay).await;
+            tokio::time::sleep(delay).await;
             Ok(admit_context(&request, &scope))
         })
     }
@@ -80,7 +80,7 @@ async fn expect_open_error(
     }
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn delayed_admission_returns_exact_timed_out() {
     let admission = DelayedAdmission {
         scope: fixture_scope(SCOPE_TAG),
@@ -103,7 +103,7 @@ async fn delayed_admission_returns_exact_timed_out() {
     assert_read_error(error, CodeGraphReadError::TimedOut);
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn cancellation_during_admission_wait_returns_exact_cancelled() {
     let deadline = Deadline::new(UtcMicros(i64::MAX)).expect("deadline");
     let cancellation =
@@ -124,14 +124,14 @@ async fn cancellation_during_admission_wait_returns_exact_cancelled() {
         "request.verified-query-deadline.admit-cancel",
     );
     let cancel_task = async move {
-        asupersync::time::sleep(asupersync::time::wall_now(), Duration::from_millis(10)).await;
+        tokio::time::sleep(Duration::from_millis(10)).await;
         cancel.cancel(now_micros());
     };
-    let (error, _) = asupersync::join!(open, cancel_task);
+    let (error, _) = tokio::join!(open, cancel_task);
     assert_read_error(error, CodeGraphReadError::Cancelled);
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn cancellation_after_open_stays_typed_in_query_and_reader_paths() {
     let scope = fixture_scope("verified-query-after-open");
     let admission = ImmediateAdmission {
