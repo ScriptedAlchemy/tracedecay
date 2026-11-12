@@ -35,7 +35,7 @@ impl ReadSnapshot {
         let runtime = Arc::clone(&self.runtime);
         let budget = self.budget;
         let statement = statement(sql, params)?;
-        let rows = super::connection::run_blocking("SQL snapshot query", join_error, move || {
+        let rows = super::connection::run_blocking(join_error, move || {
             runtime
                 .query_with_budget(statement, budget)
                 .map_err(super::Error::from)
@@ -45,6 +45,6 @@ impl ReadSnapshot {
     }
 }
 
-fn join_error(error: asupersync::runtime::JoinError) -> super::Error {
+fn join_error(error: tokio::task::JoinError) -> super::Error {
     super::Error::Runtime(format!("exact SQL read snapshot task failed: {error}"))
 }

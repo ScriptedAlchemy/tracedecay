@@ -5,7 +5,7 @@ use std::pin::Pin;
 use std::sync::{Arc, atomic::Ordering};
 use std::time::Instant;
 
-use tracedecay_runtime_core::native_runtime::{NativeTask, NativeTaskOutcome};
+use tracedecay_runtime_core::native_runtime::{self, NativeTask, NativeTaskOutcome};
 
 use super::{ProjectRuntime, ProjectRuntimeRegistryV1};
 use crate::invocation::UnavailableFeedbackCycleRuntimeV1;
@@ -185,8 +185,9 @@ impl ProjectRuntimeRegistryV1 {
     /// Shut every project runtime down and leave the registry empty.
     ///
     /// Routers become unavailable before feedback owners drop and Work
-    /// providers are joined. The drain is single-flight, so the first
-    /// caller's `deadline` bounds the producer drains for every caller.
+    /// providers are joined. The first caller supplies the observability flush
+    /// deadline for the shared task. The daemon bounds its own wait separately,
+    /// and the registry retains the task until its database workers finish.
     #[tracing::instrument(
         name = "daemon.service.project_runtime.shutdown",
         level = "trace",
@@ -368,12 +369,22 @@ async fn shut_down_advisory(runtimes: &BTreeMap<PathBuf, ProjectRuntime>) -> Vec
 }
 
 async fn shut_down_feedback(runtimes: &BTreeMap<PathBuf, ProjectRuntime>) -> Vec<String> {
+    // Start every project's terminal write before joining its independent
+    // database worker. The retained drain keeps ownership of each store
+    // through its terminal write, even if the daemon stops waiting.
+    let drains: Vec<_> = runtimes
+        .iter()
+        .filter_map(|(project_root, runtime)| {
+            let feedback = runtime.feedback.as_ref()?;
+            Some((
+                project_root,
+                feedback.runtime().close_and_drain_observations(),
+            ))
+        })
+        .collect();
     let mut lost_work = Vec::new();
-    for (project_root, runtime) in runtimes {
-        let Some(feedback) = runtime.feedback.as_ref() else {
-            continue;
-        };
-        if let Err(error) = feedback.runtime().close_and_drain_observations().await {
+    for (project_root, drain) in drains {
+        if let Err(error) = drain.await {
             lost_work.push(format!(
                 "{}: feedback observations: {error}",
                 project_root.display()
@@ -488,10 +499,10 @@ fn release_drained_runtimes<R: Send + 'static>(runtimes: BTreeMap<PathBuf, R>) {
             ],
         );
     };
-    // Queued here rather than through the awaitable helper, which would only
-    // start the release once polled. Without a pool the runtimes drop inline.
-    let _ = tracedecay_runtime_core::native_runtime::handle()
-        .and_then(|runtime| runtime.spawn_blocking(release));
+    // Queue immediately and drop the join handle to detach the release.
+    // Without a pool the captured runtimes drop inline.
+    let _ = native_runtime::handle()
+        .map(|runtime| native_runtime::spawn_blocking_on(&runtime, release));
 }
 
 #[cfg(test)]

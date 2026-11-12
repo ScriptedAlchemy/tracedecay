@@ -1,6 +1,6 @@
 //! Compiler status retained by one primitive runtime, with one current producer.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 
@@ -38,8 +38,7 @@ pub enum CompilerProducerRunV1 {
     Superseded,
 }
 
-/// How one tsconfig fared in the most recent run. A project with no compiler
-/// is not recorded: reads resolve that from the filesystem.
+/// How one tsconfig's compiler fared in the most recent run.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum TypeScriptProjectCheckV1 {
     /// Its findings are part of the published snapshot.
@@ -49,26 +48,75 @@ pub enum TypeScriptProjectCheckV1 {
     },
 }
 
-/// The latest producer outcome of one project owner: the run and how each
-/// tsconfig fared in it.
+/// The files one check's program read inside the project root, by logical
+/// path, as the compiler recorded them.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TypeScriptProgramMembershipV1 {
+    /// The files the configuration named.
+    pub(super) roots: BTreeSet<String>,
+    /// Every file the program read: its roots and what they import.
+    pub(super) files: BTreeSet<String>,
+}
+
+impl TypeScriptProgramMembershipV1 {
+    #[must_use]
+    pub fn new(roots: BTreeSet<String>, files: BTreeSet<String>) -> Self {
+        Self { roots, files }
+    }
+}
+
+/// What the most recent run established about one tsconfig.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum TypeScriptProjectStatusV1 {
+    /// No `node_modules/.bin/tsc` is installed for it; `install_command`
+    /// installs the workspace's dependencies.
+    CompilerMissing { install_command: &'static str },
+    /// The producer's first run found it and its compiler and is checking it.
+    Checking { compiler: PathBuf },
+    /// Its compiler checked it. `membership` is the program the check
+    /// recorded, `None` when it could not be read; `references` are the
+    /// projects the compiler resolved it to reference.
+    Checked {
+        compiler: PathBuf,
+        membership: Option<TypeScriptProgramMembershipV1>,
+        references: Vec<PathBuf>,
+    },
+    Failed {
+        compiler: PathBuf,
+        reason: String,
+        references: Vec<PathBuf>,
+    },
+}
+
+/// The latest producer outcome of one project owner: the run, the generation
+/// whose sources it read, and what it established about each tsconfig.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TypeScriptProducerStatusV1 {
-    pub(super) run: CompilerProducerRunV1,
-    pub(super) checks: BTreeMap<PathBuf, TypeScriptProjectCheckV1>,
+    /// `None` while the owner's first run is still checking what it found.
+    pub(super) run: Option<CompilerProducerRunV1>,
+    /// `None` when the run read no generation, as when no tsconfig has a
+    /// compiler to run.
+    pub(super) generation: Option<CodeGenerationId>,
+    pub(super) projects: BTreeMap<PathBuf, TypeScriptProjectStatusV1>,
 }
 
 impl TypeScriptProducerStatusV1 {
     #[must_use]
     pub fn new(
-        run: CompilerProducerRunV1,
-        checks: BTreeMap<PathBuf, TypeScriptProjectCheckV1>,
+        run: Option<CompilerProducerRunV1>,
+        generation: Option<CodeGenerationId>,
+        projects: BTreeMap<PathBuf, TypeScriptProjectStatusV1>,
     ) -> Self {
-        Self { run, checks }
+        Self {
+            run,
+            generation,
+            projects,
+        }
     }
 
     #[must_use]
-    pub fn run(&self) -> &CompilerProducerRunV1 {
-        &self.run
+    pub fn run(&self) -> Option<&CompilerProducerRunV1> {
+        self.run.as_ref()
     }
 }
 
@@ -102,6 +150,17 @@ impl TypeScriptProducerStatusHandleV1 {
         }
     }
 
+    /// Whether a producer was ever appointed to publish here; until then
+    /// nothing will.
+    #[must_use]
+    pub fn appointed(&self) -> bool {
+        self.status
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .producer
+            .is_some()
+    }
+
     /// The most recent completed status from an admitted producer, if any.
     #[must_use]
     pub fn current(&self) -> Option<Arc<TypeScriptProducerStatusV1>> {
@@ -120,6 +179,12 @@ pub(super) struct TypeScriptProducerStatusWriterV1 {
 }
 
 impl TypeScriptProducerStatusWriterV1 {
+    /// Whether any producer has published here, including a predecessor
+    /// whose completed check a reopened route retains.
+    pub(super) fn has_status(&self) -> bool {
+        self.status.current().is_some()
+    }
+
     /// Compiler work may overlap. Publication is ordered for this retained
     /// runtime: an already-admitted old publication finishes before the new
     /// one, and an old producer entering after replacement cannot publish.
@@ -178,9 +243,10 @@ mod tests {
 
     fn failed(reason: &str) -> TypeScriptProducerStatusV1 {
         TypeScriptProducerStatusV1::new(
-            CompilerProducerRunV1::CompilerFailed {
+            Some(CompilerProducerRunV1::CompilerFailed {
                 reason: reason.to_owned(),
-            },
+            }),
+            None,
             BTreeMap::new(),
         )
     }
@@ -189,7 +255,11 @@ mod tests {
     fn a_status_handle_publishes_to_its_owner_only() {
         let owner = TypeScriptProducerStatusHandleV1::default();
         assert_eq!(owner.current(), None);
-        owner.start_producer().publish(failed("owner"));
+        assert!(!owner.appointed(), "no producer was appointed yet");
+        let producer = owner.start_producer();
+        assert!(owner.appointed());
+        assert_eq!(owner.current(), None, "appointment publishes nothing");
+        producer.publish(failed("owner"));
         assert_eq!(owner.current().as_deref(), Some(&failed("owner")));
         assert_eq!(TypeScriptProducerStatusHandleV1::default().current(), None);
     }

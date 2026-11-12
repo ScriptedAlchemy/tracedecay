@@ -243,12 +243,12 @@ impl Drop for RetainedHookTasks {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use asupersync::runtime::yield_now;
     use std::future::poll_fn;
     use std::pin::Pin;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::task::Poll;
     use tokio::sync::Notify;
+    use tokio::task::yield_now;
 
     async fn assert_pending<F: Future + Unpin>(future: &mut F, message: &str) {
         poll_fn(|cx| {
@@ -258,7 +258,7 @@ mod tests {
         .await;
     }
 
-    #[asupersync::test]
+    #[tokio::test]
     async fn shutdown_fences_new_tasks_and_joins_active_task() {
         let tasks = RetainedHookTasks::new();
         let started = Arc::new(Notify::new());
@@ -325,7 +325,7 @@ mod tests {
         );
     }
 
-    #[asupersync::test]
+    #[tokio::test]
     async fn targeted_retirement_preserves_failure_without_failing_other_keys() {
         let tasks = RetainedHookTasks::new();
         assert!(tasks.retain("memory-graph", "failed", |_| async {
@@ -348,7 +348,7 @@ mod tests {
         assert_eq!(tasks.shutdown().await.unwrap_err(), error);
     }
 
-    #[asupersync::test]
+    #[tokio::test]
     async fn shutdown_retry_preserves_failed_join() {
         let tasks = RetainedHookTasks::new();
         assert!(tasks.retain("codex", "failed-session", |_| async {
@@ -368,7 +368,7 @@ mod tests {
         );
     }
 
-    #[asupersync::test]
+    #[tokio::test]
     async fn shutdown_joins_superseded_task() {
         let tasks = RetainedHookTasks::new();
         let first_started = Arc::new(Notify::new());
@@ -404,7 +404,7 @@ mod tests {
             .expect("retained hook tasks shut down cleanly");
     }
 
-    #[asupersync::test]
+    #[tokio::test]
     async fn retiring_one_task_cancels_and_joins_only_that_key() {
         let tasks = RetainedHookTasks::new();
         let first_started = Arc::new(Notify::new());
@@ -450,8 +450,7 @@ mod tests {
         )
         .await;
         assert!(!second_cancelled.load(Ordering::Acquire));
-        asupersync::time::timeout(
-            asupersync::time::wall_now(),
+        tokio::time::timeout(
             std::time::Duration::from_secs(2),
             tasks.retire("memory-graph", "project-2"),
         )

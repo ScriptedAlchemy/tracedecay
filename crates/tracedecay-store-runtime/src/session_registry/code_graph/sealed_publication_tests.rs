@@ -3193,23 +3193,14 @@ async fn concurrent_worktree_scopes_publish_with_one_corpus_build_and_bounded_rs
 
 #[test]
 fn off_thread_staging_release_retains_its_permit_and_leases_until_terminal_drain() {
-    let executor = asupersync::runtime::RuntimeBuilder::multi_thread()
+    let executor = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
         .worker_threads(2)
-        .blocking_threads(1, 1)
-        .enable_time()
-        .enable_platform_reactor(true)
+        .max_blocking_threads(1)
         .build()
         .expect("isolated blocking-pool runtime");
-    // The registry's remote replay authority binds the daemon's Tokio
-    // runtime, so the fixture provides one beside the native executor.
-    let daemon_runtime = tokio::runtime::Builder::new_multi_thread()
-        .worker_threads(1)
-        .enable_all()
-        .build()
-        .expect("daemon Tokio runtime");
-    let _daemon_context = daemon_runtime.enter();
     executor.block_on(async {
-        let cx = asupersync::Cx::current().expect("native fixture execution context");
+        let executor_handle = tokio::runtime::Handle::current();
         let temporary = tempfile::tempdir().expect("temporary fixture parent");
         let root = temporary
             .path()
@@ -3314,14 +3305,12 @@ fn off_thread_staging_release_retains_its_permit_and_leases_until_terminal_drain
         // Occupy the actual blocking-pool slot. Dropping the sender on any
         // assertion failure also releases this worker, so teardown cannot hang.
         let (release, blocked) = std::sync::mpsc::channel::<()>();
-        let (started, mut entered) = asupersync::channel::oneshot::channel();
-        let mut blocker = cx
-            .spawn_blocking(move |_| {
-                started.send_blocking(()).unwrap();
-                let _ = blocked.recv();
-            })
-            .expect("native blocking-pool admission");
-        entered.recv(&cx).await.unwrap();
+        let (started, entered) = tokio::sync::oneshot::channel();
+        let blocker = executor_handle.spawn_blocking(move || {
+            started.send(()).unwrap();
+            let _ = blocked.recv();
+        });
+        entered.await.unwrap();
         std::thread::scope(|scope| {
             scope
                 .spawn(|| runtime.release_sealed_staging_rows(build, projection))
@@ -3341,13 +3330,13 @@ fn off_thread_staging_release_retains_its_permit_and_leases_until_terminal_drain
 
         // Poll the operation owner itself: terminal shutdown has other blocking
         // phases, which must not make a detached release falsely pass this test.
-        let mut operation_drain = std::pin::pin!(runtime.operation_task_owner.shutdown(&cx));
+        let mut operation_drain = std::pin::pin!(runtime.operation_task_owner.shutdown());
         std::future::poll_fn(|cx| {
             assert!(std::future::Future::poll(operation_drain.as_mut(), cx).is_pending());
             std::task::Poll::Ready(())
         })
         .await;
-        let mut terminal_drain = std::pin::pin!(registry.shutdown_terminal_tasks(&cx));
+        let mut terminal_drain = std::pin::pin!(registry.shutdown_terminal_tasks());
         std::future::poll_fn(|cx| {
             assert!(std::future::Future::poll(terminal_drain.as_mut(), cx).is_pending());
             std::task::Poll::Ready(())
@@ -3360,7 +3349,7 @@ fn off_thread_staging_release_retains_its_permit_and_leases_until_terminal_drain
                 .is_err()
         );
         release.send(()).unwrap();
-        blocker.join(&cx).await.unwrap();
+        blocker.await.unwrap();
         operation_drain.await.expect("accepted sweep is joined");
         terminal_drain
             .await

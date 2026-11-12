@@ -5,7 +5,7 @@
 
 use std::collections::VecDeque;
 
-use asupersync::channel::mpsc;
+use tokio::sync::mpsc;
 
 use tracedecay_store::{RuntimeCancellationStageV1, RuntimeSubmitOutcomeV1, UnavailableReasonV1};
 

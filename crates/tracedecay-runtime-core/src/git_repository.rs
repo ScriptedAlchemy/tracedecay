@@ -600,7 +600,7 @@ fn observe_repository_discovery(path: &Path) {
 /// [`DiscoveryBlocked`].
 #[cfg(any(test, feature = "test-helpers"))]
 struct RepositoryDiscoveryBlockGate {
-    entered: asupersync::channel::watch::Sender<bool>,
+    entered: tokio::sync::watch::Sender<bool>,
     release: Mutex<Option<std::sync::mpsc::Receiver<()>>>,
 }
 
@@ -615,7 +615,7 @@ impl RepositoryDiscoveryBlockGate {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .take();
-        let _ = self.entered.send(true);
+        self.entered.send_replace(true);
         if let Some(release) = release {
             let _ = release.recv();
         }
@@ -628,7 +628,7 @@ impl RepositoryDiscoveryBlockGate {
 /// the walk has reached the blocking section.
 #[cfg(any(test, feature = "test-helpers"))]
 pub struct RepositoryDiscoveryBlock {
-    entered: asupersync::channel::watch::Receiver<bool>,
+    entered: tokio::sync::watch::Receiver<bool>,
     release: std::sync::mpsc::Sender<()>,
 }
 
@@ -638,8 +638,7 @@ impl RepositoryDiscoveryBlock {
     /// from any executor.
     #[allow(clippy::expect_used)]
     pub async fn wait_entered(&mut self) {
-        let cx = crate::native_runtime::cx().expect("native runtime for the discovery block");
-        discovery_block_entered(&cx, &mut self.entered).await;
+        discovery_block_entered(&mut self.entered).await;
     }
 
     /// Let the parked walk finish.
@@ -656,7 +655,7 @@ impl RepositoryDiscoveryBlock {
 pub fn block_repository_discovery_for_test(root: &Path) -> RepositoryDiscoveryBlock {
     forget_retained_checkout_topology_for_test(root);
     let (release_tx, release_rx) = std::sync::mpsc::channel();
-    let (entered_tx, entered_rx) = asupersync::channel::watch::channel(false);
+    let (entered_tx, entered_rx) = tokio::sync::watch::channel(false);
     repository_discovery_observations().insert(
         observed_discovery_root(root),
         RepositoryDiscoveryObservation {
@@ -676,9 +675,9 @@ pub fn block_repository_discovery_for_test(root: &Path) -> RepositoryDiscoveryBl
 /// Completes once a test block for `directory` has entered its wait, and
 /// never when no block is armed, so production deadlines keep their own timer.
 #[cfg(any(test, feature = "test-helpers"))]
-pub(crate) async fn repository_discovery_parked(cx: &asupersync::Cx, directory: &Path) {
+pub(crate) async fn repository_discovery_parked(directory: &Path) {
     if let Some(block) = armed_discovery_block(directory)
-        && discovery_block_entered(cx, &mut block.entered.subscribe()).await
+        && discovery_block_entered(&mut block.entered.subscribe()).await
     {
         return;
     }
@@ -687,15 +686,12 @@ pub(crate) async fn repository_discovery_parked(cx: &asupersync::Cx, directory: 
 
 /// Whether the walk entered its block before the block was disarmed.
 #[cfg(any(test, feature = "test-helpers"))]
-async fn discovery_block_entered(
-    cx: &asupersync::Cx,
-    entered: &mut asupersync::channel::watch::Receiver<bool>,
-) -> bool {
+async fn discovery_block_entered(entered: &mut tokio::sync::watch::Receiver<bool>) -> bool {
     loop {
-        if entered.borrow_and_update_clone() {
+        if *entered.borrow_and_update() {
             return true;
         }
-        if entered.changed(cx).await.is_err() {
+        if entered.changed().await.is_err() {
             return false;
         }
     }
@@ -817,20 +813,17 @@ pub async fn wait_for_topology_callers_for_test(
     callers: u64,
     returned: impl Fn() -> u64,
 ) {
-    let cx = crate::native_runtime::cx().expect("native runtime for the caller wait");
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
     while repository_topology_wait_count_for_test(root) + returned() < callers {
         assert!(
             std::time::Instant::now() < deadline,
             "callers neither joined the parked discovery walk nor returned"
         );
-        // The timer runs in a native task so a Tokio caller never polls it.
-        let mut pause = cx
-            .spawn(|cx| async move {
-                asupersync::time::sleep(cx.now(), std::time::Duration::from_millis(5)).await;
-            })
-            .expect("native pause task");
-        let _ = pause.join(&cx).await;
+        crate::native_runtime::sleep_until(
+            std::time::Instant::now() + std::time::Duration::from_millis(5),
+        )
+        .await
+        .expect("discovery wait timer");
     }
 }
 
@@ -1715,19 +1708,17 @@ mod tests {
         reset_repository_discovery_for_test(&repository);
     }
 
-    #[asupersync::test]
+    #[tokio::test]
     async fn discovery_block_retains_entry_for_late_subscribers() {
-        let cx = asupersync::Cx::current().expect("test task context");
         let root = tempfile::tempdir().expect("discovery root");
         let mut block = block_repository_discovery_for_test(root.path());
         let path = root.path().to_path_buf();
         let discovery = std::thread::spawn(move || observe_repository_discovery(&path));
         block.wait_entered().await;
 
-        let entered = asupersync::time::timeout(
-            cx.now(),
+        let entered = tokio::time::timeout(
             Duration::from_secs(1),
-            repository_discovery_parked(&cx, root.path()),
+            repository_discovery_parked(root.path()),
         )
         .await;
         block.release();
@@ -1769,7 +1760,7 @@ mod tests {
 
     /// A subdirectory's walk is not retained under its own path, and a failed
     /// walk is retained nowhere; both still answer the callers that joined it.
-    #[asupersync::test]
+    #[tokio::test]
     async fn unretained_walks_hand_their_answer_to_joined_callers() {
         let temporary = tempfile::tempdir().expect("temporary directory");
         let repository = temporary.path().join("repository");

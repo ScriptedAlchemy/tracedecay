@@ -49,7 +49,7 @@ fn incomplete_snapshot_requires_reset_instead_of_default_repair() {
     );
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn linked_worktree_and_submodule_defaults_converge_into_existing_snapshot() {
     let (_directory, runtime, root) = Box::pin(global_setup()).await;
     let keys = [
@@ -111,7 +111,7 @@ async fn linked_worktree_and_submodule_defaults_converge_into_existing_snapshot(
 /// `index.exclude.v1` default. A store that never overrode the setting must
 /// follow the current default, otherwise the pattern would drop tracked
 /// `bin/` sources the first time the setting is honored.
-#[asupersync::test]
+#[tokio::test]
 async fn a_changed_default_converges_when_the_setting_was_never_overridden() {
     let (_directory, runtime, root) = Box::pin(global_setup()).await;
     let key = SettingKey::new(INDEX_EXCLUDE_SETTING_KEY).unwrap();

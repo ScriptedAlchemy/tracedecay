@@ -1,3 +1,7 @@
+use sha2::Digest;
+use tracedecay_runtime_core::db::engine::params;
+
+use crate::tests::harness::writer_telemetry;
 use crate::{
     GitHubStackDeliveryStateV1, GitHubStackSignalAppendOutcomeV1, GitHubStackSignalRecordV1,
     MAX_GITHUB_STACK_ACTIVE_PENDING_V1, tests::harness::RegisteredGlobalDbHarness,
@@ -31,7 +35,151 @@ async fn state(
         .expect("read recipient state")
 }
 
-#[asupersync::test]
+#[tokio::test]
+async fn registered_stack_signal_limit_counts_utf8_bytes_not_characters() {
+    let harness = RegisteredGlobalDbHarness::open("github-stack-utf8-byte-limit").await;
+    // SQLite length(TEXT) counts characters; the on-disk and Rust limits
+    // count UTF-8 bytes. This valid JSON fits the former but not the latter.
+    let mut oversized = signal("signal.github-stack-utf8-oversize", 10);
+    oversized.signal_json = format!(r#"{{"payload":"{}"}}"#, "é".repeat(600_000));
+    assert!(oversized.signal_json.chars().count() < 1_048_576);
+    assert!(oversized.signal_json.len() > 1_048_576);
+
+    let writer = harness
+        .registered
+        .writer_connection()
+        .expect("registered stack byte-limit writer");
+    let refusal = writer
+        .execute(
+            "INSERT INTO github_stack_delivery_signals
+                 (project_id, signal_id, scope_digest, repository_id,
+                  watermark_id, observed_at_micros, signal_json)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![
+                oversized.project_id.as_str(),
+                oversized.signal_id.as_str(),
+                oversized.scope_digest.as_str(),
+                oversized.repository_id.as_str(),
+                oversized.watermark_id.as_str(),
+                oversized.observed_at_micros,
+                oversized.signal_json.as_str(),
+            ],
+        )
+        .await
+        .expect_err("raw registered SQL must reject a payload over the UTF-8 byte limit")
+        .to_string();
+    assert!(
+        refusal.contains("GitHub stack signal JSON exceeds 1 MiB"),
+        "{refusal}"
+    );
+    assert!(
+        harness
+            .registered
+            .github_stack_signal(PROJECT_ID, &oversized.signal_id)
+            .await
+            .expect("failed raw insert must leave no signal")
+            .is_none()
+    );
+
+    // The application boundary must make the same refusal rather than
+    // relying on SQLite to accept a second, larger copy of the history.
+    assert!(
+        harness
+            .registered
+            .append_github_stack_signal(oversized, vec![RECIPIENT.to_owned()])
+            .await
+            .is_err()
+    );
+    let mut admitted = signal("signal.github-stack-utf8-within-limit", 11);
+    admitted.signal_json = format!(r#"{{"payload":"{}"}}"#, "é".repeat(400_000));
+    harness
+        .registered
+        .append_github_stack_signal(admitted.clone(), vec![RECIPIENT.to_owned()])
+        .await
+        .expect("non-ASCII bytes within the 1 MiB limit remain admissible");
+    assert_eq!(
+        harness
+            .registered
+            .github_stack_signal(PROJECT_ID, &admitted.signal_id)
+            .await
+            .expect("read admitted non-ASCII payload"),
+        Some(admitted)
+    );
+}
+
+#[tokio::test]
+async fn registered_sql_cannot_forge_a_retired_signal_identity() {
+    let harness = RegisteredGlobalDbHarness::open("github-stack-no-forged-retirement").await;
+    let record = signal("signal.github-stack-forged-retirement", 10);
+    let digest = "a".repeat(64);
+    // The registered database must enforce the same reserved-key policy as
+    // append_github_stack_signal, including null and escaped/duplicate keys.
+    // An INSERT-only forgery would reserve this identity permanently without
+    // a delivery recipient, bypassing the required settlement and age checks.
+    for forged in [
+        format!(r#"{{"__tracedecay_retired_stack_sha256_v1":"{digest}"}}"#),
+        r#"{"__tracedecay_retired_stack_sha256_v1":null}"#.to_owned(),
+        format!(r#"{{"__trac\u0065decay_retired_stack_sha256_v1":"{digest}"}}"#),
+        r#"{"payload":true,"__tracedecay_retired_stack_sha256_v1":null}"#.to_owned(),
+        format!(
+            r#"{{"__tracedecay_retired_stack_sha256_v1":null,"__tracedecay_retired_stack_sha256_v1":"{digest}"}}"#
+        ),
+    ] {
+        let writer = harness
+            .registered
+            .writer_connection()
+            .expect("registered signal insert writer");
+        let refusal = writer
+            .execute(
+                "INSERT INTO github_stack_delivery_signals
+                     (project_id, signal_id, scope_digest, repository_id,
+                      watermark_id, observed_at_micros, signal_json)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                params![
+                    record.project_id.as_str(),
+                    record.signal_id.as_str(),
+                    record.scope_digest.as_str(),
+                    record.repository_id.as_str(),
+                    record.watermark_id.as_str(),
+                    record.observed_at_micros,
+                    forged.as_str(),
+                ],
+            )
+            .await
+            .expect_err("registered INSERT must refuse forged retirement")
+            .to_string();
+        assert!(
+            refusal.contains("GitHub stack signal uses a reserved retirement marker"),
+            "{refusal}"
+        );
+        assert!(
+            harness
+                .registered
+                .github_stack_signal(PROJECT_ID, &record.signal_id)
+                .await
+                .expect("refused forgery must not reserve a signal identity")
+                .is_none()
+        );
+    }
+
+    let mut valid = signal("signal.github-stack-after-forgery", 11);
+    valid.signal_json = r#"{"payload":{"not_retired":true}}"#.to_owned();
+    harness
+        .registered
+        .append_github_stack_signal(valid.clone(), vec![RECIPIENT.to_owned()])
+        .await
+        .expect("normal signal admission must remain available");
+    assert_eq!(
+        harness
+            .registered
+            .github_stack_signal(PROJECT_ID, &valid.signal_id)
+            .await
+            .expect("read admitted live signal"),
+        Some(valid)
+    );
+}
+
+#[tokio::test]
 async fn pending_delivery_survives_restart_and_settles_only_after_acknowledgement() {
     let harness = RegisteredGlobalDbHarness::open("github-stack-delivery-restart").await;
     let record = signal("signal.github-stack-restart", 10);
@@ -99,7 +247,7 @@ async fn pending_delivery_survives_restart_and_settles_only_after_acknowledgemen
     );
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn saturation_is_per_recipient_and_defers_the_exact_overflow_recipient() {
     let harness = RegisteredGlobalDbHarness::open("github-stack-delivery-saturation").await;
     for index in 0..MAX_GITHUB_STACK_ACTIVE_PENDING_V1 {
@@ -155,7 +303,7 @@ async fn saturation_is_per_recipient_and_defers_the_exact_overflow_recipient() {
     );
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn settling_a_recipient_promotes_only_its_oldest_deferred_row() {
     let harness = RegisteredGlobalDbHarness::open("github-stack-delivery-promotion").await;
     let both = vec![RECIPIENT.to_owned(), "actor.other".to_owned()];
@@ -204,5 +352,678 @@ async fn settling_a_recipient_promotes_only_its_oldest_deferred_row() {
         state(&harness, &older.signal_id, "actor.other").await,
         Some(GitHubStackDeliveryStateV1::Deferred),
         "another recipient's backlog is untouched"
+    );
+}
+
+async fn stored_signal_payload_bytes(harness: &RegisteredGlobalDbHarness, signal_id: &str) -> i64 {
+    let snapshot = harness
+        .registered
+        .read_snapshot()
+        .await
+        .expect("read stored signal");
+    let mut rows = snapshot
+        .query(
+            "SELECT length(signal_json) FROM github_stack_delivery_signals
+             WHERE project_id = ?1 AND signal_id = ?2",
+            params![PROJECT_ID, signal_id],
+        )
+        .await
+        .expect("query stored payload size");
+    rows.next()
+        .await
+        .expect("read stored payload size")
+        .expect("signal identity remains after retirement")
+        .get::<i64>(0)
+        .expect("decode stored payload bytes")
+}
+
+#[tokio::test]
+async fn noncanonical_retirement_marker_cannot_reopen_an_expired_signal() {
+    let harness = RegisteredGlobalDbHarness::open("github-stack-retirement-marker-shape").await;
+    let record = signal("signal.github-stack-retirement-whitespace", 10);
+    harness
+        .registered
+        .append_github_stack_signal(record.clone(), vec![RECIPIENT.to_owned()])
+        .await
+        .expect("append a real signal");
+    harness
+        .registered
+        .acknowledge_github_stack_host_delivery(PROJECT_ID, &record.signal_id, RECIPIENT)
+        .await
+        .expect("settle the recipient");
+
+    // The installed SQL trigger accepts equivalent JSON with whitespace.
+    // The old byte-prefix decoder treated it as an unretired signal.
+    let digest = hex::encode(sha2::Sha256::digest(record.signal_json.as_bytes()));
+    let whitespace_marker =
+        format!("{{\n  \"__tracedecay_retired_stack_sha256_v1\": \"{digest}\"\n}}");
+    let writer = harness
+        .registered
+        .writer_connection()
+        .expect("registered retirement-marker writer");
+    writer
+        .execute(
+            "UPDATE github_stack_delivery_signals SET signal_json = ?3
+             WHERE project_id = ?1 AND signal_id = ?2",
+            params![
+                PROJECT_ID,
+                record.signal_id.as_str(),
+                whitespace_marker.as_str()
+            ],
+        )
+        .await
+        .expect("the terminal-only marker is allowed by SQLite");
+    assert!(
+        harness
+            .registered
+            .github_stack_signal(PROJECT_ID, &record.signal_id)
+            .await
+            .expect("a retired marker must never expand as a signal")
+            .is_none(),
+        "whitespace in a legitimate retirement marker must not expose it"
+    );
+    assert!(matches!(
+        harness
+            .registered
+            .append_github_stack_signal(record.clone(), vec![RECIPIENT.to_owned()])
+            .await
+            .expect("the identical replay remains recognized"),
+        GitHubStackSignalAppendOutcomeV1::Replayed { .. }
+    ));
+    let mut conflict = record.clone();
+    conflict.signal_json = r#"{"different":true}"#.to_owned();
+    assert!(
+        harness
+            .registered
+            .append_github_stack_signal(conflict, vec![RECIPIENT.to_owned()])
+            .await
+            .expect_err("changed bytes must conflict with retained fingerprint")
+            .contains("identity conflict")
+    );
+
+    // SQLite decodes Unicode-escaped object keys as the same retirement
+    // field, even though its literal byte spelling differs from the key.
+    let escaped = signal("signal.github-stack-escaped-retirement-key", 12);
+    harness
+        .registered
+        .append_github_stack_signal(escaped.clone(), vec![RECIPIENT.to_owned()])
+        .await
+        .expect("append the Unicode-key fixture");
+    harness
+        .registered
+        .acknowledge_github_stack_host_delivery(PROJECT_ID, &escaped.signal_id, RECIPIENT)
+        .await
+        .expect("settle Unicode-key fixture");
+    let escaped_marker = format!(r#"{{"__trac\u0065decay_retired_stack_sha256_v1":"{digest}"}}"#);
+    let writer = harness
+        .registered
+        .writer_connection()
+        .expect("registered Unicode-marker writer");
+    writer
+        .execute(
+            "UPDATE github_stack_delivery_signals SET signal_json = ?3
+             WHERE project_id = ?1 AND signal_id = ?2",
+            params![
+                PROJECT_ID,
+                escaped.signal_id.as_str(),
+                escaped_marker.as_str()
+            ],
+        )
+        .await
+        .expect("SQLite accepts the escaped retirement key");
+    assert!(
+        harness
+            .registered
+            .github_stack_signal(PROJECT_ID, &escaped.signal_id)
+            .await
+            .expect("escaped-key marker must not expand")
+            .is_none(),
+        "escaped JSON keys must retain the same retired identity"
+    );
+
+    let malformed = signal("signal.github-stack-malformed-marker", 11);
+    harness
+        .registered
+        .append_github_stack_signal(malformed.clone(), vec![RECIPIENT.to_owned()])
+        .await
+        .expect("append a second signal");
+    harness
+        .registered
+        .acknowledge_github_stack_host_delivery(PROJECT_ID, &malformed.signal_id, RECIPIENT)
+        .await
+        .expect("settle second recipient");
+    // SQL and the reader must agree: a retirement marker has one member.
+    // A second field or a duplicate key is ambiguous, even if its hash is valid.
+    for ambiguous_marker in [
+        format!(r#"{{"__tracedecay_retired_stack_sha256_v1":"{digest}","other":"unexpected"}}"#),
+        format!(
+            r#"{{"__tracedecay_retired_stack_sha256_v1":"{digest}","__tracedecay_retired_stack_sha256_v1":"{digest}"}}"#
+        ),
+    ] {
+        let rejection = harness
+            .registered
+            .writer_connection()
+            .expect("registered ambiguous-marker writer")
+            .execute(
+                "UPDATE github_stack_delivery_signals SET signal_json = ?3
+                 WHERE project_id = ?1 AND signal_id = ?2",
+                params![
+                    PROJECT_ID,
+                    malformed.signal_id.as_str(),
+                    ambiguous_marker.as_str()
+                ],
+            )
+            .await
+            .expect_err("retirement must reject extra and duplicated JSON members")
+            .to_string();
+        assert!(
+            rejection.contains("GitHub stack delivery signals are immutable"),
+            "{rejection}"
+        );
+        assert_eq!(
+            harness
+                .registered
+                .github_stack_signal(PROJECT_ID, &malformed.signal_id)
+                .await
+                .expect("refused ambiguous retirement keeps the original"),
+            Some(malformed.clone())
+        );
+    }
+    let invalid_marker = format!(
+        r#"{{"__tracedecay_retired_stack_sha256_v1":"{}"}}"#,
+        "g".repeat(64)
+    );
+    let rejection = harness
+        .registered
+        .writer_connection()
+        .expect("registered malformed-marker writer")
+        .execute(
+            "UPDATE github_stack_delivery_signals SET signal_json = ?3
+             WHERE project_id = ?1 AND signal_id = ?2",
+            params![
+                PROJECT_ID,
+                malformed.signal_id.as_str(),
+                invalid_marker.as_str()
+            ],
+        )
+        .await
+        .expect_err("the SQL guard must reject a non-hexadecimal fingerprint")
+        .to_string();
+    assert!(
+        rejection.contains("GitHub stack delivery signals are immutable"),
+        "{rejection}"
+    );
+    assert_eq!(
+        harness
+            .registered
+            .github_stack_signal(PROJECT_ID, &malformed.signal_id)
+            .await
+            .expect("refused invalid marker cannot alter the original"),
+        Some(malformed)
+    );
+}
+
+#[tokio::test]
+async fn terminal_compaction_preserves_pending_peers_and_refuses_replay_collision() {
+    let harness = RegisteredGlobalDbHarness::open("github-stack-terminal-compaction").await;
+    let mut record = signal("signal.github-stack-old", 10);
+    record.signal_json = format!(r#"{{"large":"{}"}}"#, "x".repeat(80_000));
+    let recipients = vec![RECIPIENT.to_owned(), "actor.other".to_owned()];
+    harness
+        .registered
+        .append_github_stack_signal(record.clone(), recipients.clone())
+        .await
+        .expect("durably append old signal");
+    let original_size = stored_signal_payload_bytes(&harness, &record.signal_id).await;
+
+    harness
+        .registered
+        .acknowledge_github_stack_host_delivery(PROJECT_ID, &record.signal_id, RECIPIENT)
+        .await
+        .expect("settle first recipient");
+    assert_eq!(
+        harness
+            .registered
+            .retire_github_stack_terminal_payloads_before(11)
+            .await
+            .expect("attempt cleanup with pending peer")
+            .retired,
+        0,
+        "a pending peer retains its exact payload"
+    );
+    assert_eq!(
+        harness
+            .registered
+            .github_stack_signal(PROJECT_ID, &record.signal_id)
+            .await
+            .expect("read live signal"),
+        Some(record.clone())
+    );
+    harness
+        .registered
+        .record_github_stack_authorization_loss(PROJECT_ID, &record.signal_id, "actor.other")
+        .await
+        .expect("record permanently lost authorization");
+    assert_eq!(
+        harness
+            .registered
+            .retire_github_stack_terminal_payloads_before(10)
+            .await
+            .expect("respect inspection window")
+            .retired,
+        0,
+        "the cutoff excludes the issue timestamp itself"
+    );
+    assert_eq!(
+        harness
+            .registered
+            .retire_github_stack_terminal_payloads_before(11)
+            .await
+            .expect("retire fully terminal signal")
+            .retired,
+        1
+    );
+    assert!(
+        stored_signal_payload_bytes(&harness, &record.signal_id).await < original_size / 100,
+        "retire the large transport payload rather than moving it to another log"
+    );
+    assert!(
+        harness
+            .registered
+            .github_stack_signal(PROJECT_ID, &record.signal_id)
+            .await
+            .expect("old expansion must expire")
+            .is_none(),
+        "a compact fingerprint must never be returned as expandable signal JSON"
+    );
+    assert_eq!(
+        state(&harness, &record.signal_id, RECIPIENT).await,
+        None,
+        "retired recipient bookkeeping is no longer part of the active index"
+    );
+    assert!(matches!(
+        harness
+            .registered
+            .append_github_stack_signal(record.clone(), recipients.clone())
+            .await
+            .expect("identical replay remains recognized"),
+        GitHubStackSignalAppendOutcomeV1::Replayed { .. }
+    ));
+    let mut conflict = record.clone();
+    conflict.signal_json = r#"{"different":true}"#.to_owned();
+    assert!(
+        harness
+            .registered
+            .append_github_stack_signal(conflict, recipients.clone())
+            .await
+            .is_err(),
+        "retired signal identities reject mismatched payloads"
+    );
+
+    let restarted = harness.restart().await;
+    assert!(matches!(
+        restarted
+            .registered
+            .append_github_stack_signal(record, recipients)
+            .await
+            .expect("the small replay fingerprint survives restart"),
+        GitHubStackSignalAppendOutcomeV1::Replayed { .. }
+    ));
+    assert_eq!(
+        restarted
+            .registered
+            .pending_github_stack_deliveries(PROJECT_ID, SCOPE_DIGEST, None)
+            .await
+            .expect("retired data cannot redeliver"),
+        vec![]
+    );
+}
+
+#[tokio::test]
+async fn compaction_is_bounded_and_raw_sql_cannot_delete_unsettled_delivery() {
+    let harness = RegisteredGlobalDbHarness::open("github-stack-bounded-retirement").await;
+    let count = crate::MAX_GITHUB_STACK_RETIRE_BATCH_V1 + 3;
+    for index in 0..count {
+        let record = signal(
+            &format!("signal.github-stack-batch.{index}"),
+            index as i64 + 1,
+        );
+        harness
+            .registered
+            .append_github_stack_signal(record.clone(), vec![RECIPIENT.to_owned()])
+            .await
+            .expect("append batch signal");
+        if index + 1 != count {
+            harness
+                .registered
+                .acknowledge_github_stack_host_delivery(PROJECT_ID, &record.signal_id, RECIPIENT)
+                .await
+                .expect("settle eligible batch signal");
+        }
+    }
+    let live = format!("signal.github-stack-batch.{}", count - 1);
+    let pending_deletion = harness
+        .registered
+        .writer_connection()
+        .expect("registered test writer")
+        .execute(
+            "DELETE FROM github_stack_delivery_recipients
+             WHERE project_id = ?1 AND signal_id = ?2",
+            params![PROJECT_ID, live.as_str()],
+        )
+        .await;
+    assert!(
+        pending_deletion
+            .expect_err("the SQL guard protects active pending state")
+            .to_string()
+            .contains("GitHub stack delivery recipient is not retired"),
+        "the trigger must reject deletion of an unsettled recipient"
+    );
+
+    let first = harness
+        .registered
+        .retire_github_stack_terminal_payloads_before(1000)
+        .await
+        .expect("bounded first page")
+        .retired;
+    assert_eq!(first, crate::MAX_GITHUB_STACK_RETIRE_BATCH_V1);
+    let second = harness
+        .registered
+        .retire_github_stack_terminal_payloads_before(1000)
+        .await
+        .expect("next page")
+        .retired;
+    assert_eq!(second, 2, "pending signal is ineligible across pages");
+    assert_eq!(
+        state(&harness, &live, RECIPIENT).await,
+        Some(GitHubStackDeliveryStateV1::Pending)
+    );
+    assert_eq!(
+        harness
+            .registered
+            .retire_github_stack_terminal_payloads_before(1000)
+            .await
+            .expect("fully drained next page")
+            .retired,
+        0
+    );
+}
+
+#[tokio::test]
+async fn retention_frontier_bounds_writer_work_and_resumes_past_deferred_backlog() {
+    const BLOCKED: usize = 4_096;
+    let harness = RegisteredGlobalDbHarness::open("github-stack-retirement-frontier").await;
+    let writer = harness
+        .registered
+        .writer_connection()
+        .expect("registered retention fixture writer");
+    // One recipient's first 256 signals are pending and all later ones are
+    // deferred. The terminal signal is beyond this old, ineligible prefix.
+    writer
+        .execute(
+            "WITH RECURSIVE seq(n) AS (
+                 SELECT 0 UNION ALL SELECT n + 1 FROM seq WHERE n < 4095
+             )
+             INSERT INTO github_stack_delivery_signals
+                 (project_id, signal_id, scope_digest, repository_id,
+                  watermark_id, observed_at_micros, signal_json)
+             SELECT ?1, printf('signal.github-stack-prefix.%05d', n), ?2,
+                    'repository.github-stack-delivery', 'watermark.github-stack-delivery',
+                    n + 1, json_object('n', n) FROM seq",
+            params![PROJECT_ID, SCOPE_DIGEST],
+        )
+        .await
+        .expect("seed a large genuine signal table");
+    writer
+        .execute(
+            "INSERT INTO github_stack_delivery_recipients
+                 (project_id, signal_id, recipient, state)
+             SELECT project_id, signal_id, ?1,
+                    CASE WHEN observed_at_micros <= 256 THEN 'pending'
+                         ELSE 'deferred' END
+             FROM github_stack_delivery_signals WHERE project_id = ?2",
+            params![RECIPIENT, PROJECT_ID],
+        )
+        .await
+        .expect("seed a saturated recipient backlog");
+    let late = signal("signal.github-stack-eligible-tail", 10_000);
+    // The old recipient is saturated. Give the eligible tail an independently
+    // admitted recipient so it can actually settle before retirement.
+    let tail_recipient = "actor.terminal-tail";
+    harness
+        .registered
+        .append_github_stack_signal(late.clone(), vec![tail_recipient.to_owned()])
+        .await
+        .expect("append terminal tail beyond the backlog");
+    harness
+        .registered
+        .acknowledge_github_stack_host_delivery(PROJECT_ID, &late.signal_id, tail_recipient)
+        .await
+        .expect("settle eligible tail");
+
+    let before = writer_telemetry(&harness.registered);
+    let first = harness
+        .registered
+        .retire_github_stack_terminal_payloads_before(10_001)
+        .await
+        .expect("scan one bounded pending window");
+    let after = writer_telemetry(&harness.registered);
+    assert_eq!(
+        after.transactions.commands - before.transactions.commands,
+        1
+    );
+    let steps = after.sqlite_vm.vm_steps - before.sqlite_vm.vm_steps;
+    assert_eq!(first.retired, 0);
+    assert_eq!(
+        first.inspected,
+        crate::stack_delivery::MAX_GITHUB_STACK_RETIRE_SCAN_V1
+    );
+    assert!(
+        !first.exhausted,
+        "the deferred prefix cannot starve the tail"
+    );
+    assert!(
+        (1..30_000).contains(&steps),
+        "one idle writer slice must not examine the 4096-row deferred prefix: {steps} VM steps"
+    );
+    assert_eq!(
+        harness
+            .registered
+            .github_stack_signal(PROJECT_ID, &late.signal_id)
+            .await
+            .unwrap(),
+        Some(late.clone()),
+        "the first bounded window must not skip ahead and compact the tail"
+    );
+
+    // The scan cursor is durable, not an in-process iterator. A restart must
+    // resume past exactly the first 64 inspected rows and reach the tail.
+    let restarted = harness.restart().await;
+    let mut retired = 0;
+    for _ in 0..(BLOCKED / crate::stack_delivery::MAX_GITHUB_STACK_RETIRE_SCAN_V1 + 3) {
+        let page = restarted
+            .registered
+            .retire_github_stack_terminal_payloads_before(10_001)
+            .await
+            .expect("continue bounded retirement after restart");
+        assert!(page.inspected <= crate::stack_delivery::MAX_GITHUB_STACK_RETIRE_SCAN_V1);
+        assert!(page.retired <= crate::MAX_GITHUB_STACK_RETIRE_BATCH_V1);
+        retired += page.retired;
+        if retired != 0 {
+            break;
+        }
+    }
+    assert_eq!(retired, 1, "the terminal tail must eventually be reached");
+    assert!(
+        restarted
+            .registered
+            .github_stack_signal(PROJECT_ID, &late.signal_id)
+            .await
+            .unwrap()
+            .is_none()
+    );
+
+    // On wrap, earlier signals that have since settled are reconsidered.
+    let formerly_pending = "signal.github-stack-prefix.00000";
+    restarted
+        .registered
+        .record_github_stack_authorization_loss(PROJECT_ID, formerly_pending, RECIPIENT)
+        .await
+        .expect("permanently settle an earlier signal");
+    let mut saw_earlier = false;
+    for _ in 0..(BLOCKED / crate::stack_delivery::MAX_GITHUB_STACK_RETIRE_SCAN_V1 + 3) {
+        let page = restarted
+            .registered
+            .retire_github_stack_terminal_payloads_before(10_001)
+            .await
+            .expect("revisit old newly settled signals");
+        assert!(page.inspected <= crate::stack_delivery::MAX_GITHUB_STACK_RETIRE_SCAN_V1);
+        if restarted
+            .registered
+            .github_stack_signal(PROJECT_ID, formerly_pending)
+            .await
+            .unwrap()
+            .is_none()
+        {
+            saw_earlier = true;
+            break;
+        }
+    }
+    assert!(
+        saw_earlier,
+        "wrap must not abandon later-settling old signals"
+    );
+}
+
+#[tokio::test]
+async fn terminal_retirement_cannot_be_accelerated_past_the_issued_window() {
+    let harness = RegisteredGlobalDbHarness::open("github-stack-terminal-freshness").await;
+    let mut fresh = signal(
+        "signal.github-stack-fresh",
+        tracedecay_contracts::now_micros().0,
+    );
+    fresh.signal_json = r#"{"recent":true}"#.to_owned();
+    harness
+        .registered
+        .append_github_stack_signal(fresh.clone(), vec![RECIPIENT.to_owned()])
+        .await
+        .expect("append current signal");
+    harness
+        .registered
+        .acknowledge_github_stack_host_delivery(PROJECT_ID, &fresh.signal_id, RECIPIENT)
+        .await
+        .expect("settle current signal");
+    assert_eq!(
+        harness
+            .registered
+            .retire_github_stack_terminal_payloads_before(i64::MAX)
+            .await
+            .expect("future cutoff is conservatively clamped")
+            .retired,
+        0
+    );
+    // A direct registered writer must not retire fresh transport evidence,
+    // even with a syntactically valid marker for its real original bytes.
+    let digest = hex::encode(sha2::Sha256::digest(fresh.signal_json.as_bytes()));
+    let marker = format!(r#"{{"__tracedecay_retired_stack_sha256_v1":"{digest}"}}"#);
+    let writer = harness
+        .registered
+        .writer_connection()
+        .expect("registered fresh-retirement writer");
+    let refusal = writer
+        .execute(
+            "UPDATE github_stack_delivery_signals SET signal_json = ?3
+             WHERE project_id = ?1 AND signal_id = ?2",
+            params![PROJECT_ID, fresh.signal_id.as_str(), marker.as_str()],
+        )
+        .await
+        .expect_err("registered SQL must preserve the inspection window")
+        .to_string();
+    assert!(
+        refusal.contains("GitHub stack delivery signals are immutable"),
+        "{refusal}"
+    );
+    assert_eq!(
+        harness
+            .registered
+            .github_stack_signal(PROJECT_ID, &fresh.signal_id)
+            .await
+            .expect("recent expanded signal remains inspectable"),
+        Some(fresh)
+    );
+}
+
+#[tokio::test]
+async fn failed_terminal_recipient_retirement_rolls_back_payload_compaction() {
+    let harness = RegisteredGlobalDbHarness::open("github-stack-retire-rollback").await;
+    let record = signal("signal.github-stack-rollback", 10);
+    harness
+        .registered
+        .append_github_stack_signal(record.clone(), vec![RECIPIENT.to_owned()])
+        .await
+        .expect("persist signal");
+    harness
+        .registered
+        .acknowledge_github_stack_host_delivery(PROJECT_ID, &record.signal_id, RECIPIENT)
+        .await
+        .expect("settle signal before retention");
+
+    harness
+        .registered
+        .writer_connection()
+        .expect("registered test writer")
+        .execute_batch(
+            "CREATE TRIGGER github_stack_retirement_failure
+             BEFORE DELETE ON github_stack_delivery_recipients
+             BEGIN SELECT RAISE(ABORT, 'simulate interrupted retirement'); END;",
+        )
+        .await
+        .expect("inject failure after payload update");
+    let problem = harness
+        .registered
+        .retire_github_stack_terminal_payloads_before(11)
+        .await
+        .expect_err("recipient deletion must fail inside the transaction");
+    assert!(
+        problem.contains("simulate interrupted retirement"),
+        "{problem}"
+    );
+    assert_eq!(
+        harness
+            .registered
+            .github_stack_signal(PROJECT_ID, &record.signal_id)
+            .await
+            .expect("failed retirement preserves the full payload"),
+        Some(record.clone())
+    );
+    assert_eq!(
+        state(&harness, &record.signal_id, RECIPIENT).await,
+        Some(GitHubStackDeliveryStateV1::Settled)
+    );
+
+    harness
+        .registered
+        .writer_connection()
+        .expect("registered test writer")
+        .execute_batch("DROP TRIGGER github_stack_retirement_failure")
+        .await
+        .expect("remove failure injection");
+    assert_eq!(
+        harness
+            .registered
+            .retire_github_stack_terminal_payloads_before(11)
+            .await
+            .expect("retry after failure")
+            .retired,
+        1
+    );
+    let restarted = harness.restart().await;
+    assert!(
+        restarted
+            .registered
+            .github_stack_signal(PROJECT_ID, &record.signal_id)
+            .await
+            .expect("retirement persisted across restart")
+            .is_none()
     );
 }

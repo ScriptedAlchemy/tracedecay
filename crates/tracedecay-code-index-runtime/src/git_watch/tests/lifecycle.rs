@@ -554,7 +554,7 @@ async fn abandoned_shutdown_aborts_the_task_it_was_joining() {
         worktree_git_dir(repo.path()).expect("worktree git directory"),
         MaintenanceCoordinator::default(),
     ));
-    let (alive, task_dropped) = std::sync::mpsc::channel::<()>();
+    let (alive, task_dropped) = tokio::sync::oneshot::channel::<()>();
     state.retain_task(native_task(async move {
         let _alive = alive;
         std::future::pending::<()>().await;
@@ -573,9 +573,11 @@ async fn abandoned_shutdown_aborts_the_task_it_was_joining() {
         "the join must still be inside its budget when its caller gives up"
     );
 
-    assert_eq!(
-        task_dropped.recv_timeout(Duration::from_secs(5)),
-        Err(std::sync::mpsc::RecvTimeoutError::Disconnected),
+    assert!(
+        matches!(
+            tokio::time::timeout(Duration::from_secs(5), task_dropped).await,
+            Ok(Err(_))
+        ),
         "an abandoned shutdown must not leave the task it was joining running"
     );
     let outcome = tokio::time::timeout(TEST_READY_TIMEOUT, watcher.shutdown())

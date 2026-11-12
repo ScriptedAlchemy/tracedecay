@@ -106,7 +106,7 @@ fn with_stateless_request_context(line: String) -> String {
 #[cfg(all(unix, any(test, feature = "test-transport")))]
 fn connected_broker_pair() -> Result<(BrokerStream, tokio::net::UnixStream)> {
     let (daemon, client) = tokio::net::UnixStream::pair()?;
-    Ok((BrokerStream::from_tokio_unix(daemon)?, client))
+    Ok((BrokerStream::Unix(daemon), client))
 }
 
 #[cfg(all(not(unix), any(test, feature = "test-transport")))]

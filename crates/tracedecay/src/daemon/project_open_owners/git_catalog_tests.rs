@@ -1,6 +1,8 @@
 use crate::test_support::git::GIT_FIXTURE_CONFIG;
 use tracedecay_application::git_intelligence::NativeGitIntelligence;
-use tracedecay_code_index_runtime::git_transactions::DaemonGitIndexTransactionServiceRegistry;
+use tracedecay_code_index_runtime::git_transactions::{
+    DaemonGitAuthorityStateV1, DaemonGitIndexTransactionServiceRegistry, DaemonGitInvocationOwner,
+};
 use tracedecay_contracts::catalog_composition::{
     CatalogCompositionError, build_application_catalog_snapshot,
 };
@@ -28,6 +30,20 @@ fn unavailable_catalog()
             "catalog unavailable for this independently constructed owner".to_owned(),
         ),
     ))
+}
+
+/// The authority blocks on the configuration store, so it runs where a thread
+/// may park: a dedicated thread or the storage-aware blocking pool.
+fn current_authority_off_runtime(
+    owner: &DaemonGitInvocationOwner,
+    operation: GitIndexTransactionOperationV1,
+) -> Result<DaemonGitAuthorityStateV1, GitIndexTransactionPortError> {
+    std::thread::scope(|threads| {
+        threads
+            .spawn(|| owner.current_authority(operation))
+            .join()
+            .expect("authority thread")
+    })
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -97,7 +113,7 @@ async fn git_owner_uses_explicit_canonical_catalog_and_rechecks_authorization() 
         .unwrap()
         .unwrap();
     let operation = GitIndexTransactionOperationV1::StageHunks;
-    let initial = owner.current_authority(operation).unwrap();
+    let initial = current_authority_off_runtime(&owner, operation).unwrap();
     assert_eq!(
         initial.catalog_digest.as_str(),
         build_application_catalog_snapshot()
@@ -106,19 +122,15 @@ async fn git_owner_uses_explicit_canonical_catalog_and_rechecks_authorization() 
             .to_string()
     );
     assert_eq!(initial.scope, scope);
-    // The authority blocks on the configuration store from whichever thread
-    // rechecks policy, so it must not need that thread's Tokio runtime.
-    let off_runtime = std::thread::scope(|threads| {
-        let plain = threads.spawn(|| owner.current_authority(operation));
-        let current_thread = threads.spawn(|| {
-            tokio::runtime::Builder::new_current_thread()
-                .build()
-                .unwrap()
-                .block_on(async { owner.current_authority(operation) })
-        });
-        [plain.join().unwrap(), current_thread.join().unwrap()]
-    });
-    for authority in off_runtime {
+    let process = tracedecay_runtime_core::native_runtime::handle().expect("process runtime");
+    let blocking_owner = owner.clone();
+    let blocking =
+        tracedecay_runtime_core::native_runtime::spawn_blocking_on(&process, move || {
+            blocking_owner.current_authority(operation)
+        })
+        .await
+        .expect("blocking authority task");
+    for authority in [current_authority_off_runtime(&owner, operation), blocking] {
         let authority = authority.unwrap();
         assert_eq!(authority.policy_digest, initial.policy_digest);
         assert_eq!(authority.configuration_digest, initial.configuration_digest);
@@ -142,11 +154,13 @@ async fn git_owner_uses_explicit_canonical_catalog_and_rechecks_authorization() 
         .unwrap()
         .unwrap();
     assert!(matches!(
-        unavailable.current_authority(operation),
+        current_authority_off_runtime(&unavailable, operation),
         Err(GitIndexTransactionPortError::DaemonUnavailable)
     ));
     assert_eq!(
-        owner.current_authority(operation).unwrap().catalog_digest,
+        current_authority_off_runtime(&owner, operation)
+            .unwrap()
+            .catalog_digest,
         initial.catalog_digest
     );
 
@@ -207,7 +221,7 @@ async fn git_owner_uses_explicit_canonical_catalog_and_rechecks_authorization() 
         .await
         .unwrap();
     assert!(matches!(
-        owner.current_authority(operation),
+        current_authority_off_runtime(&owner, operation),
         Err(GitIndexTransactionPortError::PolicyDenied)
     ));
     let denied_result = owner.service.apply(&denied).await.unwrap();
@@ -238,8 +252,7 @@ async fn git_owner_uses_explicit_canonical_catalog_and_rechecks_authorization() 
         .mount(database, project_root.clone(), day_old, opened_at)
         .await
         .unwrap();
-    let current = owner
-        .current_authority(operation)
+    let current = current_authority_off_runtime(&owner, operation)
         .expect("the Git owner must still authorize a route opened a day ago");
     assert!(
         current.grant_expires_at > current.evaluated_at
@@ -271,7 +284,7 @@ async fn transaction_preview(
     suffix: &str,
     operation: GitIndexTransactionOperationV1,
 ) -> tracedecay_contracts::GitIndexApplyRequestV1 {
-    let captured = owner.current_authority(operation).unwrap();
+    let captured = current_authority_off_runtime(owner, operation).unwrap();
     let binding = GitIndexOperationBindingV1::for_operation(operation).unwrap();
     let snapshot = tracedecay_code_index_runtime::git_transactions::capture_exact_snapshot(
         &owner.repository_root,
@@ -303,7 +316,7 @@ async fn transaction_preview(
     // The preview input lives 30 s from the authority evaluation that admits
     // it. Evaluate that authority after the Git capture, which takes seconds
     // on a loaded host, so the lifetime covers only the transaction itself.
-    let current = owner.current_authority(operation).unwrap();
+    let current = current_authority_off_runtime(owner, operation).unwrap();
     let expires_at =
         UtcMicros(current.evaluated_at.0 + MAX_GIT_INDEX_PREVIEW_INPUT_LIFETIME_MICROS);
     let input = GitIndexPreviewInputV1::new_hunk_selection(
