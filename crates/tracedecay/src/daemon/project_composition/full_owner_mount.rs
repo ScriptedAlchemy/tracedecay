@@ -184,12 +184,15 @@ mod tests {
     }
 
     #[test]
-    fn independent_full_mounts_join_without_a_tokio_runtime() {
+    fn independent_full_mounts_join_from_a_synchronous_host() {
+        if !crate::test_support::alone_with_runtime_hazards() {
+            return;
+        }
         let hazards = crate::test_support::native_runtime_hazards();
         let joined = tracedecay_runtime_core::native_runtime::block_on(async {
-            assert!(tokio::runtime::Handle::try_current().is_err());
+            assert!(tokio::runtime::Handle::try_current().is_ok());
             join_independent_full_owner_mounts(async { Ok("owners-ready") }, async {
-                Ok(tokio::runtime::Handle::try_current().is_err())
+                Ok(tokio::runtime::Handle::try_current().is_ok())
             })
             .await
         })

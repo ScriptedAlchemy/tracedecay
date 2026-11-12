@@ -97,18 +97,17 @@ use tracedecay_domain::test_fixtures::id;
 
 use tracedecay_domain::test_fixtures::digest;
 
-/// Runs `future` with no Tokio runtime anywhere on the stack, so any Tokio
-/// reactor, timer or blocking-pool call on the attempt path panics. Like
-/// `spawn_for_worktree`, it spawns the attempt with `NativeTask::spawn`, so
+/// Runs `future` from a synchronous host on the installed Tokio runtime.
+/// Like `spawn_for_worktree`, it spawns the attempt with `NativeTask::spawn`, so
 /// `native_runtime::spawn_blocking` queues its work instead of running it
 /// inline as it does on a blocking-pool thread.
 #[cfg(unix)]
-fn without_tokio<F>(future: F)
+fn on_installed_runtime<F>(future: F)
 where
     F: std::future::Future<Output = ()> + Send + 'static,
 {
     let outcome = native_runtime::block_on(async {
-        assert!(tokio::runtime::Handle::try_current().is_err());
+        assert!(tokio::runtime::Handle::try_current().is_ok());
         native_runtime::NativeTask::spawn(future)
             .expect("native blocking pool available")
             .wait()
@@ -971,7 +970,7 @@ const CLEAN_PROVIDER: &str = "#!/bin/sh\ncat > /dev/null\nexit 0\n";
 #[cfg(unix)]
 #[test]
 fn a_clean_provider_run_seals_succeeded_evidence_over_the_captured_stream() {
-    without_tokio(async {
+    on_installed_runtime(async {
         let (_artifact_dir, workflow_artifacts) = provider_artifact_store().await;
         let directory = tempfile::TempDir::new().unwrap();
         let root = directory.path();
@@ -1217,7 +1216,7 @@ async fn initial_provider_child_uses_values_captured_for_that_spawn() {
 #[cfg(unix)]
 #[test]
 fn stdout_past_the_admitted_cap_is_a_typed_overflow_not_a_silent_success() {
-    without_tokio(async {
+    on_installed_runtime(async {
         let (_artifact_dir, workflow_artifacts) = provider_artifact_store().await;
         let directory = tempfile::TempDir::new().unwrap();
         let root = directory.path();
@@ -1369,7 +1368,7 @@ fn overflow_classification_names_the_channel_and_yields_to_cancellation() {
 #[cfg(unix)]
 #[test]
 fn a_provider_that_ignores_interrupt_is_escalated_to_a_kill_on_the_record() {
-    without_tokio(async {
+    on_installed_runtime(async {
         let (_artifact_dir, workflow_artifacts) = provider_artifact_store().await;
         let directory = tempfile::TempDir::new().unwrap();
         let root = directory.path();
@@ -1479,7 +1478,7 @@ fn a_provider_that_ignores_interrupt_is_escalated_to_a_kill_on_the_record() {
 #[cfg(target_os = "linux")]
 #[test]
 fn dropping_a_live_provider_kills_its_whole_process_group() {
-    without_tokio(async {
+    on_installed_runtime(async {
         let directory = tempfile::TempDir::new().unwrap();
         let pids = directory.path().join("pids");
         let executable = fake_executable(
@@ -1624,7 +1623,7 @@ fn a_descendant_holding_the_provider_pipes_settles_timed_out_at_the_deadline() {
         ("over the cap", "", "hello hello hello hello", 8),
     ];
     for (name, redirect, written, cap) in cases {
-        without_tokio(async move {
+        on_installed_runtime(async move {
             let (_artifact_dir, workflow_artifacts) = provider_artifact_store().await;
             let directory = tempfile::TempDir::new().unwrap();
             let root = directory.path();
@@ -1687,7 +1686,7 @@ fn a_descendant_holding_the_provider_pipes_settles_timed_out_at_the_deadline() {
 #[cfg(target_os = "linux")]
 #[test]
 fn a_descendant_outside_the_provider_group_cannot_pin_the_attempt() {
-    without_tokio(async {
+    on_installed_runtime(async {
         let (_artifact_dir, workflow_artifacts) = provider_artifact_store().await;
         let directory = tempfile::TempDir::new().unwrap();
         let root = directory.path();
@@ -1734,7 +1733,7 @@ fn a_descendant_outside_the_provider_group_cannot_pin_the_attempt() {
 #[cfg(target_os = "linux")]
 #[test]
 fn cancelling_while_a_descendant_holds_the_pipes_settles_cancelled() {
-    without_tokio(async {
+    on_installed_runtime(async {
         let (_artifact_dir, workflow_artifacts) = provider_artifact_store().await;
         let directory = tempfile::TempDir::new().unwrap();
         let root = directory.path();
@@ -1825,7 +1824,7 @@ fn cancelling_while_a_descendant_holds_the_pipes_settles_cancelled() {
 #[cfg(target_os = "linux")]
 #[test]
 fn a_descendant_finishing_within_the_deadline_has_its_output_captured() {
-    without_tokio(async {
+    on_installed_runtime(async {
         let (_artifact_dir, workflow_artifacts) = provider_artifact_store().await;
         let directory = tempfile::TempDir::new().unwrap();
         let root = directory.path();
@@ -2933,7 +2932,7 @@ impl AppServerAttempt {
 #[cfg(unix)]
 #[test]
 fn cancelling_a_running_app_server_session_settles_cancelled_promptly() {
-    without_tokio(async {
+    on_installed_runtime(async {
         let (_artifact_dir, store) = provider_artifact_store().await;
         let directory = tempfile::TempDir::new().unwrap();
         let attempt = AppServerAttempt::spawn(
@@ -2997,7 +2996,7 @@ fn cancelling_a_running_app_server_session_settles_cancelled_promptly() {
 #[cfg(unix)]
 #[test]
 fn a_completed_app_server_session_settles_succeeded_once() {
-    without_tokio(async {
+    on_installed_runtime(async {
         let (_artifact_dir, store) = provider_artifact_store().await;
         let directory = tempfile::TempDir::new().unwrap();
         let attempt = AppServerAttempt::spawn(
@@ -3027,7 +3026,7 @@ fn a_completed_app_server_session_settles_succeeded_once() {
 #[cfg(unix)]
 #[test]
 fn an_app_server_that_never_starts_its_session_settles_timed_out_once() {
-    without_tokio(async {
+    on_installed_runtime(async {
         let (_artifact_dir, store) = provider_artifact_store().await;
         let directory = tempfile::TempDir::new().unwrap();
         let attempt =

@@ -86,10 +86,9 @@ that compatible workers are online. A reachable coordinator can queue an
 action while its worker pool is offline. Linux and macOS dynamic compilation can
 still progress on the hosted runner while waiting for a compatible worker;
 Windows compilation waits for MINI. The checked-in execution platforms select OS
-and CPU architecture, with CPU admission requirements. They do not define a high-memory worker
-class for asupersync. Worker memory capacity and scheduling belong to the
-private fleet configuration and must be verified from executed-action worker
-identities and metrics.
+and CPU architecture, with CPU admission requirements. Worker memory capacity
+and scheduling belong to the private fleet configuration and must be verified
+from executed-action worker identities and metrics.
 
 ## Trust configuration
 

@@ -62,43 +62,44 @@ fn generation_bits(generation: libc::c_long) -> u64 {
 #[cfg(test)]
 mod tests {
     #[cfg(target_os = "linux")]
+    use std::fs::File;
+    #[cfg(target_os = "linux")]
     use std::os::unix::ffi::OsStrExt;
     #[cfg(target_os = "linux")]
     use std::os::unix::fs::MetadataExt;
-    #[cfg(target_os = "linux")]
-    use std::path::Path;
 
     #[cfg(target_os = "linux")]
     use super::inode_generation;
 
-    /// Writes `path` and reads back the allocation identity the kernel keeps
-    /// unique: the inode number with the generation, `None` where the
-    /// filesystem answers `FS_IOC_GETVERSION` with no generation at all.
     #[cfg(target_os = "linux")]
-    fn write_and_identify(path: &Path) -> (u64, Option<u64>) {
-        std::fs::write(path, b"{}\n").unwrap();
-        let file = std::fs::File::open(path).unwrap();
+    fn allocation_identity(file: &File) -> (u64, Option<u64>) {
         (
             file.metadata().unwrap().ino(),
-            inode_generation(&file).unwrap(),
+            inode_generation(file).unwrap(),
         )
     }
 
-    /// Ext4 recycles the inode number and advances the generation; ZFS keeps
-    /// the generation and allocates a new inode number; tmpfs reports no
-    /// generation and allocates a new inode number. The pair differs on all
-    /// of them, and neither field is required to on its own.
     #[cfg(target_os = "linux")]
     #[test]
     fn replacing_a_file_changes_its_inode_allocation_identity() {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("rollout.jsonl");
-        let first = write_and_identify(&path);
+        let original = File::create(&path).unwrap();
+        let first = allocation_identity(&original);
+
+        // A reported generation survives close. Without it, filesystems such
+        // as overlayfs can immediately reuse a closed file's inode number.
+        let pin = first.1.is_none().then_some(original);
         std::fs::remove_file(&path).unwrap();
-        let second = write_and_identify(&path);
+        let replacement = File::create(&path).unwrap();
+        let second = allocation_identity(&replacement);
+        if let Some(unlinked) = pin {
+            assert_eq!(unlinked.metadata().unwrap().nlink(), 0);
+            assert_eq!(allocation_identity(&unlinked), first);
+        }
         assert_ne!(
             first, second,
-            "a replacement must not share the predecessor's identity"
+            "a replacement must differ from a pinned or generation-backed predecessor"
         );
         if is_ext4(temp.path()) {
             assert!(

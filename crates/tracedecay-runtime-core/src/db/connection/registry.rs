@@ -251,7 +251,7 @@ pub(super) struct DatabaseInner {
     pub(super) opened_file_identity: u64,
     /// Serializes admission, while each transaction owns its SQL state and rollback.
     /// A caller panic must release capacity rather than poison a unit-valued lock.
-    pub(super) writer: Arc<asupersync::sync::Semaphore>,
+    pub(super) writer: Arc<tokio::sync::Semaphore>,
     /// Coalesces and retains background memory-graph catch-up for this exact
     /// relational attachment.
     pub(super) memory_graph_reconciliation: MemoryGraphReconciliationCoordinatorV1,
@@ -380,7 +380,7 @@ impl DatabaseInner {
             canonical_path: runtime.client().canonical_path().to_path_buf(),
             runtime,
             opened_file_identity,
-            writer: Arc::new(asupersync::sync::Semaphore::new(1)),
+            writer: Arc::new(tokio::sync::Semaphore::new(1)),
             memory_graph_reconciliation: MemoryGraphReconciliationCoordinatorV1::default(),
             memory_graph_reconciliation_telemetry: Arc::new(
                 ProjectMemoryReconciliationTelemetryV1::default(),

@@ -209,7 +209,7 @@ mod tests {
     use tempfile::TempDir;
     use tracedecay_runtime_core::db::engine::TestConnection;
 
-    #[asupersync::test]
+    #[tokio::test]
     async fn body_reads_distinguish_storage_failures_from_missing_rows() {
         let tmp = TempDir::new().unwrap();
         let conn = TestConnection::open(&tmp.path().join("body-read-errors.db"));
@@ -236,7 +236,7 @@ mod tests {
         );
     }
 
-    #[asupersync::test]
+    #[tokio::test]
     async fn lcm_compaction_stores_large_bodies_once_and_bounds_placeholders() {
         const N: usize = 16;
         let stem = "m".repeat(80_000);
@@ -350,7 +350,7 @@ mod tests {
         }
     }
 
-    #[asupersync::test]
+    #[tokio::test]
     async fn observation_body_hydration_batches_reads_and_preserves_verification() {
         let tmp = TempDir::new().unwrap();
         let conn = TestConnection::open(&tmp.path().join("observation-bodies.db"));

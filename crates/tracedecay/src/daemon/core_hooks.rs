@@ -6,8 +6,8 @@
 
 use std::path::{Path, PathBuf};
 
-use asupersync::io::{AsyncWriteExt, BufReader};
 use rmcp::model::{ProtocolVersion, RequestMetaObject};
+use tokio::io::{AsyncWriteExt, BufReader};
 use tracedecay_framing::BoundedLineReader;
 use tracedecay_hooks::core_events::{DaemonHookEvent, HOOK_EVENT_METHOD, HookEventNotifyOutcomeV1};
 

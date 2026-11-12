@@ -1,4 +1,3 @@
-use std::sync::mpsc::RecvTimeoutError;
 use std::time::Duration;
 
 use tracedecay_contracts::CancellationSignal;
@@ -15,7 +14,7 @@ use crate::session_sync::{DaemonSessionSyncService, SessionSyncTaskV1, test_harn
 #[tokio::test]
 async fn timed_out_shutdown_aborts_the_session_sync_task() {
     let service = DaemonSessionSyncService::default();
-    let (alive, task_dropped) = std::sync::mpsc::channel::<()>();
+    let (alive, task_dropped) = tokio::sync::oneshot::channel::<()>();
     let task = NativeTask::spawn(async move {
         let _alive = alive;
         std::future::pending::<()>().await;
@@ -45,9 +44,11 @@ async fn timed_out_shutdown_aborts_the_session_sync_task() {
         "the join must still be waiting inside its abort grace"
     );
 
-    assert_eq!(
-        task_dropped.recv_timeout(Duration::from_secs(5)),
-        Err(RecvTimeoutError::Disconnected),
+    assert!(
+        matches!(
+            native_runtime::timeout(Duration::from_secs(5), task_dropped).await,
+            Ok(Err(_))
+        ),
         "a timed-out shutdown must not leave the session sync task running"
     );
     assert_eq!(

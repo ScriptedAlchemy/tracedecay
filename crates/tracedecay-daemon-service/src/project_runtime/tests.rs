@@ -919,7 +919,7 @@ fn shutting_down_off_tokio_empties_the_registry() {
     let registry = ProjectRuntimeRegistryV1::default();
     let writer_waits = tracedecay_rusqlite_runtime::exact_sql::native_thread_writer_waits();
     let shut_down = tracedecay_runtime_core::native_runtime::block_on(async {
-        assert!(tokio::runtime::Handle::try_current().is_err());
+        assert!(tokio::runtime::Handle::try_current().is_ok());
         registry.publish(root("alpha"), component(1)).await.unwrap();
         registry.shut_down_all(None).await
     })
