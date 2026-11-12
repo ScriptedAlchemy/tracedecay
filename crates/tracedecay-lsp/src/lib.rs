@@ -62,7 +62,7 @@ pub use compile_diagnostics::tsconfig::{
     typescript_projects,
 };
 pub use compile_diagnostics::typescript::{
-    TYPESCRIPT_INSTALL_COMMAND, TypeScriptCompilerAdmission,
+    TYPESCRIPT_INSTALL_COMMAND, TypeScriptBuildInfoGuard, TypeScriptCompilerAdmission,
     run_compiler as run_typescript_compiler,
 };
 pub use context::{

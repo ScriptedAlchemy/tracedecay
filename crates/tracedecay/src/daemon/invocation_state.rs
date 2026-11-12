@@ -1294,6 +1294,7 @@ mod shutdown_tests {
                 project.path(),
                 &config,
                 None,
+                None,
             )
             .await
             .unwrap()
@@ -1305,6 +1306,7 @@ mod shutdown_tests {
             &compiler,
             project.path(),
             &config,
+            None,
             None,
         )
         .await
