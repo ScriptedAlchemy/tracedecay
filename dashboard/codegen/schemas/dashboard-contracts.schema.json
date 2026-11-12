@@ -5250,32 +5250,6 @@
       "description": "Strongly typed algorithm-tagged integrity digest: `ContentDigest`.",
       "type": "string"
     },
-    "ContextScoutIntentKindV1": {
-      "description": "One user intent the Scout can recognize. The serialized keys are the\nhistorical hook hint category keys, so persisted hint analytics, hint\nsettlement, and evals keep one vocabulary.",
-      "enum": [
-        "search",
-        "semantic_search",
-        "file_read",
-        "tool_descriptor_read",
-        "broad_read",
-        "call_graph",
-        "impact",
-        "symbol_lookup",
-        "file_lookup",
-        "project_context",
-        "session_recall",
-        "atomic_edit",
-        "type_orientation",
-        "explore_subagent",
-        "subagent_start_context",
-        "build_diagnostics",
-        "review_changes",
-        "memory_store",
-        "edit_redundancy",
-        "unexpected_changes"
-      ],
-      "type": "string"
-    },
     "ContextScoutIntentSettingsV1": {
       "additionalProperties": false,
       "description": "Operator configuration for the Context Scout intent pass.",
@@ -5290,9 +5264,6 @@
         "enabled": {
           "type": "boolean"
         },
-        "engine": {
-          "$ref": "#/$defs/DecisionEngineSettingsV1"
-        },
         "min_delivery_gap_secs": {
           "format": "uint32",
           "minimum": 0,
@@ -5302,12 +5273,6 @@
           "format": "uint32",
           "minimum": 0,
           "type": "integer"
-        },
-        "questions": {
-          "items": {
-            "$ref": "#/$defs/IntentQuestionSettingsV1"
-          },
-          "type": "array"
         },
         "ttl_secs": {
           "format": "uint32",
@@ -5320,9 +5285,7 @@
       },
       "required": [
         "enabled",
-        "engine",
         "window",
-        "questions",
         "action_fact_score_permille",
         "ttl_secs",
         "min_delivery_gap_secs",
@@ -8125,45 +8088,6 @@
         "proposal",
         "disposition",
         "mutation"
-      ],
-      "type": "object"
-    },
-    "DecisionEngineSettingsV1": {
-      "additionalProperties": false,
-      "description": "The decision engine the intent pass asks. There is no default endpoint or\nmodel; both come only from explicit operator configuration.",
-      "properties": {
-        "base_url": {
-          "type": "string"
-        },
-        "max_concurrent": {
-          "format": "uint8",
-          "maximum": 255,
-          "minimum": 0,
-          "type": "integer"
-        },
-        "max_state_bytes": {
-          "format": "uint32",
-          "minimum": 0,
-          "type": "integer"
-        },
-        "model": {
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "timeout_ms": {
-          "format": "uint32",
-          "minimum": 0,
-          "type": "integer"
-        }
-      },
-      "required": [
-        "base_url",
-        "model",
-        "timeout_ms",
-        "max_concurrent",
-        "max_state_bytes"
       ],
       "type": "object"
     },
@@ -16148,40 +16072,6 @@
         "target",
         "kind",
         "line"
-      ],
-      "type": "object"
-    },
-    "IntentQuestionSettingsV1": {
-      "additionalProperties": false,
-      "description": "One yes/no question asked of the decision engine for one intent. The\nintent is a candidate when the engine's probability reaches\n`threshold_permille` and, when set, exceeds the runner-up by\n`margin_permille`.",
-      "properties": {
-        "instructions": {
-          "type": "string"
-        },
-        "intent": {
-          "$ref": "#/$defs/ContextScoutIntentKindV1"
-        },
-        "margin_permille": {
-          "format": "uint16",
-          "maximum": 65535,
-          "minimum": 0,
-          "type": [
-            "integer",
-            "null"
-          ]
-        },
-        "threshold_permille": {
-          "format": "uint16",
-          "maximum": 65535,
-          "minimum": 0,
-          "type": "integer"
-        }
-      },
-      "required": [
-        "intent",
-        "instructions",
-        "threshold_permille",
-        "margin_permille"
       ],
       "type": "object"
     },

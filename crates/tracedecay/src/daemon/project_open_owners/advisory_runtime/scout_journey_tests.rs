@@ -1198,7 +1198,7 @@ async fn intent_pass_enqueues_one_session_suggestion_claimed_at_stop_and_settled
         tracedecay_domain::configuration::IntentDecisionSourceV1::PromptInference,
         "a prompt inference must not be recorded as an observed action"
     );
-    assert!(evidence.decision.facts.is_empty());
+    assert_eq!(evidence.decision.facts, Vec::new());
     assert!(
         evidence
             .decision
