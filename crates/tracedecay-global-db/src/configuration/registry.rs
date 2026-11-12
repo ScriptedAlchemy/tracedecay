@@ -13,8 +13,7 @@ use tracedecay_domain::configuration::{
     INDEX_TRACK_CALL_SITES_SETTING_KEY, LCM_SUMMARIZER_EXECUTABLES_SETTING_KEY,
     LcmSummarizerExecutablesV1, PROFILE_SETTING_KEYS_V1,
     PROJECT_WORK_EXPERTISE_CONSENT_SETTING_KEY, RestartRequirementV1, SOURCE_BINDINGS_SETTING_KEY,
-    SYNC_AUTO_INIT_SETTING_KEY, SYNC_AUTO_TRACK_PR_BRANCHES_SETTING_KEY,
-    SYNC_AUTO_TRACK_PR_POLL_SECS_SETTING_KEY, SYNC_AUTO_WATCH_SETTING_KEY,
+    SYNC_AUTO_INIT_SETTING_KEY, SYNC_AUTO_WATCH_SETTING_KEY,
     SYNC_BACKSTOP_INTERVAL_MINS_SETTING_KEY, SYNC_BRANCH_GC_DAYS_SETTING_KEY,
     SYNC_FULL_SYNC_ESCALATION_FILES_SETTING_KEY, SYNC_MAX_CONCURRENT_SYNCS_SETTING_KEY,
     SYNC_READ_COOLDOWN_SECS_SETTING_KEY, SYNC_READ_REFRESH_SETTING_KEY,
@@ -388,11 +387,6 @@ impl ConfigurationRegistry {
     }
 }
 
-/// Lower bound the daemon clamps PR-branch auto-tracking polling up to.
-///
-/// Mirrors root `config::MIN_AUTO_TRACK_PR_POLL_SECS`.
-pub const MIN_AUTO_TRACK_PR_POLL_SECS: u64 = 60;
-
 fn register_project_stored_user_profile_settings(
     registry: &mut ConfigurationRegistry,
 ) -> Result<(), ConfigurationRegistryError> {
@@ -487,8 +481,6 @@ struct SyncDefaults {
     max_concurrent_syncs: usize,
     branch_gc_days: u64,
     auto_init: bool,
-    auto_track_pr_branches: bool,
-    auto_track_pr_poll_secs: u64,
 }
 
 impl Default for SyncDefaults {
@@ -508,8 +500,6 @@ impl Default for SyncDefaults {
             max_concurrent_syncs: 2,
             branch_gc_days: 14,
             auto_init: true,
-            auto_track_pr_branches: false,
-            auto_track_pr_poll_secs: 300,
         }
     }
 }
@@ -662,21 +652,6 @@ fn register_project_settings(
         (
             SYNC_AUTO_INIT_SETTING_KEY,
             ConfigurationValueV1::Boolean(sync.auto_init),
-            SettingSensitivityV1::Public,
-            RestartRequirementV1::DaemonRestart,
-        ),
-        (
-            SYNC_AUTO_TRACK_PR_BRANCHES_SETTING_KEY,
-            ConfigurationValueV1::Boolean(sync.auto_track_pr_branches),
-            SettingSensitivityV1::Public,
-            RestartRequirementV1::DaemonRestart,
-        ),
-        (
-            SYNC_AUTO_TRACK_PR_POLL_SECS_SETTING_KEY,
-            ConfigurationValueV1::Unsigned(
-                sync.auto_track_pr_poll_secs
-                    .max(MIN_AUTO_TRACK_PR_POLL_SECS),
-            ),
             SettingSensitivityV1::Public,
             RestartRequirementV1::DaemonRestart,
         ),

@@ -85,11 +85,6 @@ impl RetentionConfig {
     }
 }
 
-/// Floor for the PR-autotrack poll interval; polls faster than this hammer the
-/// GitHub API / `git ls-remote` needlessly, so any smaller configured value is
-/// clamped up to this.
-pub const MIN_AUTO_TRACK_PR_POLL_SECS: u64 = 60;
-
 #[derive(Debug, Clone, PartialEq)]
 pub struct TelemetryConfig {
     pub timings: bool,
@@ -140,24 +135,8 @@ pub struct SyncConfig {
     pub branch_gc_days: u64,
     /// Auto-initialise never-indexed repos on first contact.
     pub auto_init: bool,
-    /// Enable the daemon PR-branch auto-tracking mode: when on, the daemon polls
-    /// the repo's GitHub remote for open PRs and tracks/untracks each PR head
-    /// branch through the normal branch-tracking machinery.
-    pub auto_track_pr_branches: bool,
-    /// Poll cadence (seconds) for PR-branch auto-tracking discovery. Clamped up
-    /// to [`MIN_AUTO_TRACK_PR_POLL_SECS`] at read time.
-    pub auto_track_pr_poll_secs: u64,
     /// Daemon retention/compaction policy tree (Plan 38).
     pub retention: RetentionConfig,
-}
-
-impl SyncConfig {
-    /// The effective PR-autotrack poll interval, never below the safety floor.
-    #[must_use]
-    pub fn effective_auto_track_pr_poll_secs(&self) -> u64 {
-        self.auto_track_pr_poll_secs
-            .max(MIN_AUTO_TRACK_PR_POLL_SECS)
-    }
 }
 
 impl Default for SyncConfig {
@@ -177,8 +156,6 @@ impl Default for SyncConfig {
             max_concurrent_syncs: 2,
             branch_gc_days: 14,
             auto_init: true,
-            auto_track_pr_branches: false,
-            auto_track_pr_poll_secs: 300,
             retention: RetentionConfig::default(),
         }
     }

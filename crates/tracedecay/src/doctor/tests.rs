@@ -23,30 +23,20 @@ fn domain_symbol_rules_warning_is_silent_without_the_file() {
 }
 
 #[test]
-fn pr_autotrack_state_findings_name_stale_entries_and_blocking_state() {
+fn retired_pr_autotrack_artifacts_are_named_for_the_operator() {
     let data_root = tempfile::tempdir().expect("data root");
-    assert_eq!(
-        pr_autotrack_state_findings(data_root.path()),
-        Ok(Vec::new())
-    );
+    assert!(retired_pr_autotrack_artifact_findings(data_root.path()).is_empty());
 
-    let state_path = tracedecay_application::pr_tracking::state_path(data_root.path());
-    std::fs::write(
-        &state_path,
-        r#"{"managed":{"tracedecay/autotrack/pr/8":{"pr":8,"head_branch":"legacy","worktree":"pr-worktrees/pr-8","tracking_ref":"refs/tracedecay/pr/8"}}}"#,
-    )
-    .expect("write stale state");
-    let warnings = pr_autotrack_state_findings(data_root.path()).expect("stale entries warn");
-    assert_eq!(warnings.len(), 1);
-    assert!(warnings[0].contains("'tracedecay/autotrack/pr/8'"));
-    assert!(warnings[0].contains("head_sha"));
-    assert!(warnings[0].contains("drops this entry"));
+    let ledger = data_root.path().join("pr-autotrack.json");
+    std::fs::write(&ledger, "{}").expect("write ledger");
+    let worktree = data_root.path().join("pr-worktrees").join("pr-8");
+    std::fs::create_dir_all(&worktree).expect("create worktree");
 
-    std::fs::write(&state_path, "{not json").expect("write malformed state");
-    let failure =
-        pr_autotrack_state_findings(data_root.path()).expect_err("malformed state is blocking");
-    assert!(failure.contains(&state_path.display().to_string()));
-    assert!(failure.contains("until that file is removed"));
+    let findings = retired_pr_autotrack_artifact_findings(data_root.path());
+    assert_eq!(findings.len(), 2);
+    assert!(findings[0].contains(&ledger.display().to_string()));
+    assert!(findings[1].contains(&worktree.display().to_string()));
+    assert!(findings[1].contains("git worktree remove"));
 }
 
 #[test]

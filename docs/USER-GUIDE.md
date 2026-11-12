@@ -158,6 +158,21 @@ same registered project authority while each code generation retains exact
 worktree/ref/commit/snapshot identity. Facts, sessions, and LCM remain owned by
 that project authority; branch and worktree labels are provenance only.
 
+TraceDecay does not check out or index pull requests automatically. Request a
+branch with `tracedecay branch add <name>`; the daemon resolves its exact head,
+prepares one linked worktree under the project store's `branch-worktrees/`
+directory, and reports `warming`, `unavailable`, or ready coverage honestly.
+
+The retired `sync.auto_track_pr_branches` and `sync.auto_track_pr_poll_secs`
+settings are dropped from a stored project configuration the next time it is
+read, and nothing polls for pull requests. Settings patches that still send a
+`sync` block are rejected as unknown fields. The daemon never deletes what the
+retired poller left behind. `tracedecay doctor` names each remaining
+`pr-autotrack.json` ledger and `pr-worktrees/*` checkout in the project store.
+Remove a checkout with `git worktree remove` once it holds no uncommitted work,
+and delete its `refs/tracedecay/pr/*` ref and `tracedecay/autotrack/pr/*`
+branch with `git update-ref -d` and `git branch -D`.
+
 An explicit `tracedecay sync` remains an administrative refresh request for a
 diagnostic or offline workflow; it is not the normal post-edit product path and
 never opens a store outside the daemon.

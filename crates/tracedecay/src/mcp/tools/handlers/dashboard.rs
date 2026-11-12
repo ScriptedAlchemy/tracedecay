@@ -823,7 +823,6 @@ pub(super) async fn compute_dashboard(
         tracedecay_contracts::code_index_freshness::CodeIndexFreshnessReader,
     >,
     feedback_status_reader: Option<tracedecay_dashboard_api::feedback_api::FeedbackStatusReader>,
-    pr_autotrack_reader: Option<tracedecay_dashboard_api::PrAutoTrackManagedSummaryReader>,
     code_diagnostics_broker: Option<
         Arc<tokio::sync::Mutex<tracedecay_lsp::analyzer::broker::DiagnosticBroker>>,
     >,
@@ -1098,7 +1097,6 @@ pub(super) async fn compute_dashboard(
                     remote_operational_status_reader: remote_operational_status,
                     code_index_freshness_reader,
                     feedback_status_reader,
-                    pr_autotrack_reader,
                     code_diagnostics_broker,
                     application_invocation_executor,
                     delivery_settlement_authority,

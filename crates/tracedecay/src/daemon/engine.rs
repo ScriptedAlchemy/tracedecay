@@ -101,9 +101,6 @@ pub(super) struct DaemonEngine {
     /// Platform-neutral retention owner. The Unix watcher may wake this task,
     /// but never owns its cadence or lifecycle.
     maintenance_coordinator: maintenance::MaintenanceCoordinator,
-    /// PR reconciliation task, retained so shutdown never leaves it writing.
-    pr_autotrack_task:
-        Arc<tokio::sync::Mutex<Option<crate::daemon::pr_autotrack::PrAutotrackTask>>>,
 }
 
 #[tracing::instrument(
@@ -205,14 +202,6 @@ impl DaemonEngine {
         coordinator: maintenance::MaintenanceCoordinator,
     ) -> Self {
         self.maintenance_coordinator = coordinator;
-        self
-    }
-
-    pub(super) async fn with_pr_autotrack_task(
-        self,
-        task: Option<crate::daemon::pr_autotrack::PrAutotrackTask>,
-    ) -> Self {
-        *self.pr_autotrack_task.lock().await = task;
         self
     }
 

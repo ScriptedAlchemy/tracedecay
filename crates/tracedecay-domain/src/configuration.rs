@@ -56,10 +56,16 @@ pub const LCM_SUMMARIZER_EXECUTABLES_SETTING_KEY: &str = "lcm.summarizer_executa
 /// project's snapshot through v1.0.0-beta.61 and now live only in the profile
 /// store ([`PROFILE_SETTING_KEYS_V1`]). `diagnostics.prewarm.v1` shipped
 /// through v1.0.0-beta.83 and left with the compile-on-read cargo prewarm.
+/// `sync.auto_track_pr_branches.v1` and `sync.auto_track_pr_poll_secs.v1`
+/// controlled the all-PR worktree autotracking poller, which was retired in
+/// favor of explicit branch activation. A profile that enabled the setting
+/// converges by dropping it on the next read, and nothing starts a poller for it.
 pub const RETIRED_CORE_SETTING_KEYS_V1: &[&str] = &[
     "diagnostics.prewarm.v1",
     "index.git_ignore.v1",
     "semantic.runtime.v1",
+    "sync.auto_track_pr_branches.v1",
+    "sync.auto_track_pr_poll_secs.v1",
     "sync.orphan_db_gc_days.v1",
     "user.upload_enabled.v1",
     USER_WATCHER_DEBOUNCE_MS_SETTING_KEY,
@@ -116,8 +122,6 @@ pub const SYNC_FULL_SYNC_ESCALATION_FILES_SETTING_KEY: &str = "sync.full_sync_es
 pub const SYNC_MAX_CONCURRENT_SYNCS_SETTING_KEY: &str = "sync.max_concurrent_syncs.v1";
 pub const SYNC_BRANCH_GC_DAYS_SETTING_KEY: &str = "sync.branch_gc_days.v1";
 pub const SYNC_AUTO_INIT_SETTING_KEY: &str = "sync.auto_init.v1";
-pub const SYNC_AUTO_TRACK_PR_BRANCHES_SETTING_KEY: &str = "sync.auto_track_pr_branches.v1";
-pub const SYNC_AUTO_TRACK_PR_POLL_SECS_SETTING_KEY: &str = "sync.auto_track_pr_poll_secs.v1";
 pub const TELEMETRY_TIMINGS_SETTING_KEY: &str = "telemetry.timings.v1";
 
 /// Exact registry inventory. Keeping this closed list in the domain
@@ -158,8 +162,6 @@ pub const CONFIGURATION_SETTING_KEYS_V1: &[&str] = &[
     SYNC_MAX_CONCURRENT_SYNCS_SETTING_KEY,
     SYNC_BRANCH_GC_DAYS_SETTING_KEY,
     SYNC_AUTO_INIT_SETTING_KEY,
-    SYNC_AUTO_TRACK_PR_BRANCHES_SETTING_KEY,
-    SYNC_AUTO_TRACK_PR_POLL_SECS_SETTING_KEY,
     TELEMETRY_TIMINGS_SETTING_KEY,
 ];
 

@@ -197,6 +197,22 @@ async fn retired_diagnostics_prewarm_key_converges_without_reset() {
     .await;
 }
 
+/// A profile that enabled the retired all-PR worktree poller persisted both
+/// keys; they converge out so no setting remains that implies the poller runs.
+#[asupersync::test]
+async fn retired_pr_autotrack_keys_converge_out_of_an_enabled_snapshot() {
+    assert_retired_key_converges_out(
+        "sync.auto_track_pr_branches.v1",
+        ConfigurationValueV1::Boolean(true),
+    )
+    .await;
+    assert_retired_key_converges_out(
+        "sync.auto_track_pr_poll_secs.v1",
+        ConfigurationValueV1::Unsigned(300),
+    )
+    .await;
+}
+
 async fn assert_retired_key_converges_out(raw_key: &str, value: ConfigurationValueV1) {
     let (_directory, runtime, root) = Box::pin(global_setup()).await;
     let retired = SettingKey::new(raw_key).unwrap();

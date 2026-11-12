@@ -6,32 +6,6 @@ const MAINTENANCE_TEST_DEADLINE: std::time::Duration = std::time::Duration::from
 
 #[cfg(unix)]
 #[tokio::test]
-async fn pr_autotrack_is_cancelled_before_invocation_join() {
-    let engine = DaemonEngine::default();
-    let task = crate::daemon::pr_autotrack::spawn_with_administration(
-        engine.store_administration.clone(),
-        tracedecay_code_index_runtime::code_index_scheduler::CodeIndexSchedulerRegistryV1::new(1),
-    )
-    .expect("the native runtime admits the loop");
-    let cancellation = task.cancellation();
-    let engine = engine.with_pr_autotrack_task(Some(task)).await;
-
-    let owner_phases = engine.shutdown_owner_phases().await;
-    assert!(!cancellation.is_cancelled());
-
-    let prepared = tracedecay_daemon_service::shutdown::prepare_shutdown_owner_phases(owner_phases);
-    assert!(
-        cancellation.is_cancelled(),
-        "PR auto-track must be cancelled before invocation join begins"
-    );
-
-    let _ = prepared
-        .join(std::time::Instant::now() + std::time::Duration::from_secs(1))
-        .await;
-}
-
-#[cfg(unix)]
-#[tokio::test]
 async fn manual_branch_add_journey_is_joined_by_daemon_shutdown() {
     let engine = DaemonEngine::default();
     let administration = engine.store_administration.clone();
@@ -986,35 +960,4 @@ async fn dropping_the_administration_aborts_an_owned_manual_branch_publication()
     })
     .await
     .expect("the dropped owner aborts its publication");
-}
-
-/// Dropping the PR auto-track owner aborts its loop, as a timed-out shutdown
-/// join does. The parked loop holds one administration clone until then.
-#[cfg(unix)]
-#[tokio::test]
-async fn dropping_the_pr_autotrack_owner_aborts_its_parked_loop() {
-    let dir = TempDir::new().expect("temp dir");
-    let profile_root = dir.path().join("profile");
-    let engine = test_daemon_engine_for_profile(&profile_root);
-    let _database_scope = enter_test_daemon_database_scope(&profile_root, "pr-autotrack-drop-test");
-    let administration = engine.store_administration.clone();
-    let owners = Arc::strong_count(administration.automation_schedulers());
-    let task = crate::daemon::pr_autotrack::spawn_with_administration(
-        administration.clone(),
-        tracedecay_code_index_runtime::code_index_scheduler::CodeIndexSchedulerRegistryV1::new(1),
-    )
-    .expect("the native runtime admits the loop");
-    assert_eq!(
-        Arc::strong_count(administration.automation_schedulers()),
-        owners + 1
-    );
-
-    drop(task);
-    tokio::time::timeout(MAINTENANCE_TEST_DEADLINE, async {
-        while Arc::strong_count(administration.automation_schedulers()) > owners {
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .expect("the dropped owner aborts its loop");
 }

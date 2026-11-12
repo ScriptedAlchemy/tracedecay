@@ -104,16 +104,6 @@ const BINDINGS: Readonly<Record<string, SettingsBinding>> = {
     field: 'telemetry_timings',
     input: 'boolean',
   },
-  'project.config.sync.auto_track_pr_branches': {
-    scope: 'project',
-    field: 'auto_track_pr_branches',
-    input: 'boolean',
-  },
-  'project.config.sync.auto_track_pr_poll_secs': {
-    scope: 'project',
-    field: 'auto_track_pr_poll_secs',
-    input: 'integer',
-  },
   'user.watcher_debounce': { scope: 'user', field: 'watcher_debounce', input: 'duration' },
   'user.extraction_timeout_secs': {
     scope: 'user',
@@ -338,13 +328,11 @@ function withProjectField(
     case 'exclude':
       return isStringList(value) ? { ...values, [field]: value } : values;
     case 'max_file_size':
-    case 'auto_track_pr_poll_secs':
       return typeof value === 'string' ? { ...values, [field]: value } : values;
     case 'extract_docstrings':
     case 'track_call_sites':
     case 'context_scout':
     case 'telemetry_timings':
-    case 'auto_track_pr_branches':
       return typeof value === 'boolean' ? { ...values, [field]: value } : values;
     default: {
       const exhaustive: never = field;

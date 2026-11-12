@@ -41,7 +41,7 @@ describe('effective rows', () => {
     expect(rows.every((row) => row.row.kind !== 'group')).toBe(true);
     expect(rows.length).toBe(model.settingCount);
     const keys = rows.map((row) => row.key);
-    expect(keys).toContain('project.config.sync.auto_track_pr_poll_secs');
+    expect(keys).toContain('project.config.max_file_size');
     expect(keys).toContain('environment.variables.TRACEDECAY_DATA_DIR');
     expect(keys).toContain('user.code_index_worker_status.effective_workers');
     expect(new Set(keys).size).toBe(keys.length);
@@ -53,8 +53,8 @@ describe('effective rows', () => {
 
   it('filters over key, value text, and served description', () => {
     const rows = effectiveRows(model);
-    expect(filterEffectiveRows(rows, 'poll_secs').map((row) => row.key)).toEqual([
-      'project.config.sync.auto_track_pr_poll_secs',
+    expect(filterEffectiveRows(rows, 'telemetry.timings').map((row) => row.key)).toEqual([
+      'project.config.telemetry.timings',
     ]);
     expect(filterEffectiveRows(rows, 'node_modules').map((row) => row.key)).toEqual([
       'project.config.exclude',

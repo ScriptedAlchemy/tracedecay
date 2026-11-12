@@ -11,7 +11,7 @@ pub mod configuration;
 pub mod test_support;
 
 pub use config::model::{
-    MIN_AUTO_TRACK_PR_POLL_SECS, RetentionConfig, SyncConfig, TelemetryConfig, resolve_path,
+    RetentionConfig, SyncConfig, TelemetryConfig, resolve_path,
     resolve_path_with_discovery,
 };
 pub use config::{

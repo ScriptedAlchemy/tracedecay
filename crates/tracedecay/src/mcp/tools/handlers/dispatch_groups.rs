@@ -838,7 +838,6 @@ async fn compute_owner_side_effect(
                     options.remote_operational_status.clone(),
                     options.code_index_freshness_reader.clone(),
                     options.feedback_status_reader.clone(),
-                    options.pr_autotrack_reader.clone(),
                     options.diagnostics_lsp.clone(),
                     options.dashboard_application_invocation_executor.clone(),
                     options.dashboard_delivery_settlement_authority.clone(),

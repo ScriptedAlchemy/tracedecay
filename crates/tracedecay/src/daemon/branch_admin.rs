@@ -2065,7 +2065,7 @@ async fn cleanup_manual_branch_retirements(
     }
     let mut retained_leases = Vec::with_capacity(lifecycle_leases.len());
     for (retirement, lifecycle) in retirements.iter().zip(lifecycle_leases) {
-        let lifecycle = super::pr_autotrack::cleanup_manual_branch_retirement(
+        let lifecycle = super::manual_branch::cleanup_manual_branch_retirement(
             project_root,
             data_root,
             schedulers,

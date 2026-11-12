@@ -145,8 +145,6 @@ export interface ProjectSettingsValues {
   readonly track_call_sites: boolean;
   readonly context_scout: boolean;
   readonly telemetry_timings: boolean;
-  readonly auto_track_pr_branches: boolean;
-  readonly auto_track_pr_poll_secs: string;
 }
 
 export interface UserSettingsValues {
@@ -196,10 +194,6 @@ export interface ProjectSettingsChangeSet {
   context_scout?: boolean;
   context_scout_intent?: ContextScoutIntentSettingsV1;
   telemetry?: { timings?: boolean };
-  sync?: {
-    auto_track_pr_branches?: boolean;
-    auto_track_pr_poll_secs?: number;
-  };
 }
 
 /** The user-scope counterpart of `ProjectSettingsChangeSet`. */
@@ -265,8 +259,6 @@ export interface SettingsRevisionConflict {
   readonly expectedRevisionId: string;
   readonly actualRevisionId: string | null;
 }
-
-const MIN_AUTO_TRACK_PR_POLL_SECS = 60;
 
 /**
  * Recognized top-level groups and how to describe them. `origin` records where
@@ -413,14 +405,12 @@ export function buildSettingsEditor(payload: SettingsPayloadV1): SettingsEditor 
   const { configuration_revision_id: userRevision } = payload.user;
   const workerRevision = payload.user.code_index_worker_configuration_revision_id;
   const maxFileSize = unsignedIntegerString(config.max_file_size);
-  const pollSecs = unsignedIntegerString(config.sync.auto_track_pr_poll_secs);
   const extractionTimeout = unsignedIntegerString(payload.user.extraction_timeout_secs);
   if (
     projectRevision.length === 0 ||
     userRevision.length === 0 ||
     workerRevision.length === 0 ||
     maxFileSize == null ||
-    pollSecs == null ||
     extractionTimeout == null
   ) {
     return null;
@@ -437,8 +427,6 @@ export function buildSettingsEditor(payload: SettingsPayloadV1): SettingsEditor 
       track_call_sites: config.track_call_sites,
       context_scout: config.context_scout,
       telemetry_timings: config.telemetry.timings,
-      auto_track_pr_branches: config.sync.auto_track_pr_branches,
-      auto_track_pr_poll_secs: pollSecs,
     },
     user: {
       watcher_debounce: payload.user.watcher_debounce,
@@ -557,15 +545,6 @@ export function planProjectChangeAgainst(
   if (values.telemetry_timings !== current.project.telemetry_timings) {
     patch.telemetry = { timings: values.telemetry_timings };
   }
-  const sync: NonNullable<ProjectSettingsChangeSet['sync']> = {};
-  if (values.auto_track_pr_branches !== current.project.auto_track_pr_branches) {
-    sync.auto_track_pr_branches = values.auto_track_pr_branches;
-  }
-  const pollSecs = Number(values.auto_track_pr_poll_secs);
-  if (pollSecs !== Number(current.project.auto_track_pr_poll_secs)) {
-    sync.auto_track_pr_poll_secs = pollSecs;
-  }
-  if (Object.keys(sync).length > 0) patch.sync = sync;
 
   return Object.keys(patch).length === 0
     ? { outcome: 'unchanged', expectedRevisionId: current.projectExpectedRevisionId }
@@ -651,13 +630,6 @@ function validateProjectValues(values: ProjectSettingsValues): SettingsValidatio
     errors.push({
       field: 'max_file_size',
       message: 'max_file_size must be at least 1 byte',
-    });
-  }
-  const pollSecs = unsignedInteger(values.auto_track_pr_poll_secs);
-  if (pollSecs == null || pollSecs < MIN_AUTO_TRACK_PR_POLL_SECS) {
-    errors.push({
-      field: 'auto_track_pr_poll_secs',
-      message: `auto_track_pr_poll_secs must be at least ${MIN_AUTO_TRACK_PR_POLL_SECS} seconds`,
     });
   }
   return errors;

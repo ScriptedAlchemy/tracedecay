@@ -13,10 +13,7 @@ use tracedecay_private_fs::{FileLease, LockAdmissionError, lock_until};
 use tracedecay_runtime_core::branch::BranchAddOutcome;
 use tracedecay_runtime_core::native_runtime;
 
-use super::{
-    PrCommandControlV1, PrGitCommandError, StaleManagedPr, pr_label, pr_tracking_ref,
-    run_git_with_control, successful_git_with_control,
-};
+use super::{PrCommandControlV1, PrGitCommandError, run_git_with_control, successful_git_with_control};
 
 const CODE_INDEX_SCHEDULER_UNAVAILABLE: &str = "code_index_scheduler_unavailable";
 const GIT_AUTHORITY_UNAVAILABLE: &str = "git_authority_unavailable";
@@ -31,20 +28,6 @@ pub struct ManualBranchActivation {
     pub head_sha: String,
     pub worktree: PathBuf,
     pub outcome: BranchAddOutcome,
-}
-
-/// A summary of what one reconcile pass changed, for logging and tests.
-#[derive(Debug, Default, Clone, PartialEq, Eq)]
-pub struct ReconcileReport {
-    pub tracked: Vec<String>,
-    pub untracked: Vec<String>,
-    pub skipped_forks: Vec<u64>,
-    pub capped: bool,
-    pub removals_suppressed: bool,
-    pub failures: Vec<(String, String)>,
-    /// Undecodable persisted entries dropped from state; their leftover
-    /// artifacts go through the orphan sweep or a fresh track.
-    pub reset_stale: Vec<StaleManagedPr>,
 }
 
 /// Hex digits of a digest that name a branch or head in a worktree path or
@@ -752,34 +735,6 @@ fn remove_owned_manual_worktree(
     Ok(())
 }
 
-pub fn prepare_pr_worktree(
-    repo_root: &Path,
-    worktree: &Path,
-    pr_number: u64,
-    tracking_ref: &str,
-    label: &str,
-    expected_head: &str,
-    command_control: &PrCommandControlV1,
-) -> std::result::Result<(), String> {
-    let pr_ref_spec = format!("+refs/pull/{pr_number}/head:{tracking_ref}");
-    successful_git_with_control(
-        repo_root,
-        &["fetch", "--no-tags", "origin", &pr_ref_spec],
-        command_control,
-    )
-    .map_err(|error| format!("fetch of PR head failed: {error}"))?;
-    let fetched_head =
-        successful_git_with_control(repo_root, &["rev-parse", tracking_ref], command_control)
-            .ok()
-            .and_then(|output| String::from_utf8(output.stdout).ok())
-            .map(|sha| sha.trim().to_string());
-    if fetched_head.as_deref() != Some(expected_head) {
-        return Err("PR head changed during reconciliation".to_string());
-    }
-
-    checkout_linked_worktree(repo_root, worktree, tracking_ref, label, command_control)
-}
-
 fn checkout_linked_worktree(
     repo_root: &Path,
     worktree: &Path,
@@ -809,205 +764,6 @@ fn checkout_linked_worktree(
     )
     .map_err(|error| format!("worktree add failed: {error}"))?;
     Ok(())
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum PrCleanupArtifact {
-    Worktree(PathBuf),
-    Branch(String),
-    TrackingRef(String),
-}
-
-impl std::fmt::Display for PrCleanupArtifact {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Worktree(path) => write!(formatter, "worktree '{}'", path.display()),
-            Self::Branch(reference) => write!(formatter, "branch '{reference}'"),
-            Self::TrackingRef(reference) => write!(formatter, "tracking ref '{reference}'"),
-        }
-    }
-}
-
-#[derive(Debug)]
-pub struct PrCleanupReceipt(());
-
-#[derive(Debug, thiserror::Error)]
-pub enum PrCleanupError {
-    #[error("PR cleanup task failed to join: {0}")]
-    Join(String),
-    #[error("PR cleanup command failed for {artifact}: {source}")]
-    Command {
-        artifact: PrCleanupArtifact,
-        #[source]
-        source: PrGitCommandError,
-    },
-    #[error(
-        "PR cleanup did not remove owned artifacts: {}",
-        .0.iter().map(ToString::to_string).collect::<Vec<_>>().join(", ")
-    )]
-    Remaining(Vec<PrCleanupArtifact>),
-}
-
-#[tracing::instrument(
-    name = "application.pr_tracking.cleanup_worktree",
-    level = "trace",
-    skip_all
-)]
-pub fn cleanup_pr_worktree(
-    repo_root: &Path,
-    data_root: &Path,
-    pr: u64,
-    expected_head: &str,
-    command_control: &PrCommandControlV1,
-) -> std::result::Result<PrCleanupReceipt, PrCleanupError> {
-    let worktree = data_root.join("pr-worktrees").join(format!("pr-{pr}"));
-    let tracking_ref = pr_tracking_ref(pr);
-    let label = pr_label(pr);
-    let branch_ref = format!("refs/heads/{label}");
-    let artifacts = || {
-        vec![
-            PrCleanupArtifact::Worktree(worktree.clone()),
-            PrCleanupArtifact::TrackingRef(tracking_ref.clone()),
-            PrCleanupArtifact::Branch(branch_ref.clone()),
-        ]
-    };
-    if command_control.is_cancelled() {
-        return Err(PrCleanupError::Remaining(artifacts()));
-    }
-    let owned_head = if expected_head.is_empty() {
-        let ref_head = ref_sha(repo_root, &tracking_ref, command_control)?;
-        let worktree_head = ref_sha(&worktree, "HEAD", command_control)?;
-        match (ref_head, worktree_head) {
-            (Some(ref_head), Some(worktree_head)) if ref_head == worktree_head => Some(ref_head),
-            _ => None,
-        }
-    } else {
-        Some(expected_head.to_string())
-    };
-    remove_worktree(repo_root, &worktree, command_control).map_err(|source| {
-        PrCleanupError::Command {
-            artifact: PrCleanupArtifact::Worktree(worktree.clone()),
-            source,
-        }
-    })?;
-    if let Some(owned_head) = owned_head {
-        if ref_points_to(repo_root, &branch_ref, &owned_head, command_control)? {
-            successful_git_with_control(repo_root, &["branch", "-D", &label], command_control)
-                .map_err(|source| PrCleanupError::Command {
-                    artifact: PrCleanupArtifact::Branch(branch_ref.clone()),
-                    source,
-                })?;
-        }
-        if ref_points_to(repo_root, &tracking_ref, &owned_head, command_control)? {
-            successful_git_with_control(
-                repo_root,
-                &["update-ref", "-d", &tracking_ref],
-                command_control,
-            )
-            .map_err(|source| PrCleanupError::Command {
-                artifact: PrCleanupArtifact::TrackingRef(tracking_ref.clone()),
-                source,
-            })?;
-        }
-    }
-    let verification_control = PrCommandControlV1::default();
-    let remaining = remaining_pr_artifacts(
-        repo_root,
-        &worktree,
-        &branch_ref,
-        &tracking_ref,
-        &verification_control,
-    )?;
-    if !remaining.is_empty() {
-        return Err(PrCleanupError::Remaining(remaining));
-    }
-    Ok(PrCleanupReceipt(()))
-}
-
-fn ref_points_to(
-    repo_root: &Path,
-    reference: &str,
-    expected_head: &str,
-    command_control: &PrCommandControlV1,
-) -> std::result::Result<bool, PrCleanupError> {
-    Ok(ref_sha(repo_root, reference, command_control)?.is_some_and(|sha| sha == expected_head))
-}
-
-fn ref_sha(
-    repo_root: &Path,
-    reference: &str,
-    command_control: &PrCommandControlV1,
-) -> std::result::Result<Option<String>, PrCleanupError> {
-    let output = run_git_with_control(
-        repo_root,
-        &["rev-parse", "--verify", "--end-of-options", reference],
-        command_control,
-    )
-    .map_err(|source| PrCleanupError::Command {
-        artifact: cleanup_artifact_for_ref(reference),
-        source: PrGitCommandError::Command(source),
-    })?;
-    if !output.status.success() {
-        return Ok(None);
-    }
-    String::from_utf8(output.stdout)
-        .map(|sha| Some(sha.trim().to_owned()))
-        .map_err(|source| PrCleanupError::Command {
-            artifact: cleanup_artifact_for_ref(reference),
-            source: PrGitCommandError::InvalidOutput {
-                arguments: format!("rev-parse --verify --end-of-options {reference}"),
-                detail: source.to_string(),
-            },
-        })
-}
-
-fn cleanup_artifact_for_ref(reference: &str) -> PrCleanupArtifact {
-    if reference.starts_with("refs/heads/") {
-        PrCleanupArtifact::Branch(reference.to_owned())
-    } else {
-        PrCleanupArtifact::TrackingRef(reference.to_owned())
-    }
-}
-
-fn remaining_pr_artifacts(
-    repo_root: &Path,
-    worktree: &Path,
-    branch_ref: &str,
-    tracking_ref: &str,
-    command_control: &PrCommandControlV1,
-) -> std::result::Result<Vec<PrCleanupArtifact>, PrCleanupError> {
-    let worktrees = successful_git_with_control(
-        repo_root,
-        &["worktree", "list", "--porcelain"],
-        command_control,
-    )
-    .map_err(|source| PrCleanupError::Command {
-        artifact: PrCleanupArtifact::Worktree(worktree.to_owned()),
-        source,
-    })?;
-    let listed = String::from_utf8(worktrees.stdout).map_err(|source| PrCleanupError::Command {
-        artifact: PrCleanupArtifact::Worktree(worktree.to_owned()),
-        source: PrGitCommandError::InvalidOutput {
-            arguments: "worktree list --porcelain".to_owned(),
-            detail: source.to_string(),
-        },
-    })?;
-    let mut remaining = Vec::new();
-    if worktree.exists()
-        || listed
-            .lines()
-            .filter_map(|line| line.strip_prefix("worktree "))
-            .any(|listed| Path::new(listed) == worktree)
-    {
-        remaining.push(PrCleanupArtifact::Worktree(worktree.to_owned()));
-    }
-    if ref_sha(repo_root, branch_ref, command_control)?.is_some() {
-        remaining.push(PrCleanupArtifact::Branch(branch_ref.to_owned()));
-    }
-    if ref_sha(repo_root, tracking_ref, command_control)?.is_some() {
-        remaining.push(PrCleanupArtifact::TrackingRef(tracking_ref.to_owned()));
-    }
-    Ok(remaining)
 }
 
 fn remove_worktree(
@@ -1121,31 +877,14 @@ pub async fn manual_branch_artifacts_match_off_runtime(
     })?
 }
 
-pub async fn cleanup_pr_worktree_off_runtime(
-    repo_root: &Path,
-    data_root: &Path,
-    pr: u64,
-    expected_head: &str,
-    command_control: PrCommandControlV1,
-) -> std::result::Result<PrCleanupReceipt, PrCleanupError> {
-    let repo_root = repo_root.to_path_buf();
-    let data_root = data_root.to_path_buf();
-    let expected_head = expected_head.to_owned();
-    native_runtime::spawn_blocking(move || {
-        cleanup_pr_worktree(&repo_root, &data_root, pr, &expected_head, &command_control)
-    })
-    .await
-    .map_err(PrCleanupError::Join)?
-}
-
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::{
         ManualBranchActivationError, ManualBranchArtifactsV1, PrCommandControlV1,
         acquire_manual_branch_lifecycle, acquire_manual_branch_lifecycle_until,
-        cleanup_owned_worktree, prepare_manual_branch_worktree, ref_points_to, remove_worktree,
-        resolve_branch_head, successful_git_with_control,
+        cleanup_owned_worktree, prepare_manual_branch_worktree, remove_worktree, resolve_branch_head,
+        successful_git_with_control,
     };
     use crate::pr_tracking::default_pr_command_control;
     use std::path::Path;
@@ -1328,13 +1067,7 @@ mod tests {
             "foreign ref replacement must survive an exact-source cleanup"
         );
         assert!(
-            ref_points_to(
-                repo.path(),
-                &artifacts.tracking_ref,
-                &foreign,
-                default_pr_command_control(),
-            )
-            .expect("foreign tracking ref remains readable"),
+            ref_points_to(repo.path(), &artifacts.tracking_ref, &foreign),
             "the foreign tracking ref must remain untouched"
         );
         assert!(
@@ -1451,6 +1184,16 @@ mod tests {
         git(repo, &["add", "."]);
         git(repo, &["commit", "-qm", "feature content"]);
         git(repo, &["checkout", "-q", "main"]);
+    }
+
+    fn ref_points_to(repo: &Path, reference: &str, expected: &str) -> bool {
+        std::process::Command::new("git")
+            .args(["rev-parse", "--verify", "--end-of-options", reference])
+            .current_dir(repo)
+            .output()
+            .is_ok_and(|output| {
+                output.status.success() && String::from_utf8_lossy(&output.stdout).trim() == expected
+            })
     }
 
     fn git_ref_exists(repo: &Path, reference: &str) -> bool {

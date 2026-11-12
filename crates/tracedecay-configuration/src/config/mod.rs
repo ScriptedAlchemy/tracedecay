@@ -23,7 +23,6 @@ use tracedecay_domain::configuration::{
     INDEX_MAX_FILE_SIZE_SETTING_KEY, INDEX_NATIVE_GRAPH_ACTIVATION_SETTING_KEY,
     INDEX_TRACK_CALL_SITES_SETTING_KEY, LCM_SUMMARIZER_EXECUTABLES_SETTING_KEY,
     LcmSummarizerExecutablesV1, SYNC_AUTO_INIT_SETTING_KEY,
-    SYNC_AUTO_TRACK_PR_BRANCHES_SETTING_KEY, SYNC_AUTO_TRACK_PR_POLL_SECS_SETTING_KEY,
     SYNC_AUTO_WATCH_SETTING_KEY, SYNC_BACKSTOP_INTERVAL_MINS_SETTING_KEY,
     SYNC_BRANCH_GC_DAYS_SETTING_KEY, SYNC_FULL_SYNC_ESCALATION_FILES_SETTING_KEY,
     SYNC_MAX_CONCURRENT_SYNCS_SETTING_KEY, SYNC_READ_COOLDOWN_SECS_SETTING_KEY,
@@ -291,14 +290,6 @@ fn runtime_config_from_snapshot(
             max_concurrent_syncs: required_usize(snapshot, SYNC_MAX_CONCURRENT_SYNCS_SETTING_KEY)?,
             branch_gc_days: required_unsigned(snapshot, SYNC_BRANCH_GC_DAYS_SETTING_KEY)?,
             auto_init: required_bool(snapshot, SYNC_AUTO_INIT_SETTING_KEY)?,
-            auto_track_pr_branches: required_bool(
-                snapshot,
-                SYNC_AUTO_TRACK_PR_BRANCHES_SETTING_KEY,
-            )?,
-            auto_track_pr_poll_secs: required_unsigned(
-                snapshot,
-                SYNC_AUTO_TRACK_PR_POLL_SECS_SETTING_KEY,
-            )?,
             // Retention is not a registered setting, so a snapshot cannot
             // carry retention policy.
             retention: RetentionConfig::default(),

@@ -1896,10 +1896,7 @@ impl CommandStartupPolicy {
             }
             | Commands::Branch {
                 action:
-                    BranchAction::List { .. }
-                    | BranchAction::Autotrack {
-                        action: BranchAutotrackAction::Status { .. },
-                    },
+                    BranchAction::List { .. },
             }
             | Commands::Channel { channel: None }
             | Commands::Automation {

@@ -13,7 +13,7 @@ import { applySettingsMutation } from './settingsMutation.ts';
 const ACTIVE_SCOPE: ScopeWritability = { state: 'writable', target: 'tracedecay' };
 
 const MAX_FILE_SIZE = 'project.config.max_file_size';
-const POLL_SECS = 'project.config.sync.auto_track_pr_poll_secs';
+const OTHER_ROW = 'project.config.track_call_sites';
 const WATCHER_DEBOUNCE = 'user.watcher_debounce';
 const WORKERS = 'user.code_index_workers';
 
@@ -27,13 +27,10 @@ const FIXTURE_SETTINGS: ReadonlyArray<readonly [string, readonly string[]]> = [
       'project.config.extract_docstrings',
       'project.config.include',
       'project.config.max_file_size',
-      'project.config.sync.auto_track_pr_branches',
-      'project.config.sync.auto_track_pr_poll_secs',
       'project.config.telemetry.timings',
       'project.config.track_call_sites',
       'project.configuration_revision_id',
       'project.configuration_snapshot_id',
-      'project.pr_autotrack.tracked',
     ],
   ],
   [
@@ -165,9 +162,9 @@ describe('SettingsPage direct settings editing', () => {
     expect(document.querySelector('[data-settings-editor]')).toBeNull();
 
     // Focus is the keyboard's hover.
-    act(() => row(POLL_SECS).focus());
+    act(() => row(OTHER_ROW).focus());
     expect(document.querySelector('[data-inspected-key]')?.getAttribute('data-inspected-key')).toBe(
-      POLL_SECS,
+      OTHER_ROW,
     );
   });
 
@@ -813,18 +810,18 @@ describe('SettingsPage direct settings editing', () => {
     const user = userEvent.setup();
     renderSettings();
 
-    await openEditor(user, POLL_SECS);
-    const poll = proposal(POLL_SECS);
+    await openEditor(user, MAX_FILE_SIZE);
+    const poll = proposal(MAX_FILE_SIZE);
     await user.clear(poll);
-    await user.type(poll, '59');
+    await user.type(poll, '0');
 
-    expect(screen.getAllByText('auto_track_pr_poll_secs must be at least 60 seconds').length).toBeGreaterThan(0);
+    expect(screen.getAllByText('max_file_size must be at least 1 byte').length).toBeGreaterThan(0);
     expect(document.querySelector('[data-settings-validation]')?.getAttribute('data-settings-validation')).toBe('invalid');
     expect(poll.getAttribute('aria-invalid')).toBe('true');
     const pollError = poll.getAttribute('aria-describedby');
     expect(pollError).not.toBeNull();
     expect(document.getElementById(pollError ?? '')?.textContent).toBe(
-      'auto_track_pr_poll_secs must be at least 60 seconds',
+      'max_file_size must be at least 1 byte',
     );
     expect(screen.getByRole('button', { name: 'Save' }).hasAttribute('disabled')).toBe(true);
     expect(calls).toEqual(['GET /api/settings']);
@@ -1013,9 +1010,9 @@ describe('SettingsPage direct settings editing', () => {
     // the panel away while the write is out.
     expect(screen.getByRole('button', { name: 'Close editor' }).hasAttribute('disabled')).toBe(true);
     await user.keyboard('{Escape}');
-    await user.click(row(POLL_SECS));
+    await user.click(row(OTHER_ROW));
     expect(document.querySelector(`[data-settings-editor="${MAX_FILE_SIZE}"]`)).toBeTruthy();
-    expect(row(POLL_SECS).getAttribute('aria-selected')).toBe('false');
+    expect(row(OTHER_ROW).getAttribute('aria-selected')).toBe('false');
 
     act(() => releasePatch?.());
     expect(
@@ -1076,8 +1073,8 @@ describe('SettingsPage direct settings editing', () => {
     expect(screen.getByText(`${total} settings`)).toBeTruthy();
 
     const filter = screen.getByLabelText('Filter configuration');
-    await user.type(filter, 'poll');
-    expect(rowKeys()).toEqual([POLL_SECS]);
+    await user.type(filter, 'timings');
+    expect(rowKeys()).toEqual(['project.config.telemetry.timings']);
     expect(screen.getByText(`1 of ${total} settings`)).toBeTruthy();
 
     await user.clear(filter);

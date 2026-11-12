@@ -33,8 +33,8 @@ fn command_identity_uses_the_exact_clap_subcommand_path() {
         "daemon.install-service"
     );
     assert_eq!(
-        parsed_command_profile_label(&["branch", "autotrack", "status"]),
-        "branch.autotrack.status"
+        parsed_command_profile_label(&["branch", "list"]),
+        "branch.list"
     );
     assert_eq!(
         parsed_command_profile_label(&[
@@ -519,7 +519,6 @@ fn nested_inspection_commands_skip_agent_install_check() {
             "refresh-123",
         ][..],
         &["branch", "list"][..],
-        &["branch", "autotrack", "status"][..],
         &["channel"][..],
         &["automation", "config", "get", "--json"][..],
     ];

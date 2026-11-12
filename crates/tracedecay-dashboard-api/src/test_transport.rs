@@ -14,7 +14,7 @@ use crate::{
     DashboardGitCorrelationReadPortV1, DashboardLcmReadPortV1,
     DashboardProfileCodeIndexWorkerSettingsPort, DashboardProjectContext,
     DashboardSessionAuthoritiesV1, DashboardSessionMountV1, DashboardSessionResolutionV1,
-    DashboardStateCompositionV1, PrAutoTrackManagedSummaryReader, bind_dashboard, code_read_api,
+    DashboardStateCompositionV1, bind_dashboard, code_read_api,
     router, serve_loopback, standalone_dashboard_automation_writer, with_dashboard_http_admission,
 };
 
@@ -37,7 +37,6 @@ pub struct DashboardHostAdmissionTestAuthorityV1 {
     profile_code_index_worker_settings:
         Option<Arc<dyn DashboardProfileCodeIndexWorkerSettingsPort>>,
     application_invocation_executor: Option<Arc<dyn DashboardApplicationRuntime>>,
-    pr_autotrack_reader: Option<PrAutoTrackManagedSummaryReader>,
     opening_project_sessions: Option<tokio::sync::watch::Receiver<DashboardSessionResolutionV1>>,
 }
 
@@ -65,7 +64,6 @@ impl DashboardHostAdmissionTestAuthorityV1 {
             code_index_freshness_reader: None,
             profile_code_index_worker_settings: None,
             application_invocation_executor: None,
-            pr_autotrack_reader: None,
             opening_project_sessions: None,
         }
     }
@@ -89,11 +87,6 @@ impl DashboardHostAdmissionTestAuthorityV1 {
             lcm_read_authority: self.lcm_read_authority.clone(),
             git_correlation_read_authority: self.git_correlation_read_authority.clone(),
         }
-    }
-
-    pub fn with_pr_autotrack_reader(mut self, reader: PrAutoTrackManagedSummaryReader) -> Self {
-        self.pr_autotrack_reader = Some(reader);
-        self
     }
 
     /// Attaches the daemon-owned application runtime used by mutating
@@ -294,7 +287,6 @@ where
             remote_operational_status_reader: None,
             code_index_freshness_reader: authority.code_index_freshness_reader.clone(),
             feedback_status_reader: None,
-            pr_autotrack_reader: authority.pr_autotrack_reader.clone(),
             code_diagnostics_broker: Some(code_diagnostics_broker),
             application_invocation_executor: authority.application_invocation_executor.clone(),
             delivery_settlement_authority: None,

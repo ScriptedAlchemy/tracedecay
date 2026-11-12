@@ -68,11 +68,6 @@ impl DaemonEngine {
         let watcher_cancel = self.git_watcher.clone();
         let watcher_join = self.git_watcher.clone();
 
-        let pr_task = self.pr_autotrack_task.lock().await.take();
-        let pr_cancel = pr_task
-            .as_ref()
-            .map(crate::daemon::pr_autotrack::PrAutotrackTask::cancellation);
-
         vec![
             vec![ShutdownOwner::with_deadline_status(
                 "manual_branch_publication",
@@ -169,19 +164,6 @@ impl DaemonEngine {
                                     .collect::<Vec<_>>()
                                     .join("; "),
                             )
-                        }
-                    },
-                ),
-                ShutdownOwner::new(
-                    "pr_autotrack",
-                    move || {
-                        if let Some(cancellation) = pr_cancel {
-                            cancellation.cancel();
-                        }
-                    },
-                    async move {
-                        if let Some(task) = pr_task {
-                            task.shutdown().await;
                         }
                     },
                 ),

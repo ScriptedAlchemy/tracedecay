@@ -1117,27 +1117,36 @@ fn check_inert_project_config(dc: &mut DoctorCounters, project_path: &Path) {
     }
 }
 
-/// Warnings name entries PR reconciliation will reset; the error names a
-/// state file that blocks reconciliation outright.
-fn pr_autotrack_state_findings(data_root: &Path) -> std::result::Result<Vec<String>, String> {
-    match tracedecay_application::pr_tracking::load_state(data_root) {
-        Ok(state) => Ok(state
-            .stale
-            .iter()
-            .map(|stale| {
-                format!(
-                    "{stale}; PR auto-tracking reconciliation drops this entry and re-tracks the PR if it is still open"
-                )
-            })
-            .collect()),
-        Err(error) => Err(format!(
-            "PR auto-tracking state {} is unreadable ({error}); reconciliation stays blocked until that file is removed, after which open PRs are re-tracked",
-            tracedecay_application::pr_tracking::state_path(data_root).display()
-        )),
+/// The daemon no longer reads or deletes the artifacts the retired all-PR
+/// autotracking poller left in a project store. Each remaining one is named
+/// so the operator can retire it deliberately.
+fn retired_pr_autotrack_artifact_findings(data_root: &Path) -> Vec<String> {
+    let mut findings = Vec::new();
+    let ledger = data_root.join("pr-autotrack.json");
+    if ledger.exists() {
+        findings.push(format!(
+            "retired PR auto-tracking ledger {} is no longer read; delete it once you no longer need it",
+            ledger.display()
+        ));
     }
+    let worktrees = data_root.join("pr-worktrees");
+    if let Ok(entries) = std::fs::read_dir(&worktrees) {
+        let mut paths = entries
+            .filter_map(std::result::Result::ok)
+            .map(|entry| entry.path())
+            .collect::<Vec<_>>();
+        paths.sort();
+        for path in paths {
+            findings.push(format!(
+                "retired PR auto-tracking worktree {} is no longer managed; remove it with `git worktree remove` after checking it holds no uncommitted work, and delete its `refs/tracedecay/pr/*` ref",
+                path.display()
+            ));
+        }
+    }
+    findings
 }
 
-/// Reports PR auto-tracking state and refused automation effect journals for
+/// Reports retired PR auto-tracking artifacts and refused automation effect journals for
 /// the project's persisted layout, when it has one.
 fn check_persisted_state_resets(dc: &mut DoctorCounters, profile_root: &Path, project_path: &Path) {
     let Ok(Some(layout)) =
@@ -1146,7 +1155,7 @@ fn check_persisted_state_resets(dc: &mut DoctorCounters, profile_root: &Path, pr
         return;
     };
     for findings in [
-        pr_autotrack_state_findings(&layout.data_root),
+        Ok(retired_pr_autotrack_artifact_findings(&layout.data_root)),
         automation_effect_reset_findings(&layout.dashboard_root),
     ] {
         match findings {

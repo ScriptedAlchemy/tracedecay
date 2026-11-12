@@ -795,29 +795,9 @@ async fn run_foreground_unix(
             &[("reason", "shutting_down".to_string())],
         );
     }
-    // PR-branch auto-tracking runs independently of the metadata watcher: it is
-    // gated per-project on `sync.auto_track_pr_branches` (default off), so this
-    // loop is inert unless a project opts in.
-    let pr_autotrack_task = pr_autotrack::spawn_with_administration(
-        engine.store_administration.clone(),
-        engine.invocation.code_index_schedulers.clone(),
-    )
-    .inspect_err(|error| {
-        log_daemon_event(
-            "pr_autotrack",
-            &[
-                ("action", "start".to_string()),
-                ("outcome", "runtime_unavailable".to_string()),
-                ("reason", error.clone()),
-            ],
-        );
-    })
-    .ok();
     let engine = engine
         .with_git_watcher(git_watcher)
-        .with_maintenance_coordinator(maintenance)
-        .with_pr_autotrack_task(pr_autotrack_task)
-        .await;
+        .with_maintenance_coordinator(maintenance);
     let mut shutdown_signals = ShutdownSignals::listen()?;
     let mut run_end = DaemonRunEnd::Stopped;
     let lateness_canary = spawn_lateness_canary();

@@ -493,7 +493,6 @@ impl DashboardStateFixture {
             project_root: project_root.clone(),
             code_index_freshness_reader: None,
             feedback_status_reader: None,
-            pr_autotrack_reader: None,
             storage_mode: storage_mode_label(&layout.storage_mode).to_owned(),
             store_root: layout.data_root.clone(),
             profile_root: profile_root.clone(),

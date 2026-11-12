@@ -359,7 +359,7 @@ pub(super) async fn activate_and_track_manual_branch_owned(
 ) -> Result<BranchAddOutcome, TraceDecayError> {
     let data_root = graph.store_layout().data_root.clone();
     let publication = branch_publication_context(&graph)?;
-    let activation = super::pr_autotrack::activate_manual_branch_head_with_lifecycle(
+    let activation = super::manual_branch::activate_manual_branch_head_with_lifecycle(
         &administration,
         &project_root,
         &graph,
@@ -402,7 +402,7 @@ pub(super) async fn activate_and_track_manual_branch_owned(
                 && previous.worktree_root != activation.worktree.to_string_lossy()
                 && manual_branch_source_owns_artifacts(&data_root, &branch, &previous)
             {
-                super::pr_autotrack::cleanup_manual_branch_retirement(
+                super::manual_branch::cleanup_manual_branch_retirement(
                     &project_root, &data_root, &schedulers, &branch, &previous, lifecycle,
                 ).await.map_err(|error| TraceDecayError::project_route(
                     error.reason_code(), error.retryable(),
@@ -412,7 +412,7 @@ pub(super) async fn activate_and_track_manual_branch_owned(
             Ok(outcome)
         }
         Err(error) if activation.outcome == BranchAddOutcome::Added => {
-            super::pr_autotrack::cleanup_manual_branch_activation(
+            super::manual_branch::cleanup_manual_branch_activation(
                 &project_root,
                 &data_root,
                 &schedulers,

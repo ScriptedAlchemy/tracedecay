@@ -12,8 +12,7 @@ use tracedecay_domain::configuration::{
     ContextScoutIntentSettingsV1, ContextScoutSettingsV1, INDEX_EXCLUDE_SETTING_KEY,
     INDEX_EXTRACT_DOCSTRINGS_SETTING_KEY, INDEX_INCLUDE_SETTING_KEY,
     INDEX_MAX_FILE_SIZE_SETTING_KEY, INDEX_TRACK_CALL_SITES_SETTING_KEY,
-    SYNC_AUTO_TRACK_PR_BRANCHES_SETTING_KEY, SYNC_AUTO_TRACK_PR_POLL_SECS_SETTING_KEY, SettingKey,
-    TELEMETRY_TIMINGS_SETTING_KEY,
+    SettingKey, TELEMETRY_TIMINGS_SETTING_KEY,
 };
 use tracedecay_domain::{ProjectId, validate_index_path_patterns};
 
@@ -39,8 +38,6 @@ pub struct ProjectSettingsPatchV1 {
     pub track_call_sites: Option<bool>,
     #[serde(default)]
     pub telemetry: Option<TelemetrySettingsPatchV1>,
-    #[serde(default)]
-    pub sync: Option<SyncSettingsPatchV1>,
     #[serde(default)]
     pub context_scout: Option<bool>,
     /// Replaces the Context Scout intent-pass block. Enabling it with no
@@ -88,15 +85,6 @@ pub fn context_scout_settings_are_enabled(settings: &ContextScoutSettingsV1) -> 
 
 #[derive(Debug, Clone, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
-pub struct SyncSettingsPatchV1 {
-    #[serde(default)]
-    pub auto_track_pr_branches: Option<bool>,
-    #[serde(default)]
-    pub auto_track_pr_poll_secs: Option<u64>,
-}
-
-#[derive(Debug, Clone, Deserialize, Default)]
-#[serde(deny_unknown_fields)]
 pub struct TelemetrySettingsPatchV1 {
     #[serde(default)]
     pub timings: Option<bool>,
@@ -132,10 +120,6 @@ pub fn preview_project_settings(
         include: patch.include.clone(),
         exclude: patch.exclude.clone(),
         max_file_size: patch.max_file_size,
-        auto_track_pr_poll_secs: patch
-            .sync
-            .as_ref()
-            .and_then(|sync| sync.auto_track_pr_poll_secs),
     }) {
         return Err(ProjectSettingsPreviewErrorV1::Validation(issues));
     }
@@ -187,13 +171,6 @@ pub fn preview_project_settings(
                 .timings
                 .is_none_or(|value| value == current.config().telemetry.timings)
         })
-        && patch.sync.as_ref().is_none_or(|sync| {
-            sync.auto_track_pr_branches
-                .is_none_or(|value| value == current.config().sync.auto_track_pr_branches)
-                && sync
-                    .auto_track_pr_poll_secs
-                    .is_none_or(|value| value == current.config().sync.auto_track_pr_poll_secs)
-        })
         && patch.context_scout.is_none_or(|value| {
             value == context_scout_settings_are_enabled(&current_context_scout)
         })
@@ -237,22 +214,6 @@ pub fn preview_project_settings(
             &layer,
             TELEMETRY_TIMINGS_SETTING_KEY,
             telemetry.timings.map(ConfigurationValueV1::Boolean),
-        )?;
-    }
-    if let Some(sync) = patch.sync {
-        push(
-            &mut mutations,
-            &layer,
-            SYNC_AUTO_TRACK_PR_BRANCHES_SETTING_KEY,
-            sync.auto_track_pr_branches
-                .map(ConfigurationValueV1::Boolean),
-        )?;
-        push(
-            &mut mutations,
-            &layer,
-            SYNC_AUTO_TRACK_PR_POLL_SECS_SETTING_KEY,
-            sync.auto_track_pr_poll_secs
-                .map(ConfigurationValueV1::Unsigned),
         )?;
     }
     // The dashboard flag is only a state toggle: mode, limits, and model

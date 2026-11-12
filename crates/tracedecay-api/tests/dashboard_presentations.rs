@@ -28,8 +28,7 @@ fn configuration_patch_and_cas_errors_are_api_owned() {
     let project = parse_project_settings_patch(json!({
         "expected_revision_id": "revision.project.1",
         "idempotency_key": "configuration.idempotency.project.1",
-        "include": ["src/**"],
-        "sync": {"auto_track_pr_branches": true}
+        "include": ["src/**"]
     }))
     .expect("valid project patch");
     assert_eq!(project.expected_revision_id, "revision.project.1");
@@ -38,10 +37,14 @@ fn configuration_patch_and_cas_errors_are_api_owned() {
         "configuration.idempotency.project.1"
     );
     assert_eq!(project.include, Some(vec!["src/**".to_owned()]));
-    assert_eq!(
-        project.sync.expect("sync patch").auto_track_pr_branches,
-        Some(true)
-    );
+
+    let retired = parse_project_settings_patch(json!({
+        "expected_revision_id": "revision.project.1",
+        "idempotency_key": "configuration.idempotency.project.2",
+        "sync": {"auto_track_pr_branches": true}
+    }))
+    .expect_err("the retired PR auto-tracking patch must be a typed bad request");
+    assert_eq!(retired.0, StatusCode::BAD_REQUEST);
 
     let shape_error = parse_user_settings_patch(
         json!({"expected_revision_id": "revision.user.1", "unknown": true}),

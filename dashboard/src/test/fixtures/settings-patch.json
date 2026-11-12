@@ -193,20 +193,13 @@
                 ".github/**"
               ],
               "max_file_size": 2097152,
-              "sync": {
-                "auto_track_pr_branches": false,
-                "auto_track_pr_poll_secs": 300
-              },
               "telemetry": {
                 "timings": true
               },
               "track_call_sites": true
             },
             "configuration_revision_id": "configuration.revision.v1.f1dda57fc1603bacc602ad4cdbb08de9bfb8aa867eaabaef844d45f8c779d5b4",
-            "configuration_snapshot_id": "tracedecay.configuration.snapshot.v1.061944e9d3ea29c90e551a2ce8af6d42a385839a986c5fd045ed0add7dee042f",
-            "pr_autotrack": {
-              "tracked": []
-            }
+            "configuration_snapshot_id": "tracedecay.configuration.snapshot.v1.061944e9d3ea29c90e551a2ce8af6d42a385839a986c5fd045ed0add7dee042f"
           },
           "resync_recommended": true,
           "storage": {
@@ -421,20 +414,13 @@
             "extract_docstrings": true,
             "include": [],
             "max_file_size": 1048576,
-            "sync": {
-              "auto_track_pr_branches": false,
-              "auto_track_pr_poll_secs": 300
-            },
             "telemetry": {
               "timings": true
             },
             "track_call_sites": true
           },
           "configuration_revision_id": "configuration.initial.canonical.v1",
-          "configuration_snapshot_id": "tracedecay.configuration.snapshot.v1.e027d2b7709ea9e063d5bbce4809ee1d4e72187298a22bd16df6720b2e329741",
-          "pr_autotrack": {
-            "tracked": []
-          }
+          "configuration_snapshot_id": "tracedecay.configuration.snapshot.v1.e027d2b7709ea9e063d5bbce4809ee1d4e72187298a22bd16df6720b2e329741"
         },
         "storage": {
           "dashboard_root": "/run/nl/w/4ba25a53-d0f6-4590-8e56-7dffb5d83e12/tmp/.tmpxOcJR3/home/.tracedecay/projects/proj_69173dcc8b282d79/dashboard",
@@ -598,20 +584,13 @@
                 ".github/**"
               ],
               "max_file_size": 2097152,
-              "sync": {
-                "auto_track_pr_branches": false,
-                "auto_track_pr_poll_secs": 300
-              },
               "telemetry": {
                 "timings": true
               },
               "track_call_sites": true
             },
             "configuration_revision_id": "configuration.revision.v1.f1dda57fc1603bacc602ad4cdbb08de9bfb8aa867eaabaef844d45f8c779d5b4",
-            "configuration_snapshot_id": "tracedecay.configuration.snapshot.v1.061944e9d3ea29c90e551a2ce8af6d42a385839a986c5fd045ed0add7dee042f",
-            "pr_autotrack": {
-              "tracked": []
-            }
+            "configuration_snapshot_id": "tracedecay.configuration.snapshot.v1.061944e9d3ea29c90e551a2ce8af6d42a385839a986c5fd045ed0add7dee042f"
           },
           "resync_recommended": false,
           "storage": {
