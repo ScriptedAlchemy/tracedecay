@@ -3392,6 +3392,7 @@ mod recent_first_discovery_tests {
         }
         let eligible = archive.join("rollout-eligible.jsonl");
         std::fs::write(&eligible, b"{}\n").unwrap();
+        spin_until_jsonl_change_settled(&eligible);
         let expected = directory_entry_fingerprint(&archive).unwrap();
 
         let source = CodexSource::with_home(temp.path());
@@ -3417,10 +3418,11 @@ mod recent_first_discovery_tests {
                 .is_none(),
             "no eager whole-archive fingerprint before bounded traversal"
         );
-        // Model an initially unsettled native witness after the structural
-        // pass so scheduler delay cannot select the settled no-name-fingerprint
-        // path. The bounded iterator assembles the same complete fingerprint.
-        current.fingerprint.get_or_insert_with(Default::default);
+        // Model an initially unsettled directory witness independently of the
+        // native clock. Restart its iterator with the empty fingerprint so
+        // entries consumed by the first pass cannot be omitted from the witness.
+        current.entries = std::fs::read_dir(&archive).unwrap();
+        current.fingerprint = Some(Default::default());
         frontier = first.next_frontier;
 
         let mut covered = BTreeSet::new();
