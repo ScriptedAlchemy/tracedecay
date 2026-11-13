@@ -2908,6 +2908,8 @@ mod recent_first_discovery_tests {
         }
         let admitted = archive.join("rollout-admitted.jsonl");
         std::fs::write(&admitted, b"{}\n").unwrap();
+        // Isolate bounded enumeration from the file's coarse-clock transition.
+        spin_until_jsonl_change_settled(&admitted);
 
         let source = CodexSource::with_home(temp.path());
         let bounds = TranscriptDiscoveryBounds::from_discovered_units(1);
