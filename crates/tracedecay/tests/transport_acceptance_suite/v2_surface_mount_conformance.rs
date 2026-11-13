@@ -157,7 +157,6 @@ struct MountFixture {
     base_url: String,
     origin: String,
     authorization: String,
-    daemon_log: PathBuf,
     // Field order is drop order: the daemon child must be reaped before the
     // temporary home it writes into is removed.
     _daemon: common::DaemonProcess,
@@ -192,8 +191,7 @@ impl MountFixture {
         );
         common::initialize_tracedecay_cli_project(&home, &project);
 
-        let daemon_log = home.join("surface-mount-daemon.log");
-        let daemon = common::spawn_tracedecay_daemon_logged(&home, &daemon_log, |_| {});
+        let daemon = common::spawn_tracedecay_daemon_with(&home, |_| {});
         let authority = wait_for_http_authority(&common::daemon_authority_path(&profile));
 
         let context = run_ok(
@@ -226,7 +224,6 @@ impl MountFixture {
             base_url: format!("http://{endpoint}"),
             origin: format!("http://{endpoint}"),
             authorization: format!("Bearer {token}"),
-            daemon_log,
             _daemon: daemon,
             _home_dir: home_dir,
         }
@@ -356,34 +353,27 @@ impl DashboardProbe {
 }
 
 /// One Content-Length-framed JSON-RPC reply from the live `lsp bridge`.
-fn read_lsp_frame(reader: &mut BufReader<ChildStdout>) -> Result<Value, String> {
+fn read_lsp_frame(reader: &mut BufReader<ChildStdout>) -> Option<Value> {
     let mut content_length = None;
     loop {
         let mut line = String::new();
         match reader.read_line(&mut line) {
-            Ok(0) => return Err("stdout reached EOF while reading frame headers".to_owned()),
+            Ok(0) => return None,
             Ok(_) => {}
-            Err(error) => return Err(format!("read frame headers: {error}")),
+            Err(_) => return None,
         }
         let line = line.trim_end();
         if line.is_empty() {
             break;
         }
         if let Some(value) = line.strip_prefix("Content-Length:") {
-            content_length = Some(
-                value
-                    .trim()
-                    .parse::<usize>()
-                    .map_err(|error| format!("parse Content-Length: {error}"))?,
-            );
+            content_length = value.trim().parse::<usize>().ok();
         }
     }
-    let length = content_length.ok_or_else(|| "missing Content-Length header".to_owned())?;
+    let length = content_length?;
     let mut body = vec![0_u8; length];
-    reader
-        .read_exact(&mut body)
-        .map_err(|error| format!("read frame body: {error}"))?;
-    serde_json::from_slice(&body).map_err(|error| format!("decode frame JSON: {error}"))
+    reader.read_exact(&mut body).ok()?;
+    serde_json::from_slice(&body).ok()
 }
 
 /// A live `tracedecay lsp bridge --stdio` session bound to the fixture's
@@ -401,46 +391,42 @@ fn read_lsp_frame(reader: &mut BufReader<ChildStdout>) -> Result<Value, String> 
 /// operation names at construction, so every declared binding reaches this
 /// gate.
 struct LspBridgeProbe {
-    process: common::TestChildProcess,
+    _process: common::TestChildProcess,
     stdin: ChildStdin,
-    responses: mpsc::Receiver<Result<Value, String>>,
-    stderr_log: PathBuf,
-    daemon_log: PathBuf,
+    responses: mpsc::Receiver<Value>,
     next_id: i64,
 }
 
 impl LspBridgeProbe {
     fn start(fixture: &MountFixture) -> Self {
-        let stderr_log = fixture.home.join("surface-mount-lsp-bridge.log");
         let mut child = isolated_command(&fixture.home)
             .args(["lsp", "bridge", "--stdio", "--project"])
             .arg(&fixture.project)
             .current_dir(&fixture.project)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::from(
-                fs::File::create(&stderr_log).expect("lsp bridge stderr log"),
-            ))
+            .stderr(Stdio::piped())
             .spawn()
             .expect("tracedecay lsp bridge should start");
         let stdin = child.stdin.take().expect("lsp bridge stdin");
         let mut reader = BufReader::new(child.stdout.take().expect("lsp bridge stdout"));
+        if let Some(mut stderr) = child.stderr.take() {
+            std::thread::spawn(move || {
+                let _ = std::io::copy(&mut stderr, &mut std::io::sink());
+            });
+        }
         let (tx, rx) = mpsc::channel();
         std::thread::spawn(move || {
-            loop {
-                let message = read_lsp_frame(&mut reader);
-                let terminal = message.is_err();
-                if tx.send(message).is_err() || terminal {
+            while let Some(message) = read_lsp_frame(&mut reader) {
+                if tx.send(message).is_err() {
                     break;
                 }
             }
         });
         let mut probe = Self {
-            process: common::TestChildProcess::new(child),
+            _process: common::TestChildProcess::new(child),
             stdin,
             responses: rx,
-            stderr_log,
-            daemon_log: fixture.daemon_log.clone(),
             next_id: 0,
         };
         let root_uri = url::Url::from_file_path(&fixture.project)
@@ -530,31 +516,18 @@ impl LspBridgeProbe {
         let deadline = Instant::now() + Duration::from_secs(60);
         loop {
             let remaining = deadline.saturating_duration_since(Instant::now());
-            if remaining.is_zero() {
-                self.fail_request(method, id, "reply deadline expired");
-            }
-            let message = match self.responses.recv_timeout(remaining) {
-                Ok(Ok(message)) => message,
-                Ok(Err(error)) => self.fail_request(method, id, &error),
-                Err(error) => self.fail_request(method, id, &error.to_string()),
-            };
+            assert!(
+                !remaining.is_zero(),
+                "the lsp bridge never answered method {method}"
+            );
+            let message = self
+                .responses
+                .recv_timeout(remaining)
+                .expect("lsp bridge stdout closed before answering");
             if message["id"].as_i64() == Some(id) {
                 return message;
             }
         }
-    }
-
-    fn fail_request(&mut self, method: &str, id: i64, error: &str) -> ! {
-        let status = self.process.try_wait();
-        let stderr = fs::read_to_string(&self.stderr_log)
-            .unwrap_or_else(|error| format!("bridge stderr unavailable: {error}"));
-        let daemon_log = fs::read_to_string(&self.daemon_log)
-            .unwrap_or_else(|error| format!("daemon log unavailable: {error}"));
-        panic!(
-            "lsp bridge failed to answer method {method} (id {id}): {error}\n\
-             bridge status: {status:?}\nbridge stderr:\n{stderr}\n\
-             isolated daemon log:\n{daemon_log}"
-        );
     }
 
     fn notify(&mut self, method: &str, params: Value) {

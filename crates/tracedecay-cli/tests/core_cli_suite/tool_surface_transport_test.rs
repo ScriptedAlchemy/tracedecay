@@ -457,36 +457,29 @@ fn init_typescript_project(home: &Path, project: &Path, write_fixture: impl FnOn
 
 const DIAGNOSTICS_FILE_ARGS: &str = r#"{"scope":"file","path":"src/index.ts","format":"json"}"#;
 
-/// Producer discovery can still be pending after project initialization.
-/// Wait through only pending or stale states before asserting its current result.
-fn await_cli_diagnostics_discovery(home: &Path, project: &Path, args: &str) -> SurfaceOutcome {
+/// Polls `tracedecay tool diagnostics` until the daemon's producer has
+/// published for the current generation; pending is the only state worth
+/// waiting through.
+fn await_published_cli_diagnostics(home: &Path, project: &Path, args: &str) -> serde_json::Value {
     let started = Instant::now();
     loop {
         let outcome = run_surface_tool_from(home, project, "diagnostics", args);
         match outcome.problem_code().as_deref() {
+            None => break outcome.answer(),
             Some("application.diagnostics.pending" | "application.diagnostics.stale") => {
                 assert!(
                     started.elapsed() < SURFACE_TIMEOUT,
-                    "the TypeScript producer did not finish discovery within {:?}\nstdout:\n{}",
+                    "the TypeScript producer did not publish within {:?}\nstdout:\n{}",
                     started.elapsed(),
                     outcome.stdout
                 );
                 std::thread::sleep(Duration::from_millis(250));
             }
-            _ => break outcome,
+            Some(code) => panic!(
+                "the producer reported a terminal state instead of publishing: {code}\nstdout:\n{}\nstderr:\n{}",
+                outcome.stdout, outcome.stderr
+            ),
         }
-    }
-}
-
-/// Polls until the producer publishes, preserving terminal refusal failures.
-fn await_published_cli_diagnostics(home: &Path, project: &Path, args: &str) -> serde_json::Value {
-    let outcome = await_cli_diagnostics_discovery(home, project, args);
-    match outcome.problem_code().as_deref() {
-        None => outcome.answer(),
-        Some(code) => panic!(
-            "the producer reported a terminal state instead of publishing: {code}\nstdout:\n{}\nstderr:\n{}",
-            outcome.stdout, outcome.stderr
-        ),
     }
 }
 
@@ -554,7 +547,12 @@ fn tool_diagnostics_names_the_install_command_without_a_compiler() {
     });
     let _daemon = spawn_tracedecay_daemon(&home_path);
 
-    let outcome = await_cli_diagnostics_discovery(&home_path, &project_path, DIAGNOSTICS_FILE_ARGS);
+    let outcome = run_surface_tool_from(
+        &home_path,
+        &project_path,
+        "diagnostics",
+        DIAGNOSTICS_FILE_ARGS,
+    );
     assert_eq!(
         outcome.problem_code().as_deref(),
         Some("application.diagnostics.producer-missing"),
@@ -702,8 +700,12 @@ fn tool_diagnostics_names_pnpm_install_for_an_uninstalled_monorepo() {
     });
     let _daemon = spawn_tracedecay_daemon(&home_path);
 
-    let outcome =
-        await_cli_diagnostics_discovery(&home_path, &project_path, MONOREPO_APP_FILE_ARGS);
+    let outcome = run_surface_tool_from(
+        &home_path,
+        &project_path,
+        "diagnostics",
+        MONOREPO_APP_FILE_ARGS,
+    );
     assert_eq!(
         outcome.problem_code().as_deref(),
         Some("application.diagnostics.producer-missing"),

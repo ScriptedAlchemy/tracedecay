@@ -114,28 +114,10 @@ impl LspDeliverySettlementClaim {
         self,
         project_lease: ProjectRuntimeRequestLeaseV1,
     ) -> impl Future<Output = LspDeliverySettlementAdmissionV1> + Send {
-        let owner_event_id = self.settlement.attempt.owner_event_id.clone();
-        tracing::trace!(
-            %owner_event_id,
-            phase = "submit",
-            "LSP delivery receipt admission"
-        );
         let admission = tracedecay_runtime_core::native_runtime::on_blocking_pool(
             async move {
                 let _project_lease = project_lease;
-                tracing::trace!(
-                    %owner_event_id,
-                    phase = "started",
-                    "LSP delivery receipt admission"
-                );
-                let outcome = self.admit_inline();
-                tracing::trace!(
-                    %owner_event_id,
-                    phase = "completed",
-                    ?outcome,
-                    "LSP delivery receipt admission"
-                );
-                outcome
+                self.admit_inline()
             }
             .with_current_subscriber(),
         );

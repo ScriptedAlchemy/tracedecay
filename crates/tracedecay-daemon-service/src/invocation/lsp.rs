@@ -769,20 +769,10 @@ impl DaemonInvocationService {
         session: DaemonLspSessionAccess,
         now_ms: u64,
     ) -> DaemonInvocationResponse {
-        tracing::trace!(
-            %request_id,
-            phase = "authenticate",
-            "daemon LSP acknowledgement"
-        );
         let access = match self.authenticate(lsp_registry, session, now_ms).await {
             Ok(access) => access,
             Err(problem) => return DaemonInvocationResponse::problem(request_id, problem),
         };
-        tracing::trace!(
-            %request_id,
-            phase = "await_session_lock",
-            "daemon LSP acknowledgement"
-        );
         // The session map lock covers only the state transition. The receipt's
         // durable admission is disk-latency work and runs after it releases.
         let (acknowledged, delivery, project_lease) = {
@@ -793,11 +783,6 @@ impl DaemonInvocationService {
                     DaemonInvocationProblem::NotFoundOrNotAuthorized,
                 );
             };
-            tracing::trace!(
-                %request_id,
-                phase = "admit_project_lease",
-                "daemon LSP acknowledgement"
-            );
             // Session controls need no request project. Pin the exact owner
             // before changing the frame so its recorder outlives admission.
             let Some(project_lease) = self
@@ -809,11 +794,6 @@ impl DaemonInvocationService {
                     DaemonInvocationProblem::Unavailable,
                 );
             };
-            tracing::trace!(
-                %request_id,
-                phase = "acknowledge_frame",
-                "daemon LSP acknowledgement"
-            );
             let acknowledged = session.actor.acknowledge_outbound();
             let delivery = if acknowledged {
                 session
@@ -827,20 +807,9 @@ impl DaemonInvocationService {
             };
             (acknowledged, delivery, project_lease)
         };
-        tracing::trace!(
-            %request_id,
-            phase = "admit_receipt",
-            "daemon LSP acknowledgement"
-        );
         if let Some(delivery) = delivery {
             let _ = delivery.admit(project_lease).await;
         }
-        tracing::trace!(
-            %request_id,
-            phase = "completed",
-            acknowledged,
-            "daemon LSP acknowledgement"
-        );
         DaemonInvocationResponse::with_outcome(
             request_id,
             DaemonInvocationOutcome::LspAcknowledged { acknowledged },
