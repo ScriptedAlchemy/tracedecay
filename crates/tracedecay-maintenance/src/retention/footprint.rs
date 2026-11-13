@@ -648,8 +648,7 @@ fn entry_statement(entry: &ProfileFootprintEntryV1) -> String {
     let root_state = entry
         .project
         .as_ref()
-        .map(|project| format!(" ({})", project.state.label()))
-        .unwrap_or_default();
+        .map_or_default(|project| format!(" ({})", project.state.label()));
     let compact = render(
         &format!(" (registered root omitted from bounded diagnostic){root_state}"),
         &reclaim,
