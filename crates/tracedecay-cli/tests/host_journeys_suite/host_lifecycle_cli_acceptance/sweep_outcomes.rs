@@ -429,6 +429,11 @@ impl ProfileDaemon {
         let mut command = cli.command(&["daemon", "run"]);
         command
             .env("TRACEDECAY_TEST_ALLOW_INCOMPLETE_HOLDER_SCAN", "1")
+            .env(
+                "RUST_LOG",
+                "info,tracedecay::daemon=trace,tracedecay_daemon_identity=trace,tracedecay_private_fs=trace,tracedecay_global_db=trace",
+            )
+            .env("TRACEDECAY_SPAN_TIMINGS", "1")
             .stdout(Stdio::null())
             .stderr(stderr_log);
         daemon.child = Some(command.spawn().unwrap());
@@ -439,24 +444,34 @@ impl ProfileDaemon {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
         // Follow the exact isolated profile's published endpoint, retaining
         // child ownership and startup diagnostics if admission fails.
-        while !current_daemon_connection(&cli.profile).is_ok_and(|connection| {
-            match connection.endpoint() {
-                DaemonEndpoint::Unix(socket) => {
-                    std::os::unix::net::UnixStream::connect(socket).is_ok()
+        loop {
+            let readiness_error = match current_daemon_connection(&cli.profile) {
+                Ok(connection) => {
+                    let connected = match connection.endpoint() {
+                        DaemonEndpoint::Unix(socket) => {
+                            std::os::unix::net::UnixStream::connect(socket).map(|_| ())
+                        }
+                        DaemonEndpoint::Loopback(address) => {
+                            std::net::TcpStream::connect(address).map(|_| ())
+                        }
+                    };
+                    match connected {
+                        Ok(()) => break,
+                        Err(error) => format!("connect to {}: {error}", connection.endpoint()),
+                    }
                 }
-                DaemonEndpoint::Loopback(address) => std::net::TcpStream::connect(address).is_ok(),
-            }
-        }) {
+                Err(error) => format!("read daemon authority: {error}"),
+            };
             if let Some(status) = daemon.child.as_mut().unwrap().try_wait().unwrap() {
                 panic!(
-                    "profile daemon exited before listening for {}: {status}; stderr:\n{}",
+                    "profile daemon exited before listening for {}: {status}; last readiness error: {readiness_error}; stderr:\n{}",
                     cli.profile.display(),
                     stderr()
                 );
             }
             assert!(
                 std::time::Instant::now() < deadline,
-                "the registered daemon never listened for profile {}; stderr:\n{}",
+                "the registered daemon never listened for profile {}; last readiness error: {readiness_error}; stderr:\n{}",
                 cli.profile.display(),
                 stderr()
             );
