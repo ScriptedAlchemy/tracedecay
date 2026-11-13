@@ -6,7 +6,9 @@ use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 use tracedecay::daemon::call_default_tool;
-use tracedecay_contracts::code_index_freshness::{CodeIndexReadinessTargetV1, CodeIndexReadinessV1};
+use tracedecay_contracts::code_index_freshness::{
+    CodeIndexReadinessTargetV1, CodeIndexReadinessV1,
+};
 use tracedecay_contracts::retrieval::StatusCodeIndexFreshnessV1;
 use tracedecay_daemon_protocol::{DaemonHandshake, TOOL_REQUEST_DEADLINE_ENV};
 use tracedecay_runtime_core::config::ProfileRoot;

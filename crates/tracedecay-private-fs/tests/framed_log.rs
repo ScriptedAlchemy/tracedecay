@@ -333,7 +333,10 @@ fn durable_batch_sync_overlaps_member_barriers_on_a_slow_disk() {
         );
         // Release even on failed admission before joining any blocked helpers.
         slow_disk.release();
-        syncing.join().expect("batch sync worker").expect("batch sync");
+        syncing
+            .join()
+            .expect("batch sync worker")
+            .expect("batch sync");
         assert!(
             all_entered,
             "all {MEMBERS} member barriers must be in flight before any can finish"
