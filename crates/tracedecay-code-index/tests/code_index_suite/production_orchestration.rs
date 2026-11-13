@@ -3348,8 +3348,7 @@ fn partitioned_codec_has_stable_bytes_and_round_trips() {
     let envelope: serde_json::Value =
         serde_json::from_slice(&manifest).expect("partitioned manifest JSON");
     assert_eq!(
-        envelope["generation"]["format_revision"],
-        23,
+        envelope["generation"]["format_revision"], 23,
         "the canonical fixture pins the sealed generation revision"
     );
     assert_eq!(
