@@ -501,11 +501,35 @@ pub(crate) mod seeded_composition {
 
     use tracedecay::daemon::ProductionProjectCompositionHarnessV1;
     use tracedecay_domain::errors::Result;
+    use tracing::level_filters::LevelFilter;
+    use tracing_subscriber::Layer as _;
+    use tracing_subscriber::filter::Targets;
+    use tracing_subscriber::fmt::format::FmtSpan;
+    use tracing_subscriber::layer::SubscriberExt as _;
+    use tracing_subscriber::util::SubscriberInitExt as _;
 
     async fn seed(
         isolation_root: &Path,
         project_roots: impl IntoIterator<Item = PathBuf>,
     ) -> Vec<PathBuf> {
+        static SPAN_DIAGNOSTICS: std::sync::Once = std::sync::Once::new();
+        SPAN_DIAGNOSTICS.call_once(|| {
+            let layer = tracing_subscriber::fmt::layer()
+                .with_span_events(FmtSpan::NEW | FmtSpan::CLOSE)
+                .with_thread_ids(true)
+                .with_ansi(false)
+                .with_writer(std::io::stderr)
+                .with_filter(
+                    Targets::new()
+                        .with_default(LevelFilter::WARN)
+                        .with_target("tracedecay_code_index::production", LevelFilter::TRACE)
+                        .with_target(
+                            "tracedecay_code_index_runtime::code_index_scheduler::publication_store",
+                            LevelFilter::TRACE,
+                        ),
+                );
+            let _ = tracing_subscriber::registry().with(layer).try_init();
+        });
         let project_roots: Vec<PathBuf> = project_roots.into_iter().collect();
         crate::fixture::seed_production_composition_profile(isolation_root, &project_roots).await;
         project_roots
