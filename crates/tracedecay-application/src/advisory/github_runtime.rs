@@ -1398,6 +1398,53 @@ where
     S: GitHubReviewAtomicRefreshStoreV1 + Sync,
     A: GitHubSourceAccessAuthorityV1,
 {
+    /// Serves the state an earlier refresh already retained, without any
+    /// provider read or store write. The caller's grant and the configured
+    /// source policy are re-checked now, and the retained state must validate
+    /// for this exact scope (including head commit), pull request and
+    /// operation; anything else is unavailable rather than borrowed.
+    pub fn retained<'a>(
+        &'a self,
+        context: &'a RequestContext,
+        request: &'a GitHubReviewReadRequestV1,
+    ) -> FeedbackPortFuture<'a, GitHubReviewRefreshOutcomeV1> {
+        Box::pin(async move {
+            if request.validate().is_err() {
+                return GitHubReviewRefreshOutcomeV1::Unavailable;
+            }
+            if let Some(outcome) = refresh_request_outcome(context, request) {
+                return outcome;
+            }
+            if let Some(outcome) =
+                blocked_refresh_outcome(self.source_access.authorize(context, request).await)
+            {
+                return outcome;
+            }
+            if let Some(outcome) = refresh_request_outcome(context, request) {
+                return outcome;
+            }
+            let loaded = self.store.load(context, request).await;
+            if let Some(outcome) = refresh_request_outcome(context, request) {
+                return outcome;
+            }
+            match loaded {
+                GitHubReviewRefreshStoreReadOutcomeV1::State(state)
+                    if state.validate_for(request) =>
+                {
+                    GitHubReviewRefreshOutcomeV1::Stored(Box::new(GitHubReviewRefreshReceiptV1 {
+                        state: *state,
+                        deleted_items: 0,
+                    }))
+                }
+                GitHubReviewRefreshStoreReadOutcomeV1::State(_)
+                | GitHubReviewRefreshStoreReadOutcomeV1::Empty
+                | GitHubReviewRefreshStoreReadOutcomeV1::Unavailable => {
+                    GitHubReviewRefreshOutcomeV1::Unavailable
+                }
+            }
+        })
+    }
+
     pub fn refresh<'a>(
         &'a self,
         context: &'a RequestContext,
@@ -2113,6 +2160,135 @@ mod tests {
         assert_eq!(outcome, GitHubReviewRefreshOutcomeV1::Cancelled);
         assert_eq!(reads.calls.load(Ordering::SeqCst), 0);
         assert_eq!(store.commits.load(Ordering::SeqCst), 0);
+    }
+
+    struct SourceLifecycle(GitHubProviderLifecycleV1);
+
+    impl GitHubSourceAccessAuthorityV1 for SourceLifecycle {
+        fn authorize<'a>(
+            &'a self,
+            _context: &'a RequestContext,
+            _request: &'a GitHubReviewReadRequestV1,
+        ) -> FeedbackPortFuture<'a, GitHubProviderLifecycleV1> {
+            let lifecycle = self.0;
+            Box::pin(async move { lifecycle })
+        }
+    }
+
+    #[tokio::test]
+    async fn retained_read_serves_exact_scope_state_without_provider_io() {
+        let (context, request) =
+            context_and_request(GitHubReviewReadOperationV1::RestListPullRequestReviewComments);
+        let store = RefreshStore::default();
+        let idle = Reads::new(Vec::new());
+        let reader = GitHubReviewRefreshCoordinatorV1::new(&idle, &store, Ready);
+        assert_eq!(
+            reader.retained(&context, &request).await,
+            GitHubReviewRefreshOutcomeV1::Unavailable,
+            "nothing retained is unavailable, never an empty clean read"
+        );
+
+        let first = complete_response(&request);
+        let mut second = first.clone();
+        second.ingress.fetched_at = UtcMicros(first.ingress.fetched_at.0 + 1);
+        let reads = Reads::new(vec![read(first), read(second)]);
+        let refresher = GitHubReviewRefreshCoordinatorV1::new(&reads, &store, Ready);
+        assert!(matches!(
+            refresher.refresh(&context, &request).await,
+            GitHubReviewRefreshOutcomeV1::Stored(_)
+        ));
+        let retained_state = store.state.lock().unwrap().clone().expect("retained state");
+        let commits = store.commits.load(Ordering::SeqCst);
+
+        let GitHubReviewRefreshOutcomeV1::Stored(receipt) =
+            reader.retained(&context, &request).await
+        else {
+            panic!("exact-scope retained state must be served");
+        };
+        assert_eq!(receipt.state, retained_state);
+        assert_eq!(receipt.deleted_items, 0);
+        assert_eq!(idle.calls.load(Ordering::SeqCst), 0, "no provider read");
+        assert_eq!(store.commits.load(Ordering::SeqCst), commits, "no write");
+
+        // State retained for an earlier head is not evidence for this one.
+        let mut moved = request.clone();
+        moved.scope.head_commit_id = CommitId::new("commit.github.next-head").unwrap();
+        assert_eq!(
+            reader.retained(&context, &moved).await,
+            GitHubReviewRefreshOutcomeV1::Unavailable
+        );
+        assert_eq!(idle.calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn retained_read_rechecks_cancellation_grant_and_source_policy() {
+        let (context, request) =
+            context_and_request(GitHubReviewReadOperationV1::RestListPullRequestReviewComments);
+        let first = complete_response(&request);
+        let mut second = first.clone();
+        second.ingress.fetched_at = UtcMicros(first.ingress.fetched_at.0 + 1);
+        let reads = Reads::new(vec![read(first), read(second)]);
+        let store = RefreshStore::default();
+        assert!(matches!(
+            GitHubReviewRefreshCoordinatorV1::new(&reads, &store, Ready)
+                .refresh(&context, &request)
+                .await,
+            GitHubReviewRefreshOutcomeV1::Stored(_)
+        ));
+        let idle = Reads::new(Vec::new());
+
+        let cancelled = context.clone().with_cancellation(
+            CancellationContext::cancelled("cancel.github.retained", UtcMicros(12)).unwrap(),
+        );
+        assert_eq!(
+            GitHubReviewRefreshCoordinatorV1::new(&idle, &store, Ready)
+                .retained(&cancelled, &request)
+                .await,
+            GitHubReviewRefreshOutcomeV1::Cancelled
+        );
+
+        // The admitted grant is scoped to this worktree; another worktree's
+        // retained review state is refused before the source policy is read.
+        let mut foreign = request.clone();
+        foreign.scope.worktree_id = WorktreeId::new("worktree.github.foreign").unwrap();
+        assert_eq!(
+            GitHubReviewRefreshCoordinatorV1::new(
+                &idle,
+                &store,
+                SourceLifecycle(GitHubProviderLifecycleV1::Ready)
+            )
+            .retained(&context, &foreign)
+            .await,
+            GitHubReviewRefreshOutcomeV1::Denied
+        );
+
+        for (lifecycle, expected) in [
+            (
+                GitHubProviderLifecycleV1::Denied,
+                GitHubReviewRefreshOutcomeV1::Denied,
+            ),
+            (
+                GitHubProviderLifecycleV1::Stale,
+                GitHubReviewRefreshOutcomeV1::Stale,
+            ),
+            (
+                GitHubProviderLifecycleV1::Ambiguous,
+                GitHubReviewRefreshOutcomeV1::Stale,
+            ),
+            (
+                GitHubProviderLifecycleV1::Unavailable,
+                GitHubReviewRefreshOutcomeV1::Unavailable,
+            ),
+        ] {
+            assert_eq!(
+                GitHubReviewRefreshCoordinatorV1::new(&idle, &store, SourceLifecycle(lifecycle))
+                    .retained(&context, &request)
+                    .await,
+                expected,
+                "revoked or unsettled source policy must not serve retained {lifecycle:?} state"
+            );
+        }
+        assert_eq!(idle.calls.load(Ordering::SeqCst), 0);
     }
 
     #[tokio::test]

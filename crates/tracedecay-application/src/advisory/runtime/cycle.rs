@@ -123,8 +123,8 @@ where
         let mut contributions = AdvisoryContributionsV1::absent();
         mark_unrequested_remote_providers(
             &mut contributions,
-            request.github.is_some(),
-            request.ci.is_configured(),
+            request.remote.github().is_some(),
+            request.remote.ci_configured(),
         );
 
         if !context_matches_scope(context, &self.feedback_scope) {
@@ -156,231 +156,39 @@ where
             ));
         }
 
-        if let Some(provider_request) = request.github.as_ref() {
-            if let Some(github) = self.github.as_ref() {
-                let outcome =
-                    await_provider(&mut control, github.refresh(context, provider_request)).await;
-                let outcome = match outcome {
-                    Ok(outcome) => outcome,
-                    Err(interruption) => {
-                        return Ok(self.finish_interruption(
-                            &request.feedback.input,
-                            interruption,
-                            contributions,
-                        ));
-                    }
-                };
-                // Retain the PR identity, review votes, and conversation beside
-                // usable inline-review evidence. These reads contribute no
-                // advisory findings; unavailable provider reads stop enrichment.
-                if matches!(
-                    provider_request.operation,
-                    GitHubReviewReadOperationV1::GraphQlQueryPullRequestReviewThreads
-                        | GitHubReviewReadOperationV1::RestListPullRequestReviewComments
-                ) && outcome.has_usable_observation()
-                {
-                    for operation in [
-                        GitHubReviewReadOperationV1::RestGetPullRequest,
-                        GitHubReviewReadOperationV1::RestListPullRequestReviews,
-                        GitHubReviewReadOperationV1::RestListPullRequestConversationComments,
-                    ] {
-                        let detail_request = GitHubReviewReadRequestV1 {
-                            operation,
-                            scope: provider_request.scope.clone(),
-                            pull_request_id: provider_request.pull_request_id.clone(),
-                        };
-                        match await_provider(&mut control, github.refresh(context, &detail_request))
-                            .await
-                        {
-                            Ok(detail_outcome) if detail_outcome.has_usable_observation() => {}
-                            Ok(detail_outcome) => {
-                                tracing::warn!(
-                                    event = "github_pull_request_detail_refresh_not_stored",
-                                    operation = ?operation,
-                                    outcome = ?detail_outcome,
-                                    "pull-request enrichment was not retained; serving the available evidence"
-                                );
-                                break;
-                            }
-                            Err(interruption) => {
-                                return Ok(self.finish_interruption(
-                                    &request.feedback.input,
-                                    interruption,
-                                    contributions,
-                                ));
-                            }
-                        }
-                    }
-                }
-                match outcome {
-                    GitHubReviewRefreshOutcomeV1::Stored(state) => {
-                        let ingress = &state.state.latest_attempt.ingress;
-                        self.observe_github(&request.feedback.input, ingress);
-                        contributions.capture(
-                            AdvisoryProviderV1::GitHub,
-                            ingress.advisory_findings(request.validity),
-                        );
-                    }
-                    GitHubReviewRefreshOutcomeV1::Cancelled => {
-                        return Ok(self.finish_interruption(
-                            &request.feedback.input,
-                            AdvisoryCycleInterruption::Cancelled,
-                            contributions,
-                        ));
-                    }
-                    GitHubReviewRefreshOutcomeV1::Denied => {
-                        self.observe_github_terminal(
-                            &request.feedback.input,
-                            FeedbackOutcomeV1::Denied,
-                        );
-                        contributions.set_state(
-                            AdvisoryProviderV1::GitHub,
-                            ProviderEvaluationStateV1::Unavailable,
-                        );
-                    }
-                    GitHubReviewRefreshOutcomeV1::Unavailable => {
-                        self.observe_github_terminal(
-                            &request.feedback.input,
-                            FeedbackOutcomeV1::Unavailable,
-                        );
-                        contributions.set_state(
-                            AdvisoryProviderV1::GitHub,
-                            ProviderEvaluationStateV1::Unavailable,
-                        );
-                    }
-                    GitHubReviewRefreshOutcomeV1::Stale => {
-                        self.observations.observe_source_event(
-                            &request.feedback.input,
-                            FeedbackSourceEventV1::GitHubStale { item_count: 0 },
-                        );
-                        contributions.set_state(
-                            AdvisoryProviderV1::GitHub,
-                            ProviderEvaluationStateV1::Stale,
-                        );
-                    }
-                }
-            } else {
-                self.observe_github_terminal(
-                    &request.feedback.input,
-                    FeedbackOutcomeV1::Unavailable,
-                );
-                contributions.set_state(
-                    AdvisoryProviderV1::GitHub,
-                    ProviderEvaluationStateV1::Unavailable,
-                );
+        let collected = match &request.remote {
+            AdvisoryRemoteEvidenceV1::Retained {
+                github,
+                ci_configured,
+            } => {
+                self.collect_retained_remote(
+                    context,
+                    &mut control,
+                    &request,
+                    github.as_ref(),
+                    *ci_configured,
+                    &mut contributions,
+                )
+                .await
             }
-        }
-
-        match &request.ci {
-            ProductionCiFailureDiscoveryOutcomeV1::Found(provider_request) => {
-                let outcome =
-                    await_provider(&mut control, self.ci.localize(context, provider_request)).await;
-                let outcome = match outcome {
-                    Ok(outcome) => outcome,
-                    Err(interruption) => {
-                        return Ok(self.finish_interruption(
-                            &request.feedback.input,
-                            interruption,
-                            contributions,
-                        ));
-                    }
-                };
-                match outcome {
-                    CiFailureLocalizationPortOutcomeV1::Localized(localization) => {
-                        self.observe_ci(&request.feedback.input, &localization);
-                        contributions.capture(
-                            AdvisoryProviderV1::Ci,
-                            localization.advisory_findings(request.validity),
-                        );
-                    }
-                    CiFailureLocalizationPortOutcomeV1::Denied => {
-                        self.observe_ci_terminal(
-                            &request.feedback.input,
-                            FeedbackOutcomeV1::Denied,
-                            FeedbackCoverageV1::Known,
-                            None,
-                        );
-                        contributions.set_state(
-                            AdvisoryProviderV1::Ci,
-                            ProviderEvaluationStateV1::Unavailable,
-                        );
-                    }
-                    CiFailureLocalizationPortOutcomeV1::RateLimited(checkpoint) => {
-                        self.observe_ci_terminal(
-                            &request.feedback.input,
-                            FeedbackOutcomeV1::RateLimited,
-                            FeedbackCoverageV1::Unknown,
-                            Some(tracedecay_domain::feedback::CiFailureSourceDegradationV1::RateLimited(
-                                checkpoint,
-                            )),
-                        );
-                        contributions
-                            .set_state(AdvisoryProviderV1::Ci, ProviderEvaluationStateV1::Partial);
-                    }
-                    CiFailureLocalizationPortOutcomeV1::Failed(cause) => {
-                        self.observe_ci_terminal(
-                            &request.feedback.input,
-                            FeedbackOutcomeV1::Failed,
-                            FeedbackCoverageV1::Unknown,
-                            Some(
-                                tracedecay_domain::feedback::CiFailureSourceDegradationV1::Failed(
-                                    cause,
-                                ),
-                            ),
-                        );
-                        contributions
-                            .set_state(AdvisoryProviderV1::Ci, ProviderEvaluationStateV1::Failed);
-                    }
-                    CiFailureLocalizationPortOutcomeV1::Unavailable => {
-                        self.observe_ci_terminal(
-                            &request.feedback.input,
-                            FeedbackOutcomeV1::Unavailable,
-                            FeedbackCoverageV1::Unknown,
-                            None,
-                        );
-                        contributions.set_state(
-                            AdvisoryProviderV1::Ci,
-                            ProviderEvaluationStateV1::Unavailable,
-                        );
-                    }
-                }
+            AdvisoryRemoteEvidenceV1::Refresh { github, ci } => {
+                self.collect_refreshed_remote(
+                    context,
+                    &mut control,
+                    &request,
+                    github.as_ref(),
+                    ci,
+                    &mut contributions,
+                )
+                .await
             }
-            discovery => {
-                if let Some((state, outcome, coverage)) = ci_discovery_terminal_state(discovery) {
-                    let degradation = match discovery {
-                        ProductionCiFailureDiscoveryOutcomeV1::RateLimited(checkpoint) => Some(
-                            tracedecay_domain::feedback::CiFailureSourceDegradationV1::RateLimited(
-                                checkpoint.clone(),
-                            ),
-                        ),
-                        ProductionCiFailureDiscoveryOutcomeV1::Failed(cause) => Some(
-                            tracedecay_domain::feedback::CiFailureSourceDegradationV1::Failed(
-                                *cause,
-                            ),
-                        ),
-                        _ => None,
-                    };
-                    self.observe_ci_terminal(
-                        &request.feedback.input,
-                        outcome,
-                        coverage,
-                        degradation,
-                    );
-                    contributions.set_state(AdvisoryProviderV1::Ci, state);
-                } else {
-                    // Found is handled above; fail closed if the terminal map regresses.
-                    self.observe_ci_terminal(
-                        &request.feedback.input,
-                        FeedbackOutcomeV1::Unavailable,
-                        FeedbackCoverageV1::Unknown,
-                        None,
-                    );
-                    contributions.set_state(
-                        AdvisoryProviderV1::Ci,
-                        ProviderEvaluationStateV1::Unavailable,
-                    );
-                }
-            }
+        };
+        if let Err(interruption) = collected {
+            return Ok(self.finish_interruption(
+                &request.feedback.input,
+                interruption,
+                contributions,
+            ));
         }
 
         if let Some(provider_request) = request.proximity.as_ref() {
@@ -479,6 +287,329 @@ where
         for provider in &contributions.providers {
             self.observations
                 .observe_source_event(input, provider_state_event(provider));
+        }
+    }
+
+    /// Explicit advisory demand: refreshes GitHub (with PR enrichment) and
+    /// localizes the discovered CI run, attributing that remote work to this
+    /// cycle's source observations.
+    async fn collect_refreshed_remote(
+        &self,
+        context: &RequestContext,
+        control: &mut AdvisoryCycleControl,
+        request: &AdvisoryCycleRequest,
+        github: Option<&GitHubReviewReadRequestV1>,
+        ci: &ProductionCiFailureDiscoveryOutcomeV1,
+        contributions: &mut AdvisoryContributionsV1,
+    ) -> Result<(), AdvisoryCycleInterruption> {
+        if let Some(provider_request) = github {
+            if let Some(github) = self.github.as_ref() {
+                let outcome =
+                    await_provider(&mut *control, github.refresh(context, provider_request)).await;
+                let outcome = match outcome {
+                    Ok(outcome) => outcome,
+                    Err(interruption) => return Err(interruption),
+                };
+                // Retain the PR identity, review votes, and conversation beside
+                // usable inline-review evidence. These reads contribute no
+                // advisory findings; unavailable provider reads stop enrichment.
+                if matches!(
+                    provider_request.operation,
+                    GitHubReviewReadOperationV1::GraphQlQueryPullRequestReviewThreads
+                        | GitHubReviewReadOperationV1::RestListPullRequestReviewComments
+                ) && outcome.has_usable_observation()
+                {
+                    for operation in [
+                        GitHubReviewReadOperationV1::RestGetPullRequest,
+                        GitHubReviewReadOperationV1::RestListPullRequestReviews,
+                        GitHubReviewReadOperationV1::RestListPullRequestConversationComments,
+                    ] {
+                        let detail_request = GitHubReviewReadRequestV1 {
+                            operation,
+                            scope: provider_request.scope.clone(),
+                            pull_request_id: provider_request.pull_request_id.clone(),
+                        };
+                        match await_provider(
+                            &mut *control,
+                            github.refresh(context, &detail_request),
+                        )
+                        .await
+                        {
+                            Ok(detail_outcome) if detail_outcome.has_usable_observation() => {}
+                            Ok(detail_outcome) => {
+                                tracing::warn!(
+                                    event = "github_pull_request_detail_refresh_not_stored",
+                                    operation = ?operation,
+                                    outcome = ?detail_outcome,
+                                    "pull-request enrichment was not retained; serving the available evidence"
+                                );
+                                break;
+                            }
+                            Err(interruption) => return Err(interruption),
+                        }
+                    }
+                }
+                match outcome {
+                    GitHubReviewRefreshOutcomeV1::Stored(state) => {
+                        let ingress = &state.state.latest_attempt.ingress;
+                        self.observe_github(&request.feedback.input, ingress);
+                        contributions.capture(
+                            AdvisoryProviderV1::GitHub,
+                            ingress.advisory_findings(request.validity),
+                        );
+                    }
+                    GitHubReviewRefreshOutcomeV1::Cancelled => {
+                        return Err(AdvisoryCycleInterruption::Cancelled);
+                    }
+                    GitHubReviewRefreshOutcomeV1::Denied => {
+                        self.observe_github_terminal(
+                            &request.feedback.input,
+                            FeedbackOutcomeV1::Denied,
+                        );
+                        contributions.set_state(
+                            AdvisoryProviderV1::GitHub,
+                            ProviderEvaluationStateV1::Unavailable,
+                        );
+                    }
+                    GitHubReviewRefreshOutcomeV1::Unavailable => {
+                        self.observe_github_terminal(
+                            &request.feedback.input,
+                            FeedbackOutcomeV1::Unavailable,
+                        );
+                        contributions.set_state(
+                            AdvisoryProviderV1::GitHub,
+                            ProviderEvaluationStateV1::Unavailable,
+                        );
+                    }
+                    GitHubReviewRefreshOutcomeV1::Stale => {
+                        self.observations.observe_source_event(
+                            &request.feedback.input,
+                            FeedbackSourceEventV1::GitHubStale { item_count: 0 },
+                        );
+                        contributions.set_state(
+                            AdvisoryProviderV1::GitHub,
+                            ProviderEvaluationStateV1::Stale,
+                        );
+                    }
+                }
+            } else {
+                self.observe_github_terminal(
+                    &request.feedback.input,
+                    FeedbackOutcomeV1::Unavailable,
+                );
+                contributions.set_state(
+                    AdvisoryProviderV1::GitHub,
+                    ProviderEvaluationStateV1::Unavailable,
+                );
+            }
+        }
+
+        match ci {
+            ProductionCiFailureDiscoveryOutcomeV1::Found(provider_request) => {
+                let outcome =
+                    await_provider(&mut *control, self.ci.localize(context, provider_request))
+                        .await;
+                let outcome = match outcome {
+                    Ok(outcome) => outcome,
+                    Err(interruption) => return Err(interruption),
+                };
+                match outcome {
+                    CiFailureLocalizationPortOutcomeV1::Localized(localization) => {
+                        self.observe_ci(&request.feedback.input, &localization);
+                        contributions.capture(
+                            AdvisoryProviderV1::Ci,
+                            localization.advisory_findings(request.validity),
+                        );
+                    }
+                    CiFailureLocalizationPortOutcomeV1::Denied => {
+                        self.observe_ci_terminal(
+                            &request.feedback.input,
+                            FeedbackOutcomeV1::Denied,
+                            FeedbackCoverageV1::Known,
+                            None,
+                        );
+                        contributions.set_state(
+                            AdvisoryProviderV1::Ci,
+                            ProviderEvaluationStateV1::Unavailable,
+                        );
+                    }
+                    CiFailureLocalizationPortOutcomeV1::RateLimited(checkpoint) => {
+                        self.observe_ci_terminal(
+                            &request.feedback.input,
+                            FeedbackOutcomeV1::RateLimited,
+                            FeedbackCoverageV1::Unknown,
+                            Some(tracedecay_domain::feedback::CiFailureSourceDegradationV1::RateLimited(
+                                checkpoint,
+                            )),
+                        );
+                        contributions
+                            .set_state(AdvisoryProviderV1::Ci, ProviderEvaluationStateV1::Partial);
+                    }
+                    CiFailureLocalizationPortOutcomeV1::Failed(cause) => {
+                        self.observe_ci_terminal(
+                            &request.feedback.input,
+                            FeedbackOutcomeV1::Failed,
+                            FeedbackCoverageV1::Unknown,
+                            Some(
+                                tracedecay_domain::feedback::CiFailureSourceDegradationV1::Failed(
+                                    cause,
+                                ),
+                            ),
+                        );
+                        contributions
+                            .set_state(AdvisoryProviderV1::Ci, ProviderEvaluationStateV1::Failed);
+                    }
+                    CiFailureLocalizationPortOutcomeV1::Unavailable => {
+                        self.observe_ci_terminal(
+                            &request.feedback.input,
+                            FeedbackOutcomeV1::Unavailable,
+                            FeedbackCoverageV1::Unknown,
+                            None,
+                        );
+                        contributions.set_state(
+                            AdvisoryProviderV1::Ci,
+                            ProviderEvaluationStateV1::Unavailable,
+                        );
+                    }
+                }
+            }
+            discovery => {
+                self.record_ci_discovery_terminal(
+                    &request.feedback.input,
+                    discovery,
+                    contributions,
+                );
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Editor and hook feedback: attaches only evidence an earlier refresh
+    /// retained for this exact scope, rechecked for grant, source policy and
+    /// head. No provider I/O happens here, so no remote source telemetry is
+    /// attributed to this cycle, and retained evidence never reports complete
+    /// coverage: local completion is never evidence of remote success.
+    async fn collect_retained_remote(
+        &self,
+        context: &RequestContext,
+        control: &mut AdvisoryCycleControl,
+        request: &AdvisoryCycleRequest,
+        github: Option<&GitHubReviewReadRequestV1>,
+        ci_configured: bool,
+        contributions: &mut AdvisoryContributionsV1,
+    ) -> Result<(), AdvisoryCycleInterruption> {
+        if let Some(provider_request) = github {
+            let state = match self.github.as_ref() {
+                Some(github) => {
+                    match await_provider(&mut *control, github.retained(context, provider_request))
+                        .await?
+                    {
+                        GitHubReviewRefreshOutcomeV1::Stored(receipt) => {
+                            contributions.capture(
+                                AdvisoryProviderV1::GitHub,
+                                retained_contribution(
+                                    receipt
+                                        .state
+                                        .latest_attempt
+                                        .ingress
+                                        .advisory_findings(request.validity),
+                                ),
+                            );
+                            None
+                        }
+                        GitHubReviewRefreshOutcomeV1::Cancelled => {
+                            return Err(AdvisoryCycleInterruption::Cancelled);
+                        }
+                        // An unsettled source policy withholds retained
+                        // evidence; it must not force the local cycle to
+                        // replan as a stale provider would.
+                        GitHubReviewRefreshOutcomeV1::Stale
+                        | GitHubReviewRefreshOutcomeV1::Denied
+                        | GitHubReviewRefreshOutcomeV1::Unavailable => {
+                            Some(ProviderEvaluationStateV1::Unavailable)
+                        }
+                    }
+                }
+                None => Some(ProviderEvaluationStateV1::Unavailable),
+            };
+            if let Some(state) = state {
+                contributions.set_state(AdvisoryProviderV1::GitHub, state);
+            }
+        }
+        if !ci_configured {
+            self.record_ci_discovery_terminal(
+                &request.feedback.input,
+                &ProductionCiFailureDiscoveryOutcomeV1::NotConfigured,
+                contributions,
+            );
+            return Ok(());
+        }
+        let state = match await_provider(
+            &mut *control,
+            self.ci.retained(context, &self.feedback_scope),
+        )
+        .await?
+        {
+            // Nothing retained is not evidence that no failure exists.
+            CiRetainedLocalizationV1::NotRetained => ProviderEvaluationStateV1::Unavailable,
+            CiRetainedLocalizationV1::Ambiguous => ProviderEvaluationStateV1::Failed,
+            CiRetainedLocalizationV1::Read(CiFailureLocalizationPortOutcomeV1::Localized(
+                localization,
+            )) => {
+                contributions.capture(
+                    AdvisoryProviderV1::Ci,
+                    retained_contribution(localization.advisory_findings(request.validity)),
+                );
+                return Ok(());
+            }
+            CiRetainedLocalizationV1::Read(
+                CiFailureLocalizationPortOutcomeV1::Denied
+                | CiFailureLocalizationPortOutcomeV1::Unavailable,
+            ) => ProviderEvaluationStateV1::Unavailable,
+            CiRetainedLocalizationV1::Read(CiFailureLocalizationPortOutcomeV1::RateLimited(_)) => {
+                ProviderEvaluationStateV1::Partial
+            }
+            CiRetainedLocalizationV1::Read(CiFailureLocalizationPortOutcomeV1::Failed(_)) => {
+                ProviderEvaluationStateV1::Failed
+            }
+        };
+        contributions.set_state(AdvisoryProviderV1::Ci, state);
+        Ok(())
+    }
+
+    fn record_ci_discovery_terminal(
+        &self,
+        input: &tracedecay_domain::feedback::FeedbackEvaluationInputV1,
+        discovery: &ProductionCiFailureDiscoveryOutcomeV1,
+        contributions: &mut AdvisoryContributionsV1,
+    ) {
+        if let Some((state, outcome, coverage)) = ci_discovery_terminal_state(discovery) {
+            let degradation = match discovery {
+                ProductionCiFailureDiscoveryOutcomeV1::RateLimited(checkpoint) => Some(
+                    tracedecay_domain::feedback::CiFailureSourceDegradationV1::RateLimited(
+                        checkpoint.clone(),
+                    ),
+                ),
+                ProductionCiFailureDiscoveryOutcomeV1::Failed(cause) => {
+                    Some(tracedecay_domain::feedback::CiFailureSourceDegradationV1::Failed(*cause))
+                }
+                _ => None,
+            };
+            self.observe_ci_terminal(input, outcome, coverage, degradation);
+            contributions.set_state(AdvisoryProviderV1::Ci, state);
+        } else {
+            // Found is localized by the caller; fail closed if the map regresses.
+            self.observe_ci_terminal(
+                input,
+                FeedbackOutcomeV1::Unavailable,
+                FeedbackCoverageV1::Unknown,
+                None,
+            );
+            contributions.set_state(
+                AdvisoryProviderV1::Ci,
+                ProviderEvaluationStateV1::Unavailable,
+            );
         }
     }
 
@@ -816,6 +947,25 @@ pub(super) fn provider_state_event(provider: &AdvisoryProviderStateV1) -> Feedba
         provider: provider_kind,
         state: provider.state,
     }
+}
+
+/// Retained evidence was not revalidated by this cycle, so it never reports
+/// complete coverage: a complete retained batch is partial, which keeps the
+/// cycle from terminating clean. It is not `Stale`, which would demand a
+/// replan and withhold the independently authorized local findings. The
+/// retained findings keep their own lifecycle and diagnostic projection.
+pub(super) fn retained_contribution(
+    batch: Result<AdvisoryFindingContributionBatchV1, ApplicationContractError>,
+) -> Result<AdvisoryFindingContributionBatchV1, ApplicationContractError> {
+    batch.map(|mut batch| {
+        if batch.provider_state == ProviderEvaluationStateV1::SupportedCompletedComplete {
+            batch.provider_state = ProviderEvaluationStateV1::Partial;
+            for finding in &mut batch.findings {
+                finding.provider_state = ProviderEvaluationStateV1::Partial;
+            }
+        }
+        batch
+    })
 }
 
 pub(super) fn mark_unrequested_remote_providers(
