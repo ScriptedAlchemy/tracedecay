@@ -439,6 +439,12 @@ fn terminal_backlog_does_not_block_an_unrelated_store_writer() {
         held.rollback().await.expect("release A");
         let outcome = native_runtime::timeout(Duration::from_secs(10), tick.wait()).await.expect("terminal tick settled");
         assert!(matches!(outcome, native_runtime::NativeTaskOutcome::Completed(_)));
+        // A queued maintenance admission is supervised independently of the
+        // census tick. Join its fair store turn before reading the committed
+        // page, without admitting a second maintenance page.
+        native_runtime::timeout(Duration::from_secs(10),
+            daemon.engine.store_administration.with_writer_in(a_scope, || async {})
+        ).await.expect("terminal store writer settled");
         assert!(progressed.is_ok(), "B must write while A is suspended with a terminal backlog");
         assert_eq!(retired_signals(&shard).await, 16, "one admission runs one bounded terminal page");
         assert_eq!(retirement_frontiers(&shard).await, 1);
