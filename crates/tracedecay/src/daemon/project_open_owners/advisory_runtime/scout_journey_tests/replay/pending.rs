@@ -55,7 +55,7 @@ async fn pending_stop_delivers_once(
     let sessions = runtime
         .registered_database_arc(HostAdmissionScope::Project)
         .unwrap();
-    let (engine, entry) = mount_intent(&fixture, &graph, &sessions).await;
+    let entry = mount_intent(&fixture, &graph, &sessions).await;
     let effects = Arc::new(AtomicUsize::new(0));
     let intent_runs = Arc::new(AtomicUsize::new(0));
     let captured = Arc::new(Mutex::new(None));
@@ -226,7 +226,6 @@ async fn pending_stop_delivers_once(
         }
         assert_eq!(settlements.load(Ordering::SeqCst), 1);
         assert_eq!(effects.load(Ordering::SeqCst), 1);
-        assert_eq!(engine.requests(), 1);
         let recent = fixture
             .owner
             .recent_exact(entry.work.address, 8)
@@ -307,7 +306,6 @@ async fn pending_stop_delivers_once(
     ));
     assert_eq!(pending(), vec![stop.envelope().clone()]);
     assert_eq!(effects.load(Ordering::SeqCst), 1);
-    assert_eq!(engine.requests(), 1);
     wait_for_stop_with_settled_intent(&producer).await;
     assert_eq!(
         intent_runs.load(Ordering::SeqCst),
@@ -342,7 +340,6 @@ async fn pending_stop_delivers_once(
         })
     ));
     assert_eq!(effects.load(Ordering::SeqCst), 1);
-    assert_eq!(engine.requests(), 1);
     let recent = fixture.owner.recent_exact(address, 8).await.unwrap();
     assert_eq!(recent.pending, Vec::new());
     assert_eq!(recent.deliveries.len(), 1);

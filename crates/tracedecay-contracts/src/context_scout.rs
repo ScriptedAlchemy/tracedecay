@@ -122,9 +122,6 @@ pub enum ContextScoutRouteV1 {
     Deterministic,
     ModelAssisted,
     DeterministicFallback,
-    /// Produced by the session intent pass: decision-engine answers combined
-    /// with deterministic action facts.
-    DecisionEngine,
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
@@ -133,7 +130,6 @@ pub enum ContextScoutModelBackendV1 {
     Disabled,
     CodexAppServer,
     Unsupported,
-    DecisionEngine,
 }
 
 #[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
@@ -150,8 +146,6 @@ pub enum ContextScoutModelOutcomeV1 {
     DeadlineExceeded,
     TokenBudgetExceeded,
     InvalidOutput,
-    /// The engine's concurrency bound was full; the request was not sent.
-    Backpressured,
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
@@ -445,33 +439,11 @@ pub struct ContextScoutSessionWindowV1 {
     pub newest_timestamp: Option<i64>,
 }
 
-/// Identity of the decision engine that answered. The endpoint is retained
-/// only as a digest.
-#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct DecisionEngineIdentityV1 {
-    pub base_url_digest: ManifestDigest,
-    pub model: Option<String>,
-}
-
-/// One engine answer for one configured intent question.
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct ContextScoutIntentAnswerV1 {
-    pub intent: ContextScoutIntentKindV1,
-    pub probability_permille: u16,
-    pub threshold_permille: u16,
-}
-
-/// Why the intent pass selected one intent: the engine outcome and answers,
-/// the observed action facts, and the source carrying the selection. A
-/// PromptFallback source names a prompt interpretation without an answer.
+/// Why the intent pass selected one intent: the deterministic action facts the
+/// window recorded, which of them carried the selection, and the source.
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct ContextScoutIntentReceiptV1 {
-    pub engine: Option<DecisionEngineIdentityV1>,
-    pub outcome: ContextScoutModelOutcomeV1,
-    pub answers: Vec<ContextScoutIntentAnswerV1>,
     pub facts: Vec<ContextScoutIntentKindV1>,
     pub selected: ContextScoutIntentKindV1,
     pub source: IntentDecisionSourceV1,
@@ -1245,5 +1217,90 @@ mod tests {
                 capability.capability_id().as_str()
             );
         }
+    }
+
+    /// The intent receipt names only deterministic action facts, so a durable
+    /// claim round-trips through the wire without a model answer or engine
+    /// identity to reinterpret.
+    #[test]
+    fn intent_receipt_round_trips_deterministic_action_facts() {
+        let receipt = ContextScoutIntentReceiptV1 {
+            facts: vec![
+                ContextScoutIntentKindV1::Search,
+                ContextScoutIntentKindV1::BuildDiagnostics,
+            ],
+            selected: ContextScoutIntentKindV1::Search,
+            source: IntentDecisionSourceV1::ActionFact,
+        };
+        let encoded = serde_json::to_value(&receipt).unwrap();
+        assert_eq!(
+            encoded,
+            serde_json::json!({
+                "facts": ["search", "build_diagnostics"],
+                "selected": "search",
+                "source": "action_fact",
+            })
+        );
+        assert_eq!(
+            serde_json::from_value::<ContextScoutIntentReceiptV1>(encoded).unwrap(),
+            receipt
+        );
+    }
+
+    /// Retired model-judged intent fields must be refused rather than decoded
+    /// into a receipt that claims a source it no longer has.
+    #[test]
+    fn intent_receipt_refuses_retired_model_fields() {
+        for retired in ["engine", "outcome", "answers"] {
+            let mut value = serde_json::json!({
+                "facts": ["search"],
+                "selected": "search",
+                "source": "action_fact",
+            });
+            value
+                .as_object_mut()
+                .unwrap()
+                .insert(retired.to_owned(), serde_json::Value::Null);
+            assert!(
+                serde_json::from_value::<ContextScoutIntentReceiptV1>(value).is_err(),
+                "a persisted `{retired}` field must be refused"
+            );
+        }
+    }
+
+    /// The Scout routes and backends name only deterministic and generic
+    /// Codex authoring; the retired decision-engine variants are refused.
+    #[test]
+    fn scout_route_backend_and_source_refuse_decision_engine() {
+        for route in [
+            ContextScoutRouteV1::Deterministic,
+            ContextScoutRouteV1::ModelAssisted,
+            ContextScoutRouteV1::DeterministicFallback,
+        ] {
+            let encoded = serde_json::to_value(route).unwrap();
+            assert!(serde_json::from_value::<ContextScoutRouteV1>(encoded.clone()).is_ok());
+        }
+        for backend in [
+            ContextScoutModelBackendV1::Disabled,
+            ContextScoutModelBackendV1::CodexAppServer,
+            ContextScoutModelBackendV1::Unsupported,
+        ] {
+            let encoded = serde_json::to_value(backend).unwrap();
+            assert!(serde_json::from_value::<ContextScoutModelBackendV1>(encoded.clone()).is_ok());
+        }
+        for removed in ["decision_engine", "model", "both", "prompt_fallback"] {
+            let encoded = serde_json::Value::String(removed.to_owned());
+            assert!(
+                serde_json::from_value::<ContextScoutRouteV1>(encoded.clone()).is_err()
+                    && serde_json::from_value::<ContextScoutModelBackendV1>(encoded.clone())
+                        .is_err()
+                    && serde_json::from_value::<IntentDecisionSourceV1>(encoded.clone()).is_err(),
+                "`{removed}` must not decode as a route, backend, or intent source"
+            );
+        }
+        assert_eq!(
+            serde_json::to_value(IntentDecisionSourceV1::ActionFact).unwrap(),
+            serde_json::Value::String("action_fact".to_owned())
+        );
     }
 }
