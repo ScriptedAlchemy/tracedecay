@@ -3,7 +3,7 @@
 //! authorities.
 
 #[cfg(all(test, unix))]
-mod tests;
+mod source_cancellation_tests;
 
 use std::path::Path;
 use std::sync::{Arc, Weak};
