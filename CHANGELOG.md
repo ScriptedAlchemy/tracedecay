@@ -5,6 +5,30 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.0-beta.101](https://github.com/ScriptedAlchemy/tracedecay/compare/v1.0.0-beta.100...v1.0.0-beta.101) (2026-11-13)
+
+
+### Bug Fixes
+
+* **code-graph:** retain authenticated proofs across interrupted successors ([ea40275](https://github.com/ScriptedAlchemy/tracedecay/commit/ea4027578e141d0749a109f8b50026a0ab5e877b))
+* **daemon:** finish degraded code owners before reset publication ([46e9c79](https://github.com/ScriptedAlchemy/tracedecay/commit/46e9c79d0a6b462a37688f8e066fa084813120d1))
+* **diagnostics:** take TypeScript membership from the compiler ([f5cd520](https://github.com/ScriptedAlchemy/tracedecay/commit/f5cd520d48e0c38a80ae90560bc1dcb4e52e99d6))
+* **feedback:** attach retained CI and GitHub evidence to local cycles ([bf085e1](https://github.com/ScriptedAlchemy/tracedecay/commit/bf085e1b71c20ba07f6e5176a535a578ba594d84)), closes [#4423](https://github.com/ScriptedAlchemy/tracedecay/issues/4423)
+* **feedback:** isolate local diagnostics from remote refresh ([43a459b](https://github.com/ScriptedAlchemy/tracedecay/commit/43a459b10f5e83fd048a83f942f5023fb706b50c))
+* **feedback:** serve retained GitHub review state to local feedback ([d6ba33f](https://github.com/ScriptedAlchemy/tracedecay/commit/d6ba33f39dbb60235022cf14f4356face9c9854c)), closes [#4423](https://github.com/ScriptedAlchemy/tracedecay/issues/4423)
+* **graph-db:** release small staging generations in one commit ([7043cbf](https://github.com/ScriptedAlchemy/tracedecay/commit/7043cbf28dbbf9440d5d36f9d43876be9c774094))
+* **graph-db:** release small staging generations in one commit ([3b0787f](https://github.com/ScriptedAlchemy/tracedecay/commit/3b0787fb4c019589cb53b3a196eb92c4a9d2a110))
+* **mcp:** use map_or_default for operation events ([aaf832d](https://github.com/ScriptedAlchemy/tracedecay/commit/aaf832d36b5ec40f3237d4a3ac709483bff67051))
+* **runtime:** finish settled owners after their runtime stops ([69e55cb](https://github.com/ScriptedAlchemy/tracedecay/commit/69e55cb3b095d1aa3b54c062816eec13f1963232))
+* **rust:** satisfy option mapping lint in Rust 1.100 ([ca95079](https://github.com/ScriptedAlchemy/tracedecay/commit/ca95079c758ba2d7907638caf530e879f096993e))
+* **sqlite:** publish complete stores and recover interrupted initialization ([8228cf1](https://github.com/ScriptedAlchemy/tracedecay/commit/8228cf17b22fac36aabe3125b8e7678d0580226a))
+
+
+### Performance Improvements
+
+* **dashboard:** reuse the SSE identity eviction cursor ([1633915](https://github.com/ScriptedAlchemy/tracedecay/commit/1633915eef63bdc0840e573a465e76f4e58ff58f))
+* **dashboard:** reuse the SSE identity eviction cursor ([004e51c](https://github.com/ScriptedAlchemy/tracedecay/commit/004e51c9f8e8b1ed9f58eff32ff0576a2bed2042))
+
 ## [1.0.0-beta.100](https://github.com/ScriptedAlchemy/tracedecay/compare/v1.0.0-beta.99...v1.0.0-beta.100) (2026-11-11)
 
 
