@@ -1,12 +1,18 @@
 //! Releasing the retained-parse pool returns the pages its documents
 //! occupied in the shipped allocator.
 //!
-//! One test in its own binary: it measures this process's anonymous RSS.
+//! Measurements run exclusively because allocator routing and resident memory
+//! are process-wide.
 
-#![cfg(all(target_os = "linux", not(feature = "alloc-jemalloc")))]
+#![cfg(all(
+    any(target_os = "linux", target_os = "macos"),
+    not(feature = "alloc-jemalloc")
+))]
 
 #[path = "../src/process_allocator.rs"]
 mod process_allocator;
+
+use std::sync::{Mutex, Once};
 
 use tracedecay_code_extraction::LanguageRegistry;
 use tracedecay_code_extraction::incremental::ParseDocumentIdentity;
@@ -20,7 +26,10 @@ use tracedecay_runtime_core::resident_memory::{
 static MIMALLOC: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 const MIB: u64 = 1024 * 1024;
-const DOCUMENTS: usize = 120;
+const DOCUMENTS: usize = 240;
+const FUNCTIONS_PER_DOCUMENT: usize = 200;
+static MEASUREMENT: Mutex<()> = Mutex::new(());
+static CONFIGURE_ALLOCATOR: Once = Once::new();
 
 fn identity(ordinal: usize) -> ParseDocumentIdentity {
     ParseDocumentIdentity::Repository {
@@ -35,19 +44,24 @@ fn identity(ordinal: usize) -> ParseDocumentIdentity {
     }
 }
 
-fn anon_bytes() -> u64 {
+fn resident_bytes() -> u64 {
     let _ = release_process_allocator_memory_v1();
-    sampled_process_resident_bytes_v1().expect("this kernel reports RssAnon")
+    sampled_process_resident_bytes_v1().expect("this kernel reports resident memory")
 }
 
 #[test]
 fn releasing_retained_parses_returns_their_pages() {
-    process_allocator::configure_process_allocator();
+    let _measurement = MEASUREMENT
+        .lock()
+        .expect("exclusive process heap measurement");
+    CONFIGURE_ALLOCATOR.call_once(process_allocator::configure_process_allocator);
     let pool = SharedRetainedParsePool::default();
     let registry = LanguageRegistry::new();
     let extractor = registry.extractor_for_file("src/lib.rs").expect("rust");
     let revision = ExtractorRevision::new("extractor.rust.retained-heap").expect("revision");
-    let source = (0..400)
+    // Keep the 48,000-function retained corpus, partitioned into smaller
+    // documents so each standalone parse has less work within its quantum.
+    let source = (0..FUNCTIONS_PER_DOCUMENT)
         .map(|index| {
             format!("pub fn f{index}(v: &[u32]) -> u32 {{ v.iter().map(|x| x * {index}).sum() }}\n")
         })
@@ -79,9 +93,9 @@ fn releasing_retained_parses_returns_their_pages() {
     let held = pool.holding().expect("retained documents");
     assert_eq!(held.documents, DOCUMENTS);
 
-    let before = anon_bytes();
+    let before = resident_bytes();
     assert_eq!(pool.release(), RetainedParsePoolReleaseV1::Released);
-    let freed = before.saturating_sub(anon_bytes());
+    let freed = before.saturating_sub(resident_bytes());
     assert_eq!(pool.holding(), None);
     assert!(
         freed >= 16 * MIB,
@@ -89,28 +103,27 @@ fn releasing_retained_parses_returns_their_pages() {
     );
 }
 
-/// Reproducible idle-after-ingest heap: a transient payload is charged at
-/// peak and the shipped allocator returns it on collect. Prints the
-/// before/peak/after numbers the PR body cites.
+/// The shipped allocator returns a transient ingest payload on collect.
 #[test]
 fn idle_collect_returns_a_transient_ingest_heap() {
-    process_allocator::configure_process_allocator();
+    let _measurement = MEASUREMENT
+        .lock()
+        .expect("exclusive process heap measurement");
+    CONFIGURE_ALLOCATOR.call_once(process_allocator::configure_process_allocator);
     const CHUNKS: usize = 64;
     const CHUNK_BYTES: usize = 1024 * 1024;
-    let before = anon_bytes();
+    let before = resident_bytes();
     let payload = (0..CHUNKS)
         .map(|_| vec![7_u8; CHUNK_BYTES])
         .collect::<Vec<_>>();
-    let peak = anon_bytes();
+    let peak = resident_bytes();
     assert!(
         peak >= before + 32 * MIB,
-        "the ingest-shaped payload must be visible in RssAnon: before={before} peak={peak}"
+        "the ingest-shaped payload must be resident: before={before} peak={peak}"
     );
     drop(payload);
     let _ = release_process_allocator_memory_v1();
-    let after = anon_bytes();
-    let returned = peak.saturating_sub(after);
-    eprintln!("HEAP_PROOF before={before} peak={peak} after={after} returned={returned}");
+    let after = resident_bytes();
     assert!(
         after <= peak.saturating_sub(16 * MIB),
         "idle collect must return the transient heap: before={before} peak={peak} after={after}"

@@ -550,17 +550,26 @@ async fn large_catch_up_converges_in_one_pass_and_then_stays_settled() {
     .await
     .unwrap_or_else(|error| panic!("open registered sessions runtime: {error}"));
     let project = repo.to_string_lossy().to_string();
+    let mut sessions = Vec::with_capacity(SESSIONS as usize);
+    let mut messages = Vec::with_capacity(SESSIONS as usize);
     for index in 0..SESSIONS {
         let started = T_BASE + index * 60;
         let session_id = format!("catch-up-{index:05}");
-        db.seed_session_messages_for_test(
-            HostAdmissionScope::Project,
-            &session(&session_id, &project, started, started + 30),
-            &[message(&session_id, &format!("m-{index:05}"), started + 15)],
-        )
+        sessions.push(session(&session_id, &project, started, started + 30));
+        messages.push(vec![message(
+            &session_id,
+            &format!("m-{index:05}"),
+            started + 15,
+        )]);
+    }
+    let histories = sessions
+        .iter()
+        .zip(&messages)
+        .map(|(session, messages)| (session, messages.as_slice()))
+        .collect::<Vec<_>>();
+    db.seed_session_histories_for_test(HostAdmissionScope::Project, &histories)
         .await
         .unwrap();
-    }
     let last_sequence = SESSIONS * 2; // One session and one message change each.
     let scope = ObservationScopeV1::Project { project_id };
 
