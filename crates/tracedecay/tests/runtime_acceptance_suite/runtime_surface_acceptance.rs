@@ -2568,7 +2568,8 @@ async fn production_lsp_negotiates_and_projects_canonical_context() {
         fixture.daemon_log()
     );
     assert_eq!(
-        initialized["result"]["capabilities"]["hoverProvider"], true,
+        initialized["result"]["capabilities"]["hoverProvider"],
+        true,
         "a routed analyzer must negotiate the declared hover capability: {initialized}\nIsolated daemon log:\n{}",
         fixture.daemon_log()
     );
