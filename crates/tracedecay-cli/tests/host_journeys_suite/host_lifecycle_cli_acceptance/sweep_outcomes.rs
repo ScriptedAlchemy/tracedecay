@@ -429,11 +429,6 @@ impl ProfileDaemon {
         let mut command = cli.command(&["daemon", "run"]);
         command
             .env("TRACEDECAY_TEST_ALLOW_INCOMPLETE_HOLDER_SCAN", "1")
-            .env(
-                "RUST_LOG",
-                "info,tracedecay::daemon=trace,tracedecay_daemon_identity=trace,tracedecay_private_fs=trace,tracedecay_global_db=trace",
-            )
-            .env("TRACEDECAY_SPAN_TIMINGS", "1")
             .stdout(Stdio::null())
             .stderr(stderr_log);
         daemon.child = Some(command.spawn().unwrap());

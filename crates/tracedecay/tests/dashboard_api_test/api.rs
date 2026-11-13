@@ -1,11 +1,5 @@
 use crate::dashboard_api_support::*;
 use serde_json::json;
-use tracing::level_filters::LevelFilter;
-use tracing_subscriber::Layer as _;
-use tracing_subscriber::filter::Targets;
-use tracing_subscriber::fmt::format::FmtSpan;
-use tracing_subscriber::layer::SubscriberExt as _;
-use tracing_subscriber::util::SubscriberInitExt as _;
 
 fn absent_canonical_fact_id(existing: &FactId) -> String {
     let raw = existing.as_str();
@@ -494,25 +488,6 @@ fn holographic_fact_detail_returns_full_content_and_entities() {
 
 #[test]
 fn holographic_fact_trust_history_returns_feedback_trail_and_empty_for_unreviewed_facts() {
-    // Measure the existing read phases without changing this fixture's budget.
-    let layer = tracing_subscriber::fmt::layer()
-        .with_span_events(FmtSpan::NEW | FmtSpan::CLOSE)
-        .with_ansi(false)
-        .with_writer(std::io::stderr)
-        .with_filter(
-            Targets::new()
-                .with_default(LevelFilter::WARN)
-                .with_target("tracedecay_dashboard_api::memory_api", LevelFilter::TRACE)
-                .with_target(
-                    "tracedecay_session_memory::memory::dashboard",
-                    LevelFilter::TRACE,
-                )
-                .with_target(
-                    "tracedecay_session_memory::fact_store::graph",
-                    LevelFilter::TRACE,
-                ),
-        );
-    let _ = tracing_subscriber::registry().with(layer).try_init();
     let runtime = create_runtime();
     runtime.block_on(async {
         let fixture = start_dashboard_fixture(false).await;
