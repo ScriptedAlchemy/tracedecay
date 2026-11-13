@@ -807,8 +807,7 @@ impl McpServer {
         } = context;
         let operation_events = daemon_invocation_service
             .as_ref()
-            .map(tracedecay_daemon_service::DaemonInvocationService::operation_events)
-            .unwrap_or_default();
+            .map_or_default(tracedecay_daemon_service::DaemonInvocationService::operation_events);
         let persisted_tokens_saved = match cg.get_tokens_saved().await {
             Ok(persisted) => Some(persisted),
             Err(error) => {
