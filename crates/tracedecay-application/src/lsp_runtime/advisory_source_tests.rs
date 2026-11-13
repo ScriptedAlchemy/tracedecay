@@ -954,7 +954,8 @@ async fn incomplete_publication_remains_readable_without_consuming_completed_ded
     .expect("repeated incomplete publication");
     assert_eq!(
         store.record_publication(&context, &repeated).await,
-        FeedbackPublicationRecordState::Recorded
+        FeedbackPublicationRecordState::Reused(Box::new(publication.clone())),
+        "a repeated incomplete cycle must return its actual committed identity"
     );
     assert_eq!(
         store
@@ -963,6 +964,72 @@ async fn incomplete_publication_remains_readable_without_consuming_completed_ded
         FeedbackCycleDedupeState::Unique,
         "repeated incomplete publications must not consume completed dedupe"
     );
+
+    // Run the real service again, not just the store port. A new local
+    // evaluation must reuse the committed finding identity and expose its
+    // read handles without converting incomplete remote coverage into Clean.
+    let mut repeated_request = cycle_request(digest('a'), observed_at);
+    repeated_request.input.request.cycle_id = repeated_input.request.cycle_id.clone();
+    let repeated_service = feedback_service(runtime.clone(), &repeated_request);
+    let mut repeated_providers = complete_advisory_providers();
+    repeated_providers[1].state = ProviderEvaluationStateV1::Unavailable;
+    let repeated_execution = repeated_service
+        .execute_with_advisory(
+            &context,
+            repeated_request,
+            FeedbackCycleAdvisoryV1 {
+                providers: repeated_providers,
+                findings: vec![github_finding()],
+            },
+        )
+        .await
+        .expect("replayed incomplete cycle");
+    assert_eq!(
+        repeated_execution.cycle.termination,
+        tracedecay_domain::feedback::FeedbackCycleTerminationV1::IncompleteCoverage
+    );
+    assert_eq!(repeated_execution.publication, Some(publication.clone()));
+    assert_eq!(
+        repeated_execution.cycle.result_id,
+        publication.result.result_id
+    );
+    assert_ne!(repeated_input.request.cycle_id, publication.result.cycle_id);
+    let replayed_canonical = compose_canonical_result(
+        &runtime,
+        repeated_execution,
+        tracedecay_domain::feedback::FeedbackDurabilityV1::Durable,
+    )
+    .expect("reused incomplete result handles");
+    assert_eq!(replayed_canonical.finding_handles.len(), 1);
+    let replayed_handles = replayed_canonical
+        .read_handles
+        .as_ref()
+        .expect("reused diagnostics/list handles");
+    let replayed_read = runtime
+        .owner()
+        .invoke(
+            FeedbackReadOperationV1::Diagnostics,
+            &replayed_handles.diagnostics_handle,
+            read_at,
+        )
+        .await
+        .expect("reused diagnostics handle");
+    let FeedbackReadInvocationResultV1::Diagnostics(replayed_read) = replayed_read else {
+        panic!("reused diagnostics result variant");
+    };
+    let ApplicationOutcome::Evidence(replayed_diagnostics) =
+        replayed_read.expect("reused diagnostics read").outcome
+    else {
+        panic!("reused diagnostics evidence");
+    };
+    assert_eq!(
+        replayed_diagnostics
+            .payload
+            .expect("reused diagnostics payload")
+            .cycle,
+        publication.result.clone()
+    );
+
     let complete_result =
         tracedecay_domain::feedback::FeedbackCycleResultV1::new_with_advisory_provider_states(
             &repeated_input.request,
