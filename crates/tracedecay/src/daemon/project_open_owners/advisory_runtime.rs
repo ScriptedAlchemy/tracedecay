@@ -1,7 +1,6 @@
 //! Project-open composition for the canonical feedback and advisory owners.
 
 use std::fmt::Write as _;
-use std::future::Future;
 use std::path::Path;
 use std::process::Command;
 use std::sync::Arc;
@@ -18,9 +17,9 @@ use tracedecay_application::advisory::github_runtime::{
     record_github_source_reading_v1, resolve_registered_github_read_only_credential_v1,
 };
 use tracedecay_application::advisory::{
-    AdvisoryCycleControl, AdvisoryCycleOutcome, AdvisoryCycleRequest, AdvisoryGitHubReadV1,
-    AdvisoryHookDeliveryV1, AdvisoryHookNoticeQueueV1, AdvisoryProductionOpenV1,
-    AdvisoryProductionStartupRegistrationV1, AdvisoryRuntimeOpenV1, CiCodeAnchorStoreV1,
+    AdvisoryCycleControl, AdvisoryCycleOutcome, AdvisoryCycleRequest, AdvisoryHookDeliveryV1,
+    AdvisoryHookNoticeQueueV1, AdvisoryProductionOpenV1, AdvisoryProductionStartupRegistrationV1,
+    AdvisoryRemoteEvidenceV1, AdvisoryRuntimeOpenV1, CiCodeAnchorStoreV1,
     CiRetainedProviderObservationAuthorityV1, CiSourceAccessAuthorityV1,
     GitHubCiRepositoryTargetV1, GitHubHttpReadConfigV1, GitHubReadOnlyCredentialV1,
     GitHubReadPermissionV1, GitHubRepositoryTargetV1, GitHubReviewProviderIdentityV1,
@@ -153,43 +152,12 @@ struct ProjectOpenAdvisoryCycleExecutionV1 {
     feedback_cycle: Arc<FeedbackCycleRuntime>,
 }
 
-/// Local editor/hook feedback must not wait for remote refresh: it reads the
-/// GitHub review state an earlier refresh retained, revalidated for the exact
-/// current scope and grant, and never polls CI discovery. The explicit
-/// advisory operation keeps its existing GitHub and CI refresh semantics.
+/// Editor and hook feedback reads retained remote evidence only; the explicit
+/// advisory operation refreshes GitHub and discovers and localizes CI.
 #[derive(Clone, Copy)]
 enum AdvisoryRemoteReadMode {
     LocalFeedback,
     ExplicitRefresh,
-}
-
-async fn advisory_remote_requests<DiscoverCi>(
-    mode: AdvisoryRemoteReadMode,
-    github: Option<GitHubReviewReadRequestV1>,
-    ci_configured: bool,
-    discover_ci: DiscoverCi,
-) -> (
-    Option<AdvisoryGitHubReadV1>,
-    ProductionCiFailureDiscoveryOutcomeV1,
-)
-where
-    DiscoverCi: Future<Output = ProductionCiFailureDiscoveryOutcomeV1>,
-{
-    match mode {
-        AdvisoryRemoteReadMode::LocalFeedback => (
-            github.map(AdvisoryGitHubReadV1::Retained),
-            if ci_configured {
-                // A configured remote source was deliberately not queried in
-                // this local cycle; it has not established a clean result.
-                ProductionCiFailureDiscoveryOutcomeV1::Unavailable
-            } else {
-                ProductionCiFailureDiscoveryOutcomeV1::NotConfigured
-            },
-        ),
-        AdvisoryRemoteReadMode::ExplicitRefresh => {
-            (github.map(AdvisoryGitHubReadV1::Refresh), discover_ci.await)
-        }
-    }
 }
 
 #[derive(Clone)]
@@ -308,16 +276,18 @@ impl ProjectOpenAdvisoryFeedbackCycleV1 {
             .request
             .configuration_digest
             .clone();
-        // Construct the discovery future without polling it on editor or hook
-        // paths. A pending/denied remote provider cannot consume local feedback's
-        // deadline or cancel its independently authorized diagnostics.
-        let github_request = self.github_review_request();
-        let (github, ci) = advisory_remote_requests(
-            remote_mode,
-            github_request,
-            self.ci_discovery_config.is_some(),
-            async {
-                match self.ci_discovery_config.as_ref() {
+        let github = self.github_review_request();
+        let remote = match remote_mode {
+            // Editor and hook feedback never starts a provider read: a held,
+            // denied or failing remote cannot consume its deadline or cancel
+            // its independently authorized diagnostics.
+            AdvisoryRemoteReadMode::LocalFeedback => AdvisoryRemoteEvidenceV1::Retained {
+                github,
+                ci_configured: self.ci_discovery_config.is_some(),
+            },
+            AdvisoryRemoteReadMode::ExplicitRefresh => AdvisoryRemoteEvidenceV1::Refresh {
+                github,
+                ci: match self.ci_discovery_config.as_ref() {
                     Some(config) => {
                         discover_production_ci_failure_request_v1(
                             &invocation.context,
@@ -327,10 +297,9 @@ impl ProjectOpenAdvisoryFeedbackCycleV1 {
                         .await
                     }
                     None => ProductionCiFailureDiscoveryOutcomeV1::NotConfigured,
-                }
+                },
             },
-        )
-        .await;
+        };
         let expires_at = UtcMicros(observed_at.0.saturating_add(5 * 60 * 1_000_000));
         let operation = self
             .operation_events
@@ -361,8 +330,7 @@ impl ProjectOpenAdvisoryFeedbackCycleV1 {
                 },
                 AdvisoryCycleRequest {
                     feedback: invocation.request,
-                    github,
-                    ci,
+                    remote,
                     proximity: Some(ProximityEvaluationRequestV1 {
                         scope: self.feedback_scope.clone(),
                         observed_at,

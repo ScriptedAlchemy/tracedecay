@@ -26,6 +26,10 @@ impl<S> CiFailureLocalizationAdapter<S> {
     pub fn new(source: S) -> Self {
         Self { source }
     }
+
+    pub(crate) fn source(&self) -> &S {
+        &self.source
+    }
 }
 
 impl<S> CiFailureLocalizationPort for CiFailureLocalizationAdapter<S>

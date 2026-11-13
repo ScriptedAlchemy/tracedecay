@@ -42,8 +42,8 @@ use tracedecay_runtime_core::cancellation::MonotonicDeadline;
 use tracedecay_runtime_core::db::Database;
 
 use super::ci_runtime::{
-    CiExactEvidenceAuthorityV1, CiReadOnlyProviderArchiveV1, ConcreteCiFailureLocalizationOwnerV1,
-    ProductionCiFailureDiscoveryOutcomeV1,
+    CiExactEvidenceAuthorityV1, CiReadOnlyProviderArchiveV1, CiRetainedLocalizationV1,
+    ConcreteCiFailureLocalizationOwnerV1, ProductionCiFailureDiscoveryOutcomeV1,
 };
 use super::github_runtime::GitHubSourceAccessAuthorityV1;
 use super::proximity_runtime::{ConcreteProximityRuntimeOwnerV1, ProximityRuntimeOutcomeV1};
@@ -61,11 +61,14 @@ mod registration;
 pub use cycle::AdvisoryRuntime;
 pub use model::{
     AdvisoryContributionsV1, AdvisoryCycleControl, AdvisoryCycleOutcome, AdvisoryCycleRequest,
-    AdvisoryGitHubReadV1, AdvisoryProviderAuthoritiesV1, AdvisoryProviderStateV1,
-    AdvisoryProviderV1, AdvisoryRuntimeOpenErrorV1, AdvisoryRuntimeOpenV1,
+    AdvisoryProviderAuthoritiesV1, AdvisoryProviderStateV1, AdvisoryProviderV1,
+    AdvisoryRemoteEvidenceV1, AdvisoryRuntimeOpenErrorV1, AdvisoryRuntimeOpenV1,
 };
 pub use registration::{AdvisoryDaemonRegistrationV1, open_advisory_daemon_registration};
 
+#[cfg(test)]
+#[path = "runtime/local_cycle_tests.rs"]
+mod local_cycle_tests;
 #[cfg(test)]
 #[path = "runtime/tests.rs"]
 mod tests;
