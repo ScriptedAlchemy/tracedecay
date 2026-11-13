@@ -215,7 +215,9 @@ impl ProjectRuntimeRegistryV1 {
                         &[("outcome", "project_runtimes_drained".to_string())],
                     );
                     let stop = match drained {
-                        Ok(Ok(runtimes)) => registry.finish_drained_runtimes(runtimes, deadline).await,
+                        Ok(Ok(runtimes)) => {
+                            registry.finish_drained_runtimes(runtimes, deadline).await
+                        }
                         _ => {
                             registry.shutdown_started.store(false, Ordering::Release);
                             ProjectRuntimesStop::DidNotStop
