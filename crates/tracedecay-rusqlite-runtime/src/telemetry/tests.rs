@@ -72,6 +72,7 @@ fn transaction_close_records_commands_rows_lock_and_outcomes() {
         lock_held_micros: 4,
         transaction_micros: 9,
         sqlite_vm: SqliteVmSnapshot {
+            statements: 2,
             fullscan_steps: 1,
             sort_steps: 2,
             vm_steps: 6,
@@ -111,6 +112,7 @@ fn transaction_close_records_commands_rows_lock_and_outcomes() {
         snapshot.transactions.lock_held_micros <= snapshot.transactions.transaction_micros,
         "lock-held time cannot exceed total transaction time"
     );
+    assert_eq!(snapshot.sqlite_vm.statements, 2);
     assert_eq!(snapshot.sqlite_vm.fullscan_steps, 1);
     assert_eq!(snapshot.sqlite_vm.sort_steps, 2);
     assert_eq!(snapshot.sqlite_vm.vm_steps, 6);

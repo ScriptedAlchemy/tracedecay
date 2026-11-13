@@ -16,6 +16,7 @@ pub(crate) struct ReaderAdmissionRecorder {
     release_events: AtomicU64,
     wait_micros: AtomicU64,
     execution_micros: AtomicU64,
+    statements: AtomicU64,
     fullscan_steps: AtomicU64,
     sort_steps: AtomicU64,
     vm_steps: AtomicU64,
@@ -51,6 +52,8 @@ impl ReaderAdmissionRecorder {
     pub(crate) fn executed(&self, elapsed: Duration, sqlite_vm: SqliteVmSnapshot) {
         self.execution_micros
             .fetch_add(duration_micros(elapsed), Ordering::Relaxed);
+        self.statements
+            .fetch_add(sqlite_vm.statements, Ordering::Relaxed);
         self.fullscan_steps
             .fetch_add(sqlite_vm.fullscan_steps, Ordering::Relaxed);
         self.sort_steps
@@ -69,6 +72,7 @@ impl ReaderAdmissionRecorder {
             wait_micros: self.wait_micros.load(Ordering::Relaxed),
             execution_micros: self.execution_micros.load(Ordering::Relaxed),
             sqlite_vm: SqliteVmSnapshot {
+                statements: self.statements.load(Ordering::Relaxed),
                 fullscan_steps: self.fullscan_steps.load(Ordering::Relaxed),
                 sort_steps: self.sort_steps.load(Ordering::Relaxed),
                 vm_steps: self.vm_steps.load(Ordering::Relaxed),
@@ -91,6 +95,7 @@ mod tests {
         recorder.executed(
             Duration::from_micros(11),
             SqliteVmSnapshot {
+                statements: 1,
                 fullscan_steps: 2,
                 sort_steps: 1,
                 vm_steps: 9,
@@ -104,6 +109,7 @@ mod tests {
         assert_eq!(snapshot.release_events, 1);
         assert_eq!(snapshot.wait_micros, 10);
         assert_eq!(snapshot.execution_micros, 11);
+        assert_eq!(snapshot.sqlite_vm.statements, 1);
         assert_eq!(snapshot.sqlite_vm.fullscan_steps, 2);
         assert_eq!(snapshot.sqlite_vm.sort_steps, 1);
         assert_eq!(snapshot.sqlite_vm.vm_steps, 9);
