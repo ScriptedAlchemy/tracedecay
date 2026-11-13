@@ -485,7 +485,16 @@ fn terminal_housekeeping_bounds_a_mounted_store_window_and_reaches_its_tail() {
             retired += retired_signals(database).await;
         }
         assert_eq!(retired, 8, "one tick admits at most eight store pages");
-        assert_eq!(daemon.tick().await, MaintenanceTickOutcome::Complete);
+        // A queued writer or busy background slot returns Retry before the
+        // tail is durable. Follow the owner's continuation outcomes while
+        // preserving the first window's exact page bound above.
+        native_runtime::timeout(Duration::from_secs(10), async {
+            while daemon.tick().await != MaintenanceTickOutcome::Complete {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the mounted-store tail settles");
         for database in &databases {
             assert_eq!(
                 retired_signals(database).await,
