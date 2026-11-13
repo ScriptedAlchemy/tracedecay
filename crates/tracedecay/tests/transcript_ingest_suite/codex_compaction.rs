@@ -20,7 +20,7 @@ use tracedecay_runtime_core::test_executable::write_executable_script;
 use tracedecay_sessions::runtime::{SessionProvider, with_transcript_source_profile};
 
 #[cfg(unix)]
-use crate::common::{spawn_tracedecay_daemon, tracedecay_command_with_home};
+use crate::common::{spawn_tracedecay_daemon_logged, tracedecay_command_with_home};
 #[cfg(unix)]
 use crate::restart_atomicity::mark_test_project;
 use crate::support::setup;
@@ -182,19 +182,27 @@ done
     )
     .unwrap();
     let project_id = mark_test_project(&project);
+    let daemon_log = tmp.path().join("codex-compaction-daemon.log");
+    let daemon = spawn_tracedecay_daemon_logged(&home, &daemon_log, |command| {
+        command
+            .env(
+                "RUST_LOG",
+                "info,tracedecay_session_runtime::session_temporal_refresh_scheduler=trace,tracedecay_mcp::handlers::hook_runtime=trace",
+            )
+            .env("TRACEDECAY_SPAN_TIMINGS", "1");
+    });
     // The hook resolves the project root through the initialized-store gate,
     // exactly like production installs: `init` creates the project store and
     // admits the canonical daemon-owned project route.
     crate::common::initialize_tracedecay_cli_project(&home, &project);
     // The daemon launches a summarizer only through the project's
     // `lcm.summarizer_executables.v1` binding, so the fake `codex` is bound
-    // through the production configuration surface while the managed daemon
-    // from init is still serving the project.
+    // through the production configuration surface while the same daemon
+    // is still serving the project.
     configure_codex_summarizer(&home, &project, &project_id, &codex_bin);
-    // Keep that production owner through the hook. An in-process enrollment
+    // Keep the logged production owner through the hook. An in-process enrollment
     // adds no fixture data and would require retiring and cold-opening the
     // same stores again just before the hook's bounded publication join.
-    let daemon = spawn_tracedecay_daemon(&home);
     write_codex_rollout_with_compaction(&home, &project, "codex-compact");
 
     let event = serde_json::json!({
@@ -216,15 +224,17 @@ done
         .unwrap();
     writeln!(child.stdin.take().unwrap(), "{event}").unwrap();
     let output = child.wait_with_output().unwrap();
+    let daemon_diagnostics = std::fs::read_to_string(&daemon_log)
+        .unwrap_or_else(|error| format!("daemon log unavailable: {error}"));
     assert!(
         output.status.success(),
-        "Codex PostCompact hook failed: {}",
-        String::from_utf8_lossy(&output.stderr)
+        "Codex PostCompact hook failed: {}; daemon log: {daemon_diagnostics}",
+        String::from_utf8_lossy(&output.stderr),
     );
     assert!(
         !String::from_utf8_lossy(&output.stderr).contains("PostCompact daemon call failed"),
-        "the PostCompact hook must not fail open around the daemon effect: {}",
-        String::from_utf8_lossy(&output.stderr)
+        "the PostCompact hook must not fail open around the daemon effect: {}; daemon log: {daemon_diagnostics}",
+        String::from_utf8_lossy(&output.stderr),
     );
     assert_eq!(
         std::fs::read_to_string(codex_bin.with_extension("launches")).unwrap(),
