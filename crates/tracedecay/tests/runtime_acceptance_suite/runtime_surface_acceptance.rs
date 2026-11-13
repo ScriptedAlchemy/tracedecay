@@ -229,7 +229,9 @@ async fn lsp_runtime_fixture() -> RuntimeFixture {
             .env(
                 "RUST_LOG",
                 "info,tracedecay_daemon_service::invocation=trace,\
-                 tracedecay_private_fs::framed_log=trace",
+                 tracedecay_private_fs::framed_log=trace,\
+                 tracedecay_application::lsp_runtime=debug,\
+                 tracedecay_lsp=trace",
             )
             .env("TRACEDECAY_SPAN_TIMINGS", "1")
             .stderr(daemon_log);
@@ -2563,11 +2565,12 @@ async fn production_lsp_negotiates_and_projects_canonical_context() {
         initialized["result"]["capabilities"]["documentSymbolProvider"],
         true,
         "a routed analyzer must negotiate the declared document-symbol capability: {initialized}\nIsolated daemon log:\n{}",
-        fixture.daemon_log_tail()
+        fixture.daemon_log()
     );
     assert_eq!(
         initialized["result"]["capabilities"]["hoverProvider"], true,
-        "a routed analyzer must negotiate the declared hover capability: {initialized}"
+        "a routed analyzer must negotiate the declared hover capability: {initialized}\nIsolated daemon log:\n{}",
+        fixture.daemon_log()
     );
     assert!(
         initialized["result"]["capabilities"]["definitionProvider"].is_null(),
