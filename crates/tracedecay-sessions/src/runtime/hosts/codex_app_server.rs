@@ -69,21 +69,46 @@ fn active_codex_children() -> &'static Mutex<ActiveCodexChildren> {
     ACTIVE_CODEX_CHILDREN.get_or_init(|| Mutex::new(ActiveCodexChildren::default()))
 }
 
+/// What the protocol wait receives: a stdout frame, the end of stdout, or the
+/// caller's cancellation.
+enum SessionInput {
+    Frame(std::io::Result<String>),
+    StdoutClosed,
+    Cancelled,
+}
+
 #[derive(Clone, Default)]
 pub struct CodexAppServerCancellation {
     cancelled: Arc<AtomicBool>,
-    process_group: Arc<Mutex<Option<u32>>>,
+    session: Arc<Mutex<Option<CancellableSession>>>,
+}
+
+/// The live session a cancellation ends: its process group and the wake for
+/// its protocol wait.
+struct CancellableSession {
+    process_group: u32,
+    wake: mpsc::Sender<SessionInput>,
+}
+
+impl CancellableSession {
+    fn end(&self) {
+        terminate_process_tree(self.process_group);
+        // A descendant that left the killed group, or any process that
+        // inherited the pipe, can hold stdout open after the kill, so the
+        // protocol wait ends here instead of at stdout EOF.
+        let _ = self.wake.send(SessionInput::Cancelled);
+    }
 }
 
 impl CodexAppServerCancellation {
     pub fn cancel(&self) {
         self.cancelled.store(true, Ordering::Release);
-        if let Some(process_group) = *self
-            .process_group
+        if let Some(session) = &*self
+            .session
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
         {
-            terminate_process_tree(process_group);
+            session.end();
         }
     }
 
@@ -91,25 +116,41 @@ impl CodexAppServerCancellation {
         self.cancelled.load(Ordering::Acquire)
     }
 
-    fn register(&self, process_group: u32) {
-        *self
-            .process_group
+    fn register(&self, process_group: u32, wake: mpsc::Sender<SessionInput>) {
+        let mut registered = self
+            .session
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(process_group);
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let session = registered.insert(CancellableSession {
+            process_group,
+            wake,
+        });
         if self.is_cancelled() {
-            terminate_process_tree(process_group);
+            session.end();
         }
     }
 
     fn unregister(&self, process_group: u32) {
         let mut registered = self
-            .process_group
+            .session
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if *registered == Some(process_group) {
+        if registered
+            .as_ref()
+            .is_some_and(|session| session.process_group == process_group)
+        {
             *registered = None;
         }
     }
+}
+
+/// The session ended because its caller cancelled it. The caller seals the
+/// cancelled outcome; this error only ends the protocol wait.
+fn cancelled_session_error() -> CodexAppServerError {
+    CodexAppServerError::new(
+        AgentTaskFailureClass::Disconnected,
+        "codex app-server session was cancelled",
+    )
 }
 
 #[cfg_attr(
@@ -305,8 +346,11 @@ fn run_prompt_with_optional_execution(
                     .as_ref()
                     .map(|execution| execution.cancellation.clone()),
             };
+            let (line_tx, line_rx) = mpsc::channel::<SessionInput>();
             if let Some(execution) = &execution {
-                execution.cancellation.register(process_group);
+                execution
+                    .cancellation
+                    .register(process_group, line_tx.clone());
             }
 
             let stdout = child.child.stdout.take().ok_or_else(|| {
@@ -315,13 +359,18 @@ fn run_prompt_with_optional_execution(
                     "codex app-server stdout was not available",
                 )
             })?;
-            let (line_tx, line_rx) = mpsc::channel::<std::io::Result<String>>();
             let stdout_reader = std::thread::spawn(move || {
                 let mut frames =
                     RawJsonlFrameReader::new(BufReader::new(stdout), MAX_WIRE_MESSAGE_BYTES);
                 loop {
                     let line = match frames.next_frame() {
-                        Ok(RawJsonlFrame::Eof) => break,
+                        // The registered cancellation keeps a sender alive, so
+                        // EOF is announced rather than inferred from a
+                        // disconnected channel.
+                        Ok(RawJsonlFrame::Eof) => {
+                            let _ = line_tx.send(SessionInput::StdoutClosed);
+                            break;
+                        }
                         Ok(RawJsonlFrame::Complete { .. } | RawJsonlFrame::Partial { .. }) => {
                             String::from_utf8(frames.record().to_vec()).map_err(|error| {
                                 std::io::Error::new(std::io::ErrorKind::InvalidData, error)
@@ -332,7 +381,7 @@ fn run_prompt_with_optional_execution(
                         ) => Err(wire_oversized_io_error()),
                         Err(error) => Err(error),
                     };
-                    if line_tx.send(line).is_err() {
+                    if line_tx.send(SessionInput::Frame(line)).is_err() {
                         break;
                     }
                 }
@@ -365,7 +414,7 @@ fn run_prompt_with_optional_execution(
 #[allow(clippy::too_many_arguments)]
 fn run_codex_protocol(
     child: &mut ChildGuard,
-    line_rx: &mpsc::Receiver<std::io::Result<String>>,
+    line_rx: &mpsc::Receiver<SessionInput>,
     prompt: &str,
     config: &CodexAppServerSummaryConfig,
     thread_source: &str,
@@ -721,7 +770,7 @@ fn reported_failure_class(error: &Value) -> AgentTaskFailureClass {
     skip_all
 )]
 fn wait_for_response(
-    line_rx: &mpsc::Receiver<std::io::Result<String>>,
+    line_rx: &mpsc::Receiver<SessionInput>,
     deadline: Instant,
     id: i64,
 ) -> Result<Value> {
@@ -742,7 +791,7 @@ fn wait_for_response(
 }
 
 fn wait_for_turn_summary(
-    line_rx: &mpsc::Receiver<std::io::Result<String>>,
+    line_rx: &mpsc::Receiver<SessionInput>,
     deadline: Instant,
     thread_id: String,
 ) -> Result<CodexAppServerSummary> {
@@ -806,10 +855,7 @@ fn wait_for_turn_summary(
     }
 }
 
-fn recv_line(
-    line_rx: &mpsc::Receiver<std::io::Result<String>>,
-    deadline: Instant,
-) -> Result<String> {
+fn recv_line(line_rx: &mpsc::Receiver<SessionInput>, deadline: Instant) -> Result<String> {
     let remaining = deadline
         .checked_duration_since(Instant::now())
         .unwrap_or_default();
@@ -823,8 +869,8 @@ fn recv_line(
         return Err(timed_out());
     }
     match line_rx.recv_timeout(remaining) {
-        Ok(Ok(line)) => Ok(line),
-        Ok(Err(err)) => {
+        Ok(SessionInput::Frame(Ok(line))) => Ok(line),
+        Ok(SessionInput::Frame(Err(err))) => {
             let class = if err.kind() == std::io::ErrorKind::InvalidData {
                 AgentTaskFailureClass::MalformedOutput
             } else {
@@ -835,11 +881,14 @@ fn recv_line(
                 format!("codex app-server stdout failed: {err}"),
             ))
         }
+        Ok(SessionInput::Cancelled) => Err(cancelled_session_error()),
         Err(mpsc::RecvTimeoutError::Timeout) => Err(timed_out()),
-        Err(mpsc::RecvTimeoutError::Disconnected) => Err(CodexAppServerError::new(
-            AgentTaskFailureClass::Disconnected,
-            "codex app-server closed stdout before completing",
-        )),
+        Ok(SessionInput::StdoutClosed) | Err(mpsc::RecvTimeoutError::Disconnected) => {
+            Err(CodexAppServerError::new(
+                AgentTaskFailureClass::Disconnected,
+                "codex app-server closed stdout before completing",
+            ))
+        }
     }
 }
 
@@ -1013,7 +1062,7 @@ mod tests {
         let (tx, rx) = mpsc::channel();
         let thread_id = "summary-thread-actual";
         assert!(
-            tx.send(Ok(json!({
+            tx.send(SessionInput::Frame(Ok(json!({
                 "method": "item/completed",
                 "params": {
                     "threadId": thread_id,
@@ -1021,18 +1070,18 @@ mod tests {
                     "item": {"content": [{"text": "summary text"}]}
                 }
             })
-            .to_string()))
+            .to_string())))
                 .is_ok()
         );
         assert!(
-            tx.send(Ok(json!({
+            tx.send(SessionInput::Frame(Ok(json!({
                 "method": "turn/completed",
                 "params": {
                     "threadId": thread_id,
                     "turn": {"id": "turn-provider-request"}
                 }
             })
-            .to_string()))
+            .to_string())))
                 .is_ok()
         );
 
@@ -1057,11 +1106,11 @@ mod tests {
     fn turn_summary_records_absent_provider_turn_identity() {
         let (tx, rx) = mpsc::channel();
         assert!(
-            tx.send(Ok(json!({
+            tx.send(SessionInput::Frame(Ok(json!({
                 "method": "turn/completed",
                 "params": {"threadId": "summary-thread"}
             })
-            .to_string()))
+            .to_string())))
                 .is_ok()
         );
 
@@ -1080,7 +1129,7 @@ mod tests {
     fn turn_summary_preserves_failed_terminal_error() {
         let (tx, rx) = mpsc::channel();
         assert!(
-            tx.send(Ok(json!({
+            tx.send(SessionInput::Frame(Ok(json!({
                 "method": "turn/completed",
                 "params": {
                     "threadId": "failed-thread",
@@ -1090,7 +1139,7 @@ mod tests {
                     }
                 }
             })
-            .to_string()))
+            .to_string())))
                 .is_ok()
         );
 
@@ -1421,6 +1470,106 @@ mod tests {
         assert_eq!(
             summary.map(|summary| summary.text),
             Ok("work result".to_owned())
+        );
+    }
+
+    /// Cancelling a turn ends the session at the cancel, not when stdout
+    /// closes: a descendant that left the killed group keeps stdout open, and
+    /// the session must still return, reap its leader and drop its group.
+    #[cfg(unix)]
+    #[test]
+    fn cancelling_a_work_turn_returns_while_an_escaped_descendant_holds_stdout() {
+        const SIGKILL: i32 = 9;
+        unsafe extern "C" {
+            fn kill(pid: i32, signal: i32) -> i32;
+        }
+        let _process_guard = APP_SERVER_PROCESS_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temporary = tempfile::tempdir().expect("temporary app-server directory");
+        let holder_pid = temporary.path().join("holder.pid");
+        let leader_pid = temporary.path().join("leader.pid");
+        let executable = temporary.path().join("fake-codex");
+        let script = format!(
+            "#!/bin/sh\nprintf '%s' $$ > {leader_pid}\nwhile IFS= read -r line; do\n  case \"$line\" in\n    *'\"id\":0'*) printf '%s\\n' '{{\"id\":0,\"result\":{{}}}}' ;;\n    *'\"id\":1'*) printf '%s\\n' '{{\"id\":1,\"result\":{{\"thread\":{{\"id\":\"work-thread\"}}}}}}' ;;\n    *'\"id\":2'*) python3 -c 'import os, sys, time; os.setsid(); f = open(sys.argv[1], \"w\"); f.write(str(os.getpid())); f.close(); time.sleep(60)' {holder_pid} &\n      sleep 120 ;;\n  esac\ndone\n",
+            holder_pid = holder_pid.display(),
+            leader_pid = leader_pid.display(),
+        );
+        write_executable_script(&executable, script).expect("write fake app-server");
+        let session_wall = Duration::from_secs(300);
+        let config = CodexAppServerSummaryConfig {
+            codex_bin: executable.to_string_lossy().into_owned(),
+            model: None,
+            timeout: session_wall,
+        };
+        let cancellation = CodexAppServerCancellation::default();
+        let session_cancellation = cancellation.clone();
+        let cwd = temporary.path().to_path_buf();
+        let (result_tx, result_rx) = mpsc::channel();
+        let session = std::thread::spawn(move || {
+            let result = run_work_with_codex_app_server(
+                "Return a work result.",
+                &config,
+                "tracedecay_work_attempt",
+                CodexAppServerWorkExecution {
+                    cancellation: &session_cancellation,
+                    cwd: &cwd,
+                    timeout: session_wall,
+                    admitted_environment: &BTreeMap::new(),
+                    launch_receipt: &CodexAppServerLaunchReceipt::default(),
+                    approval: WorkApprovalPolicy::Never,
+                    filesystem: WorkFilesystemPolicy::ReadOnly,
+                    egress: WorkEgressPolicy::Deny,
+                },
+            );
+            let _ = result_tx.send(result);
+        });
+        let started = Instant::now();
+        let holder = loop {
+            if let Some(pid) = std::fs::read_to_string(&holder_pid)
+                .ok()
+                .and_then(|pid| pid.trim().parse::<i32>().ok())
+            {
+                break pid;
+            }
+            assert!(
+                started.elapsed() < Duration::from_secs(30),
+                "the fake app-server never started its stdout holder"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        };
+        let leader: i32 = std::fs::read_to_string(&leader_pid)
+            .expect("the fake app-server recorded its pid")
+            .trim()
+            .parse()
+            .expect("leader pid");
+
+        cancellation.cancel();
+        let result = result_rx.recv_timeout(Duration::from_secs(30));
+        let holder_still_holds_stdout = unsafe { kill(holder, 0) } == 0;
+        unsafe { kill(holder, SIGKILL) };
+        let error = result
+            .expect("cancellation must end the session while stdout stays open")
+            .expect_err("a cancelled turn has no summary");
+        session.join().expect("session thread");
+
+        assert!(
+            holder_still_holds_stdout,
+            "the session must return while the escaped descendant still holds stdout"
+        );
+        assert_eq!(error, cancelled_session_error());
+        assert_ne!(
+            unsafe { kill(leader, 0) },
+            0,
+            "the cancelled leader must be killed and reaped before the session returns"
+        );
+        assert!(
+            active_codex_children()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .process_groups
+                .is_empty(),
+            "the cancelled process group must be removed before the session returns"
         );
     }
 
