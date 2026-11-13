@@ -69,6 +69,16 @@ use tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1;
 const OBSERVED_AT: UtcMicros = UtcMicros(100);
 const EXPIRES_AT: UtcMicros = UtcMicros(10_000);
 
+fn run_native_journey(journey: impl Future<Output = ()>) {
+    // Native owners reuse the ambient runtime. Match the daemon's scheduling
+    // policy so a wake issued during a long owner poll stays stealable by
+    // another worker instead of being held in Tokio's default LIFO slot.
+    native_runtime::default_builder()
+        .build()
+        .expect("native journey runtime")
+        .block_on(journey);
+}
+
 struct UnexpectedAnalysis;
 
 impl NativeIntegrationAnalysisPort for UnexpectedAnalysis {
@@ -760,8 +770,12 @@ async fn stack_snapshot(
     selection.as_ref().clone()
 }
 
-#[tokio::test(flavor = "multi_thread")]
-async fn declared_stack_runtime_shares_native_preview_and_failure_without_consuming_result() {
+#[test]
+fn declared_stack_runtime_shares_native_preview_and_failure_without_consuming_result() {
+    run_native_journey(shared_native_preview_and_failure_journey());
+}
+
+async fn shared_native_preview_and_failure_journey() {
     for fail in [false, true] {
         let directory = tempfile::tempdir().expect("temporary project directory");
         let repository_root = directory.path().join("repo");
@@ -928,8 +942,12 @@ async fn declared_stack_runtime_shares_native_preview_and_failure_without_consum
     }
 }
 
-#[tokio::test(flavor = "multi_thread")]
-async fn checked_out_declared_stack_conflict_enqueues_without_moving_refs() {
+#[test]
+fn checked_out_declared_stack_conflict_enqueues_without_moving_refs() {
+    run_native_journey(checked_out_stack_conflict_journey());
+}
+
+async fn checked_out_stack_conflict_journey() {
     let directory = tempfile::tempdir().expect("temporary project directory");
     let repository_root = directory.path().join("repo");
     let source_root = directory.path().join("dependency");
@@ -1392,8 +1410,12 @@ async fn checked_out_declared_stack_conflict_enqueues_without_moving_refs() {
     code_index.shutdown().await;
 }
 
-#[tokio::test(flavor = "multi_thread")]
-async fn independent_pair_applies_supported_modes_and_survives_daemon_restart() {
+#[test]
+fn independent_pair_applies_supported_modes_and_survives_daemon_restart() {
+    run_native_journey(independent_pair_restart_journey());
+}
+
+async fn independent_pair_restart_journey() {
     for (index, mode) in [
         MechanicalIntegrationModeV1::FastForward,
         MechanicalIntegrationModeV1::TwoParentMerge,
@@ -1773,8 +1795,12 @@ async fn independent_pair_applies_supported_modes_and_survives_daemon_restart() 
     }
 }
 
-#[tokio::test(flavor = "multi_thread")]
-async fn generated_only_change_requires_semantic_review() {
+#[test]
+fn generated_only_change_requires_semantic_review() {
+    run_native_journey(generated_only_change_journey());
+}
+
+async fn generated_only_change_journey() {
     let directory = tempfile::tempdir().expect("temporary project directory");
     let repository_root = directory.path().join("repo");
     std::fs::create_dir_all(&repository_root).expect("repository root");
@@ -1818,8 +1844,12 @@ async fn generated_only_change_requires_semantic_review() {
     code_index.shutdown().await;
 }
 
-#[tokio::test(flavor = "multi_thread")]
-async fn foreign_destination_ref_drift_terminates_without_mutating_the_foreign_tip() {
+#[test]
+fn foreign_destination_ref_drift_terminates_without_mutating_the_foreign_tip() {
+    run_native_journey(foreign_destination_ref_drift_journey());
+}
+
+async fn foreign_destination_ref_drift_journey() {
     let directory = tempfile::tempdir().expect("temporary project directory");
     let repository_root = directory.path().join("repo");
     std::fs::create_dir_all(&repository_root).expect("repository root");
@@ -1920,8 +1950,12 @@ async fn foreign_destination_ref_drift_terminates_without_mutating_the_foreign_t
 /// Cleanup inspection of an owned checkout, asked while another thread walks
 /// that checkout, classifies it from the shared walk. Reading the walk as
 /// "no repository" classified the checkout as foreign.
-#[tokio::test(flavor = "multi_thread")]
-async fn owned_worktree_inspection_shares_the_discovery_walk_another_thread_owns() {
+#[test]
+fn owned_worktree_inspection_shares_the_discovery_walk_another_thread_owns() {
+    run_native_journey(shared_worktree_discovery_journey());
+}
+
+async fn shared_worktree_discovery_journey() {
     let directory = tempfile::tempdir().expect("temporary project directory");
     let repository_root = directory.path().join("repo");
     std::fs::create_dir_all(&repository_root).expect("repository root");
