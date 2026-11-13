@@ -27,7 +27,7 @@ use super::super::github_runtime::{
 };
 use super::{
     CiExactEvidenceAuthorityV1, CiProviderReadResultV1, CiReadOnlyProviderArchiveV1,
-    CiSourceAccessAuthorityV1, CiSourceAccessOutcomeV1, GitHubCiProviderRecordV1,
+    CiRetainedReadV1, CiSourceAccessAuthorityV1, CiSourceAccessOutcomeV1, GitHubCiProviderRecordV1,
     MAX_CI_RETAINED_ANNOTATIONS_V1, MAX_CI_RETAINED_FAILURES_V1,
 };
 
@@ -83,6 +83,15 @@ pub trait CiRetainedProviderObservationAuthorityV1: Send + Sync {
         state: CiFailureLocalizationStateV1,
         coverage: CiFailureCoverageV1,
     ) -> FeedbackPortFuture<'a, Option<CiRetainedProviderObservationV1>>;
+
+    /// Requests with a retained observation in this exact scope (including
+    /// head commit), from the store's own inventory. `None` when the
+    /// inventory cannot be read for this caller.
+    fn retained_requests<'a>(
+        &'a self,
+        context: &'a RequestContext,
+        scope: &'a FeedbackScopeV1,
+    ) -> FeedbackPortFuture<'a, Option<Vec<CiFailureLocalizationRequestV1>>>;
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -764,6 +773,14 @@ impl CiReadOnlyProviderArchiveV1 for UnavailableProductionCiArchiveV1 {
             }
         })
     }
+
+    fn read_retained<'a>(
+        &'a self,
+        _context: &'a RequestContext,
+        _scope: &'a FeedbackScopeV1,
+    ) -> FeedbackPortFuture<'a, CiRetainedReadV1<Self::Record>> {
+        Box::pin(async { CiRetainedReadV1::Unavailable })
+    }
 }
 
 struct UnavailableProductionCiExactEvidenceV1;
@@ -791,6 +808,57 @@ struct ProductionGitHubCiArchiveV1 {
 }
 
 impl ProductionGitHubCiArchiveV1 {
+    /// Reports the coverage the retained record itself supports, using the
+    /// same bounds a live read applies before retaining it. Freshness is not
+    /// claimed here: local feedback never reports retained coverage complete.
+    fn retained_record_read(
+        &self,
+        request: &CiFailureLocalizationRequestV1,
+        retained: Option<CiRetainedProviderRecordV1>,
+    ) -> CiProviderReadResultV1<CiRetainedProviderRecordV1> {
+        let Some(record) = retained.filter(|record| {
+            record.validate_for(request)
+                && validate_provider_record(&self.target, request, &record.provider_record)
+        }) else {
+            return unavailable_result(&self.provider, request);
+        };
+        let failures = record
+            .provider_record
+            .workflow_job
+            .steps
+            .iter()
+            .filter(|step| step.is_failed())
+            .count();
+        let annotations = record.provider_record.annotations.len();
+        if failures == 0
+            || failures > MAX_CI_RETAINED_FAILURES_V1
+            || annotations > MAX_CI_RETAINED_ANNOTATIONS_V1
+        {
+            return unavailable_result(&self.provider, request);
+        }
+        let complete =
+            record.provider_record.check_run.output.annotations_count as usize == annotations;
+        CiProviderReadResultV1 {
+            provider: self.provider.clone(),
+            run: request.run.clone(),
+            state: if complete {
+                CiFailureLocalizationStateV1::Complete
+            } else {
+                CiFailureLocalizationStateV1::Partial
+            },
+            coverage: if complete {
+                CiFailureCoverageV1::Complete
+            } else {
+                CiFailureCoverageV1::Partial
+            },
+            source_degradation: None,
+            failures,
+            checks: 1,
+            annotations,
+            record: Some(record),
+        }
+    }
+
     async fn retained_result(
         &self,
         context: &RequestContext,
@@ -1107,6 +1175,55 @@ impl CiReadOnlyProviderArchiveV1 for ProductionGitHubCiArchiveV1 {
                 }
             },
             tracing::trace_span!("usecases.ci_runtime.read_record"),
+        ))
+    }
+
+    fn read_retained<'a>(
+        &'a self,
+        context: &'a RequestContext,
+        scope: &'a FeedbackScopeV1,
+    ) -> FeedbackPortFuture<'a, CiRetainedReadV1<Self::Record>> {
+        Box::pin(tracing::Instrument::instrument(
+            async move {
+                if !context_admitted(context) {
+                    return CiRetainedReadV1::Unavailable;
+                }
+                if !context_admitted_for_ci_discovery(context, scope) {
+                    return CiRetainedReadV1::Denied;
+                }
+                let Some(requests) = self.retained.retained_requests(context, scope).await else {
+                    return CiRetainedReadV1::Unavailable;
+                };
+                let request = match requests.as_slice() {
+                    [] => return CiRetainedReadV1::NotRetained,
+                    [request] => request.clone(),
+                    _ => return CiRetainedReadV1::Ambiguous,
+                };
+                if let Err(failure) = self.authorize_source(context, &request).await {
+                    let read = source_failure_result(&self.provider, &request, failure);
+                    return CiRetainedReadV1::Read {
+                        request: Box::new(request),
+                        read: Box::new(read),
+                    };
+                }
+                let retained = tracing::Instrument::instrument(
+                    self.retained.load(context, &request),
+                    tracing::trace_span!("usecases.ci_runtime.cache_load"),
+                )
+                .await;
+                if let Err(failure) = self.authorize_source(context, &request).await {
+                    let read = source_failure_result(&self.provider, &request, failure);
+                    return CiRetainedReadV1::Read {
+                        request: Box::new(request),
+                        read: Box::new(read),
+                    };
+                }
+                CiRetainedReadV1::Read {
+                    read: Box::new(self.retained_record_read(&request, retained)),
+                    request: Box::new(request),
+                }
+            },
+            tracing::trace_span!("usecases.ci_runtime.read_retained"),
         ))
     }
 }
@@ -1601,6 +1718,240 @@ mod discovery_tests {
         ));
     }
 
+    async fn retained_store(
+        scope: &FeedbackScopeV1,
+        name: &str,
+    ) -> (
+        tempfile::TempDir,
+        super::super::ProjectCiRetainedObservationStoreV1,
+    ) {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join(format!("{name}.db"));
+        crate::register_test_schema_installer();
+        let authority =
+            tracedecay_runtime_core::db::DatabaseAuthority::acquire_test(&path, name).unwrap();
+        let (database, _) = tracedecay_runtime_core::db::Database::publish_test_runtime(
+            &path,
+            &authority,
+            tracedecay_runtime_core::db::TestDatabaseRuntimeMode::Initialize,
+        )
+        .await
+        .unwrap();
+        let store = super::super::ProjectCiRetainedObservationStoreV1::new(database, scope.clone())
+            .unwrap();
+        (temp, store)
+    }
+
+    fn production_archive(
+        fixture: &crate::advisory::fixtures::AdvisorySourceBackedCompositeFixtureV1,
+        listener: &TcpListener,
+        retained: Arc<dyn CiRetainedProviderObservationAuthorityV1>,
+        source_access: Arc<dyn CiSourceAccessAuthorityV1>,
+    ) -> ProductionGitHubCiArchiveV1 {
+        ProductionGitHubCiArchiveV1 {
+            provider: ProviderId::new(GITHUB_ACTIONS_PROVIDER_ID_V1).unwrap(),
+            client: fixture_client(listener),
+            retained,
+            target: target(fixture),
+            source_access,
+        }
+    }
+
+    fn context_expiring(scope: &FeedbackScopeV1) -> RequestContext {
+        context(scope, UtcMicros(2))
+    }
+
+    fn assert_no_provider_connection(listener: &TcpListener) {
+        listener.set_nonblocking(true).unwrap();
+        assert!(
+            matches!(
+                listener.accept(),
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock
+            ),
+            "a retained read must not open a provider connection"
+        );
+        listener.set_nonblocking(false).unwrap();
+    }
+
+    /// The explicit path's live two-scan read is what fills the retained
+    /// store; the local retained read then serves that exact record with no
+    /// provider connection, and only for the exact admitted scope.
+    #[tokio::test]
+    async fn explicit_live_read_retains_what_local_reads_serve_without_provider_io() {
+        let fixture =
+            crate::advisory::fixtures::load_advisory_source_backed_composite_fixture_v1().unwrap();
+        let scope = scope(&fixture);
+        let request = CiFailureLocalizationRequestV1 {
+            scope: scope.clone(),
+            run: fixture.ci_provider_record.run_identity(),
+        };
+        let context = context(&scope, UtcMicros(i64::MAX));
+        let (_temp, store) = retained_store(&scope, "ci-retained-local-read").await;
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let archive = production_archive(
+            &fixture,
+            &listener,
+            Arc::new(store.clone()),
+            SequencedSourceAccess::ready(),
+        );
+
+        assert_eq!(
+            archive.read_retained(&context, &scope).await,
+            CiRetainedReadV1::NotRetained,
+            "nothing retained is absent evidence, not a clean CI result"
+        );
+        assert_no_provider_connection(&listener);
+
+        let record = &fixture.ci_provider_record;
+        // The reader requests exactly the provider-declared annotation count.
+        let annotations = usize::try_from(record.check_run.output.annotations_count)
+            .unwrap()
+            .min(MAX_CI_RETAINED_ANNOTATIONS_V1);
+        assert!(record.annotations.len() >= annotations);
+        let mut scan = vec![
+            serde_json::to_vec(&record.workflow_run).unwrap(),
+            serde_json::to_vec(&record.workflow_job).unwrap(),
+            serde_json::to_vec(&record.check_run).unwrap(),
+        ];
+        if annotations > 0 {
+            scan.push(serde_json::to_vec(&record.annotations[..annotations]).unwrap());
+        }
+        let provider_reads = scan.len() * 2;
+        let server = serve_ci_pages(listener, scan.iter().chain(scan.iter()).cloned().collect());
+        let live = archive.read_record(&context, &request).await;
+        let (listener, paths) = server.join().unwrap();
+        assert_eq!(paths.len(), provider_reads, "two-scan consensus read");
+        assert!(matches!(
+            live.state,
+            CiFailureLocalizationStateV1::Complete | CiFailureLocalizationStateV1::Partial
+        ));
+        let live_record = live
+            .record
+            .clone()
+            .expect("explicit read retains its record");
+
+        let CiRetainedReadV1::Read {
+            request: retained_request,
+            read,
+        } = archive.read_retained(&context, &scope).await
+        else {
+            panic!("the explicitly retained failure must be served locally");
+        };
+        assert_eq!(*retained_request, request);
+        assert_eq!(read.record.as_ref(), Some(&live_record));
+        assert_eq!((read.state, read.coverage), (live.state, live.coverage));
+        assert_eq!(read.source_degradation, None);
+        assert!(read.validate_for(&request));
+        assert_no_provider_connection(&listener);
+
+        // Retained evidence for this head is not evidence for another head.
+        let mut moved = scope.clone();
+        moved.head_commit_id = tracedecay_domain::CommitId::new("f".repeat(40)).unwrap();
+        assert_eq!(
+            archive.read_retained(&context, &moved).await,
+            CiRetainedReadV1::Unavailable,
+            "the store only answers for its own exact scope"
+        );
+        assert_no_provider_connection(&listener);
+    }
+
+    #[tokio::test]
+    async fn retained_ci_read_rechecks_grant_policy_cancellation_and_run_uniqueness() {
+        let fixture =
+            crate::advisory::fixtures::load_advisory_source_backed_composite_fixture_v1().unwrap();
+        let scope = scope(&fixture);
+        let request = CiFailureLocalizationRequestV1 {
+            scope: scope.clone(),
+            run: fixture.ci_provider_record.run_identity(),
+        };
+        let context = context(&scope, UtcMicros(i64::MAX));
+        let (_temp, store) = retained_store(&scope, "ci-retained-admission").await;
+        store
+            .retain(
+                &context,
+                &request,
+                &fixture.ci_provider_record,
+                CiFailureLocalizationStateV1::Complete,
+                CiFailureCoverageV1::Complete,
+            )
+            .await
+            .expect("retained observation");
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+
+        // A revoked source policy refuses the retained record it would serve.
+        let revoked = production_archive(
+            &fixture,
+            &listener,
+            Arc::new(store.clone()),
+            SequencedSourceAccess::revoke_at(1),
+        );
+        let CiRetainedReadV1::Read { read, .. } = revoked.read_retained(&context, &scope).await
+        else {
+            panic!("policy refusal is reported for the selected run");
+        };
+        assert_eq!(read.state, CiFailureLocalizationStateV1::Denied);
+        assert!(read.record.is_none());
+        let stale_policy = production_archive(
+            &fixture,
+            &listener,
+            Arc::new(store.clone()),
+            Arc::new(StaleSourceAccess),
+        );
+        let CiRetainedReadV1::Read { read, .. } =
+            stale_policy.read_retained(&context, &scope).await
+        else {
+            panic!("unsettled policy is reported for the selected run");
+        };
+        assert_eq!(read.state, CiFailureLocalizationStateV1::Unavailable);
+        assert!(read.record.is_none());
+
+        let archive = production_archive(
+            &fixture,
+            &listener,
+            Arc::new(store.clone()),
+            SequencedSourceAccess::ready(),
+        );
+        // An expired grant and a cancelled request read nothing retained.
+        assert_eq!(
+            archive
+                .read_retained(&context_expiring(&scope), &scope)
+                .await,
+            CiRetainedReadV1::Unavailable
+        );
+        let cancelled = context.clone().with_cancellation(
+            CancellationContext::cancelled("cancel.ci-retained", UtcMicros(3)).unwrap(),
+        );
+        assert_eq!(
+            archive.read_retained(&cancelled, &scope).await,
+            CiRetainedReadV1::Unavailable
+        );
+
+        // A second retained attempt for the same head is ambiguous, exactly as
+        // discovery would refuse to pick one.
+        let mut rerun = fixture.ci_provider_record.clone();
+        rerun.workflow_run.run_attempt += 1;
+        rerun.workflow_job.run_attempt += 1;
+        let rerun_request = CiFailureLocalizationRequestV1 {
+            scope: scope.clone(),
+            run: rerun.run_identity(),
+        };
+        store
+            .retain(
+                &context,
+                &rerun_request,
+                &rerun,
+                CiFailureLocalizationStateV1::Complete,
+                CiFailureCoverageV1::Complete,
+            )
+            .await
+            .expect("second retained attempt");
+        assert_eq!(
+            archive.read_retained(&context, &scope).await,
+            CiRetainedReadV1::Ambiguous
+        );
+        assert_no_provider_connection(&listener);
+    }
+
     #[tokio::test]
     async fn stale_ci_access_remains_stale_without_a_network_read() {
         let fixture =
@@ -1702,6 +2053,18 @@ mod discovery_tests {
         ) -> FeedbackPortFuture<'a, Option<CiRetainedProviderObservationV1>> {
             Box::pin(async { None })
         }
+
+        fn retained_requests<'a>(
+            &'a self,
+            _context: &'a RequestContext,
+            scope: &'a FeedbackScopeV1,
+        ) -> FeedbackPortFuture<'a, Option<Vec<CiFailureLocalizationRequestV1>>> {
+            let request = CiFailureLocalizationRequestV1 {
+                scope: scope.clone(),
+                run: self.0.provider_record.run_identity(),
+            };
+            Box::pin(async move { Some(vec![request]) })
+        }
     }
 
     #[tokio::test]
@@ -1784,6 +2147,14 @@ mod discovery_tests {
                     record: None,
                 }
             })
+        }
+
+        fn read_retained<'a>(
+            &'a self,
+            _context: &'a RequestContext,
+            _scope: &'a FeedbackScopeV1,
+        ) -> FeedbackPortFuture<'a, CiRetainedReadV1<Self::Record>> {
+            Box::pin(async { CiRetainedReadV1::NotRetained })
         }
     }
 

@@ -866,44 +866,85 @@ pub(crate) fn projection_relations_checked(
     Ok(relations)
 }
 
-pub(crate) fn projection_entity_deletion_page_checked(
+/// One bounded durable page of a projection's row release.
+///
+/// Relations come first and entities follow in the same page, under one
+/// shared mutation-count and live-byte budget. Entities join only once every
+/// remaining relation was admitted, so an entity is never deleted in a page
+/// that leaves one of its relations behind, and a crash or cancellation
+/// between pages leaves a prefix that the idempotent retry finishes. The
+/// canonical mutation order (`DeleteRelation` before `DeleteEntity`) applies
+/// the relation deletions first inside the one transaction.
+///
+/// Planning the two kinds as separate pages forced every release into at
+/// least two fsync-backed commits; a small mixed generation now releases in
+/// one.
+pub(crate) fn projection_deletion_page_checked(
     database: &GrafeoDB,
     namespace: &GraphNamespace,
     projection: &GraphProjectionId,
     check: &dyn Fn() -> Result<(), GraphDbError>,
 ) -> Result<Vec<GraphMutation>, GraphDbError> {
-    projection_identity_deletion_page_checked(
-        database,
-        &entity_projection_label(namespace, projection),
-        ENTITY_LABEL,
-        ENTITY_ID_PROPERTY,
-        MAX_VERIFIED_GENERATION_ENTITIES,
-        "entity",
-        check,
-    )?
-    .into_iter()
-    .map(|identity| GraphEntityId::new(identity).map(GraphMutation::DeleteEntity))
-    .collect()
-}
-
-pub(crate) fn projection_relation_deletion_page_checked(
-    database: &GrafeoDB,
-    namespace: &GraphNamespace,
-    projection: &GraphProjectionId,
-    check: &dyn Fn() -> Result<(), GraphDbError>,
-) -> Result<Vec<GraphMutation>, GraphDbError> {
-    projection_identity_deletion_page_checked(
+    let mut budget = DeletionPageBudget::default();
+    let (relations, relations_complete) = projection_identity_deletion_page_checked(
         database,
         &relation_projection_label(namespace, projection),
-        RELATION_LABEL,
-        crate::schema::RELATION_ID_PROPERTY,
-        MAX_VERIFIED_GENERATION_RELATIONS,
-        "relation",
+        &DeletionRecordKind::RELATIONS,
+        &mut budget,
         check,
-    )?
-    .into_iter()
-    .map(|identity| GraphRelationId::new(identity).map(GraphMutation::DeleteRelation))
-    .collect()
+    )?;
+    let mut mutations = relations
+        .into_iter()
+        .map(|identity| GraphRelationId::new(identity).map(GraphMutation::DeleteRelation))
+        .collect::<Result<Vec<_>, _>>()?;
+    if !relations_complete {
+        return Ok(mutations);
+    }
+    let (entities, _) = projection_identity_deletion_page_checked(
+        database,
+        &entity_projection_label(namespace, projection),
+        &DeletionRecordKind::ENTITIES,
+        &mut budget,
+        check,
+    )?;
+    for identity in entities {
+        mutations.push(GraphMutation::DeleteEntity(GraphEntityId::new(identity)?));
+    }
+    Ok(mutations)
+}
+
+/// The mutation-count and live-byte budget one deletion page shares across
+/// every record kind it admits.
+#[derive(Default)]
+struct DeletionPageBudget {
+    mutations: usize,
+    live_bytes: usize,
+}
+
+/// How one record kind is recognized and bounded by a deletion page scan.
+struct DeletionRecordKind {
+    record_label: &'static str,
+    identity_property: &'static str,
+    maximum_records: usize,
+    capacity: &'static str,
+    description: &'static str,
+}
+
+impl DeletionRecordKind {
+    const RELATIONS: Self = Self {
+        record_label: RELATION_LABEL,
+        identity_property: crate::schema::RELATION_ID_PROPERTY,
+        maximum_records: MAX_VERIFIED_GENERATION_RELATIONS,
+        capacity: "relations",
+        description: "relation",
+    };
+    const ENTITIES: Self = Self {
+        record_label: ENTITY_LABEL,
+        identity_property: ENTITY_ID_PROPERTY,
+        maximum_records: MAX_VERIFIED_GENERATION_ENTITIES,
+        capacity: "entities",
+        description: "entity",
+    };
 }
 
 #[cfg(test)]
@@ -923,7 +964,9 @@ pub(crate) fn retirement_page_record_reads() -> usize {
     RETIREMENT_PAGE_RECORD_READS.with(std::cell::Cell::get)
 }
 
-/// One bounded page of identities to retire from a projection.
+/// The identities of one record kind a deletion page retires, admitted
+/// against the page's shared `budget`, and whether the scan admitted every
+/// remaining record of that kind (`false` once the budget filled).
 ///
 /// Retirement deletes a generation page by page, so this scan must cost one
 /// page, not the projection: it reads owner-label candidates in index order
@@ -936,26 +979,20 @@ pub(crate) fn retirement_page_record_reads() -> usize {
 fn projection_identity_deletion_page_checked(
     database: &GrafeoDB,
     owner_label: &str,
-    record_label: &str,
-    identity_property: &str,
-    maximum_records: usize,
-    description: &str,
+    kind: &DeletionRecordKind,
+    budget: &mut DeletionPageBudget,
     check: &dyn Fn() -> Result<(), GraphDbError>,
-) -> Result<Vec<String>, GraphDbError> {
+) -> Result<(Vec<String>, bool), GraphDbError> {
     check()?;
     let store = database.graph_store();
     require_generation_capacity(
-        if record_label == ENTITY_LABEL {
-            "entities"
-        } else {
-            "relations"
-        },
+        kind.capacity,
         nodes_with_label_count(store.as_ref(), owner_label),
         0,
-        maximum_records,
+        kind.maximum_records,
     )?;
     let mut identities = BTreeSet::new();
-    let mut live_bytes = 0usize;
+    let mut complete = true;
     for node in nodes_with_label(store.as_ref(), owner_label) {
         check()?;
         #[cfg(test)]
@@ -964,34 +1001,42 @@ fn projection_identity_deletion_page_checked(
         // a record of this kind; the labeled scan skips those the same way.
         let Some(record) = store
             .get_node(node)
-            .filter(|record| has_native_label(record, record_label))
+            .filter(|record| has_native_label(record, kind.record_label))
         else {
             continue;
         };
         let identity = identity_arc(
-            record.get_property(identity_property),
-            &format!("native graph {description} identity"),
+            record.get_property(kind.identity_property),
+            &format!("native graph {} identity", kind.description),
         )?;
-        let next_live_bytes = live_bytes.checked_add(identity.len()).ok_or_else(|| {
-            GraphDbError::budget_exhausted_count(
-                crate::GraphBudgetKind::Write,
-                MAX_VERIFIED_GENERATION_BATCH_LIVE_BYTES,
-            )
-        })?;
-        if identities.len() == MAX_VERIFIED_GENERATION_BATCH_MUTATIONS
+        let next_live_bytes = budget
+            .live_bytes
+            .checked_add(identity.len())
+            .ok_or_else(|| {
+                GraphDbError::budget_exhausted_count(
+                    crate::GraphBudgetKind::Write,
+                    MAX_VERIFIED_GENERATION_BATCH_LIVE_BYTES,
+                )
+            })?;
+        if budget.mutations == MAX_VERIFIED_GENERATION_BATCH_MUTATIONS
             || next_live_bytes > MAX_VERIFIED_GENERATION_BATCH_LIVE_BYTES
         {
+            complete = false;
             break;
         }
-        live_bytes = next_live_bytes;
         if !identities.insert(identity.as_str().to_owned()) {
             return Err(GraphDbError::Corrupt {
-                message: format!("native graph generation repeats a {description} identity"),
+                message: format!(
+                    "native graph generation repeats a {} identity",
+                    kind.description
+                ),
             });
         }
+        budget.live_bytes = next_live_bytes;
+        budget.mutations += 1;
     }
     check()?;
-    Ok(identities.into_iter().collect())
+    Ok((identities.into_iter().collect(), complete))
 }
 
 pub(crate) fn projection_relation_nodes_sorted_checked(
