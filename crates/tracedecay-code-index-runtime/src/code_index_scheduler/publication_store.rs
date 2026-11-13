@@ -2715,6 +2715,27 @@ impl DaemonCodeIndexPublicationStoreV1 {
             .map_err(Self::unavailable)?;
         temporary.write_all(bytes).map_err(Self::unavailable)?;
         temporary.as_file().sync_all().map_err(Self::unavailable)?;
+        #[cfg(windows)]
+        let mut persisted = {
+            // Normalize FILE_ATTRIBUTE_TEMPORARY before publication while
+            // retaining cleanup ownership if normalization or rename fails.
+            let mut temporary_path =
+                tempfile::TempPath::try_from_path(temporary.path().to_path_buf())
+                    .map_err(Self::unavailable)?;
+            let (persisted, _) = temporary
+                .keep()
+                .map_err(|error| Self::map_pointer_io(error.error))?;
+            // The memo can still hold the prior pointer open. Use the
+            // durable Windows rename, including its POSIX replacement path.
+            tracedecay_private_fs::framed_log::replace_via_rename(
+                &temporary_path,
+                &self.active_path,
+            )
+            .map_err(Self::map_pointer_io)?;
+            temporary_path.disable_cleanup(true);
+            persisted
+        };
+        #[cfg(not(windows))]
         let mut persisted = temporary
             .persist(&self.active_path)
             .map_err(|error| Self::map_pointer_io(error.error))?;

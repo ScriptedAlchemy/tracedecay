@@ -436,9 +436,16 @@ fn atomic_replace_fixture_pointer(pointer_path: &Path, bytes: &[u8]) {
     let mut staged = tempfile::NamedTempFile::new_in(parent).expect("stage pointer replacement");
     std::io::Write::write_all(staged.as_file_mut(), bytes).expect("write staged pointer bytes");
     staged.as_file().sync_all().expect("sync staged pointer");
-    staged
-        .persist(pointer_path)
+    persist_fixture_pointer(staged, pointer_path);
+}
+
+fn persist_fixture_pointer(staged: tempfile::NamedTempFile, pointer_path: &Path) {
+    let mut temporary_path = tempfile::TempPath::try_from_path(staged.path().to_path_buf())
+        .expect("retain pointer staging cleanup");
+    let (_file, _) = staged.keep().expect("normalize staged pointer attributes");
+    tracedecay_private_fs::framed_log::replace_via_rename(&temporary_path, pointer_path)
         .expect("atomically replace active pointer");
+    temporary_path.disable_cleanup(true);
 }
 
 fn remove_historical_pointer_entries(store_root: &Path) {

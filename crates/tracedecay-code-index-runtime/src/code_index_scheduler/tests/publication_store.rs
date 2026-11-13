@@ -1,5 +1,7 @@
 #[cfg(unix)]
 use std::os::unix::fs::MetadataExt;
+#[cfg(windows)]
+use std::os::windows::fs::MetadataExt;
 
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -52,9 +54,9 @@ use super::super::publication_store::{
 };
 use super::{
     EIGHT_DAYS_SECS, GitFixture, RETAINED_REVISION_0, atomic_replace_fixture_pointer,
-    execute_proof_bound_scope_retention, published, remove_historical_pointer_entries,
-    retention_generations, scheduler, seeded_scope, test_project_id, unix_now_secs,
-    with_untouched_fillers,
+    execute_proof_bound_scope_retention, persist_fixture_pointer, published,
+    remove_historical_pointer_entries, retention_generations, scheduler, seeded_scope,
+    test_project_id, unix_now_secs, with_untouched_fillers,
 };
 use crate::code_index_scheduler::{
     CodeIndexReconcileOutcomeV1, CodeIndexSchedulerErrorV1, CodeIndexSchedulerRegistryV1,
@@ -3225,9 +3227,7 @@ fn publication_pointer_memo_follows_bytes_when_size_and_mtime_stay_put() {
         .set_modified(mtime)
         .expect("preserve prior pointer mtime");
     staged.as_file().sync_all().expect("sync next pointer");
-    staged
-        .persist(&pointer_path)
-        .expect("atomic pointer replacement");
+    persist_fixture_pointer(staged, &pointer_path);
     let replaced = std::fs::metadata(&pointer_path).expect("replaced metadata");
     assert_eq!(replaced.len(), first_bytes.len() as u64);
     assert_eq!(replaced.modified().ok(), Some(mtime));
@@ -3252,9 +3252,7 @@ fn publication_pointer_memo_follows_bytes_when_size_and_mtime_stay_put() {
         .as_file()
         .sync_all()
         .expect("sync repeated pointer");
-    repeated
-        .persist(&pointer_path)
-        .expect("atomically republish identical pointer");
+    persist_fixture_pointer(repeated, &pointer_path);
     assert_eq!(
         publication
             .read_publication_pointer()
@@ -3424,6 +3422,88 @@ fn pointer_commit_refuses_existing_and_dangling_symlink_slots() {
             std::fs::read(&pointer_path).expect("read published pointer"),
             replacement_bytes,
             "the successful publication must persist exact bytes"
+        );
+    }
+}
+
+#[cfg(windows)]
+#[test]
+fn pointer_commit_replaces_a_live_memo_and_preserves_its_old_reader() {
+    const FILE_ATTRIBUTE_TEMPORARY: u32 = 0x100;
+
+    let store = TempDir::new().expect("store root");
+    let project = TempDir::new().expect("project root");
+    let publication = super::super::DaemonCodeIndexPublicationStoreV1::new(
+        store.path(),
+        project.path(),
+        SanitizerRevision::new(tracedecay_privacy::CODE_SOURCE_SANITIZER_VERSION_V1)
+            .expect("sanitizer revision"),
+    )
+    .expect("open publication store");
+    let pointer_path = store.path().join("active-code-generation-v1.json");
+    let first = same_length_publication_pointer("generation.memo-aaaa", 0x41);
+    let second = same_length_publication_pointer("generation.memo-bbbb", 0x42);
+    let first_bytes = serde_json::to_vec(&first).expect("encode first pointer");
+    let second_bytes = serde_json::to_vec(&second).expect("encode second pointer");
+    let store_lock = acquire_code_generation_store_lock(store.path()).expect("store lock");
+
+    publication
+        .commit_observed_pointer(&store_lock, None, &first, &first_bytes)
+        .expect("publish first pointer");
+    assert_eq!(
+        publication
+            .read_publication_pointer()
+            .expect("authenticate the first publication")
+            .expect("first pointer exists")
+            .generation_id,
+        first.generation_id
+    );
+    let mut old_reader = File::open(&pointer_path).expect("retain the first published inode");
+    publication
+        .commit_observed_pointer(&store_lock, Some(&first_bytes), &second, &second_bytes)
+        .expect("replace the pointer while its memo and reader remain live");
+    assert_eq!(
+        std::fs::metadata(&pointer_path)
+            .expect("published pointer attributes")
+            .file_attributes()
+            & FILE_ATTRIBUTE_TEMPORARY,
+        0,
+        "publication must clear the temporary-file attribute"
+    );
+
+    let mut retained_bytes = Vec::new();
+    old_reader
+        .read_to_end(&mut retained_bytes)
+        .expect("read the retained old inode");
+    assert_eq!(retained_bytes, first_bytes);
+    assert_eq!(
+        std::fs::read(&pointer_path).expect("read the current published inode"),
+        second_bytes
+    );
+    for _ in 0..2 {
+        assert_eq!(
+            publication
+                .read_publication_pointer()
+                .expect("authenticate the replacement memo")
+                .expect("replacement pointer exists")
+                .generation_id,
+            second.generation_id
+        );
+    }
+
+    let error = publication
+        .commit_observed_pointer(&store_lock, Some(&first_bytes), &first, &first_bytes)
+        .expect_err("the retired observation must not replace its successor");
+    assert!(matches!(error, CodeIndexPublicationStoreErrorV1::CompareAndSwap));
+    assert_eq!(
+        std::fs::read(&pointer_path).expect("current pointer survives stale CAS"),
+        second_bytes
+    );
+    for entry in std::fs::read_dir(store.path()).expect("inspect publication staging") {
+        let name = entry.expect("store entry").file_name();
+        assert!(
+            !name.to_string_lossy().starts_with(".active-code-generation-"),
+            "successful publication must consume its temporary name"
         );
     }
 }
