@@ -3170,8 +3170,9 @@ fn partitioned_codec_fixture() -> (
     (second.as_ref().clone(), manifest, segments)
 }
 
+// The sealed generation revision is part of the authenticated manifest payload.
 const PARTITIONED_FORMAT_STATE_DIGEST: &str =
-    "sha256:3e63dc8f57ab07543a49988150fd1b91db816b6051e613a79f90c3b3aeb6a10e";
+    "sha256:9dfca7e0f68bbe8502dfe19bef6b9e202b4e444a068b91ddee77a2c047d89a37";
 const PARTITIONED_FORMAT_SEGMENTS: &[(&str, u64)] = &[
     (
         "sha256:49ac89476728e3983d94d2fa74f2844144dd800e6df4a82fe24484c5a7369518",
@@ -3346,6 +3347,11 @@ fn partitioned_codec_has_stable_bytes_and_round_trips() {
     let (expected, manifest, segments) = partitioned_codec_fixture();
     let envelope: serde_json::Value =
         serde_json::from_slice(&manifest).expect("partitioned manifest JSON");
+    assert_eq!(
+        envelope["generation"]["format_revision"],
+        23,
+        "the canonical fixture pins the sealed generation revision"
+    );
     assert_eq!(
         envelope["state_digest"], PARTITIONED_FORMAT_STATE_DIGEST,
         "the canonical manifest payload bytes changed"
