@@ -62,9 +62,9 @@ where
     S: tracing::Subscriber + for<'a> LookupSpan<'a>,
 {
     fn on_close(&self, id: tracing::span::Id, context: Context<'_, S>) {
-        if !context
+        if context
             .span(&id)
-            .is_some_and(|span| span.name() == "daemon.project.owners.primitive")
+            .is_none_or(|span| span.name() != "daemon.project.owners.primitive")
         {
             return;
         }
