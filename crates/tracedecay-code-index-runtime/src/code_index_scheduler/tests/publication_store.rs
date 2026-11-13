@@ -3494,7 +3494,10 @@ fn pointer_commit_replaces_a_live_memo_and_preserves_its_old_reader() {
     let error = publication
         .commit_observed_pointer(&store_lock, Some(&first_bytes), &first, &first_bytes)
         .expect_err("the retired observation must not replace its successor");
-    assert!(matches!(error, CodeIndexPublicationStoreErrorV1::CompareAndSwap));
+    assert!(matches!(
+        error,
+        CodeIndexPublicationStoreErrorV1::CompareAndSwap
+    ));
     assert_eq!(
         std::fs::read(&pointer_path).expect("current pointer survives stale CAS"),
         second_bytes
@@ -3502,7 +3505,9 @@ fn pointer_commit_replaces_a_live_memo_and_preserves_its_old_reader() {
     for entry in std::fs::read_dir(store.path()).expect("inspect publication staging") {
         let name = entry.expect("store entry").file_name();
         assert!(
-            !name.to_string_lossy().starts_with(".active-code-generation-"),
+            !name
+                .to_string_lossy()
+                .starts_with(".active-code-generation-"),
             "successful publication must consume its temporary name"
         );
     }
