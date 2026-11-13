@@ -1116,6 +1116,67 @@ mod worktree_inventory_tests {
     }
 
     #[test]
+    fn oversized_worktree_inventory_refuses_partial_authority_then_recovers() {
+        const ADMITTED_ROOTS: usize = 256;
+        const OVERSIZED_ROOTS: usize = 331;
+
+        let temporary = tempfile::TempDir::new().expect("repository root");
+        let base = std::fs::canonicalize(temporary.path()).expect("canonical root");
+        let (primary, _) = repository_with_linked_worktree(&base);
+        let add_worktree = |ordinal| {
+            let linked = base.join(format!("linked-{ordinal}"));
+            run_git(
+                &primary,
+                &[
+                    "worktree",
+                    "add",
+                    "-q",
+                    "--detach",
+                    "--no-checkout",
+                    linked.to_str().expect("worktree path"),
+                ],
+            );
+            linked
+        };
+        // The main checkout and the fixture's linked checkout already exist.
+        for ordinal in 1..ADMITTED_ROOTS - 1 {
+            add_worktree(ordinal);
+        }
+        let (admitted_roots, receipt) =
+            git_worktree_scope_root_inventory(&primary).expect("the complete bound is admissible");
+        assert_eq!(receipt.terminal_count, ADMITTED_ROOTS as u64);
+
+        let excess = (ADMITTED_ROOTS - 1..OVERSIZED_ROOTS - 1)
+            .map(add_worktree)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            git_worktree_scope_root_inventory(&primary).expect_err("331 roots exceed the bound"),
+            "git_worktree_inventory_exceeds_bound"
+        );
+        assert_eq!(
+            scope_root_liveness_proof(&primary, &BTreeSet::new())
+                .expect_err("a partial inventory must never authorize scope collection"),
+            "git_worktree_inventory_exceeds_bound"
+        );
+
+        for linked in excess {
+            run_git(
+                &primary,
+                &[
+                    "worktree",
+                    "remove",
+                    "--force",
+                    linked.to_str().expect("worktree path"),
+                ],
+            );
+        }
+        let (recovered_roots, receipt) = git_worktree_scope_root_inventory(&primary)
+            .expect("a later bounded inventory recovers");
+        assert_eq!(receipt.terminal_count, ADMITTED_ROOTS as u64);
+        assert_eq!(recovered_roots, admitted_roots);
+    }
+
+    #[test]
     fn liveness_proof_drops_a_removed_worktree_only_once_nothing_mounts_it() {
         let temporary = tempfile::TempDir::new().expect("repository root");
         let base = std::fs::canonicalize(temporary.path()).expect("canonical root");
