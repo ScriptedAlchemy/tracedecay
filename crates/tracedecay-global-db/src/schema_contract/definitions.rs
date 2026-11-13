@@ -512,6 +512,19 @@ pub(super) const TABLES: &[Table] = &[
         )]
     ),
     table!(
+        "projection_retry_owners",
+        [
+            column("observation_id", "TEXT", true, None, 1),
+            column("mount", "TEXT", true, None, 0),
+        ],
+        [foreign_key(
+            "observation_id",
+            "projection_queue",
+            "observation_id",
+            "CASCADE"
+        )]
+    ),
+    table!(
         "observation_projection_provenance",
         [
             column("projector_version", "TEXT", true, None, 1),
@@ -1805,6 +1818,20 @@ pub(super) const INDEXES: &[Index] = &[
         unique: true,
         origin: "u",
         columns: &["observation_sequence"],
+    },
+    Index {
+        table: "projection_queue",
+        name: Some("idx_projection_queue_active_sequence"),
+        unique: false,
+        origin: "c",
+        columns: &["observation_sequence", "next_retry_at_micros"],
+    },
+    Index {
+        table: "projection_queue",
+        name: Some("idx_projection_queue_retry_deadline"),
+        unique: false,
+        origin: "c",
+        columns: &["next_retry_at_micros"],
     },
     Index {
         table: "observation_projection_provenance",

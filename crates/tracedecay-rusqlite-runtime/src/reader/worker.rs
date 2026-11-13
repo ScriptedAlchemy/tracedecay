@@ -27,6 +27,8 @@ use crate::telemetry::{ReaderAdmissionRecorder, take_observed_vm};
 
 use super::{ExistingReaderLocator, ReaderStartError};
 
+mod table_sizes;
+
 const REPLY_POLL_QUANTUM: Duration = Duration::from_millis(5);
 
 /// How often an idle snapshot checks whether the checkpoint fence revoked it.
@@ -770,29 +772,7 @@ async fn run_snapshot<E: ReaderQueryExecutor>(
                 let _ = reply.send(result);
             }
             SnapshotCommand::TableSizes { reply } => {
-                let read = || -> Result<Vec<TableSizeTelemetrySample>, rusqlite::Error> {
-                    let mut statement = transaction.prepare_cached(
-                        "SELECT schema_entry.name, COALESCE(SUM(dbstat.payload), 0) \
-                         FROM sqlite_schema AS schema_entry \
-                         LEFT JOIN dbstat ON dbstat.name = schema_entry.name \
-                         WHERE schema_entry.type = 'table' \
-                           AND schema_entry.name NOT LIKE 'sqlite_%' \
-                         GROUP BY schema_entry.name \
-                         ORDER BY schema_entry.name",
-                    )?;
-                    statement
-                        .query_map([], |row| {
-                            let bytes = row.get::<_, i64>(1)?;
-                            Ok(TableSizeTelemetrySample {
-                                table_name: row.get(0)?,
-                                bytes: u64::try_from(bytes).map_err(|_| {
-                                    rusqlite::Error::IntegralValueOutOfRange(1, bytes)
-                                })?,
-                            })
-                        })?
-                        .collect()
-                };
-                let result = read().map_err(|error| {
+                let result = table_sizes::read(transaction).map_err(|error| {
                     ReaderWorkerError::Storage(StorageRuntimeErrorV1::Infrastructure {
                         operation: format!("read table size telemetry: {error}"),
                     })

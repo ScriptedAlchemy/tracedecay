@@ -568,3 +568,452 @@ async fn stale_exact_duplicate_queue_item_is_consumed_before_later_observation()
     );
     assert_eq!(projection_counts(&tmp).await, (1, 2, 2, 1, 0, 0));
 }
+
+#[tokio::test]
+async fn batched_projection_rearms_the_deferred_head_after_the_durable_checkpoint() {
+    let tmp = TempDir::new().unwrap();
+    let database_path;
+    let records = (0_u64..5)
+        .map(|ordinal| {
+            observation(
+                "session-windowed-restart",
+                ordinal * 100,
+                (ordinal + 1) * 100,
+                &format!("receipt.windowed.{ordinal}"),
+                conversational_payload(
+                    &format!("message-windowed-{ordinal}"),
+                    &format!("windowed restart canary {ordinal}"),
+                ),
+            )
+        })
+        .collect::<Vec<_>>();
+
+    {
+        let runtime = profile_runtime(&tmp).await;
+        let store = runtime
+            .observation_store(HostAdmissionScope::Profile)
+            .unwrap();
+        database_path = runtime
+            .database_path(HostAdmissionScope::Profile)
+            .unwrap()
+            .to_path_buf();
+
+        for (index, record) in records.iter().enumerate() {
+            let expected =
+                (index > 0).then(|| cursor("session-windowed-restart", index as u64 * 100));
+            persist(&store, record.clone(), expected).await;
+        }
+        store
+            .project_observation(records[0].observation_id())
+            .await
+            .unwrap();
+        assert_eq!(
+            store.projection_checkpoint().await.unwrap().last_sequence(),
+            1
+        );
+
+        // A terminal collision remains in the queue behind the committed
+        // checkpoint, while the next real head is initially ready.
+        let conn = rusqlite::Connection::open(&database_path).unwrap();
+        conn.execute(
+            "INSERT INTO projection_queue (observation_id, observation_sequence)
+             VALUES (?1, 1)",
+            rusqlite::params![records[0].observation_id().as_str()],
+        )
+        .unwrap();
+        conn.execute(
+            "UPDATE projection_queue SET next_retry_at_micros = ?2
+             WHERE observation_id = ?1",
+            rusqlite::params![records[0].observation_id().as_str(), i64::MAX],
+        )
+        .unwrap();
+        // A nonterminal future retry at sequence 4 must fence sequence 5
+        // even though sequence 5 is already due.
+        conn.execute(
+            "UPDATE projection_queue SET next_retry_at_micros = ?2
+             WHERE observation_id = ?1",
+            rusqlite::params![records[3].observation_id().as_str(), i64::MAX - 1],
+        )
+        .unwrap();
+        drop(conn);
+
+        let batch = store
+            .project_queued_observations(32)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(batch.items.len(), 2, "only sequences 2 and 3 are ready");
+        assert!(
+            batch.has_more,
+            "the deferred sequence 4 must remain pending"
+        );
+        assert_eq!(
+            store.projection_checkpoint().await.unwrap().last_sequence(),
+            3
+        );
+        assert_eq!(table_count(&tmp, "lcm_raw_messages").await, 3);
+    }
+
+    {
+        let runtime = profile_runtime(&tmp).await;
+        let store = runtime
+            .observation_store(HostAdmissionScope::Profile)
+            .unwrap();
+        // Fresh admission re-arms the previous mount's retry. Its first ready
+        // item must be sequence four, after the durable checkpoint.
+        assert_eq!(
+            store.next_queued_observation().await.unwrap().as_ref(),
+            Some(records[3].observation_id())
+        );
+        assert_eq!(
+            store.projection_checkpoint().await.unwrap().last_sequence(),
+            3
+        );
+        assert_eq!(table_count(&tmp, "lcm_raw_messages").await, 3);
+
+        let first = store.project_queued_observations(1).await.unwrap().unwrap();
+        assert_eq!(
+            first.items.len(),
+            1,
+            "one-item window must not overrun its bound"
+        );
+        assert!(matches!(
+            first.items[0].outcome,
+            ProjectionPersistOutcome::Projected(_)
+        ));
+        assert!(first.has_more);
+        assert_eq!(
+            store.projection_checkpoint().await.unwrap().last_sequence(),
+            4
+        );
+
+        let tail = store
+            .project_queued_observations(32)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(tail.items.len(), 1);
+        assert!(
+            !tail.has_more,
+            "the terminal collision is not runnable backlog"
+        );
+        assert_eq!(
+            store.projection_checkpoint().await.unwrap().last_sequence(),
+            5
+        );
+        assert_eq!(table_count(&tmp, "lcm_raw_messages").await, 5);
+        assert_eq!(table_count(&tmp, "projection_queue").await, 1);
+
+        // A terminal-only queue may survive indefinitely; it must not take
+        // a writer lease while another service holds the same database writer.
+        let writer = rusqlite::Connection::open(&database_path).unwrap();
+        writer.execute_batch("BEGIN IMMEDIATE").unwrap();
+        let idle = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            store.project_queued_observations(32),
+        )
+        .await
+        .expect("a terminal-only queue cannot acquire the writer")
+        .unwrap()
+        .unwrap();
+        writer.execute_batch("ROLLBACK").unwrap();
+        assert!(idle.items.is_empty());
+        assert!(!idle.has_more);
+        assert_eq!(
+            store.projection_checkpoint().await.unwrap().last_sequence(),
+            5
+        );
+
+        // The skip is not cached: a later admission still advances the
+        // durable checkpoint past the parked terminal collision.
+        persist(
+            &store,
+            observation(
+                "session-windowed-restart",
+                500,
+                600,
+                "receipt.windowed.5",
+                conversational_payload("message-windowed-5", "post-terminal admission"),
+            ),
+            Some(cursor("session-windowed-restart", 500)),
+        )
+        .await;
+        let resumed = store
+            .project_queued_observations(32)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(resumed.items.len(), 1);
+        assert!(!resumed.has_more);
+        assert_eq!(
+            store.projection_checkpoint().await.unwrap().last_sequence(),
+            6
+        );
+        assert_eq!(table_count(&tmp, "lcm_raw_messages").await, 6);
+    }
+}
+
+#[tokio::test]
+async fn reopened_queue_skips_writer_for_a_newly_deferred_head() {
+    let tmp = TempDir::new().unwrap();
+    let database_path;
+    let first = observation(
+        "session-deferred-only",
+        0,
+        100,
+        "receipt.deferred-only-first",
+        conversational_payload("message-deferred-only-first", "first deferred-only canary"),
+    );
+    let second = observation(
+        "session-deferred-only",
+        100,
+        200,
+        "receipt.deferred-only-second",
+        conversational_payload(
+            "message-deferred-only-second",
+            "second deferred-only canary",
+        ),
+    );
+    let third = observation(
+        "session-deferred-only",
+        200,
+        300,
+        "receipt.deferred-only-third",
+        conversational_payload("message-deferred-only-third", "due behind deferred head"),
+    );
+    {
+        let runtime = profile_runtime(&tmp).await;
+        let store = runtime
+            .observation_store(HostAdmissionScope::Profile)
+            .unwrap();
+        database_path = runtime
+            .database_path(HostAdmissionScope::Profile)
+            .unwrap()
+            .to_path_buf();
+        persist(&store, first.clone(), None).await;
+        persist(
+            &store,
+            second.clone(),
+            Some(cursor("session-deferred-only", 100)),
+        )
+        .await;
+        persist(
+            &store,
+            third.clone(),
+            Some(cursor("session-deferred-only", 200)),
+        )
+        .await;
+        store
+            .project_observation(first.observation_id())
+            .await
+            .unwrap();
+
+        // Terminal collisions persist across fresh admission.
+        let connection = rusqlite::Connection::open(&database_path).unwrap();
+        connection
+            .execute(
+                "INSERT INTO projection_queue (observation_id, observation_sequence)
+                 VALUES (?1, 1)",
+                rusqlite::params![first.observation_id().as_str()],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "UPDATE projection_queue SET next_retry_at_micros = ?2
+                 WHERE observation_id = ?1",
+                rusqlite::params![first.observation_id().as_str(), i64::MAX],
+            )
+            .unwrap();
+    }
+
+    let runtime = profile_runtime(&tmp).await;
+    let store = runtime
+        .observation_store(HostAdmissionScope::Profile)
+        .unwrap();
+    let writer = rusqlite::Connection::open(&database_path).unwrap();
+    // A retry deferred by this mount fences the already-due third row.
+    assert_eq!(
+        writer
+            .execute(
+                "UPDATE projection_queue SET next_retry_at_micros = ?2
+                 WHERE observation_id = ?1",
+                rusqlite::params![second.observation_id().as_str(), i64::MAX - 1],
+            )
+            .unwrap(),
+        1
+    );
+    writer.execute_batch("BEGIN IMMEDIATE").unwrap();
+    for _ in 0..2 {
+        let deferred = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            store.project_queued_observations(32),
+        )
+        .await
+        .expect("deferred-only projection must not acquire the writer")
+        .unwrap()
+        .unwrap();
+        assert!(deferred.items.is_empty());
+        assert!(deferred.has_more, "the deferred head remains pending");
+    }
+    assert!(
+        store.next_queued_observation().await.unwrap().is_none(),
+        "the later due row must not bypass a deferred sequence head"
+    );
+    writer.execute_batch("ROLLBACK").unwrap();
+    assert_eq!(
+        store.projection_checkpoint().await.unwrap().last_sequence(),
+        1
+    );
+    assert_eq!(table_count(&tmp, "lcm_raw_messages").await, 1);
+
+    // Skipping the writer must never cache a negative readiness decision.
+    rusqlite::Connection::open(&database_path)
+        .unwrap()
+        .execute(
+            "UPDATE projection_queue SET next_retry_at_micros = 0
+             WHERE observation_id = ?1",
+            rusqlite::params![second.observation_id().as_str()],
+        )
+        .unwrap();
+    assert_eq!(
+        store.next_queued_observation().await.unwrap(),
+        Some(second.observation_id().clone()),
+        "the released sequence head must be the next queued observation"
+    );
+    let resumed = store.project_queued_observations(1).await.unwrap().unwrap();
+    assert_eq!(
+        resumed.items.len(),
+        1,
+        "the one-item window cannot skip ahead"
+    );
+    assert!(
+        resumed.has_more,
+        "the later ready sequence still needs projection"
+    );
+    assert_eq!(
+        store.projection_checkpoint().await.unwrap().last_sequence(),
+        2
+    );
+    assert_eq!(table_count(&tmp, "lcm_raw_messages").await, 2);
+
+    let tail = store.project_queued_observations(1).await.unwrap().unwrap();
+    assert_eq!(tail.items.len(), 1);
+    assert!(!tail.has_more, "only the terminal collision remains");
+    assert_eq!(
+        store.projection_checkpoint().await.unwrap().last_sequence(),
+        3
+    );
+    assert_eq!(table_count(&tmp, "lcm_raw_messages").await, 3);
+}
+
+#[tokio::test]
+async fn empty_projection_drain_does_not_wait_for_an_unrelated_writer() {
+    let tmp = TempDir::new().unwrap();
+    let runtime = profile_runtime(&tmp).await;
+    let store = runtime
+        .observation_store(HostAdmissionScope::Profile)
+        .unwrap();
+    let database_path = runtime.database_path(HostAdmissionScope::Profile).unwrap();
+
+    // A separate connection holds SQLite's writer reservation. An idle
+    // projection pass must still finish using only the read connection.
+    let writer = rusqlite::Connection::open(database_path).unwrap();
+    writer.execute_batch("BEGIN IMMEDIATE").unwrap();
+    let empty = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        store.project_queued_observations(32),
+    )
+    .await
+    .expect("an empty projection pass must not acquire the writer")
+    .unwrap()
+    .unwrap();
+    assert!(empty.items.is_empty());
+    assert!(!empty.has_more);
+    writer.execute_batch("ROLLBACK").unwrap();
+
+    // Skipping the empty writer transaction must never suppress subsequent
+    // admissions after the external writer releases its reservation.
+    let new_record = observation(
+        "session-empty-drain",
+        0,
+        100,
+        "receipt.empty-drain",
+        conversational_payload("message-empty-drain", "post-idle admission"),
+    );
+    persist(&store, new_record, None).await;
+    let after = store
+        .project_queued_observations(32)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(after.items.len(), 1);
+    assert!(!after.has_more);
+    assert_eq!(table_count(&tmp, "lcm_raw_messages").await, 1);
+}
+
+#[tokio::test]
+async fn active_rebuild_keeps_projection_pending_without_acquiring_writer() {
+    let tmp = TempDir::new().unwrap();
+    let runtime = profile_runtime(&tmp).await;
+    let store = runtime
+        .observation_store(HostAdmissionScope::Profile)
+        .unwrap();
+    let database_path = runtime.database_path(HostAdmissionScope::Profile).unwrap();
+    persist(
+        &store,
+        observation(
+            "session-rebuild-gate",
+            0,
+            100,
+            "receipt.rebuild-gate",
+            conversational_payload("message-rebuild-gate", "project after rebuild"),
+        ),
+        None,
+    )
+    .await;
+
+    let writer = rusqlite::Connection::open(database_path).unwrap();
+    writer
+        .execute(
+            "INSERT INTO observation_projection_rebuilds
+                (projector_version, generation, frontier_sequence, state)
+             VALUES (?1, 'rebuild-gate-generation', 1, 'building')",
+            rusqlite::params![tracedecay_store::SESSION_MESSAGE_PROJECTOR_VERSION],
+        )
+        .unwrap();
+
+    // A live rebuild fences ordinary projection, so an empty drain should
+    // return pending without waiting for a separate SQLite writer reservation.
+    writer.execute_batch("BEGIN IMMEDIATE").unwrap();
+    for _ in 0..2 {
+        let deferred = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            store.project_queued_observations(32),
+        )
+        .await
+        .expect("an active rebuild must not acquire the projection writer")
+        .unwrap()
+        .unwrap();
+        assert!(deferred.items.is_empty());
+        assert!(deferred.has_more, "the observation remains queued");
+    }
+    writer.execute_batch("ROLLBACK").unwrap();
+    assert_eq!(table_count(&tmp, "lcm_raw_messages").await, 0);
+
+    // Clearing the durable rebuild fence must expose the original queued
+    // observation on the next poll without a cached negative gate.
+    writer
+        .execute(
+            "DELETE FROM observation_projection_rebuilds WHERE projector_version = ?1",
+            rusqlite::params![tracedecay_store::SESSION_MESSAGE_PROJECTOR_VERSION],
+        )
+        .unwrap();
+    let resumed = store.project_queued_observations(1).await.unwrap().unwrap();
+    assert_eq!(resumed.items.len(), 1);
+    assert!(!resumed.has_more);
+    assert_eq!(
+        store.projection_checkpoint().await.unwrap().last_sequence(),
+        1
+    );
+    assert_eq!(table_count(&tmp, "lcm_raw_messages").await, 1);
+}

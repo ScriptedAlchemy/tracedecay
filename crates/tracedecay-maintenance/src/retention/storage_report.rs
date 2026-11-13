@@ -27,7 +27,11 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::io::Read;
+#[cfg(unix)]
+use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
+
+use cap_fs_ext::{FollowSymlinks, OpenOptionsFollowExt};
 
 use tracedecay_domain::errors::TraceDecayError;
 use tracedecay_domain::{
@@ -61,7 +65,7 @@ const CODE_GENERATIONS_DIRECTORY: &str = "code-generations-v1";
 const CODE_INDEX_DIRECTORY: &str = "code-index-v1";
 const SEALED_GRAPH_DIRECTORY: &str = "tracedecay.sealed";
 const GRAPH_REPLAY_POOL_DIRECTORY: &str = "tracedecay.graph-replay";
-pub(crate) const GRAPH_CONTAINER_SUFFIX: &str = ".grafeo";
+const GRAPH_CONTAINER_SUFFIX: &str = ".grafeo";
 pub(crate) const GRAPH_CONTAINER_WAL_SUFFIX: &str = ".grafeo.wal";
 /// Why a report without the daemon's scheduler authority cannot plan a
 /// retention dry run.
@@ -188,25 +192,42 @@ pub struct StoreKindBytesV1 {
     pub other: u64,
 }
 
+/// A container is a regular file at the store root. Its recognized sidecars
+/// can also be directories, whose descendants belong to the same container.
+pub(super) fn graph_container_stem(name: &str, is_leaf: bool) -> Option<&str> {
+    let stem = name
+        .strip_suffix(".verified")
+        .or_else(|| name.strip_suffix(".spill"))
+        .or_else(|| is_leaf.then_some(name))?;
+    stem.ends_with(GRAPH_CONTAINER_SUFFIX).then_some(stem)
+}
+
+// Only SQLite-owned sidecars belong to the database family. Incident debris,
+// backups and unrelated adjacent files must remain visible as "other" bytes.
+fn is_sqlite_family_member(name: &str, main: &str) -> bool {
+    name == main
+        || name
+            .strip_prefix(main)
+            .is_some_and(|suffix| matches!(suffix, "-wal" | "-shm" | "-journal"))
+}
+
 impl StoreKindBytesV1 {
     pub(crate) fn add(&mut self, relative: &Path, bytes: u64) {
         let mut components = relative
             .components()
-            .map(|component| component.as_os_str().to_string_lossy());
+            .map(|component| component.as_os_str().to_string_lossy())
+            .peekable();
         let first = components.next().unwrap_or_default();
+        let root_file = components.peek().is_none();
         let db_filename = tracedecay_runtime_core::config::DB_FILENAME;
-        let family = if first == db_filename
-            || first
-                .strip_prefix(db_filename)
-                .is_some_and(|suffix| suffix.starts_with('-'))
-        {
+        let family = if root_file && is_sqlite_family_member(&first, db_filename) {
             &mut self.graph_database
         } else if first == SEALED_GRAPH_DIRECTORY {
             &mut self.sealed_graph
         } else if first == GRAPH_REPLAY_POOL_DIRECTORY {
             &mut self.graph_replay_pool
         } else if first.ends_with(GRAPH_CONTAINER_WAL_SUFFIX)
-            || (first.ends_with(GRAPH_CONTAINER_SUFFIX) && components.next().is_none())
+            || graph_container_stem(&first, components.peek().is_none()).is_some()
         {
             &mut self.graph_container
         } else if first == CODE_INDEX_DIRECTORY {
@@ -219,10 +240,12 @@ impl StoreKindBytesV1 {
             } else {
                 &mut self.generation_artifacts
             }
-        } else if first.starts_with(SESSIONS_DB_FILENAME)
+        } else if (root_file && is_sqlite_family_member(&first, SESSIONS_DB_FILENAME))
+            || first.strip_prefix(SESSIONS_DB_FILENAME) == Some(".delivery-settlement-spool-v1")
             || first
                 .strip_prefix('.')
-                .is_some_and(|name| name.starts_with(SESSIONS_DB_FILENAME))
+                .and_then(|name| name.strip_prefix(SESSIONS_DB_FILENAME))
+                == Some(".host-admission")
         {
             &mut self.sessions
         } else {
@@ -603,13 +626,28 @@ async fn build_storage_report_with_walk_budget(
     profile_root: &Path,
     walk_entry_budget: usize,
 ) -> tracedecay_domain::errors::Result<StorageReport> {
+    reject_linked_profile_root(profile_root)?;
     let global_db_path = profile_root.join(GLOBAL_DB_FILENAME);
     // The registry rows come from an off-profile copy, so reading them first
     // leaves the profile untouched.
-    let registered_projects = if global_db_path.exists() {
-        load_registered_project_rows(profile_root, &global_db_path).await?
-    } else {
-        Vec::new()
+    // `Path::exists` hides permission errors and dangling symlinks as
+    // absence. A valid symlink is also not a profile-owned registry: following
+    // it would read a foreign database the footprint walker does not charge.
+    let registered_projects = match std::fs::symlink_metadata(&global_db_path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            return Err(report_error(
+                "inspect profile registry for storage report",
+                "registry path is a symbolic link; its target is outside the measured registry authority",
+            ));
+        }
+        Ok(_) => load_registered_project_rows(profile_root, &global_db_path).await?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+        Err(error) => {
+            return Err(report_error(
+                "inspect profile registry for storage report",
+                error,
+            ));
+        }
     };
     // Capture the profile's physical footprint before opening any SQLite
     // readers. A report must describe the profile supplied by its caller, not
@@ -877,6 +915,7 @@ async fn build_storage_report_page_with_walk_budget(
     cancellation: Option<CancellationSignal>,
     deadline: Option<Deadline>,
 ) -> tracedecay_domain::errors::Result<StorageReport> {
+    reject_linked_profile_root(profile_root)?;
     let limit = limit.clamp(1, MAX_STORAGE_REPORT_PAGE_LIMIT);
     let walk_control = StorageReportWalkControl {
         cancellation,
@@ -1212,6 +1251,7 @@ fn build_project_storage_report_with_control(
     sample_free_page_header: bool,
     walk_control: &StorageReportWalkControl,
 ) -> tracedecay_domain::errors::Result<StorageReport> {
+    reject_linked_profile_root(profile_root)?;
     tracedecay_runtime_core::storage::validate_project_id(project_id).map_err(|message| {
         tracedecay_domain::errors::TraceDecayError::Config {
             message: message.to_owned(),
@@ -1249,6 +1289,21 @@ fn build_project_storage_report_with_control(
     })
 }
 
+/// A caller-supplied profile symlink is not the authority that owns its target.
+/// The physical footprint walker refuses that link; report readers must also
+/// refuse it before inspecting registry rows or sampling individual stores.
+fn reject_linked_profile_root(profile_root: &Path) -> tracedecay_domain::errors::Result<()> {
+    match std::fs::symlink_metadata(profile_root) {
+        Ok(metadata) if metadata.file_type().is_symlink() => Err(report_error(
+            "inspect storage report profile root",
+            "profile root is a symbolic link; refusing to read foreign storage",
+        )),
+        Ok(_) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(report_error("inspect storage report profile root", error)),
+    }
+}
+
 fn directory_chain_is_nofollow(root: &Path, directory: &Path) -> bool {
     if !std::fs::symlink_metadata(root).is_ok_and(|metadata| metadata.is_dir()) {
         return false;
@@ -1278,6 +1333,14 @@ fn append_project_report(
     remaining_entries: &mut usize,
     walk_control: &StorageReportWalkControl,
 ) -> tracedecay_domain::errors::Result<()> {
+    // Offline registry snapshots and live registry rows must obey the same
+    // path-segment authority as explicit project-scoped reports. Otherwise a
+    // corrupt project ID can escape projects/ and measure an unrelated tree.
+    tracedecay_runtime_core::storage::validate_project_id(project_id).map_err(|message| {
+        TraceDecayError::Config {
+            message: format!("invalid registered project id {project_id:?}: {message}"),
+        }
+    })?;
     let data_root = profile_root.join("projects").join(project_id);
     let code_index_root = data_root.join("code-index-v1");
     let code_index_store_root =
@@ -1493,8 +1556,14 @@ fn user_sessions_family_bytes(profile_root: &Path) -> u64 {
 
 fn database_family_bytes(database_path: &Path) -> u64 {
     let mut total_bytes = 0u64;
-    for suffix in ["", "-wal", "-shm"] {
-        if let Ok(metadata) = std::fs::metadata(sqlite_family_member(database_path, suffix)) {
+    // PERSIST rollback journals remain allocated after a committed transaction;
+    // TRUNCATE journals are zero-length. Both are physical family bytes.
+    for suffix in ["", "-wal", "-shm", "-journal"] {
+        // Physical profile bytes must not include a symlink's foreign target.
+        // The full-profile walk separately marks a linked member unavailable.
+        if let Ok(metadata) = std::fs::symlink_metadata(sqlite_family_member(database_path, suffix))
+            && metadata.file_type().is_file()
+        {
             total_bytes = total_bytes.saturating_add(metadata.len());
         }
     }
@@ -1507,14 +1576,206 @@ fn database_family_bytes(database_path: &Path) -> u64 {
 fn copy_sqlite_family(source: &Path, destination: &Path) -> std::io::Result<()> {
     let generation =
         tracedecay_runtime_core::sqlite_read_snapshot::SourceGeneration::capture(source)?;
+    copy_sqlite_family_at_generation(source, destination, &generation)
+}
+
+fn copy_sqlite_family_at_generation(
+    source: &Path,
+    destination: &Path,
+    generation: &tracedecay_runtime_core::sqlite_read_snapshot::SourceGeneration,
+) -> std::io::Result<()> {
+    // Rollback journals can outlive commits in TRUNCATE and PERSIST mode.
+    // Only an absent, truncated, or explicitly invalidated journal is safe
+    // to omit from a snapshot. Recheck its witness after copying: a writer
+    // must not turn a stable registry into an uncommitted main-file image.
+    let journal_before = inspect_inert_rollback_journal(source)?;
+    // Refuse nonregular and linked source members before copying any bytes.
+    // Path::is_file() follows symlinks, potentially copying an arbitrarily
+    // large foreign file into the report's temporary SQLite snapshot.
+    let mut members = Vec::with_capacity(3);
     for suffix in ["", "-wal", "-shm"] {
-        let source_member = sqlite_family_member(source, suffix);
-        if !source_member.is_file() {
-            continue;
+        let member = sqlite_family_member(source, suffix);
+        match std::fs::symlink_metadata(&member) {
+            Ok(metadata) if metadata.file_type().is_file() => {
+                members.push((member, suffix, metadata));
+            }
+            Ok(_) => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!(
+                        "SQLite report source member '{}' is not a regular file; symbolic links are not allowed",
+                        member.display()
+                    ),
+                ));
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
         }
-        std::fs::copy(&source_member, sqlite_family_member(destination, suffix))?;
+    }
+    copy_sqlite_members_nofollow(source, destination, &members)?;
+    let journal_after = inspect_inert_rollback_journal(source)?;
+    if !rollback_journal_unchanged(journal_before.as_ref(), journal_after.as_ref()) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "SQLite report rollback journal changed while copying registry",
+        ));
     }
     generation.validate()
+}
+
+fn rollback_journal_uncommitted(path: &Path) -> std::io::Error {
+    std::io::Error::new(
+        std::io::ErrorKind::InvalidData,
+        format!(
+            "SQLite report source has active or uncertain rollback journal '{}'; main/WAL/SHM snapshot is unsafe",
+            path.display()
+        ),
+    )
+}
+
+/// A committed TRUNCATE journal is empty; PERSIST clears the first 28 header
+/// bytes instead of deleting the file. A zero magic prefix alone is NOT enough:
+/// SQLite may leave those first eight bytes zero during an active transaction,
+/// while the nonce and page/sector fields are already populated.
+fn inspect_inert_rollback_journal(source: &Path) -> std::io::Result<Option<std::fs::Metadata>> {
+    let path = sqlite_family_member(source, "-journal");
+    let checked = match std::fs::symlink_metadata(&path) {
+        Ok(metadata) if metadata.file_type().is_file() => metadata,
+        Ok(_) => return Err(rollback_journal_uncommitted(&path)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    if checked.len() == 0 {
+        return Ok(Some(checked));
+    }
+    if checked.len() < 28 {
+        return Err(rollback_journal_uncommitted(&path));
+    }
+
+    let parent = source
+        .parent()
+        .filter(|path| !path.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let directory = cap_std::fs::Dir::open_ambient_dir(parent, cap_std::ambient_authority())?;
+    let mut options = cap_std::fs::OpenOptions::new();
+    options.read(true);
+    options.follow(FollowSymlinks::No);
+    let name = path.file_name().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "SQLite rollback journal has no filename",
+        )
+    })?;
+    let mut input = directory.open_with(name, &options)?.into_std();
+    let opened = input.metadata()?;
+    if !matches_checked_sqlite_member(&checked, &opened)
+        || checked.modified()? != opened.modified()?
+    {
+        return Err(rollback_journal_uncommitted(&path));
+    }
+    let mut header = [0u8; 28];
+    input.read_exact(&mut header)?;
+    if header != [0u8; 28] {
+        return Err(rollback_journal_uncommitted(&path));
+    }
+    let after_read = input.metadata()?;
+    if !matches_checked_sqlite_member(&checked, &after_read)
+        || checked.modified()? != after_read.modified()?
+    {
+        return Err(rollback_journal_uncommitted(&path));
+    }
+    Ok(Some(checked))
+}
+
+fn rollback_journal_unchanged(
+    before: Option<&std::fs::Metadata>,
+    after: Option<&std::fs::Metadata>,
+) -> bool {
+    match (before, after) {
+        (None, None) => true,
+        (Some(before), Some(after)) => {
+            matches_checked_sqlite_member(before, after)
+                && before
+                    .modified()
+                    .ok()
+                    .zip(after.modified().ok())
+                    .is_some_and(|(left, right)| left == right)
+        }
+        _ => false,
+    }
+}
+
+fn matches_checked_sqlite_member(checked: &std::fs::Metadata, opened: &std::fs::Metadata) -> bool {
+    if !opened.is_file() || checked.len() != opened.len() {
+        return false;
+    }
+    // A no-follow open blocks symlink swaps but not regular-file replacement.
+    // Revalidate the held file's identity before creating any scratch output.
+    #[cfg(unix)]
+    {
+        checked.dev() == opened.dev() && checked.ino() == opened.ino()
+    }
+    #[cfg(not(unix))]
+    {
+        // A size-changing swap is rejected above. On platforms without the
+        // Unix inode API, compare timestamps and let the generation witness
+        // independently reject a changed source after copying.
+        checked
+            .created()
+            .ok()
+            .zip(opened.created().ok())
+            .zip(checked.modified().ok().zip(opened.modified().ok()))
+            .is_some_and(|((created, opened_created), (modified, opened_modified))| {
+                created == opened_created && modified == opened_modified
+            })
+    }
+}
+
+/// Open the checked member through a held directory, refusing symlink or
+/// regular-file replacement after preflight. A pathname copy would import
+/// unrelated bytes into report scratch even if later validation rejected it.
+fn copy_sqlite_members_nofollow(
+    source: &Path,
+    destination: &Path,
+    members: &[(PathBuf, &str, std::fs::Metadata)],
+) -> std::io::Result<()> {
+    let parent = source
+        .parent()
+        .filter(|path| !path.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let directory = cap_std::fs::Dir::open_ambient_dir(parent, cap_std::ambient_authority())?;
+    let mut options = cap_std::fs::OpenOptions::new();
+    options.read(true);
+    options.follow(FollowSymlinks::No);
+    for (member, suffix, checked) in members {
+        let name = member.file_name().ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "SQLite member has no filename",
+            )
+        })?;
+        let input = directory.open_with(name, &options)?.into_std();
+        if !matches_checked_sqlite_member(checked, &input.metadata()?) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!(
+                    "SQLite report source member '{}' changed after preflight",
+                    member.display()
+                ),
+            ));
+        }
+        let mut output = std::fs::File::create(sqlite_family_member(destination, suffix))?;
+        // A live WAL may grow after inspection; do not copy an unbounded tail.
+        let cap = checked.len().saturating_add(1);
+        let copied = std::io::copy(&mut input.take(cap), &mut output)?;
+        if copied != checked.len() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "SQLite report source member changed size during copy",
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn validate_external_scratch(profile_root: &Path, scratch_root: &Path) -> std::io::Result<()> {
@@ -1758,6 +2019,66 @@ mod tests {
     #[cfg(unix)]
     use crate::retention::footprint::census_profile_footprint;
     use tracedecay_runtime_core::db::engine::TestConnection;
+
+    #[test]
+    fn registered_report_refuses_project_ids_that_escape_the_profile() {
+        let temp = tempfile::tempdir().unwrap();
+        let profile = temp.path().join("profile");
+        let outside = temp.path().join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::create_dir_all(profile.join("projects/proj_valid")).unwrap();
+        std::fs::write(outside.join("foreign"), [7u8; 16]).unwrap();
+        std::fs::write(profile.join("projects/proj_valid/local"), [3u8; 9]).unwrap();
+
+        let mut stores = Vec::new();
+        let mut retention = Vec::new();
+        let mut availability = Vec::new();
+        let mut budget = MAX_STORAGE_REPORT_WALK_ENTRIES;
+        for project_id in [
+            "../../outside",
+            "../outside",
+            "nested/store",
+            "..",
+            ".",
+            "",
+            "bad\\name",
+        ] {
+            let error = append_project_report(
+                &profile,
+                project_id,
+                "/work/valid",
+                Err(RETENTION_PROTECTION_UNRESOLVED),
+                &mut stores,
+                &mut retention,
+                &mut availability,
+                false,
+                &mut budget,
+                &StorageReportWalkControl::default(),
+            )
+            .unwrap_err();
+            assert!(
+                error.to_string().contains("invalid registered project id"),
+                "{project_id:?}: {error}"
+            );
+            assert!(stores.is_empty(), "foreign storage was adopted");
+            assert_eq!(budget, MAX_STORAGE_REPORT_WALK_ENTRIES);
+        }
+        assert_eq!(std::fs::read(outside.join("foreign")).unwrap(), [7u8; 16]);
+
+        let valid = build_project_storage_report(
+            &profile,
+            "proj_valid",
+            Path::new("/work/valid"),
+            Err(RETENTION_PROTECTION_UNRESOLVED),
+        )
+        .unwrap();
+        assert_eq!(valid.stores.len(), 1);
+        assert_eq!(valid.stores[0].total_bytes, 9);
+        assert_eq!(
+            valid.stores[0].size_coverage.state,
+            StorageReportSizeStateV1::Complete
+        );
+    }
 
     fn store(project_id: &str, total_bytes: u64) -> StoreSizeReportEntry {
         StoreSizeReportEntry {
@@ -2447,6 +2768,574 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn committed_persist_journal_is_charged_to_user_sessions_family() {
+        let temporary = tempfile::TempDir::new().unwrap();
+        let profile_root = temporary.path().join("profile");
+        std::fs::create_dir_all(&profile_root).unwrap();
+        let database = profile_root.join(USER_SESSIONS_DB_FILENAME);
+        let writer = rusqlite::Connection::open(&database).unwrap();
+        writer
+            .execute_batch(
+                "PRAGMA journal_mode = PERSIST;
+                 CREATE TABLE receipts(payload BLOB NOT NULL);
+                 INSERT INTO receipts VALUES (zeroblob(262144));",
+            )
+            .unwrap();
+
+        let journal = sqlite_family_member(&database, "-journal");
+        let main_bytes = std::fs::metadata(&database).unwrap().len();
+        let journal_bytes = std::fs::metadata(&journal).unwrap().len();
+        assert!(journal_bytes > 0, "PERSIST must retain a committed journal");
+        let retained_header = std::fs::read(&journal).unwrap();
+        assert_eq!(
+            &retained_header[..28],
+            &[0u8; 28],
+            "the retained journal must be committed, not active"
+        );
+
+        let report = build_storage_report(&profile_root).await.unwrap();
+        assert_eq!(report.user_sessions_db_bytes, main_bytes + journal_bytes);
+        let footprint = report.full_profile_size.unwrap();
+        assert_eq!(footprint.total_bytes, main_bytes + journal_bytes);
+        assert_eq!(footprint.state, ProfileTotalCoverageStateV1::Complete);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn linked_rollback_journal_does_not_charge_foreign_storage() {
+        let temporary = tempfile::TempDir::new().unwrap();
+        let database = temporary.path().join("owned.db");
+        std::fs::write(&database, b"owned").unwrap();
+        let foreign = temporary.path().join("foreign.bin");
+        std::fs::write(&foreign, vec![0u8; 1024 * 1024]).unwrap();
+        let journal = sqlite_family_member(&database, "-journal");
+        std::os::unix::fs::symlink(&foreign, &journal).unwrap();
+
+        assert_eq!(database_family_bytes(&database), 5);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn dangling_profile_registry_cannot_make_registered_stores_look_unregistered() {
+        let temporary = tempfile::TempDir::new().unwrap();
+        let profile_root = temporary.path().join("profile");
+        let project = profile_root.join("projects/proj_retained");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::write(project.join("sessions.db"), b"retained sessions").unwrap();
+
+        let registry = profile_root.join(GLOBAL_DB_FILENAME);
+        std::os::unix::fs::symlink(temporary.path().join("missing-global.db"), &registry).unwrap();
+        assert!(std::fs::symlink_metadata(&registry).is_ok());
+        assert!(
+            !registry.exists(),
+            "the old existence test silently lost this registry"
+        );
+
+        let error = build_storage_report(&profile_root)
+            .await
+            .expect_err("a broken registry link must not imply zero registered projects");
+        assert!(
+            matches!(&error, TraceDecayError::Database { .. }),
+            "the unreadable registry must have a typed storage failure: {error}"
+        );
+
+        std::fs::remove_file(&registry).unwrap();
+        let absent = build_storage_report(&profile_root)
+            .await
+            .expect("a genuinely absent registry is still reportable");
+        assert_eq!(absent.stores, Vec::<StoreSizeReportEntry>::new());
+        assert_eq!(absent.unregistered_dir_count, 1);
+        assert!(absent.unregistered_bytes >= 17);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn linked_foreign_registry_is_not_misattributed_to_the_profile() {
+        let temporary = tempfile::TempDir::new().unwrap();
+        let foreign_root = temporary.path().join("foreign");
+        std::fs::create_dir_all(&foreign_root).unwrap();
+        seed_global_db(&foreign_root, &[("proj_foreign", "/repos/foreign")]).await;
+
+        let profile_root = temporary.path().join("profile");
+        std::fs::create_dir_all(&profile_root).unwrap();
+        let registry = profile_root.join(GLOBAL_DB_FILENAME);
+        std::os::unix::fs::symlink(foreign_root.join(GLOBAL_DB_FILENAME), &registry).unwrap();
+        assert!(
+            registry.is_file(),
+            "the old path probe follows the foreign registry"
+        );
+
+        let error = build_storage_report(&profile_root)
+            .await
+            .expect_err("a foreign registry cannot supply project identity for this profile");
+        assert!(
+            matches!(&error, TraceDecayError::Database { .. }),
+            "the symlink must be refused as a typed storage error: {error}"
+        );
+        assert!(
+            error.to_string().contains("symbolic link"),
+            "the error must name the profile registry's disallowed link: {error}"
+        );
+    }
+
+    #[test]
+    fn registry_snapshot_refuses_rollback_journal_and_recovers_after_rollback() {
+        let temporary = tempfile::TempDir::new().unwrap();
+        let registry = temporary.path().join(GLOBAL_DB_FILENAME);
+        let writer = rusqlite::Connection::open(&registry).unwrap();
+        writer
+            .execute_batch(
+                "PRAGMA journal_mode = DELETE;
+                 CREATE TABLE code_projects (
+                     project_id TEXT PRIMARY KEY, canonical_root TEXT NOT NULL
+                 );
+                 INSERT INTO code_projects VALUES ('proj_committed', '/repos/committed');
+                 BEGIN IMMEDIATE;
+                 UPDATE code_projects SET canonical_root = '/repos/uncommitted'
+                 WHERE project_id = 'proj_committed';",
+            )
+            .unwrap();
+        let journal = sqlite_family_member(&registry, "-journal");
+        assert!(
+            journal.is_file(),
+            "the uncommitted update needs an undo journal"
+        );
+
+        let destination = temporary.path().join("snapshot.db");
+        let error = copy_sqlite_family(&registry, &destination)
+            .expect_err("a main-only snapshot must not read uncommitted rollback pages");
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+        assert!(error.to_string().contains("rollback journal"), "{error}");
+        assert!(!destination.exists(), "refusal must happen before any copy");
+
+        writer.execute_batch("ROLLBACK").unwrap();
+        drop(writer);
+        assert!(
+            !journal.exists(),
+            "DELETE-mode rollback removes the journal"
+        );
+        copy_sqlite_family(&registry, &destination).unwrap();
+        let snapshot = rusqlite::Connection::open(&destination).unwrap();
+        let root: String = snapshot
+            .query_row(
+                "SELECT canonical_root FROM code_projects WHERE project_id = 'proj_committed'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(root, "/repos/committed");
+    }
+
+    #[tokio::test]
+    async fn offline_report_refuses_rollback_journal_instead_of_misclassifying_stores() {
+        let temporary = tempfile::TempDir::new().unwrap();
+        let profile_root = temporary.path().join("profile");
+        let project = profile_root.join("projects/proj_committed");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::write(project.join("sessions.db"), b"retained session").unwrap();
+        let registry = profile_root.join(GLOBAL_DB_FILENAME);
+        let writer = rusqlite::Connection::open(&registry).unwrap();
+        writer
+            .execute_batch(
+                "PRAGMA journal_mode = DELETE;
+                 CREATE TABLE code_projects (
+                     project_id TEXT PRIMARY KEY, canonical_root TEXT NOT NULL
+                 );
+                 INSERT INTO code_projects VALUES ('proj_committed', '/repos/committed');
+                 BEGIN IMMEDIATE;
+                 UPDATE code_projects SET canonical_root = '/repos/uncommitted'
+                 WHERE project_id = 'proj_committed';",
+            )
+            .unwrap();
+        assert!(sqlite_family_member(&registry, "-journal").is_file());
+
+        let error = build_storage_report(&profile_root)
+            .await
+            .expect_err("an active rollback journal must not become registration truth");
+        assert!(
+            matches!(&error, TraceDecayError::Database { .. }),
+            "{error}"
+        );
+        assert!(error.to_string().contains("rollback journal"), "{error}");
+
+        writer.execute_batch("ROLLBACK").unwrap();
+        drop(writer);
+        let report = build_storage_report(&profile_root).await.unwrap();
+        assert_eq!(report.stores.len(), 1);
+        assert_eq!(report.stores[0].project_id, "proj_committed");
+        assert_eq!(report.stores[0].canonical_root, "/repos/committed");
+        assert_eq!(report.unregistered_dir_count, 0);
+    }
+
+    #[tokio::test]
+    async fn committed_persist_and_truncate_journals_remain_reportable_but_active_writes_refuse() {
+        for mode in ["PERSIST", "TRUNCATE"] {
+            let temporary = tempfile::TempDir::new().unwrap();
+            let profile_root = temporary.path().join("profile");
+            let project = profile_root.join("projects/proj_committed");
+            std::fs::create_dir_all(&project).unwrap();
+            std::fs::write(project.join("sessions.db"), b"retained session").unwrap();
+
+            let registry = profile_root.join(GLOBAL_DB_FILENAME);
+            let writer = rusqlite::Connection::open(&registry).unwrap();
+            writer
+                .execute_batch(&format!(
+                    "PRAGMA journal_mode = {mode};
+                     CREATE TABLE code_projects (
+                         project_id TEXT PRIMARY KEY, canonical_root TEXT NOT NULL
+                     );
+                     INSERT INTO code_projects VALUES ('proj_committed', '/repos/committed');"
+                ))
+                .unwrap();
+            let journal = sqlite_family_member(&registry, "-journal");
+            let journal_bytes = std::fs::metadata(&journal).unwrap().len();
+            if mode == "TRUNCATE" {
+                assert_eq!(journal_bytes, 0, "TRUNCATE retains an empty journal");
+            } else {
+                assert!(
+                    journal_bytes >= 28,
+                    "PERSIST retains an invalidated journal"
+                );
+                let mut header = [0u8; 28];
+                std::fs::File::open(&journal)
+                    .unwrap()
+                    .read_exact(&mut header)
+                    .unwrap();
+                assert_eq!(header, [0u8; 28]);
+            }
+
+            let committed = build_storage_report(&profile_root).await.unwrap();
+            assert_eq!(committed.stores.len(), 1);
+            assert_eq!(committed.stores[0].project_id, "proj_committed");
+            assert_eq!(committed.stores[0].canonical_root, "/repos/committed");
+            assert_eq!(committed.unregistered_dir_count, 0);
+
+            writer
+                .execute_batch(
+                    "BEGIN IMMEDIATE;
+                     UPDATE code_projects SET canonical_root = '/repos/uncommitted'
+                     WHERE project_id = 'proj_committed';",
+                )
+                .unwrap();
+            assert!(
+                std::fs::metadata(&journal).unwrap().len() >= 28,
+                "the active rollback transaction must have a journal header"
+            );
+            let error = build_storage_report(&profile_root)
+                .await
+                .expect_err("active rollback journal must not leak uncommitted registrations");
+            assert!(
+                matches!(&error, TraceDecayError::Database { .. }),
+                "report refusal must be a typed storage error: {error}"
+            );
+            assert!(error.to_string().contains("rollback journal"), "{error}");
+
+            writer.execute_batch("ROLLBACK").unwrap();
+            let recovered = build_storage_report(&profile_root).await.unwrap();
+            assert_eq!(recovered.stores.len(), 1);
+            assert_eq!(recovered.stores[0].canonical_root, "/repos/committed");
+            assert_eq!(recovered.unregistered_dir_count, 0);
+            drop(writer);
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn registry_snapshot_refuses_foreign_sidecar_links_before_copying() {
+        for suffix in ["-wal", "-shm"] {
+            let temporary = tempfile::TempDir::new().unwrap();
+            let registry = temporary.path().join(GLOBAL_DB_FILENAME);
+            let connection = rusqlite::Connection::open(&registry).unwrap();
+            connection
+                .execute_batch(
+                    "CREATE TABLE code_projects (
+                        project_id TEXT PRIMARY KEY,
+                        canonical_root TEXT NOT NULL
+                    );",
+                )
+                .unwrap();
+            drop(connection);
+
+            let foreign = temporary.path().join("foreign.bin");
+            let foreign_bytes = 512 * 1024 * 1024;
+            std::fs::File::create(&foreign)
+                .unwrap()
+                .set_len(foreign_bytes)
+                .unwrap();
+            std::os::unix::fs::symlink(&foreign, sqlite_family_member(&registry, suffix)).unwrap();
+
+            let destination = temporary.path().join("snapshot.db");
+            let error = copy_sqlite_family(&registry, &destination)
+                .expect_err("a linked SQLite family member cannot supply snapshot bytes");
+            assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+            assert!(error.to_string().contains("symbolic links"), "{error}");
+            assert!(
+                !destination.exists(),
+                "the invalid family must be refused before making a partial copy"
+            );
+            assert_eq!(foreign.metadata().unwrap().len(), foreign_bytes);
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn registry_snapshot_member_cannot_follow_a_post_preflight_link_swap() {
+        let temporary = tempfile::TempDir::new().unwrap();
+        let registry = temporary.path().join(GLOBAL_DB_FILENAME);
+        let wal = sqlite_family_member(&registry, "-wal");
+        std::fs::write(&wal, b"original WAL member").unwrap();
+        assert!(
+            std::fs::symlink_metadata(&wal)
+                .unwrap()
+                .file_type()
+                .is_file()
+        );
+        // The production preflight recorded this pathname as a regular file.
+        let checked = vec![(
+            wal.clone(),
+            "-wal",
+            std::fs::symlink_metadata(&wal).unwrap(),
+        )];
+        std::fs::remove_file(&wal).unwrap();
+        let foreign = temporary.path().join("foreign-data.bin");
+        std::fs::write(&foreign, vec![73u8; 4096]).unwrap();
+        std::os::unix::fs::symlink(&foreign, &wal).unwrap();
+
+        let destination = temporary.path().join("report-snapshot.db");
+        copy_sqlite_members_nofollow(&registry, &destination, &checked)
+            .expect_err("a swapped link must never supply snapshot bytes");
+        assert!(
+            !sqlite_family_member(&destination, "-wal").exists(),
+            "a link swapped after preflight cannot be copied into report scratch"
+        );
+        assert_eq!(std::fs::metadata(&foreign).unwrap().len(), 4096);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn registry_snapshot_refuses_regular_member_replacement_before_copying() {
+        for replacement_bytes in [4096_u64, 512 * 1024 * 1024] {
+            let temporary = tempfile::TempDir::new().unwrap();
+            let registry = temporary.path().join(GLOBAL_DB_FILENAME);
+            let wal = sqlite_family_member(&registry, "-wal");
+            std::fs::write(&wal, vec![17u8; 4096]).unwrap();
+            let checked = vec![(
+                wal.clone(),
+                "-wal",
+                std::fs::symlink_metadata(&wal).unwrap(),
+            )];
+
+            // Both files are regular, so a no-follow open still succeeds.
+            // Include a same-sized swap: checking size alone is insufficient.
+            let incoming = temporary.path().join("foreign-regular.bin");
+            std::fs::File::create(&incoming)
+                .unwrap()
+                .set_len(replacement_bytes)
+                .unwrap();
+            std::fs::rename(&incoming, &wal).unwrap();
+            assert!(
+                std::fs::symlink_metadata(&wal)
+                    .unwrap()
+                    .file_type()
+                    .is_file()
+            );
+
+            let destination = temporary.path().join("report-snapshot.db");
+            let error = copy_sqlite_members_nofollow(&registry, &destination, &checked)
+                .expect_err("a regular member swapped after preflight must be refused");
+            assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+            assert!(
+                error.to_string().contains("changed after preflight"),
+                "{error}"
+            );
+            assert!(
+                !sqlite_family_member(&destination, "-wal").exists(),
+                "the replacement must be refused before any bytes enter scratch"
+            );
+            assert_eq!(std::fs::metadata(&wal).unwrap().len(), replacement_bytes);
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn registry_snapshot_rejects_wal_committed_after_generation_capture() {
+        let temporary = tempfile::TempDir::new().unwrap();
+        let registry = temporary.path().join(GLOBAL_DB_FILENAME);
+        let writer = rusqlite::Connection::open(&registry).unwrap();
+        writer
+            .execute_batch(
+                "CREATE TABLE code_projects (
+                    project_id TEXT PRIMARY KEY,
+                    canonical_root TEXT NOT NULL
+                );",
+            )
+            .unwrap();
+        let generation =
+            tracedecay_runtime_core::sqlite_read_snapshot::SourceGeneration::capture(&registry)
+                .unwrap();
+        // A new committed WAL must invalidate the preexisting generation.
+        // The old order captured membership before the generation and then
+        // silently copied only the main database, losing this project.
+        writer
+            .execute_batch(
+                "PRAGMA journal_mode = WAL;
+                 PRAGMA wal_autocheckpoint = 0;
+                 INSERT INTO code_projects VALUES ('proj_new', '/repos/new');",
+            )
+            .unwrap();
+        let wal = sqlite_family_member(&registry, "-wal");
+        assert!(wal.metadata().unwrap().len() > 0);
+
+        let destination = temporary.path().join("report-snapshot.db");
+        let error = copy_sqlite_family_at_generation(&registry, &destination, &generation)
+            .expect_err("a post-capture WAL commit must invalidate the snapshot");
+        assert!(
+            error.to_string().contains("changed after inspection"),
+            "the snapshot must fail closed instead of misclassifying new projects: {error}"
+        );
+        let canonical_root: String = writer
+            .query_row(
+                "SELECT canonical_root FROM code_projects WHERE project_id = 'proj_new'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(canonical_root, "/repos/new");
+
+        // A new complete generation must still be usable on the same live
+        // registry; the rejection is for racing changes, not WAL mode itself.
+        let stable =
+            tracedecay_runtime_core::sqlite_read_snapshot::SourceGeneration::capture(&registry)
+                .unwrap();
+        let stable_destination = temporary.path().join("stable-snapshot.db");
+        copy_sqlite_family_at_generation(&registry, &stable_destination, &stable).unwrap();
+        let snapshot = rusqlite::Connection::open(&stable_destination).unwrap();
+        let snapshot_root: String = snapshot
+            .query_row(
+                "SELECT canonical_root FROM code_projects WHERE project_id = 'proj_new'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(snapshot_root, "/repos/new");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn offline_report_refuses_a_foreign_registry_wal_before_sampling() {
+        let temporary = tempfile::TempDir::new().unwrap();
+        let profile_root = temporary.path().join("profile");
+        std::fs::create_dir_all(&profile_root).unwrap();
+        let registry = profile_root.join(GLOBAL_DB_FILENAME);
+        let connection = rusqlite::Connection::open(&registry).unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE code_projects (
+                    project_id TEXT PRIMARY KEY,
+                    canonical_root TEXT NOT NULL
+                );",
+            )
+            .unwrap();
+        drop(connection);
+
+        let foreign = temporary.path().join("foreign-wal.bin");
+        std::fs::File::create(&foreign)
+            .unwrap()
+            .set_len(512 * 1024 * 1024)
+            .unwrap();
+        std::os::unix::fs::symlink(&foreign, sqlite_family_member(&registry, "-wal")).unwrap();
+
+        let error = build_storage_report(&profile_root)
+            .await
+            .expect_err("a linked registry WAL must fail instead of copying a foreign file");
+        assert!(
+            matches!(&error, TraceDecayError::Database { .. }),
+            "expected a typed storage report failure: {error}"
+        );
+        assert!(error.to_string().contains("symbolic links"), "{error}");
+        assert_eq!(foreign.metadata().unwrap().len(), 512 * 1024 * 1024);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn user_sessions_family_excludes_foreign_wal_bytes_and_downgrades_coverage() {
+        let temporary = tempfile::TempDir::new().unwrap();
+        let profile_root = temporary.path().join("profile");
+        std::fs::create_dir_all(&profile_root).unwrap();
+        seed_global_db(&profile_root, &[]).await;
+        std::fs::write(
+            profile_root.join(USER_SESSIONS_DB_FILENAME),
+            vec![1u8; 4_096],
+        )
+        .unwrap();
+        let foreign = temporary.path().join("foreign-sessions-wal.bin");
+        std::fs::File::create(&foreign)
+            .unwrap()
+            .set_len(512 * 1024 * 1024)
+            .unwrap();
+        std::os::unix::fs::symlink(
+            &foreign,
+            profile_root.join(format!("{USER_SESSIONS_DB_FILENAME}-wal")),
+        )
+        .unwrap();
+
+        let report = build_storage_report(&profile_root).await.unwrap();
+        assert_eq!(report.user_sessions_db_bytes, 4_096);
+        let profile_size = report.full_profile_size.expect("measured profile");
+        assert_eq!(profile_size.state, ProfileTotalCoverageStateV1::Partial);
+        assert!(
+            profile_size.unavailable_entry_count > 0,
+            "the linked WAL must remain explicitly unavailable, not be counted as zero"
+        );
+        assert_eq!(foreign.metadata().unwrap().len(), 512 * 1024 * 1024);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_linked_profile_cannot_read_foreign_registry_or_store_bytes() {
+        let temporary = tempfile::tempdir().unwrap();
+        let foreign = temporary.path().join("foreign");
+        let linked = temporary.path().join("profile-link");
+        std::fs::create_dir_all(foreign.join("projects/proj_foreign")).unwrap();
+        std::fs::write(foreign.join("projects/proj_foreign/payload"), [1u8; 16]).unwrap();
+        std::fs::write(foreign.join(USER_SESSIONS_DB_FILENAME), [2u8; 4_096]).unwrap();
+        seed_global_db(&foreign, &[("proj_foreign", "/repos/foreign")]).await;
+        std::os::unix::fs::symlink(&foreign, &linked).unwrap();
+
+        // Before the guard, the footprint was partial, but offline sampling
+        // still followed this profile link and attributed foreign store bytes.
+        let offline = build_storage_report(&linked)
+            .await
+            .expect_err("offline report must not read linked profile storage");
+        assert!(offline.to_string().contains("symbolic link"), "{offline}");
+
+        // The explicit project route also reports shared profile DB sizes,
+        // so it must not silently measure a linked profile either.
+        let project = build_project_storage_report(
+            &linked,
+            "proj_foreign",
+            Path::new("/repos/foreign"),
+            Err(RETENTION_PROTECTION_UNRESOLVED),
+        )
+        .expect_err("project-scoped report must refuse linked profile storage");
+        assert!(project.to_string().contains("symbolic link"), "{project}");
+
+        // Explicitly selecting the real directory remains measurable. The
+        // refusal is for a linked authority, not for the fixture's contents.
+        let real = build_storage_report(&foreign).await.unwrap();
+        assert_eq!(real.user_sessions_db_bytes, 4_096);
+        assert_eq!(real.stores.len(), 1);
+        assert_eq!(real.stores[0].project_id, "proj_foreign");
+        assert_eq!(real.stores[0].total_bytes, 16);
+        assert_eq!(real.unregistered_dir_count, 0);
+        assert_eq!(real.unregistered_bytes, 0);
+        let registry_bytes = std::fs::metadata(foreign.join(GLOBAL_DB_FILENAME))
+            .unwrap()
+            .len();
+        assert!(real.full_profile_size.unwrap().total_bytes >= registry_bytes + 4_112);
+    }
+
+    #[tokio::test]
     async fn storage_report_names_user_sessions_db_family() {
         let tmp = tempfile::TempDir::new().unwrap();
         let profile_root = tmp.path().join("profile");
@@ -2757,9 +3646,18 @@ mod tests {
             ("tracedecay.graph-replay/generation.json", 40),
             ("tracedecay.grafeo", 500),
             ("tracedecay.grafeo.wal/wal_00000001.log", 60),
+            ("tracedecay.grafeo.verified", 80),
+            ("tracedecay.grafeo.spill/inflight", 120),
             ("sessions.db", 900),
             ("sessions.db-wal", 10),
             (".sessions.db.host-admission/claim", 5),
+            ("sessions.db.delivery-settlement-spool-v1/claim", 11),
+            ("tracedecay.db-archive", 17),
+            ("tracedecay.db-journal/incident.bin", 37),
+            ("sessions.db-shm/incident.bin", 41),
+            ("sessions.db-backup", 19),
+            ("sessions.db.corrupt-incident", 23),
+            (".sessions.db.host-admission-backup/claim", 13),
             ("hook-delivery-spool/claude/record", 7),
         ] {
             let path = data_root.join(relative);
@@ -2795,13 +3693,13 @@ mod tests {
                 sealed_graph: 3_000,
                 text_artifacts: 2_050,
                 generation_artifacts: 1_000,
-                graph_container: 560,
+                graph_container: 760,
                 graph_replay_pool: 40,
-                sessions: 915,
-                other: 7,
+                sessions: 926,
+                other: 157,
             }
         );
-        assert_eq!(store.total_bytes, 11_768);
+        assert_eq!(store.total_bytes, 12_129);
         assert_eq!(store.total_bytes, walked_bytes);
         assert_eq!(store.unavailable_entry_count, 0);
     }
