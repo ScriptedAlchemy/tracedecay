@@ -220,6 +220,13 @@ pub(crate) fn await_published_code_index(home: &Path, project: &Path) {
                 | StatusCodeIndexFreshnessV1::Restoring { worktree }
                 | StatusCodeIndexFreshnessV1::Warming { worktree }
                 | StatusCodeIndexFreshnessV1::Parked { worktree } => worktree,
+                StatusCodeIndexFreshnessV1::Unavailable { reason }
+                    if reason == "code_index_scheduler_not_mounted" =>
+                {
+                    // The canonical readiness wait allows a scheduler to mount
+                    // inside its budget. This status sample has no mount refusal.
+                    return None;
+                }
                 StatusCodeIndexFreshnessV1::MountFailed { .. }
                 | StatusCodeIndexFreshnessV1::Unavailable { .. } => {
                     panic!("code-index readiness is unavailable: {status}")
