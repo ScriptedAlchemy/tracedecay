@@ -426,11 +426,13 @@ impl LspBridgeProbe {
         let stdin = child.stdin.take().expect("lsp bridge stdin");
         let mut reader = BufReader::new(child.stdout.take().expect("lsp bridge stdout"));
         let (tx, rx) = mpsc::channel();
-        std::thread::spawn(move || loop {
-            let message = read_lsp_frame(&mut reader);
-            let terminal = message.is_err();
-            if tx.send(message).is_err() || terminal {
-                break;
+        std::thread::spawn(move || {
+            loop {
+                let message = read_lsp_frame(&mut reader);
+                let terminal = message.is_err();
+                if tx.send(message).is_err() || terminal {
+                    break;
+                }
             }
         });
         let mut probe = Self {
