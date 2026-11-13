@@ -54,9 +54,9 @@ use super::*;
 /// [`superseded_sealed_generation_revision`], and the generation is rebuilt
 /// from source rather than migrated. Revisions through eight also predate
 /// required clone-body source rows, so the rebuild keeps them from reading as
-/// successful empty clone evidence. Revision 22 requires the TypeScript
+/// successful empty clone evidence. Revision 23 requires the TypeScript
 /// receiver facts used by both full and sparse generation resolution.
-pub const SEALED_GENERATION_FORMAT_REVISION_V1: u32 = 22;
+pub const SEALED_GENERATION_FORMAT_REVISION_V1: u32 = 23;
 
 /// The typed refusal for a sealed generation this build no longer reads.
 pub fn superseded_sealed_generation_revision(revision: u32) -> CodeIndexProductionErrorV1 {
