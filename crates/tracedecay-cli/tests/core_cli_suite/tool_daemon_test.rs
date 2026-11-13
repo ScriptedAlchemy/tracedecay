@@ -3329,7 +3329,10 @@ fn spawn_scripted_retained_daemon(
     let (request_tx, request_rx) = mpsc::channel();
     let stop = Arc::new(AtomicBool::new(false));
     let daemon_stop = Arc::clone(&stop);
-    let startup = Arc::new(std::sync::Mutex::new(("await thread start", Instant::now())));
+    let startup = Arc::new(std::sync::Mutex::new((
+        "await thread start",
+        Instant::now(),
+    )));
     let server_startup = Arc::clone(&startup);
 
     let server = std::thread::spawn(move || {
