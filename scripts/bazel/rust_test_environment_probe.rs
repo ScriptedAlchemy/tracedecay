@@ -8,9 +8,16 @@ fn compiler_version(
     if let Some(rustup_home) = rustup_home {
         command.env("RUSTUP_HOME", rustup_home);
     }
+    let started = std::time::Instant::now();
     let output = command
         .output()
         .expect("run fixture compiler outside the workspace");
+    println!(
+        "toolchain_probe phase=version program={:?} elapsed_ms={} status={}",
+        program.as_ref(),
+        started.elapsed().as_millis(),
+        output.status,
+    );
     assert!(
         output.status.success(),
         "{:?}: {output:?}",
@@ -140,15 +147,25 @@ fn main() {
     );
     assert!(!home.join("empty-rustup").exists());
     let analyzer = std::env::var_os("RUST_ANALYZER").unwrap();
+    let started = std::time::Instant::now();
     let lsp = std::process::Command::new("node")
         .args(["-e", ANALYZER_PROTOCOL_PROBE])
         .arg(analyzer)
         .arg(&fixture)
         .env("RUSTUP_HOME", home.join("empty-rustup"))
         .env("CARGO_HOME", home.join("empty-cargo"))
+        .env("RA_LOG", "rust_analyzer::session=info")
+        .env_remove("RA_LOG_FILE")
         .current_dir(&fixture)
         .output()
         .expect("run declared Node and rust-analyzer against an isolated fixture");
+    println!(
+        "toolchain_probe phase=analyzer_protocol elapsed_ms={} status={}\nstdout:\n{}\nstderr:\n{}",
+        started.elapsed().as_millis(),
+        lsp.status,
+        String::from_utf8_lossy(&lsp.stdout),
+        String::from_utf8_lossy(&lsp.stderr),
+    );
     assert!(lsp.status.success(), "analyzer protocol: {lsp:?}");
     assert!(
         String::from_utf8(lsp.stdout)
@@ -183,8 +200,15 @@ if (fs.realpathSync(process.execPath) !== fs.realpathSync(process.env.NODE)) {
     throw new Error('PATH node is not the declared runtime');
 }
 const root = process.argv[2];
+const started = process.hrtime.bigint();
+function phase(name) {
+    const elapsed = Number(process.hrtime.bigint() - started) / 1e6;
+    console.error(`analyzer_probe phase=${name} elapsed_ms=${elapsed.toFixed(3)}`);
+}
+phase('launch');
 const server = spawn(process.argv[1], [], {cwd: root, stdio: ['pipe', 'pipe', 'pipe']});
 let buffered = Buffer.alloc(0), shutdown = false, errors = '';
+let stderrSeen = false, stdoutSeen = false;
 const timeout = setTimeout(() => fail('analyzer protocol timed out'), 30000);
 function fail(message) {
     console.error(message, errors);
@@ -197,8 +221,14 @@ function send(message) {
     server.stdin.write(body);
 }
 server.on('error', error => fail(error.message));
-server.stderr.on('data', data => { errors = (errors + data).slice(-8000); });
+server.once('spawn', () => phase('spawned'));
+server.stderr.on('data', data => {
+    if (!stderrSeen) { stderrSeen = true; phase('first_stderr'); }
+    errors = (errors + data).slice(-8000);
+    process.stderr.write(data);
+});
 server.stdout.on('data', data => {
+    if (!stdoutSeen) { stdoutSeen = true; phase('first_stdout'); }
     buffered = Buffer.concat([buffered, data]);
     for (;;) {
         const boundary = buffered.indexOf('\r\n\r\n');
@@ -213,6 +243,7 @@ server.stdout.on('data', data => {
         }
         if (message.error) { fail(JSON.stringify(message.error)); return; }
         if (message.id === 1) {
+            phase('initialized');
             const uri = pathToFileURL(path.join(root, 'src/lib.rs')).href;
             send({method: 'initialized', params: {}});
             send({method: 'textDocument/didOpen', params: {textDocument: {
@@ -221,6 +252,7 @@ server.stdout.on('data', data => {
             }}});
             send({id: 2, method: 'textDocument/documentSymbol', params: {textDocument: {uri}}});
         } else if (message.id === 2) {
+            phase('document_symbols');
             if (!JSON.stringify(message.result).includes('"answer"')) {
                 fail(`missing fixture symbol: ${JSON.stringify(message)}`); return;
             }
@@ -232,6 +264,7 @@ server.stdout.on('data', data => {
     }
 });
 server.on('exit', code => {
+    phase('exited');
     clearTimeout(timeout);
     if (!shutdown || code !== 0) { fail(`analyzer exit ${code}`); return; }
     console.log('analyzed answer');
@@ -239,4 +272,5 @@ server.on('exit', code => {
 send({id: 1, method: 'initialize', params: {
     processId: process.pid, rootUri: pathToFileURL(root).href, capabilities: {},
 }});
+phase('initialize_queued');
 "#;
