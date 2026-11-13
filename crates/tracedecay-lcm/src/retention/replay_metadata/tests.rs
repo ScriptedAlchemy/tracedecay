@@ -116,7 +116,7 @@ fn metadata(message: &LcmRawMessage) -> Value {
     serde_json::from_str(message.metadata_json.as_deref().unwrap()).unwrap()
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn removes_only_the_duplicate_and_preserves_receipts_replay_and_summary_state() {
     let store = Store::open().await;
     let text = "retained verified reasoning and tool evidence ".repeat(180);
@@ -215,7 +215,7 @@ async fn removes_only_the_duplicate_and_preserves_receipts_replay_and_summary_st
     );
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn structured_different_media_and_external_representations_are_retained() {
     let store = Store::open().await;
     let text = "ordinary original body ".repeat(30);
@@ -257,7 +257,7 @@ async fn structured_different_media_and_external_representations_are_retained() 
     assert_eq!(scalar(&store.conn, "SELECT COUNT(*) FROM lcm_raw_messages WHERE json_type(metadata_json, '$.active_replay.content') IS NOT NULL").await, 5);
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn corrupt_body_rolls_back_prior_changes_frontier_and_guard_suspension() {
     let store = Store::open().await;
     let first = "first verified duplicated string ".repeat(120);
@@ -305,7 +305,7 @@ async fn corrupt_body_rolls_back_prior_changes_frontier_and_guard_suspension() {
     );
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn stale_metadata_cannot_be_overwritten_and_missing_guard_refuses_repair() {
     let store = Store::open().await;
     let text = "verified duplicate content ".repeat(80);
@@ -346,7 +346,7 @@ async fn stale_metadata_cannot_be_overwritten_and_missing_guard_refuses_repair()
     assert_eq!(frontier(&store.conn).await.unwrap(), 0);
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn row_and_byte_budgets_advance_a_durable_frontier_and_finished_pages_are_noops() {
     let store = Store::open().await;
     let text = "bounded replay text ".repeat(35_000);
@@ -391,7 +391,7 @@ async fn row_and_byte_budgets_advance_a_durable_frontier_and_finished_pages_are_
     assert_eq!(idle, ReplayMetadataCompactionReport::default());
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn zero_compaction_pages_advance_distinct_durable_frontiers() {
     let store = Store::open().await;
     for ordinal in 1..=52 {
@@ -429,7 +429,7 @@ async fn zero_compaction_pages_advance_distinct_durable_frontiers() {
     );
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn large_ineligible_metadata_is_bounded_before_eligibility_checks() {
     let store = Store::open().await;
     let structured = serde_json::json!([{
@@ -503,7 +503,7 @@ async fn large_ineligible_metadata_is_bounded_before_eligibility_checks() {
     }
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn oversized_metadata_is_preserved_without_blocking_later_compaction() {
     let store = Store::open().await;
     let text = "verified duplicate content ".repeat(80);
@@ -649,7 +649,7 @@ async fn assert_checkpoint_refusal_is_atomic(store: &Store, id: i64, trigger_sql
     );
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn ignored_initial_checkpoint_rolls_back_compaction() {
     let store = Store::open().await;
     let text = "verified replay checkpoint content ".repeat(80);
@@ -663,7 +663,7 @@ async fn ignored_initial_checkpoint_rolls_back_compaction() {
     assert_checkpoint_refusal_is_atomic(&store, id, &trigger).await;
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn rewritten_checkpoint_cannot_claim_durable_progress() {
     let store = Store::open().await;
     let text = "verified replay checkpoint content ".repeat(80);
@@ -687,7 +687,7 @@ async fn rewritten_checkpoint_cannot_claim_durable_progress() {
     assert_checkpoint_refusal_is_atomic(&store, id, &trigger).await;
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn idle_page_does_not_initialize_a_checkpoint() {
     let store = Store::open().await;
     let trigger = format!(

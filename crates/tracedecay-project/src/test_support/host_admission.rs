@@ -14,6 +14,8 @@ use tracedecay_host_admission::{HostAdmissionAuthorities, HostAdmissionFacade};
 use tracedecay_host_admission::{
     HostAdmissionBroker, HostAdmissionRuntime, SharedHostAdmissionBroker,
 };
+use tracedecay_lcm::payload::PayloadFileRollback;
+use tracedecay_lcm::raw::{commit_staged_raw_message, stage_raw_message_with_payload_tracked};
 use tracedecay_sessions::admission::{
     HostAdmissionOutcome, HostAdmissionScope, HostAdmissionStatus,
 };
@@ -414,12 +416,7 @@ impl HostAdmissionTestRuntimeV1 {
         session_registry.cancel_store_opens_for_shutdown();
         session_registry.cancel_terminal_tasks();
         session_registry.cancel_memory_graph_reconciliation_tasks();
-        let cx = tracedecay_runtime_core::native_runtime::cx().ok_or_else(|| {
-            TraceDecayError::Config {
-                message: "native execution runtime is unavailable".to_owned(),
-            }
-        })?;
-        let terminal = session_registry.shutdown_terminal_tasks(&cx).await;
+        let terminal = session_registry.shutdown_terminal_tasks().await;
         let reconciliation = session_registry
             .shutdown_memory_graph_reconciliation_tasks()
             .await;
@@ -639,21 +636,11 @@ impl HostAdmissionTestRuntimeV1 {
         session: &tracedecay_sessions::runtime::SessionRecord,
         messages: &[tracedecay_sessions::runtime::SessionMessageRecord],
     ) -> Result<Vec<i64>> {
-        if !self.upsert_session_for_test(scope, session).await? {
-            return Err(TraceDecayError::Database {
-                operation: "seed registered session fixture".to_owned(),
-                message: "registered session write failed".to_owned(),
-            });
-        }
+        self.seed_session_histories_for_test(scope, &[(session, messages)])
+            .await?;
         let database = self.session_database_for_test(scope)?;
         let mut store_ids = Vec::with_capacity(messages.len());
         for message in messages {
-            self.lcm_ingest_raw_message_for_test(scope, message)
-                .await
-                .map_err(|error| TraceDecayError::Database {
-                    operation: "seed registered session message fixture".to_owned(),
-                    message: error.to_string(),
-                })?;
             let store_id = database
                 .lcm_raw_message_store_id(&message.provider, &message.message_id)
                 .await
@@ -671,6 +658,78 @@ impl HostAdmissionTestRuntimeV1 {
             store_ids.push(store_id);
         }
         Ok(store_ids)
+    }
+
+    /// Seeds many session histories through the canonical batch session and
+    /// raw-message transactions. Each session and message still allocates its
+    /// own history change sequence; only the durable commit count shrinks.
+    #[doc(hidden)]
+    pub async fn seed_session_histories_for_test(
+        &self,
+        scope: HostAdmissionScope,
+        histories: &[(
+            &tracedecay_sessions::runtime::SessionRecord,
+            &[tracedecay_sessions::runtime::SessionMessageRecord],
+        )],
+    ) -> Result<()> {
+        const BATCH_ITEMS: usize = 32;
+        let database = self.session_database_for_test(scope)?;
+        for window in histories.chunks(BATCH_ITEMS) {
+            let sessions = window
+                .iter()
+                .map(|(session, _)| (*session).clone())
+                .collect::<Vec<_>>();
+            if !database.upsert_sessions(&sessions).await {
+                return Err(TraceDecayError::Database {
+                    operation: "seed registered session fixture".to_owned(),
+                    message: "registered session write failed".to_owned(),
+                });
+            }
+        }
+        let storage_root =
+            database
+                .db_path()
+                .parent()
+                .ok_or_else(|| TraceDecayError::Database {
+                    operation: "seed registered session message fixture".to_owned(),
+                    message: "registered session database has no storage root".to_owned(),
+                })?;
+        let mut messages = histories.iter().flat_map(|(_, messages)| messages.iter());
+        loop {
+            let chunk = messages.by_ref().take(BATCH_ITEMS).collect::<Vec<_>>();
+            if chunk.is_empty() {
+                break;
+            }
+            let mut rollback = PayloadFileRollback::begin_cancellation_safe(storage_root);
+            let staged = chunk
+                .iter()
+                .map(|message| {
+                    stage_raw_message_with_payload_tracked(storage_root, message, &mut rollback)
+                })
+                .collect::<std::result::Result<Vec<_>, _>>()
+                .map_err(|error| TraceDecayError::Database {
+                    operation: "seed registered session message fixture".to_owned(),
+                    message: error.to_string(),
+                })?;
+            let transaction = database.begin_write_transaction().await?;
+            for (message, staged) in chunk.into_iter().zip(staged) {
+                commit_staged_raw_message(&transaction, message, staged)
+                    .await
+                    .map_err(|error| TraceDecayError::Database {
+                        operation: "seed registered session message fixture".to_owned(),
+                        message: error.to_string(),
+                    })?;
+            }
+            transaction
+                .commit()
+                .await
+                .map_err(|error| TraceDecayError::Database {
+                    operation: "commit registered session message fixture".to_owned(),
+                    message: error.to_string(),
+                })?;
+            rollback.disarm();
+        }
+        Ok(())
     }
 
     #[doc(hidden)]

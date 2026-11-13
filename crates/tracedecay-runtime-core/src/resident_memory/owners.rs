@@ -23,7 +23,7 @@ use std::fmt;
 use std::sync::{Arc, Mutex, OnceLock, PoisonError, Weak};
 use std::time::{Duration, Instant};
 
-use asupersync::channel::watch;
+use tokio::sync::watch;
 use tracedecay_domain::{CodeGenerationId, ManifestDigest, ProjectId, WorktreeId};
 
 use super::advance_headroom_epoch;
@@ -998,13 +998,22 @@ mod tests {
         );
 
         assert_eq!(owners.release_idle(start).len(), 0);
-        assert!(!headroom.has_changed(), "a sweep that frees nothing");
+        assert!(
+            !headroom
+                .has_changed()
+                .expect("headroom publisher remains open"),
+            "a sweep that frees nothing"
+        );
 
         assert_eq!(
             owners.release_idle(start + Duration::from_secs(301)).len(),
             1
         );
-        assert!(headroom.has_changed());
+        assert!(
+            headroom
+                .has_changed()
+                .expect("headroom publisher remains open")
+        );
         assert_eq!(*headroom.borrow_and_update(), 1);
 
         owners.note_headroom();
@@ -1038,11 +1047,13 @@ mod tests {
         let all_woken = |woken: &[Arc<Woken>]| woken.iter().all(|w| w.0.load(Ordering::Acquire));
 
         let owners = ResidentOwnersV1::new(Duration::from_mins(5));
-        let cx = crate::native_runtime::cx().unwrap();
         let mut receivers = [(); 2].map(|()| owners.subscribe_headroom());
         let woken = [(); 2].map(|()| Arc::new(Woken(AtomicBool::new(false))));
 
-        let mut waits: Vec<_> = receivers.iter_mut().map(|r| r.changed(&cx)).collect();
+        let mut waits: Vec<_> = receivers
+            .iter_mut()
+            .map(|r| Box::pin(r.changed()))
+            .collect();
         assert!(
             poll_all(&mut waits, &woken)
                 .iter()
@@ -1058,7 +1069,10 @@ mod tests {
         drop(waits);
         assert!(receivers.iter().all(|r| *r.borrow() == 1));
 
-        let mut waits: Vec<_> = receivers.iter_mut().map(|r| r.changed(&cx)).collect();
+        let mut waits: Vec<_> = receivers
+            .iter_mut()
+            .map(|r| Box::pin(r.changed()))
+            .collect();
         assert!(
             poll_all(&mut waits, &woken)
                 .iter()

@@ -38,6 +38,12 @@
       "enabled": false
     },
     {
+      "description": "The typescript@5 test compiler stays on the 5.x line that projects still pin",
+      "matchFileNames": ["tests/typescript5/package.json"],
+      "matchDepNames": ["typescript"],
+      "allowedVersions": "5.x"
+    },
+    {
       "description": "One PR moves every Rust toolchain pin",
       "matchDepNames": ["rust"],
       "matchDatasources": ["rust-version"],

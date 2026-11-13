@@ -8,9 +8,9 @@
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 
-use asupersync::io::AsyncWriteExt;
 use rmcp::model::{ClientJsonRpcMessage, ServerJsonRpcMessage};
 use serde_json::json;
+use tokio::io::AsyncWriteExt;
 use tracedecay_daemon_protocol::{BrokerReadHalf, BrokerStream, BrokerWriteHalf};
 use tracedecay_framing::{BoundedLineReader, is_wire_oversized_io_error};
 use tracedecay_runtime_core::cancellation::CancellationToken;
@@ -101,7 +101,7 @@ pub struct BrokerStreamTransport {
     // bounded reader owns the partial-frame accumulator so a read dropped by a
     // lost race resumes instead of restarting mid-frame and desynchronizing
     // JSON-RPC framing for the rest of the connection.
-    reader: BoundedLineReader<asupersync::io::BufReader<BrokerReadHalf>>,
+    reader: BoundedLineReader<tokio::io::BufReader<BrokerReadHalf>>,
     writer: Arc<tokio::sync::Mutex<Option<BrokerWriteHalf>>>,
     active_requests: ActiveRmcpRequests,
     replay: VecDeque<String>,
@@ -159,7 +159,7 @@ impl BrokerStreamTransport {
     pub fn new(stream: BrokerStream) -> Self {
         let (reader, writer) = stream.into_owned_split();
         Self {
-            reader: BoundedLineReader::new(asupersync::io::BufReader::new(reader)),
+            reader: BoundedLineReader::new(tokio::io::BufReader::new(reader)),
             writer: Arc::new(tokio::sync::Mutex::new(Some(writer))),
             active_requests: Arc::default(),
             replay: VecDeque::new(),
@@ -372,13 +372,16 @@ impl BrokerStreamTransport {
             // A full close raises no event this side waits on, so probe on a
             // bounded interval while a legitimate half-closed one-shot client
             // is still computing its response. No request deadline is imposed
-            // here. A direct Asupersync timer, not `native_runtime::sleep_until`:
-            // it skips a task spawn per probe and works from any executor.
-            asupersync::time::sleep(
-                asupersync::time::wall_now(),
-                std::time::Duration::from_millis(100),
+            // here. The timer remains bound to the selected runtime even if a
+            // dedicated thread polls the transport.
+            if let Err(error) = tracedecay_runtime_core::native_runtime::sleep_until(
+                std::time::Instant::now() + std::time::Duration::from_millis(100),
             )
-            .await;
+            .await
+            {
+                tracing::warn!(%error, "daemon peer-close probe lost its timer driver");
+                return;
+            }
         }
     }
 }
@@ -702,13 +705,16 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn full_close_probe_sees_the_peer_close_with_no_tokio_runtime_entered() {
+    fn full_close_probe_sees_the_peer_close_from_a_plain_thread() {
         assert!(tokio::runtime::Handle::try_current().is_err());
         let (server, client) = std::os::unix::net::UnixStream::pair().unwrap();
         server.set_nonblocking(true).unwrap();
-        let transport = BrokerStreamTransport::new(BrokerStream::Unix(
-            asupersync::net::unix::UnixStream::from_std(server).unwrap(),
-        ));
+        let transport = native_runtime::block_on(async {
+            BrokerStreamTransport::new(BrokerStream::Unix(
+                tokio::net::UnixStream::from_std(server).unwrap(),
+            ))
+        })
+        .expect("the process runtime registers the stream");
         let closed = native_runtime::block_on(wakes_after(
             transport.peer_fully_closed_after_eof(),
             move || drop(client),
@@ -727,9 +733,12 @@ mod tests {
         client
             .set_read_timeout(Some(Duration::from_secs(5)))
             .unwrap();
-        let transport = BrokerStreamTransport::new(BrokerStream::Unix(
-            asupersync::net::unix::UnixStream::from_std(server).unwrap(),
-        ))
+        let transport = native_runtime::block_on(async {
+            BrokerStreamTransport::new(BrokerStream::Unix(
+                tokio::net::UnixStream::from_std(server).unwrap(),
+            ))
+        })
+        .expect("the process runtime registers the stream")
         .with_project_response_lifecycle(lifecycle);
         let refusal = json!({
             "jsonrpc": "2.0", "id": 1,
@@ -785,9 +794,12 @@ mod tests {
         client
             .set_read_timeout(Some(Duration::from_secs(5)))
             .unwrap();
-        let transport = BrokerStreamTransport::new(BrokerStream::Unix(
-            asupersync::net::unix::UnixStream::from_std(server).unwrap(),
-        ))
+        let transport = native_runtime::block_on(async {
+            BrokerStreamTransport::new(BrokerStream::Unix(
+                tokio::net::UnixStream::from_std(server).unwrap(),
+            ))
+        })
+        .expect("the process runtime registers the stream")
         .with_project_response_lifecycle(caller)
         .with_rmcp_selected_project_responses(selected.clone());
         let mut client = BufReader::new(client);

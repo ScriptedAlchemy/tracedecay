@@ -1237,6 +1237,8 @@ mod recent_first_discovery_tests {
         directory_entry_fingerprint, directory_stat_witness, indexed_replay_pass,
         replay_index_entries_visited_for_test, reset_replay_index_entries_visited_for_test,
     };
+    #[cfg(unix)]
+    use crate::runtime::hosts::codex::{DirectoryStatWitness, codex_directory_changed_since};
     use crate::runtime::ingest::quarantine::SourceSweep;
     use crate::runtime::jsonl_observation_admission::{
         SHARED_JSONL_PIN_GATES, install_test_shared_jsonl_preparation_authority,
@@ -1463,7 +1465,11 @@ mod recent_first_discovery_tests {
         else {
             panic!("the first scan delivers");
         };
-        assert!(!released.has_changed());
+        assert!(
+            !released
+                .has_changed()
+                .expect("discovery release publisher remains open")
+        );
         hub.acknowledge("profile");
 
         // A consumer joining now replays the source's index, which another
@@ -1489,7 +1495,11 @@ mod recent_first_discovery_tests {
         hub.discover("profile", &source, bounds, first.next_frontier)
             .await
             .unwrap();
-        assert!(released.has_changed());
+        assert!(
+            released
+                .has_changed()
+                .expect("discovery release publisher remains open")
+        );
     }
 
     /// An idle scan one consumer ran is queued for every other consumer. A
@@ -2716,23 +2726,40 @@ mod recent_first_discovery_tests {
         std::fs::create_dir_all(&bucket).unwrap();
         std::fs::write(bucket.join("rollout-existing.jsonl"), b"{}\n").unwrap();
 
-        // A recently changed bucket uses an entry-name witness when the
-        // clock is still coarse. Model a different previously observed stat
-        // (such as a directory metadata update) with identical entry names.
+        // Supply the native coarse-clock sample directly: scheduler delay
+        // after the write must not decide which clock branch this exercises.
+        let metadata = std::fs::metadata(&bucket).unwrap();
+        let stat =
+            codex_directory_stat_identity(&bucket, &metadata, ChangeStamp::Unvouched(0)).unwrap();
         let mut stored = codex_directory_witness(&bucket).unwrap().unwrap();
+        stored.stat = stat;
+        stored.entries = Some(directory_entry_fingerprint(&bucket).unwrap());
         assert!(
-            !directory_stat_witness(&bucket).unwrap().unwrap().settled,
-            "this regression requires the unsettled-clock branch"
+            !codex_directory_changed_since(
+                &bucket,
+                Some(DirectoryStatWitness {
+                    stat,
+                    settled: false
+                }),
+                Some(stored),
+            )
+            .unwrap(),
+            "an unchanged unsettled directory retains its name witness"
         );
-        assert!(stored.entries.is_some());
-        assert_eq!(
-            stored.entries,
-            Some(directory_entry_fingerprint(&bucket).unwrap())
-        );
+        // Model a different previously observed stat (such as a directory
+        // metadata update) while the eligible entry names remain identical.
         stored.stat[0] ^= 1;
 
         assert!(
-            codex_directory_changed(&bucket, Some(stored)).unwrap(),
+            codex_directory_changed_since(
+                &bucket,
+                Some(DirectoryStatWitness {
+                    stat,
+                    settled: false
+                }),
+                Some(stored),
+            )
+            .unwrap(),
             "a changed native identity must invalidate even when the entry-name fingerprint is unchanged"
         );
     }

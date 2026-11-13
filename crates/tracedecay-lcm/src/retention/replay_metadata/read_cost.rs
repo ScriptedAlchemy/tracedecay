@@ -21,7 +21,7 @@ fn read_chars() -> u64 {
         .unwrap()
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn oversized_rows_skip_payload_io() {
     const CHILD: &str = "TRACEDECAY_REPLAY_READ_COST_CHILD";
     const TEST: &str = "retention::replay_metadata::read_cost::oversized_rows_skip_payload_io";

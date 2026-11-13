@@ -248,7 +248,7 @@ async fn raw_owners(conn: &(impl QueryExecutor + ?Sized)) -> Vec<i64> {
     owners
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn bootstrap_pages_batch_writes_and_preserve_sparse_frontiers() {
     let fixture = Fixture::open().await;
     for (scanned, through, owners) in [(48_u64, 96_i64, 48_i64), (4, 104, 52)] {
@@ -305,7 +305,7 @@ async fn bootstrap_pages_batch_writes_and_preserve_sparse_frontiers() {
     fixture.assert_bodies_preserved().await;
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn bootstrap_batch_refusal_rolls_back_and_recovers() {
     for bodies_phase in [false, true] {
         let fixture = Fixture::open().await;
@@ -376,7 +376,7 @@ async fn bootstrap_batch_refusal_rolls_back_and_recovers() {
     }
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn bootstrap_batch_eligibility_does_not_change_the_page_boundary() {
     let fixture = Fixture::open().await;
     fixture
@@ -431,7 +431,7 @@ async fn observation_owners(conn: &(impl QueryExecutor + ?Sized)) -> Vec<i64> {
     owners
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn observation_bootstrap_batches_across_a_bounded_write_submission() {
     let fixture = Fixture::with_observations(true).await;
     for _ in 0..2 {
@@ -492,7 +492,7 @@ async fn observation_bootstrap_batches_across_a_bounded_write_submission() {
     assert_eq!(submissions, 0);
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn observation_bootstrap_failure_after_a_full_batch_rolls_back_and_recovers() {
     let fixture = Fixture::with_observations(true).await;
     for _ in 0..2 {
@@ -573,7 +573,7 @@ async fn assert_refused_bootstrap_rolls_back(fixture: &Fixture, diagnosis: &str)
     fixture.assert_bodies_preserved().await;
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn ignored_raw_reference_insert_refuses_checkpoint_then_recovers() {
     let fixture = Fixture::open().await;
     fixture
@@ -608,7 +608,7 @@ async fn ignored_raw_reference_insert_refuses_checkpoint_then_recovers() {
     fixture.assert_bodies_preserved().await;
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn ignored_observation_reference_insert_refuses_checkpoint_then_recovers() {
     let fixture = Fixture::with_observations(true).await;
     fixture.tick().await;
@@ -659,7 +659,7 @@ async fn ignored_observation_reference_insert_refuses_checkpoint_then_recovers()
     fixture.assert_bodies_preserved().await;
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn ignored_candidate_insert_refuses_checkpoint_then_recovers() {
     let fixture = Fixture::open().await;
     fixture.tick().await;

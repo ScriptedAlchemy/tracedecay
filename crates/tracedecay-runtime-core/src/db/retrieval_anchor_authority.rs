@@ -678,7 +678,7 @@ mod tests {
         .unwrap()
     }
 
-    #[asupersync::test]
+    #[tokio::test]
     async fn disposition_replay_survives_restart_without_resurrection() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("anchors.db");
@@ -731,7 +731,7 @@ mod tests {
         );
     }
 
-    #[asupersync::test]
+    #[tokio::test]
     async fn deletion_tombstones_reverse_lineage_for_every_derivative_kind() {
         let directory = tempfile::tempdir().unwrap();
         let database = open_database(&directory.path().join("anchors.db")).await;
@@ -838,7 +838,7 @@ mod tests {
         );
     }
 
-    #[asupersync::test]
+    #[tokio::test]
     async fn retained_direct_evidence_keeps_a_derivative_servable() {
         let directory = tempfile::tempdir().unwrap();
         let database = open_database(&directory.path().join("anchors.db")).await;
@@ -884,7 +884,7 @@ mod tests {
         );
     }
 
-    #[asupersync::test]
+    #[tokio::test]
     async fn only_active_direct_evidence_can_serve_a_derivative() {
         let directory = tempfile::tempdir().unwrap();
         let database = open_database(&directory.path().join("anchors.db")).await;
@@ -939,7 +939,7 @@ mod tests {
         );
     }
 
-    #[asupersync::test]
+    #[tokio::test]
     async fn production_authority_preserves_history_and_suppresses_superseded_sources() {
         let directory = tempfile::tempdir().unwrap();
         let database = open_database(&directory.path().join("anchors.db")).await;

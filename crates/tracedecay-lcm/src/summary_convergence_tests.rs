@@ -70,7 +70,7 @@ async fn fetch_i64(conn: &TestConnection, sql: &str, params: impl IntoParams) ->
     rows.next().await.unwrap().unwrap().get::<i64>(0).unwrap()
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn backfill_page_upserts_each_session_once_and_idles_without_work() {
     const ROWS: i64 = 300;
     let temp = tempfile::tempdir().unwrap();
@@ -265,7 +265,7 @@ async fn backfill_page_upserts_each_session_once_and_idles_without_work() {
     );
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn retained_queue_page_is_keyset_bounded_and_candidate_read_avoids_raw_corpus() {
     let temp = tempfile::tempdir().unwrap();
     let conn = TestConnection::open(&temp.path().join("sessions.db"));
@@ -365,7 +365,7 @@ async fn retained_queue_page_is_keyset_bounded_and_candidate_read_avoids_raw_cor
     );
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn protected_content_revision_requeues_a_current_session() {
     let temp = tempfile::tempdir().unwrap();
     let conn = TestConnection::open(&temp.path().join("sessions.db"));
@@ -447,7 +447,7 @@ async fn protected_content_revision_requeues_a_current_session() {
     );
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn protection_progress_cannot_overwrite_a_concurrent_raw_rewind() {
     let temp = tempfile::tempdir().unwrap();
     let conn = TestConnection::open(&temp.path().join("sessions.db"));
@@ -505,7 +505,7 @@ async fn protection_progress_cannot_overwrite_a_concurrent_raw_rewind() {
     assert_eq!(refreshed.protection_frontier_store_id, 0);
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn disjoint_raw_revisions_drain_as_distinct_restart_safe_work_items() {
     let temp = tempfile::tempdir().unwrap();
     let conn = TestConnection::open(&temp.path().join("sessions.db"));
@@ -644,7 +644,7 @@ async fn dirty_summary_queue_store(temp: &tempfile::TempDir) -> TestConnection {
     conn
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn dirty_raw_failure_backoff_survives_restart_and_new_revision_recovers() {
     let temp = tempfile::tempdir().unwrap();
     let conn = dirty_summary_queue_store(&temp).await;
@@ -738,7 +738,7 @@ async fn dirty_raw_failure_backoff_survives_restart_and_new_revision_recovers() 
     );
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn dirty_raw_terminal_outcomes_park_until_an_actual_raw_change() {
     let temp = tempfile::tempdir().unwrap();
     let conn = dirty_summary_queue_store(&temp).await;
@@ -865,7 +865,7 @@ async fn parked_count(conn: &TestConnection) -> i64 {
     .await
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn parked_sessions_requeue_once_per_summarizer_binding_in_bounded_pages() {
     let temp = tempfile::tempdir().unwrap();
     let conn = parked_queue_store(&temp, &["parked-a", "parked-b", "parked-c"]).await;

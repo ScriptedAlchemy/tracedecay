@@ -198,8 +198,10 @@ async fn a_failed_later_mount_releases_the_whole_composition_before_returning() 
         Err(error) => error,
     };
     assert!(
-        format!("{error:?}").contains("file is not a database"),
-        "expected the second mount to refuse its graph store: {error:?}"
+        format!("{error:?}").contains(
+            "existing SQLite file has no valid database header; refusing sidecar access",
+        ),
+        "expected the second mount to refuse its graph store before sidecar access: {error:?}"
     );
 
     let first_layout = default_profile_sharded_layout(&first, &profile)

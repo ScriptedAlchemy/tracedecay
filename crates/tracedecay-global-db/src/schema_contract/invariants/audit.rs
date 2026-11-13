@@ -1729,7 +1729,7 @@ mod tests {
 
     crate::observation_projection::impl_send_projection_derive!(CountingQuery<'_>);
 
-    #[asupersync::test]
+    #[tokio::test]
     async fn audit_checkpoint_schema_tracks_source_cursor_progress() {
         let directory = TempDir::new().unwrap();
         let connection = TestConnection::open(&directory.path().join("sessions.db"));
@@ -1777,7 +1777,7 @@ mod tests {
         );
     }
 
-    #[asupersync::test]
+    #[tokio::test]
     async fn observation_point_reads_have_covering_indexes() {
         let directory = TempDir::new().unwrap();
         let connection = open_registered_test_fixture(
@@ -1887,7 +1887,7 @@ mod tests {
         .unwrap()
     }
 
-    #[asupersync::test]
+    #[tokio::test]
     async fn projection_audit_batches_common_skip_rows() {
         const OBSERVATIONS: usize = 128;
 
@@ -2017,7 +2017,7 @@ mod tests {
         observation
     }
 
-    #[asupersync::test]
+    #[tokio::test]
     async fn projection_audit_accepts_metadata_retired_before_projection() {
         let directory = TempDir::new().unwrap();
         let connection = open_registered_test_fixture(
@@ -2165,7 +2165,7 @@ mod tests {
     /// an output it only adopted resolves to its *oldest*, and a requested key
     /// with no provenance resolves to nothing at all (the absence every caller
     /// turns into a typed provenance collision).
-    #[asupersync::test]
+    #[tokio::test]
     async fn batched_output_authority_reproduces_projector_ownership_ordering() {
         let directory = TempDir::new().unwrap();
         let connection = open_registered_test_fixture(
@@ -2280,7 +2280,7 @@ mod tests {
 
     /// Every requested key must be answered, including across the chunk
     /// boundary the batched statement pages at.
-    #[asupersync::test]
+    #[tokio::test]
     async fn batched_output_authority_answers_every_key_across_chunks() {
         const OUTPUTS: usize = 300;
 
@@ -2487,7 +2487,7 @@ mod tests {
         observation
     }
 
-    #[asupersync::test]
+    #[tokio::test]
     async fn projection_audit_preserves_receipt_bound_cursor_collision() {
         let directory = TempDir::new().unwrap();
         let runtime = crate::tests::harness::HostAdmissionTestRuntimeV1::profile(directory.path())
@@ -2591,7 +2591,7 @@ mod tests {
         assert!(rows.next().await.unwrap().is_none());
     }
 
-    #[asupersync::test]
+    #[tokio::test]
     async fn projection_audit_restores_a_created_cursor_message_whose_row_is_gone() {
         let directory = TempDir::new().unwrap();
         let runtime = crate::tests::harness::HostAdmissionTestRuntimeV1::profile(directory.path())
@@ -2629,7 +2629,7 @@ mod tests {
     /// baseline this replaced issued two authority reads, one ownership read
     /// and a full owner re-derivation (two more reads) for every message on top
     /// of the rest; the batched path must land well under that.
-    #[asupersync::test]
+    #[tokio::test]
     async fn projection_audit_batches_message_output_authority() {
         const OBSERVATIONS: usize = 24;
 
@@ -2808,7 +2808,7 @@ mod tests {
     /// A resumed audit validates the observations committed since its
     /// checkpoint. Its work must follow those observations: re-reading the
     /// store for each one makes a streamed window cost O(new × store).
-    #[asupersync::test]
+    #[tokio::test]
     async fn resumed_authority_audit_work_follows_new_observations_not_the_store() {
         const BASE: usize = 48;
         const GROWN: usize = 8 * BASE;
@@ -2844,7 +2844,7 @@ mod tests {
     /// audited sits behind the observation checkpoint but past the projection
     /// rowid checkpoints. The resumed audit must still reach it when the same
     /// pass also validates newly committed observations.
-    #[asupersync::test]
+    #[tokio::test]
     async fn resumed_authority_audit_detects_a_projection_row_planted_behind_its_checkpoint() {
         let directory = TempDir::new().unwrap();
         let runtime = crate::tests::harness::HostAdmissionTestRuntimeV1::profile(directory.path())
@@ -2896,7 +2896,7 @@ mod tests {
     /// Batched creation-owner counting keeps the "one creator per output"
     /// invariant, including the cross-projector case a single projector-scoped
     /// query would miss, and reads an unknown output as zero creators.
-    #[asupersync::test]
+    #[tokio::test]
     async fn batched_output_ownership_still_rejects_multiple_creators() {
         let directory = TempDir::new().unwrap();
         let connection = open_registered_test_fixture(

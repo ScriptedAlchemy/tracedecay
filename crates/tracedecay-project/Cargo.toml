@@ -54,7 +54,7 @@ test-transport = [
 ]
 
 [dependencies]
-asupersync.workspace = true
+tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros", "time", "sync", "io-util", "net"] }
 # Only the `test-helpers` LCM fixture opens a raw connection.
 rusqlite = { version = "0.40.1", default-features = false, optional = true }
 serde_json.workspace = true

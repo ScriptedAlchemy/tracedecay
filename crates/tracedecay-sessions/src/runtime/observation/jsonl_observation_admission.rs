@@ -1,4 +1,3 @@
-use asupersync::channel::watch;
 use futures_util::future::AbortHandle;
 use rayon::prelude::*;
 use std::borrow::Cow;
@@ -10,6 +9,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 use tokio::sync::Notify;
+use tokio::sync::watch;
 
 use tracedecay_domain::{
     ObservationId, ObservationIdentityMaterialV1, ObservationOrderingDomainV1, ObservationScopeV1,
@@ -1764,14 +1764,13 @@ pub(crate) fn start_shared_jsonl_page_prefetch(paths: &[PathBuf]) -> Vec<SharedJ
 
 /// Dropping the handle detaches the page task; joining it observes the end
 /// of any build the task started.
-type SharedJsonlPrefetchTask =
-    asupersync::runtime::TaskHandle<Result<(), futures_util::future::Aborted>>;
+type SharedJsonlPrefetchTask = tokio::task::JoinHandle<Result<(), futures_util::future::Aborted>>;
 
 fn start_shared_jsonl_page_prefetch_with_cancellation(
     paths: &[PathBuf],
     cancellation: Option<Arc<std::sync::atomic::AtomicBool>>,
 ) -> Vec<(AbortHandle, SharedJsonlPrefetchTask)> {
-    let Some(cx) = tracedecay_runtime_core::native_runtime::cx() else {
+    let Some(runtime) = tracedecay_runtime_core::native_runtime::handle() else {
         return Vec::new();
     };
     let workers = shared_jsonl_speculative_capacity_from(shared_jsonl_preparation_capacity());
@@ -1804,9 +1803,7 @@ fn start_shared_jsonl_page_prefetch_with_cancellation(
                 );
             }
         });
-        if let Ok(task) = cx.spawn(move |_cx| prefetch) {
-            prefetches.push((abort, task));
-        }
+        prefetches.push((abort, runtime.spawn(prefetch)));
     }
     prefetches
 }

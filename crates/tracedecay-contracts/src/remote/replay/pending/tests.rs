@@ -603,7 +603,7 @@ fn committed(receipt: &RemoteReplayPendingReceiptV1) -> Vec<&RemoteReplayCommitR
         .collect()
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn a_resend_after_every_frame_is_acknowledged_commits_nothing() {
     let frames = frames(2);
     let authority = FakeAuthority::new(frames.clone(), BTreeSet::new());
@@ -645,7 +645,7 @@ async fn a_resend_after_every_frame_is_acknowledged_commits_nothing() {
     assert_eq!(authority.commits(), 2, "a resend never commits again");
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn a_frame_whose_acknowledgement_was_lost_acknowledges_without_a_commit() {
     let frames = frames(2);
     let authority = FakeAuthority::new(frames.clone(), BTreeSet::new());
@@ -683,7 +683,7 @@ async fn a_frame_whose_acknowledgement_was_lost_acknowledges_without_a_commit() 
     );
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn a_stale_fence_refuses_even_when_every_frame_is_settled() {
     let authority = FakeAuthority::new(frames(2), BTreeSet::new());
     replay_pending(&authority, "request.remote-replay-pending")
@@ -716,7 +716,7 @@ async fn a_stale_fence_refuses_even_when_every_frame_is_settled() {
     assert_eq!(authority.commits(), 2);
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn a_store_refusal_stops_the_walk_and_a_resend_repeats_the_stop() {
     let frames = frames(3);
     let authority =
@@ -799,7 +799,7 @@ fn single_request(
     .unwrap()
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn a_single_replay_of_an_acknowledged_frame_reports_its_stored_receipt() {
     let frames = frames(2);
     let authority = FakeAuthority::new(frames.clone(), BTreeSet::new());
@@ -897,7 +897,7 @@ async fn a_single_replay_of_an_acknowledged_frame_reports_its_stored_receipt() {
     assert_eq!(authority.commits(), 2);
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn a_single_replay_of_an_acknowledged_frame_still_checks_the_fence_and_credential() {
     let frames = frames(1);
     let authority = FakeAuthority::new(frames.clone(), BTreeSet::new());
@@ -951,7 +951,7 @@ async fn a_single_replay_of_an_acknowledged_frame_still_checks_the_fence_and_cre
     );
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn a_single_replay_of_a_refused_frame_reports_its_stored_finding() {
     let frames = frames(2);
     let authority =
@@ -1038,7 +1038,7 @@ async fn a_single_replay_of_a_refused_frame_reports_its_stored_finding() {
     );
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn a_single_replay_of_a_refused_frame_authenticates_before_it_reports_the_finding() {
     let frames = frames(1);
     let authority =

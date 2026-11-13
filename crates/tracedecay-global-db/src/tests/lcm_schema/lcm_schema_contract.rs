@@ -1,7 +1,7 @@
 use super::*;
 use tracedecay_domain::errors::TraceDecayError;
 
-#[asupersync::test]
+#[tokio::test]
 async fn legacy_profile_requires_reset_without_carrying_session_content_forward() {
     let tmp = TempDir::new().unwrap();
     let db_path = tmp.path().join(".tracedecay").join("sessions.db");
@@ -23,7 +23,7 @@ async fn legacy_profile_requires_reset_without_carrying_session_content_forward(
     assert_eq!(row_count(&db_path, "session_messages").await, 1);
 }
 
-#[asupersync::test]
+#[tokio::test]
 async fn stale_or_future_lcm_marker_requires_reset_without_rewriting_marker() {
     for found_version in [
         tracedecay_lcm::LCM_SCHEMA_VERSION - 1,
