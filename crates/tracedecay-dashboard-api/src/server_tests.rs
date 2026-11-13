@@ -81,7 +81,7 @@ fn loopback_server_drains_in_flight_request_after_shutdown() {
 
 /// Cancelling the listener must abort the connection tasks it owns, including
 /// a handler that cannot finish gracefully.
-#[tokio::test]
+#[tokio::test(flavor = "current_thread")]
 async fn cancelling_the_loopback_server_drops_its_open_connections() {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -122,13 +122,30 @@ async fn cancelling_the_loopback_server_drops_its_open_connections() {
         .await
         .expect("the connection must admit the held handler");
 
+    // Connect without yielding this current-thread runtime, so the socket
+    // remains in this listener's accept backlog when cancellation lands.
+    // Reconnecting after shutdown could reach another test that reused the
+    // ephemeral port and would not identify the listener being checked.
+    let queued_peer = TcpStream::connect_timeout(&address, bound).unwrap();
+    queued_peer.set_nonblocking(true).unwrap();
+    let mut queued_peer = tokio::net::TcpStream::from_std(queued_peer).unwrap();
     server.abort();
     assert!(server.await.unwrap_err().is_cancelled());
     tokio::time::timeout(bound, dropped.notified())
         .await
         .expect("listener cancellation must drop its active handler");
-    assert!(tokio::net::TcpStream::connect(address).await.is_err());
     let mut byte = [0];
+    let queued_received = tokio::time::timeout(bound, queued_peer.read(&mut byte))
+        .await
+        .expect("listener cancellation must close its unaccepted socket");
+    assert!(
+        matches!(queued_received, Ok(0))
+            || matches!(queued_received, Err(ref error) if matches!(
+                error.kind(),
+                std::io::ErrorKind::ConnectionReset | std::io::ErrorKind::ConnectionAborted
+            )),
+        "the cancelled listener must close its backlog: {queued_received:?}"
+    );
     let received = tokio::time::timeout(bound, peer.read(&mut byte))
         .await
         .expect("listener cancellation must close its accepted socket");
