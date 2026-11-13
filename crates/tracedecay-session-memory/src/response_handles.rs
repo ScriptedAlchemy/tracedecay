@@ -675,7 +675,8 @@ mod tests {
                     let started = Instant::now();
                     let result = {
                         let _span =
-                            tracing::info_span!("response_handles.contended_writer", writer).entered();
+                            tracing::info_span!("response_handles.contended_writer", writer)
+                                .entered();
                         store_response_handle(&root, &content, 100)
                     };
                     (content, result, started.elapsed(), capture.text())
