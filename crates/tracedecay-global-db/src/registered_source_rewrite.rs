@@ -14,17 +14,22 @@ use tracedecay_domain::{
     ObservationSourceIdentityV1,
 };
 use tracedecay_runtime_core::db::engine::{Executor, QueryExecutor, params};
-use tracedecay_store::{ProjectionStoreError, ProjectionStoreResult};
+use tracedecay_store::{
+    ProjectionStoreError, ProjectionStoreResult, SESSION_MESSAGE_PROJECTOR_VERSION,
+};
 
 use super::RegisteredGlobalDb;
 use super::observation_projection::retire_source_record;
 use super::registered::JobExit;
+use tracedecay_session_temporal_store::request_session_temporal_resets;
 
-/// Unoffered-record reads are keyset-paginated at this page size. The exact-
-/// SQL engine refuses a query that materializes more rows than its hard cap,
-/// and one long host session can hold more unoffered records than that cap,
-/// which made rewrite completion fail deterministically for those sources.
-const UNOFFERED_RECORD_PAGE_SIZE: i64 = 1_000;
+/// Each committed page settles at most this many source-presence records,
+/// releasing the writer lease and making restart continuation durable.
+const UNOFFERED_RECORD_PAGE_SIZE: i64 = 128;
+
+/// One page is small enough for the SQLite JSON virtual table and writer
+/// deadline. The entire supplied presence batch still commits atomically.
+const SOURCE_PRESENCE_PAGE_ROWS: usize = 128;
 
 /// One record a source layout offered, under the identity admission derived.
 pub struct ObservationSourcePresenceV1 {
@@ -94,21 +99,34 @@ impl RegisteredGlobalDb {
             .await
             .map_err(|error| storage("begin source presence transaction", error))?;
         let recorded = async {
-            for record in records {
+            for chunk in records.chunks(SOURCE_PRESENCE_PAGE_ROWS) {
+                let page = chunk
+                    .iter()
+                    .map(|record| {
+                        Ok((
+                            record.observation_id.as_str(),
+                            record.generation.generation_id().to_string(),
+                            offset(record.start_offset)?,
+                        ))
+                    })
+                    .collect::<ProjectionStoreResult<Vec<_>>>()?;
+                let encoded = serde_json::to_string(&page)
+                    .map_err(|error| storage("encode source presence page", error))?;
                 transaction
                     .execute(
                         "INSERT INTO observation_source_presence (
                             source_key, observation_id, generation, start_offset
-                         ) VALUES (?1, ?2, ?3, ?4)
+                         )
+                         SELECT ?1, json_extract(value, '$[0]'),
+                                json_extract(value, '$[1]'), json_extract(value, '$[2]')
+                         FROM json_each(?2) AS input
+                         WHERE true ORDER BY CAST(input.key AS INTEGER)
                          ON CONFLICT(source_key, observation_id) DO UPDATE SET
                             generation = excluded.generation,
-                            start_offset = excluded.start_offset",
-                        params![
-                            key.as_str(),
-                            record.observation_id.as_str(),
-                            record.generation.generation_id().to_string(),
-                            offset(record.start_offset)?,
-                        ],
+                            start_offset = excluded.start_offset
+                         WHERE observation_source_presence.generation IS NOT excluded.generation
+                            OR observation_source_presence.start_offset IS NOT excluded.start_offset",
+                        params![key.as_str(), encoded.as_str()],
                     )
                     .await
                     .map_err(|error| storage("record source presence", error))?;
@@ -163,15 +181,14 @@ impl RegisteredGlobalDb {
                 transaction
                     .execute(
                         "UPDATE projection_queue SET revival_generation = ?2
-                         WHERE EXISTS (
-                             SELECT 1 FROM observation_source_presence AS presence
-                             WHERE presence.source_key = ?1
-                               AND presence.observation_id = projection_queue.observation_id
-                               AND presence.start_offset < ?3
-                               AND presence.generation IN (?4, ?5)
-                               AND presence.generation = projection_queue.revival_generation
-                               AND presence.start_offset = projection_queue.revival_start_offset
-                         )",
+                         FROM observation_source_presence AS presence
+                         WHERE presence.source_key = ?1
+                           AND presence.observation_id = projection_queue.observation_id
+                           AND presence.start_offset < ?3
+                           AND presence.generation IN (?4, ?5)
+                           AND presence.generation = projection_queue.revival_generation
+                           AND presence.start_offset = projection_queue.revival_start_offset
+                           AND presence.generation <> ?2",
                         params![
                             key.as_str(),
                             generation.as_str(),
@@ -186,7 +203,8 @@ impl RegisteredGlobalDb {
                     .execute(
                         "UPDATE observation_source_presence SET generation = ?2
                          WHERE source_key = ?1 AND start_offset < ?3
-                           AND generation IN (?4, ?5)",
+                           AND generation IN (?4, ?5)
+                           AND generation <> ?2",
                         params![
                             key.as_str(),
                             generation.as_str(),
@@ -204,7 +222,9 @@ impl RegisteredGlobalDb {
                          ) VALUES (?1, ?2, ?3)
                          ON CONFLICT(source_key) DO UPDATE SET
                             generation = excluded.generation,
-                            retained_through = excluded.retained_through",
+                            retained_through = excluded.retained_through
+                         WHERE observation_source_rewrites.generation IS NOT excluded.generation
+                            OR observation_source_rewrites.retained_through IS NOT excluded.retained_through",
                         params![key.as_str(), generation.as_str(), retained_through],
                     )
                     .await
@@ -239,81 +259,175 @@ impl RegisteredGlobalDb {
             return Ok(0);
         }
         drop(snapshot);
-        self.transact_or_rollback(
-            |error| storage("run source rewrite completion", error),
-            async move |transaction| {
-                if pending_rewrite(&transaction, &key).await?.as_deref()
-                    != Some(generation.as_str())
-                {
-                    return Err(JobExit::Rollback(0));
-                }
-                let mut retired = 0_u64;
-                // Keyset-paginate the unoffered ids instead of materializing the whole
-                // set in one statement: a single rewritten source can hold more
-                // unoffered records than the engine's per-query materialization cap,
-                // and one oversized read wedged every completion attempt forever.
-                // `retire_source_record` never touches `observation_source_presence`,
-                // so the ordered id cursor stays stable across pages; the settle
-                // deletes below remain the authoritative cleanup.
-                let mut after_observation_id = String::new();
-                loop {
-                    let mut rows = transaction
-                        .query(
-                            "SELECT observation_id FROM observation_source_presence
-                             WHERE source_key = ?1 AND generation <> ?2
-                               AND observation_id > ?3
-                             ORDER BY observation_id
-                             LIMIT ?4",
-                            params![
-                                key.as_str(),
-                                generation.as_str(),
-                                after_observation_id.as_str(),
-                                UNOFFERED_RECORD_PAGE_SIZE
-                            ],
-                        )
-                        .await
-                        .map_err(|error| storage("read unoffered source records", error))?;
-                    let mut page = Vec::new();
-                    while let Some(row) = rows
-                        .next()
-                        .await
-                        .map_err(|error| storage("read unoffered source records", error))?
-                    {
-                        page.push(
-                            row.get::<String>(0)
-                                .map_err(|error| storage("read unoffered source records", error))?,
-                        );
-                    }
-                    drop(rows);
-                    if page.is_empty() {
-                        break;
-                    }
-                    let page_len = page.len();
-                    after_observation_id = page[page_len - 1].clone();
-                    for observation_id in &page {
-                        let retired_one: Pin<
-                            Box<dyn Future<Output = ProjectionStoreResult<bool>> + Send + '_>,
-                        > = Box::pin(retire_source_record(&transaction, observation_id));
-                        if retired_one.await? {
-                            retired += 1;
+        let mut total_retired = 0_u64;
+        // Durably deleted pages survive restart; within this invocation seek
+        // past the already-visited current-generation survivor prefix.
+        let mut resume_from = String::new();
+        loop {
+            // The remaining older-generation presence entries are the durable
+            // continuation frontier. Each page commits its retirements and
+            // deletes only the entries it has finished processing; a failed
+            // page rolls back without repeating earlier committed pages.
+            let key = key.clone();
+            let generation = generation.clone();
+            let after_id = resume_from.clone();
+            let (retired, finished, next_cursor) = self
+                .transact_or_rollback(
+                    |error| storage("run source rewrite completion page", error),
+                    async move |transaction| {
+                        if pending_rewrite(&transaction, &key).await?.as_deref()
+                            != Some(generation.as_str())
+                        {
+                            return Err(JobExit::Rollback((0_u64, true, String::new())));
                         }
-                    }
-                    if (page_len as i64) < UNOFFERED_RECORD_PAGE_SIZE {
-                        break;
-                    }
-                }
-                for sql in [
-                    "DELETE FROM observation_source_presence WHERE source_key = ?1 AND generation <> ?2",
-                    "DELETE FROM observation_source_rewrites WHERE source_key = ?1 AND generation = ?2",
-                ] {
-                    transaction
-                        .execute(sql, params![key.as_str(), generation.as_str()])
-                        .await
-                        .map_err(|error| storage("settle source rewrite", error))?;
-                }
-                Ok(retired)
-            },
-        )
-        .await
+                        let mut rows = transaction
+                            .query(
+                                "SELECT presence.observation_id,
+                                        (
+                                            (
+                                                EXISTS (
+                                                    SELECT 1 FROM observations AS observation
+                                                    WHERE observation.observation_id = presence.observation_id
+                                                )
+                                                AND NOT EXISTS (
+                                                    SELECT 1 FROM observation_projection_dispositions AS disposition
+                                                    WHERE disposition.projector_version = ?4
+                                                      AND disposition.observation_id = presence.observation_id
+                                                )
+                                            )
+                                            OR EXISTS (
+                                                SELECT 1 FROM projection_queue AS queued
+                                                WHERE queued.observation_id = presence.observation_id
+                                                  AND (queued.revival_generation IS NOT NULL
+                                                       OR queued.revival_start_offset IS NOT NULL)
+                                            )
+                                        )
+                                 FROM observation_source_presence AS presence
+                                 WHERE presence.source_key = ?1 AND presence.generation <> ?2
+                                   AND presence.observation_id >= ?5
+                                 ORDER BY presence.observation_id
+                                 LIMIT (?3 + 1)",
+                                params![
+                                    key.as_str(),
+                                    generation.as_str(),
+                                    UNOFFERED_RECORD_PAGE_SIZE,
+                                    SESSION_MESSAGE_PROJECTOR_VERSION,
+                                    after_id.as_str(),
+                                ],
+                            )
+                            .await
+                            .map_err(|error| storage("read unoffered source records", error))?;
+                        let mut page = Vec::new();
+                        while let Some(row) = rows
+                            .next()
+                            .await
+                            .map_err(|error| storage("read unoffered source records", error))?
+                        {
+                            page.push((
+                                row.get::<String>(0).map_err(|error| {
+                                    storage("read unoffered source records", error)
+                                })?,
+                                row.get::<i64>(1).map_err(|error| {
+                                    storage("read unoffered source records", error)
+                                })? != 0,
+                            ));
+                        }
+                        drop(rows);
+                        // An extra read-only key establishes whether a full page
+                        // was the final page. Never retire or delete the lookahead.
+                        let has_next_page = page.len() > UNOFFERED_RECORD_PAGE_SIZE as usize;
+                        if has_next_page {
+                            page.truncate(UNOFFERED_RECORD_PAGE_SIZE as usize);
+                        }
+                        let mut retired = 0_u64;
+                        let mut retired_ids = Vec::new();
+                        for (observation_id, needs_retirement) in &page {
+                            if !needs_retirement {
+                                continue;
+                            }
+                            let retired_one: Pin<
+                                Box<dyn Future<Output = ProjectionStoreResult<bool>> + Send + '_>,
+                            > = Box::pin(retire_source_record(&transaction, observation_id));
+                            if retired_one.await? {
+                                retired += 1;
+                                retired_ids.push(observation_id.as_str());
+                            }
+                        }
+                        // One source can yield many effects for the same session.
+                        // Request one temporal reset per affected session in
+                        // this page's transaction, rather than per observation.
+                        request_session_temporal_resets(&transaction, &retired_ids).await?;
+                        if let Some((last_id, _)) = page.last() {
+                            transaction
+                                .execute(
+                                    "DELETE FROM observation_source_presence
+                                     WHERE source_key = ?1 AND generation <> ?2
+                                       AND observation_id >= ?4 AND observation_id <= ?3",
+                                    params![
+                                        key.as_str(),
+                                        generation.as_str(),
+                                        last_id.as_str(),
+                                        after_id.as_str(),
+                                    ],
+                                )
+                                .await
+                                .map_err(|error| storage("settle source rewrite page", error))?;
+                        }
+                        // Another admitted writer can append an older-generation
+                        // key behind this in-memory seek between commits. Recheck
+                        // the entire source before dropping the durable marker.
+                        let last_page = !has_next_page;
+                        let finished = if last_page {
+                            // With no seek this page covered the entire source
+                            // under the writer lock, so no second scan is needed.
+                            // A resumed page must check keys admitted behind it.
+                            let empty = if after_id.is_empty() {
+                                true
+                            } else {
+                                let mut remaining = transaction
+                                    .query(
+                                        "SELECT 1 FROM observation_source_presence
+                                         WHERE source_key = ?1 AND generation <> ?2 LIMIT 1",
+                                        params![key.as_str(), generation.as_str()],
+                                    )
+                                    .await
+                                    .map_err(|error| storage("check remaining source records", error))?;
+                                let empty = remaining
+                                    .next()
+                                    .await
+                                    .map_err(|error| storage("check remaining source records", error))?
+                                    .is_none();
+                                drop(remaining);
+                                empty
+                            };
+                            if empty {
+                                transaction
+                                    .execute(
+                                        "DELETE FROM observation_source_rewrites
+                                         WHERE source_key = ?1 AND generation = ?2",
+                                        params![key.as_str(), generation.as_str()],
+                                    )
+                                    .await
+                                    .map_err(|error| storage("settle source rewrite", error))?;
+                            }
+                            empty
+                        } else {
+                            false
+                        };
+                        let next_cursor = if last_page {
+                            String::new()
+                        } else {
+                            page.last().map(|(id, _)| id.clone()).unwrap_or_default()
+                        };
+                        Ok((retired, finished, next_cursor))
+                    },
+                )
+                .await?;
+            total_retired += retired;
+            if finished {
+                return Ok(total_retired);
+            }
+            resume_from = next_cursor;
+        }
     }
 }

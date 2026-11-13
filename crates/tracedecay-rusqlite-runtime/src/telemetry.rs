@@ -134,6 +134,8 @@ pub struct WriterTransactionMetrics {
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct SqliteVmSnapshot {
+    /// Completed prepared executions observed by the runtime, including reads.
+    pub statements: u64,
     pub fullscan_steps: u64,
     pub sort_steps: u64,
     pub vm_steps: u64,
@@ -142,6 +144,7 @@ pub struct SqliteVmSnapshot {
 impl SqliteVmSnapshot {
     pub(crate) fn saturating_add(self, other: Self) -> Self {
         Self {
+            statements: self.statements.saturating_add(other.statements),
             fullscan_steps: self.fullscan_steps.saturating_add(other.fullscan_steps),
             sort_steps: self.sort_steps.saturating_add(other.sort_steps),
             vm_steps: self.vm_steps.saturating_add(other.vm_steps),

@@ -523,14 +523,12 @@ exit /b %ERRORLEVEL%\r\n"
     )
 }
 
-/// Small multi-thread runtime for `#[test]`-driven async dashboard fixtures.
+/// Small runtime with production scheduling for dashboard fixtures.
 pub fn create_runtime() -> tokio::runtime::Runtime {
-    match tokio::runtime::Builder::new_multi_thread()
-        // Dashboard tests issue synchronous ureq calls while the in-process
-        // server and database handlers use this same runtime. Two workers can
-        // deadlock under load (one blocked in ureq, one awaiting DB work).
+    match tracedecay_runtime_core::native_runtime::default_builder()
+        // Keep the fixture's worker count while using the daemon's wake
+        // policy: work woken during a long poll must remain stealable.
         .worker_threads(4)
-        .enable_all()
         .build()
     {
         Ok(runtime) => runtime,

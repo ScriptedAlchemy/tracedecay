@@ -1,10 +1,10 @@
 //! Bounded, transient reader of a session's most recent turns.
 //!
-//! The decision engine ([`super::decision_engine`]) judges a prompt better
-//! with the last few turns of its own session than with the prompt alone. This
-//! module reads that tail from the daemon's own LCM raw-message store (the
-//! same transcript store every host ingests into) and returns a bounded
-//! [`SessionWindowV1`] for model input. A window is never persisted; only its
+//! The intent pass judges a boundary from the last few turns of its own
+//! session rather than from the boundary alone. This module reads that tail
+//! from the daemon's own LCM raw-message store (the same transcript store every
+//! host ingests into) and returns a bounded [`SessionWindowV1`] of observed
+//! tool activity. A window is never persisted; only its
 //! [`SessionWindowV1::window_digest`] is safe to keep as a cache or receipt
 //! key.
 //!
@@ -432,17 +432,6 @@ fn head_on_char_boundary(text: &str, max_bytes: usize) -> &str {
     &text[..end]
 }
 
-fn tail_on_char_boundary(text: &str, max_bytes: usize) -> &str {
-    if text.len() <= max_bytes {
-        return text;
-    }
-    let mut start = text.len() - max_bytes;
-    while !text.is_char_boundary(start) {
-        start += 1;
-    }
-    &text[start..]
-}
-
 fn assemble(
     request: &SessionWindowRequestV1<'_>,
     messages: Vec<SessionWindowMessageV1>,
@@ -522,46 +511,6 @@ fn window_digest(
         }
     }
     hasher.finalize().into()
-}
-
-/// Renders the window as a plain-text transcript, oldest to newest.
-///
-/// Lines are `User: …`, `Assistant: …`, `Tool result: …`, `Other: …` and, for
-/// each recorded call, `Tool <name>(<argument excerpt>)`. `prompt_excerpt`,
-/// the turn being decided on, is appended last as a user turn. When the whole
-/// exceeds `max_bytes` the front is cut on a character boundary so the newest
-/// text survives.
-pub fn render_window_state(
-    window: &SessionWindowV1,
-    prompt_excerpt: Option<&str>,
-    max_bytes: usize,
-) -> String {
-    let mut lines = Vec::new();
-    for message in &window.messages {
-        let label = match message.role {
-            SessionWindowRoleV1::User => "User",
-            SessionWindowRoleV1::Assistant => "Assistant",
-            SessionWindowRoleV1::Tool => "Tool result",
-            SessionWindowRoleV1::Other => "Other",
-        };
-        if !message.text.is_empty() {
-            lines.push(format!("{label}: {}", message.text));
-        }
-        for call in &message.tool_calls {
-            lines.push(format!(
-                "Tool {}({})",
-                call.name,
-                call.argument_excerpt.as_deref().unwrap_or_default()
-            ));
-        }
-    }
-    if let Some(prompt) = prompt_excerpt
-        .map(str::trim)
-        .filter(|prompt| !prompt.is_empty())
-    {
-        lines.push(format!("User: {prompt}"));
-    }
-    tail_on_char_boundary(&lines.join("\n"), max_bytes).to_owned()
 }
 
 #[cfg(test)]
@@ -1018,11 +967,6 @@ mod tests {
                 "{provider}"
             );
             assert!(window.messages[2].tool_calls.is_empty(), "{provider}");
-            assert!(
-                render_window_state(&window, None, 4096)
-                    .contains(&format!("Tool {tool}({payload})")),
-                "{provider}"
-            );
         }
     }
 
@@ -1127,86 +1071,6 @@ mod tests {
             window_digest(PROVIDER, SESSION, &messages),
             window_digest("claude", SESSION, &messages)
         );
-    }
-
-    fn message(
-        role: SessionWindowRoleV1,
-        text: &str,
-        calls: &[(&str, Option<&str>)],
-    ) -> SessionWindowMessageV1 {
-        SessionWindowMessageV1 {
-            role,
-            text: text.to_owned(),
-            tool_calls: calls
-                .iter()
-                .map(|(name, args)| SessionWindowToolCallV1 {
-                    name: (*name).to_owned(),
-                    argument_excerpt: args.map(str::to_owned),
-                })
-                .collect(),
-            store_id: 1,
-            timestamp_micros: None,
-        }
-    }
-
-    fn window_of(messages: Vec<SessionWindowMessageV1>) -> SessionWindowV1 {
-        SessionWindowV1 {
-            first_store_id: 1,
-            last_store_id: 1,
-            newest_timestamp_micros: None,
-            window_digest: [0; 32],
-            freshness: SessionWindowFreshnessV1::Unknown,
-            messages,
-        }
-    }
-
-    #[test]
-    fn the_rendered_state_is_a_plain_transcript_ending_in_the_prompt() {
-        let window = window_of(vec![
-            message(SessionWindowRoleV1::User, "where is the parser?", &[]),
-            message(
-                SessionWindowRoleV1::Assistant,
-                "Searching.",
-                &[("Grep", Some("parse_expr")), ("Read", None)],
-            ),
-            message(SessionWindowRoleV1::Tool, "src/parse.rs:10", &[]),
-        ]);
-        assert_eq!(
-            render_window_state(&window, Some("  now fix it  "), 4096),
-            "User: where is the parser?\n\
-             Assistant: Searching.\n\
-             Tool Grep(parse_expr)\n\
-             Tool Read()\n\
-             Tool result: src/parse.rs:10\n\
-             User: now fix it"
-        );
-        assert_eq!(
-            render_window_state(&window, None, 4096).lines().last(),
-            Some("Tool result: src/parse.rs:10")
-        );
-        assert_eq!(
-            render_window_state(&window, Some("   "), 4096),
-            render_window_state(&window, None, 4096)
-        );
-    }
-
-    #[test]
-    fn the_rendered_state_truncates_from_the_front_on_char_boundaries() {
-        let window = window_of(vec![
-            message(SessionWindowRoleV1::User, "old context é", &[]),
-            message(SessionWindowRoleV1::Assistant, "recent reply", &[]),
-        ]);
-        let full = render_window_state(&window, Some("latest prompt"), usize::MAX);
-        let cut = render_window_state(&window, Some("latest prompt"), 30);
-        assert!(cut.len() <= 30);
-        assert!(full.ends_with(&cut), "{cut:?} must be a suffix of {full:?}");
-        assert!(cut.ends_with("User: latest prompt"));
-
-        // A multi-byte character straddling the cut is dropped, not split.
-        let accented = window_of(vec![message(SessionWindowRoleV1::User, "ééééé", &[])]);
-        let rendered = render_window_state(&accented, None, 7);
-        assert_eq!(rendered, "ééé");
-        assert_eq!(render_window_state(&accented, None, 0), "");
     }
 
     #[test]
