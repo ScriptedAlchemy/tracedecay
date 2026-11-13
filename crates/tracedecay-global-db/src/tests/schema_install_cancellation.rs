@@ -183,64 +183,71 @@ async fn unpublished_existing_wal_is_refused_without_deleting_foreign_bytes() {
     assert_eq!(std::fs::read(&wal).unwrap(), foreign_wal);
 }
 
-#[tokio::test(flavor = "multi_thread")]
-async fn cancelled_daemon_attach_preserves_published_schema_and_reopens() {
-    let store = RegisteredStore::create();
-    let (outcome, total_polls) = store.attach_cancelled_at(usize::MAX).await;
-    outcome.unwrap();
-    let installed = store.external_schema_objects();
-    assert!(
-        installed
-            .iter()
-            .any(|(object, _)| object == "table:code_projects"),
-        "a completed attach installs the registered schema: {installed:?}"
-    );
+#[test]
+fn cancelled_daemon_attach_preserves_published_schema_and_reopens() {
+    tracedecay_runtime_core::native_runtime::default_builder()
+        .build()
+        .expect("schema cancellation runtime")
+        .block_on(async {
+            let store = RegisteredStore::create();
+            let (outcome, total_polls) = store.attach_cancelled_at(usize::MAX).await;
+            outcome.unwrap();
+            let installed = store.external_schema_objects();
+            assert!(
+                installed
+                    .iter()
+                    .any(|(object, _)| object == "table:code_projects"),
+                "a completed attach installs the registered schema: {installed:?}"
+            );
 
-    let stride = (total_polls / 20).max(1);
-    let mut cancelled = Vec::new();
-    let mut completed = Vec::new();
-    for cancel_at in std::iter::once(1)
-        .chain((2..total_polls).step_by(stride))
-        .chain([total_polls + 10])
-    {
-        // The reference admission, then each successful reopen below, leave
-        // this family closed with the exact baseline schema. Creating another
-        // family would repeat initialization without exercising another
-        // cancellation point. Keep real runtime retirement and reopening
-        // around every sampled admission.
-        let before_admission = store.external_schema_objects();
-        assert_eq!(before_admission, installed);
-        let (outcome, _) = store.attach_cancelled_at(cancel_at).await;
-        let objects = store.external_schema_objects();
-        match outcome {
-            Err(error) => {
-                assert!(
-                    error.is_store_open_cancelled(),
-                    "cancel at poll {cancel_at}/{total_polls} must fail typed: {error:?}"
-                );
-                assert_eq!(
-                    objects, before_admission,
-                    "cancel at poll {cancel_at}/{total_polls} must preserve the published schema"
-                );
-                cancelled.push(cancel_at);
+            let stride = (total_polls / 20).max(1);
+            let mut cancelled = Vec::new();
+            let mut completed = Vec::new();
+            for cancel_at in std::iter::once(1)
+                .chain((2..total_polls).step_by(stride))
+                .chain([total_polls + 10])
+            {
+                // The reference admission, then each successful reopen below, leave
+                // this family closed with the exact baseline schema. Creating another
+                // family would repeat initialization without exercising another
+                // cancellation point. Keep real runtime retirement and reopening
+                // around every sampled admission.
+                let before_admission = store.external_schema_objects();
+                assert_eq!(before_admission, installed);
+                let (outcome, _) = store.attach_cancelled_at(cancel_at).await;
+                let objects = store.external_schema_objects();
+                match outcome {
+                    Err(error) => {
+                        assert!(
+                            error.is_store_open_cancelled(),
+                            "cancel at poll {cancel_at}/{total_polls} must fail typed: {error:?}"
+                        );
+                        assert_eq!(
+                            objects, before_admission,
+                            "cancel at poll {cancel_at}/{total_polls} must preserve the published schema"
+                        );
+                        cancelled.push(cancel_at);
+                    }
+                    Ok(()) => {
+                        assert_eq!(
+                            objects, installed,
+                            "an admission completed before cancel at poll {cancel_at}/{total_polls} preserves the published schema"
+                        );
+                        completed.push(cancel_at);
+                    }
+                }
+                let (reopened, _) = store.attach_cancelled_at(usize::MAX).await;
+                reopened.unwrap_or_else(|error| {
+                    panic!(
+                        "reopen after cancel at poll {cancel_at}/{total_polls} failed: {error:?}"
+                    )
+                });
+                assert_eq!(store.external_schema_objects(), installed);
             }
-            Ok(()) => {
-                assert_eq!(
-                    objects, installed,
-                    "an admission completed before cancel at poll {cancel_at}/{total_polls} preserves the published schema"
-                );
-                completed.push(cancel_at);
-            }
-        }
-        let (reopened, _) = store.attach_cancelled_at(usize::MAX).await;
-        reopened.unwrap_or_else(|error| {
-            panic!("reopen after cancel at poll {cancel_at}/{total_polls} failed: {error:?}")
+            assert!(
+                cancelled.contains(&1),
+                "a cancel before admission starts must stop it; cancelled at {cancelled:?}"
+            );
+            assert!(completed.contains(&(total_polls + 10)));
         });
-        assert_eq!(store.external_schema_objects(), installed);
-    }
-    assert!(
-        cancelled.contains(&1),
-        "a cancel before admission starts must stop it; cancelled at {cancelled:?}"
-    );
-    assert!(completed.contains(&(total_polls + 10)));
 }
