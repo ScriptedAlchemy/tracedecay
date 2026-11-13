@@ -412,11 +412,20 @@ fn terminal_backlog_does_not_block_an_unrelated_store_writer() {
         for ordinal in 0..33 {
             seed_stack_signal(&shard, &format!("signal.{ordinal:03}"), 100 + ordinal, true).await;
         }
+        let other = tracedecay_global_db::tests::harness::RegisteredGlobalDbHarness::open("terminal-writer-b").await;
         let held = shard.begin_write_transaction().await.expect("hold A SQLite writer");
         let owner = daemon.coordinator.clone();
         let administration = daemon.engine.store_administration.clone();
         let tick = NativeTask::spawn(async move {
-            terminal_tick(&owner, &administration, None).await
+            // A queued store job or busy background CPU returns Retry before
+            // its page finishes. Drive that state as the cadence owner does.
+            loop {
+                let outcome = terminal_tick(&owner, &administration, None).await;
+                if outcome != MaintenanceTickOutcome::Retry {
+                    return outcome;
+                }
+                tokio::task::yield_now().await;
+            }
         }).expect("native terminal tick");
         let a_scope = store_writer_scope(shard.db_path().parent().expect("A store root"), StoreWriterClass::Content);
         native_runtime::timeout(Duration::from_secs(10), async {
@@ -425,7 +434,6 @@ fn terminal_backlog_does_not_block_an_unrelated_store_writer() {
                 tokio::task::yield_now().await;
             }
         }).await.expect("maintenance admitted A");
-        let other = tracedecay_global_db::tests::harness::RegisteredGlobalDbHarness::open("terminal-writer-b").await;
         let b_scope = store_writer_scope(other.registered.db_path().parent().expect("B store root"), StoreWriterClass::Content);
         let progressed = native_runtime::timeout(Duration::from_secs(2),
             daemon.engine.store_administration.with_writer_in(b_scope, || async {
@@ -438,7 +446,9 @@ fn terminal_backlog_does_not_block_an_unrelated_store_writer() {
         // settles its admitted owner and releases every fixture lease.
         held.rollback().await.expect("release A");
         let outcome = native_runtime::timeout(Duration::from_secs(10), tick.wait()).await.expect("terminal tick settled");
-        assert!(matches!(outcome, native_runtime::NativeTaskOutcome::Completed(_)));
+        assert!(matches!(outcome, native_runtime::NativeTaskOutcome::Completed(
+            MaintenanceTickOutcome::Continue(MaintenanceContinuation::StoreRetention)
+        )), "the terminal page must finish before its durable result is asserted: {outcome:?}");
         assert!(progressed.is_ok(), "B must write while A is suspended with a terminal backlog");
         assert_eq!(retired_signals(&shard).await, 16, "one admission runs one bounded terminal page");
         assert_eq!(retirement_frontiers(&shard).await, 1);
