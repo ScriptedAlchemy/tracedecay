@@ -738,7 +738,7 @@ jobs:
               *) echo "Expected a Bazel target pattern: $target" >&2; exit 1 ;;
             esac
           done
-          bazel test --config=ci-windows --jobs=${{ steps.bazel.outputs.fleet-enabled == 'true' && '16' || '2' }} --test_output=all --test_env=RUST_TEST_NOCAPTURE=1 "${targets[@]}"
+          bazel test --config=ci-windows --jobs=${{ steps.bazel.outputs.fleet-enabled == 'true' && '16' || '2' }} --test_output=all "${targets[@]}"
 
       - name: Upload failed test diagnostics
         if: failure()
