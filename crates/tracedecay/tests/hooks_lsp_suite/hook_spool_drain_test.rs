@@ -439,16 +439,30 @@ fn a_receipt_backlog_beyond_one_batch_drains_without_waiting_for_the_sweep() {
         "all receipts must be durable before the daemon restarts"
     );
 
-    let _daemon = spawn_tracedecay_daemon(&home);
+    let log = home.join("receipt-backlog-daemon.log");
+    let _daemon = spawn_tracedecay_daemon_logged(&home, &log, |command| {
+        command.env("TRACEDECAY_SPAN_TIMINGS", "1");
+        command.env(
+            "RUST_LOG",
+            concat!(
+                "info,tracedecay::daemon::hook_v2_replay_consumer=trace,",
+                "tracedecay_hooks::delivery_spool=trace,",
+                "tracedecay_application::observability=trace"
+            ),
+        );
+    });
     assert!(
         receipt_drain_latency(&receipts, PROMPT_DRAIN).is_some(),
-        "a {BACKLOG}-receipt backlog must drain within {PROMPT_DRAIN:?}, not one batch per 30 s sweep; {} left",
-        published_receipts(&receipts).len()
+        "a {BACKLOG}-receipt backlog must drain within {PROMPT_DRAIN:?}, not one batch per 30 s sweep; {} left\ndaemon log:\n{}",
+        published_receipts(&receipts).len(),
+        std::fs::read_to_string(&log).unwrap()
     );
     let drained = json!({ "status": "drained" });
     assert_eq!(
         await_hook_replay_status(&home, &project, &drained, PROMPT_DRAIN),
-        drained
+        drained,
+        "daemon log:\n{}",
+        std::fs::read_to_string(&log).unwrap()
     );
 }
 
