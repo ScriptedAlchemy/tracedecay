@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.0-beta.102](https://github.com/ScriptedAlchemy/tracedecay/compare/v1.0.0-beta.101...v1.0.0-beta.102) (2026-11-13)
+
+
+### Bug Fixes
+
+* **sessions:** preserve historical admission FIFO across live wakes ([5a5e857](https://github.com/ScriptedAlchemy/tracedecay/commit/5a5e857a5d2b5f0725f46270b0fcec133711f09b))
+* **storage:** stream growth measurements and preserve registry errors ([0923df7](https://github.com/ScriptedAlchemy/tracedecay/commit/0923df7d707af7ab4c31b7c277c758c547cab496))
+
 ## [1.0.0-beta.101](https://github.com/ScriptedAlchemy/tracedecay/compare/v1.0.0-beta.100...v1.0.0-beta.101) (2026-11-13)
 
 
