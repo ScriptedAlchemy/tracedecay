@@ -1077,13 +1077,16 @@ async fn no_explicit_path_prefers_initialize_roots_over_global_fallback() {
     register_global_project(home.path(), stale.path()).await;
     let _daemon = common::spawn_tracedecay_daemon(home.path());
 
-    let output = run_serve_runtime_with_initialize_root(
-        home.path(),
-        cwd.path(),
-        None,
-        file_uri(active.path()),
-        "active",
-    );
+    // The stdio session blocks while the initialized projects still have
+    // runtime-owned work, so keep the current-thread worker available.
+    let home_path = home.path().to_path_buf();
+    let cwd_path = cwd.path().to_path_buf();
+    let root_uri = file_uri(active.path());
+    let output = tokio::task::spawn_blocking(move || {
+        run_serve_runtime_with_initialize_root(&home_path, &cwd_path, None, root_uri, "active")
+    })
+    .await
+    .expect("serve runtime host session");
 
     assert_eq!(
         canonical_path_string(Path::new(&runtime_project_root(&output.stdout, 2))),
