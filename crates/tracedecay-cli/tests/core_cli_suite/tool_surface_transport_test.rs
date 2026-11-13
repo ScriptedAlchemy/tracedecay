@@ -554,8 +554,7 @@ fn tool_diagnostics_names_the_install_command_without_a_compiler() {
     });
     let _daemon = spawn_tracedecay_daemon(&home_path);
 
-    let outcome =
-        await_cli_diagnostics_discovery(&home_path, &project_path, DIAGNOSTICS_FILE_ARGS);
+    let outcome = await_cli_diagnostics_discovery(&home_path, &project_path, DIAGNOSTICS_FILE_ARGS);
     assert_eq!(
         outcome.problem_code().as_deref(),
         Some("application.diagnostics.producer-missing"),
