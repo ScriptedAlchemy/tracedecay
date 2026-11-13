@@ -96,7 +96,7 @@ impl RegisteredStore {
     /// Inspect a completed family with an ordinary independent read-only SQLite
     /// connection. Reopening the registered runtime for every observation would
     /// perform another full attachment lifecycle and obscure cancellation timing.
-    fn external_schema_objects(&self) -> Vec<String> {
+    fn external_schema_objects(&self) -> Vec<(String, Option<String>)> {
         let connection = rusqlite::Connection::open_with_flags(
             &self.path,
             rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
@@ -104,12 +104,12 @@ impl RegisteredStore {
         .unwrap();
         let mut statement = connection
             .prepare(
-                "SELECT type || ':' || name FROM sqlite_schema
+                "SELECT type || ':' || name, sql FROM sqlite_schema
                  WHERE name NOT LIKE 'sqlite_%' ORDER BY type, name",
             )
             .unwrap();
         statement
-            .query_map([], |row| row.get::<_, String>(0))
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
             .unwrap()
             .map(Result::unwrap)
             .collect()
@@ -185,12 +185,14 @@ async fn unpublished_existing_wal_is_refused_without_deleting_foreign_bytes() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn cancelled_daemon_attach_preserves_published_schema_and_reopens() {
-    let reference = RegisteredStore::create();
-    let (outcome, total_polls) = reference.attach_cancelled_at(usize::MAX).await;
+    let store = RegisteredStore::create();
+    let (outcome, total_polls) = store.attach_cancelled_at(usize::MAX).await;
     outcome.unwrap();
-    let installed = reference.external_schema_objects();
+    let installed = store.external_schema_objects();
     assert!(
-        installed.contains(&"table:code_projects".to_owned()),
+        installed
+            .iter()
+            .any(|(object, _)| object == "table:code_projects"),
         "a completed attach installs the registered schema: {installed:?}"
     );
 
@@ -201,12 +203,11 @@ async fn cancelled_daemon_attach_preserves_published_schema_and_reopens() {
         .chain((2..total_polls).step_by(stride))
         .chain([total_polls + 10])
     {
-        let store = RegisteredStore::create();
-        // Cancellation cannot modify the already-published schema or
-        // prevent the next admission from reopening the same family.
-        let (owner, runtime, retirement) = store.publish().await.into_parts();
-        drop((owner, runtime));
-        retire_runtime(retirement).await;
+        // The reference admission, then each successful reopen below, leave
+        // this family closed with the exact baseline schema. Creating another
+        // family would repeat initialization without exercising another
+        // cancellation point. Keep real runtime retirement and reopening
+        // around every sampled admission.
         let before_admission = store.external_schema_objects();
         assert_eq!(before_admission, installed);
         let (outcome, _) = store.attach_cancelled_at(cancel_at).await;
