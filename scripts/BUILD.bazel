@@ -196,6 +196,7 @@ exports_files(
 rust_test(
     name = "rust_test_environment_probe",
     srcs = ["bazel/rust_test_environment_probe.rs"],
+    tags = ["no-cache", "no-local"],
     runfiles_env = {
         "CARGO_BIN_EXE_runfile-probe": ":bazel/rust_test_environment_probe.txt",
         "TRACEDECAY_RUNFILE_PROBE": ":bazel/rust_test_environment_probe.txt",
