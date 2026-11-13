@@ -387,9 +387,9 @@ fn run_with_pinned_summarizer_binding<T>(future: impl std::future::Future<Output
     let _binding = PINNED_SUMMARIZER_BINDING
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    tokio::runtime::Builder::new_multi_thread()
+    // Store and settlement tasks inherit this runtime's scheduling policy.
+    tracedecay_runtime_core::native_runtime::default_builder()
         .worker_threads(2)
-        .enable_all()
         .build()
         .expect("build lcm effects test runtime")
         .block_on(future)
@@ -3425,13 +3425,22 @@ fn retained_summary_rejects_a_role_revision_during_model_generation() {
         fixture.pin_cursor_agent(&cursor_bin);
 
         let convergence_db = db.clone();
-        let convergence = tokio::spawn(async move {
+        let mut convergence = tokio::spawn(async move {
             super::super::lcm_summary_convergence::run_summary_convergence_page(convergence_db, 1)
                 .await
         });
         tokio::time::timeout(std::time::Duration::from_secs(3), async {
-            while !started.exists() {
-                tokio::task::yield_now().await;
+            tokio::select! {
+                result = &mut convergence => {
+                    panic!(
+                        "summary convergence ended before provider revision barrier: {result:?}"
+                    );
+                }
+                () = async {
+                    while !started.exists() {
+                        tokio::task::yield_now().await;
+                    }
+                } => {}
             }
         })
         .await
