@@ -227,6 +227,38 @@ pub trait CiReadOnlyProviderArchiveV1 {
         context: &'a RequestContext,
         request: &'a CiFailureLocalizationRequestV1,
     ) -> FeedbackPortFuture<'a, CiProviderReadResultV1<Self::Record>>;
+
+    /// Reads the failure an earlier refresh retained for this exact scope
+    /// without any provider I/O. The caller's grant and source policy are
+    /// re-checked; the result reports what the retained record supports.
+    fn read_retained<'a>(
+        &'a self,
+        context: &'a RequestContext,
+        scope: &'a FeedbackScopeV1,
+    ) -> FeedbackPortFuture<'a, CiRetainedReadV1<Self::Record>>;
+}
+
+/// Exact-scope retained CI evidence, selected the way discovery selects a
+/// run: one retained failure is read, several are ambiguous, none is absent.
+#[derive(Clone, Debug, PartialEq)]
+pub enum CiRetainedReadV1<R> {
+    NotRetained,
+    Ambiguous,
+    Denied,
+    Unavailable,
+    Read {
+        request: Box<CiFailureLocalizationRequestV1>,
+        read: Box<CiProviderReadResultV1<R>>,
+    },
+}
+
+/// Retained localization for local feedback. `Localized` carries the same
+/// typed port outcome an explicit refresh would produce from that record.
+#[derive(Clone, Debug, PartialEq)]
+pub enum CiRetainedLocalizationV1 {
+    NotRetained,
+    Ambiguous,
+    Read(CiFailureLocalizationPortOutcomeV1),
 }
 
 impl<T> CiReadOnlyProviderArchiveV1 for Arc<T>
@@ -241,6 +273,14 @@ where
         request: &'a CiFailureLocalizationRequestV1,
     ) -> FeedbackPortFuture<'a, CiProviderReadResultV1<Self::Record>> {
         self.as_ref().read_record(context, request)
+    }
+
+    fn read_retained<'a>(
+        &'a self,
+        context: &'a RequestContext,
+        scope: &'a FeedbackScopeV1,
+    ) -> FeedbackPortFuture<'a, CiRetainedReadV1<Self::Record>> {
+        self.as_ref().read_retained(context, scope)
     }
 }
 
@@ -309,82 +349,141 @@ where
                 return CiFailureLocalizationPortOutcomeV1::Denied;
             }
             let read = self.source.read_record(context, request).await;
-            if !context_allows_feedback_operation(
-                context,
-                &request.scope,
-                CI_FAILURE_LOCALIZE_CAPABILITY_ID_V1,
-                CI_FAILURE_LOCALIZE_USE_CASE_ID_V1,
-            ) {
-                return CiFailureLocalizationPortOutcomeV1::Denied;
-            }
-            if !read.validate_for(request) {
-                return CiFailureLocalizationPortOutcomeV1::Unavailable;
-            }
-            match read.state {
-                CiFailureLocalizationStateV1::Denied => {
-                    return CiFailureLocalizationPortOutcomeV1::Denied;
-                }
-                CiFailureLocalizationStateV1::Unavailable => {
-                    return CiFailureLocalizationPortOutcomeV1::Unavailable;
-                }
-                CiFailureLocalizationStateV1::Failed => {
-                    return match read.source_degradation {
-                        Some(CiFailureSourceDegradationV1::RateLimited(checkpoint)) => {
-                            CiFailureLocalizationPortOutcomeV1::RateLimited(checkpoint)
-                        }
-                        Some(CiFailureSourceDegradationV1::Failed(cause)) => {
-                            CiFailureLocalizationPortOutcomeV1::Failed(cause)
-                        }
-                        None => CiFailureLocalizationPortOutcomeV1::Failed(
-                            CiFailureSourceFailureV1::Schema,
-                        ),
-                    };
-                }
-                CiFailureLocalizationStateV1::Complete
-                | CiFailureLocalizationStateV1::Partial
-                | CiFailureLocalizationStateV1::Stale => {}
-            }
-            let Some(record) = read.record.as_ref() else {
-                return CiFailureLocalizationPortOutcomeV1::Unavailable;
-            };
-            let Some(localized) = self
-                .exact_evidence
-                .map_exact_evidence(context, request, &read, record)
-                .await
-            else {
-                if !context_allows_feedback_operation(
-                    context,
-                    &request.scope,
-                    CI_FAILURE_LOCALIZE_CAPABILITY_ID_V1,
-                    CI_FAILURE_LOCALIZE_USE_CASE_ID_V1,
-                ) {
-                    return CiFailureLocalizationPortOutcomeV1::Denied;
-                }
-                return CiFailureLocalizationPortOutcomeV1::Unavailable;
-            };
-            if !context_allows_feedback_operation(
-                context,
-                &request.scope,
-                CI_FAILURE_LOCALIZE_CAPABILITY_ID_V1,
-                CI_FAILURE_LOCALIZE_USE_CASE_ID_V1,
-            ) {
-                return CiFailureLocalizationPortOutcomeV1::Denied;
-            }
-            if localized.validate().is_err()
-                || localized.provider != read.provider
-                || localized.run != read.run
-                || !localization_not_stronger_than_read(
-                    read.state,
-                    read.coverage,
-                    localized.state,
-                    localized.coverage,
-                )
-                || localized.branch.scope != request.scope
-            {
-                return CiFailureLocalizationPortOutcomeV1::Unavailable;
-            }
-            CiFailureLocalizationPortOutcomeV1::Localized(Box::new(localized))
+            self.localize_read(context, request, read).await
         })
+    }
+}
+
+impl<S, A> DaemonCiReadOnlyEvidenceSourceV1<S, A>
+where
+    S: CiReadOnlyProviderArchiveV1 + Sync,
+    A: CiExactEvidenceAuthorityV1<S::Record> + Sync,
+{
+    /// Localizes the failure retained for this exact scope through the same
+    /// exact-evidence authority as an explicit refresh, with no provider I/O.
+    pub fn read_retained_localization<'a>(
+        &'a self,
+        context: &'a RequestContext,
+        scope: &'a FeedbackScopeV1,
+    ) -> FeedbackPortFuture<'a, CiRetainedLocalizationV1> {
+        Box::pin(async move {
+            if scope.validate().is_err() {
+                return CiRetainedLocalizationV1::Read(
+                    CiFailureLocalizationPortOutcomeV1::Unavailable,
+                );
+            }
+            if !context_allows_feedback_operation(
+                context,
+                scope,
+                CI_FAILURE_LOCALIZE_CAPABILITY_ID_V1,
+                CI_FAILURE_LOCALIZE_USE_CASE_ID_V1,
+            ) {
+                return CiRetainedLocalizationV1::Read(CiFailureLocalizationPortOutcomeV1::Denied);
+            }
+            match self.source.read_retained(context, scope).await {
+                CiRetainedReadV1::NotRetained => CiRetainedLocalizationV1::NotRetained,
+                CiRetainedReadV1::Ambiguous => CiRetainedLocalizationV1::Ambiguous,
+                CiRetainedReadV1::Denied => {
+                    CiRetainedLocalizationV1::Read(CiFailureLocalizationPortOutcomeV1::Denied)
+                }
+                CiRetainedReadV1::Unavailable => {
+                    CiRetainedLocalizationV1::Read(CiFailureLocalizationPortOutcomeV1::Unavailable)
+                }
+                CiRetainedReadV1::Read { request, read } => {
+                    if request.scope != *scope || request.validate().is_err() {
+                        return CiRetainedLocalizationV1::Read(
+                            CiFailureLocalizationPortOutcomeV1::Unavailable,
+                        );
+                    }
+                    CiRetainedLocalizationV1::Read(
+                        self.localize_read(context, &request, *read).await,
+                    )
+                }
+            }
+        })
+    }
+
+    async fn localize_read(
+        &self,
+        context: &RequestContext,
+        request: &CiFailureLocalizationRequestV1,
+        read: CiProviderReadResultV1<S::Record>,
+    ) -> CiFailureLocalizationPortOutcomeV1 {
+        if !context_allows_feedback_operation(
+            context,
+            &request.scope,
+            CI_FAILURE_LOCALIZE_CAPABILITY_ID_V1,
+            CI_FAILURE_LOCALIZE_USE_CASE_ID_V1,
+        ) {
+            return CiFailureLocalizationPortOutcomeV1::Denied;
+        }
+        if !read.validate_for(request) {
+            return CiFailureLocalizationPortOutcomeV1::Unavailable;
+        }
+        match read.state {
+            CiFailureLocalizationStateV1::Denied => {
+                return CiFailureLocalizationPortOutcomeV1::Denied;
+            }
+            CiFailureLocalizationStateV1::Unavailable => {
+                return CiFailureLocalizationPortOutcomeV1::Unavailable;
+            }
+            CiFailureLocalizationStateV1::Failed => {
+                return match read.source_degradation {
+                    Some(CiFailureSourceDegradationV1::RateLimited(checkpoint)) => {
+                        CiFailureLocalizationPortOutcomeV1::RateLimited(checkpoint)
+                    }
+                    Some(CiFailureSourceDegradationV1::Failed(cause)) => {
+                        CiFailureLocalizationPortOutcomeV1::Failed(cause)
+                    }
+                    None => {
+                        CiFailureLocalizationPortOutcomeV1::Failed(CiFailureSourceFailureV1::Schema)
+                    }
+                };
+            }
+            CiFailureLocalizationStateV1::Complete
+            | CiFailureLocalizationStateV1::Partial
+            | CiFailureLocalizationStateV1::Stale => {}
+        }
+        let Some(record) = read.record.as_ref() else {
+            return CiFailureLocalizationPortOutcomeV1::Unavailable;
+        };
+        let Some(localized) = self
+            .exact_evidence
+            .map_exact_evidence(context, request, &read, record)
+            .await
+        else {
+            if !context_allows_feedback_operation(
+                context,
+                &request.scope,
+                CI_FAILURE_LOCALIZE_CAPABILITY_ID_V1,
+                CI_FAILURE_LOCALIZE_USE_CASE_ID_V1,
+            ) {
+                return CiFailureLocalizationPortOutcomeV1::Denied;
+            }
+            return CiFailureLocalizationPortOutcomeV1::Unavailable;
+        };
+        if !context_allows_feedback_operation(
+            context,
+            &request.scope,
+            CI_FAILURE_LOCALIZE_CAPABILITY_ID_V1,
+            CI_FAILURE_LOCALIZE_USE_CASE_ID_V1,
+        ) {
+            return CiFailureLocalizationPortOutcomeV1::Denied;
+        }
+        if localized.validate().is_err()
+            || localized.provider != read.provider
+            || localized.run != read.run
+            || !localization_not_stronger_than_read(
+                read.state,
+                read.coverage,
+                localized.state,
+                localized.coverage,
+            )
+            || localized.branch.scope != request.scope
+        {
+            return CiFailureLocalizationPortOutcomeV1::Unavailable;
+        }
+        CiFailureLocalizationPortOutcomeV1::Localized(Box::new(localized))
     }
 }
 
@@ -418,6 +517,22 @@ const fn localization_not_stronger_than_read(
 
 pub type ConcreteCiFailureLocalizationOwnerV1<S, A> =
     CiFailureLocalizationAdapter<DaemonCiReadOnlyEvidenceSourceV1<S, A>>;
+
+impl<S, A> ConcreteCiFailureLocalizationOwnerV1<S, A>
+where
+    S: CiReadOnlyProviderArchiveV1 + Sync,
+    A: CiExactEvidenceAuthorityV1<S::Record> + Sync,
+{
+    /// Retained CI evidence for local feedback; see
+    /// [`DaemonCiReadOnlyEvidenceSourceV1::read_retained_localization`].
+    pub fn retained<'a>(
+        &'a self,
+        context: &'a RequestContext,
+        scope: &'a FeedbackScopeV1,
+    ) -> FeedbackPortFuture<'a, CiRetainedLocalizationV1> {
+        self.source().read_retained_localization(context, scope)
+    }
+}
 
 /// Single CI owner factory for central registration. The canonical result
 /// continues through the existing Plan 09 finding contributor.
