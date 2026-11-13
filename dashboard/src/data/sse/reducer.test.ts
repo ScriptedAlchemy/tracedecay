@@ -321,4 +321,27 @@ describe("SSE reducer, housekeeping", () => {
     expect(r.ingest(ev({ event_revision: 1, event_id: "e1" }))).toBe(false);
     expect(r.takeBatch().events).toHaveLength(0);
   });
+
+  it("keeps evicting the oldest identity across sustained churn, not only the first", () => {
+    const r = createSseReducer<Body>({ sizeOf: () => 1 });
+    const total = MAX_OBSERVED_IDENTITIES + MAX_OBSERVED_IDENTITIES / 2;
+    for (let revision = 1; revision <= total; revision += 1) {
+      r.ingest(ev({ event_revision: revision, event_id: `e${revision}` }));
+      if (revision % MAX_QUEUED_EVENTS === 0) r.takeBatch();
+    }
+    r.takeBatch();
+    // The cap has to hold through half a ceiling of evictions, not just at the
+    // first one: an eviction cursor that stalls after its first advance would
+    // leave the identity set growing without bound from here on.
+    expect(r.stats().observedIdentities).toBe(MAX_OBSERVED_IDENTITIES);
+
+    // A generation change restarts this stream's revision sequence, which is
+    // the one case where the identity set, not the watermark, recognizes a
+    // redelivery. The oldest identity has been evicted by now, the newest has
+    // not, so a redelivery of each is the observable proof of FIFO eviction.
+    const redelivered = (revision: number) =>
+      ev({ event_revision: revision, event_id: `e${revision}`, generation: 2 });
+    expect(r.ingest(redelivered(1))).toBe(true);
+    expect(r.ingest(redelivered(total))).toBe(false);
+  });
 });

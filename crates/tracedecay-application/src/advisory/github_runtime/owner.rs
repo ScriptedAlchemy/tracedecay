@@ -336,6 +336,15 @@ where
         }
     }
 
+    /// Retained review state for local feedback: no provider or stack read.
+    pub fn retained<'a>(
+        &'a self,
+        context: &'a RequestContext,
+        request: &'a GitHubReviewReadRequestV1,
+    ) -> FeedbackPortFuture<'a, GitHubReviewRefreshOutcomeV1> {
+        self.coordinator.retained(context, request)
+    }
+
     pub fn authorize<'a>(
         &'a self,
         context: &'a RequestContext,
@@ -429,13 +438,14 @@ mod tests {
     use std::sync::{Arc, mpsc};
 
     use serde_json::json;
+    use tracedecay_contracts::CancellationContext;
     use tracedecay_domain::configuration::GitHubStackedPullRequestPolicyV1;
     use tracedecay_domain::feedback::{
         GitHubReviewCurrentBranchRemapV1, GitHubReviewImmutableAnchorV1,
     };
     use tracedecay_domain::{
         CommitId, GitHubStackCapabilityStateV1, GitTopologyAnchorTargetV1, IntervalStateV1,
-        ProviderId, RetrievalAnchorRecord, RetrievalAnchorTarget,
+        ProviderId, RetrievalAnchorRecord, RetrievalAnchorTarget, UtcMicros,
     };
     use tracedecay_global_db::tests::harness::open_registered_test_database_fixture;
     use tracedecay_runtime_core::db::{
@@ -487,6 +497,184 @@ mod tests {
         ) -> FeedbackPortFuture<'a, GitHubProviderLifecycleV1> {
             Box::pin(async { GitHubProviderLifecycleV1::Ready })
         }
+    }
+
+    /// Explicit refresh is the only writer of retained review state; local
+    /// feedback reads it back from the real store without a provider
+    /// connection, and never waits on (or is cancelled by) a held refresh.
+    #[tokio::test]
+    async fn retained_reads_serve_refreshed_state_without_waiting_on_a_held_refresh() {
+        let repository = "runtime-retained-isolation";
+        let mut scope = scope(repository);
+        scope.head_commit_id = CommitId::new("dddddddddddddddddddddddddddddddddddddddd").unwrap();
+        let context = context(&scope);
+        let mut request = request(scope.clone());
+        request.operation = GitHubReviewReadOperationV1::RestListPullRequestReviewComments;
+        let storage = tempfile::tempdir().unwrap();
+        let (anchor_database, _anchor_owner) = open_registered_test_database_fixture(
+            &storage.path().join("project-sessions.db"),
+            TestDatabaseRuntimeScope::ProjectSessions {
+                project_id: scope.project_id.clone(),
+            },
+        )
+        .await
+        .unwrap();
+        crate::register_test_schema_installer();
+        let review_path = storage.path().join("review.db");
+        let authority =
+            DatabaseAuthority::acquire_test(&review_path, "github-runtime-retained").unwrap();
+        let (review_database, _) = Database::publish_test_runtime(
+            &review_path,
+            &authority,
+            TestDatabaseRuntimeMode::Initialize,
+        )
+        .await
+        .unwrap();
+        let coordinator = Arc::new(DaemonGitHubStackCoordinatorV1::default());
+        coordinator
+            .register_scope(context.scope(), GitHubStackedPullRequestPolicyV1::Disabled)
+            .unwrap();
+        let (_credential_authority, resolution) =
+            registered_fixture_credential(repository, FixtureCredentialAuthorityModeV1::Verified);
+        let RegisteredGitHubReadOnlyCredentialV1::Verified(credential) = resolution else {
+            panic!("verified fixture credential must resolve");
+        };
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let (arrived, request_arrived) = tokio::sync::oneshot::channel();
+        let (release, released) = mpsc::channel::<()>();
+        let server = std::thread::spawn(move || {
+            let mut connections = 0_usize;
+            // Explicit refresh: a complete collection needs two agreeing scans.
+            for _ in 0..2 {
+                let (mut review, _) = listener.accept().unwrap();
+                connections += 1;
+                let _ = read_http_request_with_headers(&mut review);
+                write_http_json(&mut review, &json!([]));
+            }
+            // Second explicit refresh, held at its first provider read.
+            let (mut held, _) = listener.accept().unwrap();
+            connections += 1;
+            let _ = read_http_request_with_headers(&mut held);
+            arrived.send(()).unwrap();
+            released.recv().unwrap();
+            drop(held);
+            listener.set_nonblocking(true).unwrap();
+            let unexpected = std::iter::from_fn(|| listener.accept().ok()).count();
+            connections + unexpected
+        });
+        let client = local_client(
+            address,
+            GitHubRepositoryTargetV1 {
+                owner: "ScriptedAlchemy".to_owned(),
+                repository: repository.to_owned(),
+                pull_request_number: 421,
+                pull_request_id: request.pull_request_id.clone(),
+            },
+            credential,
+        );
+        let store = ProjectGitHubReviewStoreV1::new(review_database, scope.clone()).unwrap();
+        let decoder = GitHubOfficialResponseDecoderV1::new(
+            GitHubReviewProviderIdentityV1 {
+                provider: ProviderId::new("provider.github").unwrap(),
+                repository_owner: "ScriptedAlchemy".to_owned(),
+                repository_name: repository.to_owned(),
+                pull_request_number: 421,
+                base_commit_id: CommitId::new("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa").unwrap(),
+                head_commit_id: scope.head_commit_id.clone(),
+                merge_base_commit_id: CommitId::new("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+                    .unwrap(),
+            },
+            EmptyReviewAnchors,
+        )
+        .unwrap();
+        let transport =
+            GitHubReadOnlyRuntimeTransportV1::new(store.clone(), client.clone(), decoder);
+        let connector = GitHubReadOnlyConnector::new(
+            GitHubReadOnlyDescriptorSetV1::new(vec![rest_descriptor(request.operation)]).unwrap(),
+            transport,
+            EmptyReviewAnchors,
+        )
+        .unwrap();
+        let source_access: Arc<dyn GitHubSourceAccessAuthorityV1> = Arc::new(ReadySource);
+        let anchors =
+            ProjectGitHubStackAnchorAuthorityV1::new(anchor_database.clone(), scope.clone())
+                .unwrap();
+        let owner = Arc::new(GitHubReviewRuntimeOwnerV1 {
+            coordinator: GitHubReviewRefreshCoordinatorV1::new(
+                connector,
+                store,
+                Arc::clone(&source_access),
+            ),
+            source_access,
+            stack_client: client,
+            stack_scope: context.scope().clone(),
+            stack_provider: ProviderId::new("provider.github").unwrap(),
+            stack_coordinator: Arc::clone(&coordinator),
+            stack_anchors: anchors,
+            stack_observability: None,
+        });
+
+        assert_eq!(
+            owner.retained(&context, &request).await,
+            GitHubReviewRefreshOutcomeV1::Unavailable,
+            "nothing is retained before an explicit refresh"
+        );
+        let GitHubReviewRefreshOutcomeV1::Stored(refreshed) =
+            owner.refresh(&context, &request).await
+        else {
+            panic!("the explicit refresh must retain its agreed scans");
+        };
+        let GitHubReviewRefreshOutcomeV1::Stored(retained) =
+            owner.retained(&context, &request).await
+        else {
+            panic!("local feedback must read what the refresh retained");
+        };
+        assert_eq!(retained.state, refreshed.state);
+
+        // Hold the next explicit refresh inside its provider read.
+        let refresh_context = context
+            .clone()
+            .with_cancellation(CancellationContext::active("cancel.github.held-refresh").unwrap());
+        let held = {
+            let (owner, request) = (Arc::clone(&owner), request.clone());
+            tokio::spawn(async move { owner.refresh(&refresh_context, &request).await })
+        };
+        request_arrived.await.unwrap();
+        let GitHubReviewRefreshOutcomeV1::Stored(during) = owner.retained(&context, &request).await
+        else {
+            panic!("a held refresh must not hold local retained reads");
+        };
+        assert_eq!(during.state, refreshed.state);
+        assert!(
+            !held.is_finished(),
+            "the local read completed while the refresh was still held"
+        );
+
+        // Abandoning the remote refresh stops its own work only.
+        held.abort();
+        assert!(held.await.unwrap_err().is_cancelled());
+        release.send(()).unwrap();
+        let GitHubReviewRefreshOutcomeV1::Stored(after) = owner.retained(&context, &request).await
+        else {
+            panic!("an abandoned refresh must not disturb retained evidence");
+        };
+        assert_eq!(after.state, refreshed.state);
+
+        // Local cancellation still stops local work.
+        let cancelled = context.clone().with_cancellation(
+            CancellationContext::cancelled("cancel.github.local", UtcMicros(5)).unwrap(),
+        );
+        assert_eq!(
+            owner.retained(&cancelled, &request).await,
+            GitHubReviewRefreshOutcomeV1::Cancelled
+        );
+
+        assert_eq!(
+            server.join().unwrap(),
+            3,
+            "only explicit refreshes reach the provider: two agreeing scans plus the held read"
+        );
     }
 
     #[tokio::test]

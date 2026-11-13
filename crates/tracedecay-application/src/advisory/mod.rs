@@ -25,13 +25,13 @@ pub mod runtime;
 pub use ci::{CiFailureLocalizationAdapter, CiReadOnlyEvidenceSource};
 pub use ci_runtime::{
     CiCodeAnchorStoreV1, CiExactCodeEvidenceV1, CiExactEvidenceAuthorityV1, CiProviderReadResultV1,
-    CiReadOnlyProviderArchiveV1, CiRetainedObservationManifestEntryV1,
+    CiReadOnlyProviderArchiveV1, CiRetainedLocalizationV1, CiRetainedObservationManifestEntryV1,
     CiRetainedObservationManifestLoadOutcomeV1, CiRetainedObservationManifestV1,
     CiRetainedProviderObservationAuthorityV1, CiRetainedProviderObservationV1,
-    CiRetainedProviderRecordV1, CiSourceAccessAuthorityV1, CiSourceAccessOutcomeV1,
-    ConcreteCiFailureLocalizationOwnerV1, DaemonCiReadOnlyEvidenceSourceV1,
-    GitHubCiOfficialResponseDecoderV1, GitHubCiProviderRecordV1, MAX_CI_RETAINED_ANNOTATIONS_V1,
-    MAX_CI_RETAINED_CHECKS_V1, MAX_CI_RETAINED_FAILURES_V1,
+    CiRetainedProviderRecordV1, CiRetainedReadV1, CiSourceAccessAuthorityV1,
+    CiSourceAccessOutcomeV1, ConcreteCiFailureLocalizationOwnerV1,
+    DaemonCiReadOnlyEvidenceSourceV1, GitHubCiOfficialResponseDecoderV1, GitHubCiProviderRecordV1,
+    MAX_CI_RETAINED_ANNOTATIONS_V1, MAX_CI_RETAINED_CHECKS_V1, MAX_CI_RETAINED_FAILURES_V1,
     MAX_CI_RETAINED_OBSERVATION_MANIFEST_ENTRIES_V1, ProductionCiArchiveHandleV1,
     ProductionCiExactEvidenceHandleV1, ProductionCiFailureDiscoveryOutcomeV1,
     ProductionCiProviderAuthoritiesV1, ProductionCiProviderConfigV1,
@@ -111,8 +111,8 @@ pub use proximity_runtime::{
 pub use runtime::{
     AdvisoryContributionsV1, AdvisoryCycleControl, AdvisoryCycleOutcome, AdvisoryCycleRequest,
     AdvisoryDaemonRegistrationV1, AdvisoryProviderAuthoritiesV1, AdvisoryProviderStateV1,
-    AdvisoryProviderV1, AdvisoryRuntime, AdvisoryRuntimeOpenErrorV1, AdvisoryRuntimeOpenV1,
-    open_advisory_daemon_registration,
+    AdvisoryProviderV1, AdvisoryRemoteEvidenceV1, AdvisoryRuntime, AdvisoryRuntimeOpenErrorV1,
+    AdvisoryRuntimeOpenV1, open_advisory_daemon_registration,
 };
 
 /// Every adapter preserves the already-admitted project/repository/worktree/
