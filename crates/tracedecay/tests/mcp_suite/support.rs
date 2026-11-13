@@ -501,9 +501,9 @@ pub(crate) mod seeded_composition {
 
     use tracedecay::daemon::ProductionProjectCompositionHarnessV1;
     use tracedecay_domain::errors::Result;
-    use tracing::level_filters::LevelFilter;
+    use tracing::Level;
     use tracing_subscriber::Layer as _;
-    use tracing_subscriber::filter::Targets;
+    use tracing_subscriber::filter::filter_fn;
     use tracing_subscriber::fmt::format::FmtSpan;
     use tracing_subscriber::layer::SubscriberExt as _;
     use tracing_subscriber::util::SubscriberInitExt as _;
@@ -519,15 +519,14 @@ pub(crate) mod seeded_composition {
                 .with_thread_ids(true)
                 .with_ansi(false)
                 .with_writer(std::io::stderr)
-                .with_filter(
-                    Targets::new()
-                        .with_default(LevelFilter::WARN)
-                        .with_target("tracedecay_code_index::production", LevelFilter::TRACE)
-                        .with_target(
-                            "tracedecay_code_index_runtime::code_index_scheduler::publication_store",
-                            LevelFilter::TRACE,
-                        ),
-                );
+                .with_filter(filter_fn(|metadata| {
+                    metadata.level() <= &Level::WARN
+                        || matches!(
+                            metadata.target(),
+                            "tracedecay_code_index::production"
+                                | "tracedecay_code_index_runtime::code_index_scheduler::publication_store"
+                        )
+                }));
             let _ = tracing_subscriber::registry().with(layer).try_init();
         });
         let project_roots: Vec<PathBuf> = project_roots.into_iter().collect();
