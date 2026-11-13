@@ -1717,6 +1717,12 @@ fn settle_bound_owner_with_budget(
     mut state: RetainedBoundSettlement,
     budget: Duration,
 ) -> Result<RetainedOwnerValue<(AutomationSettledTerminal, AutomationRunLedgerRecord)>> {
+    // Capture the retained fixture's retry warnings on its owning blocking thread.
+    #[cfg(test)]
+    let _capture = state
+        .phase_hook
+        .as_ref()
+        .map(|_| tracedecay_runtime_core::logging::FormattedTracingCapture::start_with_stderr());
     let started = std::time::Instant::now();
     let mut delay = Duration::from_millis(25);
     loop {
