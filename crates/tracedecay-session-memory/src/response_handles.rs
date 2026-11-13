@@ -616,6 +616,7 @@ mod tests {
     use std::sync::{Arc, Barrier};
 
     use super::*;
+    use tracedecay_runtime_core::logging::FormattedTracingCapture;
     use tracedecay_runtime_core::storage::{
         DurableAtomicWriteFaultForTest, with_durable_atomic_write_fault_for_test,
     };
@@ -668,20 +669,37 @@ mod tests {
                 let root = Arc::clone(&root);
                 let barrier = Arc::clone(&barrier);
                 std::thread::spawn(move || {
+                    let capture = FormattedTracingCapture::start_with_span_timings();
                     let content = format!("payload {writer}");
                     barrier.wait();
-                    (content.clone(), store_response_handle(&root, &content, 100))
+                    let started = Instant::now();
+                    let result = {
+                        let _span =
+                            tracing::info_span!("response_handles.contended_writer", writer).entered();
+                        store_response_handle(&root, &content, 100)
+                    };
+                    (content, result, started.elapsed(), capture.text())
                 })
             })
             .collect();
 
         // Settle every owner before asserting so one failed admission does not
-        // detach the remaining writers.
+        // detach the remaining writers or lose the holder's timing evidence.
         let joined: Vec<_> = workers.into_iter().map(|worker| worker.join()).collect();
-        for (content, result) in joined.into_iter().map(|outcome| outcome.unwrap()) {
-            let stored = result.unwrap_or_else(|error| {
-                panic!("contended writer for {content:?} failed instead of waiting: {error}")
-            });
+        let outcomes: Vec<_> = joined.into_iter().map(|outcome| outcome.unwrap()).collect();
+        let diagnostics = outcomes
+            .iter()
+            .map(|(content, result, elapsed, trace)| {
+                format!("{content}: {result:?}, elapsed={elapsed:?}\n{trace}")
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            outcomes.iter().all(|(_, result, _, _)| result.is_ok()),
+            "every contended writer must publish within its existing admission bound:\n{diagnostics}"
+        );
+        for (content, result, _, _) in outcomes {
+            let stored = result.unwrap();
             let ResponseHandleLookup::Found(persisted) =
                 retrieve_response_handle(&root, &stored.handle, 100).unwrap()
             else {
