@@ -1,11 +1,10 @@
 #![allow(clippy::collapsible_if)] // test scaffolding
 use std::path::Path;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 use tempfile::TempDir;
 use tokio::sync::oneshot;
 use tokio::time::timeout;
-use tracing::{Instrument, instrument::WithSubscriber};
 
 use tracedecay_runtime_core::db::engine::{
     Connection, TestConnection, TransactionBehavior, params,
@@ -13,45 +12,18 @@ use tracedecay_runtime_core::db::engine::{
 use tracedecay_runtime_core::db::{
     Database, DatabaseAuthority, TestDatabaseRuntimeMode, TestDatabaseRuntimeScope,
 };
-use tracedecay_runtime_core::logging::FormattedTracingCapture;
 
 use crate::tests::harness::open_registered_test_database_fixture;
 
 async fn open_global_db(db_path: &Path) -> tracedecay_domain::errors::Result<TestConnection> {
-    // Carry the dispatcher on the future; the thread-local guard must leave
-    // scope before the caller awaits or moves this future between workers.
-    let opening = {
-        let _capture = FormattedTracingCapture::start_with_info_span_timings();
-        let thread = std::thread::current();
-        let started_at = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default();
-        let span = tracing::info_span!(
-            "global_db.schema_fixture",
-            test = thread.name().unwrap_or("unnamed"),
-            started_at_unix_ms = started_at.as_millis() as u64,
-        );
-        async move {
-            if let Some(parent) = db_path.parent() {
-                std::fs::create_dir_all(parent)?;
-            }
-            let fixture = open_registered_test_database_fixture(
-                db_path,
-                TestDatabaseRuntimeScope::ProfileSessions,
-            )
-            .instrument(tracing::info_span!("global_db.fixture.admit"))
-            .await?;
-            {
-                let _span = tracing::info_span!("global_db.fixture.release").entered();
-                drop(fixture);
-            }
-            let _span = tracing::info_span!("global_db.fixture.raw_open").entered();
-            Ok(TestConnection::open(db_path))
-        }
-        .instrument(span)
-        .with_current_subscriber()
-    };
-    opening.await
+    if let Some(parent) = db_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    drop(
+        open_registered_test_database_fixture(db_path, TestDatabaseRuntimeScope::ProfileSessions)
+            .await?,
+    );
+    Ok(TestConnection::open(db_path))
 }
 
 async fn open_read_only_global_db(
