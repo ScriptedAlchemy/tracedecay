@@ -1,9 +1,15 @@
 //! Real filesystem evidence for bounded, descriptor-owned durability batches.
+#[cfg(target_os = "linux")]
 use std::ffi::CString;
 use std::fs::{self, File};
-use std::io::{ErrorKind, Read, Write};
+#[cfg(target_os = "linux")]
+use std::io::Read;
+use std::io::{ErrorKind, Write};
+#[cfg(target_os = "linux")]
 use std::mem::size_of;
+#[cfg(target_os = "linux")]
 use std::os::fd::{AsRawFd, FromRawFd};
+#[cfg(target_os = "linux")]
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
@@ -14,8 +20,10 @@ use super::sync_latency;
 use super::{DURABLE_BATCH_CONCURRENT_SYNCS, DurableFileBatch};
 
 /// Count kernel open events, not calls to an observer unrelated to the opener.
+#[cfg(target_os = "linux")]
 struct OpenEvents(File);
 
+#[cfg(target_os = "linux")]
 impl OpenEvents {
     fn watch(root: &Path) -> Self {
         // SAFETY: inotify_init1 has no pointer arguments.
@@ -79,6 +87,7 @@ fn write_member(batch: &mut DurableFileBatch, root: &Path, index: usize) -> Path
     path
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn durable_batch_flushes_multiple_windows_without_pathname_reopens() {
     let root = tempfile::tempdir().expect("batch root");
@@ -127,12 +136,16 @@ fn durable_batch_flushes_each_window_before_releasing_its_handles() {
     let members = DURABLE_BATCH_CONCURRENT_SYNCS * 2 + 3;
     for index in 0..members {
         write_member(&mut batch, root.path(), index);
+        // Every platform retains at most one window of writer handles.
+        assert!(batch.pending.len() <= DURABLE_BATCH_CONCURRENT_SYNCS);
     }
     assert_eq!(
         barriers.syncs(),
         u64::try_from(DURABLE_BATCH_CONCURRENT_SYNCS * 2).expect("flushed count"),
         "both completed windows must have issued real file barriers"
     );
+    assert_eq!(batch.synced.len(), DURABLE_BATCH_CONCURRENT_SYNCS * 2);
+    assert_eq!(batch.pending.len(), 3);
     batch.sync().expect("flush remaining members");
     assert_eq!(
         barriers.syncs(),

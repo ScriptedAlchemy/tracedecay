@@ -18,11 +18,11 @@ use windows_sys::Win32::Storage::FileSystem::{
     FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
 };
 
-#[cfg(all(test, target_os = "linux"))]
+#[cfg(all(test, unix))]
 #[path = "framed_log_batch_tests.rs"]
 mod batch_tests;
 
-#[cfg(all(test, target_os = "linux", feature = "test-helpers"))]
+#[cfg(all(test, unix, feature = "test-helpers"))]
 #[path = "framed_log_window_tests.rs"]
 mod window_tests;
 
@@ -80,24 +80,26 @@ pub fn sync_parent_directory(path: &Path, policy: DirectorySyncPolicy) -> io::Re
 /// New, fully written files whose contents become durable before any is renamed.
 /// Members must remain immutable until publication.
 ///
-/// Linux retains at most one concurrency window of duplicated writer handles.
-/// When that window fills, its members are fsynced concurrently before their
-/// handles are released. This preserves grouped log commits without reopening
-/// every pathname through endpoint security or holding a descriptor per segment.
-/// [`Self::sync`] flushes the final window and checks that earlier members still
-/// name the same immutable files. It never flushes unrelated filesystem data.
-/// Other Unix platforms fsync each file as it is written, then verify the
-/// admitted pathnames again before publication. Windows also syncs inline and
-/// authenticates each admitted file index before and after its barrier.
+/// Every supported platform retains at most one concurrency window of
+/// duplicated writer handles. When that window fills, its members are fsynced
+/// concurrently before their handles are released, so the filesystem can fold
+/// their barriers into shared log commits instead of paying one per segment.
+/// This never reopens a member pathname through endpoint security and never
+/// holds a descriptor per segment of a large seal. Linux additionally starts
+/// each member's writeback as soon as it is admitted. [`Self::sync`] flushes
+/// the final window and checks that earlier members still name the same
+/// immutable files. It never flushes unrelated filesystem data. Unix
+/// authenticates members by device, inode, size and timestamps; Windows also
+/// authenticates each retained handle and pathname by volume and file index.
 #[derive(Default)]
 pub struct DurableFileBatch {
-    #[cfg(target_os = "linux")]
+    #[cfg(any(unix, windows))]
     pending: Vec<PendingDurableFile>,
     #[cfg(any(unix, windows))]
     synced: Vec<DurableFileIdentity>,
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(unix, windows))]
 struct PendingDurableFile {
     identity: DurableFileIdentity,
     file: File,
@@ -115,6 +117,13 @@ struct DurableFileIdentity {
 
 #[cfg(unix)]
 impl DurableFileIdentity {
+    fn new(path: &Path, metadata: fs::Metadata, _file: &File) -> io::Result<Self> {
+        Ok(Self {
+            path: path.to_path_buf(),
+            metadata,
+        })
+    }
+
     fn validate_metadata(&self, current: &fs::Metadata) -> io::Result<()> {
         let original = &self.metadata;
         if !original.file_type().is_file()
@@ -130,6 +139,10 @@ impl DurableFileIdentity {
             return Err(changed_durable_member());
         }
         Ok(())
+    }
+
+    fn validate_file(&self, file: &File) -> io::Result<()> {
+        self.validate_metadata(&file.metadata()?)
     }
 
     fn validate_path(&self) -> io::Result<()> {
@@ -186,15 +199,15 @@ fn changed_durable_member() -> io::Error {
     )
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(unix, windows))]
 impl PendingDurableFile {
     fn sync(&self) -> io::Result<()> {
         self.identity.validate_path()?;
-        self.identity.validate_metadata(&self.file.metadata()?)?;
+        self.identity.validate_file(&self.file)?;
         sync_owned_file(&self.identity.path, &self.file)?;
         // A replacement or in-place write during the barrier must not be
         // reported as a successful flush of the originally admitted bytes.
-        self.identity.validate_metadata(&self.file.metadata()?)?;
+        self.identity.validate_file(&self.file)?;
         self.identity.validate_path()
     }
 }
@@ -219,13 +232,10 @@ impl DurableFileBatch {
         file: &File,
         authenticated: &fs::Metadata,
     ) -> io::Result<()> {
-        #[cfg(target_os = "linux")]
+        #[cfg(any(unix, windows))]
         {
-            let identity = DurableFileIdentity {
-                path: path.to_path_buf(),
-                metadata: authenticated.clone(),
-            };
-            identity.validate_metadata(&file.metadata()?)?;
+            let identity = DurableFileIdentity::new(path, authenticated.clone(), file)?;
+            identity.validate_file(file)?;
             // An invalid incoming member must not force a full, otherwise
             // healthy window to fsync before its admission is rejected.
             identity.validate_path()?;
@@ -237,59 +247,30 @@ impl DurableFileBatch {
                     .extend(self.pending.drain(..).map(|member| member.identity));
                 // A slow filesystem barrier leaves time for the incoming
                 // path or descriptor to change. Do not admit that change.
-                identity.validate_metadata(&file.metadata()?)?;
+                identity.validate_file(file)?;
                 identity.validate_path()?;
             }
             // Duplication retains the writer's inode without a pathname open.
             let retained = file.try_clone()?;
-            // SAFETY: `retained` is an open descriptor for the whole call.
-            let started = unsafe {
-                libc::sync_file_range(retained.as_raw_fd(), 0, 0, libc::SYNC_FILE_RANGE_WRITE)
-            };
-            if started != 0 {
-                return Err(io::Error::last_os_error());
+            #[cfg(target_os = "linux")]
+            {
+                // SAFETY: `retained` is an open descriptor for the whole call.
+                let started = unsafe {
+                    libc::sync_file_range(retained.as_raw_fd(), 0, 0, libc::SYNC_FILE_RANGE_WRITE)
+                };
+                if started != 0 {
+                    return Err(io::Error::last_os_error());
+                }
             }
             // This is the last fallible check before admission. There must
             // be no caller-side validation that could delete a registered
             // member after a successful return.
-            identity.validate_metadata(&retained.metadata()?)?;
+            identity.validate_file(&retained)?;
             identity.validate_path()?;
             self.pending.push(PendingDurableFile {
                 identity,
                 file: retained,
             });
-            Ok(())
-        }
-        #[cfg(all(unix, not(target_os = "linux")))]
-        {
-            // The caller authenticated these exact writer bytes. On macOS
-            // the barrier runs immediately, but the pathname may still be
-            // replaced while fsync blocks under endpoint authorization.
-            // Witness both the writer and its name without another open().
-            let identity = DurableFileIdentity {
-                path: path.to_path_buf(),
-                metadata: authenticated.clone(),
-            };
-            identity.validate_metadata(&file.metadata()?)?;
-            identity.validate_path()?;
-            sync_owned_file(path, file)?;
-            identity.validate_metadata(&file.metadata()?)?;
-            identity.validate_path()?;
-            // The writer descriptor is no longer retained after its inline
-            // barrier. Keep its authenticated pathname identity instead:
-            // a later atomic replacement must not be published by sync().
-            self.synced.push(identity);
-            Ok(())
-        }
-        #[cfg(windows)]
-        {
-            let identity = DurableFileIdentity::new(path, authenticated.clone(), file)?;
-            identity.validate_file(file)?;
-            identity.validate_path()?;
-            sync_owned_file(path, file)?;
-            identity.validate_file(file)?;
-            identity.validate_path()?;
-            self.synced.push(identity);
             Ok(())
         }
         #[cfg(not(any(unix, windows)))]
@@ -306,33 +287,17 @@ impl DurableFileBatch {
         skip_all
     )]
     pub fn sync(&self) -> io::Result<()> {
-        #[cfg(target_os = "linux")]
+        #[cfg(any(unix, windows))]
         {
-            // Already-flushed windows need no further opens or barriers, but
-            // missing or substituted names must still refuse publication.
+            // Already-flushed windows need no further barriers, but missing
+            // or substituted names must still refuse publication.
             for identity in &self.synced {
                 identity.validate_path()?;
             }
             self.sync_pending()?;
             // The final barriers may block long enough for an earlier window
             // to change. Its pre-barrier observation cannot authorize the
-            // whole batch after those barriers return. Recheck without opens.
-            for identity in &self.synced {
-                identity.validate_path()?;
-            }
-            Ok(())
-        }
-        #[cfg(all(unix, not(target_os = "linux")))]
-        {
-            // Inline fsyncs do not authorize a pathname that was replaced or
-            // rewritten after admission and before the generation commit.
-            for identity in &self.synced {
-                identity.validate_path()?;
-            }
-            Ok(())
-        }
-        #[cfg(windows)]
-        {
+            // whole batch after those barriers return.
             for identity in &self.synced {
                 identity.validate_path()?;
             }
@@ -344,13 +309,20 @@ impl DurableFileBatch {
         }
     }
 
-    #[cfg(target_os = "linux")]
+    /// Flush the retained window. A full window flushes during admission, so
+    /// its own span keeps those barriers distinguishable from staging work.
+    #[cfg(any(unix, windows))]
     fn sync_pending(&self) -> io::Result<()> {
+        let _window_span = tracing::trace_span!(
+            "private_fs.framed_log.sync_file_batch_window",
+            members = self.pending.len()
+        )
+        .entered();
         let next = std::sync::atomic::AtomicUsize::new(0);
         let syncer = || -> io::Result<()> {
             while let Some(member) = self.pending.get(next.fetch_add(1, Ordering::Relaxed)) {
                 member.sync()?;
-                #[cfg(all(test, feature = "test-helpers"))]
+                #[cfg(all(test, unix, feature = "test-helpers"))]
                 sync_latency::after_batch_member_sync(&member.identity.path);
             }
             Ok(())
@@ -375,7 +347,7 @@ impl DurableFileBatch {
         // window after every worker finishes, before success or handle release.
         for member in &self.pending {
             let identity = &member.identity;
-            identity.validate_metadata(&member.file.metadata()?)?;
+            identity.validate_file(&member.file)?;
             identity.validate_path()?;
         }
         Ok(())
@@ -384,8 +356,8 @@ impl DurableFileBatch {
 
 /// Barriers one batch keeps in flight together: enough for the filesystem to
 /// fold them into a shared log commit, bounded so a large seal does not
-/// spawn a thread per segment.
-#[cfg(target_os = "linux")]
+/// spawn a thread or retain a descriptor per segment.
+#[cfg(any(unix, windows))]
 const DURABLE_BATCH_CONCURRENT_SYNCS: usize = 32;
 
 /// Flush an already-written file's contents so its bytes are durable.
@@ -606,7 +578,7 @@ fn remove_owned_temp(path: &Path) {
 pub mod sync_latency {
     use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicU64, Ordering};
-    #[cfg(all(test, target_os = "linux"))]
+    #[cfg(all(test, unix))]
     use std::sync::mpsc;
     use std::sync::{Arc, Mutex, PoisonError};
     use std::time::Duration;
@@ -616,20 +588,20 @@ pub mod sync_latency {
         root: PathBuf,
         delay: Duration,
         syncs: Arc<AtomicU64>,
-        #[cfg(all(test, target_os = "linux"))]
+        #[cfg(all(test, unix))]
         pause: Option<Arc<SyncPauseSignal>>,
     }
 
     // A fixture can synchronize exactly at a real fsync, without wall-time
     // races, mock barriers, or changes to production file I/O.
-    #[cfg(all(test, target_os = "linux"))]
+    #[cfg(all(test, unix))]
     struct SyncPauseSignal {
         entered: mpsc::Sender<()>,
         resume: Mutex<mpsc::Receiver<()>>,
         after_member: bool,
     }
 
-    #[cfg(all(test, target_os = "linux"))]
+    #[cfg(all(test, unix))]
     impl SyncPauseSignal {
         fn wait(&self) {
             let _ = self.entered.send(());
@@ -641,13 +613,13 @@ pub mod sync_latency {
         }
     }
 
-    #[cfg(all(test, target_os = "linux"))]
+    #[cfg(all(test, unix))]
     pub(super) struct SyncPause {
         entered: mpsc::Receiver<()>,
         resume: mpsc::Sender<()>,
     }
 
-    #[cfg(all(test, target_os = "linux"))]
+    #[cfg(all(test, unix))]
     impl SyncPause {
         pub(super) fn wait_for_sync(&self, timeout: Duration) -> bool {
             self.entered.recv_timeout(timeout).is_ok()
@@ -687,7 +659,7 @@ pub mod sync_latency {
     fn register(
         root: &Path,
         delay: Duration,
-        #[cfg(all(test, target_os = "linux"))] pause: Option<Arc<SyncPauseSignal>>,
+        #[cfg(all(test, unix))] pause: Option<Arc<SyncPauseSignal>>,
     ) -> SyncLatencyGuard {
         let id = NEXT_ID.fetch_add(1, Ordering::SeqCst);
         let syncs = Arc::new(AtomicU64::new(0));
@@ -699,7 +671,7 @@ pub mod sync_latency {
                 root: root.to_path_buf(),
                 delay,
                 syncs: Arc::clone(&syncs),
-                #[cfg(all(test, target_os = "linux"))]
+                #[cfg(all(test, unix))]
                 pause,
             });
         SyncLatencyGuard { id, syncs }
@@ -708,31 +680,31 @@ pub mod sync_latency {
     /// Delay every fsync of root or a path below it by delay.
     #[must_use]
     pub fn inject(root: &Path, delay: Duration) -> SyncLatencyGuard {
-        #[cfg(all(test, target_os = "linux"))]
+        #[cfg(all(test, unix))]
         {
             register(root, delay, None)
         }
-        #[cfg(not(all(test, target_os = "linux")))]
+        #[cfg(not(all(test, unix)))]
         {
             register(root, delay)
         }
     }
 
     /// Pause one actual barrier under a private fixture root until released.
-    #[cfg(all(test, target_os = "linux"))]
+    #[cfg(all(test, unix))]
     #[must_use]
     pub(super) fn pause(root: &Path) -> (SyncLatencyGuard, SyncPause) {
         pause_at(root, false)
     }
 
     /// Observe a completed member before the concurrent window joins.
-    #[cfg(all(test, target_os = "linux"))]
+    #[cfg(all(test, unix))]
     #[must_use]
     pub(super) fn pause_after_batch_member(root: &Path) -> (SyncLatencyGuard, SyncPause) {
         pause_at(root, true)
     }
 
-    #[cfg(all(test, target_os = "linux"))]
+    #[cfg(all(test, unix))]
     fn pause_at(root: &Path, after_member: bool) -> (SyncLatencyGuard, SyncPause) {
         let (entered_sender, entered_receiver) = mpsc::channel();
         let (resume_sender, resume_receiver) = mpsc::channel();
@@ -751,7 +723,7 @@ pub mod sync_latency {
         )
     }
 
-    #[cfg(all(test, target_os = "linux"))]
+    #[cfg(all(test, unix))]
     pub(super) fn after_batch_member_sync(path: &Path) {
         let pause = INJECTIONS
             .lock()
@@ -768,7 +740,7 @@ pub mod sync_latency {
     struct MatchedInjection {
         delay: Duration,
         syncs: Arc<AtomicU64>,
-        #[cfg(all(test, target_os = "linux"))]
+        #[cfg(all(test, unix))]
         pause: Option<Arc<SyncPauseSignal>>,
     }
 
@@ -781,12 +753,12 @@ pub mod sync_latency {
             .map(|injection| MatchedInjection {
                 delay: injection.delay,
                 syncs: Arc::clone(&injection.syncs),
-                #[cfg(all(test, target_os = "linux"))]
+                #[cfg(all(test, unix))]
                 pause: injection.pause.clone(),
             });
         if let Some(matched) = matched {
             matched.syncs.fetch_add(1, Ordering::SeqCst);
-            #[cfg(all(test, target_os = "linux"))]
+            #[cfg(all(test, unix))]
             if let Some(pause) = matched.pause.filter(|pause| !pause.after_member) {
                 pause.wait();
             }
@@ -1176,7 +1148,7 @@ mod tests {
         let mut batch = super::DurableFileBatch::new();
         batch
             .written_with_identity(&path, &writer, &original)
-            .expect("authenticate and flush original member");
+            .expect("authenticate and retain original member");
         #[cfg(windows)]
         let original_file_index =
             crate::windows_file::information(&writer).expect("original file index");
