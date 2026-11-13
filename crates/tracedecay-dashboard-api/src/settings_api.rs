@@ -855,7 +855,7 @@ mod tests {
     use tracedecay_domain::ProjectId;
     use tracedecay_domain::configuration::{
         CONTEXT_SCOUT_SETTINGS_SETTING_KEY, CodeIndexWorkerLimitingReasonV1, ConfigurationValueV1,
-        ContextScoutConfigurationStateV1, ContextScoutIntentSettingsV1,
+        ContextScoutConfigurationStateV1,
     };
 
     fn pinned_defaults(
@@ -876,20 +876,13 @@ mod tests {
         .unwrap()
     }
 
-    fn intent_patch_body(base_url: &str, revision: &ConfigurationRevisionId) -> Value {
+    fn intent_patch_body(revision: &ConfigurationRevisionId, score: u16) -> Value {
         json!({
             "expected_revision_id": revision.as_str(),
             "idempotency_key": "intent-patch",
             "context_scout": true,
             "context_scout_intent": {
                 "enabled": true,
-                "engine": {
-                    "base_url": base_url,
-                    "model": "intent-small",
-                    "timeout_ms": 250,
-                    "max_concurrent": 2,
-                    "max_state_bytes": 65536
-                },
                 "window": {
                     "max_user_turns": 3,
                     "max_messages": 12,
@@ -897,8 +890,7 @@ mod tests {
                     "max_age_secs": 1800,
                     "freshen_budget_ms": 150
                 },
-                "questions": [],
-                "action_fact_score_permille": 700,
+                "action_fact_score_permille": score,
                 "ttl_secs": 600,
                 "min_delivery_gap_secs": 30,
                 "prompt_lookup_deadline_ms": 200
@@ -912,9 +904,8 @@ mod tests {
         let current = pinned_defaults(&revision);
         let project_id = ProjectId::new("project.settings.scout").unwrap();
 
-        let patch =
-            parse_project_settings_patch(intent_patch_body("http://127.0.0.1:8088", &revision))
-                .expect("intent block parses");
+        let patch = parse_project_settings_patch(intent_patch_body(&revision, 700))
+            .expect("intent block parses");
         let preview =
             preview_project_settings(&project_id, &current, application_project_patch(patch))
                 .expect("valid intent block previews");
@@ -931,18 +922,15 @@ mod tests {
         };
         assert_eq!(settings.state, ContextScoutConfigurationStateV1::Active);
         let intent = settings.intent.as_ref().expect("intent block written");
-        assert_eq!(intent.engine.base_url, "http://127.0.0.1:8088");
-        assert_eq!(
-            intent.questions,
-            ContextScoutIntentSettingsV1::reference_questions()
-        );
+        assert_eq!(intent.action_fact_score_permille, 700);
+        assert!(intent.enabled);
 
-        let patch = parse_project_settings_patch(intent_patch_body("not-a-url", &revision))
-            .expect("shape is valid; the engine URL is a domain check");
+        let patch = parse_project_settings_patch(intent_patch_body(&revision, 1_001))
+            .expect("shape is valid; the action-fact score is a domain check");
         let Err(ProjectSettingsPreviewErrorV1::Validation(issues)) =
             preview_project_settings(&project_id, &current, application_project_patch(patch))
         else {
-            panic!("an invalid engine URL must be a validation error")
+            panic!("an invalid action-fact score must be a validation error")
         };
         assert_eq!(issues.len(), 1);
         assert_eq!(issues[0].field, "context_scout_intent");

@@ -19,10 +19,11 @@ use tracedecay_application::advisory::github_runtime::{
 use tracedecay_application::advisory::{
     AdvisoryCycleControl, AdvisoryCycleOutcome, AdvisoryCycleRequest, AdvisoryHookDeliveryV1,
     AdvisoryHookNoticeQueueV1, AdvisoryProductionOpenV1, AdvisoryProductionStartupRegistrationV1,
-    AdvisoryRuntimeOpenV1, CiCodeAnchorStoreV1, CiRetainedProviderObservationAuthorityV1,
-    CiSourceAccessAuthorityV1, GitHubCiRepositoryTargetV1, GitHubHttpReadConfigV1,
-    GitHubReadOnlyCredentialV1, GitHubReadPermissionV1, GitHubRepositoryTargetV1,
-    GitHubReviewProviderIdentityV1, GitHubReviewRefreshOutcomeV1, GitHubReviewRuntimeOwnerConfigV1,
+    AdvisoryRemoteEvidenceV1, AdvisoryRuntimeOpenV1, CiCodeAnchorStoreV1,
+    CiRetainedProviderObservationAuthorityV1, CiSourceAccessAuthorityV1,
+    GitHubCiRepositoryTargetV1, GitHubHttpReadConfigV1, GitHubReadOnlyCredentialV1,
+    GitHubReadPermissionV1, GitHubRepositoryTargetV1, GitHubReviewProviderIdentityV1,
+    GitHubReviewRefreshOutcomeV1, GitHubReviewRuntimeOwnerConfigV1,
     ProductionCiFailureDiscoveryOutcomeV1, ProductionCiProviderConfigV1,
     ProjectCiCodeAnchorStoreV1, ProjectCiRetainedObservationStoreV1,
     discover_production_ci_failure_request_v1, github_anchor_authorities_arc_v1,
@@ -48,9 +49,7 @@ use tracedecay_application::lsp_runtime::DaemonLspSessionFactory;
 use tracedecay_application::operation_stream::OperationKind;
 use tracedecay_code_index_runtime::code_index_scheduler::CodeIndexSchedulerRegistryV1;
 use tracedecay_code_index_runtime::project_reads::code_index_disabled_for_scope;
-use tracedecay_contracts::context_scout::{
-    ContextScoutDeliveryOutcomeV1, ContextScoutModelOutcomeV1,
-};
+use tracedecay_contracts::context_scout::ContextScoutDeliveryOutcomeV1;
 use tracedecay_contracts::feedback::observations::{
     FeedbackDeliveryRouteV1, FeedbackOperationV1, FeedbackOutcomeV1, FeedbackSourceEventV1,
 };
@@ -151,6 +150,14 @@ struct ProjectOpenAdvisoryCycleExecutionV1 {
     feedback_cycle: Arc<FeedbackCycleRuntime>,
 }
 
+/// Editor and hook feedback reads retained remote evidence only; the explicit
+/// advisory operation refreshes GitHub and discovers and localizes CI.
+#[derive(Clone, Copy)]
+enum AdvisoryRemoteReadMode {
+    LocalFeedback,
+    ExplicitRefresh,
+}
+
 #[derive(Clone)]
 struct ProjectOpenFeedbackCyclePinV1 {
     revision_id: ConfigurationRevisionId,
@@ -220,6 +227,7 @@ impl ProjectOpenAdvisoryFeedbackCycleV1 {
         deadline: MonotonicDeadline,
         agent_stop_gate: bool,
         expected_generation: Option<&tracedecay_domain::CodeGenerationId>,
+        remote_mode: AdvisoryRemoteReadMode,
     ) -> std::result::Result<ProjectOpenAdvisoryCycleExecutionV1, LspRuntimeFailure> {
         let pin = self.producer.feedback_cycle.read().await.clone();
         let lsp_input = pin.runtime.lsp_input();
@@ -242,7 +250,7 @@ impl ProjectOpenAdvisoryFeedbackCycleV1 {
                 Some(&latest.generation().manifest().generation_id)
                     == invocation.request.input.target.generation_id.as_ref()
             });
-        self.run_cycle_with_invocation(pin, invocation, deadline, agent_stop_gate)
+        self.run_cycle_with_invocation(pin, invocation, deadline, agent_stop_gate, remote_mode)
             .await
     }
 
@@ -252,6 +260,7 @@ impl ProjectOpenAdvisoryFeedbackCycleV1 {
         mut invocation: FeedbackCycleInvocation,
         deadline: MonotonicDeadline,
         agent_stop_gate: bool,
+        remote_mode: AdvisoryRemoteReadMode,
     ) -> std::result::Result<ProjectOpenAdvisoryCycleExecutionV1, LspRuntimeFailure> {
         if agent_stop_gate {
             invocation.request.input.request.trigger = FeedbackTriggerV1::AgentStopGate;
@@ -265,16 +274,29 @@ impl ProjectOpenAdvisoryFeedbackCycleV1 {
             .request
             .configuration_digest
             .clone();
-        let ci = match self.ci_discovery_config.as_ref() {
-            Some(config) => {
-                discover_production_ci_failure_request_v1(
-                    &invocation.context,
-                    config,
-                    &self.feedback_scope,
-                )
-                .await
-            }
-            None => ProductionCiFailureDiscoveryOutcomeV1::NotConfigured,
+        let github = self.github_review_request();
+        let remote = match remote_mode {
+            // Editor and hook feedback never starts a provider read: a held,
+            // denied or failing remote cannot consume its deadline or cancel
+            // its independently authorized diagnostics.
+            AdvisoryRemoteReadMode::LocalFeedback => AdvisoryRemoteEvidenceV1::Retained {
+                github,
+                ci_configured: self.ci_discovery_config.is_some(),
+            },
+            AdvisoryRemoteReadMode::ExplicitRefresh => AdvisoryRemoteEvidenceV1::Refresh {
+                github,
+                ci: match self.ci_discovery_config.as_ref() {
+                    Some(config) => {
+                        discover_production_ci_failure_request_v1(
+                            &invocation.context,
+                            config,
+                            &self.feedback_scope,
+                        )
+                        .await
+                    }
+                    None => ProductionCiFailureDiscoveryOutcomeV1::NotConfigured,
+                },
+            },
         };
         let expires_at = UtcMicros(observed_at.0.saturating_add(5 * 60 * 1_000_000));
         let operation = self
@@ -295,46 +317,39 @@ impl ProjectOpenAdvisoryFeedbackCycleV1 {
                 );
                 LspRuntimeFailure::new("feedback-cycle-advisory-operation")
             })?;
-        let outcome =
-            pin.registration
-                .runtime()
-                .run_once(
-                    &invocation.context,
-                    AdvisoryCycleControl {
-                        operation,
-                        deadline,
+        let outcome = pin
+            .registration
+            .runtime()
+            .run_once(
+                &invocation.context,
+                AdvisoryCycleControl {
+                    operation,
+                    deadline,
+                },
+                AdvisoryCycleRequest {
+                    feedback: invocation.request,
+                    remote,
+                    proximity: Some(ProximityEvaluationRequestV1 {
+                        scope: self.feedback_scope.clone(),
+                        observed_at,
+                    }),
+                    validity: tracedecay_contracts::AdvisoryFindingValidityWindowV1 {
+                        valid_at: observed_at,
+                        expires_at,
                     },
-                    AdvisoryCycleRequest {
-                        feedback: invocation.request,
-                        github: self.github_review_read.clone().map(
-                            |(pull_request_id, operation)| GitHubReviewReadRequestV1 {
-                                operation,
-                                scope: self.feedback_scope.clone(),
-                                pull_request_id,
-                            },
-                        ),
-                        ci,
-                        proximity: Some(ProximityEvaluationRequestV1 {
-                            scope: self.feedback_scope.clone(),
-                            observed_at,
-                        }),
-                        validity: tracedecay_contracts::AdvisoryFindingValidityWindowV1 {
-                            valid_at: observed_at,
-                            expires_at,
-                        },
-                    },
-                )
-                .await
-                .map_err(|error| {
-                    tracing::warn!(
-                        target: "tracedecay::feedback_advisory_cycle",
-                        project_id = self.feedback_scope.project_id.as_str(),
-                        worktree_id = self.feedback_scope.worktree_id.as_str(),
-                        ?error,
-                        "advisory feedback cycle execution failed"
-                    );
-                    LspRuntimeFailure::new(error.lsp_failure_class())
-                })?;
+                },
+            )
+            .await
+            .map_err(|error| {
+                tracing::warn!(
+                    target: "tracedecay::feedback_advisory_cycle",
+                    project_id = self.feedback_scope.project_id.as_str(),
+                    worktree_id = self.feedback_scope.worktree_id.as_str(),
+                    ?error,
+                    "advisory feedback cycle execution failed"
+                );
+                LspRuntimeFailure::new(error.lsp_failure_class())
+            })?;
         if outcome.publication().is_some() {
             self.deliver_completed_publication(&pin.registration, &outcome);
         }
@@ -344,6 +359,16 @@ impl ProjectOpenAdvisoryFeedbackCycleV1 {
             configuration_digest,
             feedback_cycle: pin.runtime,
         })
+    }
+
+    fn github_review_request(&self) -> Option<GitHubReviewReadRequestV1> {
+        self.github_review_read
+            .clone()
+            .map(|(pull_request_id, operation)| GitHubReviewReadRequestV1 {
+                operation,
+                scope: self.feedback_scope.clone(),
+                pull_request_id,
+            })
     }
 
     /// Drives the mounted host-delivery half for one atomically recorded
@@ -459,6 +484,7 @@ impl FeedbackCycleRuntimePort for ProjectOpenAdvisoryFeedbackCycleV1 {
                     MonotonicDeadline::at(Instant::now() + Duration::from_secs(5)),
                     false,
                     None,
+                    AdvisoryRemoteReadMode::LocalFeedback,
                 )
                 .await?;
             Ok(())
@@ -550,6 +576,7 @@ impl DaemonAdvisoryCycleInvocationPort for ProjectOpenAdvisoryFeedbackCycleV1 {
                     monotonic_deadline,
                     false,
                     None,
+                    AdvisoryRemoteReadMode::ExplicitRefresh,
                 )
                 .await
                 .map_err(|failure| {
@@ -1138,6 +1165,7 @@ async fn run_production_hook_cycle(
             MonotonicDeadline::at(Instant::now() + Duration::from_secs(5)),
             request.trigger == HookOrchestrationTriggerV1::Stop,
             Some(&indexed_generation.metadata().manifest().generation_id),
+            AdvisoryRemoteReadMode::LocalFeedback,
         )
         .await
     {
@@ -1419,7 +1447,8 @@ fn intent_pass_work_outcome(
 ) -> HookOrchestrationWorkOutcomeV1 {
     let terminal = match outcome {
         ContextScoutIntentPassOutcomeV1::Disabled
-        | ContextScoutIntentPassOutcomeV1::ProviderUnsupported => true,
+        | ContextScoutIntentPassOutcomeV1::ProviderUnsupported
+        | ContextScoutIntentPassOutcomeV1::NoCandidate => true,
         ContextScoutIntentPassOutcomeV1::CodeGenerationUnavailable
         | ContextScoutIntentPassOutcomeV1::AddressUnavailable
         | ContextScoutIntentPassOutcomeV1::WindowUnavailable
@@ -1429,19 +1458,6 @@ fn intent_pass_work_outcome(
         | ContextScoutIntentPassOutcomeV1::Unavailable
         // Enqueue alone is insufficient: the caller must mount its exact claim.
         | ContextScoutIntentPassOutcomeV1::Enqueued { .. } => false,
-        ContextScoutIntentPassOutcomeV1::NoCandidate { model_outcome } => match model_outcome {
-            ContextScoutModelOutcomeV1::Succeeded
-            | ContextScoutModelOutcomeV1::NotRequested
-            | ContextScoutModelOutcomeV1::Disabled
-            | ContextScoutModelOutcomeV1::Denied
-            | ContextScoutModelOutcomeV1::TokenBudgetExceeded => true,
-            ContextScoutModelOutcomeV1::Unavailable
-            | ContextScoutModelOutcomeV1::Disconnected
-            | ContextScoutModelOutcomeV1::Cancelled
-            | ContextScoutModelOutcomeV1::DeadlineExceeded
-            | ContextScoutModelOutcomeV1::Backpressured
-            | ContextScoutModelOutcomeV1::InvalidOutput => false,
-        },
         ContextScoutIntentPassOutcomeV1::Suppressed { reason, .. } => match reason {
             ContextScoutSuppressionV1::Disabled
             | ContextScoutSuppressionV1::Paused
@@ -1469,8 +1485,8 @@ fn intent_pass_work_outcome(
 /// retains its durable debt until the pass evaluates or truthfully refuses it.
 /// Stop companions use this same pass without a durable completion callback.
 /// The pass pins the current configuration, mints the project's hook-runtime
-/// authority, reads the session window, asks the installed decision engine,
-/// and mounts the claim authority of the suggestion it enqueued.
+/// authority, derives deterministic action facts from the session window, and
+/// mounts the claim authority of the suggestion it enqueued.
 #[expect(
     clippy::too_many_lines,
     reason = "The intent cycle is one pinned, authorized pass over the opened project."
@@ -1506,7 +1522,7 @@ async fn run_production_intent_cycle(
         log_scout_intent_outcome(project_root, &request, "configuration_pin_unavailable");
         return HookOrchestrationWorkOutcomeV1::RetryableFailure;
     };
-    // Disabled or absent: no window read, no engine request, no authority.
+    // Disabled or absent: no window read, fact derivation, or authority.
     if !scout_configuration
         .intent_settings()
         .is_some_and(|settings| settings.enabled)
@@ -1519,8 +1535,6 @@ async fn run_production_intent_cycle(
         );
         return HookOrchestrationWorkOutcomeV1::Completed;
     }
-    // Installing the pinned configuration also builds the decision engine
-    // when its settings digest changed since the last install.
     if install_project_open_context_scout_configuration(
         producer.scout_owner.as_ref(),
         scout_configuration.clone(),
@@ -1592,10 +1606,7 @@ async fn run_production_intent_cycle(
         .configuration()
         .intent_settings()
         .map_or(Duration::ZERO, |settings| {
-            Duration::from_millis(
-                u64::from(settings.window.freshen_budget_ms)
-                    .saturating_add(u64::from(settings.engine.timeout_ms)),
-            )
+            Duration::from_millis(u64::from(settings.window.freshen_budget_ms))
         })
         .saturating_add(INTENT_PASS_STORE_BUDGET);
     let project_key = tracedecay_global_db::RegisteredGlobalDb::canonical_project_key(project_root);
@@ -1612,7 +1623,6 @@ async fn run_production_intent_cycle(
         context: &context,
         lifecycle: &lifecycle,
         code_generation_id,
-        engine: producer.scout_owner.intent_engine().await,
         observed_at,
         deadline: MonotonicDeadline::at(Instant::now() + deadline),
         cancellation: work_cancellation,
@@ -1624,13 +1634,6 @@ async fn run_production_intent_cycle(
         lifecycle: intent_lifecycle,
     } = outcome
     else {
-        if let ContextScoutIntentPassOutcomeV1::NoCandidate { model_outcome } = &outcome {
-            tracing::debug!(
-                event = "context_scout_intent_evaluation",
-                ?model_outcome,
-                "intent evaluation returned no candidate"
-            );
-        }
         log_scout_intent_outcome(project_root, &request, outcome.as_str());
         return settlement;
     };

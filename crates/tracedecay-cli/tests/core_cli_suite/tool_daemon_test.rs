@@ -60,6 +60,41 @@ fn run_command_with_timeout(command: Command, timeout: Duration) -> Output {
     common::output_with_timeout(command, timeout)
 }
 
+/// Transcript admission and its temporal projection publish separately. The
+/// fixture follows only the typed same-request publication retry; its stable
+/// message identities make a replay preserve the already-admitted transcript.
+fn ingest_transcript_until_published(command: &mut Command) -> Output {
+    let deadline = Instant::now() + CLI_ROUNDTRIP_TIMEOUT;
+    loop {
+        let output = command.output().expect("transcript ingest should run");
+        let response = serde_json::from_slice::<Value>(&output.stdout).ok();
+        let problem = response
+            .as_ref()
+            .map(|value| &value["structuredContent"]["problem"]);
+        let publication_pending = problem.is_some_and(|problem| {
+            problem["code"] == "temporal_refresh_unavailable"
+                && problem["retryable"] == true
+                && problem["terminality"] == "pre_admission"
+                && problem["retry_scope"] == "same_request"
+                && problem["retry"] == "after_delay"
+        });
+        if output.status.success() || !publication_pending {
+            return output;
+        }
+        let delay = Duration::from_millis(
+            problem.unwrap()["retry_after_millis"]
+                .as_u64()
+                .expect("publication retry must name its delay"),
+        );
+        assert!(
+            Instant::now() + delay < deadline,
+            "transcript projection did not publish before the fixture deadline: {}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+        std::thread::sleep(delay);
+    }
+}
+
 enum FakeDaemonResponse {
     Complete { text: String },
     HoldOpen,
@@ -3695,18 +3730,18 @@ fn hermes_read_only_preflight_keeps_project_lcm_grep_available() {
         ],
     })
     .to_string();
-    let user_output = tracedecay_command_with_home(&home_path)
-        .current_dir(std::path::Path::new("/"))
-        .env("TRACEDECAY_DAEMON_SOCKET", &socket)
-        .args([
-            "tool",
-            "tracedecay_hook_runtime",
-            "--json",
-            "--args",
-            user_args.as_str(),
-        ])
-        .output()
-        .expect("user-scoped transcript ingest should run");
+    let user_output = ingest_transcript_until_published(
+        tracedecay_command_with_home(&home_path)
+            .current_dir(std::path::Path::new("/"))
+            .env("TRACEDECAY_DAEMON_SOCKET", &socket)
+            .args([
+                "tool",
+                "tracedecay_hook_runtime",
+                "--json",
+                "--args",
+                user_args.as_str(),
+            ]),
+    );
     assert!(
         user_output.status.success(),
         "user-scoped Hermes transcript ingest must succeed projectless\nstdout:\n{}\nstderr:\n{}",
@@ -3737,20 +3772,20 @@ fn hermes_read_only_preflight_keeps_project_lcm_grep_available() {
         ],
     })
     .to_string();
-    let project_output = tracedecay_command_with_home(&home_path)
-        .current_dir(&project_path)
-        .env("TRACEDECAY_DAEMON_SOCKET", &socket)
-        .args([
-            "tool",
-            "--project",
-            &project_arg,
-            "tracedecay_hook_runtime",
-            "--json",
-            "--args",
-            project_args.as_str(),
-        ])
-        .output()
-        .expect("project-scoped transcript ingest should run");
+    let project_output = ingest_transcript_until_published(
+        tracedecay_command_with_home(&home_path)
+            .current_dir(&project_path)
+            .env("TRACEDECAY_DAEMON_SOCKET", &socket)
+            .args([
+                "tool",
+                "--project",
+                &project_arg,
+                "tracedecay_hook_runtime",
+                "--json",
+                "--args",
+                project_args.as_str(),
+            ]),
+    );
     assert!(
         project_output.status.success(),
         "project-scoped Hermes transcript ingest must succeed\nstdout:\n{}\nstderr:\n{}",

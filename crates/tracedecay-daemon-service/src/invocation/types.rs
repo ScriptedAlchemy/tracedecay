@@ -203,8 +203,8 @@ pub const MAX_COALESCED_HOOK_COMPLETIONS: usize = 32;
 /// permit and coalescing bounds is backpressured instead of queued.
 pub struct BoundedHookOrchestratorV1 {
     permits: Arc<Semaphore>,
-    /// The intent lane's own bound: a slow decision engine can hold these, never
-    /// the feedback producer's.
+    /// The intent lane's own bound: slow transcript freshness or storage can
+    /// hold these, never the feedback producer's.
     intent_permits: Arc<Semaphore>,
     work: Arc<HookOrchestrationWorkV1>,
     in_flight: Arc<StdMutex<HookOrchestrationInFlightV1>>,

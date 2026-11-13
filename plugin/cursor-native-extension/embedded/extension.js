@@ -1,7 +1,7 @@
 "use strict";
 const __rslib_import_meta_url__ = /*#__PURE__*/ (function () {
   return typeof document === 'undefined'
-    ? new (require('url'.replace('', '')).URL)('file:' + __filename).href
+    ? require('url'.replace('', '')).pathToFileURL(__filename).href
     : (document.currentScript && document.currentScript.src) ||
       new URL('main.js', document.baseURI).href;
 })();
@@ -25960,6 +25960,7 @@ __webpack_require__.d(__webpack_exports__, {
   DocumentLink: () => (DocumentLink),
   DocumentSymbol: () => (DocumentSymbol),
   DocumentUri: () => (DocumentUri),
+  EOL: () => (EOL),
   FoldingRange: () => (FoldingRange),
   FoldingRangeKind: () => (FoldingRangeKind),
   FormattingOptions: () => (FormattingOptions),
@@ -26007,14 +26008,12 @@ __webpack_require__.d(__webpack_exports__, {
   TextEdit: () => (TextEdit),
   URI: () => (URI),
   VersionedTextDocumentIdentifier: () => (VersionedTextDocumentIdentifier),
+  WorkspaceChange: () => (WorkspaceChange),
   WorkspaceEdit: () => (WorkspaceEdit),
   WorkspaceFolder: () => (WorkspaceFolder),
   WorkspaceSymbol: () => (WorkspaceSymbol),
   integer: () => (integer),
   uinteger: () => (uinteger)
-}, {
-  EOL: EOL,
-  WorkspaceChange: WorkspaceChange
 });
 
 

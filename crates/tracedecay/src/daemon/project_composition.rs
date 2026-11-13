@@ -1964,14 +1964,13 @@ impl ProjectOpenInputs<'_> {
         }
         if core_retained {
             let reset_refusal = tracedecay_mcp::reset_required_detail(&error);
-            if let Some(attempt) = &activation.publication_attempt {
-                let project_runtimes = &self.invocation.service.project_runtimes;
-                match &reset_refusal {
-                    Some(refusal) => {
-                        project_runtimes.mark_publication_reset_required(attempt, refusal.clone())
-                    }
-                    None => project_runtimes.mark_publication_failed(attempt),
-                };
+            if reset_refusal.is_none()
+                && let Some(attempt) = &activation.publication_attempt
+            {
+                self.invocation
+                    .service
+                    .project_runtimes
+                    .mark_publication_failed(attempt);
             }
             if let Some(failed_full_server) = failed_full_server {
                 failed_full_server.revoke_project_server_responses();
@@ -1986,10 +1985,19 @@ impl ProjectOpenInputs<'_> {
             // A session store in its typed reset-required state keeps the
             // full upgrade refused until the operator resets it, so the
             // retained core serves the code index meanwhile.
-            if reset_refusal.is_some() {
+            if let Some(refusal) = reset_refusal {
                 let code_index_status = self.activate_code_index(core);
                 Box::pin(self.register_reset_required_code_reads(core, resolved)).await;
                 Box::pin(self.publish_reset_required_doctor_report(opened, core, resolved)).await;
+                // The retained core still mounts its code-read owners after
+                // session admission refuses. Until they settle, missing
+                // primitives are warming, not refused session authorities.
+                if let Some(attempt) = &activation.publication_attempt {
+                    self.invocation
+                        .service
+                        .project_runtimes
+                        .mark_publication_reset_required(attempt, refusal);
+                }
                 self.log_phase(
                     "full_upgrade_reset_required",
                     Some(("code_index", code_index_status.to_owned())),

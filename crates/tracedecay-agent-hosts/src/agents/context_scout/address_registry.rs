@@ -1302,29 +1302,22 @@ mod tests {
             intent: None,
         };
         let with_intent = ContextScoutSettingsV1 {
-            intent: Some(tracedecay_domain::configuration::ContextScoutIntentSettingsV1 {
-                enabled: true,
-                engine: tracedecay_domain::configuration::DecisionEngineSettingsV1 {
-                    base_url: "http://127.0.0.1:8088".to_owned(),
-                    model: None,
-                    timeout_ms: 250,
-                    max_concurrent: 2,
-                    max_state_bytes: 64 * 1024,
+            intent: Some(
+                tracedecay_domain::configuration::ContextScoutIntentSettingsV1 {
+                    enabled: true,
+                    window: tracedecay_domain::configuration::IntentWindowSettingsV1 {
+                        max_user_turns: 3,
+                        max_messages: 12,
+                        max_bytes: 16 * 1024,
+                        max_age_secs: 1_800,
+                        freshen_budget_ms: 150,
+                    },
+                    action_fact_score_permille: 700,
+                    ttl_secs: 600,
+                    min_delivery_gap_secs: 30,
+                    prompt_lookup_deadline_ms: 200,
                 },
-                window: tracedecay_domain::configuration::IntentWindowSettingsV1 {
-                    max_user_turns: 3,
-                    max_messages: 12,
-                    max_bytes: 16 * 1024,
-                    max_age_secs: 1_800,
-                    freshen_budget_ms: 150,
-                },
-                questions:
-                    tracedecay_domain::configuration::ContextScoutIntentSettingsV1::reference_questions(),
-                action_fact_score_permille: 700,
-                ttl_secs: 600,
-                min_delivery_gap_secs: 30,
-                prompt_lookup_deadline_ms: 200,
-            }),
+            ),
             ..configured.clone()
         };
         let configured = ContextScoutConfigurationPinV1::from_current(&configuration(

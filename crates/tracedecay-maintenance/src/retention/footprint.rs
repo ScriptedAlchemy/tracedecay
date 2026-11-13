@@ -6,7 +6,12 @@
 //! That is why the ceiling is an entry count: a byte budget small enough to be
 //! cheap is smaller than one real graph container.
 
+use std::borrow::Cow;
 use std::collections::BTreeMap;
+#[cfg(unix)]
+use std::collections::BTreeSet;
+#[cfg(unix)]
+use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -16,11 +21,13 @@ use tracedecay_contracts::doctor::{
     DoctorStorageFamilyReadV1, DoctorStorageFindingKindV1, DoctorStorageFindingV1,
     storage_family_read,
 };
+use tracedecay_domain::canonical_text::sha256_hex;
+use tracedecay_domain::fold_control_characters;
 use tracedecay_global_db::registry_maintenance::{RootLivenessV1, probe_root};
 use tracedecay_runtime_core::text::format_bytes;
 
 use super::storage_report::{
-    FullProfileSizeV1, GRAPH_CONTAINER_SUFFIX, ProfileTotalCoverageStateV1, StoreKindBytesV1,
+    FullProfileSizeV1, ProfileTotalCoverageStateV1, StoreKindBytesV1, graph_container_stem,
 };
 
 /// Entries a footprint walk visits before it stops and reports a floor.
@@ -231,6 +238,16 @@ pub fn walk_regular_files_with_budget(
                 WalkInterruptionV1::DeadlineExceeded => WalkTerminationV1::DeadlineExceeded,
             };
         }
+        // read_dir follows a symlink when the directory argument itself is
+        // a symlink. Check every pending directory, including the caller's
+        // root, instead of relying only on child DirEntry::file_type.
+        match std::fs::symlink_metadata(&directory) {
+            Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {}
+            _ => {
+                visit(&directory, WalkedEntryV1::Unavailable);
+                continue;
+            }
+        }
         let Ok(entries) = std::fs::read_dir(&directory) else {
             visit(&directory, WalkedEntryV1::Unavailable);
             continue;
@@ -305,6 +322,8 @@ struct EntryTally {
     bytes: u64,
     unavailable_entry_count: usize,
     kinds: Option<StoreKindBytesV1>,
+    /// An expected project directory was replaced by a regular file.
+    unexpected_project_file: bool,
 }
 
 struct FootprintKeys {
@@ -342,10 +361,27 @@ pub(crate) fn census_profile_footprint_with_budget(
             else {
                 return;
             };
+            // The file itself is measurable, but it cannot be a usable
+            // project-store directory. Keep its bytes in the physical total,
+            // and report the missing store traversal as unavailable rather
+            // than calling the replaced project healthy.
+            let unexpected_project_file = matches!(walked, WalkedEntryV1::File { .. })
+                && keys
+                    .project
+                    .as_ref()
+                    .is_some_and(|(_, relative)| relative.as_os_str().is_empty());
+            if unexpected_project_file {
+                unavailable_entry_count = unavailable_entry_count.saturating_add(1);
+            }
             let primary = tallies.entry(keys.primary).or_default();
             tally(primary, walked);
+            if unexpected_project_file {
+                primary.unavailable_entry_count = primary.unavailable_entry_count.saturating_add(1);
+                primary.unexpected_project_file = true;
+            }
             if let (Some((_, store_relative)), WalkedEntryV1::File { bytes }) =
                 (&keys.project, walked)
+                && !unexpected_project_file
             {
                 primary
                     .kinds
@@ -369,10 +405,15 @@ pub(crate) fn census_profile_footprint_with_budget(
                 }
             });
             ProfileFootprintEntryV1 {
-                bound_bytes: bound_overrides
-                    .get(&key)
-                    .copied()
-                    .unwrap_or_else(|| default_bound_bytes(family)),
+                bound_bytes: bound_overrides.get(&key).copied().unwrap_or_else(|| {
+                    if tally.unexpected_project_file {
+                        // An unrelated file must not inherit a project's 10 GiB
+                        // allowance. An explicit owner override still wins.
+                        default_bound_bytes(ProfileFamilyV1::Other)
+                    } else {
+                        default_bound_bytes(family)
+                    }
+                }),
                 key,
                 family,
                 bytes: tally.bytes,
@@ -408,6 +449,9 @@ pub fn census_sqlite_temp_spill(
 ) -> Option<ProfileFootprintEntryV1> {
     let mut bytes = 0u64;
     let mut unavailable_entry_count = 0usize;
+    // Multiple descriptors may refer to one unlinked SQLite allocation.
+    #[cfg(unix)]
+    let mut observed_files = BTreeSet::new();
     for entry in std::fs::read_dir(fd_directory).ok()? {
         let fd = match entry {
             Ok(fd) => fd,
@@ -431,7 +475,13 @@ pub fn census_sqlite_temp_spill(
             .is_some_and(|name| name.starts_with("etilqs_") && name.ends_with(" (deleted)"));
         if unlinked_temp {
             match std::fs::metadata(fd.path()) {
-                Ok(metadata) => bytes = bytes.saturating_add(metadata.len()),
+                Ok(metadata) => {
+                    #[cfg(unix)]
+                    if !observed_files.insert((metadata.dev(), metadata.ino())) {
+                        continue;
+                    }
+                    bytes = bytes.saturating_add(metadata.len());
+                }
                 // A closed descriptor no longer consumes space.
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
                 Err(_) => unavailable_entry_count = unavailable_entry_count.saturating_add(1),
@@ -465,6 +515,13 @@ fn is_wal(name: &str) -> bool {
     name.ends_with("-wal") || name.ends_with(".wal")
 }
 
+// SQLite WALs are regular root-level files. Only Grafeo WALs are
+// directories, so a similarly named incident tree must not inherit a WAL
+// budget or hide its own independently bounded footprint.
+fn is_wal_family_root(name: &str, is_file: bool) -> bool {
+    is_wal(name) && (is_file || name.ends_with(".grafeo.wal"))
+}
+
 /// The footprint keys one profile-relative path belongs to. A WAL directory
 /// is one entry keyed by the directory; its segments sum into it.
 fn footprint_keys(relative: &Path) -> Option<FootprintKeys> {
@@ -473,25 +530,31 @@ fn footprint_keys(relative: &Path) -> Option<FootprintKeys> {
         .map(|component| component.as_os_str().to_string_lossy().into_owned())
         .collect::<Vec<_>>();
     let first = components.first()?;
-    if first == PROJECTS_DIRECTORY && components.len() >= 3 {
+    // A non-traversable project root (symlink, unreadable directory, or
+    // unexpected file) still belongs to that project's named finding.
+    // Otherwise its unavailable bytes appear under a generic `projects` key
+    // while the affected store disappears from Doctor altogether.
+    if first == PROJECTS_DIRECTORY && components.len() >= 2 {
         let store_key = format!("{PROJECTS_DIRECTORY}/{}", components[1]);
         let inner = &components[2..];
+        // A container's verified/spill tree owns its descendants, even when
+        // a scratch file is named *.wal. Only the actual container WAL
+        // directory (or a WAL outside a container) gets a WAL bound.
         let overlay = inner
-            .iter()
-            .position(|name| is_wal(name))
-            .map(|end| {
-                (
-                    format!("{store_key}/{}", inner[..=end].join("/")),
-                    ProfileFamilyV1::Wal,
-                )
-            })
-            .or_else(|| {
-                (inner.len() == 1 && inner[0].ends_with(GRAPH_CONTAINER_SUFFIX)).then(|| {
+            .split_first()
+            .and_then(|(first, rest)| {
+                graph_container_stem(first, rest.is_empty()).map(|stem| {
                     (
-                        format!("{store_key}/{}", inner[0]),
+                        format!("{store_key}/{stem}"),
                         ProfileFamilyV1::GraphContainer,
                     )
                 })
+            })
+            .or_else(|| {
+                inner
+                    .first()
+                    .filter(|name| is_wal_family_root(name, inner.len() == 1))
+                    .map(|first| (format!("{store_key}/{first}"), ProfileFamilyV1::Wal))
             });
         return Some(FootprintKeys {
             primary: (store_key, ProfileFamilyV1::ProjectStore),
@@ -499,19 +562,33 @@ fn footprint_keys(relative: &Path) -> Option<FootprintKeys> {
             project: Some((components[1].clone(), inner.iter().collect())),
         });
     }
-    let primary = if let Some(end) = components.iter().position(|name| is_wal(name)) {
-        (components[..=end].join("/"), ProfileFamilyV1::Wal)
-    } else if let Some(stem) = first
-        .find(GRAPH_CONTAINER_SUFFIX)
-        .map(|at| &first[..at + GRAPH_CONTAINER_SUFFIX.len()])
-    {
-        // A top-level container and its sidecars (`.verified`, `.spill`).
+    // A top-level family owns all descendants. WAL-looking nested scratch
+    // filenames in an otherwise unrelated tree must not escape that bound.
+    let primary = if let Some(stem) = graph_container_stem(first, components.len() == 1) {
+        // Sidecar trees take precedence over WAL-looking scratch filenames.
         (stem.to_owned(), ProfileFamilyV1::GraphContainer)
-    } else if first == "global.db" || first.starts_with("global.db-") {
+    } else if is_wal_family_root(first, components.len() == 1) {
+        (first.clone(), ProfileFamilyV1::Wal)
+    } else if components.len() == 1
+        && matches!(
+            first.as_str(),
+            "global.db" | "global.db-shm" | "global.db-journal"
+        )
+    {
         ("global.db".to_owned(), ProfileFamilyV1::ProfileRegistry)
-    } else if first.starts_with("user-sessions.db") {
+    } else if components.len() == 1
+        && matches!(
+            first.as_str(),
+            "user-sessions.db" | "user-sessions.db-shm" | "user-sessions.db-journal"
+        )
+    {
         ("user-sessions.db".to_owned(), ProfileFamilyV1::UserSessions)
-    } else if first.starts_with("user-memory.") {
+    } else if components.len() == 1
+        && matches!(
+            first.as_str(),
+            "user-memory.db" | "user-memory.db-shm" | "user-memory.db-journal"
+        )
+    {
         ("user-memory".to_owned(), ProfileFamilyV1::UserMemory)
     } else {
         let family = match first.as_str() {
@@ -530,6 +607,48 @@ fn footprint_keys(relative: &Path) -> Option<FootprintKeys> {
     })
 }
 
+/// Keep a stable evidence reference even for deeply nested filesystem names.
+/// The report retains the complete key; Doctor references have a smaller bound.
+fn doctor_footprint_reference_key(key: &str) -> Cow<'_, str> {
+    if DoctorEvidenceReferenceV1::new(key.to_owned()).is_ok() {
+        return Cow::Borrowed(key);
+    }
+    Cow::Owned(format!("footprint/sha256:{}", sha256_hex(key.as_bytes())))
+}
+
+/// Preserve the measured size and bound in Doctor even when an optional
+/// registered root, kind breakdown, or long footprint identity exceeds its
+/// 512-byte coverage statement. Full identities and breakdowns remain in the
+/// storage report; a truncated number would make the finding unactionable.
+fn bounded_entry_subject(entry: &ProfileFootprintEntryV1) -> (String, String) {
+    let mut evidence_key = doctor_footprint_reference_key(&entry.key).into_owned();
+    let mut subject = entry_statement(entry, &evidence_key);
+    let fits = |subject: &str| {
+        let statement = footprint_statement(subject, entry.bytes, entry.bound_bytes);
+        // Compare the *rendered* statement. Doctor folds control characters,
+        // so a valid short registered path containing a tab or newline must
+        // not be mistaken for an overlong detail and silently omitted.
+        super::diagnostics::bounded_statement(&statement)
+            == fold_control_characters(&statement).trim()
+    };
+    if !fits(&subject) {
+        let mut compact = entry.clone();
+        compact.kinds = None;
+        if let Some(project) = compact.project.as_mut() {
+            // Keep the verified root state, but omit its optional long path.
+            project.registered_root = None;
+        }
+        subject = entry_statement(&compact, &evidence_key);
+        if !fits(&subject) {
+            // A valid Doctor reference can be longer than its statement budget.
+            // Retain stable evidence identity without losing the numeric bound.
+            evidence_key = format!("footprint/sha256:{}", sha256_hex(entry.key.as_bytes()));
+            subject = entry_statement(&compact, &evidence_key);
+        }
+    }
+    (evidence_key, subject)
+}
+
 /// One `OverBudgetStore` finding per footprint entry plus one for the profile
 /// total. A floor above its bound proves the overage, so an over-bound entry
 /// is degraded with complete coverage even when bytes went unread.
@@ -537,9 +656,10 @@ fn footprint_keys(relative: &Path) -> Option<FootprintKeys> {
 pub fn footprint_findings(footprint: &ProfileFootprintV1) -> DoctorStorageFamilyReadV1 {
     let mut findings = Vec::with_capacity(footprint.entries.len() + 1);
     for entry in &footprint.entries {
+        let (evidence_key, subject) = bounded_entry_subject(entry);
         let Some(finding) = bounded_finding(
-            &entry.key,
-            &entry_statement(entry),
+            evidence_key.as_str(),
+            &subject,
             entry.bytes,
             entry.bound_bytes,
             entry.unavailable_entry_count > 0 || footprint.truncated,
@@ -596,7 +716,7 @@ fn registered_project_reclaim_hint(entry: &ProfileFootprintEntryV1) -> Option<St
     ))
 }
 
-fn entry_statement(entry: &ProfileFootprintEntryV1) -> String {
+fn entry_statement(entry: &ProfileFootprintEntryV1, evidence_key: &str) -> String {
     let label = match entry.family {
         ProfileFamilyV1::ProjectStore => "project store",
         ProfileFamilyV1::GraphContainer => "graph container",
@@ -611,6 +731,10 @@ fn entry_statement(entry: &ProfileFootprintEntryV1) -> String {
         ProfileFamilyV1::SqliteTempSpill => "unlinked SQLite temp files",
         ProfileFamilyV1::Other => "profile entry",
     };
+    let floor = floor_note(entry.unavailable_entry_count, false);
+    if evidence_key != entry.key {
+        return format!("{label} {evidence_key} (full path in storage report){floor}");
+    }
     let root =
         entry
             .project
@@ -630,13 +754,16 @@ fn entry_statement(entry: &ProfileFootprintEntryV1) -> String {
             )
         });
     let reclaim = registered_project_reclaim_hint(entry).unwrap_or_default();
-    let floor = floor_note(entry.unavailable_entry_count, false);
     let render = |root: &str, reclaim: &str| {
-        format!("{label} {}{reclaim}{root}{breakdown}{floor}", entry.key)
+        format!("{label} {evidence_key}{reclaim}{root}{breakdown}{floor}")
     };
     let fits = |subject: &str| {
         let statement = footprint_statement(subject, entry.bytes, entry.bound_bytes);
-        super::diagnostics::bounded_statement(&statement) == statement
+        // Compare the *rendered* statement. Doctor folds control characters,
+        // so a valid short registered path containing a tab or newline must
+        // not be mistaken for an overlong detail and silently omitted.
+        super::diagnostics::bounded_statement(&statement)
+            == fold_control_characters(&statement).trim()
     };
     let detailed = render(&root, &reclaim);
     if reclaim.is_empty() || fits(&detailed) {
@@ -648,8 +775,7 @@ fn entry_statement(entry: &ProfileFootprintEntryV1) -> String {
     let root_state = entry
         .project
         .as_ref()
-        .map(|project| format!(" ({})", project.state.label()))
-        .unwrap_or_default();
+        .map_or_default(|project| format!(" ({})", project.state.label()));
     let compact = render(
         &format!(" (registered root omitted from bounded diagnostic){root_state}"),
         &reclaim,
@@ -769,12 +895,38 @@ mod tests {
             std::os::unix::fs::symlink(&target, fd_directory.join(fd)).expect("fd link");
         }
 
+        // Duplicated file descriptors must not double-count a physical inode.
+        std::os::unix::fs::symlink(
+            temporary.path().join("etilqs_5e598e639aa4c638 (deleted)"),
+            fd_directory.join("7"),
+        )
+        .expect("duplicated temp descriptor");
+
         let entry = census_sqlite_temp_spill(&fd_directory, &BTreeMap::new())
             .expect("a readable fd directory");
 
         assert_eq!(entry.key, SQLITE_TEMP_SPILL_KEY);
         assert_eq!(entry.bytes, 1_924 * MIB);
         assert_eq!(entry.bound_bytes, GIB);
+        let healthy_budget = BTreeMap::from([(SQLITE_TEMP_SPILL_KEY.to_owned(), 2 * GIB)]);
+        let healthy = census_sqlite_temp_spill(&fd_directory, &healthy_budget)
+            .expect("same unlinked SQLite allocations");
+        assert_eq!(healthy.bytes, 1_924 * MIB);
+        assert_eq!(healthy.bound_bytes, 2 * GIB);
+        let healthy_footprint = ProfileFootprintV1 {
+            entries: vec![healthy],
+            total_bytes: 0,
+            unavailable_entry_count: 0,
+            truncated: false,
+            total_bound_bytes: PROFILE_TOTAL_BOUND_BYTES,
+        };
+        assert_eq!(
+            findings(&healthy_footprint)[SQLITE_TEMP_SPILL_KEY]
+                .finding()
+                .state(),
+            DoctorEvidenceStateV1::HealthyCompleteCoverage,
+            "duplicate handles must not cause a false storage-pressure finding"
+        );
         let footprint = ProfileFootprintV1 {
             entries: vec![entry],
             total_bytes: 0,
@@ -1318,6 +1470,135 @@ mod tests {
         assert_eq!(remaining, 100 - 1 - 64 - 1 - 1);
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn unreadable_project_root_has_its_own_partial_finding() {
+        let temporary = tempfile::tempdir().expect("footprint fixture");
+        let profile = temporary.path().join("profile");
+        let foreign = temporary.path().join("foreign");
+        sized(&foreign.join("private"), 2 * GIB);
+        sized(&profile.join("projects/proj_live/tracedecay.db"), 11);
+        std::os::unix::fs::symlink(&foreign, profile.join("projects/proj_blocked"))
+            .expect("substituted project directory");
+
+        let registered_root = temporary.path().join("registered-checkout");
+        std::fs::create_dir(&registered_root).expect("registered root");
+        let registered = BTreeMap::from([(
+            "proj_blocked".to_owned(),
+            registered_root.display().to_string(),
+        )]);
+        let overrides = BTreeMap::from([
+            ("projects/proj_blocked".to_owned(), 1),
+            ("projects/proj_live".to_owned(), 11),
+            (PROFILE_TOTAL_KEY.to_owned(), 11),
+        ]);
+
+        let footprint = census_profile_footprint(&profile, &registered, &overrides);
+        assert_eq!(
+            footprint.total_bytes, 11,
+            "foreign bytes must not be counted"
+        );
+        assert_eq!(footprint.unavailable_entry_count, 1);
+        assert_eq!(footprint.entries.len(), 2, "no generic projects entry");
+        assert_eq!(
+            footprint.full_profile_size().state,
+            ProfileTotalCoverageStateV1::Partial
+        );
+        let blocked = entry(&footprint, "projects/proj_blocked");
+        assert_eq!(blocked.family, ProfileFamilyV1::ProjectStore);
+        assert_eq!(blocked.bytes, 0);
+        assert_eq!(blocked.unavailable_entry_count, 1);
+        assert_eq!(blocked.bound_bytes, 1);
+        assert_eq!(
+            blocked.project.as_ref().expect("registered project").state,
+            ProjectRootStateV1::Present
+        );
+        assert_eq!(entry(&footprint, "projects/proj_live").bytes, 11);
+
+        let observed = findings(&footprint);
+        assert_eq!(observed.len(), 3);
+        assert_eq!(
+            observed["projects/proj_blocked"].finding().state(),
+            DoctorEvidenceStateV1::Partial,
+            "an untraversable project store cannot be reported healthy or omitted"
+        );
+        assert_eq!(
+            observed["projects/proj_live"].finding().state(),
+            DoctorEvidenceStateV1::HealthyCompleteCoverage
+        );
+        assert_eq!(
+            observed[PROFILE_TOTAL_KEY].finding().state(),
+            DoctorEvidenceStateV1::Partial
+        );
+    }
+
+    #[test]
+    fn regular_file_replacing_project_directory_is_not_healthy_or_project_budgeted() {
+        let temporary = tempfile::tempdir().expect("footprint fixture");
+        let profile = temporary.path().join("profile");
+        sized(&profile.join("projects/proj_replaced"), 11);
+        sized(&profile.join("projects/proj_healthy/tracedecay.db"), 7);
+        let registered_root = temporary.path().join("registered-checkout");
+        std::fs::create_dir(&registered_root).expect("registered root");
+        let registered = BTreeMap::from([(
+            "proj_replaced".to_owned(),
+            registered_root.display().to_string(),
+        )]);
+
+        let footprint = census_profile_footprint(&profile, &registered, &BTreeMap::new());
+        assert_eq!(footprint.total_bytes, 18, "count all regular-file bytes");
+        assert_eq!(footprint.unavailable_entry_count, 1);
+        assert_eq!(footprint.entries.len(), 2, "name the replaced store");
+        let replaced = entry(&footprint, "projects/proj_replaced");
+        assert_eq!(replaced.family, ProfileFamilyV1::ProjectStore);
+        assert_eq!(replaced.bytes, 11, "do not hide the replacement file");
+        assert_eq!(replaced.unavailable_entry_count, 1);
+        assert_eq!(
+            replaced.bound_bytes,
+            default_bound_bytes(ProfileFamilyV1::Other),
+            "a replacement file must not inherit the 10 GiB project allowance"
+        );
+        assert!(replaced.kinds.is_none(), "not a valid project-store file");
+        assert_eq!(
+            replaced.project.as_ref().expect("registration").state,
+            ProjectRootStateV1::Present
+        );
+        let healthy = entry(&footprint, "projects/proj_healthy");
+        assert_eq!(healthy.bytes, 7);
+        assert_eq!(healthy.unavailable_entry_count, 0);
+        assert_eq!(
+            healthy.bound_bytes,
+            default_bound_bytes(ProfileFamilyV1::ProjectStore)
+        );
+
+        let observed = findings(&footprint);
+        assert_eq!(observed.len(), 3);
+        assert_eq!(
+            observed["projects/proj_replaced"].finding().state(),
+            DoctorEvidenceStateV1::Partial
+        );
+        assert_eq!(
+            observed["projects/proj_healthy"].finding().state(),
+            DoctorEvidenceStateV1::HealthyCompleteCoverage
+        );
+        assert_eq!(
+            observed[PROFILE_TOTAL_KEY].finding().state(),
+            DoctorEvidenceStateV1::Partial
+        );
+
+        // Exercise the same overage path without allocating a 1 GiB fixture
+        // on platforms that eagerly provision extended regular files.
+        let overrides = BTreeMap::from([("projects/proj_replaced".to_owned(), 10)]);
+        let over = census_profile_footprint(&profile, &registered, &overrides);
+        assert_eq!(over.total_bytes, 18);
+        assert_eq!(entry(&over, "projects/proj_replaced").bound_bytes, 10);
+        assert_eq!(
+            findings(&over)["projects/proj_replaced"].finding().state(),
+            DoctorEvidenceStateV1::Degraded,
+            "a large replacement file must trigger its tighter named bound"
+        );
+    }
+
     #[test]
     fn one_entry_budget_is_shared_across_walk_roots() {
         let temporary = tempfile::tempdir().expect("walk fixture");
@@ -1366,6 +1647,592 @@ mod tests {
     }
 
     #[test]
+    fn hashed_wal_reference_keeps_overages_and_partial_coverage() {
+        // A real WAL overlay is anchored at a store root; nested payloads do
+        // not create WAL families. Construct the oversized diagnostic key
+        // directly to exercise the bounded Doctor evidence contract.
+        let key = format!("projects/proj_deep/{}.wal", "x".repeat(1025));
+        let mut footprint = ProfileFootprintV1 {
+            entries: vec![
+                ProfileFootprintEntryV1 {
+                    key: "projects/proj_deep".to_owned(),
+                    family: ProfileFamilyV1::ProjectStore,
+                    bytes: 2 * GIB,
+                    unavailable_entry_count: 1,
+                    bound_bytes: 1,
+                    project: None,
+                    kinds: None,
+                },
+                ProfileFootprintEntryV1 {
+                    key: key.clone(),
+                    family: ProfileFamilyV1::Wal,
+                    bytes: 2 * GIB,
+                    unavailable_entry_count: 1,
+                    bound_bytes: default_bound_bytes(ProfileFamilyV1::Wal),
+                    project: None,
+                    kinds: None,
+                },
+            ],
+            total_bytes: 2 * GIB,
+            unavailable_entry_count: 1,
+            truncated: false,
+            total_bound_bytes: 1,
+        };
+        assert!(DoctorEvidenceReferenceV1::new(key.clone()).is_err());
+
+        let observed = findings(&footprint);
+        assert_eq!(observed.len(), footprint.entries.len() + 1);
+        let reference = format!("footprint/sha256:{}", sha256_hex(key.as_bytes()));
+        let wal_finding = &observed[&reference];
+        assert_eq!(
+            wal_finding.finding().state(),
+            DoctorEvidenceStateV1::Degraded
+        );
+        let statement = wal_finding.finding().coverage().statement();
+        assert!(
+            statement.contains("full path in storage report"),
+            "{statement}"
+        );
+        assert!(statement.contains(&format_bytes(2 * GIB)), "{statement}");
+        assert!(
+            statement.contains(&format_bytes(default_bound_bytes(ProfileFamilyV1::Wal))),
+            "{statement}"
+        );
+        assert!(statement.contains("1 unreadable entries"), "{statement}");
+        for reference in ["projects/proj_deep", PROFILE_TOTAL_KEY] {
+            assert_eq!(
+                observed[reference].finding().state(),
+                DoctorEvidenceStateV1::Degraded,
+                "an oversized identity must not suppress other overages"
+            );
+        }
+
+        footprint.entries[1].bound_bytes = 3 * GIB;
+        let observed = findings(&footprint);
+        let finding = observed[&reference].finding();
+        assert_eq!(finding.state(), DoctorEvidenceStateV1::Partial);
+        let statement = finding.coverage().statement();
+        assert!(statement.contains("WAL "), "{statement}");
+        assert!(statement.contains("1 unreadable entries"), "{statement}");
+    }
+
+    #[test]
+    fn top_level_container_bound_excludes_unrelated_grafeo_suffixes() {
+        let temp = tempfile::tempdir().expect("footprint fixture");
+        let profile = temp.path().join("profile");
+        for (name, bytes) in [
+            ("user-sessions.grafeo", 5),
+            ("user-sessions.grafeo.verified", 7),
+            ("user-sessions.grafeo.spill/scratch/inflight", 11),
+            ("user-sessions.grafeo.notes", 30),
+            ("other.grafeo.metrics", 40),
+            ("scratch.grafeo/unrelated", 13),
+        ] {
+            sized(&profile.join(name), bytes);
+        }
+        let container_key = "user-sessions.grafeo";
+        let overrides = BTreeMap::from([(container_key.to_owned(), 24)]);
+        let footprint = census_profile_footprint(&profile, &BTreeMap::new(), &overrides);
+
+        assert_eq!(footprint.total_bytes, 106);
+        assert_eq!(entry(&footprint, container_key).bytes, 23);
+        assert_eq!(
+            entry(&footprint, container_key).family,
+            ProfileFamilyV1::GraphContainer
+        );
+        for (name, bytes) in [
+            ("user-sessions.grafeo.notes", 30),
+            ("other.grafeo.metrics", 40),
+            ("scratch.grafeo", 13),
+        ] {
+            let unrelated = entry(&footprint, name);
+            assert_eq!(unrelated.family, ProfileFamilyV1::Other);
+            assert_eq!(unrelated.bytes, bytes);
+        }
+        assert_eq!(
+            footprint.full_profile_size().state,
+            ProfileTotalCoverageStateV1::Complete
+        );
+        let observed = findings(&footprint);
+        assert_eq!(
+            observed[container_key].finding().state(),
+            DoctorEvidenceStateV1::HealthyCompleteCoverage,
+            "unowned files must not falsely trip the graph-container bound"
+        );
+
+        let over = census_profile_footprint(
+            &profile,
+            &BTreeMap::new(),
+            &BTreeMap::from([(container_key.to_owned(), 22)]),
+        );
+        assert_eq!(
+            findings(&over)[container_key].finding().state(),
+            DoctorEvidenceStateV1::Degraded,
+            "actual graph sidecar bytes must still trip their bound"
+        );
+    }
+
+    #[test]
+    fn project_container_bound_includes_verified_and_spill_sidecars() {
+        let temp = tempfile::tempdir().expect("footprint fixture");
+        let profile = temp.path().join("profile");
+        let project = "projects/proj_sidecars";
+        for (name, bytes) in [
+            ("graph.grafeo", 5),
+            ("graph.grafeo.verified", 7),
+            ("graph.grafeo.spill", 11),
+            ("graph.grafeo.wal/segment", 13),
+            ("other.grafeo.spill/scratch/inflight", 17),
+            ("not-a-graph.grafeo.tmp", 19),
+        ] {
+            sized(&profile.join(project).join(name), bytes);
+        }
+        let container_key = format!("{project}/graph.grafeo");
+        let sibling_key = format!("{project}/other.grafeo");
+        let wal_key = format!("{project}/graph.grafeo.wal");
+        let overrides = BTreeMap::from([(container_key.clone(), 10), (sibling_key.clone(), 16)]);
+        let footprint = census_profile_footprint(&profile, &BTreeMap::new(), &overrides);
+        assert_eq!(footprint.total_bytes, 72);
+        assert_eq!(entry(&footprint, project).bytes, 72);
+        assert_eq!(
+            entry(&footprint, project)
+                .kinds
+                .expect("physical project-kind census")
+                .graph_container,
+            53
+        );
+        assert_eq!(
+            entry(&footprint, &container_key).family,
+            ProfileFamilyV1::GraphContainer
+        );
+        assert_eq!(entry(&footprint, &container_key).bytes, 23);
+        assert_eq!(entry(&footprint, &sibling_key).bytes, 17);
+        assert_eq!(entry(&footprint, &wal_key).family, ProfileFamilyV1::Wal);
+        assert_eq!(entry(&footprint, &wal_key).bytes, 13);
+        assert_eq!(
+            footprint.full_profile_size().state,
+            ProfileTotalCoverageStateV1::Complete
+        );
+
+        let observed = findings(&footprint);
+        assert_eq!(
+            observed[&container_key].finding().state(),
+            DoctorEvidenceStateV1::Degraded,
+            "the former main-file-only overlay would falsely report healthy"
+        );
+        assert_eq!(
+            observed[&sibling_key].finding().state(),
+            DoctorEvidenceStateV1::Degraded,
+            "an orphaned spill still consumes a named container bound"
+        );
+        assert_eq!(
+            observed[&wal_key].finding().state(),
+            DoctorEvidenceStateV1::HealthyCompleteCoverage,
+            "WAL pressure remains its own bound, not double-charged to containers"
+        );
+    }
+
+    #[test]
+    fn nested_wal_named_graph_spill_files_remain_under_container_bounds() {
+        let temp = tempfile::tempdir().expect("footprint fixture");
+        let profile = temp.path().join("profile");
+        for (relative, bytes) in [
+            ("user-sessions.grafeo", 5),
+            ("user-sessions.grafeo.spill/scratch/chunk.wal", 17),
+            ("user-sessions.grafeo.spill/scratch/segment-wal/part", 19),
+            ("user-sessions.grafeo.wal/segment", 7),
+            ("projects/proj_spill/graph.grafeo", 3),
+            (
+                "projects/proj_spill/graph.grafeo.spill/scratch/chunk.wal",
+                23,
+            ),
+            (
+                "projects/proj_spill/graph.grafeo.spill/segment-wal/part",
+                29,
+            ),
+            ("projects/proj_spill/graph.grafeo.wal/segment", 11),
+        ] {
+            sized(&profile.join(relative), bytes);
+        }
+        let overrides = BTreeMap::from([
+            ("user-sessions.grafeo".to_owned(), 40),
+            ("projects/proj_spill/graph.grafeo".to_owned(), 54),
+            ("user-sessions.grafeo.wal".to_owned(), 7),
+            ("projects/proj_spill/graph.grafeo.wal".to_owned(), 11),
+        ]);
+        let footprint = census_profile_footprint(&profile, &BTreeMap::new(), &overrides);
+        assert_eq!(footprint.total_bytes, 114);
+        assert_eq!(footprint.unavailable_entry_count, 0);
+        assert_eq!(footprint.entries.len(), 5);
+        assert_eq!(
+            footprint.full_profile_size().state,
+            ProfileTotalCoverageStateV1::Complete
+        );
+
+        for (key, family, bytes) in [
+            ("user-sessions.grafeo", ProfileFamilyV1::GraphContainer, 41),
+            (
+                "projects/proj_spill/graph.grafeo",
+                ProfileFamilyV1::GraphContainer,
+                55,
+            ),
+            ("user-sessions.grafeo.wal", ProfileFamilyV1::Wal, 7),
+            (
+                "projects/proj_spill/graph.grafeo.wal",
+                ProfileFamilyV1::Wal,
+                11,
+            ),
+            ("projects/proj_spill", ProfileFamilyV1::ProjectStore, 66),
+        ] {
+            let measured = entry(&footprint, key);
+            assert_eq!(measured.family, family, "{key}");
+            assert_eq!(measured.bytes, bytes, "{key}");
+        }
+
+        let observed = findings(&footprint);
+        assert_eq!(observed.len(), 6);
+        for key in ["user-sessions.grafeo", "projects/proj_spill/graph.grafeo"] {
+            assert_eq!(
+                observed[key].finding().state(),
+                DoctorEvidenceStateV1::Degraded,
+                "{key} must detect spill bytes despite WAL-looking filenames"
+            );
+        }
+        for key in [
+            "user-sessions.grafeo.wal",
+            "projects/proj_spill/graph.grafeo.wal",
+            "projects/proj_spill",
+            PROFILE_TOTAL_KEY,
+        ] {
+            assert_eq!(
+                observed[key].finding().state(),
+                DoctorEvidenceStateV1::HealthyCompleteCoverage,
+                "{key} must retain its actual bound"
+            );
+        }
+    }
+
+    #[test]
+    fn database_family_bounds_do_not_swallow_unrelated_suffix_files() {
+        let temp = tempfile::tempdir().expect("footprint fixture");
+        let profile = temp.path().join("profile");
+        for (name, bytes) in [
+            ("global.db", 5),
+            ("global.db-shm", 7),
+            ("global.db-journal", 11),
+            ("global.db-wal", 13),
+            ("global.db-mystery", 17),
+            ("user-sessions.db", 19),
+            ("user-sessions.db-shm", 23),
+            ("user-sessions.db-journal", 29),
+            ("user-sessions.db-wal", 31),
+            ("user-sessions.db-backup", 37),
+            ("user-memory.db", 41),
+            ("user-memory.db-shm", 43),
+            ("user-memory.db-journal", 47),
+            ("user-memory.db-wal", 53),
+            ("user-memory.db-backup", 59),
+            ("user-memory.grafeo.notes", 61),
+        ] {
+            sized(&profile.join(name), bytes);
+        }
+        let overrides = BTreeMap::from([
+            ("global.db".to_owned(), 23),
+            ("user-sessions.db".to_owned(), 71),
+            ("global.db-mystery".to_owned(), 16),
+            ("user-sessions.db-backup".to_owned(), 36),
+            ("user-memory".to_owned(), 132),
+            ("user-memory.db-wal".to_owned(), 54),
+            ("user-memory.db-backup".to_owned(), 58),
+            ("user-memory.grafeo.notes".to_owned(), 60),
+        ]);
+        let footprint = census_profile_footprint(&profile, &BTreeMap::new(), &overrides);
+        assert_eq!(footprint.total_bytes, 496);
+        assert_eq!(
+            footprint.full_profile_size().state,
+            ProfileTotalCoverageStateV1::Complete
+        );
+
+        for (key, family, bytes) in [
+            ("global.db", ProfileFamilyV1::ProfileRegistry, 23),
+            ("user-sessions.db", ProfileFamilyV1::UserSessions, 71),
+            ("global.db-wal", ProfileFamilyV1::Wal, 13),
+            ("user-sessions.db-wal", ProfileFamilyV1::Wal, 31),
+            ("global.db-mystery", ProfileFamilyV1::Other, 17),
+            ("user-sessions.db-backup", ProfileFamilyV1::Other, 37),
+            ("user-memory", ProfileFamilyV1::UserMemory, 131),
+            ("user-memory.db-wal", ProfileFamilyV1::Wal, 53),
+            ("user-memory.db-backup", ProfileFamilyV1::Other, 59),
+            ("user-memory.grafeo.notes", ProfileFamilyV1::Other, 61),
+        ] {
+            let measured = entry(&footprint, key);
+            assert_eq!(measured.family, family, "{key}");
+            assert_eq!(measured.bytes, bytes, "{key}");
+        }
+        let observed = findings(&footprint);
+        assert_eq!(observed.len(), footprint.entries.len() + 1);
+        for key in [
+            "global.db",
+            "user-sessions.db",
+            "global.db-wal",
+            "user-sessions.db-wal",
+            "user-memory",
+            "user-memory.db-wal",
+        ] {
+            assert_eq!(
+                observed[key].finding().state(),
+                DoctorEvidenceStateV1::HealthyCompleteCoverage,
+                "{key} must not inherit unrelated suffix bytes"
+            );
+        }
+        for key in [
+            "global.db-mystery",
+            "user-sessions.db-backup",
+            "user-memory.db-backup",
+            "user-memory.grafeo.notes",
+        ] {
+            assert_eq!(
+                observed[key].finding().state(),
+                DoctorEvidenceStateV1::Degraded,
+                "{key} must retain its own named bound"
+            );
+        }
+    }
+
+    #[test]
+    fn managed_profile_families_bound_wal_named_payloads() {
+        let temp = tempfile::tempdir().expect("footprint fixture");
+        let profile = temp.path().join("profile");
+        for (name, bytes) in [
+            ("lcm-payloads/payload-wal/part", 25),
+            ("lcm-payloads/archive.wal", 34),
+            ("lcm-payloads/plain", 3),
+            ("response-handles/handle-wal/part", 11),
+            ("maintenance/cursor.wal", 13),
+            ("global.db-wal", 7),
+        ] {
+            sized(&profile.join(name), bytes);
+        }
+        let overrides = BTreeMap::from([
+            ("lcm-payloads".to_owned(), 61),
+            ("response-handles".to_owned(), 10),
+            ("maintenance".to_owned(), 12),
+            ("global.db-wal".to_owned(), 7),
+        ]);
+        let footprint = census_profile_footprint(&profile, &BTreeMap::new(), &overrides);
+        assert_eq!(footprint.total_bytes, 93);
+        assert_eq!(
+            footprint.entries.len(),
+            4,
+            "owner aggregates must not be split"
+        );
+        assert_eq!(
+            footprint.full_profile_size().state,
+            ProfileTotalCoverageStateV1::Complete
+        );
+        for (key, family, bytes) in [
+            ("lcm-payloads", ProfileFamilyV1::LcmPayloads, 62),
+            ("response-handles", ProfileFamilyV1::ResponseHandles, 11),
+            ("maintenance", ProfileFamilyV1::Maintenance, 13),
+            ("global.db-wal", ProfileFamilyV1::Wal, 7),
+        ] {
+            let measured = entry(&footprint, key);
+            assert_eq!(measured.family, family, "{key}");
+            assert_eq!(measured.bytes, bytes, "{key}");
+        }
+        let observed = findings(&footprint);
+        assert_eq!(observed.len(), footprint.entries.len() + 1);
+        for key in ["lcm-payloads", "response-handles", "maintenance"] {
+            assert_eq!(
+                observed[key].finding().state(),
+                DoctorEvidenceStateV1::Degraded,
+                "{key} must retain a named over-budget finding"
+            );
+        }
+        for key in ["global.db-wal", "profile"] {
+            assert_eq!(
+                observed[key].finding().state(),
+                DoctorEvidenceStateV1::HealthyCompleteCoverage,
+                "{key}"
+            );
+        }
+    }
+
+    #[test]
+    fn project_payloads_with_wal_names_retain_only_real_root_wal_overlays() {
+        let temp = tempfile::tempdir().expect("footprint fixture");
+        let profile = temp.path().join("profile");
+        for (relative, bytes) in [
+            (
+                "projects/proj_payload/code-index-v1/objects/archive.wal",
+                40,
+            ),
+            ("projects/proj_payload/lcm-payloads/payload-wal/chunk", 30),
+            ("projects/proj_payload/response-handles/result.wal", 17),
+            ("projects/proj_payload/plain", 3),
+            ("projects/proj_payload/sessions.db-wal", 7),
+        ] {
+            sized(&profile.join(relative), bytes);
+        }
+        let overrides = BTreeMap::from([
+            ("projects/proj_payload".to_owned(), 96),
+            ("projects/proj_payload/sessions.db-wal".to_owned(), 7),
+        ]);
+        let footprint = census_profile_footprint(&profile, &BTreeMap::new(), &overrides);
+        assert_eq!(footprint.total_bytes, 97);
+        assert_eq!(footprint.unavailable_entry_count, 0);
+        assert_eq!(
+            footprint.entries.len(),
+            2,
+            "nested payloads cannot be false WALs"
+        );
+        assert_eq!(
+            footprint.full_profile_size().state,
+            ProfileTotalCoverageStateV1::Complete
+        );
+        let project = entry(&footprint, "projects/proj_payload");
+        assert_eq!(project.family, ProfileFamilyV1::ProjectStore);
+        assert_eq!(project.bytes, 97);
+        let kinds = project.kinds.expect("project breakdown");
+        assert_eq!(kinds.generation_artifacts, 40);
+        assert_eq!(kinds.sessions, 7);
+        assert_eq!(kinds.other, 50);
+        assert_eq!(kinds.total(), 97);
+        let wal = entry(&footprint, "projects/proj_payload/sessions.db-wal");
+        assert_eq!(wal.family, ProfileFamilyV1::Wal);
+        assert_eq!(wal.bytes, 7);
+        let observed = findings(&footprint);
+        assert_eq!(observed.len(), 3);
+        assert_eq!(
+            observed["projects/proj_payload"].finding().state(),
+            DoctorEvidenceStateV1::Degraded
+        );
+        for key in ["projects/proj_payload/sessions.db-wal", PROFILE_TOTAL_KEY] {
+            assert_eq!(
+                observed[key].finding().state(),
+                DoctorEvidenceStateV1::HealthyCompleteCoverage,
+                "{key}"
+            );
+        }
+    }
+
+    #[test]
+    fn unrelated_profile_trees_keep_wal_named_descendants_under_their_own_bounds() {
+        let temp = tempfile::tempdir().expect("footprint fixture");
+        let profile = temp.path().join("profile");
+        for (relative, bytes) in [
+            ("host-bundle-stage/artifact-wal/chunk", 40),
+            ("host-bundle-stage/cache/trace.wal", 30),
+            ("host-components/bundle.wal", 17),
+            ("host-components/plain", 3),
+            ("global.db-wal", 7),
+        ] {
+            sized(&profile.join(relative), bytes);
+        }
+        let overrides = BTreeMap::from([
+            ("host-bundle-stage".to_owned(), 69),
+            ("host-components".to_owned(), 19),
+            ("global.db-wal".to_owned(), 7),
+        ]);
+        let footprint = census_profile_footprint(&profile, &BTreeMap::new(), &overrides);
+        assert_eq!(footprint.total_bytes, 97);
+        assert_eq!(footprint.unavailable_entry_count, 0);
+        assert_eq!(footprint.entries.len(), 3);
+        assert_eq!(
+            footprint.full_profile_size().state,
+            ProfileTotalCoverageStateV1::Complete
+        );
+        for (key, family, bytes) in [
+            ("host-bundle-stage", ProfileFamilyV1::Other, 70),
+            ("host-components", ProfileFamilyV1::Other, 20),
+            ("global.db-wal", ProfileFamilyV1::Wal, 7),
+        ] {
+            let measured = entry(&footprint, key);
+            assert_eq!(measured.family, family, "{key}");
+            assert_eq!(measured.bytes, bytes, "{key}");
+        }
+        let observed = findings(&footprint);
+        assert_eq!(observed.len(), 4);
+        for key in ["host-bundle-stage", "host-components"] {
+            assert_eq!(
+                observed[key].finding().state(),
+                DoctorEvidenceStateV1::Degraded,
+                "{key} must retain its named over-budget finding"
+            );
+        }
+        for key in ["global.db-wal", PROFILE_TOTAL_KEY] {
+            assert_eq!(
+                observed[key].finding().state(),
+                DoctorEvidenceStateV1::HealthyCompleteCoverage,
+                "{key} must keep its actual bound"
+            );
+        }
+    }
+
+    #[test]
+    fn sqlite_sidecar_named_directories_have_independent_doctor_bounds() {
+        let temp = tempfile::tempdir().expect("footprint fixture");
+        let profile = temp.path().join("profile");
+        // A directory bearing a SQLite sidecar name is not a SQLite file.
+        for (relative, bytes) in [
+            ("global.db", 5),
+            ("user-sessions.db", 7),
+            ("user-memory.db", 9),
+            ("global.db-journal/incident.bin", 11),
+            ("user-memory.db-shm/incident.bin", 13),
+            ("user-sessions.db-shm/incident.bin", 17),
+        ] {
+            sized(&profile.join(relative), bytes);
+        }
+        let overrides = BTreeMap::from([
+            ("global.db".to_owned(), 5),
+            ("user-sessions.db".to_owned(), 7),
+            ("user-memory".to_owned(), 9),
+            ("global.db-journal".to_owned(), 10),
+            ("user-memory.db-shm".to_owned(), 12),
+            ("user-sessions.db-shm".to_owned(), 16),
+        ]);
+        let footprint = census_profile_footprint(&profile, &BTreeMap::new(), &overrides);
+        assert_eq!(footprint.total_bytes, 62);
+        assert_eq!(footprint.unavailable_entry_count, 0);
+        assert_eq!(
+            footprint.full_profile_size().state,
+            ProfileTotalCoverageStateV1::Complete
+        );
+        let observed = findings(&footprint);
+        assert_eq!(observed.len(), footprint.entries.len() + 1);
+        for (key, family, bytes) in [
+            ("global.db", ProfileFamilyV1::ProfileRegistry, 5),
+            ("user-sessions.db", ProfileFamilyV1::UserSessions, 7),
+            ("user-memory", ProfileFamilyV1::UserMemory, 9),
+            ("global.db-journal", ProfileFamilyV1::Other, 11),
+            ("user-memory.db-shm", ProfileFamilyV1::Other, 13),
+            ("user-sessions.db-shm", ProfileFamilyV1::Other, 17),
+        ] {
+            assert_eq!(entry(&footprint, key).family, family, "{key}");
+            assert_eq!(entry(&footprint, key).bytes, bytes, "{key}");
+        }
+        for key in ["global.db", "user-sessions.db", "user-memory", "profile"] {
+            assert_eq!(
+                observed[key].finding().state(),
+                DoctorEvidenceStateV1::HealthyCompleteCoverage,
+                "{key}"
+            );
+        }
+        for key in [
+            "global.db-journal",
+            "user-memory.db-shm",
+            "user-sessions.db-shm",
+        ] {
+            assert_eq!(
+                observed[key].finding().state(),
+                DoctorEvidenceStateV1::Degraded,
+                "{key} must have an independent named over-budget finding"
+            );
+        }
+    }
+
+    #[test]
     fn an_unreadable_walk_root_is_accounted_as_unavailable() {
         let temporary = tempfile::tempdir().expect("walk fixture");
         let file_root = temporary.path().join("not-a-directory");
@@ -1387,5 +2254,216 @@ mod tests {
         assert_eq!(termination, WalkTerminationV1::Complete);
         assert_eq!(unavailable, 1);
         assert_eq!(remaining, 10);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn linked_profile_root_cannot_measure_foreign_storage_as_owned() {
+        let temporary = tempfile::tempdir().expect("footprint fixture");
+        let outside = temporary.path().join("outside");
+        let profile = temporary.path().join("profile");
+        sized(&outside.join("lcm-payloads/foreign"), 2048);
+        std::os::unix::fs::symlink(&outside, &profile).expect("linked profile root");
+        let overrides = BTreeMap::from([("lcm-payloads".to_owned(), 1)]);
+
+        let linked = census_profile_footprint(&profile, &BTreeMap::new(), &overrides);
+        assert_eq!(linked.total_bytes, 0, "foreign bytes must not be owned");
+        assert_eq!(linked.unavailable_entry_count, 1);
+        assert_eq!(linked.entries, Vec::<ProfileFootprintEntryV1>::new());
+        assert!(!linked.truncated);
+        assert_eq!(
+            linked.full_profile_size().state,
+            ProfileTotalCoverageStateV1::Partial
+        );
+        let linked_findings = findings(&linked);
+        assert_eq!(linked_findings.len(), 1);
+        assert_eq!(
+            linked_findings["profile"].finding().state(),
+            DoctorEvidenceStateV1::Partial,
+            "unverifiable root must not be reported healthy"
+        );
+
+        // The same bytes must be measured and over-budget when the actual
+        // directory is explicitly selected instead of its symbolic link.
+        let owned = census_profile_footprint(&outside, &BTreeMap::new(), &overrides);
+        assert_eq!(owned.total_bytes, 2048);
+        assert_eq!(owned.unavailable_entry_count, 0);
+        assert_eq!(entry(&owned, "lcm-payloads").bytes, 2048);
+        assert_eq!(
+            findings(&owned)["lcm-payloads"].finding().state(),
+            DoctorEvidenceStateV1::Degraded
+        );
+    }
+
+    #[test]
+    fn sqlite_wal_lookalike_directories_keep_independent_bounds() {
+        let temp = tempfile::tempdir().expect("footprint fixture");
+        let profile = temp.path().join("profile");
+        for (relative, bytes) in [
+            ("global.db", 5),
+            ("global.db-wal/incident.bin", 11),
+            ("scratch.wal/chunk", 13),
+            ("user-sessions.db-wal", 7),
+            ("projects/proj_wal/sessions.db-wal", 17),
+            ("projects/proj_wal/tracedecay.db-wal/incident.bin", 19),
+            ("projects/proj_wal/tracedecay.grafeo.wal/segment", 23),
+        ] {
+            sized(&profile.join(relative), bytes);
+        }
+        let overrides = BTreeMap::from([
+            ("global.db-wal".to_owned(), 10),
+            ("scratch.wal".to_owned(), 12),
+            ("projects/proj_wal".to_owned(), 58),
+            ("user-sessions.db-wal".to_owned(), 7),
+            ("projects/proj_wal/sessions.db-wal".to_owned(), 17),
+            ("projects/proj_wal/tracedecay.grafeo.wal".to_owned(), 23),
+            (PROFILE_TOTAL_KEY.to_owned(), 95),
+        ]);
+        let footprint = census_profile_footprint(&profile, &BTreeMap::new(), &overrides);
+        assert_eq!(footprint.total_bytes, 95);
+        assert_eq!(footprint.unavailable_entry_count, 0);
+        assert_eq!(footprint.entries.len(), 7);
+        assert_eq!(
+            footprint.full_profile_size().state,
+            ProfileTotalCoverageStateV1::Complete
+        );
+        for (key, family, bytes) in [
+            ("global.db", ProfileFamilyV1::ProfileRegistry, 5),
+            ("global.db-wal", ProfileFamilyV1::Other, 11),
+            ("scratch.wal", ProfileFamilyV1::Other, 13),
+            ("user-sessions.db-wal", ProfileFamilyV1::Wal, 7),
+            ("projects/proj_wal", ProfileFamilyV1::ProjectStore, 59),
+            (
+                "projects/proj_wal/sessions.db-wal",
+                ProfileFamilyV1::Wal,
+                17,
+            ),
+            (
+                "projects/proj_wal/tracedecay.grafeo.wal",
+                ProfileFamilyV1::Wal,
+                23,
+            ),
+        ] {
+            assert_eq!(entry(&footprint, key).family, family, "{key}");
+            assert_eq!(entry(&footprint, key).bytes, bytes, "{key}");
+        }
+        let kinds = entry(&footprint, "projects/proj_wal")
+            .kinds
+            .expect("production project-kind breakdown");
+        assert_eq!(kinds.sessions, 17);
+        assert_eq!(kinds.graph_container, 23);
+        assert_eq!(kinds.other, 19);
+        assert_eq!(kinds.total(), 59);
+
+        let observed = findings(&footprint);
+        assert_eq!(observed.len(), 8);
+        for key in ["global.db-wal", "scratch.wal", "projects/proj_wal"] {
+            assert_eq!(
+                observed[key].finding().state(),
+                DoctorEvidenceStateV1::Degraded,
+                "{key} must not evade its physical footprint bound"
+            );
+        }
+        for key in [
+            "global.db",
+            "user-sessions.db-wal",
+            "projects/proj_wal/sessions.db-wal",
+            "projects/proj_wal/tracedecay.grafeo.wal",
+            PROFILE_TOTAL_KEY,
+        ] {
+            assert_eq!(
+                observed[key].finding().state(),
+                DoctorEvidenceStateV1::HealthyCompleteCoverage,
+                "{key} must retain its real, independent bound"
+            );
+        }
+    }
+
+    #[test]
+    fn long_footprint_details_keep_doctor_size_and_bound_visible() {
+        let temporary = tempfile::tempdir().unwrap();
+        let profile = temporary.path().join("profile");
+        let key = "projects/proj_long";
+        let bytes = 3 * 1024;
+        sized(&profile.join(key).join("tracedecay.db"), bytes);
+        let registered = BTreeMap::from([(
+            "proj_long".to_owned(),
+            temporary.path().display().to_string(),
+        )]);
+        let overrides = BTreeMap::from([(key.to_owned(), 1)]);
+        let mut footprint = census_profile_footprint(&profile, &registered, &overrides);
+        let project = footprint
+            .entries
+            .iter_mut()
+            .find(|entry| entry.key == key)
+            .expect("measured project");
+        assert_eq!(
+            project.project.as_ref().unwrap().state,
+            ProjectRootStateV1::Present
+        );
+        // A short registered checkout path with control characters fits once
+        // folded by Doctor. Preserve its useful identity rather than dropping
+        // it just because the sanitized representation differs byte-for-byte.
+        project.project.as_mut().unwrap().registered_root =
+            Some("checkout\tbranch\nalpha".to_owned());
+        let sanitized = findings(&footprint);
+        let sanitized_statement = sanitized[key].finding().coverage().statement();
+        assert!(
+            sanitized_statement.contains("for checkout branch alpha (root present)"),
+            "sanitized registered checkout was omitted: {sanitized_statement}"
+        );
+        assert!(!sanitized_statement.contains('\t'), "{sanitized_statement}");
+        assert!(!sanitized_statement.contains('\n'), "{sanitized_statement}");
+        assert!(
+            sanitized_statement.ends_with(&format!("{} of 1 B bound", format_bytes(bytes))),
+            "a sanitized identity must keep the exact measured overage: {sanitized_statement}"
+        );
+
+        // The complete state remains available in the storage report; only
+        // the Doctor coverage text is bounded.
+        let project = footprint
+            .entries
+            .iter_mut()
+            .find(|entry| entry.key == key)
+            .expect("measured project");
+        project.project.as_mut().unwrap().registered_root = Some("long-root/".repeat(120));
+        let observed = findings(&footprint);
+        let finding = &observed[key];
+        let statement = finding.finding().coverage().statement();
+        assert_eq!(finding.finding().state(), DoctorEvidenceStateV1::Degraded);
+        assert!(statement.contains("root present"), "{statement}");
+        assert!(
+            statement.ends_with(&format!("{} of 1 B bound", format_bytes(bytes))),
+            "the measured overage must not be clipped after a long root: {statement}"
+        );
+        assert!(!statement.contains("long-root/long-root"), "{statement}");
+
+        // A valid long evidence key can also fill the statement budget before
+        // the numeric overage. Hash the reference, never the reported bytes.
+        let project = footprint
+            .entries
+            .iter_mut()
+            .find(|entry| entry.key == key)
+            .expect("measured project");
+        project.key = format!("projects/proj_{}/graph.grafeo", "x".repeat(520));
+        let hash_key = format!("footprint/sha256:{}", sha256_hex(project.key.as_bytes()));
+        let observed = findings(&footprint);
+        let finding = &observed[&hash_key];
+        let statement = finding.finding().coverage().statement();
+        assert_eq!(finding.finding().state(), DoctorEvidenceStateV1::Degraded);
+        assert!(
+            statement.contains("full path in storage report"),
+            "{statement}"
+        );
+        assert!(
+            statement.ends_with(&format!("{} of 1 B bound", format_bytes(bytes))),
+            "the complete numeric bound must survive a long evidence key: {statement}"
+        );
+        assert_eq!(
+            std::fs::metadata(profile.join(key).join("tracedecay.db"))
+                .unwrap()
+                .len(),
+            bytes
+        );
     }
 }
