@@ -161,12 +161,10 @@ pub(crate) fn render_pr_context_brief(brief: &PrContextBriefV1) -> String {
         let author = discussion
             .author
             .as_deref()
-            .map(|author| format!(" by {}", code(author)))
-            .unwrap_or_default();
+            .map_or_default(|author| format!(" by {}", code(author)));
         let event = discussion
             .event_at
-            .map(|at| format!("; activity {}", observed_at(at)))
-            .unwrap_or_default();
+            .map_or_default(|at| format!("; activity {}", observed_at(at)));
         let anchor = match (&discussion.file, discussion.line) {
             (Some(file), Some(line)) => format!(" at {}", code(&format!("{file}:{line}"))),
             (Some(file), None) => format!(" at {}", code(file)),
@@ -220,8 +218,7 @@ pub(crate) fn render_pr_context_brief(brief: &PrContextBriefV1) -> String {
             check
                 .conclusion
                 .as_ref()
-                .map(|value| format!(" / {value}"))
-                .unwrap_or_default(),
+                .map_or_default(|value| format!(" / {value}")),
             if check.matches_head {
                 "head"
             } else {
@@ -232,8 +229,7 @@ pub(crate) fn render_pr_context_brief(brief: &PrContextBriefV1) -> String {
             check
                 .failed_step
                 .as_ref()
-                .map(|value| format!("; failed step {}", code(value)))
-                .unwrap_or_default()
+                .map_or_default(|value| format!("; failed step {}", code(value)))
         ));
         if !check.locations.is_empty() {
             lines.push(format!(
@@ -334,8 +330,7 @@ pub(crate) fn render_pr_context_brief(brief: &PrContextBriefV1) -> String {
             let previous = change
                 .previous_file
                 .as_ref()
-                .map(|path| format!("{} → ", code(path)))
-                .unwrap_or_default();
+                .map_or_default(|path| format!("{} → ", code(path)));
             lines.push(format!(
                 "- {}{}: {}.",
                 previous,
