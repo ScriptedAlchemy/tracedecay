@@ -228,12 +228,8 @@ async fn lsp_runtime_fixture() -> RuntimeFixture {
         command
             .env(
                 "RUST_LOG",
-                "info,tracedecay_daemon_service::invocation=trace,\
-                 tracedecay_private_fs::framed_log=trace,\
-                 tracedecay_application::lsp_runtime=debug,\
-                 tracedecay_lsp=trace",
+                "info,tracedecay_daemon_service::invocation=trace",
             )
-            .env("RA_LOG", "rust_analyzer::session=info")
             .env("TRACEDECAY_SPAN_TIMINGS", "1")
             .stderr(daemon_log);
     });
