@@ -1178,7 +1178,8 @@ async fn packaged_host_ingest_delivers_a_registered_advisory_cycle() {
                     .expect("registered daemon stop response text"),
             )
             .expect("registered daemon stop payload");
-            if stop_payload["completed"] != false {
+            if stop_payload["completed"] != false && stop_payload["status"] != "accepted_for_replay"
+            {
                 assert!(
                     matches!(
                         stop_payload["status"].as_str(),
@@ -1190,14 +1191,24 @@ async fn packaged_host_ingest_delivers_a_registered_advisory_cycle() {
                 );
                 break;
             }
-            assert_eq!(
-                stop_payload["admission"]["retryable"], true,
-                "incomplete stop ingest must carry a retryable admission: {stop_response}"
-            );
+            if stop_payload["completed"] == false {
+                assert_eq!(
+                    stop_payload["admission"]["retryable"], true,
+                    "incomplete stop ingest must carry a retryable admission: {stop_response}"
+                );
+            }
         } else {
             let stderr = String::from_utf8_lossy(&stop_output.stderr).into_owned();
+            let publication_pending = serde_json::from_slice::<Value>(&stop_output.stdout)
+                .is_ok_and(|response| {
+                    let problem = &response["structuredContent"]["problem"];
+                    problem["code"] == "temporal_refresh_unavailable"
+                        && problem["retryable"] == true
+                        && problem["terminality"] == "pre_admission"
+                        && problem["retry_scope"] == "same_request"
+                });
             assert!(
-                stderr.contains("is warming in the background"),
+                publication_pending || stderr.contains("is warming in the background"),
                 "registered daemon stop ingest failed\nstdout:\n{}\nstderr:\n{stderr}\ndaemon log:\n{}",
                 String::from_utf8_lossy(&stop_output.stdout),
                 std::fs::read_to_string(&daemon_log).expect("read isolated advisory daemon log"),

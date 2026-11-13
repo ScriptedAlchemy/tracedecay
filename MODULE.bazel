@@ -45,7 +45,7 @@ bazel_dep(name = "hermetic_cc_toolchain", version = "4.3.0")
 zig = use_extension("@hermetic_cc_toolchain//toolchain:ext.bzl", "toolchains")
 use_repo(zig, "zig_sdk")
 
-RUST_VERSION = "1.99.1"
+RUST_VERSION = "1.100.0"
 
 rust = use_extension("@rules_rust//rust:extensions.bzl", "rust")
 rust.toolchain(
