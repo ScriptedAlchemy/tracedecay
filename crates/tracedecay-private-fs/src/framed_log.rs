@@ -84,7 +84,8 @@ pub fn sync_parent_directory(path: &Path, policy: DirectorySyncPolicy) -> io::Re
 /// duplicated writer handles. When that window fills, its members are fsynced
 /// concurrently before their handles are released, so the filesystem can fold
 /// their barriers into shared log commits instead of paying one per segment.
-/// This never reopens a member pathname through endpoint security and never
+/// Flushing uses retained writer handles without reopening member pathnames;
+/// Windows pathname identity checks still open each member. The batch never
 /// holds a descriptor per segment of a large seal. Linux additionally starts
 /// each member's writeback as soon as it is admitted. [`Self::sync`] flushes
 /// the final window and checks that earlier members still name the same

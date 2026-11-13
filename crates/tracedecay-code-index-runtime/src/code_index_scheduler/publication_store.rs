@@ -1925,22 +1925,12 @@ impl DaemonCodeIndexPublicationStoreV1 {
                     .durable
                     .written_with_identity(&temporary_path, &file, &original)
                     .map_err(Self::unavailable)?;
-                // On Linux the batch performed its final identity checks
+                // The batch performed its final identity checks
                 // before enrolling the member. No fallible post-admission
                 // check may remove its pathname while retaining its handle.
-                #[cfg(target_os = "linux")]
+                #[cfg(unix)]
                 {
                     Ok(Some(original))
-                }
-                #[cfg(all(unix, not(target_os = "linux")))]
-                {
-                    let after = file.metadata().map_err(Self::unavailable)?;
-                    if !Self::same_unix_segment_identity(&original, &after) {
-                        return Err(Self::corruption(
-                            "newly staged segment changed during durability admission",
-                        ));
-                    }
-                    Ok(Some(after))
                 }
                 #[cfg(not(unix))]
                 {
