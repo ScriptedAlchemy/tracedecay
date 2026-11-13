@@ -183,14 +183,7 @@ done
     .unwrap();
     let project_id = mark_test_project(&project);
     let daemon_log = tmp.path().join("codex-compaction-daemon.log");
-    let daemon = spawn_tracedecay_daemon_logged(&home, &daemon_log, |command| {
-        command
-            .env(
-                "RUST_LOG",
-                "info,tracedecay_session_runtime::session_temporal_refresh_scheduler=trace,tracedecay_mcp::handlers::hook_runtime=trace",
-            )
-            .env("TRACEDECAY_SPAN_TIMINGS", "1");
-    });
+    let daemon = spawn_tracedecay_daemon_logged(&home, &daemon_log, |_| {});
     // The hook resolves the project root through the initialized-store gate,
     // exactly like production installs: `init` creates the project store and
     // admits the canonical daemon-owned project route.
