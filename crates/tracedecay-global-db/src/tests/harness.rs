@@ -4,6 +4,8 @@ use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use tempfile::TempDir;
+#[cfg(test)]
+use tracing::Instrument;
 
 use crate::{RegisteredGlobalDb, RegisteredGlobalDbLeaseV1, RegisteredGlobalDbOwnerV1};
 use tracedecay_domain::canonical_text::sha256_hex;
@@ -1515,7 +1517,10 @@ async fn open_registered_test_database_with_identity(
         }
     };
     let (database_owner, _runtime, _retirement) = fixture.into_parts();
-    let database = RegisteredGlobalDbOwnerV1::admit_and_attach(database_owner).await?;
+    let attachment = RegisteredGlobalDbOwnerV1::admit_and_attach(database_owner);
+    #[cfg(test)]
+    let attachment = attachment.instrument(tracing::info_span!("global_db.fixture.attach"));
+    let database = attachment.await?;
     // The physical fixture is already opened with the requested authority.
     // Issuance preserves that capability; neither branch manufactures a
     // second raw authority after publication.
