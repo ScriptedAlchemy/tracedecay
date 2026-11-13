@@ -127,7 +127,10 @@ async fn cancelling_the_loopback_server_drops_its_open_connections() {
     tokio::time::timeout(bound, dropped.notified())
         .await
         .expect("listener cancellation must drop its active handler");
-    assert!(tokio::net::TcpStream::connect(address).await.is_err());
+    // The joined task has dropped the listener it exclusively owned. Its
+    // ephemeral address may already belong to another parallel test, so a new
+    // connection cannot identify that listener. Observe the original accepted
+    // connection below instead.
     let mut byte = [0];
     let received = tokio::time::timeout(bound, peer.read(&mut byte))
         .await
