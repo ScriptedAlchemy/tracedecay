@@ -6,6 +6,7 @@ use std::sync::{Arc, atomic::Ordering};
 use std::time::Instant;
 
 use tracedecay_runtime_core::native_runtime::{self, NativeTask, NativeTaskOutcome};
+use tracing::{Instrument, instrument::WithSubscriber};
 
 use super::{ProjectRuntime, ProjectRuntimeRegistryV1};
 use crate::invocation::UnavailableFeedbackCycleRuntimeV1;
@@ -200,29 +201,32 @@ impl ProjectRuntimeRegistryV1 {
         if !self.shutdown_started.swap(true, Ordering::AcqRel) {
             let registry = self.clone();
             self.shutdown_complete.send_replace(ShutdownState::Pending);
-            let task = NativeTask::spawn(async move {
-                let drain_registry = registry.clone();
-                let drained = tracedecay_runtime_core::native_runtime::spawn_blocking(move || {
-                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                        drain_registry.take_all_blocking()
-                    }))
-                })
-                .await;
-                tracedecay_runtime_core::logging::log_daemon_event(
-                    "daemon_shutdown",
-                    &[("outcome", "project_runtimes_drained".to_string())],
-                );
-                let stop = match drained {
-                    Ok(Ok(runtimes)) => registry.finish_drained_runtimes(runtimes, deadline).await,
-                    _ => {
-                        registry.shutdown_started.store(false, Ordering::Release);
-                        ProjectRuntimesStop::DidNotStop
-                    }
-                };
-                registry
-                    .shutdown_complete
-                    .send_replace(ShutdownState::Finished(stop));
-            });
+            let task = NativeTask::spawn(
+                async move {
+                    let drain_registry = registry.clone();
+                    let drained = tracedecay_runtime_core::native_runtime::spawn_blocking(move || {
+                        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                            drain_registry.take_all_blocking()
+                        }))
+                    })
+                    .await;
+                    tracedecay_runtime_core::logging::log_daemon_event(
+                        "daemon_shutdown",
+                        &[("outcome", "project_runtimes_drained".to_string())],
+                    );
+                    let stop = match drained {
+                        Ok(Ok(runtimes)) => registry.finish_drained_runtimes(runtimes, deadline).await,
+                        _ => {
+                            registry.shutdown_started.store(false, Ordering::Release);
+                            ProjectRuntimesStop::DidNotStop
+                        }
+                    };
+                    registry
+                        .shutdown_complete
+                        .send_replace(ShutdownState::Finished(stop));
+                }
+                .with_current_subscriber(),
+            );
             match task {
                 Ok(task) => *shutdown_task = Some(task),
                 Err(error) => {
@@ -384,7 +388,13 @@ async fn shut_down_feedback(runtimes: &BTreeMap<PathBuf, ProjectRuntime>) -> Vec
         .collect();
     let mut lost_work = Vec::new();
     for (project_root, drain) in drains {
-        if let Err(error) = drain.await {
+        if let Err(error) = drain
+            .instrument(tracing::trace_span!(
+                "daemon.service.project_runtime.feedback_drain",
+                project = %project_root.display()
+            ))
+            .await
+        {
             lost_work.push(format!(
                 "{}: feedback observations: {error}",
                 project_root.display()

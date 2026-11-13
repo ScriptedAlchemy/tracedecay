@@ -38,6 +38,7 @@ use tracedecay_runtime_core::cancellation::CancellationToken;
 use tracedecay_runtime_core::git_discovery::REPOSITORY_DISCOVERY_DEFERRED_REASON_CODE;
 use tracedecay_runtime_core::native_runtime::{self, TimeoutError};
 use tracedecay_session_runtime::StoreOwnerKey;
+use tracing::instrument::WithSubscriber;
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub(super) struct ProjectServerKey {
@@ -671,18 +672,21 @@ impl ProjectOpenTasks {
         // completion fires once the task and the blocking work it owns end.
         let completion_owner: Arc<dyn Send + Sync> =
             Arc::new(ProjectOpenTaskCompletionFinalizer(task_completion));
-        let task = runtime.spawn(tracing::Instrument::instrument(
-            native_runtime::BLOCKING_WORK_OWNER.scope(completion_owner, async move {
-                let state = match open(task_cancellation).await {
-                    Ok(()) => ProjectOpenTaskState::Ready,
-                    Err(error) => ProjectOpenTaskState::Failed(
-                        ProjectOpenFailure::recorded_for_route(&error, &failure_route),
-                    ),
-                };
-                updates.send_replace(state);
-            }),
-            tracing::trace_span!("daemon.project.admit.task"),
-        ));
+        let task = runtime.spawn(
+            tracing::Instrument::instrument(
+                native_runtime::BLOCKING_WORK_OWNER.scope(completion_owner, async move {
+                    let state = match open(task_cancellation).await {
+                        Ok(()) => ProjectOpenTaskState::Ready,
+                        Err(error) => ProjectOpenTaskState::Failed(
+                            ProjectOpenFailure::recorded_for_route(&error, &failure_route),
+                        ),
+                    };
+                    updates.send_replace(state);
+                }),
+                tracing::trace_span!("daemon.project.admit.task"),
+            )
+            .with_current_subscriber(),
+        );
         registry.routes.insert(
             route,
             ProjectOpenTaskEntry {
