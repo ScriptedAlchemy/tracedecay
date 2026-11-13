@@ -31,8 +31,7 @@ use crate::schema::{NAMESPACE_PROPERTY, relation_kind_from_type, required_string
 use crate::sealed_store::{SealedReleaseEvidence, SealedStoreInstall};
 use crate::state::{
     EndpointIdentityCache, latest_projection, load_relation_by_edge_cached,
-    projection_entity_deletion_page_checked, projection_node_counts,
-    projection_relation_deletion_page_checked,
+    projection_deletion_page_checked, projection_node_counts,
 };
 use crate::verified_marker::GenerationVerification;
 use crate::{
@@ -287,12 +286,6 @@ impl GenerationStageOutcome {
             Self::Applied(commit) | Self::Reseated(commit) => commit,
         }
     }
-}
-
-#[derive(Clone, Copy)]
-enum GenerationRetirementPageKind {
-    Relations,
-    Entities,
 }
 
 impl GraphDb {
@@ -1970,57 +1963,39 @@ impl GraphDb {
         check: &dyn Fn() -> Result<(), GraphDbError>,
     ) -> Result<GraphCommit, GraphDbError> {
         check()?;
-        let mut last_commit = None;
-        for kind in [
-            GenerationRetirementPageKind::Relations,
-            GenerationRetirementPageKind::Entities,
-        ] {
-            loop {
-                let (commit, applied) = self.delete_projection_page_checked(
-                    &namespace,
-                    &projection,
-                    &source_generation,
-                    &watermark,
-                    kind,
-                    check,
-                )?;
-                last_commit = Some(commit);
-                if !applied {
-                    break;
-                }
-                // A committed page stays durable. Cancellation at this exact
-                // boundary leaves the remaining rows for an idempotent retry.
-                check()?;
+        loop {
+            let (commit, applied) = self.delete_projection_page_checked(
+                &namespace,
+                &projection,
+                &source_generation,
+                &watermark,
+                check,
+            )?;
+            if !applied {
+                return Ok(commit);
             }
+            // A committed page stays durable. Cancellation at this exact
+            // boundary leaves the remaining rows for an idempotent retry.
+            check()?;
         }
-        last_commit.ok_or_else(|| GraphDbError::unavailable("graph projection disappeared"))
     }
 
-    #[allow(clippy::too_many_arguments)]
+    /// Commits one bounded page of the projection's row release: relations
+    /// first, then entities once no relation remains, all in one durable
+    /// transaction. `false` means nothing was left to delete.
     fn delete_projection_page_checked(
         &self,
         namespace: &GraphNamespace,
         projection: &crate::GraphProjectionId,
         source_generation: &crate::SourceGeneration,
         watermark: &crate::GraphWatermark,
-        kind: GenerationRetirementPageKind,
         check: &dyn Fn() -> Result<(), GraphDbError>,
     ) -> Result<(GraphCommit, bool), GraphDbError> {
         self.run_gated_batch(
             check,
             |database| {
-                let mutations = match kind {
-                    GenerationRetirementPageKind::Relations => {
-                        projection_relation_deletion_page_checked(
-                            database, namespace, projection, check,
-                        )?
-                    }
-                    GenerationRetirementPageKind::Entities => {
-                        projection_entity_deletion_page_checked(
-                            database, namespace, projection, check,
-                        )?
-                    }
-                };
+                let mutations =
+                    projection_deletion_page_checked(database, namespace, projection, check)?;
                 if mutations.is_empty() {
                     let commit = latest_projection(database, namespace, projection)?
                         .ok_or_else(|| GraphDbError::unavailable("graph projection disappeared"))?
@@ -3338,6 +3313,213 @@ mod tests {
         owner.close().unwrap();
     }
 
+    /// A generation of `entities` entities and `relations` relations, each
+    /// relation joining the first two entities.
+    fn mixed_manifest(
+        namespace: &str,
+        entities: usize,
+        relations: usize,
+    ) -> GraphGenerationManifest {
+        let projection = GraphProjectionIdentity::new(
+            GraphNamespace::new(namespace).unwrap(),
+            GraphProjectionId::new("mixed").unwrap(),
+        );
+        let endpoint = |index: usize| {
+            GraphEntityRef::new(
+                projection.clone(),
+                GraphEntityId::new(format!("entity:{index:05}")).unwrap(),
+            )
+        };
+        GraphGenerationManifest::new(
+            projection.clone(),
+            GraphGenerationId::new("generation-mixed").unwrap(),
+            SourceGeneration::new("source-mixed").unwrap(),
+            GraphWatermark::new("watermark-mixed").unwrap(),
+            vec![],
+            (0..entities)
+                .map(|index| {
+                    GraphEntity::new(
+                        GraphEntityId::new(format!("entity:{index:05}")).unwrap(),
+                        BTreeSet::new(),
+                        BTreeMap::new(),
+                    )
+                    .unwrap()
+                })
+                .collect(),
+            (0..relations)
+                .map(|index| {
+                    GraphGenerationRelation::new(
+                        GraphRelationId::new(format!("relation:{index:05}")).unwrap(),
+                        endpoint(0),
+                        endpoint(1),
+                        GraphRelationKind::new("calls").unwrap(),
+                        BTreeMap::new(),
+                    )
+                    .unwrap()
+                })
+                .collect(),
+        )
+        .unwrap()
+    }
+
+    fn staged_persistent_generation(
+        temp: &TempDir,
+        manifest: &GraphGenerationManifest,
+    ) -> (GraphDbOwner, crate::GraphDbLeaseV1) {
+        let (owner, database) = persistent_database(temp);
+        database
+            .apply_generation_unverified_with_digest_and_work(
+                arc_manifest(manifest),
+                &sealed_digest(manifest),
+                &|| Ok(()),
+                None,
+            )
+            .unwrap();
+        (owner, database)
+    }
+
+    fn delete_one_release_page(
+        database: &crate::GraphDbLeaseV1,
+        manifest: &GraphGenerationManifest,
+    ) -> bool {
+        let (_, applied) = database
+            .delete_projection_page_checked(
+                &manifest.identity().physical_namespace().unwrap(),
+                &manifest.projection.projection,
+                &manifest.source_generation,
+                &manifest.watermark,
+                &|| Ok(()),
+            )
+            .unwrap();
+        applied
+    }
+
+    /// A small generation's relations and entities fit one page, so its
+    /// staging rows are released by one durable transaction: the projection
+    /// commit sequence advances once. Planning relations and entities as
+    /// separate pages forced two fsync-backed commits for even three rows,
+    /// which is the release sweep's whole measured latency.
+    #[test]
+    fn small_mixed_generation_releases_its_rows_in_one_durable_commit() {
+        let temp = TempDir::new().unwrap();
+        let manifest = mixed_manifest("one-commit-release", 2, 1);
+        let locator =
+            GenerationLocator::new(manifest.projection.clone(), manifest.generation.clone());
+        let (owner, database) = staged_persistent_generation(&temp, &manifest);
+        assert_eq!(
+            database
+                .staging_generation_row_counts(&manifest.identity())
+                .unwrap(),
+            (2, 1)
+        );
+        let staged = database
+            .staging_generation_commit(&locator)
+            .unwrap()
+            .expect("staged generation commit");
+
+        assert!(matches!(
+            database.delete_staged_generation_rows(&locator, &|| Ok(())),
+            Ok(StagedGenerationRowsDeletion::Deleted { removed_rows: true })
+        ));
+        let released = database
+            .staging_generation_commit(&locator)
+            .unwrap()
+            .expect("released projection keeps its commit");
+        assert_eq!(
+            released.sequence,
+            staged.sequence + 1,
+            "relations and entities of a one-page generation must release in one commit"
+        );
+        assert_eq!(released.source_generation, manifest.source_generation);
+        assert_eq!(released.watermark, manifest.watermark);
+        drop(database);
+        owner.close().unwrap();
+
+        // The single commit is the durable one: a physical reopen observes
+        // the same commit and no rows.
+        let (reopened_owner, reopened) = persistent_database(&temp);
+        assert_eq!(
+            reopened
+                .staging_generation_row_counts(&manifest.identity())
+                .unwrap(),
+            (0, 0)
+        );
+        assert_eq!(
+            reopened
+                .staging_generation_commit(&locator)
+                .unwrap()
+                .map(|commit| commit.sequence),
+            Some(released.sequence)
+        );
+        drop(reopened);
+        reopened_owner.close().unwrap();
+    }
+
+    /// Relations and entities share one page budget: once every relation is
+    /// admitted, entities fill exactly the remainder of the same page.
+    #[test]
+    fn release_page_fills_its_shared_budget_with_entities_after_relations() {
+        let temp = TempDir::new().unwrap();
+        let entities = MAX_VERIFIED_GENERATION_BATCH_MUTATIONS + 10;
+        let manifest = mixed_manifest("shared-release-budget", entities, 1);
+        let (owner, database) = staged_persistent_generation(&temp, &manifest);
+
+        assert!(delete_one_release_page(&database, &manifest));
+        assert_eq!(
+            database
+                .staging_generation_row_counts(&manifest.identity())
+                .unwrap(),
+            (entities - (MAX_VERIFIED_GENERATION_BATCH_MUTATIONS - 1), 0),
+            "the first page must delete the relation and fill the rest of its budget with entities"
+        );
+        assert!(delete_one_release_page(&database, &manifest));
+        assert_eq!(
+            database
+                .staging_generation_row_counts(&manifest.identity())
+                .unwrap(),
+            (0, 0)
+        );
+        assert!(!delete_one_release_page(&database, &manifest));
+        drop(database);
+        owner.close().unwrap();
+    }
+
+    /// An entity is never released by a page that leaves one of the
+    /// generation's relations behind: a page full of relations commits
+    /// relations only, and entities join the page that admits the last one.
+    #[test]
+    fn release_page_admits_entities_only_after_every_relation() {
+        let temp = TempDir::new().unwrap();
+        let relations = MAX_VERIFIED_GENERATION_BATCH_MUTATIONS + 1;
+        let manifest = mixed_manifest("relations-before-entities", 2, relations);
+        let (owner, database) = staged_persistent_generation(&temp, &manifest);
+
+        assert!(delete_one_release_page(&database, &manifest));
+        assert_eq!(
+            database
+                .staging_generation_row_counts(&manifest.identity())
+                .unwrap(),
+            (2, 1),
+            "a page filled by relations must leave every entity in place"
+        );
+        drop(database);
+        owner.close().unwrap();
+
+        // The interrupted release resumes after a physical reopen, and the
+        // page that admits the last relation also releases the entities.
+        let (reopened_owner, reopened) = persistent_database(&temp);
+        assert!(delete_one_release_page(&reopened, &manifest));
+        assert_eq!(
+            reopened
+                .staging_generation_row_counts(&manifest.identity())
+                .unwrap(),
+            (0, 0)
+        );
+        assert!(!delete_one_release_page(&reopened, &manifest));
+        drop(reopened);
+        reopened_owner.close().unwrap();
+    }
+
     /// Retirement pages a generation out in `MAX_VERIFIED_GENERATION_BATCH_MUTATIONS`
     /// slices. Each slice must read only the rows it retires: reading the
     /// whole remaining projection to pick one page made a corpus release
@@ -3510,7 +3692,6 @@ mod tests {
                 &manifest.projection.projection,
                 &manifest.source_generation,
                 &manifest.watermark,
-                super::GenerationRetirementPageKind::Entities,
                 &|| Ok(()),
             )
             .unwrap();

@@ -432,6 +432,26 @@ impl CiRetainedProviderObservationAuthorityV1 for ProjectCiRetainedObservationSt
         ))
     }
 
+    fn retained_requests<'a>(
+        &'a self,
+        context: &'a RequestContext,
+        scope: &'a FeedbackScopeV1,
+    ) -> FeedbackPortFuture<'a, Option<Vec<CiFailureLocalizationRequestV1>>> {
+        Box::pin(async move {
+            match self.load_inventory_manifest(context, scope).await {
+                CiRetainedObservationManifestLoadOutcomeV1::Manifest(manifest) => Some(
+                    manifest
+                        .entries
+                        .into_iter()
+                        .map(|entry| entry.request)
+                        .collect(),
+                ),
+                CiRetainedObservationManifestLoadOutcomeV1::Empty => Some(Vec::new()),
+                CiRetainedObservationManifestLoadOutcomeV1::Unavailable => None,
+            }
+        })
+    }
+
     fn retain<'a>(
         &'a self,
         context: &'a RequestContext,

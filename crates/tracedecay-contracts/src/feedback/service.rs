@@ -305,9 +305,8 @@ pub struct FeedbackCycleExecutionResult {
     pub dedupe_key: Option<FeedbackDedupeKeyV1>,
     pub authority: Option<AuthorityReceipt>,
     pub usage: FeedbackBudgetUsage,
-    /// Present only after the shared durable store atomically records this
-    /// exact inspectable publication. Duplicate, stale, cancelled, timed-out,
-    /// unavailable, and non-durable outcomes never expose a delivery handoff.
+    /// Present for the committed result, including an explicitly reused
+    /// incomplete publication. Never expose handles for an uncommitted identity.
     pub publication: Option<FeedbackPublicationV1>,
 }
 
@@ -1291,6 +1290,30 @@ where
                 publication: Some(publication),
                 ..result
             }),
+            FeedbackPublicationRecordState::Reused(existing) => {
+                if !existing.same_incomplete_evidence(&publication) {
+                    return Err(ApplicationContractError::Inconsistent {
+                        field: "feedback incomplete publication reuse",
+                    });
+                }
+                existing.validate()?;
+                Ok(FeedbackCycleExecutionResult {
+                    cycle: existing.result.clone(),
+                    dedupe_key: Some(existing.dedupe_key.clone()),
+                    authority: Some(existing.authority.clone()),
+                    publication: Some(*existing),
+                    ..result
+                })
+            }
+            // A bare Duplicate cannot represent incomplete evidence: that
+            // loses the committed reference and therefore all read handles.
+            FeedbackPublicationRecordState::Duplicate
+                if result.cycle.termination == FeedbackCycleTerminationV1::IncompleteCoverage =>
+            {
+                Err(ApplicationContractError::Inconsistent {
+                    field: "feedback incomplete publication duplicate",
+                })
+            }
             FeedbackPublicationRecordState::Duplicate => self.assemble(
                 request,
                 Some(dedupe_key),
