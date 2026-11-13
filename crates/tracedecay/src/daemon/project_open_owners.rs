@@ -23,7 +23,7 @@ use tracedecay_agent_hosts::native_integration::{
     DaemonNativeIntegrationAnalysisV1, DaemonNativeIntegrationServiceRegistry,
     NativeIntegrationTargetV1,
 };
-use tracedecay_application::diagnostics_producer::TypeScriptProducerStatusHandleV1;
+use tracedecay_application::diagnostics_producer::TypeScriptProducerStateV1;
 use tracedecay_application::lsp_runtime::DaemonLspSessionFactory;
 use tracedecay_application::source_authorization::ProjectSourceAccessSnapshot;
 use tracedecay_code_index_runtime::git_transactions::DaemonGitIndexTransactionServiceRegistry;
@@ -37,6 +37,7 @@ use tracedecay_daemon_service::{
     },
 };
 use tracedecay_domain::errors::{Result, TraceDecayError};
+use tracedecay_lsp::TypeScriptCompilerAdmission;
 use tracedecay_lsp::analyzer::broker::AdmittedLspProvider;
 use tracedecay_lsp::analyzer::client::LspRefreshTimeouts;
 use tracedecay_session_runtime::session_retrieval::DaemonSessionLookupPrimitiveV1;
@@ -169,8 +170,12 @@ pub(crate) async fn install_project_open_source_edit_owners_for_test(
 
 /// Registers the owners that serve code reads on an admitted route: the
 /// callable-code authorization and the primitive runtime. Returns the
-/// admitted root URI and the compiler status retained by their runtime.
+/// admitted root URI and the compiler producer appointed by their runtime.
 #[tracing::instrument(name = "daemon.project.owners.code_reads", level = "trace", skip_all)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Code-read registration carries the admitted compiler with its route authorities."
+)]
 async fn register_project_code_read_owners(
     invocation: &DaemonInvocationState,
     project_root: &Path,
@@ -179,7 +184,8 @@ async fn register_project_code_read_owners(
     access: &ProjectSourceAccessSnapshot,
     session_db: tracedecay_global_db::RegisteredGlobalDbLeaseV1,
     temporal: Arc<dyn TemporalRetrievalPort + Send + Sync>,
-) -> Result<(String, TypeScriptProducerStatusHandleV1)> {
+    compiler_admission: Option<TypeScriptCompilerAdmission>,
+) -> Result<(String, Option<TypeScriptProducerStateV1>)> {
     // Primitive reads are part of the admitted core route. Publish their
     // runtime and callable-code authorization before the slower mutation,
     // delivery, native-integration, and Work owners finish mounting.
@@ -221,6 +227,7 @@ async fn register_project_code_read_owners(
         session_db,
         temporal,
         access.clone(),
+        compiler_admission,
     )
     .await
 }
@@ -273,6 +280,7 @@ pub(super) async fn register_reset_required_route_code_read_owners(
         &access,
         session_store,
         Arc::new(primitive_runtime::ResetRequiredSessionLookupV1),
+        None,
     ))
     .await
     .map(drop)
@@ -382,7 +390,12 @@ pub(super) async fn register_project_open_production_owners(
     let temporal = Arc::new(DaemonSessionLookupPrimitiveV1::new(
         server.project_session_application_retrieval_service(&access.scope)?,
     ));
-    let (admitted_root_uri, compiler_status) = Box::pin(register_project_code_read_owners(
+    let compiler_admission = compiler_diagnostics_producer::compiler_admission_for_project(
+        invocation,
+        project_root,
+        &scope,
+    );
+    let (admitted_root_uri, compiler_producer) = Box::pin(register_project_code_read_owners(
         invocation,
         project_root,
         server,
@@ -390,8 +403,21 @@ pub(super) async fn register_project_open_production_owners(
         &access,
         session_db.clone(),
         temporal,
+        compiler_admission,
     ))
     .await?;
+    // The producer needs only the admitted graph, scheduler, and compiler
+    // authority. Hand the appointed state to supervision before any later
+    // owner can fail or yield.
+    if let Some(compiler_producer) = compiler_producer {
+        let _typescript_producer_admitted = compiler_diagnostics_producer::spawn_typescript_diagnostics_producer(
+            server,
+            invocation.clone(),
+            project_root.to_path_buf(),
+            Arc::clone(&graph),
+            compiler_producer,
+        );
+    }
     owner_phase("code_read_owners_registered");
 
     // One worktree discovery serves both the Git transaction owner here and
@@ -782,20 +808,6 @@ pub(super) async fn register_project_open_production_owners(
         )
         .await;
     });
-
-    // A TypeScript project with its own compiler gets an automatic diagnostics
-    // producer: bounded background work after each complete generation, so
-    // `tracedecay_diagnostics` has a publication to read without a caller
-    // pasting compiler output first.
-    let _typescript_producer_admitted =
-        compiler_diagnostics_producer::spawn_typescript_diagnostics_producer(
-            server,
-            invocation.clone(),
-            project_root.to_path_buf(),
-            &scope,
-            Arc::clone(&graph),
-            compiler_status,
-        );
 
     tracing::info!(
         event = "project_open_owner_phase",
