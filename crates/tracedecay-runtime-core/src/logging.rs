@@ -289,10 +289,34 @@ impl FormattedTracingCapture {
         Self::start_with_output(true)
     }
 
+    /// Records high-level phase boundaries without verbose SQL trace events.
+    #[must_use]
+    pub fn start_with_info_span_timings() -> Self {
+        Self::start_with_settings(
+            true,
+            tracing::Level::INFO,
+            tracing_subscriber::fmt::format::FmtSpan::NEW
+                | tracing_subscriber::fmt::format::FmtSpan::CLOSE,
+        )
+    }
+
     fn start_with_output(stderr: bool) -> Self {
+        Self::start_with_settings(
+            stderr,
+            tracing::Level::TRACE,
+            tracing_subscriber::fmt::format::FmtSpan::NONE,
+        )
+    }
+
+    fn start_with_settings(
+        stderr: bool,
+        level: tracing::Level,
+        span_events: tracing_subscriber::fmt::format::FmtSpan,
+    ) -> Self {
         let bytes = std::sync::Arc::new(Mutex::new(Vec::new()));
         let subscriber = tracing_subscriber::fmt()
-            .with_max_level(tracing::Level::TRACE)
+            .with_max_level(level)
+            .with_span_events(span_events)
             .with_ansi(false)
             .with_writer(CaptureBuffer(std::sync::Arc::clone(&bytes), stderr));
         let guard = if stderr {
