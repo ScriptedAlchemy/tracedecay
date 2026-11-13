@@ -189,23 +189,31 @@ impl RuntimeOperationTaskOwnerV1 {
                 state.lifecycle = RuntimeOperationTaskLifecycleV1::Fenced;
                 let (publish_completion, completion) = watch::channel(None);
                 let tasks = std::mem::take(&mut state.tasks);
-                self.runtime.spawn(async move {
-                    let mut failures = Vec::new();
-                    for (task_id, task) in tasks {
-                        if let Err(error) = task.await {
-                            failures.push(RuntimeOperationTaskJoinFailure {
-                                task_id,
-                                error: Arc::new(error),
-                            });
+                if tasks.is_empty() {
+                    // Completed owners need no runtime to drain. Cleanup can
+                    // arrive after their admission runtime has stopped; an
+                    // empty reaper spawned there would be cancelled without
+                    // publishing the already-settled result.
+                    publish_completion.send_replace(Some(Ok(())));
+                } else {
+                    self.runtime.spawn(async move {
+                        let mut failures = Vec::new();
+                        for (task_id, task) in tasks {
+                            if let Err(error) = task.await {
+                                failures.push(RuntimeOperationTaskJoinFailure {
+                                    task_id,
+                                    error: Arc::new(error),
+                                });
+                            }
                         }
-                    }
-                    let result = if failures.is_empty() {
-                        Ok(())
-                    } else {
-                        Err(RuntimeOperationShutdownError::JoinFailures(failures))
-                    };
-                    publish_completion.send_replace(Some(result));
-                });
+                        let result = if failures.is_empty() {
+                            Ok(())
+                        } else {
+                            Err(RuntimeOperationShutdownError::JoinFailures(failures))
+                        };
+                        publish_completion.send_replace(Some(result));
+                    });
+                }
                 state.lifecycle = RuntimeOperationTaskLifecycleV1::Draining {
                     completion: completion.clone(),
                 };
@@ -247,6 +255,33 @@ mod tests {
     use super::*;
     use std::sync::atomic::AtomicBool;
     use tokio::sync::oneshot;
+
+    #[test]
+    fn settled_owner_shuts_down_after_its_admission_runtime_stops() {
+        let admission_runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let owner = RuntimeOperationTaskOwnerV1::new(admission_runtime.handle().clone());
+        admission_runtime.block_on(async {
+            owner.retain(|_| async {}).unwrap();
+            owner.settled().await;
+        });
+        drop(admission_runtime);
+
+        let cleanup_runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        cleanup_runtime.block_on(async {
+            owner.shutdown().await.unwrap();
+            owner.shutdown().await.unwrap();
+            assert!(matches!(
+                owner.retain(|_| async {}),
+                Err(RuntimeOperationAdmissionError::Closed)
+            ));
+        });
+    }
 
     #[tokio::test]
     async fn accepted_settlement_survives_request_and_shutdown_waiter_cancellation() {
