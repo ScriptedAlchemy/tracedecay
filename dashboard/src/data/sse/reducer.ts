@@ -128,6 +128,16 @@ export function createSseReducer<TPayload = unknown>(
   }
 
   /**
+   * The eviction cursor for {@link rememberIdentity}. A `Set` iterator is a
+   * live view, so one iterator held across calls yields exactly the front a
+   * freshly created one would, because every entry it yields is deleted
+   * immediately and new entries are only ever appended. Reusing the cursor
+   * avoids repeatedly scanning deleted slots from the start of the Set as
+   * the stream grows beyond the cap; ingest runs on the render thread.
+   */
+  let oldestIdentity = observed.values();
+
+  /**
    * Remember an accepted event's identity, capped. `Set` iterates in insertion
    * order, so evicting the front is FIFO: the newest identities, the only ones
    * a redelivery can still be above its stream watermark for, are the ones
@@ -137,8 +147,13 @@ export function createSseReducer<TPayload = unknown>(
   function rememberIdentity(key: string): void {
     observed.add(key);
     while (observed.size > MAX_OBSERVED_IDENTITIES) {
-      const oldest = observed.values().next();
-      if (oldest.done) break;
+      const oldest = oldestIdentity.next();
+      if (oldest.done) {
+        // A drained iterator never resumes, so restart from the live front
+        // rather than leaving the cap unenforced.
+        oldestIdentity = observed.values();
+        continue;
+      }
       observed.delete(oldest.value);
     }
   }

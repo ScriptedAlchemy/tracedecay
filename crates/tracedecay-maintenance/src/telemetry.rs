@@ -26,6 +26,8 @@ use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
 
 use crate::tick::MaintenanceTickOutcome;
 
+#[cfg(test)]
+mod reclaim_tests;
 mod text_artifact_scans;
 use text_artifact_scans::TextArtifactScansV1;
 
@@ -35,6 +37,9 @@ const STORAGE_TELEMETRY_USE_CASE: &str = "use-case.application.storage.telemetry
 
 const TABLE_GROWTH_STATE_DIRECTORY: &str = "maintenance";
 const TABLE_GROWTH_STATE_FILE: &str = "table-growth-v1.json";
+/// The durable baseline is metadata, never an unbounded profile payload.
+/// Leave room below the maintenance-family soft bound for other cursors.
+const MAX_TABLE_GROWTH_STATE_BYTES: usize = 16 * 1024 * 1024;
 /// How long a walk that ran out of its deadline suppresses the next one.
 const TABLE_SIZE_WALK_REPROBE_MICROS: i64 = 24 * 60 * 60 * 1_000_000;
 
@@ -44,22 +49,24 @@ struct TableWatermark {
     observed_at: UtcMicros,
 }
 
-/// The store size at which a per-table `dbstat` walk last ran out of its
-/// deadline.
+/// The live-page count at which a per-table `dbstat` walk timed out.
 ///
-/// The walk reads every page of every table, so its cost tracks the store
-/// size: a multi-gigabyte session store needs minutes. Once a walk has run
-/// out of time, repeating it on a store at least as large only spends the
-/// deadline again. A smaller store, or a day-old mark, is walked again.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+/// Deleting data can reclaim table pages to SQLite's freelist without shrinking
+/// the database file. `dbstat` no longer walks those pages, so the retry
+/// decision uses allocated pages minus freelist pages instead of file size.
+/// A store with fewer live pages, or a day-old mark, gets another measurement.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct OverBudgetTableSizeWalk {
+    /// Allocated pages minus freelist pages when the walk timed out.
     page_count: u64,
     observed_at: UtcMicros,
 }
 
 impl OverBudgetTableSizeWalk {
     fn still_applies(self, page_count: u64, now: UtcMicros) -> bool {
+        // A regressed wall clock cannot extend a failed-walk hold indefinitely.
         page_count >= self.page_count
+            && now.0 >= self.observed_at.0
             && now.0.saturating_sub(self.observed_at.0) < TABLE_SIZE_WALK_REPROBE_MICROS
     }
 }
@@ -99,6 +106,10 @@ fn settle_table_size_walk(
 struct TableGrowthStateV1 {
     watermarks: Option<BTreeMap<TableNameV1, TableWatermark>>,
     latest: Option<TableGrowthTelemetryReadV1>,
+    // A timed-out census describes the work cost of this executable, not a
+    // durable store limit. Restart must re-probe after reader improvements.
+    // Persist only actual samples and their watermarks.
+    #[serde(skip)]
     over_budget: Option<OverBudgetTableSizeWalk>,
 }
 
@@ -205,10 +216,13 @@ impl GuardedStoreTelemetryPort {
         let over_budget = self.table_growth_state().over_budget;
         let walk = native_runtime::spawn_blocking(move || {
             let interrupted = || telemetry_interruption(&context);
-            let page_count = handle
+            let sample = handle
                 .store_size_telemetry(reader_wait, interrupted)
-                .map_err(|error| error.table_growth_unavailable_reason())?
-                .page_count;
+                .map_err(|error| error.table_growth_unavailable_reason())?;
+            let page_count = sample
+                .page_count
+                .checked_sub(sample.freelist_pages)
+                .ok_or(TableGrowthUnavailableReasonV1::StorageOther)?;
             if over_budget.is_some_and(|walk| walk.still_applies(page_count, now_micros())) {
                 return Ok(TableSizeWalk::Skipped);
             }
@@ -564,7 +578,17 @@ impl StoreTelemetrySamplingRegistry {
             .table_growth_state_path
             .as_deref()
             .zip(path.to_str())
-            .and_then(|(state_path, key)| load_table_growth_states(state_path).remove(key))
+            .and_then(|(state_path, key)| match load_table_growth_states(state_path) {
+                Ok(mut states) => states.remove(key),
+                Err(error) => {
+                    tracing::warn!(
+                        path = %state_path.display(),
+                        %error,
+                        "table growth checkpoint is unavailable; preserving it and re-baselining this store"
+                    );
+                    None
+                }
+            })
             .unwrap_or_default();
         let port = GuardedStoreTelemetryPort::new(
             handle,
@@ -881,11 +905,31 @@ impl StoreTelemetrySamplingRegistry {
 
 /// Every persisted store state, keyed by database path. A missing or
 /// unreadable file is an empty state: the next pass re-baselines.
-fn load_table_growth_states(state_path: &Path) -> BTreeMap<String, TableGrowthStateV1> {
-    std::fs::read(state_path)
-        .ok()
-        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
-        .unwrap_or_default()
+fn load_table_growth_states(
+    state_path: &Path,
+) -> std::io::Result<BTreeMap<String, TableGrowthStateV1>> {
+    // A stale or substituted maintenance file need not respect the size of
+    // data this daemon normally writes. Do not read a sparse multi-GB file,
+    // follow a foreign symlink, or wait forever on a FIFO during startup.
+    // Refuse unsafe reads rather than replacing their sole existing bytes.
+    let bytes = match tracedecay_private_fs::framed_log::read_bounded(
+        state_path,
+        MAX_TABLE_GROWTH_STATE_BYTES,
+    )? {
+        Some(bytes) => bytes,
+        None => return Ok(BTreeMap::new()),
+    };
+    match serde_json::from_slice(&bytes) {
+        Ok(states) => Ok(states),
+        Err(error) => {
+            tracing::warn!(
+                path = %state_path.display(),
+                %error,
+                "table growth checkpoint is invalid; measurements will re-baseline"
+            );
+            Ok(BTreeMap::new())
+        }
+    }
 }
 
 /// Merge `updates` into the persisted state and drop stores whose database no
@@ -899,10 +943,16 @@ fn persist_table_growth_states(
     state_path: &Path,
     updates: Vec<(String, TableGrowthStateV1)>,
 ) -> std::io::Result<()> {
-    let mut states = load_table_growth_states(state_path);
+    let mut states = load_table_growth_states(state_path)?;
     states.extend(updates);
     states.retain(|database_path, _| Path::new(database_path).exists());
     let bytes = serde_json::to_vec(&states).map_err(std::io::Error::other)?;
+    if bytes.len() > MAX_TABLE_GROWTH_STATE_BYTES {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "table growth checkpoint exceeds the bounded maintenance-state size",
+        ));
+    }
     if let Some(parent) = state_path.parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -960,6 +1010,98 @@ fn storage_telemetry_request_context(
         Deadline::new(expires_at)?,
         CancellationContext::active(format!("cancel.daemon.storage-telemetry.{suffix}"))?,
     )
+}
+
+#[cfg(test)]
+#[allow(clippy::expect_used, clippy::panic)]
+mod table_growth_checkpoint_tests {
+    use super::{
+        MAX_TABLE_GROWTH_STATE_BYTES, TableGrowthStateV1, load_table_growth_states,
+        persist_table_growth_states,
+    };
+
+    #[test]
+    fn checkpoint_reads_refuse_oversized_and_foreign_files_without_losing_valid_state() {
+        let temp = tempfile::tempdir().expect("isolated checkpoint fixture");
+        let database = temp.path().join("project.db");
+        std::fs::write(&database, b"owned").expect("existing database identity");
+        let checkpoint = temp.path().join("maintenance/table-growth-v1.json");
+        let key = database.to_str().expect("UTF-8 fixture path").to_owned();
+        persist_table_growth_states(
+            &checkpoint,
+            vec![(key.clone(), TableGrowthStateV1::default())],
+        )
+        .expect("persist genuine bounded state");
+        let loaded = load_table_growth_states(&checkpoint).expect("valid checkpoint readback");
+        assert_eq!(loaded.len(), 1);
+        assert!(loaded.contains_key(&key));
+
+        // A sparse file exercises the held-file length refusal, without
+        // allocating or reading an oversized JSON payload in the test.
+        std::fs::OpenOptions::new()
+            .write(true)
+            .truncate(true)
+            .open(&checkpoint)
+            .expect("replace disposable checkpoint")
+            .set_len(MAX_TABLE_GROWTH_STATE_BYTES as u64 + 1)
+            .expect("sparse oversized checkpoint");
+        assert!(matches!(
+            load_table_growth_states(&checkpoint),
+            Err(error) if error.kind() == std::io::ErrorKind::InvalidData
+        ));
+        assert!(
+            persist_table_growth_states(
+                &checkpoint,
+                vec![(key.clone(), TableGrowthStateV1::default())],
+            )
+            .is_err(),
+            "an oversized existing checkpoint must not be replaced"
+        );
+        assert_eq!(
+            std::fs::metadata(&checkpoint).unwrap().len(),
+            MAX_TABLE_GROWTH_STATE_BYTES as u64 + 1
+        );
+
+        #[cfg(unix)]
+        {
+            let foreign = temp.path().join("foreign-state.json");
+            std::fs::write(
+                &foreign,
+                serde_json::to_vec(&std::collections::BTreeMap::from([(
+                    key.clone(),
+                    TableGrowthStateV1::default(),
+                )]))
+                .expect("valid foreign state"),
+            )
+            .expect("foreign contents");
+            std::fs::remove_file(&checkpoint).expect("remove disposable oversized file");
+            std::os::unix::fs::symlink(&foreign, &checkpoint)
+                .expect("substitute foreign checkpoint symlink");
+            assert!(
+                matches!(
+                    load_table_growth_states(&checkpoint),
+                    Err(error) if error.kind() == std::io::ErrorKind::InvalidInput
+                ),
+                "the previous std::fs::read would import this valid foreign state"
+            );
+            assert!(
+                persist_table_growth_states(
+                    &checkpoint,
+                    vec![(key, TableGrowthStateV1::default())],
+                )
+                .is_err(),
+                "a foreign symlink must never be replaced by persistence"
+            );
+            assert!(
+                checkpoint
+                    .symlink_metadata()
+                    .unwrap()
+                    .file_type()
+                    .is_symlink()
+            );
+            assert!(std::fs::read(&foreign).unwrap().len() > 2);
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1323,6 +1465,98 @@ mod table_growth_tests {
             "a day-old over-budget mark is probed again"
         );
         assert_eq!(port.table_growth_state().over_budget, None);
+
+        // A prior timed-out walk can have a future wall-clock timestamp after
+        // time synchronization moves backward. It must not hide table growth
+        // for the entire clock skew plus the normal retry interval.
+        mark(
+            1,
+            UtcMicros(
+                now_micros()
+                    .0
+                    .saturating_add(super::TABLE_SIZE_WALK_REPROBE_MICROS),
+            ),
+        );
+        assert!(
+            matches!(
+                port.table_growth(&context, &store).await,
+                TableGrowthTelemetryReadV1::Observed { .. }
+            ),
+            "a future timeout marker must not suppress a live measurement"
+        );
+        assert_eq!(port.table_growth_state().over_budget, None);
+    }
+
+    #[tokio::test]
+    async fn freed_pages_retry_a_timed_out_census_without_file_compaction() {
+        let temporary = tempfile::tempdir().expect("telemetry fixture root");
+        let (database, store, port) =
+            fixture_port(&temporary.path().join("project.db"), Duration::from_secs(5)).await;
+        let context = storage_telemetry_request_context(port.scope.clone()).expect("context");
+
+        database
+            .execute_write_batch(
+                "grow a disposable table before retention",
+                "WITH RECURSIVE n(i) AS (
+                    SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 8
+                 ) INSERT INTO growth_payload SELECT zeroblob(1048576) FROM n;",
+            )
+            .await
+            .expect("fill the table with real overflow pages");
+        let StorageTelemetryReadV1::Observed { sample: before } =
+            port.store_size(&context, &store).await
+        else {
+            panic!("the grown store must expose its page and freelist counts");
+        };
+        let live_pages_before = before.page_count - before.freelist_pages;
+        assert!(
+            live_pages_before > 1024,
+            "the fixture must have many live pages"
+        );
+
+        port.table_growth
+            .lock()
+            .expect("table growth state")
+            .over_budget = Some(OverBudgetTableSizeWalk {
+            page_count: live_pages_before,
+            observed_at: now_micros(),
+        });
+        assert!(matches!(
+            port.table_growth(&context, &store).await,
+            TableGrowthTelemetryReadV1::Unknown {
+                reason: TableGrowthUnavailableReasonV1::ExceedsMeasurementBudget,
+                ..
+            }
+        ));
+
+        database
+            .execute_write_batch(
+                "reclaim the disposable table without vacuum",
+                "DELETE FROM growth_payload;",
+            )
+            .await
+            .expect("reclaim the table's overflow pages");
+        let StorageTelemetryReadV1::Observed { sample: after } =
+            port.store_size(&context, &store).await
+        else {
+            panic!("the reclaimed store must expose its page and freelist counts");
+        };
+        assert_eq!(
+            after.page_count, before.page_count,
+            "the database did not shrink, so allocated-page retry suppression would still apply"
+        );
+        assert!(after.freelist_pages > before.freelist_pages);
+        assert!(after.page_count - after.freelist_pages < live_pages_before);
+
+        let retried = port.table_growth(&context, &store).await;
+        assert!(
+            matches!(
+                retried,
+                TableGrowthTelemetryReadV1::BaselineEstablished { .. }
+            ),
+            "the cheaper post-reclamation census must run without a restart: {retried:?}"
+        );
+        assert_eq!(port.table_growth_state().over_budget, None);
     }
 }
 
@@ -1331,10 +1565,15 @@ mod table_growth_tests {
 mod table_growth_restart_tests {
     use std::collections::BTreeSet;
 
-    use tracedecay_contracts::storage::TableGrowthTelemetryReadV1;
+    use tracedecay_contracts::now_micros;
+    use tracedecay_contracts::storage::{
+        TableGrowthTelemetryReadV1, TableGrowthUnavailableReasonV1,
+    };
     use tracedecay_runtime_core::cancellation::CancellationToken;
 
-    use super::{StoreTelemetrySamplingRegistry, storage_telemetry_request_context};
+    use super::{
+        OverBudgetTableSizeWalk, StoreTelemetrySamplingRegistry, storage_telemetry_request_context,
+    };
 
     #[tokio::test]
     async fn a_restarted_registry_reports_the_persisted_measurement() {
@@ -1395,6 +1634,93 @@ mod table_growth_restart_tests {
                 .iter()
                 .all(|sample| sample.previous_observed_at == observed_at)
         );
+    }
+    #[tokio::test]
+    async fn restart_reprobes_a_timed_out_census_without_losing_the_baseline() {
+        let temporary = tempfile::tempdir().expect("profile root");
+        let profile_root = temporary.path().join("profile");
+        let database_path = temporary.path().join("project.db");
+        let (database, scope) = super::table_growth_tests::growth_fixture(&database_path).await;
+        let paths = BTreeSet::from([database_path.clone()]);
+        let before = StoreTelemetrySamplingRegistry::persisted_under(&profile_root);
+        assert!(before.register_port(&database_path, &scope, || {
+            database.storage_telemetry_handle()
+        }));
+        before
+            .advance_registered(&paths, &paths, &CancellationToken::new())
+            .await;
+        let context = storage_telemetry_request_context(scope.clone()).expect("reader context");
+        let (store, port) = before
+            .registered_port(&database_path, &scope)
+            .expect("registered port");
+        let TableGrowthTelemetryReadV1::BaselineEstablished { observed_at, .. } =
+            port.latest_table_growth(&context, &store)
+        else {
+            panic!("first maintenance pass must establish a baseline");
+        };
+
+        database
+            .execute_write_batch(
+                "grow retained table after baseline",
+                "INSERT INTO growth_payload VALUES (zeroblob(32768));",
+            )
+            .await
+            .expect("insert a nonzero measured payload");
+        port.table_growth
+            .lock()
+            .expect("table growth state")
+            .over_budget = Some(OverBudgetTableSizeWalk {
+            page_count: 1,
+            observed_at: now_micros(),
+        });
+        before
+            .advance_registered(&paths, &paths, &CancellationToken::new())
+            .await;
+        let skipped = port.latest_table_growth(&context, &store);
+        assert!(matches!(
+            skipped,
+            TableGrowthTelemetryReadV1::Unknown {
+                reason: TableGrowthUnavailableReasonV1::ExceedsMeasurementBudget,
+                ..
+            }
+        ));
+        assert!(port.table_growth_state().over_budget.is_some());
+        drop(port);
+        drop(before);
+
+        let after = StoreTelemetrySamplingRegistry::persisted_under(&profile_root);
+        assert!(after.register_port(&database_path, &scope, || {
+            database.storage_telemetry_handle()
+        }));
+        let (store, port) = after
+            .registered_port(&database_path, &scope)
+            .expect("registered port after restart");
+        assert_eq!(
+            port.latest_table_growth(&context, &store),
+            skipped,
+            "the last unavailability is retained until a real new measurement"
+        );
+        assert_eq!(
+            port.table_growth_state().over_budget,
+            None,
+            "a previous executable's timed-out census must not suppress the new one"
+        );
+
+        after
+            .advance_registered(&paths, &paths, &CancellationToken::new())
+            .await;
+        let TableGrowthTelemetryReadV1::Observed { samples, .. } =
+            port.latest_table_growth(&context, &store)
+        else {
+            panic!("restart must retry and compare to the retained baseline");
+        };
+        let grown = samples
+            .iter()
+            .find(|sample| sample.table.as_str() == "growth_payload")
+            .expect("the retried census reports real table bytes");
+        assert_eq!(grown.previous_observed_at, observed_at);
+        assert!(grown.growth_bytes().get() >= 32_768);
+        assert_eq!(port.table_growth_state().over_budget, None);
     }
 }
 
@@ -1502,8 +1828,8 @@ mod registry_tests {
         assert!(registry.graph_replay_release_attempt_admitted(project));
         assert!(registry.graph_replay_release_attempt_admitted(project));
 
-        // Consecutive unhealthy attempts widen the skip window 1, 2, 4, and
-        // cap at GRAPH_REPLAY_RELEASE_BACKOFF_CAP_TICKS denied ticks.
+        // Consecutive unhealthy attempts open a bounded skip window:
+        // 1, 2, 4, and capped at GRAPH_REPLAY_RELEASE_BACKOFF_CAP_TICKS.
         for expected_skips in [1_usize, 2, 4, 8, 8] {
             registry.record_graph_replay_release_unhealthy(project);
             let mut denied = 0_usize;

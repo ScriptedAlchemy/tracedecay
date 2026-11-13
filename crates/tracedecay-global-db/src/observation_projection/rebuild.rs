@@ -25,7 +25,8 @@ use super::state::{
     consume_projection_queue_item, decode_observation_row, decode_sequence,
     projected_stored_message, projection_retry_state, queued_projection, read_checkpoint,
     read_message, read_observation, read_session, reconcile_session_rows_detailed,
-    schedule_projection_retry, storage, storage_message, stored_output_digest, write_checkpoint,
+    retry_mount_identity, schedule_projection_retry, storage, storage_message,
+    stored_output_digest, write_checkpoint,
 };
 use super::transition::{
     MessageTransition, MessageTransitionState, WorkflowFactTarget, WorkflowFactTransition,
@@ -220,17 +221,63 @@ pub async fn project_queued_observations(
     if max == 0 {
         return Ok(ProjectionDrainBatch::default());
     }
+    // Sequence order, not the earliest deadline anywhere in the queue,
+    // determines readiness. A deferred head fences even a later due row:
+    // neither case should take a writer lease just to find no ready work.
+    // The partial sequence index excludes terminal (i64::MAX) collisions.
+    // The writer remains authoritative when this check finds a ready head.
+    {
+        let reader = database.read_connection();
+        let mut rows = reader
+            .query(
+                // The fixed terminal sentinel matches the partial index predicate.
+                "SELECT next_retry_at_micros,
+                        EXISTS(SELECT 1 FROM observation_projection_rebuilds
+                               WHERE projector_version = ?1)
+                 FROM projection_queue
+                 WHERE next_retry_at_micros < 9223372036854775807
+                 ORDER BY observation_sequence LIMIT 1",
+                params![SESSION_MESSAGE_PROJECTOR_VERSION],
+            )
+            .await
+            .map_err(|error| storage("probe ready projection queue", error))?;
+        let head = rows
+            .next()
+            .await
+            .map_err(|error| storage("probe ready projection queue", error))?;
+        let Some(head) = head else {
+            return Ok(ProjectionDrainBatch::default());
+        };
+        let deadline = head
+            .get::<i64>(0)
+            .map_err(|error| storage("decode projection head deadline", error))?;
+        // An active generation rebuild suppresses ordinary projection.
+        // Do not acquire a writer only to discover that suppression again;
+        // the next poll rechecks both the rebuild and the ordered queue head.
+        let rebuild_active = head
+            .get::<i64>(1)
+            .map_err(|error| storage("decode projection rebuild gate", error))?
+            != 0;
+        if rebuild_active || deadline > tracedecay_contracts::clock::now_micros().0 {
+            return Ok(ProjectionDrainBatch {
+                items: Vec::new(),
+                has_more: true,
+            });
+        }
+    }
     let transaction = database
         .begin_write_transaction("begin projection window transaction")
         .await
         .map_err(|error| storage("begin projection window transaction", error))?;
     let now_micros = tracedecay_contracts::clock::now_micros().0;
-    let mut items = Vec::new();
-    while items.len() < max {
-        let Some(observation_id) = next_ready_projection_head(&transaction, now_micros).await?
-        else {
-            break;
-        };
+    // Read the next ordered window only once. The old query ran a fresh
+    // MIN(observation_sequence) scan for every projected item. Permanently
+    // parked collision rows remain in this queue, so every new item re-walked
+    // that same growing prefix even inside one 32-item write transaction.
+    // The first not-yet-due row still fences every later row.
+    let ready = ready_projection_window(&transaction, now_micros, max).await?;
+    let mut items = Vec::with_capacity(ready.len());
+    for observation_id in ready {
         // Boxed for the same reason as the scalar drain: the collision-guarded
         // apply subtree overflows the base-opt worker stack when inlined.
         match Box::pin(project_observation_in_transaction_with_session(
@@ -259,47 +306,57 @@ pub async fn project_queued_observations(
     Ok(ProjectionDrainBatch { items, has_more })
 }
 
-/// Ready queue head under the same gate as the runtime's
-/// `NextQueuedProjection` read: strict minimum sequence, retry deadline
-/// passed, and no active projection rebuild generation.
-async fn next_ready_projection_head(
+/// The strict sequence head is the first nonterminal queue row, even when
+/// that row is not due yet. Read at most one write-window worth of heads
+/// through the sequence index, stopping at that first deferred row. This
+/// preserves head-of-line retry fences and active-rebuild suppression while
+/// avoiding one full queued-prefix probe per observation.
+async fn ready_projection_window(
     conn: &impl QueryExecutor,
     now_micros: i64,
-) -> ProjectionStoreResult<Option<CanonicalObservationIdV1>> {
+    max: usize,
+) -> ProjectionStoreResult<Vec<CanonicalObservationIdV1>> {
+    let limit = i64::try_from(max).map_err(|_| {
+        storage_message(
+            "read projection queue window",
+            "projection window exceeds SQLite integer range",
+        )
+    })?;
     let mut rows = conn
         .query(
-            "SELECT observation_id FROM projection_queue
-             WHERE next_retry_at_micros <= ?2
-               AND observation_sequence = (
-                 SELECT MIN(observation_sequence) FROM projection_queue
-                 WHERE next_retry_at_micros < ?3
-               )
+            "SELECT observation_id, next_retry_at_micros FROM projection_queue
+             WHERE next_retry_at_micros < 9223372036854775807
                AND NOT EXISTS (
                  SELECT 1 FROM observation_projection_rebuilds
                  WHERE projector_version = ?1
                )
-             LIMIT 1",
-            params![
-                SESSION_MESSAGE_PROJECTOR_VERSION,
-                now_micros,
-                PROJECTION_TERMINAL_RETRY_MICROS
-            ],
+             ORDER BY observation_sequence
+             LIMIT ?2",
+            params![SESSION_MESSAGE_PROJECTOR_VERSION, limit],
         )
         .await
-        .map_err(|error| storage("read projection queue head", error))?;
-    let Some(row) = rows
+        .map_err(|error| storage("read projection queue window", error))?;
+    let mut ready = Vec::new();
+    while let Some(row) = rows
         .next()
         .await
-        .map_err(|error| storage("read projection queue head", error))?
-    else {
-        return Ok(None);
-    };
-    let observation_id = row
-        .get::<String>(0)
-        .map_err(|error| storage("decode projection queue head", error))?;
-    Ok(Some(
-        CanonicalObservationIdV1::new(observation_id).map_err(ProjectionStoreError::Contract)?,
-    ))
+        .map_err(|error| storage("read projection queue window", error))?
+    {
+        let due = row
+            .get::<i64>(1)
+            .map_err(|error| storage("decode projection queue deadline", error))?;
+        if due > now_micros {
+            break;
+        }
+        let observation_id = row
+            .get::<String>(0)
+            .map_err(|error| storage("decode projection queue head", error))?;
+        ready.push(
+            CanonicalObservationIdV1::new(observation_id)
+                .map_err(ProjectionStoreError::Contract)?,
+        );
+    }
+    Ok(ready)
 }
 
 /// Whether a later drain still has work. A row parked on a terminal collision
@@ -307,8 +364,8 @@ async fn next_ready_projection_head(
 async fn projection_queue_has_items(conn: &impl QueryExecutor) -> ProjectionStoreResult<bool> {
     let mut rows = conn
         .query(
-            "SELECT 1 FROM projection_queue WHERE next_retry_at_micros < ?1 LIMIT 1",
-            params![PROJECTION_TERMINAL_RETRY_MICROS],
+            "SELECT 1 FROM projection_queue WHERE next_retry_at_micros < 9223372036854775807 LIMIT 1",
+            (),
         )
         .await
         .map_err(|error| storage("probe projection queue", error))?;
@@ -348,6 +405,7 @@ async fn persist_projection_retry_on_database(
         attempt_count,
         next_retry_at_micros,
         last_error,
+        &retry_mount_identity(database)?,
     )
     .await?;
     transaction
@@ -1056,9 +1114,9 @@ async fn activate_projection_rebuild_transaction(
     transaction
         .execute(
             "DELETE FROM projection_queue
-             WHERE observation_sequence <= ?1 AND next_retry_at_micros < ?2
+             WHERE observation_sequence <= ?1 AND next_retry_at_micros < 9223372036854775807
                AND revival_generation IS NULL",
-            params![job.frontier, PROJECTION_TERMINAL_RETRY_MICROS],
+            params![job.frontier],
         )
         .await
         .map_err(|error| storage("consume rebuilt projection queue", error))?;
