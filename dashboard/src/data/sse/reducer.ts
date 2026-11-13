@@ -131,11 +131,9 @@ export function createSseReducer<TPayload = unknown>(
    * The eviction cursor for {@link rememberIdentity}. A `Set` iterator is a
    * live view, so one iterator held across calls yields exactly the front a
    * freshly created one would, because every entry it yields is deleted
-   * immediately and new entries are only ever appended. Allocating a fresh
-   * iterator per eviction instead made the whole ingest path 80x more
-   * expensive once the cap was reached (measured: 4.9us vs 0.06us per evicted
-   * identity; a 60k-event stream 300ms vs 93ms), and ingest runs on the render
-   * thread.
+   * immediately and new entries are only ever appended. Reusing the cursor
+   * avoids repeatedly scanning deleted slots from the start of the Set as
+   * the stream grows beyond the cap; ingest runs on the render thread.
    */
   let oldestIdentity = observed.values();
 
