@@ -277,6 +277,7 @@ impl CodeIndexExecutionControlV1 for MutableCancellationControl {
 
 pub(super) fn config() -> CodeIndexProductionConfigV1 {
     CodeIndexProductionConfigV1 {
+        include_submodules: false,
         project_id: id::<ProjectId>("project.production"),
         repository: id::<RepositoryId>("repository.production"),
         sanitizer_revision: id::<SanitizerRevision>("sanitizer.v1"),
@@ -319,6 +320,7 @@ fn request_in_scope(
     request.snapshot.worktree = worktree.map(id::<WorktreeId>);
     request.snapshot.source_revision = Some(id::<CommitId>(source_revision));
     request.repository_parse_identity = CodeIndexRepositoryParseIdentityV1 {
+        include_submodules: false,
         tree: Some(id::<TreeId>(&format!("tree.{source_revision}"))),
         dirty: RepositoryDirtyStateV1::Dirty,
     };
@@ -365,6 +367,7 @@ fn request_at_path(
         invalidations: BTreeSet::new(),
         ignored_source_admissions: Vec::new(),
         repository_parse_identity: CodeIndexRepositoryParseIdentityV1 {
+            include_submodules: false,
             tree: None,
             dirty: RepositoryDirtyStateV1::Dirty,
         },
@@ -1033,6 +1036,7 @@ fn resumed_parse_quanta_publish_the_same_complete_generation() {
         invalidations: BTreeSet::new(),
         ignored_source_admissions: Vec::new(),
         repository_parse_identity: CodeIndexRepositoryParseIdentityV1 {
+            include_submodules: false,
             tree: None,
             dirty: RepositoryDirtyStateV1::Dirty,
         },
@@ -3003,6 +3007,7 @@ fn partitioned_request(
         invalidations: BTreeSet::new(),
         ignored_source_admissions: Vec::new(),
         repository_parse_identity: CodeIndexRepositoryParseIdentityV1 {
+            include_submodules: false,
             tree: None,
             dirty: RepositoryDirtyStateV1::Dirty,
         },
@@ -3172,7 +3177,7 @@ fn partitioned_codec_fixture() -> (
 
 // The sealed generation revision is part of the authenticated manifest payload.
 const PARTITIONED_FORMAT_STATE_DIGEST: &str =
-    "sha256:9dfca7e0f68bbe8502dfe19bef6b9e202b4e444a068b91ddee77a2c047d89a37";
+    "sha256:b8669b6269e0a571d9f6fa58fb9f9f7e254fe47c03c1dc231a7d71623abcfac5";
 const PARTITIONED_FORMAT_SEGMENTS: &[(&str, u64)] = &[
     (
         "sha256:49ac89476728e3983d94d2fa74f2844144dd800e6df4a82fe24484c5a7369518",

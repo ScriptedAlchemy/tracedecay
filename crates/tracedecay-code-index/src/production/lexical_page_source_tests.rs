@@ -611,6 +611,7 @@ fn fixture_for_source_files(
         invalidations: BTreeSet::new(),
         ignored_source_admissions: Vec::new(),
         repository_parse_identity: CodeIndexRepositoryParseIdentityV1 {
+            include_submodules: false,
             tree: None,
             dirty: RepositoryDirtyStateV1::Dirty,
         },
@@ -624,6 +625,7 @@ fn fixture_for_source_files(
     };
     let mut owner = CodeIndexProductionOwnerV1::new(
         CodeIndexProductionConfigV1 {
+            include_submodules: false,
             project_id: ProjectId::new("project.lexical-page-batch").expect("fixture project ID"),
             repository: RepositoryId::new("repository.lexical-page-batch")
                 .expect("fixture repository ID"),

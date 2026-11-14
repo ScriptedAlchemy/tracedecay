@@ -1,0 +1,767 @@
+//! Truthful gix-based change classification for incremental indexing.
+//!
+//! Filesystem events and hook payloads only *hint* which paths may have moved.
+//! The authoritative changed/added/deleted/renamed set is always recomputed
+//! here from gix's HEAD-tree/index/worktree status, so a duplicate hook, a
+//! save-without-change, or a dropped watcher event can never fabricate work or
+//! hide a real change.
+//!
+//! Committed, staged, unstaged, untracked, and deleted paths are kept
+//! *distinct*. Deletions become tombstone candidates. Renames are deliberately
+//! not tracked as a distinct class: for indexing a rename is just a deletion of
+//! the source plus an addition of the destination, so rename detection is
+//! disabled and gix reports the two halves independently. The scheduler
+//! consumes the derived candidate and changed sets to build an incremental
+//! batch.
+
+use std::collections::{BTreeMap, BTreeSet};
+use std::path::Path;
+
+use super::{
+    has_nested_repository_ancestor, parent_gitlink_paths, resolve_parent_source,
+    submodules::{AuthenticatedSubmodule, live_submodules},
+};
+use gix::bstr::ByteSlice;
+use tracedecay_runtime_core::git_repository::GIT_STATUS_MODIFICATION_CHECK_THREADS;
+
+/// Failure to classify worktree changes through gix.
+#[derive(Debug, thiserror::Error)]
+pub enum ClassificationErrorV1 {
+    #[error("code-index classification: {0}")]
+    Git(String),
+    #[error("code-index source boundary: {0}")]
+    SourceBoundary(#[from] std::io::Error),
+}
+
+/// The truthful disposition of one repository-relative path.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WorktreeChangeClassV1 {
+    /// Added to the index versus HEAD (staged new file).
+    StagedAdded,
+    /// Content differs between HEAD tree and index (staged modification).
+    StagedModified,
+    /// Present in HEAD tree, removed from the index (staged deletion).
+    StagedDeleted,
+    /// Worktree content differs from the index (unstaged modification).
+    UnstagedModified,
+    /// Tracked file missing from the worktree (unstaged deletion).
+    UnstagedDeleted,
+    /// Present on disk with no index relation (untracked, incl. intent-to-add).
+    Untracked,
+    /// Merge conflict; content is not a single truthful revision.
+    Conflicted,
+}
+
+impl WorktreeChangeClassV1 {
+    /// Whether this class removes a path (so its prior chunks become tombstones)
+    /// rather than presenting current content to index.
+    pub fn is_deletion(self) -> bool {
+        matches!(self, Self::StagedDeleted | Self::UnstagedDeleted)
+    }
+
+    /// Whether this class contributes a present file whose bytes should be
+    /// hashed and considered for (re)indexing.
+    pub fn presents_content(self) -> bool {
+        !self.is_deletion()
+    }
+}
+
+/// One classified path.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ClassifiedChangeV1 {
+    pub path: String,
+    pub class: WorktreeChangeClassV1,
+}
+
+/// One classified change whose Git path bytes are not UTF-8. No `String`
+/// names it, so it lives outside `changes`: a lossy decode could equal a
+/// real UTF-8 path and make the string-keyed candidate and changed sets
+/// treat this change as that file's.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NonUtf8ClassifiedChangeV1 {
+    /// The exact Git path bytes.
+    pub git_path: Vec<u8>,
+    pub class: WorktreeChangeClassV1,
+}
+
+/// A complete, truthful classification of one worktree snapshot.
+#[derive(Clone, Debug, Default)]
+pub struct WorktreeChangeClassificationV1 {
+    /// Repository-relative paths tracked in the index (the committed/staged
+    /// baseline present in the checkout).
+    committed_baseline: BTreeSet<String>,
+    changes: Vec<ClassifiedChangeV1>,
+    /// Changes whose Git path bytes are not UTF-8, kept byte-exact so the
+    /// worktree is still dirty on a non-UTF-8-only transition.
+    non_utf8_changes: Vec<NonUtf8ClassifiedChangeV1>,
+    /// Present paths whose Git bytes are not UTF-8, so no `String` above
+    /// names them.
+    non_utf8_paths: BTreeSet<Vec<u8>>,
+    /// Files still tracked by the parent but hidden behind a nested checkout
+    /// or symlinked ancestor. These are tombstones, not indexable candidates.
+    nested_repository_exclusions: BTreeSet<String>,
+    parent_gitlinks: BTreeSet<String>,
+    /// Direct parent-relative child paths admitted from that checkout's own Git roster.
+    child_sources: BTreeMap<String, String>,
+    /// Retained parent-owned authority for every admitted direct child.
+    child_bindings: BTreeMap<String, AuthenticatedSubmodule>,
+    child_revision_changed: bool,
+}
+
+impl WorktreeChangeClassificationV1 {
+    /// Classify the current status of `repository` truthfully.
+    #[tracing::instrument(name = "daemon.code_index.capture.classify", level = "trace", skip_all)]
+    pub fn classify(repository: &gix::Repository) -> Result<Self, ClassificationErrorV1> {
+        let index = repository
+            .index_or_empty()
+            .map_err(|error| ClassificationErrorV1::Git(error.to_string()))?;
+        let skip_validation = gix::index::entry::Flags::UPTODATE
+            | gix::index::entry::Flags::SKIP_WORKTREE
+            | gix::index::entry::Flags::ASSUME_VALID
+            | gix::index::entry::Flags::FSMONITOR_VALID;
+        let mut committed_baseline = BTreeSet::new();
+        let mut non_utf8_paths = BTreeSet::new();
+        let mut has_skipped_entries = false;
+        for entry in index.entries() {
+            has_skipped_entries |= entry.flags.intersects(skip_validation);
+            let path: &[u8] = entry.path(&index).as_ref();
+            match std::str::from_utf8(path) {
+                Ok(path) => {
+                    committed_baseline.insert(path.to_owned());
+                }
+                Err(_) => {
+                    non_utf8_paths.insert(path.to_vec());
+                }
+            }
+        }
+        let mut status_index = gix::worktree::IndexPersistedOrInMemory::from(index);
+        if has_skipped_entries {
+            // These flags are Git status shortcuts, not evidence that source
+            // bytes still match the index. Recheck only those entries through
+            // gix's ordinary filtered blob comparison. An mtime at the index
+            // timestamp is racy even when all stat fields match, so neither
+            // the flags nor preserved file metadata can suppress that check.
+            // This private index is never written back to the user's checkout.
+            let mut checked = status_index.into_owned();
+            let racy_mtime = checked.timestamp().into();
+            for (entry, path) in checked.entries_mut_with_paths() {
+                if entry.flags.intersects(skip_validation) {
+                    // Sparse entries deliberately omit worktree content.
+                    // Preserve that omission; only materialized skipped
+                    // paths need to prove their bytes against the index.
+                    if entry
+                        .flags
+                        .contains(gix::index::entry::Flags::SKIP_WORKTREE)
+                        && (entry.mode.is_sparse()
+                            || repository.workdir().is_some_and(|root| {
+                                gix::path::from_bstr(path).is_ok_and(|relative| {
+                                    std::fs::symlink_metadata(root.join(relative)).is_err_and(
+                                        |error| error.kind() == std::io::ErrorKind::NotFound,
+                                    )
+                                })
+                            }))
+                    {
+                        continue;
+                    }
+                    entry.flags.remove(skip_validation);
+                    entry.stat.mtime = racy_mtime;
+                }
+            }
+            status_index = checked.into();
+        }
+
+        let mut changes = Vec::new();
+        let mut non_utf8_changes = Vec::new();
+        let status = repository
+            .status(gix::progress::Discard)
+            .map_err(|error| ClassificationErrorV1::Git(error.to_string()))?
+            .index(status_index)
+            // Emit untracked files, but not ignored ones: ignored/generated
+            // content is out of indexing scope.
+            .untracked_files(gix::status::UntrackedFiles::Files)
+            // Rename detection is deliberately disabled on both the tree↔index
+            // and index↔worktree axes: for indexing a rename is just a deletion
+            // plus an addition, and rewrite tracking is expensive. Content
+            // reuse still happens via the content-addressed byte pool.
+            .tree_index_track_renames(gix::status::tree_index::TrackRenames::Disabled)
+            .index_worktree_rewrites(None)
+            // Submodule content belongs to its own repository identity and is
+            // never indexed as part of this worktree.
+            .index_worktree_submodules(None)
+            .index_worktree_options_mut(|options| {
+                options.thread_limit = Some(GIT_STATUS_MODIFICATION_CHECK_THREADS);
+            })
+            .into_iter(Vec::<gix::bstr::BString>::new())
+            .map_err(|error| ClassificationErrorV1::Git(error.to_string()))?;
+        for item in status {
+            let item = item.map_err(|error| ClassificationErrorV1::Git(error.to_string()))?;
+            let location: &[u8] = item.location().as_ref();
+            if let Some(class) = classify_item(&item) {
+                match location.to_str() {
+                    Ok(path) => changes.push(ClassifiedChangeV1 {
+                        path: path.to_owned(),
+                        class,
+                    }),
+                    Err(_) => {
+                        if class.presents_content() {
+                            non_utf8_paths.insert(location.to_vec());
+                        } else {
+                            non_utf8_paths.remove(location);
+                        }
+                        non_utf8_changes.push(NonUtf8ClassifiedChangeV1 {
+                            git_path: location.to_vec(),
+                            class,
+                        });
+                    }
+                }
+            }
+        }
+
+        // A nested .git marker can appear under paths that are still in
+        // the parent's index without changing Git status. The live walker
+        // refuses those files; classification must also exclude them and
+        // invalidate clean-tree and active-generation reuse. Resolve each
+        // parent directory once rather than probing per source file.
+        let mut classification = Self {
+            committed_baseline,
+            changes,
+            non_utf8_changes,
+            non_utf8_paths,
+            ..Self::default()
+        };
+        if let Some(project_root) = repository.workdir() {
+            // The live walker also denies HEAD gitlinks staged for removal.
+            // Without this check, Git reports their markerless child sources
+            // as untracked, and worktree capture can re-admit those bytes.
+            classification.parent_gitlinks = parent_gitlink_paths(project_root)
+                .map_err(|error| ClassificationErrorV1::Git(error.message))?;
+            let mut checked_parents = BTreeMap::new();
+            for path in classification
+                .committed_baseline
+                .iter()
+                .chain(classification.changes.iter().map(|change| &change.path))
+            {
+                let relative = Path::new(path);
+                let parent = relative.parent().unwrap_or_else(|| Path::new(""));
+                let excluded = if classification.beneath_gitlink(relative)
+                    || resolve_parent_source(project_root, relative)?.is_none()
+                {
+                    true
+                } else {
+                    match checked_parents.get(parent) {
+                        Some(excluded) => *excluded,
+                        None => {
+                            let excluded = has_nested_repository_ancestor(project_root, relative)?;
+                            checked_parents.insert(parent.to_path_buf(), excluded);
+                            excluded
+                        }
+                    }
+                };
+                if excluded {
+                    classification
+                        .nested_repository_exclusions
+                        .insert(path.clone());
+                }
+            }
+        }
+
+        Ok(classification)
+    }
+
+    pub fn for_policy(
+        repository: &gix::Repository,
+        include_submodules: bool,
+    ) -> Result<Self, ClassificationErrorV1> {
+        let mut parent = Self::classify(repository)?;
+        if !include_submodules || parent.parent_gitlinks.is_empty() {
+            return Ok(parent);
+        }
+        let children = live_submodules(repository)
+            .map_err(|error| ClassificationErrorV1::Git(error.message))?;
+        // A missing checkout must not let the clean parent-tree shortcut import children.
+        parent.child_revision_changed = parent
+            .parent_gitlinks
+            .iter()
+            .any(|path| !children.contains_key(path));
+        for (prefix, binding) in children {
+            let child = tracedecay_runtime_core::git_open::open(&binding.git_dir)
+                .map_err(|error| ClassificationErrorV1::Git(error.to_string()))?;
+            let child_head = child
+                .head_id()
+                .map_err(|error| ClassificationErrorV1::Git(error.to_string()))?;
+            parent.child_revision_changed |= child_head.detach() != binding.pin;
+            let local = Self::classify(&child)?;
+            for path in local.regular_child_files(&binding.worktree)? {
+                let logical = format!("{prefix}/{path}");
+                parent.committed_baseline.insert(logical.clone());
+                parent.child_sources.insert(logical, prefix.clone());
+            }
+            for change in local.changes {
+                let path = format!("{prefix}/{}", change.path);
+                if !change.class.presents_content() || parent.child_sources.contains_key(&path) {
+                    parent.changes.push(ClassifiedChangeV1 {
+                        path,
+                        class: change.class,
+                    });
+                }
+            }
+            parent.nested_repository_exclusions.extend(
+                local
+                    .nested_repository_exclusions
+                    .into_iter()
+                    .map(|path| format!("{prefix}/{path}")),
+            );
+            let qualify = |path: &[u8]| [prefix.as_bytes(), b"/", path].concat();
+            parent
+                .non_utf8_paths
+                .extend(local.non_utf8_paths.into_iter().map(|path| qualify(&path)));
+            parent
+                .non_utf8_changes
+                .extend(local.non_utf8_changes.into_iter().map(|change| {
+                    NonUtf8ClassifiedChangeV1 {
+                        git_path: qualify(&change.git_path),
+                        class: change.class,
+                    }
+                }));
+            parent.child_bindings.insert(prefix, binding);
+        }
+        Ok(parent)
+    }
+
+    pub(super) fn regular_child_files(&self, root: &Path) -> std::io::Result<BTreeSet<String>> {
+        let mut files = BTreeSet::new();
+        for path in self.candidate_paths() {
+            if !super::submodules::is_source_location(Path::new(&path)) {
+                continue;
+            }
+            match root.join(&path).symlink_metadata() {
+                Ok(metadata) if metadata.is_file() => {
+                    files.insert(path);
+                }
+                Ok(_) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error),
+            }
+        }
+        Ok(files)
+    }
+
+    /// Keep the original child authority with its admitted logical path;
+    /// a filesystem root alone cannot survive a staged parent revocation.
+    pub fn bound_child(&self, logical_path: &str) -> Option<(&str, &AuthenticatedSubmodule)> {
+        let prefix = self.child_sources.get(logical_path)?.as_str();
+        self.child_bindings
+            .get(prefix)
+            .map(|binding| (prefix, binding))
+    }
+
+    /// A snapshot may reuse unchanged child rows without reading them again.
+    /// That reuse must not outlive any captured parent/child authorization.
+    pub fn child_bindings_live(&self) -> std::io::Result<bool> {
+        for child in self.child_bindings.values() {
+            if !child.checkout_is_live()? {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+
+    pub(super) fn gitlink_paths(&self) -> &BTreeSet<String> {
+        &self.parent_gitlinks
+    }
+
+    /// Explicit enrollment cannot cross a parent gitlink staged for removal.
+    pub fn beneath_gitlink(&self, path: &Path) -> bool {
+        path.ancestors()
+            .skip(1)
+            .filter_map(Path::to_str)
+            .any(|ancestor| self.parent_gitlinks.contains(ancestor))
+    }
+
+    /// Paths whose Git bytes are not UTF-8, present or not.
+    pub fn non_utf8_paths(&self) -> &BTreeSet<Vec<u8>> {
+        &self.non_utf8_paths
+    }
+
+    /// Paths no logical path can name because their Git bytes are not UTF-8,
+    /// limited to those naming a regular file (through links) under
+    /// `project_root`, the files capture would read.
+    pub fn non_utf8_files(&self, project_root: &Path) -> Vec<Vec<u8>> {
+        self.non_utf8_paths
+            .iter()
+            .filter(|path| {
+                gix::path::from_byte_slice(path)
+                    .is_ok_and(|relative| project_root.join(relative).is_file())
+            })
+            .cloned()
+            .collect()
+    }
+
+    /// Present files worth hashing and considering for (re)indexing: the
+    /// committed baseline, plus untracked/added/rename-destination paths, minus
+    /// any path removed by a deletion.
+    pub fn candidate_paths(&self) -> BTreeSet<String> {
+        let mut candidates = self.committed_baseline.clone();
+        for change in &self.changes {
+            if change.class.presents_content() {
+                candidates.insert(change.path.clone());
+            } else {
+                candidates.remove(&change.path);
+            }
+        }
+        candidates.retain(|path| !self.nested_repository_exclusions.contains(path));
+        candidates
+    }
+
+    /// Whether the worktree carries any change relative to the committed
+    /// baseline, UTF-8-named or not.
+    pub fn has_changes(&self) -> bool {
+        !(self.changes().is_empty()
+            && self.non_utf8_changes().is_empty()
+            && self.nested_repository_exclusions.is_empty()
+            && !self.child_revision_changed)
+    }
+
+    /// Whether any classified change is a merge conflict.
+    pub fn has_conflicted(&self) -> bool {
+        self.changes()
+            .iter()
+            .map(|change| change.class)
+            .chain(self.non_utf8_changes().iter().map(|change| change.class))
+            .any(|class| class == WorktreeChangeClassV1::Conflicted)
+    }
+
+    /// Paths whose indexing evidence changed relative to the last generation:
+    /// every staged, unstaged, or untracked path (deletions included so
+    /// tombstones flow through). This is a hint to narrow work, not the identity
+    /// authority; the generation planner still compares content digests.
+    pub fn changed_paths(&self) -> BTreeSet<String> {
+        let mut changed = self
+            .changes
+            .iter()
+            .map(|change| change.path.clone())
+            .collect::<BTreeSet<_>>();
+        changed.extend(self.nested_repository_exclusions.iter().cloned());
+        changed
+    }
+
+    /// Paths removed from the present snapshot (staged or unstaged deletions).
+    #[cfg(any(test, feature = "test-helpers"))]
+    pub fn deleted_paths(&self) -> BTreeSet<String> {
+        self.changes
+            .iter()
+            .filter(|change| change.class.is_deletion())
+            .map(|change| change.path.clone())
+            .collect()
+    }
+
+    /// All classified changes a `String` can name (for reporting and tests).
+    /// Non-UTF-8 changes live under [`Self::non_utf8_changes`].
+    pub fn changes(&self) -> &[ClassifiedChangeV1] {
+        &self.changes
+    }
+
+    /// All classified changes whose Git path bytes are not UTF-8, kept
+    /// byte-exact (for reporting and tests).
+    pub fn non_utf8_changes(&self) -> &[NonUtf8ClassifiedChangeV1] {
+        &self.non_utf8_changes
+    }
+
+    /// The class recorded for `path`, if any change touched it.
+    #[cfg(any(test, feature = "test-helpers"))]
+    pub fn class_of(&self, path: &str) -> Option<WorktreeChangeClassV1> {
+        self.changes
+            .iter()
+            .find(|change| change.path == path)
+            .map(|change| change.class)
+    }
+}
+
+/// Map one gix status item to a truthful class, or `None` for items that carry
+/// no indexing signal on their own.
+///
+/// Rename detection is disabled on both status axes (see [`classify`]), so gix
+/// reports a move as an independent deletion of the source plus an addition of
+/// the destination. The `Rewrite` variants therefore cannot occur here; they
+/// are mapped to `None` defensively rather than fabricating a rename class.
+fn classify_item(item: &gix::status::Item) -> Option<WorktreeChangeClassV1> {
+    use gix::diff::index::ChangeRef;
+    use gix::status::Item;
+    use gix::status::index_worktree::Item as IndexWorktreeItem;
+    use gix::status::plumbing::index_as_worktree::{Change as WorktreeChange, EntryStatus};
+
+    Some(match item {
+        // HEAD tree ↔ index: staged changes.
+        Item::TreeIndex(change) => match change {
+            ChangeRef::Addition { .. } => WorktreeChangeClassV1::StagedAdded,
+            ChangeRef::Deletion { .. } => WorktreeChangeClassV1::StagedDeleted,
+            ChangeRef::Modification { .. } => WorktreeChangeClassV1::StagedModified,
+            // Unreachable with rename detection disabled; skip rather than
+            // classify a move as anything other than delete + add.
+            ChangeRef::Rewrite { .. } => return None,
+        },
+        // Index ↔ worktree: unstaged / untracked changes.
+        Item::IndexWorktree(worktree) => match worktree {
+            IndexWorktreeItem::Modification { status, .. } => match status {
+                EntryStatus::Change(WorktreeChange::Removed) => {
+                    WorktreeChangeClassV1::UnstagedDeleted
+                }
+                EntryStatus::Conflict { .. } => WorktreeChangeClassV1::Conflicted,
+                EntryStatus::IntentToAdd => WorktreeChangeClassV1::Untracked,
+                // Any other worktree change (content, type, submodule) is an
+                // unstaged modification of present content.
+                EntryStatus::Change(_) | EntryStatus::NeedsUpdate(_) => {
+                    WorktreeChangeClassV1::UnstagedModified
+                }
+            },
+            IndexWorktreeItem::DirectoryContents { .. } => WorktreeChangeClassV1::Untracked,
+            // Unreachable with rewrite tracking disabled; skip defensively.
+            IndexWorktreeItem::Rewrite { .. } => return None,
+        },
+    })
+}
+
+#[cfg(test)]
+mod nested_repository_tests {
+    use std::fs;
+    use std::path::Path;
+    use std::process::Command;
+
+    use super::WorktreeChangeClassificationV1;
+
+    fn fixture_git(root: &Path, args: &[&str]) {
+        let program = tracedecay_runtime_core::git::try_git_program().expect("fixture Git program");
+        let mut command = Command::new(program);
+        command.current_dir(root);
+        for (key, _) in std::env::vars_os() {
+            if key.to_string_lossy().starts_with("GIT_") {
+                command.env_remove(key);
+            }
+        }
+        let output = command
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", root.join(".fixture-gitconfig"))
+            .args([
+                "-c",
+                "user.name=Fixture",
+                "-c",
+                "user.email=fixture@example.invalid",
+                "-c",
+                "commit.gpgsign=false",
+            ])
+            .args(args)
+            .output()
+            .expect("fixture Git command");
+        assert!(
+            output.status.success(),
+            "Git {args:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[test]
+    fn nested_checkout_marker_tombstones_parent_tracked_sources() {
+        let root = tempfile::tempdir().unwrap();
+        fixture_git(root.path(), &["init", "-q"]);
+        for path in ["src/keep.rs", "nested/foreign.rs", "linked/foreign.rs"] {
+            let full = root.path().join(path);
+            fs::create_dir_all(full.parent().unwrap()).unwrap();
+            fs::write(full, "pub fn source() {}\n").unwrap();
+        }
+        fixture_git(root.path(), &["add", "."]);
+        fixture_git(root.path(), &["commit", "-qm", "parent tracked files"]);
+
+        let repository = tracedecay_runtime_core::git_open::open(root.path()).unwrap();
+        let before = WorktreeChangeClassificationV1::classify(&repository).unwrap();
+        assert!(!before.has_changes());
+        assert!(before.candidate_paths().contains("nested/foreign.rs"));
+
+        fs::create_dir(root.path().join("nested/.git")).unwrap();
+        fs::write(
+            root.path().join("nested/.git/HEAD"),
+            "ref: refs/heads/main\n",
+        )
+        .unwrap();
+        fs::write(
+            root.path().join("linked/.git"),
+            "gitdir: /untrusted/worktrees/linked\n",
+        )
+        .unwrap();
+        let hidden = WorktreeChangeClassificationV1::classify(&repository).unwrap();
+        let candidates = hidden.candidate_paths();
+        assert!(candidates.contains("src/keep.rs"));
+        assert!(!candidates.contains("nested/foreign.rs"));
+        assert!(!candidates.contains("linked/foreign.rs"));
+        assert!(
+            hidden.has_changes(),
+            "a clean HEAD-tree capture is now unsafe"
+        );
+        assert!(hidden.changed_paths().contains("nested/foreign.rs"));
+        assert!(hidden.changed_paths().contains("linked/foreign.rs"));
+
+        fs::remove_dir_all(root.path().join("nested/.git")).unwrap();
+        fs::remove_file(root.path().join("linked/.git")).unwrap();
+        let restored = WorktreeChangeClassificationV1::classify(&repository).unwrap();
+        assert!(!restored.has_changes());
+        assert!(restored.candidate_paths().contains("nested/foreign.rs"));
+        assert!(restored.candidate_paths().contains("linked/foreign.rs"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn tracked_symlink_into_submodule_is_not_parent_source() {
+        use std::os::unix::fs::symlink;
+
+        let fixture = tempfile::tempdir().unwrap();
+        let parent = fixture.path().join("parent");
+        let child = fixture.path().join("child");
+        fs::create_dir_all(&parent).unwrap();
+        fs::create_dir_all(&child).unwrap();
+        fixture_git(&child, &["init", "-q"]);
+        fs::create_dir_all(child.join("src")).unwrap();
+        fs::write(child.join("src/lib.rs"), "pub fn child() {}\n").unwrap();
+        fixture_git(&child, &["add", "."]);
+        fixture_git(&child, &["commit", "-qm", "child"]);
+        fixture_git(&parent, &["init", "-q"]);
+        fixture_git(
+            &parent,
+            &[
+                "-c",
+                "protocol.file.allow=always",
+                "submodule",
+                "add",
+                "-q",
+                "../child",
+                "app",
+            ],
+        );
+        symlink("app/src/lib.rs", parent.join("bridge.rs")).unwrap();
+        fs::write(parent.join("parent.rs"), "pub fn parent() {}\n").unwrap();
+        symlink("parent.rs", parent.join("local.rs")).unwrap();
+        fixture_git(
+            &parent,
+            &[
+                "add",
+                ".gitmodules",
+                "app",
+                "bridge.rs",
+                "parent.rs",
+                "local.rs",
+            ],
+        );
+        fixture_git(
+            &parent,
+            &["commit", "-qm", "registered child and source alias"],
+        );
+        assert_eq!(
+            fs::read_to_string(parent.join("bridge.rs")).unwrap(),
+            "pub fn child() {}\n",
+            "fixture must prove the parent symlink actually reaches child bytes"
+        );
+        assert!(
+            fs::symlink_metadata(parent.join("bridge.rs"))
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+
+        let repository = tracedecay_runtime_core::git_open::open(&parent).unwrap();
+        for include_submodules in [false, true] {
+            let classified =
+                WorktreeChangeClassificationV1::for_policy(&repository, include_submodules)
+                    .unwrap();
+            let candidates = classified.candidate_paths();
+            let boundaries = crate::source_walk::submodules::LiveSourceBoundaries::open(
+                &parent,
+                include_submodules,
+            )
+            .unwrap();
+            let (_, relative) = boundaries.resolve(Path::new("local.rs")).unwrap().unwrap();
+            assert_eq!(relative.as_ref(), Path::new("parent.rs"));
+            assert!(
+                boundaries
+                    .resolve(Path::new("bridge.rs"))
+                    .unwrap()
+                    .is_none()
+            );
+            assert!(candidates.contains("local.rs"));
+            assert!(!candidates.contains("bridge.rs"));
+            assert!(classified.changed_paths().contains("bridge.rs"));
+            assert!(
+                classified.has_changes(),
+                "do not reuse HEAD tree source bytes"
+            );
+            assert_eq!(candidates.contains("app/src/lib.rs"), include_submodules);
+        }
+        symlink("parent.rs", parent.join("untracked_alias.rs")).unwrap();
+        let classification = WorktreeChangeClassificationV1::classify(&repository).unwrap();
+        assert!(
+            !classification
+                .candidate_paths()
+                .contains("untracked_alias.rs")
+        );
+    }
+
+    #[test]
+    fn staged_gitlink_removal_without_child_marker_does_not_admit_child_sources() {
+        let fixture = tempfile::tempdir().unwrap();
+        let parent = fixture.path().join("parent");
+        let child = fixture.path().join("child");
+        fs::create_dir_all(&parent).unwrap();
+        fs::create_dir_all(&child).unwrap();
+
+        fixture_git(&child, &["init", "-q"]);
+        fs::create_dir_all(child.join("src")).unwrap();
+        fs::write(child.join("src/lib.rs"), "pub fn child() {}\n").unwrap();
+        fixture_git(&child, &["add", "."]);
+        fixture_git(&child, &["commit", "-qm", "child"]);
+
+        fixture_git(&parent, &["init", "-q"]);
+        fs::create_dir_all(parent.join("src")).unwrap();
+        fs::write(parent.join("src/lib.rs"), "pub fn parent() {}\n").unwrap();
+        fixture_git(&parent, &["add", "."]);
+        fixture_git(&parent, &["commit", "-qm", "parent"]);
+        fixture_git(
+            &parent,
+            &[
+                "-c",
+                "protocol.file.allow=always",
+                "submodule",
+                "add",
+                "-q",
+                "../child",
+                "app",
+            ],
+        );
+        fixture_git(&parent, &["add", ".gitmodules", "app"]);
+        fixture_git(&parent, &["commit", "-qm", "register submodule"]);
+
+        // A registered, clean gitlink is not itself a source file or a
+        // dirty nested descendant. It must not defeat clean HEAD reuse.
+        let clean_repository = tracedecay_runtime_core::git_open::open(&parent).unwrap();
+        let clean = WorktreeChangeClassificationV1::classify(&clean_repository).unwrap();
+        assert!(!clean.has_changes());
+        assert!(clean.candidate_paths().contains("src/lib.rs"));
+
+        // Git still records app as a mode-160000 gitlink in HEAD, but
+        // removing the staged gitlink and child marker makes child files
+        // appear untracked to the parent. They must never enter its index.
+        fs::remove_file(parent.join("app/.git")).unwrap();
+        fixture_git(&parent, &["rm", "-q", "--cached", "app"]);
+        assert!(parent.join("app/src/lib.rs").is_file());
+
+        let repository = tracedecay_runtime_core::git_open::open(&parent).unwrap();
+        let classified = WorktreeChangeClassificationV1::classify(&repository).unwrap();
+        assert!(
+            classified
+                .changes()
+                .iter()
+                .any(|change| change.path == "app/src/lib.rs"),
+            "fixture must exercise a child file reported by parent Git status"
+        );
+        assert!(classified.has_changes(), "clean HEAD reuse must be refused");
+        assert!(!classified.candidate_paths().contains("app/src/lib.rs"));
+        assert!(classified.changed_paths().contains("app/src/lib.rs"));
+        assert!(classified.candidate_paths().contains("src/lib.rs"));
+    }
+}

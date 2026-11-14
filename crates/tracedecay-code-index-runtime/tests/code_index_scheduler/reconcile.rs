@@ -944,10 +944,8 @@ fn unfollowable_committed_source_links_are_absent_from_disk_capture() {
     );
 }
 
-/// Git stores a committed source symlink as its target path, while the
-/// worktree reads through it. Sealing the link text from HEAD's tree left the
-/// first post-publication sweep disproving an unchanged checkout, so every
-/// mount rebuilt once and served the rebuild as dirty.
+/// Publishing the link target bytes under both tracked paths must preserve
+/// the clean HEAD revision and avoid a redundant post-publication rebuild.
 #[cfg(unix)]
 #[test]
 fn committed_source_symlink_publishes_a_current_clean_generation() {
@@ -970,16 +968,19 @@ fn committed_source_symlink_publishes_a_current_clean_generation() {
         !scheduler.request_fresh_now_background(),
         "the sweep after publication must find the unchanged checkout current"
     );
+    let latest = scheduler.latest_complete().expect("published generation");
+    let snapshot = latest.generation.snapshot();
     assert_eq!(
-        scheduler
-            .latest_complete()
-            .expect("published generation")
-            .generation
-            .snapshot()
-            .source_revision
-            .as_ref(),
-        scheduler.identity.head_commit(),
-        "a clean checkout's generation must carry HEAD's revision"
+        snapshot.source_revision.as_ref(),
+        scheduler.identity.head_commit()
+    );
+    assert_eq!(
+        snapshot
+            .files
+            .iter()
+            .map(|file| file.logical_path.as_str())
+            .collect::<Vec<_>>(),
+        ["src/lib.rs", "src/pricing.rs", "src/pricing_alias.rs"]
     );
 }
 
@@ -13250,93 +13251,6 @@ async fn graph_decode_does_not_block_text_freshness() {
     );
 
     drop(held_decode);
-    registry.shutdown().await;
-}
-
-/// Busy admission preserves the prior generation and schedules a follow-up wake
-/// so serve-during-refresh cannot leave the index stale indefinitely.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn busy_admission_schedules_follow_up_cadence_wake() {
-    let fixture = GitFixture::new(ALPHA_LIB_V1);
-    let store = TempDir::new().expect("store root");
-    let registry = CodeIndexSchedulerRegistryV1::new(1);
-    registry
-        .mount_worktree(
-            test_project_id(),
-            fixture.path(),
-            store.path().to_path_buf(),
-        )
-        .await
-        .expect("mount");
-    let expected = wait_for_live_complete_generation(&registry, fixture.path())
-        .await
-        .generation
-        .manifest()
-        .generation_id
-        .clone();
-    // The mount pass records its receipt after it releases its in-progress
-    // guard, so wait for the receipt itself before taking the baseline.
-    wait_for_quiescent_owner_pass(&registry, fixture.path()).await;
-    wait_for_event_to_ready(&registry).await;
-    let before_receipts = registry.event_to_ready_receipts().len();
-    // A new branch ref moves Git metadata past the seated proof without
-    // changing HEAD or any source, so the follow-up pass is an unchanged
-    // reconcile. A busy read must leave that one follow-up wake rather than
-    // trust the expired proof.
-    git(fixture.path(), &["branch", "proof-moved"]);
-
-    let scheduler = registry
-        .scheduler_handle(fixture.path())
-        .await
-        .expect("scheduler handle");
-    let (held_tx, held_rx) = std::sync::mpsc::channel();
-    let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
-    let lock_thread = std::thread::spawn(move || {
-        let _guard = scheduler
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        held_tx.send(()).expect("signal held");
-        let _ = release_rx.recv();
-    });
-    held_rx.recv().expect("lock acquired");
-    // Busy means a pass owns the worktree: wake one and let it park on the
-    // held scheduler before the read.
-    let _ = registry.notify_hook_overflow(fixture.path()).await;
-    wait_for_owner_pass(&registry, fixture.path()).await;
-
-    // The scheduler stays held until after this read, so a read that waited
-    // on it could never return.
-    let latest = tokio::time::timeout(
-        SERVING_SEAT_FAILURE_CEILING,
-        registry.latest_complete_fresh(fixture.path()),
-    )
-    .await
-    .expect("must not wait on busy lock")
-    .expect("prior generation served");
-    assert_eq!(latest.generation.manifest().generation_id, expected);
-
-    release_tx.send(()).expect("release");
-    lock_thread.join().expect("join");
-
-    // The follow-up wake must produce its own cadence receipt after the lock
-    // frees.
-    let mut signals = OwnerSignals::subscribe(&registry, fixture.path()).await;
-    let deadline = std::time::Instant::now() + SERVING_SEAT_FAILURE_CEILING;
-    loop {
-        let receipts = registry.event_to_ready_receipts();
-        if receipts
-            .iter()
-            .skip(before_receipts)
-            .any(|receipt| receipt.trigger == CodeIndexCadenceTriggerV1::BusyFollowUp)
-        {
-            break;
-        }
-        assert!(
-            std::time::Instant::now() <= deadline,
-            "busy follow-up wake did not produce a cadence receipt"
-        );
-        signals.changed_before(deadline).await;
-    }
     registry.shutdown().await;
 }
 

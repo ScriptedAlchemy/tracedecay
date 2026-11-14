@@ -425,6 +425,7 @@ pub(crate) fn real_lexical_source_fixture_from_sources(
         invalidations: BTreeSet::new(),
         ignored_source_admissions: Vec::new(),
         repository_parse_identity: CodeIndexRepositoryParseIdentityV1 {
+            include_submodules: false,
             tree: None,
             dirty: RepositoryDirtyStateV1::Dirty,
         },
@@ -436,6 +437,7 @@ pub(crate) fn real_lexical_source_fixture_from_sources(
         },
     };
     let config = CodeIndexProductionConfigV1 {
+        include_submodules: false,
         project_id: id::<ProjectId>("project.artifact"),
         repository: repository.clone(),
         sanitizer_revision,

@@ -72,6 +72,7 @@ pub(super) fn prove_cancellation(
         invalidations: BTreeSet::new(),
         ignored_source_admissions: Vec::new(),
         repository_parse_identity: CodeIndexRepositoryParseIdentityV1 {
+            include_submodules: false,
             tree: None,
             dirty: RepositoryDirtyStateV1::Dirty,
         },
@@ -84,6 +85,7 @@ pub(super) fn prove_cancellation(
     };
     let generation_scope = CodeIndexGenerationScopeV1::for_snapshot(&request.snapshot);
     let config = CodeIndexProductionConfigV1 {
+        include_submodules: false,
         project_id: id::<ProjectId>("project.candidate.cancel")?,
         repository: id::<RepositoryId>("repository.candidate.cancel")?,
         sanitizer_revision: id::<SanitizerRevision>("sanitizer.candidate.v1")?,
