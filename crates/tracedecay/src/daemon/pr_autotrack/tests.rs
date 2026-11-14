@@ -6,6 +6,11 @@ use std::time::Duration;
 use super::*;
 use crate::test_support::git::git;
 #[cfg(unix)]
+use tracedecay_code_index_runtime::code_index_scheduler::{
+    CodeIndexReconcileOutcomeV1, CodeIndexWorktreeSchedulerV1, SharedCodeIndexBytePoolV1,
+    scoped_code_index_store_root,
+};
+#[cfg(unix)]
 use tracedecay_contracts::code_index_freshness::{
     CodeIndexFreshnessReadFailureV1, CodeIndexReadinessTargetV1, CodeIndexReadinessWaitReadV1,
 };
@@ -1562,6 +1567,64 @@ async fn a_pr_first_source_reader_recovers_through_the_canonical_broker_slot() {
     let stores = &hosted.engine.store_administration;
     let graph = &hosted.graph;
     let schedulers = &hosted.engine.invocation.code_index_schedulers;
+    let project_id: tracedecay_domain::ProjectId = graph
+        .store_layout()
+        .identity
+        .project_id
+        .as_ref()
+        .unwrap()
+        .clone()
+        .try_into()
+        .unwrap();
+    let seed_project_id = project_id.clone();
+    let seed_repo = graph.project_root().to_path_buf();
+    let seed_data_root = graph.store_layout().data_root.clone();
+    // Prepare the same real generation and lexical artifact before testing
+    // broker recovery. The PR mount below still creates the first source
+    // reader, and its existing deadline measures recovery instead of cold
+    // capture, seal, and text-artifact construction.
+    let prepared_worktree = native_runtime::spawn_blocking(move || {
+        let head =
+            resolve_branch_head(&seed_repo, "feature/recovery", default_pr_command_control())
+                .expect("resolve recovery fixture head");
+        let artifacts =
+            ManualBranchArtifactsV1::for_head(&seed_data_root, "feature/recovery", &head);
+        prepare_manual_branch_worktree(
+            &seed_repo,
+            &artifacts.worktree,
+            &artifacts.tracking_ref,
+            &artifacts.label,
+            &head,
+            default_pr_command_control(),
+        )
+        .expect("prepare recovery fixture worktree");
+        let canonical_worktree =
+            tracedecay_runtime_core::path_safety::canonical_existing_identity(&artifacts.worktree)
+                .expect("canonical recovery fixture worktree");
+        let scoped_store = scoped_code_index_store_root(
+            &seed_data_root.join("code-index-v1"),
+            &canonical_worktree,
+        );
+        let mut seeder = CodeIndexWorktreeSchedulerV1::open(
+            seed_project_id,
+            &canonical_worktree,
+            scoped_store,
+            Arc::new(SharedCodeIndexBytePoolV1::default()),
+        )
+        .expect("open recovery fixture generation owner");
+        assert!(matches!(
+            seeder.reconcile_now().expect("seal recovery fixture"),
+            CodeIndexReconcileOutcomeV1::Published(_)
+        ));
+        seeder
+            .latest_complete()
+            .expect("sealed recovery fixture generation")
+            .production_query_owners()
+            .expect("persist recovery fixture lexical artifact");
+        artifacts.worktree
+    })
+    .await
+    .expect("prepare recovery fixture generation");
     let database_path = &graph.store_layout().sessions_db_path;
     let spool = database_path.parent().unwrap().join(format!(
         ".{}.host-admission",
@@ -1569,6 +1632,7 @@ async fn a_pr_first_source_reader_recovers_through_the_canonical_broker_slot() {
     ));
     std::fs::write(&spool, "blocked").unwrap();
     let mounted = hosted.activate(schedulers, "feature/recovery").await;
+    assert_eq!(mounted.worktree, prepared_worktree);
     assert!(schedulers.is_worktree_mounted(&mounted.worktree).await);
     assert!(matches!(
         schedulers.dashboard_freshness_read(&mounted.worktree).await,
@@ -1583,15 +1647,6 @@ async fn a_pr_first_source_reader_recovers_through_the_canonical_broker_slot() {
         .await
         .unwrap();
     assert!(slot.get().is_none());
-    let project_id = graph
-        .store_layout()
-        .identity
-        .project_id
-        .as_ref()
-        .unwrap()
-        .clone()
-        .try_into()
-        .unwrap();
     let scope =
         tracedecay_code_index_runtime::resolved_scope_for_project(&mounted.worktree, &project_id)
             .unwrap();

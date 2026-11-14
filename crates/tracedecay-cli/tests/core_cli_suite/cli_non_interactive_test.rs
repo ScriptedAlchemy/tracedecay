@@ -825,17 +825,54 @@ fn dashboard_started_while_the_project_opens_mounts_sessions_on_publication() {
     let hold = canonical_temp_path(home.path()).join("hold-after-core-publish");
     std::fs::write(&hold, b"hold").unwrap();
     let entered = PathBuf::from(format!("{}.entered", hold.display()));
-    let _daemon = crate::common::spawn_tracedecay_daemon_with(home.path(), {
+    let daemon_log = home.path().join("dashboard-daemon.log");
+    let _daemon = crate::common::spawn_tracedecay_daemon_logged(home.path(), &daemon_log, {
         let hold = hold.clone();
         move |command| {
             command.env("TRACEDECAY_TEST_HOLD_AFTER_CORE_PUBLISH", &hold);
         }
     });
-    // The dashboard request opens the project; the core server answers it
-    // while the open is held before the full server publishes.
+    // Status carries the deadline for a cold project open. Establish this
+    // fixture's held core before the dashboard's one-shot mounting grace can
+    // expire, and await the receipt written after the core becomes reachable.
+    // Setup and dashboard launch share the original command budget.
+    let launch_deadline = Instant::now() + cli_timeout();
+    let mut opening_command = tracedecay_command_without_daemon(home.path(), &project_root);
+    opening_command.args(["status", "--json"]);
+    let opening = run_with_timeout(
+        opening_command,
+        launch_deadline.saturating_duration_since(Instant::now()),
+    );
+    assert!(
+        opening.status.success(),
+        "status should open the project\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&opening.stdout),
+        String::from_utf8_lossy(&opening.stderr)
+    );
+    crate::common::poll_until(
+        launch_deadline,
+        Duration::from_millis(20),
+        || entered.is_file().then_some(()),
+        || {
+            format!(
+                "core publication was not held:\n{}",
+                std::fs::read_to_string(&daemon_log).expect("read isolated daemon log")
+            )
+        },
+    );
+
     let mut command = tracedecay_command_without_daemon(home.path(), &project_root);
     command.args(["dashboard", "--host", "127.0.0.1", "--port", "0"]);
-    let dashboard = run_with_timeout(command, cli_timeout());
+    let dashboard = run_with_timeout(
+        command,
+        launch_deadline.saturating_duration_since(Instant::now()),
+    );
+    assert!(
+        dashboard.status.success(),
+        "dashboard should start on the held core\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&dashboard.stdout),
+        String::from_utf8_lossy(&dashboard.stderr)
+    );
     assert!(entered.is_file(), "core publication was not held");
     let stdout = String::from_utf8_lossy(&dashboard.stdout);
     let launch_url = stdout
