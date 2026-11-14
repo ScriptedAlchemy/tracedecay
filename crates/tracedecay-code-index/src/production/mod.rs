@@ -2345,7 +2345,12 @@ where
     /// from the files the edit changed and never decodes it; a generation
     /// without one, or an edit that needs every file's resolution, is built
     /// whole.
-    #[tracing::instrument(name = "code_index.build.and_publish", level = "trace", skip_all)]
+    #[tracing::instrument(
+        name = "code_index.build.and_publish",
+        level = "trace",
+        skip_all,
+        fields(project_id = %self.config.project_id)
+    )]
     pub fn build_and_publish(
         &mut self,
         request: CodeIndexBuildRequestV1,

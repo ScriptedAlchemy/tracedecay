@@ -758,11 +758,18 @@ fn publish_under_ledger_lock(
         }
     };
 
-    ledger
-        .seek(SeekFrom::Start(pre_append_eof))
-        .map_err(TraceDecayError::from)?;
-    copy_exact_payload(&mut spool, &mut ledger, publication.payload_len)?;
-    ledger.write_all(b"\n").map_err(TraceDecayError::from)?;
+    {
+        let _span = tracing::trace_span!(
+            "hosts.automation.run_ledger.append_payload",
+            bytes = publication.payload_len
+        )
+        .entered();
+        ledger
+            .seek(SeekFrom::Start(pre_append_eof))
+            .map_err(TraceDecayError::from)?;
+        copy_exact_payload(&mut spool, &mut ledger, publication.payload_len)?;
+        ledger.write_all(b"\n").map_err(TraceDecayError::from)?;
+    }
     sync_run_ledger_file_and_parent(ledger_path, &ledger)?;
     verify_published_range(&mut ledger, &mut spool, &intent)?;
     clear_append_intent(dashboard_root)?;
@@ -1115,7 +1122,11 @@ fn publish_append_intent_bytes(
         tracedecay_private_fs::framed_log::DirectorySyncPolicy::Strict,
     )
     .map_err(TraceDecayError::from)?;
-    let actual = read_append_intent_bytes(dashboard_root)?.ok_or_else(|| {
+    let actual = {
+        let _span = tracing::trace_span!("hosts.automation.run_ledger.intent_readback").entered();
+        read_append_intent_bytes(dashboard_root)
+    }?
+    .ok_or_else(|| {
         config_error("automation run append intent disappeared after durable publication")
     })?;
     if actual != bytes {
