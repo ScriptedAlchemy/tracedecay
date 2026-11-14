@@ -184,6 +184,7 @@ fn build_fixture() -> Fixture {
         invalidations: BTreeSet::new(),
         ignored_source_admissions: Vec::new(),
         repository_parse_identity: CodeIndexRepositoryParseIdentityV1 {
+            include_submodules: false,
             tree: None,
             dirty: RepositoryDirtyStateV1::Dirty,
         },
@@ -195,6 +196,7 @@ fn build_fixture() -> Fixture {
         },
     };
     let config = CodeIndexProductionConfigV1 {
+        include_submodules: false,
         project_id: id::<ProjectId>("project.catchup-benchmark"),
         repository: repository.clone(),
         sanitizer_revision,

@@ -41,6 +41,7 @@ where
 
 pub(super) fn worker_config() -> CodeIndexProductionConfigV1 {
     CodeIndexProductionConfigV1 {
+        include_submodules: false,
         project_id: worker_id("project.worker"),
         repository: worker_id("repository.worker"),
         sanitizer_revision: worker_id::<SanitizerRevision>("sanitizer.v1"),
@@ -89,6 +90,7 @@ pub(super) fn worker_request_with_source(
         invalidations: BTreeSet::new(),
         ignored_source_admissions: Vec::new(),
         repository_parse_identity: CodeIndexRepositoryParseIdentityV1 {
+            include_submodules: false,
             tree: None,
             dirty: tracedecay_domain::RepositoryDirtyStateV1::Dirty,
         },
@@ -1034,6 +1036,92 @@ fn unchanged_successor_carries_every_parent_segment() {
         .expect("active successor")
         .validate_fresh()
         .expect("restored successor re-validates without a live parent");
+}
+
+#[test]
+fn submodule_policy_change_refuses_packed_parent_and_replaces_incumbent() {
+    for include_submodules in [false, true] {
+        let store = WorkerPublicationStore::default();
+        let mut config = worker_config();
+        config.include_submodules = include_submodules;
+        let mut owner = CodeIndexProductionOwnerV1::new(config.clone(), store.clone())
+            .expect("original production owner");
+        let mut first_request = worker_request_with_source(
+            "file.worker.policy",
+            1_100_000,
+            b"pub fn policy_value() -> u32 { 1 }\n",
+        );
+        first_request.repository_parse_identity.include_submodules = include_submodules;
+        let scope = CodeIndexGenerationScopeV1::for_snapshot(&first_request.snapshot);
+        let first_operation = first_request.resident_memory.begin_operation();
+        let first = owner
+            .build_and_publish(first_request, &UninterruptibleCodeIndexControlV1)
+            .expect("original generation publishes");
+        assert!(
+            owner
+                .active_generation(&scope, &first_operation)
+                .expect("matching policy lookup")
+                .is_some()
+        );
+        drop(owner);
+
+        config.include_submodules = !include_submodules;
+        let mut owner = CodeIndexProductionOwnerV1::new(config, store.clone())
+            .expect("production owner under the opposite policy");
+        assert!(
+            owner
+                .active_generation(&scope, &first_operation)
+                .expect("changed policy lookup")
+                .is_none(),
+            "the opposite submodule policy must refuse the packed parent"
+        );
+        assert_eq!(
+            store
+                .load_active(&scope)
+                .expect("incumbent lookup")
+                .expect("refused generation remains the incumbent")
+                .manifest_bytes(),
+            first.manifest_bytes().as_ref(),
+            "refusing reuse must leave publication authority unchanged"
+        );
+
+        let mut next_request = worker_request_with_source(
+            "file.worker.policy",
+            1_200_000,
+            b"pub fn policy_value() -> u32 { 2 }\n",
+        );
+        next_request.repository_parse_identity.include_submodules = !include_submodules;
+        let next_operation = next_request.resident_memory.begin_operation();
+        let next = owner
+            .build_and_publish(next_request, &UninterruptibleCodeIndexControlV1)
+            .expect("cold rebuild replaces the existing incumbent through CAS");
+        assert_ne!(
+            next.manifest().generation_id,
+            first.manifest().generation_id
+        );
+        assert!(
+            next.manifest().parent_generation.is_none(),
+            "the refused generation must not become the rebuild's parent"
+        );
+        let restored = store
+            .decode_active(&scope, &next_operation)
+            .expect("replacement restores")
+            .expect("replacement is active");
+        assert_eq!(
+            restored.manifest().generation_id,
+            next.manifest().generation_id
+        );
+        assert_eq!(
+            restored.repository_parse_identity().include_submodules,
+            !include_submodules
+        );
+        assert!(
+            owner
+                .active_generation(&scope, &next_operation)
+                .expect("replacement policy lookup")
+                .is_some()
+        );
+    }
 }
 
 #[test]

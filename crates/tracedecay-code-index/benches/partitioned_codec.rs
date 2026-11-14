@@ -289,6 +289,7 @@ fn build_generation(
         invalidations: BTreeSet::new(),
         ignored_source_admissions: Vec::new(),
         repository_parse_identity: CodeIndexRepositoryParseIdentityV1 {
+            include_submodules: false,
             tree: None,
             dirty: RepositoryDirtyStateV1::Dirty,
         },
@@ -350,6 +351,7 @@ fn build_generation(
 
 fn production_config() -> Result<CodeIndexProductionConfigV1, Box<dyn Error>> {
     Ok(CodeIndexProductionConfigV1 {
+        include_submodules: false,
         project_id: id::<ProjectId>("project.partitioned-codec")?,
         repository: id::<RepositoryId>("repository.partitioned-codec")?,
         sanitizer_revision: id::<SanitizerRevision>("sanitizer.partitioned-codec.v1")?,

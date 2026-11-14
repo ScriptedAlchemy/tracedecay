@@ -76,10 +76,12 @@ pub struct WorktreeStatSweepV1 {
 pub fn worktree_stat_sweep(
     project_root: &Path,
     ignored_source_admissions: &[CodeIndexIgnoredSourceAdmissionV1],
+    include_submodules: bool,
 ) -> Result<WorktreeStatSweepV1, CodeIndexSchedulerErrorV1> {
     let repository = tracedecay_runtime_core::git_open::open(project_root)
         .map_err(|error| CodeIndexSchedulerErrorV1::Git(error.to_string()))?;
-    let candidate_roster = source_candidates(&repository, ignored_source_admissions)?;
+    let candidate_roster =
+        source_candidates(&repository, ignored_source_admissions, include_submodules)?;
     // One sweep span covers the O(candidates) stat walk. Never emit one
     // trace event per file.
     let mut buf = Vec::new();
@@ -120,16 +122,36 @@ struct SourceCandidatesV1 {
 fn source_candidates(
     repository: &gix::Repository,
     ignored_source_admissions: &[CodeIndexIgnoredSourceAdmissionV1],
+    include_submodules: bool,
 ) -> Result<SourceCandidatesV1, CodeIndexSchedulerErrorV1> {
-    let classification = classification::WorktreeChangeClassificationV1::classify(repository)
-        .map_err(|error| CodeIndexSchedulerErrorV1::Git(error.to_string()))?;
+    let classification =
+        classification::WorktreeChangeClassificationV1::for_policy(repository, include_submodules)
+            .map_err(|error| CodeIndexSchedulerErrorV1::Git(error.to_string()))?;
     let registry = StaticLanguageRegistry::new();
     let admitted_paths = ignored_source_admissions
         .iter()
         .map(|admission| admission.logical_path.as_str())
         .collect::<BTreeSet<_>>();
     let mut candidate_paths = classification.candidate_paths();
-    candidate_paths.extend(admitted_paths.iter().map(|path| (*path).to_owned()));
+    let project_root = repository.workdir().ok_or_else(|| {
+        CodeIndexSchedulerErrorV1::Git("source freshness requires a worktree".to_owned())
+    })?;
+    // Explicit ignored-file enrollment lifts Git ignore rules, never the
+    // parent's index/HEAD gitlink boundary. A staged gitlink removal and
+    // missing child .git marker must not re-admit its files through freshness.
+    for path in &admitted_paths {
+        let relative = Path::new(path);
+        if classification.beneath_gitlink(relative)
+            || tracedecay_code_index::source_walk::has_nested_repository_ancestor(
+                project_root,
+                relative,
+            )?
+            || tracedecay_code_index::source_walk::is_source_symlink(project_root, relative)?
+        {
+            continue;
+        }
+        candidate_paths.insert((*path).to_owned());
+    }
     let mut unrepresentable = classification
         .non_utf8_paths()
         .iter()
@@ -233,11 +255,20 @@ fn read_candidate(
             None,
         )
     } else {
-        ignored_dependencies::read_bounded_snapshot_source(
-            &project_root.join(&candidate.logical_path),
-            None,
-        )
+        let path = resolved_candidate_path(project_root, &candidate.logical_path)?;
+        ignored_dependencies::read_bounded_snapshot_source(&path, None)
     }
+}
+
+fn resolved_candidate_path(root: &Path, logical_path: &str) -> std::io::Result<PathBuf> {
+    tracedecay_code_index::source_walk::resolve_parent_source(root, Path::new(logical_path))?
+        .map(|relative| root.join(relative))
+        .ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "source alias is outside the parent Git inventory",
+            )
+        })
 }
 
 /// The canonical content digest capture would seal for `raw`: the digest of
@@ -478,6 +509,7 @@ fn roster_evidence(
     repository: &gix::Repository,
     project_root: &Path,
     sampled_at: ChangeClockReading,
+    ignored_source_admissions: &[CodeIndexIgnoredSourceAdmissionV1],
 ) -> Option<Vec<(PathBuf, Option<StatKeyV1>)>> {
     let mut recorder = DirectoryEvidenceV1 {
         root: project_root.to_path_buf(),
@@ -501,6 +533,37 @@ fn roster_evidence(
     }
     recorder.record_directory(project_root.to_path_buf());
     let index = repository.index_or_empty().ok()?;
+    // Git's directory walk may not descend into tracked-only directories.
+    // Their nested .git markers still change source admission without a
+    // parent index or HEAD update, so key each tracked and explicitly
+    // admitted source ancestor independently of dirwalk traversal.
+    let mut source_ancestors = BTreeSet::new();
+    let mut collect_ancestors = |relative: &Path| {
+        let mut current = relative.parent();
+        while let Some(parent) = current {
+            if parent.as_os_str().is_empty() {
+                break;
+            }
+            source_ancestors.insert(parent.to_path_buf());
+            current = parent.parent();
+        }
+    };
+    for entry in index.entries() {
+        collect_ancestors(gix::path::from_bstr(entry.path(&index)).ok()?.as_ref());
+    }
+    for admission in ignored_source_admissions {
+        if validate_code_logical_path(&admission.logical_path).is_err() {
+            return None;
+        }
+        collect_ancestors(Path::new(&admission.logical_path));
+    }
+    for relative in source_ancestors {
+        let directory = project_root.join(relative);
+        recorder.record_directory(directory.clone());
+        // A missing marker is evidence too: a newly created gitdir file or
+        // directory must invalidate the roster even if Git ignores it.
+        recorder.record(directory.join(".git"), false);
+    }
     let options = repository
         .dirwalk_options()
         .ok()?
@@ -585,12 +648,27 @@ impl SourceSweepCacheV1 {
                 let Ok(repository) = tracedecay_runtime_core::git_open::open(project_root) else {
                     return (false, stats);
                 };
-                let evidence = roster_evidence(&repository, project_root, sampled_at);
+                // Parent-only directory evidence cannot vouch for child Git indexes,
+                // refs or untracked entries. Enumerate both Git rosters on every child proof.
+                let evidence = (!self.path_policy.includes_submodules())
+                    .then(|| {
+                        roster_evidence(
+                            &repository,
+                            project_root,
+                            sampled_at,
+                            ignored_source_admissions,
+                        )
+                    })
+                    .flatten();
                 let Ok(SourceCandidatesV1 {
                     candidates,
                     unrepresentable,
                     ..
-                }) = source_candidates(&repository, ignored_source_admissions)
+                }) = source_candidates(
+                    &repository,
+                    ignored_source_admissions,
+                    self.path_policy.includes_submodules(),
+                )
                 else {
                     return (false, stats);
                 };
@@ -668,12 +746,14 @@ impl SourceSweepCacheV1 {
         &mut self,
         project_root: &Path,
         manifest: &SourceContentManifestV1,
+        candidate_paths: &BTreeSet<String>,
         shutting_down: &AtomicBool,
     ) -> Result<BTreeSet<String>, CodeIndexSchedulerErrorV1> {
         let registry = StaticLanguageRegistry::new();
         let candidates = manifest
             .files
             .keys()
+            .filter(|path| candidate_paths.contains(*path))
             .filter_map(|logical_path| source_candidate(&registry, logical_path.clone(), false))
             .collect::<Vec<_>>();
         let present = present_candidates(
@@ -771,7 +851,12 @@ impl SourceSweepCacheV1 {
         if disputed.is_empty() {
             return Ok(disputed);
         }
-        Ok(clean_filter_mismatches(project_root, disputed, manifest))
+        Ok(clean_filter_mismatches(
+            project_root,
+            disputed,
+            manifest,
+            self.path_policy.includes_submodules(),
+        ))
     }
 }
 
@@ -815,28 +900,80 @@ fn clean_filter_mismatches<'a>(
     project_root: &Path,
     disputed: Vec<&'a StatCandidateV1>,
     manifest: &SourceContentManifestV1,
+    include_submodules: bool,
 ) -> Vec<&'a StatCandidateV1> {
     let Ok(repository) = tracedecay_runtime_core::git_open::open(project_root) else {
         return disputed;
     };
+    let mut remaining = disputed;
+    let mut mismatches = Vec::new();
+    if include_submodules {
+        let Ok(children) =
+            tracedecay_code_index::source_walk::submodules::live_submodules(&repository)
+        else {
+            return remaining;
+        };
+        for (prefix, binding) in children {
+            let (local, other): (Vec<_>, Vec<_>) = remaining
+                .into_iter()
+                .partition(|candidate| Path::new(&candidate.logical_path).starts_with(&prefix));
+            remaining = other;
+            if local.is_empty() {
+                continue;
+            }
+            match tracedecay_runtime_core::git_open::open(&binding.git_dir) {
+                Ok(child) => mismatches.extend(filter_mismatches_in_repository(
+                    project_root,
+                    &child,
+                    Path::new(&prefix),
+                    local,
+                    manifest,
+                )),
+                Err(_) => mismatches.extend(local),
+            }
+        }
+    }
+    mismatches.extend(filter_mismatches_in_repository(
+        project_root,
+        &repository,
+        Path::new(""),
+        remaining,
+        manifest,
+    ));
+    mismatches
+}
+
+fn filter_mismatches_in_repository<'a>(
+    project_root: &Path,
+    repository: &gix::Repository,
+    prefix: &Path,
+    disputed: Vec<&'a StatCandidateV1>,
+    manifest: &SourceContentManifestV1,
+) -> Vec<&'a StatCandidateV1> {
     let Ok((mut pipeline, index)) = repository.filter_pipeline(None) else {
         return disputed;
     };
+    let repository_root = project_root.join(prefix);
     disputed
         .into_iter()
         .filter(|candidate| {
             let Some(expected) = manifest.files.get(&candidate.logical_path) else {
                 return true;
             };
+            let Ok(path) = resolved_candidate_path(project_root, &candidate.logical_path) else {
+                return true;
+            };
+            let Ok(rela_path) = path.strip_prefix(&repository_root) else {
+                return true;
+            };
             if candidate.explicitly_admitted
                 || index
-                    .entry_by_path(BStr::new(candidate.logical_path.as_str()))
+                    .entry_by_path(BStr::new(rela_path.as_os_str().as_encoded_bytes()))
                     .is_none()
             {
                 return true;
             }
-            let rela_path = Path::new(&candidate.logical_path);
-            let Ok(file) = std::fs::File::open(project_root.join(rela_path)) else {
+            let Ok(file) = std::fs::File::open(&path) else {
                 return true;
             };
             let Ok(mut converted) = pipeline.convert_to_git(file, rela_path, &index) else {
@@ -860,30 +997,33 @@ fn clean_filter_mismatches<'a>(
 /// disk first, then through the repository's own filter pipeline, the same
 /// two readings [`clean_filter_mismatches`] accepts as current.
 pub fn sealed_source_bytes(
-    project_root: &Path,
+    boundaries: &tracedecay_code_index::source_walk::submodules::LiveSourceBoundaries,
     logical_path: &str,
     language: &LanguageId,
     sealed: &ContentDigest,
 ) -> Result<Option<Vec<u8>>, CodeIndexSchedulerErrorV1> {
-    let raw =
-        ignored_dependencies::read_bounded_snapshot_source(&project_root.join(logical_path), None)?;
+    let Some((root, relative)) = boundaries.resolve(Path::new(logical_path))? else {
+        return Ok(None);
+    };
+    let raw = ignored_dependencies::read_bounded_snapshot_source(&root.join(&relative), None)?;
     let (sanitized, _, _) = privacy::sanitize_code_file(language, &raw)?;
     if content_digest(&sanitized) == *sealed {
         return Ok(Some(sanitized));
     }
-    // ponytail: one repository open and filter pipeline per filtered file;
-    // hoist them into a caller-held reader if a caller ever needs hundreds.
-    let repository = tracedecay_runtime_core::git_open::open(project_root)
+    let repository = tracedecay_runtime_core::git_open::open(root)
         .map_err(|error| CodeIndexSchedulerErrorV1::Git(error.to_string()))?;
     let (mut pipeline, index) = repository
         .filter_pipeline(None)
         .map_err(|error| CodeIndexSchedulerErrorV1::Git(error.to_string()))?;
-    if index.entry_by_path(BStr::new(logical_path)).is_none() {
+    if index
+        .entry_by_path(BStr::new(relative.as_os_str().as_encoded_bytes()))
+        .is_none()
+    {
         return Ok(None);
     }
     let mut filtered = Vec::new();
     pipeline
-        .convert_to_git(raw.as_slice(), Path::new(logical_path), &index)
+        .convert_to_git(raw.as_slice(), relative.as_ref(), &index)
         .map_err(|error| CodeIndexSchedulerErrorV1::Git(error.to_string()))?
         .read_to_end(&mut filtered)?;
     let (sanitized, _, _) = privacy::sanitize_code_file(language, &filtered)?;
@@ -1015,5 +1155,164 @@ mod tests {
         let first = sample(&path, sampled_at).unwrap().unwrap();
         assert!(first.settled());
         assert_eq!(first, sample(&path, sampled_at).unwrap().unwrap());
+    }
+}
+
+#[cfg(all(test, unix))]
+mod tracked_parent_boundary_tests {
+    use std::path::Path;
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
+
+    use super::{
+        CachedCandidateRosterV1, ChangeClockReading, CodeIndexIgnoredSourceAdmissionV1,
+        roster_evidence, source_candidates,
+    };
+
+    fn git(root: &Path, args: &[&str]) {
+        let program = tracedecay_runtime_core::git::try_git_program().expect("fixture Git");
+        let mut command = std::process::Command::new(program);
+        command.current_dir(root);
+        for (key, _) in std::env::vars_os() {
+            if key.to_string_lossy().starts_with("GIT_") {
+                command.env_remove(key);
+            }
+        }
+        let output = command
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", root.join(".fixture-gitconfig"))
+            .args([
+                "-c",
+                "user.name=Fixture",
+                "-c",
+                "user.email=fixture@example.invalid",
+                "-c",
+                "commit.gpgsign=false",
+            ])
+            .args(args)
+            .output()
+            .expect("run fixture Git");
+        assert!(
+            output.status.success(),
+            "Git {args:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[test]
+    fn ignored_source_cannot_reenter_markerless_parent_gitlink_freshness() {
+        let fixture = tempfile::tempdir().expect("Git fixture");
+        let parent = fixture.path().join("parent");
+        let child = fixture.path().join("child");
+        std::fs::create_dir_all(&parent).unwrap();
+        std::fs::create_dir_all(&child).unwrap();
+
+        git(&child, &["init", "-q"]);
+        std::fs::write(child.join("child.rs"), "pub fn child() {}\n").unwrap();
+        git(&child, &["add", "child.rs"]);
+        git(&child, &["commit", "-qm", "child"]);
+
+        git(&parent, &["init", "-q"]);
+        std::fs::create_dir_all(parent.join("ignored")).unwrap();
+        std::fs::write(parent.join(".gitignore"), "ignored/\n").unwrap();
+        std::fs::write(parent.join("parent.rs"), "pub fn parent() {}\n").unwrap();
+        std::fs::write(parent.join("ignored/ordinary.rs"), "pub fn ordinary() {}\n").unwrap();
+        git(&parent, &["add", ".gitignore", "parent.rs"]);
+        git(&parent, &["commit", "-qm", "parent"]);
+        git(
+            &parent,
+            &[
+                "-c",
+                "protocol.file.allow=always",
+                "submodule",
+                "add",
+                "-q",
+                "../child",
+                "app",
+            ],
+        );
+        git(&parent, &["add", ".gitmodules", "app"]);
+        git(&parent, &["commit", "-qm", "registered submodule"]);
+
+        // Git still records the child gitlink in HEAD after staging its
+        // removal. Its missing marker makes child.rs appear untracked, but
+        // an old explicit ignored admission must not revive it in freshness.
+        std::fs::remove_file(parent.join("app/.git")).unwrap();
+        git(&parent, &["rm", "-q", "--cached", "app"]);
+        let repository = tracedecay_runtime_core::git_open::open(&parent).unwrap();
+        let admitted = [
+            CodeIndexIgnoredSourceAdmissionV1 {
+                logical_path: "app/child.rs".to_owned(),
+            },
+            CodeIndexIgnoredSourceAdmissionV1 {
+                logical_path: "ignored/ordinary.rs".to_owned(),
+            },
+        ];
+        let candidates = source_candidates(&repository, &admitted, false).unwrap();
+        let paths = candidates
+            .candidates
+            .iter()
+            .map(|candidate| candidate.logical_path.as_str())
+            .collect::<std::collections::BTreeSet<_>>();
+        assert!(paths.contains("parent.rs"));
+        assert!(paths.contains("ignored/ordinary.rs"));
+        assert!(
+            !paths.contains("app/child.rs"),
+            "ignored admission must not cross a HEAD gitlink boundary"
+        );
+    }
+
+    #[test]
+    fn cached_tracked_directory_roster_invalidates_on_nested_git_marker() {
+        let root = tempfile::tempdir().expect("parent checkout");
+        let tracked = root.path().join("src/nested/tracked.rs");
+        std::fs::create_dir_all(tracked.parent().unwrap()).unwrap();
+        std::fs::write(&tracked, "pub fn tracked() {}\n").unwrap();
+        git(root.path(), &["init", "-q"]);
+        git(root.path(), &["add", "src/nested/tracked.rs"]);
+        git(root.path(), &["commit", "-qm", "parent source"]);
+
+        let repository =
+            tracedecay_runtime_core::git_open::open(root.path()).expect("open parent Git");
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let evidence = loop {
+            if let Some(evidence) =
+                roster_evidence(&repository, root.path(), ChangeClockReading::now(), &[])
+            {
+                break evidence;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "tracked parent directories never became settleable"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        };
+        let marker = root.path().join("src/nested/.git");
+        assert!(
+            evidence
+                .iter()
+                .any(|(path, key)| path == &marker && key.is_none()),
+            "missing nested marker must be sampled independently of gix dirwalk"
+        );
+
+        let cached = CachedCandidateRosterV1 {
+            git_metadata_signature: "unchanged-parent-git".to_owned(),
+            admitted_paths: Vec::new(),
+            evidence,
+            candidates: Arc::new(Vec::new()),
+            unrepresentable: Arc::new(Vec::new()),
+        };
+        assert!(cached.holds("unchanged-parent-git", &[]));
+        std::fs::write(&marker, "gitdir: ../../.git/modules/nested\n")
+            .expect("create nested gitdir marker");
+        assert!(
+            !cached.holds("unchanged-parent-git", &[]),
+            "a new nested repository marker must invalidate the cached roster even when parent Git metadata is unchanged"
+        );
+        std::fs::remove_file(&marker).unwrap();
+        assert!(
+            !cached.holds("unchanged-parent-git", &[]),
+            "removing the marker also changes the tracked ancestor directory evidence"
+        );
     }
 }

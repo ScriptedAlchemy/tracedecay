@@ -34,8 +34,8 @@ use super::resolution_view::{
 use super::sealed_codec::{FileScopeIdentityV1, restore_file_pages};
 use super::{
     ChunkPolicyRevisionSummaryV1, CodeIndexGenerationStatisticsV1, CodeIndexProductionErrorV1,
-    CodeIndexPublishedGenerationV1, ConstructionMemoryV1, FileGenerationArtifactsV1,
-    VerifiedSealedTextGenerationMetadataV1,
+    CodeIndexPublishedGenerationV1, CodeIndexRepositoryParseIdentityV1, ConstructionMemoryV1,
+    FileGenerationArtifactsV1, VerifiedSealedTextGenerationMetadataV1,
 };
 
 /// Reads one sealed segment's bytes into the buffer it is handed. Shared by
@@ -355,6 +355,10 @@ impl SealedParentGenerationV1 {
 
     pub(super) fn snapshot(&self) -> &SanitizedCodeSnapshotV1 {
         &self.generation.snapshot
+    }
+
+    pub(super) fn repository_parse_identity(&self) -> &CodeIndexRepositoryParseIdentityV1 {
+        &self.generation.repository_parse_identity
     }
 
     pub(super) fn statistics(&self) -> &CodeIndexGenerationStatisticsV1 {

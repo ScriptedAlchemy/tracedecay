@@ -15,6 +15,42 @@ pub fn resolve_tree_link(
     link_path: &[u8],
     target: &[u8],
 ) -> Result<Option<gix::ObjectId>, GitRepositoryError> {
+    resolve_repository_link(link_path, target, |path| {
+        let Some(entry) = tree
+            .lookup_entry(path.iter().map(Vec::as_slice))
+            .map_err(|error| operation("tree link lookup", error))?
+        else {
+            return Ok(None);
+        };
+        let mode = entry.mode();
+        Ok(if mode.is_tree() {
+            Some(RepositoryLinkEntry::Directory)
+        } else if mode.is_link() {
+            let link = entry
+                .object()
+                .map_err(|error| operation("tree link target", error))?;
+            Some(RepositoryLinkEntry::Link(link.data.clone()))
+        } else if mode.is_blob() {
+            Some(RepositoryLinkEntry::File(entry.object_id()))
+        } else {
+            None
+        })
+    })
+}
+
+pub enum RepositoryLinkEntry<T> {
+    Directory,
+    Link(Vec<u8>),
+    File(T),
+}
+
+/// Walk relative link components with the caller's repository authority. Each
+/// directory is checked before descending, including one followed by `..`.
+pub fn resolve_repository_link<T, E>(
+    link_path: &[u8],
+    target: &[u8],
+    mut lookup: impl FnMut(&[Vec<u8>]) -> Result<Option<RepositoryLinkEntry<T>>, E>,
+) -> Result<Option<T>, E> {
     let mut resolved = components(link_path).collect::<Vec<_>>();
     resolved.pop();
     let mut pending = Vec::new();
@@ -33,26 +69,17 @@ pub fn resolve_tree_link(
             }
             _ => resolved.push(component),
         }
-        let Some(entry) = tree
-            .lookup_entry(resolved.iter().map(Vec::as_slice))
-            .map_err(|error| operation("tree link lookup", error))?
-        else {
-            return Ok(None);
-        };
-        let mode = entry.mode();
-        if mode.is_tree() {
-            continue;
-        }
-        if !mode.is_link() {
-            return Ok((pending.is_empty() && mode.is_blob()).then(|| entry.object_id()));
-        }
-        hops += 1;
-        resolved.pop();
-        let link = entry
-            .object()
-            .map_err(|error| operation("tree link target", error))?;
-        if hops > MAX_LINK_HOPS || !push_target(&mut pending, &link.data) {
-            return Ok(None);
+        match lookup(&resolved)? {
+            Some(RepositoryLinkEntry::Directory) => {}
+            Some(RepositoryLinkEntry::Link(target)) => {
+                hops += 1;
+                resolved.pop();
+                if hops > MAX_LINK_HOPS || !push_target(&mut pending, &target) {
+                    return Ok(None);
+                }
+            }
+            Some(RepositoryLinkEntry::File(file)) if pending.is_empty() => return Ok(Some(file)),
+            _ => return Ok(None),
         }
     }
     Ok(None)

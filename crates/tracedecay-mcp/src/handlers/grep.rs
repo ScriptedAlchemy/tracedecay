@@ -477,11 +477,17 @@ mod tests {
             "// UNIQUE_GENERATED_DIR_TOKEN\n",
         )
         .expect("source fixture");
-        std::fs::write(
-            project.path().join(".git"),
-            "gitdir: UNIQUE_GENERATED_DIR_TOKEN\n",
-        )
-        .expect("linked-worktree git file fixture");
+        let administration = tempfile::tempdir().expect("isolated Git administration");
+        let git = tracedecay_runtime_core::git::try_git_program().expect("Git program");
+        let initialized = std::process::Command::new(git)
+            .args(["init", "--quiet", "--template=", "--separate-git-dir"])
+            .arg(administration.path().join("UNIQUE_GENERATED_DIR_TOKEN"))
+            .arg(project.path())
+            .env("HOME", administration.path())
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .status()
+            .expect("initialize checkout with a Git pointer file");
+        assert!(initialized.success());
         std::fs::write(
             project.path().join(".tracedecay/internal.txt"),
             "UNIQUE_GENERATED_DIR_TOKEN\n",

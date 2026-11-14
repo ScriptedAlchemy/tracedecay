@@ -500,6 +500,7 @@ fn request(
         invalidations: BTreeSet::new(),
         ignored_source_admissions: Vec::new(),
         repository_parse_identity: CodeIndexRepositoryParseIdentityV1 {
+            include_submodules: false,
             tree: Some(id::<TreeId>(tree)?),
             dirty: RepositoryDirtyStateV1::Clean,
         },
@@ -514,6 +515,7 @@ fn request(
 
 fn config() -> Result<CodeIndexProductionConfigV1, Box<dyn Error>> {
     Ok(CodeIndexProductionConfigV1 {
+        include_submodules: false,
         project_id: id::<ProjectId>("project.sealed-storage")?,
         repository: id::<RepositoryId>("repository.sealed-storage")?,
         sanitizer_revision: id::<SanitizerRevision>("sanitizer.sealed-storage.v1")?,

@@ -268,6 +268,7 @@ fn synthetic_candidate_tree_is_streamed_in_order_before_object_memory_drops() {
                 let mut paths = Vec::new();
                 candidate
                     .visit_blobs(
+                        false,
                         |_| false,
                         |path, _bytes| {
                             paths.push(String::from_utf8(path.to_vec()).expect("UTF-8 test path"));
@@ -306,6 +307,7 @@ fn synthetic_candidate_tree_is_streamed_in_order_before_object_memory_drops() {
         |_, candidate| {
             candidate
                 .visit_blobs(
+                    false,
                     |_| false,
                     |_, _| {
                         cancelled.cancel();
@@ -358,6 +360,7 @@ fn candidate_tree_reads_accepted_symlinks_through_to_their_blobs() {
                 let mut visited = Vec::new();
                 candidate
                     .visit_blobs(
+                        false,
                         |path| path.ends_with(b".rs"),
                         |path, bytes| {
                             visited.push((

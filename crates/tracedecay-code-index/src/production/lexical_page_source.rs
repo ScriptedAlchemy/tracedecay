@@ -1343,6 +1343,7 @@ impl VerifiedSealedTextGenerationMetadataV1 {
             &self.snapshot,
             config,
         );
+        compatibility.observe_submodule_policy(self.repository_parse_identity(), config);
         self.chunk_policy.observe(config, &mut compatibility);
         compatibility
     }

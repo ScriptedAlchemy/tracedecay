@@ -100,7 +100,13 @@ pub async fn compute_analysis_report(
             compute_constructors(&graph, args, scope_prefix).await
         }
         ApplicationSurfaceOperation::FieldSites => {
-            compute_field_sites(&graph, args, scope_prefix).await
+            compute_field_sites(
+                &graph,
+                args,
+                scope_prefix,
+                ctx.index_path_policy().includes_submodules(),
+            )
+            .await
         }
         operation => Err(unknown_tool_error(operation.mcp_tool_name())),
     }
