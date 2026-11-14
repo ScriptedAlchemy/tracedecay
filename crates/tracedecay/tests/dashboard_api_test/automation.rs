@@ -9,11 +9,12 @@ use tracing_subscriber::fmt::format::FmtSpan;
 use tracing_subscriber::layer::SubscriberExt as _;
 use tracing_subscriber::util::SubscriberInitExt as _;
 
-fn measure_automation_run_reads() {
+pub(crate) fn measure_dashboard_request_phases() {
     static START: Once = Once::new();
     START.call_once(|| {
-        // The HTTP server and ledger reads run on separate runtime threads.
-        // These phase spans identify threads, not individual fixture requests.
+        // One process-wide subscriber observes both request families. Server
+        // and native-worker spans can include concurrent fixtures; thread ids
+        // do not establish a causal link to a caller's HTTP request.
         let layer = tracing_subscriber::fmt::layer()
             .with_span_events(FmtSpan::NEW | FmtSpan::CLOSE)
             .with_thread_ids(true)
@@ -29,10 +30,24 @@ fn measure_automation_run_reads() {
                     .with_target(
                         "tracedecay_automation_runtime::automation::run_ledger",
                         LevelFilter::TRACE,
-                    ),
+                    )
+                    .with_target("dashboard_api_test::memory_curation", LevelFilter::TRACE)
+                    .with_target(
+                        "tracedecay_daemon_service::application_surface",
+                        LevelFilter::TRACE,
+                    )
+                    .with_target(
+                        "tracedecay_store_runtime::retained_memory",
+                        LevelFilter::TRACE,
+                    )
+                    .with_target(
+                        "tracedecay_session_memory::memory::project_memory::add",
+                        LevelFilter::TRACE,
+                    )
+                    .with_target("tracedecay_session_memory::fact_store", LevelFilter::TRACE),
             );
         if let Err(error) = tracing_subscriber::registry().with(layer).try_init() {
-            eprintln!("automation run measurement subscriber was not installed: {error}");
+            eprintln!("dashboard request measurement subscriber was not installed: {error}");
         }
     });
 }
@@ -451,7 +466,7 @@ fn final_self_improvement_smoke_covers_autonomous_curation_and_skill_deployment(
 /// admission with the run's receipt, and the run settles on the daemon.
 #[test]
 fn fact_store_curate_answers_with_its_receipt_while_a_slow_curator_runs() {
-    measure_automation_run_reads();
+    measure_dashboard_request_phases();
     let runtime = create_runtime();
     runtime.block_on(async {
         let tmp = tempdir_or_panic();

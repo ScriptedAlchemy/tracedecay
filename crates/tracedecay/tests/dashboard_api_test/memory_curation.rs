@@ -212,6 +212,7 @@ fn retained_admin_journey_commits_add_update_feedback_and_remove() {
 
 #[test]
 fn fact_detail_keeps_a_superseded_fact_readable_by_id() {
+    crate::automation::measure_dashboard_request_phases();
     let runtime = create_runtime();
     runtime.block_on(async {
         let fixture = start_dashboard_configuration_fixture().await;
@@ -228,8 +229,16 @@ fn fact_detail_keeps_a_superseded_fact_readable_by_id() {
                 .unwrap_or_else(|| panic!("add must return a fact id: {added}"))
                 .to_owned()
         };
-        let retired = add("Dashboard detail reads the retired wording");
-        let successor = add("Dashboard detail reads the corrected wording");
+        let retired = {
+            let _span =
+                tracing::trace_span!("dashboard.fixture.fact_add", phase = "retired").entered();
+            add("Dashboard detail reads the retired wording")
+        };
+        let successor = {
+            let _span =
+                tracing::trace_span!("dashboard.fixture.fact_add", phase = "successor").entered();
+            add("Dashboard detail reads the corrected wording")
+        };
         let (status, superseded) = post_json_body(
             &agent,
             &retained_url(&fixture, "fact_store_supersede"),
