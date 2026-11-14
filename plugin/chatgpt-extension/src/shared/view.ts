@@ -1,7 +1,7 @@
 // View state shared by the MCP server (producer) and the MCP App (consumer).
 // Every variant is a truthful daemon-backed state; the app never synthesizes
 // data the daemon did not report.
-import type { ProjectRegistrySummary } from "@tracedecay/sdk";
+import type { NodeUnresolvedCallReasonV1, NodeUnresolvedCallReportV1, ProjectRegistrySummary } from "@tracedecay/sdk";
 
 export type ProjectRef = {
   readonly project_id: string;
@@ -139,8 +139,30 @@ export type BoundedGraph = {
 
 export type SymbolDetail = SymbolSummary & {
   readonly complexity: number | null;
+  readonly unresolved_calls: NodeUnresolvedCallReportV1;
   readonly unavailable_fields: readonly string[];
 };
+
+export const UNRESOLVED_CALL_REASON_LABELS: Readonly<Record<NodeUnresolvedCallReasonV1, string>> = {
+  target_unresolved: "Target not resolved",
+  ambiguous_local: "Multiple local matches",
+  unmodeled_block_glob: "Block wildcard import limits resolution",
+  unmodeled_inline_module_glob: "Inline module wildcard import limits resolution",
+};
+
+export const UNRESOLVED_CALL_COVERAGE = "Recorded evidence only; dynamic calls may be missing.";
+export const UNRESOLVED_CALL_RANGES = "Byte ranges are zero-based and end-exclusive; some cover a whole declaration.";
+
+export function unresolvedCallSummary(outcome: NodeUnresolvedCallReportV1["outcome"]): string {
+  switch (outcome.state) {
+    case "complete":
+      return outcome.sites.length === 0 ? "No unresolved calls recorded." : "All recorded unresolved calls are shown.";
+    case "truncated":
+      return "Partial report; more unresolved calls may remain.";
+    case "unavailable":
+      return "Unresolved-call report unavailable.";
+  }
+}
 
 export type Evidence = {
   readonly title: string;
@@ -193,14 +215,57 @@ export type ViewPage = ViewState["page"];
 
 const PAGES: ReadonlySet<string> = new Set<ViewPage>(["projects", "search", "symbol", "failure"]);
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function isUnsignedInteger(value: unknown, maximum = Number.MAX_SAFE_INTEGER): value is number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 && value <= maximum;
+}
+
+function isUnresolvedCallSite(value: unknown): boolean {
+  if (!isRecord(value) || typeof value.reference_name !== "string" || !isRecord(value.evidence_span)) return false;
+  const span = value.evidence_span;
+  return isUnsignedInteger(span.start_byte) && isUnsignedInteger(span.end_byte) && span.end_byte >= span.start_byte
+    && (value.argument_count == null || isUnsignedInteger(value.argument_count, 4_294_967_295))
+    && Array.isArray(value.reasons)
+    && value.reasons.every((reason: unknown) => typeof reason === "string" && Object.hasOwn(UNRESOLVED_CALL_REASON_LABELS, reason));
+}
+
+/** The host payload must carry the report the symbol renderer consumes. */
+function isUnresolvedCallReport(value: unknown): value is NodeUnresolvedCallReportV1 {
+  if (!isRecord(value) || !isRecord(value.outcome)) return false;
+  for (const field of ["code_generation", "caller_node_id", "file_occurrence_id", "file"]) {
+    const identity = value[field];
+    if (typeof identity !== "string" || identity.length === 0) return false;
+  }
+  const outcome = value.outcome;
+  switch (outcome.state) {
+    case "complete":
+      return Array.isArray(outcome.sites) && outcome.sites.every(isUnresolvedCallSite);
+    case "truncated":
+      return isUnsignedInteger(outcome.maximum_references, 4_294_967_295)
+        && Array.isArray(outcome.sites) && outcome.sites.every(isUnresolvedCallSite);
+    case "unavailable": {
+      const evidence = outcome.evidence;
+      return isRecord(evidence) && evidence.status === "unavailable"
+        && typeof evidence.reason_code === "string" && typeof evidence.detail === "string"
+        && typeof evidence.retryable === "boolean";
+    }
+    default:
+      return false;
+  }
+}
+
 export function isViewState(value: unknown): value is ViewState {
-  return (
-    typeof value === "object" &&
-    value !== null &&
-    "page" in value &&
-    typeof value.page === "string" &&
-    PAGES.has(value.page)
-  );
+  if (!isRecord(value) || typeof value.page !== "string" || !PAGES.has(value.page)) return false;
+  if (value.page !== "symbol") return true;
+  const symbol = value.symbol;
+  if (!isRecord(symbol)) return false;
+  if (symbol.state !== "ready") return symbol.state === "empty" || symbol.state === "failed";
+  const detail = symbol.data;
+  if (!isRecord(detail) || !isUnresolvedCallReport(detail.unresolved_calls)) return false;
+  return detail.unresolved_calls.caller_node_id === detail.node_id && detail.unresolved_calls.file === detail.file;
 }
 
 /** Deep-link paths understood by the app; the host supplies them as URLs. */

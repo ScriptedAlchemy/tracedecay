@@ -332,11 +332,6 @@ impl<'a, D: SessionTemporalRegisteredDb + Sync> SessionTemporalStore<'a, D> {
             let mut complete_items = Vec::new();
             let mut complete_sessions = Vec::new();
             if !projections.is_empty() {
-                let apply_snapshot = &self.access().read_snapshot().await.map_err(|_| {
-                    SessionStoreError::InvalidStateTransition {
-                        context: "test temporal fixture apply snapshot",
-                    }
-                })?;
                 for (index, outcome) in receipt_outcomes.iter().enumerate() {
                     if outcome.is_err()
                         && let Some((session_id, _)) = ready[index].as_ref()
@@ -354,7 +349,6 @@ impl<'a, D: SessionTemporalRegisteredDb + Sync> SessionTemporalStore<'a, D> {
                     async move {
                         self.access()
                             .apply_candidate_relation_projection(
-                                apply_snapshot,
                                 projection,
                                 &ExecutionControl::default(),
                             )

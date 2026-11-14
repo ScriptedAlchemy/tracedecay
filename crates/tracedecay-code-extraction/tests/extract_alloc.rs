@@ -505,9 +505,8 @@ fn python_hot_walk_owns_only_signature_prefixes() {
     );
 }
 
-/// An incremental walk over one tiny trailing item must not pay for the huge
-/// rest of the file: same signature strings, allocation far below the source
-/// size.
+/// Rust and Python changed-region walks do not depend on module-wide
+/// receiver bindings, so a tiny item must still allocate by that item.
 #[test]
 fn incremental_walk_of_tiny_item_pays_only_for_that_item() {
     // Initial indexing initializes the process-wide clone grammar-kind table.
@@ -537,17 +536,6 @@ fn incremental_walk_of_tiny_item_pays_only_for_that_item() {
             expected_kind: NodeKind::Struct,
             expected_name: "Marker",
             expected_signature: "pub struct Marker;",
-            expected_clone_bodies: 0,
-        },
-        Case {
-            extractor: &TypeScriptExtractor,
-            file_path: "hot.ts",
-            grammar_key: "typescript",
-            source: typescript_fixture(),
-            needle: "export type MarkerAlias",
-            expected_kind: NodeKind::TypeAlias,
-            expected_name: "MarkerAlias",
-            expected_signature: "type MarkerAlias = number;",
             expected_clone_bodies: 0,
         },
         Case {
@@ -612,6 +600,59 @@ fn incremental_walk_of_tiny_item_pays_only_for_that_item() {
             case.source.len()
         );
     }
+}
+
+/// TypeScript receiver proof depends on module bindings outside the edited
+/// item. Its reset reuses the supplied tree and pays for one complete
+/// extraction, with no extra document copy or second extraction pass.
+#[test]
+fn typescript_changed_region_reset_costs_one_canonical_file_walk() {
+    let source = typescript_fixture();
+    let tree = parse_with_grammar("typescript", &source);
+    let (full, full_bytes) = measure_allocation(|| {
+        TypeScriptExtractor.extract_parsed_artifact(
+            "hot.ts",
+            &source,
+            &source,
+            &tree,
+            ParsedExtractionScope::FullDocument,
+        )
+    });
+    let regions = [trailing_region(&source, "export type MarkerAlias")];
+    let (reset, reset_bytes) = measure_allocation(|| {
+        TypeScriptExtractor.extract_parsed_artifact(
+            "hot.ts",
+            &source,
+            &source,
+            &tree,
+            ParsedExtractionScope::ChangedRegions(&regions),
+        )
+    });
+    assert_eq!(
+        reset.disposition,
+        ParsedExtractionDisposition::Reset {
+            reason: ParsedExtractionResetReason::ModuleBindingsChanged,
+        }
+    );
+    assert_eq!(
+        canonical_digest(&reset.artifact.result),
+        canonical_digest(&full.artifact.result)
+    );
+    assert_eq!(reset.artifact.clone_bodies, full.artifact.clone_bodies);
+    assert_eq!(
+        reset.artifact.typescript_types,
+        full.artifact.typescript_types
+    );
+    assert_eq!(
+        reset.metrics.visited_top_level_nodes,
+        full.metrics.visited_top_level_nodes
+    );
+    assert_eq!(reset.metrics.visited_bytes, full.metrics.visited_bytes);
+    assert!(!reset.artifact.clone_bodies.is_empty());
+    assert!(
+        reset_bytes <= full_bytes,
+        "retained-tree reset allocated {reset_bytes} bytes; one full walk allocated {full_bytes}"
+    );
 }
 
 /// Representative changed-region extractors must retain the caller's

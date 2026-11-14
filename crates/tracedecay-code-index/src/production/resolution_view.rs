@@ -14,13 +14,13 @@ use std::sync::Arc;
 
 use super::resident_bytes::{
     abstention_heap_bytes, edge_heap_bytes, go_method_set_heap_bytes, import_heap_bytes,
-    symbol_bytes, unresolved_heap_bytes, vec_bytes,
+    symbol_bytes, typescript_type_heap_bytes, unresolved_heap_bytes, vec_bytes,
 };
 
 use super::{CodeIndexProductionErrorV1, FileGenerationArtifactsV1};
 use crate::chunks::{
     CodeIndexCallableArityV1, CodeIndexEdgeAbstentionV1, CodeIndexGoMethodSetRowV1,
-    CodeIndexImportEvidenceV1, CodeIndexUnresolvedReferenceV1,
+    CodeIndexImportEvidenceV1, CodeIndexTypeScriptTypeRowV1, CodeIndexUnresolvedReferenceV1,
 };
 use crate::lineage::LineageSymbolRecordV1;
 use tracedecay_domain::CanonicalRelationEdgeV1;
@@ -198,6 +198,7 @@ pub(super) struct CompactFileResolutionV1 {
     unresolved_references: Vec<CodeIndexUnresolvedReferenceV1>,
     callable_arities: Vec<CodeIndexCallableArityV1>,
     go_method_sets: Vec<CodeIndexGoMethodSetRowV1>,
+    typescript_types: Vec<CodeIndexTypeScriptTypeRowV1>,
     edges: Vec<CanonicalRelationEdgeV1>,
     edge_abstentions: Vec<CodeIndexEdgeAbstentionV1>,
     graph_owners: Vec<tracedecay_domain::SymbolOccurrenceId>,
@@ -253,6 +254,11 @@ fn resolution_rows_bytes(file: &dyn ResolutionFileFactsV1, cloned: bool) -> usiz
             file.go_method_sets(),
             capacity(file.go_method_sets(), cloned),
             go_method_set_heap_bytes,
+        ))
+        .saturating_add(vec_bytes(
+            file.typescript_types(),
+            capacity(file.typescript_types(), cloned),
+            typescript_type_heap_bytes,
         ))
         .saturating_add(vec_bytes(
             file.edges(),
@@ -335,6 +341,7 @@ impl CompactFileResolutionV1 {
             unresolved_references: file.artifacts.unresolved_references.clone(),
             callable_arities: file.artifacts.callable_arities.clone(),
             go_method_sets: file.artifacts.go_method_sets.clone(),
+            typescript_types: file.artifacts.typescript_types.clone(),
             edges: file.artifacts.edges.clone(),
             edge_abstentions: file.artifacts.edge_abstentions.clone(),
             graph_owners,
@@ -397,6 +404,7 @@ pub(crate) trait ResolutionFileFactsV1: Send + Sync {
     fn unresolved_references(&self) -> &Vec<CodeIndexUnresolvedReferenceV1>;
     fn callable_arities(&self) -> &Vec<CodeIndexCallableArityV1>;
     fn go_method_sets(&self) -> &Vec<CodeIndexGoMethodSetRowV1>;
+    fn typescript_types(&self) -> &Vec<CodeIndexTypeScriptTypeRowV1>;
     fn edges(&self) -> &Vec<CanonicalRelationEdgeV1>;
     fn edge_abstentions(&self) -> &Vec<CodeIndexEdgeAbstentionV1>;
 }
@@ -422,6 +430,9 @@ impl ResolutionFileFactsV1 for FileGenerationArtifactsV1 {
     }
     fn go_method_sets(&self) -> &Vec<CodeIndexGoMethodSetRowV1> {
         &self.artifacts.go_method_sets
+    }
+    fn typescript_types(&self) -> &Vec<CodeIndexTypeScriptTypeRowV1> {
+        &self.artifacts.typescript_types
     }
     fn edges(&self) -> &Vec<CanonicalRelationEdgeV1> {
         &self.artifacts.edges
@@ -453,6 +464,9 @@ impl<T: ResolutionFileFactsV1 + ?Sized> ResolutionFileFactsV1 for Arc<T> {
     fn go_method_sets(&self) -> &Vec<CodeIndexGoMethodSetRowV1> {
         ResolutionFileFactsV1::go_method_sets(self.as_ref())
     }
+    fn typescript_types(&self) -> &Vec<CodeIndexTypeScriptTypeRowV1> {
+        ResolutionFileFactsV1::typescript_types(self.as_ref())
+    }
     fn edges(&self) -> &Vec<CanonicalRelationEdgeV1> {
         ResolutionFileFactsV1::edges(self.as_ref())
     }
@@ -483,6 +497,9 @@ impl ResolutionFileFactsV1 for CompactFileResolutionV1 {
     fn go_method_sets(&self) -> &Vec<CodeIndexGoMethodSetRowV1> {
         &self.go_method_sets
     }
+    fn typescript_types(&self) -> &Vec<CodeIndexTypeScriptTypeRowV1> {
+        &self.typescript_types
+    }
     fn edges(&self) -> &Vec<CanonicalRelationEdgeV1> {
         &self.edges
     }
@@ -512,6 +529,9 @@ impl<T: ResolutionFileFactsV1 + ?Sized> ResolutionFileFactsV1 for &T {
     }
     fn go_method_sets(&self) -> &Vec<CodeIndexGoMethodSetRowV1> {
         ResolutionFileFactsV1::go_method_sets(*self)
+    }
+    fn typescript_types(&self) -> &Vec<CodeIndexTypeScriptTypeRowV1> {
+        ResolutionFileFactsV1::typescript_types(*self)
     }
     fn edges(&self) -> &Vec<CanonicalRelationEdgeV1> {
         ResolutionFileFactsV1::edges(*self)

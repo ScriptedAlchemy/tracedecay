@@ -661,8 +661,11 @@ pub(crate) fn register_hook_v2_replay_consumer(
     };
     let displaced = match registered_replay_roots().lock() {
         Ok(mut roots) => {
+            // A provenance restamp keeps the graph but replaces its settlement
+            // frontend. The consumer must follow both current owners.
             if roots.get(&data_root).is_some_and(|consumer| {
                 Weak::ptr_eq(&consumer.graph, &graph)
+                    && Weak::ptr_eq(&consumer.delivery_settlements, &delivery_settlements)
                     && consumer.graph.upgrade().is_some()
                     && consumer.delivery_settlements.upgrade().is_some()
             }) {
@@ -692,7 +695,7 @@ pub(crate) fn register_hook_v2_replay_consumer(
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ReplayConsumerStart {
     Started,
-    /// `graph`'s own consumer already drains the data root.
+    /// This graph and settlement authority already drain the data root.
     AlreadyRunning,
     /// The native runtime refused the consumer; the registry is unchanged.
     RuntimeUnavailable,
@@ -1577,6 +1580,50 @@ mod tests {
             "the reopened owner's registration must be accepted"
         );
         assert_owner_keeps_replay(&data_root, &newer).await;
+    }
+
+    /// A remount may restamp the settlement frontend while an in-flight sweep
+    /// still retains the old one. The unchanged graph must adopt the new owner.
+    #[test]
+    fn a_restamped_authority_takes_over_replay_for_the_same_graph() {
+        tracedecay_runtime_core::native_runtime::default_builder()
+            .build()
+            .expect("native replay owner runtime")
+            .block_on(async {
+                let (mut fixture, graph, _other_graph) = replay_owner_fixture().await;
+                let data_root = graph.hook_store_layout().data_root.clone();
+                assert_eq!(fixture.register(&graph), ReplayConsumerStart::Started);
+                assert_eq!(
+                    fixture.register(&graph),
+                    ReplayConsumerStart::AlreadyRunning,
+                    "unchanged owners keep their consumer"
+                );
+
+                // Retain the old frontend through replacement, just as a sweep
+                // does while awaiting a durable delivery settlement.
+                let previous = Arc::clone(&fixture.settlements);
+                let mut identity = previous.identity().clone();
+                identity.policy_revision = "replay-owner-policy.v2".to_owned();
+                fixture.settlements = Arc::new(
+                    previous
+                        .alias_with_policy_identity(identity)
+                        .expect("restamped settlement authority"),
+                );
+                let registered = fixture.register(&graph);
+                drop(previous);
+
+                assert_eq!(
+                    registered,
+                    ReplayConsumerStart::Started,
+                    "the current settlement frontend must take over a retained old frontend"
+                );
+                assert_eq!(
+                    fixture.register(&graph),
+                    ReplayConsumerStart::AlreadyRunning,
+                    "the replacement consumer owns the current frontend"
+                );
+                assert_owner_keeps_replay(&data_root, &graph).await;
+            });
     }
 
     /// A project open may register from a plain OS thread; the reopened

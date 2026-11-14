@@ -7,6 +7,7 @@ pub const CONTEXT_MEMORY_FEEDBACK_HINT: &str = "Rate what you use: call tracedec
 pub const CONTEXT_ENTRY_POINTS_HEADING: &str = "### Entry Points";
 pub const CONTEXT_RELATED_SYMBOLS_HEADING: &str = "### Related Symbols";
 pub const CONTEXT_CODE_HEADING: &str = "### Code";
+pub const CONTEXT_CALL_PATH_HEADING: &str = "### Call Path";
 pub const CONTEXT_INDEX_COVERAGE_HINT_HEADING: &str = "### Index Coverage Hint";
 pub const CONTEXT_EXTENSION_POINTS_HEADING: &str = "### Extension Points";
 pub const CONTEXT_TEST_COVERAGE_HEADING: &str = "### Test Coverage";
@@ -14,6 +15,7 @@ pub const CONTEXT_SEEN_NODE_IDS_LABEL: &str = "seen_node_ids:";
 
 /// Late-priority sections kept when a context response is truncated.
 pub const CONTEXT_PRIORITY_HEADINGS: &[&str] = &[
+    CONTEXT_CALL_PATH_HEADING,
     CONTEXT_MEMORY_MATCHES_HEADING,
     CONTEXT_ENTRY_POINTS_HEADING,
     CONTEXT_RELATED_SYMBOLS_HEADING,

@@ -107,7 +107,7 @@ pub(super) const HANDWRITTEN_TOOLS: &[HandwrittenTool] = &[
     read(
         "tracedecay_node",
         "Node Details",
-        "Retrieve detailed information about a single node by its ID.",
+        "Read one exact node's metadata and bounded recorded unresolved-call evidence, including reference spellings, byte spans, and proven limitation reasons. Inspect unresolved_calls.outcome: complete covers recorded sites only; truncated and unavailable are explicit. This does not infer missing target edges or prove runtime-call completeness.",
     ),
     read(
         "tracedecay_status",

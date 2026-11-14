@@ -3118,6 +3118,7 @@ impl RustExtractor {
             schema_evidence: None,
             callable_arities: state.callable_arities,
             go_method_sets: Vec::new(),
+            typescript_types: Vec::new(),
         }
     }
 }

@@ -7,6 +7,8 @@
 
 #![cfg(feature = "test-transport")]
 
+mod unavailable_graph;
+
 use std::fs;
 use std::path::Path;
 
@@ -525,6 +527,25 @@ async fn tracedecay_context_withholds_partial_windows_of_oversized_declarations(
         "{payload}"
     );
 
+    let node_id = payload["oversized_symbols"][0]["node_id"]
+        .as_str()
+        .expect("oversized symbol occurrence");
+    let mut path_request = request.clone();
+    path_request["call_path"] = json!({
+        "from_node_id": format!("code-symbol:{node_id}"),
+        "to_node_id": node_id,
+    });
+    let path = context_json(&server, path_request).await;
+    assert_eq!(path["call_path"]["from_node_id"], node_id, "{path}");
+    assert_eq!(path["call_path"]["outcome"]["state"], "found", "{path}");
+    assert_eq!(path["call_path"]["outcome"]["edges"], json!([]));
+    assert_eq!(
+        path["call_path"]["outcome"]["nodes"][0]["source"],
+        json!({"state": "omitted", "reason": "oversized"}),
+        "{path}"
+    );
+    assert_eq!(path["code"], json!([]), "{path}");
+
     let mut markdown_request = request;
     markdown_request["format"] = json!("markdown");
     let markdown = context_text(&server, markdown_request).await;
@@ -670,7 +691,7 @@ async fn tracedecay_context_rejects_malformed_requests() {
     .await;
     assert_rejected(
         &unknown,
-        "invalid arguments for tracedecay_context: unknown field `not_a_context_field`, expected one of `task`, `max_nodes`, `include_code`, `max_code_blocks`, `mode`, `include_memory`, `memory_limit`, `memory_min_trust`, `lexical_anchors`, `prefer_symbol`, `budget_tokens`",
+        "invalid arguments for tracedecay_context: unknown field `not_a_context_field`, expected one of `task`, `max_nodes`, `include_code`, `max_code_blocks`, `mode`, `include_memory`, `memory_limit`, `memory_min_trust`, `lexical_anchors`, `prefer_symbol`, `call_path`, `budget_tokens`",
     );
 
     let mode = handle_real_server_tool_call_raw(
@@ -683,6 +704,21 @@ async fn tracedecay_context_rejects_malformed_requests() {
         &mode,
         "invalid arguments for tracedecay_context: unknown variant `nope`, expected `explore` or `plan`",
     );
+
+    for max_depth in [0, 33] {
+        let depth = handle_real_server_tool_call_raw(
+            &server,
+            "tracedecay_context",
+            json!({
+                "task": "invoice_total",
+                "call_path": {"from_node_id": "symbol.from", "to_node_id": "symbol.to", "max_depth": max_depth}
+            }),
+        ).await;
+        assert_rejected(
+            &depth,
+            "invalid parameter: call_path.max_depth must be between 1 and 32",
+        );
+    }
 
     let empty_anchor = handle_real_server_tool_call_raw(
         &server,
@@ -703,5 +739,298 @@ async fn tracedecay_context_rejects_malformed_requests() {
         "lexical anchor 0 must be one identifier or technical term: no surrounding whitespace, inner whitespace, or control characters",
     );
 
+    fixture.harness.shutdown().await;
+}
+
+fn invoice_call_path_source(secret: &str) -> String {
+    format!(
+        "pub fn submit_invoice() -> u32 {{\n    validate_invoice()\n}}\n\n\
+         fn validate_invoice() -> u32 {{\n    let _api_key = \"{secret}\";\n    persist_invoice()\n}}\n\n\
+         fn persist_invoice() -> u32 {{\n    7\n}}\n\n\
+         pub fn unrelated_invoice() -> u32 {{ 99 }}\n"
+    )
+}
+
+async fn context_node_id(server: &McpServer, name: &str) -> String {
+    let context = context_json(
+        server,
+        json!({
+            "task": name, "max_nodes": 1, "include_code": true, "include_memory": false,
+        }),
+    )
+    .await;
+    context["symbols"]
+        .as_array()
+        .expect("selected context symbols")
+        .iter()
+        .find(|symbol| symbol["name"] == name)
+        .unwrap_or_else(|| panic!("no exact symbol {name}: {context}"))["node_id"]
+        .as_str()
+        .expect("symbol occurrence")
+        .to_owned()
+}
+
+#[tokio::test]
+async fn context_call_path_includes_intermediate_attested_source_and_reports_source_cuts() {
+    let secret = ["sk", "-test-", "1234567890abcdef"].concat();
+    let source = invoice_call_path_source(&secret);
+    let fixture = production_composition_fixture_with_sources(|project| {
+        fs::create_dir_all(project.join("src")).expect("call-path src");
+        fs::write(project.join("src/lib.rs"), &source).expect("call-path source");
+    })
+    .await;
+    let server = fixture
+        .harness
+        .server(&fixture.project_root)
+        .expect("call-path server");
+    warm_code_index_search(&server, "submit_invoice").await;
+    let from = context_node_id(&server, "submit_invoice").await;
+    let to = context_node_id(&server, "persist_invoice").await;
+    let request = json!({
+        "task": "submit_invoice",
+        "max_nodes": 1,
+        "include_code": true,
+        "max_code_blocks": 3,
+        "include_memory": false,
+        "call_path": {"from_node_id": from, "to_node_id": to},
+    });
+    let payload = context_json(&server, request.clone()).await;
+    let _: tracedecay_contracts::retrieval::ContextResultV1 =
+        serde_json::from_value(payload.clone()).expect("canonical context result");
+    let path = &payload["call_path"];
+    assert_eq!(path["outcome"]["state"], "found", "{payload}");
+    assert_eq!(path["max_depth"], 8);
+    assert_eq!(path["code_generation"], payload["code_generation"]);
+    assert_eq!(
+        path["outcome"]["weakest_authority"], "syntax_exact",
+        "{payload}"
+    );
+    let nodes = path["outcome"]["nodes"].as_array().expect("path nodes");
+    assert_eq!(
+        nodes
+            .iter()
+            .map(|node| node["symbol"]["name"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        ["submit_invoice", "validate_invoice", "persist_invoice"]
+    );
+    assert_eq!(nodes[0]["symbol"]["node_id"], from);
+    assert_eq!(nodes[2]["symbol"]["node_id"], to);
+    assert!(
+        nodes
+            .iter()
+            .all(|node| node["source"]["state"] == "included"),
+        "{payload}"
+    );
+    assert!(
+        payload["search_matches"]
+            .as_array()
+            .expect("search matches")
+            .iter()
+            .all(|candidate| candidate["name"] != "validate_invoice"),
+        "the intermediate must come from traversal, not task search: {payload}"
+    );
+    let edges = path["outcome"]["edges"]
+        .as_array()
+        .expect("ordered call edges");
+    assert_eq!(edges.len(), 2);
+    for (edge, adjacent) in edges.iter().zip(nodes.windows(2)) {
+        assert_eq!(edge["from_node_id"], adjacent[0]["symbol"]["node_id"]);
+        assert_eq!(edge["to_node_id"], adjacent[1]["symbol"]["node_id"]);
+        assert_eq!(edge["authority"], "syntax_exact");
+        assert!(
+            edge["evidence_span"]["end_byte"].as_u64().unwrap()
+                > edge["evidence_span"]["start_byte"].as_u64().unwrap()
+        );
+    }
+    let blocks = payload["code"].as_array().expect("path code blocks");
+    assert_eq!(blocks.len(), 3, "{payload}");
+    assert_eq!(
+        blocks
+            .iter()
+            .map(|block| &block["node_id"])
+            .collect::<Vec<_>>(),
+        nodes
+            .iter()
+            .map(|node| &node["symbol"]["node_id"])
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(
+        blocks[1]["code"],
+        "fn validate_invoice() -> u32 {\n    let [TraceDecay redacted: credential assignment];\n    persist_invoice()\n}"
+    );
+    assert!(
+        !payload.to_string().contains(&secret),
+        "source must remain sanitized"
+    );
+
+    let mut markdown_request = request.clone();
+    markdown_request["format"] = json!("markdown");
+    let markdown = context_text(&server, markdown_request).await;
+    require_line(&markdown, "### Call Path");
+    require_line(&markdown, "Shortest indexed call path: 2 edge(s).");
+    assert!(
+        markdown.contains("validate_invoice") && markdown.contains("syntax_exact"),
+        "{markdown}"
+    );
+
+    let mut one_block = request.clone();
+    one_block["max_code_blocks"] = json!(1);
+    let limited = context_json(&server, one_block).await;
+    assert_eq!(limited["code"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        limited["call_path"]["outcome"]["nodes"][0]["source"]["state"],
+        "included"
+    );
+    for index in [1, 2] {
+        assert_eq!(
+            limited["call_path"]["outcome"]["nodes"][index]["source"],
+            json!({"state":"omitted", "reason":"code_block_limit"})
+        );
+    }
+    assert_eq!(limited["retrieval"]["code"]["truncated"], true);
+
+    let mut small_budget = request.clone();
+    small_budget["budget_tokens"] = json!(1);
+    let budgeted = context_json(&server, small_budget).await;
+    assert_eq!(
+        budgeted["call_path"]["outcome"]["nodes"]
+            .as_array()
+            .unwrap()
+            .len(),
+        3
+    );
+    assert_eq!(
+        budgeted["call_path"]["outcome"]["edges"],
+        path["outcome"]["edges"]
+    );
+    assert_eq!(budgeted["token_budget"]["over_ceiling"], true);
+    for index in [1, 2] {
+        assert_eq!(
+            budgeted["call_path"]["outcome"]["nodes"][index]["source"],
+            json!({"state":"omitted", "reason":"token_budget"})
+        );
+    }
+
+    // Even unchanged declarations in this file must not bypass whole-file
+    // generation attestation through an ordinary search window.
+    fs::write(
+        fixture.project_root.join("src/lib.rs"),
+        source.replace("    7\n", "    8\n"),
+    )
+    .expect("post-index source change");
+    let drifted = context_json(&server, request).await;
+    assert_eq!(
+        drifted["call_path"]["outcome"]["state"], "found",
+        "{drifted}"
+    );
+    assert_eq!(
+        drifted["call_path"]["outcome"]["edges"],
+        path["outcome"]["edges"]
+    );
+    assert_eq!(
+        drifted["call_path"]["code_generation"],
+        path["code_generation"]
+    );
+    assert_eq!(drifted["code"], json!([]), "{drifted}");
+    for node in drifted["call_path"]["outcome"]["nodes"].as_array().unwrap() {
+        assert_eq!(node["source"]["state"], "unavailable", "{drifted}");
+        assert_eq!(
+            node["source"]["evidence"]["reason_code"], "context-call-path-source-stale",
+            "{drifted}"
+        );
+    }
+    fixture.harness.shutdown().await;
+}
+
+#[tokio::test]
+async fn context_call_path_distinguishes_disconnected_depth_cut_missing_and_zero_edge_paths() {
+    let fixture = production_composition_fixture_with_sources(|project| {
+        fs::create_dir_all(project.join("src")).expect("call-path src");
+        fs::write(
+            project.join("src/lib.rs"),
+            invoice_call_path_source("fixture-token"),
+        )
+        .expect("call-path source");
+    })
+    .await;
+    let server = fixture
+        .harness
+        .server(&fixture.project_root)
+        .expect("call-path server");
+    warm_code_index_search(&server, "submit_invoice").await;
+    let from = context_node_id(&server, "submit_invoice").await;
+    let to = context_node_id(&server, "persist_invoice").await;
+    let unrelated = context_node_id(&server, "unrelated_invoice").await;
+    let request = json!({
+        "task":"submit_invoice", "max_nodes":1, "include_memory":false,
+        "call_path":{"from_node_id":from, "to_node_id":to, "max_depth":1},
+    });
+    let truncated = context_json(&server, request.clone()).await;
+    assert_eq!(
+        truncated["call_path"]["outcome"],
+        json!({"state":"truncated", "limit":"depth"}),
+        "{truncated}"
+    );
+    assert!(
+        truncated["symbols"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|symbol| symbol["name"] == "submit_invoice")
+    );
+
+    let mut disconnected_request = request.clone();
+    disconnected_request["call_path"]["to_node_id"] = json!(unrelated);
+    disconnected_request["call_path"]["max_depth"] = json!(8);
+    let disconnected = context_json(&server, disconnected_request).await;
+    assert_eq!(
+        disconnected["call_path"]["outcome"],
+        json!({"state":"no_path"}),
+        "{disconnected}"
+    );
+
+    let mut same_request = request.clone();
+    same_request["call_path"]["to_node_id"] = json!(from);
+    let same = context_json(&server, same_request).await;
+    assert_eq!(same["call_path"]["outcome"]["state"], "found", "{same}");
+    assert_eq!(same["call_path"]["outcome"]["edges"], json!([]));
+    assert_eq!(
+        same["call_path"]["outcome"]["weakest_authority"],
+        Value::Null
+    );
+    assert_eq!(
+        same["call_path"]["outcome"]["nodes"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(
+        same["call_path"]["outcome"]["nodes"][0]["source"],
+        json!({"state":"not_requested"})
+    );
+    assert_eq!(same["code"], json!([]), "include_code remains opt-in");
+
+    let missing_id = "symbol.absent-context-endpoint";
+    let mut missing_request = request;
+    missing_request["call_path"]["from_node_id"] = json!(missing_id);
+    missing_request["call_path"]["to_node_id"] = json!(missing_id);
+    let missing = context_json(&server, missing_request).await;
+    assert_eq!(
+        missing["call_path"]["outcome"]["state"], "unavailable",
+        "{missing}"
+    );
+    assert_eq!(
+        missing["call_path"]["outcome"]["evidence"]["reason_code"],
+        "context-call-path-node-unavailable"
+    );
+    assert!(
+        missing["symbols"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|symbol| symbol["name"] == "submit_invoice"),
+        "path refusal must preserve lexical context: {missing}"
+    );
     fixture.harness.shutdown().await;
 }

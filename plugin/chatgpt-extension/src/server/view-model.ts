@@ -30,7 +30,13 @@ import type {
   SymbolSummary,
   ViewState,
 } from "../shared/view.js";
-import { deepLinkPath } from "../shared/view.js";
+import {
+  UNRESOLVED_CALL_COVERAGE,
+  UNRESOLVED_CALL_RANGES,
+  UNRESOLVED_CALL_REASON_LABELS,
+  deepLinkPath,
+  unresolvedCallSummary,
+} from "../shared/view.js";
 import type { DaemonBridge } from "./bridge.js";
 import { DaemonFailure, toFailure } from "./serve-client.js";
 
@@ -283,6 +289,7 @@ function symbolDetail(node: NodeDetailsV1): SymbolDetail {
     end_line: node.end_line,
     signature: node.signature ?? null,
     complexity: node.cyclomatic_complexity ?? null,
+    unresolved_calls: node.unresolved_calls,
     unavailable_fields: node.unavailable_fields,
   };
 }
@@ -345,14 +352,12 @@ function graphSection(
   if (callees.state === "ready") add(callees.data, "callee");
   if (nodes.length === 1) return { state: "empty", message: "This symbol has no recorded callers or callees." };
   // The graph is bounded when a side failed, when a side kept rows to a page,
-  // or when the two sides were served from different generations and cannot
-  // describe one consistent snapshot.
-  const mixedGeneration =
-    callers.state === "ready" &&
-    callees.state === "ready" &&
-    callers.generation !== undefined &&
-    callees.generation !== undefined &&
-    callers.generation !== callees.generation;
+  // or when a relation side differs from the node's reported generation and
+  // cannot describe one consistent snapshot with the focus symbol.
+  const nodeGeneration = symbol.data.unresolved_calls.code_generation;
+  const mixedGeneration = [callers, callees].some((side) =>
+    side.state === "ready" && side.generation !== nodeGeneration,
+  );
   const truncated =
     callers.state === "failed" ||
     callees.state === "failed" ||
@@ -387,6 +392,30 @@ function relationLines(value: Section<readonly Relation[]>, title: string, gener
   return lines;
 }
 
+function markdownCode(value: string): string {
+  // Keep line breaks visible without allowing extracted spelling to create
+  // Markdown structure. A longer delimiter also preserves literal backticks.
+  const text = value.length === 0 || /[\r\n]/u.test(value) ? JSON.stringify(value) : value;
+  const longest = (text.match(/`+/gu) ?? []).reduce((length, run) => Math.max(length, run.length), 0);
+  const delimiter = "`".repeat(longest + 1);
+  const padding = text.startsWith("`") || text.endsWith("`") || (text.startsWith(" ") && text.endsWith(" ") && text.trim().length > 0) ? " " : "";
+  return `${delimiter}${padding}${text}${padding}${delimiter}`;
+}
+
+function unresolvedCallLines(report: SymbolDetail["unresolved_calls"]): string[] {
+  const { outcome } = report;
+  const lines = ["### Unresolved calls", unresolvedCallSummary(outcome), `- Report generation: ${markdownCode(report.code_generation)}`];
+  if (outcome.state === "unavailable") return lines;
+  lines.push(...outcome.sites.map((site) => {
+    const reasons = site.reasons.map((reason) => UNRESOLVED_CALL_REASON_LABELS[reason]).join("; ");
+    const argumentsText = site.argument_count == null ? "" : `; ${site.argument_count} ${site.argument_count === 1 ? "argument" : "arguments"}`;
+    return `- ${markdownCode(site.reference_name)} — ${reasons}; ${markdownCode(report.file)}, bytes [${site.evidence_span.start_byte}, ${site.evidence_span.end_byte})${argumentsText}`;
+  }));
+  lines.push(`_${UNRESOLVED_CALL_COVERAGE}_`);
+  if (outcome.sites.length > 0) lines.push(`_${UNRESOLVED_CALL_RANGES}_`);
+  return lines;
+}
+
 export function buildEvidence(
   project: ProjectRef,
   symbol: SymbolDetail,
@@ -402,9 +431,10 @@ export function buildEvidence(
     `- Location: ${location}`,
     ...(symbol.signature === null ? [] : [`- Signature: \`${symbol.signature}\``]),
     `- Node id: \`${symbol.node_id}\``,
-    "_Symbol and impact reads do not report a generation; their snapshot identity is unverified._",
+    "_Impact reads do not report a generation; their snapshot identity is unverified._",
     ...relationLines(callers, "Callers", provenance?.generation ?? null),
     ...relationLines(callees, "Callees", provenance?.generation ?? null),
+    ...unresolvedCallLines(symbol.unresolved_calls),
     ...sectionLines(
       "Impact",
       impact.state === "ready" ? { state: "ready", data: impact.data.nodes } : impact,

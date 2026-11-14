@@ -717,8 +717,11 @@ impl StdioLspClient {
             result = initialize => match result {
                 Ok(response) => response,
                 Err(error) => {
+                    // Termination settles the stderr reader as well as the child.
+                    // Include its final captured bytes in the startup failure.
+                    let terminated = process.terminate().await;
                     let error = enrich_start_error(command, error, &process.stderr());
-                    return match process.terminate().await {
+                    return match terminated {
                         Ok(_) => StdioLspClientStartupSettlement::Failed(error),
                         Err(reap_error) => StdioLspClientStartupSettlement::ReapFailed(
                             TraceDecayError::Config {

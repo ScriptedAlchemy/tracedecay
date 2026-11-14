@@ -2,7 +2,7 @@
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, mpsc as blocking_mpsc};
 use std::time::Duration;
 use tracedecay_daemon_protocol::{
     DaemonHandshake, DaemonInvocationOutcome, DaemonInvocationRequest,
@@ -48,6 +48,32 @@ where
             .is_some_and(|span| span.name() == "usecases.diagnostics.typescript_producer")
         {
             let _ = self.0.send(());
+        }
+    }
+}
+
+struct PrimitiveRegistrationPaused {
+    registered: mpsc::UnboundedSender<()>,
+    resume: Mutex<Option<blocking_mpsc::Receiver<()>>>,
+}
+
+impl<S> Layer<S> for PrimitiveRegistrationPaused
+where
+    S: tracing::Subscriber + for<'a> LookupSpan<'a>,
+{
+    fn on_close(&self, id: tracing::span::Id, context: Context<'_, S>) {
+        if context
+            .span(&id)
+            .is_none_or(|span| span.name() != "daemon.project.owners.primitive")
+        {
+            return;
+        }
+        let resume = self.resume.lock().unwrap().take();
+        if let Some(resume) = resume {
+            self.registered.send(()).expect("registration observer");
+            resume
+                .recv_timeout(Duration::from_mins(1))
+                .expect("release primitive registration after the public read");
         }
     }
 }
@@ -124,6 +150,103 @@ fn compiler_failure(outcome: &DaemonInvocationOutcome) -> String {
     let diagnostic = problem.diagnostic().expect("compiler failure diagnostic");
     assert_eq!(diagnostic.code, "application.diagnostics.producer-failed");
     diagnostic.message.clone()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn published_primitive_reads_pending_before_the_compiler_task_starts() {
+    const CHILD: &str = "TRACEDECAY_TEST_COMPILER_REGISTRATION_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let name = format!(
+            "{}::published_primitive_reads_pending_before_the_compiler_task_starts",
+            module_path!().split_once("::").unwrap().1
+        );
+        let home = TempDir::new().unwrap();
+        let output = Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", &name, "--test-threads=1", "--nocapture"])
+            .env(CHILD, "1")
+            .env("HOME", home.path())
+            .env("XDG_CONFIG_HOME", home.path().join("config"))
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .output()
+            .expect("isolated compiler-registration journey");
+        assert!(
+            output.status.success()
+                && String::from_utf8_lossy(&output.stdout).contains("test result: ok. 1 passed"),
+            "compiler-registration journey failed:\n{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
+        );
+        return;
+    }
+
+    let temp = TempDir::new().unwrap();
+    let project = temp.path().join("project");
+    let profile = temp.path().join("profile");
+    std::fs::create_dir_all(project.join("packages/app/src")).unwrap();
+    std::fs::write(
+        project.join("packages/app/src/index.ts"),
+        "export const value = 1;\n",
+    )
+    .unwrap();
+    std::fs::write(
+        project.join("packages/app/tsconfig.json"),
+        r#"{"include":["src/**/*.ts"]}"#,
+    )
+    .unwrap();
+    git(&project, &["init", "--quiet", "--initial-branch=main"]);
+    git(&project, &["add", "--all"]);
+    git(
+        &project,
+        &["commit", "--quiet", "-m", "test: compiler registration"],
+    );
+    let client_identity = test_client_identity_for(profile.clone());
+    initialize_test_project(&project, &client_identity).await;
+    let project = project.canonicalize().unwrap();
+    let handshake = DaemonHandshake {
+        project_path: Some(project),
+        client_identity,
+        ..test_handshake_defaults()
+    };
+    let _database_scope = enter_test_daemon_database_scope(&profile, "compiler-registration");
+    let engine = test_daemon_engine_for_profile(&profile);
+    let (registered, mut registrations) = mpsc::unbounded_channel();
+    let (resume, paused) = blocking_mpsc::channel();
+    tracing::subscriber::set_global_default(tracing_subscriber::registry().with(
+        PrimitiveRegistrationPaused {
+            registered,
+            resume: Mutex::new(Some(paused)),
+        },
+    ))
+    .unwrap();
+    let opening_engine = engine.clone();
+    let opening_handshake = handshake.clone();
+    let opening =
+        tokio::spawn(async move { opening_engine.open_project_server(&opening_handshake).await });
+    tokio::time::timeout(Duration::from_mins(1), registrations.recv())
+        .await
+        .expect("the real primitive runtime must register")
+        .expect("registration observer stays alive");
+
+    // Registration has published the callable runtime, but the remaining
+    // owners and the compiler task are still held. Exercise the public read
+    // at precisely the point that formerly claimed no producer would run.
+    let outcome = diagnostics(&engine, &handshake).await;
+    resume.send(()).expect("resume the owner mount");
+    let (_, _, server, _) = opening.await.unwrap().expect("project owner admission");
+    drop(server);
+    let shutdown = engine.shutdown_all().await;
+    assert!(shutdown.project_servers.is_clean(), "{shutdown:?}");
+    assert!(shutdown.background.unfinished().is_empty(), "{shutdown:?}");
+
+    let DaemonInvocationOutcome::ApplicationProblem { problem } = outcome else {
+        panic!("an appointed producer must report its pending state: {outcome:?}");
+    };
+    assert_eq!(
+        problem.diagnostic().expect("pending diagnostic").code,
+        "application.diagnostics.pending",
+        "the public runtime must not claim that its appointed producer is unsupported"
+    );
 }
 
 async fn register_work_for_configuration(

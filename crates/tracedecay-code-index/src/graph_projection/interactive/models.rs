@@ -208,6 +208,15 @@ pub struct UnresolvedCallerGapsV1 {
     pub unmodeled_imports: BTreeSet<UnmodeledImportShapeV1>,
 }
 
+/// A bounded read of one symbol's retained unresolved call evidence.
+/// `has_more` concerns retained evidence records, including non-call
+/// limitations, and never claims completeness of runtime calls.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CodeGraphUnresolvedCallSitesV1 {
+    pub references: Vec<CodeIndexUnresolvedReferenceV1>,
+    pub has_more: bool,
+}
+
 impl UnresolvedCallerGapsV1 {
     pub fn is_empty(&self) -> bool {
         !self.exact_target_unavailable && self.unmodeled_imports.is_empty()

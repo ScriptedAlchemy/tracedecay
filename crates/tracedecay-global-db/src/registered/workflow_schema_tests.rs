@@ -1074,10 +1074,36 @@ mod published_artifact_ceiling {
 
         let stride = (total_polls / 12).max(1);
         let mut cancelled_published = 0;
+        // Each convergence joins its exact runtime retirement. Reuse the
+        // canonically initialized store, restoring the upgrade's inputs and
+        // proving the entire workflow state before admitting a fresh runtime.
+        let store = &reference.store;
         for cancel_at in (1..total_polls).step_by(stride) {
-            let daemon_store = DaemonPublishedStore::create().await;
-            let store = &daemon_store.store;
-            store.run(BULK_ROWS);
+            {
+                let mut connection = Connection::open(&store.path).unwrap();
+                let transaction = connection.transaction().unwrap();
+                republish(&transaction, &before.table_sql, &before.digest);
+                {
+                    let mut insert = transaction
+                        .prepare(
+                            "INSERT INTO workflow_artifact_payloads
+                             (rowid, payload_digest, byte_length, payload)
+                             VALUES (?1, ?2, ?3, ?4)",
+                        )
+                        .unwrap();
+                    for (rowid, digest, byte_length, payload) in &before.artifacts {
+                        insert
+                            .execute(rusqlite::params![rowid, digest, byte_length, payload])
+                            .unwrap();
+                    }
+                }
+                transaction.commit().unwrap();
+            }
+            assert_eq!(
+                store.state(),
+                before,
+                "poll {cancel_at} must start from the published workflow state"
+            );
             let (outcome, _) = converge_cancelled_at(&store.path, cancel_at).await;
             let state = store.state();
             match outcome {
