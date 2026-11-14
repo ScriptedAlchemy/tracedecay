@@ -44,8 +44,7 @@ fn failed_pending_receipt_removes_its_marker_and_empty_directory() {
     let (directory, marker) = read_only_pending_marker(&pending);
 
     assert!(
-        write_pending_receipt(directory, OsStr::new("owner"), marker, b"complete receipt")
-            .is_err()
+        write_pending_receipt(directory, OsStr::new("owner"), marker, b"complete receipt").is_err()
     );
     assert!(
         !pending.exists(),
@@ -63,8 +62,7 @@ fn failed_pending_receipt_preserves_a_replaced_marker() {
     fs::write(pending.join("owner"), b"replacement receipt").unwrap();
 
     assert!(
-        write_pending_receipt(directory, OsStr::new("owner"), marker, b"complete receipt")
-            .is_err()
+        write_pending_receipt(directory, OsStr::new("owner"), marker, b"complete receipt").is_err()
     );
     assert_eq!(
         fs::read(pending.join("owner")).unwrap(),
