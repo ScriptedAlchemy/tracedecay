@@ -1,38 +1,5 @@
-use std::sync::Once;
-
 use crate::dashboard_api_support::*;
 use tracedecay_automation_runtime::automation::backend::AgentTaskRetryAttempt;
-use tracing::level_filters::LevelFilter;
-use tracing_subscriber::Layer as _;
-use tracing_subscriber::filter::Targets;
-use tracing_subscriber::fmt::format::FmtSpan;
-use tracing_subscriber::layer::SubscriberExt as _;
-use tracing_subscriber::util::SubscriberInitExt as _;
-
-fn measure_automation_run_reads() {
-    static START: Once = Once::new();
-    START.call_once(|| {
-        // The HTTP server and ledger reads run on separate runtime threads.
-        let layer = tracing_subscriber::fmt::layer()
-            .with_span_events(FmtSpan::NEW | FmtSpan::CLOSE)
-            .with_thread_ids(true)
-            .with_ansi(false)
-            .with_writer(std::io::stderr)
-            .with_filter(
-                Targets::new()
-                    .with_default(LevelFilter::WARN)
-                    .with_target(
-                        "tracedecay_dashboard_api::automation_run_api",
-                        LevelFilter::TRACE,
-                    )
-                    .with_target(
-                        "tracedecay_automation_runtime::automation::run_ledger",
-                        LevelFilter::TRACE,
-                    ),
-            );
-        let _ = tracing_subscriber::registry().with(layer).try_init();
-    });
-}
 
 #[test]
 fn fact_store_curate_is_the_only_public_manual_automation_launcher() {
@@ -175,7 +142,6 @@ fn fact_store_curate_is_the_only_public_manual_automation_launcher() {
 
 #[test]
 fn final_self_improvement_smoke_covers_autonomous_curation_and_skill_deployment() {
-    measure_automation_run_reads();
     let runtime = create_runtime();
     runtime.block_on(async {
         let tmp = tempdir_or_panic();
@@ -449,7 +415,6 @@ fn final_self_improvement_smoke_covers_autonomous_curation_and_skill_deployment(
 /// admission with the run's receipt, and the run settles on the daemon.
 #[test]
 fn fact_store_curate_answers_with_its_receipt_while_a_slow_curator_runs() {
-    measure_automation_run_reads();
     let runtime = create_runtime();
     runtime.block_on(async {
         let tmp = tempdir_or_panic();

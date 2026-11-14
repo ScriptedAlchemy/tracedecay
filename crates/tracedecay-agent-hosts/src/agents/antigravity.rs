@@ -305,8 +305,6 @@ fn uninstall_mcp_if_selected(components: &[HostComponentV1], home: &Path) -> Res
 mod tests {
     use std::sync::Arc;
 
-    use tracedecay_runtime_core::logging::FormattedTracingCapture;
-
     use super::*;
 
     fn install_context(home: &Path, binary: &str) -> InstallContext {
@@ -430,13 +428,10 @@ mod tests {
         let install = Arc::new(install_context(home.path(), "/tmp/tracedecay"));
         let worker_install = Arc::clone(&install);
         let worker = std::thread::spawn(move || {
-            let _capture = FormattedTracingCapture::start_with_span_timings();
-            let outcome = AntigravityIntegration.activate_deployed_host_component_registration(
+            AntigravityIntegration.activate_deployed_host_component_registration(
                 &[HostComponentV1::ContextMcp],
                 &worker_install,
-            );
-            tracing::info!(?outcome, "paired host registration worker settled");
-            outcome
+            )
         });
 
         pause.wait_until_reached();
