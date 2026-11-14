@@ -446,8 +446,15 @@ async fn saved_edit_of_a_language_less_file_completes_its_hook_work() {
     harness.shutdown().await;
 }
 
-#[tokio::test(flavor = "multi_thread")]
-async fn disabled_context_scout_ends_the_hook_cycle_after_its_advisory_half() {
+#[test]
+fn disabled_context_scout_ends_the_hook_cycle_after_its_advisory_half() {
+    tracedecay_runtime_core::native_runtime::default_builder()
+        .build()
+        .expect("native test runtime")
+        .block_on(verify_disabled_context_scout_hook_completion());
+}
+
+async fn verify_disabled_context_scout_hook_completion() {
     let isolation = tempfile::TempDir::new().expect("production harness isolation");
     let (harness, project) = settled_checkout_with_language_less_file(isolation.path()).await;
 
