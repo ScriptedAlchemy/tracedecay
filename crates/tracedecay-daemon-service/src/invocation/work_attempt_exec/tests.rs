@@ -1941,8 +1941,13 @@ async fn a_cancellation_requested_before_mark_running_seals_cancelled() {
 /// effect outcome. This test spends the real two-second wall on purpose, the
 /// stall must be a monotonic measurement, not a virtual-clock artifact.
 #[cfg(unix)]
-#[tokio::test]
-async fn a_wall_exhausted_provider_seals_timed_out_and_emits_the_no_progress_terminal() {
+#[test]
+fn a_wall_exhausted_provider_seals_timed_out_and_emits_the_no_progress_terminal() {
+    on_installed_runtime(verify_wall_exhausted_provider_terminal());
+}
+
+#[cfg(unix)]
+async fn verify_wall_exhausted_provider_terminal() {
     let (_artifact_dir, workflow_artifacts) = provider_artifact_store().await;
     let profile = tempfile::TempDir::new().unwrap();
     let directory = tempfile::TempDir::new().unwrap();
