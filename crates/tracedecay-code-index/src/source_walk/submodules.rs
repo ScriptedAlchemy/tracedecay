@@ -265,7 +265,7 @@ impl AuthenticatedSubmodule {
         Ok(valid)
     }
 
-    fn require_live_checkout(&self) -> io::Result<()> {
+    pub(crate) fn require_live_checkout(&self) -> io::Result<()> {
         if self.checkout_is_live()? {
             Ok(())
         } else {
@@ -274,6 +274,16 @@ impl AuthenticatedSubmodule {
                 "authenticated submodule checkout binding changed during source walk",
             ))
         }
+    }
+
+    pub(crate) fn with_live_checkout<T>(
+        &self,
+        read: impl FnOnce() -> io::Result<T>,
+    ) -> io::Result<T> {
+        self.require_live_checkout()?;
+        let value = read()?;
+        self.require_live_checkout()?;
+        Ok(value)
     }
 
     fn verify_checkout_binding(&self) -> io::Result<bool> {
@@ -323,6 +333,10 @@ pub struct SourceWalkEntry {
 }
 
 impl SourceWalkEntry {
+    pub(crate) fn child_binding(&self) -> Option<&Arc<AuthenticatedSubmodule>> {
+        self.child.as_ref()
+    }
+
     pub fn path(&self) -> &Path {
         self.entry.path()
     }
@@ -343,14 +357,11 @@ impl SourceWalkEntry {
     /// second check covers revocation during the filesystem read, matching
     /// the source-capture boundary used by graph publication.
     pub fn read(&self) -> io::Result<Vec<u8>> {
-        if let Some(child) = &self.child {
-            child.require_live_checkout()?;
+        let read = || std::fs::read(self.path());
+        match &self.child {
+            Some(child) => child.with_live_checkout(read),
+            None => read(),
         }
-        let bytes = std::fs::read(self.path())?;
-        if let Some(child) = &self.child {
-            child.require_live_checkout()?;
-        }
-        Ok(bytes)
     }
 }
 
