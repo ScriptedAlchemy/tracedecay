@@ -1438,7 +1438,7 @@ fn assert_workflow_get_definition_route_conceals_missing_definition(client: &Cli
         panic!("mounted get-definition route must return a typed Workflow problem: {error}");
     };
 
-    assert_eq!(problem.status, 404);
+    assert_eq!(problem.status, 404, "{problem:?}");
     assert_eq!(problem.kind, "not_found_or_not_authorized");
     assert_eq!(problem.code, "not_found_or_not_authorized");
     assert_eq!(problem.retry, "never");
