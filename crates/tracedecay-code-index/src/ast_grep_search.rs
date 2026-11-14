@@ -329,7 +329,8 @@ where
             result.cancelled = true;
             return Ok(result);
         }
-        let entry = entry.map_err(|error| AstGrepSearchError::SourceUnavailable(error.to_string()))?;
+        let entry =
+            entry.map_err(|error| AstGrepSearchError::SourceUnavailable(error.to_string()))?;
         if !entry.file_type().is_some_and(|ft| ft.is_file()) {
             continue;
         }
