@@ -22,7 +22,7 @@ use tracedecay_runtime_core::path_safety::canonical_existing_identity;
 #[cfg(unix)]
 use tracing::instrument::WithSubscriber;
 #[cfg(unix)]
-use tracing_subscriber::{EnvFilter, fmt::format::FmtSpan};
+use tracing_subscriber::{filter::Targets, fmt::format::FmtSpan, layer::SubscriberExt};
 
 use super::*;
 
@@ -1462,20 +1462,23 @@ async fn serve_proxy_cancels_running_and_queued_requests_without_host_disconnect
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn deadline_reply_does_not_wait_for_a_worker_that_ignores_cancellation() {
     let dispatch = {
-        let subscriber = tracing_subscriber::fmt()
-            .with_env_filter(EnvFilter::new(concat!(
-                "tracedecay_application::feedback::concrete=trace,",
-                "tracedecay_daemon_service::project_runtime::shutdown=trace,",
-                "tracedecay_daemon_service::shutdown=trace,",
-                "tracedecay::mcp::server::connection=trace,",
-                "tracedecay_runtime_core::db::engine=trace"
-            )))
-            .with_span_events(FmtSpan::NEW | FmtSpan::CLOSE)
-            .with_timer(tracing_subscriber::fmt::time::uptime())
-            .with_thread_names(true)
-            .with_ansi(false)
-            .with_writer(std::io::stderr)
-            .finish();
+        let targets = Targets::new().with_targets([
+            ("tracedecay_application::feedback::concrete", tracing::Level::TRACE),
+            ("tracedecay_daemon_service::project_runtime::shutdown", tracing::Level::TRACE),
+            ("tracedecay_daemon_service::shutdown", tracing::Level::TRACE),
+            ("tracedecay::mcp::server::connection", tracing::Level::TRACE),
+            ("tracedecay_runtime_core::db::engine", tracing::Level::TRACE),
+        ]);
+        let subscriber = tracing_subscriber::registry()
+            .with(
+                tracing_subscriber::fmt::layer()
+                    .with_span_events(FmtSpan::NEW | FmtSpan::CLOSE)
+                    .with_timer(tracing_subscriber::fmt::time::uptime())
+                    .with_thread_names(true)
+                    .with_ansi(false)
+                    .with_writer(std::io::stderr),
+            )
+            .with(targets);
         let _capture = tracedecay_runtime_core::logging::set_tracing_capture(subscriber);
         tracing::dispatcher::get_default(Clone::clone)
     };
