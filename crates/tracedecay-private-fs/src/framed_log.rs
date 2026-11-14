@@ -253,7 +253,7 @@ fn open_no_follow(path: &Path) -> io::Result<File> {
     options.open(path).map_err(normalize_no_follow_error)
 }
 
-fn normalize_no_follow_error(error: io::Error) -> io::Error {
+pub(crate) fn normalize_no_follow_error(error: io::Error) -> io::Error {
     #[cfg(unix)]
     if error.raw_os_error() == Some(libc::ELOOP) {
         return io::Error::new(io::ErrorKind::InvalidInput, "path is a symbolic link");
@@ -278,6 +278,13 @@ pub fn read_bounded(path: &Path, maximum: usize) -> io::Result<Option<Vec<u8>>> 
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(error),
     };
+    read_bounded_open_file(file, maximum).map(Some)
+}
+
+/// Applies the same bounded regular-file proof to a file opened relative to a
+/// held directory capability. The caller supplies a no-follow, nonblocking
+/// handle; this function never resolves another pathname.
+pub(crate) fn read_bounded_open_file(file: File, maximum: usize) -> io::Result<Vec<u8>> {
     let metadata = file.metadata()?;
     if !metadata.file_type().is_file() {
         return Err(io::Error::new(
@@ -300,7 +307,7 @@ pub fn read_bounded(path: &Path, maximum: usize) -> io::Result<Option<Vec<u8>>> 
             "bounded read length mismatch",
         ));
     }
-    Ok(Some(bytes))
+    Ok(bytes)
 }
 
 const TEMPORARY_SUFFIX: &str = ".tmp";
@@ -373,7 +380,7 @@ fn remove_owned_temp(path: &Path) {
 pub mod sync_latency {
     use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicU64, Ordering};
-    use std::sync::{Arc, Mutex, PoisonError};
+    use std::sync::{Arc, Condvar, Mutex, PoisonError};
     use std::time::Duration;
 
     struct Injection {
@@ -381,6 +388,13 @@ pub mod sync_latency {
         root: PathBuf,
         delay: Duration,
         syncs: Arc<AtomicU64>,
+        held: Option<Arc<HeldSyncState>>,
+    }
+
+    #[derive(Default)]
+    struct HeldSyncState {
+        released: Mutex<bool>,
+        changed: Condvar,
     }
 
     static INJECTIONS: Mutex<Vec<Injection>> = Mutex::new(Vec::new());
@@ -409,9 +423,72 @@ pub mod sync_latency {
         }
     }
 
+    /// Keeps matching barriers in flight until explicitly released or dropped.
+    pub struct HeldSyncBarriers {
+        registration: SyncLatencyGuard,
+        state: Arc<HeldSyncState>,
+    }
+
+    impl HeldSyncBarriers {
+        /// Wait for the requested number of barriers to enter without releasing them.
+        #[must_use]
+        pub fn wait_for_syncs(&self, minimum: u64, timeout: Duration) -> bool {
+            let released = self
+                .state
+                .released
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            let _wait = self
+                .state
+                .changed
+                .wait_timeout_while(released, timeout, |_| self.syncs() < minimum)
+                .unwrap_or_else(PoisonError::into_inner);
+            self.syncs() >= minimum
+        }
+
+        #[must_use]
+        pub fn syncs(&self) -> u64 {
+            self.registration.syncs()
+        }
+
+        pub fn release(&self) {
+            *self
+                .state
+                .released
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner) = true;
+            self.state.changed.notify_all();
+        }
+    }
+
+    impl Drop for HeldSyncBarriers {
+        fn drop(&mut self) {
+            self.release();
+        }
+    }
+
+    /// Hold every fsync below `root` so a fixture can prove concurrent admission.
+    #[must_use]
+    pub fn hold(root: &Path) -> HeldSyncBarriers {
+        let state = Arc::new(HeldSyncState::default());
+        let registration = register(root, Duration::ZERO, Some(Arc::clone(&state)));
+        HeldSyncBarriers {
+            registration,
+            state,
+        }
+    }
+
     /// Delay every fsync of `root` or a path below it by `delay`.
     #[must_use]
     pub fn inject(root: &Path, delay: Duration) -> SyncLatencyGuard {
+        register(root, delay, None)
+    }
+
+    fn register(
+        root: &Path,
+        delay: Duration,
+        held: Option<Arc<HeldSyncState>>,
+    ) -> SyncLatencyGuard {
         let id = NEXT_ID.fetch_add(1, Ordering::SeqCst);
         let syncs = Arc::new(AtomicU64::new(0));
         INJECTIONS
@@ -422,6 +499,7 @@ pub mod sync_latency {
                 root: root.to_path_buf(),
                 delay,
                 syncs: Arc::clone(&syncs),
+                held,
             });
         SyncLatencyGuard { id, syncs }
     }
@@ -432,9 +510,23 @@ pub mod sync_latency {
             .unwrap_or_else(PoisonError::into_inner)
             .iter()
             .find(|injection| path.starts_with(&injection.root))
-            .map(|injection| (injection.delay, Arc::clone(&injection.syncs)));
-        if let Some((delay, syncs)) = matched {
+            .map(|injection| {
+                (
+                    injection.delay,
+                    Arc::clone(&injection.syncs),
+                    injection.held.clone(),
+                )
+            });
+        if let Some((delay, syncs, held)) = matched {
             syncs.fetch_add(1, Ordering::SeqCst);
+            if let Some(held) = held {
+                let released = held.released.lock().unwrap_or_else(PoisonError::into_inner);
+                held.changed.notify_all();
+                let _released = held
+                    .changed
+                    .wait_while(released, |released| !*released)
+                    .unwrap_or_else(PoisonError::into_inner);
+            }
             std::thread::sleep(delay);
         }
     }

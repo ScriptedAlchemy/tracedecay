@@ -2,10 +2,15 @@ use crate::common;
 
 use std::path::Path;
 use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 use tracedecay::daemon::call_default_tool;
-use tracedecay_daemon_protocol::DaemonHandshake;
+use tracedecay_contracts::code_index_freshness::{
+    CodeIndexReadinessTargetV1, CodeIndexReadinessV1,
+};
+use tracedecay_contracts::retrieval::StatusCodeIndexFreshnessV1;
+use tracedecay_daemon_protocol::{DaemonHandshake, TOOL_REQUEST_DEADLINE_ENV};
 use tracedecay_runtime_core::config::ProfileRoot;
 
 fn initialize_project(home: &Path, project: &Path, marker: &str) {
@@ -169,28 +174,77 @@ async fn selected_project_source_route_survives_physical_daemon_restart() {
 /// arms one, so a freshness wait would perturb the very state it samples.
 pub(crate) fn await_published_code_index(home: &Path, project: &Path) {
     let project_arg = project.to_string_lossy().into_owned();
-    let output = common::tracedecay_command_with_home(home)
-        .current_dir(project)
-        .args([
-            "tool",
-            "--project",
-            project_arg.as_str(),
-            "status",
-            "--args",
-            r#"{"format":"json","wait_for":{"state":"graph_ready","timeout_ms":110000}}"#,
-        ])
-        .stdin(Stdio::null())
-        .output()
-        .expect("run status");
-    assert!(
-        output.status.success(),
-        "status failed: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let status: Value = serde_json::from_slice(&output.stdout).expect("status JSON");
-    assert_eq!(
-        status["wait"],
-        json!({ "outcome": "reached" }),
-        "daemon never published a serving code-index generation: {status}"
+    let deadline = Instant::now() + Duration::from_secs(110);
+    // CLI admission spends part of the request budget before status runs, so
+    // a nested 110-second wait can exceed the remaining dispatch deadline.
+    // Sample the same typed predicate under one end-to-end fixture deadline.
+    common::poll_until(
+        deadline,
+        Duration::from_millis(100),
+        || {
+            let remaining_ms = deadline
+                .saturating_duration_since(Instant::now())
+                .as_millis();
+            assert!(remaining_ms > 0, "code-index publication deadline elapsed");
+            let output = common::tracedecay_command_with_home(home)
+                .current_dir(project)
+                .env(TOOL_REQUEST_DEADLINE_ENV, remaining_ms.to_string())
+                .args([
+                    "tool",
+                    "--project",
+                    project_arg.as_str(),
+                    "status",
+                    "--args",
+                    r#"{"format":"json"}"#,
+                ])
+                .stdin(Stdio::null())
+                .output()
+                .expect("run status");
+            assert!(
+                output.status.success(),
+                "status failed\nstdout:\n{}\nstderr:\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            let status: Value = serde_json::from_slice(&output.stdout).expect("status JSON");
+            assert!(
+                Instant::now() < deadline,
+                "code-index publication deadline elapsed: {status}"
+            );
+            let freshness: StatusCodeIndexFreshnessV1 =
+                serde_json::from_value(status["code_index_freshness"].clone())
+                    .expect("typed code-index freshness");
+            let worktree = match freshness {
+                StatusCodeIndexFreshnessV1::Current { worktree }
+                | StatusCodeIndexFreshnessV1::Stale { worktree }
+                | StatusCodeIndexFreshnessV1::Restoring { worktree }
+                | StatusCodeIndexFreshnessV1::Warming { worktree }
+                | StatusCodeIndexFreshnessV1::Parked { worktree } => worktree,
+                StatusCodeIndexFreshnessV1::Unavailable { reason }
+                    if reason == "code_index_scheduler_not_mounted" =>
+                {
+                    // The canonical readiness wait allows a scheduler to mount
+                    // inside its budget. This status sample has no mount refusal.
+                    return None;
+                }
+                StatusCodeIndexFreshnessV1::MountFailed { .. }
+                | StatusCodeIndexFreshnessV1::Unavailable { .. } => {
+                    panic!("code-index readiness is unavailable: {status}")
+                }
+            };
+            match worktree.readiness(CodeIndexReadinessTargetV1::GraphReady) {
+                CodeIndexReadinessV1::Reached => Some(()),
+                CodeIndexReadinessV1::Pending => None,
+                CodeIndexReadinessV1::Unreachable { reason } => {
+                    panic!("code-index readiness cannot be reached: {reason}; {status}")
+                }
+            }
+        },
+        || {
+            format!(
+                "daemon never published a serving generation for {}",
+                project.display()
+            )
+        },
     );
 }

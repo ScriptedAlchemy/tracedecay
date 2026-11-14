@@ -54,13 +54,17 @@ use grafeo_core::graph::compact::IncrementalCompactStoreBuilder;
 use grafeo_engine::GrafeoDB;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
+use tracedecay_private_fs::capability_dir::{
+    HeldDirectory, install_held_child_directory_noreplace,
+};
 use tracedecay_store::runtime::{
     GraphNativeWorkKindV1, GraphNativeWorkV1, GraphRecoveredGenerationDigestV1,
 };
 
 use crate::generation::{
-    GraphRowDigestSum, physical_namespace_projection_map, recovered_digest_from_row_sum,
-    verify_sealed_copy_generation,
+    AbandonedRowSpill, GraphRowDigestSum, MAX_ROW_SPILL_OWNER_RECEIPT_BYTES,
+    ROW_SPILL_OWNER_RECEIPT_FILE, ROW_SPILL_PREFIX, physical_namespace_projection_map,
+    recovered_digest_from_row_sum, row_spill_owner, verify_sealed_copy_generation,
 };
 use crate::lease::GenerationLocator;
 use crate::location::PersistentGraphStoreState;
@@ -114,7 +118,7 @@ pub(crate) fn open_direct_sealed_generation(
         sealed_generation_directory(&sealed_store_root(database_path), &physical_namespace);
     let receipt_path = directory.join(SEALED_STORE_RECEIPT_FILE);
     let sealed_path = directory.join(SEALED_STORE_DATABASE_FILE);
-    let receipt_bytes = match std::fs::read(&receipt_path) {
+    let receipt_bytes = match read_sealed_receipt_bytes(&receipt_path) {
         Ok(bytes) => bytes,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(sealed_store_io_failure("receipt read failed", error)),
@@ -209,8 +213,28 @@ pub(crate) fn open_direct_sealed_generation(
 const SEALED_COPY_GUARD_CHUNK_ROWS: usize = 4096;
 
 const SEALED_STORE_RECEIPT_VERSION: u32 = 1;
+/// A proof marker contains one canonical recovered digest, never a payload.
+const MAX_SEALED_CHECK_BYTES: usize = 256;
+/// Identity metadata, never an unbounded content read.
+const MAX_SEALED_RECEIPT_BYTES: usize = 64 * 1024;
+
+fn read_sealed_receipt_bytes(path: &Path) -> std::io::Result<Vec<u8>> {
+    // The shared reader opens without following a final symlink, rejects FIFOs
+    // and other nonregular files, and checks size against the same held handle.
+    match tracedecay_private_fs::framed_log::read_bounded(path, MAX_SEALED_RECEIPT_BYTES)? {
+        Some(bytes) => Ok(bytes),
+        None => Err(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "sealed generation receipt is missing",
+        )),
+    }
+}
+
 pub(crate) const SEALED_STORE_DATABASE_FILE: &str = "generation.grafeo";
 const SEALED_STORE_RECEIPT_FILE: &str = "sealed.json";
+/// Small, generation-bound deletion authority persisted before any staged rows.
+/// Unlike sealed.json, this is never evidence that a container is complete.
+const SEALED_STAGING_OWNER_FILE: &str = ".sealed-staging-owner-v1";
 /// Digest recorded only after a successful post-reopen proof. A `sealed.json`
 /// written before that proof is not release authority.
 const SEALED_STORE_CHECKED_FILE: &str = "sealed.checked";
@@ -254,6 +278,14 @@ struct SealedStoreReceiptV1 {
     /// layering over it names without opening its container.
     source_generation: Option<String>,
     watermark: Option<String>,
+}
+
+/// An incomplete sealed container belongs to one producer incarnation.
+/// A remount in that process must not reclaim its in-flight row stream.
+#[derive(Debug, Deserialize, Serialize)]
+struct SealedStagingOwnerV1 {
+    producer: String,
+    receipt: SealedStoreReceiptV1,
 }
 
 impl SealedStoreReceiptV1 {
@@ -379,13 +411,27 @@ impl SealedGenerationStore {
     }
 
     pub(crate) fn close(&self) -> Result<(), GraphDbError> {
-        let mut result = Ok(());
+        // Closing the same derived reader twice is harmless. A durability
+        // failure is not: preserve the first real close failure even when a
+        // later layered-base reader was already closed.
+        let mut failure = None;
         for database in self.engines() {
-            if let Err(error) = database.close() {
-                result = Err(error);
+            match database.close() {
+                Ok(()) | Err(GraphDbError::Closed) => {}
+                Err(error) => {
+                    failure.get_or_insert(error);
+                }
+            }
+            // An earlier failed engine.close() may have consumed its handle
+            // and set Closed on the next attempt. Closed is idempotent only
+            // when the underlying reader is not poisoned.
+            if database.inner.poisoned.load(AtomicOrdering::Acquire) {
+                failure.get_or_insert_with(|| GraphDbError::DurabilityUncertain {
+                    message: "sealed reader physical close remains uncertain".to_owned(),
+                });
             }
         }
-        result
+        failure.map_or(Ok(()), Err)
     }
 
     pub(crate) fn hibernate_if_lazy(&self) -> Result<(), GraphDbError> {
@@ -478,8 +524,14 @@ impl SealedGenerationStore {
     /// unlink. A failed unlink remains a typed error for the durable cleanup
     /// owner to retry; a sealed-only live head never enters this path.
     fn discard(&self) -> Result<(), GraphDbError> {
-        let _ = self.close();
-        remove_sealed_directory_checked(&self.directory)
+        // An unconfirmed physical close cannot authorize unlinking the only
+        // durable sealed copy. Leave its receipt for a later retirement retry.
+        self.close()?;
+        retire_sealed_directory_checked(
+            &self.directory,
+            &self.locator,
+            Some(&self.recovered_digest),
+        )
     }
 }
 
@@ -523,11 +575,12 @@ pub struct SealedStoreCensusV1 {
     /// retirement has not run since the last publication.
     pub superseded_count: u64,
     pub superseded_bytes: u64,
-    /// `.staging-*` directories left by seals that never installed.
+    /// Receipt-verified `.staging-*` directories belonging to earlier producer
+    /// incarnations; current or unproven staging cannot be called abandoned.
     pub abandoned_staging_count: u64,
     pub abandoned_staging_bytes: u64,
-    /// Entries that are neither a readable sealed receipt nor staging: an
-    /// unrecognized layout is reported, never silently classed as dead.
+    /// Unrecognized or unproven entries (including live staging) are reported
+    /// without walking their contents or claiming that they can be reclaimed.
     pub unrecognized_count: u64,
 }
 
@@ -537,96 +590,99 @@ pub struct SealedStoreCensusV1 {
 /// Metadata only: every entry is one receipt read plus a directory size walk,
 /// never a container open. An unreadable receipt counts as unrecognized so the
 /// census stays truthful when a receipt is mid-write or corrupt.
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+enum SealedCensusEntry {
+    Head,
+    Superseded,
+    AbandonedStaging,
+    Unrecognized,
+}
+
 pub fn census_sealed_store(
     database_path: &Path,
     head_generations: &std::collections::BTreeSet<(GraphProjectionIdentity, GraphGenerationId)>,
 ) -> std::io::Result<SealedStoreCensusV1> {
     let root = sealed_store_root(database_path);
-    let entries = match std::fs::read_dir(&root) {
-        Ok(entries) => entries,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return Ok(SealedStoreCensusV1::default());
-        }
-        Err(error) => return Err(error),
-    };
+    let current_producer = row_spill_owner().to_string();
+    let totals = tracedecay_private_fs::capability_dir::census_receipted_directory_bytes(
+        &root,
+        SealedCensusEntry::Unrecognized,
+        |name| {
+            if name.to_str().is_some_and(sealed_staging_name) {
+                (SEALED_STAGING_OWNER_FILE, MAX_SEALED_RECEIPT_BYTES)
+            } else {
+                (SEALED_STORE_RECEIPT_FILE, MAX_SEALED_RECEIPT_BYTES)
+            }
+        },
+        |name, bytes| {
+            let Some(bytes) = bytes else {
+                return SealedCensusEntry::Unrecognized;
+            };
+            if name.to_str().is_some_and(sealed_staging_name) {
+                return if verified_staging_receipt(name, bytes)
+                    .is_some_and(|owner| owner.producer != current_producer)
+                {
+                    SealedCensusEntry::AbandonedStaging
+                } else {
+                    SealedCensusEntry::Unrecognized
+                };
+            }
+            let Some(name) = name.to_str() else {
+                return SealedCensusEntry::Unrecognized;
+            };
+            let Ok(receipt) = serde_json::from_slice::<SealedStoreReceiptV1>(bytes) else {
+                return SealedCensusEntry::Unrecognized;
+            };
+            let form_valid = match receipt.form.as_str() {
+                SEALED_STORE_FORM_COMPACT => receipt.base.is_none(),
+                SEALED_STORE_FORM_LAYERED => receipt.base.is_some(),
+                _ => false,
+            };
+            if !form_valid
+                || receipt.version != SEALED_STORE_RECEIPT_VERSION
+                || receipt.graph_format == 0
+                || receipt.graph_format > GraphFormatVersion::current().get()
+                || receipt.recovered_digest.is_empty()
+                || !sealed_receipt_matches_generation_entry(&receipt, name)
+            {
+                return SealedCensusEntry::Unrecognized;
+            }
+            let (Ok(namespace), Ok(projection), Ok(generation)) = (
+                GraphNamespace::new(receipt.namespace),
+                GraphProjectionId::new(receipt.projection),
+                GraphGenerationId::new(receipt.generation),
+            ) else {
+                return SealedCensusEntry::Unrecognized;
+            };
+            if head_generations.contains(&(
+                GraphProjectionIdentity::new(namespace, projection),
+                generation,
+            )) {
+                SealedCensusEntry::Head
+            } else {
+                SealedCensusEntry::Superseded
+            }
+        },
+    )?;
     let mut census = SealedStoreCensusV1::default();
-    let mut counted = std::collections::HashSet::new();
-    for entry in entries {
-        let entry = entry?;
-        if !entry.file_type()?.is_dir() {
-            census.unrecognized_count += 1;
-            continue;
-        }
-        let path = entry.path();
-        let bytes = directory_bytes(&path, &mut counted)?;
-        let name = entry.file_name();
-        if name
-            .to_str()
-            .is_some_and(|name| name.starts_with(".staging-"))
-        {
-            census.abandoned_staging_count += 1;
-            census.abandoned_staging_bytes += bytes;
-            continue;
-        }
-        let receipt = std::fs::read(path.join(SEALED_STORE_RECEIPT_FILE))
-            .ok()
-            .and_then(|bytes| serde_json::from_slice::<SealedStoreReceiptV1>(&bytes).ok());
-        let Some(receipt) = receipt else {
-            census.unrecognized_count += 1;
-            continue;
-        };
-        let (Ok(namespace), Ok(projection), Ok(generation)) = (
-            GraphNamespace::new(receipt.namespace),
-            GraphProjectionId::new(receipt.projection),
-            GraphGenerationId::new(receipt.generation),
-        ) else {
-            census.unrecognized_count += 1;
-            continue;
-        };
-        if head_generations.contains(&(
-            GraphProjectionIdentity::new(namespace, projection),
-            generation,
-        )) {
-            census.head_count += 1;
-            census.head_bytes += bytes;
-        } else {
-            census.superseded_count += 1;
-            census.superseded_bytes += bytes;
+    for (kind, (count, bytes)) in totals {
+        match kind {
+            SealedCensusEntry::Head => {
+                census.head_count = count;
+                census.head_bytes = bytes;
+            }
+            SealedCensusEntry::Superseded => {
+                census.superseded_count = count;
+                census.superseded_bytes = bytes;
+            }
+            SealedCensusEntry::AbandonedStaging => {
+                census.abandoned_staging_count = count;
+                census.abandoned_staging_bytes = bytes;
+            }
+            SealedCensusEntry::Unrecognized => census.unrecognized_count = count,
         }
     }
     Ok(census)
-}
-
-/// Bytes under `directory` not already counted in `counted`: a layered
-/// generation's base container is a hard link to bytes another directory
-/// already holds, so each file is charged once per census.
-fn directory_bytes(
-    directory: &Path,
-    counted: &mut std::collections::HashSet<(u64, u64)>,
-) -> std::io::Result<u64> {
-    let mut total = 0u64;
-    let mut pending = vec![directory.to_path_buf()];
-    while let Some(directory) = pending.pop() {
-        for entry in std::fs::read_dir(&directory)? {
-            let entry = entry?;
-            let metadata = entry.metadata()?;
-            if metadata.is_dir() {
-                pending.push(entry.path());
-                continue;
-            }
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::MetadataExt;
-                if metadata.nlink() > 1 && !counted.insert((metadata.dev(), metadata.ino())) {
-                    continue;
-                }
-            }
-            #[cfg(not(unix))]
-            let _ = &counted;
-            total = total.saturating_add(metadata.len());
-        }
-    }
-    Ok(total)
 }
 
 /// Removes every sealed generation beside `database_path` whose receipt does
@@ -637,100 +693,206 @@ pub(crate) fn discard_superseded_sealed_generations(
     database_path: &Path,
 ) -> Result<(), GraphDbError> {
     let root = sealed_store_root(database_path);
-    let entries = match std::fs::read_dir(&root) {
-        Ok(entries) => entries,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(error) => return Err(sealed_store_io_failure("sealed root read failed", error)),
-    };
-    for entry in entries {
-        let entry =
-            entry.map_err(|error| sealed_store_io_failure("sealed root read failed", error))?;
-        let path = entry.path();
-        if entry
-            .file_name()
-            .to_str()
-            .is_some_and(|name| name.starts_with(".staging-"))
-        {
-            continue;
-        }
-        let current = load_sealed_store_receipt(&path)
-            .ok()
-            .flatten()
-            .is_some_and(|receipt| receipt.graph_format == GraphFormatVersion::current().get());
-        if !current {
-            match std::fs::remove_dir_all(&path) {
-                Ok(()) => {}
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                Err(error) => {
-                    return Err(sealed_store_io_failure(
-                        "superseded sealed generation removal failed",
-                        error,
-                    ));
-                }
+    let reclaimed = tracedecay_private_fs::capability_dir::remove_receipted_directories_nofollow(
+        &root,
+        std::ffi::OsStr::new(SEALED_STORE_RECEIPT_FILE),
+        MAX_SEALED_RECEIPT_BYTES,
+        |name, bytes| {
+            let Some(name) = name.to_str() else {
+                return false;
+            };
+            if name.len() != 64 || !name.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+                return false;
             }
-        }
+            let Ok(receipt) = serde_json::from_slice::<SealedStoreReceiptV1>(bytes) else {
+                return false;
+            };
+            let recognized_form = match receipt.form.as_str() {
+                SEALED_STORE_FORM_COMPACT => receipt.base.is_none(),
+                SEALED_STORE_FORM_LAYERED => receipt.base.is_some(),
+                _ => false,
+            };
+            recognized_form
+                && receipt.version == SEALED_STORE_RECEIPT_VERSION
+                && sealed_receipt_matches_generation_entry(&receipt, name)
+                && !receipt.recovered_digest.is_empty()
+                && receipt.graph_format > 0
+                && receipt.graph_format < GraphFormatVersion::current().get()
+        },
+    );
+    match reclaimed {
+        Ok(_) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(sealed_store_io_failure(
+            "superseded sealed generation removal failed",
+            error,
+        )),
     }
-    Ok(())
 }
 
-/// Removes every `.staging-*` directory a seal left behind under the store's
-/// sealed root.
-///
-/// A seal builds into `.staging-<digest>` and installs by rename, so a staging
-/// directory that survives to the next open of the same store belongs to a
-/// build the process never finished, a crash, a kill, or an OOM between
-/// container write and rename. Nothing reads it and the next seal of that
-/// generation starts over, so on the live profile these accumulated to 7.4 GB
-/// under one store. Run at open: the exclusive store lock means no seal of
-/// this store is in flight.
-pub(crate) fn sweep_abandoned_sealed_staging(database_path: &Path) {
-    let root = sealed_store_root(database_path);
-    let entries = match std::fs::read_dir(&root) {
-        Ok(entries) => entries,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return,
-        Err(error) => {
-            tracing::warn!(
-                event = "sealed_staging_sweep_unreadable",
-                root = %root.display(),
-                error = %error,
-                "sealed store root could not be enumerated; abandoned staging stays"
-            );
-            return;
-        }
+/// A physical generation entry is deletable only if the receipt's logical
+/// locator derives that exact entry name. A copied receipt with a fabricated
+/// physical namespace is not evidence of ownership.
+fn sealed_receipt_matches_generation_entry(
+    receipt: &SealedStoreReceiptV1,
+    generation_hex: &str,
+) -> bool {
+    let (Ok(namespace), Ok(projection), Ok(generation)) = (
+        GraphNamespace::new(receipt.namespace.clone()),
+        GraphProjectionId::new(receipt.projection.clone()),
+        crate::GraphGenerationId::new(receipt.generation.clone()),
+    ) else {
+        return false;
     };
-    let mut removed = 0usize;
-    for entry in entries.flatten() {
-        let name = entry.file_name();
-        let Some(name) = name.to_str() else {
-            continue;
-        };
-        if !name.starts_with(".staging-") {
-            continue;
-        }
-        let path = entry.path();
-        match std::fs::remove_dir_all(&path) {
-            Ok(()) => removed += 1,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => tracing::warn!(
-                event = "sealed_staging_sweep_failed",
-                path = %path.display(),
-                error = %error,
-                "abandoned sealed staging directory could not be removed"
-            ),
-        }
+    let locator = GenerationLocator::new(
+        GraphProjectionIdentity::new(namespace, projection),
+        generation,
+    );
+    locator.physical_namespace().is_ok_and(|physical| {
+        physical.as_str() == receipt.physical_namespace
+            && receipt.physical_namespace == format!("generation:{generation_hex}")
+    })
+}
+
+fn sealed_staging_name(name: &str) -> bool {
+    name.strip_prefix(".staging-").is_some_and(|suffix| {
+        suffix.len() == 64
+            && suffix
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    })
+}
+
+fn initial_sealed_staging_owner(
+    identity: &GraphGenerationManifestIdentity,
+    expected: &GraphRecoveredGenerationDigestV1,
+    physical_namespace: &str,
+) -> SealedStoreReceiptV1 {
+    // This receipt authorizes only abandoned-staging cleanup, never serving.
+    // The completed container receives a separate sealed.json after writing.
+    SealedStoreReceiptV1 {
+        version: SEALED_STORE_RECEIPT_VERSION,
+        form: SEALED_STORE_FORM_COMPACT.to_owned(),
+        namespace: identity.projection.namespace.as_str().to_owned(),
+        projection: identity.projection.projection.as_str().to_owned(),
+        generation: identity.generation.as_str().to_owned(),
+        physical_namespace: physical_namespace.to_owned(),
+        recovered_digest: expected.as_str().to_owned(),
+        entities: 0,
+        relations: 0,
+        graph_format: GraphFormatVersion::current().get(),
+        row_sum: None,
+        base: None,
+        source_generation: None,
+        watermark: None,
     }
-    if removed > 0 {
-        tracing::info!(
-            event = "sealed_staging_swept",
-            root = %root.display(),
-            removed,
-            "removed abandoned sealed staging directories left by interrupted seals"
+}
+
+fn verified_staging_receipt(name: &std::ffi::OsStr, bytes: &[u8]) -> Option<SealedStagingOwnerV1> {
+    let name = name.to_str()?;
+    if !sealed_staging_name(name) {
+        return None;
+    }
+    let generation_hex = name.strip_prefix(".staging-")?;
+    let owner = serde_json::from_slice::<SealedStagingOwnerV1>(bytes).ok()?;
+    let instance = owner.producer.parse::<u128>().ok()?;
+    if instance.to_string() != owner.producer {
+        return None;
+    }
+    let receipt = &owner.receipt;
+    let recognized_form = match receipt.form.as_str() {
+        SEALED_STORE_FORM_COMPACT => receipt.base.is_none(),
+        SEALED_STORE_FORM_LAYERED => receipt.base.is_some(),
+        _ => false,
+    };
+    (recognized_form
+        && receipt.version == SEALED_STORE_RECEIPT_VERSION
+        && receipt.graph_format > 0
+        && receipt.graph_format <= GraphFormatVersion::current().get()
+        && sealed_receipt_matches_generation_entry(receipt, generation_hex)
+        && !receipt.recovered_digest.is_empty())
+    .then_some(owner)
+}
+
+/// A failed builder must never recursively delete a substituted directory
+/// merely because its pathname is the deterministic staging name. Only the
+/// producer-bound early marker authorizes cleanup, including after sealed.json
+/// publication and before installation.
+fn discard_failed_sealed_staging(
+    staging: &Path,
+    locator: &GenerationLocator,
+    expected_digest: &str,
+) {
+    let Some((root, name)) = staging.parent().zip(staging.file_name()) else {
+        return;
+    };
+    let result = tracedecay_private_fs::capability_dir::remove_receipted_child_directory_nofollow(
+        root,
+        name,
+        std::ffi::OsStr::new(SEALED_STAGING_OWNER_FILE),
+        MAX_SEALED_RECEIPT_BYTES,
+        |bytes| {
+            verified_staging_receipt(name, bytes).is_some_and(|owner| {
+                let receipt = &owner.receipt;
+                owner.producer == row_spill_owner().to_string()
+                    && receipt.namespace == locator.projection.namespace.as_str()
+                    && receipt.projection == locator.projection.projection.as_str()
+                    && receipt.generation == locator.generation.as_str()
+                    && receipt.recovered_digest == expected_digest
+            })
+        },
+    );
+    if !matches!(&result, Ok(true)) {
+        tracing::warn!(
+            event = "sealed_staging_cleanup_deferred",
+            path = %staging.display(),
+            ?result,
+            "unverified staging preserved instead of deleting an unknown directory"
         );
     }
 }
 
-/// Prefix of a batch producer's row spill under the sealed root.
-const ROW_SPILL_PREFIX: &str = ".rows-";
+/// Reclaims interrupted seals only when the bounded receipt from the same
+/// opened staging directory proves its exact generation identity. The staging
+/// filename alone is not deletion authority: a missing, malformed, oversized,
+/// or foreign receipt leaves the directory intact for inspection.
+///
+/// Store open owns exclusive maintenance admission. Capability-relative
+/// traversal holds the root and child across verification and recursive removal,
+/// so a pathname replacement cannot redirect deletion into a different tree.
+pub(crate) fn sweep_abandoned_sealed_staging(database_path: &Path) {
+    let root = sealed_store_root(database_path);
+    // Every new sealed build writes this marker before rows and retains it
+    // through installation. The final sealed.json is not a separate cleanup
+    // authority: it cannot identify whether a concurrent build is still live.
+    let reclaimed =
+        tracedecay_private_fs::capability_dir::remove_matching_receipted_directories_nofollow(
+            &root,
+            std::ffi::OsStr::new(SEALED_STAGING_OWNER_FILE),
+            MAX_SEALED_RECEIPT_BYTES,
+            |name| name.to_str().is_some_and(sealed_staging_name),
+            |name, bytes| {
+                verified_staging_receipt(name, bytes)
+                    .is_some_and(|owner| owner.producer != row_spill_owner().to_string())
+            },
+        );
+    match reclaimed {
+        Ok(removed) if removed > 0 => tracing::info!(
+            event = "sealed_staging_swept",
+            root = %root.display(),
+            removed,
+            "removed receipt-verified staging from exited producers"
+        ),
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => tracing::warn!(
+            event = "sealed_staging_sweep_failed",
+            root = %root.display(),
+            %error,
+            "unverified abandoned staging stays for inspection"
+        ),
+    }
+}
 
 /// Removes every row spill another process left under the store's sealed
 /// root. Run at the eager open, whose exclusive store lock means no other
@@ -739,52 +901,113 @@ const ROW_SPILL_PREFIX: &str = ".rows-";
 /// whose spill removes itself when it drops.
 pub(crate) fn sweep_abandoned_row_spills(database_path: &Path) {
     let root = sealed_store_root(database_path);
-    let Ok(entries) = std::fs::read_dir(&root) else {
-        return;
-    };
-    let own = format!("{ROW_SPILL_PREFIX}{}-", std::process::id());
-    for entry in entries.flatten() {
-        if entry
-            .file_name()
-            .to_str()
-            .is_some_and(|name| name.starts_with(ROW_SPILL_PREFIX) && !name.starts_with(&own))
-        {
-            let path = entry.path();
-            if let Err(error) = std::fs::remove_dir_all(&path)
-                && error.kind() != std::io::ErrorKind::NotFound
-            {
-                tracing::warn!(
-                    event = "graph_row_spill_sweep_failed",
-                    path = %path.display(),
-                    error = %error,
-                    "abandoned graph row spill could not be removed"
-                );
-            }
-        }
+    let current_owner = row_spill_owner();
+    // Enumerate, verify and unlink through one held sealed-root capability:
+    // a root rename between discovery and cleanup must not redirect deletion.
+    let result =
+        tracedecay_private_fs::capability_dir::remove_matching_receipted_directories_nofollow(
+            &root,
+            std::ffi::OsStr::new(ROW_SPILL_OWNER_RECEIPT_FILE),
+            MAX_ROW_SPILL_OWNER_RECEIPT_BYTES,
+            |name| AbandonedRowSpill::from_name(name, current_owner).is_some(),
+            |name, receipt| {
+                AbandonedRowSpill::from_name(name, current_owner)
+                    .is_some_and(|proof| proof.owns(receipt))
+            },
+        );
+    match result {
+        Ok(removed) if removed > 0 => tracing::info!(
+            event = "graph_row_spill_swept",
+            root = %root.display(),
+            removed,
+            "reclaimed receipt-verified abandoned graph row spills"
+        ),
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => tracing::warn!(
+            event = "graph_row_spill_sweep_failed",
+            root = %root.display(),
+            %error,
+            "unverified abandoned graph row spills preserved for inspection"
+        ),
     }
 }
 
-fn remove_sealed_directory_checked(directory: &Path) -> Result<(), GraphDbError> {
-    match std::fs::remove_dir_all(directory) {
-        Ok(()) => Ok(()),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(sealed_store_io_failure(
-            "sealed directory removal failed",
-            error,
-        )),
+/// Accepted replay retirement is not permission to recursively delete a
+/// substituted or unrecognizable artifact. Require the exact durable identity
+/// under a held child capability; preserve an unverified directory for retry.
+fn retire_sealed_directory_checked(
+    directory: &Path,
+    locator: &GenerationLocator,
+    expected_digest: Option<&str>,
+) -> Result<(), GraphDbError> {
+    let physical = locator.physical_namespace()?;
+    let root = directory
+        .parent()
+        .ok_or_else(|| GraphDbError::unavailable("sealed retirement directory has no parent"))?;
+    if sealed_generation_directory(root, &physical) != directory {
+        return Err(GraphDbError::unavailable(
+            "sealed retirement directory does not match generation identity",
+        ));
     }
+    let name = directory.file_name().ok_or_else(|| {
+        GraphDbError::unavailable("sealed retirement directory has no entry name")
+    })?;
+    let result = tracedecay_private_fs::capability_dir::remove_receipted_child_directory_nofollow(
+        root,
+        name,
+        std::ffi::OsStr::new(SEALED_STORE_RECEIPT_FILE),
+        MAX_SEALED_RECEIPT_BYTES,
+        |bytes| {
+            let Ok(receipt) = serde_json::from_slice::<SealedStoreReceiptV1>(bytes) else {
+                return false;
+            };
+            let form_valid = match receipt.form.as_str() {
+                SEALED_STORE_FORM_COMPACT => receipt.base.is_none(),
+                SEALED_STORE_FORM_LAYERED => receipt.base.is_some(),
+                _ => false,
+            };
+            form_valid
+                && receipt.version == SEALED_STORE_RECEIPT_VERSION
+                && receipt.graph_format > 0
+                && receipt.graph_format <= GraphFormatVersion::current().get()
+                && receipt.physical_namespace == physical.as_str()
+                && receipt.namespace == locator.projection.namespace.as_str()
+                && receipt.projection == locator.projection.projection.as_str()
+                && receipt.generation == locator.generation.as_str()
+                && expected_digest.is_none_or(|digest| receipt.recovered_digest == digest)
+        },
+    );
+    let removed = result
+        .map_err(|error| sealed_store_io_failure("sealed generation retirement refused", error))?;
+    // A resident reader carries exact proof that this artifact was installed.
+    // If its root or child disappeared before we acquired a deletion capability,
+    // physical retirement was not confirmed: the directory may have been moved
+    // aside and still contain the sole durable generation. Keep the reader
+    // registered so maintenance can retry rather than mark it collected.
+    if !removed && expected_digest.is_some() {
+        return Err(GraphDbError::unavailable(
+            "registered sealed generation retirement found no owned artifact",
+        ));
+    }
+    Ok(())
 }
 
 /// Staging and invalid-artifact cleanup are best effort. Retiring an accepted
 /// replay instead uses the checked path, so a failed unlink cannot be reported
 /// as a completed retirement and lose its durable retry ownership.
-fn remove_sealed_directory(directory: &Path) {
-    if let Err(error) = remove_sealed_directory_checked(directory) {
+/// Best-effort disposal after failed adoption/reopen. Only an exact durable
+/// generation receipt authorizes removal; foreign bytes remain for diagnosis.
+fn discard_failed_sealed_adoption(
+    directory: &Path,
+    locator: &GenerationLocator,
+    expected_digest: &str,
+) {
+    if let Err(error) = retire_sealed_directory_checked(directory, locator, Some(expected_digest)) {
         tracing::warn!(
-            event = "sealed_artifact_cleanup_deferred",
-            path = %directory.display(),
             %error,
-            "sealed artifact cleanup did not complete"
+            path = %directory.display(),
+            "failed sealed adoption left an unverified artifact for inspection"
         );
     }
 }
@@ -841,10 +1064,14 @@ struct PreparedSealedRelation {
 
 impl SealedCompactRows {
     /// Spools pushed column values to an anonymous file in `staging`, so
-    /// the build holds the row topology rather than every value.
-    fn new(staging: &Path) -> Result<Self, GraphDbError> {
-        let spool = tempfile::tempfile_in(staging)
-            .map_err(|error| sealed_store_io_failure("column spool", error))?;
+    /// the build holds the row topology rather than every value. The spool is
+    /// created and unlinked through the held directory, so a replaced staging
+    /// pathname cannot place it in a foreign tree.
+    fn new(staging: &HeldDirectory) -> Result<Self, GraphDbError> {
+        let spool = staging
+            .anonymous_file()
+            .map_err(|error| sealed_store_io_failure("column spool", error))?
+            .into_std();
         Ok(Self {
             builder: IncrementalCompactStoreBuilder::spooling_to(spool),
             next_node: 0,
@@ -1371,7 +1598,7 @@ impl GraphDb {
             .map_err(|error| sealed_store_io_failure("row spill root create failed", error))?;
         Ok(root.join(format!(
             "{ROW_SPILL_PREFIX}{}-{}",
-            std::process::id(),
+            row_spill_owner(),
             NEXT_SPILL.fetch_add(1, AtomicOrdering::Relaxed)
         )))
     }
@@ -1571,10 +1798,16 @@ impl GraphDb {
             Ok(Some(store)) => self.install_sealed_generation_store(locator, store),
             Ok(None) => Ok(()),
             Err(error @ (GraphDbError::Cancelled | GraphDbError::DeadlineExceeded)) => Err(error),
-            Err(_) => {
-                // A stale or corrupt artifact never outranks the verified
-                // staging rows; discard it so a later seal can rebuild.
-                remove_sealed_directory(&directory);
+            Err(error) => {
+                // A failed adoption does not prove this directory belongs to
+                // the generation. Preserve unknown bytes rather than removing
+                // an occupied path without a matching durable receipt.
+                discard_failed_sealed_adoption(&directory, &locator, expected.as_str());
+                tracing::warn!(
+                    %error,
+                    path = %directory.display(),
+                    "sealed adoption failed; serving falls back to staging rows"
+                );
                 Ok(())
             }
         }
@@ -1694,18 +1927,33 @@ impl GraphDb {
         &self,
         locator: &GenerationLocator,
     ) -> Result<(), GraphDbError> {
-        let removed = self
+        let registered = self
             .inner
             .sealed_generations
-            .write()
+            .read()
             .map_err(|_| GraphDbError::unavailable("sealed generation registry lock poisoned"))?
-            .remove(locator);
-        if let Some(store) = removed {
-            return store.discard();
+            .get(locator)
+            .cloned();
+        if let Some(store) = registered {
+            // Keep the registered reader until its physical close AND sealed
+            // directory removal both succeed. A failed close may consume the
+            // native handle; dropping the registry entry would let the next
+            // tick take the disk-only path and unlink uncertain bytes.
+            store.discard()?;
+            let mut sealed = self.inner.sealed_generations.write().map_err(|_| {
+                GraphDbError::unavailable("sealed generation registry lock poisoned")
+            })?;
+            if sealed
+                .get(locator)
+                .is_some_and(|current| Arc::ptr_eq(current, &store))
+            {
+                sealed.remove(locator);
+            }
+            return Ok(());
         }
-        // A removed in-memory reader is not necessary for the artifact to
-        // exist on disk. Unlink by exact locator even after a prior failed
-        // retirement; a durable tombstone can then retry without the reader.
+        // The artifact may exist on disk without a resident reader, for
+        // example after reopening a store before generation activation.
+        // Only receipt-verified, exact-locator disk cleanup is authorized.
         let Some(reopen) = self.inner.reopen.as_ref() else {
             return Ok(());
         };
@@ -1714,7 +1962,11 @@ impl GraphDb {
         };
         let physical_namespace = locator.physical_namespace()?;
         let root = sealed_store_root(database_path);
-        remove_sealed_directory_checked(&sealed_generation_directory(&root, &physical_namespace))
+        retire_sealed_directory_checked(
+            &sealed_generation_directory(&root, &physical_namespace),
+            locator,
+            None,
+        )
     }
 }
 
@@ -1760,14 +2012,26 @@ pub(crate) enum SealedRowSource<'a> {
 /// Returns whether this writer installed a new sealed segment. A losing
 /// concurrent writer can adopt the winner only after the caller reopens and
 /// verifies its digest; existence alone is not a new durable write.
-fn install_staged_sealed_store(staging: &Path, directory: &Path) -> Result<bool, GraphDbError> {
-    match std::fs::rename(staging, directory) {
+fn install_staged_sealed_store(
+    staging: &HeldDirectory,
+    root: &Path,
+    staging_name: &std::ffi::OsStr,
+    artifact_name: &std::ffi::OsStr,
+    locator: &GenerationLocator,
+    expected_digest: &str,
+) -> Result<bool, GraphDbError> {
+    let staging_path = root.join(staging_name);
+    let directory = root.join(artifact_name);
+    match install_held_child_directory_noreplace(root, staging, staging_name, artifact_name) {
         Ok(()) => Ok(true),
         Err(error) => {
-            remove_sealed_directory(staging);
-            if directory.exists() {
-                // A winner may have installed the same generation. The
-                // caller still requires a full identity/digest reopen proof.
+            discard_failed_sealed_staging(&staging_path, locator, expected_digest);
+            if error.kind() == std::io::ErrorKind::AlreadyExists && directory.exists() {
+                // Only an occupied destination is a concurrent-writer
+                // collision. An identity mismatch, including one detected
+                // after the rename, must never be reclassified as adoption.
+                // The caller still requires a full identity/digest reopen
+                // proof for a genuine collision.
                 Ok(false)
             } else {
                 Err(sealed_store_io_failure("artifact install failed", error))
@@ -1817,6 +2081,7 @@ fn build_or_open_sealed_store_with_work(
     // Idempotent replay: an artifact from an earlier seal of this exact
     // generation is adopted if its receipt binds the same digest. Adoption
     // never enumerates `source`'s rows, so it yields no staging proof.
+    let locator = GenerationLocator::new(identity.projection.clone(), identity.generation.clone());
     match open_sealed_store_checked(
         &directory,
         identity,
@@ -1825,33 +2090,93 @@ fn build_or_open_sealed_store_with_work(
         trusted_base.as_ref(),
     ) {
         Ok(Some(store)) => return Ok((store, None)),
-        Ok(None) => {}
-        Err(_) => remove_sealed_directory(&directory),
+        Ok(None) => match std::fs::symlink_metadata(&directory) {
+            Ok(_) => {
+                return Err(GraphDbError::unavailable(
+                    "unverified sealed generation occupies the artifact directory",
+                ));
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(sealed_store_io_failure(
+                    "sealed artifact metadata read failed",
+                    error,
+                ));
+            }
+        },
+        Err(GraphDbError::Cancelled) => return Err(GraphDbError::Cancelled),
+        Err(_) => {
+            // A corrupt owned artifact may be rebuilt, but an unknown receipt
+            // (or a replacement directory) never grants deletion authority.
+            retire_sealed_directory_checked(&directory, &locator, Some(expected.as_str()))?;
+        }
     }
-    if directory.exists() {
-        remove_sealed_directory(&directory);
-    }
-    let staging = root.join(format!(
+    let staging_name = std::ffi::OsString::from(format!(
         ".staging-{}",
         directory
             .file_name()
             .and_then(|name| name.to_str())
             .unwrap_or("sealed")
     ));
-    remove_sealed_directory(&staging);
-    std::fs::create_dir_all(&staging)
+    let staging = root.join(&staging_name);
+    // create_dir_all may accept a symlinked sealed root, so verify the actual
+    // root before creating the staging entry or writing a container.
+    std::fs::create_dir_all(&root)
+        .map_err(|error| sealed_store_io_failure("sealed root create failed", error))?;
+    // create_dir_all accepts symlinked directory components. Refuse a
+    // preexisting substituted sealed root before writing staging bytes.
+    let root_metadata = std::fs::symlink_metadata(&root)
+        .map_err(|error| sealed_store_io_failure("sealed root metadata failed", error))?;
+    if !root_metadata.is_dir() {
+        return Err(GraphDbError::unavailable(
+            "sealed root must be a real directory",
+        ));
+    }
+    let owner = SealedStagingOwnerV1 {
+        producer: row_spill_owner().to_string(),
+        receipt: initial_sealed_staging_owner(identity, expected, physical_namespace.as_str()),
+    };
+    let owner_bytes = serde_json::to_vec(&owner)
+        .map_err(|error| GraphDbError::unavailable(format!("staging owner encode: {error}")))?;
+    // A deterministic staging name is not proof of ownership. An earlier
+    // interrupted build or a foreign directory must not be deleted on retry.
+    // Exclusive creation refuses an occupied name, and every byte below is
+    // written through the held handle or the path it resolves to, so replacing
+    // the staging name cannot redirect a producer write into a foreign tree.
+    let staging_directory = HeldDirectory::create_exclusive(&root, &staging_name)
         .map_err(|error| sealed_store_io_failure("staging directory create failed", error))?;
-    let receipt = stage_sealed_artifact(rows, identity, expected, &staging, check, observe)
-        .inspect_err(|_| remove_sealed_directory(&staging))?;
+    // Exclusive creation refuses a pre-existing marker. Flush before writing
+    // rows so a killed producer leaves verifiable deletion authority.
+    let staging_directory = staging_directory
+        .write_initial_receipt(
+            std::ffi::OsStr::new(SEALED_STAGING_OWNER_FILE),
+            &owner_bytes,
+        )
+        .map_err(|error| sealed_store_io_failure("staging owner persist failed", error))?;
+    let receipt =
+        stage_sealed_artifact(rows, identity, expected, &staging_directory, check, observe)
+            .inspect_err(|_| {
+                discard_failed_sealed_staging(&staging, &locator, expected.as_str())
+            })?;
     let encoded = serde_json::to_vec_pretty(&receipt)
-        .map_err(|error| GraphDbError::unavailable(format!("sealed receipt encode: {error}")))?;
-    std::fs::write(staging.join(SEALED_STORE_RECEIPT_FILE), encoded)
-        .inspect_err(|_| remove_sealed_directory(&staging))
-        .map_err(|error| sealed_store_io_failure("receipt write failed", error))?;
-    // The transaction boundary matters to progress: a second writer can
-    // lose the destination race and verify the winner's sealed segment.
-    // Only the writer that installed this directory may report a new write.
-    let installed_here = install_staged_sealed_store(&staging, &directory)?;
+        .map_err(|error| GraphDbError::unavailable(format!("sealed receipt encode: {error}")))
+        .inspect_err(|_| discard_failed_sealed_staging(&staging, &locator, expected.as_str()))?;
+    staging_directory
+        .write_new_file(std::ffi::OsStr::new(SEALED_STORE_RECEIPT_FILE), &encoded)
+        .map_err(|error| sealed_store_io_failure("receipt persist failed", error))
+        .inspect_err(|_| discard_failed_sealed_staging(&staging, &locator, expected.as_str()))?;
+    // Only the writer that installed this directory reports a new durable
+    // segment; losing the race still requires the winner's digest proof.
+    let installed_here = install_staged_sealed_store(
+        &staging_directory,
+        &root,
+        &staging_name,
+        directory
+            .file_name()
+            .ok_or_else(|| GraphDbError::unavailable("sealed artifact name missing"))?,
+        &locator,
+        expected.as_str(),
+    )?;
     let match_result = {
         let _span = tracing::trace_span!("code_index.seal.verify").entered();
         open_sealed_store_checked(
@@ -1893,13 +2218,13 @@ fn build_or_open_sealed_store_with_work(
             Ok((store, staging_proof))
         }
         Ok(None) => {
-            remove_sealed_directory(&directory);
+            discard_failed_sealed_adoption(&directory, &locator, expected.as_str());
             Err(GraphDbError::unavailable(
                 "sealed generation store disappeared between install and reopen".to_owned(),
             ))
         }
         Err(error) => {
-            remove_sealed_directory(&directory);
+            discard_failed_sealed_adoption(&directory, &locator, expected.as_str());
             Err(error)
         }
     }
@@ -1912,7 +2237,7 @@ fn stage_sealed_artifact(
     rows: SealedRowSource<'_>,
     identity: &GraphGenerationManifestIdentity,
     expected: &GraphRecoveredGenerationDigestV1,
-    staging: &Path,
+    staging: &HeldDirectory,
     check: &dyn Fn() -> Result<(), GraphDbError>,
     observe: Option<&dyn Fn(GraphNativeWorkV1)>,
 ) -> Result<SealedStoreReceiptV1, GraphDbError> {
@@ -1950,7 +2275,8 @@ fn stage_sealed_artifact(
                 crate::row_index::ENTITY_ROW_OFFSETS_FILE,
             ),
         ] {
-            std::fs::hard_link(source, staging.join(name))
+            staging
+                .hard_link_from(source, std::ffi::OsStr::new(name))
                 .map_err(|error| sealed_store_io_failure("base file link failed", error))?;
         }
     }
@@ -1991,7 +2317,7 @@ fn stage_sealed_artifact(
 fn build_sealed_container_with_work(
     rows: SealedRowSource<'_>,
     identity: &GraphGenerationManifestIdentity,
-    staging: &Path,
+    staging: &HeldDirectory,
     check: &dyn Fn() -> Result<(), GraphDbError>,
     observe: Option<&dyn Fn(GraphNativeWorkV1)>,
 ) -> Result<(usize, usize), GraphDbError> {
@@ -2099,8 +2425,18 @@ fn build_sealed_container_with_work(
     check()?;
     {
         let _span = tracing::trace_span!("code_index.seal.write").entered();
-        sealed.write_container(&staging.join(SEALED_STORE_DATABASE_FILE))
-    }?;
+        // The container writer takes a pathname. Resolve the held staging
+        // handle to the path of the directory it owns, so a staging name
+        // replaced by a link or a foreign directory cannot redirect the
+        // container into that tree. Linux retains that authority through
+        // /proc/self/fd; macOS and Windows still require a Grafeo open-file
+        // writer to close substitution of the resolved pathname itself.
+        let container_path = staging
+            .path()
+            .map_err(|error| sealed_store_io_failure("container staging path failed", error))?
+            .join(SEALED_STORE_DATABASE_FILE);
+        sealed.write_container(&container_path)?;
+    }
     Ok((entity_count, relation_count))
 }
 
@@ -2581,7 +2917,7 @@ fn load_sealed_store_receipt(
     directory: &Path,
 ) -> Result<Option<SealedStoreReceiptV1>, GraphDbError> {
     let receipt_path = directory.join(SEALED_STORE_RECEIPT_FILE);
-    let receipt_bytes = match std::fs::read(&receipt_path) {
+    let receipt_bytes = match read_sealed_receipt_bytes(&receipt_path) {
         Ok(bytes) => bytes,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(sealed_store_io_failure("receipt read failed", error)),
@@ -2596,9 +2932,12 @@ fn sealed_store_check_matches(
     expected_digest: &str,
 ) -> Result<bool, GraphDbError> {
     let path = directory.join(SEALED_STORE_CHECKED_FILE);
-    match std::fs::read_to_string(&path) {
-        Ok(digest) => Ok(digest == expected_digest),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+    // This is a rebuildable proof hint. Invalid or overlarge bytes cause a
+    // fresh proof, never an unbounded allocation or a trusted cache hit.
+    match tracedecay_private_fs::framed_log::read_bounded(&path, MAX_SEALED_CHECK_BYTES) {
+        Ok(Some(bytes)) => Ok(bytes == expected_digest.as_bytes()),
+        Ok(None) => Ok(false),
+        Err(error) if error.kind() == std::io::ErrorKind::InvalidData => Ok(false),
         Err(error) => Err(sealed_store_io_failure("sealed check read failed", error)),
     }
 }
@@ -2607,8 +2946,14 @@ fn persist_sealed_store_check(directory: &Path, expected_digest: &str) -> Result
     if sealed_store_check_matches(directory, expected_digest)? {
         return Ok(());
     }
-    std::fs::write(directory.join(SEALED_STORE_CHECKED_FILE), expected_digest)
-        .map_err(|error| sealed_store_io_failure("sealed check persist failed", error))
+    // Never truncate an existing symlink target: the marker is a rebuildable
+    // cache, so stage a regular file and publish it by atomic replacement.
+    tracedecay_private_fs::capability_dir::atomic_replace_child_file_nofollow(
+        directory,
+        std::ffi::OsStr::new(SEALED_STORE_CHECKED_FILE),
+        expected_digest.as_bytes(),
+    )
+    .map_err(|error| sealed_store_io_failure("sealed check persist failed", error))
 }
 
 fn open_sealed_store_checked(
@@ -2886,21 +3231,493 @@ pub(crate) fn sealed_copy_proof(
 }
 
 #[cfg(test)]
+mod receipt_budget_tests {
+    #[cfg(unix)]
+    use std::collections::BTreeSet;
+    use std::path::Path;
+
+    use super::*;
+
+    fn receipt(format: u32, name: &str, generation: &str) -> Vec<u8> {
+        serde_json::to_vec(&SealedStoreReceiptV1 {
+            version: SEALED_STORE_RECEIPT_VERSION,
+            form: SEALED_STORE_FORM_COMPACT.to_owned(),
+            namespace: "test".to_owned(),
+            projection: "code".to_owned(),
+            generation: generation.to_owned(),
+            physical_namespace: format!("generation:{name}"),
+            recovered_digest: "digest".to_owned(),
+            entities: 0,
+            relations: 0,
+            graph_format: format,
+            row_sum: None,
+            base: None,
+            source_generation: None,
+            watermark: None,
+        })
+        .unwrap()
+    }
+
+    fn generation(root: &Path, digit: char, contents: &[u8]) -> PathBuf {
+        let directory = root.join(digit.to_string().repeat(64));
+        std::fs::create_dir_all(&directory).unwrap();
+        std::fs::write(directory.join(SEALED_STORE_RECEIPT_FILE), contents).unwrap();
+        directory
+    }
+
+    #[test]
+    fn sealed_receipt_reads_bound_memory_even_for_json_padded_beyond_the_limit() {
+        let temp = tempfile::tempdir().unwrap();
+        let receipt_path = temp.path().join(SEALED_STORE_RECEIPT_FILE);
+        let normal = receipt(GraphFormatVersion::current().get(), &"a".repeat(64), "head");
+        std::fs::write(&receipt_path, &normal).unwrap();
+        assert_eq!(read_sealed_receipt_bytes(&receipt_path).unwrap(), normal);
+
+        let oversized = [normal, vec![b' '; MAX_SEALED_RECEIPT_BYTES]].concat();
+        assert!(serde_json::from_slice::<SealedStoreReceiptV1>(&oversized).is_ok());
+        std::fs::write(&receipt_path, oversized).unwrap();
+        assert_eq!(
+            read_sealed_receipt_bytes(&receipt_path).unwrap_err().kind(),
+            std::io::ErrorKind::InvalidData
+        );
+        // On Unix this is sparse, so the multi-gigabyte bound is exercised
+        // without allocating a multi-gigabyte test artifact.
+        #[cfg(unix)]
+        {
+            std::fs::File::create(&receipt_path)
+                .unwrap()
+                .set_len(15 * 1024 * 1024 * 1024)
+                .unwrap();
+            assert_eq!(
+                read_sealed_receipt_bytes(&receipt_path).unwrap_err().kind(),
+                std::io::ErrorKind::InvalidData
+            );
+        }
+    }
+
+    #[test]
+    fn sealed_check_marker_is_bounded_and_never_overwrites_a_foreign_target() {
+        let temp = tempfile::tempdir().unwrap();
+        let directory = temp.path().join("sealed");
+        std::fs::create_dir(&directory).unwrap();
+        let marker = directory.join(SEALED_STORE_CHECKED_FILE);
+        let digest = format!("sha256:{}", "a".repeat(64));
+
+        assert!(!sealed_store_check_matches(&directory, &digest).unwrap());
+        persist_sealed_store_check(&directory, &digest).unwrap();
+        assert!(sealed_store_check_matches(&directory, &digest).unwrap());
+        assert_eq!(std::fs::read(&marker).unwrap(), digest.as_bytes());
+
+        let mut oversized = digest.as_bytes().to_vec();
+        oversized.extend(vec![b' '; MAX_SEALED_CHECK_BYTES]);
+        std::fs::write(&marker, oversized).unwrap();
+        assert!(!sealed_store_check_matches(&directory, &digest).unwrap());
+        persist_sealed_store_check(&directory, &digest).unwrap();
+        assert!(sealed_store_check_matches(&directory, &digest).unwrap());
+
+        #[cfg(unix)]
+        {
+            // Sparse bytes establish the large-file refusal without writing
+            // or allocating a multi-gigabyte test payload.
+            std::fs::File::create(&marker)
+                .unwrap()
+                .set_len(15 * 1024 * 1024 * 1024)
+                .unwrap();
+            assert!(!sealed_store_check_matches(&directory, &digest).unwrap());
+            persist_sealed_store_check(&directory, &digest).unwrap();
+            assert!(sealed_store_check_matches(&directory, &digest).unwrap());
+
+            let foreign = temp.path().join("foreign");
+            std::fs::remove_file(&marker).unwrap();
+            std::fs::write(&foreign, digest.as_bytes()).unwrap();
+            std::os::unix::fs::symlink(&foreign, &marker).unwrap();
+            assert!(
+                sealed_store_check_matches(&directory, &digest).is_err(),
+                "a symlink cannot supply proof evidence"
+            );
+
+            std::fs::remove_file(&marker).unwrap();
+            std::fs::write(&foreign, b"foreign sentinel").unwrap();
+            std::os::unix::fs::symlink(&foreign, &marker).unwrap();
+            assert!(
+                persist_sealed_store_check(&directory, &digest).is_err(),
+                "publishing a proof marker must refuse a foreign symlink"
+            );
+            assert_eq!(std::fs::read(&foreign).unwrap(), b"foreign sentinel");
+            assert!(
+                std::fs::symlink_metadata(&marker)
+                    .unwrap()
+                    .file_type()
+                    .is_symlink(),
+                "the foreign marker entry itself must survive"
+            );
+        }
+    }
+
+    #[test]
+    fn obsolete_format_cleanup_keeps_unknown_receipts_and_other_files() {
+        let temp = tempfile::tempdir().unwrap();
+        let database = temp.path().join("graph.grafeo");
+        let root = sealed_store_root(&database);
+        std::fs::create_dir_all(&root).unwrap();
+        let current = GraphFormatVersion::current().get();
+        assert!(current > 0);
+        let old_locator = GenerationLocator::new(
+            GraphProjectionIdentity::new(
+                GraphNamespace::new("test").unwrap(),
+                GraphProjectionId::new("code").unwrap(),
+            ),
+            crate::GraphGenerationId::new("generation:obsolete").unwrap(),
+        );
+        let old_physical = old_locator.physical_namespace().unwrap();
+        let old_name = old_physical.as_str().strip_prefix("generation:").unwrap();
+        let old = root.join(old_name);
+        std::fs::create_dir(&old).unwrap();
+        std::fs::write(
+            old.join(SEALED_STORE_RECEIPT_FILE),
+            receipt(current - 1, old_name, "generation:obsolete"),
+        )
+        .unwrap();
+        // A syntactically plausible old receipt with a different logical
+        // generation cannot authorize deletion of this occupied directory.
+        let forged = generation(
+            &root,
+            'a',
+            &receipt(current - 1, &"a".repeat(64), "generation:foreign"),
+        );
+        let live = generation(&root, 'b', &receipt(current, &"b".repeat(64), "live"));
+        let invalid = generation(&root, 'c', b"not a receipt");
+        // Zero is not a valid GraphFormatVersion, even when the JSON is well formed.
+        let zero_format = generation(&root, '0', &receipt(0, &"0".repeat(64), "zero"));
+        let future = generation(
+            &root,
+            'f',
+            &receipt(current.saturating_add(1), &"f".repeat(64), "future"),
+        );
+        let padded = [
+            receipt(current - 1, &"d".repeat(64), "padded"),
+            vec![b' '; MAX_SEALED_RECEIPT_BYTES],
+        ]
+        .concat();
+        let oversized = generation(&root, 'd', &padded);
+        let missing = root.join("e".repeat(64));
+        std::fs::create_dir_all(&missing).unwrap();
+        let unrelated = root.join("unrelated.txt");
+        std::fs::write(&unrelated, b"foreign").unwrap();
+        // A symlink to a syntactically valid old receipt must never confer
+        // deletion authority over the directory that holds the link.
+        #[cfg(unix)]
+        let linked_receipt = {
+            let directory = root.join("1".repeat(64));
+            std::fs::create_dir_all(&directory).unwrap();
+            let foreign = temp.path().join("foreign-receipt.json");
+            std::fs::write(&foreign, receipt(current - 1, &"1".repeat(64), "foreign")).unwrap();
+            std::os::unix::fs::symlink(&foreign, directory.join(SEALED_STORE_RECEIPT_FILE))
+                .unwrap();
+            std::fs::write(directory.join("sentinel"), b"unowned").unwrap();
+            (directory, foreign)
+        };
+        for dir in [
+            &old,
+            &forged,
+            &live,
+            &invalid,
+            &zero_format,
+            &oversized,
+            &missing,
+            &future,
+        ] {
+            std::fs::write(dir.join("sentinel"), b"owned").unwrap();
+        }
+
+        discard_superseded_sealed_generations(&database).unwrap();
+        assert!(!old.exists(), "verified old-format receipt is reclaimable");
+        for dir in [
+            &forged,
+            &live,
+            &invalid,
+            &zero_format,
+            &oversized,
+            &missing,
+            &future,
+        ] {
+            assert_eq!(std::fs::read(dir.join("sentinel")).unwrap(), b"owned");
+        }
+        assert_eq!(std::fs::read(&unrelated).unwrap(), b"foreign");
+        #[cfg(unix)]
+        {
+            assert_eq!(
+                std::fs::read(linked_receipt.0.join("sentinel")).unwrap(),
+                b"unowned"
+            );
+            assert!(linked_receipt.1.is_file());
+            assert_eq!(
+                read_sealed_receipt_bytes(&linked_receipt.0.join(SEALED_STORE_RECEIPT_FILE))
+                    .unwrap_err()
+                    .kind(),
+                std::io::ErrorKind::InvalidInput
+            );
+        }
+    }
+
+    #[test]
+    fn failed_adoption_cannot_discard_unverified_or_foreign_artifacts() {
+        let temp = tempfile::tempdir().unwrap();
+        let database = temp.path().join("graph.grafeo");
+        let root = sealed_store_root(&database);
+        let locator = GenerationLocator::new(
+            GraphProjectionIdentity::new(
+                GraphNamespace::new("test").unwrap(),
+                GraphProjectionId::new("code").unwrap(),
+            ),
+            crate::GraphGenerationId::new("generation:retirement").unwrap(),
+        );
+        let directory = sealed_generation_directory(&root, &locator.physical_namespace().unwrap());
+        std::fs::create_dir_all(&directory).unwrap();
+        let name = directory.file_name().unwrap().to_str().unwrap();
+        let sentinel = directory.join("foreign-sentinel");
+        std::fs::write(&sentinel, b"preserve").unwrap();
+        let sibling = root.join("unrelated");
+        std::fs::create_dir(&sibling).unwrap();
+        std::fs::write(sibling.join("sentinel"), b"other").unwrap();
+
+        // Neither a missing nor a malformed receipt proves ownership.
+        discard_failed_sealed_adoption(&directory, &locator, "digest");
+        assert_eq!(std::fs::read(&sentinel).unwrap(), b"preserve");
+        let receipt_path = directory.join(SEALED_STORE_RECEIPT_FILE);
+        std::fs::write(&receipt_path, b"invalid receipt").unwrap();
+        discard_failed_sealed_adoption(&directory, &locator, "digest");
+        assert_eq!(std::fs::read(&sentinel).unwrap(), b"preserve");
+
+        // An otherwise recognizable receipt still cannot retire a different
+        // expected digest. The exact matching receipt allows cleanup.
+        std::fs::write(
+            &receipt_path,
+            receipt(
+                GraphFormatVersion::current().get(),
+                name,
+                "generation:retirement",
+            ),
+        )
+        .unwrap();
+        discard_failed_sealed_adoption(&directory, &locator, "other-digest");
+        assert_eq!(std::fs::read(&sentinel).unwrap(), b"preserve");
+        discard_failed_sealed_adoption(&directory, &locator, "digest");
+        assert!(
+            !directory.exists(),
+            "owned invalid artifacts can be reclaimed"
+        );
+        assert_eq!(std::fs::read(sibling.join("sentinel")).unwrap(), b"other");
+    }
+
+    #[test]
+    fn retired_sealed_generation_requires_its_exact_receipt_identity() {
+        let temp = tempfile::tempdir().unwrap();
+        let database = temp.path().join("graph.grafeo");
+        let root = sealed_store_root(&database);
+        let locator = GenerationLocator::new(
+            GraphProjectionIdentity::new(
+                GraphNamespace::new("test").unwrap(),
+                GraphProjectionId::new("code").unwrap(),
+            ),
+            crate::GraphGenerationId::new("generation:retirement").unwrap(),
+        );
+        let physical = locator.physical_namespace().unwrap();
+        let directory = sealed_generation_directory(&root, &physical);
+        std::fs::create_dir_all(&directory).unwrap();
+        let name = directory.file_name().unwrap().to_str().unwrap();
+        let receipt_path = directory.join(SEALED_STORE_RECEIPT_FILE);
+        std::fs::write(
+            &receipt_path,
+            receipt(
+                GraphFormatVersion::current().get(),
+                name,
+                "generation:other",
+            ),
+        )
+        .unwrap();
+        std::fs::write(directory.join("sentinel"), b"preserve").unwrap();
+        assert!(retire_sealed_directory_checked(&directory, &locator, None).is_err());
+        assert_eq!(
+            std::fs::read(directory.join("sentinel")).unwrap(),
+            b"preserve"
+        );
+        std::fs::write(
+            &receipt_path,
+            receipt(
+                GraphFormatVersion::current().get(),
+                name,
+                locator.generation.as_str(),
+            ),
+        )
+        .unwrap();
+        assert!(retire_sealed_directory_checked(&directory, &locator, Some("wrong")).is_err());
+        assert_eq!(
+            std::fs::read(directory.join("sentinel")).unwrap(),
+            b"preserve"
+        );
+        retire_sealed_directory_checked(&directory, &locator, Some("digest")).unwrap();
+        assert!(
+            !directory.exists(),
+            "verified retired generation is physically removed"
+        );
+        // A registered reader proves the artifact was installed, so its
+        // absence is unconfirmed retirement. Only a disk-only retry with no
+        // resident reader may treat an already-absent directory as done.
+        assert!(
+            retire_sealed_directory_checked(&directory, &locator, Some("digest")).is_err(),
+            "a registered generation must not report retirement of an absent artifact"
+        );
+        retire_sealed_directory_checked(&directory, &locator, None).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn census_handles_seventy_large_sparse_generations_without_loading_containers() {
+        let temp = tempfile::tempdir().unwrap();
+        let database = temp.path().join("graph.grafeo");
+        let root = sealed_store_root(&database);
+        std::fs::create_dir_all(&root).unwrap();
+        const FILE_BYTES: u64 = 220 * 1024 * 1024;
+        let mut oldest = None;
+        for index in 0..70 {
+            let generation = format!("generation:g{index}");
+            let locator = GenerationLocator::new(
+                GraphProjectionIdentity::new(
+                    GraphNamespace::new("test").unwrap(),
+                    GraphProjectionId::new("code").unwrap(),
+                ),
+                crate::GraphGenerationId::new(generation.clone()).unwrap(),
+            );
+            let physical = locator.physical_namespace().unwrap();
+            let name = physical.as_str().strip_prefix("generation:").unwrap();
+            let dir = root.join(name);
+            if index == 0 {
+                oldest = Some(dir.clone());
+            }
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(
+                dir.join(SEALED_STORE_RECEIPT_FILE),
+                receipt(GraphFormatVersion::current().get(), name, &generation),
+            )
+            .unwrap();
+            std::fs::File::create(dir.join(SEALED_STORE_DATABASE_FILE))
+                .unwrap()
+                .set_len(FILE_BYTES)
+                .unwrap();
+        }
+        // A sealed directory must never account bytes outside its own tree.
+        // A missing target must also remain a harmless link, not abort census.
+        let foreign = temp.path().join("foreign");
+        std::fs::create_dir(&foreign).unwrap();
+        std::fs::File::create(foreign.join("payload"))
+            .unwrap()
+            .set_len(20 * 1024 * 1024 * 1024)
+            .unwrap();
+        let oldest = oldest.unwrap();
+        std::os::unix::fs::symlink(&foreign, oldest.join("foreign")).unwrap();
+        std::os::unix::fs::symlink(temp.path().join("missing"), oldest.join("dangling")).unwrap();
+        let heads = BTreeSet::from([(
+            GraphProjectionIdentity::new(
+                GraphNamespace::new("test").unwrap(),
+                GraphProjectionId::new("code").unwrap(),
+            ),
+            GraphGenerationId::new("generation:g69").unwrap(),
+        )]);
+        let census = census_sealed_store(&database, &heads).unwrap();
+        assert_eq!(census.head_count, 1);
+        assert_eq!(census.superseded_count, 69);
+        assert_eq!(census.unrecognized_count, 0);
+        assert!(census.head_bytes >= FILE_BYTES);
+        assert!(census.superseded_bytes >= 69 * FILE_BYTES);
+        assert!(
+            census.superseded_bytes < 70 * FILE_BYTES,
+            "foreign link targets must not contribute to sealed generation bytes"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn census_does_not_classify_copied_or_foreign_receipts_as_live_heads() {
+        let temp = tempfile::tempdir().unwrap();
+        let database = temp.path().join("graph.grafeo");
+        let root = sealed_store_root(&database);
+        std::fs::create_dir_all(&root).unwrap();
+        let generation = "generation:head";
+        let locator = GenerationLocator::new(
+            GraphProjectionIdentity::new(
+                GraphNamespace::new("test").unwrap(),
+                GraphProjectionId::new("code").unwrap(),
+            ),
+            crate::GraphGenerationId::new(generation).unwrap(),
+        );
+        let physical = locator.physical_namespace().unwrap();
+        let owned_name = physical.as_str().strip_prefix("generation:").unwrap();
+        let owned = root.join(owned_name);
+        std::fs::create_dir(&owned).unwrap();
+        let owned_receipt = receipt(GraphFormatVersion::current().get(), owned_name, generation);
+        std::fs::write(owned.join(SEALED_STORE_RECEIPT_FILE), &owned_receipt).unwrap();
+        std::fs::write(owned.join(SEALED_STORE_DATABASE_FILE), b"owned payload").unwrap();
+
+        // The foreign directory carries the *exact* valid head receipt, but
+        // its physical entry is not the one derived from the logical identity.
+        let foreign_name = if owned_name == "f".repeat(64) {
+            "e".repeat(64)
+        } else {
+            "f".repeat(64)
+        };
+        let foreign = root.join(foreign_name);
+        std::fs::create_dir(&foreign).unwrap();
+        std::fs::write(foreign.join(SEALED_STORE_RECEIPT_FILE), &owned_receipt).unwrap();
+        std::fs::File::create(foreign.join(SEALED_STORE_DATABASE_FILE))
+            .unwrap()
+            .set_len(5 * 1024 * 1024 * 1024)
+            .unwrap();
+
+        let census = census_sealed_store(
+            &database,
+            &BTreeSet::from([(locator.projection, locator.generation)]),
+        )
+        .unwrap();
+        assert_eq!(census.head_count, 1);
+        assert_eq!(census.superseded_count, 0);
+        assert_eq!(census.unrecognized_count, 1);
+        assert_eq!(census.head_bytes, owned_receipt.len() as u64 + 13);
+        assert!(foreign.join(SEALED_STORE_DATABASE_FILE).exists());
+    }
+}
+
+#[cfg(test)]
 mod build_tests {
     use std::collections::{BTreeMap, BTreeSet};
+    #[cfg(unix)]
+    use std::os::unix::fs::MetadataExt;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
 
     use rayon::ThreadPoolBuilder;
 
     use super::{
-        NativeCompactEncodeBoundaryV1, SEALED_STORE_DATABASE_FILE, SealedCompactRows,
-        SealedRowSource, build_or_open_sealed_store, build_or_open_sealed_store_with_work,
-        build_sealed_container_with_work, census_sealed_store, push_manifest_rows,
-        sealed_artifact_database_options, sealed_copy_proof, sealed_generation_directory,
-        sealed_store_root,
+        HeldDirectory, MAX_SEALED_RECEIPT_BYTES, NativeCompactEncodeBoundaryV1,
+        SEALED_STAGING_OWNER_FILE, SEALED_STORE_DATABASE_FILE, SEALED_STORE_RECEIPT_FILE,
+        SealedCompactRows, SealedRowSource, SealedStagingOwnerV1, build_or_open_sealed_store,
+        build_or_open_sealed_store_with_work, build_sealed_container_with_work,
+        census_sealed_store, initial_sealed_staging_owner, persist_sealed_store_check,
+        push_manifest_rows, retire_sealed_directory_checked, sealed_artifact_database_options,
+        sealed_copy_proof, sealed_generation_directory, sealed_store_root,
+        sweep_abandoned_sealed_staging,
     };
     use tracedecay_store::runtime::{GraphNativeWorkKindV1, GraphNativeWorkV1};
+
+    /// Opens a test-owned directory as the held capability the production
+    /// builder uses, so the tests exercise the same write authority.
+    fn held(directory: &std::path::Path) -> HeldDirectory {
+        HeldDirectory::open_nofollow(
+            directory.parent().expect("held directory parent"),
+            directory.file_name().expect("held directory name"),
+        )
+        .expect("open the test staging directory")
+    }
 
     use crate::location::PersistentGraphStoreState;
     use crate::{
@@ -2910,6 +3727,38 @@ mod build_tests {
         GraphProjectionId, GraphProjectionIdentity, GraphProperty, GraphPropertyName,
         GraphRelationId, GraphRelationKind, GraphWatermark, NeverCancelled, SourceGeneration,
     };
+
+    #[cfg(unix)]
+    #[test]
+    fn sealed_check_persistence_refuses_a_substituted_generation_directory() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().unwrap();
+        let owned = temp.path().join("owned-generation");
+        let foreign = temp.path().join("foreign-generation");
+        std::fs::create_dir(&owned).unwrap();
+        std::fs::create_dir(&foreign).unwrap();
+        std::fs::write(foreign.join("sealed.checked"), b"foreign marker").unwrap();
+        std::fs::remove_dir(&owned).unwrap();
+        symlink(&foreign, &owned).unwrap();
+
+        assert!(persist_sealed_store_check(&owned, "accepted-digest").is_err());
+        assert_eq!(
+            std::fs::read(foreign.join("sealed.checked")).unwrap(),
+            b"foreign marker",
+        );
+        std::fs::remove_file(&owned).unwrap();
+        std::fs::create_dir(&owned).unwrap();
+        persist_sealed_store_check(&owned, "accepted-digest").unwrap();
+        assert_eq!(
+            std::fs::read(owned.join("sealed.checked")).unwrap(),
+            b"accepted-digest",
+        );
+        assert_eq!(
+            std::fs::read(foreign.join("sealed.checked")).unwrap(),
+            b"foreign marker",
+        );
+    }
 
     fn entity_identity(index: usize) -> GraphEntityId {
         GraphEntityId::new(format!("symbol:{index:05}")).unwrap()
@@ -2966,6 +3815,21 @@ mod build_tests {
             relation_rows,
         )
         .unwrap()
+    }
+
+    /// Real layered generations share one physical base. The production
+    /// census must attribute those hard links to the live head, regardless
+    /// of how many older layered generations already reference the base.
+    #[cfg(unix)]
+    #[test]
+    fn sealed_census_counts_published_single_base_link_once() {
+        census_with_layered_publication(0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn sealed_census_counts_published_multiple_base_links_once() {
+        census_with_layered_publication(1);
     }
 
     #[test]
@@ -3027,6 +3891,199 @@ mod build_tests {
         }
     }
 
+    #[cfg(unix)]
+    fn census_with_layered_publication(initial_layers: u64) {
+        let temp = tempfile::tempdir().unwrap();
+        let database_path = temp.path().join("source.grafeo");
+        let database = open_source(&database_path);
+        let manifest = manifest(3, 2);
+        let identity = manifest.identity();
+        let expected = manifest.expected_recovered_digest(&|| Ok(())).unwrap();
+        let mut spill = database
+            .generation_row_spill(manifest.projection.clone())
+            .unwrap();
+        spill
+            .push_batch(
+                manifest.entities.clone(),
+                manifest.relations.clone(),
+                &|| Ok(()),
+            )
+            .unwrap();
+        std::fs::write(spill.attachment_path(), b"producer inputs").unwrap();
+        let spilled = spill.finish(identity.clone(), &|| Ok(())).unwrap();
+        let (cold, _) = build_or_open_sealed_store(
+            SealedRowSource::Spilled(&spilled),
+            &identity,
+            &expected,
+            &database_path,
+            &|| Ok(()),
+        )
+        .unwrap();
+        drop(spilled);
+        let base = cold.sealed_base(&|| Ok(())).unwrap().unwrap();
+        let publish = |generation: &str| {
+            let mut identity = identity.clone();
+            identity.generation = GraphGenerationId::new(generation).unwrap();
+            let layered = database
+                .layered_row_spill(identity.projection.clone(), base.clone())
+                .unwrap()
+                .finish(identity.clone(), &|| Ok(()))
+                .unwrap();
+            let (store, _) = build_or_open_sealed_store(
+                SealedRowSource::Layered(&layered),
+                &identity,
+                layered.expected_recovered_digest(),
+                &database_path,
+                &|| Ok(()),
+            )
+            .unwrap();
+            drop(layered);
+            store
+        };
+        let mut stores = vec![cold];
+        if initial_layers == 1 {
+            stores.push(publish("generation:child1"));
+        }
+        let original = stores[0].directory.join(SEALED_STORE_DATABASE_FILE);
+        let original_bytes = std::fs::read(&original).unwrap();
+        assert_eq!(
+            std::fs::metadata(&original).unwrap().nlink(),
+            1 + initial_layers
+        );
+        let receipts: Vec<_> = stores
+            .iter()
+            .map(|store| {
+                let path = store.directory.join(SEALED_STORE_RECEIPT_FILE);
+                let bytes = std::fs::read(&path).unwrap();
+                (path, bytes)
+            })
+            .collect();
+        stores.push(publish("generation:child2"));
+        assert_eq!(
+            std::fs::metadata(&original).unwrap().nlink(),
+            2 + initial_layers
+        );
+        assert_eq!(std::fs::read(&original).unwrap(), original_bytes);
+        for (path, bytes) in receipts {
+            assert_eq!(std::fs::read(path).unwrap(), bytes);
+        }
+        // Independent native identity census of the completed real artifacts.
+        // Compare each category as well as the unique physical total.
+        let mut physical = BTreeMap::<_, (u8, u64)>::new();
+        for (index, store) in stores.iter().enumerate() {
+            let kind = if index + 1 == stores.len() { 0 } else { 1 };
+            for entry in std::fs::read_dir(&store.directory).unwrap() {
+                let metadata = entry.unwrap().metadata().unwrap();
+                assert!(metadata.is_file());
+                physical
+                    .entry((metadata.dev(), metadata.ino()))
+                    .and_modify(|(owner, _)| *owner = (*owner).min(kind))
+                    .or_insert((kind, metadata.len()));
+            }
+        }
+        let census = census_sealed_store(
+            &database_path,
+            &BTreeSet::from([(
+                identity.projection,
+                GraphGenerationId::new("generation:child2").unwrap(),
+            )]),
+        )
+        .unwrap();
+        assert_eq!(census.head_count, 1);
+        assert_eq!(census.superseded_count, 1 + initial_layers);
+        assert_eq!(census.unrecognized_count, 0);
+        for kind in [0, 1] {
+            let bytes: u64 = physical
+                .values()
+                .filter(|(owner, _)| *owner == kind)
+                .map(|(_, bytes)| bytes)
+                .sum();
+            let observed = if kind == 0 {
+                census.head_bytes
+            } else {
+                census.superseded_bytes
+            };
+            assert_eq!(
+                observed, bytes,
+                "initial layers {initial_layers}, category {kind}"
+            );
+        }
+        for store in stores {
+            store.close().unwrap();
+        }
+        database.close().unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn sealed_census_only_attributes_verified_abandoned_staging() {
+        let temp = tempfile::tempdir().unwrap();
+        let database = temp.path().join("source.grafeo");
+        let root = sealed_store_root(&database);
+        let manifest = manifest(2, 1);
+        let identity = manifest.identity();
+        let expected = manifest.expected_recovered_digest(&|| Ok(())).unwrap();
+        let physical = identity.physical_namespace().unwrap();
+        let name = physical.as_str().strip_prefix("generation:").unwrap();
+        let staging = root.join(format!(".staging-{name}"));
+        std::fs::create_dir_all(&staging).unwrap();
+
+        let exited = SealedStagingOwnerV1 {
+            producer: (crate::generation::row_spill_owner() ^ 1).to_string(),
+            receipt: initial_sealed_staging_owner(&identity, &expected, physical.as_str()),
+        };
+        let bytes = serde_json::to_vec(&exited).unwrap();
+        let owner_path = staging.join(SEALED_STAGING_OWNER_FILE);
+        std::fs::write(&owner_path, &bytes).unwrap();
+        std::fs::write(staging.join("payload"), vec![7; 4096]).unwrap();
+
+        let census = census_sealed_store(&database, &BTreeSet::new()).unwrap();
+        assert_eq!(census.abandoned_staging_count, 1);
+        assert_eq!(census.abandoned_staging_bytes, bytes.len() as u64 + 4096);
+        assert_eq!(census.unrecognized_count, 0);
+
+        // This same completed marker may belong to a seal currently running
+        // in this process. A remount must not report its bytes as garbage.
+        let live = SealedStagingOwnerV1 {
+            producer: crate::generation::row_spill_owner().to_string(),
+            receipt: initial_sealed_staging_owner(&identity, &expected, physical.as_str()),
+        };
+        std::fs::write(&owner_path, serde_json::to_vec(&live).unwrap()).unwrap();
+        let census = census_sealed_store(&database, &BTreeSet::new()).unwrap();
+        assert_eq!(census.abandoned_staging_count, 0);
+        assert_eq!(census.abandoned_staging_bytes, 0);
+        assert_eq!(census.unrecognized_count, 1);
+
+        // A copied authentic receipt in a different physical staging name
+        // does not authorize either reclamation or an unbounded size walk.
+        let foreign_name = if name == "f".repeat(64) {
+            "e".repeat(64)
+        } else {
+            "f".repeat(64)
+        };
+        let foreign = root.join(format!(".staging-{foreign_name}"));
+        std::fs::create_dir(&foreign).unwrap();
+        std::fs::write(foreign.join(SEALED_STAGING_OWNER_FILE), &bytes).unwrap();
+        std::fs::File::create(foreign.join("sparse-foreign-payload"))
+            .unwrap()
+            .set_len(5 * 1024 * 1024 * 1024)
+            .unwrap();
+        let census = census_sealed_store(&database, &BTreeSet::new()).unwrap();
+        assert_eq!(census.abandoned_staging_count, 0);
+        assert_eq!(census.abandoned_staging_bytes, 0);
+        assert_eq!(census.unrecognized_count, 2);
+        assert!(foreign.join("sparse-foreign-payload").is_file());
+
+        // Even an owned directory whose marker exceeds the fixed bound must
+        // not cause its contents to be traversed or counted as abandoned.
+        let oversized = vec![b'x'; MAX_SEALED_RECEIPT_BYTES + 1];
+        std::fs::write(&owner_path, &oversized).unwrap();
+        let census = census_sealed_store(&database, &BTreeSet::new()).unwrap();
+        assert_eq!(census.abandoned_staging_count, 0);
+        assert_eq!(census.unrecognized_count, 2);
+        assert_eq!(std::fs::read(&owner_path).unwrap(), oversized);
+    }
+
     fn open_source(database_path: &std::path::Path) -> crate::GraphDbLeaseV1 {
         let owner = GraphDbOwner::open(GraphDbOpenOptions {
             location: GraphDbLocation::Persistent(database_path.to_path_buf()),
@@ -3056,7 +4113,7 @@ mod build_tests {
             build_sealed_container_with_work(
                 SealedRowSource::Manifest(&manifest),
                 &identity,
-                staging.path(),
+                &held(staging.path()),
                 check,
                 None,
             )
@@ -3091,7 +4148,7 @@ mod build_tests {
         let pool = ThreadPoolBuilder::new().num_threads(1).build().unwrap();
         let counts = pool
             .install(|| {
-                let mut writer = SealedCompactRows::new(staging.path())?;
+                let mut writer = SealedCompactRows::new(&held(staging.path()))?;
                 push_manifest_rows(
                     &fixture,
                     &identity,
@@ -3137,7 +4194,7 @@ mod build_tests {
         let calls = AtomicUsize::new(0);
         let staging = tempfile::tempdir().unwrap();
         let result = pool.install(|| {
-            let mut writer = SealedCompactRows::new(staging.path())?;
+            let mut writer = SealedCompactRows::new(&held(staging.path()))?;
             push_manifest_rows(
                 &fixture,
                 &identity,
@@ -3176,7 +4233,7 @@ mod build_tests {
         build_sealed_container_with_work(
             SealedRowSource::Manifest(&manifest),
             &identity,
-            staging.path(),
+            &held(staging.path()),
             check,
             None,
         )
@@ -3259,7 +4316,7 @@ mod build_tests {
         build_sealed_container_with_work(
             SealedRowSource::Manifest(&manifest),
             &identity,
-            staging.path(),
+            &held(staging.path()),
             check,
             None,
         )
@@ -3296,6 +4353,760 @@ mod build_tests {
             matches!(proof, Err(GraphDbError::Corrupt { .. })),
             "a copy proof over a corrupt sealed page must be refused as corrupt: {proof:?}"
         );
+    }
+
+    /// An unverified existing generation directory cannot be treated as
+    /// disposable scratch space. Rebuilding is allowed only after its owner
+    /// removes the unknown data.
+    #[test]
+    fn sealed_build_preserves_an_unverified_occupied_generation() {
+        let check: &dyn Fn() -> Result<(), GraphDbError> = &|| Ok(());
+        let temp = tempfile::tempdir().unwrap();
+        let database_path = temp.path().join("source.grafeo");
+        let manifest = manifest(2, 1);
+        let identity = manifest.identity();
+        let expected = manifest.expected_recovered_digest(check).unwrap();
+        let root = sealed_store_root(&database_path);
+        let directory = sealed_generation_directory(&root, &identity.physical_namespace().unwrap());
+        std::fs::create_dir_all(&directory).unwrap();
+        let sentinel = directory.join("foreign-sentinel");
+        std::fs::write(&sentinel, b"not owned").unwrap();
+
+        for foreign_receipt in [false, true] {
+            if foreign_receipt {
+                std::fs::write(
+                    directory.join(SEALED_STORE_RECEIPT_FILE),
+                    b"invalid receipt",
+                )
+                .unwrap();
+            }
+            let result = build_or_open_sealed_store(
+                SealedRowSource::Manifest(&manifest),
+                &identity,
+                &expected,
+                &database_path,
+                check,
+            );
+            assert!(
+                result.is_err(),
+                "unreceipted or malformed foreign data must refuse rebuilding"
+            );
+            assert_eq!(std::fs::read(&sentinel).unwrap(), b"not owned");
+            assert!(
+                !directory.join(SEALED_STORE_DATABASE_FILE).exists(),
+                "refused rebuilding must never write a container into foreign data"
+            );
+        }
+
+        std::fs::remove_dir_all(&directory).unwrap();
+        let (store, _) = build_or_open_sealed_store(
+            SealedRowSource::Manifest(&manifest),
+            &identity,
+            &expected,
+            &database_path,
+            check,
+        )
+        .expect("clearing the unknown artifact allows a verified sealed build");
+        assert_eq!(store.recovered_digest(), expected.as_str());
+        assert!(directory.join(SEALED_STORE_DATABASE_FILE).is_file());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn retirement_keeps_sealed_bytes_when_reader_close_is_uncertain() {
+        let check: &dyn Fn() -> Result<(), GraphDbError> = &|| Ok(());
+        let temp = tempfile::tempdir().unwrap();
+        let database_path = temp.path().join("source.grafeo");
+        let manifest = manifest(2, 1);
+        let identity = manifest.identity();
+        let expected = manifest.expected_recovered_digest(check).unwrap();
+        let (store, _) = build_or_open_sealed_store(
+            SealedRowSource::Manifest(&manifest),
+            &identity,
+            &expected,
+            &database_path,
+            check,
+        )
+        .unwrap();
+        let directory = store.directory.clone();
+        let container = directory.join(SEALED_STORE_DATABASE_FILE);
+        let receipt = directory.join(SEALED_STORE_RECEIPT_FILE);
+        assert!(container.is_file() && receipt.is_file());
+
+        // Poison the real native reader's engine lock. Its physical close
+        // now returns DurabilityUncertain; the old discard ignored that error
+        // and removed the verified directory anyway on Unix.
+        let reader = Arc::clone(&store.database);
+        let poisoned = std::thread::spawn(move || {
+            let _guard = reader.inner.database.write().unwrap();
+            panic!("exercise uncertain sealed reader close");
+        });
+        assert!(poisoned.join().is_err());
+        let refused = store.discard();
+        assert!(
+            matches!(refused, Err(GraphDbError::DurabilityUncertain { .. })),
+            "retirement must surface the failed native close: {refused:?}"
+        );
+        assert!(
+            container.is_file(),
+            "uncertain close must preserve sealed bytes"
+        );
+        assert!(receipt.is_file(), "retry must retain its ownership receipt");
+    }
+
+    #[test]
+    fn retirement_accepts_an_already_closed_derived_reader() {
+        let check: &dyn Fn() -> Result<(), GraphDbError> = &|| Ok(());
+        let temp = tempfile::tempdir().unwrap();
+        let database_path = temp.path().join("source.grafeo");
+        let manifest = manifest(2, 1);
+        let identity = manifest.identity();
+        let expected = manifest.expected_recovered_digest(check).unwrap();
+        let (store, _) = build_or_open_sealed_store(
+            SealedRowSource::Manifest(&manifest),
+            &identity,
+            &expected,
+            &database_path,
+            check,
+        )
+        .unwrap();
+        let directory = store.directory.clone();
+        store.database.close().unwrap();
+        store.discard().unwrap();
+        assert!(
+            !directory.exists(),
+            "a cleanly closed reader is reclaimable"
+        );
+    }
+
+    #[test]
+    fn retirement_does_not_erase_a_prior_uncertain_close() {
+        let check: &dyn Fn() -> Result<(), GraphDbError> = &|| Ok(());
+        let temp = tempfile::tempdir().unwrap();
+        let database_path = temp.path().join("source.grafeo");
+        let manifest = manifest(2, 1);
+        let identity = manifest.identity();
+        let expected = manifest.expected_recovered_digest(check).unwrap();
+        let (store, _) = build_or_open_sealed_store(
+            SealedRowSource::Manifest(&manifest),
+            &identity,
+            &expected,
+            &database_path,
+            check,
+        )
+        .unwrap();
+        let directory = store.directory.clone();
+        let container = directory.join(SEALED_STORE_DATABASE_FILE);
+        let receipt = directory.join(SEALED_STORE_RECEIPT_FILE);
+
+        // Reproduce the post-failure state of native engine.close(): its
+        // handle is gone, Closed will be returned on retry, but durability
+        // remains uncertain. Retirement must never mistake that state for a
+        // previously successful close and destroy its sealed receipt.
+        store.database.inner.poisoned.store(true, Ordering::Release);
+        let first = store.database.close();
+        assert!(matches!(
+            first,
+            Err(GraphDbError::DurabilityUncertain { .. })
+        ));
+        let retry = store.discard();
+        assert!(
+            matches!(retry, Err(GraphDbError::DurabilityUncertain { .. })),
+            "a prior uncertain close must not become an unlink: {retry:?}"
+        );
+        assert!(container.is_file() && receipt.is_file());
+    }
+
+    #[test]
+    fn retirement_retries_must_keep_a_reader_with_uncertain_close_registered() {
+        let check: &dyn Fn() -> Result<(), GraphDbError> = &|| Ok(());
+        let temp = tempfile::tempdir().unwrap();
+        let database_path = temp.path().join("source.grafeo");
+        let manifest = manifest(2, 1);
+        let identity = manifest.identity();
+        let expected = manifest.expected_recovered_digest(check).unwrap();
+        let (store, _) = build_or_open_sealed_store(
+            SealedRowSource::Manifest(&manifest),
+            &identity,
+            &expected,
+            &database_path,
+            check,
+        )
+        .unwrap();
+        let locator = crate::lease::GenerationLocator::new(
+            identity.projection.clone(),
+            identity.generation.clone(),
+        );
+        let parent = GraphDb::open(GraphDbOpenOptions {
+            location: GraphDbLocation::Persistent(database_path.clone()),
+            expected_format: GraphFormatVersion::current(),
+            durability: GraphDurability::WalSync,
+            cancellation: Arc::new(NeverCancelled),
+        })
+        .unwrap();
+        parent
+            .inner
+            .sealed_generations
+            .write()
+            .unwrap()
+            .insert(locator.clone(), Arc::clone(&store));
+
+        let container = store.directory.join(SEALED_STORE_DATABASE_FILE);
+        let receipt = store.directory.join(SEALED_STORE_RECEIPT_FILE);
+        let held_reader = Arc::clone(store.database());
+        store.database.inner.poisoned.store(true, Ordering::Release);
+        for attempt in 1..=2 {
+            let retirement = parent.retire_sealed_generation_store(&locator);
+            assert!(
+                matches!(&retirement, Err(GraphDbError::DurabilityUncertain { .. })),
+                "retirement attempt {attempt} must refuse uncertain close: {retirement:?}"
+            );
+            let registered = parent
+                .sealed_generation_reader(&locator)
+                .expect("failed close must preserve the registered reader");
+            assert!(Arc::ptr_eq(&registered, &store));
+            assert!(container.is_file() && receipt.is_file());
+        }
+        assert!(Arc::ptr_eq(&held_reader, store.database()));
+    }
+
+    #[test]
+    fn successful_retirement_uninstalls_the_reader_after_removing_artifact() {
+        let check: &dyn Fn() -> Result<(), GraphDbError> = &|| Ok(());
+        let temp = tempfile::tempdir().unwrap();
+        let database_path = temp.path().join("source.grafeo");
+        let manifest = manifest(2, 1);
+        let identity = manifest.identity();
+        let expected = manifest.expected_recovered_digest(check).unwrap();
+        let (store, _) = build_or_open_sealed_store(
+            SealedRowSource::Manifest(&manifest),
+            &identity,
+            &expected,
+            &database_path,
+            check,
+        )
+        .unwrap();
+        let locator = crate::lease::GenerationLocator::new(
+            identity.projection.clone(),
+            identity.generation.clone(),
+        );
+        let parent = GraphDb::open(GraphDbOpenOptions {
+            location: GraphDbLocation::Persistent(database_path.clone()),
+            expected_format: GraphFormatVersion::current(),
+            durability: GraphDurability::WalSync,
+            cancellation: Arc::new(NeverCancelled),
+        })
+        .unwrap();
+        parent
+            .inner
+            .sealed_generations
+            .write()
+            .unwrap()
+            .insert(locator.clone(), Arc::clone(&store));
+
+        parent.retire_sealed_generation_store(&locator).unwrap();
+        assert!(parent.sealed_generation_reader(&locator).is_none());
+        assert!(!store.directory.exists());
+    }
+
+    /// A missing pathname is not evidence that an installed generation's
+    /// durable bytes were removed. It may have been relocated between
+    /// registration and the retirement attempt.
+    #[cfg(unix)]
+    #[test]
+    fn registered_retirement_refuses_disappeared_root_or_child_until_restored() {
+        let check: &dyn Fn() -> Result<(), GraphDbError> = &|| Ok(());
+        for move_root in [true, false] {
+            let temp = tempfile::tempdir().unwrap();
+            let database_path = temp.path().join("source.grafeo");
+            let manifest = manifest(2, 1);
+            let identity = manifest.identity();
+            let expected = manifest.expected_recovered_digest(check).unwrap();
+            let (store, _) = build_or_open_sealed_store(
+                SealedRowSource::Manifest(&manifest),
+                &identity,
+                &expected,
+                &database_path,
+                check,
+            )
+            .unwrap();
+            let locator = crate::lease::GenerationLocator::new(
+                identity.projection.clone(),
+                identity.generation.clone(),
+            );
+            let parent = GraphDb::open(GraphDbOpenOptions {
+                location: GraphDbLocation::Persistent(database_path.clone()),
+                expected_format: GraphFormatVersion::current(),
+                durability: GraphDurability::WalSync,
+                cancellation: Arc::new(NeverCancelled),
+            })
+            .unwrap();
+            parent
+                .inner
+                .sealed_generations
+                .write()
+                .unwrap()
+                .insert(locator.clone(), Arc::clone(&store));
+
+            let root = sealed_store_root(&database_path);
+            let (original, relocated) = if move_root {
+                (root, temp.path().join("relocated-sealed-root"))
+            } else {
+                (store.directory.clone(), root.join("relocated-sealed-child"))
+            };
+            std::fs::rename(&original, &relocated).unwrap();
+            let surviving_receipt = if move_root {
+                relocated
+                    .join(store.directory.file_name().unwrap())
+                    .join(SEALED_STORE_RECEIPT_FILE)
+            } else {
+                relocated.join(SEALED_STORE_RECEIPT_FILE)
+            };
+            let receipt = std::fs::read(&surviving_receipt).unwrap();
+
+            let refused = parent.retire_sealed_generation_store(&locator);
+            assert!(
+                matches!(&refused, Err(GraphDbError::Unavailable { .. })),
+                "missing owned artifact must remain pending (root={move_root}): {refused:?}"
+            );
+            assert_eq!(
+                std::fs::read(&surviving_receipt).unwrap(),
+                receipt,
+                "retirement must preserve the relocated sealed receipt"
+            );
+            let retained = parent
+                .sealed_generation_reader(&locator)
+                .expect("failed retirement must retain its registered reader");
+            assert!(Arc::ptr_eq(&retained, &store));
+            drop(retained);
+
+            // Retry against the restored owner must really delete the bytes
+            // and remove the reader. A permanent refusal cannot pass.
+            std::fs::rename(&relocated, &original).unwrap();
+            parent.retire_sealed_generation_store(&locator).unwrap();
+            assert!(parent.sealed_generation_reader(&locator).is_none());
+            assert!(!store.directory.exists());
+            // Disk-only duplicate notifications remain idempotent.
+            retire_sealed_directory_checked(&store.directory, &locator, None).unwrap();
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn sealed_build_refuses_a_foreign_root_symlink() {
+        let check: &dyn Fn() -> Result<(), GraphDbError> = &|| Ok(());
+        let temp = tempfile::tempdir().unwrap();
+        let database_path = temp.path().join("source.grafeo");
+        let manifest = manifest(2, 1);
+        let identity = manifest.identity();
+        let expected = manifest.expected_recovered_digest(check).unwrap();
+        let root = sealed_store_root(&database_path);
+        let foreign = temp.path().join("foreign");
+        std::fs::create_dir(&foreign).unwrap();
+        std::fs::write(foreign.join("sentinel"), b"not owned").unwrap();
+        std::os::unix::fs::symlink(&foreign, &root).unwrap();
+
+        let result = build_or_open_sealed_store(
+            SealedRowSource::Manifest(&manifest),
+            &identity,
+            &expected,
+            &database_path,
+            check,
+        );
+        assert!(
+            result.is_err(),
+            "a symlinked sealed root must refuse writes"
+        );
+        assert_eq!(
+            std::fs::read(foreign.join("sentinel")).unwrap(),
+            b"not owned"
+        );
+        assert_eq!(
+            std::fs::read_dir(&foreign).unwrap().count(),
+            1,
+            "no staged container or receipt may be written into the foreign root"
+        );
+
+        std::fs::remove_file(&root).unwrap();
+        let (store, _) = build_or_open_sealed_store(
+            SealedRowSource::Manifest(&manifest),
+            &identity,
+            &expected,
+            &database_path,
+            check,
+        )
+        .expect("a genuine sealed root still supports building");
+        assert_eq!(store.recovered_digest(), expected.as_str());
+    }
+
+    /// A pre-existing staging symlink must not become a writable artifact
+    /// root or be unlinked as disposable scratch space.
+    #[cfg(unix)]
+    #[test]
+    fn sealed_build_refuses_a_foreign_staging_symlink() {
+        let check: &dyn Fn() -> Result<(), GraphDbError> = &|| Ok(());
+        let temp = tempfile::tempdir().unwrap();
+        let database_path = temp.path().join("source.grafeo");
+        let manifest = manifest(2, 1);
+        let identity = manifest.identity();
+        let expected = manifest.expected_recovered_digest(check).unwrap();
+        let root = sealed_store_root(&database_path);
+        let directory = sealed_generation_directory(&root, &identity.physical_namespace().unwrap());
+        let staging = root.join(format!(
+            ".staging-{}",
+            directory.file_name().unwrap().to_str().unwrap()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let foreign = temp.path().join("foreign");
+        std::fs::create_dir(&foreign).unwrap();
+        std::fs::write(foreign.join("sentinel"), b"unchanged").unwrap();
+        std::os::unix::fs::symlink(&foreign, &staging).unwrap();
+
+        let result = build_or_open_sealed_store(
+            SealedRowSource::Manifest(&manifest),
+            &identity,
+            &expected,
+            &database_path,
+            check,
+        );
+        assert!(result.is_err(), "a symlink must refuse the build");
+        assert!(
+            std::fs::symlink_metadata(&staging)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert_eq!(
+            std::fs::read(foreign.join("sentinel")).unwrap(),
+            b"unchanged"
+        );
+        assert!(
+            !foreign.join(SEALED_STORE_DATABASE_FILE).exists()
+                && !foreign.join("sealed.json").exists(),
+            "the foreign directory must not receive a container or receipt"
+        );
+        assert!(!directory.exists(), "no generation was installed");
+
+        // Removing the foreign link must restore a successful, verified seal.
+        // A fixture that always refuses to build would not prove the fix.
+        std::fs::remove_file(&staging).unwrap();
+        let (store, _) = build_or_open_sealed_store(
+            SealedRowSource::Manifest(&manifest),
+            &identity,
+            &expected,
+            &database_path,
+            check,
+        )
+        .expect("a normal staging directory must still produce a sealed generation");
+        assert_eq!(store.recovered_digest(), expected.as_str());
+        assert!(
+            directory.join(SEALED_STORE_DATABASE_FILE).is_file(),
+            "valid staging must install a verified sealed container"
+        );
+    }
+
+    /// A pre-existing real staging directory is not disposable merely
+    /// because its name matches the generation being built.
+    #[test]
+    fn sealed_build_preserves_a_foreign_real_staging_directory() {
+        let check: &dyn Fn() -> Result<(), GraphDbError> = &|| Ok(());
+        let temp = tempfile::tempdir().unwrap();
+        let database_path = temp.path().join("source.grafeo");
+        let manifest = manifest(2, 1);
+        let identity = manifest.identity();
+        let expected = manifest.expected_recovered_digest(check).unwrap();
+        let root = sealed_store_root(&database_path);
+        let directory = sealed_generation_directory(&root, &identity.physical_namespace().unwrap());
+        let staging = root.join(format!(
+            ".staging-{}",
+            directory.file_name().unwrap().to_str().unwrap()
+        ));
+        std::fs::create_dir_all(&staging).unwrap();
+        let sentinel = staging.join("foreign-sentinel");
+        std::fs::write(&sentinel, b"must survive").unwrap();
+
+        let result = build_or_open_sealed_store(
+            SealedRowSource::Manifest(&manifest),
+            &identity,
+            &expected,
+            &database_path,
+            check,
+        );
+        assert!(
+            result.is_err(),
+            "an occupied staging entry must refuse sealing"
+        );
+        assert_eq!(std::fs::read(&sentinel).unwrap(), b"must survive");
+        assert!(
+            !staging.join(SEALED_STORE_DATABASE_FILE).exists()
+                && !staging.join(SEALED_STORE_RECEIPT_FILE).exists(),
+            "refused sealing must not modify foreign staging data"
+        );
+        assert!(!directory.exists(), "no generation may be installed");
+
+        std::fs::remove_dir_all(&staging).unwrap();
+        let (store, _) = build_or_open_sealed_store(
+            SealedRowSource::Manifest(&manifest),
+            &identity,
+            &expected,
+            &database_path,
+            check,
+        )
+        .expect("clearing the unknown stage allows a verified seal");
+        assert_eq!(store.recovered_digest(), expected.as_str());
+        assert!(directory.join(SEALED_STORE_DATABASE_FILE).is_file());
+    }
+
+    /// A store remount invokes the real startup sweep while a producer is
+    /// still streaming rows. The sweep must preserve its owner-bound staging
+    /// directory, or the builder can no longer install the verified artifact.
+    #[test]
+    fn remount_preserves_live_sealed_staging_and_seal_completes() {
+        let temp = tempfile::tempdir().unwrap();
+        let database_path = temp.path().join("source.grafeo");
+        let manifest = manifest(48, 24);
+        let identity = manifest.identity();
+        let expected = manifest.expected_recovered_digest(&|| Ok(())).unwrap();
+        let root = sealed_store_root(&database_path);
+        let directory = sealed_generation_directory(&root, &identity.physical_namespace().unwrap());
+        let staging = root.join(format!(
+            ".staging-{}",
+            directory.file_name().unwrap().to_str().unwrap()
+        ));
+        let remounted = std::cell::Cell::new(false);
+        let check = || {
+            if !remounted.replace(true) {
+                assert!(staging.join(SEALED_STAGING_OWNER_FILE).is_file());
+                let remount = open_source(&database_path);
+                drop(remount);
+                assert!(
+                    staging.join(SEALED_STAGING_OWNER_FILE).is_file(),
+                    "remount must not reclaim a live producer's staged container"
+                );
+            }
+            Ok(())
+        };
+        let (store, _) = build_or_open_sealed_store(
+            SealedRowSource::Manifest(&manifest),
+            &identity,
+            &expected,
+            &database_path,
+            &check,
+        )
+        .expect("live seal must finish after a store remount");
+        assert!(
+            remounted.get(),
+            "remount must run inside the row-copy callback"
+        );
+        assert!(directory.join(SEALED_STORE_DATABASE_FILE).is_file());
+        assert_eq!(store.recovered_digest(), expected.as_str());
+        assert!(!staging.exists());
+    }
+
+    /// Kill the real builder during row preparation, before sealed.json is
+    /// published. Its early receipt must let a later store-open sweep reclaim
+    /// the crashed stage without touching foreign staging data.
+    #[test]
+    fn crashed_seal_before_final_receipt_is_reclaimed_and_can_retry() {
+        const CHILD_ROOT: &str = "TRACEDECAY_TEST_CRASHED_SEAL_ROOT";
+        const CRASHED: i32 = 43;
+        if let Some(root) = std::env::var_os(CHILD_ROOT) {
+            let database_path = std::path::PathBuf::from(root).join("source.grafeo");
+            let manifest = manifest(24, 12);
+            let identity = manifest.identity();
+            let expected = manifest.expected_recovered_digest(&|| Ok(())).unwrap();
+            let exit_during_copy = || -> Result<(), GraphDbError> {
+                std::process::exit(CRASHED);
+            };
+            let _ = build_or_open_sealed_store(
+                SealedRowSource::Manifest(&manifest),
+                &identity,
+                &expected,
+                &database_path,
+                &exit_during_copy,
+            );
+            panic!("the row stream did not invoke its cancellation callback");
+        }
+
+        let temp = tempfile::tempdir().unwrap();
+        let database_path = temp.path().join("source.grafeo");
+        let manifest = manifest(24, 12);
+        let identity = manifest.identity();
+        let expected = manifest.expected_recovered_digest(&|| Ok(())).unwrap();
+        let root = sealed_store_root(&database_path);
+        let directory = sealed_generation_directory(&root, &identity.physical_namespace().unwrap());
+        let staging = root.join(format!(
+            ".staging-{}",
+            directory.file_name().unwrap().to_str().unwrap()
+        ));
+        let child = std::process::Command::new(std::env::current_exe().unwrap())
+            .arg("--exact")
+            .arg(std::thread::current().name().unwrap())
+            .env(CHILD_ROOT, temp.path())
+            .output()
+            .unwrap();
+        assert_eq!(child.status.code(), Some(CRASHED), "{child:?}");
+        assert!(staging.join(SEALED_STAGING_OWNER_FILE).is_file());
+        assert!(!staging.join(SEALED_STORE_RECEIPT_FILE).exists());
+
+        let foreign = root.join(format!(".staging-{}", "0".repeat(64)));
+        std::fs::create_dir(&foreign).unwrap();
+        std::fs::write(foreign.join("sentinel"), b"foreign").unwrap();
+        sweep_abandoned_sealed_staging(&database_path);
+        assert!(
+            !staging.exists(),
+            "the crashed but proven stage must be reclaimed"
+        );
+        assert_eq!(std::fs::read(foreign.join("sentinel")).unwrap(), b"foreign");
+
+        let (store, _) = build_or_open_sealed_store(
+            SealedRowSource::Manifest(&manifest),
+            &identity,
+            &expected,
+            &database_path,
+            &|| Ok(()),
+        )
+        .unwrap();
+        assert_eq!(store.recovered_digest(), expected.as_str());
+        assert!(directory.join(SEALED_STORE_DATABASE_FILE).is_file());
+    }
+
+    /// The failed-builder cleanup must not delete a foreign replacement of a
+    /// staging pathname after the owner marker was written.
+    #[cfg(unix)]
+    #[test]
+    fn interrupted_seal_preserves_a_substituted_staging_directory() {
+        let temp = tempfile::tempdir().unwrap();
+        let database_path = temp.path().join("source.grafeo");
+        let manifest = manifest(24, 12);
+        let identity = manifest.identity();
+        let expected = manifest.expected_recovered_digest(&|| Ok(())).unwrap();
+        let root = sealed_store_root(&database_path);
+        let directory = sealed_generation_directory(&root, &identity.physical_namespace().unwrap());
+        let staging = root.join(format!(
+            ".staging-{}",
+            directory.file_name().unwrap().to_str().unwrap()
+        ));
+        let moved = root.join("original-stage");
+        let swapped = std::cell::Cell::new(false);
+        let interrupt = || {
+            if !swapped.replace(true) {
+                std::fs::rename(&staging, &moved).unwrap();
+                std::fs::create_dir(&staging).unwrap();
+                std::fs::write(staging.join("sentinel"), b"foreign replacement").unwrap();
+            }
+            Err(GraphDbError::Cancelled)
+        };
+        let result = build_or_open_sealed_store(
+            SealedRowSource::Manifest(&manifest),
+            &identity,
+            &expected,
+            &database_path,
+            &interrupt,
+        );
+        assert!(
+            matches!(&result, Err(GraphDbError::Cancelled)),
+            "{result:?}"
+        );
+        assert_eq!(
+            std::fs::read(staging.join("sentinel")).unwrap(),
+            b"foreign replacement",
+            "cleanup must not erase the substituted directory"
+        );
+        assert!(moved.join(SEALED_STAGING_OWNER_FILE).is_file());
+        assert!(!directory.exists());
+
+        std::fs::remove_dir_all(&staging).unwrap();
+        std::fs::remove_dir_all(&moved).unwrap();
+        let (store, _) = build_or_open_sealed_store(
+            SealedRowSource::Manifest(&manifest),
+            &identity,
+            &expected,
+            &database_path,
+            &|| Ok(()),
+        )
+        .unwrap();
+        assert_eq!(store.recovered_digest(), expected.as_str());
+    }
+
+    /// A staging directory replaced by a symlink after the owner marker is
+    /// written must not redirect the live producer's container write into the
+    /// foreign target. The builder keeps running after the substitution, so
+    /// this exercises writer ownership rather than deletion authority.
+    #[cfg(unix)]
+    #[test]
+    fn live_seal_refuses_a_staging_symlink_substituted_after_the_owner_marker() {
+        let temp = tempfile::tempdir().unwrap();
+        let database_path = temp.path().join("source.grafeo");
+        let manifest = manifest(24, 12);
+        let identity = manifest.identity();
+        let expected = manifest.expected_recovered_digest(&|| Ok(())).unwrap();
+        let root = sealed_store_root(&database_path);
+        let directory = sealed_generation_directory(&root, &identity.physical_namespace().unwrap());
+        let staging = root.join(format!(
+            ".staging-{}",
+            directory.file_name().unwrap().to_str().unwrap()
+        ));
+        let moved = root.join("original-stage");
+        let foreign = temp.path().join("foreign");
+        std::fs::create_dir(&foreign).unwrap();
+        std::fs::write(foreign.join("sentinel"), b"foreign").unwrap();
+        let swapped = std::cell::Cell::new(false);
+        let substitute = || {
+            if !swapped.replace(true) {
+                assert!(
+                    staging.join(SEALED_STAGING_OWNER_FILE).is_file(),
+                    "the owner marker must exist before the substitution"
+                );
+                std::fs::rename(&staging, &moved).unwrap();
+                std::os::unix::fs::symlink(&foreign, &staging).unwrap();
+            }
+            Ok(())
+        };
+        let result = build_or_open_sealed_store(
+            SealedRowSource::Manifest(&manifest),
+            &identity,
+            &expected,
+            &database_path,
+            &substitute,
+        );
+        assert!(
+            result.is_err(),
+            "a staging symlink substituted mid-build must refuse the seal"
+        );
+        assert_eq!(
+            std::fs::read(foreign.join("sentinel")).unwrap(),
+            b"foreign",
+            "the foreign directory's own bytes must survive"
+        );
+        assert!(
+            !foreign.join(SEALED_STORE_DATABASE_FILE).exists(),
+            "the live producer must not write its container into the foreign target"
+        );
+        assert!(
+            !foreign.join(SEALED_STORE_RECEIPT_FILE).exists(),
+            "the live producer must not write its receipt into the foreign target"
+        );
+        assert!(
+            std::fs::symlink_metadata(&staging)
+                .unwrap()
+                .file_type()
+                .is_symlink(),
+            "the substituted link is not ours to remove"
+        );
+        assert!(!directory.exists(), "no generation may be installed");
+
+        std::fs::remove_file(&staging).unwrap();
+        std::fs::remove_dir_all(&moved).unwrap();
+        let (store, _) = build_or_open_sealed_store(
+            SealedRowSource::Manifest(&manifest),
+            &identity,
+            &expected,
+            &database_path,
+            &|| Ok(()),
+        )
+        .expect("a genuine staging directory must still seal");
+        assert_eq!(store.recovered_digest(), expected.as_str());
     }
 
     /// The sealed container is written once, complete, after every row has
@@ -3637,9 +5448,36 @@ mod build_tests {
         ));
         std::fs::create_dir_all(&staging).expect("losing writer staging");
         std::fs::write(staging.join("loser.tmp"), b"uninstalled").unwrap();
-
-        let installed_by_loser = super::install_staged_sealed_store(&staging, &directory)
-            .expect("candidate exists after the install collision");
+        let owner = SealedStagingOwnerV1 {
+            producer: crate::generation::row_spill_owner().to_string(),
+            receipt: initial_sealed_staging_owner(
+                &identity,
+                &expected,
+                identity.physical_namespace().unwrap().as_str(),
+            ),
+        };
+        std::fs::write(
+            staging.join(SEALED_STAGING_OWNER_FILE),
+            serde_json::to_vec(&owner).unwrap(),
+        )
+        .unwrap();
+        let locator = crate::lease::GenerationLocator::new(
+            identity.projection.clone(),
+            identity.generation.clone(),
+        );
+        let staging_name = staging.file_name().unwrap().to_owned();
+        let artifact_name = directory.file_name().unwrap().to_owned();
+        let held_staging =
+            HeldDirectory::open_nofollow(&root, &staging_name).expect("open the losing staging");
+        let installed_by_loser = super::install_staged_sealed_store(
+            &held_staging,
+            &root,
+            &staging_name,
+            &artifact_name,
+            &locator,
+            expected.as_str(),
+        )
+        .expect("candidate exists after the install collision");
         assert!(
             !installed_by_loser,
             "the losing writer committed no new native segment"
@@ -3653,6 +5491,64 @@ mod build_tests {
         assert_eq!(reopened.recovered_digest(), expected.as_str());
         assert_eq!((reopened.entity_count, reopened.relation_count), (7, 9));
         let _ = reopened.database().close();
+    }
+
+    #[test]
+    fn sealed_install_identity_mismatch_is_not_an_occupied_destination_collision() {
+        let temp = tempfile::tempdir().expect("persistent sealed graph root");
+        let database_path = temp.path().join("source.grafeo");
+        let manifest = manifest(3, 2);
+        let identity = manifest.identity();
+        let expected = manifest
+            .expected_recovered_digest(&|| Ok(()))
+            .expect("generation digest");
+        let root = sealed_store_root(&database_path);
+        std::fs::create_dir_all(&root).expect("sealed root");
+        let directory = sealed_generation_directory(
+            &root,
+            &identity.physical_namespace().expect("physical namespace"),
+        );
+        std::fs::create_dir(&directory).expect("occupied generation");
+        std::fs::write(directory.join("sentinel"), b"installed").unwrap();
+
+        let staging_name = std::ffi::OsString::from(format!(
+            ".staging-{}",
+            directory.file_name().unwrap().to_str().unwrap()
+        ));
+        let staging = root.join(&staging_name);
+        let held_staging = HeldDirectory::create_exclusive(&root, &staging_name)
+            .expect("create the producer staging directory");
+        held_staging
+            .write_new_file(std::ffi::OsStr::new("owned"), b"producer")
+            .expect("write producer evidence");
+        let moved = root.join("moved-producer");
+        std::fs::rename(&staging, &moved).expect("move the producer aside");
+        std::fs::create_dir(&staging).expect("substitute a foreign real directory");
+        std::fs::write(staging.join("sentinel"), b"foreign").unwrap();
+
+        let artifact_name = directory.file_name().unwrap().to_owned();
+        let locator = crate::lease::GenerationLocator::new(
+            identity.projection.clone(),
+            identity.generation.clone(),
+        );
+        let error = super::install_staged_sealed_store(
+            &held_staging,
+            &root,
+            &staging_name,
+            &artifact_name,
+            &locator,
+            expected.as_str(),
+        )
+        .expect_err("an identity mismatch is not a concurrent-writer collision");
+        assert!(error.to_string().contains("artifact install failed"));
+
+        assert_eq!(std::fs::read(staging.join("sentinel")).unwrap(), b"foreign");
+        assert_eq!(std::fs::read(moved.join("owned")).unwrap(), b"producer");
+        assert_eq!(
+            std::fs::read(directory.join("sentinel")).unwrap(),
+            b"installed"
+        );
+        assert!(!directory.join("owned").exists());
     }
 
     /// Two builds of the same staged rows write byte-identical section
@@ -3771,11 +5667,32 @@ mod build_tests {
             "an interrupted direct build must leave neither its staging directory nor an artifact"
         );
 
-        // A crash image: the process died after creating the staging
-        // directory and part of a container. The next attempt owns that
-        // directory and rebuilds from the manifest.
+        // A crash before the receipt exists leaves no deletion authority.
+        // A retry must preserve the unverified staging bytes, not silently
+        // treat a name collision as proof that the directory belongs to us.
         std::fs::create_dir_all(&staging).unwrap();
-        std::fs::write(staging.join(SEALED_STORE_DATABASE_FILE), b"torn container").unwrap();
+        let torn_container = staging.join(SEALED_STORE_DATABASE_FILE);
+        std::fs::write(&torn_container, b"torn container").unwrap();
+        let refused = build_or_open_sealed_store(
+            SealedRowSource::Manifest(&manifest),
+            &identity,
+            &expected,
+            &database_path,
+            check,
+        );
+        assert!(
+            matches!(&refused, Err(GraphDbError::Unavailable { .. })),
+            "an unreceipted staging collision must fail closed: {refused:?}"
+        );
+        assert_eq!(std::fs::read(&torn_container).unwrap(), b"torn container");
+        assert!(
+            !directory.exists(),
+            "refused build must not publish a generation"
+        );
+
+        // The test fixture explicitly removes its unowned crash image.
+        // Only then may the same build succeed and prove its normal payload.
+        std::fs::remove_dir_all(&staging).unwrap();
         let (direct, staging_proof) = build_or_open_sealed_store(
             SealedRowSource::Manifest(&manifest),
             &identity,
@@ -3792,7 +5709,7 @@ mod build_tests {
         assert_eq!((direct.entity_count, direct.relation_count), (2_000, 3_000));
         assert!(
             !staging.exists(),
-            "the crash image must be replaced, not kept"
+            "successful build must consume its staging directory"
         );
         let _ = direct.database().close();
         let direct_bytes = std::fs::read(&artifact).unwrap();

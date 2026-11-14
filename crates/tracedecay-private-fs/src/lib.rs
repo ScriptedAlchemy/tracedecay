@@ -2,7 +2,10 @@
 //! plus the Windows file-handle identity primitive that shares this crate's
 //! cold, dependency-light position.
 
+use std::collections::hash_map::RandomState;
+use std::hash::BuildHasher;
 use std::io;
+use std::sync::LazyLock;
 
 pub mod capability_dir;
 mod coarse_time;
@@ -14,6 +17,14 @@ mod rename_noreplace;
 
 pub use coarse_time::{ChangeClockReading, ChangeStamp, RewriteWitness, change_time_settled};
 pub use inode_generation::inode_generation;
+
+/// A process-local random witness for persisted identities that must distinguish
+/// successive processes reusing a PID. Pair it with the PID for forked children.
+#[must_use]
+pub fn process_instance_nonce() -> u64 {
+    static NONCE: LazyLock<u64> = LazyLock::new(|| RandomState::new().hash_one(0_u8));
+    *NONCE
+}
 
 pub use file_lease::FileLease;
 pub use lock_admission::{LockAdmissionError, lock_shared_until, lock_until};

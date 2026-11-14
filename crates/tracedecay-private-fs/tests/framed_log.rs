@@ -308,11 +308,13 @@ fn durable_batch_sync_flushes_only_its_members() {
 /// batch that syncs its members one after another pays one commit per member.
 /// The members' barriers must be in flight together, so a seal of many
 /// segments waits about one barrier, not one per segment.
+/// Hold all barriers until every member enters: elapsed sleep time also
+/// measures unrelated host scheduling and cannot prove that overlap.
 #[cfg(target_os = "linux")]
 #[test]
 fn durable_batch_sync_overlaps_member_barriers_on_a_slow_disk() {
     const MEMBERS: u32 = 16;
-    const BARRIER: Duration = Duration::from_millis(500);
+    const COMPLETION_BUDGET: Duration = Duration::from_secs(2);
     let root = tempfile::tempdir().expect("batch fixture root");
     let mut batch = DurableFileBatch::new();
     for index in 0..MEMBERS {
@@ -321,15 +323,31 @@ fn durable_batch_sync_overlaps_member_barriers_on_a_slow_disk() {
         member.write_all(b"sealed segment").expect("member bytes");
         batch.written(&path, &member).expect("record member");
     }
-    let slow_disk = sync_latency::inject(root.path(), BARRIER);
-
     let started = Instant::now();
-    batch.sync().expect("batch sync");
+    let syncs = std::thread::scope(|scope| {
+        let slow_disk = sync_latency::hold(root.path());
+        let syncing = scope.spawn(|| batch.sync());
+        let all_entered = slow_disk.wait_for_syncs(
+            u64::from(MEMBERS),
+            COMPLETION_BUDGET.saturating_sub(started.elapsed()),
+        );
+        // Release even on failed admission before joining any blocked helpers.
+        slow_disk.release();
+        syncing
+            .join()
+            .expect("batch sync worker")
+            .expect("batch sync");
+        assert!(
+            all_entered,
+            "all {MEMBERS} member barriers must be in flight before any can finish"
+        );
+        slow_disk.syncs()
+    });
     let elapsed = started.elapsed();
 
-    assert_eq!(slow_disk.syncs(), u64::from(MEMBERS));
+    assert_eq!(syncs, u64::from(MEMBERS));
     assert!(
-        elapsed < BARRIER * (MEMBERS / 4),
-        "{MEMBERS} member barriers of {BARRIER:?} each took {elapsed:?} together"
+        elapsed < COMPLETION_BUDGET,
+        "{MEMBERS} concurrent member barriers took {elapsed:?} together"
     );
 }
