@@ -3365,32 +3365,36 @@ impl DaemonCodeIndexPublicationStoreV1 {
                 .saturating_add(identity.digest.as_str().len()),
         )?;
         let authority = self.read_authority();
-        Ok(move |control, layout| {
-            let lease = loop {
-                Self::require_read_control(control)?;
-                if let Some(lease) = authority.try_lease()? {
-                    break lease;
-                }
-                std::thread::park_timeout(Duration::from_millis(1));
-            };
-            let opened = authority.open_under_lease(&identity, layout, memory.operation(), lease);
-            Self::require_read_control(control)?;
-            let mut pass = opened?;
-            Ok(Box::new(
-                move |request: SealedGenerationSegmentReadV1<'_>,
-                      buffer: &mut Vec<u8>,
-                      control: &dyn CodeIndexExecutionControlV1| {
-                    buffer.clear();
+        Ok(
+            move |control: &dyn CodeIndexExecutionControlV1,
+                  layout: &SealedGenerationPackLayoutV1| {
+                let lease = loop {
                     Self::require_read_control(control)?;
-                    let result = pass.read(request, buffer);
-                    if let Err(error) = Self::require_read_control(control) {
-                        buffer.clear();
-                        return Err(error);
+                    if let Some(lease) = authority.try_lease()? {
+                        break lease;
                     }
-                    result
-                },
-            ) as Box<SealedGenerationPackReadPassV1>)
-        })
+                    std::thread::park_timeout(Duration::from_millis(1));
+                };
+                let opened =
+                    authority.open_under_lease(&identity, layout, memory.operation(), lease);
+                Self::require_read_control(control)?;
+                let mut pass = opened?;
+                Ok(Box::new(
+                    move |request: SealedGenerationSegmentReadV1<'_>,
+                          buffer: &mut Vec<u8>,
+                          control: &dyn CodeIndexExecutionControlV1| {
+                        buffer.clear();
+                        Self::require_read_control(control)?;
+                        let result = pass.read(request, buffer);
+                        if let Err(error) = Self::require_read_control(control) {
+                            buffer.clear();
+                            return Err(error);
+                        }
+                        result
+                    },
+                ) as Box<SealedGenerationPackReadPassV1>)
+            },
+        )
     }
 
     fn active_pack_read_factory(

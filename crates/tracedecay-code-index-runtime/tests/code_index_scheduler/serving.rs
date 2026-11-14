@@ -1703,14 +1703,21 @@ fn published_text_artifact_with_stale_search_revision_is_rebuilt() {
         let staging = root.join(".previous-search.staging");
         let mut builder = CodeLexicalArtifactBuilderV1::create(&staging, metadata.clone())
             .expect("previous-revision artifact builder");
+        let mut read_pass = source
+            .begin_read_pass(&control)
+            .expect("verified source read pass");
         let source_receipt = loop {
-            match source.next_page(&control).expect("verified page") {
+            match source
+                .next_page(&control, read_pass.as_mut())
+                .expect("verified page")
+            {
                 VerifiedSealedLexicalPageReadV1::Page(page) => {
                     builder.append_page(&page, &control).expect("append page");
                 }
                 VerifiedSealedLexicalPageReadV1::Complete(receipt) => break receipt,
             }
         };
+        drop(read_pass);
         let verified = loop {
             match builder
                 .advance_finalization(&source_receipt, 4_096, &control)

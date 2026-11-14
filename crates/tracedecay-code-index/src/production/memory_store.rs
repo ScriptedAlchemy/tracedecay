@@ -24,13 +24,12 @@ use super::{
     SharedDecodedContentPoolV1,
 };
 
+type MemoryActivePublicationV1 = (CodeGenerationId, Arc<[u8]>, Arc<MemoryCommittedPayloadsV1>);
+
 #[derive(Default)]
 struct MemorySealedStateV1 {
     segments: HashMap<ManifestDigest, Arc<MemoryCommittedPayloadsV1>>,
-    active: BTreeMap<
-        CodeIndexGenerationScopeV1,
-        (CodeGenerationId, Arc<[u8]>, Arc<MemoryCommittedPayloadsV1>),
-    >,
+    active: BTreeMap<CodeIndexGenerationScopeV1, MemoryActivePublicationV1>,
     manifests: HashMap<CodeGenerationId, Arc<[u8]>>,
     publications: u64,
     reads: HashMap<ManifestDigest, u64>,

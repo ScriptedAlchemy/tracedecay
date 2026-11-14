@@ -438,6 +438,7 @@ fn cold_finalization_denies_before_emitting_and_preserves_sealed_wire_bytes() {
         ignored_source_admissions_digest: &parsed.ignored_source_admissions_digest,
         file_segments: &parsed.file_segments,
         file_evidence: &parsed.file_evidence,
+        content_pack: &parsed.content_pack,
         coverage: parsed.coverage,
         capability: &parsed.capability,
         generation_evidence: &parsed.generation_evidence,

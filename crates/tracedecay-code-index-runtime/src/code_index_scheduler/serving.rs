@@ -3274,7 +3274,7 @@ impl LatestCodeTextGenerationV1 {
         // exclusive open has completed. It lasts for this synchronous copy.
         let mut read_pass = source
             .begin_read_pass(control)
-            .map_err(carried_source_error)?;
+            .map_err(map_sealed_page_source_error)?;
         let mut stage_file_pages = |file: u64, first_page: u64, first_chunk: u64| {
             source
                 .stage_file_pages(file, first_page, first_chunk, control, read_pass.as_mut())
