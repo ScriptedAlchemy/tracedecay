@@ -221,61 +221,6 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
         Ok((generation, projection))
     }
 
-    #[cfg(any(test, feature = "test-helpers"))]
-    pub async fn apply_active_session_relation_projections_for_test(
-        &self,
-        session_ids: &[SessionId],
-        cancellation: Arc<dyn GraphCancellation>,
-    ) -> SessionStoreResult<()> {
-        let (scope, _) = self
-            .session_relation_store()
-            .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?;
-        let snapshot = self
-            .read_snapshot()
-            .await
-            .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?;
-        let mut projections = Vec::with_capacity(session_ids.len());
-        for session_id in session_ids {
-            let (_, projection) = self
-                .load_active_relation_projection(
-                    &snapshot,
-                    &scope,
-                    session_id,
-                    Arc::clone(&cancellation),
-                )
-                .await?;
-            super::relation_receipts::write_relation_projection_on_snapshot(
-                self.inner(),
-                &snapshot,
-                &projection,
-                Arc::clone(&cancellation),
-            )
-            .await?;
-            projections.push(projection);
-        }
-        drop(snapshot);
-        let transaction = self
-            .begin_write_transaction()
-            .await
-            .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?;
-        for projection in &projections {
-            if let Err(error) =
-                super::relation_receipts::acknowledge_relation_receipt(&transaction, projection)
-                    .await
-            {
-                transaction
-                    .rollback()
-                    .await
-                    .map_err(|rollback| storage(RECONSTRUCT_OPERATION, rollback))?;
-                return Err(error);
-            }
-        }
-        transaction
-            .commit()
-            .await
-            .map_err(|error| storage(RECONSTRUCT_OPERATION, error))
-    }
-
     #[tracing::instrument(
         name = "session_temporal.persist.recover_relations",
         level = "trace",
