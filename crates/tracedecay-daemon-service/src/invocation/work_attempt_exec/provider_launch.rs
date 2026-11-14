@@ -74,6 +74,11 @@ impl Drop for ProviderProcess {
 impl ProviderProcess {
     /// Spawns `command` on a lifeline thread, capturing at most `stdout_cap`
     /// and `stderr_cap` bytes. Stdin stays open and empty until [`Self::start`].
+    #[tracing::instrument(
+        name = "daemon.service.work_attempt.provider.spawn",
+        level = "trace",
+        skip_all
+    )]
     pub(super) async fn spawn(
         mut command: Command,
         stdout_cap: u64,
