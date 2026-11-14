@@ -287,7 +287,6 @@ mod published_artifact_ceiling {
     use std::pin::Pin;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::task::Poll;
-    use std::time::{SystemTime, UNIX_EPOCH};
 
     use rusqlite::Connection;
     use tempfile::TempDir;
@@ -298,14 +297,12 @@ mod published_artifact_ceiling {
     use tracedecay_runtime_core::db::{
         RegisteredTestRuntimeRetirementControlV1, TestDatabaseRuntimeScope,
     };
-    use tracedecay_runtime_core::logging::FormattedTracingCapture;
     use tracedecay_runtime_core::shard_runtime::registry::{
         StoreRuntimeClientLease, StoreRuntimeRetirementOutcome, StoreRuntimeRetirementResult,
     };
     use tracedecay_rusqlite_runtime::workflow::{
         WORKFLOW_SCHEMA_DEFINITION_DIGEST_V1, WORKFLOW_TABLE_CONTRACTS_V1,
     };
-    use tracing::{Instrument, instrument::WithSubscriber};
 
     use super::fs;
     use crate::RegisteredGlobalDbOwnerV1;
@@ -434,11 +431,6 @@ mod published_artifact_ceiling {
     }
 
     impl WorkflowState {
-        #[tracing::instrument(
-            name = "global_db.workflow_sweep.read_state",
-            level = "info",
-            skip_all
-        )]
         fn read(path: &Path) -> Self {
             let connection = Connection::open(path).unwrap();
             let table_sql = connection
@@ -1018,36 +1010,11 @@ mod published_artifact_ceiling {
     /// stays typed recovering, and the next open finishes the job.
     #[tokio::test(flavor = "multi_thread")]
     async fn background_upgrade_is_atomic_at_every_cancellation_point() {
-        let sweep = {
-            let _capture = FormattedTracingCapture::start_with_info_span_timings();
-            let started_at = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap_or_default();
-            let span = tracing::info_span!(
-                "global_db.workflow_sweep",
-                started_at_unix_ms = started_at.as_millis() as u64,
-            );
-            run_background_upgrade_cancellation_sweep()
-                .instrument(span)
-                .with_current_subscriber()
-        };
-        sweep.await;
-    }
-
-    async fn run_background_upgrade_cancellation_sweep() {
-        #[tracing::instrument(
-            name = "global_db.workflow_sweep.sample",
-            level = "info",
-            skip_all,
-            fields(cancel_at)
-        )]
         async fn converge_cancelled_at(
             path: &Path,
             cancel_at: usize,
         ) -> (Result<(), TraceDecayError>, usize) {
-            let (owner, convergence, (runtime, retirement)) = admit_for_daemon(path)
-                .instrument(tracing::info_span!("global_db.workflow_sweep.admit"))
-                .await;
+            let (owner, convergence, (runtime, retirement)) = admit_for_daemon(path).await;
             let lease = owner.issue_lease().unwrap();
             let cancellation = CancellationToken::new();
             let mut recovery = Box::pin(lease.converge_schema(convergence, &cancellation));
@@ -1059,41 +1026,29 @@ mod published_artifact_ceiling {
                 }
                 recovery.as_mut().poll(context)
             })
-            .instrument(tracing::info_span!("global_db.workflow_sweep.converge"))
             .await;
             drop(recovery);
             if let Err(error) = &outcome
                 && error.is_store_open_cancelled()
                 && WorkflowState::read(path).digest == PUBLISHED_DIGEST
             {
-                assert_workflow_recovering(&lease)
-                    .instrument(tracing::info_span!(
-                        "global_db.workflow_sweep.recovering_gate"
-                    ))
-                    .await;
+                assert_workflow_recovering(&lease).await;
             }
             // Each sampled cancellation reopens this path. Join the exact
             // published runtime before the next admission can acquire it.
             drop((lease, owner, runtime));
-            let mut reservation = {
-                let _span =
-                    tracing::info_span!("global_db.workflow_sweep.reserve_retirement").entered();
-                match retirement
-                    .registry()
-                    .reserve_retirement_batch(vec![retirement.retirement_target()])
-                {
-                    StoreRuntimeRetirementResult::Reserved(reservation) => reservation,
-                    StoreRuntimeRetirementResult::Blocked(refusal) => {
-                        panic!("completed convergence retained runtime clients: {refusal:?}")
-                    }
+            let mut reservation = match retirement
+                .registry()
+                .reserve_retirement_batch(vec![retirement.retirement_target()])
+            {
+                StoreRuntimeRetirementResult::Reserved(reservation) => reservation,
+                StoreRuntimeRetirementResult::Blocked(refusal) => {
+                    panic!("completed convergence retained runtime clients: {refusal:?}")
                 }
             };
             let committed = tracedecay_runtime_core::native_runtime::spawn_blocking(move || {
                 reservation.commit()
             })
-            .instrument(tracing::info_span!(
-                "global_db.workflow_sweep.join_retirement"
-            ))
             .await
             .unwrap()
             .unwrap();
@@ -1108,42 +1063,23 @@ mod published_artifact_ceiling {
             (outcome, polls)
         }
 
-        let reference = DaemonPublishedStore::create()
-            .instrument(tracing::info_span!(
-                "global_db.workflow_sweep.reference_fixture"
-            ))
-            .await;
-        tracing::info_span!("global_db.workflow_sweep.reference_seed")
-            .in_scope(|| reference.store.run(BULK_ROWS));
-        let before = tracing::info_span!("global_db.workflow_sweep.reference_before")
-            .in_scope(|| reference.store.state());
+        let reference = DaemonPublishedStore::create().await;
+        reference.store.run(BULK_ROWS);
+        let before = reference.store.state();
         let (outcome, total_polls) = converge_cancelled_at(&reference.store.path, usize::MAX).await;
         outcome.unwrap();
-        let completed = tracing::info_span!("global_db.workflow_sweep.reference_after")
-            .in_scope(|| reference.store.state());
+        let completed = reference.store.state();
         assert_eq!(completed.digest, WORKFLOW_SCHEMA_DEFINITION_DIGEST_V1);
         assert_eq!(completed.artifacts, before.artifacts);
 
         let stride = (total_polls / 12).max(1);
-        tracing::info!(
-            total_polls,
-            stride,
-            "workflow cancellation sweep calibrated"
-        );
         let mut cancelled_published = 0;
         for cancel_at in (1..total_polls).step_by(stride) {
-            let daemon_store = DaemonPublishedStore::create()
-                .instrument(tracing::info_span!(
-                    "global_db.workflow_sweep.fixture",
-                    cancel_at
-                ))
-                .await;
+            let daemon_store = DaemonPublishedStore::create().await;
             let store = &daemon_store.store;
-            tracing::info_span!("global_db.workflow_sweep.seed", cancel_at)
-                .in_scope(|| store.run(BULK_ROWS));
+            store.run(BULK_ROWS);
             let (outcome, _) = converge_cancelled_at(&store.path, cancel_at).await;
-            let state = tracing::info_span!("global_db.workflow_sweep.state", cancel_at)
-                .in_scope(|| store.state());
+            let state = store.state();
             match outcome {
                 Ok(()) => assert_eq!(state, completed, "completed at poll {cancel_at}"),
                 Err(error) => {
@@ -1156,15 +1092,7 @@ mod published_artifact_ceiling {
                         cancelled_published += 1;
                         let (reopened, _) = converge_cancelled_at(&store.path, usize::MAX).await;
                         reopened.unwrap();
-                        assert_eq!(
-                            tracing::info_span!(
-                                "global_db.workflow_sweep.reopened_state",
-                                cancel_at
-                            )
-                            .in_scope(|| store.state()),
-                            completed,
-                            "reopen after poll {cancel_at}"
-                        );
+                        assert_eq!(store.state(), completed, "reopen after poll {cancel_at}");
                     }
                 }
             }
