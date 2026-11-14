@@ -185,7 +185,11 @@ impl DeliveryRecorderSpoolV1 {
         if bytes.is_empty() || bytes.len() > MAX_RECEIPT_BYTES {
             return Err(DeliveryRecorderSpoolError::InvalidReceipt);
         }
-        tracing::trace!(phase = "publish", bytes = bytes.len(), "delivery spool append");
+        tracing::trace!(
+            phase = "publish",
+            bytes = bytes.len(),
+            "delivery spool append"
+        );
         atomic_write(&path, "delivery", &bytes, DIRECTORY_POLICY)
             .map_err(|_| DeliveryRecorderSpoolError::Io)?;
         state.receipt_paths.insert(path);
