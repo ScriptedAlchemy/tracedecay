@@ -4400,6 +4400,25 @@ fn a_manifest_cannot_activate_another_preparations_private_segments() {
         &mut before,
     )
     .expect("A reads its staged bytes");
+    let physical_packs =
+        CodeIndexPublishedGenerationV1::partitioned_pack_identities(publication.manifest_bytes())
+            .expect("canonical physical pack identities");
+    assert_eq!(physical_packs.len(), 2);
+    let physical_reader = staged.pack_reader();
+    let mut physical_before = Vec::new();
+    for pack in &physical_packs {
+        let mut bytes = Vec::new();
+        physical_reader(
+            SealedGenerationSegmentReadV1::Whole {
+                digest: &pack.digest,
+                size_bytes: pack.size_bytes,
+            },
+            &mut bytes,
+        )
+        .expect("pin A's physical packs before publication");
+        assert_eq!(bytes.len() as u64, pack.size_bytes);
+        physical_before.push(bytes);
+    }
     let incumbent = target
         .publication
         .read_publication_pointer()
@@ -4421,10 +4440,59 @@ fn a_manifest_cannot_activate_another_preparations_private_segments() {
             .expect("unchanged incumbent"),
         incumbent
     );
+    let collision_index =
+        usize::from(physical_packs[0].digest.as_str() < physical_packs[1].digest.as_str());
+    let canonical = |index: usize| {
+        code_generation_segments_root(target_store.path()).join(format!(
+            "segment-{}.json",
+            sha256_hex_suffix(physical_packs[index].digest.as_str()).expect("pack digest suffix"),
+        ))
+    };
+    // The first canonical name publishes before the second refuses this
+    // collision. Readers must then combine canonical and still-private packs.
+    let collision = canonical(collision_index);
+    let foreign_bytes = b"foreign immutable pack fixture";
+    std::fs::write(&collision, foreign_bytes).expect("inject the second-name collision");
+    let refusal = target
+        .publication
+        .commit(&mut staged, &publication)
+        .expect_err("A must refuse a foreign immutable name");
+    assert!(matches!(
+        refusal,
+        CodeIndexPublicationStoreErrorV1::CorruptionResetRequired(_)
+    ));
+    assert_eq!(
+        std::fs::read(canonical(1 - collision_index)).expect("first pack was published"),
+        physical_before[1 - collision_index],
+    );
+    assert_eq!(
+        std::fs::read(&collision).expect("foreign name"),
+        foreign_bytes
+    );
+    assert_eq!(
+        target
+            .publication
+            .read_publication_pointer()
+            .expect("no partially published pointer"),
+        incumbent,
+    );
+    let mut physical_after_refusal = Vec::new();
+    for (pack, expected) in physical_packs.iter().zip(&physical_before) {
+        physical_reader(
+            SealedGenerationSegmentReadV1::Whole {
+                digest: &pack.digest,
+                size_bytes: pack.size_bytes,
+            },
+            &mut physical_after_refusal,
+        )
+        .expect("read canonical and still-private packs after refusal");
+        assert_eq!(&physical_after_refusal, expected);
+    }
+    std::fs::remove_file(&collision).expect("remove only the injected foreign fixture");
     target
         .publication
         .commit(&mut staged, &publication)
-        .expect("A commits its exact segments");
+        .expect("A retries its remaining exact segments");
     drop(staged);
     let mut after = Vec::new();
     reader(
@@ -4436,6 +4504,17 @@ fn a_manifest_cannot_activate_another_preparations_private_segments() {
     )
     .expect("committed reader survives preparation drop");
     assert_eq!(after, before);
+    for (pack, expected) in physical_packs.iter().zip(&physical_before) {
+        physical_reader(
+            SealedGenerationSegmentReadV1::Whole {
+                digest: &pack.digest,
+                size_bytes: pack.size_bytes,
+            },
+            &mut after,
+        )
+        .expect("physical reader follows the committed immutable names");
+        assert_eq!(&after, expected);
+    }
     let decoded = target
         .publication
         .load_active_shared()
@@ -4508,6 +4587,24 @@ fn escaped_staged_readers_refuse_after_abort_or_uncommitted_drop() {
         )
         .expect("staged range");
         assert_eq!(range, whole[1..3]);
+        let physical_packs = CodeIndexPublishedGenerationV1::partitioned_pack_identities(
+            publication.manifest_bytes(),
+        )
+        .expect("physical pack identities");
+        assert_eq!(physical_packs.len(), 2);
+        let physical_reader = preparation.pack_reader();
+        let mut physical_bytes = Vec::new();
+        for pack in &physical_packs {
+            physical_reader(
+                SealedGenerationSegmentReadV1::Whole {
+                    digest: &pack.digest,
+                    size_bytes: pack.size_bytes,
+                },
+                &mut physical_bytes,
+            )
+            .expect("pin both physical packs before abort or drop");
+            assert_eq!(physical_bytes.len() as u64, pack.size_bytes);
+        }
         if explicit_abort {
             preparation.abort().expect("abort");
         } else {
@@ -4523,6 +4620,19 @@ fn escaped_staged_readers_refuse_after_abort_or_uncommitted_drop() {
             )
             .is_err()
         );
+        let pack = &physical_packs[0];
+        assert!(
+            physical_reader(
+                SealedGenerationSegmentReadV1::Whole {
+                    digest: &pack.digest,
+                    size_bytes: pack.size_bytes,
+                },
+                &mut physical_bytes,
+            )
+            .is_err(),
+            "an escaped physical reader cannot reopen an aborted preparation"
+        );
+        assert!(physical_bytes.is_empty());
         assert!(
             std::fs::read_dir(code_generation_segments_root(target_store.path()))
                 .expect("segments root")

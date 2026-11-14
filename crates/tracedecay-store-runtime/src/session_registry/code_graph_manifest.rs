@@ -1085,13 +1085,15 @@ impl<'a> GraphSegmentReadPassV1<'a> {
             ));
         }
         let started = std::time::Instant::now();
-        let opened = select_partitioned_segment_root(self.roots, request).and_then(
-            |(root, path_metadata)| {
-                open_partitioned_segment(root, &path_metadata, request, || {
-                    self.open_attempts += 1;
-                })
-            },
-        );
+        let mut record_open = || {
+            self.open_attempts += 1;
+            #[cfg(test)]
+            SEGMENT_OPENS.with(|opens| opens.set(opens.get() + 1));
+        };
+        let opened = select_partitioned_segment_root(self.roots, request, &mut record_open)
+            .and_then(|(root, path_metadata)| {
+                open_partitioned_segment(root, &path_metadata, request, &mut record_open)
+            });
         self.open_wall_time += started.elapsed();
         let position = self.pinned.len();
         self.pinned.push(opened?);
@@ -1201,12 +1203,18 @@ fn partitioned_segment_request(
 fn select_partitioned_segment_root<'a>(
     roots: &'a [PathBuf],
     request: tracedecay_code_index::production::SealedGenerationSegmentReadV1<'_>,
+    record_open_attempt: &mut impl FnMut(),
 ) -> Result<(&'a std::path::Path, std::fs::Metadata), CodeIndexProductionErrorV1> {
     let (digest, _, _, _) = partitioned_segment_request(request)?;
     let digest = sha256_hex_suffix(digest).ok_or_else(|| {
         CodeIndexProductionErrorV1::Contract("sealed segment digest is not sha256".to_owned())
     })?;
     for root in roots {
+        // Windows pathname metadata performs an open even when the candidate
+        // is missing or its metadata will be refused. Unix probes do not.
+        if cfg!(windows) {
+            record_open_attempt();
+        }
         match root
             .join(format!("segment-{digest}.json"))
             .symlink_metadata()
@@ -1247,13 +1255,7 @@ fn open_partitioned_segment(
             "sealed generation segment identity does not match its manifest".to_owned(),
         ));
     }
-    // Count attempted opens, not pathname probes or rejected metadata.
-    let mut record_open = || {
-        record_open_attempt();
-        #[cfg(test)]
-        SEGMENT_OPENS.with(|opens| opens.set(opens.get() + 1));
-    };
-    record_open();
+    record_open_attempt();
     let file = File::open(&path).map_err(|error| {
         CodeIndexProductionErrorV1::Contract(format!(
             "sealed generation segment cannot be opened: {error}"
@@ -1270,7 +1272,7 @@ fn open_partitioned_segment(
         ));
     }
     #[cfg(windows)]
-    if !same_windows_handle_identity(&file, &path, &mut record_open)
+    if !same_windows_handle_identity(&file, &path, &mut record_open_attempt)
         .map_err(|error| CodeIndexProductionErrorV1::Contract(error.to_string()))?
     {
         return Err(CodeIndexProductionErrorV1::Contract(
@@ -3006,10 +3008,14 @@ mod tests {
 
     const PARTITIONED_FIXTURE_FILES: [&str; 3] = ["lib", "alpha", "beta"];
 
-    /// Windows reopens each physical pathname once for its stable file-ID witness.
-    /// Both opens belong in the payload-open counter; the number of files is fixed.
+    /// Windows opens the first existing pathname for metadata, payload and a
+    /// stable file-ID witness. Preceding missing routes are counted separately.
     fn payload_open_count(files: usize) -> usize {
-        files * if cfg!(windows) { 2 } else { 1 }
+        files * if cfg!(windows) { 3 } else { 1 }
+    }
+
+    fn pathname_probe_open_count(probes: usize) -> usize {
+        if cfg!(windows) { probes } else { 0 }
     }
 
     fn packed_extent(
@@ -3301,11 +3307,9 @@ mod tests {
         let mut decoded = Vec::new();
         pass.read(request, &mut decoded).unwrap();
         assert_eq!(decoded, bytes);
-        assert_eq!(pass.open_attempts, payload_open_count(1));
-        assert_eq!(
-            SEGMENT_OPENS.with(|opens| opens.get()),
-            payload_open_count(1)
-        );
+        let fallback_opens = payload_open_count(1) + pathname_probe_open_count(1);
+        assert_eq!(pass.open_attempts, fallback_opens);
+        assert_eq!(SEGMENT_OPENS.with(|opens| opens.get()), fallback_opens);
         assert!(pass.open_wall_time > std::time::Duration::ZERO);
 
         // A non-file at the first existing route is corrupt, not a reason
@@ -3317,14 +3321,19 @@ mod tests {
             fresh.read(request, &mut Vec::new()),
             Err(CodeIndexProductionErrorV1::Contract(_))
         ));
-        assert_eq!(SEGMENT_OPENS.with(|opens| opens.get()), 0);
         assert_eq!(
-            fresh.open_attempts, 0,
-            "invalid pathname must not count as an open"
+            SEGMENT_OPENS.with(|opens| opens.get()),
+            pathname_probe_open_count(1)
+        );
+        assert_eq!(
+            fresh.open_attempts,
+            pathname_probe_open_count(1),
+            "invalid pathname is refused after its metadata probe"
         );
 
         // A valid pathname with a mismatched manifest extent must also stop
-        // before File::open, without inflating the reported open count.
+        // before the payload open, while retaining its metadata attempt.
+        SEGMENT_OPENS.with(|opens| opens.set(0));
         let roots = vec![second.path().to_path_buf()];
         let mut wrong_extent = super::GraphSegmentReadPassV1::new(&roots);
         let mismatch = SealedGenerationSegmentReadV1::Whole {
@@ -3335,8 +3344,74 @@ mod tests {
             wrong_extent.read(mismatch, &mut Vec::new()),
             Err(CodeIndexProductionErrorV1::Contract(_))
         ));
-        assert_eq!(wrong_extent.open_attempts, 0);
-        assert_eq!(SEGMENT_OPENS.with(|opens| opens.get()), 0);
+        assert_eq!(wrong_extent.open_attempts, pathname_probe_open_count(1));
+        assert_eq!(
+            SEGMENT_OPENS.with(|opens| opens.get()),
+            pathname_probe_open_count(1)
+        );
+    }
+
+    #[test]
+    fn graph_pack_missing_routes_preserve_a_healthy_role_and_count_recovery() {
+        let first = TempDir::new().unwrap();
+        let second = TempDir::new().unwrap();
+        let roots = [first.path().to_path_buf(), second.path().to_path_buf()];
+        let healthy_bytes = b"retained healthy graph pack";
+        let missing_bytes = b"graph pack restored to a later route";
+        let healthy_digest =
+            ManifestDigest::from_sha256_bytes(&Sha256::digest(healthy_bytes)).unwrap();
+        let missing_digest =
+            ManifestDigest::from_sha256_bytes(&Sha256::digest(missing_bytes)).unwrap();
+        std::fs::write(
+            super::segment_path(first.path(), &healthy_digest).unwrap(),
+            healthy_bytes,
+        )
+        .unwrap();
+        let healthy = SealedGenerationSegmentReadV1::Whole {
+            digest: &healthy_digest,
+            size_bytes: healthy_bytes.len() as u64,
+        };
+        let missing = SealedGenerationSegmentReadV1::Whole {
+            digest: &missing_digest,
+            size_bytes: missing_bytes.len() as u64,
+        };
+        SEGMENT_OPENS.with(|opens| opens.set(0));
+        let mut pass = super::GraphSegmentReadPassV1::new(&roots);
+        let mut buffer = Vec::new();
+        pass.read(healthy, &mut buffer).unwrap();
+        assert_eq!(buffer, healthy_bytes);
+        assert_eq!(pass.open_attempts, payload_open_count(1));
+
+        assert!(matches!(
+            pass.read(missing, &mut buffer),
+            Err(CodeIndexProductionErrorV1::Contract(_))
+        ));
+        assert!(buffer.is_empty());
+        assert_eq!(pass.pinned.len(), 1);
+        assert_eq!(pass.pinned[0].digest, healthy_digest.as_str());
+        let after_missing = payload_open_count(1) + pathname_probe_open_count(2);
+        assert_eq!(pass.open_attempts, after_missing);
+        assert_eq!(SEGMENT_OPENS.with(|opens| opens.get()), after_missing);
+        pass.read(healthy, &mut buffer).unwrap();
+        assert_eq!(buffer, healthy_bytes);
+        assert_eq!(pass.open_attempts, after_missing);
+
+        std::fs::write(
+            super::segment_path(second.path(), &missing_digest).unwrap(),
+            missing_bytes,
+        )
+        .unwrap();
+        pass.read(missing, &mut buffer).unwrap();
+        assert_eq!(buffer, missing_bytes);
+        let after_recovery = after_missing + payload_open_count(1) + pathname_probe_open_count(1);
+        assert_eq!(pass.open_attempts, after_recovery);
+        assert_eq!(pass.pinned.len(), 2);
+        pass.read(healthy, &mut buffer).unwrap();
+        assert_eq!(buffer, healthy_bytes);
+        pass.read(missing, &mut buffer).unwrap();
+        assert_eq!(buffer, missing_bytes);
+        assert_eq!(pass.open_attempts, after_recovery);
+        assert_eq!(SEGMENT_OPENS.with(|opens| opens.get()), after_recovery);
     }
 
     #[test]

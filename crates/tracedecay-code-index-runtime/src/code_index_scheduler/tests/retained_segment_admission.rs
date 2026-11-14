@@ -1,5 +1,8 @@
 //! A refused read cannot discard another operation's authenticated pack handles.
-use super::{GenerationPackReadPassV1, StagedGenerationSegmentsV1, TemporaryPayloadPackV1};
+use super::{
+    GenerationPackReadPassV1, PackReadOpenAttemptsV1, StagedGenerationSegmentsV1,
+    TemporaryPayloadPackV1,
+};
 #[cfg(target_os = "linux")]
 use notify::{RecommendedWatcher, Watcher};
 use sha2::{Digest, Sha256};
@@ -122,26 +125,24 @@ fn retained_failed_read_preserves_other_operation_handles_and_recovers() {
         drop(File::open(path(0)).expect("positive observer control"));
         assert_eq!(observer.opens(), 1, "the observer counts a real open");
     }
-    let mut healthy_opens = 0;
+    let mut healthy_opens = PackReadOpenAttemptsV1::default();
     let mut healthy =
         GenerationPackReadPassV1::open(&segments, &identities[..2], None, &mut healthy_opens)
             .expect("pin the two healthy generation roles");
     let mut output = Vec::new();
     for (index, expected) in bytes.iter().take(2).enumerate() {
         healthy
-            .read(request(index), &mut output, &mut healthy_opens)
+            .read(request(index), &mut output)
             .expect("authenticate healthy pack");
         assert_eq!(&output, expected);
     }
-    assert_eq!(healthy_opens, 2);
+    assert_eq!(healthy_opens.payload, 2);
     #[cfg(target_os = "linux")]
     assert_eq!(observer.opens(), 2, "only the two payload roles are opened");
     for _ in 0..2 {
         output = vec![0x55, 0xaa];
         assert!(
-            healthy
-                .read(request(2), &mut output, &mut healthy_opens)
-                .is_err(),
+            healthy.read(request(2), &mut output).is_err(),
             "an outside-roster request is refused"
         );
         assert!(output.is_empty());
@@ -149,12 +150,12 @@ fn retained_failed_read_preserves_other_operation_handles_and_recovers() {
             !healthy.is_invalidated(),
             "malformed requests preserve admitted handles"
         );
-        let mut candidate_opens = 0;
+        let mut candidate_opens = PackReadOpenAttemptsV1::default();
         let mut candidate =
             GenerationPackReadPassV1::open(&segments, &identities[2..], None, &mut candidate_opens)
                 .expect("pin a separate cold operation");
         let error = candidate
-            .read(request(2), &mut output, &mut candidate_opens)
+            .read(request(2), &mut output)
             .expect_err("the first read authenticates the candidate");
         let CodeIndexProductionErrorV1::Contract(detail) = error else {
             panic!("expected an authenticated refusal, got {error}");
@@ -165,8 +166,8 @@ fn retained_failed_read_preserves_other_operation_handles_and_recovers() {
         );
         assert!(output.is_empty(), "refusal clears stale and corrupt bytes");
         assert!(candidate.is_invalidated());
-        assert_eq!(candidate_opens, 1);
-        assert_eq!(healthy_opens, 2);
+        assert_eq!(candidate_opens.payload, 1);
+        assert_eq!(healthy_opens.payload, 2);
         #[cfg(target_os = "linux")]
         assert_eq!(observer.opens(), 1, "only the cold candidate was opened");
     }
@@ -182,24 +183,23 @@ fn retained_failed_read_preserves_other_operation_handles_and_recovers() {
                         length: 3,
                     },
                     &mut output,
-                    &mut healthy_opens,
                 )
                 .expect("healthy range after candidate refusal");
             assert_eq!(output, bytes[index][offset as usize..offset as usize + 3]);
         }
     }
-    assert_eq!(healthy_opens, 2);
+    assert_eq!(healthy_opens.payload, 2);
     #[cfg(target_os = "linux")]
     assert_eq!(observer.opens(), 0, "healthy handles are never reopened");
     fs::write(path(2), &bytes[2]).expect("repair disposable candidate");
     #[cfg(target_os = "linux")]
     assert_eq!(observer.opens(), 1, "observe fixture write separately");
-    let mut candidate_opens = 0;
+    let mut candidate_opens = PackReadOpenAttemptsV1::default();
     let mut candidate =
         GenerationPackReadPassV1::open(&segments, &identities[2..], None, &mut candidate_opens)
             .expect("new operation over repaired candidate");
     candidate
-        .read(request(2), &mut output, &mut candidate_opens)
+        .read(request(2), &mut output)
         .expect("authenticate repaired candidate");
     assert_eq!(output, bytes[2]);
     candidate
@@ -211,20 +211,17 @@ fn retained_failed_read_preserves_other_operation_handles_and_recovers() {
                 length: 3,
             },
             &mut output,
-            &mut candidate_opens,
         )
         .expect("exact admitted range without reopening");
     assert_eq!(output, bytes[2][1..4]);
-    assert_eq!(candidate_opens, 1);
+    assert_eq!(candidate_opens.payload, 1);
     #[cfg(target_os = "linux")]
     assert_eq!(observer.opens(), 1);
     fs::write(path(2), &damaged).expect("mutate the admitted file");
     #[cfg(target_os = "linux")]
     let _ = observer.opens();
     assert!(
-        candidate
-            .read(request(2), &mut output, &mut candidate_opens)
-            .is_err(),
+        candidate.read(request(2), &mut output).is_err(),
         "admitted authority rejects later mutation"
     );
     assert!(output.is_empty());
@@ -237,13 +234,11 @@ fn retained_failed_read_preserves_other_operation_handles_and_recovers() {
     );
     fs::write(path(2), &bytes[2]).expect("restore bytes after invalidation");
     assert!(
-        candidate
-            .read(request(2), &mut output, &mut candidate_opens)
-            .is_err(),
+        candidate.read(request(2), &mut output).is_err(),
         "restoration cannot revive an invalidated pass"
     );
     healthy
-        .read(request(0), &mut output, &mut healthy_opens)
+        .read(request(0), &mut output)
         .expect("independent healthy operation remains admitted");
     assert_eq!(output, bytes[0]);
 }

@@ -75,7 +75,7 @@ use crate::code_graph_seat::CodeGraphBuildAdmissionV1;
 
 #[path = "publication_store/pack_read_pass.rs"]
 mod pack_read_pass;
-use pack_read_pass::GenerationPackReadPassV1;
+use pack_read_pass::{GenerationPackReadPassV1, PackReadOpenAttemptsV1};
 
 #[cfg(all(test, unix))]
 #[path = "tests/staged_segment_reads.rs"]
@@ -686,7 +686,6 @@ struct AdmittedPackLayoutV1 {
 /// Idle factories retain only path, pointer and admitted manifest authority.
 struct RetainedPackReadPassV1 {
     payloads: GenerationPackReadPassV1,
-    open_attempts: u64,
     _memory: PreparedPackMemoryV1,
     _lease: CodeGenerationStoreLockV1,
 }
@@ -697,7 +696,7 @@ impl RetainedPackReadPassV1 {
         request: SealedGenerationSegmentReadV1<'_>,
         buffer: &mut Vec<u8>,
     ) -> Result<(), CodeIndexProductionErrorV1> {
-        self.payloads.read(request, buffer, &mut self.open_attempts)
+        self.payloads.read(request, buffer)
     }
 }
 
@@ -760,14 +759,15 @@ impl GenerationReadAuthorityV1 {
         let content = layout.content_pack();
         let evidence = layout.evidence_pack();
         let mut memory = PreparedPackMemoryV1::new(operation)?;
-        memory.admit(pack_read_workspace_bytes(
+        let workspace = pack_read_workspace_bytes(
             &self.segments_root,
             content
                 .digest
                 .as_str()
                 .len()
                 .saturating_add(evidence.digest.as_str().len()),
-        ))?;
+        );
+        memory.admit(workspace)?;
         let identities = [
             SealedGenerationSegmentIdentityV1 {
                 digest: content.digest.clone(),
@@ -775,7 +775,14 @@ impl GenerationReadAuthorityV1 {
             },
             evidence.clone(),
         ];
-        let mut open_attempts = 0;
+        memory.admit(workspace.saturating_add(
+            GenerationPackReadPassV1::immutable_workspace_bytes(
+                &self.segments_root,
+                &identities,
+                None,
+            )?,
+        ))?;
+        let mut open_attempts = PackReadOpenAttemptsV1::default();
         let payloads = GenerationPackReadPassV1::open(
             &self.segments_root,
             &identities,
@@ -784,7 +791,6 @@ impl GenerationReadAuthorityV1 {
         )?;
         Ok(RetainedPackReadPassV1 {
             payloads,
-            open_attempts,
             _memory: memory,
             _lease: lease,
         })
@@ -801,7 +807,7 @@ struct DaemonCodeIndexPreparationFilesV1 {
     segments: StagedGenerationSegmentsV1,
     content_pack: Option<SealedGenerationContentPackV1>,
     evidence_identity: Option<SealedGenerationSegmentIdentityV1>,
-    segment_read_open_attempts: u64,
+    segment_read_open_attempts: PackReadOpenAttemptsV1,
     // One changed sealed pathname invalidates the entire transaction. Retrying
     // must not silently accept substituted bytes under the same digest name.
     segment_reads_poisoned: bool,
@@ -967,6 +973,13 @@ impl DaemonCodeIndexPreparationFilesV1 {
             );
             self.admit(workspace)?;
             let identities = self.physical_identities();
+            self.admit(workspace.saturating_add(
+                GenerationPackReadPassV1::immutable_workspace_bytes(
+                    root,
+                    &identities,
+                    Some(&self.segments.pending),
+                )?,
+            ))?;
             let pass = GenerationPackReadPassV1::open(
                 root,
                 &identities,
@@ -984,7 +997,7 @@ impl DaemonCodeIndexPreparationFilesV1 {
         let pass = self.payload_reads.as_mut().ok_or_else(|| {
             CodeIndexProductionErrorV1::Contract("prepared payload pass is absent".to_owned())
         })?;
-        let result = pass.read(request, buffer, &mut self.segment_read_open_attempts);
+        let result = pass.read(request, buffer);
         if pass.is_invalidated() {
             self.invalidate_reads();
         }
@@ -1023,9 +1036,7 @@ impl DaemonCodeIndexPreparationFilesV1 {
         }
         if let Some(parent) = self.parent.as_mut() {
             let result = parent.manifest.layout.read(request, buffer, |raw, into| {
-                parent
-                    .read
-                    .read(raw, into, &mut self.segment_read_open_attempts)?;
+                parent.read.read(raw, into)?;
                 parent
                     .bytes_read
                     .fetch_add(into.len() as u64, Ordering::Relaxed);
@@ -1347,7 +1358,9 @@ impl DaemonCodeIndexPreparationV1 {
     pub(super) fn staged_segment_read_open_attempts_for_test(&self) -> u64 {
         let state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
         match &*state {
-            DaemonCodeIndexPreparationStateV1::Open(files) => files.segment_read_open_attempts,
+            DaemonCodeIndexPreparationStateV1::Open(files) => {
+                files.segment_read_open_attempts.payload
+            }
             _ => 0,
         }
     }
@@ -1440,14 +1453,15 @@ impl CodeIndexPreparationPort for DaemonCodeIndexPreparationV1 {
         }
         let content = manifest.layout.content_pack();
         let evidence = manifest.layout.evidence_pack();
-        files.admit(pack_read_workspace_bytes(
+        let workspace = pack_read_workspace_bytes(
             &self.segments_root,
             content
                 .digest
                 .as_str()
                 .len()
                 .saturating_add(evidence.digest.as_str().len()),
-        ))?;
+        );
+        files.admit(workspace)?;
         let identities = [
             SealedGenerationSegmentIdentityV1 {
                 digest: content.digest.clone(),
@@ -1455,6 +1469,16 @@ impl CodeIndexPreparationPort for DaemonCodeIndexPreparationV1 {
             },
             evidence.clone(),
         ];
+        files.admit(
+            workspace.saturating_add(
+                GenerationPackReadPassV1::immutable_workspace_bytes(
+                    &self.segments_root,
+                    &identities,
+                    None,
+                )
+                .map_err(DaemonCodeIndexPublicationStoreV1::corruption)?,
+            ),
+        )?;
         // The preparation already holds the shared segment-retention lease.
         // Re-entering the main store lease here would invert commit ordering.
         let read = GenerationPackReadPassV1::open(
@@ -1990,8 +2014,31 @@ impl Drop for StagedGenerationSegmentsV1 {
 struct PinnedGenerationSegmentV1 {
     digest: String,
     size_bytes: u64,
-    file: File,
+    file: PinnedGenerationFileV1,
     admitted_metadata: std::fs::Metadata,
+}
+
+#[cfg(not(windows))]
+type PinnedGenerationFileV1 = File;
+
+/// Only a payload read pass uses immutable sharing. Short manifest reads
+/// preserve their existing opener and do not acquire a persistent route lease.
+#[cfg(windows)]
+enum PinnedGenerationFileV1 {
+    Shared(File),
+    Immutable(tracedecay_private_fs::windows::ImmutableReadFile),
+}
+
+#[cfg(windows)]
+impl std::ops::Deref for PinnedGenerationFileV1 {
+    type Target = File;
+
+    fn deref(&self) -> &Self::Target {
+        match self {
+            Self::Shared(file) => file,
+            Self::Immutable(owner) => owner.file(),
+        }
+    }
 }
 
 impl TemporaryPayloadPackV1 {
@@ -3470,6 +3517,12 @@ impl DaemonCodeIndexPublicationStoreV1 {
                 "sealed generation segment range exceeds its manifest identity".to_owned(),
             ));
         }
+        #[cfg(windows)]
+        {
+            // Windows pathname metadata performs a native open even when the
+            // lookup fails; Unix metadata does not open a payload handle.
+            *open_attempts = open_attempts.saturating_add(1);
+        }
         let path_metadata = path.symlink_metadata().map_err(|error| {
             CodeIndexProductionErrorV1::Contract(format!(
                 "sealed generation segment is unavailable: {error}"
@@ -3537,9 +3590,27 @@ impl DaemonCodeIndexPublicationStoreV1 {
         Ok(PinnedGenerationSegmentV1 {
             digest: digest.to_owned(),
             size_bytes: expected_size,
+            #[cfg(not(windows))]
             file,
+            #[cfg(windows)]
+            file: PinnedGenerationFileV1::Shared(file),
             admitted_metadata: path_metadata,
         })
+    }
+
+    #[cfg(windows)]
+    fn same_windows_segment_metadata(
+        admitted: &std::fs::Metadata,
+        current: &std::fs::Metadata,
+    ) -> bool {
+        const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+        admitted.file_type().is_file()
+            && current.file_type().is_file()
+            && admitted.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT == 0
+            && current.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT == 0
+            && admitted.file_size() == current.file_size()
+            && admitted.creation_time() == current.creation_time()
+            && admitted.last_write_time() == current.last_write_time()
     }
 
     #[cfg(windows)]
@@ -3554,16 +3625,8 @@ impl DaemonCodeIndexPublicationStoreV1 {
                 "sealed generation pack identity cannot be rechecked: {error}"
             ))
         };
-        let same_metadata = |current: &std::fs::Metadata| {
-            const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
-            admitted.file_type().is_file()
-                && current.file_type().is_file()
-                && admitted.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT == 0
-                && current.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT == 0
-                && admitted.file_size() == current.file_size()
-                && admitted.creation_time() == current.creation_time()
-                && admitted.last_write_time() == current.last_write_time()
-        };
+        let same_metadata =
+            |current: &std::fs::Metadata| Self::same_windows_segment_metadata(admitted, current);
         if !same_metadata(&file.metadata().map_err(unavailable)?) {
             return Ok(false);
         }
@@ -3580,10 +3643,15 @@ impl DaemonCodeIndexPublicationStoreV1 {
         }
         let named_identity =
             tracedecay_private_fs::windows_file::information(&named).map_err(unavailable)?;
+        if opened_identity.volume_serial_number != named_identity.volume_serial_number
+            || opened_identity.file_index != named_identity.file_index
+        {
+            return Ok(false);
+        }
+        // std's Windows pathname metadata query opens the name again.
+        *open_attempts = open_attempts.saturating_add(1);
         Ok(
-            opened_identity.volume_serial_number == named_identity.volume_serial_number
-                && opened_identity.file_index == named_identity.file_index
-                && same_metadata(&path.symlink_metadata().map_err(unavailable)?)
+            same_metadata(&path.symlink_metadata().map_err(unavailable)?)
                 && same_metadata(&file.metadata().map_err(unavailable)?),
         )
     }
@@ -3635,10 +3703,9 @@ impl DaemonCodeIndexPublicationStoreV1 {
             )
         })?;
         buffer.resize(length, 0);
-        pinned
-            .file
-            .seek(SeekFrom::Start(offset))
-            .and_then(|_| pinned.file.read_exact(buffer))
+        let mut file: &File = &pinned.file;
+        file.seek(SeekFrom::Start(offset))
+            .and_then(|_| file.read_exact(buffer))
             .map_err(|error| {
                 buffer.clear();
                 CodeIndexProductionErrorV1::Contract(format!(
@@ -3750,7 +3817,7 @@ impl DaemonCodeIndexPublicationStoreV1 {
         let _lifetime_lock = lifetime_lock;
         let mut memory = PreparedPackMemoryV1::new(&operation)?;
         let mut pinned: [Option<(ManifestDigest, GenerationPackReadPassV1)>; 2] = [None, None];
-        let mut open_attempts = 0;
+        let mut open_attempts = PackReadOpenAttemptsV1::default();
         match CodeIndexPublishedGenerationV1::decode_partitioned_sealed(
             &manifest,
             &self.decoded_content,
@@ -3773,17 +3840,26 @@ impl DaemonCodeIndexPublicationStoreV1 {
                                 "sealed decode requested more than two physical packs".to_owned(),
                             )
                         })?;
-                        memory.admit(
-                            pack_read_workspace_bytes(
-                                &self.segments_root,
-                                digest.as_str().len().saturating_mul(2),
-                            )
-                            .saturating_mul(2),
-                        )?;
+                        let workspace = pack_read_workspace_bytes(
+                            &self.segments_root,
+                            digest.as_str().len().saturating_mul(2),
+                        );
+                        memory.admit(workspace.saturating_mul(2))?;
                         let identity = SealedGenerationSegmentIdentityV1 {
                             digest: digest.clone(),
                             size_bytes,
                         };
+                        memory.admit(
+                            workspace
+                                .saturating_add(
+                                    GenerationPackReadPassV1::immutable_workspace_bytes(
+                                        &self.segments_root,
+                                        std::slice::from_ref(&identity),
+                                        None,
+                                    )?,
+                                )
+                                .saturating_mul(2),
+                        )?;
                         let pass = GenerationPackReadPassV1::open(
                             &self.segments_root,
                             std::slice::from_ref(&identity),
@@ -3797,7 +3873,7 @@ impl DaemonCodeIndexPublicationStoreV1 {
                 let (_, pass) = pinned[index].as_mut().ok_or_else(|| {
                     CodeIndexProductionErrorV1::Contract("sealed decode pack is absent".to_owned())
                 })?;
-                pass.read(request, buffer, &mut open_attempts)
+                pass.read(request, buffer)
             },
             &mut |needed| {
                 manifest_memory
@@ -4869,7 +4945,7 @@ impl CodeIndexAtomicPublicationPort for DaemonCodeIndexPublicationStoreV1 {
                     content_pack: None,
                     evidence_identity: None,
                     payload_reads: None,
-                    segment_read_open_attempts: 0,
+                    segment_read_open_attempts: PackReadOpenAttemptsV1::default(),
                     segment_reads_poisoned: false,
                     _retention: retention,
                     referenced_segment_bytes: 0,
@@ -5120,6 +5196,11 @@ impl DaemonCodeIndexPublicationStoreV1 {
             }
         }
         if !files.segments_durable {
+            // The state mutex excludes escaped readers. All payload identity
+            // and digest verification is complete; release only healthy read
+            // handles before pending names are renamed or deduplicated. A
+            // partial publish retry reopens from the remaining pending map.
+            drop(files.payload_reads.take());
             {
                 let _span =
                     tracing::trace_span!("code_index.generation.publish.segments_flush").entered();
