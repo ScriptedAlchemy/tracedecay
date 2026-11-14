@@ -154,6 +154,7 @@ fn request(files: usize) -> CodeIndexBuildRequestV1 {
         invalidations: BTreeSet::new(),
         ignored_source_admissions: Vec::new(),
         repository_parse_identity: CodeIndexRepositoryParseIdentityV1 {
+            include_submodules: false,
             tree: None,
             dirty: RepositoryDirtyStateV1::Dirty,
         },
@@ -168,6 +169,7 @@ fn request(files: usize) -> CodeIndexBuildRequestV1 {
 
 fn config() -> CodeIndexProductionConfigV1 {
     CodeIndexProductionConfigV1 {
+        include_submodules: false,
         project_id: id::<ProjectId>("project.accounting"),
         repository: id::<RepositoryId>("repository.accounting"),
         sanitizer_revision: id::<SanitizerRevision>("sanitizer.v1"),

@@ -67,6 +67,40 @@ pub struct GitNativeCandidateTreeV1<'repository> {
     cancellation: &'repository CancellationToken,
 }
 
+/// Registration and child commits taken from one immutable parent tree.
+#[derive(Debug, Default)]
+pub struct GitTreeSubmodulePins {
+    pub registration: Vec<u8>,
+    pub gitlinks: Vec<(String, gix::ObjectId)>,
+}
+
+impl GitTreeSubmodulePins {
+    pub fn from_tree(
+        tree: &gix::Tree<'_>,
+        gitlinks: Vec<(String, gix::ObjectId)>,
+    ) -> Result<Self, GitRepositoryError> {
+        if gitlinks.is_empty() {
+            return Ok(Self::default());
+        }
+        let registration = match tree
+            .find_entry(".gitmodules")
+            .filter(|entry| entry.mode().is_blob())
+        {
+            Some(entry) => tree
+                .repo
+                .find_blob(entry.object_id())
+                .map_err(|error| operation("read pinned .gitmodules", error))?
+                .data
+                .clone(),
+            None => Vec::new(),
+        };
+        Ok(Self {
+            registration,
+            gitlinks,
+        })
+    }
+}
+
 impl GitNativeCandidateTreeV1<'_> {
     pub fn tree(&self) -> Result<GitOidV1, GitRepositoryError> {
         oid(self.tree)
@@ -78,9 +112,10 @@ impl GitNativeCandidateTreeV1<'_> {
     /// when it names none; every other symlink is visited with its link text.
     pub fn visit_blobs<E>(
         &self,
+        include_submodules: bool,
         read_through: impl Fn(&[u8]) -> bool,
         mut visitor: impl FnMut(&[u8], &[u8]) -> Result<(), E>,
-    ) -> Result<(), GitNativeCandidateTreeVisitError<E>> {
+    ) -> Result<GitTreeSubmodulePins, GitNativeCandidateTreeVisitError<E>> {
         let tree = self
             .repository
             .find_tree(self.tree)
@@ -90,6 +125,7 @@ impl GitNativeCandidateTreeV1<'_> {
                 repository_visit_error("native candidate tree traversal", error)
             })?;
         entries.sort_by(|left, right| left.filepath.cmp(&right.filepath));
+        let mut gitlinks = Vec::new();
         for entry in entries {
             if self.cancellation.is_cancelled() {
                 return Err(GitNativeCandidateTreeVisitError::Repository(
@@ -98,6 +134,12 @@ impl GitNativeCandidateTreeV1<'_> {
                         detail: "cancelled".to_owned(),
                     },
                 ));
+            }
+            if include_submodules && entry.mode.is_commit() {
+                let path = entry.filepath.to_str().map_err(|error| {
+                    repository_visit_error("native candidate gitlink path", error)
+                })?;
+                gitlinks.push((path.to_owned(), entry.oid));
             }
             if entry.mode.is_tree() || entry.mode.is_commit() {
                 continue;
@@ -120,7 +162,8 @@ impl GitNativeCandidateTreeV1<'_> {
             visitor(entry.filepath.as_ref(), &blob.data)
                 .map_err(GitNativeCandidateTreeVisitError::Visitor)?;
         }
-        Ok(())
+        GitTreeSubmodulePins::from_tree(&tree, gitlinks)
+            .map_err(GitNativeCandidateTreeVisitError::Repository)
     }
 }
 

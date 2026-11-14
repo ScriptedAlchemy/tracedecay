@@ -154,6 +154,11 @@ pub struct GitMetadataFingerprintV1 {
     /// branch switch changes this even when mtime resolution is too coarse to
     /// observe, so content is compared alongside mtimes.
     head_contents: Option<String>,
+    // Include the registered child pin, bound checkout and resolved HEAD in the same
+    // read-admission proof as the parent. A failed probe cannot renew that proof.
+    submodule_refs: Option<String>,
+    submodule_indexes: Option<String>,
+    submodule_probe_failed: bool,
 }
 
 impl GitMetadataFingerprintV1 {
@@ -176,37 +181,84 @@ impl GitMetadataFingerprintV1 {
             packed_refs: mtime(&common_dir.join("packed-refs")),
             refs_heads: refs_heads_signature(&common_dir.join("refs").join("heads")),
             head_contents: std::fs::read_to_string(&head_path).ok(),
+            ..Self::default()
         }
+    }
+
+    pub(super) fn for_policy(project_root: &Path, include_submodules: bool) -> Self {
+        let mut fingerprint = Self::capture(project_root);
+        if include_submodules {
+            let probes = (|| {
+                let parent = tracedecay_runtime_core::git_open::open(project_root).ok()?;
+                let children =
+                    tracedecay_code_index::source_walk::submodules::live_submodules(&parent)
+                        .ok()?;
+                let mut refs = Vec::new();
+                let mut indexes = Vec::new();
+                for (path, binding) in children {
+                    let child = tracedecay_runtime_core::git_open::open(&binding.git_dir).ok()?;
+                    let head = child.head_id().ok()?.detach();
+                    refs.push((
+                        path.clone(),
+                        binding.git_dir,
+                        binding.pin.to_string(),
+                        head.to_string(),
+                    ));
+                    indexes.push((path, mtime(&child.index_path())));
+                }
+                Some((
+                    tracedecay_domain::canonical_sha256(&refs).ok()?,
+                    tracedecay_domain::canonical_sha256(&indexes).ok()?,
+                ))
+            })();
+            match probes {
+                Some((refs, indexes)) => {
+                    fingerprint.submodule_refs = Some(refs.as_str().to_owned());
+                    fingerprint.submodule_indexes = Some(indexes.as_str().to_owned());
+                }
+                None => fingerprint.submodule_probe_failed = true,
+            }
+        }
+        fingerprint
     }
 
     /// Whether the sampled metadata differs from a previously captured value.
     pub fn differs_from(&self, other: &GitMetadataFingerprintV1) -> bool {
-        self != other
+        self.submodule_probe_failed || other.submodule_probe_failed || self != other
     }
 
     /// Whether HEAD and every branch ref are unchanged. The index is excluded:
     /// opening the repository may refresh `.git/index` on its own, while a
     /// commit, checkout, or ref update always moves HEAD or a ref.
     pub fn same_refs_as(&self, other: &GitMetadataFingerprintV1) -> bool {
-        self.head == other.head
+        !self.submodule_probe_failed
+            && !other.submodule_probe_failed
+            && self.submodule_refs == other.submodule_refs
+            && self.head == other.head
             && self.packed_refs == other.packed_refs
             && self.refs_heads == other.refs_heads
             && self.head_contents == other.head_contents
     }
 
+    /// Whether an authenticated submodule probe can establish a freshness witness.
+    pub(super) fn can_prove_freshness(&self) -> bool {
+        !self.submodule_probe_failed
+    }
+
     /// A stable, order-independent textual signature of this fingerprint.
     ///
     /// Used to persist a restore-time freshness witness: two fingerprints share
-    /// a signature iff they are structurally equal (`PartialEq`), so comparing
-    /// the recomputed signature against a witness recorded at seal time is a
-    /// faithful stand-in for `differs_from`. `SystemTime` mtimes are rendered as
+    /// a signature iff they are structurally equal (`PartialEq`). A failed
+    /// submodule probe is explicitly encoded, but even matching failed probes
+    /// cannot prove freshness: callers must reject them, as `differs_from` does.
+    /// `SystemTime` mtimes are rendered as
     /// nanos-since-epoch so the encoding is deterministic across processes.
     pub fn stable_signature(&self) -> String {
         fn render_time(time: Option<SystemTime>) -> String {
             time.and_then(|time| time.duration_since(UNIX_EPOCH).ok())
                 .map_or_else(|| "-".to_owned(), |elapsed| elapsed.as_nanos().to_string())
         }
-        format!(
+        let mut signature = format!(
             "head={}|index={}|packed_refs={}|refs_heads={}|head_contents={}",
             render_time(self.head),
             render_time(self.index),
@@ -216,7 +268,19 @@ impl GitMetadataFingerprintV1 {
                 || "-".to_owned(),
                 |value| super::sha256_hex(value.as_bytes())
             ),
-        )
+        );
+        if let Some(refs) = &self.submodule_refs {
+            signature.push_str("|submodule_refs=");
+            signature.push_str(refs);
+        }
+        if let Some(indexes) = &self.submodule_indexes {
+            signature.push_str("|submodule_indexes=");
+            signature.push_str(indexes);
+        }
+        if self.submodule_probe_failed {
+            signature.push_str("|submodule_probe_failed=true");
+        }
+        signature
     }
 }
 
@@ -442,6 +506,49 @@ mod tests {
             !after.same_source_revision(&before),
             "a HEAD move is a different source revision"
         );
+    }
+
+    #[test]
+    fn failed_submodule_probe_cannot_reuse_a_persisted_parent_only_witness() {
+        let root = TempDir::new().expect("non-repository root");
+        let parent_only = GitMetadataFingerprintV1::capture(root.path());
+        let failed = GitMetadataFingerprintV1::for_policy(root.path(), true);
+
+        assert!(
+            failed.submodule_probe_failed,
+            "opt-in probe must fail closed"
+        );
+        assert!(!failed.can_prove_freshness());
+        assert!(failed.differs_from(&parent_only));
+        assert_ne!(
+            failed.stable_signature(),
+            parent_only.stable_signature(),
+            "restore cannot mistake failed authentication for parent-only freshness"
+        );
+        assert_eq!(
+            GitMetadataFingerprintV1::for_policy(root.path(), false).stable_signature(),
+            parent_only.stable_signature(),
+            "the default-off persisted witness remains stable"
+        );
+        let failed_again = GitMetadataFingerprintV1::for_policy(root.path(), true);
+        assert_eq!(failed.stable_signature(), failed_again.stable_signature());
+        assert!(
+            !failed_again.can_prove_freshness(),
+            "repeated matching failures cannot authorize retained reuse"
+        );
+    }
+
+    #[test]
+    fn successful_submodule_probe_has_a_distinct_stable_witness() {
+        let repo = init_repo(&[("src/lib.rs", "pub fn example() {}\n")]);
+        let disabled = GitMetadataFingerprintV1::for_policy(repo.path(), false);
+        let enabled = GitMetadataFingerprintV1::for_policy(repo.path(), true);
+
+        assert!(enabled.can_prove_freshness());
+        assert!(!disabled.submodule_probe_failed);
+        assert!(enabled.submodule_refs.is_some());
+        assert!(enabled.submodule_indexes.is_some());
+        assert_ne!(enabled.stable_signature(), disabled.stable_signature());
     }
 
     #[test]

@@ -173,9 +173,7 @@ impl AliasRule {
 /// Walks every discovered npm package's import graph and reports the source
 /// files no entry point reaches.
 pub(super) fn audit(files: &ProjectFiles) -> Result<EcosystemAudit> {
-    Ok(audit_with_reader(files, &|path| {
-        std::fs::read_to_string(path)
-    }))
+    Ok(audit_with_reader(files, &|path| files.read_to_string(path)))
 }
 
 fn audit_with_reader(
