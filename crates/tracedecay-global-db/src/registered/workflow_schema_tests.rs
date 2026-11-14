@@ -287,6 +287,7 @@ mod published_artifact_ceiling {
     use std::pin::Pin;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::task::Poll;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     use rusqlite::Connection;
     use tempfile::TempDir;
@@ -297,12 +298,14 @@ mod published_artifact_ceiling {
     use tracedecay_runtime_core::db::{
         RegisteredTestRuntimeRetirementControlV1, TestDatabaseRuntimeScope,
     };
+    use tracedecay_runtime_core::logging::FormattedTracingCapture;
     use tracedecay_runtime_core::shard_runtime::registry::{
         StoreRuntimeClientLease, StoreRuntimeRetirementOutcome, StoreRuntimeRetirementResult,
     };
     use tracedecay_rusqlite_runtime::workflow::{
         WORKFLOW_SCHEMA_DEFINITION_DIGEST_V1, WORKFLOW_TABLE_CONTRACTS_V1,
     };
+    use tracing::{Instrument, instrument::WithSubscriber};
 
     use super::fs;
     use crate::RegisteredGlobalDbOwnerV1;
@@ -431,6 +434,11 @@ mod published_artifact_ceiling {
     }
 
     impl WorkflowState {
+        #[tracing::instrument(
+            name = "global_db.workflow_sweep.read_state",
+            level = "info",
+            skip_all
+        )]
         fn read(path: &Path) -> Self {
             let connection = Connection::open(path).unwrap();
             let table_sql = connection
@@ -1010,6 +1018,36 @@ mod published_artifact_ceiling {
     /// stays typed recovering, and the next open finishes the job.
     #[tokio::test(flavor = "multi_thread")]
     async fn background_upgrade_is_atomic_at_every_cancellation_point() {
+        let subscriber = {
+            let _capture = FormattedTracingCapture::start_with_target_span_timings(&[
+                module_path!(),
+                "tracedecay_global_db::registered",
+                "tracedecay_global_db::schema_stages",
+            ]);
+            tracing::dispatcher::get_default(Clone::clone)
+        };
+        async {
+            let started_at = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default();
+            run_background_upgrade_cancellation_sweep()
+                .instrument(tracing::info_span!(
+                    "global_db.workflow_sweep",
+                    started_at_unix_ms = started_at.as_millis() as u64,
+                ))
+                .await;
+        }
+        .with_subscriber(subscriber)
+        .await;
+    }
+
+    async fn run_background_upgrade_cancellation_sweep() {
+        #[tracing::instrument(
+            name = "global_db.workflow_sweep.sample",
+            level = "info",
+            skip_all,
+            fields(cancel_at = cancel_at)
+        )]
         async fn converge_cancelled_at(
             path: &Path,
             cancel_at: usize,
@@ -1073,6 +1111,7 @@ mod published_artifact_ceiling {
         assert_eq!(completed.artifacts, before.artifacts);
 
         let stride = (total_polls / 12).max(1);
+        tracing::info!(total_polls, stride, "workflow cancellation sweep calibrated");
         let mut cancelled_published = 0;
         // Each convergence joins its exact runtime retirement. Reuse the
         // canonically initialized store, restoring the upgrade's inputs and
@@ -1080,6 +1119,8 @@ mod published_artifact_ceiling {
         let store = &reference.store;
         for cancel_at in (1..total_polls).step_by(stride) {
             {
+                let _restore =
+                    tracing::info_span!("global_db.workflow_sweep.restore", cancel_at).entered();
                 let mut connection = Connection::open(&store.path).unwrap();
                 let transaction = connection.transaction().unwrap();
                 republish(&transaction, &before.table_sql, &before.digest);
