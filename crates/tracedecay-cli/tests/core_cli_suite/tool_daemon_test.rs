@@ -3329,21 +3329,10 @@ fn spawn_scripted_retained_daemon(
     let (request_tx, request_rx) = mpsc::channel();
     let stop = Arc::new(AtomicBool::new(false));
     let daemon_stop = Arc::clone(&stop);
-    let startup = Arc::new(std::sync::Mutex::new((
-        "await thread start",
-        Instant::now(),
-    )));
-    let server_startup = Arc::clone(&startup);
 
-    let server = std::thread::spawn(move || {
-        let phase = |name| {
-            *server_startup.lock().expect("fake daemon startup phase") = (name, Instant::now());
-        };
-        phase("remove prior socket");
+    std::thread::spawn(move || {
         let _ = std::fs::remove_file(&socket_path);
-        phase("acquire durable authority");
         let authority = seed_fake_daemon_authority(&socket_path);
-        phase("construct retained scope");
         let scope = ResolvedScope::new(
             ProjectId::new("project.scripted-daemon").expect("project id"),
             RepositoryId::new("repository.scripted-daemon").expect("repository id"),
@@ -3351,13 +3340,10 @@ fn spawn_scripted_retained_daemon(
             None,
         )
         .expect("scripted daemon scope");
-        phase("bind listener");
         let listener = UnixListener::bind(&socket_path).expect("bind fake daemon socket");
-        phase("set nonblocking listener");
         listener
             .set_nonblocking(true)
             .expect("set listener nonblocking");
-        phase("signal readiness");
         ready_tx.send(()).expect("notify fake daemon readiness");
         let mut problems = problems.into_iter();
         let mut current = problems.next().expect("at least one scripted problem");
@@ -3429,15 +3415,7 @@ fn spawn_scripted_retained_daemon(
 
     ready_rx
         .recv_timeout(LOCAL_READY_TIMEOUT)
-        .unwrap_or_else(|error| {
-            let phase = startup
-                .try_lock()
-                .map(|progress| (progress.0, progress.1.elapsed()));
-            panic!(
-                "fake daemon should become ready: {error:?}; phase={phase:?}; server_finished={}",
-                server.is_finished(),
-            );
-        });
+        .expect("fake daemon should become ready");
     ScriptedRetainedDaemon {
         requests: request_rx,
         stop,
