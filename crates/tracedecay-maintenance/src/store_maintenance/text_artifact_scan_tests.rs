@@ -58,7 +58,6 @@ async fn maintenance_owner_advances_noop_pages_and_applies_a_later_orphan() {
                 store.path(),
                 &observations,
                 &cancellation,
-                None,
             )
             .await
             .unwrap();

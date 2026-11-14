@@ -104,6 +104,9 @@ mod publication_pointer_validation_windows;
 const MAX_DURABLE_PUBLICATION_POINTER_BYTES: u64 = 512 * 1024;
 const DURABLE_GENERATION_IO_CHUNK_BYTES_V1: usize = 64 * 1024;
 
+type RetainedPackReadPassResultV1 =
+    Result<Box<SealedGenerationPackReadPassV1>, CodeIndexProductionErrorV1>;
+
 struct SealedGraphBuildAdmissionV1(DaemonCodeIndexPublicationStoreV1);
 
 impl CodeGraphBuildAdmissionV1 for SealedGraphBuildAdmissionV1 {
@@ -863,7 +866,7 @@ impl DaemonCodeIndexPreparationFilesV1 {
             .saturating_add(
                 self.content_pack
                     .as_ref()
-                    .map_or(0, |pack| pack.retained_bytes()),
+                    .map_or(0, SealedGenerationContentPackV1::retained_bytes),
             )
             .saturating_add(
                 self.evidence_identity
@@ -1082,7 +1085,7 @@ impl PreparedPackMemoryV1 {
         let retained = self
             .charge
             .as_ref()
-            .map_or(0, |charge| charge.reserved_bytes());
+            .map_or(0, ProcessSharedMemoryReservationV1::reserved_bytes);
         if bytes <= retained {
             return Ok(());
         }
@@ -3394,7 +3397,7 @@ impl DaemonCodeIndexPublicationStoreV1 {
         impl Fn(
             &dyn CodeIndexExecutionControlV1,
             &SealedGenerationPackLayoutV1,
-        ) -> Result<Box<SealedGenerationPackReadPassV1>, CodeIndexProductionErrorV1>
+        ) -> RetainedPackReadPassResultV1
         + Send
         + Sync
         + 'static,

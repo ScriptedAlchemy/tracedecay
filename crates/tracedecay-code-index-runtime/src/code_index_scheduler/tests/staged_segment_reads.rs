@@ -348,7 +348,7 @@ fn staged_segment_cold_digest_mismatch_poison_survives_restoration() {
     let content = publication.pack_layout().content_pack();
     let path = staged_path(&preparation, &content.digest);
     let original = std::fs::read(&path).expect("original content pack");
-    assert!(!original.is_empty());
+    assert_ne!(original, [] as [u8; 0]);
     assert_eq!(segment_digest(&original), content.digest);
     let mut corrupt = original.clone();
     corrupt[0] ^= 1;
@@ -381,7 +381,7 @@ fn staged_segment_cold_digest_mismatch_poison_survives_restoration() {
         read.extend_from_slice(b"stale retry");
         assert!(matches!(reader(request, &mut read),
             Err(CodeIndexProductionErrorV1::Contract(detail)) if detail.contains("invalidated")));
-        assert!(read.is_empty());
+        assert_eq!(read, [] as [u8; 0]);
     }
     assert_eq!(
         preparation.staged_segment_read_open_attempts_for_test(),
@@ -1099,7 +1099,7 @@ fn staged_pack_rejected_requests_preserve_fixed_handles_and_valid_reads() {
                 reader(request, &mut read),
                 Err(CodeIndexProductionErrorV1::Contract(_))
             ));
-            assert!(read.is_empty());
+            assert_eq!(read, [] as [u8; 0]);
             assert_eq!(
                 preparation.staged_segment_read_open_attempts_for_test(),
                 expected_opens,
@@ -1181,7 +1181,7 @@ fn staged_pack_admission_failure_closes_partial_handles_and_records_opens() {
         reader(request, &mut output),
         Err(CodeIndexProductionErrorV1::Contract(_))
     ));
-    assert!(output.is_empty());
+    assert_eq!(output, [] as [u8; 0]);
     assert_eq!(
         preparation.staged_segment_read_open_attempts_for_test(),
         1,
@@ -1197,7 +1197,7 @@ fn staged_pack_admission_failure_closes_partial_handles_and_records_opens() {
     output.extend_from_slice(b"stale after restoration");
     assert!(matches!(reader(request, &mut output),
         Err(CodeIndexProductionErrorV1::Contract(detail)) if detail.contains("invalidated")));
-    assert!(output.is_empty());
+    assert_eq!(output, [] as [u8; 0]);
     assert_eq!(
         preparation.staged_segment_read_open_attempts_for_test(),
         1,

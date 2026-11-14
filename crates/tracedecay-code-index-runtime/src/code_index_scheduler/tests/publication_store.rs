@@ -4632,7 +4632,7 @@ fn escaped_staged_readers_refuse_after_abort_or_uncommitted_drop() {
             .is_err(),
             "an escaped physical reader cannot reopen an aborted preparation"
         );
-        assert!(physical_bytes.is_empty());
+        assert_eq!(physical_bytes, [] as [u8; 0]);
         assert!(
             std::fs::read_dir(code_generation_segments_root(target_store.path()))
                 .expect("segments root")

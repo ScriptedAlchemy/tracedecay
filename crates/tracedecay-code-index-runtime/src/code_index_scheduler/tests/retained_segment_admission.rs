@@ -145,7 +145,7 @@ fn retained_failed_read_preserves_other_operation_handles_and_recovers() {
             healthy.read(request(2), &mut output).is_err(),
             "an outside-roster request is refused"
         );
-        assert!(output.is_empty());
+        assert_eq!(output, [] as [u8; 0]);
         assert!(
             !healthy.is_invalidated(),
             "malformed requests preserve admitted handles"
@@ -224,7 +224,7 @@ fn retained_failed_read_preserves_other_operation_handles_and_recovers() {
         candidate.read(request(2), &mut output).is_err(),
         "admitted authority rejects later mutation"
     );
-    assert!(output.is_empty());
+    assert_eq!(output, [] as [u8; 0]);
     assert!(candidate.is_invalidated());
     #[cfg(target_os = "linux")]
     assert_eq!(

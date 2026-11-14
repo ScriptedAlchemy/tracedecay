@@ -156,7 +156,7 @@ impl GenerationPackReadPassV1 {
             let segment = Self::open_immutable_pack(path, identity, open_attempts)?;
             let pinned = PinnedPackV1 {
                 segment,
-                path: path.to_path_buf(),
+                path: path.clone(),
             };
             *slot = Some(pinned);
         }
@@ -439,7 +439,7 @@ mod tests {
             )
             .is_err()
         );
-        assert!(bytes.is_empty());
+        assert_eq!(bytes, [] as [u8; 0]);
         let unknown = identity(b"unknown");
         for request in [
             SealedGenerationSegmentReadV1::Whole {
@@ -452,7 +452,7 @@ mod tests {
             },
         ] {
             assert!(pass.read(request, &mut bytes).is_err());
-            assert!(bytes.is_empty());
+            assert_eq!(bytes, [] as [u8; 0]);
         }
         assert_eq!(
             open_attempts, expected_opens,
@@ -482,7 +482,7 @@ mod tests {
         let pending = BTreeMap::from([(canonical, staged)]);
         let mut pass = GenerationPackReadPassV1::open(
             root.path(),
-            &[pack.clone()],
+            std::slice::from_ref(&pack),
             Some(&pending),
             &mut PackReadOpenAttemptsV1::default(),
         )
@@ -563,9 +563,13 @@ mod tests {
             std::fs::write(&path, b"original").unwrap();
             set_modified(&path, 1);
             let mut opens = PackReadOpenAttemptsV1::default();
-            let mut pass =
-                GenerationPackReadPassV1::open(root.path(), &[pack.clone()], None, &mut opens)
-                    .unwrap();
+            let mut pass = GenerationPackReadPassV1::open(
+                root.path(),
+                std::slice::from_ref(&pack),
+                None,
+                &mut opens,
+            )
+            .unwrap();
             let request = SealedGenerationSegmentReadV1::Range {
                 digest: &pack.digest,
                 size_bytes: pack.size_bytes,
@@ -581,14 +585,14 @@ mod tests {
             std::fs::write(&path, b"modified").unwrap();
             set_modified(&path, if replace { 1 } else { 2 });
             assert!(pass.read(request, &mut bytes).is_err());
-            assert!(bytes.is_empty());
+            assert_eq!(bytes, [] as [u8; 0]);
             assert!(pass.is_invalidated());
             let refused_opens = opens;
             std::fs::write(&path, b"original").unwrap();
             set_modified(&path, 1);
             bytes.extend_from_slice(b"stale");
             assert!(pass.read(request, &mut bytes).is_err());
-            assert!(bytes.is_empty());
+            assert_eq!(bytes, [] as [u8; 0]);
             assert_eq!(opens, refused_opens, "an invalidated pass never reopens");
         }
     }
@@ -654,8 +658,13 @@ mod tests {
             assert_eq!(metadata.last_write_time(), original.last_write_time());
         }
         let mut opens = PackReadOpenAttemptsV1::default();
-        let mut pass =
-            GenerationPackReadPassV1::open(root.path(), &[pack.clone()], None, &mut opens).unwrap();
+        let mut pass = GenerationPackReadPassV1::open(
+            root.path(),
+            std::slice::from_ref(&pack),
+            None,
+            &mut opens,
+        )
+        .unwrap();
         let admitted_opens = opens;
         let displaced = root.path().join("displaced");
         assert!(std::fs::OpenOptions::new().write(true).open(&path).is_err());
@@ -676,13 +685,18 @@ mod tests {
         std::fs::rename(&path, &displaced).expect("closed pass releases leaf and ancestor guards");
         std::fs::rename(&replacement_path, &path)
             .expect("replacement is allowed after the pass ends");
-        let mut replacement =
-            GenerationPackReadPassV1::open(root.path(), &[pack.clone()], None, &mut opens).unwrap();
+        let mut replacement = GenerationPackReadPassV1::open(
+            root.path(),
+            std::slice::from_ref(&pack),
+            None,
+            &mut opens,
+        )
+        .unwrap();
         assert!(
             replacement.read(request, &mut bytes).is_err(),
             "a new pass must still authenticate whole bytes"
         );
-        assert!(bytes.is_empty());
+        assert_eq!(bytes, [] as [u8; 0]);
         assert!(replacement.is_invalidated());
     }
 
@@ -721,14 +735,14 @@ mod tests {
         };
         let mut bytes = b"stale".to_vec();
         assert!(pass.read(request, &mut bytes).is_err());
-        assert!(bytes.is_empty());
+        assert_eq!(bytes, [] as [u8; 0]);
         assert!(pass.is_invalidated());
         std::fs::write(&content_path, b"original").expect("poison releases the content lease");
         std::fs::write(&evidence_path, b"evidence").expect("poison releases the evidence lease");
         set_modified(&content_path, 1);
         bytes.extend_from_slice(b"stale");
         assert!(pass.read(request, &mut bytes).is_err());
-        assert!(bytes.is_empty());
+        assert_eq!(bytes, [] as [u8; 0]);
         assert_eq!(opens, admitted_opens, "poisoned passes do not reopen");
     }
 
@@ -742,13 +756,24 @@ mod tests {
         let writer = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
         let mut opens = PackReadOpenAttemptsV1::default();
         assert!(
-            GenerationPackReadPassV1::open(root.path(), &[pack.clone()], None, &mut opens).is_err()
+            GenerationPackReadPassV1::open(
+                root.path(),
+                std::slice::from_ref(&pack),
+                None,
+                &mut opens
+            )
+            .is_err()
         );
         assert_eq!(opens.payload, 2, "metadata and the denied leaf both count");
         assert!(opens.ancestors > 0);
         drop(writer);
-        let mut pass =
-            GenerationPackReadPassV1::open(root.path(), &[pack.clone()], None, &mut opens).unwrap();
+        let mut pass = GenerationPackReadPassV1::open(
+            root.path(),
+            std::slice::from_ref(&pack),
+            None,
+            &mut opens,
+        )
+        .unwrap();
         assert_eq!(opens.payload, 6);
         let mut bytes = Vec::new();
         pass.read(

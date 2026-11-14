@@ -728,13 +728,13 @@ fn spill_verified_seal_graph(
 
 /// Authenticates a seal's partitioned manifest for a streaming graph build.
 fn open_verified_seal(
-    manifest: Vec<u8>,
+    manifest_bytes: Vec<u8>,
     expected_digest: &str,
     memory: CodeGraphMemoryV1,
 ) -> Result<AdmittedSealV1, GraphDbError> {
     // Owned allocations unwind before their reservation on every refusal.
     let mut memory = memory;
-    let manifest = manifest;
+    let manifest = manifest_bytes;
     let raw_bytes = manifest.capacity() as u64;
     let digest_len = "sha256:".len().saturating_add(expected_digest.len());
     let digest_bytes = std::mem::size_of::<ManifestDigest>().saturating_add(digest_len) as u64;
@@ -3087,7 +3087,9 @@ mod tests {
              name| {
                 let mut read = |request: SealedGenerationSegmentReadV1<'_>,
                                 buffer: &mut Vec<u8>| {
-                    seal.layout.read(request, buffer, &mut *read_pack)
+                    seal.admitted
+                        .source
+                        .read_segment(request, buffer, &mut *read_pack)
                 };
                 build_sealed_code_graph_rows(
                     projection.clone(),
