@@ -1227,14 +1227,21 @@ async fn retained_read_snapshot_keeps_reference_scope_and_payload_together() {
         COMMIT;",
         )
         .unwrap();
-    let (page, _) = materialize_reference_page(
+    let (page, budget) = materialize_reference_page(
         reader.reader.connection(),
         &source,
         references.references,
         budget,
     )
     .unwrap();
-    assert_eq!(page.records.len(), 1);
+    assert_eq!(
+        page.records.len(),
+        1,
+        "snapshot hydration: fully_processed={}, input_bytes={}, evidence={:?}",
+        page.fully_processed,
+        page.input_bytes,
+        budget.evidence()
+    );
     let payload = String::from_utf8(page.records[0].payload.clone()).unwrap();
     let transcript = serde_json::to_string(&source.source_path).unwrap();
     let expected =
