@@ -19,7 +19,6 @@ use tracedecay_domain::{
     SanitizationReceiptId, SanitizationReceiptRefV1, SanitizationReceiptV1, SanitizerDispositionV1,
     SensitivityV1, SessionId, UtcMicros,
 };
-use tracedecay_session_temporal_store::SessionTemporalAccess;
 use tracedecay_store::{
     AnchoredObservationWrite, ObservationProjectionStore, ObservationStore, ObservationWrite,
     build_observation_resolution_authorization_v1, build_observation_retrieval_anchor,
@@ -237,11 +236,9 @@ pub async fn seed_session_message_observations_for_test(
     Ok(())
 }
 
-/// Materializes the pending session-temporal refresh so the seeded
-/// observations become readable through the daemon retrieval authority, then
-/// re-applies the session relation projection for the newly-active
-/// generation, the step the daemon's LCM effects loop performs after every
-/// production refresh, without which summary lineage reads go relation-blind.
+/// Materializes the pending session-temporal refresh through production
+/// completion, which writes and verifies the native relation graph before
+/// activating the seeded observations for the daemon retrieval authority.
 pub async fn materialize_session_temporal_refresh_for_test(
     project_database: &RegisteredGlobalDb,
     session_id: &str,
@@ -261,21 +258,5 @@ pub async fn materialize_session_temporal_refreshes_for_test(
     tracedecay_session_temporal_store::SessionTemporalStore::new(project_database)
         .materialize_pending_session_refreshes_for_test(&session_ids)
         .await
-        .map_err(|error| fixture_error("materialize session refresh", error))?;
-    SessionTemporalAccess::new(project_database)
-        .apply_active_session_relation_projections_for_test(
-            &session_ids,
-            std::sync::Arc::new(DashboardFixtureGraphCancellation),
-        )
-        .await
-        .map_err(|error| fixture_error("apply session relation projection", error))?;
-    Ok(())
-}
-
-struct DashboardFixtureGraphCancellation;
-
-impl tracedecay_graph_db::GraphCancellation for DashboardFixtureGraphCancellation {
-    fn is_cancelled(&self) -> bool {
-        false
-    }
+        .map_err(|error| fixture_error("materialize session refresh", error))
 }
