@@ -6,7 +6,7 @@ use std::{ffi::OsStr, fs, io, path::Path};
 use cap_std::fs::{File, OpenOptions};
 
 #[cfg(any(unix, windows))]
-use super::write_pending_receipt;
+use super::{HeldDirectory, require_entry_name, write_pending_receipt};
 use super::{Dir, rename_noreplace, replace_file};
 
 const FAMILY: [&str; 4] = [
@@ -38,6 +38,71 @@ fn read_only_pending_marker(path: &Path) -> (Dir, File) {
 
 #[cfg(any(unix, windows))]
 #[test]
+fn initial_receipt_open_failure_releases_directory_for_retry() {
+    let root = tempfile::tempdir().unwrap();
+    let name = OsStr::new("pending");
+    let pending = root.path().join(name);
+    let directory = HeldDirectory::create_exclusive(root.path(), name).unwrap();
+    let filename = "owner".repeat(128);
+    require_entry_name(OsStr::new(&filename)).unwrap();
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    let expected = directory
+        .directory
+        .open_with(OsStr::new(&filename), &options)
+        .unwrap_err();
+
+    let error = directory
+        .write_initial_receipt(OsStr::new(&filename), b"complete receipt")
+        .err()
+        .expect("an oversized single entry must fail during marker open");
+    assert_eq!(error.kind(), expected.kind());
+    assert_eq!(error.raw_os_error(), expected.raw_os_error());
+    assert!(
+        !pending.exists(),
+        "failed receipt open must release its empty directory"
+    );
+
+    let directory = HeldDirectory::create_exclusive(root.path(), name)
+        .unwrap()
+        .write_initial_receipt(OsStr::new("owner"), b"complete receipt")
+        .unwrap();
+    directory
+        .write_new_file(OsStr::new("payload"), b"sealed rows")
+        .unwrap();
+    assert_eq!(fs::read(pending.join("owner")).unwrap(), b"complete receipt");
+    assert_eq!(fs::read(pending.join("payload")).unwrap(), b"sealed rows");
+}
+
+#[cfg(any(unix, windows))]
+#[test]
+fn initial_receipt_refusal_preserves_foreign_entries() {
+    for (filename, kind) in [
+        ("owner", io::ErrorKind::AlreadyExists),
+        ("../owner", io::ErrorKind::InvalidInput),
+    ] {
+        let root = tempfile::tempdir().unwrap();
+        let name = OsStr::new("pending");
+        let pending = root.path().join(name);
+        let directory = HeldDirectory::create_exclusive(root.path(), name).unwrap();
+        fs::write(pending.join("owner"), b"foreign receipt").unwrap();
+        fs::write(root.path().join("owner"), b"outside receipt").unwrap();
+
+        let error = directory
+            .write_initial_receipt(OsStr::new(filename), b"replacement receipt")
+            .err()
+            .expect("receipt refusal must preserve foreign entries");
+        assert_eq!(error.kind(), kind);
+        assert_eq!(fs::read(pending.join("owner")).unwrap(), b"foreign receipt");
+        assert_eq!(
+            fs::read(root.path().join("owner")).unwrap(),
+            b"outside receipt"
+        );
+    }
+}
+
+#[cfg(any(unix, windows))]
+#[test]
 fn failed_pending_receipt_removes_its_marker_and_empty_directory() {
     let root = tempfile::tempdir().unwrap();
     let pending = root.path().join("pending");
@@ -50,6 +115,12 @@ fn failed_pending_receipt_removes_its_marker_and_empty_directory() {
         !pending.exists(),
         "failed unpublished receipts must not leave owned staging behind"
     );
+
+    HeldDirectory::create_exclusive(root.path(), OsStr::new("pending"))
+        .unwrap()
+        .write_initial_receipt(OsStr::new("owner"), b"retry receipt")
+        .unwrap();
+    assert_eq!(fs::read(pending.join("owner")).unwrap(), b"retry receipt");
 }
 
 #[cfg(any(unix, windows))]
