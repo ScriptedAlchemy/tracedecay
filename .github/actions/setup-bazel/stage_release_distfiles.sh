@@ -22,7 +22,7 @@ stage_asset() {
 }
 
 # The same rules_python archive is required by Bazel on every host.
-stage_asset bazel-contrib/rules_python 690529045 rules_python-2.4.6.tar.gz
+stage_asset bazel-contrib/rules_python 744869973 rules_python-2.5.1.tar.gz
 
 if [[ "$RUNNER_OS" == Linux && "$RUNNER_ARCH" == X64 ]]; then
   # hermetic_launcher release binaries-20261025, for Linux x86-64 tools.

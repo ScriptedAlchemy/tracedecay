@@ -823,8 +823,12 @@ impl CodeIndexPreparationPort for DaemonCodeIndexPreparationV1 {
                 segment_size_bytes,
                 page_count,
             } => {
-                let _span =
-                    tracing::trace_span!("code_index.generation.publish.evidence_commit").entered();
+                let _span = tracing::trace_span!(
+                    "code_index.generation.publish.evidence_commit",
+                    bytes = segment_size_bytes,
+                    pages = page_count,
+                )
+                .entered();
                 // The existing pack authority validates every page and the
                 // complete digest, but names it only inside this session.
                 if files.evidence.commit(
@@ -1390,8 +1394,15 @@ impl TemporaryEvidencePackV1 {
             )
         })?;
         let final_path = root.join(format!("segment-{digest_hex}.json"));
-        match final_path.symlink_metadata() {
+        let existing = {
+            let _span =
+                tracing::trace_span!("code_index.generation.publish.evidence_lookup").entered();
+            final_path.symlink_metadata()
+        };
+        match existing {
             Ok(metadata) => {
+                let _span =
+                    tracing::trace_span!("code_index.generation.publish.evidence_reuse").entered();
                 // Reject non-files and mismatched extents before opening the
                 // canonical name: a FIFO must never block digest verification.
                 if !metadata.file_type().is_file() || metadata.len() != segment_size_bytes {
@@ -1426,15 +1437,19 @@ impl TemporaryEvidencePackV1 {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(error) => return Err(DaemonCodeIndexPublicationStoreV1::unavailable(error)),
         }
-        self.file
-            .as_ref()
-            .ok_or_else(|| {
-                DaemonCodeIndexPublicationStoreV1::unavailable(
-                    "sealed evidence pack temporary file is already closed",
-                )
-            })?
-            .sync_all()
-            .map_err(DaemonCodeIndexPublicationStoreV1::unavailable)?;
+        {
+            let _span =
+                tracing::trace_span!("code_index.generation.publish.evidence_file_sync").entered();
+            self.file
+                .as_ref()
+                .ok_or_else(|| {
+                    DaemonCodeIndexPublicationStoreV1::unavailable(
+                        "sealed evidence pack temporary file is already closed",
+                    )
+                })?
+                .sync_all()
+                .map_err(DaemonCodeIndexPublicationStoreV1::unavailable)?;
+        }
         // On Unix, keep the original writer descriptor through the rename
         // and hash the actual published bytes. Opening the pack by pathname
         // again would trigger endpoint authorization for no additional proof.
@@ -1450,10 +1465,18 @@ impl TemporaryEvidencePackV1 {
             .metadata()
             .map_err(DaemonCodeIndexPublicationStoreV1::unavailable)?;
         #[cfg(not(unix))]
-        drop(self.file.take());
+        {
+            let _span =
+                tracing::trace_span!("code_index.generation.publish.evidence_file_close").entered();
+            drop(self.file.take());
+        }
         let staged_path = staging_root.join(format!("segment-{digest_hex}.json"));
-        std::fs::rename(&self.path, &staged_path)
-            .map_err(DaemonCodeIndexPublicationStoreV1::unavailable)?;
+        {
+            let _span =
+                tracing::trace_span!("code_index.generation.publish.evidence_rename").entered();
+            std::fs::rename(&self.path, &staged_path)
+                .map_err(DaemonCodeIndexPublicationStoreV1::unavailable)?;
+        }
         self.published_path = Some(staged_path.clone());
         #[cfg(unix)]
         {
@@ -1501,8 +1524,17 @@ impl TemporaryEvidencePackV1 {
             }
             self.authenticated = Some((staged_path, after));
         }
-        drop(self.file.take());
-        DaemonCodeIndexPublicationStoreV1::sync_directory(staging_root)?;
+        {
+            let _span =
+                tracing::trace_span!("code_index.generation.publish.evidence_file_close").entered();
+            drop(self.file.take());
+        }
+        {
+            let _span =
+                tracing::trace_span!("code_index.generation.publish.evidence_directory_sync")
+                    .entered();
+            DaemonCodeIndexPublicationStoreV1::sync_directory(staging_root)?;
+        }
         Ok(true)
     }
 
