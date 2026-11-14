@@ -164,23 +164,6 @@ pub(crate) async fn write_relation_projection(
     write_relation_projection_with_receipt(database, projection, expected, cancellation)
 }
 
-#[cfg(any(test, feature = "test-helpers"))]
-pub(crate) async fn write_relation_projection_on_snapshot(
-    database: &impl SessionTemporalRegisteredDb,
-    snapshot: &tracedecay_runtime_core::db::DatabaseEngineReadSnapshot,
-    projection: &SessionRelationProjection,
-    cancellation: Arc<dyn GraphCancellation>,
-) -> SessionStoreResult<GraphWatermark> {
-    let (expected, _) = expected_receipt(
-        snapshot,
-        &projection.session_id,
-        SessionProjectionGenerationV1::new(projection.generation)
-            .map_err(|error| storage(RECEIPT_OPERATION, error))?,
-    )
-    .await?;
-    write_relation_projection_with_receipt(database, projection, expected, cancellation)
-}
-
 fn write_relation_projection_with_receipt(
     database: &impl SessionTemporalRegisteredDb,
     projection: &SessionRelationProjection,
