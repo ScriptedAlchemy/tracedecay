@@ -1302,6 +1302,7 @@ fn publish_scope_generation(
         invalidations: BTreeSet::new(),
         ignored_source_admissions: Vec::new(),
         repository_parse_identity: CodeIndexRepositoryParseIdentityV1 {
+            include_submodules: false,
             tree: None,
             dirty: RepositoryDirtyStateV1::Dirty,
         },
@@ -1309,6 +1310,7 @@ fn publish_scope_generation(
         target_projection_key,
     };
     let config = CodeIndexProductionConfigV1 {
+        include_submodules: false,
         project_id: id::<ProjectId>("project.candidate.fixture")?,
         repository: id::<RepositoryId>("repository.candidate.fixture")?,
         sanitizer_revision: id::<SanitizerRevision>("sanitizer.candidate.v1")?,

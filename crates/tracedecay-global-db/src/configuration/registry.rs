@@ -8,9 +8,10 @@ use tracedecay_domain::configuration::{
     AnalyzerSettingsV1, CONFIGURATION_SETTING_KEYS_V1, CONTEXT_SCOUT_SETTINGS_SETTING_KEY,
     CodeIndexWorkerSelectionV1, ConfigurationValueKindV1, ConfigurationValueV1,
     ContextScoutSettingsV1, INDEX_EXCLUDE_SETTING_KEY, INDEX_EXTRACT_DOCSTRINGS_SETTING_KEY,
-    INDEX_INCLUDE_SETTING_KEY, INDEX_MAX_FILE_SIZE_SETTING_KEY,
-    INDEX_NATIVE_GRAPH_ACTIVATION_SETTING_KEY, INDEX_TRACK_CALL_SITES_SETTING_KEY,
-    LCM_SUMMARIZER_EXECUTABLES_SETTING_KEY, LcmSummarizerExecutablesV1, PROFILE_SETTING_KEYS_V1,
+    INDEX_INCLUDE_SETTING_KEY, INDEX_INCLUDE_SUBMODULES_SETTING_KEY,
+    INDEX_MAX_FILE_SIZE_SETTING_KEY, INDEX_NATIVE_GRAPH_ACTIVATION_SETTING_KEY,
+    INDEX_TRACK_CALL_SITES_SETTING_KEY, LCM_SUMMARIZER_EXECUTABLES_SETTING_KEY,
+    LcmSummarizerExecutablesV1, PROFILE_SETTING_KEYS_V1,
     PROJECT_WORK_EXPERTISE_CONSENT_SETTING_KEY, RestartRequirementV1, SOURCE_BINDINGS_SETTING_KEY,
     SYNC_AUTO_INIT_SETTING_KEY, SYNC_AUTO_TRACK_PR_BRANCHES_SETTING_KEY,
     SYNC_AUTO_TRACK_PR_POLL_SECS_SETTING_KEY, SYNC_AUTO_WATCH_SETTING_KEY,
@@ -35,7 +36,7 @@ pub const MAX_PROXIMITY_RISK_THRESHOLD_BASIS_POINTS_V1: u64 = 10_000;
 
 /// Registry schema revision. Increment only when setting-definition semantics
 /// change, not when a setting value changes.
-pub const CONFIGURATION_REGISTRY_SCHEMA_REVISION: u16 = 8;
+pub const CONFIGURATION_REGISTRY_SCHEMA_REVISION: u16 = 9;
 
 #[derive(Debug, Error)]
 pub enum ConfigurationRegistryError {
@@ -524,6 +525,12 @@ fn register_project_settings(
             RestartRequirementV1::DaemonRestart,
         ),
         (
+            INDEX_INCLUDE_SUBMODULES_SETTING_KEY,
+            ConfigurationValueV1::Boolean(false),
+            SettingSensitivityV1::Public,
+            RestartRequirementV1::DaemonRestart,
+        ),
+        (
             INDEX_MAX_FILE_SIZE_SETTING_KEY,
             ConfigurationValueV1::Unsigned(defaults.max_file_size),
             SettingSensitivityV1::Public,
@@ -779,7 +786,10 @@ mod user_profile_settings_tests {
         );
         let definition = registry.definition(&key).expect("definition");
 
-        assert_eq!(definition.schema_revision, 8);
+        assert_eq!(
+            definition.schema_revision,
+            CONFIGURATION_REGISTRY_SCHEMA_REVISION
+        );
         assert_eq!(definition.scope, SettingScopeV1::UserProfile);
         assert_eq!(
             definition.value_kind,

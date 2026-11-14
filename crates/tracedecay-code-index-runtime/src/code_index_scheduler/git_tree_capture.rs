@@ -16,7 +16,9 @@ use tracedecay_domain::{
 };
 use tracedecay_privacy::CODE_SOURCE_SANITIZER_VERSION_V1;
 use tracedecay_query::code_search::CodeIndexSearchUnavailableReasonV1;
-use tracedecay_runtime_core::git_repository::resolve_tree_link;
+use tracedecay_runtime_core::git_repository::{
+    GitNativeCandidateTreeVisitError, GitTreeSubmodulePins, resolve_tree_link,
+};
 use tracedecay_runtime_core::resident_memory::ResidentMemoryReservationV1;
 
 use super::{
@@ -32,6 +34,9 @@ use tracedecay_code_index::production::{
     CodeIndexProductionErrorV1, CodeIndexPublicationStoreErrorV1, CodeIndexPublishedGenerationV1,
     CodeIndexRepositoryParseIdentityV1,
 };
+
+type TreeBlobVisitor<'a> =
+    dyn FnMut(&[u8], &[u8]) -> Result<(), CodeIndexSearchUnavailableReasonV1> + 'a;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ExactGitTreeSourceV1 {
@@ -161,7 +166,7 @@ pub(super) fn representable_logical_path(git_path: &[u8]) -> Option<&str> {
 /// Whether capture would parse `git_path` as source. A committed symlink at
 /// such a path is read through to its target, as a checkout reads it, so its
 /// link text never becomes source.
-fn is_source_path(registry: &StaticLanguageRegistry, git_path: &[u8]) -> bool {
+pub(super) fn is_source_path(registry: &StaticLanguageRegistry, git_path: &[u8]) -> bool {
     representable_logical_path(git_path)
         .and_then(|logical_path| Path::new(logical_path).extension())
         .and_then(|extension| extension.to_str())
@@ -396,9 +401,8 @@ impl CodeIndexWorktreeSchedulerV1 {
     }
 
     /// HEAD's tree standing in for a clean checkout. Git stores a symlink as
-    /// its target path, while worktree capture and every source sweep read
-    /// through the link, so a tree holding a source symlink would seal bytes
-    /// the next sweep disproves. That tree is `GenerationUnavailable` here and
+    /// its target path, while the live roster excludes the link. A tree holding
+    /// a source symlink would seal bytes the next sweep disproves. That tree is `GenerationUnavailable` here and
     /// the checkout is captured from disk instead.
     pub(super) fn capture_clean_head_tree_snapshot(
         &self,
@@ -461,8 +465,15 @@ impl CodeIndexWorktreeSchedulerV1 {
             control,
             work_observer,
             |visitor| {
+                let mut gitlinks = Vec::new();
                 for entry in entries {
                     control.termination().map_or(Ok(()), Err)?;
+                    if self.path_policy.includes_submodules() && entry.mode.is_commit() {
+                        let path = entry.filepath.to_str().map_err(|_| {
+                            CodeIndexSearchUnavailableReasonV1::GenerationUnavailable
+                        })?;
+                        gitlinks.push((path.to_owned(), entry.oid));
+                    }
                     if entry.mode.is_tree() || entry.mode.is_commit() {
                         continue;
                     }
@@ -483,9 +494,59 @@ impl CodeIndexWorktreeSchedulerV1 {
                     }
                     visitor(entry.filepath.as_ref(), &blob.data)?;
                 }
-                Ok(())
+                let pins = GitTreeSubmodulePins::from_tree(&tree, gitlinks)
+                    .map_err(|_| CodeIndexSearchUnavailableReasonV1::GenerationUnavailable)?;
+                self.visit_pinned_submodule_blobs(&repository, &pins, control, visitor)
             },
         )
+    }
+
+    fn visit_pinned_submodule_blobs(
+        &self,
+        parent: &gix::Repository,
+        pins: &GitTreeSubmodulePins,
+        control: &branch_generations::BranchGenerationReadControlV1,
+        visitor: &mut TreeBlobVisitor<'_>,
+    ) -> Result<(), CodeIndexSearchUnavailableReasonV1> {
+        let unavailable = CodeIndexSearchUnavailableReasonV1::GenerationUnavailable;
+        let children =
+            tracedecay_code_index::source_walk::submodules::pinned_submodules(parent, pins)
+                .map_err(|_| unavailable)?;
+        let registry = StaticLanguageRegistry::new();
+        for (prefix, (repo, pin)) in children {
+            control.termination().map_or(Ok(()), Err)?;
+            let tree = repo
+                .find_commit(pin)
+                .and_then(|commit| commit.tree())
+                .map_err(|_| unavailable)?;
+            for entry in tree
+                .traverse()
+                .breadthfirst
+                .files()
+                .map_err(|_| unavailable)?
+            {
+                control.termination().map_or(Ok(()), Err)?;
+                if !entry.mode.is_blob() {
+                    continue;
+                }
+                let path = [prefix.as_bytes(), b"/", entry.filepath.as_slice()].concat();
+                let Some(logical_path) = representable_logical_path(&path) else {
+                    // Capture records the unrepresentable name without consulting its blob.
+                    visitor(&path, &[])?;
+                    continue;
+                };
+                if !is_source_path(&registry, &path)
+                    || !tracedecay_code_index::source_walk::submodules::is_source_location(
+                        Path::new(logical_path),
+                    )
+                {
+                    continue;
+                }
+                let blob = repo.find_blob(entry.oid).map_err(|_| unavailable)?;
+                visitor(&path, &blob.data)?;
+            }
+        }
+        Ok(())
     }
 
     #[tracing::instrument(
@@ -514,14 +575,24 @@ impl CodeIndexWorktreeSchedulerV1 {
             control,
             None,
             |visitor| {
-                candidate.visit_blobs(|path| is_source_path(&registry, path), visitor).map_err(|error| match error {
-                    tracedecay_runtime_core::git_repository::GitNativeCandidateTreeVisitError::Repository(_) => {
-                        control
+                let pins = candidate
+                    .visit_blobs(
+                        self.path_policy.includes_submodules(),
+                        |path| is_source_path(&registry, path),
+                        &mut *visitor,
+                    )
+                    .map_err(|error| match error {
+                        GitNativeCandidateTreeVisitError::Repository(_) => control
                             .termination()
-                            .unwrap_or(CodeIndexSearchUnavailableReasonV1::GenerationUnavailable)
-                    }
-                    tracedecay_runtime_core::git_repository::GitNativeCandidateTreeVisitError::Visitor(reason) => reason,
-                })
+                            .unwrap_or(CodeIndexSearchUnavailableReasonV1::GenerationUnavailable),
+                        GitNativeCandidateTreeVisitError::Visitor(reason) => reason,
+                    })?;
+                if pins.gitlinks.is_empty() {
+                    return Ok(());
+                }
+                let parent = tracedecay_runtime_core::git_open::open(&self.project_root)
+                    .map_err(|_| CodeIndexSearchUnavailableReasonV1::GenerationUnavailable)?;
+                self.visit_pinned_submodule_blobs(&parent, &pins, control, visitor)
             },
         )
     }
@@ -533,9 +604,7 @@ impl CodeIndexWorktreeSchedulerV1 {
         tree: tracedecay_domain::TreeId,
         control: &branch_generations::BranchGenerationReadControlV1,
         work_observer: Option<&dyn CodeIndexExecutionControlV1>,
-        visit: impl FnOnce(
-            &mut dyn FnMut(&[u8], &[u8]) -> Result<(), CodeIndexSearchUnavailableReasonV1>,
-        ) -> Result<(), CodeIndexSearchUnavailableReasonV1>,
+        visit: impl FnOnce(&mut TreeBlobVisitor<'_>) -> Result<(), CodeIndexSearchUnavailableReasonV1>,
     ) -> Result<CapturedSnapshotV1, CodeIndexSearchUnavailableReasonV1> {
         let registry = StaticLanguageRegistry::new();
         let mut roster = CapturedFileRosterV1::default();
@@ -620,6 +689,7 @@ impl CodeIndexWorktreeSchedulerV1 {
             snapshot_content_identity(&files, &sanitization_receipts, &omitted_sources);
         Ok(CapturedSnapshotV1 {
             repository_parse_identity: CodeIndexRepositoryParseIdentityV1 {
+                include_submodules: self.path_policy.includes_submodules(),
                 tree: Some(tree),
                 dirty: tracedecay_domain::RepositoryDirtyStateV1::Clean,
             },
@@ -1345,16 +1415,41 @@ mod tests {
             ],
             "only source links that name a file in the tree are captured"
         );
-        assert_eq!(
-            branch,
-            present(
-                &scheduler
-                    .capture_authoritative_snapshot_without_active_generation_reuse(None)
-                    .expect("capture the checkout from disk")
-                    .snapshot
-            ),
-            "a branch capture must index the bytes a checkout reads through each link"
+        let live = present(
+            &scheduler
+                .capture_authoritative_snapshot_without_active_generation_reuse(None)
+                .expect("capture the checkout from disk")
+                .snapshot,
         );
+        assert_eq!(
+            branch, live,
+            "same-parent source aliases resolve to the live checkout's bytes"
+        );
+        let changed = b"pub fn linked_target() -> u32 { 19 }\n";
+        std::fs::write(root.join("src/real.rs"), changed).expect("edit only the alias target");
+        let edited = present(
+            &scheduler
+                .capture_authoritative_snapshot_without_active_generation_reuse(None)
+                .expect("capture unstaged target through each tracked alias")
+                .snapshot,
+        );
+        let expected = tracedecay_code_index::chunks::content_digest(changed);
+        for alias in [
+            "src/alias.rs",
+            "src/nested/chained.rs",
+            "src/through_directory.rs",
+        ] {
+            assert!(
+                edited
+                    .iter()
+                    .any(|(path, digest)| path == alias && *digest == expected)
+            );
+            assert!(
+                branch
+                    .iter()
+                    .any(|(path, digest)| path == alias && *digest != expected)
+            );
+        }
         let notes = captured
             .snapshot
             .files

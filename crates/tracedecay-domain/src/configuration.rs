@@ -68,6 +68,7 @@ pub fn is_profile_setting_key(key: &SettingKey) -> bool {
 
 /// Canonical project-scoped runtime settings.
 pub const INDEX_EXCLUDE_SETTING_KEY: &str = "index.exclude.v1";
+pub const INDEX_INCLUDE_SUBMODULES_SETTING_KEY: &str = "index.include_submodules.v1";
 pub const INDEX_INCLUDE_SETTING_KEY: &str = "index.include.v1";
 pub const INDEX_MAX_FILE_SIZE_SETTING_KEY: &str = "index.max_file_size.v1";
 pub const INDEX_EXTRACT_DOCSTRINGS_SETTING_KEY: &str = "index.extract_docstrings.v1";
@@ -110,6 +111,7 @@ pub const CONFIGURATION_SETTING_KEYS_V1: &[&str] = &[
     USER_WORK_EXPERTISE_CONSENT_SETTING_KEY,
     INDEX_EXCLUDE_SETTING_KEY,
     INDEX_INCLUDE_SETTING_KEY,
+    INDEX_INCLUDE_SUBMODULES_SETTING_KEY,
     INDEX_MAX_FILE_SIZE_SETTING_KEY,
     INDEX_EXTRACT_DOCSTRINGS_SETTING_KEY,
     INDEX_TRACK_CALL_SITES_SETTING_KEY,
