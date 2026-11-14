@@ -280,8 +280,7 @@ async fn temporal_schema_cursor_audit_rejects_nonmax_active_key() {
     assert_cursor_rotation_verdict(
         initialize_global_db(&restart_path)
             .await
-            .err()
-            .expect("restart audit refuses the database"),
+            .expect_err("restart audit refuses the database"),
         "restart audit must reject an active key that is not the monotonic maximum",
     );
 }
@@ -334,8 +333,7 @@ async fn temporal_schema_cursor_audit_rejects_skipped_successor_chain() {
         assert_cursor_rotation_verdict(
             initialize_global_db(&restart_path)
                 .await
-                .err()
-                .expect("restart audit refuses the database"),
+                .expect_err("restart audit refuses the database"),
             &format!(
                 "{fixture}: a later key must not satisfy a skipped immediate-successor retirement"
             ),
