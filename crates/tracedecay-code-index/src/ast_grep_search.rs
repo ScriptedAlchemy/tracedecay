@@ -210,6 +210,8 @@ pub enum AstGrepSearchError {
     InvalidPattern { lang: String, message: String },
     /// The `path_glob` was not a valid glob.
     InvalidGlob(String),
+    /// The walk or a source read lost its current filesystem authority.
+    SourceUnavailable(String),
 }
 
 impl std::fmt::Display for AstGrepSearchError {
@@ -225,6 +227,9 @@ impl std::fmt::Display for AstGrepSearchError {
                 write!(f, "invalid {lang} pattern: {message}")
             }
             AstGrepSearchError::InvalidGlob(glob) => write!(f, "invalid path_glob '{glob}'"),
+            AstGrepSearchError::SourceUnavailable(message) => {
+                write!(f, "source is unavailable: {message}")
+            }
         }
     }
 }
@@ -324,7 +329,7 @@ where
             result.cancelled = true;
             return Ok(result);
         }
-        let Ok(entry) = entry else { continue };
+        let entry = entry.map_err(|error| AstGrepSearchError::SourceUnavailable(error.to_string()))?;
         if !entry.file_type().is_some_and(|ft| ft.is_file()) {
             continue;
         }
@@ -364,9 +369,9 @@ where
             result.cancelled = true;
             return Ok(result);
         }
-        let Ok(bytes) = std::fs::read(path) else {
-            continue;
-        };
+        let bytes = entry
+            .read()
+            .map_err(|error| AstGrepSearchError::SourceUnavailable(error.to_string()))?;
         if looks_binary(&bytes) {
             continue;
         }

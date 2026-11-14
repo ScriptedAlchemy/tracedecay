@@ -7,8 +7,9 @@ use std::io;
 #[cfg(unix)]
 use std::os::unix::fs::MetadataExt;
 use std::path::{Component, Path, PathBuf};
+use std::sync::Arc;
 #[cfg(unix)]
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Mutex, PoisonError};
 
 use gix::bstr::ByteSlice;
 use ignore::{DirEntry, Error as WalkError, Walk};
@@ -264,6 +265,17 @@ impl AuthenticatedSubmodule {
         Ok(valid)
     }
 
+    fn require_live_checkout(&self) -> io::Result<()> {
+        if self.checkout_is_live()? {
+            Ok(())
+        } else {
+            Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "authenticated submodule checkout binding changed during source walk",
+            ))
+        }
+    }
+
     fn verify_checkout_binding(&self) -> io::Result<bool> {
         #[cfg(test)]
         FULL_BINDING_VALIDATIONS.with(|count| count.set(count.get() + 1));
@@ -301,51 +313,89 @@ impl AuthenticatedSubmodule {
     }
 }
 
-/// A lazy walk that cannot outlive its authenticated child checkout binding.
+/// A walked path retains the checkout authority used to admit it. Search
+/// workers may queue entries after the walk advances, so the read itself must
+/// validate that authority before accepting bytes.
+#[derive(Clone, Debug)]
+pub struct SourceWalkEntry {
+    entry: DirEntry,
+    child: Option<Arc<AuthenticatedSubmodule>>,
+}
+
+impl SourceWalkEntry {
+    pub fn path(&self) -> &Path {
+        self.entry.path()
+    }
+
+    pub fn into_path(self) -> PathBuf {
+        self.entry.into_path()
+    }
+
+    pub fn file_type(&self) -> Option<std::fs::FileType> {
+        self.entry.file_type()
+    }
+
+    pub fn metadata(&self) -> Result<std::fs::Metadata, WalkError> {
+        self.entry.metadata()
+    }
+
+    /// Return bytes only while the original child binding still holds. The
+    /// second check covers revocation during the filesystem read, matching
+    /// the source-capture boundary used by graph publication.
+    pub fn read(&self) -> io::Result<Vec<u8>> {
+        if let Some(child) = &self.child {
+            child.require_live_checkout()?;
+        }
+        let bytes = std::fs::read(self.path())?;
+        if let Some(child) = &self.child {
+            child.require_live_checkout()?;
+        }
+        Ok(bytes)
+    }
+}
+
+/// A lazy walk and its yielded entries retain the authenticated child binding.
 /// The ordinary parent walk has no child binding and retains its own policy.
 pub struct CheckoutWalk {
     walk: Option<Walk>,
-    child: Option<AuthenticatedSubmodule>,
+    child: Option<Arc<AuthenticatedSubmodule>>,
 }
 
 impl CheckoutWalk {
     pub(super) fn new(walk: Walk, child: Option<AuthenticatedSubmodule>) -> Self {
         Self {
             walk: Some(walk),
-            child,
+            child: child.map(Arc::new),
         }
     }
 }
 
 impl Iterator for CheckoutWalk {
-    type Item = Result<DirEntry, WalkError>;
+    type Item = Result<SourceWalkEntry, WalkError>;
 
     fn next(&mut self) -> Option<Self::Item> {
         self.walk.as_ref()?;
-        if let Some(child) = &self.child {
-            let refusal = match child.checkout_is_live() {
-                Ok(true) => None,
-                Ok(false) => Some(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    "authenticated submodule checkout binding changed during source walk",
-                )),
-                Err(error) => Some(error),
-            };
-            if let Some(error) = refusal {
-                // A failed Git read must not become a successful empty walk.
-                self.walk = None;
-                return Some(Err(WalkError::WithPath {
-                    path: child.worktree.clone(),
-                    err: Box::new(WalkError::Io(error)),
-                }));
-            }
+        if let Some(child) = &self.child
+            && let Err(error) = child.require_live_checkout()
+        {
+            // A failed Git read must not become a successful empty walk.
+            self.walk = None;
+            return Some(Err(WalkError::WithPath {
+                path: child.worktree.clone(),
+                err: Box::new(WalkError::Io(error)),
+            }));
         }
 
         let next = self.walk.as_mut()?.next();
         if next.is_none() {
             self.walk = None;
         }
-        next
+        next.map(|entry| {
+            entry.map(|entry| SourceWalkEntry {
+                entry,
+                child: self.child.clone(),
+            })
+        })
     }
 }
 

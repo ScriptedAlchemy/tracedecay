@@ -163,6 +163,33 @@ fn binding_change_before_iteration(change: impl FnOnce(&Path)) {
 }
 
 #[test]
+fn queued_submodule_entry_keeps_its_read_authority_after_the_walk_drops() {
+    let fixture = fixture();
+    let root = fixture.path().join("parent");
+    let entries = walk(&root)
+        .map(|entry| entry.expect("unchanged source walk"))
+        .collect::<Vec<_>>();
+    let child = entries
+        .iter()
+        .find(|entry| entry.path() == root.join("app/first.rs"))
+        .expect("queued child source");
+    let parent = entries
+        .iter()
+        .find(|entry| entry.path() == root.join("parent.rs"))
+        .expect("queued parent source");
+    assert_eq!(child.read().unwrap(), b"pub fn first() {}\n");
+
+    fs::remove_file(root.join(".gitmodules")).unwrap();
+
+    let error = child
+        .read()
+        .expect_err("revoked child binding must refuse the read");
+    assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+    assert!(error.to_string().contains("checkout binding changed"));
+    assert_eq!(parent.read().unwrap(), b"pub fn parent() {}\n");
+}
+
+#[test]
 fn lazy_submodule_walk_refuses_removed_worktree_registration() {
     binding_change_before_iteration(|root| {
         fs::remove_file(root.join(".gitmodules")).unwrap();
