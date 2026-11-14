@@ -730,14 +730,9 @@ async fn fire_and_forget_edit_hooks_each_wake_a_reconcile() {
         )
     };
 
-    let initial = wait_for_new_text_generation(
-        &fixture,
-        &project,
-        None,
-        &["src/main.rs"],
-        "initial mount",
-    )
-    .await;
+    let initial =
+        wait_for_new_text_generation(&fixture, &project, None, &["src/main.rs"], "initial mount")
+            .await;
 
     std::fs::write(project.join("src/saved.rs"), "pub fn saved() {}\n").expect("save source");
     unix_fire_and_forget_hook(&fixture, edit(&["src/saved.rs"])).await;

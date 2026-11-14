@@ -403,10 +403,8 @@ where
             let spawned = coordinator
                 .ok_or_else(|| "daemon shutdown runner found no Tokio runtime".to_owned())
                 .and_then(|coordinator| {
-                    lifecycle.spawn_shutdown_coordinator(
-                        &attempt,
-                        coordinator.with_current_subscriber(),
-                    )
+                    lifecycle
+                        .spawn_shutdown_coordinator(&attempt, coordinator.with_current_subscriber())
                 });
             if let Err(error) = spawned {
                 let receipt = Arc::new(DaemonShutdownReceipt::coordinator_failed(

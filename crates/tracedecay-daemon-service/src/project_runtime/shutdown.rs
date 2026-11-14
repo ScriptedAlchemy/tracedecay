@@ -204,12 +204,13 @@ impl ProjectRuntimeRegistryV1 {
             let task = NativeTask::spawn(
                 async move {
                     let drain_registry = registry.clone();
-                    let drained = tracedecay_runtime_core::native_runtime::spawn_blocking(move || {
-                        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                            drain_registry.take_all_blocking()
-                        }))
-                    })
-                    .await;
+                    let drained =
+                        tracedecay_runtime_core::native_runtime::spawn_blocking(move || {
+                            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                                drain_registry.take_all_blocking()
+                            }))
+                        })
+                        .await;
                     tracedecay_runtime_core::logging::log_daemon_event(
                         "daemon_shutdown",
                         &[("outcome", "project_runtimes_drained".to_string())],
