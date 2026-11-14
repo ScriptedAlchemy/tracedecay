@@ -665,7 +665,11 @@ async fn registered_work_evidence_hydrates_the_provider_qualified_task_session()
         ObservationSourceIdentityV1::for_provider(id::<ProviderId>("codex"), session_id)
             .expect("provider session identity");
     let storage = database.work_storage().expect("Work storage");
-    seal_attempt(&storage, &authority, admitted_attempt, provider_session);
+    tracedecay_runtime_core::native_runtime::spawn_blocking(move || {
+        seal_attempt(&storage, &authority, admitted_attempt, provider_session);
+    })
+    .await
+    .expect("seal attempt evidence off the native worker");
 
     let graph = invoke_work(
         &service,
