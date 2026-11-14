@@ -343,9 +343,7 @@ fn collect_writes<'t>(
         && target.kind() != "subscript_expression"
     {
         visit_binding_names(state, target, &mut |name| {
-            if binding_owner(state, target, name, lookup)
-                .is_some_and(|(owner, _)| owner == scope)
-            {
+            if binding_owner(state, target, name, lookup).is_some_and(|(owner, _)| owner == scope) {
                 found.insert(name.to_owned());
             }
         });
