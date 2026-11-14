@@ -503,6 +503,7 @@ pub(super) fn ensure_run_ledger_eof_guard(file: &mut std::fs::File) -> std::io::
     }
 }
 
+#[tracing::instrument(name = "hosts.automation.run_ledger.sync", level = "trace", skip_all)]
 pub(super) fn sync_run_ledger_file_and_parent(path: &Path, file: &std::fs::File) -> Result<()> {
     #[cfg(test)]
     exact_lookup::scan_receipt::record_sync();
