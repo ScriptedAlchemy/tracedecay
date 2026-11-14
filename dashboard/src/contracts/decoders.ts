@@ -156,7 +156,6 @@ import type {
   ConfigurationRevisionId,
   ConfigurationSnapshotId,
   ContentDigest,
-  ContextScoutIntentKindV1,
   ContextScoutIntentSettingsV1,
   CostsReadModelV1,
   CoverageCompleteness,
@@ -186,7 +185,6 @@ import type {
   Deadline,
   DecideWorkProposalRequestV1,
   DecideWorkRelationReplanRequestV1,
-  DecisionEngineSettingsV1,
   DeliveryAgentUsageRowV1,
   DeliveryAgentUsageV1,
   DeliveryAttentionEvidenceV1,
@@ -395,7 +393,6 @@ import type {
   HandoffOpenTargetV1,
   HistoryRewritePolicyV1,
   IncomingCallEdgeV1,
-  IntentQuestionSettingsV1,
   IntentWindowSettingsV1,
   JobDelivery,
   LatencyDistributionReadModelV1,
@@ -2875,28 +2872,19 @@ export const ConfigurationSnapshotIdSchema: z.ZodType<string, unknown> = z.strin
 /** Strongly typed algorithm-tagged integrity digest: `ContentDigest`. */
 export const ContentDigestSchema: z.ZodType<string, unknown> = z.string();
 
-/** One user intent the Scout can recognize. The serialized keys are the
-historical hook hint category keys, so persisted hint analytics, hint
-settlement, and evals keep one vocabulary. */
-export const ContextScoutIntentKindV1Schema: z.ZodEnum<{ "atomic_edit": "atomic_edit"; "broad_read": "broad_read"; "build_diagnostics": "build_diagnostics"; "call_graph": "call_graph"; "edit_redundancy": "edit_redundancy"; "explore_subagent": "explore_subagent"; "file_lookup": "file_lookup"; "file_read": "file_read"; "impact": "impact"; "memory_store": "memory_store"; "project_context": "project_context"; "review_changes": "review_changes"; "search": "search"; "semantic_search": "semantic_search"; "session_recall": "session_recall"; "subagent_start_context": "subagent_start_context"; "symbol_lookup": "symbol_lookup"; "tool_descriptor_read": "tool_descriptor_read"; "type_orientation": "type_orientation"; "unexpected_changes": "unexpected_changes" }> = z.enum(["atomic_edit", "broad_read", "build_diagnostics", "call_graph", "edit_redundancy", "explore_subagent", "file_lookup", "file_read", "impact", "memory_store", "project_context", "review_changes", "search", "semantic_search", "session_recall", "subagent_start_context", "symbol_lookup", "tool_descriptor_read", "type_orientation", "unexpected_changes"]);
-
 /** Operator configuration for the Context Scout intent pass. */
 export const ContextScoutIntentSettingsV1Schema: z.ZodObject<{
   action_fact_score_permille: z.ZodType<number, unknown>;
   enabled: z.ZodType<boolean, unknown>;
-  engine: z.ZodType<DecisionEngineSettingsV1, unknown>;
   min_delivery_gap_secs: z.ZodType<number, unknown>;
   prompt_lookup_deadline_ms: z.ZodType<number, unknown>;
-  questions: z.ZodType<Array<IntentQuestionSettingsV1>, unknown>;
   ttl_secs: z.ZodType<number, unknown>;
   window: z.ZodType<IntentWindowSettingsV1, unknown>;
 }, z.core.$strict> = z.object({
   action_fact_score_permille: z.number().refine(Number.isInteger).min(0).max(65535),
   enabled: z.boolean(),
-  engine: z.lazy(() => DecisionEngineSettingsV1Schema),
   min_delivery_gap_secs: z.number().refine(Number.isInteger).min(0),
   prompt_lookup_deadline_ms: z.number().refine(Number.isInteger).min(0),
-  questions: z.array(z.lazy(() => IntentQuestionSettingsV1Schema)),
   ttl_secs: z.number().refine(Number.isInteger).min(0),
   window: z.lazy(() => IntentWindowSettingsV1Schema),
 }).strict();
@@ -3197,22 +3185,6 @@ export const DecideWorkRelationReplanRequestV1Schema: z.ZodObject<{
   mutation: z.lazy(() => WorkProductMutationIdentityV1Schema),
   proposal: z.lazy(() => WorkRelationReplanProposalV1Schema),
   selection: z.lazy(() => WorkProductSelectionScopeV1Schema),
-}).strict();
-
-/** The decision engine the intent pass asks. There is no default endpoint or
-model; both come only from explicit operator configuration. */
-export const DecisionEngineSettingsV1Schema: z.ZodObject<{
-  base_url: z.ZodType<string, unknown>;
-  max_concurrent: z.ZodType<number, unknown>;
-  max_state_bytes: z.ZodType<number, unknown>;
-  model: z.ZodType<string | null, unknown>;
-  timeout_ms: z.ZodType<number, unknown>;
-}, z.core.$strict> = z.object({
-  base_url: z.string(),
-  max_concurrent: z.number().refine(Number.isInteger).min(0).max(255),
-  max_state_bytes: z.number().refine(Number.isInteger).min(0),
-  model: z.string().nullable(),
-  timeout_ms: z.number().refine(Number.isInteger).min(0),
 }).strict();
 
 export const DeliveryAgentUsageRowV1Schema: z.ZodObject<{
@@ -5661,22 +5633,6 @@ export const IncomingCallEdgeV1Schema: z.ZodObject<{
   source: z.string(),
   target: z.string(),
 });
-
-/** One yes/no question asked of the decision engine for one intent. The
-intent is a candidate when the engine's probability reaches
-`threshold_permille` and, when set, exceeds the runner-up by
-`margin_permille`. */
-export const IntentQuestionSettingsV1Schema: z.ZodObject<{
-  instructions: z.ZodType<string, unknown>;
-  intent: z.ZodType<ContextScoutIntentKindV1, unknown>;
-  margin_permille: z.ZodType<number | null, unknown>;
-  threshold_permille: z.ZodType<number, unknown>;
-}, z.core.$strict> = z.object({
-  instructions: z.string(),
-  intent: z.lazy(() => ContextScoutIntentKindV1Schema),
-  margin_permille: z.number().refine(Number.isInteger).min(0).max(65535).nullable(),
-  threshold_permille: z.number().refine(Number.isInteger).min(0).max(65535),
-}).strict();
 
 /** Bounds on the recent-session window one intent pass reads. */
 export const IntentWindowSettingsV1Schema: z.ZodObject<{

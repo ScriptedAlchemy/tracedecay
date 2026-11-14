@@ -10,6 +10,7 @@ use super::SqliteVmSnapshot;
 
 thread_local! {
     static OBSERVED: Cell<SqliteVmSnapshot> = const { Cell::new(SqliteVmSnapshot {
+        statements: 0,
         fullscan_steps: 0,
         sort_steps: 0,
         vm_steps: 0,
@@ -18,6 +19,9 @@ thread_local! {
 
 pub(crate) fn observe_statement(statement: &Statement<'_>) {
     let delta = SqliteVmSnapshot {
+        // SQLITE_STMTSTATUS_RUN counts trigger subprograms as additional runs.
+        // This boundary observes the caller's prepared statement once.
+        statements: 1,
         fullscan_steps: take_status(statement, StatementStatus::FullscanStep),
         sort_steps: take_status(statement, StatementStatus::Sort),
         vm_steps: take_status(statement, StatementStatus::VmStep),
@@ -64,6 +68,7 @@ mod tests {
         assert_eq!(count, 2);
         observe_statement(&statement);
         let snapshot = take_observed_vm();
+        assert_eq!(snapshot.statements, 1);
         assert!(
             snapshot.fullscan_steps > 0,
             "unindexed table scan must increment fullscan"

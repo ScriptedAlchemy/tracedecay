@@ -5,8 +5,7 @@ use tracedecay_configuration::config::scope_control::daemon_owned_project_source
 use tracedecay_domain::configuration::{
     CONTEXT_SCOUT_SETTINGS_SETTING_KEY, ConfigurationLayerIdV1, ConfigurationRevisionId,
     ConfigurationValueV1, ContextScoutConfigurationStateV1, ContextScoutIntentSettingsV1,
-    ContextScoutSettingsV1, DecisionEngineSettingsV1, IntentWindowSettingsV1,
-    SOURCE_BINDINGS_SETTING_KEY, SettingKey,
+    ContextScoutSettingsV1, IntentWindowSettingsV1, SOURCE_BINDINGS_SETTING_KEY, SettingKey,
 };
 use tracedecay_domain::{NativeHostIdentityV1, ProjectId};
 use tracedecay_global_db::configuration::GlobalDbConfigurationControlStore;
@@ -115,13 +114,6 @@ pub(super) async fn open() -> ToolDispatchFixture {
 async fn initialize_configuration(sessions: &RegisteredGlobalDb, project: &ProjectId) {
     let intent = ContextScoutIntentSettingsV1 {
         enabled: true,
-        engine: DecisionEngineSettingsV1 {
-            base_url: "http://127.0.0.1:9".to_owned(),
-            model: Some("kev-4b".to_owned()),
-            timeout_ms: 1_000,
-            max_concurrent: 1,
-            max_state_bytes: 8_192,
-        },
         window: IntentWindowSettingsV1 {
             max_user_turns: 3,
             max_messages: 12,
@@ -129,7 +121,6 @@ async fn initialize_configuration(sessions: &RegisteredGlobalDb, project: &Proje
             max_age_secs: 600,
             freshen_budget_ms: 0,
         },
-        questions: ContextScoutIntentSettingsV1::reference_questions(),
         action_fact_score_permille: 700,
         ttl_secs: 600,
         min_delivery_gap_secs: 30,

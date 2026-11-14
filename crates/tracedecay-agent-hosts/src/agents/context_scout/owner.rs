@@ -12,7 +12,7 @@ use tracedecay_contracts::context_scout::{
     ContextScoutDurableQueueEntryV1, ContextScoutLeaseV1, ContextScoutModelBackendV1,
     ContextScoutModelOutcomeV1, ContextScoutWorkV1,
 };
-use tracedecay_domain::configuration::{ContextScoutIntentKindV1, ContextScoutIntentSettingsV1};
+use tracedecay_domain::configuration::ContextScoutIntentKindV1;
 use tracedecay_domain::{UtcMicros, canonical_sha256};
 use tracedecay_hooks::{
     HookBoundaryV1, HookEventEnvelopeV2, HookEventV2, HookLifecyclePhaseV1, HookReadyGuidanceV1,
@@ -23,9 +23,6 @@ use super::address_registry::{
     AdmittedContextScoutHookV1, ContextScoutAddressResolveOutcomeV1, ContextScoutAuthorityPinV1,
     ContextScoutConfigurationPinV1, ContextScoutLifecycleAddressV1,
     ProjectContextScoutAddressRegistryV1,
-};
-use super::decision_engine::{
-    DecisionEngineClientV1, DecisionEngineConfigV1, DecisionEnginePortV1,
 };
 use super::model::{ContextScoutModelConfig, context_scout_model_assistant_from_project_config};
 use super::{
@@ -88,16 +85,6 @@ pub struct ProjectContextScoutOwnerV1 {
     next_inflight_id: AtomicU64,
     startup: ContextScoutDurableStartupOutcomeV1,
     claim_authorities: RwLock<Vec<MountedContextScoutClaimV1>>,
-    intent_engine: StdMutex<Option<InstalledIntentEngineV1>>,
-}
-
-/// The decision engine built from one installed intent configuration. It is
-/// rebuilt only when the pinned settings digest changes, so its concurrency
-/// bound spans every pass of that configuration.
-#[derive(Clone)]
-struct InstalledIntentEngineV1 {
-    settings_digest: [u8; 32],
-    engine: Arc<dyn DecisionEnginePortV1>,
 }
 
 /// What the session's Scout state says about one intent pass. Read across
@@ -206,7 +193,6 @@ impl ProjectContextScoutOwnerV1 {
             next_inflight_id: AtomicU64::new(1),
             startup,
             claim_authorities: RwLock::new(Vec::new()),
-            intent_engine: StdMutex::new(None),
         });
         let mut owners = registered_context_scout_owners().lock().ok()?;
         if let Some(existing) = owners.get(&project_id).and_then(Weak::upgrade)
@@ -638,56 +624,8 @@ impl ProjectContextScoutOwnerV1 {
         let mut runtime = self.runtime.lock().await;
         runtime.status(control)?;
         runtime.replace_model(model);
-        self.refresh_intent_engine(&pin);
         *configuration = Some(pin);
         Ok(())
-    }
-
-    /// Keeps the installed decision engine when the pinned intent settings
-    /// are unchanged, builds one when they changed, and drops it when the
-    /// pass is disabled or absent. A configuration the client refuses leaves
-    /// no engine, which the pass reports as an unavailable engine.
-    fn refresh_intent_engine(&self, pin: &ContextScoutConfigurationPinV1) {
-        let Ok(mut installed) = self.intent_engine.lock() else {
-            return;
-        };
-        let (Some(control), Some(settings)) = (pin.control().intent, pin.intent_settings()) else {
-            *installed = None;
-            return;
-        };
-        if !control.enabled {
-            *installed = None;
-            return;
-        }
-        if installed
-            .as_ref()
-            .is_some_and(|current| current.settings_digest == control.settings_digest)
-        {
-            return;
-        }
-        *installed = intent_engine_client(settings).map(|engine| InstalledIntentEngineV1 {
-            settings_digest: control.settings_digest,
-            engine,
-        });
-    }
-
-    /// The decision engine of the currently installed intent configuration.
-    pub async fn intent_engine(&self) -> Option<Arc<dyn DecisionEnginePortV1>> {
-        let digest = self
-            .configuration
-            .read()
-            .await
-            .as_ref()?
-            .control()
-            .intent
-            .filter(|intent| intent.enabled)?
-            .settings_digest;
-        self.intent_engine
-            .lock()
-            .ok()?
-            .as_ref()
-            .filter(|installed| installed.settings_digest == digest)
-            .map(|installed| Arc::clone(&installed.engine))
     }
 
     /// Reads the session's Scout state for one intent pass whose suggestions
@@ -741,7 +679,7 @@ impl ProjectContextScoutOwnerV1 {
             .await?;
         if state.pending_sibling {
             let mut runtime = self.runtime.lock().await;
-            runtime.last_route = Some(ContextScoutRouteV1::DecisionEngine);
+            runtime.last_route = Some(ContextScoutRouteV1::Deterministic);
             runtime.last_suppression = Some(ContextScoutSuppressionV1::PendingSibling);
             return Ok(ContextScoutRuntimeOutcomeV1::Suppressed {
                 reason: ContextScoutSuppressionV1::PendingSibling,
@@ -751,11 +689,11 @@ impl ProjectContextScoutOwnerV1 {
     }
 
     /// Records an intent pass that ended before selection (no candidate, or
-    /// an engine failure with no action fact). The model slot describes the
-    /// configured model and is left untouched.
+    /// no action fact). The model slot describes the configured model and is
+    /// left untouched.
     pub async fn record_intent_outcome(&self, suppression: ContextScoutSuppressionV1) {
         let mut runtime = self.runtime.lock().await;
-        runtime.last_route = Some(ContextScoutRouteV1::DecisionEngine);
+        runtime.last_route = Some(ContextScoutRouteV1::Deterministic);
         runtime.last_suppression = Some(suppression);
     }
 
@@ -1027,25 +965,6 @@ fn same_routed_native_session(
         && !mounted.is_intent_scoped()
 }
 
-fn intent_engine_client(
-    settings: &ContextScoutIntentSettingsV1,
-) -> Option<Arc<dyn DecisionEnginePortV1>> {
-    let client = DecisionEngineClientV1::new(DecisionEngineConfigV1 {
-        base_url: settings.engine.base_url.clone(),
-        model: settings.engine.model.clone(),
-        timeout: std::time::Duration::from_millis(u64::from(settings.engine.timeout_ms)),
-        max_concurrent: usize::from(settings.engine.max_concurrent),
-        max_state_bytes: usize::try_from(settings.engine.max_state_bytes).ok()?,
-    });
-    match client {
-        Ok(client) => Some(Arc::new(client)),
-        Err(error) => {
-            tracing::warn!(%error, "Context Scout decision engine configuration refused");
-            None
-        }
-    }
-}
-
 fn intent_session_state(
     recent: &ContextScoutRecentStateV1,
     intent_address: ContextScoutAddressV1,
@@ -1163,7 +1082,7 @@ fn status_with_recent(
     };
     status.last_route = Some(entry.route);
     if let Some(model_entry) = entries()
-        .filter(|entry| entry.route != ContextScoutRouteV1::DecisionEngine)
+        .filter(|entry| entry.envelope.candidate.evidence.as_session().is_none())
         .max_by_key(|entry| entry.envelope.candidate.expires_at)
     {
         status.last_model_outcome = Some(model_entry.model_outcome);
@@ -1234,7 +1153,7 @@ mod tests {
         CONTEXT_SCOUT_SETTINGS_SETTING_KEY, CandidateDispositionV1, ConfigurationCandidateV1,
         ConfigurationLayerIdV1, ConfigurationRevisionId, ConfigurationSnapshotV1,
         ConfigurationValueV1, ContextScoutConfigurationModeV1, ContextScoutConfigurationStateV1,
-        ContextScoutConfiguredModelPathV1, ContextScoutSettingsV1, DecisionEngineSettingsV1,
+        ContextScoutConfiguredModelPathV1, ContextScoutIntentSettingsV1, ContextScoutSettingsV1,
         IntentWindowSettingsV1, SettingKey,
     };
     use tracedecay_domain::feedback::FeedbackScopeV1;
@@ -2083,13 +2002,6 @@ mod tests {
             state: ContextScoutConfigurationStateV1::Active,
             intent: Some(ContextScoutIntentSettingsV1 {
                 enabled: true,
-                engine: DecisionEngineSettingsV1 {
-                    base_url: "http://127.0.0.1:9".to_owned(),
-                    model: Some("intent-small".to_owned()),
-                    timeout_ms: 250,
-                    max_concurrent: 1,
-                    max_state_bytes: 4_096,
-                },
                 window: IntentWindowSettingsV1 {
                     max_user_turns: 2,
                     max_messages: 8,
@@ -2097,7 +2009,6 @@ mod tests {
                     max_age_secs: 600,
                     freshen_budget_ms: 0,
                 },
-                questions: ContextScoutIntentSettingsV1::reference_questions(),
                 action_fact_score_permille: 700,
                 ttl_secs: 600,
                 min_delivery_gap_secs: 30,
@@ -2167,18 +2078,6 @@ mod tests {
             .install_configuration(configuration.clone(), None)
             .await
             .expect("intent configuration");
-        let engine = owner.intent_engine().await.expect("installed engine");
-        owner
-            .install_configuration(configuration.clone(), None)
-            .await
-            .expect("reinstalled intent configuration");
-        assert!(
-            Arc::ptr_eq(
-                &engine,
-                &owner.intent_engine().await.expect("installed engine")
-            ),
-            "unchanged intent settings keep the installed engine"
-        );
         let revision = configuration.control().configuration_revision;
         // Recent reads filter on the wall clock; keep the fixture unexpired.
         let expires_at = UtcMicros(4_000_000_000_000_000);
@@ -2273,12 +2172,15 @@ mod tests {
         else {
             panic!("an intent entry without a pending sibling must enqueue");
         };
-        assert_eq!(first.route, ContextScoutRouteV1::DecisionEngine);
-        assert_eq!(first.model_outcome, evidence.decision.outcome);
+        assert_eq!(first.route, ContextScoutRouteV1::Deterministic);
+        assert_eq!(
+            first.model_outcome,
+            ContextScoutModelOutcomeV1::NotRequested
+        );
         assert_eq!(first.model_receipt, None);
         assert_eq!(first.work.generation, 1);
         let status = owner.configured_status().await.expect("status");
-        assert_eq!(status.last_route, Some(ContextScoutRouteV1::DecisionEngine));
+        assert_eq!(status.last_route, Some(ContextScoutRouteV1::Deterministic));
         assert_eq!(
             status.last_model_outcome, None,
             "the model slot describes the configured model, not the intent engine"
@@ -2414,8 +2316,8 @@ mod tests {
                 generation: 1,
                 input_watermark: [8; 32],
             },
-            route: ContextScoutRouteV1::DecisionEngine,
-            model_outcome: evidence.decision.outcome,
+            route: ContextScoutRouteV1::Deterministic,
+            model_outcome: ContextScoutModelOutcomeV1::NotRequested,
             model_receipt: None,
             envelope: tracedecay_contracts::context_scout::ContextScoutSuggestionEnvelopeV1 {
                 envelope_id: [9; 16],
@@ -2453,7 +2355,7 @@ mod tests {
         );
         assert_eq!(
             owner.configured_status().await.expect("status").last_route,
-            Some(ContextScoutRouteV1::DecisionEngine)
+            Some(ContextScoutRouteV1::Deterministic)
         );
     }
 

@@ -31,7 +31,6 @@ use tracedecay_runtime_core::cancellation::{CancellationToken, MonotonicDeadline
 use tracedecay_tokenizer::o200k_base;
 
 pub mod address_registry;
-pub mod decision_engine;
 pub mod intent_pass;
 pub mod model;
 pub mod owner;
@@ -1282,20 +1281,14 @@ impl ContextScoutDurableQueueEntryExt for ContextScoutDurableQueueEntryV1 {
                 | ContextScoutModelOutcomeV1::InvalidOutput,
                 None,
             ) => {}
-            // The intent pass records its engine outcome in the session
-            // evidence's decision receipt, never in a Codex model receipt.
-            (ContextScoutRouteV1::DecisionEngine, outcome, None)
-                if self
-                    .envelope
-                    .candidate
-                    .evidence
-                    .as_session()
-                    .is_some_and(|evidence| evidence.decision.outcome == outcome) => {}
             _ => return Err(ContextScoutErrorV1::InvalidCandidate),
         }
-        // Session evidence is produced only by the intent pass.
+        // Session evidence is produced only by the deterministic intent pass,
+        // which never asks a model backend.
         if self.envelope.candidate.evidence.as_session().is_some()
-            != (self.route == ContextScoutRouteV1::DecisionEngine)
+            && (self.route != ContextScoutRouteV1::Deterministic
+                || self.model_outcome != ContextScoutModelOutcomeV1::NotRequested
+                || self.model_receipt.is_some())
         {
             return Err(ContextScoutErrorV1::InvalidCandidate);
         }
@@ -1383,7 +1376,7 @@ pub struct ContextScoutControlV1 {
 }
 
 /// Behavior pin of the configured intent pass: whether it runs and the digest
-/// of its whole settings block (engine, window, questions, lifecycle bounds).
+/// of its whole settings block (window, scoring, lifecycle bounds).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ContextScoutIntentControlV1 {
@@ -1599,14 +1592,21 @@ where
         mode: ContextScoutRuntimeModeV1,
         model_execution: ContextScoutModelExecutionV1,
     ) -> Result<ContextScoutRuntimeOutcomeV1, ContextScoutErrorV1> {
-        let selection = if let Some(model_outcome) = intent_pass_model_outcome(input)? {
-            // Intent-pass candidates were judged by the decision engine when
-            // they were built; selection among them is deterministic, and the
-            // route records the engine outcome their receipts carry.
+        let session_evidence = input
+            .candidates
+            .iter()
+            .map(|candidate| candidate.evidence.as_session().is_some())
+            .collect::<BTreeSet<_>>();
+        if session_evidence.len() > 1 {
+            return Err(ContextScoutErrorV1::InvalidCandidate);
+        }
+        let selection = if session_evidence.contains(&true) {
+            // Intent-pass candidates carry only deterministic action facts;
+            // they never enter the configured authoring-model route.
             ContextScoutSelectionV1 {
-                route: ContextScoutRouteV1::DecisionEngine,
+                route: ContextScoutRouteV1::Deterministic,
                 decision: select_deterministic_context_scout(input, limits)?,
-                model_outcome,
+                model_outcome: ContextScoutModelOutcomeV1::NotRequested,
                 model_receipt: None,
             }
         } else {
@@ -1624,7 +1624,7 @@ where
             }
         };
         self.last_route = Some(selection.route);
-        if selection.route != ContextScoutRouteV1::DecisionEngine {
+        if !session_evidence.contains(&true) {
             self.last_model_outcome = Some(selection.model_outcome);
             self.last_model_receipt.clone_from(&selection.model_receipt);
         }
@@ -1720,27 +1720,6 @@ where
         }
         Ok(outcome)
     }
-}
-
-/// The engine outcome of an intent-pass selection, `None` for code-evidence
-/// selections. One intent pass offers session evidence only, all of it from
-/// one engine exchange; mixing evidence kinds is a malformed input.
-fn intent_pass_model_outcome(
-    input: &ContextScoutSelectionInputV1,
-) -> Result<Option<ContextScoutModelOutcomeV1>, ContextScoutErrorV1> {
-    let mut outcomes = input.candidates.iter().map(|candidate| {
-        candidate
-            .evidence
-            .as_session()
-            .map(|evidence| evidence.decision.outcome)
-    });
-    let Some(first) = outcomes.next() else {
-        return Ok(None);
-    };
-    if outcomes.any(|outcome| outcome != first) {
-        return Err(ContextScoutErrorV1::InvalidCandidate);
-    }
-    Ok(first)
 }
 
 #[cfg(test)]

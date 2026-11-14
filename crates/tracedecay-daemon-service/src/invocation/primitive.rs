@@ -7,7 +7,7 @@ use tracedecay_agent_hosts::agents::context_scout::{
     ContextScoutMutationResultV1, ContextScoutMutationSettlementOutcomeV1,
     ContextScoutPublicMutationV1, ContextScoutRecentStateV1,
 };
-use tracedecay_application::diagnostics_producer::TypeScriptProducerStatusHandleV1;
+use tracedecay_application::diagnostics_producer::TypeScriptProducerStateV1;
 use tracedecay_application::primitives::{
     ProductionPrimitiveOpenRequestV1, open_production_primitive_runtime,
 };
@@ -19,6 +19,7 @@ use tracedecay_contracts::context_scout::{
     ContextScoutSuggestionProjectionV1, ContextScoutSurfaceRequestV1,
 };
 use tracedecay_domain::sha256_hex_suffix;
+use tracedecay_lsp::TypeScriptCompilerAdmission;
 use tracedecay_runtime_core::cancellation::CancellationToken;
 use tracedecay_tool_catalog::ApplicationSurfaceOperation;
 
@@ -1380,9 +1381,10 @@ impl DaemonPrimitiveRuntimeRegistrar {
         &self,
         project_root: PathBuf,
         request: ProductionPrimitiveOpenRequestV1,
-    ) -> Result<TypeScriptProducerStatusHandleV1, DaemonPrimitiveRuntimeRegistrationError> {
+        mut compiler_admission: Option<TypeScriptCompilerAdmission>,
+    ) -> Result<Option<TypeScriptProducerStateV1>, DaemonPrimitiveRuntimeRegistrationError> {
         request.validate_registration_root(&project_root)?;
-        let retained = self
+        let (retained, compiler_producer, already_current) = self
             .service
             .project_runtimes
             .register_or_reconcile_with(
@@ -1398,11 +1400,28 @@ impl DaemonPrimitiveRuntimeRegistrar {
                         .await
                         .map_err(DaemonPrimitiveRuntimeRegistrationError::from)
                 },
-                PrimitiveProjectRuntime::clone,
+                |runtime| {
+                    // The registry projects under its publication lock. Appoint
+                    // the producer before a read can observe this runtime, so
+                    // discovery is pending rather than falsely unsupported.
+                    let already_current = request.validate_retained(runtime)?;
+                    let producer = if already_current {
+                        compiler_admission.take().map(|admission| {
+                            TypeScriptProducerStateV1::new(runtime.compiler_status(), admission)
+                        })
+                    } else {
+                        None
+                    };
+                    Ok::<_, DaemonPrimitiveRuntimeRegistrationError>((
+                        runtime.clone(),
+                        producer,
+                        already_current,
+                    ))
+                },
             )
-            .await?;
-        if request.validate_retained(&retained)? {
-            return Ok(retained.compiler_status());
+            .await??;
+        if already_current {
+            return Ok(compiler_producer);
         }
 
         // A sibling can retain this root's store owner after route eviction.
@@ -1419,7 +1438,11 @@ impl DaemonPrimitiveRuntimeRegistrar {
                         .map_err(Into::into)
                 },
                 || async { Ok(replacement.clone()) },
-                PrimitiveProjectRuntime::compiler_status,
+                |runtime| {
+                    compiler_admission.map(|admission| {
+                        TypeScriptProducerStateV1::new(runtime.compiler_status(), admission)
+                    })
+                },
             )
             .await
     }

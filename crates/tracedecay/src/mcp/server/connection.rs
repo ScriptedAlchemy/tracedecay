@@ -666,7 +666,7 @@ mod cancellable_queue_tests {
 
     async fn receive_response(
         responses: &mut tokio::sync::mpsc::UnboundedReceiver<String>,
-    ) -> Value {
+    ) -> std::result::Result<Value, tokio::time::error::Elapsed> {
         tokio::time::timeout(Duration::from_secs(5), async {
             loop {
                 let line = responses.recv().await.expect("connection response");
@@ -678,7 +678,6 @@ mod cancellable_queue_tests {
             }
         })
         .await
-        .expect("connection response timeout")
     }
 
     #[tokio::test]
@@ -727,7 +726,9 @@ mod cancellable_queue_tests {
             )
             .expect("send independent status read");
 
-        let fast = receive_response(&mut responses).await;
+        let fast = receive_response(&mut responses)
+            .await
+            .expect("independent status response");
         assert_eq!(
             fast["id"],
             serde_json::json!(2),
@@ -735,7 +736,9 @@ mod cancellable_queue_tests {
         );
 
         fixture.route_release.add_permits(1);
-        let slow = receive_response(&mut responses).await;
+        let slow = receive_response(&mut responses)
+            .await
+            .expect("delayed selected-read response");
         assert!(
             slow["result"]["content"].is_array(),
             "selected fact read: {slow}"
@@ -843,7 +846,12 @@ mod cancellable_queue_tests {
         );
 
         fixture.route_release.add_permits(1);
-        assert_eq!(receive_response(&mut responses).await["id"], json!(10));
+        assert_eq!(
+            receive_response(&mut responses)
+                .await
+                .expect("read-before-effect response")["id"],
+            json!(10)
+        );
         fixture.wait_for_routes(2).await;
         assert!(
             tokio::time::timeout(Duration::from_millis(50), responses.recv())
@@ -853,12 +861,16 @@ mod cancellable_queue_tests {
         );
         fixture.route_release.add_permits(1);
         assert_eq!(
-            receive_response(&mut responses).await["id"],
+            receive_response(&mut responses)
+                .await
+                .expect("effect-barrier response")["id"],
             json!(11),
             "the effect must settle after the preceding read"
         );
         assert_eq!(
-            receive_response(&mut responses).await["id"],
+            receive_response(&mut responses)
+                .await
+                .expect("read-after-effect response")["id"],
             json!(12),
             "the later read must not overtake the effect"
         );
@@ -915,7 +927,9 @@ mod cancellable_queue_tests {
         );
 
         fixture.route_release.add_permits(1);
-        let _ = receive_response(&mut responses).await;
+        let _ = receive_response(&mut responses)
+            .await
+            .expect("first admitted-read response");
         fixture
             .wait_for_routes(MAX_CONCURRENT_CONNECTION_READS + 1)
             .await;
@@ -925,7 +939,12 @@ mod cancellable_queue_tests {
 
         let mut response_ids = HashSet::new();
         while response_ids.len() < MAX_CONCURRENT_CONNECTION_READS {
-            response_ids.insert(receive_response(&mut responses).await["id"].clone());
+            response_ids.insert(
+                receive_response(&mut responses)
+                    .await
+                    .expect("remaining admitted-read response")["id"]
+                    .clone(),
+            );
         }
         assert_eq!(
             response_ids.len(),
