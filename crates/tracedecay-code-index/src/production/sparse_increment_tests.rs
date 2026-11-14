@@ -25,6 +25,95 @@ use super::*;
 const RUST: &str = "rust";
 
 #[test]
+fn typescript_shadowed_local_writes_preserve_sealed_module_receivers() {
+    const CALLER: &str = r#"import { Worker } from './workers';
+const worker = new Worker();
+function shadow() {
+  let worker: Worker = new Worker();
+  worker = new Worker();
+}
+export function stable() { worker.execute(); }
+let captured: Worker = new Worker();
+function replace() { captured = new Worker(); }
+export function reassigned() { captured.execute(); }
+"#;
+    let store = MemorySealedPublicationStoreV1::default();
+    publish(
+        &mut owner(&store),
+        &[
+            ("main.ts", "typescript", CALLER),
+            (
+                "workers.ts",
+                "typescript",
+                "export class Worker { execute() {} }\nexport class Alternate { execute() {} }\n",
+            ),
+        ],
+        1_100_000,
+    );
+    let restored = store
+        .decode_active(&scope())
+        .expect("sealed receiver context decodes")
+        .expect("published generation");
+    for (caller_name, reference, expected) in [
+        (
+            "main.ts::stable",
+            "worker.execute",
+            Some("workers.ts::Worker::execute"),
+        ),
+        ("main.ts::reassigned", "captured.execute", None),
+    ] {
+        let caller = &restored
+            .symbols()
+            .symbols
+            .iter()
+            .find(|symbol| symbol.qualified_name == caller_name)
+            .expect("fixture caller")
+            .occurrence;
+        let calls = restored
+            .edges()
+            .iter()
+            .filter(|edge| {
+                edge.from_occurrence == *caller && edge.kind == RelationEdgeKindV1::Calls
+            })
+            .collect::<Vec<_>>();
+        if let Some(expected) = expected {
+            assert_eq!(calls.len(), 1, "{caller_name}");
+            let edge = calls[0];
+            assert_eq!(
+                edge.authority,
+                tracedecay_domain::EdgeAuthorityV1::NameResolved
+            );
+            assert_eq!(
+                &CALLER
+                    [edge.evidence_span.start_byte as usize..edge.evidence_span.end_byte as usize],
+                reference
+            );
+            assert_eq!(
+                restored
+                    .symbols()
+                    .symbols
+                    .iter()
+                    .find(|symbol| symbol.occurrence == edge.to_occurrence)
+                    .expect("resolved target")
+                    .qualified_name,
+                expected
+            );
+        } else {
+            assert!(calls.is_empty(), "a written captured binding must abstain");
+        }
+        assert_eq!(
+            restored
+                .unresolved_import_calls()
+                .expect("restored unresolved receiver evidence")
+                .iter()
+                .any(|gap| gap.from_occurrence == *caller && gap.reference_name == reference),
+            expected.is_none(),
+            "{caller_name}"
+        );
+    }
+}
+
+#[test]
 fn typescript_factory_return_edits_rebind_unchanged_receivers_after_restore() {
     const CALLER: &str = "import { makeWorker as acquire } from './factory';\nclass Created { execute() {} }\nexport async function run() { const worker = await acquire(); const alias = worker; alias.execute(); }\n";
     const FACTORY: &str = "import { Worker as Created, Alternate as Changed } from './workers';\nexport async function makeWorker(): Promise<Created> { return new Created(); }\n";
