@@ -344,11 +344,30 @@ async fn hard_killed_cold_preseal_attempt_recovers_a_verified_native_graph() {
             let attempt = &receipt["code_index_freshness"]["worktree"]["preseal_attempt"];
             if attempt["active"] == true
                 && attempt["phase"] == "parse_evidence"
-                && attempt["completed_items"]
-                    .as_u64()
-                    .is_some_and(|count| count > 0)
+                && attempt["completed_items"].as_u64().is_some_and(|count| {
+                    count > 0 && attempt["total_items"].as_u64() == Some(count)
+                })
             {
-                return receipt;
+                let repeat = status(&socket, &handshake).await;
+                let repeated_attempt =
+                    &repeat["code_index_freshness"]["worktree"]["preseal_attempt"];
+                // Init may still deliver its queued reconcile after a cold
+                // attempt enters the hold. The arrival marker survives that
+                // attempt's cancellation; compare observations of one owner.
+                if [
+                    "daemon_incarnation",
+                    "producer_incarnation",
+                    "attempt_sequence",
+                ]
+                .into_iter()
+                .all(|field| repeated_attempt[field] == attempt[field])
+                {
+                    assert_eq!(
+                        repeated_attempt, attempt,
+                        "status polling under a paused producer must not invent new work"
+                    );
+                    return receipt;
+                }
             }
             tokio::time::sleep(Duration::from_millis(25)).await;
         }
@@ -380,12 +399,6 @@ async fn hard_killed_cold_preseal_attempt_recovers_a_verified_native_graph() {
             .is_some_and(|epoch| epoch > 0),
         "the active attempt must have an observed work epoch: {in_flight}"
     );
-    let repeat = status(&socket, &handshake).await;
-    assert_eq!(
-        repeat["code_index_freshness"]["worktree"]["preseal_attempt"], *attempt,
-        "status polling under a paused producer must not invent new work"
-    );
-
     let killed = daemon.kill_and_wait().expect("hard-kill the cold daemon");
     assert!(
         !killed.success(),

@@ -675,7 +675,10 @@ mod tests {
             })
             .collect();
 
-        for (content, result) in workers.into_iter().map(|worker| worker.join().unwrap()) {
+        // Settle every owner before asserting so one failed admission does not
+        // detach the remaining writers.
+        let joined: Vec<_> = workers.into_iter().map(|worker| worker.join()).collect();
+        for (content, result) in joined.into_iter().map(|outcome| outcome.unwrap()) {
             let stored = result.unwrap_or_else(|error| {
                 panic!("contended writer for {content:?} failed instead of waiting: {error}")
             });
