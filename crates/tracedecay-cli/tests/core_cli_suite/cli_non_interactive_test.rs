@@ -1959,8 +1959,18 @@ fn automation_config_set_rejects_unimplemented_external_backend() {
         String::from_utf8_lossy(&output.stderr)
     );
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("unknown automation backend"));
-    assert!(stderr.contains("disabled, codex-app-server"));
+    assert!(
+        stderr.contains("unknown automation backend"),
+        "external backend should report its refusal\nstatus: {}\nstdout:\n{}\nstderr:\n{stderr}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout)
+    );
+    assert!(
+        stderr.contains("disabled, codex-app-server"),
+        "external backend refusal should list implemented choices\nstatus: {}\nstdout:\n{}\nstderr:\n{stderr}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout)
+    );
 }
 
 #[test]
