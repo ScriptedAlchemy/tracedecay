@@ -136,9 +136,13 @@ impl RuntimeFixture {
         }
     }
 
-    fn daemon_log_tail(&self) -> String {
+    fn daemon_log(&self) -> String {
         std::fs::read_to_string(self._environment.scratch().join("runtime-daemon.log"))
             .expect("read isolated runtime daemon log")
+    }
+
+    fn daemon_log_tail(&self) -> String {
+        self.daemon_log()
             .lines()
             .rev()
             .take(160)
@@ -439,10 +443,10 @@ async fn poll_lsp_response(
                     .unwrap_or_else(|error| {
                         panic!(
                             "acknowledge daemon LSP frame while awaiting response {response_id}: \
-                             {error:?}; frame id={:?}, method={:?}; daemon log tail:\n{}",
+                             {error:?}; frame id={:?}, method={:?}; daemon log:\n{}",
                             value.get("id"),
                             value.get("method"),
-                            fixture.daemon_log_tail(),
+                            fixture.daemon_log(),
                         )
                     });
                 if value.get("id").and_then(Value::as_u64) == Some(response_id) {
