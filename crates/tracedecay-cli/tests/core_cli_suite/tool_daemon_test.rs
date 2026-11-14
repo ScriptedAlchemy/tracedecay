@@ -29,7 +29,6 @@ use tracedecay_domain::NativeHostIdentityV1;
 use tracedecay_domain::UtcMicros;
 use tracedecay_domain::{FactCategoryV1, ProjectId, RepositoryId, WorktreeId};
 use tracedecay_hooks::{HookEventV2, HookSpoolConfigV1, HookSpoolV1};
-use tracedecay_runtime_core::logging::FormattedTracingCapture;
 use tracedecay_runtime_core::storage::{
     default_profile_project_id, pin_fixture_repository_identity, profile_sharded_data_root,
     profile_sharded_layout,
@@ -3330,26 +3329,9 @@ fn spawn_scripted_retained_daemon(
     let (request_tx, request_rx) = mpsc::channel();
     let stop = Arc::new(AtomicBool::new(false));
     let daemon_stop = Arc::clone(&stop);
-    let test_name = std::thread::current()
-        .name()
-        .unwrap_or("unnamed test")
-        .to_owned();
 
     std::thread::spawn(move || {
-        let capture = FormattedTracingCapture::start_with_target_span_timings(&[
-            module_path!(),
-            "tracedecay_daemon_identity::authority",
-            "tracedecay_daemon_identity::profile_identity",
-            "tracedecay_private_fs",
-        ]);
-        let startup = tracing::info_span!(
-            "core_cli.scripted_retained_daemon.startup",
-            test = %test_name,
-        )
-        .entered();
-        tracing::info_span!("core_cli.scripted_retained_daemon.remove_socket").in_scope(|| {
-            let _ = std::fs::remove_file(&socket_path);
-        });
+        let _ = std::fs::remove_file(&socket_path);
         let authority = seed_fake_daemon_authority(&socket_path);
         let scope = ResolvedScope::new(
             ProjectId::new("project.scripted-daemon").expect("project id"),
@@ -3358,17 +3340,11 @@ fn spawn_scripted_retained_daemon(
             None,
         )
         .expect("scripted daemon scope");
-        let listener = tracing::info_span!("core_cli.scripted_retained_daemon.bind_socket")
-            .in_scope(|| {
-                let listener = UnixListener::bind(&socket_path).expect("bind fake daemon socket");
-                listener
-                    .set_nonblocking(true)
-                    .expect("set listener nonblocking");
-                listener
-            });
+        let listener = UnixListener::bind(&socket_path).expect("bind fake daemon socket");
+        listener
+            .set_nonblocking(true)
+            .expect("set listener nonblocking");
         ready_tx.send(()).expect("notify fake daemon readiness");
-        drop(startup);
-        drop(capture);
         let mut problems = problems.into_iter();
         let mut current = problems.next().expect("at least one scripted problem");
 
