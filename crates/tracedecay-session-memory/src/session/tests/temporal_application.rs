@@ -498,16 +498,16 @@ fn rendered(outcome: &SessionRetrievalOutcome<TemporalKernelResult>) -> &str {
 }
 
 /// `(request digest, access digest)` the production admission step binds for
-/// this request, read before any execution is constructed.
-async fn admitted_digests<A: SessionScopeAuthorizer>(
+/// this request, read without executing against the registered store.
+fn admitted_digests<A: SessionScopeAuthorizer>(
+    harness: &RegisteredTemporalHarness,
     authorizer: A,
     context: TestRequestContext,
     query: SessionTemporalQuery,
     estimator: Words,
     configuration: SessionRetrievalConfiguration,
 ) -> (String, String) {
-    let harness = RegisteredTemporalHarness::open("temporal-admission-digest").await;
-    let service = service(&harness, authorizer, estimator, configuration);
+    let service = service(harness, authorizer, estimator, configuration);
     let admitted = service
         .admit_execution(&context.request, context.binding(), &query)
         .unwrap();
@@ -518,16 +518,23 @@ async fn admitted_digests<A: SessionScopeAuthorizer>(
     )
 }
 
-async fn admitted_digest<A: SessionScopeAuthorizer>(
+fn admitted_digest<A: SessionScopeAuthorizer>(
+    harness: &RegisteredTemporalHarness,
     authorizer: A,
     context: TestRequestContext,
     query: SessionTemporalQuery,
     estimator: Words,
     configuration: SessionRetrievalConfiguration,
 ) -> String {
-    admitted_digests(authorizer, context, query, estimator, configuration)
-        .await
-        .0
+    admitted_digests(
+        harness,
+        authorizer,
+        context,
+        query,
+        estimator,
+        configuration,
+    )
+    .0
 }
 
 const BASELINE_GRANT: GrantAuthorizer = GrantAuthorizer {
@@ -552,29 +559,29 @@ async fn canonical_request_digest_drifts_for_query_and_root_changes() {
         ));
     }
     let first = admitted_digest(
+        &harness,
         AllowAuthorizer,
         context("root.one", policy),
         query("alpha"),
         Words("words-v1"),
         configuration(),
-    )
-    .await;
+    );
     let second = admitted_digest(
+        &harness,
         AllowAuthorizer,
         context("root.one", policy),
         query("beta"),
         Words("words-v1"),
         configuration(),
-    )
-    .await;
+    );
     let third = admitted_digest(
+        &harness,
         AllowAuthorizer,
         context("root.two", policy),
         query("alpha"),
         Words("words-v1"),
         configuration(),
-    )
-    .await;
+    );
     assert_ne!(first, second);
     assert_ne!(first, third);
 }
@@ -660,36 +667,39 @@ async fn application_binds_and_freezes_root_wide_retrieval_scope() {
 
 #[tokio::test]
 async fn canonical_digest_binds_every_semantic_input_and_excludes_resume_ephemera() {
+    // Admission binds inputs without executing a store query. Open its real
+    // registered owner once, before any request deadline starts.
+    let harness = RegisteredTemporalHarness::open("temporal-admission-digest").await;
     let baseline_context = || ContextSpec::new("root.one", DIGEST);
     let (baseline, baseline_access) = admitted_digests(
+        &harness,
         BASELINE_GRANT,
         baseline_context().build(),
         QuerySpec::default().build(),
         Words("words-v1"),
         configuration(),
-    )
-    .await;
-    let digest_for = |context: ContextSpec, spec: QuerySpec| async move {
+    );
+    let digest_for = |context: ContextSpec, spec: QuerySpec| {
         let estimator = Words(if spec.context_budget.estimator_version == "words-v2" {
             "words-v2"
         } else {
             "words-v1"
         });
         admitted_digests(
+            &harness,
             BASELINE_GRANT,
             context.build(),
             spec.build(),
             estimator,
             configuration(),
         )
-        .await
     };
 
     let root_wide = QuerySpec {
         retrieval_scope: Some(SessionRetrievalScope::AllSessionsInAuthorizedRoot),
         ..QuerySpec::default()
     };
-    let (root_wide_digest, _) = digest_for(baseline_context(), root_wide.clone()).await;
+    let (root_wide_digest, _) = digest_for(baseline_context(), root_wide.clone());
     assert_ne!(baseline, root_wide_digest);
     assert_eq!(
         root_wide_digest,
@@ -700,7 +710,6 @@ async fn canonical_digest_binds_every_semantic_input_and_excludes_resume_ephemer
                 ..root_wide
             },
         )
-        .await
         .0
     );
 
@@ -715,13 +724,13 @@ async fn canonical_digest_binds_every_semantic_input_and_excludes_resume_ephemer
         },
     ] {
         let (request_digest, access_digest) = admitted_digests(
+            &harness,
             authorizer,
             baseline_context().build(),
             QuerySpec::default().build(),
             Words("words-v1"),
             configuration(),
-        )
-        .await;
+        );
         assert_ne!(baseline, request_digest);
         assert_eq!(baseline_access, access_digest);
     }
@@ -825,7 +834,7 @@ async fn canonical_digest_binds_every_semantic_input_and_excludes_resume_ephemer
         });
     }
     for spec in semantic_variants {
-        assert_ne!(baseline, digest_for(baseline_context(), spec).await.0);
+        assert_ne!(baseline, digest_for(baseline_context(), spec).0);
     }
 
     for (budgets, configuration_digest) in [
@@ -849,7 +858,7 @@ async fn canonical_digest_binds_every_semantic_input_and_excludes_resume_ephemer
             configuration: configuration_digest,
             ..baseline_context()
         };
-        assert_ne!(baseline, digest_for(context, QuerySpec::default()).await.0);
+        assert_ne!(baseline, digest_for(context, QuerySpec::default()).0);
     }
     for (capability, policy) in [([0x5b; 32], DIGEST), (DIGEST, [0x5b; 32])] {
         let context = ContextSpec {
@@ -858,7 +867,7 @@ async fn canonical_digest_binds_every_semantic_input_and_excludes_resume_ephemer
             policy,
             ..baseline_context()
         };
-        let (request_digest, access_digest) = digest_for(context, QuerySpec::default()).await;
+        let (request_digest, access_digest) = digest_for(context, QuerySpec::default());
         assert_ne!(baseline, request_digest);
         if policy == DIGEST {
             assert_eq!(baseline_access, access_digest);
@@ -873,20 +882,18 @@ async fn canonical_digest_binds_every_semantic_input_and_excludes_resume_ephemer
         assert_ne!(
             baseline,
             admitted_digest(
+                &harness,
                 BASELINE_GRANT,
                 baseline_context().build(),
                 QuerySpec::default().build(),
                 Words("words-v1"),
                 configuration,
             )
-            .await
         );
     }
     assert_ne!(
         baseline,
-        digest_for(ContextSpec::new("root.two", DIGEST), QuerySpec::default())
-            .await
-            .0
+        digest_for(ContextSpec::new("root.two", DIGEST), QuerySpec::default()).0
     );
 
     let route = |repository: &str, worktree: &str, branch: &str| {
@@ -969,7 +976,7 @@ async fn canonical_digest_binds_every_semantic_input_and_excludes_resume_ephemer
             identity,
             ..baseline_context()
         };
-        assert_ne!(baseline, digest_for(context, QuerySpec::default()).await.0);
+        assert_ne!(baseline, digest_for(context, QuerySpec::default()).0);
     }
 
     let (other_actor_request, other_actor_access) = digest_for(
@@ -979,8 +986,7 @@ async fn canonical_digest_binds_every_semantic_input_and_excludes_resume_ephemer
             ..baseline_context()
         },
         QuerySpec::default(),
-    )
-    .await;
+    );
     assert_ne!(baseline, other_actor_request);
     assert_eq!(baseline_access, other_actor_access);
 
@@ -996,7 +1002,6 @@ async fn canonical_digest_binds_every_semantic_input_and_excludes_resume_ephemer
                 ..QuerySpec::default()
             },
         )
-        .await
         .0
     );
 }
@@ -1157,7 +1162,9 @@ async fn request_budget_preflight_rejects_before_execution() {
 
 #[tokio::test]
 async fn mode_cutoff_is_bound_and_a_forged_cursor_is_refused_by_the_cursor_authority() {
+    let harness = RegisteredTemporalHarness::open("temporal-forged-cursor").await;
     let as_of = admitted_digest(
+        &harness,
         AllowAuthorizer,
         context("root.one", DIGEST),
         QuerySpec {
@@ -1169,9 +1176,9 @@ async fn mode_cutoff_is_bound_and_a_forged_cursor_is_refused_by_the_cursor_autho
         .build(),
         Words("words-v1"),
         configuration(),
-    )
-    .await;
+    );
     let evolution = admitted_digest(
+        &harness,
         AllowAuthorizer,
         context("root.one", DIGEST),
         QuerySpec {
@@ -1181,11 +1188,9 @@ async fn mode_cutoff_is_bound_and_a_forged_cursor_is_refused_by_the_cursor_autho
         .build(),
         Words("words-v1"),
         configuration(),
-    )
-    .await;
+    );
     assert_ne!(as_of, evolution);
 
-    let harness = RegisteredTemporalHarness::open("temporal-forged-cursor").await;
     let policy = harness.seed_application_fixture().await;
     let service = allow(&harness);
     assert!(
@@ -1205,21 +1210,21 @@ async fn mode_cutoff_is_bound_and_a_forged_cursor_is_refused_by_the_cursor_autho
     };
     assert_eq!(
         admitted_digest(
+            &harness,
             AllowAuthorizer,
             context("root.one", policy),
             forged.clone().build(),
             Words("words-v1"),
             configuration(),
-        )
-        .await,
+        ),
         admitted_digest(
+            &harness,
             AllowAuthorizer,
             context("root.one", policy),
             inline_query().build(),
             Words("words-v1"),
             configuration(),
-        )
-        .await,
+        ),
         "the cursor is resume ephemera, not a request input"
     );
     assert_eq!(
