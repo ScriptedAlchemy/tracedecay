@@ -1049,19 +1049,27 @@ fn read_bounded_child_receipt(
     };
     if descriptor < 0 {
         let error = io::Error::last_os_error();
-        // Unix socket opens return ENXIO on Linux or EOPNOTSUPP on macOS.
-        // Classify that refusal as a nonregular receipt only when the held
-        // directory still names a nonregular entry. A regular file's I/O
-        // failure must remain a refusal of complete census coverage.
-        if matches!(error.raw_os_error(), Some(libc::ENXIO | libc::EOPNOTSUPP))
-            && directory
-                .symlink_metadata(name)
-                .is_ok_and(|metadata| !metadata.file_type().is_file())
-        {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "sealed receipt is not a regular file",
-            ));
+        // The errno an open reports for a nonregular entry is platform
+        // specific: Linux refuses a socket with ENXIO, Darwin with
+        // EOPNOTSUPP, and a FIFO differs again. Classify through the SAME
+        // held directory's no-follow metadata instead, so a nonregular
+        // receipt is unrecognized on every Unix rather than aborting the
+        // whole census with an unclassified refusal. A regular file's open
+        // failure must remain a refusal of complete coverage.
+        if let Ok(metadata) = directory.symlink_metadata(name) {
+            let file_type = metadata.file_type();
+            if file_type.is_symlink() {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "path is a symbolic link",
+                ));
+            }
+            if !file_type.is_file() {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "sealed receipt is not a regular file",
+                ));
+            }
         }
         return Err(normalize_no_follow_error(error));
     }
@@ -1629,8 +1637,10 @@ mod tests {
         std::fs::write(unknown.join("sentinel"), b"preserve").unwrap();
         let _socket = UnixListener::bind(unknown.join("owner")).unwrap();
 
-        // openat on a socket fails with ENXIO or EOPNOTSUPP before fstat.
-        // The held directory's metadata proves the entry is nonregular.
+        // openat(O_RDONLY | O_NONBLOCK) on a socket fails before any
+        // regular-file check, with a platform-specific errno (ENXIO on Linux,
+        // EOPNOTSUPP on Darwin). The held directory's metadata proves that
+        // entry is nonregular, not an unreadable owned receipt.
         let receipt = read_bounded_child_receipt(&open(&unknown), OsStr::new("owner"), 64);
         assert_eq!(receipt.unwrap_err().kind(), io::ErrorKind::InvalidData);
 
