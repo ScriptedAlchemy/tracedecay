@@ -54,6 +54,8 @@ jobs:
           persist-credentials: false
           sparse-checkout-cone-mode: false
           sparse-checkout: |
+            .github/release-targets.json
+            scripts/check-release-artifacts.py
             scripts/plan-release-recovery.py
             scripts/verify-retained-release-assets.sh
 
@@ -87,8 +89,10 @@ jobs:
           echo "source_epoch=${source_epoch}" >> "$GITHUB_OUTPUT"
           gh api "repos/${{ github.repository }}/releases/tags/${RELEASE_TAG}" \
             --jq '.assets[].name' > remote-asset-names
+          # Keep the tag's artifact roster; use this workflow's current runners.
           python3 .release-automation/scripts/plan-release-recovery.py \
             --manifest .github/release-targets.json \
+            --execution-manifest .release-automation/.github/release-targets.json \
             --tag "$RELEASE_TAG" \
             --profile beta \
             --asset-names remote-asset-names \
@@ -307,6 +311,7 @@ jobs:
           persist-credentials: false
           sparse-checkout-cone-mode: false
           sparse-checkout: |
+            .github/release-targets.json
             scripts/assemble-release-artifacts.sh
             scripts/check-release-artifacts.py
             scripts/generate-release-inventory.py
