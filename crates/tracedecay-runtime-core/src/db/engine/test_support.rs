@@ -131,6 +131,13 @@ impl Executor for TestConnection {
         Connection::execute(&self.connection, sql, params).await
     }
 
+    async fn execute_statements(
+        &self,
+        statements: Vec<super::WriteStatement>,
+    ) -> EngineResult<Vec<u64>> {
+        Connection::execute_statements(&self.connection, statements).await
+    }
+
     async fn execute_batch(&self, sql: &str) -> EngineResult<()> {
         Connection::execute_batch(&self.connection, sql).await
     }

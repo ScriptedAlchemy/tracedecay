@@ -59,6 +59,15 @@ impl Executor for GitMutationWriteTransaction<'_> {
         }
     }
 
+    async fn execute_statements(
+        &self,
+        statements: Vec<tracedecay_runtime_core::db::engine::WriteStatement>,
+    ) -> tracedecay_runtime_core::db::engine::Result<Vec<u64>> {
+        match self {
+            Self::Registered(transaction) => transaction.execute_statements(statements).await,
+        }
+    }
+
     async fn execute_batch(&self, sql: &str) -> tracedecay_runtime_core::db::engine::Result<()> {
         match self {
             Self::Registered(transaction) => transaction.execute_batch(sql).await,
