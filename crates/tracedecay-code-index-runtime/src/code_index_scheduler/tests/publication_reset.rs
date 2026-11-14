@@ -5,10 +5,12 @@ use std::sync::Arc;
 
 use tempfile::TempDir;
 use tracedecay_code_index::production::{
-    CodeIndexAtomicPublicationPort, CodeIndexPublicationStoreErrorV1,
+    CodeIndexAtomicPublicationPort, CodeIndexProductionErrorV1, CodeIndexPublicationStoreErrorV1,
     CodeIndexPublishedGenerationV1, SealedGenerationSegmentReadV1,
 };
-use tracedecay_code_index_retention::code_index_generations::try_acquire_code_generation_store_read_lock;
+use tracedecay_code_index_retention::code_index_generations::{
+    try_acquire_code_generation_store_lock, try_acquire_code_generation_store_read_lock,
+};
 #[cfg(target_os = "linux")]
 use tracedecay_domain::sha256_hex_suffix;
 use tracedecay_domain::{ProjectId, SanitizerRevision};
@@ -158,10 +160,57 @@ fn failed_reset_releases_publication_handles_across_store_clones() {
         "positive live-segment-handle control"
     );
 
+    // The escaped reader must not refill the cache between retirement and
+    // unlink, even though the segment pathname still exists in this window.
+    {
+        let _retirement = try_acquire_code_generation_store_lock(target_root.path())
+            .expect("acquire retirement authority")
+            .expect("completed reads release their store lease");
+        let retire = target.retained_segment_reclaimer();
+        retire().expect("retire shared segment handles");
+        let mut refused = segment_bytes.clone();
+        assert!(matches!(
+            segment_reader(
+                SealedGenerationSegmentReadV1::Whole {
+                    digest: &segment_identity.digest,
+                    size_bytes: segment_identity.size_bytes,
+                },
+                &mut refused,
+            ),
+            Err(CodeIndexProductionErrorV1::Publication(
+                CodeIndexPublicationStoreErrorV1::StoreLockContended
+            ))
+        ));
+        assert!(refused.is_empty(), "refused admission returns no old bytes");
+        assert!(
+            target
+                .retained_segment_reads
+                .lock()
+                .expect("retired segment cache")
+                .is_empty(),
+            "the escaped reader must not repin the retired segment"
+        );
+        #[cfg(target_os = "linux")]
+        assert_eq!(
+            live_inode_handles(&segment_file_identity),
+            0,
+            "retirement leaves no open segment inode before unlink"
+        );
+    }
+
     // A rejected reset owns no deletion authority and must preserve its memo.
     let reader = try_acquire_code_generation_store_read_lock(target_root.path())
         .expect("acquire production read lock")
         .expect("uncontended read lock");
+    segment_reader(
+        SealedGenerationSegmentReadV1::Whole {
+            digest: &segment_identity.digest,
+            size_bytes: segment_identity.size_bytes,
+        },
+        &mut segment_bytes,
+    )
+    .expect("a released retirement and another shared reader permit a new read");
+    assert_eq!(segment_bytes.len() as u64, segment_identity.size_bytes);
     assert!(matches!(
         target.reset_corrupt_store(),
         Err(CodeIndexPublicationStoreErrorV1::StoreLockContended)

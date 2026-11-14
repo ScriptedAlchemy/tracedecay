@@ -2852,8 +2852,27 @@ impl DaemonCodeIndexPublicationStoreV1 {
         // after reset or normal generation retention.
         #[cfg(unix)]
         let pinned_reads = Arc::clone(&self.retained_segment_reads);
+        #[cfg(unix)]
+        let read_lock = Arc::clone(&self.retained_generation_lock);
+        #[cfg(not(unix))]
+        let active_path = self.active_path.clone();
         Arc::new(move |request, buffer: &mut Vec<u8>| {
             buffer.clear();
+            // Retention holds the exclusive store lease from cache retirement
+            // through unlink. Admit before the cache mutex, and never wait for
+            // a writer while a successor may hold its preparation lease.
+            #[cfg(unix)]
+            let candidate = read_lock.try_acquire_serialized();
+            #[cfg(not(unix))]
+            let candidate = {
+                let root = active_path.parent().ok_or_else(|| {
+                    Self::unavailable("active code-generation pointer has no store root")
+                })?;
+                try_acquire_code_generation_store_read_lock(root)
+            };
+            let _store_lock = candidate
+                .map_err(Self::unavailable)?
+                .ok_or(CodeIndexPublicationStoreErrorV1::StoreLockContended)?;
             #[cfg(unix)]
             {
                 let mut pinned = pinned_reads.lock().map_err(|_| {

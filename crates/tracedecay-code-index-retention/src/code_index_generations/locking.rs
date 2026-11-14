@@ -53,8 +53,8 @@ impl CodeGenerationStoreLockV1 {
 
 /// Reuses the same lock-file descriptor for successive bounded historical reads.
 ///
-/// Every read still obtains a fresh kernel shared lock. The mutex is acquired
-/// without blocking so concurrent callers and cancelled requests can retry.
+/// Every read still obtains a fresh kernel shared lock. Cancellable callers
+/// probe the descriptor mutex; synchronous sealed reads can serialize on it.
 /// The pathname and opened inode are authenticated before and after locking;
 /// a replaced lock authority must never silently authorize an old inode.
 #[cfg(unix)]
@@ -105,7 +105,7 @@ impl CachedCodeGenerationStoreReadLockV1 {
         &self,
     ) -> Result<Option<CachedCodeGenerationStoreReadGuardV1<'_>>, CodeGenerationRetentionErrorV1>
     {
-        let mut cached = match self.file.try_lock() {
+        let cached = match self.file.try_lock() {
             Ok(guard) => guard,
             Err(TryLockError::WouldBlock) => return Ok(None),
             Err(TryLockError::Poisoned(_)) => {
@@ -114,6 +114,30 @@ impl CachedCodeGenerationStoreReadLockV1 {
                 ));
             }
         };
+        self.try_acquire_cached(cached)
+    }
+
+    /// Wait for another bounded reader of this descriptor, then try the store
+    /// lease without waiting for an exclusive writer. Sealed build workers
+    /// already serialize segment cache access and must not mistake a sibling
+    /// read for a publication conflict.
+    pub fn try_acquire_serialized(
+        &self,
+    ) -> Result<Option<CachedCodeGenerationStoreReadGuardV1<'_>>, CodeGenerationRetentionErrorV1>
+    {
+        let cached = self.file.lock().map_err(|_| {
+            CodeGenerationRetentionErrorV1::UnsafeState(
+                "cached generation-store read lock is poisoned".to_owned(),
+            )
+        })?;
+        self.try_acquire_cached(cached)
+    }
+
+    fn try_acquire_cached<'a>(
+        &self,
+        mut cached: MutexGuard<'a, Option<File>>,
+    ) -> Result<Option<CachedCodeGenerationStoreReadGuardV1<'a>>, CodeGenerationRetentionErrorV1>
+    {
         let root = canonical_store_root(&self.store_root)?;
         let path = root.join(STORE_LOCK_FILE);
         if cached.is_none() {
