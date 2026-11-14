@@ -397,7 +397,8 @@ mod tests {
                 let database = runtime
                     .registered_database(HostAdmissionScope::Profile)
                     .unwrap();
-                let (scope, relations) = database.session_relation_store().unwrap();
+                let (scope, relations) =
+                    SessionTemporalRegisteredDb::session_relation_store(database).unwrap();
                 let access = SessionTemporalAccess::new(database);
                 let mut projections = Vec::new();
                 for id in ["receipt-reader-a", "receipt-reader-b"] {
