@@ -154,8 +154,11 @@ fn reconcile_leaves_no_captured_source_charged_after_the_build() {
             .all(|charge| charge.key.component != source_component),
         "the sealed manifest may remain admitted, but no captured source charge survives"
     );
-    assert_eq!(byte_pool.stats().source_allocations, 0);
     assert_eq!(byte_pool.stats().live_sources, 0);
+    // A direct reconcile leaves the registry's end-of-pass weak-cache sweep
+    // to its caller. Prove no source owner survives before reclaiming entries.
+    byte_pool.release_dead_entries();
+    assert_eq!(byte_pool.stats().source_allocations, 0);
     assert_eq!(
         scheduler
             .latest_complete()
@@ -183,8 +186,9 @@ fn reconcile_leaves_no_captured_source_charged_after_the_build() {
             .all(|charge| charge.key.component != source_component),
         "a no-build reconcile releases its captured source charge too"
     );
-    assert_eq!(byte_pool.stats().source_allocations, 0);
     assert_eq!(byte_pool.stats().live_sources, 0);
+    byte_pool.release_dead_entries();
+    assert_eq!(byte_pool.stats().source_allocations, 0);
     drop(scheduler);
     drop(byte_pool);
     assert_eq!(authority.snapshot().used_bytes, 0);
