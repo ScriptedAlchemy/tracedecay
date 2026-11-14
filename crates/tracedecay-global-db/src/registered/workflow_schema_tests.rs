@@ -1067,15 +1067,17 @@ mod published_artifact_ceiling {
                 && WorkflowState::read(path).digest == PUBLISHED_DIGEST
             {
                 assert_workflow_recovering(&lease)
-                    .instrument(tracing::info_span!("global_db.workflow_sweep.recovering_gate"))
+                    .instrument(tracing::info_span!(
+                        "global_db.workflow_sweep.recovering_gate"
+                    ))
                     .await;
             }
             // Each sampled cancellation reopens this path. Join the exact
             // published runtime before the next admission can acquire it.
             drop((lease, owner, runtime));
             let mut reservation = {
-                let _span = tracing::info_span!("global_db.workflow_sweep.reserve_retirement")
-                    .entered();
+                let _span =
+                    tracing::info_span!("global_db.workflow_sweep.reserve_retirement").entered();
                 match retirement
                     .registry()
                     .reserve_retirement_batch(vec![retirement.retirement_target()])
@@ -1089,7 +1091,9 @@ mod published_artifact_ceiling {
             let committed = tracedecay_runtime_core::native_runtime::spawn_blocking(move || {
                 reservation.commit()
             })
-            .instrument(tracing::info_span!("global_db.workflow_sweep.join_retirement"))
+            .instrument(tracing::info_span!(
+                "global_db.workflow_sweep.join_retirement"
+            ))
             .await
             .unwrap()
             .unwrap();
@@ -1105,7 +1109,9 @@ mod published_artifact_ceiling {
         }
 
         let reference = DaemonPublishedStore::create()
-            .instrument(tracing::info_span!("global_db.workflow_sweep.reference_fixture"))
+            .instrument(tracing::info_span!(
+                "global_db.workflow_sweep.reference_fixture"
+            ))
             .await;
         tracing::info_span!("global_db.workflow_sweep.reference_seed")
             .in_scope(|| reference.store.run(BULK_ROWS));
@@ -1119,7 +1125,11 @@ mod published_artifact_ceiling {
         assert_eq!(completed.artifacts, before.artifacts);
 
         let stride = (total_polls / 12).max(1);
-        tracing::info!(total_polls, stride, "workflow cancellation sweep calibrated");
+        tracing::info!(
+            total_polls,
+            stride,
+            "workflow cancellation sweep calibrated"
+        );
         let mut cancelled_published = 0;
         for cancel_at in (1..total_polls).step_by(stride) {
             let daemon_store = DaemonPublishedStore::create()
