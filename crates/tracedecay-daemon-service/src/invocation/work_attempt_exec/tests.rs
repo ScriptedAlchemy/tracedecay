@@ -26,9 +26,6 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::sync::Mutex;
 
-#[cfg(target_os = "linux")]
-use tracing::instrument::WithSubscriber as _;
-
 #[cfg(unix)]
 use sha2::{Digest, Sha256};
 use tracedecay_domain::configuration::TopologyConcurrencyPolicyV1;
@@ -79,8 +76,6 @@ use tracedecay_domain::{
     ObservabilityTerminalResultV1, OperationActivationOutcomeV1, OperationStageV1, SessionId,
     WorkflowStageClassV1, canonical_sha256,
 };
-#[cfg(target_os = "linux")]
-use tracedecay_runtime_core::logging::FormattedTracingCapture;
 use tracedecay_runtime_core::native_runtime;
 #[cfg(unix)]
 use tracedecay_runtime_core::test_executable::write_executable_script;
@@ -1621,11 +1616,6 @@ async fn assert_dead_soon(pid: &str) {
 #[cfg(target_os = "linux")]
 #[test]
 fn a_descendant_holding_the_provider_pipes_settles_timed_out_at_the_deadline() {
-    // End the thread-local guard before NativeTask polls on other workers.
-    let dispatch = {
-        let _capture = FormattedTracingCapture::start_with_span_timings();
-        tracing::dispatcher::get_default(Clone::clone)
-    };
     // (name, descendant redirections, bytes the leader writes first, cap)
     let cases = [
         ("stdout", "2>/dev/null", "hello", 65_536_u64),
@@ -1633,8 +1623,7 @@ fn a_descendant_holding_the_provider_pipes_settles_timed_out_at_the_deadline() {
         ("over the cap", "", "hello hello hello hello", 8),
     ];
     for (name, redirect, written, cap) in cases {
-        let attempt = async move {
-            tracing::trace!(case = name, "provider descendant deadline fixture");
+        on_installed_runtime(async move {
             let (_artifact_dir, workflow_artifacts) = provider_artifact_store().await;
             let directory = tempfile::TempDir::new().unwrap();
             let root = directory.path();
@@ -1688,8 +1677,7 @@ fn a_descendant_holding_the_provider_pipes_settles_timed_out_at_the_deadline() {
             assert_eq!(held.truncated, written.len() as u64 > cap, "{name}");
             let (_, descendant) = provider_pids(&pids).await;
             assert_dead_soon(&descendant).await;
-        };
-        on_installed_runtime(attempt.with_subscriber(dispatch.clone()));
+        });
     }
 }
 

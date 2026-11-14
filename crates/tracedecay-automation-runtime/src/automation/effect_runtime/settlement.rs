@@ -1709,19 +1709,6 @@ impl AutomationEffectAuthority {
 fn settle_bound_owner(
     state: RetainedBoundSettlement,
 ) -> Result<RetainedOwnerValue<(AutomationSettledTerminal, AutomationRunLedgerRecord)>> {
-    #[cfg(test)]
-    let _capture = state.phase_hook.as_ref().map(|_| {
-        tracedecay_runtime_core::logging::FormattedTracingCapture::start_with_span_timings()
-    });
-    #[cfg(test)]
-    let _capture_span = state.phase_hook.as_ref().map(|_| {
-        tracing::info_span!(
-            "daemon.automation.retained_owner",
-            run_id = %state.ledger.run_id,
-            task = ?state.ledger.task
-        )
-        .entered()
-    });
     settle_bound_owner_with_budget(state, RETAINED_SETTLEMENT_RETRY_BUDGET)
 }
 

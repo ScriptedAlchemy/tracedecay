@@ -94,11 +94,6 @@ use operation_resource::{AttemptAdmissionTimingV1, work_operation_resource_obser
 use provider_launch::ProviderProcess;
 use provider_output::{overflow_outcome, provider_session, stream_summary};
 
-#[tracing::instrument(
-    name = "daemon.service.work_attempt.provider.stdout_artifacts",
-    level = "trace",
-    skip_all
-)]
 async fn provider_stdout_artifacts(
     identity: &WorkAttemptIdentityV1,
     captured: Option<&(Vec<u8>, u64)>,
@@ -1874,11 +1869,6 @@ async fn cancel_ladder(
 /// SIGKILLs the provider's group, then waits for its pipes to close. Pipes a
 /// survivor outside the group still holds are abandoned after
 /// [`KILLED_DRAIN_GRACE`].
-#[tracing::instrument(
-    name = "daemon.service.work_attempt.provider.kill_and_drain",
-    level = "trace",
-    skip_all
-)]
 async fn kill_and_drain(process: &mut ProviderProcess) {
     process.signal(TerminationSignal::Kill);
     if native_runtime::timeout(KILLED_DRAIN_GRACE, process.finish())
