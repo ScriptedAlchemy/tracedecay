@@ -384,6 +384,38 @@ pub async fn request_session_temporal_reset(
     Ok(())
 }
 
+/// Coalesces temporal resets for a bounded source-rewrite retirement page.
+/// The caller atomically commits these requests with retired projections and
+/// the durable page frontier. Different sessions retain distinct requests.
+#[tracing::instrument(
+    name = "session_temporal.persist.reset_request_batch",
+    level = "trace",
+    skip_all
+)]
+pub async fn request_session_temporal_resets(
+    conn: &impl Executor,
+    observation_ids: &[&str],
+) -> ProjectionStoreResult<()> {
+    if observation_ids.is_empty() {
+        return Ok(());
+    }
+    let encoded = serde_json::to_string(observation_ids)
+        .map_err(|error| ProjectionStoreError::storage("encode temporal reset page", error))?;
+    conn.execute(
+        "INSERT INTO session_temporal_resets (session_id, requested_at)
+         SELECT DISTINCT effect.session_id, unixepoch() * 1000000
+         FROM json_each(?1) AS retired
+         JOIN session_temporal_observation_effects AS effect
+           ON effect.observation_id = retired.value
+         WHERE effect.output_count > 0
+         ON CONFLICT(session_id) DO UPDATE SET requested_at = excluded.requested_at",
+        params![encoded.as_str()],
+    )
+    .await
+    .map_err(|error| ProjectionStoreError::storage("request temporal reset page", error))?;
+    Ok(())
+}
+
 /// [`request_session_temporal_reset`] for an observation whose output was
 /// retired, limited to a session where a live or pending generation already
 /// covers it. A refresh past that frontier skips the retired effect on its

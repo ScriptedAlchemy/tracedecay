@@ -1677,7 +1677,8 @@ pub(in super::super) async fn retire_source_record(
         };
         supersede_projected_message(conn, &message).await?;
     }
-    request_session_temporal_reset(conn, observation_id).await?;
+    // Source-rewrite completion coalesces temporal reset requests for the
+    // retired page after all output ownership has been reconciled.
     Ok(true)
 }
 

@@ -18,7 +18,7 @@ pub(super) use apply::{
     derive_projection_with_alias, retire_source_record, verify_workflow_effects,
 };
 pub use rebuild::{project_observation, project_queued_observations, rebuild_projection};
-pub(crate) use schema::OBSERVATION_PROJECTION_PERFORMANCE_INDEX_SQL;
+pub(crate) use schema::{ACTIVE_QUEUE_INDEX_SQL, OBSERVATION_PROJECTION_PERFORMANCE_INDEX_SQL};
 pub(super) use schema::{
     ensure_observation_projection_performance_indexes, ensure_observation_projection_schema,
 };
