@@ -774,6 +774,20 @@ fn open_encoded_handle(
     Ok(unsafe { File::from_raw_handle(handle) })
 }
 
+/// Resolve a caller's store root once, before deriving persistent child paths.
+///
+/// This is lexical Windows normalization, not filesystem canonicalization or
+/// a namespace validation: it neither follows reparse points nor requires the
+/// store to exist. Ordinary relative, slash and dot spellings are normalized
+/// before the existing extended-length conversion; verbatim literal names
+/// retain their original meaning. The caller owns the resolved path for the
+/// store lifetime, and individual opens still enforce their no-follow policy.
+pub fn absolute_store_path(path: &Path) -> io::Result<PathBuf> {
+    let absolute = std::path::absolute(path)
+        .map_err(|error| wrap_error("resolve absolute Windows store path", path, error))?;
+    absolute_security_path(&absolute)
+}
+
 fn absolute_security_path(path: &Path) -> io::Result<PathBuf> {
     let long_plain_absolute = path.as_os_str().encode_wide().count() >= 260
         && path.is_absolute()
@@ -1417,6 +1431,81 @@ mod tests {
                 .unwrap()
                 .starts_with(r"\\?\UNC\server\share")
         );
+    }
+
+    #[test]
+    fn absolute_store_path_resolves_ordinary_absolute_aliases() {
+        for (input, expected) in [
+            (r"C:/safe//discard/.././store", r"C:\safe\store"),
+            (
+                r"\\server\share/safe//discard/.././store",
+                r"\\server\share\safe\store",
+            ),
+        ] {
+            assert_eq!(
+                absolute_store_path(Path::new(input)).unwrap().as_os_str(),
+                Path::new(expected).as_os_str(),
+                "ordinary store spelling {input:?} must resolve before immutable reads"
+            );
+        }
+    }
+
+    #[test]
+    fn absolute_store_path_resolves_relative_roots_without_changing_current_directory() {
+        let current = std::env::current_dir().unwrap();
+        let expected = absolute_security_path(&current.join("normalization").join("store"))
+            .expect("exact expected absolute store path");
+        let resolved = absolute_store_path(Path::new(r"normalization/discard/.././store"))
+            .expect("relative store root");
+
+        assert!(resolved.is_absolute());
+        assert_eq!(resolved.as_os_str(), expected.as_os_str());
+        assert_eq!(std::env::current_dir().unwrap(), current);
+    }
+
+    #[test]
+    fn absolute_store_path_normalizes_long_aliases_before_verbatim_conversion() {
+        let components = "long-directory/".repeat(20);
+        let exact_components = "long-directory\\".repeat(20);
+        for (prefix, expected_prefix) in [
+            ("C:/safe/", r"\\?\C:\safe\"),
+            ("//server/share/safe/", r"\\?\UNC\server\share\safe\"),
+        ] {
+            let input = format!("{prefix}/{components}discard/.././store");
+            let expected = format!("{expected_prefix}{exact_components}store");
+            assert!(input.encode_utf16().count() >= 260);
+            assert!(expected.encode_utf16().count() >= 260);
+            assert_eq!(
+                absolute_store_path(Path::new(&input)).unwrap().as_os_str(),
+                Path::new(&expected).as_os_str(),
+                "long ordinary store spelling must normalize before gaining a verbatim prefix"
+            );
+        }
+    }
+
+    #[test]
+    fn absolute_store_path_preserves_literal_verbatim_roots() {
+        for prefix in [r"\\?\C:\", r"\\?\UNC\server\share\"] {
+            for components in [String::new(), "literal-directory\\".repeat(20)] {
+                let input = format!("{prefix}CON\\{components}trailing.\\trailing \\store");
+                let resolved = absolute_store_path(Path::new(&input)).unwrap();
+                assert_eq!(
+                    resolved.as_os_str().as_encoded_bytes(),
+                    Path::new(&input).as_os_str().as_encoded_bytes(),
+                    "verbatim reserved and trailing-dot/space components must stay literal"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn absolute_store_path_preserves_invalid_input_refusal() {
+        for input in ["", "C:\\store\\bad\0leaf"] {
+            assert_eq!(
+                absolute_store_path(Path::new(input)).unwrap_err().kind(),
+                io::ErrorKind::InvalidInput
+            );
+        }
     }
 
     fn snapshot(path: &Path, kind: PathKind) -> SecuritySnapshot {

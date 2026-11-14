@@ -1325,6 +1325,11 @@ impl CodeIndexWorktreeSchedulerV1 {
         path_policy: IndexPathPolicyV1,
     ) -> Result<Self, CodeIndexSchedulerErrorV1> {
         let project_root = canonical_existing_identity(project_root)?;
+        // Anchor the caller's Windows spelling once. Every scheduler and
+        // publication path must derive from this same owned absolute root;
+        // payload passes never resolve a relative path against a later cwd.
+        #[cfg(windows)]
+        let store_root = tracedecay_private_fs::windows::absolute_store_path(&store_root)?;
         // Resolve exact identity BEFORE any indexing work. Paths located this
         // checkout; identity authorizes what may be reused.
         let identity = identity::IndexingIdentityV1::resolve(&project_root)

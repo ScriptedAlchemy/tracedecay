@@ -127,6 +127,138 @@ fn publish_generation(
     result
 }
 
+#[cfg(windows)]
+#[test]
+fn relative_windows_store_root_publishes_reads_and_restores() {
+    const CHILD_ENV: &str = "TRACEDECAY_RELATIVE_WINDOWS_STORE_CHILD";
+    const COMPLETED: &str = "relative-store-completed";
+    if std::env::var_os(CHILD_ENV).is_none() {
+        // Use the existing test-executable child pattern so this fixture owns
+        // its cwd without mutating the process shared by parallel tests.
+        let directory = TempDir::new().expect("isolated relative-store cwd");
+        let test_path = concat!(
+            module_path!(),
+            "::relative_windows_store_root_publishes_reads_and_restores"
+        );
+        let (_, test_path) = test_path.split_once("::").expect("test module has a crate");
+        let output =
+            std::process::Command::new(std::env::current_exe().expect("current test executable"))
+                .args(["--exact", test_path, "--nocapture"])
+                .env(CHILD_ENV, "1")
+                .current_dir(directory.path())
+                .output()
+                .expect("run the relative-store production journey");
+        assert!(
+            output.status.success(),
+            "relative-store child failed:\nstdout: {}\nstderr: {}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
+        );
+        assert_eq!(
+            std::fs::read(directory.path().join(COMPLETED))
+                .expect("the exact child must execute, not pass with zero selected tests"),
+            b"published, read, restored",
+        );
+        return;
+    }
+
+    let fixture = GitFixture::new(&[("src/lib.rs", "pub fn alpha() -> u32 { 1 }\n")]);
+    let relative_store = PathBuf::from("relative-store").join("nested");
+    assert!(!relative_store.is_absolute());
+    let mut producer = scheduler(
+        &fixture,
+        relative_store.clone(),
+        Arc::new(SharedCodeIndexBytePoolV1::default()),
+    );
+    assert!(producer.store_root.is_absolute());
+    assert_eq!(
+        producer
+            .store_root
+            .canonicalize()
+            .expect("owned store root"),
+        relative_store
+            .canonicalize()
+            .expect("the caller's actual store"),
+    );
+    assert_eq!(
+        producer.publication.generations_root,
+        producer.store_root.join("code-generations-v1"),
+    );
+    let evidence = published(
+        producer
+            .reconcile_now()
+            .expect("publish under a relative root"),
+    );
+    let latest = producer
+        .latest_complete()
+        .expect("the published generation serves");
+    let scope = latest.generation.sealed_scope();
+    let sealed = producer
+        .publication
+        .load_active(&scope)
+        .expect("load the actual sealed carrier")
+        .expect("the relative-root generation is active");
+    let manifest = sealed.manifest_bytes().to_vec();
+    drop(sealed);
+    let packs = CodeIndexPublishedGenerationV1::partitioned_pack_identities(&manifest)
+        .expect("the authentic physical pack roster");
+    assert_eq!(packs.len(), 2);
+    let expected_packs = packs
+        .into_iter()
+        .map(|pack| {
+            let suffix = sha256_hex_suffix(pack.digest.as_str()).expect("physical pack digest");
+            let path = code_generation_segments_root(&relative_store)
+                .join(format!("segment-{suffix}.json"));
+            let bytes = std::fs::read(path).expect("pack at the caller's actual store");
+            assert_eq!(u64::try_from(bytes.len()).unwrap(), pack.size_bytes);
+            (pack, bytes)
+        })
+        .collect::<Vec<_>>();
+    let assert_pack_reads = |publication: &super::super::DaemonCodeIndexPublicationStoreV1| {
+        let sealed = publication
+            .load_active(&scope)
+            .expect("load the sealed carrier")
+            .expect("the generation remains active");
+        assert_eq!(sealed.manifest_bytes(), manifest.as_slice());
+        let read = sealed
+            .begin_read_pass()
+            .expect("open the immutable pack pass");
+        let mut bytes = Vec::new();
+        for (pack, expected) in &expected_packs {
+            read(
+                SealedGenerationSegmentReadV1::Whole {
+                    digest: &pack.digest,
+                    size_bytes: pack.size_bytes,
+                },
+                &mut bytes,
+            )
+            .expect("read both real physical roles");
+            assert_eq!(&bytes, expected);
+        }
+    };
+    assert_pack_reads(&producer.publication);
+    drop(latest);
+    drop(producer);
+
+    let reopened = scheduler(
+        &fixture,
+        PathBuf::from("./relative-store/./nested"),
+        Arc::new(SharedCodeIndexBytePoolV1::default()),
+    );
+    assert!(reopened.store_root.is_absolute());
+    assert_eq!(reopened.sealed_decode_count(), 0);
+    let restored = reopened
+        .publication
+        .load_active_shared()
+        .expect("restore through the cold production decoder")
+        .expect("the real publication survives reopen");
+    assert_eq!(restored.manifest().generation_id, evidence.generation_id);
+    assert_eq!(reopened.sealed_decode_count(), 1);
+    assert_pack_reads(&reopened.publication);
+    std::fs::write(COMPLETED, b"published, read, restored")
+        .expect("record completion of the real child journey");
+}
+
 #[test]
 fn manifest_metadata_and_lazy_source_admission_remain_payload_free() {
     let fixture = GitFixture::new(&[("src/lib.rs", "pub fn alpha() -> u32 { 1 }\n")]);
