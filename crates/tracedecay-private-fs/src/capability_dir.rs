@@ -340,7 +340,8 @@ fn write_exclusive_pending_receipt(
 ) -> io::Result<Dir> {
     let mut options = OpenOptions::new();
     options.write(true).create_new(true);
-    let opened = require_entry_name(filename).and_then(|()| directory.open_with(filename, &options));
+    let opened =
+        require_entry_name(filename).and_then(|()| directory.open_with(filename, &options));
     let marker = match opened {
         Ok(marker) => marker,
         Err(error) => {
