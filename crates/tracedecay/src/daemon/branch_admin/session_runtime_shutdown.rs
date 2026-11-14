@@ -1,29 +1,10 @@
 use std::sync::{Arc, atomic::Ordering};
-use std::time::Instant;
 
 use super::SessionRuntimeRegistryEntryV1;
 use crate::daemon::branch_admin::StoreAdministration;
 use tracedecay_daemon_identity::authority;
 use tracedecay_domain::errors::{Result, TraceDecayError};
-use tracedecay_runtime_core::logging::log_daemon_event;
 use tracedecay_store_runtime::RemoteRecoveryProjectLifecycle;
-
-fn log_store_close_phase(
-    profile_id: Option<&str>,
-    phase: &'static str,
-    outcome: &'static str,
-    started: Instant,
-) {
-    let mut fields = vec![
-        ("phase", phase.to_owned()),
-        ("outcome", outcome.to_owned()),
-        ("elapsed_ms", started.elapsed().as_millis().to_string()),
-    ];
-    if let Some(profile_id) = profile_id {
-        fields.push(("profile_id", profile_id.to_owned()));
-    }
-    log_daemon_event("daemon_store_close", &fields);
-}
 
 #[derive(Clone)]
 pub(in crate::daemon) struct SessionRuntimeMemoryGraphReconciliationShutdownV1 {
@@ -47,29 +28,10 @@ impl SessionRuntimeMemoryGraphReconciliationShutdownV1 {
         self.cancel();
         let mut failures = Vec::new();
         for registry in &self.registries {
-            let profile_id = Some(registry.profile_id().as_str());
-            let started = Instant::now();
-            log_store_close_phase(profile_id, "terminal_tasks", "start", started);
-            let result = registry.shutdown_terminal_tasks().await;
-            log_store_close_phase(
-                profile_id,
-                "terminal_tasks",
-                if result.is_ok() { "complete" } else { "failed" },
-                started,
-            );
-            if let Err(error) = result {
+            if let Err(error) = registry.shutdown_terminal_tasks().await {
                 failures.push(error);
             }
-            let started = Instant::now();
-            log_store_close_phase(profile_id, "reconciliation_tasks", "start", started);
-            let result = registry.shutdown_memory_graph_reconciliation_tasks().await;
-            log_store_close_phase(
-                profile_id,
-                "reconciliation_tasks",
-                if result.is_ok() { "complete" } else { "failed" },
-                started,
-            );
-            if let Err(error) = result {
+            if let Err(error) = registry.shutdown_memory_graph_reconciliation_tasks().await {
                 failures.push(error);
             }
         }
@@ -222,55 +184,17 @@ impl StoreAdministration {
         &self,
         deadline: std::time::Instant,
     ) -> std::result::Result<(), String> {
-        let profile_id = self
-            .profile_identity
-            .as_ref()
-            .map(|identity| identity.profile_id().as_str());
-        let started = Instant::now();
-        log_store_close_phase(profile_id, "prepare_registries", "start", started);
-        let result = self
+        let owner = self
             .prepare_memory_graph_reconciliation_shutdown()
             .await
-            .map_err(|error| error.to_string());
-        log_store_close_phase(
-            profile_id,
-            "prepare_registries",
-            if result.is_ok() { "complete" } else { "failed" },
-            started,
-        );
-        let owner = result?;
-        let started = Instant::now();
-        log_store_close_phase(profile_id, "cancel_reconciliation", "start", started);
+            .map_err(|error| error.to_string())?;
         owner.cancel();
-        log_store_close_phase(profile_id, "cancel_reconciliation", "complete", started);
-        let started = Instant::now();
-        log_store_close_phase(profile_id, "join_registry_tasks", "start", started);
-        let result = owner.shutdown().await;
-        log_store_close_phase(
-            profile_id,
-            "join_registry_tasks",
-            if result.is_ok() { "complete" } else { "failed" },
-            started,
-        );
-        result?;
-        let started = Instant::now();
-        log_store_close_phase(profile_id, "release_telemetry", "start", started);
+        owner.shutdown().await?;
         self.store_telemetry_sampling()
             .release_retained_handles_for_shutdown();
-        log_store_close_phase(profile_id, "release_telemetry", "complete", started);
-        let started = Instant::now();
-        log_store_close_phase(profile_id, "close_retained_stores", "start", started);
-        let result = self
-            .close_retained_graph_runtimes_for_shutdown(deadline)
+        self.close_retained_graph_runtimes_for_shutdown(deadline)
             .await
-            .map_err(|error| error.to_string());
-        log_store_close_phase(
-            profile_id,
-            "close_retained_stores",
-            if result.is_ok() { "complete" } else { "failed" },
-            started,
-        );
-        result
+            .map_err(|error| error.to_string())
     }
 
     /// Shutdown-only: stops the store opens and schema installs of every

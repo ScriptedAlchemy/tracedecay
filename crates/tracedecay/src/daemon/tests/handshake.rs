@@ -6,8 +6,6 @@ use std::sync::Arc;
 use tracedecay_daemon_protocol::{DaemonClientIdentity, DaemonHandshake};
 #[cfg(unix)]
 use tracedecay_daemon_service::shutdown::ShutdownStatus;
-#[cfg(unix)]
-use tracedecay_runtime_core::logging::log_daemon_event;
 
 #[cfg(unix)]
 fn test_client_instance_id(value: u128) -> String {
@@ -758,25 +756,8 @@ async fn catalog_refresh_rejects_untrusted_ids_and_stops_at_capacity() {
 }
 
 #[cfg(unix)]
-async fn shutdown_catalog_generation(
-    engine: crate::daemon::engine::DaemonEngine,
-    generation: &'static str,
-) {
-    let started = std::time::Instant::now();
-    let log_phase = |outcome: &str| {
-        let mut fields = vec![
-            ("generation", generation.to_owned()),
-            ("outcome", outcome.to_owned()),
-            ("elapsed_ms", started.elapsed().as_millis().to_string()),
-        ];
-        if let Ok(identity) = engine.store_administration.profile_identity() {
-            fields.push(("profile_id", identity.profile_id().as_str().to_owned()));
-        }
-        log_daemon_event("catalog_generation_shutdown", &fields);
-    };
-    log_phase("start");
+async fn shutdown_catalog_generation(engine: crate::daemon::engine::DaemonEngine) {
     let receipt = engine.shutdown_all().await;
-    log_phase("returned");
     assert!(
         receipt.in_flight == ShutdownStatus::Clean
             && receipt.clients == ShutdownStatus::Clean
@@ -786,7 +767,7 @@ async fn shutdown_catalog_generation(
                 .iter()
                 .all(|owner| owner.status == ShutdownStatus::Clean)
             && receipt.project_servers.is_clean(),
-        "catalog {generation} owners must shut down cleanly: {receipt:?}"
+        "catalog generation owners must shut down cleanly: {receipt:?}"
     );
 }
 
@@ -841,7 +822,7 @@ async fn daemon_refreshes_once_only_after_generation_change() {
 
     // A new generation may reopen this profile only after the previous
     // generation's retained store owners and background tasks have joined.
-    Box::pin(shutdown_catalog_generation(engine, "first_generation")).await;
+    Box::pin(shutdown_catalog_generation(engine)).await;
     let next_generation = test_daemon_engine_for_profile(&profile_root);
     prewarm_test_profile_runtime(&next_generation.store_administration).await;
     let first = daemon_round_trip(
@@ -871,11 +852,7 @@ async fn daemon_refreshes_once_only_after_generation_change() {
     .await;
     assert_eq!(second.len(), 1, "the refresh must not loop");
     assert_eq!(second[0]["id"], json!(4));
-    Box::pin(shutdown_catalog_generation(
-        next_generation,
-        "second_generation",
-    ))
-    .await;
+    Box::pin(shutdown_catalog_generation(next_generation)).await;
 }
 
 #[cfg(unix)]
