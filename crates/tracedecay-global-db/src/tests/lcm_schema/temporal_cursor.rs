@@ -24,10 +24,9 @@ fn assert_cursor_rotation_verdict(error: TraceDecayError, context: &str) {
 async fn temporal_schema_persists_cursor_keys_without_read_creation() {
     let tmp = TempDir::new().unwrap();
     let db_path = tmp.path().join(".tracedecay").join("sessions.db");
-    let db = open_global_db(&db_path)
+    initialize_global_db(&db_path)
         .await
         .expect("temporal schema initialization should not error");
-    drop(db);
     assert!(
         table_exists(&db_path, "session_query_cursor_keys").await,
         "the temporal schema must create the cursor-key authority table"
@@ -50,10 +49,9 @@ async fn temporal_schema_persists_cursor_keys_without_read_creation() {
 
     let restart_path = tmp.path().join(".tracedecay").join("restart.db");
     copy_database_for_temporal_restart(&db_path, &restart_path).await;
-    let reopened = open_global_db(&restart_path)
+    initialize_global_db(&restart_path)
         .await
         .expect("writer reopen should preserve a persisted cursor key");
-    drop(reopened);
     assert_eq!(
         row_count(&restart_path, "session_query_cursor_keys").await,
         1
@@ -234,10 +232,9 @@ async fn temporal_schema_rotates_cursor_keys_atomically_and_survives_restart() {
 
     let restart_path = tmp.path().join(".tracedecay").join("cursor-restart.db");
     copy_database_for_temporal_restart(&db_path, &restart_path).await;
-    let reopened = open_global_db(&restart_path)
+    initialize_global_db(&restart_path)
         .await
         .expect("rotated cursor key authority must pass restart validation");
-    drop(reopened);
     assert_eq!(
         row_count(&restart_path, "session_query_cursor_keys").await,
         2
@@ -281,10 +278,9 @@ async fn temporal_schema_cursor_audit_rejects_nonmax_active_key() {
     let restart_path = tmp.path().join(".tracedecay").join("cursor-audit.db");
     copy_database_for_temporal_restart(&db_path, &restart_path).await;
     assert_cursor_rotation_verdict(
-        open_global_db(&restart_path)
+        initialize_global_db(&restart_path)
             .await
-            .err()
-            .expect("restart audit refuses the database"),
+            .expect_err("restart audit refuses the database"),
         "restart audit must reject an active key that is not the monotonic maximum",
     );
 }
@@ -335,10 +331,9 @@ async fn temporal_schema_cursor_audit_rejects_skipped_successor_chain() {
             .join("restart.db");
         copy_database_for_temporal_restart(&db_path, &restart_path).await;
         assert_cursor_rotation_verdict(
-            open_global_db(&restart_path)
+            initialize_global_db(&restart_path)
                 .await
-                .err()
-                .expect("restart audit refuses the database"),
+                .expect_err("restart audit refuses the database"),
             &format!(
                 "{fixture}: a later key must not satisfy a skipped immediate-successor retirement"
             ),
@@ -385,10 +380,9 @@ async fn temporal_schema_cursor_audit_accepts_valid_successor_chains() {
             .join(".tracedecay")
             .join("valid-restart.db");
         copy_database_for_temporal_restart(&db_path, &restart_path).await;
-        let reopened = open_global_db(&restart_path)
+        initialize_global_db(&restart_path)
             .await
             .expect("valid immediate-successor chain must pass restart audit");
-        drop(reopened);
         assert_valid_cursor_chain(&cursor_key_history(&restart_path).await);
     }
 }
@@ -397,10 +391,9 @@ async fn temporal_schema_cursor_audit_accepts_valid_successor_chains() {
 async fn temporal_schema_concurrent_cursor_rotations_serialize_safely() {
     let tmp = TempDir::new().unwrap();
     let db_path = tmp.path().join(".tracedecay").join("sessions.db");
-    let db = open_global_db(&db_path)
+    initialize_global_db(&db_path)
         .await
         .expect("temporal schema initialization should not error");
-    drop(db);
 
     let seed_db = TestConnection::open(&db_path);
     let initial = (*seed_db).clone();
@@ -540,9 +533,8 @@ async fn temporal_schema_concurrent_cursor_rotations_serialize_safely() {
 
     let restart_path = tmp.path().join(".tracedecay").join("concurrent-restart.db");
     copy_database_for_temporal_restart(&db_path, &restart_path).await;
-    let reopened = open_global_db(&restart_path)
+    initialize_global_db(&restart_path)
         .await
         .expect("serialized concurrent rotations must pass restart audit");
-    drop(reopened);
     assert_valid_cursor_chain(&cursor_key_history(&restart_path).await);
 }

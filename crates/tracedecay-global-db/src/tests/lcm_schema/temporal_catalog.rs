@@ -5,10 +5,9 @@ async fn fresh_temporal_schema_stores_and_searches_a_summary_node() {
     let tmp = TempDir::new().unwrap();
     let db_path = tmp.path().join(".tracedecay").join("sessions.db");
 
-    let db = open_global_db(&db_path)
+    initialize_global_db(&db_path)
         .await
         .expect("temporal schema initialization should not error");
-    drop(db);
     assert!(
         table_exists(&db_path, "lcm_raw_messages").await,
         "fresh initialization must compose the final temporal and LCM schemas"
@@ -622,7 +621,7 @@ async fn temporal_schema_rejects_unexpected_indexes_without_dropping_them() {
     drop(conn);
     drop(raw_db);
 
-    let error = match open_global_db(&db_path).await {
+    let error = match initialize_global_db(&db_path).await {
         Ok(_) => panic!("unexpected temporal indexes must require reset"),
         Err(error) => error,
     };
@@ -675,7 +674,7 @@ async fn temporal_schema_refuses_markerless_malformed_fts_without_mutation() {
     drop(raw_db);
     let before_catalog = temporal_schema_object_catalog(&db_path).await;
 
-    let error = match open_global_db(&db_path).await {
+    let error = match initialize_global_db(&db_path).await {
         Ok(_) => panic!("a markerless malformed FTS store must require reset"),
         Err(error) => error,
     };
@@ -743,7 +742,7 @@ async fn temporal_schema_rejects_missing_fts_without_rebuilding_it() {
     drop(conn);
     drop(raw_db);
 
-    let error = match open_global_db(&db_path).await {
+    let error = match initialize_global_db(&db_path).await {
         Ok(_) => panic!("missing temporal FTS objects must require reset"),
         Err(error) => error,
     };
@@ -798,7 +797,7 @@ async fn temporal_schema_rejects_missing_graph_publication_authority_without_reb
     drop(conn);
     drop(raw_db);
 
-    let error = match open_global_db(&db_path).await {
+    let error = match initialize_global_db(&db_path).await {
         Ok(_) => panic!("missing graph publication authority must require reset"),
         Err(error) => error,
     };
