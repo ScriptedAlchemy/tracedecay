@@ -23,6 +23,7 @@ use crate::production::resolution_view::{
     FileSymbolsByNameV1, ResolutionFileFactsV1, ResolutionFileV1, SymbolsByNameV1,
     reserve_resolution_map, reserve_resolution_vec,
 };
+use crate::production::typescript_receivers::resolve_receiver_call;
 use crate::production::typescript_resolution::{
     ImportBindingOutcomeV1, TypeScriptModuleIndexV1, unique_local_import,
 };
@@ -708,13 +709,25 @@ pub(super) fn unresolved_import_calls_with_modules<T: ResolutionFileV1>(
             continue;
         }
         let file = files[index].binding()?;
-        match typescript_import_call_outcome(
+        let outcome = match resolve_receiver_call(
             files,
             by_simple_name,
             modules.typescript()?,
-            file,
+            index,
             reference,
         )? {
+            Some(ImportBindingOutcomeV1::Bound(..) | ImportBindingOutcomeV1::External) => continue,
+            // A lexical receiver shadows any import with the same spelling.
+            Some(_) => None,
+            None => typescript_import_call_outcome(
+                files,
+                by_simple_name,
+                modules.typescript()?,
+                file,
+                reference,
+            )?,
+        };
+        match outcome {
             Some(ImportBindingOutcomeV1::Unresolved) => {
                 reserve_resolution_vec(&mut unresolved, 1, charge)?;
                 charge(ResolutionMemoryChangeV1::Retain(
@@ -805,7 +818,8 @@ where
 {
     // A module-rule binding may land in the referencing file itself
     // (`Util.normalize` inside `Util`); the per-file pass never saw it.
-    let same_file_binds = is_module_import_language(files[index].language());
+    let same_file_binds = is_module_import_language(files[index].language())
+        || is_typescript_family(files[index].language());
     let mut resolved_references = ResolvedReferenceCacheV1::new();
     let mut edges = Vec::new();
     let mut gaps = Vec::new();
@@ -821,6 +835,7 @@ where
             reference.argument_count,
             reference.ambiguous_local,
             caller_scope(files[index].language(), reference),
+            is_typescript_family(files[index].language()).then_some(reference.evidence_span),
         );
         let (resolved, ambiguous) = if let Some(resolved) = resolved_references.get(&cache_key) {
             resolved.clone()
@@ -911,6 +926,7 @@ type ResolvedReferenceCacheV1<'a> = HashMap<
         Option<u32>,
         bool,
         Option<&'a SymbolOccurrenceId>,
+        Option<tracedecay_domain::SourceSpan>,
     ),
     (Option<ReferenceResolutionV1>, bool),
 >;
@@ -984,6 +1000,22 @@ where
         return Ok(None);
     }
     let file = source.binding()?;
+    if is_typescript_family(source.language())
+        && let Some(outcome) = resolve_receiver_call(
+            files,
+            by_simple_name,
+            modules.typescript()?,
+            index,
+            reference,
+        )?
+    {
+        return Ok(match outcome {
+            ImportBindingOutcomeV1::Bound(target_index, symbol) => Some(
+                ReferenceResolutionV1::Bound(target_index, vec![symbol.occurrence.clone()]),
+            ),
+            _ => None,
+        });
+    }
     let qualified = reference.reference_name.contains("::");
     // A TypeScript-family import binds one exact module and one exact name,
     // so it resolves through module resolution rather than name matching;

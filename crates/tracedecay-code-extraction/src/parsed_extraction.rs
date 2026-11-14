@@ -28,6 +28,7 @@ pub enum ParsedExtractionResetReason {
     LanguageChanged,
     MissingPriorExtraction,
     MultilineEdit,
+    ModuleBindingsChanged,
     PartialParse,
 }
 

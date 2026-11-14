@@ -9,10 +9,10 @@ use std::sync::Arc;
 use crate::{GraphQueryError, GraphQueryResult as Result};
 use tracedecay_code_index::chunks::CodeIndexImportEvidenceV1;
 use tracedecay_code_index::graph_projection::{
-    CodeGraphCensusV1, CodeGraphImpactBatchV1, CodeGraphInteractiveReader,
+    CodeGraphCensusV1, CodeGraphImpactBatchV1, CodeGraphInteractiveReader, CodeGraphPathSearchV1,
     CodeGraphRankedNeighborsV1, CodeGraphReadCostMeter, CodeGraphReadinessRequirement,
     CodeGraphSemanticEdgeV1, CodeGraphSymbolPageV1, CodeGraphSymbolPredicate,
-    CodeGraphSymbolSummaryV1,
+    CodeGraphSymbolSummaryV1, CodeGraphUnresolvedCallSitesV1,
 };
 use tracedecay_contracts::{
     ApplicationOperation, CancellationSignal, Deadline, RequestContext, RequestCostReceiptV1,
@@ -206,6 +206,11 @@ impl VerifiedGraphQuery {
         &self.request_context
     }
 
+    /// The live cancellation signal bound to this admitted query.
+    pub fn cancellation_signal(&self) -> &CancellationSignal {
+        &self.live_cancellation
+    }
+
     /// What this query has cost its stores since it was opened.
     pub fn read_cost(&self) -> RequestCostReceiptV1 {
         self.cost.receipt()
@@ -343,6 +348,19 @@ impl VerifiedGraphQuery {
         self.refuse_if_bound_closed()?;
         self.reader
             .has_unresolved_callers(targets, None, Arc::clone(&self.cancellation))
+            .map_err(GraphQueryError::from)
+    }
+
+    /// A bounded read of the sealed caller's recorded unresolved sites.
+    /// Admission, cancellation and cost accounting use this query's lease.
+    pub fn unresolved_call_sites(
+        &self,
+        occurrence: &SymbolOccurrenceId,
+        max_references: usize,
+    ) -> Result<Option<CodeGraphUnresolvedCallSitesV1>> {
+        self.refuse_if_bound_closed()?;
+        self.reader
+            .unresolved_call_sites(occurrence, max_references, Arc::clone(&self.cancellation))
             .map_err(GraphQueryError::from)
     }
 
@@ -593,6 +611,35 @@ impl VerifiedGraphQuery {
                 occurrences,
                 kinds,
                 max_relations,
+                Arc::clone(&self.cancellation),
+            )
+            .map_err(GraphQueryError::from)
+    }
+
+    /// Bounded shortest path over the same admitted, metered generation as
+    /// the other graph reads. An exhausted frontier and a depth cut remain
+    /// distinct in the reader's result.
+    #[tracing::instrument(
+        name = "usecases.graph.verified.shortest_path",
+        level = "trace",
+        skip_all
+    )]
+    pub fn shortest_path(
+        &self,
+        from: &SymbolOccurrenceId,
+        to: &SymbolOccurrenceId,
+        kinds: &[RelationEdgeKindV1],
+        max_depth: u32,
+        max_relations_per_hop: usize,
+    ) -> Result<CodeGraphPathSearchV1> {
+        self.refuse_if_bound_closed()?;
+        self.reader
+            .shortest_path(
+                from,
+                to,
+                kinds,
+                max_depth,
+                max_relations_per_hop,
                 Arc::clone(&self.cancellation),
             )
             .map_err(GraphQueryError::from)

@@ -175,15 +175,15 @@ fn rust_self_path_calls_bind_the_enclosing_impl_function() {
 }
 
 #[test]
-fn unbound_receiver_calls_make_callers_and_callees_partial() {
+fn proved_receivers_bind_while_unbound_receivers_remain_partial() {
     let graph = sealed_graph();
 
-    // `logger.handle(s)` on a local binds no edge.
+    // A constructor-backed local remains typed inside its captured closure.
     assert_eq!(
         graph.callers("ts/src/events.ts::Logger::handle"),
-        Vec::<String>::new()
+        ["ts/src/main.ts::runPipeline"]
     );
-    assert!(graph.callers_partial("ts/src/events.ts::Logger::handle"));
+    assert!(!graph.callers_partial("ts/src/events.ts::Logger::handle"));
     assert_eq!(
         graph.callers("ts/src/events.ts::formatEvent"),
         [
@@ -204,6 +204,66 @@ fn unbound_receiver_calls_make_callers_and_callees_partial() {
     // `s.score(5)` leaves `main_entry` with a callee the graph cannot list.
     assert!(graph.callees_partial("py/pkg/app.py::main_entry"));
     assert!(!graph.callees_partial("py/pkg/scoring.py::Scorer::score"));
+}
+
+#[test]
+fn typescript_receiver_edges_keep_lexical_scopes_and_exact_evidence() {
+    let source = r#"class Worker { execute() {} static staticOnly() {} }
+class Other { execute() {} }
+export function run(worker: Worker) {
+  worker.execute();
+  { const worker = new Other(); worker.execute(); }
+  worker.execute();
+  (new Worker()).execute();
+}
+export function unsupported(worker: Worker) { worker.staticOnly(); }
+"#;
+    let graph = sealed_graph_of(&[("receiver.ts", source)]);
+    let caller = graph.symbol("receiver.ts::run");
+    let worker = graph.symbol("receiver.ts::Worker::execute");
+    let other = graph.symbol("receiver.ts::Other::execute");
+    let mut calls = graph
+        .generation
+        .edges()
+        .iter()
+        .filter(|edge| {
+            edge.kind == RelationEdgeKindV1::Calls
+                && edge.from_occurrence == caller
+                && (edge.to_occurrence == worker || edge.to_occurrence == other)
+        })
+        .collect::<Vec<_>>();
+    calls.sort_by_key(|edge| edge.evidence_span);
+    assert_eq!(calls.len(), 4);
+    assert_eq!(
+        calls
+            .iter()
+            .map(|edge| &edge.to_occurrence)
+            .collect::<Vec<_>>(),
+        [&worker, &other, &worker, &worker]
+    );
+    assert_eq!(
+        calls
+            .iter()
+            .map(|edge| {
+                assert_eq!(
+                    edge.authority,
+                    tracedecay_domain::EdgeAuthorityV1::NameResolved
+                );
+                &source
+                    [edge.evidence_span.start_byte as usize..edge.evidence_span.end_byte as usize]
+            })
+            .collect::<Vec<_>>(),
+        [
+            "worker.execute",
+            "worker.execute",
+            "worker.execute",
+            "execute"
+        ]
+    );
+    assert!(!graph.callers_partial("receiver.ts::Worker::execute"));
+    assert!(!graph.callees_partial("receiver.ts::run"));
+    assert!(graph.callers("receiver.ts::Worker::staticOnly").is_empty());
+    assert!(graph.callees_partial("receiver.ts::unsupported"));
 }
 
 const NAMESPACES_TS: &str = r#"export function formatEvent(e: string): string {
@@ -236,6 +296,134 @@ namespace Dotted.Path {
   }
 }
 "#;
+
+#[test]
+fn typescript_value_aliases_keep_parameter_types_across_inner_shadows() {
+    let source = r#"import { Worker as Real, Other as Different } from './workers';
+export function run<T extends Real = Real>(worker: Real) {
+  const first = worker;
+  const alias = (first);
+  { const worker = new Different(); alias.execute(); const inner = worker; inner.execute(); }
+  alias.execute();
+}
+export function mutated(worker: Real, replacement: Real) { const alias = worker; worker = replacement; alias.execute(); }
+export function optional(worker?: Real) { const alias = worker; alias.execute(); }
+export function cyclic() { const alias = next; const next = alias; alias.execute(); }
+export function constructorValue() { const alias = Real; alias.execute(); }
+"#;
+    let graph = sealed_graph_of(&[
+        (
+            "workers.ts",
+            "export class Worker { execute() {} }\nexport class Other { execute() {} }\n",
+        ),
+        ("aliases.ts", source),
+    ]);
+    let run = graph.symbol("aliases.ts::run");
+    let worker = graph.symbol("workers.ts::Worker::execute");
+    let other = graph.symbol("workers.ts::Other::execute");
+    let mut calls = graph
+        .generation
+        .edges()
+        .iter()
+        .filter(|edge| {
+            edge.kind == RelationEdgeKindV1::Calls
+                && edge.from_occurrence == run
+                && (edge.to_occurrence == worker || edge.to_occurrence == other)
+        })
+        .collect::<Vec<_>>();
+    calls.sort_by_key(|edge| edge.evidence_span);
+    assert_eq!(
+        calls
+            .iter()
+            .map(|edge| &edge.to_occurrence)
+            .collect::<Vec<_>>(),
+        [&worker, &other, &worker]
+    );
+    assert_eq!(
+        calls
+            .iter()
+            .map(|edge| {
+                assert_eq!(
+                    edge.authority,
+                    tracedecay_domain::EdgeAuthorityV1::NameResolved
+                );
+                &source
+                    [edge.evidence_span.start_byte as usize..edge.evidence_span.end_byte as usize]
+            })
+            .collect::<Vec<_>>(),
+        ["alias.execute", "inner.execute", "alias.execute"]
+    );
+    assert!(!graph.callees_partial("aliases.ts::run"));
+    for function in ["mutated", "optional", "cyclic", "constructorValue"] {
+        let name = format!("aliases.ts::{function}");
+        let caller = graph.symbol(&name);
+        assert!(
+            !graph
+                .generation
+                .edges()
+                .iter()
+                .any(|edge| edge.from_occurrence == caller
+                    && (edge.to_occurrence == worker || edge.to_occurrence == other)),
+            "unsupported alias must not bind an instance method: {function}"
+        );
+        assert!(
+            graph.callees_partial(&name),
+            "unsupported alias must disclose a gap: {function}"
+        );
+    }
+}
+
+#[test]
+fn javascript_default_parameters_resolve_outer_receivers_before_body_bindings() {
+    let source = r#"class Worker { execute() {} }
+class Other { execute() {} }
+const shared = new Worker();
+export function run() {
+  const worker = new Worker();
+  const callback = function(value = worker) { worker.execute(); };
+  const pattern = function({ [worker]: value } = {}) { worker.execute(); };
+}
+export function parameterScope(value = shared.execute()) { var shared = new Other(); }
+"#;
+    let graph = sealed_graph_of(&[("defaults.js", source)]);
+    assert_eq!(
+        graph.callers("defaults.js::Worker::execute"),
+        [
+            "defaults.js::parameterScope",
+            "defaults.js::run",
+            "defaults.js::run",
+        ]
+    );
+    assert!(graph.callers("defaults.js::Other::execute").is_empty());
+    assert!(!graph.callers_partial("defaults.js::Worker::execute"));
+    assert!(!graph.callees_partial("defaults.js::run"));
+    assert!(!graph.callees_partial("defaults.js::parameterScope"));
+}
+
+#[test]
+fn imported_receiver_types_and_factories_do_not_guess_nested_declarations() {
+    let graph = sealed_graph_of(&[
+        (
+            "hidden.ts",
+            "export class PublicWorker { execute() {} }\nexport namespace Hidden { export class Worker { execute() {} } export async function make(): Promise<PublicWorker> { return new PublicWorker(); } }\n",
+        ),
+        (
+            "consumer.ts",
+            "import { Worker, make } from './hidden';\nexport async function run() { const local = new Worker(); local.execute(); const loaded = await make(); loaded.execute(); }\n",
+        ),
+    ]);
+    for target in [
+        "hidden.ts::Hidden::Worker::execute",
+        "hidden.ts::PublicWorker::execute",
+    ] {
+        assert!(
+            graph.callers(target).is_empty(),
+            "must not invent the import binding: {target}"
+        );
+        assert!(graph.callers_partial(target));
+    }
+    assert!(graph.callees_partial("consumer.ts::run"));
+}
 
 #[test]
 fn typescript_namespace_members_are_symbols_and_bound_callers() {

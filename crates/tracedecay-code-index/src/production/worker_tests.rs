@@ -1380,21 +1380,26 @@ fn prior_sealed_generation_is_rejected_before_manifest_decode() {
         "the current revision must pass the revision gate and reach payload decode: {current_error}"
     );
 
-    let previous = current - 1;
-    let previous_error = refuse(previous);
-    assert!(
-        matches!(
-            previous_error,
-            CodeIndexProductionErrorV1::SupersededSealedGenerationRevision(refused)
-                if refused == previous
-        ),
-        "the previous revision reached the wrong rejection: {previous_error}"
-    );
-    assert!(
-        previous_error
-            .to_string()
-            .contains("will be rebuilt from source")
-    );
+    // Revision 22 was published without the now-required TypeScript receiver
+    // rows. Keep that concrete wire boundary even as later formats advance:
+    // accepting it would discover the missing field during a file-page read
+    // instead of rebuilding from source at the manifest boundary.
+    for previous in BTreeSet::from([22, current - 1]) {
+        let previous_error = refuse(previous);
+        assert!(
+            matches!(
+                previous_error,
+                CodeIndexProductionErrorV1::SupersededSealedGenerationRevision(refused)
+                    if refused == previous
+            ),
+            "revision {previous} reached the wrong rejection: {previous_error}"
+        );
+        assert!(
+            previous_error
+                .to_string()
+                .contains("will be rebuilt from source")
+        );
+    }
 }
 
 /// Seal `generation` partitioned, keeping every segment in memory with the

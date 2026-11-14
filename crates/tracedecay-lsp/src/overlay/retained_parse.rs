@@ -362,7 +362,12 @@ mod tests {
             else {
                 panic!("expected canonical composite extraction");
             };
-            assert_eq!(*disposition, ParsedExtractionDisposition::ChangedRegions);
+            assert_eq!(
+                *disposition,
+                ParsedExtractionDisposition::Reset {
+                    reason: ParsedExtractionResetReason::ModuleBindingsChanged,
+                }
+            );
             assert!(result.nodes.iter().any(|node| node.name == "after_"));
             assert!(!result.nodes.iter().any(|node| node.name == "before"));
 
