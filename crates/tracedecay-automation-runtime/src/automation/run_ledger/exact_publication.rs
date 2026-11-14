@@ -771,7 +771,7 @@ fn publish_under_ledger_lock(
         ledger.write_all(b"\n").map_err(TraceDecayError::from)?;
     }
     sync_run_ledger_file_and_parent(ledger_path, &ledger)?;
-    verify_published_range(&mut ledger, &mut spool, &intent)?;
+    verify_published_range(&mut ledger, &mut spool, &intent, "post-append")?;
     clear_append_intent(dashboard_root)?;
     super::lifecycle_index::record_durable_run_ledger_append(&ledger, ledger_path, pre_append_eof);
     Ok(ExactRunPublishOutcome::Published)
@@ -828,9 +828,16 @@ fn recover_matching_append_intent(
             "automation run append intent has foreign bytes after its owned range",
         ));
     }
-    compare_owned_prefix(ledger, &mut spool, &intent, appended_len)?;
+    compare_owned_prefix(
+        ledger,
+        &mut spool,
+        &intent,
+        appended_len,
+        ledger_len,
+        "resumed-prefix",
+    )?;
     if appended_len == complete_len {
-        verify_published_range(ledger, &mut spool, &intent)?;
+        verify_published_range(ledger, &mut spool, &intent, "recovered-complete")?;
         sync_run_ledger_file_and_parent(ledger_path, ledger)?;
         clear_append_intent(dashboard_root)?;
         super::lifecycle_index::record_durable_run_ledger_append(
@@ -857,6 +864,8 @@ fn compare_owned_prefix(
     spool: &mut std::fs::File,
     intent: &LedgerAppendIntent,
     appended_len: u64,
+    ledger_len: u64,
+    phase: &'static str,
 ) -> Result<()> {
     ledger
         .seek(SeekFrom::Start(intent.pre_append_eof))
@@ -865,7 +874,7 @@ fn compare_owned_prefix(
         .seek(SeekFrom::Start(0))
         .map_err(TraceDecayError::from)?;
     let payload_prefix = appended_len.min(intent.publication.payload_len);
-    compare_exact_bytes(ledger, spool, payload_prefix)?;
+    compare_exact_bytes(ledger, spool, payload_prefix, intent, ledger_len, phase)?;
     if appended_len > intent.publication.payload_len {
         let mut delimiter = [0_u8; 1];
         ledger
@@ -884,25 +893,31 @@ fn verify_published_range(
     ledger: &mut std::fs::File,
     spool: &mut std::fs::File,
     intent: &LedgerAppendIntent,
+    phase: &'static str,
 ) -> Result<()> {
     let complete_len = exact_run_framed_payload_len(intent.publication.payload_len)?;
     let expected_end = intent
         .pre_append_eof
         .checked_add(complete_len)
         .ok_or_else(|| config_error("automation run append range overflowed"))?;
-    if ledger.metadata().map_err(TraceDecayError::from)?.len() != expected_end {
+    let ledger_len = ledger.metadata().map_err(TraceDecayError::from)?.len();
+    if ledger_len != expected_end {
         return Err(config_error(
             "automation run ledger changed outside its exact append range",
         ));
     }
-    compare_owned_prefix(ledger, spool, intent, complete_len)
+    compare_owned_prefix(ledger, spool, intent, complete_len, ledger_len, phase)
 }
 
 fn compare_exact_bytes(
     left: &mut std::fs::File,
     right: &mut std::fs::File,
     mut remaining: u64,
+    intent: &LedgerAppendIntent,
+    ledger_len: u64,
+    phase: &'static str,
 ) -> Result<()> {
+    let compared_payload_len = remaining;
     let mut left_buffer = vec![0_u8; COPY_BUFFER_BYTES];
     let mut right_buffer = vec![0_u8; COPY_BUFFER_BYTES];
     while remaining > 0 {
@@ -914,9 +929,20 @@ fn compare_exact_bytes(
             .read_exact(&mut right_buffer[..take])
             .map_err(TraceDecayError::from)?;
         if left_buffer[..take] != right_buffer[..take] {
-            return Err(config_error(
-                "automation run append intent does not own the ledger tail",
-            ));
+            let equal_prefix_len = left_buffer[..take]
+                .iter()
+                .zip(&right_buffer[..take])
+                .take_while(|(left, right)| left == right)
+                .count() as u64;
+            let first_differing_payload_offset =
+                compared_payload_len - remaining + equal_prefix_len;
+            return Err(config_error(format!(
+                "automation run append intent does not own the ledger tail: \
+                 phase={phase}, ledger_start={}, compared_payload_len={compared_payload_len}, \
+                 observed_ledger_len={ledger_len}, validated_spool_len={}, \
+                 first_differing_payload_offset={first_differing_payload_offset}",
+                intent.pre_append_eof, intent.publication.payload_len,
+            )));
         }
         remaining -= take as u64;
     }
