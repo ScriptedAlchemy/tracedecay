@@ -5,6 +5,39 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.0-beta.103](https://github.com/ScriptedAlchemy/tracedecay/compare/v1.0.0-beta.102...v1.0.0-beta.103) (2026-11-14)
+
+
+### Features
+
+* **codegraph:** improve call tracing and unresolved call evidence ([a8d75f6](https://github.com/ScriptedAlchemy/tracedecay/commit/a8d75f66e5acb610d842e931f95b9783a9b778e2))
+
+
+### Bug Fixes
+
+* **automation:** attribute ledger tail ownership refusals ([767c5b2](https://github.com/ScriptedAlchemy/tracedecay/commit/767c5b2c6e63b7d0724a81537b1ae95382c764ab))
+* **automation:** attribute ledger tail ownership refusals ([5d61bfe](https://github.com/ScriptedAlchemy/tracedecay/commit/5d61bfe3389fa7108027e395a1f6254a80b56fa1))
+* **code-extraction:** attribute receiver writes to lexical bindings ([9f46cde](https://github.com/ScriptedAlchemy/tracedecay/commit/9f46cde0c9a3a23affa68e6c3d80dbad76b7940c))
+* **diagnostics:** appoint compiler before runtime publication ([2e07cdf](https://github.com/ScriptedAlchemy/tracedecay/commit/2e07cdf21493beca97dbe6ad4b52577add648875))
+* **fs:** classify nonregular sealed receipt opens ([4c85732](https://github.com/ScriptedAlchemy/tracedecay/commit/4c8573292f5166520cefc69b0a18e2080d1deb63))
+* **graph:** clean failed initial staging receipts ([3606c63](https://github.com/ScriptedAlchemy/tracedecay/commit/3606c631db5f0a5c75ea1522634cb388e968d460))
+* **graph:** verify sealed retirement and preserve retry state ([6c5599d](https://github.com/ScriptedAlchemy/tracedecay/commit/6c5599df60b024308ecb24946d63bcbd803b32d5))
+* **private-fs:** clean failed Windows pending receipts ([546c8b6](https://github.com/ScriptedAlchemy/tracedecay/commit/546c8b65766baca388947357932da4b8e0bfaec8))
+* reconcile relation receipts with dashboard cleanup ([f3e9976](https://github.com/ScriptedAlchemy/tracedecay/commit/f3e9976c66550c47f6ef5d352c23d9c0f4fc702c))
+* **retention:** integrate reviewed master changes ([74dc425](https://github.com/ScriptedAlchemy/tracedecay/commit/74dc425346b861499a60c2b8903e3853f33a02b0))
+* **retention:** verify GC bootstrap progress and batch writer pages ([d2650cd](https://github.com/ScriptedAlchemy/tracedecay/commit/d2650cdd4714a88aadb8c33d94f920a3fafb0c32))
+* **sessions:** end cancelled app-server turns without stdout EOF ([7269bc0](https://github.com/ScriptedAlchemy/tracedecay/commit/7269bc0087090c7cb6207e14ddee689ee75eea76))
+* **sessions:** release receipt readers before native publication ([d97ff00](https://github.com/ScriptedAlchemy/tracedecay/commit/d97ff00401594cdb3a085968819e487387c150a9))
+* **sqlite:** join failed reader startup before returning pins ([f7a8a1c](https://github.com/ScriptedAlchemy/tracedecay/commit/f7a8a1c85e33000c88075d9c6cf907757067571b))
+* **sqlite:** join failed reader startup before returning pins ([0054bb1](https://github.com/ScriptedAlchemy/tracedecay/commit/0054bb175d2f02de2c97a61223b8e686640e2fa1))
+* **sqlite:** join failed reader startup before returning pins ([01b0ebb](https://github.com/ScriptedAlchemy/tracedecay/commit/01b0ebb6ac0c720c6e4679e7e8385d707c24620e))
+
+
+### Performance Improvements
+
+* **sessions:** bound projection queue-head scans per write window ([1d32223](https://github.com/ScriptedAlchemy/tracedecay/commit/1d32223766d8dbbe7dbd6cfb26165ba63caec082))
+* **test:** avoid duplicate dashboard relation projections ([4b587bd](https://github.com/ScriptedAlchemy/tracedecay/commit/4b587bd9598eb40b13cce385a2576104b0105c2b))
+
 ## [1.0.0-beta.102](https://github.com/ScriptedAlchemy/tracedecay/compare/v1.0.0-beta.101...v1.0.0-beta.102) (2026-11-13)
 
 
