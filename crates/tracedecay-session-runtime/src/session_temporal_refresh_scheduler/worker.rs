@@ -1657,10 +1657,8 @@ async fn drain_staged_completions<'a>(
     for item in survivors {
         match native_runtime::timeout(
             policy.operation_deadline,
-            access.apply_candidate_relation_projection(
-                &item.projection,
-                &state.completion_control(),
-            ),
+            access
+                .apply_candidate_relation_projection(&item.projection, &state.completion_control()),
         )
         .await
         {
