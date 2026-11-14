@@ -1749,7 +1749,6 @@ mod tests {
         GraphProjectionId, GraphProjectionIdentity, GraphProjectorRevision,
         SealedCodeGenerationReplay, SealedGraphStateDigest, SpilledGraphGeneration,
     };
-    use tracedecay_runtime_core::logging::FormattedTracingCapture;
     use tracedecay_store::{
         BrainId, GraphNamespaceV1, GraphProjectionIdV1, GraphProjectionIdentityV1, StoreShardIdV1,
         UserProfileId,
@@ -4346,10 +4345,6 @@ mod tests {
             .join(fixture.pool_manifest.file_name().unwrap());
         std::fs::copy(&fixture.pool_manifest, &canonical).unwrap();
         let hydrate_route = |route_kind: &str| {
-            let capture = FormattedTracingCapture::start_with_target_span_timings(&[
-                "tracedecay_store_runtime::session_registry::code_graph_manifest",
-                "tracedecay_code_index::graph_projection::builder",
-            ]);
             let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
             hydrate(&provider, &owner, &source, &|| {
                 if std::time::Instant::now() >= deadline {
@@ -4358,12 +4353,7 @@ mod tests {
                     Ok(())
                 }
             })
-            .unwrap_or_else(|error| {
-                panic!(
-                    "{route_kind} hydration failed: {error:?}\n{}",
-                    capture.text()
-                )
-            });
+            .unwrap_or_else(|error| panic!("{route_kind} hydration failed: {error:?}"));
         };
         hydrate_route("canonical");
         std::fs::remove_file(&canonical).unwrap();
