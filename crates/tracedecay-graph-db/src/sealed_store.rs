@@ -2132,6 +2132,12 @@ fn build_or_open_sealed_store_with_work(
             "sealed root must be a real directory",
         ));
     }
+    let owner = SealedStagingOwnerV1 {
+        producer: row_spill_owner().to_string(),
+        receipt: initial_sealed_staging_owner(identity, expected, physical_namespace.as_str()),
+    };
+    let owner_bytes = serde_json::to_vec(&owner)
+        .map_err(|error| GraphDbError::unavailable(format!("staging owner encode: {error}")))?;
     // A deterministic staging name is not proof of ownership. An earlier
     // interrupted build or a foreign directory must not be deleted on retry.
     // Exclusive creation refuses an occupied name, and every byte below is
@@ -2139,16 +2145,10 @@ fn build_or_open_sealed_store_with_work(
     // the staging name cannot redirect a producer write into a foreign tree.
     let staging_directory = HeldDirectory::create_exclusive(&root, &staging_name)
         .map_err(|error| sealed_store_io_failure("staging directory create failed", error))?;
-    let owner = SealedStagingOwnerV1 {
-        producer: row_spill_owner().to_string(),
-        receipt: initial_sealed_staging_owner(identity, expected, physical_namespace.as_str()),
-    };
-    let owner_bytes = serde_json::to_vec(&owner)
-        .map_err(|error| GraphDbError::unavailable(format!("staging owner encode: {error}")))?;
     // Exclusive creation refuses a pre-existing marker. Flush before writing
     // rows so a killed producer leaves verifiable deletion authority.
-    staging_directory
-        .write_new_file(
+    let staging_directory = staging_directory
+        .write_initial_receipt(
             std::ffi::OsStr::new(SEALED_STAGING_OWNER_FILE),
             &owner_bytes,
         )

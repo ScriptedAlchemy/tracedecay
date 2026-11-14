@@ -318,8 +318,9 @@ pub fn sync_directory(directory: &Dir) -> io::Result<()> {
 /// Persist a new producer-owned staging receipt through a held directory.
 ///
 /// An exclusive marker creation is the only authority for removing an
-/// incomplete marker. On write/sync failure, remove only that marker and
-/// attempt a nonrecursive removal of the same held directory. A substituted
+/// incomplete marker. On open failure, attempt only nonrecursive removal of
+/// the empty held directory. On write/sync failure, remove only that marker
+/// and attempt nonrecursive removal of the same held directory. A substituted
 /// directory containing other bytes must survive. The caller must disable
 /// pathname-based temporary-directory cleanup before invoking this operation.
 pub fn write_exclusive_pending_receipt_nofollow(
@@ -329,9 +330,28 @@ pub fn write_exclusive_pending_receipt_nofollow(
 ) -> io::Result<()> {
     require_entry_name(filename)?;
     let directory = open_root_nofollow(directory_path)?;
+    write_exclusive_pending_receipt(directory, filename, contents).map(|_| ())
+}
+
+fn write_exclusive_pending_receipt(
+    directory: Dir,
+    filename: &OsStr,
+    contents: &[u8],
+) -> io::Result<Dir> {
     let mut options = OpenOptions::new();
     options.write(true).create_new(true);
-    let marker = directory.open_with(filename, &options)?;
+    let opened = require_entry_name(filename).and_then(|()| directory.open_with(filename, &options));
+    let marker = match opened {
+        Ok(marker) => marker,
+        Err(error) => {
+            // No marker was created, so only emptiness can authorize cleanup.
+            // Keep the original refusal if this best-effort removal fails.
+            if let Err(cleanup) = directory.remove_open_dir() {
+                tracing::warn!(%cleanup, "pending owner directory could not be removed");
+            }
+            return Err(error);
+        }
+    };
     write_pending_receipt(directory, filename, marker, contents)
 }
 
@@ -341,7 +361,7 @@ fn write_pending_receipt(
     filename: &OsStr,
     mut marker: File,
     contents: &[u8],
-) -> io::Result<()> {
+) -> io::Result<Dir> {
     #[cfg(unix)]
     let marker_identity = marker
         .metadata()
@@ -387,7 +407,7 @@ fn write_pending_receipt(
         }
         return Err(error);
     }
-    Ok(())
+    Ok(directory)
 }
 
 /// Publish a rebuildable marker through one held directory. Replacing the
@@ -515,6 +535,17 @@ impl HeldDirectory {
         require_entry_name(name)?;
         let root = open_root_nofollow(root_path)?;
         root.open_dir_nofollow(name)
+            .map(|directory| Self { directory })
+    }
+
+    /// Persist the initial owner receipt and retain this directory on success.
+    ///
+    /// The caller must own this unpublished directory. Invalid names and
+    /// failed marker opens attempt only nonrecursive removal of the held
+    /// directory. Failed writes or syncs first remove only the identity-checked
+    /// marker. Cleanup is best effort and never replaces the original error.
+    pub fn write_initial_receipt(self, name: &OsStr, contents: &[u8]) -> io::Result<Self> {
+        write_exclusive_pending_receipt(self.directory, name, contents)
             .map(|directory| Self { directory })
     }
 
