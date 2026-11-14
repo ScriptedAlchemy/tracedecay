@@ -1715,6 +1715,13 @@ mod tests {
             self.inner.execute(sql, params).await
         }
 
+        async fn execute_statements(
+            &self,
+            statements: Vec<tracedecay_runtime_core::db::engine::WriteStatement>,
+        ) -> EngineResult<Vec<u64>> {
+            self.inner.execute_statements(statements).await
+        }
+
         async fn execute_batch(&self, sql: &str) -> EngineResult<()> {
             self.inner.execute_batch(sql).await
         }
