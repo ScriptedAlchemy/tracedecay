@@ -55,11 +55,7 @@ impl Drop for HostFileWriteLock {
 /// a pathological churn storm surfaces as a typed error instead of a spin.
 const HOST_FILE_LOCK_ACQUIRE_ATTEMPTS: usize = 64;
 
-#[tracing::instrument(
-    name = "agent_hosts.agents.config.lock",
-    level = "trace",
-    skip_all
-)]
+#[tracing::instrument(name = "agent_hosts.agents.config.lock", level = "trace", skip_all)]
 pub(super) fn lock_host_file_write(path: &Path) -> Result<HostFileWriteLock> {
     let parent = path
         .parent()
@@ -284,11 +280,7 @@ impl HostFileSnapshot {
     }
 }
 
-#[tracing::instrument(
-    name = "agent_hosts.agents.config.snapshot",
-    level = "trace",
-    skip_all
-)]
+#[tracing::instrument(name = "agent_hosts.agents.config.snapshot", level = "trace", skip_all)]
 fn capture_host_file_snapshot(path: &Path) -> std::io::Result<HostFileSnapshot> {
     let before = match std::fs::symlink_metadata(path) {
         Ok(metadata) if metadata.file_type().is_file() => metadata,
@@ -421,16 +413,22 @@ pub(crate) fn update_two_config_files_locked<T>(
     let first_existing = snapshot_utf8(first_path, &first_snapshot)?;
     let second_existing = snapshot_utf8(second_path, &second_snapshot)?;
     let (output, first_mutation, second_mutation) = update(first_existing, second_existing)?;
-    tracing::trace_span!("agent_hosts.agents.config.apply_document", document = "first")
-        .in_scope(|| apply_file_mutation(first_path, &first_snapshot, &first_mutation))?;
-    tracing::trace_span!("agent_hosts.agents.config.apply_document", document = "second")
-        .in_scope(|| apply_file_mutation(second_path, &second_snapshot, &second_mutation))
-        .map_err(|error| TraceDecayError::Config {
-            message: format!(
-                "{error}; earlier changes to {} remain in place",
-                first_path.display()
-            ),
-        })?;
+    tracing::trace_span!(
+        "agent_hosts.agents.config.apply_document",
+        document = "first"
+    )
+    .in_scope(|| apply_file_mutation(first_path, &first_snapshot, &first_mutation))?;
+    tracing::trace_span!(
+        "agent_hosts.agents.config.apply_document",
+        document = "second"
+    )
+    .in_scope(|| apply_file_mutation(second_path, &second_snapshot, &second_mutation))
+    .map_err(|error| TraceDecayError::Config {
+        message: format!(
+            "{error}; earlier changes to {} remain in place",
+            first_path.display()
+        ),
+    })?;
     Ok(output)
 }
 
