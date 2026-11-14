@@ -170,19 +170,21 @@ fn relative_windows_store_root_publishes_reads_and_restores() {
         relative_store.clone(),
         Arc::new(SharedCodeIndexBytePoolV1::default()),
     );
-    assert!(producer.store_root.is_absolute());
+    let owned_store_root = producer
+        .publication
+        .generations_root
+        .parent()
+        .expect("publication store root");
+    assert!(owned_store_root.is_absolute());
     assert_eq!(
-        producer
-            .store_root
-            .canonicalize()
-            .expect("owned store root"),
+        owned_store_root.canonicalize().expect("owned store root"),
         relative_store
             .canonicalize()
             .expect("the caller's actual store"),
     );
     assert_eq!(
         producer.publication.generations_root,
-        producer.store_root.join("code-generations-v1"),
+        owned_store_root.join("code-generations-v1"),
     );
     let evidence = published(
         producer
@@ -245,7 +247,14 @@ fn relative_windows_store_root_publishes_reads_and_restores() {
         PathBuf::from("./relative-store/./nested"),
         Arc::new(SharedCodeIndexBytePoolV1::default()),
     );
-    assert!(reopened.store_root.is_absolute());
+    assert!(
+        reopened
+            .publication
+            .generations_root
+            .parent()
+            .expect("reopened publication store root")
+            .is_absolute()
+    );
     assert_eq!(reopened.sealed_decode_count(), 0);
     let restored = reopened
         .publication
@@ -356,19 +365,30 @@ fn manifest_metadata_and_lazy_source_admission_remain_payload_free() {
     ));
     assert_eq!(memory.snapshot().used_bytes, standing.reserved_bytes());
     drop(standing);
+    // The parked reader owns the canonical factory as well as its pack map.
+    // Measure that factory's actual admission without opening either payload.
+    let factory = cold
+        .publication
+        .retained_pack_read_factory(identity.clone())
+        .expect("admit the retained reader factory without payloads");
+    let factory_bytes = memory.snapshot().used_bytes;
+    assert!(factory_bytes > 0);
+    drop(factory);
+    assert_eq!(memory.snapshot().used_bytes, 0);
     let source = text
         .text_artifact_store
         .open_sealed_source(&identity, &UninterruptibleCodeIndexControlV1)
         .expect("a lazy source admits its map without opening either payload pack");
     let map_bytes = source.admitted_pack_layout_bytes() as u64;
     assert!(map_bytes > 0);
-    assert_eq!(memory.snapshot().used_bytes, map_bytes);
+    let source_bytes = map_bytes + factory_bytes;
+    assert_eq!(memory.snapshot().used_bytes, source_bytes);
     drop(text);
     drop(cold);
     assert_eq!(
         memory.snapshot().used_bytes,
-        map_bytes,
-        "the parked source retains its own map admission"
+        source_bytes,
+        "the parked source retains its map and factory admissions"
     );
     drop(source);
     assert_eq!(memory.snapshot().used_bytes, 0);

@@ -3345,7 +3345,7 @@ fn partitioned_codec_fixture() -> (
 
 // The sealed generation revision is part of the authenticated manifest payload.
 const PARTITIONED_FORMAT_STATE_DIGEST: &str =
-    "sha256:08e91a89b2dd82615897c5df08b74740fc483551f8f8cef1ef57cf96a93c837f";
+    "sha256:59c65ca2016673cecf09843cf09cceb6779f41590271e0c85e54f7a6e42276db";
 
 #[test]
 fn admitted_partitioned_source_refuses_before_decode_and_releases_parse_workspace() {

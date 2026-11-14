@@ -6,6 +6,7 @@ use super::{IntoParams, Result, Value};
 ///
 /// Construction performs the same request validation as scalar execution, so
 /// a malformed statement is attributed before any batch reaches the writer.
+#[derive(Clone)]
 pub struct WriteStatement {
     exact: ExactSqlStatement,
 }

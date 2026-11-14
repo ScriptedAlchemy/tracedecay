@@ -168,6 +168,7 @@ fn segment_sweep_marks_a_replay_unlink_while_staged() {
             "snapshot": { "files": [] },
             "file_segments": [],
             "file_evidence": [],
+            "content_pack": single_segment_content_pack(index_bytes),
             "code_graph_pages": [],
             "generation_evidence": {
                 "segment_digest": format!("sha256:{orphan_digest}"),

@@ -111,6 +111,13 @@ impl Executor for SnapshotConnection {
         .map_err(|error| EngineError::Runtime(format!("snapshot execute task failed: {error}")))?
     }
 
+    async fn execute_statements(
+        &self,
+        statements: Vec<crate::db::engine::WriteStatement>,
+    ) -> crate::db::engine::Result<Vec<u64>> {
+        crate::db::engine::execute_statements_serially(self, statements).await
+    }
+
     async fn execute_batch(&self, sql: &str) -> crate::db::engine::Result<()> {
         let cx = crate::native_runtime::handle().ok_or(EngineError::RuntimeContextUnavailable)?;
         let connection = Arc::clone(&self.connection);

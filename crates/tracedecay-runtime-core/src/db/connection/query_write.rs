@@ -114,6 +114,27 @@ impl Database {
         .await?
     }
 
+    /// Executes owned parameterized writes in one brokered writer job.
+    #[doc(hidden)]
+    pub async fn execute_write_statements(
+        &self,
+        operation: &str,
+        statements: Vec<crate::db::engine::WriteStatement>,
+    ) -> Result<Vec<u64>> {
+        let operation_name = operation.to_owned();
+        self.transact(operation, async move |tx| {
+            let operation_name = operation_name.clone();
+            let statements = statements.clone();
+            tx.execute_statements(statements)
+                .await
+                .map_err(|error| TraceDecayError::Database {
+                    message: format!("failed to execute brokered write statements: {error}"),
+                    operation: operation_name,
+                })
+        })
+        .await?
+    }
+
     /// Executes one authority-revalidated schema or bulk-maintenance batch
     /// through the canonical long-lease writer path.
     ///

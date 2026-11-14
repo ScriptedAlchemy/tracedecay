@@ -16,7 +16,8 @@ use tempfile::TempDir;
 use tracedecay_application::diagnostics_publication::CodeIndexPublicationIdentityPortV1;
 use tracedecay_application::lsp_runtime::LspCodeIndexProjectionIdentityPort;
 use tracedecay_code_index_retention::code_index_generations::{
-    acquire_code_generation_store_lock, try_acquire_code_generation_store_read_lock,
+    DurableSealedCodeGenerationIdentityV1, acquire_code_generation_store_lock,
+    try_acquire_code_generation_store_read_lock,
 };
 use tracedecay_contracts::code_index_freshness::{
     CodeGraphServingReadinessV1, CodeIndexBuildBlockedReasonV1, CodeIndexReadinessTargetV1,
@@ -2112,6 +2113,7 @@ fn chunker_transition_preserves_safe_serving_until_replacement() {
 /// sealed segments on disk, one window of files at a time, without decoding
 /// the generation.
 fn sealed_segment_graph_store(
+    publication: &super::super::DaemonCodeIndexPublicationStoreV1,
     binding: &super::super::CodeGraphReplayBindingV1,
     generation_id: &tracedecay_domain::CodeGenerationId,
     scratch: &Path,
@@ -2132,30 +2134,30 @@ fn sealed_segment_graph_store(
             .join(format!("generation-{digest}.json")),
     )
     .expect("sealed manifest");
-    let segments_root =
-        tracedecay_code_index_retention::code_index_generations::code_generation_segments_root(
-            binding.generations_root.parent().expect("store root"),
-        );
     let source =
         tracedecay_code_index::production::SealedGenerationFileWindowsV1::open(&sealed_manifest)
             .expect("sealed manifest opens");
+    let layout =
+        tracedecay_code_index::production::SealedGenerationPackLayoutV1::open(&sealed_manifest)
+            .expect("canonical packed layout");
+    let identity = DurableSealedCodeGenerationIdentityV1 {
+        locator: format!("generation-{digest}.json"),
+        digest: tracedecay_domain::ManifestDigest::new(binding.sealed_state_digest.as_str())
+            .expect("canonical sealed digest"),
+        size_bytes: sealed_manifest.len() as u64,
+    };
+    let factory = publication
+        .retained_pack_read_factory(identity)
+        .expect("retain the publication's admitted pack authority");
+    let control = UninterruptibleCodeIndexControlV1;
+    let mut read_pack = factory(&control, &layout).expect("open the graph's physical pack pass");
     let manifest = tracedecay_code_index::graph_projection::build_sealed_code_graph_rows(
         projection.clone(),
         &source,
         &mut |request, buffer| {
-            let tracedecay_code_index::production::SealedGenerationSegmentReadV1::Whole {
-                digest,
-                ..
-            } = request
-            else {
-                panic!("the graph build reads whole file segments");
-            };
-            *buffer = std::fs::read(segments_root.join(format!(
-                "segment-{}.json",
-                tracedecay_domain::sha256_hex_suffix(digest.as_str()).expect("segment digest")
-            )))
-            .expect("sealed segment");
-            Ok(())
+            source.read_segment(request, buffer, |physical, buffer| {
+                read_pack(physical, buffer, &control)
+            })
         },
         &projector_revision,
         tracedecay_graph_db::GraphGenerationRowSpill::create(scratch.join("rows"), projection)
@@ -2196,7 +2198,12 @@ fn occurrence_graph_store_is_available_before_catalog_warm() {
         .code_graph_replay_binding(&generation_id)
         .expect("sealed replay binding");
     let scratch = TempDir::new().expect("graph row scratch");
-    let graph_store = sealed_segment_graph_store(&binding, &generation_id, scratch.path());
+    let graph_store = sealed_segment_graph_store(
+        &scheduler.publication,
+        &binding,
+        &generation_id,
+        scratch.path(),
+    );
     let reader = graph_store
         .evidence_reader_with_cancellation(
             &generation_id,
@@ -3954,8 +3961,18 @@ async fn refused_decode_of_a_graph_serving_publication_seats_on_the_follow_up_pa
         .await
         .expect("mounted worktree")
         .expect("sealed replay binding");
+    let publication = {
+        let mounted = registry.mounted.lock().await;
+        mounted
+            .get(&canonical_existing_identity(fixture.path()).expect("canonical root"))
+            .expect("mounted worktree")
+            .historical_generation_owner
+            .publication
+            .clone()
+    };
     let scratch = TempDir::new().expect("graph row scratch");
-    let graph_store = sealed_segment_graph_store(&binding, &generation_id, scratch.path());
+    let graph_store =
+        sealed_segment_graph_store(&publication, &binding, &generation_id, scratch.path());
     let reader = graph_store
         .evidence_reader_with_cancellation(
             &generation_id,
@@ -4110,8 +4127,17 @@ async fn graph_reads_serve_the_outgoing_warm_graph_until_the_successor_warms() {
         .await
         .expect("mounted worktree")
         .expect("sealed replay binding");
+    let publication = {
+        let mounted = registry.mounted.lock().await;
+        mounted
+            .get(&canonical_existing_identity(root).expect("canonical root"))
+            .expect("mounted worktree")
+            .historical_generation_owner
+            .publication
+            .clone()
+    };
     let scratch = TempDir::new().expect("graph row scratch");
-    let warming = sealed_segment_graph_store(&binding, &second, scratch.path());
+    let warming = sealed_segment_graph_store(&publication, &binding, &second, scratch.path());
     let reader = warming
         .evidence_reader_with_cancellation(
             &second,

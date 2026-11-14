@@ -125,6 +125,13 @@ impl Executor for RegisteredGlobalDbWriterConnection<'_> {
         RegisteredGlobalDbWriterConnection::execute(self, sql, params).await
     }
 
+    async fn execute_statements(
+        &self,
+        statements: Vec<tracedecay_runtime_core::db::engine::WriteStatement>,
+    ) -> tracedecay_runtime_core::db::engine::Result<Vec<u64>> {
+        RegisteredGlobalDbWriterConnection::execute_statements(self, statements).await
+    }
+
     async fn execute_batch(&self, sql: &str) -> tracedecay_runtime_core::db::engine::Result<()> {
         RegisteredGlobalDbWriterConnection::execute_batch(self, sql).await
     }

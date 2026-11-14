@@ -24,6 +24,8 @@ struct CountingStoreV1 {
 
 struct CountingPreparationV1 {
     inner: MemoryCodeIndexPreparationV1,
+    reads: Arc<AtomicUsize>,
+    read_digests: Arc<Mutex<Vec<ManifestDigest>>>,
     writes: Arc<Mutex<BTreeMap<ManifestDigest, usize>>>,
 }
 
@@ -53,7 +55,18 @@ impl CodeIndexPreparationPort for CountingPreparationV1 {
     }
 
     fn segment_reader(&self) -> Arc<SealedSegmentReaderV1> {
-        self.inner.segment_reader()
+        let read = self.inner.segment_reader();
+        let reads = Arc::clone(&self.reads);
+        let read_digests = Arc::clone(&self.read_digests);
+        Arc::new(move |request, buffer| {
+            reads.fetch_add(1, Ordering::Relaxed);
+            let digest = match request {
+                SealedGenerationSegmentReadV1::Whole { digest, .. }
+                | SealedGenerationSegmentReadV1::Range { digest, .. } => digest,
+            };
+            read_digests.lock().expect("read log").push(digest.clone());
+            read(request, buffer)
+        })
     }
 
     fn finalize_content_pack(
@@ -83,52 +96,7 @@ impl CodeIndexAtomicPublicationPort for CountingStoreV1 {
         &self,
         scope: &CodeIndexGenerationScopeV1,
     ) -> Result<Option<CodeIndexSealedGenerationV1>, CodeIndexPublicationStoreErrorV1> {
-        let Some(active) = self.inner.load_active(scope)? else {
-            return Ok(None);
-        };
-        let pack = Arc::new(
-            partitioned_codec::parse_partitioned_manifest(active.manifest_bytes())
-                .map_err(|error| CodeIndexPublicationStoreErrorV1::Unavailable(error.to_string()))?
-                .content_pack,
-        );
-        let reads = Arc::clone(&self.reads);
-        let read_digests = Arc::clone(&self.read_digests);
-        Ok(Some(CodeIndexSealedGenerationV1::new(
-            Arc::from(active.manifest_bytes()),
-            Arc::new(move || {
-                let read = active.begin_read_pass()?;
-                let reads = Arc::clone(&reads);
-                let read_digests = Arc::clone(&read_digests);
-                let pack = Arc::clone(&pack);
-                let observed: Arc<SealedSegmentReaderV1> = Arc::new(move |request, buffer| {
-                    reads.fetch_add(1, Ordering::Relaxed);
-                    let (digest, offset, length) = match request {
-                        SealedGenerationSegmentReadV1::Whole { digest, size_bytes } => {
-                            (digest, 0, size_bytes)
-                        }
-                        SealedGenerationSegmentReadV1::Range {
-                            digest,
-                            offset,
-                            length,
-                            ..
-                        } => (digest, offset, length),
-                    };
-                    let logical = (digest == &pack.digest)
-                        .then(|| {
-                            pack.extents.iter().find(|extent| {
-                                offset >= extent.offset
-                                    && offset - extent.offset <= extent.size_bytes
-                                    && length <= extent.size_bytes - (offset - extent.offset)
-                            })
-                        })
-                        .flatten()
-                        .map_or(digest, |extent| &extent.digest);
-                    read_digests.lock().expect("read log").push(logical.clone());
-                    read(request, buffer)
-                });
-                Ok(observed)
-            }),
-        )))
+        self.inner.load_active(scope)
     }
 
     fn prepare(
@@ -143,6 +111,8 @@ impl CodeIndexAtomicPublicationPort for CountingStoreV1 {
         self.writes.lock().expect("write log").clear();
         Ok(CountingPreparationV1 {
             inner,
+            reads: Arc::clone(&self.reads),
+            read_digests: Arc::clone(&self.read_digests),
             writes: Arc::clone(&self.writes),
         })
     }
@@ -336,7 +306,7 @@ fn an_edit_reads_and_writes_only_what_it_changes() {
         let reads = store.reads.load(Ordering::Relaxed);
         assert!(
             reads < 24,
-            "an edit to one of {LEAVES} files read {reads} parent segments"
+            "an edit to one of {LEAVES} files read {reads} logical segments"
         );
         let written = written_evidence(&store, &edited);
         assert_eq!(

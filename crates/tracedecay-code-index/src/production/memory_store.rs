@@ -81,7 +81,8 @@ impl MemorySealedPublicationStoreV1 {
         self.state().publications
     }
 
-    /// Reads this store served of the segment `digest` addresses.
+    /// External logical reads and physical pack reads by content address.
+    /// Internal content-pack assembly copies count only as physical reads.
     pub fn segment_reads(&self, digest: &ManifestDigest) -> u64 {
         self.state().reads.get(digest).copied().unwrap_or_default()
     }
@@ -305,7 +306,10 @@ impl MemoryPreparationStateV1 {
         &self,
         request: SealedGenerationSegmentReadV1<'_>,
         buffer: &mut Vec<u8>,
-        read_pack: &SealedSegmentReaderV1,
+        read_pack: impl FnMut(
+            SealedGenerationSegmentReadV1<'_>,
+            &mut Vec<u8>,
+        ) -> Result<(), CodeIndexProductionErrorV1>,
     ) -> Result<(), CodeIndexProductionErrorV1> {
         buffer.clear();
         if self.closed && !self.committed {
@@ -526,11 +530,20 @@ impl CodeIndexPreparationPort for MemoryCodeIndexPreparationV1 {
 
     fn segment_reader(&self) -> Arc<SealedSegmentReaderV1> {
         let staged = Arc::clone(&self.state);
+        let store = self.store.clone();
         let incumbent = self.store.pack_reader();
         Arc::new(move |request, buffer| {
             // Commit and abort wait for active copies, not escaped closures.
             let state = staged.lock().unwrap_or_else(PoisonError::into_inner);
-            state.read_logical(request, buffer, incumbent.as_ref())
+            state.read_logical(request, buffer, |physical, buffer| {
+                // Observe decoded logical extents at the external reader, not
+                // the finalizer's copies of every carried content extent.
+                let digest = request_digest(request);
+                if digest != request_digest(physical) {
+                    *store.state().reads.entry(digest.clone()).or_default() += 1;
+                }
+                incumbent(physical, buffer)
+            })
         })
     }
 

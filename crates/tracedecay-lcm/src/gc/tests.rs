@@ -1707,6 +1707,14 @@ impl<E: Executor + ?Sized> Executor for CountingExecutor<'_, E> {
         self.counter.tick();
         self.inner.execute_batch(sql).await
     }
+
+    async fn execute_statements(
+        &self,
+        statements: Vec<tracedecay_runtime_core::db::engine::WriteStatement>,
+    ) -> tracedecay_runtime_core::db::engine::Result<Vec<u64>> {
+        self.counter.tick();
+        self.inner.execute_statements(statements).await
+    }
 }
 
 fn batch_ref(index: usize) -> String {

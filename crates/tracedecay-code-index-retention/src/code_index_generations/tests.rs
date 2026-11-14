@@ -8,10 +8,27 @@ use std::ffi::CString;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 #[cfg(target_os = "linux")]
 use std::os::unix::ffi::OsStrExt;
+use tracedecay_code_index::production::{
+    SealedGenerationContentExtentV1, SealedGenerationContentPackV1,
+};
 use tracedecay_domain::sha256_hex_suffix;
 
 mod graph_replay_pool_lock_tests;
 mod graph_replay_release_tests;
+
+fn single_segment_content_pack(bytes: &[u8]) -> SealedGenerationContentPackV1 {
+    let digest = ManifestDigest::from_sha256_bytes(&Sha256::digest(bytes)).expect("content digest");
+    let size_bytes = u64::try_from(bytes.len()).expect("content byte count");
+    SealedGenerationContentPackV1 {
+        digest: digest.clone(),
+        size_bytes,
+        extents: vec![SealedGenerationContentExtentV1 {
+            digest,
+            offset: 0,
+            size_bytes,
+        }],
+    }
+}
 
 /// Marks the newest `count` superseded fixture generations as vector-readable
 /// sources so a fixture keeps exactly one collectable generation: the exact
@@ -2022,6 +2039,7 @@ fn segment_mark_reads_a_generation_manifest_with_one_kernel_open() {
         "snapshot": { "files": [] },
         "file_segments": [],
         "file_evidence": [],
+        "content_pack": single_segment_content_pack(evidence_bytes),
         "generation_evidence": {
             "segment_digest": evidence_digest,
             "segment_size_bytes": evidence_bytes.len(),

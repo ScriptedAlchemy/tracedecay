@@ -1036,6 +1036,16 @@ impl RegisteredGlobalDbWriterConnection<'_> {
             .await
             .map_err(engine_error)
     }
+
+    pub async fn execute_statements(
+        &self,
+        statements: Vec<tracedecay_runtime_core::db::engine::WriteStatement>,
+    ) -> tracedecay_runtime_core::db::engine::Result<Vec<u64>> {
+        self.database
+            .execute_write_statements("execute registered global database statements", statements)
+            .await
+            .map_err(engine_error)
+    }
 }
 
 pub struct RegisteredGlobalDbWriteTransaction<'a> {
@@ -1066,6 +1076,13 @@ impl Executor for RegisteredGlobalDbWriteTransaction<'_> {
         P: IntoParams,
     {
         RegisteredGlobalDbWriteTransaction::execute(self, sql, params).await
+    }
+
+    async fn execute_statements(
+        &self,
+        statements: Vec<tracedecay_runtime_core::db::engine::WriteStatement>,
+    ) -> tracedecay_runtime_core::db::engine::Result<Vec<u64>> {
+        RegisteredGlobalDbWriteTransaction::execute_statements(self, statements).await
     }
 
     async fn execute_batch(&self, sql: &str) -> tracedecay_runtime_core::db::engine::Result<()> {
@@ -1122,6 +1139,13 @@ impl RegisteredGlobalDbWriteTransaction<'_> {
         sql: &str,
     ) -> tracedecay_runtime_core::db::engine::Result<()> {
         self.transaction.execute_batch(sql).await
+    }
+
+    pub async fn execute_statements(
+        &self,
+        statements: Vec<tracedecay_runtime_core::db::engine::WriteStatement>,
+    ) -> tracedecay_runtime_core::db::engine::Result<Vec<u64>> {
+        self.transaction.execute_statements(statements).await
     }
 
     #[tracing::instrument(name = "global_db.registered.txn.commit", level = "trace", skip_all)]
@@ -1199,6 +1223,13 @@ impl Executor for RegisteredGlobalDbWriteTx<'_, '_> {
         P: IntoParams,
     {
         self.transaction.execute(sql, params).await
+    }
+
+    async fn execute_statements(
+        &self,
+        statements: Vec<tracedecay_runtime_core::db::engine::WriteStatement>,
+    ) -> EngineResult<Vec<u64>> {
+        self.transaction.execute_statements(statements).await
     }
 
     async fn execute_batch(&self, sql: &str) -> EngineResult<()> {

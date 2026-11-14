@@ -111,14 +111,17 @@ fn captured_source_bytes_are_charged_until_the_snapshot_drops() {
 fn reconcile_leaves_no_captured_source_charged_after_the_build() {
     let project = fixture();
     let store = TempDir::new().expect("store root");
+    let byte_pool = Arc::new(SharedCodeIndexBytePoolV1::default());
     let mut scheduler = CodeIndexWorktreeSchedulerV1::open(
         ProjectId::new("project.code-index-source-build-copy").expect("valid project"),
         project.path(),
         store.path().to_path_buf(),
-        Arc::new(SharedCodeIndexBytePoolV1::default()),
+        Arc::clone(&byte_pool),
     )
     .expect("open scheduler");
     let authority = ledger_memory(DEFAULT_PROCESS_RESIDENT_MEMORY_LIMIT_V1);
+    let source_component = ResidentMemoryComponentIdV1::new("code_index.snapshot.source_bytes.v1")
+        .expect("captured source component");
     scheduler.bind_resident_memory(Arc::clone(&authority));
     let captured = scheduler
         .capture_authoritative_snapshot(None)
@@ -128,13 +131,31 @@ fn reconcile_leaves_no_captured_source_charged_after_the_build() {
         u64::try_from("pub fn retained_generation() -> u32 { 1 }\n".len()).expect("fits"),
         "captured source is charged while a build holds it"
     );
+    assert!(
+        authority
+            .snapshot()
+            .charges
+            .iter()
+            .any(|charge| charge.key.component == source_component && charge.bytes > 0),
+        "the source component must observe the live capture before testing its release"
+    );
     drop(captured);
+    assert_eq!(authority.snapshot().used_bytes, 0);
 
     assert!(matches!(
         scheduler.reconcile_now().expect("publish generation"),
         CodeIndexReconcileOutcomeV1::Published(_)
     ));
-    assert_eq!(authority.snapshot().used_bytes, 0);
+    assert!(
+        authority
+            .snapshot()
+            .charges
+            .iter()
+            .all(|charge| charge.key.component != source_component),
+        "the sealed manifest may remain admitted, but no captured source charge survives"
+    );
+    assert_eq!(byte_pool.stats().source_allocations, 0);
+    assert_eq!(byte_pool.stats().live_sources, 0);
     assert_eq!(
         scheduler
             .latest_complete()
@@ -154,6 +175,18 @@ fn reconcile_leaves_no_captured_source_charged_after_the_build() {
             .expect("reconcile unchanged source"),
         CodeIndexReconcileOutcomeV1::Noop(_)
     ));
+    assert!(
+        authority
+            .snapshot()
+            .charges
+            .iter()
+            .all(|charge| charge.key.component != source_component),
+        "a no-build reconcile releases its captured source charge too"
+    );
+    assert_eq!(byte_pool.stats().source_allocations, 0);
+    assert_eq!(byte_pool.stats().live_sources, 0);
+    drop(scheduler);
+    drop(byte_pool);
     assert_eq!(authority.snapshot().used_bytes, 0);
 }
 
