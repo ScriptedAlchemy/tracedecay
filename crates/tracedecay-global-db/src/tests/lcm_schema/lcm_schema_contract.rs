@@ -7,7 +7,7 @@ async fn legacy_profile_requires_reset_without_carrying_session_content_forward(
     let db_path = tmp.path().join(".tracedecay").join("sessions.db");
     create_legacy_sessions_db(&db_path).await;
 
-    let error = match open_global_db(&db_path).await {
+    let error = match initialize_global_db(&db_path).await {
         Err(error) => error,
         Ok(_) => panic!("legacy session content must require an explicit profile reset"),
     };
@@ -31,8 +31,9 @@ async fn stale_or_future_lcm_marker_requires_reset_without_rewriting_marker() {
     ] {
         let tmp = TempDir::new().unwrap();
         let db_path = tmp.path().join(".tracedecay").join("sessions.db");
-        let db = open_global_db(&db_path).await.expect("fresh global db");
-        drop(db);
+        initialize_global_db(&db_path)
+            .await
+            .expect("fresh global db");
         set_migration_version(&db_path, found_version).await;
 
         let (lease, owner) = open_registered_test_database_fixture(
