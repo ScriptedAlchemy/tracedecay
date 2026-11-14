@@ -68,13 +68,13 @@ pub(super) fn publish<P: CodeIndexAtomicPublicationPort>(
     fresh: Option<usize>,
     over_parent: bool,
     sealed_at: i64,
-) -> CodeIndexPublishedBuildV1 {
-    owner
-        .build_and_publish(
-            fixture_request(files, fresh, over_parent, sealed_at),
-            &UninterruptibleCodeIndexControlV1,
-        )
-        .expect("publish the fixture tree")
+) -> (CodeIndexPublishedBuildV1, ResidentMemoryOperationV1) {
+    let request = fixture_request(files, fresh, over_parent, sealed_at);
+    let operation = request.resident_memory.begin_operation();
+    let published = owner
+        .build_and_publish(request, &UninterruptibleCodeIndexControlV1)
+        .expect("publish the fixture tree");
+    (published, operation)
 }
 
 fn fixture_request(
@@ -164,14 +164,16 @@ struct DifferentialCounts {
 fn restored_answers(
     store: &WorkerPublicationStore,
     published: &CodeIndexPublishedBuildV1,
+    operation: &ResidentMemoryOperationV1,
 ) -> (
     Vec<CanonicalRelationEdgeV1>,
     Vec<crate::chunks::CodeIndexUnresolvedReferenceV1>,
 ) {
     let restored = store
-        .decode_active(&CodeIndexGenerationScopeV1::for_snapshot(
-            published.snapshot(),
-        ))
+        .decode_active(
+            &CodeIndexGenerationScopeV1::for_snapshot(published.snapshot()),
+            operation,
+        )
         .expect("the published generation restores")
         .expect("an active generation");
     (restored.edges, restored.unresolved_calls)
@@ -193,15 +195,15 @@ fn assert_seals_like_cold(
     let store = WorkerPublicationStore::default();
     let mut owner =
         CodeIndexProductionOwnerV1::new(worker_config(), store.clone()).expect("production owner");
-    let parent = publish(&mut owner, base_tree, base_fresh, false, 1_100_000);
-    let parent_answers = restored_answers(&store, &parent);
+    let (parent, parent_operation) = publish(&mut owner, base_tree, base_fresh, false, 1_100_000);
+    let parent_answers = restored_answers(&store, &parent, &parent_operation);
     super::helpers::take_seal_reference_resolutions();
-    let edited = publish(&mut owner, edited_tree, Some(index), true, 1_200_000);
+    let (edited, edited_operation) = publish(&mut owner, edited_tree, Some(index), true, 1_200_000);
     let build_resolutions = super::helpers::take_seal_reference_resolutions();
     let path = &edited_tree[index].0;
 
     let cold_store = WorkerPublicationStore::default();
-    let cold = publish(
+    let (cold, cold_operation) = publish(
         &mut CodeIndexProductionOwnerV1::new(worker_config(), cold_store.clone())
             .expect("cold production owner"),
         edited_tree,
@@ -210,10 +212,10 @@ fn assert_seals_like_cold(
         1_200_000,
     );
     super::helpers::take_seal_reference_resolutions();
-    let answers = restored_answers(&store, &edited);
+    let answers = restored_answers(&store, &edited, &edited_operation);
     assert_eq!(
         answers,
-        restored_answers(&cold_store, &cold),
+        restored_answers(&cold_store, &cold, &cold_operation),
         "restored answers after editing {path}"
     );
     assert_eq!(
@@ -257,9 +259,12 @@ fn differential_counts(language: &str) -> DifferentialCounts {
     let store = WorkerPublicationStore::default();
     let mut owner =
         CodeIndexProductionOwnerV1::new(worker_config(), store.clone()).expect("production owner");
-    let base = publish(&mut owner, &tree, None, false, 1_000_000);
+    let (base, operation) = publish(&mut owner, &tree, None, false, 1_000_000);
     let base = store
-        .decode_active(&CodeIndexGenerationScopeV1::for_snapshot(base.snapshot()))
+        .decode_active(
+            &CodeIndexGenerationScopeV1::for_snapshot(base.snapshot()),
+            &operation,
+        )
         .expect("decode cold fixture")
         .expect("cold fixture active");
     let mut counts = DifferentialCounts::default();
@@ -351,8 +356,10 @@ fn cold_resolution_index_publication_advances_actual_work_counts() {
     let mut owner =
         CodeIndexProductionOwnerV1::new(worker_config(), store.clone()).expect("production owner");
     let observer = ResolutionWork::default();
+    let request = fixture_request(&files, None, false, 1_500_000);
+    let operation = request.resident_memory.begin_operation();
     let published = owner
-        .build_and_publish(fixture_request(&files, None, false, 1_500_000), &observer)
+        .build_and_publish(request, &observer)
         .expect("real cold reference resolution");
     assert_eq!(
         observer.1.load(std::sync::atomic::Ordering::Acquire),
@@ -383,9 +390,10 @@ fn cold_resolution_index_publication_advances_actual_work_counts() {
     );
     assert!(
         store
-            .decode_active(&CodeIndexGenerationScopeV1::for_snapshot(
-                published.snapshot(),
-            ))
+            .decode_active(
+                &CodeIndexGenerationScopeV1::for_snapshot(published.snapshot()),
+                &operation,
+            )
             .expect("read the committed cold generation")
             .is_some(),
         "counted index segments must produce a readable published generation"
@@ -474,9 +482,12 @@ fn a_restored_parent_and_the_edit_over_it_resolve_nothing_whole() {
         let store = WorkerPublicationStore::default();
         let mut owner = CodeIndexProductionOwnerV1::new(worker_config(), store.clone())
             .expect("production owner");
-        let parent = publish(&mut owner, &tree, None, false, 1_000_000);
+        let (parent, parent_operation) = publish(&mut owner, &tree, None, false, 1_000_000);
         let parent = store
-            .decode_active(&CodeIndexGenerationScopeV1::for_snapshot(parent.snapshot()))
+            .decode_active(
+                &CodeIndexGenerationScopeV1::for_snapshot(parent.snapshot()),
+                &parent_operation,
+            )
             .expect("decode cold fixture")
             .expect("cold fixture active");
         assert!(
@@ -489,7 +500,7 @@ fn a_restored_parent_and_the_edit_over_it_resolve_nothing_whole() {
         super::helpers::take_seal_reference_resolutions();
         let scope = CodeIndexGenerationScopeV1::for_snapshot(parent.snapshot());
         let restored = store
-            .decode_active(&scope)
+            .decode_active(&scope, &parent_operation)
             .expect("the parent restores")
             .expect("an active parent");
         assert_eq!(
@@ -511,7 +522,8 @@ fn a_restored_parent_and_the_edit_over_it_resolve_nothing_whole() {
             .expect("a source file");
         let mut shifted = tree.clone();
         shifted[index].1 = format!("\n\n{}", tree[index].1);
-        let edited = publish(&mut restarted, &shifted, Some(index), true, 1_100_000);
+        let (edited, edited_operation) =
+            publish(&mut restarted, &shifted, Some(index), true, 1_100_000);
         assert_eq!(
             edited.cold_reason(),
             None,
@@ -523,7 +535,7 @@ fn a_restored_parent_and_the_edit_over_it_resolve_nothing_whole() {
             "{language}: the first build after the restart resolved the corpus whole"
         );
         let edited = store
-            .decode_active(&scope)
+            .decode_active(&scope, &edited_operation)
             .expect("the edit restores")
             .expect("an active edit");
         let full_resolution =

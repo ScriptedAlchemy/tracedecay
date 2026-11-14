@@ -68,10 +68,10 @@ pub fn build_sealed_code_graph_rows(
         .map_err(|error| CodeGraphProjectionError::Contract(error.to_string()))?;
     let mut pages = SealedCodeGraphPageStoreV1::new(source, read_segment);
     let descriptors = pages.pages().to_vec();
-    admit(sealed_page_graph_build_bound(
-        &descriptors,
-        projection.namespace.as_str().len(),
-    ))?;
+    admit(
+        sealed_page_graph_build_bound(&descriptors, projection.namespace.as_str().len())
+            .with_retained_source_bytes(source.retained_pack_bytes()),
+    )?;
     let mut attachment = CodeGraphPageStoreWriterV1::create(
         &spill.attachment_path(),
         &generation,

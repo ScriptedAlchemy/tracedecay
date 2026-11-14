@@ -1,5 +1,7 @@
 use std::fs::File;
 use std::io::Read;
+#[cfg(unix)]
+use std::os::unix::fs::MetadataExt;
 use std::path::Path;
 
 use sha2::{Digest, Sha256};
@@ -14,14 +16,14 @@ use super::{
 const MAX_FORMAT_REVISION_PREFIX_BYTES: usize = 4 * 1024;
 const GENERATION_METADATA_READ_CHUNK_BYTES: usize = 4 * 1024;
 
-pub(super) fn read_generation_format_revision(
+pub(super) fn read_generation_format_revision_from_file(
+    file: &mut File,
     path: &Path,
     is_cancelled: &dyn Fn() -> bool,
 ) -> Result<u32, CodeGenerationRetentionErrorV1> {
     if is_cancelled() {
         return Err(CodeGenerationRetentionErrorV1::Cancelled);
     }
-    let file = File::open(path).map_err(deferred_if_absent)?;
     let mut prefix = Vec::with_capacity(MAX_FORMAT_REVISION_PREFIX_BYTES);
     file.take(MAX_FORMAT_REVISION_PREFIX_BYTES as u64)
         .read_to_end(&mut prefix)
@@ -47,8 +49,29 @@ pub(super) fn read_generation_metadata(
     if is_cancelled() {
         return Err(CodeGenerationRetentionErrorV1::Cancelled);
     }
+    // Enumerating a content-addressed name does not authorize following an
+    // alias to another generation. This metadata witness adds no pathname open.
+    let named_before = path.symlink_metadata().map_err(deferred_if_absent)?;
+    if !named_before.file_type().is_file() {
+        let message = format!("generation file '{}' is not a regular file", path.display());
+        // A substituted link is an authority violation. Other non-files
+        // remain storage-shape failures, not missing publisher entries.
+        return Err(if named_before.file_type().is_symlink() {
+            CodeGenerationRetentionErrorV1::UnsafeState(message)
+        } else {
+            storage(message)
+        });
+    }
     let mut file = File::open(path).map_err(deferred_if_absent)?;
-    let size_bytes = file.metadata().map_err(storage)?.len();
+    let opened_before = file.metadata().map_err(storage)?;
+    #[cfg(unix)]
+    if !same_generation_file_identity(&named_before, &opened_before) {
+        return Err(CodeGenerationRetentionErrorV1::UnsafeState(format!(
+            "generation file '{}' changed while opening",
+            path.display()
+        )));
+    }
+    let size_bytes = opened_before.len();
     let mut hasher = Sha256::new();
     let (format_revision, manifest) =
         read_generation_metadata_prefix(&mut file, path, verification, &mut hasher, is_cancelled)?;
@@ -75,7 +98,42 @@ pub(super) fn read_generation_metadata(
         }
         GenerationDigestVerificationV1::MetadataOnly => named_state_digest(path)?,
     };
+    // The manifest, digest and reported size must belong to the pathname
+    // enumerated by retention, not a replaced inode or modified old handle.
+    // Metadata-only scans cannot fall back to trusting a substituted name.
+    let named_after = path.symlink_metadata().map_err(deferred_if_absent)?;
+    let opened_after = file.metadata().map_err(storage)?;
+    #[cfg(unix)]
+    let unchanged = same_generation_file_identity(&named_before, &named_after)
+        && same_generation_file_identity(&named_before, &opened_after);
+    #[cfg(not(unix))]
+    let unchanged = named_after.file_type().is_file()
+        && opened_after.is_file()
+        && named_after.len() == size_bytes
+        && opened_after.len() == size_bytes;
+    if !unchanged {
+        return Err(CodeGenerationRetentionErrorV1::UnsafeState(format!(
+            "generation file '{}' changed during metadata read",
+            path.display()
+        )));
+    }
     Ok((format_revision, manifest, state_digest, size_bytes))
+}
+
+#[cfg(unix)]
+fn same_generation_file_identity(
+    original: &std::fs::Metadata,
+    current: &std::fs::Metadata,
+) -> bool {
+    original.file_type().is_file()
+        && current.file_type().is_file()
+        && original.dev() == current.dev()
+        && original.ino() == current.ino()
+        && original.len() == current.len()
+        && original.mtime() == current.mtime()
+        && original.mtime_nsec() == current.mtime_nsec()
+        && original.ctime() == current.ctime()
+        && original.ctime_nsec() == current.ctime_nsec()
 }
 
 /// Read only as far as complete metadata requires, up to the existing bound.
@@ -233,6 +291,8 @@ mod tests {
     use std::cell::Cell;
     use std::fs::{self, File, OpenOptions};
     use std::io::{Seek, SeekFrom, Write};
+    #[cfg(unix)]
+    use std::os::unix::fs::MetadataExt;
     use std::path::{Path, PathBuf};
 
     use sha2::{Digest, Sha256};
@@ -242,7 +302,8 @@ mod tests {
     use super::{
         CodeGenerationRetentionErrorV1, GENERATION_METADATA_READ_CHUNK_BYTES,
         GenerationDigestVerificationV1, MAX_GENERATION_METADATA_PREFIX_BYTES, parse_json_u32_field,
-        read_generation_format_revision, read_generation_metadata, read_generation_metadata_prefix,
+        read_generation_format_revision_from_file, read_generation_metadata,
+        read_generation_metadata_prefix,
     };
 
     fn generation_bytes(manifest_padding: usize, payload_bytes: usize) -> Vec<u8> {
@@ -270,10 +331,13 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let bytes = generation_bytes(0, 256 * 1024);
         let (path, expected_digest) = write_generation(root.path(), &bytes);
+        let mut revision_file = File::open(&path).unwrap();
         assert_eq!(
-            read_generation_format_revision(&path, &|| false).unwrap(),
+            read_generation_format_revision_from_file(&mut revision_file, &path, &|| false)
+                .unwrap(),
             SEALED_GENERATION_FORMAT_REVISION_V1
         );
+        drop(revision_file);
         let mut file = File::open(&path).unwrap();
         let (revision, manifest) = read_generation_metadata_prefix(
             &mut file,
@@ -426,6 +490,80 @@ mod tests {
             file.stream_position().unwrap(),
             GENERATION_METADATA_READ_CHUNK_BYTES as u64
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn generation_metadata_refuses_symlink_aliases_in_both_modes() {
+        let root = tempfile::tempdir().unwrap();
+        let bytes = generation_bytes(0, 32 * 1024);
+        let (target, _) = write_generation(root.path(), &bytes);
+        let alias = root
+            .path()
+            .join(format!("generation-{}.json", "a".repeat(64)));
+        std::os::unix::fs::symlink(&target, &alias).unwrap();
+        assert_eq!(
+            fs::read(&alias).unwrap(),
+            bytes,
+            "alias resolves to valid bytes"
+        );
+
+        for mode in [
+            GenerationDigestVerificationV1::MetadataOnly,
+            GenerationDigestVerificationV1::Full,
+        ] {
+            assert!(matches!(
+                read_generation_metadata(&alias, mode, &|| false),
+                Err(CodeGenerationRetentionErrorV1::UnsafeState(_))
+            ));
+        }
+        let (_, _, digest, size) =
+            read_generation_metadata(&target, GenerationDigestVerificationV1::Full, &|| false)
+                .unwrap();
+        assert_eq!(
+            digest,
+            encode_tagged_lowercase_hex("sha256:", &Sha256::digest(&bytes))
+        );
+        assert_eq!(size, bytes.len() as u64);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn generation_metadata_refuses_same_byte_inode_rotation_during_read() {
+        for mode in [
+            GenerationDigestVerificationV1::MetadataOnly,
+            GenerationDigestVerificationV1::Full,
+        ] {
+            let root = tempfile::tempdir().unwrap();
+            let bytes = generation_bytes(0, 64 * 1024);
+            let (path, _) = write_generation(root.path(), &bytes);
+            let substitute = root.path().join("substitute.tmp");
+            fs::write(&substitute, &bytes).unwrap();
+            let original = fs::metadata(&path).unwrap();
+            let foreign = fs::metadata(&substitute).unwrap();
+            assert_ne!(
+                (original.dev(), original.ino()),
+                (foreign.dev(), foreign.ino()),
+                "the replacement must use a different real inode"
+            );
+            let probes = Cell::new(0_usize);
+            let result = read_generation_metadata(&path, mode, &|| {
+                let previous = probes.get();
+                probes.set(previous + 1);
+                // The third cancellation checkpoint is after reading the
+                // first nonempty prefix from the already-open descriptor.
+                if previous == 2 {
+                    fs::rename(&substitute, &path).unwrap();
+                }
+                false
+            });
+            assert!(probes.get() >= 3, "the real reader must cross the swap");
+            assert!(matches!(
+                result,
+                Err(CodeGenerationRetentionErrorV1::UnsafeState(_))
+            ));
+            assert_eq!(fs::read(&path).unwrap(), bytes);
+        }
     }
 
     #[test]

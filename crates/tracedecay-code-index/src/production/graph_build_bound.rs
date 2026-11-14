@@ -32,7 +32,8 @@ const GRAPH_ROW_SAMPLE_FILES_V1: usize = 256;
 /// state holding it. Each field is resident bytes.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct CodeGraphBuildBoundV1 {
-    /// The segment buffers and the largest window of decoded pages.
+    /// The segment buffers, the largest window of decoded pages, and the
+    /// authenticated pack map retained across the build.
     pub decode_window_bytes: u64,
     /// At the emission peak: rows buffered in the spill and the entity
     /// identities it keeps.
@@ -44,6 +45,16 @@ pub struct CodeGraphBuildBoundV1 {
 }
 
 impl CodeGraphBuildBoundV1 {
+    /// The packed source map remains live while every build stage runs.
+    /// Emission already includes the decode charge, so add it there only
+    /// through that shared field, and separately to the store stage.
+    pub(crate) fn with_retained_source_bytes(mut self, retained: usize) -> Self {
+        let retained = bytes(retained);
+        self.decode_window_bytes = self.decode_window_bytes.saturating_add(retained);
+        self.store_bytes = self.store_bytes.saturating_add(retained);
+        self
+    }
+
     /// Page acquisition holds one bounded decode window.
     #[must_use]
     pub fn resolve_bytes(&self) -> u64 {

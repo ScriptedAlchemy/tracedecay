@@ -1,3 +1,8 @@
+#[cfg(unix)]
+use std::os::unix::fs::MetadataExt;
+#[cfg(windows)]
+use std::os::windows::fs::MetadataExt;
+
 use std::{
     collections::{BTreeMap, BTreeSet},
     fmt::Write as _,
@@ -16,10 +21,11 @@ use tracedecay_code_index_retention::code_index_generations::{
     CODE_INDEX_PREPARATION_DIRECTORY_PREFIX_V1, CodeGenerationRetentionErrorV1,
     CodeGenerationRetentionModeV1, DEFAULT_STRANDED_SCOPE_MINIMUM_AGE_SECS,
     DurableGenerationCardinalityV1, DurableGenerationIndexEntryV1, DurablePublicationPointerV1,
-    MAX_CODE_GENERATION_RETENTION_BATCH_V1, acquire_code_generation_store_lock,
-    code_generation_segments_root, code_text_artifact_staging_root, code_text_artifacts_root,
-    durable_generation_index_digest, execute_code_generation_retention_cancellable,
-    execute_scope_root_retention, plan_scope_root_retention_with_liveness_proof,
+    DurableSealedCodeGenerationIdentityV1, MAX_CODE_GENERATION_RETENTION_BATCH_V1,
+    acquire_code_generation_store_lock, code_generation_segments_root,
+    code_text_artifact_staging_root, code_text_artifacts_root, durable_generation_index_digest,
+    execute_code_generation_retention_cancellable, execute_scope_root_retention,
+    plan_scope_root_retention_with_liveness_proof,
     prepare_next_code_generation_retention_cancellable, run_code_generation_retention,
     scope_root_liveness_proof, try_acquire_code_generation_store_read_lock,
     withdraw_verified_text_artifact_under_lock,
@@ -44,14 +50,17 @@ use super::super::publication_store::{
     ActiveGenerationDecodeChargeV1, UnpublishedCodeIndexPublicationV1,
 };
 use super::{
-    EIGHT_DAYS_SECS, GitFixture, RETAINED_REVISION_0, execute_proof_bound_scope_retention,
-    published, remove_historical_pointer_entries, retention_generations, scheduler, seeded_scope,
+    EIGHT_DAYS_SECS, GitFixture, RETAINED_REVISION_0, atomic_replace_fixture_pointer,
+    execute_proof_bound_scope_retention, persist_fixture_pointer, published,
+    remove_historical_pointer_entries, retention_generations, scheduler, seeded_scope,
     test_project_id, unix_now_secs, with_untouched_fillers,
 };
 use crate::code_index_scheduler::{
     CodeIndexReconcileOutcomeV1, CodeIndexSchedulerErrorV1, CodeIndexSchedulerRegistryV1,
     CodeIndexWorktreeSchedulerV1, SharedCodeIndexBytePoolV1, scoped_code_index_store_root,
 };
+#[cfg(target_os = "linux")]
+use tracedecay_code_index::production::SealedGenerationPackLayoutV1;
 use tracedecay_code_index::production::{
     CodeGraphBuildBoundV1, CodeIndexAtomicPublicationPort, CodeIndexExecutionControlV1,
     CodeIndexInterruptionV1, CodeIndexPreparationPort, CodeIndexProductionErrorV1,
@@ -60,6 +69,38 @@ use tracedecay_code_index::production::{
     SharedDecodedContentPoolV1, UninterruptibleCodeIndexControlV1, VerifiedSealedLexicalPageReadV1,
 };
 
+struct PublicationFixture {
+    store: super::super::DaemonCodeIndexPublicationStoreV1,
+    _scheduler: CodeIndexWorktreeSchedulerV1,
+}
+
+impl std::ops::Deref for PublicationFixture {
+    type Target = super::super::DaemonCodeIndexPublicationStoreV1;
+    fn deref(&self) -> &Self::Target {
+        &self.store
+    }
+}
+
+impl std::ops::DerefMut for PublicationFixture {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.store
+    }
+}
+
+fn opened_publication(fixture: &GitFixture, store: &Path) -> PublicationFixture {
+    let scheduler = CodeIndexWorktreeSchedulerV1::open(
+        test_project_id(),
+        fixture.path(),
+        store.to_path_buf(),
+        Arc::new(SharedCodeIndexBytePoolV1::default()),
+    )
+    .expect("open a publication owner with the canonical process authority");
+    PublicationFixture {
+        store: scheduler.publication.clone(),
+        _scheduler: scheduler,
+    }
+}
+
 /// Re-publication stages an already validated decoded generation through the
 /// same target writer; failures retain the port's exact typed refusal.
 fn publish_generation(
@@ -67,8 +108,9 @@ fn publish_generation(
     generation: &Arc<CodeIndexPublishedGenerationV1>,
     expected: Option<&CodeGenerationId>,
 ) -> Result<Arc<[u8]>, CodeIndexPublicationStoreErrorV1> {
-    let mut preparation = target.prepare(&generation.sealed_scope(), expected)?;
-    let publication = match generation.stage_publication(&mut preparation) {
+    let operation = target.resident_memory_authority()?.begin_operation();
+    let mut preparation = target.prepare(&generation.sealed_scope(), expected, &operation)?;
+    let publication = match generation.stage_publication(&mut preparation, &operation) {
         Ok(publication) => publication,
         Err(error) => {
             preparation.abort()?;
@@ -83,6 +125,273 @@ fn publish_generation(
         preparation.abort()?;
     }
     result
+}
+
+#[cfg(windows)]
+#[test]
+fn relative_windows_store_root_publishes_reads_and_restores() {
+    const CHILD_ENV: &str = "TRACEDECAY_RELATIVE_WINDOWS_STORE_CHILD";
+    const COMPLETED: &str = "relative-store-completed";
+    if std::env::var_os(CHILD_ENV).is_none() {
+        // Use the existing test-executable child pattern so this fixture owns
+        // its cwd without mutating the process shared by parallel tests.
+        let directory = TempDir::new().expect("isolated relative-store cwd");
+        let test_path = concat!(
+            module_path!(),
+            "::relative_windows_store_root_publishes_reads_and_restores"
+        );
+        let (_, test_path) = test_path.split_once("::").expect("test module has a crate");
+        let output =
+            std::process::Command::new(std::env::current_exe().expect("current test executable"))
+                .args(["--exact", test_path, "--nocapture"])
+                .env(CHILD_ENV, "1")
+                .current_dir(directory.path())
+                .output()
+                .expect("run the relative-store production journey");
+        assert!(
+            output.status.success(),
+            "relative-store child failed:\nstdout: {}\nstderr: {}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
+        );
+        assert_eq!(
+            std::fs::read(directory.path().join(COMPLETED))
+                .expect("the exact child must execute, not pass with zero selected tests"),
+            b"published, read, restored",
+        );
+        return;
+    }
+
+    let fixture = GitFixture::new(&[("src/lib.rs", "pub fn alpha() -> u32 { 1 }\n")]);
+    let relative_store = PathBuf::from("relative-store").join("nested");
+    assert!(!relative_store.is_absolute());
+    let mut producer = scheduler(
+        &fixture,
+        relative_store.clone(),
+        Arc::new(SharedCodeIndexBytePoolV1::default()),
+    );
+    let owned_store_root = producer
+        .publication
+        .generations_root
+        .parent()
+        .expect("publication store root");
+    assert!(owned_store_root.is_absolute());
+    assert_eq!(
+        owned_store_root.canonicalize().expect("owned store root"),
+        relative_store
+            .canonicalize()
+            .expect("the caller's actual store"),
+    );
+    assert_eq!(
+        producer.publication.generations_root,
+        owned_store_root.join("code-generations-v1"),
+    );
+    let evidence = published(
+        producer
+            .reconcile_now()
+            .expect("publish under a relative root"),
+    );
+    let latest = producer
+        .latest_complete()
+        .expect("the published generation serves");
+    let scope = latest.generation.sealed_scope();
+    let sealed = producer
+        .publication
+        .load_active(&scope)
+        .expect("load the actual sealed carrier")
+        .expect("the relative-root generation is active");
+    let manifest = sealed.manifest_bytes().to_vec();
+    drop(sealed);
+    let packs = CodeIndexPublishedGenerationV1::partitioned_pack_identities(&manifest)
+        .expect("the authentic physical pack roster");
+    assert_eq!(packs.len(), 2);
+    let expected_packs = packs
+        .into_iter()
+        .map(|pack| {
+            let suffix = sha256_hex_suffix(pack.digest.as_str()).expect("physical pack digest");
+            let path = code_generation_segments_root(&relative_store)
+                .join(format!("segment-{suffix}.json"));
+            let bytes = std::fs::read(path).expect("pack at the caller's actual store");
+            assert_eq!(u64::try_from(bytes.len()).unwrap(), pack.size_bytes);
+            (pack, bytes)
+        })
+        .collect::<Vec<_>>();
+    let assert_pack_reads = |publication: &super::super::DaemonCodeIndexPublicationStoreV1| {
+        let sealed = publication
+            .load_active(&scope)
+            .expect("load the sealed carrier")
+            .expect("the generation remains active");
+        assert_eq!(sealed.manifest_bytes(), manifest.as_slice());
+        let read = sealed
+            .begin_read_pass()
+            .expect("open the immutable pack pass");
+        let mut bytes = Vec::new();
+        for (pack, expected) in &expected_packs {
+            read(
+                SealedGenerationSegmentReadV1::Whole {
+                    digest: &pack.digest,
+                    size_bytes: pack.size_bytes,
+                },
+                &mut bytes,
+            )
+            .expect("read both real physical roles");
+            assert_eq!(&bytes, expected);
+        }
+    };
+    assert_pack_reads(&producer.publication);
+    drop(latest);
+    drop(producer);
+
+    let reopened = scheduler(
+        &fixture,
+        PathBuf::from("./relative-store/./nested"),
+        Arc::new(SharedCodeIndexBytePoolV1::default()),
+    );
+    assert!(
+        reopened
+            .publication
+            .generations_root
+            .parent()
+            .expect("reopened publication store root")
+            .is_absolute()
+    );
+    assert_eq!(reopened.sealed_decode_count(), 0);
+    let restored = reopened
+        .publication
+        .load_active_shared()
+        .expect("restore through the cold production decoder")
+        .expect("the real publication survives reopen");
+    assert_eq!(restored.manifest().generation_id, evidence.generation_id);
+    assert_eq!(reopened.sealed_decode_count(), 1);
+    assert_pack_reads(&reopened.publication);
+    std::fs::write(COMPLETED, b"published, read, restored")
+        .expect("record completion of the real child journey");
+}
+
+#[test]
+fn manifest_metadata_and_lazy_source_admission_remain_payload_free() {
+    let fixture = GitFixture::new(&[("src/lib.rs", "pub fn alpha() -> u32 { 1 }\n")]);
+    let store = TempDir::new().expect("publication store");
+    let mut producer = scheduler(
+        &fixture,
+        store.path().to_path_buf(),
+        Arc::new(SharedCodeIndexBytePoolV1::default()),
+    );
+    published(producer.reconcile_now().expect("publish the real fixture"));
+    let pointer = producer
+        .publication
+        .read_publication_pointer()
+        .expect("publication pointer")
+        .expect("published generation");
+    let entry = pointer
+        .generation_index
+        .iter()
+        .find(|entry| entry.generation_id == pointer.generation_id)
+        .expect("active generation is indexed");
+    let identity = DurableSealedCodeGenerationIdentityV1 {
+        locator: entry.generation_file.clone(),
+        digest: ManifestDigest::new(entry.state_digest.clone()).expect("manifest identity"),
+        size_bytes: entry.size_bytes,
+    };
+    drop(producer);
+    let bytes = std::fs::read(
+        store
+            .path()
+            .join("code-generations-v1")
+            .join(&identity.locator),
+    )
+    .expect("published manifest");
+    let packs = CodeIndexPublishedGenerationV1::partitioned_pack_identities(&bytes)
+        .expect("canonical physical pack roster");
+    assert_eq!(packs.len(), 2);
+    for pack in packs {
+        let suffix = sha256_hex_suffix(pack.digest.as_str()).expect("physical pack identity");
+        let path =
+            code_generation_segments_root(store.path()).join(format!("segment-{suffix}.json"));
+        std::fs::rename(&path, path.with_extension("hidden")).expect("hide the payload pack");
+    }
+    let mut cold = scheduler(
+        &fixture,
+        store.path().to_path_buf(),
+        Arc::new(SharedCodeIndexBytePoolV1::default()),
+    );
+    let limit = NonZeroU64::new(64 * 1024 * 1024).expect("memory limit");
+    let pressure = Arc::new(ResidentMemoryPressureV1::with_sampler(
+        limit,
+        Arc::new(|| None),
+    ));
+    let memory = Arc::new(ProcessResidentMemoryV1::with_pressure(limit, pressure));
+    cold.bind_resident_memory(Arc::clone(&memory));
+    let standing = memory
+        .reserve_process_shared(
+            ResidentMemoryComponentIdV1::new("other-build").expect("component"),
+            NonZeroU64::new(limit.get() - 1).expect("standing charge"),
+        )
+        .expect("the standing charge fits");
+    assert!(matches!(
+        cold.publication.partitioned_text_metadata(&identity),
+        Err(CodeIndexPublicationStoreErrorV1::ResidentMemoryRefused(_))
+    ));
+    assert_eq!(memory.snapshot().used_bytes, standing.reserved_bytes());
+    drop(standing);
+    let metadata = cold
+        .publication
+        .partitioned_text_metadata(&identity)
+        .expect("metadata admission after capacity returns")
+        .expect("the current format provides metadata without payloads");
+    assert_eq!(
+        metadata.manifest().generation_id.as_str(),
+        pointer.generation_id
+    );
+    // The new raw input, canonical DTO and pack map are scoped to this call;
+    // its existing compact metadata result does not retain those allocations.
+    assert_eq!(memory.snapshot().used_bytes, 0);
+
+    let text = cold
+        .historical_generation_owner()
+        .published_text_generation(&metadata.manifest().generation_id)
+        .expect("bind the retained text authority without payloads")
+        .expect("the published generation remains indexed");
+    let standing = memory
+        .reserve_process_shared(
+            ResidentMemoryComponentIdV1::new("other-build").expect("component"),
+            NonZeroU64::new(limit.get() - 1).expect("standing charge"),
+        )
+        .expect("the standing charge fits");
+    assert!(matches!(
+        text.text_artifact_store
+            .open_sealed_source(&identity, &UninterruptibleCodeIndexControlV1),
+        Err(RetrievalPortError::ResidentMemoryRefused(_))
+    ));
+    assert_eq!(memory.snapshot().used_bytes, standing.reserved_bytes());
+    drop(standing);
+    // The parked reader owns the canonical factory as well as its pack map.
+    // Measure that factory's actual admission without opening either payload.
+    let factory = cold
+        .publication
+        .retained_pack_read_factory(identity.clone())
+        .expect("admit the retained reader factory without payloads");
+    let factory_bytes = memory.snapshot().used_bytes;
+    assert!(factory_bytes > 0);
+    drop(factory);
+    assert_eq!(memory.snapshot().used_bytes, 0);
+    let source = text
+        .text_artifact_store
+        .open_sealed_source(&identity, &UninterruptibleCodeIndexControlV1)
+        .expect("a lazy source admits its map without opening either payload pack");
+    let map_bytes = source.admitted_pack_layout_bytes() as u64;
+    assert!(map_bytes > 0);
+    let source_bytes = map_bytes + factory_bytes;
+    assert_eq!(memory.snapshot().used_bytes, source_bytes);
+    drop(text);
+    drop(cold);
+    assert_eq!(
+        memory.snapshot().used_bytes,
+        source_bytes,
+        "the parked source retains its map and factory admissions"
+    );
+    drop(source);
+    assert_eq!(memory.snapshot().used_bytes, 0);
 }
 
 #[test]
@@ -102,12 +411,17 @@ fn a_prepared_publication_retries_without_a_construction_worker_reservation() {
         target_store.path().to_path_buf(),
         Arc::new(SharedCodeIndexBytePoolV1::default()),
     );
+    let operation = target
+        .publication
+        .resident_memory_authority()
+        .expect("canonical resident authority")
+        .begin_operation();
     let mut preparation = target
         .publication
-        .prepare(&generation.sealed_scope(), None)
+        .prepare(&generation.sealed_scope(), None, &operation)
         .expect("prepare target");
     let publication = generation
-        .stage_publication(&mut preparation)
+        .stage_publication(&mut preparation, &operation)
         .expect("stage target");
     let exact_manifest = Arc::clone(publication.manifest_bytes());
     target
@@ -151,6 +465,11 @@ fn a_prepared_publication_retries_without_a_construction_worker_reservation() {
             .as_ref(),
         exact_manifest.as_ref(),
     );
+    assert!(
+        memory.snapshot().used_bytes > standing.reserved_bytes(),
+        "the active manifest owner retains its admitted metadata and pack map"
+    );
+    drop(target);
     assert_eq!(memory.snapshot().used_bytes, standing.reserved_bytes());
 }
 
@@ -174,12 +493,17 @@ fn a_superseded_prepared_publication_returns_to_authoritative_reconcile() {
         target_store.path().to_path_buf(),
         Arc::new(SharedCodeIndexBytePoolV1::default()),
     );
+    let operation = target
+        .publication
+        .resident_memory_authority()
+        .expect("canonical resident authority")
+        .begin_operation();
     let mut preparation = target
         .publication
-        .prepare(&generation.sealed_scope(), None)
+        .prepare(&generation.sealed_scope(), None, &operation)
         .expect("prepare empty slot");
     let publication = generation
-        .stage_publication(&mut preparation)
+        .stage_publication(&mut preparation, &operation)
         .expect("stage publication");
     target
         .publication
@@ -381,9 +705,9 @@ fn partitioned_reclamation_is_bounded_and_preserves_retained_segments() {
         second_encoded_segment_bytes.saturating_mul(4) < first_encoded_segment_bytes,
         "one-file increment encoded {second_encoded_segment_bytes} segment bytes after the cold generation encoded {first_encoded_segment_bytes}"
     );
-    assert_eq!(
-        second_existing_segment_bytes_read, 0,
-        "unchanged content-addressed segments must not be reopened during incremental seal"
+    assert!(
+        second_existing_segment_bytes_read > 0,
+        "a self-contained successor copies retained logical extents from its bound parent"
     );
     let second_pointer: serde_json::Value =
         serde_json::from_slice(&std::fs::read(&pointer_path).expect("read second pointer"))
@@ -435,84 +759,19 @@ fn partitioned_reclamation_is_bounded_and_preserves_retained_segments() {
     );
 
     let segment_root = store.path().join("code-generation-segments-v1");
-    let component_sizes = |manifest: &serde_json::Value| {
-        let mut components = manifest["generation"]["file_segments"]
-            .as_array()
-            .expect("file segment descriptors")
-            .iter()
-            .map(|segment| {
-                (
-                    segment["segment_digest"]
-                        .as_str()
-                        .expect("file segment digest")
-                        .to_owned(),
-                    segment["segment_size_bytes"]
-                        .as_u64()
-                        .expect("file segment size"),
-                )
-            })
-            .collect::<BTreeMap<_, _>>();
-        for evidence in manifest["generation"]["file_evidence"]
-            .as_array()
-            .expect("file evidence descriptors")
-        {
-            components.insert(
-                evidence["segment_digest"]
-                    .as_str()
-                    .expect("file evidence digest")
-                    .to_owned(),
-                evidence["segment_size_bytes"]
-                    .as_u64()
-                    .expect("file evidence size"),
-            );
-        }
-        components.insert(
-            manifest["generation"]["generation_evidence"]["segment_digest"]
-                .as_str()
-                .expect("evidence segment digest")
-                .to_owned(),
-            manifest["generation"]["generation_evidence"]["segment_size_bytes"]
-                .as_u64()
-                .expect("evidence segment size"),
-        );
-        for page in manifest["generation"]["code_graph_pages"]
-            .as_array()
-            .expect("code graph page descriptors")
-        {
-            components.insert(
-                page["page_digest"]
-                    .as_str()
-                    .expect("code graph page digest")
-                    .to_owned(),
-                page["size_bytes"].as_u64().expect("code graph page size"),
-            );
-        }
-        let index = &manifest["generation"]["resolution_index"];
-        for page in index["definitions"]
-            .as_array()
-            .expect("resolution definition pages")
-            .iter()
-            .chain(
-                index["references"]
-                    .as_array()
-                    .expect("resolution reference pages"),
-            )
-            .chain([&index["import_aliases"]])
-        {
-            components.insert(
-                page["segment_digest"]
-                    .as_str()
-                    .expect("resolution index page digest")
-                    .to_owned(),
-                page["segment_size_bytes"]
-                    .as_u64()
-                    .expect("resolution index page size"),
-            );
-        }
-        components
+    let component_sizes = |path: &Path| {
+        CodeIndexPublishedGenerationV1::partitioned_pack_identities(
+            &std::fs::read(path).expect("read canonical pack manifest"),
+        )
+        .expect("authenticated physical pack roster")
+        .into_iter()
+        .map(|identity| (identity.digest.as_str().to_owned(), identity.size_bytes))
+        .collect::<BTreeMap<_, _>>()
     };
-    let first_components = component_sizes(&first_manifest);
-    let second_components = component_sizes(&second_manifest);
+    let first_components = component_sizes(&first_manifest_path);
+    let second_components = component_sizes(&second_manifest_path);
+    assert_eq!(first_components.len(), 2);
+    assert_eq!(second_components.len(), 2);
     let first_evidence_pack = first_manifest["generation"]["generation_evidence"]["segment_digest"]
         .as_str()
         .expect("first evidence pack digest")
@@ -537,10 +796,9 @@ fn partitioned_reclamation_is_bounded_and_preserves_retained_segments() {
         .expect("second manifest metadata")
         .len()
         .saturating_add(second_components.values().sum::<u64>());
-    assert!(
-        second_generation_growth.saturating_mul(2) < full_second_bytes,
-        "one-line edit added {second_generation_growth} physical bytes versus a \
-         {full_second_bytes}-byte full rewrite"
+    assert_eq!(
+        second_generation_growth, full_second_bytes,
+        "both changed packs are self-contained; sparse logical encoding still rewrites the full physical generation"
     );
     let segment_sizes = std::fs::read_dir(&segment_root)
         .expect("list content-addressed segments")
@@ -559,7 +817,7 @@ fn partitioned_reclamation_is_bounded_and_preserves_retained_segments() {
             .chain(second_components.keys())
             .collect::<BTreeSet<_>>()
             .len(),
-        "the segment directory must hold exactly the unique addressed components"
+        "the segment directory holds only the two roles from each retained generation"
     );
     let first_generation_segment_bytes = first_segments
         .iter()
@@ -584,7 +842,7 @@ fn partitioned_reclamation_is_bounded_and_preserves_retained_segments() {
     );
     assert!(
         second_generation_new_bytes.saturating_mul(8) < first_generation_segment_bytes,
-        "one-line edit rewrote {second_generation_new_bytes} bytes from a \
+        "one-line edit encoded {second_generation_new_bytes} logical file bytes from a \
          {first_generation_segment_bytes}-byte first generation"
     );
 
@@ -653,13 +911,7 @@ fn partitioned_reclamation_is_bounded_and_preserves_retained_segments() {
     );
 
     drop(scheduler);
-    let reopened = super::super::DaemonCodeIndexPublicationStoreV1::new(
-        store.path(),
-        fixture.path(),
-        SanitizerRevision::new(tracedecay_privacy::CODE_SOURCE_SANITIZER_VERSION_V1)
-            .expect("sanitizer revision"),
-    )
-    .expect("reopen after interrupted segment sweep");
+    let reopened = opened_publication(&fixture, store.path());
     for generation in [&first_generation, &second_generation] {
         assert!(
             reopened
@@ -761,14 +1013,14 @@ fn lazy_lexical_source_cancels_when_retention_retires_its_unread_segments() {
     let initial_cursor = source.cursor().clone();
     let lock = acquire_code_generation_store_lock(store.path()).expect("hold publication lock");
     assert!(matches!(
-        source.next_page(&CancelledCodeIndexControlV1),
+        source.begin_read_pass(&CancelledCodeIndexControlV1),
         Err(CodeIndexProductionErrorV1::Interrupted(
             CodeIndexInterruptionV1::Cancelled
         ))
     ));
     assert_eq!(source.cursor(), &initial_cursor);
     assert!(matches!(
-        source.next_page(&ExpiredCodeIndexControlV1),
+        source.begin_read_pass(&ExpiredCodeIndexControlV1),
         Err(CodeIndexProductionErrorV1::Interrupted(
             CodeIndexInterruptionV1::DeadlineExceeded
         ))
@@ -776,7 +1028,11 @@ fn lazy_lexical_source_cancels_when_retention_retires_its_unread_segments() {
     assert_eq!(source.cursor(), &initial_cursor);
     let (sent, received) = std::sync::mpsc::channel();
     let reader = std::thread::spawn(move || {
-        let result = source.next_page(&UninterruptibleCodeIndexControlV1);
+        let result = source
+            .begin_read_pass(&UninterruptibleCodeIndexControlV1)
+            .and_then(|mut pass| {
+                source.next_page(&UninterruptibleCodeIndexControlV1, pass.as_mut())
+            });
         sent.send((source, result)).expect("return lexical source");
     });
     // An immutable segment read holds the store as a shared reader: while a
@@ -814,7 +1070,7 @@ fn lazy_lexical_source_cancels_when_retention_retires_its_unread_segments() {
     assert_eq!(report.deleted_generations.len(), 1);
     assert!(
         matches!(
-            source.next_page(&UninterruptibleCodeIndexControlV1),
+            source.begin_read_pass(&UninterruptibleCodeIndexControlV1),
             Err(CodeIndexProductionErrorV1::Interrupted(
                 CodeIndexInterruptionV1::Cancelled
             ))
@@ -828,7 +1084,7 @@ fn lazy_lexical_source_cancels_when_retention_retires_its_unread_segments() {
     let identity = text_store
         .sealed_identity(&latest.generation.manifest().generation_id)
         .expect("successor seal identity");
-    let mut corrupt_source = text_store
+    let corrupt_source = text_store
         .open_sealed_source(&identity, &UninterruptibleCodeIndexControlV1)
         .expect("open source before pointer corruption");
     let cursor = corrupt_source.cursor().clone();
@@ -838,8 +1094,9 @@ fn lazy_lexical_source_cancels_when_retention_retires_its_unread_segments() {
     )
     .expect("corrupt hermetic publication pointer");
     let error = corrupt_source
-        .next_page(&UninterruptibleCodeIndexControlV1)
-        .expect_err("corrupt publication pointer must refuse source read");
+        .begin_read_pass(&UninterruptibleCodeIndexControlV1)
+        .err()
+        .expect("corrupt publication pointer must refuse source read");
     assert!(
         matches!(
             super::super::map_sealed_page_source_error(error),
@@ -862,19 +1119,11 @@ fn generation_decode_shares_store_and_refuses_exclusive_writer_contention() {
     published(scheduler.reconcile_now().expect("publish generation"));
     drop(scheduler);
 
-    let open_cold = |root: &Path, project: &Path| {
-        super::super::DaemonCodeIndexPublicationStoreV1::new(
-            root,
-            project,
-            SanitizerRevision::new(tracedecay_privacy::CODE_SOURCE_SANITIZER_VERSION_V1)
-                .expect("sanitizer revision"),
-        )
-        .expect("open cold publication store")
-    };
+    let open_cold = |root: &Path| opened_publication(&fixture, root);
 
     // `new` takes the exclusive store lock while it records the scope root, so
     // the store must be open before either probe hold or this test deadlocks.
-    let publication = open_cold(store.path(), fixture.path());
+    let publication = open_cold(store.path());
     let shared = try_acquire_code_generation_store_read_lock(store.path())
         .expect("shared hold")
         .expect("shared hold not contended");
@@ -893,7 +1142,7 @@ fn generation_decode_shares_store_and_refuses_exclusive_writer_contention() {
     drop(shared);
     reader.join().expect("shared reader exits");
 
-    let publication = open_cold(store.path(), fixture.path());
+    let publication = open_cold(store.path());
     let exclusive = acquire_code_generation_store_lock(store.path()).expect("exclusive hold");
     let refused = publication
         .load_active_shared()
@@ -993,20 +1242,17 @@ fn multi_page_evidence_uses_one_durable_pack_and_survives_restart() {
             .expect("evidence page descriptors");
         assert!(pages.len() > 1, "the production fixture must span pages");
         let segments_root = store.path().join("code-generation-segments-v1");
-        for descriptor in manifest["generation"]["file_segments"]
-            .as_array()
-            .expect("file segment descriptors")
-            .iter()
-            .map(|descriptor| &descriptor["segment_digest"])
-            .chain([&manifest["generation"]["generation_evidence"]["segment_digest"]])
-        {
-            let digest = sha256_hex_suffix(descriptor.as_str().expect("segment digest"))
-                .expect("tagged segment digest");
+        for descriptor in [
+            &manifest["generation"]["content_pack"]["digest"],
+            &manifest["generation"]["generation_evidence"]["segment_digest"],
+        ] {
+            let digest = sha256_hex_suffix(descriptor.as_str().expect("pack digest"))
+                .expect("tagged pack digest");
             assert!(
                 segments_root
                     .join(format!("segment-{digest}.json"))
                     .is_file(),
-                "every file segment and the one evidence pack are durable objects"
+                "both fixed payload roles are durable objects"
             );
         }
         for page in pages {
@@ -1050,13 +1296,7 @@ fn multi_page_evidence_uses_one_durable_pack_and_survives_restart() {
         )
     };
 
-    let reopened = super::super::DaemonCodeIndexPublicationStoreV1::new(
-        store.path(),
-        fixture.path(),
-        SanitizerRevision::new(tracedecay_privacy::CODE_SOURCE_SANITIZER_VERSION_V1)
-            .expect("sanitizer revision"),
-    )
-    .expect("reopen publication store");
+    let reopened = opened_publication(&fixture, store.path());
     assert!(
         reopened
             .load_generation(&generation_id)
@@ -1075,13 +1315,7 @@ fn multi_page_evidence_uses_one_durable_pack_and_survives_restart() {
         .expect("open evidence pack for truncation")
         .set_len(evidence_len - 1)
         .expect("truncate one evidence byte");
-    let corrupted = super::super::DaemonCodeIndexPublicationStoreV1::new(
-        store.path(),
-        fixture.path(),
-        SanitizerRevision::new(tracedecay_privacy::CODE_SOURCE_SANITIZER_VERSION_V1)
-            .expect("sanitizer revision"),
-    )
-    .expect("reopen corrupted publication store");
+    let corrupted = opened_publication(&fixture, store.path());
     assert!(
         corrupted.load_generation(&generation_id).is_err(),
         "a pack missing any page byte must fail closed after restart"
@@ -1096,7 +1330,7 @@ fn failed_and_crashed_evidence_pack_temporaries_are_removed() {
     std::fs::create_dir_all(&segments_root).expect("create segment root");
     let temporary_path = segments_root.join(".evidence-pack-publication.injected.tmp");
     {
-        let mut pack = super::super::TemporaryEvidencePackV1::create(temporary_path.clone())
+        let mut pack = super::super::TemporaryPayloadPackV1::create(temporary_path.clone())
             .expect("create temporary evidence pack");
         for ordinal in 0..3 {
             let bytes = format!("page-{ordinal}");
@@ -1268,7 +1502,7 @@ fn source_supersession_during_sealing_retries_the_reconcile() {
 
 #[test]
 fn retired_fence_cancels_a_generation_seal_between_segments() {
-    // One segment per file: shutdown is signalled after the first durable
+    // One logical segment per file: shutdown is signalled after the first staged
     // segment, exactly where a TERM lands on a large worktree's first build.
     let sources = (0..8)
         .map(|file| {
@@ -1313,18 +1547,15 @@ fn retired_fence_cancels_a_generation_seal_between_segments() {
     let published_segments = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let observer_segments = Arc::clone(&published_segments);
     let observer_shutting_down = Arc::clone(&shutting_down);
-    let mut publication = super::super::DaemonCodeIndexPublicationStoreV1::new(
-        target_store.path(),
-        fixture.path(),
-        SanitizerRevision::new(tracedecay_privacy::CODE_SOURCE_SANITIZER_VERSION_V1)
-            .expect("sanitizer revision"),
-    )
-    .expect("open target publication store")
-    .with_shutdown_signal(Arc::clone(&shutting_down))
-    .with_seal_segment_observer_for_test(Arc::new(move || {
-        observer_segments.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
-        observer_shutting_down.store(true, std::sync::atomic::Ordering::Release);
-    }));
+    let publication_owner = opened_publication(&fixture, target_store.path());
+    let mut publication = publication_owner
+        .store
+        .clone()
+        .with_shutdown_signal(Arc::clone(&shutting_down))
+        .with_seal_segment_observer_for_test(Arc::new(move || {
+            observer_segments.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+            observer_shutting_down.store(true, std::sync::atomic::Ordering::Release);
+        }));
 
     let error = publish_generation(&mut publication, &generation, None)
         .expect_err("shutdown signalled mid-seal must stop the publication");
@@ -1369,11 +1600,10 @@ fn retired_fence_cancels_a_generation_seal_between_segments() {
 }
 
 #[test]
-fn publishing_many_new_segments_syncs_the_segments_directory_once() {
-    // Eight distinct files seal to eight distinct new segment files. POSIX
-    // durability only requires the containing directory to be fsynced once
-    // after all of those segments are renamed into place, so a healthy
-    // publish must not pay for one directory fsync per segment.
+fn publishing_many_logical_segments_syncs_the_pack_directory_once() {
+    // Eight logical files seal into the same two physical roles. The shared
+    // directory is synced once after both packs are named, regardless of the
+    // number of logical extents inside the content pack.
     let sources = (0..8)
         .map(|file| {
             (
@@ -1417,19 +1647,16 @@ fn publishing_many_new_segments_syncs_the_segments_directory_once() {
     let segment_observer = Arc::clone(&published_segments);
     let directory_syncs = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let sync_observer = Arc::clone(&directory_syncs);
-    let mut publication = super::super::DaemonCodeIndexPublicationStoreV1::new(
-        target_store.path(),
-        fixture.path(),
-        SanitizerRevision::new(tracedecay_privacy::CODE_SOURCE_SANITIZER_VERSION_V1)
-            .expect("sanitizer revision"),
-    )
-    .expect("open target publication store")
-    .with_seal_segment_observer_for_test(Arc::new(move || {
-        segment_observer.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
-    }))
-    .with_segments_dir_sync_observer_for_test(Arc::new(move || {
-        sync_observer.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
-    }));
+    let publication_owner = opened_publication(&fixture, target_store.path());
+    let mut publication = publication_owner
+        .store
+        .clone()
+        .with_seal_segment_observer_for_test(Arc::new(move || {
+            segment_observer.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        }))
+        .with_segments_dir_sync_observer_for_test(Arc::new(move || {
+            sync_observer.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        }));
 
     publish_generation(&mut publication, &generation, None)
         .expect("publish a fresh multi-segment generation");
@@ -1437,7 +1664,12 @@ fn publishing_many_new_segments_syncs_the_segments_directory_once() {
     let segment_count = published_segments.load(std::sync::atomic::Ordering::Acquire);
     assert!(
         segment_count >= 8,
-        "expected at least 8 newly durable segments, saw {segment_count}"
+        "expected at least 8 staged logical file segments, saw {segment_count}"
+    );
+    assert_eq!(
+        segment_files(&code_generation_segments_root(target_store.path())).len(),
+        2,
+        "the complete logical roster occupies exactly two durable payload files"
     );
     assert_eq!(
         directory_syncs.load(std::sync::atomic::Ordering::Acquire),
@@ -1509,13 +1741,7 @@ fn evidence_pack_failure_after_pages_never_publishes_manifest_or_pointer() {
         .join(format!("segment-{evidence_digest}.json"));
 
     let failed_store = TempDir::new().expect("failed publication store root");
-    let mut publication = super::super::DaemonCodeIndexPublicationStoreV1::new(
-        failed_store.path(),
-        fixture.path(),
-        SanitizerRevision::new(tracedecay_privacy::CODE_SOURCE_SANITIZER_VERSION_V1)
-            .expect("sanitizer revision"),
-    )
-    .expect("open failed publication store");
+    let mut publication = opened_publication(&fixture, failed_store.path());
     let segments_root = failed_store.path().join("code-generation-segments-v1");
     let colliding_pack = segments_root.join(format!("segment-{evidence_digest}.json"));
     std::fs::write(&colliding_pack, b"wrong immutable evidence pack")
@@ -1639,6 +1865,165 @@ fn evidence_pack_failure_after_pages_never_publishes_manifest_or_pointer() {
         !colliding_pack.exists(),
         "canonical locked maintenance must remove a final pack with no durable manifest"
     );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn ordinary_retention_waits_for_active_pack_reads_and_leaves_no_idle_payload_handles() {
+    let fixture = GitFixture::new(&[(
+        "src/lib.rs",
+        "pub fn retained_before_collection() -> usize { 1 }\n",
+    )]);
+    let store = TempDir::new().expect("isolated generation store");
+    let generation_ids = retention_generations(&fixture, store.path(), 2);
+    assert_eq!(generation_ids.len(), 2);
+
+    let pointer: DurablePublicationPointerV1 = serde_json::from_slice(
+        &std::fs::read(store.path().join("active-code-generation-v1.json"))
+            .expect("read the published generation index"),
+    )
+    .expect("decode the published generation index");
+    let old = pointer
+        .generation_index
+        .iter()
+        .find(|entry| entry.generation_id == generation_ids[0].as_str())
+        .expect("old generation remains indexed");
+    let active = pointer
+        .generation_index
+        .iter()
+        .find(|entry| entry.generation_id == generation_ids[1].as_str())
+        .expect("successor generation remains indexed");
+    let manifest_of = |generation_file: &str| {
+        std::fs::read(
+            store
+                .path()
+                .join("code-generations-v1")
+                .join(generation_file),
+        )
+        .expect("read exact generation manifest")
+    };
+    let old_manifest = manifest_of(&old.generation_file);
+    let old_packs = CodeIndexPublishedGenerationV1::partitioned_pack_identities(&old_manifest)
+        .expect("old physical pack identities");
+    let active_packs = CodeIndexPublishedGenerationV1::partitioned_pack_identities(&manifest_of(
+        &active.generation_file,
+    ))
+    .expect("active physical pack identities");
+    let active_digests = active_packs
+        .iter()
+        .map(|identity| identity.digest.as_str())
+        .collect::<BTreeSet<_>>();
+    let retired_pack = old_packs
+        .iter()
+        .find(|identity| !active_digests.contains(identity.digest.as_str()))
+        .expect("the source edit replaces at least one nonempty pack");
+    let suffix = sha256_hex_suffix(retired_pack.digest.as_str()).expect("pack digest suffix");
+    let path = code_generation_segments_root(store.path()).join(format!("segment-{suffix}.json"));
+    let expected = std::fs::read(&path).expect("read live old pack");
+    assert!(
+        !expected.is_empty(),
+        "the retired pack contains actual bytes"
+    );
+    let inode = std::fs::metadata(&path).expect("original pack inode");
+    let holders = || {
+        std::fs::read_dir("/proc/self/fd")
+            .expect("inspect actual process descriptor table")
+            .filter_map(Result::ok)
+            .filter_map(|entry| std::fs::metadata(entry.path()).ok())
+            .filter(|metadata| metadata.dev() == inode.dev() && metadata.ino() == inode.ino())
+            .count()
+    };
+
+    let publication = opened_publication(&fixture, store.path());
+    let identity = DurableSealedCodeGenerationIdentityV1 {
+        locator: old.generation_file.clone(),
+        digest: ManifestDigest::new(old.state_digest.clone()).expect("generation digest"),
+        size_bytes: old.size_bytes,
+    };
+    let layout = SealedGenerationPackLayoutV1::open(&old_manifest).expect("authenticated layout");
+    let factory = publication
+        .retained_pack_read_factory(identity)
+        .expect("operation factory");
+    assert_eq!(holders(), 0, "an idle factory owns no payload handle");
+    let mut reader = factory(&UninterruptibleCodeIndexControlV1, &layout)
+        .expect("open a retained historical read pass");
+    let mut received = vec![0x55, 0xaa];
+    reader(
+        SealedGenerationSegmentReadV1::Whole {
+            digest: &retired_pack.digest,
+            size_bytes: retired_pack.size_bytes,
+        },
+        &mut received,
+        &UninterruptibleCodeIndexControlV1,
+    )
+    .expect("read the historical pack under the operation lease");
+    assert_eq!(received, expected);
+    assert_eq!(holders(), 1, "the active pass pins its exact payload inode");
+
+    let plan =
+        tracedecay_code_index_retention::code_index_generations::plan_code_generation_retention(
+            store.path(),
+            &BTreeSet::new(),
+        )
+        .expect("independently verify retention liveness and digests");
+    assert!(
+        plan.collectable_generations
+            .iter()
+            .any(|item| item.generation_id == generation_ids[0])
+    );
+    assert!(
+        matches!(
+            execute_code_generation_retention_cancellable(
+                store.path(),
+                plan.clone(),
+                CodeGenerationRetentionModeV1::Apply,
+                UtcMicros(100_000_000),
+                None,
+                &|| false,
+            ),
+            Err(CodeGenerationRetentionErrorV1::GenerationStoreBusy)
+        ),
+        "exclusive retirement must refuse while an active pass owns the shared lease"
+    );
+    assert!(path.exists(), "the active pass fences unlink");
+    drop(reader);
+    assert_eq!(
+        holders(),
+        0,
+        "ending the operation closes every payload handle"
+    );
+    let report = execute_code_generation_retention_cancellable(
+        store.path(),
+        plan,
+        CodeGenerationRetentionModeV1::Apply,
+        UtcMicros(100_000_000),
+        None,
+        &|| false,
+    )
+    .expect("apply the real normal retention transaction");
+    assert!(
+        report
+            .deleted_generations
+            .iter()
+            .any(|item| item.generation_id == generation_ids[0])
+    );
+    assert!(!path.exists(), "the old-only pack pathname is reclaimed");
+    assert_eq!(
+        holders(),
+        0,
+        "idle owners must not keep a deleted inode allocated"
+    );
+    assert!(
+        publication
+            .load_generation(&generation_ids[1])
+            .expect("read live generation")
+            .is_some()
+    );
+    assert!(
+        factory(&UninterruptibleCodeIndexControlV1, &layout).is_err(),
+        "a collected generation cannot reopen through an escaped idle factory"
+    );
+    assert_eq!(holders(), 0);
 }
 
 /// Membership of the durable `generation_index` is a referential-integrity
@@ -2461,6 +2846,8 @@ fn restart_decode_census(
                     ))
                 })
         },
+        // This diagnostic census isolates codec and durable identity checks.
+        &mut |_| Ok(()),
     );
     let generation = match partitioned {
         Ok(generation) => generation,
@@ -2554,17 +2941,30 @@ fn restart_never_serves_a_corrupt_partitioned_file_segment() {
         .expect("read generation manifest"),
     )
     .expect("decode generation manifest");
-    let segment_digest = manifest["generation"]["file_segments"][0]["segment_digest"]
+    let logical_digest = manifest["generation"]["file_segments"][0]["segment_digest"]
         .as_str()
-        .and_then(|digest| sha256_hex_suffix(digest))
         .expect("file segment digest");
+    let extent = manifest["generation"]["content_pack"]["extents"]
+        .as_array()
+        .expect("content extent roster")
+        .iter()
+        .find(|extent| extent["digest"].as_str() == Some(logical_digest))
+        .expect("the file is covered by the canonical pack");
+    let offset =
+        usize::try_from(extent["offset"].as_u64().expect("extent offset")).expect("offset");
+    let length =
+        usize::try_from(extent["size_bytes"].as_u64().expect("extent length")).expect("length");
+    assert!(length > 0);
+    let segment_digest = manifest["generation"]["content_pack"]["digest"]
+        .as_str()
+        .and_then(sha256_hex_suffix)
+        .expect("content pack digest");
     let segment_path = store
         .path()
         .join("code-generation-segments-v1")
         .join(format!("segment-{segment_digest}.json"));
-    let mut bytes = std::fs::read(&segment_path).expect("read file segment");
-    let middle = bytes.len() / 2;
-    bytes[middle] ^= 0x01;
+    let mut bytes = std::fs::read(&segment_path).expect("read content pack");
+    bytes[offset + length / 2] ^= 0x01;
     std::fs::write(&segment_path, bytes).expect("corrupt file segment");
 
     let mut reopened = CodeIndexWorktreeSchedulerV1::open(
@@ -2632,13 +3032,7 @@ fn durable_publication_writes_partitioned_manifest_and_reuses_immutable_targets(
         .count();
 
     let active_generation = latest.generation.manifest().generation_id.clone();
-    let mut reopened = super::super::DaemonCodeIndexPublicationStoreV1::new(
-        store.path(),
-        fixture.path(),
-        SanitizerRevision::new(tracedecay_privacy::CODE_SOURCE_SANITIZER_VERSION_V1)
-            .expect("sanitizer revision"),
-    )
-    .expect("reopen publication store");
+    let mut reopened = opened_publication(&fixture, store.path());
     publish_generation(&mut reopened, &latest.generation, Some(&active_generation))
         .expect("identical immutable generation republishes");
     assert_eq!(
@@ -2777,11 +3171,10 @@ fn write_repaired_pointer(pointer_path: &Path, pointer: &mut DurablePublicationP
         pointer.generation_index_truncated,
     )
     .expect("generation index digest");
-    std::fs::write(
+    atomic_replace_fixture_pointer(
         pointer_path,
-        serde_json::to_vec(pointer).expect("encode pointer"),
-    )
-    .expect("write pointer");
+        &serde_json::to_vec(pointer).expect("encode pointer"),
+    );
 }
 
 #[test]
@@ -2879,13 +3272,7 @@ fn publication_over_an_undecodable_active_generation_refuses_a_moved_pointer() {
     drop(scheduler);
     let observed = rewrite_active_generation_as_previous_revision(store.path(), true);
 
-    let publication = super::super::DaemonCodeIndexPublicationStoreV1::new(
-        store.path(),
-        fixture.path(),
-        SanitizerRevision::new(tracedecay_privacy::CODE_SOURCE_SANITIZER_VERSION_V1)
-            .expect("sanitizer revision"),
-    )
-    .expect("open publication store over a retired generation");
+    let publication = opened_publication(&fixture, store.path());
 
     let pointer_path = store.path().join("active-code-generation-v1.json");
     type PointerMutation = fn(&mut DurablePublicationPointerV1);
@@ -3023,13 +3410,19 @@ fn publication_pointer_memo_follows_bytes_when_size_and_mtime_stay_put() {
         .expect("pointer metadata")
         .modified()
         .expect("pointer mtime");
-    std::fs::write(&pointer_path, &second_bytes).expect("replace pointer bytes");
-    let file = std::fs::File::options()
-        .write(true)
-        .open(&pointer_path)
-        .expect("reopen pointer");
-    file.set_modified(mtime).expect("restore pointer mtime");
-    drop(file);
+    // A legitimate publisher swaps a fresh inode, even when the new pointer
+    // has exactly the old length and mtime. A same-inode overwrite is denied
+    // separately below as corruption, not treated as a valid publication.
+    let mut staged =
+        tempfile::NamedTempFile::new_in(store.path()).expect("stage next publication pointer");
+    std::io::Write::write_all(staged.as_file_mut(), &second_bytes)
+        .expect("write next pointer bytes");
+    staged
+        .as_file()
+        .set_modified(mtime)
+        .expect("preserve prior pointer mtime");
+    staged.as_file().sync_all().expect("sync next pointer");
+    persist_fixture_pointer(staged, &pointer_path);
     let replaced = std::fs::metadata(&pointer_path).expect("replaced metadata");
     assert_eq!(replaced.len(), first_bytes.len() as u64);
     assert_eq!(replaced.modified().ok(), Some(mtime));
@@ -3042,6 +3435,277 @@ fn publication_pointer_memo_follows_bytes_when_size_and_mtime_stay_put() {
         reread.generation_id, second.generation_id,
         "equal size and mtime must not reuse the previous pointer"
     );
+
+    // A second valid publisher may install a different inode holding the
+    // same exact bytes. The first reader call must not surface a stale-memo
+    // CAS or require an extra caller retry just to discover that publication.
+    let mut repeated = tempfile::NamedTempFile::new_in(store.path())
+        .expect("stage identical pointer on a fresh inode");
+    std::io::Write::write_all(repeated.as_file_mut(), &second_bytes)
+        .expect("write identical pointer bytes");
+    repeated
+        .as_file()
+        .sync_all()
+        .expect("sync repeated pointer");
+    persist_fixture_pointer(repeated, &pointer_path);
+    assert_eq!(
+        publication
+            .read_publication_pointer()
+            .expect("load stable republished pointer in one call")
+            .expect("republished pointer exists")
+            .generation_id,
+        second.generation_id
+    );
+    assert_eq!(
+        publication
+            .read_publication_pointer()
+            .expect("cached republished pointer still authentic")
+            .expect("cached pointer exists")
+            .generation_id,
+        second.generation_id
+    );
+    assert_eq!(
+        std::fs::read(&pointer_path).expect("read actual repeated pointer bytes"),
+        second_bytes
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn pointer_memo_refuses_in_place_rewrite_even_when_size_and_mtime_match() {
+    let store = TempDir::new().expect("isolated store");
+    let project = TempDir::new().expect("isolated project");
+    let publication = super::super::DaemonCodeIndexPublicationStoreV1::new(
+        store.path(),
+        project.path(),
+        SanitizerRevision::new(tracedecay_privacy::CODE_SOURCE_SANITIZER_VERSION_V1)
+            .expect("sanitizer revision"),
+    )
+    .expect("open publication store");
+    let pointer_path = store.path().join("active-code-generation-v1.json");
+    let first = same_length_publication_pointer("generation.inplace-a", 0x41);
+    let second = same_length_publication_pointer("generation.inplace-b", 0x42);
+    let first_bytes = serde_json::to_vec(&first).expect("encode original pointer");
+    let second_bytes = serde_json::to_vec(&second).expect("encode mutated pointer");
+    assert_eq!(
+        first_bytes.len(),
+        second_bytes.len(),
+        "size cannot reveal mutation"
+    );
+
+    std::fs::write(&pointer_path, &first_bytes).expect("seed original pointer");
+    assert_eq!(
+        publication
+            .read_publication_pointer()
+            .expect("load original pointer")
+            .expect("original pointer exists")
+            .generation_id,
+        first.generation_id
+    );
+    let before = std::fs::metadata(&pointer_path).expect("original metadata");
+    std::fs::write(&pointer_path, &second_bytes).expect("mutate the pinned inode");
+    let file = File::options()
+        .write(true)
+        .open(&pointer_path)
+        .expect("open mutated pointer");
+    file.set_modified(before.modified().expect("original mtime"))
+        .expect("restore mtime");
+    drop(file);
+    let after = std::fs::metadata(&pointer_path).expect("mutated metadata");
+    assert_eq!((before.dev(), before.ino()), (after.dev(), after.ino()));
+    assert_eq!(before.len(), after.len());
+    assert_eq!(before.modified().ok(), after.modified().ok());
+
+    assert!(
+        matches!(
+            publication.read_publication_pointer(),
+            Err(CodeIndexPublicationStoreErrorV1::CorruptionResetRequired(_))
+        ),
+        "a pinned pointer must refuse an in-place rewrite even when stat hints match"
+    );
+    assert_eq!(
+        std::fs::read(&pointer_path).expect("inspect refused pointer"),
+        second_bytes,
+        "refusal must never overwrite foreign bytes"
+    );
+
+    atomic_replace_fixture_pointer(&pointer_path, &second_bytes);
+    assert_eq!(
+        publication
+            .read_publication_pointer()
+            .expect("read after real atomic replacement")
+            .expect("replacement pointer exists")
+            .generation_id,
+        second.generation_id,
+        "a fresh published inode must be readable after an in-place refusal"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn pointer_commit_refuses_existing_and_dangling_symlink_slots() {
+    use std::os::unix::fs::symlink;
+
+    for target_exists in [true, false] {
+        let store = TempDir::new().expect("isolated publication store");
+        let project = TempDir::new().expect("isolated project");
+        let publication = super::super::DaemonCodeIndexPublicationStoreV1::new(
+            store.path(),
+            project.path(),
+            SanitizerRevision::new(tracedecay_privacy::CODE_SOURCE_SANITIZER_VERSION_V1)
+                .expect("sanitizer revision"),
+        )
+        .expect("open publication store");
+        let pointer_path = store.path().join("active-code-generation-v1.json");
+        let foreign_path = store.path().join("foreign-pointer.json");
+        let observed = same_length_publication_pointer("generation.symlink-observed", 0x35);
+        let replacement = same_length_publication_pointer("generation.symlink-replacement", 0x36);
+        let observed_bytes = serde_json::to_vec(&observed).expect("encode observed pointer");
+        let replacement_bytes =
+            serde_json::to_vec(&replacement).expect("encode replacement pointer");
+        if target_exists {
+            std::fs::write(&foreign_path, &observed_bytes).expect("write foreign pointer");
+        }
+        symlink(&foreign_path, &pointer_path).expect("install symlinked pointer slot");
+        let lock = acquire_code_generation_store_lock(store.path()).expect("exclusive store lock");
+        let error = publication
+            .commit_observed_pointer(
+                &lock,
+                target_exists.then_some(observed_bytes.as_slice()),
+                &replacement,
+                &replacement_bytes,
+            )
+            .expect_err("a symlink must never acquire pointer publication authority");
+        assert!(
+            matches!(
+                error,
+                CodeIndexPublicationStoreErrorV1::CorruptionResetRequired(_)
+            ),
+            "a symlinked pointer slot must be reset-required corruption: {error}"
+        );
+        assert_eq!(
+            std::fs::read_link(&pointer_path).expect("link remains in place"),
+            foreign_path,
+            "refusal must not replace the symlink"
+        );
+        if target_exists {
+            assert_eq!(
+                std::fs::read(&foreign_path).expect("foreign pointer still exists"),
+                observed_bytes,
+                "refusal must not change the foreign pointer"
+            );
+        } else {
+            assert!(
+                !foreign_path.exists(),
+                "refusal must not create the dangling symlink target"
+            );
+        }
+
+        // The same exact-byte CAS must still work after the invalid entry
+        // is replaced by an ordinary file under the existing store lock.
+        std::fs::remove_file(&pointer_path).expect("remove symlink");
+        std::fs::write(&pointer_path, &observed_bytes).expect("restore regular pointer");
+        publication
+            .commit_observed_pointer(
+                &lock,
+                Some(observed_bytes.as_slice()),
+                &replacement,
+                &replacement_bytes,
+            )
+            .expect("ordinary pointer slot preserves CAS publication");
+        assert_eq!(
+            std::fs::read(&pointer_path).expect("read published pointer"),
+            replacement_bytes,
+            "the successful publication must persist exact bytes"
+        );
+    }
+}
+
+#[cfg(windows)]
+#[test]
+fn pointer_commit_replaces_a_live_memo_and_preserves_its_old_reader() {
+    const FILE_ATTRIBUTE_TEMPORARY: u32 = 0x100;
+
+    let store = TempDir::new().expect("store root");
+    let project = TempDir::new().expect("project root");
+    let publication = super::super::DaemonCodeIndexPublicationStoreV1::new(
+        store.path(),
+        project.path(),
+        SanitizerRevision::new(tracedecay_privacy::CODE_SOURCE_SANITIZER_VERSION_V1)
+            .expect("sanitizer revision"),
+    )
+    .expect("open publication store");
+    let pointer_path = store.path().join("active-code-generation-v1.json");
+    let first = same_length_publication_pointer("generation.memo-aaaa", 0x41);
+    let second = same_length_publication_pointer("generation.memo-bbbb", 0x42);
+    let first_bytes = serde_json::to_vec(&first).expect("encode first pointer");
+    let second_bytes = serde_json::to_vec(&second).expect("encode second pointer");
+    let store_lock = acquire_code_generation_store_lock(store.path()).expect("store lock");
+
+    publication
+        .commit_observed_pointer(&store_lock, None, &first, &first_bytes)
+        .expect("publish first pointer");
+    assert_eq!(
+        publication
+            .read_publication_pointer()
+            .expect("authenticate the first publication")
+            .expect("first pointer exists")
+            .generation_id,
+        first.generation_id
+    );
+    let mut old_reader = File::open(&pointer_path).expect("retain the first published inode");
+    publication
+        .commit_observed_pointer(&store_lock, Some(&first_bytes), &second, &second_bytes)
+        .expect("replace the pointer while its memo and reader remain live");
+    assert_eq!(
+        std::fs::metadata(&pointer_path)
+            .expect("published pointer attributes")
+            .file_attributes()
+            & FILE_ATTRIBUTE_TEMPORARY,
+        0,
+        "publication must clear the temporary-file attribute"
+    );
+
+    let mut retained_bytes = Vec::new();
+    old_reader
+        .read_to_end(&mut retained_bytes)
+        .expect("read the retained old inode");
+    assert_eq!(retained_bytes, first_bytes);
+    assert_eq!(
+        std::fs::read(&pointer_path).expect("read the current published inode"),
+        second_bytes
+    );
+    for _ in 0..2 {
+        assert_eq!(
+            publication
+                .read_publication_pointer()
+                .expect("authenticate the replacement memo")
+                .expect("replacement pointer exists")
+                .generation_id,
+            second.generation_id
+        );
+    }
+
+    let error = publication
+        .commit_observed_pointer(&store_lock, Some(&first_bytes), &first, &first_bytes)
+        .expect_err("the retired observation must not replace its successor");
+    assert!(matches!(
+        error,
+        CodeIndexPublicationStoreErrorV1::CompareAndSwap
+    ));
+    assert_eq!(
+        std::fs::read(&pointer_path).expect("current pointer survives stale CAS"),
+        second_bytes
+    );
+    for entry in std::fs::read_dir(store.path()).expect("inspect publication staging") {
+        let name = entry.expect("store entry").file_name();
+        assert!(
+            !name
+                .to_string_lossy()
+                .starts_with(".active-code-generation-"),
+            "successful publication must consume its temporary name"
+        );
+    }
 }
 
 #[test]
@@ -3101,9 +3765,7 @@ fn stale_pointer_commit_does_not_replace_a_changed_active_pointer() {
 
 struct ActiveSegmentDigests {
     files: BTreeSet<String>,
-    file_evidence: BTreeSet<String>,
-    graph_pages: BTreeSet<String>,
-    resolution_index: BTreeSet<String>,
+    content: String,
     evidence: String,
 }
 
@@ -3121,8 +3783,8 @@ fn active_segment_digests_by_kind(scope: &Path) -> ActiveSegmentDigests {
     let manifest: serde_json::Value =
         serde_json::from_slice(&manifest).expect("decode active manifest");
     let digest = |value: &serde_json::Value| {
-        sha256_hex_suffix(value.as_str().expect("sha256 segment digest"))
-            .expect("sha256 segment digest")
+        sha256_hex_suffix(value.as_str().expect("sha256 digest"))
+            .expect("sha256 digest")
             .to_owned()
     };
     ActiveSegmentDigests {
@@ -3132,48 +3794,15 @@ fn active_segment_digests_by_kind(scope: &Path) -> ActiveSegmentDigests {
             .iter()
             .map(|segment| digest(&segment["segment_digest"]))
             .collect(),
-        file_evidence: manifest["generation"]["file_evidence"]
-            .as_array()
-            .expect("active file evidence")
-            .iter()
-            .map(|segment| digest(&segment["segment_digest"]))
-            .collect(),
-        resolution_index: {
-            let index = &manifest["generation"]["resolution_index"];
-            index["definitions"]
-                .as_array()
-                .expect("resolution definition pages")
-                .iter()
-                .chain(
-                    index["references"]
-                        .as_array()
-                        .expect("resolution reference pages"),
-                )
-                .chain([&index["import_aliases"]])
-                .map(|page| digest(&page["segment_digest"]))
-                .collect()
-        },
-        graph_pages: manifest["generation"]["code_graph_pages"]
-            .as_array()
-            .expect("active graph pages")
-            .iter()
-            .map(|page| digest(&page["page_digest"]))
-            .collect(),
+        content: digest(&manifest["generation"]["content_pack"]["digest"]),
         evidence: digest(&manifest["generation"]["generation_evidence"]["segment_digest"]),
     }
 }
 
-/// Every content-addressed component named by one scope's active manifest.
+/// Every physical payload role named by one scope's active manifest.
 fn active_segment_digests(scope: &Path) -> Vec<String> {
-    let segments = active_segment_digests_by_kind(scope);
-    segments
-        .files
-        .into_iter()
-        .chain(segments.file_evidence)
-        .chain(segments.graph_pages)
-        .chain(segments.resolution_index)
-        .chain(std::iter::once(segments.evidence))
-        .collect()
+    let packs = active_segment_digests_by_kind(scope);
+    vec![packs.content, packs.evidence]
 }
 
 fn segment_files(segments_root: &Path) -> BTreeSet<String> {
@@ -3297,7 +3926,7 @@ fn remove_linked_worktree_and_collect_stranded_scopes(scopes: &LinkedWorktreeSco
 }
 
 #[test]
-fn linked_worktrees_that_seal_identical_files_share_one_segment_per_file() {
+fn linked_worktrees_keep_logical_file_identity_with_two_pack_roles_per_generation() {
     // Several bodies per file: in memory they sort by worktree-specific
     // symbol occurrences, so the segment must not persist that order.
     let scopes = publish_linked_worktree_scopes(&[
@@ -3344,20 +3973,16 @@ fn linked_worktrees_that_seal_identical_files_share_one_segment_per_file() {
         "the fixture must publish shared file segments"
     );
     assert_ne!(first.evidence, linked.evidence);
-    let mut expected = first.files;
-    expected.extend(first.file_evidence);
-    expected.extend(first.graph_pages);
-    expected.extend(first.resolution_index);
-    expected.insert(first.evidence);
-    expected.extend(linked.files);
-    expected.extend(linked.file_evidence);
-    expected.extend(linked.graph_pages);
-    expected.extend(linked.resolution_index);
-    expected.insert(linked.evidence);
+    let expected = BTreeSet::from([
+        first.content,
+        first.evidence,
+        linked.content,
+        linked.evidence,
+    ]);
     assert_eq!(
         segment_files(&segments_root),
         expected,
-        "the project stores each shared file segment exactly once"
+        "each generation owns two self-contained roles; only whole identical packs deduplicate"
     );
 }
 
@@ -3431,7 +4056,7 @@ fn retiring_one_worktree_keeps_the_segments_its_sibling_still_names() {
         .collect::<Vec<_>>();
     assert!(
         linked_only.len() >= 2,
-        "the linked scope named at least its own file segment and evidence pack"
+        "the linked scope named its own content and evidence packs"
     );
     for digest in linked_only {
         assert!(
@@ -3826,27 +4451,24 @@ fn a_sweep_never_collects_segments_a_publication_has_not_yet_named() {
     let sweeps = Arc::new(std::sync::Mutex::new(Vec::new()));
     let observed_sweeps = Arc::clone(&sweeps);
     let observed_sibling = sibling_scope.clone();
-    let mut publication = super::super::DaemonCodeIndexPublicationStoreV1::new(
-        &target_scope,
-        fixture.path(),
-        SanitizerRevision::new(tracedecay_privacy::CODE_SOURCE_SANITIZER_VERSION_V1)
-            .expect("sanitizer revision"),
-    )
-    .expect("open target publication store")
-    .with_seal_segment_observer_for_test(Arc::new(move || {
-        let outcome = run_code_generation_retention(
-            &observed_sibling,
-            &BTreeSet::new(),
-            CodeGenerationRetentionModeV1::Apply,
-            UtcMicros(1),
-            None,
-        )
-        .map(|_| ());
-        observed_sweeps
-            .lock()
-            .expect("sweep observations")
-            .push(outcome);
-    }));
+    let publication_owner = opened_publication(&fixture, &target_scope);
+    let mut publication = publication_owner
+        .store
+        .clone()
+        .with_seal_segment_observer_for_test(Arc::new(move || {
+            let outcome = run_code_generation_retention(
+                &observed_sibling,
+                &BTreeSet::new(),
+                CodeGenerationRetentionModeV1::Apply,
+                UtcMicros(1),
+                None,
+            )
+            .map(|_| ());
+            observed_sweeps
+                .lock()
+                .expect("sweep observations")
+                .push(outcome);
+        }));
 
     publish_generation(&mut publication, &generation, None)
         .expect("publish while sibling sweeps run");
@@ -3902,8 +4524,18 @@ fn a_manifest_cannot_activate_another_preparations_private_segments() {
         Arc::new(SharedCodeIndexBytePoolV1::default()),
     );
     let scope = generation.sealed_scope();
-    let mut staged = target.publication.prepare(&scope, None).expect("prepare A");
-    let publication = generation.stage_publication(&mut staged).expect("stage A");
+    let operation = target
+        .publication
+        .resident_memory_authority()
+        .expect("canonical resident authority")
+        .begin_operation();
+    let mut staged = target
+        .publication
+        .prepare(&scope, None, &operation)
+        .expect("prepare A");
+    let publication = generation
+        .stage_publication(&mut staged, &operation)
+        .expect("stage A");
     let reader = staged.segment_reader();
     let identities = CodeIndexPublishedGenerationV1::partitioned_segment_identities(
         publication.manifest_bytes(),
@@ -3920,12 +4552,34 @@ fn a_manifest_cannot_activate_another_preparations_private_segments() {
         &mut before,
     )
     .expect("A reads its staged bytes");
+    let physical_packs =
+        CodeIndexPublishedGenerationV1::partitioned_pack_identities(publication.manifest_bytes())
+            .expect("canonical physical pack identities");
+    assert_eq!(physical_packs.len(), 2);
+    let physical_reader = staged.pack_reader();
+    let mut physical_before = Vec::new();
+    for pack in &physical_packs {
+        let mut bytes = Vec::new();
+        physical_reader(
+            SealedGenerationSegmentReadV1::Whole {
+                digest: &pack.digest,
+                size_bytes: pack.size_bytes,
+            },
+            &mut bytes,
+        )
+        .expect("pin A's physical packs before publication");
+        assert_eq!(bytes.len() as u64, pack.size_bytes);
+        physical_before.push(bytes);
+    }
     let incumbent = target
         .publication
         .read_publication_pointer()
         .expect("incumbent");
     assert!(incumbent.is_none());
-    let mut empty = target.publication.prepare(&scope, None).expect("prepare B");
+    let mut empty = target
+        .publication
+        .prepare(&scope, None, &operation)
+        .expect("prepare B");
     assert!(
         target.publication.commit(&mut empty, &publication).is_err(),
         "B owns none of A's private files"
@@ -3938,10 +4592,59 @@ fn a_manifest_cannot_activate_another_preparations_private_segments() {
             .expect("unchanged incumbent"),
         incumbent
     );
+    let collision_index =
+        usize::from(physical_packs[0].digest.as_str() < physical_packs[1].digest.as_str());
+    let canonical = |index: usize| {
+        code_generation_segments_root(target_store.path()).join(format!(
+            "segment-{}.json",
+            sha256_hex_suffix(physical_packs[index].digest.as_str()).expect("pack digest suffix"),
+        ))
+    };
+    // The first canonical name publishes before the second refuses this
+    // collision. Readers must then combine canonical and still-private packs.
+    let collision = canonical(collision_index);
+    let foreign_bytes = b"foreign immutable pack fixture";
+    std::fs::write(&collision, foreign_bytes).expect("inject the second-name collision");
+    let refusal = target
+        .publication
+        .commit(&mut staged, &publication)
+        .expect_err("A must refuse a foreign immutable name");
+    assert!(matches!(
+        refusal,
+        CodeIndexPublicationStoreErrorV1::CorruptionResetRequired(_)
+    ));
+    assert_eq!(
+        std::fs::read(canonical(1 - collision_index)).expect("first pack was published"),
+        physical_before[1 - collision_index],
+    );
+    assert_eq!(
+        std::fs::read(&collision).expect("foreign name"),
+        foreign_bytes
+    );
+    assert_eq!(
+        target
+            .publication
+            .read_publication_pointer()
+            .expect("no partially published pointer"),
+        incumbent,
+    );
+    let mut physical_after_refusal = Vec::new();
+    for (pack, expected) in physical_packs.iter().zip(&physical_before) {
+        physical_reader(
+            SealedGenerationSegmentReadV1::Whole {
+                digest: &pack.digest,
+                size_bytes: pack.size_bytes,
+            },
+            &mut physical_after_refusal,
+        )
+        .expect("read canonical and still-private packs after refusal");
+        assert_eq!(&physical_after_refusal, expected);
+    }
+    std::fs::remove_file(&collision).expect("remove only the injected foreign fixture");
     target
         .publication
         .commit(&mut staged, &publication)
-        .expect("A commits its exact segments");
+        .expect("A retries its remaining exact segments");
     drop(staged);
     let mut after = Vec::new();
     reader(
@@ -3953,6 +4656,17 @@ fn a_manifest_cannot_activate_another_preparations_private_segments() {
     )
     .expect("committed reader survives preparation drop");
     assert_eq!(after, before);
+    for (pack, expected) in physical_packs.iter().zip(&physical_before) {
+        physical_reader(
+            SealedGenerationSegmentReadV1::Whole {
+                digest: &pack.digest,
+                size_bytes: pack.size_bytes,
+            },
+            &mut after,
+        )
+        .expect("physical reader follows the committed immutable names");
+        assert_eq!(&after, expected);
+    }
     let decoded = target
         .publication
         .load_active_shared()
@@ -3985,12 +4699,17 @@ fn escaped_staged_readers_refuse_after_abort_or_uncommitted_drop() {
         Arc::new(SharedCodeIndexBytePoolV1::default()),
     );
     for explicit_abort in [true, false] {
+        let operation = target
+            .publication
+            .resident_memory_authority()
+            .expect("canonical resident authority")
+            .begin_operation();
         let mut preparation = target
             .publication
-            .prepare(&generation.sealed_scope(), None)
+            .prepare(&generation.sealed_scope(), None, &operation)
             .expect("prepare");
         let publication = generation
-            .stage_publication(&mut preparation)
+            .stage_publication(&mut preparation, &operation)
             .expect("stage");
         let identities = CodeIndexPublishedGenerationV1::partitioned_segment_identities(
             publication.manifest_bytes(),
@@ -4020,6 +4739,24 @@ fn escaped_staged_readers_refuse_after_abort_or_uncommitted_drop() {
         )
         .expect("staged range");
         assert_eq!(range, whole[1..3]);
+        let physical_packs = CodeIndexPublishedGenerationV1::partitioned_pack_identities(
+            publication.manifest_bytes(),
+        )
+        .expect("physical pack identities");
+        assert_eq!(physical_packs.len(), 2);
+        let physical_reader = preparation.pack_reader();
+        let mut physical_bytes = Vec::new();
+        for pack in &physical_packs {
+            physical_reader(
+                SealedGenerationSegmentReadV1::Whole {
+                    digest: &pack.digest,
+                    size_bytes: pack.size_bytes,
+                },
+                &mut physical_bytes,
+            )
+            .expect("pin both physical packs before abort or drop");
+            assert_eq!(physical_bytes.len() as u64, pack.size_bytes);
+        }
         if explicit_abort {
             preparation.abort().expect("abort");
         } else {
@@ -4035,6 +4772,19 @@ fn escaped_staged_readers_refuse_after_abort_or_uncommitted_drop() {
             )
             .is_err()
         );
+        let pack = &physical_packs[0];
+        assert!(
+            physical_reader(
+                SealedGenerationSegmentReadV1::Whole {
+                    digest: &pack.digest,
+                    size_bytes: pack.size_bytes,
+                },
+                &mut physical_bytes,
+            )
+            .is_err(),
+            "an escaped physical reader cannot reopen an aborted preparation"
+        );
+        assert_eq!(physical_bytes, [] as [u8; 0]);
         assert!(
             std::fs::read_dir(code_generation_segments_root(target_store.path()))
                 .expect("segments root")
@@ -4068,14 +4818,19 @@ fn staged_segment_content_and_extent_are_authenticated_at_commit() {
         Arc::new(SharedCodeIndexBytePoolV1::default()),
     );
     for truncate in [false, true] {
+        let operation = target
+            .publication
+            .resident_memory_authority()
+            .expect("canonical resident authority")
+            .begin_operation();
         let mut preparation = target
             .publication
-            .prepare(&generation.sealed_scope(), None)
+            .prepare(&generation.sealed_scope(), None, &operation)
             .expect("prepare");
         let publication = generation
-            .stage_publication(&mut preparation)
+            .stage_publication(&mut preparation, &operation)
             .expect("stage");
-        let identities = CodeIndexPublishedGenerationV1::partitioned_segment_identities(
+        let identities = CodeIndexPublishedGenerationV1::partitioned_pack_identities(
             publication.manifest_bytes(),
         )
         .expect("segment identities");
@@ -4168,11 +4923,15 @@ fn resident_refusal_at_final_commit_retains_the_exact_publication_for_a_fresh_co
                 .recv()
                 .expect("resume commit");
         }));
+    let operation = attempt
+        .resident_memory_authority()
+        .expect("canonical resident authority")
+        .begin_operation();
     let mut preparation = attempt
-        .prepare(&generation.sealed_scope(), None)
+        .prepare(&generation.sealed_scope(), None, &operation)
         .expect("prepare");
     let publication = generation
-        .stage_publication(&mut preparation)
+        .stage_publication(&mut preparation, &operation)
         .expect("stage publication");
     let exact_manifest = Arc::clone(publication.manifest_bytes());
     let identity = CodeIndexPublishedGenerationV1::partitioned_segment_identities(&exact_manifest)
@@ -4311,11 +5070,15 @@ fn source_supersession_at_final_commit_aborts_the_preparation() {
         .with_segments_dir_sync_observer_for_test(Arc::new(move || {
             DaemonCodeIndexControlV1::advance(&epoch);
         }));
+    let operation = attempt
+        .resident_memory_authority()
+        .expect("canonical resident authority")
+        .begin_operation();
     let mut preparation = attempt
-        .prepare(&generation.sealed_scope(), None)
+        .prepare(&generation.sealed_scope(), None, &operation)
         .expect("prepare");
     let publication = generation
-        .stage_publication(&mut preparation)
+        .stage_publication(&mut preparation, &operation)
         .expect("stage publication");
     let identity = CodeIndexPublishedGenerationV1::partitioned_segment_identities(
         publication.manifest_bytes(),

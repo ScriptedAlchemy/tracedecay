@@ -1,6 +1,8 @@
 #[cfg(test)]
 use std::cell::Cell;
 use std::fs::{File, OpenOptions};
+#[cfg(unix)]
+use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
@@ -47,6 +49,21 @@ impl CodeGenerationStoreLockV1 {
     }
 }
 
+#[cfg(unix)]
+fn verify_named_lock_inode(file: &File, path: &Path) -> Result<(), CodeGenerationRetentionErrorV1> {
+    let opened = file.metadata().map_err(storage)?;
+    let named = std::fs::symlink_metadata(path).map_err(super::deferred_if_absent)?;
+    if !opened.is_file()
+        || !named.file_type().is_file()
+        || (opened.dev(), opened.ino()) != (named.dev(), named.ino())
+    {
+        return Err(CodeGenerationRetentionErrorV1::UnsafeState(
+            "generation-store lock pathname no longer names the opened inode".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
 pub fn acquire_code_generation_store_lock(
     store_root: &Path,
 ) -> Result<CodeGenerationStoreLockV1, CodeGenerationRetentionErrorV1> {
@@ -84,14 +101,23 @@ pub fn try_acquire_code_generation_store_read_lock(
         fence => fence,
     };
     let store_root = canonical_store_root(store_root)?;
-    let lock = open_lock_file(&store_root.join(STORE_LOCK_FILE))?;
+    let path = store_root.join(STORE_LOCK_FILE);
+    let lock = open_lock_file(&path)?;
+    #[cfg(unix)]
+    verify_named_lock_inode(&lock, &path)?;
     match lock.try_lock_shared().map_err(std::io::Error::from) {
-        Ok(()) => Ok(Some(CodeGenerationStoreLockV1 {
-            _file: FileLease::held(lock, CODE_GENERATION_LEASE_LABEL),
-            store_root,
-            generation_store: true,
-            shared: true,
-        })),
+        Ok(()) => {
+            // The operation owns this descriptor until its payload handles
+            // are dropped. Authenticate the named authority after admission.
+            #[cfg(unix)]
+            verify_named_lock_inode(&lock, &path)?;
+            Ok(Some(CodeGenerationStoreLockV1 {
+                _file: FileLease::held(lock, CODE_GENERATION_LEASE_LABEL),
+                store_root,
+                generation_store: true,
+                shared: true,
+            }))
+        }
         Err(error) if tracedecay_private_fs::is_lock_contended(&error) => Ok(None),
         Err(error) => Err(storage(error)),
     }
@@ -402,4 +428,65 @@ fn open_lock_file(path: &Path) -> Result<File, CodeGenerationRetentionErrorV1> {
         .truncate(false)
         .open(path)
         .map_err(super::deferred_if_absent)
+}
+
+#[cfg(all(test, unix))]
+mod read_lock_tests {
+    use super::{
+        STORE_LOCK_FILE, try_acquire_code_generation_store_lock,
+        try_acquire_code_generation_store_read_lock,
+    };
+    use crate::code_index_generations::CodeGenerationRetentionErrorV1;
+
+    #[test]
+    fn operation_readers_fence_writers_and_refuse_a_symlink_lock_authority() {
+        let store = tempfile::tempdir().expect("isolated generation-store root");
+        let first = try_acquire_code_generation_store_read_lock(store.path())
+            .unwrap()
+            .expect("first shared read pass");
+        let second = try_acquire_code_generation_store_read_lock(store.path())
+            .unwrap()
+            .expect("independent shared read pass");
+        assert!(
+            try_acquire_code_generation_store_lock(store.path())
+                .unwrap()
+                .is_none()
+        );
+        drop(first);
+        assert!(
+            try_acquire_code_generation_store_lock(store.path())
+                .unwrap()
+                .is_none()
+        );
+        drop(second);
+        let writer = try_acquire_code_generation_store_lock(store.path())
+            .unwrap()
+            .expect("all read passes released");
+        assert!(
+            try_acquire_code_generation_store_read_lock(store.path())
+                .unwrap()
+                .is_none()
+        );
+        drop(writer);
+
+        let path = store.path().join(STORE_LOCK_FILE);
+        let retired = store.path().join("retired-lock-inode");
+        std::fs::rename(&path, &retired).unwrap();
+        std::os::unix::fs::symlink(&retired, &path).unwrap();
+        assert!(matches!(
+            try_acquire_code_generation_store_read_lock(store.path()),
+            Err(CodeGenerationRetentionErrorV1::UnsafeState(_))
+        ));
+        std::fs::remove_file(&path).unwrap();
+        std::fs::rename(&retired, &path).unwrap();
+        let read = try_acquire_code_generation_store_read_lock(store.path())
+            .unwrap()
+            .expect("restored named authority");
+        assert!(
+            try_acquire_code_generation_store_lock(store.path())
+                .unwrap()
+                .is_none()
+        );
+        drop(read);
+    }
 }

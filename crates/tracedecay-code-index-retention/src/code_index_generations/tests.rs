@@ -2,10 +2,33 @@
 
 use super::*;
 use super::{journal, receipt_store};
+#[cfg(target_os = "linux")]
+use std::ffi::CString;
+#[cfg(target_os = "linux")]
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+#[cfg(target_os = "linux")]
+use std::os::unix::ffi::OsStrExt;
+use tracedecay_code_index::production::{
+    SealedGenerationContentExtentV1, SealedGenerationContentPackV1,
+};
 use tracedecay_domain::sha256_hex_suffix;
 
 mod graph_replay_pool_lock_tests;
 mod graph_replay_release_tests;
+
+fn single_segment_content_pack(bytes: &[u8]) -> SealedGenerationContentPackV1 {
+    let digest = ManifestDigest::from_sha256_bytes(&Sha256::digest(bytes)).expect("content digest");
+    let size_bytes = u64::try_from(bytes.len()).expect("content byte count");
+    SealedGenerationContentPackV1 {
+        digest: digest.clone(),
+        size_bytes,
+        extents: vec![SealedGenerationContentExtentV1 {
+            digest,
+            offset: 0,
+            size_bytes,
+        }],
+    }
+}
 
 /// Marks the newest `count` superseded fixture generations as vector-readable
 /// sources so a fixture keeps exactly one collectable generation: the exact
@@ -1939,6 +1962,246 @@ fn metadata_only_segment_census_distinguishes_empty_cancelled_and_exhausted() {
     assert_eq!(remaining_entries, 0);
 }
 
+#[cfg(target_os = "linux")]
+fn native_manifest_open_events(observer: &OwnedFd) -> usize {
+    let mut opens = 0;
+    let mut buffer = [0u8; 4096];
+    loop {
+        // The watch includes close events, preventing inotify from coalescing
+        // successive opens of the same inode into one unread notification.
+        let read = unsafe {
+            libc::read(
+                observer.as_raw_fd(),
+                buffer.as_mut_ptr().cast(),
+                buffer.len(),
+            )
+        };
+        if read < 0 {
+            let error = std::io::Error::last_os_error();
+            if error.kind() == std::io::ErrorKind::WouldBlock {
+                break;
+            }
+            if error.kind() == std::io::ErrorKind::Interrupted {
+                continue;
+            }
+            panic!("cannot read native manifest-open events: {error}");
+        }
+        if read == 0 {
+            break;
+        }
+        let bytes = usize::try_from(read).expect("nonnegative event byte count");
+        let header_size = std::mem::size_of::<libc::inotify_event>();
+        let mut offset = 0;
+        while offset < bytes {
+            assert!(
+                offset + header_size <= bytes,
+                "complete native event header"
+            );
+            let event = unsafe {
+                std::ptr::read_unaligned(buffer[offset..].as_ptr().cast::<libc::inotify_event>())
+            };
+            let end = offset + header_size + usize::try_from(event.len).unwrap();
+            assert!(end <= bytes, "complete native event payload");
+            if event.mask & libc::IN_OPEN != 0 {
+                opens += 1;
+            }
+            offset = end;
+        }
+    }
+    opens
+}
+
+/// A full mark pass must reuse the revision probe's actual descriptor, not
+/// reauthorize a pathname for the same manifest. The retained evidence is
+/// still marked live, while unrelated content is eligible for collection.
+#[cfg(target_os = "linux")]
+#[test]
+fn segment_mark_reads_a_generation_manifest_with_one_kernel_open() {
+    let store = tempfile::TempDir::new().expect("retention store");
+    let generation_root = store.path().join(GENERATIONS_DIRECTORY);
+    let segments_root = store.path().join(GENERATION_SEGMENTS_DIRECTORY);
+    std::fs::create_dir_all(&generation_root).expect("generation directory");
+    std::fs::create_dir_all(&segments_root).expect("segment directory");
+
+    let evidence_bytes = b"nonempty retained segment evidence";
+    let evidence_digest = encode_tagged_lowercase_hex("sha256:", &Sha256::digest(evidence_bytes));
+    let segment_descriptor = serde_json::json!({
+        "segment_digest": evidence_digest,
+        "segment_size_bytes": evidence_bytes.len(),
+        "decoded_size_bytes": evidence_bytes.len(),
+    });
+    let generation = serde_json::json!({
+        "format_revision": SEALED_GENERATION_FORMAT_REVISION_V1,
+        "manifest": {
+            "generation_id": "generation.v1.manifest-open",
+            "seal": { "sealed_at": 7 }
+        },
+        "snapshot": { "files": [] },
+        "file_segments": [],
+        "file_evidence": [],
+        "content_pack": single_segment_content_pack(evidence_bytes),
+        "generation_evidence": {
+            "segment_digest": evidence_digest,
+            "segment_size_bytes": evidence_bytes.len(),
+            "pages": [{
+                "page_ordinal": 0,
+                "page_digest": evidence_digest,
+                "page_size_bytes": evidence_bytes.len()
+            }]
+        },
+        "code_graph_pages": [],
+        "resolution_index": {
+            "definitions": [segment_descriptor.clone()],
+            "references": [segment_descriptor.clone()],
+            "import_aliases": segment_descriptor
+        }
+    });
+    let generation_bytes = serde_json::to_vec(&generation).expect("serialize generation");
+    let manifest_bytes = serde_json::to_vec(&serde_json::json!({
+        "state_digest": encode_tagged_lowercase_hex("sha256:", &Sha256::digest(&generation_bytes)),
+        "generation": generation,
+    }))
+    .expect("serialize sealed manifest");
+    let manifest_digest = encode_lowercase_hex(&Sha256::digest(&manifest_bytes));
+    let manifest_path = generation_root.join(format!("generation-{manifest_digest}.json"));
+    std::fs::write(&manifest_path, &manifest_bytes).expect("write sealed manifest");
+
+    let referenced_path = segments_root.join(format!(
+        "segment-{}.json",
+        sha256_hex_suffix(&evidence_digest).expect("evidence digest")
+    ));
+    std::fs::write(&referenced_path, evidence_bytes).expect("write retained evidence");
+    let orphan_bytes = b"unreferenced segment";
+    let orphan_digest = encode_lowercase_hex(&Sha256::digest(orphan_bytes));
+    let orphan_path = segments_root.join(format!("segment-{orphan_digest}.json"));
+    std::fs::write(&orphan_path, orphan_bytes).expect("write unreferenced segment");
+
+    let raw_fd = unsafe { libc::inotify_init1(libc::IN_NONBLOCK | libc::IN_CLOEXEC) };
+    assert!(
+        raw_fd >= 0,
+        "native inotify: {}",
+        std::io::Error::last_os_error()
+    );
+    let observer = unsafe { OwnedFd::from_raw_fd(raw_fd) };
+    let native_path =
+        CString::new(manifest_path.as_os_str().as_bytes()).expect("manifest path has no NUL");
+    let watch = unsafe {
+        libc::inotify_add_watch(
+            observer.as_raw_fd(),
+            native_path.as_ptr(),
+            libc::IN_OPEN | libc::IN_CLOSE_NOWRITE,
+        )
+    };
+    assert!(
+        watch >= 0,
+        "native manifest watch: {}",
+        std::io::Error::last_os_error()
+    );
+
+    drop(File::open(&manifest_path).expect("positive control pathname open"));
+    assert_eq!(
+        native_manifest_open_events(&observer),
+        1,
+        "the observer must detect an actual kernel open"
+    );
+    let (found, exhausted) =
+        sweep_unreferenced_generation_segments(store.path(), None, false, &|| false, None)
+            .expect("authenticated mark and conservative sweep");
+    assert!(found, "the unrelated nonempty segment is collectable");
+    assert!(!exhausted);
+    assert_eq!(
+        native_manifest_open_events(&observer),
+        1,
+        "revision probe and full segment mark must reuse one opened inode"
+    );
+
+    let (found, exhausted) =
+        sweep_unreferenced_generation_segments(store.path(), None, true, &|| false, None)
+            .expect("collect only the unreferenced segment");
+    assert!(found);
+    assert!(!exhausted);
+    assert_eq!(
+        native_manifest_open_events(&observer),
+        1,
+        "applying the mark must also avoid a second manifest open"
+    );
+    assert_eq!(
+        std::fs::read(&referenced_path).expect("retained evidence survives"),
+        evidence_bytes
+    );
+    assert!(!orphan_path.exists(), "unreferenced segment was removed");
+
+    // Identical byte extent but a different content-addressed file digest is
+    // never accepted as live evidence on the next mark.
+    let mut altered = manifest_bytes;
+    altered.push(b' ');
+    std::fs::write(&manifest_path, altered).expect("mutate disposable manifest");
+    assert!(matches!(
+        sweep_unreferenced_generation_segments(store.path(), None, false, &|| false, None),
+        Err(CodeGenerationRetentionErrorV1::UnsafeState(_))
+    ));
+    assert_eq!(
+        std::fs::read(&referenced_path).expect("corruption cannot erase live evidence"),
+        evidence_bytes
+    );
+}
+
+/// The marked file may be removed after the directory entry was returned.
+/// A cancellation arriving at that exact boundary must not be rewritten as
+/// an unrelated busy-store error or trigger any segment collection.
+#[test]
+fn segment_mark_prefers_cancellation_before_disappeared_manifest_open() {
+    let store = tempfile::TempDir::new().expect("isolated retention store");
+    let generation_root = store.path().join(GENERATIONS_DIRECTORY);
+    let segments_root = store.path().join(GENERATION_SEGMENTS_DIRECTORY);
+    std::fs::create_dir_all(&generation_root).expect("generation directory");
+    std::fs::create_dir_all(&segments_root).expect("segment directory");
+
+    let manifest_bytes = b"nonempty manifest that is withdrawn after enumeration";
+    let digest = encode_lowercase_hex(&Sha256::digest(manifest_bytes));
+    let manifest_path = generation_root.join(format!("generation-{digest}.json"));
+    std::fs::write(&manifest_path, manifest_bytes).expect("create a real manifest");
+
+    let segment_bytes = b"nonempty unreferenced segment remains untouched on cancellation";
+    let segment_digest = encode_lowercase_hex(&Sha256::digest(segment_bytes));
+    let segment_path = segments_root.join(format!("segment-{segment_digest}.json"));
+    std::fs::write(&segment_path, segment_bytes).expect("create segment to protect");
+
+    // With this single scope, the first cancellation probe runs when the
+    // actual manifest directory entry is visited. Simulate the listed file
+    // disappearing and cancellation becoming active before open(). The next
+    // probe must be the pre-open cancellation boundary.
+    let calls = std::cell::Cell::new(0usize);
+    let cancelled = || {
+        let next = calls.get() + 1;
+        calls.set(next);
+        if next == 1 {
+            std::fs::remove_file(&manifest_path)
+                .expect("simulate concurrent withdrawal of enumerated manifest");
+            false
+        } else {
+            true
+        }
+    };
+    let error = sweep_unreferenced_generation_segments(store.path(), None, true, &cancelled, None)
+        .expect_err("cancellation after enumeration must prevent segment deletion");
+    assert!(matches!(error, CodeGenerationRetentionErrorV1::Cancelled));
+    assert_eq!(
+        calls.get(),
+        2,
+        "the pre-open cancellation check must run after enumerating the file"
+    );
+    assert!(
+        !manifest_path.exists(),
+        "the withdrawal must actually occur"
+    );
+    assert_eq!(
+        std::fs::read(&segment_path).expect("protected segment bytes"),
+        segment_bytes,
+        "cancellation cannot collect an unmarked segment"
+    );
+}
+
 #[test]
 fn maintenance_preparation_wakes_for_an_unreferenced_final_segment() {
     let store = tempfile::TempDir::new().expect("create unpublished store");
@@ -3697,8 +3960,13 @@ fn recovery_completes_a_committed_rewrite_that_never_reached_the_pointer() {
 fn vanished_listed_generation_open_defers_instead_of_storage_loss() {
     let root = tempfile::tempdir().expect("census root");
     let missing = root.path().join(format!("generation-{:064x}.json", 1));
-    let error = super::generation_scan::read_generation_format_revision(&missing, &|| false)
-        .expect_err("a vanished listed generation defers the census");
+    let error = super::generation_scan::read_generation_metadata(
+        &missing,
+        GenerationDigestVerificationV1::MetadataOnly,
+        &|| false,
+    )
+    .err()
+    .expect("a vanished listed generation defers the census");
     assert!(
         matches!(error, CodeGenerationRetentionErrorV1::GenerationStoreBusy),
         "a missing listed generation is a publisher race, not a storage failure: {error:?}"
@@ -3706,9 +3974,13 @@ fn vanished_listed_generation_open_defers_instead_of_storage_loss() {
 
     let directory = root.path().join("not-a-generation-file");
     std::fs::create_dir(&directory).expect("directory where a file was listed");
-    let storage_error =
-        super::generation_scan::read_generation_format_revision(&directory, &|| false)
-            .expect_err("a directory is not a vanished file");
+    let storage_error = super::generation_scan::read_generation_metadata(
+        &directory,
+        GenerationDigestVerificationV1::MetadataOnly,
+        &|| false,
+    )
+    .err()
+    .expect("a directory is not a vanished file");
     assert!(
         matches!(storage_error, CodeGenerationRetentionErrorV1::Storage(_)),
         "non-NotFound census I/O stays a storage failure: {storage_error:?}"

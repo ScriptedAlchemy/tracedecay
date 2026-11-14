@@ -61,6 +61,22 @@ pub(super) struct PartitionedResolutionIndexDescriptorV1 {
 }
 
 impl PartitionedResolutionIndexDescriptorV1 {
+    /// The parsed page vectors retain their real capacities; the import-alias
+    /// descriptor is inline in the containing generation.
+    pub(super) fn retained_heap_bytes(&self) -> usize {
+        super::resident_bytes::vec_bytes(
+            &self.definitions,
+            self.definitions.capacity(),
+            |segment| segment.segment_digest.as_str().len(),
+        )
+        .saturating_add(super::resident_bytes::vec_bytes(
+            &self.references,
+            self.references.capacity(),
+            |segment| segment.segment_digest.as_str().len(),
+        ))
+        .saturating_add(self.import_aliases.segment_digest.as_str().len())
+    }
+
     pub(super) fn segments(&self) -> impl Iterator<Item = &PartitionedIndexSegmentDescriptorV1> {
         self.definitions
             .iter()

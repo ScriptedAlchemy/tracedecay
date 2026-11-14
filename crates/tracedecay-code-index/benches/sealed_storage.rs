@@ -2,19 +2,19 @@
 //!
 //! Builds a clean generation over the blobs of one git revision, then a
 //! successor after a deterministic edit of every seventeenth file, seals both
-//! through the partitioned codec, and reports what a store would hold: file
-//! segments (deduplicated across the two generations by content address, as
-//! the segment directory is), each generation's evidence pack, and manifests.
-//! File segment bytes are also split by payload section after undoing the
-//! stored encoding, so a codec change shows which section it moved.
+//! through the partitioned codec, and reports the physical payload packs and
+//! manifests a store holds. Packs are deduplicated only by their complete
+//! canonical identities. Logical preparation writes are reported separately
+//! and split by payload section after undoing the stored encoding, so a codec
+//! change shows which section it moved.
 //!
 //! `decoded_digest` hashes what readers observe after restore: every lexical
 //! page's chunks and clone bodies, the lineage roster, symbols, and edges.
 //! A storage change that preserves behaviour leaves it unchanged.
 //!
 //! ```text
-//! cargo bench -p tracedecay-code-index --bench sealed_storage
-//! SEALED_STORAGE_REPO=<git dir> SEALED_STORAGE_REV=<rev> cargo bench ...
+//! bazel test //crates/tracedecay-code-index:sealed_storage --test_arg=--bench
+//! SEALED_STORAGE_REPO=<git dir> SEALED_STORAGE_REV=<rev> bazel test ...
 //! ```
 //!
 //! The corpus is read from git objects, never from the working tree, so two
@@ -31,7 +31,7 @@ use std::{
     time::Instant,
 };
 use tracedecay_runtime_core::resident_memory::{
-    ProcessResidentMemoryV1, detected_process_resident_memory_limit_v1,
+    ProcessResidentMemoryV1, ResidentMemoryOperationV1, detected_process_resident_memory_limit_v1,
 };
 
 use serde::Serialize;
@@ -43,12 +43,13 @@ use tracedecay_code_index::{
     production::{
         CodeIndexAtomicPublicationPort, CodeIndexBuildRequestV1, CodeIndexCapturedFileV1,
         CodeIndexExecutionControlV1, CodeIndexGenerationScopeV1, CodeIndexPreparationPort,
-        CodeIndexProductionConfigV1, CodeIndexProductionErrorV1, CodeIndexProductionOwnerV1,
-        CodeIndexPublicationStoreErrorV1, CodeIndexPublishedGenerationV1,
-        CodeIndexRepositoryParseIdentityV1, CodeIndexSealedGenerationV1,
-        CodeIndexSealedPublicationV1, MemoryCodeIndexPreparationV1, MemorySealedPublicationStoreV1,
-        SealedGenerationSegmentPublicationV1, SealedGenerationSegmentReadV1, SealedSegmentReaderV1,
-        SharedDecodedContentPoolV1, VerifiedSealedLexicalPageReadV1,
+        CodeIndexProductionConfigV1, CodeIndexProductionOwnerV1, CodeIndexPublicationStoreErrorV1,
+        CodeIndexPublishedGenerationV1, CodeIndexRepositoryParseIdentityV1,
+        CodeIndexSealedGenerationV1, CodeIndexSealedPublicationV1, MemoryCodeIndexPreparationV1,
+        MemorySealedPublicationStoreV1, SealedGenerationContentPackV1,
+        SealedGenerationPackReadFactoryV1, SealedGenerationPackReadPassV1,
+        SealedGenerationSegmentIdentityV1, SealedGenerationSegmentPublicationV1,
+        SealedSegmentReaderV1, SharedDecodedContentPoolV1, VerifiedSealedLexicalPageReadV1,
         VerifiedSealedLexicalPageSourceV1,
     },
 };
@@ -103,10 +104,12 @@ struct GenerationReport {
     /// Restore through `decode_partitioned_sealed` alone.
     restore_ms: u128,
     manifest_bytes: usize,
-    file_segments: usize,
-    file_segments_written: usize,
-    file_segment_bytes_written: usize,
-    evidence_bytes: usize,
+    snapshot_files: usize,
+    logical_segments_written: usize,
+    logical_segment_bytes_written: usize,
+    evidence_bytes_written: usize,
+    physical_packs: usize,
+    physical_pack_bytes: u64,
     lineage_rows: usize,
     lineage_unchanged_rows: usize,
 }
@@ -120,13 +123,16 @@ struct Report {
     edited_files: usize,
     clean: GenerationReport,
     successor: GenerationReport,
-    /// What the segment directory holds for both generations.
-    store_file_segments: usize,
-    store_file_segment_bytes: usize,
-    store_evidence_bytes: usize,
+    /// Distinct logical writes observed across both preparations.
+    logical_segments_written: usize,
+    logical_segment_bytes_written: usize,
+    evidence_bytes_written: usize,
+    /// Actual physical payload storage for both retained generations.
+    store_packs: usize,
+    store_pack_bytes: u64,
     store_manifest_bytes: usize,
-    store_total_bytes: usize,
-    /// Distinct file segments split by payload section, measured on the
+    store_total_bytes: u64,
+    /// Distinct logical writes split by payload section, measured on the
     /// canonical JSON the stored encoding decodes to.
     decoded_section_bytes: BTreeMap<String, usize>,
     decoded_digest: String,
@@ -134,16 +140,18 @@ struct Report {
 }
 
 /// The clean generation sealed again as a linked worktree of the same
-/// project: every file segment it writes, and what two worktree scopes cost
-/// when each stores its own segments versus sharing the project's.
+/// project: the logical writes and physical packs, with whole-pack sharing
+/// between the two worktree scopes.
 #[derive(Serialize)]
 struct LinkedWorktreeReport {
-    file_segments_written: usize,
-    file_segments_shared_with_primary: usize,
+    logical_segments_written: usize,
+    logical_segments_shared_with_primary: usize,
     manifest_bytes: usize,
-    evidence_bytes: usize,
-    per_worktree_segments_total_bytes: usize,
-    shared_segments_total_bytes: usize,
+    evidence_bytes_written: usize,
+    physical_packs: usize,
+    physical_packs_shared_with_primary: usize,
+    per_worktree_store_bytes: u64,
+    shared_store_bytes: u64,
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
@@ -162,16 +170,15 @@ fn main() -> Result<(), Box<dyn Error>> {
         .iter()
         .map(|source| source.logical_path.clone())
         .collect::<BTreeSet<_>>();
-    let clean = owner.build_and_publish(
-        request(
-            &sources,
-            all_paths.clone(),
-            "tree.sealed-storage.clean",
-            2_000_000,
-            None,
-        )?,
-        &ActiveControl,
+    let clean_request = request(
+        &sources,
+        all_paths.clone(),
+        "tree.sealed-storage.clean",
+        2_000_000,
+        None,
     )?;
+    let clean_operation = clean_request.resident_memory.begin_operation();
+    let clean = owner.build_and_publish(clean_request, &ActiveControl)?;
     let (clean_sealed, clean_seal_ms) = store.take_sealed()?;
     // The same tree sealed again as a linked worktree of the project.
     let linked_store = ObservedStoreV1::default();
@@ -188,45 +195,40 @@ fn main() -> Result<(), Box<dyn Error>> {
         )?;
     let (edited, edited_paths) = edit(&sources);
     let edited_files = edited_paths.len();
-    let successor = owner.build_and_publish(
-        request(
-            &edited,
-            edited_paths,
-            "tree.sealed-storage.successor",
-            4_000_000,
-            None,
-        )?,
-        &ActiveControl,
+    let successor_request = request(
+        &edited,
+        edited_paths,
+        "tree.sealed-storage.successor",
+        4_000_000,
+        None,
     )?;
+    let successor_operation = successor_request.resident_memory.begin_operation();
+    let successor = owner.build_and_publish(successor_request, &ActiveControl)?;
 
     let (successor_sealed, successor_seal_ms) = store.take_sealed()?;
     let (linked_sealed, _) = linked_store.take_sealed()?;
-    let file_segment_bytes =
-        |segments: &BTreeMap<String, Vec<u8>>| segments.values().map(Vec::len).sum::<usize>();
-    let scope_bytes = |sealed: &Sealed| sealed.manifest.len() + sealed.evidence.1.len();
-    let mut shared_segments = clean_sealed.file_segments.clone();
-    shared_segments.extend(
-        linked_sealed
-            .file_segments
-            .iter()
-            .map(|(digest, bytes)| (digest.clone(), bytes.clone())),
-    );
+    let clean_packs = physical_packs(&[&clean_sealed])?;
+    let linked_packs = physical_packs(&[&linked_sealed])?;
+    let shared_packs = physical_packs(&[&clean_sealed, &linked_sealed])?;
+    let linked_manifest_bytes = (clean_sealed.manifest.len() + linked_sealed.manifest.len()) as u64;
     let linked_worktree = LinkedWorktreeReport {
-        file_segments_written: linked_sealed.file_segments.len(),
-        file_segments_shared_with_primary: linked_sealed
+        logical_segments_written: linked_sealed.file_segments.len(),
+        logical_segments_shared_with_primary: linked_sealed
             .file_segments
             .keys()
             .filter(|digest| clean_sealed.file_segments.contains_key(*digest))
             .count(),
         manifest_bytes: linked_sealed.manifest.len(),
-        evidence_bytes: linked_sealed.evidence.1.len(),
-        per_worktree_segments_total_bytes: file_segment_bytes(&clean_sealed.file_segments)
-            + file_segment_bytes(&linked_sealed.file_segments)
-            + scope_bytes(&clean_sealed)
-            + scope_bytes(&linked_sealed),
-        shared_segments_total_bytes: file_segment_bytes(&shared_segments)
-            + scope_bytes(&clean_sealed)
-            + scope_bytes(&linked_sealed),
+        evidence_bytes_written: linked_sealed.evidence.1.len(),
+        physical_packs: linked_packs.len(),
+        physical_packs_shared_with_primary: linked_packs
+            .keys()
+            .filter(|digest| clean_packs.contains_key(*digest))
+            .count(),
+        per_worktree_store_bytes: clean_packs.values().sum::<u64>()
+            + linked_packs.values().sum::<u64>()
+            + linked_manifest_bytes,
+        shared_store_bytes: shared_packs.values().sum::<u64>() + linked_manifest_bytes,
     };
     let mut store_segments = clean_sealed.file_segments.clone();
     store_segments.extend(
@@ -238,8 +240,12 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     let mut decoded = Sha256::new();
     let clean_restore_ms =
-        digest_decoded(&clean_sealed, &clean_sealed.file_segments, &mut decoded)?;
-    let successor_restore_ms = digest_decoded(&successor_sealed, &store_segments, &mut decoded)?;
+        digest_decoded(clean.sealed_generation(), &mut decoded, &clean_operation)?;
+    let successor_restore_ms = digest_decoded(
+        successor.sealed_generation(),
+        &mut decoded,
+        &successor_operation,
+    )?;
 
     let mut sections = BTreeMap::new();
     let mut segment_kinds = clean_sealed.segment_kinds.clone();
@@ -251,8 +257,10 @@ fn main() -> Result<(), Box<dyn Error>> {
     for sealed in [&clean_sealed, &successor_sealed] {
         add_evidence_sections(&sealed.evidence.1, &mut sections)?;
     }
-    let store_file_segment_bytes = store_segments.values().map(Vec::len).sum::<usize>();
-    let store_evidence_bytes = clean_sealed.evidence.1.len() + successor_sealed.evidence.1.len();
+    let logical_segment_bytes_written = store_segments.values().map(Vec::len).sum::<usize>();
+    let evidence_bytes_written = clean_sealed.evidence.1.len() + successor_sealed.evidence.1.len();
+    let store_packs = physical_packs(&[&clean_sealed, &successor_sealed])?;
+    let store_pack_bytes = store_packs.values().sum::<u64>();
     let store_manifest_bytes = clean_sealed.manifest.len() + successor_sealed.manifest.len();
     let report = Report {
         repository: repository.display().to_string(),
@@ -261,22 +269,28 @@ fn main() -> Result<(), Box<dyn Error>> {
         corpus_bytes,
         edited_files,
         clean: generation_report(
-            &store.inner.decode(clean.manifest_bytes())?,
+            &store
+                .inner
+                .decode(clean.manifest_bytes(), &clean_operation)?,
             &clean_sealed,
             clean_seal_ms,
             clean_restore_ms,
-        ),
+        )?,
         successor: generation_report(
-            &store.inner.decode(successor.manifest_bytes())?,
+            &store
+                .inner
+                .decode(successor.manifest_bytes(), &successor_operation)?,
             &successor_sealed,
             successor_seal_ms,
             successor_restore_ms,
-        ),
-        store_file_segments: store_segments.len(),
-        store_file_segment_bytes,
-        store_evidence_bytes,
+        )?,
+        logical_segments_written: store_segments.len(),
+        logical_segment_bytes_written,
+        evidence_bytes_written,
+        store_packs: store_packs.len(),
+        store_pack_bytes,
         store_manifest_bytes,
-        store_total_bytes: store_file_segment_bytes + store_evidence_bytes + store_manifest_bytes,
+        store_total_bytes: store_pack_bytes + store_manifest_bytes as u64,
         decoded_section_bytes: sections,
         decoded_digest: format!("sha256:{}", hex::encode(decoded.finalize())),
         linked_worktree,
@@ -290,22 +304,40 @@ fn generation_report(
     sealed: &Sealed,
     seal_ms: u128,
     restore_ms: u128,
-) -> GenerationReport {
-    GenerationReport {
+) -> Result<GenerationReport, Box<dyn Error>> {
+    let packs = physical_packs(&[sealed])?;
+    Ok(GenerationReport {
         seal_ms,
         restore_ms,
         manifest_bytes: sealed.manifest.len(),
-        file_segments: generation.snapshot().files.len(),
-        file_segments_written: sealed.file_segments.len(),
-        file_segment_bytes_written: sealed.file_segments.values().map(Vec::len).sum(),
-        evidence_bytes: sealed.evidence.1.len(),
+        snapshot_files: generation.snapshot().files.len(),
+        logical_segments_written: sealed.file_segments.len(),
+        logical_segment_bytes_written: sealed.file_segments.values().map(Vec::len).sum(),
+        evidence_bytes_written: sealed.evidence.1.len(),
+        physical_packs: packs.len(),
+        physical_pack_bytes: packs.values().sum(),
         lineage_rows: generation.lineage().len(),
         lineage_unchanged_rows: generation
             .lineage()
             .iter()
             .filter(|row| row.kind == LineageKindV1::Unchanged)
             .count(),
+    })
+}
+
+fn physical_packs(seals: &[&Sealed]) -> Result<BTreeMap<ManifestDigest, u64>, Box<dyn Error>> {
+    let mut packs = BTreeMap::new();
+    for seal in seals {
+        for identity in CodeIndexPublishedGenerationV1::partitioned_pack_identities(&seal.manifest)?
+        {
+            if let Some(previous) = packs.insert(identity.digest, identity.size_bytes)
+                && previous != identity.size_bytes
+            {
+                return Err("the same physical pack digest has conflicting byte lengths".into());
+            }
+        }
     }
+    Ok(packs)
 }
 
 fn git_output(repository: &PathBuf, args: &[&str]) -> Result<String, Box<dyn Error>> {
@@ -519,6 +551,13 @@ struct ObservedPreparationV1 {
 }
 
 impl CodeIndexPreparationPort for ObservedPreparationV1 {
+    fn bind_parent(
+        &mut self,
+        parent: &CodeIndexSealedGenerationV1,
+    ) -> Result<(), CodeIndexPublicationStoreErrorV1> {
+        self.inner.bind_parent(parent)
+    }
+
     fn write_segment(
         &mut self,
         publication: SealedGenerationSegmentPublicationV1<'_>,
@@ -570,6 +609,21 @@ impl CodeIndexPreparationPort for ObservedPreparationV1 {
         self.inner.segment_reader()
     }
 
+    fn finalize_content_pack(
+        &mut self,
+        segments: &[SealedGenerationSegmentIdentityV1],
+    ) -> Result<SealedGenerationContentPackV1, CodeIndexPublicationStoreErrorV1> {
+        self.inner.finalize_content_pack(segments)
+    }
+
+    fn pack_reader(&self) -> Arc<SealedSegmentReaderV1> {
+        self.inner.pack_reader()
+    }
+
+    fn read_pass_factory(&self) -> Arc<SealedGenerationPackReadFactoryV1> {
+        self.inner.read_pass_factory()
+    }
+
     fn abort(self) -> Result<(), CodeIndexPublicationStoreErrorV1> {
         self.inner.abort()
     }
@@ -589,10 +643,11 @@ impl CodeIndexAtomicPublicationPort for ObservedStoreV1 {
         &mut self,
         scope: &CodeIndexGenerationScopeV1,
         expected: Option<&CodeGenerationId>,
+        operation: &ResidentMemoryOperationV1,
     ) -> Result<Self::Preparation, CodeIndexPublicationStoreErrorV1> {
         let started = Instant::now();
         Ok(ObservedPreparationV1 {
-            inner: self.inner.prepare(scope, expected)?,
+            inner: self.inner.prepare(scope, expected, operation)?,
             sealed: Sealed::default(),
             evidence_pack: Vec::new(),
             started,
@@ -621,42 +676,21 @@ impl CodeIndexAtomicPublicationPort for ObservedStoreV1 {
     }
 }
 
-/// Restore `sealed` from `segments` (its own plus any it reuses from a
-/// parent) and hash everything restore and the lexical drain hand readers.
+/// Restore the real published generation and hash everything restore and
+/// the lexical drain hand readers. Write observations remain the section report.
 fn digest_decoded(
-    sealed: &Sealed,
-    segments: &BTreeMap<String, Vec<u8>>,
+    sealed: &CodeIndexSealedGenerationV1,
     digest: &mut Sha256,
+    operation: &ResidentMemoryOperationV1,
 ) -> Result<u128, Box<dyn Error>> {
-    let mut segments = segments.clone();
-    segments.insert(sealed.evidence.0.clone(), sealed.evidence.1.clone());
-    let segments = Arc::new(segments);
-    let segment = |digest: &ManifestDigest| {
-        segments
-            .get(digest.as_str())
-            .map(Vec::as_slice)
-            .ok_or_else(|| CodeIndexProductionErrorV1::Contract("segment is missing".to_owned()))
-    };
+    let reader = sealed.begin_read_pass()?;
     let started = Instant::now();
     let generation = CodeIndexPublishedGenerationV1::decode_partitioned_sealed(
-        &sealed.manifest,
+        sealed.manifest_bytes(),
         &SharedDecodedContentPoolV1::default(),
-        |request, buffer| {
-            let (bytes, offset, length) = match request {
-                SealedGenerationSegmentReadV1::Whole { digest, size_bytes } => {
-                    (segment(digest)?, 0, size_bytes)
-                }
-                SealedGenerationSegmentReadV1::Range {
-                    digest,
-                    offset,
-                    length,
-                    ..
-                } => (segment(digest)?, offset, length),
-            };
-            buffer.clear();
-            buffer.extend_from_slice(&bytes[offset as usize..(offset + length) as usize]);
-            Ok(())
-        },
+        |request, buffer| reader(request, buffer),
+        // Keep the restore measurement scoped to the codec, without an admission guard.
+        &mut |_| Ok(()),
     )?;
     let restore_ms = started.elapsed().as_millis();
     digest.update(serde_json::to_vec(generation.lineage())?);
@@ -664,24 +698,25 @@ fn digest_decoded(
     digest.update(serde_json::to_vec(generation.edges())?);
     digest.update(serde_json::to_vec(generation.imports())?);
 
-    let state_digest = ManifestDigest::from_sha256_bytes(&Sha256::digest(&sealed.manifest))?;
-    let lexical_segments = Arc::clone(&segments);
+    drop(reader);
+    let state_digest = ManifestDigest::from_sha256_bytes(&Sha256::digest(sealed.manifest_bytes()))?;
+    let lexical_sealed = sealed.clone();
     let mut source = VerifiedSealedLexicalPageSourceV1::open_partitioned_sealed(
-        &sealed.manifest,
+        sealed.manifest_bytes(),
         state_digest,
-        move |digest, _, buffer, _control| {
-            let bytes = lexical_segments.get(digest.as_str()).ok_or_else(|| {
-                CodeIndexProductionErrorV1::Contract("segment is missing".to_owned())
-            })?;
-            buffer.clear();
-            buffer.extend_from_slice(bytes);
-            Ok(())
+        move |_control, _layout| {
+            let reader = lexical_sealed.begin_read_pass()?;
+            let read_pass: Box<SealedGenerationPackReadPassV1> =
+                Box::new(move |request, buffer, _control| reader(request, buffer));
+            Ok(read_pass)
         },
         LEXICAL_PAGE_CHUNKS,
         LEXICAL_PAGE_BYTES,
+        operation,
     )?;
+    let mut read_pass = source.begin_read_pass(&ActiveControl)?;
     loop {
-        match source.next_page(&ActiveControl)? {
+        match source.next_page(&ActiveControl, read_pass.as_mut())? {
             VerifiedSealedLexicalPageReadV1::Page(page) => {
                 for chunk in page.chunks() {
                     digest.update(serde_json::to_vec(chunk.chunk())?);

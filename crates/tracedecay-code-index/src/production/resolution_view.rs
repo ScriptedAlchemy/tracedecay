@@ -665,7 +665,11 @@ mod allocation_tests {
     };
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    fn published_fixture() -> (MemorySealedPublicationStoreV1, CodeIndexPublishedBuildV1) {
+    fn published_fixture() -> (
+        MemorySealedPublicationStoreV1,
+        CodeIndexPublishedBuildV1,
+        Arc<ProcessResidentMemoryV1>,
+    ) {
         let store = MemorySealedPublicationStoreV1::default();
         let mut owner = owner(&store);
         let request = request(
@@ -676,10 +680,11 @@ mod allocation_tests {
             )],
             1_000_000,
         );
+        let resident_memory = Arc::clone(&request.resident_memory);
         let published = owner
             .build_and_publish(request, &UninterruptibleCodeIndexControlV1)
             .unwrap();
-        (store, published)
+        (store, published, resident_memory)
     }
 
     #[test]
@@ -905,8 +910,12 @@ mod allocation_tests {
     }
     #[test]
     fn compact_fact_admission_precedes_clones_and_settles_after_source_release() {
-        let (store, _published) = published_fixture();
-        let mut decoded = store.decode_active(&scope()).unwrap().unwrap();
+        let (store, _published, resident_memory) = published_fixture();
+        let decode_operation = resident_memory.begin_operation();
+        let mut decoded = store
+            .decode_active(&scope(), &decode_operation)
+            .unwrap()
+            .unwrap();
         let file = decoded.files.remove(0);
         drop(decoded);
         let symbol = &file.artifacts.symbols[0];
@@ -982,10 +991,14 @@ mod allocation_tests {
             ],
             1_000_000,
         );
+        let decode_operation = request.resident_memory.begin_operation();
         let _published = owner
             .build_and_publish(request, &UninterruptibleCodeIndexControlV1)
             .unwrap();
-        let mut decoded = store.decode_active(&scope()).unwrap().unwrap();
+        let mut decoded = store
+            .decode_active(&scope(), &decode_operation)
+            .unwrap()
+            .unwrap();
         let file_index = decoded
             .files
             .iter()
@@ -1049,8 +1062,12 @@ mod allocation_tests {
 
     #[test]
     fn sparse_decoded_and_lazy_facts_keep_only_their_actual_same_operation_charge() {
-        let (store, published) = published_fixture();
-        let decoded = store.decode_active(&scope()).unwrap().unwrap();
+        let (store, published, resident_memory) = published_fixture();
+        let decode_operation = resident_memory.begin_operation();
+        let decoded = store
+            .decode_active(&scope(), &decode_operation)
+            .unwrap()
+            .unwrap();
         let file = &decoded.files[0];
         let authority = memory(64 * 1024 * 1024);
         let operation = authority.begin_operation();
@@ -1078,7 +1095,11 @@ mod allocation_tests {
         ));
         assert_eq!(denied.snapshot().used_bytes, 0);
 
-        let parent = SealedParentGenerationV1::open(published.sealed_generation().clone()).unwrap();
+        let parent = SealedParentGenerationV1::open(
+            published.sealed_generation().clone(),
+            &resident_memory.begin_operation(),
+        )
+        .unwrap();
         let descriptor = &parent.generation().file_segments[0];
         let row = &parent.snapshot().files[descriptor.file_key as usize];
         let view = SparseFileV1::carried(
@@ -1123,14 +1144,20 @@ mod allocation_tests {
 
     #[test]
     fn cold_fact_vector_admission_precedes_canonical_segment_reads() {
-        let (_store, published) = published_fixture();
-        let parent = SealedParentGenerationV1::open(published.sealed_generation().clone()).unwrap();
-        let canonical = published.sealed_generation().segment_reader();
+        let (_store, published, resident_memory) = published_fixture();
+        let parent = SealedParentGenerationV1::open(
+            published.sealed_generation().clone(),
+            &resident_memory.begin_operation(),
+        )
+        .unwrap();
+        let canonical = published.sealed_generation().begin_read_pass().unwrap();
+        let layout =
+            super::super::SealedGenerationPackLayoutV1::open(published.manifest_bytes()).unwrap();
         let reads = Arc::new(AtomicUsize::new(0));
         let observed = Arc::clone(&reads);
         let reader: Arc<SealedSegmentReaderV1> = Arc::new(move |segment, bytes| {
             observed.fetch_add(1, Ordering::Relaxed);
-            canonical(segment, bytes)
+            layout.read(segment, bytes, canonical.as_ref())
         });
         let authority = memory(1);
         let mut guard = ConstructionMemoryV1::new(authority.begin_operation()).unwrap();

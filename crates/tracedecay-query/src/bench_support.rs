@@ -6,7 +6,6 @@
 //! indexing profiles the daemon's commit width, search profiles a narrower
 //! query ingest.
 
-use std::collections::BTreeMap;
 use std::fmt;
 use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
@@ -16,14 +15,17 @@ use std::time::Duration;
 use sha2::{Digest, Sha256};
 use tracedecay_code_index::languages::{LanguageRegistry, StaticLanguageRegistry};
 use tracedecay_code_index::production::{
-    CodeIndexExecutionControlV1, CodeIndexProductionErrorV1, CodeIndexPublishedBuildV1,
-    CodeIndexPublishedGenerationV1, MemorySealedPublicationStoreV1,
-    SealedGenerationSegmentPublicationV1, SharedDecodedContentPoolV1,
+    CodeIndexAtomicPublicationPort, CodeIndexExecutionControlV1, CodeIndexPreparationPort,
+    CodeIndexPublishedBuildV1, CodeIndexPublishedGenerationV1, MemoryCodeIndexPreparationV1,
+    MemorySealedPublicationStoreV1, SealedGenerationPackReadPassV1, SharedDecodedContentPoolV1,
     VerifiedSealedLexicalPageBatchBoundsV1, VerifiedSealedLexicalPageBatchReadV1,
     VerifiedSealedLexicalPageSourceV1, VerifiedSealedLexicalPageV1,
     VerifiedSealedLexicalSourceReceiptV1,
 };
 use tracedecay_domain::{LanguageId, ManifestDigest};
+use tracedecay_runtime_core::resident_memory::{
+    ProcessResidentMemoryV1, ResidentMemoryOperationV1, detected_process_resident_memory_limit_v1,
+};
 
 const DEFAULT_CORPUS_RELATIVE: &str = "benchmark_data/index-bench/corpus";
 
@@ -164,76 +166,63 @@ pub(crate) fn decoded_generation(
     _store: &MemorySealedPublicationStoreV1,
     published: &CodeIndexPublishedBuildV1,
 ) -> Result<Arc<CodeIndexPublishedGenerationV1>, String> {
-    let reader = published.sealed_generation().segment_reader();
+    let reader = published
+        .sealed_generation()
+        .begin_read_pass()
+        .map_err(|error| format!("begin published generation decode: {error}"))?;
+    // This benchmark helper measures codec restoration without a resident-admission boundary.
     CodeIndexPublishedGenerationV1::decode_partitioned_sealed(
         published.manifest_bytes(),
         &SharedDecodedContentPoolV1::default(),
         |request, buffer| reader(request, buffer),
+        &mut |_| Ok(()),
     )
     .map(Arc::new)
     .map_err(|error| format!("decode published generation: {error}"))
 }
 
-/// A partitioned sealed generation held in memory: the manifest, its content
-/// address (the daemon's lexical source state digest), and every published
-/// segment under its digest, with evidence pages assembled into their pack.
+/// A partitioned sealed generation held by its unpublished store preparation.
+/// Keeping that owner alive retains the packs and their construction charge.
 pub(crate) struct PartitionedSealedV1 {
     manifest: Vec<u8>,
     pub(crate) state_digest: ManifestDigest,
-    segments: Arc<BTreeMap<String, Vec<u8>>>,
+    preparation: MemoryCodeIndexPreparationV1,
+    byte_len: u64,
+    operation: ResidentMemoryOperationV1,
 }
 
 impl PartitionedSealedV1 {
-    /// Manifest plus every segment, the bytes a fresh publication writes.
+    /// Manifest plus every physical payload pack a fresh publication writes.
     pub(crate) fn byte_len(&self) -> u64 {
-        self.segments
-            .values()
-            .map(|segment| segment.len() as u64)
-            .sum::<u64>()
-            + self.manifest.len() as u64
+        self.byte_len
     }
 }
 
 pub(crate) fn seal_partitioned(
     generation: &CodeIndexPublishedGenerationV1,
 ) -> Result<PartitionedSealedV1, String> {
-    let mut segments = BTreeMap::new();
-    let mut evidence_pack = Vec::new();
+    let memory = Arc::new(ProcessResidentMemoryV1::new(
+        detected_process_resident_memory_limit_v1(),
+    ));
+    let operation = memory.begin_operation();
+    let mut store = MemorySealedPublicationStoreV1::default();
+    let mut preparation = store
+        .prepare(&generation.sealed_scope(), None, &operation)
+        .map_err(|error| format!("prepare sealed generation: {error}"))?;
     let manifest = generation
-        .encode_partitioned_sealed(|publication| {
-            match publication {
-                SealedGenerationSegmentPublicationV1::File { digest, bytes }
-                | SealedGenerationSegmentPublicationV1::FileEvidence { digest, bytes }
-                | SealedGenerationSegmentPublicationV1::ResolutionIndex { digest, bytes } => {
-                    segments.insert(digest.as_str().to_owned(), bytes.to_vec());
-                }
-                SealedGenerationSegmentPublicationV1::CodeGraphPage {
-                    page_digest, bytes, ..
-                } => {
-                    segments.insert(page_digest.as_str().to_owned(), bytes.to_vec());
-                }
-                SealedGenerationSegmentPublicationV1::GenerationEvidencePage { bytes, .. } => {
-                    evidence_pack.extend_from_slice(bytes);
-                }
-                SealedGenerationSegmentPublicationV1::GenerationEvidenceCommit {
-                    segment_digest,
-                    ..
-                } => {
-                    segments.insert(
-                        segment_digest.as_str().to_owned(),
-                        std::mem::take(&mut evidence_pack),
-                    );
-                }
-            }
-            Ok(())
-        })
+        .encode_partitioned_sealed(&mut preparation)
         .map_err(|error| format!("encode partitioned sealed generation: {error}"))?;
+    let packs = CodeIndexPublishedGenerationV1::partitioned_pack_identities(&manifest)
+        .map_err(|error| format!("inspect sealed payload packs: {error}"))?;
+    let byte_len = packs.iter().map(|pack| pack.size_bytes).sum::<u64>() + manifest.len() as u64;
     let state_digest = ManifestDigest::from_sha256_bytes(&Sha256::digest(&manifest))
         .map_err(|error| format!("sealed manifest digest: {error}"))?;
     Ok(PartitionedSealedV1 {
         manifest,
         state_digest,
-        segments: Arc::new(segments),
+        preparation,
+        byte_len,
+        operation,
     })
 }
 
@@ -256,26 +245,28 @@ pub(crate) fn drain_pages(
         bounds.batch_retained_bytes,
     )
     .map_err(|error| format!("sealed lexical batch bounds: {error}"))?;
-    let segments = Arc::clone(&sealed.segments);
+    let reader = sealed.preparation.pack_reader();
     let mut source = VerifiedSealedLexicalPageSourceV1::open_partitioned_sealed(
         &sealed.manifest,
         sealed.state_digest.clone(),
-        move |digest, _, buffer, _control| {
-            let bytes = segments.get(digest.as_str()).ok_or_else(|| {
-                CodeIndexProductionErrorV1::Contract("bench segment is missing".to_owned())
-            })?;
-            buffer.clear();
-            buffer.extend_from_slice(bytes);
-            Ok(())
+        move |_control, _layout| {
+            let reader = Arc::clone(&reader);
+            let pass: Box<SealedGenerationPackReadPassV1> =
+                Box::new(move |request, buffer, _control| reader(request, buffer));
+            Ok(pass)
         },
         bounds.page_chunks,
         bounds.page_bytes,
+        &sealed.operation,
     )
     .map_err(|error| format!("open sealed lexical page source: {error}"))?;
+    let mut read_pack = source
+        .begin_read_pass(control)
+        .map_err(|error| format!("begin sealed lexical read pass: {error}"))?;
     let mut pages = Vec::new();
     loop {
         let read = source
-            .next_page_batch_if(control, batch, |staged| {
+            .next_page_batch_if(control, read_pack.as_mut(), batch, |staged| {
                 NonZeroUsize::new(staged.len())
                     .ok_or_else(|| "sealed lexical batch staged no pages".to_owned())
             })

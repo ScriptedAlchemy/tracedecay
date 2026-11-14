@@ -16,9 +16,9 @@ use tracedecay_code_index::chunks::content_digest;
 use tracedecay_code_index::production::{
     CodeIndexBuildRequestV1, CodeIndexCapturedFileV1, CodeIndexExecutionControlV1,
     CodeIndexProductionConfigV1, CodeIndexProductionOwnerV1, CodeIndexRepositoryParseIdentityV1,
-    MemorySealedPublicationStoreV1, SealedGenerationSegmentReadV1, VerifiedSealedLexicalPageReadV1,
-    VerifiedSealedLexicalPageSourceV1, VerifiedSealedLexicalPageV1,
-    VerifiedSealedLexicalSourceReceiptV1,
+    MemorySealedPublicationStoreV1, SealedGenerationPackReadPassV1,
+    VerifiedSealedLexicalPageReadV1, VerifiedSealedLexicalPageSourceV1,
+    VerifiedSealedLexicalPageV1, VerifiedSealedLexicalSourceReceiptV1,
 };
 use tracedecay_domain::{
     ChunkerRevision, ComponentRevision, FileOccurrenceId, FreshnessCompatibilityV1, ManifestDigest,
@@ -208,11 +208,12 @@ fn build_fixture() -> Fixture {
     let mut owner =
         CodeIndexProductionOwnerV1::new(config, MemorySealedPublicationStoreV1::default())
             .expect("build deterministic production fixture owner");
+    let operation = request.resident_memory.begin_operation();
     let generation = owner
         .build_and_publish(request, &control)
         .expect("build deterministic sealed generation");
     let manifest = generation.manifest_bytes();
-    let reader = generation.sealed_generation().segment_reader();
+    let sealed = generation.sealed_generation().clone();
     let state_digest = ManifestDigest::from_sha256_bytes(&Sha256::digest(&manifest))
         .expect("sealed manifest digest");
     let metadata = CodeLexicalProjectionMetadataV1 {
@@ -239,20 +240,24 @@ fn build_fixture() -> Fixture {
     let mut source = VerifiedSealedLexicalPageSourceV1::open_partitioned_sealed(
         &manifest,
         state_digest,
-        move |digest, size_bytes, buffer, _control| {
-            reader(
-                SealedGenerationSegmentReadV1::Whole { digest, size_bytes },
-                buffer,
-            )
+        move |_control, _layout| {
+            let reader = sealed.begin_read_pass()?;
+            let pass: Box<SealedGenerationPackReadPassV1> =
+                Box::new(move |request, buffer, _control| reader(request, buffer));
+            Ok(pass)
         },
         1,
         1024 * 1024,
+        &operation,
     )
     .expect("open verified lexical page source");
+    let mut read_pack = source
+        .begin_read_pass(&control)
+        .expect("begin verified lexical read pass");
     let mut pages = Vec::new();
     let source_receipt = loop {
         match source
-            .next_page(&control)
+            .next_page(&control, read_pack.as_mut())
             .expect("read verified lexical page")
         {
             VerifiedSealedLexicalPageReadV1::Page(page) => pages.push(page),

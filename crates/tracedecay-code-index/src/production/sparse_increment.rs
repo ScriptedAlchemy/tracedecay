@@ -10,7 +10,9 @@
 //! evidence. Aggregate facts (statistics, coverage, chunk count and policy
 //! census) move by the replaced files' terms. So the successor decodes the
 //! edited files on both sides, the files their names reach, and the parent
-//! pages it reads; it never decodes the parent.
+//! pages it reads; it never decodes the parent. Finalization copies the complete
+//! logical roster into a canonical self-contained content pack, so retirement
+//! of the parent cannot remove bytes needed by its successor.
 //!
 //! An edit that adds, removes, or renames a file, or moves what name lookups
 //! land in, needs every file's resolution and is built cold instead.
@@ -30,7 +32,8 @@ use super::ignored_sources::IgnoredSourceRosterV1;
 use super::partitioned_codec::{
     PartitionedCodeGraphPageDescriptorV1, PartitionedFileSegmentDescriptorV1,
     PartitionedGenerationEvidenceRefV1, PartitionedPublishedGenerationRefV1,
-    SealedGenerationSegmentPublicationV1, seal_partitioned_manifest, write_generation_evidence,
+    SealedGenerationSegmentPublicationV1, content_segment_identities,
+    seal_partitioned_manifest_charged, write_generation_evidence,
 };
 use super::projection_rows::FileChunkRostersV1;
 use super::resolution_index::reseal_resolution_index;
@@ -351,40 +354,85 @@ impl SparseBuildV1<'_> {
                 },
                 |census, chunk| census.with_chunks_under(&chunk.sensitivity.policy_revision),
             );
-        let manifest_bytes = seal_partitioned_manifest(&PartitionedPublishedGenerationRefV1 {
-            format_revision: SEALED_GENERATION_FORMAT_REVISION_V1,
-            manifest: &manifest,
-            snapshot,
-            statistics: &statistics,
-            chunk_count: changes.chunk_count,
-            chunk_policy: &chunk_policy,
-            repository_parse_identity: self.repository_parse_identity,
-            ignored_source_admissions: self.ignored_source_roster.admissions(),
-            ignored_source_admissions_digest: self.ignored_source_roster.digest(),
-            file_segments: &file_segments,
-            file_evidence: &file_evidence,
-            coverage,
-            capability: &capability,
-            generation_evidence: &generation_evidence,
-            code_graph_pages: &code_graph_pages,
-            resolution_index: &resolution_index,
-        })?;
+        let manifest_base = usize::try_from(memory.charged_bytes)
+            .map_err(|_| contract("sparse manifest charge exceeds address space"))?;
+        let roster_workspace = super::resident_bytes::content_pack_roster_workspace_bytes(
+            &file_segments,
+            &file_evidence,
+            &code_graph_pages,
+            &resolution_index,
+        );
+        memory.resize(count(manifest_base.saturating_add(roster_workspace))?)?;
+        let content_segments = content_segment_identities(
+            &file_segments,
+            &file_evidence,
+            &code_graph_pages,
+            &resolution_index,
+        )?;
+        let content_pack = preparation.finalize_content_pack(&content_segments)?;
+        drop(content_segments);
+        let manifest_base = manifest_base.saturating_add(content_pack.retained_bytes());
+        memory.resize(count(manifest_base)?)?;
+        let manifest_bytes = seal_partitioned_manifest_charged(
+            &PartitionedPublishedGenerationRefV1 {
+                format_revision: SEALED_GENERATION_FORMAT_REVISION_V1,
+                manifest: &manifest,
+                snapshot,
+                statistics: &statistics,
+                chunk_count: changes.chunk_count,
+                chunk_policy: &chunk_policy,
+                repository_parse_identity: self.repository_parse_identity,
+                ignored_source_admissions: self.ignored_source_roster.admissions(),
+                ignored_source_admissions_digest: self.ignored_source_roster.digest(),
+                file_segments: &file_segments,
+                file_evidence: &file_evidence,
+                coverage,
+                capability: &capability,
+                generation_evidence: &generation_evidence,
+                code_graph_pages: &code_graph_pages,
+                resolution_index: &resolution_index,
+                content_pack: &content_pack,
+            },
+            manifest_base,
+            &mut |bytes| memory.resize(bytes),
+        )?;
         let (mut reused, mut computed, mut stale) = (0_u64, 0_u64, 0_u64);
         for file in &edited {
             reused = reused.saturating_add(file.clone_stats.reused);
             computed = computed.saturating_add(file.clone_stats.computed);
             stale = stale.saturating_add(file.stale_invalidations);
         }
+        let prepared_base = manifest_base
+            .saturating_add(manifest_bytes.capacity())
+            .saturating_add(manifest_bytes.len())
+            .saturating_add(4 * super::resident_bytes::ARC_HEADER_BYTES)
+            .saturating_add(std::mem::size_of::<ConstructionMemoryV1>());
+        memory.resize(count(prepared_base)?)?;
         let mut publication = CodeIndexSealedPublicationV1::from_prepared(
             Arc::from(manifest_bytes),
             projection,
             None,
             (reused, computed, stale),
+            &mut |needed| memory.resize(count(prepared_base.saturating_add(needed))?),
         )?;
+        drop(content_pack);
+        drop(file_segments);
+        drop(file_evidence);
+        drop(code_graph_pages);
+        drop(resolution_index);
+        drop(generation_evidence);
+        drop(sealed);
+        drop(lineage);
         drop(edited);
+        drop(edited_rows);
+        drop(parent_rows);
+        drop(capability);
+        drop(manifest);
+        let policy_bytes = super::resident_bytes::chunk_policy_heap_bytes(&chunk_policy);
+        drop(chunk_policy);
         memory.resize(count(super::resident_bytes::sealed_publication_bytes(
             &publication,
-            super::resident_bytes::chunk_policy_heap_bytes(&chunk_policy),
+            policy_bytes,
         ))?)?;
         publication.construction_memory = Some(Arc::new(memory));
         Ok(Ok(publication))
@@ -690,8 +738,16 @@ mod tests {
         let published = owner
             .build_and_publish(seed_request, &UninterruptibleCodeIndexControlV1)
             .unwrap();
-        let prior = store.decode_active(&scope()).unwrap().unwrap();
-        let parent = SealedParentGenerationV1::open(published.sealed_generation().clone()).unwrap();
+        let restore_operation = memory.begin_operation();
+        let prior = store
+            .decode_active(&scope(), &restore_operation)
+            .unwrap()
+            .unwrap();
+        let parent = SealedParentGenerationV1::open(
+            published.sealed_generation().clone(),
+            &restore_operation,
+        )
+        .unwrap();
         let mut successor_request = request(
             &[
                 (
@@ -708,7 +764,10 @@ mod tests {
         let successor_publication = owner
             .build_and_publish(successor_request, &UninterruptibleCodeIndexControlV1)
             .unwrap();
-        let decoded = store.decode_active(&scope()).unwrap().unwrap();
+        let decoded = store
+            .decode_active(&scope(), &restore_operation)
+            .unwrap()
+            .unwrap();
         assert_eq!(
             decoded.manifest.generation_id,
             successor_publication.publication().manifest().generation_id,

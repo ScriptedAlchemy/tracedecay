@@ -18,12 +18,14 @@ pub(super) type WorkerPublicationStore = MemorySealedPublicationStoreV1;
 pub(super) fn decoded_generation(
     published: &CodeIndexPublishedBuildV1,
 ) -> Arc<CodeIndexPublishedGenerationV1> {
-    let reader = published.sealed_generation().segment_reader();
+    let reader = published.sealed_generation().begin_read_pass().unwrap();
+    // These codec oracles decode independently of the construction admission under test.
     Arc::new(
         CodeIndexPublishedGenerationV1::decode_partitioned_sealed(
             published.manifest_bytes(),
             &SharedDecodedContentPoolV1::default(),
             |request, buffer| reader(request, buffer),
+            &mut |_| Ok(()),
         )
         .expect("published generation decodes"),
     )
@@ -436,6 +438,7 @@ fn cold_finalization_denies_before_emitting_and_preserves_sealed_wire_bytes() {
         ignored_source_admissions_digest: &parsed.ignored_source_admissions_digest,
         file_segments: &parsed.file_segments,
         file_evidence: &parsed.file_evidence,
+        content_pack: &parsed.content_pack,
         coverage: parsed.coverage,
         capability: &parsed.capability,
         generation_evidence: &parsed.generation_evidence,
@@ -607,9 +610,17 @@ struct ParentReusePreparation {
     inner: MemoryCodeIndexPreparationV1,
     unchanged_file: Option<ManifestDigest>,
     parent_segments: partitioned_codec::ParentSegmentReuseRosterV1,
+    staged_files: Vec<ManifestDigest>,
 }
 
 impl CodeIndexPreparationPort for ParentReusePreparation {
+    fn bind_parent(
+        &mut self,
+        parent: &CodeIndexSealedGenerationV1,
+    ) -> Result<(), CodeIndexPublicationStoreErrorV1> {
+        self.inner.bind_parent(parent)
+    }
+
     fn write_segment(
         &mut self,
         publication: SealedGenerationSegmentPublicationV1<'_>,
@@ -627,11 +638,30 @@ impl CodeIndexPreparationPort for ParentReusePreparation {
                 "unchanged parent file must not be encoded and staged again".to_owned(),
             ));
         }
-        self.inner.write_segment(publication)
+        self.inner.write_segment(publication)?;
+        if let SealedGenerationSegmentPublicationV1::File { digest, .. } = publication {
+            self.staged_files.push(digest.clone());
+        }
+        Ok(())
     }
 
     fn segment_reader(&self) -> Arc<SealedSegmentReaderV1> {
         self.inner.segment_reader()
+    }
+
+    fn finalize_content_pack(
+        &mut self,
+        segments: &[SealedGenerationSegmentIdentityV1],
+    ) -> Result<SealedGenerationContentPackV1, CodeIndexPublicationStoreErrorV1> {
+        self.inner.finalize_content_pack(segments)
+    }
+
+    fn pack_reader(&self) -> Arc<SealedSegmentReaderV1> {
+        self.inner.pack_reader()
+    }
+
+    fn read_pass_factory(&self) -> Arc<SealedGenerationPackReadFactoryV1> {
+        self.inner.read_pass_factory()
     }
 
     fn abort(self) -> Result<(), CodeIndexPublicationStoreErrorV1> {
@@ -653,6 +683,7 @@ impl CodeIndexAtomicPublicationPort for ParentReuseStore {
         &mut self,
         scope: &CodeIndexGenerationScopeV1,
         expected: Option<&CodeGenerationId>,
+        operation: &ResidentMemoryOperationV1,
     ) -> Result<Self::Preparation, CodeIndexPublicationStoreErrorV1> {
         let parent = self
             .parent_manifest
@@ -666,9 +697,10 @@ impl CodeIndexAtomicPublicationPort for ParentReuseStore {
                     CodeIndexPublicationStoreErrorV1::Unavailable(error.to_string())
                 })?;
         Ok(ParentReusePreparation {
-            inner: self.inner.prepare(scope, expected)?,
+            inner: self.inner.prepare(scope, expected, operation)?,
             unchanged_file: self.unchanged_file.clone(),
             parent_segments,
+            staged_files: Vec::new(),
         })
     }
 
@@ -707,35 +739,41 @@ fn cold_changed_share_reuses_parent_files_without_restaging_and_keeps_canonical_
     }).collect::<String>();
     let mut owner =
         CodeIndexProductionOwnerV1::new(worker_config(), ParentReuseStore::default()).unwrap();
+    let first_request = parent_reuse_request(
+        large.as_bytes(),
+        b"pub fn edited() -> usize { 1 }\n",
+        1_100_000,
+    );
+    let first_memory = Arc::clone(&first_request.resident_memory);
     let first = owner
-        .build_and_publish(
-            parent_reuse_request(
-                large.as_bytes(),
-                b"pub fn edited() -> usize { 1 }\n",
-                1_100_000,
-            ),
-            &UninterruptibleCodeIndexControlV1,
-        )
+        .build_and_publish(first_request, &UninterruptibleCodeIndexControlV1)
         .unwrap();
-    let parent = SealedParentGenerationV1::open(first.sealed_generation().clone()).unwrap();
+    let parent = SealedParentGenerationV1::open(
+        first.sealed_generation().clone(),
+        &first_memory.begin_operation(),
+    )
+    .unwrap();
     let large_descriptor = parent.file_segment("src/large.rs").unwrap().clone();
     owner.publication_mut().unchanged_file = Some(large_descriptor.segment_digest.clone());
     owner.publication_mut().parent_manifest = Some(Arc::clone(first.manifest_bytes()));
+    let next_request = parent_reuse_request(
+        large.as_bytes(),
+        b"pub fn edited() -> usize { 2 }\n",
+        1_200_000,
+    );
+    let next_memory = Arc::clone(&next_request.resident_memory);
     let next = owner
-        .build_and_publish(
-            parent_reuse_request(
-                large.as_bytes(),
-                b"pub fn edited() -> usize { 2 }\n",
-                1_200_000,
-            ),
-            &UninterruptibleCodeIndexControlV1,
-        )
+        .build_and_publish(next_request, &UninterruptibleCodeIndexControlV1)
         .expect("cold fallback must carry the existing large file without staging it");
     assert_eq!(
         next.cold_reason(),
         Some(CodeIndexColdBuildReasonV1::ChangedShare)
     );
-    let next_parent = SealedParentGenerationV1::open(next.sealed_generation().clone()).unwrap();
+    let next_parent = SealedParentGenerationV1::open(
+        next.sealed_generation().clone(),
+        &next_memory.begin_operation(),
+    )
+    .unwrap();
     assert_eq!(
         next_parent.file_segment("src/large.rs").unwrap(),
         &large_descriptor
@@ -750,19 +788,35 @@ fn cold_changed_share_reuses_parent_files_without_restaging_and_keeps_canonical_
     let restored = decoded_generation(&next);
     assert_eq!(restored.projection(), next.projection());
     restored.validate_fresh().unwrap();
-    let reusable =
-        partitioned_codec::ParentSegmentReuseRosterV1::new(Some(parent.generation()), &mut |_| {
-            Ok(())
-        })
-        .unwrap();
-    let mut staged_files = Vec::new();
-    let full_input = restored.encode_partitioned_sealed_with_parent(Some(first.manifest_bytes()), |segment| {
-        assert!(!reusable.contains(segment), "complete-input sealing must also suppress the parent's authenticated non-file segments");
-        if let SealedGenerationSegmentPublicationV1::File { digest, .. } = segment {
-            staged_files.push(digest.clone());
-        }
-        Ok(())
-    }).unwrap();
+    let (full_input, staged_files) = {
+        // The complete-input oracle needs its own real incumbent because the
+        // incremental owner above has already committed the successor.
+        let operation = construction_ledger(64 * 1024 * 1024).begin_operation();
+        let scope = restored.sealed_scope();
+        let mut full_store = WorkerPublicationStore::default();
+        let mut seed = full_store.prepare(&scope, None, &operation).unwrap();
+        let seed_publication = decoded_generation(&first)
+            .stage_publication(&mut seed, &operation)
+            .unwrap();
+        let seed_manifest = full_store.commit(&mut seed, &seed_publication).unwrap();
+        assert_eq!(seed_manifest.as_ref(), first.manifest_bytes().as_ref());
+        drop(seed);
+        let mut full_store = ParentReuseStore {
+            inner: full_store,
+            unchanged_file: Some(large_descriptor.segment_digest.clone()),
+            parent_manifest: Some(Arc::clone(first.manifest_bytes())),
+        };
+        let mut preparation = full_store
+            .prepare(&scope, Some(&first.manifest().generation_id), &operation)
+            .unwrap();
+        let manifest = restored
+            .encode_partitioned_sealed_with_parent(
+                Some(first.sealed_generation()),
+                &mut preparation,
+            )
+            .unwrap();
+        (manifest, preparation.staged_files.clone())
+    };
     assert!(!staged_files.contains(&large_descriptor.segment_digest));
     assert_eq!(
         full_input.as_slice(),
@@ -783,22 +837,24 @@ fn cold_changed_share_reuses_parent_files_without_restaging_and_keeps_canonical_
         },
     )
     .unwrap();
+    let rebuilt_request = parent_reuse_request(
+        large.as_bytes(),
+        b"pub fn edited() -> usize { 2 }\n",
+        1_300_000,
+    );
+    let rebuilt_memory = Arc::clone(&rebuilt_request.resident_memory);
     let rebuilt = policy_owner
-        .build_and_publish(
-            parent_reuse_request(
-                large.as_bytes(),
-                b"pub fn edited() -> usize { 2 }\n",
-                1_300_000,
-            ),
-            &UninterruptibleCodeIndexControlV1,
-        )
+        .build_and_publish(rebuilt_request, &UninterruptibleCodeIndexControlV1)
         .unwrap();
     assert_eq!(
         rebuilt.cold_reason(),
         Some(CodeIndexColdBuildReasonV1::NoParent)
     );
-    let rebuilt_parent =
-        SealedParentGenerationV1::open(rebuilt.sealed_generation().clone()).unwrap();
+    let rebuilt_parent = SealedParentGenerationV1::open(
+        rebuilt.sealed_generation().clone(),
+        &rebuilt_memory.begin_operation(),
+    )
+    .unwrap();
     assert_ne!(
         rebuilt_parent
             .file_segment("src/large.rs")
@@ -814,17 +870,20 @@ fn parent_file_reuse_requires_snapshot_parser_and_symbol_identity_evidence_befor
     let mut owner =
         CodeIndexProductionOwnerV1::new(worker_config(), WorkerPublicationStore::default())
             .unwrap();
+    let request = worker_request_with_source(
+        "file.worker.reuse-evidence",
+        1_100_000,
+        b"pub fn target() {}\n",
+    );
+    let resident_memory = Arc::clone(&request.resident_memory);
     let published = owner
-        .build_and_publish(
-            worker_request_with_source(
-                "file.worker.reuse-evidence",
-                1_100_000,
-                b"pub fn target() {}\n",
-            ),
-            &UninterruptibleCodeIndexControlV1,
-        )
+        .build_and_publish(request, &UninterruptibleCodeIndexControlV1)
         .unwrap();
-    let parent = SealedParentGenerationV1::open(published.sealed_generation().clone()).unwrap();
+    let parent = SealedParentGenerationV1::open(
+        published.sealed_generation().clone(),
+        &resident_memory.begin_operation(),
+    )
+    .unwrap();
     let descriptor = parent.file_segment("src/lib.rs").unwrap();
     let row = &parent.snapshot().files[descriptor.file_key as usize];
     let artifact = parent.decode_parent_file("src/lib.rs").unwrap();
@@ -953,11 +1012,10 @@ fn unchanged_successor_carries_every_parent_segment() {
         )
         .expect("first generation");
     let extractions = owner.retained_parse_stats().full_extractions;
+    let next_request = worker_request_with_source("file.worker.shared-symbol", 1_200_000, source);
+    let operation = next_request.resident_memory.begin_operation();
     let next = owner
-        .build_and_publish(
-            worker_request_with_source("file.worker.shared-symbol", 1_200_000, source),
-            &UninterruptibleCodeIndexControlV1,
-        )
+        .build_and_publish(next_request, &UninterruptibleCodeIndexControlV1)
         .expect("unchanged successor");
 
     assert_eq!(next.cold_reason(), None);
@@ -968,7 +1026,10 @@ fn unchanged_successor_carries_every_parent_segment() {
         first.projection().request().changes.added_or_changed.len() as u64
     );
     store
-        .decode_active(&CodeIndexGenerationScopeV1::for_snapshot(next.snapshot()))
+        .decode_active(
+            &CodeIndexGenerationScopeV1::for_snapshot(next.snapshot()),
+            &operation,
+        )
         .expect("successor restores")
         .expect("active successor")
         .validate_fresh()
@@ -980,11 +1041,10 @@ fn extractor_revision_change_reextracts_before_validating_retained_import_rows()
     let store = WorkerPublicationStore::default();
     let mut seed = CodeIndexProductionOwnerV1::new(worker_config(), store.clone())
         .expect("seed production owner");
+    let seed_request = worker_request("file.worker.v4", 1_100_000);
+    let operation = seed_request.resident_memory.begin_operation();
     let first = seed
-        .build_and_publish(
-            worker_request("file.worker.v4", 1_100_000),
-            &UninterruptibleCodeIndexControlV1,
-        )
+        .build_and_publish(seed_request, &UninterruptibleCodeIndexControlV1)
         .expect("seed generation");
     drop(first);
     drop(seed);
@@ -995,7 +1055,7 @@ fn extractor_revision_change_reextracts_before_validating_retained_import_rows()
         CodeIndexGenerationScopeV1::for_snapshot(&worker_request("file.worker.v4", 0).snapshot);
     {
         let mut active = store
-            .decode_active(&scope)
+            .decode_active(&scope, &operation)
             .expect("seed decodes")
             .expect("seeded active generation");
         let incumbent = active.manifest.generation_id.clone();
@@ -1025,10 +1085,10 @@ fn extractor_revision_change_reextracts_before_validating_retained_import_rows()
         active.validated = OnceLock::new();
         let mut publisher = store.clone();
         let mut preparation = publisher
-            .prepare(&scope, Some(&incumbent))
+            .prepare(&scope, Some(&incumbent), &operation)
             .expect("historical preparation");
         let publication = active
-            .stage_publication(&mut preparation)
+            .stage_publication(&mut preparation, &operation)
             .expect("historical generation stages through the canonical codec");
         publisher
             .commit(&mut preparation, &publication)
@@ -1365,6 +1425,7 @@ fn prior_sealed_generation_is_rejected_before_manifest_decode() {
             envelope.as_bytes(),
             &SharedDecodedContentPoolV1::default(),
             |_, _| panic!("a revision gate must refuse before any segment read"),
+            &mut |_| Ok(()),
         )
         .expect_err("an incomplete envelope cannot decode")
     };
@@ -1407,37 +1468,31 @@ fn prior_sealed_generation_is_rejected_before_manifest_decode() {
 pub(super) fn partitioned_seal(
     generation: &CodeIndexPublishedGenerationV1,
 ) -> (Vec<u8>, std::collections::BTreeMap<String, Vec<u8>>) {
-    let mut segments = std::collections::BTreeMap::new();
-    let mut evidence_pack = Vec::new();
+    let operation =
+        construction_ledger(detected_process_resident_memory_limit_v1().get()).begin_operation();
+    let mut store = WorkerPublicationStore::default();
+    let mut preparation = store
+        .prepare(&generation.sealed_scope(), None, &operation)
+        .expect("canonical publication preparation");
     let manifest = generation
-        .encode_partitioned_sealed(|publication| {
-            match publication {
-                SealedGenerationSegmentPublicationV1::File { digest, bytes }
-                | SealedGenerationSegmentPublicationV1::FileEvidence { digest, bytes }
-                | SealedGenerationSegmentPublicationV1::ResolutionIndex { digest, bytes } => {
-                    segments.insert(digest.as_str().to_owned(), bytes.to_vec());
-                }
-                SealedGenerationSegmentPublicationV1::CodeGraphPage {
-                    page_digest, bytes, ..
-                } => {
-                    segments.insert(page_digest.as_str().to_owned(), bytes.to_vec());
-                }
-                SealedGenerationSegmentPublicationV1::GenerationEvidencePage { bytes, .. } => {
-                    evidence_pack.extend_from_slice(bytes);
-                }
-                SealedGenerationSegmentPublicationV1::GenerationEvidenceCommit {
-                    segment_digest,
-                    ..
-                } => {
-                    segments.insert(
-                        segment_digest.as_str().to_owned(),
-                        std::mem::take(&mut evidence_pack),
-                    );
-                }
-            }
-            Ok(())
-        })
+        .encode_partitioned_sealed(&mut preparation)
         .expect("generation seals");
+    let reader = preparation.pack_reader();
+    let identities = CodeIndexPublishedGenerationV1::partitioned_pack_identities(&manifest)
+        .expect("canonical physical pack roster");
+    let mut segments = std::collections::BTreeMap::new();
+    for identity in identities {
+        let mut bytes = Vec::new();
+        reader(
+            SealedGenerationSegmentReadV1::Whole {
+                digest: &identity.digest,
+                size_bytes: identity.size_bytes,
+            },
+            &mut bytes,
+        )
+        .expect("prepared physical pack");
+        segments.insert(identity.digest.as_str().to_owned(), bytes);
+    }
     (manifest, segments)
 }
 
@@ -1467,6 +1522,8 @@ pub(super) fn partitioned_restore(
             buffer.extend_from_slice(&bytes[start..end]);
             Ok(())
         },
+        // Round-trip codec coverage does not supply a resident-admission boundary.
+        &mut |_| Ok(()),
     )
     .expect("generation restores")
 }

@@ -16,9 +16,10 @@ use tracedecay_code_index::languages::{LanguageRegistry, StaticLanguageRegistry}
 use tracedecay_code_index::production::{
     CodeIndexBuildRequestV1, CodeIndexCapturedFileV1, CodeIndexExecutionControlV1,
     CodeIndexInterruptionV1, CodeIndexProductionConfigV1, CodeIndexProductionErrorV1,
-    CodeIndexProductionOwnerV1, CodeIndexPublishedGenerationV1, CodeIndexRepositoryParseIdentityV1,
-    MemorySealedPublicationStoreV1, SealedGenerationSegmentPublicationV1,
-    SharedDecodedContentPoolV1, UninterruptibleCodeIndexControlV1, VerifiedSealedLexicalCursorV1,
+    CodeIndexProductionOwnerV1, CodeIndexPublicationStoreErrorV1, CodeIndexPublishedGenerationV1,
+    CodeIndexRepositoryParseIdentityV1, CodeIndexSealedGenerationV1,
+    MemorySealedPublicationStoreV1, SealedGenerationPackReadPassV1, SharedDecodedContentPoolV1,
+    UninterruptibleCodeIndexControlV1, VerifiedSealedLexicalCursorV1,
     VerifiedSealedLexicalPageBatchBoundsV1, VerifiedSealedLexicalPageBatchReadV1,
     VerifiedSealedLexicalPageReadV1, VerifiedSealedLexicalPageSourceV1,
     VerifiedSealedLexicalPageV1, VerifiedSealedLexicalSourceReceiptV1,
@@ -57,8 +58,9 @@ use tracedecay_query::retrieval::ports::{
 use tracedecay_query::retrieval::{QUERY_EXACT_SCORE_DOMAIN_V1, QUERY_LEXICAL_SCORE_DOMAIN_V1};
 
 use tracedecay_runtime_core::resident_memory::{
-    ProcessResidentMemoryV1, ProcessResidentSampleV1, ResidentMemoryComponentIdV1,
-    ResidentMemoryKeyV1, ResidentMemoryPressureV1, detected_process_resident_memory_limit_v1,
+    ProcessResidentMemoryV1, ProcessResidentSampleV1, ProcessSharedMemoryReservationV1,
+    ResidentMemoryComponentIdV1, ResidentMemoryKeyV1, ResidentMemoryOperationV1,
+    ResidentMemoryPressureV1, detected_process_resident_memory_limit_v1,
 };
 
 /// The request authority every uncancelled fixture request runs under.
@@ -293,32 +295,37 @@ impl CodeIndexExecutionControlV1 for BudgetExhaustedAtObservation {
     }
 }
 
-/// A partitioned sealed generation held in memory: the manifest, its content
-/// address, and every published segment under its digest.
+/// A canonical sealed publication held by its real in-memory store, with the
+/// manifest and content address used by the lexical source.
 #[derive(Clone)]
 pub(crate) struct RealLexicalSourceFixture {
     manifest: Vec<u8>,
-    segments: Arc<BTreeMap<String, Vec<u8>>>,
+    _store: MemorySealedPublicationStoreV1,
+    sealed: Option<CodeIndexSealedGenerationV1>,
     state_digest: ManifestDigest,
     pub(crate) metadata: CodeLexicalProjectionMetadataV1,
+    operation: ResidentMemoryOperationV1,
 }
 
 impl RealLexicalSourceFixture {
     fn open_source(&self, maximum_page_chunks: usize) -> VerifiedSealedLexicalPageSourceV1 {
-        let segments = Arc::clone(&self.segments);
+        let sealed = self
+            .sealed
+            .as_ref()
+            .expect("fixture retains sealed source")
+            .clone();
         VerifiedSealedLexicalPageSourceV1::open_partitioned_sealed(
             &self.manifest,
             self.state_digest.clone(),
-            move |digest, _, buffer, _control| {
-                let bytes = segments.get(digest.as_str()).ok_or_else(|| {
-                    CodeIndexProductionErrorV1::Contract("fixture segment is missing".to_owned())
-                })?;
-                buffer.clear();
-                buffer.extend_from_slice(bytes);
-                Ok(())
+            move |_control, _layout| {
+                let reader = sealed.begin_read_pass()?;
+                let pass: Box<SealedGenerationPackReadPassV1> =
+                    Box::new(move |request, buffer, _control| reader(request, buffer));
+                Ok(pass)
             },
             maximum_page_chunks,
             1024 * 1024,
+            &self.operation,
         )
         .expect("verified sealed lexical source")
     }
@@ -445,50 +452,55 @@ pub(crate) fn real_lexical_source_fixture_from_sources(
         privacy_key_epoch: 1,
         max_snapshot_age_micros: None,
     };
+    let store = MemorySealedPublicationStoreV1::default();
     let mut owner =
-        CodeIndexProductionOwnerV1::new(config, MemorySealedPublicationStoreV1::default())
-            .expect("artifact production owner");
+        CodeIndexProductionOwnerV1::new(config, store.clone()).expect("artifact production owner");
+    let operation = request.resident_memory.begin_operation();
     let published = owner
         .build_and_publish(request, &ArtifactControl { cancelled: false })
         .expect("production generation");
-    let reader = published.sealed_generation().segment_reader();
+    let reader = published
+        .sealed_generation()
+        .begin_read_pass()
+        .expect("begin published generation decode");
+    let mut manifest_reservation: Option<ProcessSharedMemoryReservationV1> = None;
+    let mut admit_manifest = |bytes: usize| {
+        let bytes = u64::try_from(bytes)
+            .map_err(|error| CodeIndexProductionErrorV1::Contract(error.to_string()))?;
+        let held = manifest_reservation
+            .as_ref()
+            .map_or(0, |guard| guard.reserved_bytes());
+        if let Some(additional) = std::num::NonZeroU64::new(bytes.saturating_sub(held)) {
+            let refused = |error: tracedecay_runtime_core::resident_memory::ResidentMemoryAdmissionFailureV1| {
+                CodeIndexProductionErrorV1::Publication(
+                    CodeIndexPublicationStoreErrorV1::ResidentMemoryRefused(error.to_string()),
+                )
+            };
+            match manifest_reservation.as_mut() {
+                Some(guard) => guard.try_grow(additional).map_err(refused)?,
+                None => {
+                    let component = ResidentMemoryComponentIdV1::new(
+                        "code_index.manifest_decode.v1",
+                    )
+                    .map_err(|error| CodeIndexProductionErrorV1::Contract(error.to_string()))?;
+                    manifest_reservation = Some(
+                        operation
+                            .reserve_process_shared(component, additional)
+                            .map_err(refused)?,
+                    );
+                }
+            }
+        }
+        Ok(())
+    };
     let generation = CodeIndexPublishedGenerationV1::decode_partitioned_sealed(
         published.manifest_bytes(),
         &SharedDecodedContentPoolV1::default(),
         |request, buffer| reader(request, buffer),
+        &mut admit_manifest,
     )
     .expect("published generation decodes");
-    let mut segments = BTreeMap::new();
-    let mut evidence_pack = Vec::new();
-    let manifest = generation
-        .encode_partitioned_sealed(|publication| {
-            match publication {
-                SealedGenerationSegmentPublicationV1::File { digest, bytes }
-                | SealedGenerationSegmentPublicationV1::FileEvidence { digest, bytes }
-                | SealedGenerationSegmentPublicationV1::ResolutionIndex { digest, bytes } => {
-                    segments.insert(digest.as_str().to_owned(), bytes.to_vec());
-                }
-                SealedGenerationSegmentPublicationV1::CodeGraphPage {
-                    page_digest, bytes, ..
-                } => {
-                    segments.insert(page_digest.as_str().to_owned(), bytes.to_vec());
-                }
-                SealedGenerationSegmentPublicationV1::GenerationEvidencePage { bytes, .. } => {
-                    evidence_pack.extend_from_slice(bytes);
-                }
-                SealedGenerationSegmentPublicationV1::GenerationEvidenceCommit {
-                    segment_digest,
-                    ..
-                } => {
-                    segments.insert(
-                        segment_digest.as_str().to_owned(),
-                        std::mem::take(&mut evidence_pack),
-                    );
-                }
-            }
-            Ok(())
-        })
-        .expect("sealed production generation");
+    let manifest = published.manifest_bytes().to_vec();
     let state_digest =
         ManifestDigest::from_sha256_bytes(&Sha256::digest(&manifest)).expect("manifest digest");
     let logical_paths = generation
@@ -513,9 +525,11 @@ pub(crate) fn real_lexical_source_fixture_from_sources(
     };
     RealLexicalSourceFixture {
         manifest,
-        segments: Arc::new(segments),
+        _store: store,
+        sealed: Some(published.sealed_generation().clone()),
         state_digest,
         metadata,
+        operation,
     }
 }
 
@@ -545,9 +559,15 @@ fn drain_verified_pages(
 ) {
     let control = ArtifactControl { cancelled: false };
     let mut source = fixture.open_source(maximum_page_chunks);
+    let mut read_pack = source
+        .begin_read_pass(&control)
+        .expect("begin lexical read pass");
     let mut pages = Vec::new();
     let receipt = loop {
-        match source.next_page(&control).expect("verified lexical page") {
+        match source
+            .next_page(&control, read_pack.as_mut())
+            .expect("verified lexical page")
+        {
             VerifiedSealedLexicalPageReadV1::Page(page) => pages.push(page),
             VerifiedSealedLexicalPageReadV1::Complete(receipt) => break receipt,
         }
@@ -689,12 +709,15 @@ fn sealed_source_rejected_batch_retries_byte_identical_pages_and_cursor() {
     let fixture = real_lexical_source_fixture();
     let control = ArtifactControl { cancelled: false };
     let mut source = fixture.open_source(1);
+    let mut read_pack = source
+        .begin_read_pass(&control)
+        .expect("begin lexical read pass");
     let bounds = VerifiedSealedLexicalPageBatchBoundsV1::new(2, 64 * 1024 * 1024)
         .expect("two-page batch bounds");
     let cursor_before = source.cursor().persisted_bytes().expect("initial cursor");
     let mut rejected_identities = None;
     let rejected = source
-        .next_page_batch_if(&control, bounds, |pages| {
+        .next_page_batch_if(&control, read_pack.as_mut(), bounds, |pages| {
             rejected_identities = Some(page_batch_identities(pages));
             Err("reject staged batch")
         })
@@ -707,7 +730,7 @@ fn sealed_source_rejected_batch_retries_byte_identical_pages_and_cursor() {
     );
 
     let retried = source
-        .next_page_batch_if(&control, bounds, |pages| {
+        .next_page_batch_if(&control, read_pack.as_mut(), bounds, |pages| {
             Ok::<_, &'static str>(NonZeroUsize::new(pages.len()).expect("non-empty source batch"))
         })
         .expect("retry staged batch")
@@ -745,11 +768,14 @@ fn sealed_source_batch_bounds_and_completion_never_advance_empty_work() {
     let too_small = VerifiedSealedLexicalPageBatchBoundsV1::new(1, first_page_bound)
         .expect("sub-page batch bound");
     let mut source = fixture.open_source(1);
+    let mut read_pack = source
+        .begin_read_pass(&control)
+        .expect("begin lexical read pass");
     let cursor_before = source.cursor().persisted_bytes().expect("initial cursor");
     let callbacks = AtomicUsize::new(0);
     assert!(
         source
-            .next_page_batch_if(&control, too_small, |_| {
+            .next_page_batch_if(&control, read_pack.as_mut(), too_small, |_| {
                 callbacks.fetch_add(1, Ordering::SeqCst);
                 Ok::<_, ()>(NonZeroUsize::MIN)
             })
@@ -767,7 +793,7 @@ fn sealed_source_batch_bounds_and_completion_never_advance_empty_work() {
     loop {
         let before = callbacks.load(Ordering::SeqCst);
         let read = source
-            .next_page_batch_if(&control, bounds, |pages| {
+            .next_page_batch_if(&control, read_pack.as_mut(), bounds, |pages| {
                 callbacks.fetch_add(1, Ordering::SeqCst);
                 Ok::<_, ()>(NonZeroUsize::new(pages.len()).expect("non-empty source batch"))
             })
@@ -836,9 +862,17 @@ impl TestArtifactSourceStaging for CodeLexicalArtifactBuilderV1 {
     ) -> Result<VerifiedCodeLexicalArtifactV1, CodeLexicalArtifactErrorV1> {
         let bounds = VerifiedSealedLexicalPageBatchBoundsV1::new(16, 32 * 1024 * 1024)
             .map_err(|error| CodeLexicalArtifactErrorV1::Corrupt(error.to_string()))?;
+        let mut read_pack = source
+            .begin_read_pass(control)
+            .map_err(|error| match error {
+                CodeIndexProductionErrorV1::Interrupted(interruption) => {
+                    CodeLexicalArtifactErrorV1::Interrupted(interruption)
+                }
+                error => CodeLexicalArtifactErrorV1::Corrupt(error.to_string()),
+            })?;
         let receipt = loop {
             let admitted = source
-                .next_page_batch_if(control, bounds, |pages| {
+                .next_page_batch_if(control, read_pack.as_mut(), bounds, |pages| {
                     let prepared = self.prepare_admissible_page_prefix(pages, control)?;
                     let accepted = prepared.accepted_prefix();
                     self.append_prepared_pages(prepared.prepared_pages(), control)?;
@@ -855,6 +889,7 @@ impl TestArtifactSourceStaging for CodeLexicalArtifactBuilderV1 {
                 VerifiedSealedLexicalPageBatchReadV1::Complete(receipt) => break receipt,
             }
         };
+        drop(read_pack);
         Ok(finish_staged_artifact(self, &receipt, control))
     }
 }
@@ -3938,6 +3973,7 @@ fn disk_artifact_subdivides_refused_suffix_and_resumes_exact_cursor() {
     )
     .unwrap();
     let mut source = fixture.open_source(4);
+    let mut read_pack = source.begin_read_pass(&control).unwrap();
     let bounds = VerifiedSealedLexicalPageBatchBoundsV1::new(1, 64 * 1024 * 1024).unwrap();
     let mut refusals = 0;
     let mut reopened = false;
@@ -3947,7 +3983,7 @@ fn disk_artifact_subdivides_refused_suffix_and_resumes_exact_cursor() {
             .progress(&UninterruptibleCodeIndexControlV1)
             .unwrap();
         let result = source
-            .next_page_batch_if(&control, bounds, |pages| {
+            .next_page_batch_if(&control, read_pack.as_mut(), bounds, |pages| {
                 let prepared = builder.prepare_admissible_page_prefix(pages, &control)?;
                 let accepted = prepared.accepted_prefix();
                 builder.append_prepared_pages(prepared.prepared_pages(), &control)?;
@@ -3974,6 +4010,7 @@ fn disk_artifact_subdivides_refused_suffix_and_resumes_exact_cursor() {
                 assert!(matches!(
                     source.next_page_batch_if(
                         &ArtifactControl { cancelled: true },
+                        read_pack.as_mut(),
                         bounds,
                         |_| -> Result<NonZeroUsize, CodeLexicalArtifactErrorV1> {
                             panic!("cancelled source must not call builder")
@@ -4001,14 +4038,17 @@ fn disk_artifact_subdivides_refused_suffix_and_resumes_exact_cursor() {
                         .next_cursor
                         .unwrap();
                     let persisted = cursor.persisted_bytes().unwrap();
+                    drop(read_pack);
                     drop(builder);
                     builder = CodeLexicalArtifactBuilderV1::open_or_resume_with_memory_budget_and_control(
                         &path, fixture.metadata.clone(), budget, &control).unwrap();
                     source = fixture.open_source(1);
+                    read_pack = source.begin_read_pass(&control).unwrap();
                     source
                         .restore_cursor(
                             &VerifiedSealedLexicalCursorV1::restore_persisted(&persisted).unwrap(),
                             &control,
+                            read_pack.as_mut(),
                         )
                         .unwrap();
                     assert_eq!(
@@ -4025,6 +4065,7 @@ fn disk_artifact_subdivides_refused_suffix_and_resumes_exact_cursor() {
             Ok(VerifiedSealedLexicalPageBatchReadV1::Complete(receipt)) => break receipt,
         }
     };
+    drop(read_pack);
     assert!(
         refusals > 0 && reopened,
         "must exercise actual refusal and persisted recovery"
@@ -4111,7 +4152,10 @@ fn disk_artifact_subdivides_import_only_suffix_without_replaying_chunks() {
     )
     .unwrap();
     let mut source = fixture.open_source(4);
-    source.restore_cursor(&cursor, &control).unwrap();
+    let mut read_pack = source.begin_read_pass(&control).unwrap();
+    source
+        .restore_cursor(&cursor, &control, read_pack.as_mut())
+        .unwrap();
     let bounds = VerifiedSealedLexicalPageBatchBoundsV1::new(1, 64 * 1024 * 1024).unwrap();
     let mut refusals = 0;
     let receipt = loop {
@@ -4120,7 +4164,7 @@ fn disk_artifact_subdivides_import_only_suffix_without_replaying_chunks() {
             .progress(&UninterruptibleCodeIndexControlV1)
             .unwrap();
         let result = source
-            .next_page_batch_if(&control, bounds, |pages| {
+            .next_page_batch_if(&control, read_pack.as_mut(), bounds, |pages| {
                 assert!(pages.iter().all(|page| page.chunk_count() == 0));
                 let prepared = builder.prepare_admissible_page_prefix(pages, &control)?;
                 let accepted = prepared.accepted_prefix();
@@ -4147,6 +4191,7 @@ fn disk_artifact_subdivides_import_only_suffix_without_replaying_chunks() {
             Ok(VerifiedSealedLexicalPageBatchReadV1::Complete(receipt)) => break receipt,
         }
     };
+    drop(read_pack);
     assert!(refusals > 0);
     assert_eq!(receipt.total_chunks(), expected_receipt.total_chunks());
     let expected = single_pages.last().unwrap().next_cursor();
@@ -4192,10 +4237,11 @@ fn disk_artifact_indivisible_refusal_keeps_source_and_builder_progress() {
     )
     .unwrap();
     let mut source = fixture.open_source(1);
+    let mut read_pack = source.begin_read_pass(&control).unwrap();
     let before = source.cursor().clone();
     let bounds = VerifiedSealedLexicalPageBatchBoundsV1::new(1, 64 * 1024 * 1024).unwrap();
     let refusal = source
-        .next_page_batch_if(&control, bounds, |pages| {
+        .next_page_batch_if(&control, read_pack.as_mut(), bounds, |pages| {
             builder
                 .prepare_admissible_page_prefix(pages, &control)
                 .map(|prepared| prepared.accepted_prefix())
@@ -4288,7 +4334,8 @@ fn disk_artifact_finalization_resumes_after_restart_without_source_replay() {
     // The restart must continue from SQLite state. Clearing this fixture's
     // only raw copy makes a source replay impossible in the finalization path.
     fixture.manifest.clear();
-    fixture.segments = Arc::default();
+    fixture.sealed = None;
+    fixture._store = MemorySealedPublicationStoreV1::default();
     let mut resumed = CodeLexicalArtifactBuilderV1::open_or_resume_with_memory_budget_and_control(
         &artifact_path,
         metadata,
@@ -5395,15 +5442,19 @@ fn disk_artifact_same_source_instance_resumes_after_accepted_page_failure() {
         CodeLexicalArtifactBuilderV1::create(&artifact_path, metadata).expect("create artifact");
     let mut source = fixture.open_source(1);
     let cancellation = CancelAfterAcceptedPage::default();
+    let mut read_pack = source
+        .begin_read_pass(&cancellation)
+        .expect("begin lexical read pass");
 
     let first_page = source
-        .next_page_if(&cancellation, |page| {
+        .next_page_if(&cancellation, read_pack.as_mut(), |page| {
             builder.append_page(page, &cancellation)?;
             cancellation.mark_page_accepted();
             Ok::<(), CodeLexicalArtifactErrorV1>(())
         })
         .expect("stage the first verified page")
         .expect("admit the first verified page");
+    drop(read_pack);
     assert!(matches!(
         first_page,
         VerifiedSealedLexicalPageReadV1::Page(_)

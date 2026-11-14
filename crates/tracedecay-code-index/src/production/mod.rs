@@ -114,7 +114,9 @@ mod memory_store;
 pub use memory_store::{MemoryCodeIndexPreparationV1, MemorySealedPublicationStoreV1};
 mod sealed_parent;
 use sealed_parent::SealedParentGenerationV1;
-pub use sealed_parent::{CodeIndexSealedGenerationV1, SealedSegmentReaderV1};
+pub use sealed_parent::{
+    CodeIndexSealedGenerationV1, SealedGenerationPackReadFactoryV1, SealedSegmentReaderV1,
+};
 mod sparse_increment;
 pub use sparse_increment::CodeIndexColdBuildReasonV1;
 use sparse_increment::SparseBuildV1;
@@ -131,9 +133,10 @@ mod partitioned_codec;
 pub(crate) mod resident_bytes;
 mod resolution_outputs;
 pub use partitioned_codec::{
-    SealedGenerationFileWindowsV1, SealedGenerationSegmentIdentityV1,
-    SealedGenerationSegmentPublicationV1, SealedGenerationSegmentReadV1,
-    SealedGenerationSegmentReaderV1,
+    SealedGenerationContentExtentV1, SealedGenerationContentPackV1, SealedGenerationFileWindowsV1,
+    SealedGenerationPackLayoutV1, SealedGenerationPackReadPassV1,
+    SealedGenerationSegmentIdentityV1, SealedGenerationSegmentPublicationV1,
+    SealedGenerationSegmentReadV1, SealedGenerationSegmentReaderV1,
 };
 mod sealed_codec;
 pub use sealed_codec::{
@@ -447,6 +450,7 @@ pub trait CodeIndexAtomicPublicationPort {
         &mut self,
         scope: &CodeIndexGenerationScopeV1,
         expected_active_generation: Option<&CodeGenerationId>,
+        operation: &ResidentMemoryOperationV1,
     ) -> Result<Self::Preparation, CodeIndexPublicationStoreErrorV1>;
 
     /// Recheck source and incumbent fences, make staged segments durable, and
@@ -463,12 +467,37 @@ pub trait CodeIndexAtomicPublicationPort {
 /// Readers can resolve a staged segment before its final durable name exists;
 /// abort invalidates those readers and removes only this owner's temporaries.
 pub trait CodeIndexPreparationPort {
+    /// Bind the exact reusable incumbent before staging begins. The store
+    /// verifies its scope and publication identity; a copied logical extent
+    /// may only come from this generation's authenticated payload packs.
+    fn bind_parent(
+        &mut self,
+        parent: &CodeIndexSealedGenerationV1,
+    ) -> Result<(), CodeIndexPublicationStoreErrorV1>;
+
     fn write_segment(
         &mut self,
         publication: SealedGenerationSegmentPublicationV1<'_>,
     ) -> Result<(), CodeIndexPublicationStoreErrorV1>;
 
     fn segment_reader(&self) -> Arc<SealedSegmentReaderV1>;
+
+    /// Freeze the complete logical content roster and assemble its canonical
+    /// self-contained pack. The generation evidence pack has its own existing
+    /// page writer and is not a member of this roster.
+    fn finalize_content_pack(
+        &mut self,
+        segments: &[SealedGenerationSegmentIdentityV1],
+    ) -> Result<SealedGenerationContentPackV1, CodeIndexPublicationStoreErrorV1>;
+
+    /// Read physical payload packs after finalization. Unlike segment_reader,
+    /// these requests carry the physical pack identity and absolute extent.
+    fn pack_reader(&self) -> Arc<SealedSegmentReaderV1>;
+
+    /// A published carrier opens a fresh operation-owned physical read pass.
+    /// Opening before commit, or after abort, must refuse without retaining
+    /// staged handles in the idle carrier.
+    fn read_pass_factory(&self) -> Arc<SealedGenerationPackReadFactoryV1>;
 
     fn abort(self) -> Result<(), CodeIndexPublicationStoreErrorV1>;
 }
@@ -537,6 +566,17 @@ impl ConstructionMemoryV1 {
 /// Pair its real lifetime with the construction reservation on every exit.
 struct ConstructionCanonicalScratchV1;
 
+fn canonical_scratch_workspace_bytes() -> usize {
+    // Canonical SHA's sink and the eight-slot object-buffer pool coexist
+    // with the separately measured DTO ObjectWriter allocations.
+    64_usize
+        .saturating_mul(1024)
+        .saturating_add(8_usize.saturating_mul(std::mem::size_of::<(
+            String,
+            Vec<(std::borrow::Cow<'static, str>, std::ops::Range<usize>)>,
+        )>()))
+}
+
 impl Drop for ConstructionCanonicalScratchV1 {
     fn drop(&mut self) {
         tracedecay_domain::research::release_thread_canonical_scratch();
@@ -551,16 +591,9 @@ impl ConstructionMemoryV1 {
         work: impl FnOnce() -> Result<T, CodeIndexProductionErrorV1>,
     ) -> Result<T, CodeIndexProductionErrorV1> {
         tracedecay_domain::research::release_thread_canonical_scratch();
-        // Canonical SHA's 64 KiB sink and the eight-slot object-buffer pool
-        // coexist with the known DTO ObjectWriter allocations below.
-        let pool = 8_usize.saturating_mul(std::mem::size_of::<(
-            String,
-            Vec<(std::borrow::Cow<'static, str>, std::ops::Range<usize>)>,
-        )>());
         self.resize(
             base.saturating_add(objects)
-                .saturating_add(64 * 1024)
-                .saturating_add(pool) as u64,
+                .saturating_add(canonical_scratch_workspace_bytes()) as u64,
         )?;
         let _scratch = ConstructionCanonicalScratchV1;
         work()
@@ -699,6 +732,7 @@ pub struct CodeIndexSealedPublicationV1 {
     metadata: Arc<VerifiedSealedTextGenerationMetadataV1>,
     manifest_bytes: Arc<[u8]>,
     lane_digest: ManifestDigest,
+    pack_layout: Arc<SealedGenerationPackLayoutV1>,
     chunk_count: u64,
     projection: ProjectionPublicationHandoffV1,
     cold_reason: Option<CodeIndexColdBuildReasonV1>,
@@ -714,9 +748,13 @@ impl CodeIndexSealedPublicationV1 {
         projection: ProjectionPublicationHandoffV1,
         cold_reason: Option<CodeIndexColdBuildReasonV1>,
         clone_stats: (u64, u64, u64),
+        admit: &mut dyn FnMut(usize) -> Result<(), CodeIndexProductionErrorV1>,
     ) -> Result<Self, CodeIndexProductionErrorV1> {
-        let (metadata, lane_digest, chunk_count) =
-            CodeIndexPublishedGenerationV1::partitioned_metadata_and_lane(&manifest_bytes)?;
+        let (metadata, lane_digest, chunk_count, pack_layout) =
+            CodeIndexPublishedGenerationV1::partitioned_metadata_and_lane_admitted(
+                &manifest_bytes,
+                admit,
+            )?;
         let request = projection.request();
         let expected_chunks = u64::try_from(request.changes.added_or_changed.len())
             .ok()
@@ -734,6 +772,7 @@ impl CodeIndexSealedPublicationV1 {
             metadata: Arc::new(metadata),
             manifest_bytes,
             lane_digest,
+            pack_layout: Arc::new(pack_layout),
             chunk_count,
             projection,
             cold_reason,
@@ -761,6 +800,10 @@ impl CodeIndexSealedPublicationV1 {
     }
     pub fn manifest_bytes(&self) -> &Arc<[u8]> {
         &self.manifest_bytes
+    }
+    /// Physical payload authority moved from the already-validated manifest.
+    pub fn pack_layout(&self) -> &SealedGenerationPackLayoutV1 {
+        &self.pack_layout
     }
     pub fn clone_update_statistics(&self) -> (u64, u64, bool) {
         (
@@ -1309,16 +1352,31 @@ impl CodeIndexPublishedGenerationV1 {
     pub fn stage_publication(
         &self,
         preparation: &mut impl CodeIndexPreparationPort,
+        operation: &ResidentMemoryOperationV1,
     ) -> Result<CodeIndexSealedPublicationV1, CodeIndexProductionErrorV1> {
-        let manifest = self.encode_partitioned_sealed(|segment| {
-            preparation.write_segment(segment).map_err(Into::into)
-        })?;
-        CodeIndexSealedPublicationV1::from_prepared(
+        let mut memory = ConstructionMemoryV1::new(operation.clone())?;
+        let manifest = self.encode_partitioned_sealed(preparation)?;
+        // Retain the encoded input across Vec -> Arc conversion and admit the
+        // new metadata/map before the canonical decoder allocates either one.
+        let base = manifest
+            .capacity()
+            .saturating_add(manifest.len())
+            .saturating_add(resident_bytes::projection_heap_bytes(&self.projection))
+            .saturating_add(4 * resident_bytes::ARC_HEADER_BYTES)
+            .saturating_add(std::mem::size_of::<ConstructionMemoryV1>());
+        memory.resize(base as u64)?;
+        let mut publication = CodeIndexSealedPublicationV1::from_prepared(
             Arc::from(manifest),
             self.projection.clone(),
             None,
             (0, 0, 0),
-        )
+            &mut |needed| memory.resize(base.saturating_add(needed) as u64),
+        )?;
+        let policy_bytes = resident_bytes::chunk_policy_heap_bytes(self.chunk_policy_summary());
+        memory
+            .resize(resident_bytes::sealed_publication_bytes(&publication, policy_bytes) as u64)?;
+        publication.construction_memory = Some(Arc::new(memory));
+        Ok(publication)
     }
 
     pub fn manifest(&self) -> &CodeGenerationManifestV1 {
@@ -2274,9 +2332,10 @@ where
     pub fn active_generation(
         &self,
         scope: &CodeIndexGenerationScopeV1,
+        operation: &ResidentMemoryOperationV1,
     ) -> Result<Option<CodeIndexSealedGenerationV1>, CodeIndexProductionErrorV1> {
         Ok(self
-            .lookup_active_generation(scope)?
+            .lookup_active_generation(scope, operation)?
             .reusable
             .map(|parent| parent.sealed().clone()))
     }
@@ -2285,6 +2344,7 @@ where
     fn lookup_active_generation(
         &self,
         scope: &CodeIndexGenerationScopeV1,
+        operation: &ResidentMemoryOperationV1,
     ) -> Result<ActiveGenerationLookupV1, CodeIndexProductionErrorV1> {
         scope.validate()?;
         if scope.repository != self.config.repository {
@@ -2298,7 +2358,7 @@ where
                 cas_incumbent: None,
             });
         };
-        let active = SealedParentGenerationV1::open(active)?;
+        let active = SealedParentGenerationV1::open(active, operation)?;
         let sealed_scope = CodeIndexGenerationScopeV1::for_snapshot(active.snapshot());
         let incumbent = active.manifest().generation_id.clone();
         if sealed_scope != *scope {
@@ -2396,8 +2456,8 @@ where
             &request.ignored_source_admissions,
         )?;
         let scope = CodeIndexGenerationScopeV1::for_snapshot(&request.snapshot);
-        let lookup = self.lookup_active_generation(&scope)?;
-        let parent = lookup.reusable;
+        let lookup = self.lookup_active_generation(&scope, operation)?;
+        let mut parent = lookup.reusable;
         lexical_page_source::checkpoint(control)?;
 
         let intake = self.intake_at(request.sealed_at, registry_for_snapshot(&request.snapshot)?);
@@ -2475,9 +2535,13 @@ where
         } else {
             "initial"
         });
-        let mut preparation = self
-            .publication
-            .prepare(&scope, lookup.cas_incumbent.as_ref())?;
+        let mut preparation =
+            self.publication
+                .prepare(&scope, lookup.cas_incumbent.as_ref(), operation)?;
+        if let Some(parent) = parent.as_mut() {
+            preparation.bind_parent(parent.sealed())?;
+            parent.bind_preparation_reader(preparation.segment_reader());
+        }
         let cold_reason = match (parent.as_ref(), increment.as_ref()) {
             (Some(parent), Some(plan)) => {
                 let sparse = SparseBuildV1 {
@@ -2555,7 +2619,8 @@ where
         };
         match manifest_bytes {
             Ok(bytes) => {
-                let sealed = CodeIndexSealedGenerationV1::new(bytes, preparation.segment_reader());
+                let sealed =
+                    CodeIndexSealedGenerationV1::new(bytes, preparation.read_pass_factory());
                 let published = CodeIndexPublishedBuildV1::new(publication, sealed)?;
                 crate::observe::record_generation_state("queryable");
                 Ok(published)
@@ -3065,6 +3130,22 @@ where
             .saturating_add(resident_bytes::generation_evidence_descriptor_bytes(
                 &generation_evidence,
             ));
+        let roster_workspace = resident_bytes::content_pack_roster_workspace_bytes(
+            &file_segments,
+            &resolved.file_evidence,
+            &resolved.code_graph_pages,
+            &resolved.resolution_index,
+        );
+        memory.resize(manifest_base.saturating_add(roster_workspace) as u64)?;
+        let content_segments = partitioned_codec::content_segment_identities(
+            &file_segments,
+            &resolved.file_evidence,
+            &resolved.code_graph_pages,
+            &resolved.resolution_index,
+        )?;
+        let content_pack = preparation.finalize_content_pack(&content_segments)?;
+        drop(content_segments);
+        let manifest_base = manifest_base.saturating_add(content_pack.retained_bytes());
         memory.resize(manifest_base as u64)?;
         let chunk_count = u64::try_from(projection.receipt_count()).map_err(|_| {
             CodeIndexProductionErrorV1::Contract("generation chunk count exceeds u64".to_owned())
@@ -3086,49 +3167,29 @@ where
             generation_evidence: &generation_evidence,
             code_graph_pages: &resolved.code_graph_pages,
             resolution_index: &resolved.resolution_index,
+            content_pack: &content_pack,
         };
         let manifest_bytes = partitioned_codec::seal_partitioned_manifest_charged(
             &generation_ref,
             manifest_base,
             &mut |bytes| memory.resize(bytes),
         )?;
-        let mut string_scratch = partitioned_codec::encoded_json_rows_length(&manifest)?
-            .max(partitioned_codec::encoded_json_rows_length(&capability)?);
-        for file in &snapshot.files {
-            string_scratch = string_scratch.max(partitioned_codec::encoded_json_rows_length(file)?);
-        }
-        for omitted in &snapshot.omitted_sources {
-            string_scratch =
-                string_scratch.max(partitioned_codec::encoded_json_rows_length(omitted)?);
-        }
-        for admission in ignored_source_roster.admissions() {
-            string_scratch =
-                string_scratch.max(partitioned_codec::encoded_json_rows_length(admission)?);
-        }
-        let metadata_workspace = metadata_hash_workspace(&manifest, snapshot)?;
-        let decode_workspace = resident_bytes::partitioned_decode_workspace_bytes(
-            &generation_ref,
-            partitioned_codec::encoded_json_rows_length(&generation_ref)?,
-            string_scratch,
-        );
         // Vec -> Arc copies the bytes; both allocations coexist. Compact
         // verification then owns a decoded manifest and its validation scratch.
         let prepared_base = manifest_base
             .saturating_add(manifest_bytes.capacity())
             .saturating_add(manifest_bytes.len())
-            .saturating_add(resident_bytes::ARC_HEADER_BYTES);
-        let mut publication = memory.canonical(
-            prepared_base.saturating_add(decode_workspace),
-            metadata_workspace,
-            || {
-                CodeIndexSealedPublicationV1::from_prepared(
-                    Arc::from(manifest_bytes),
-                    projection,
-                    Some(cold_reason),
-                    (clones_reused, clones_computed, 0),
-                )
-            },
+            .saturating_add(4 * resident_bytes::ARC_HEADER_BYTES)
+            .saturating_add(std::mem::size_of::<ConstructionMemoryV1>());
+        memory.resize(prepared_base as u64)?;
+        let mut publication = CodeIndexSealedPublicationV1::from_prepared(
+            Arc::from(manifest_bytes),
+            projection,
+            Some(cold_reason),
+            (clones_reused, clones_computed, 0),
+            &mut |needed| memory.resize(prepared_base.saturating_add(needed) as u64),
         )?;
+        drop(content_pack);
         drop(generation_evidence);
         drop(file_segments);
         drop(resolved);

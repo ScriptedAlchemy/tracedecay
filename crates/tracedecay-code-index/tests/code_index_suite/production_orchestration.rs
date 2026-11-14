@@ -7,7 +7,7 @@ use std::{
     time::Duration,
 };
 use tracedecay_runtime_core::resident_memory::{
-    ProcessResidentMemoryV1, detected_process_resident_memory_limit_v1,
+    ProcessResidentMemoryV1, ResidentMemoryOperationV1, detected_process_resident_memory_limit_v1,
 };
 
 use sha2::{Digest, Sha256};
@@ -28,11 +28,13 @@ use tracedecay_code_index::{
         CodeIndexPublishedGenerationV1, CodeIndexRepositoryParseIdentityV1,
         CodeIndexSealedGenerationV1, CodeIndexSealedPublicationV1, MemoryCodeIndexPreparationV1,
         MemorySealedPublicationStoreV1, SEALED_GENERATION_FORMAT_REVISION_V1,
-        SealedGenerationSegmentPublicationV1, SealedGenerationSegmentReadV1, SealedSegmentReaderV1,
-        SharedDecodedContentPoolV1, SharedPhysicalCodeArtifactPoolV1,
-        VerifiedSealedLexicalPageReadV1, VerifiedSealedLexicalPageSourceV1,
-        VerifiedSealedLexicalPageV1, advance_import_dictionary_digest,
-        initial_import_dictionary_digest,
+        SealedGenerationContentPackV1, SealedGenerationFileWindowsV1, SealedGenerationPackLayoutV1,
+        SealedGenerationPackReadFactoryV1, SealedGenerationPackReadPassV1,
+        SealedGenerationSegmentIdentityV1, SealedGenerationSegmentPublicationV1,
+        SealedGenerationSegmentReadV1, SealedSegmentReaderV1, SharedDecodedContentPoolV1,
+        SharedPhysicalCodeArtifactPoolV1, VerifiedSealedLexicalPageReadV1,
+        VerifiedSealedLexicalPageSourceV1, VerifiedSealedLexicalPageV1,
+        advance_import_dictionary_digest, initial_import_dictionary_digest,
     },
     provider::GenerationTestAttributionJoinReadPort,
     retained_parse::{RetainedParsePoolLimits, SharedRetainedParsePool},
@@ -48,7 +50,10 @@ use tracedecay_domain::{
 };
 use tracedecay_graph_db::{GraphDbError, GraphNamespace, GraphProjectorRevision};
 
-use crate::support::{PartitionedSealV1, RUST_SOURCE, cold_generation, id, reseal_manifest};
+use crate::support::{
+    PartitionedSealV1, RUST_SOURCE, cold_generation, id, memory_operation, read_pack_bytes,
+    reseal_manifest,
+};
 
 mod attribution_equivalence;
 mod parallel_equivalence;
@@ -98,8 +103,10 @@ impl CodeIndexAtomicPublicationPort for SharedPublicationStore {
         &mut self,
         scope: &CodeIndexGenerationScopeV1,
         expected_active_generation: Option<&CodeGenerationId>,
+        operation: &ResidentMemoryOperationV1,
     ) -> Result<Self::Preparation, CodeIndexPublicationStoreErrorV1> {
-        self.sealed.prepare(scope, expected_active_generation)
+        self.sealed
+            .prepare(scope, expected_active_generation, operation)
     }
 }
 
@@ -139,6 +146,13 @@ struct PartialKeyPreparation {
 }
 
 impl CodeIndexPreparationPort for PartialKeyPreparation {
+    fn bind_parent(
+        &mut self,
+        parent: &CodeIndexSealedGenerationV1,
+    ) -> Result<(), CodeIndexPublicationStoreErrorV1> {
+        self.inner.bind_parent(parent)
+    }
+
     fn write_segment(
         &mut self,
         publication: SealedGenerationSegmentPublicationV1<'_>,
@@ -148,6 +162,21 @@ impl CodeIndexPreparationPort for PartialKeyPreparation {
 
     fn segment_reader(&self) -> Arc<SealedSegmentReaderV1> {
         self.inner.segment_reader()
+    }
+
+    fn finalize_content_pack(
+        &mut self,
+        segments: &[SealedGenerationSegmentIdentityV1],
+    ) -> Result<SealedGenerationContentPackV1, CodeIndexPublicationStoreErrorV1> {
+        self.inner.finalize_content_pack(segments)
+    }
+
+    fn pack_reader(&self) -> Arc<SealedSegmentReaderV1> {
+        self.inner.pack_reader()
+    }
+
+    fn read_pass_factory(&self) -> Arc<SealedGenerationPackReadFactoryV1> {
+        self.inner.read_pass_factory()
     }
 
     fn abort(self) -> Result<(), CodeIndexPublicationStoreErrorV1> {
@@ -187,6 +216,7 @@ impl CodeIndexAtomicPublicationPort for PartialKeyPublicationStore {
         &mut self,
         scope: &CodeIndexGenerationScopeV1,
         expected_active_generation: Option<&CodeGenerationId>,
+        operation: &ResidentMemoryOperationV1,
     ) -> Result<Self::Preparation, CodeIndexPublicationStoreErrorV1> {
         let pointer = self.pointer.lock().expect("publication lock");
         if self.incumbent(pointer.as_ref())?.as_ref() != expected_active_generation {
@@ -205,7 +235,9 @@ impl CodeIndexAtomicPublicationPort for PartialKeyPublicationStore {
             })
             .transpose()
             .map_err(|error| CodeIndexPublicationStoreErrorV1::Unavailable(error.to_string()))?;
-        let inner = self.sealed.prepare(scope, destination.as_ref())?;
+        let inner = self
+            .sealed
+            .prepare(scope, destination.as_ref(), operation)?;
         Ok(PartialKeyPreparation {
             inner,
             scope: scope.clone(),
@@ -1339,8 +1371,11 @@ fn production_owner_publishes_complete_generation_and_restores_it_after_restart(
     let mut owner =
         CodeIndexProductionOwnerV1::new(config(), store.clone()).expect("production owner");
 
+    let first_request = request("file.production.1", 1_100_000);
+    let memory = Arc::clone(&first_request.resident_memory);
+    let scope = CodeIndexGenerationScopeV1::for_snapshot(&first_request.snapshot);
     let first = owner
-        .build_and_publish(request("file.production.1", 1_100_000), &ActiveControl)
+        .build_and_publish(first_request, &ActiveControl)
         .expect("first generation publishes");
     let first = store.generation(&first);
 
@@ -1373,9 +1408,7 @@ fn production_owner_publishes_complete_generation_and_restores_it_after_restart(
     let mut restarted =
         CodeIndexProductionOwnerV1::new(config(), store.clone()).expect("restart owner");
     let restored = restarted
-        .active_generation(&CodeIndexGenerationScopeV1::for_snapshot(
-            &request("file.production.scope", 1_100_000).snapshot,
-        ))
+        .active_generation(&scope, &memory.begin_operation())
         .expect("active generation loads")
         .expect("published generation survives restart");
     assert_eq!(
@@ -1649,27 +1682,30 @@ fn verified_sealed_lexical_pages_are_bounded_exact_and_resumable_after_cancellat
     let store = SharedPublicationStore::default();
     let mut owner =
         CodeIndexProductionOwnerV1::new(config(), store.clone()).expect("production owner");
+    let request = request_with_source(
+        "file.lexical-pages",
+        1_250_000,
+        "commit.lexical-pages",
+        "tree.lexical-pages",
+        "fn alpha() -> u32 { 1 }\nfn beta() -> u32 { alpha() + 1 }\nfn gamma() -> u32 { beta() + 1 }\n",
+    );
+    let operation = request.resident_memory.begin_operation();
     let generation = owner
-        .build_and_publish(
-            request_with_source(
-                "file.lexical-pages",
-                1_250_000,
-                "commit.lexical-pages",
-                "tree.lexical-pages",
-                "fn alpha() -> u32 { 1 }\nfn beta() -> u32 { alpha() + 1 }\nfn gamma() -> u32 { beta() + 1 }\n",
-            ),
-            &ActiveControl,
-        )
+        .build_and_publish(request, &ActiveControl)
         .expect("generation publishes");
     let generation = store.generation(&generation);
     let sealed = PartitionedSealV1::of(&generation);
     let expected_state_digest = sealed.state_digest();
     let control = MutableCancellationControl::default();
     let mut source = sealed
-        .lexical_source(1, 1024 * 1024)
+        .lexical_source(1, 1024 * 1024, &operation)
         .expect("verified page source opens");
+    let mut read_pack = source.begin_read_pass(&control).expect("begin source read");
 
-    let first = match source.next_page(&control).expect("first page") {
+    let first = match source
+        .next_page(&control, read_pack.as_mut())
+        .expect("first page")
+    {
         VerifiedSealedLexicalPageReadV1::Page(page) => page,
         VerifiedSealedLexicalPageReadV1::Complete(_) => {
             panic!("fixture must emit at least one lexical page")
@@ -1684,14 +1720,18 @@ fn verified_sealed_lexical_pages_are_bounded_exact_and_resumable_after_cancellat
     control.cancel();
     let cursor_before_cancel = source.cursor().clone();
     let error = source
-        .next_page(&control)
+        .next_page(&control, read_pack.as_mut())
         .expect_err("cancellation must interrupt before another page is admitted");
     assert!(matches!(
         error,
         CodeIndexProductionErrorV1::Interrupted(CodeIndexInterruptionV1::Cancelled)
     ));
     assert_eq!(source.cursor(), &cursor_before_cancel);
+    drop(read_pack);
     control.resume();
+    let mut read_pack = source
+        .begin_read_pass(&control)
+        .expect("resume source read");
 
     let mut observed = first
         .chunks()
@@ -1701,7 +1741,10 @@ fn verified_sealed_lexical_pages_are_bounded_exact_and_resumable_after_cancellat
     let mut observed_clone_bodies = first.clone_bodies().len();
     let mut final_page_digest = first.cumulative_digest().clone();
     let receipt = loop {
-        match source.next_page(&control).expect("resumed page read") {
+        match source
+            .next_page(&control, read_pack.as_mut())
+            .expect("resumed page read")
+        {
             VerifiedSealedLexicalPageReadV1::Page(page) => {
                 assert!(
                     page.chunks()
@@ -1780,6 +1823,7 @@ fn verified_content_addressed_lexical_source_resumes_from_a_persisted_cursor() {
     let store = SharedPublicationStore::default();
     let mut owner =
         CodeIndexProductionOwnerV1::new(config(), store.clone()).expect("production owner");
+    let operation = request.resident_memory.begin_operation();
     let generation = owner
         .build_and_publish(request, &ActiveControl)
         .expect("generation publishes");
@@ -1787,15 +1831,21 @@ fn verified_content_addressed_lexical_source_resumes_from_a_persisted_cursor() {
     let sealed = PartitionedSealV1::of(&generation);
 
     let mut initial = sealed
-        .lexical_source(64, 1024 * 1024)
+        .lexical_source(64, 1024 * 1024, &operation)
         .expect("content-addressed source opens");
+    let mut initial_read_pack = initial
+        .begin_read_pass(&ActiveControl)
+        .expect("begin initial read");
     let retained_layout_bytes = initial.retained_layout_bytes();
     assert!(
         retained_layout_bytes > std::mem::size_of::<u64>() * 4
             && retained_layout_bytes < sealed.byte_len() / 8,
         "source layout must count retained file positions while staying compact"
     );
-    let first = match initial.next_page(&ActiveControl).expect("first page") {
+    let first = match initial
+        .next_page(&ActiveControl, initial_read_pack.as_mut())
+        .expect("first page")
+    {
         VerifiedSealedLexicalPageReadV1::Page(page) => page,
         VerifiedSealedLexicalPageReadV1::Complete(_) => panic!("fixture must emit a first page"),
     };
@@ -1813,14 +1863,21 @@ fn verified_content_addressed_lexical_source_resumes_from_a_persisted_cursor() {
             &persisted,
         )
         .expect("persisted cursor restores");
+    drop(initial_read_pack);
 
     let mut resumed = sealed
-        .lexical_source(64, 1024 * 1024)
+        .lexical_source(64, 1024 * 1024, &operation)
         .expect("source reopens");
+    let mut resumed_read_pack = resumed
+        .begin_read_pass(&ActiveControl)
+        .expect("begin resumed read");
     resumed
-        .restore_cursor(&cursor, &ActiveControl)
+        .restore_cursor(&cursor, &ActiveControl, resumed_read_pack.as_mut())
         .expect("persisted cursor reopens the source");
-    let resumed_page = match resumed.next_page(&ActiveControl).expect("resumed page") {
+    let resumed_page = match resumed
+        .next_page(&ActiveControl, resumed_read_pack.as_mut())
+        .expect("resumed page")
+    {
         VerifiedSealedLexicalPageReadV1::Page(page) => page,
         VerifiedSealedLexicalPageReadV1::Complete(_) => panic!("fixture must emit a resumed page"),
     };
@@ -1833,6 +1890,7 @@ fn verified_content_addressed_lexical_source_resumes_from_a_persisted_cursor() {
         id::<FileOccurrenceId>("file.lexical-resume.beta"),
         "resuming must begin at the next file instead of emitting the accepted prefix"
     );
+    drop(resumed_read_pack);
 
     let mut corrupted: serde_json::Value =
         serde_json::from_slice(&persisted).expect("cursor serialization is JSON");
@@ -1846,30 +1904,32 @@ fn verified_content_addressed_lexical_source_resumes_from_a_persisted_cursor() {
         "altering a persisted cursor must fail before it can direct a source"
     );
 
+    let foreign_request = request_with_source(
+        "file.lexical-resume.foreign",
+        1_255_100,
+        "commit.lexical-resume.foreign",
+        "tree.lexical-resume.foreign",
+        "export function foreign() { return 3; }\n",
+    );
+    let foreign_operation = foreign_request.resident_memory.begin_operation();
     let foreign = owner
-        .build_and_publish(
-            request_with_source(
-                "file.lexical-resume.foreign",
-                1_255_100,
-                "commit.lexical-resume.foreign",
-                "tree.lexical-resume.foreign",
-                "export function foreign() { return 3; }\n",
-            ),
-            &ActiveControl,
-        )
+        .build_and_publish(foreign_request, &ActiveControl)
         .expect("foreign generation publishes");
     let foreign = store.generation(&foreign);
     let foreign = PartitionedSealV1::of(&foreign);
     let mut foreign_source = foreign
-        .lexical_source(64, 1024 * 1024)
+        .lexical_source(64, 1024 * 1024, &foreign_operation)
         .expect("one-file content-addressed source opens");
+    let mut foreign_read_pack = foreign_source
+        .begin_read_pass(&ActiveControl)
+        .expect("begin foreign read");
     assert!(
         foreign_source.retained_layout_bytes() > std::mem::size_of::<u64>() * 4
             && foreign_source.retained_layout_bytes() <= retained_layout_bytes,
         "the one-file source must account for its positions within the two-file allocation bound"
     );
     let error = foreign_source
-        .restore_cursor(&cursor, &ActiveControl)
+        .restore_cursor(&cursor, &ActiveControl, foreign_read_pack.as_mut())
         .expect_err("a cursor minted for another source must fail closed");
     assert!(
         error.to_string().contains("cursor") && error.to_string().contains("source"),
@@ -1890,17 +1950,16 @@ fn verified_lexical_source_pages_a_large_file_and_resumes_after_cancellation() {
     let store = SharedPublicationStore::default();
     let mut owner =
         CodeIndexProductionOwnerV1::new(config(), store.clone()).expect("production owner");
+    let request = request_with_source(
+        "file.lexical-large-page",
+        1_257_500,
+        "commit.lexical-large-page",
+        "tree.lexical-large-page",
+        &source_text,
+    );
+    let operation = request.resident_memory.begin_operation();
     let generation = owner
-        .build_and_publish(
-            request_with_source(
-                "file.lexical-large-page",
-                1_257_500,
-                "commit.lexical-large-page",
-                "tree.lexical-large-page",
-                &source_text,
-            ),
-            &ActiveControl,
-        )
+        .build_and_publish(request, &ActiveControl)
         .expect("large generation publishes");
     let generation = store.generation(&generation);
     let expected_chunks = generation
@@ -1911,8 +1970,11 @@ fn verified_lexical_source_pages_a_large_file_and_resumes_after_cancellation() {
     let sealed = PartitionedSealV1::of(&generation);
     let control = MutableCancellationControl::default();
     let mut source = sealed
-        .lexical_source(32, 64 * 1024)
+        .lexical_source(32, 64 * 1024, &operation)
         .expect("a valid large file must not be rejected by its page bound");
+    let mut read_pack = source
+        .begin_read_pass(&control)
+        .expect("begin large source read");
     let largest_file_segment = sealed.envelope()["generation"]["file_segments"]
         .as_array()
         .expect("file segment descriptors")
@@ -1937,7 +1999,10 @@ fn verified_lexical_source_pages_a_large_file_and_resumes_after_cancellation() {
     let mut emitted_chunks = 0_u64;
     let mut emitted_pages = 0_u64;
     let persisted = loop {
-        let page = match source.next_page(&control).expect("bounded page") {
+        let page = match source
+            .next_page(&control, read_pack.as_mut())
+            .expect("bounded page")
+        {
             VerifiedSealedLexicalPageReadV1::Page(page) => page,
             VerifiedSealedLexicalPageReadV1::Complete(_) => {
                 panic!("large fixture must have more than three pages")
@@ -1956,12 +2021,13 @@ fn verified_lexical_source_pages_a_large_file_and_resumes_after_cancellation() {
     };
     control.cancel();
     let error = source
-        .next_page(&control)
+        .next_page(&control, read_pack.as_mut())
         .expect_err("cancellation must not admit another page");
     assert!(matches!(
         error,
         CodeIndexProductionErrorV1::Interrupted(CodeIndexInterruptionV1::Cancelled)
     ));
+    drop(read_pack);
     control.resume();
     let cursor =
         tracedecay_code_index::production::VerifiedSealedLexicalCursorV1::restore_persisted(
@@ -1969,13 +2035,19 @@ fn verified_lexical_source_pages_a_large_file_and_resumes_after_cancellation() {
         )
         .expect("progress cursor restores");
     let mut resumed = sealed
-        .lexical_source(32, 64 * 1024)
+        .lexical_source(32, 64 * 1024, &operation)
         .expect("resumed large source opens");
+    let mut resumed_read_pack = resumed
+        .begin_read_pass(&control)
+        .expect("begin resumed large read");
     resumed
-        .restore_cursor(&cursor, &control)
+        .restore_cursor(&cursor, &control, resumed_read_pack.as_mut())
         .expect("progress cursor restores onto the source");
     let receipt = loop {
-        match resumed.next_page(&control).expect("resumed bounded page") {
+        match resumed
+            .next_page(&control, resumed_read_pack.as_mut())
+            .expect("resumed bounded page")
+        {
             VerifiedSealedLexicalPageReadV1::Page(page) => {
                 assert!(page.chunk_count() <= 32);
                 assert!(page.payload_bytes() <= 64 * 1024);
@@ -2010,6 +2082,7 @@ fn verified_sealed_lexical_imports_are_exact_once_and_fold_their_pages() {
         .snapshot
         .validate()
         .expect("TypeScript import snapshot is canonical");
+    let operation = request.resident_memory.begin_operation();
     let generation = owner
         .build_and_publish(request, &ActiveControl)
         .expect("generation publishes");
@@ -2022,13 +2095,16 @@ fn verified_sealed_lexical_imports_are_exact_once_and_fold_their_pages() {
 
     let read = |maximum_page_chunks| {
         let mut source = sealed
-            .lexical_source(maximum_page_chunks, 1024 * 1024)
+            .lexical_source(maximum_page_chunks, 1024 * 1024, &operation)
             .expect("verified import page source opens");
+        let mut read_pack = source
+            .begin_read_pass(&ActiveControl)
+            .expect("begin import page read");
         let mut imports = Vec::new();
         let mut folded = initial_import_dictionary_digest().expect("initial import dictionary");
         let receipt = loop {
             match source
-                .next_page(&ActiveControl)
+                .next_page(&ActiveControl, read_pack.as_mut())
                 .expect("verified import page")
             {
                 VerifiedSealedLexicalPageReadV1::Page(page) => {
@@ -2109,6 +2185,7 @@ fn verified_sealed_lexical_page_transition_is_canonical_across_importing_files()
     let store = SharedPublicationStore::default();
     let mut owner =
         CodeIndexProductionOwnerV1::new(config(), store.clone()).expect("production owner");
+    let operation = request.resident_memory.begin_operation();
     let generation = owner
         .build_and_publish(request, &ActiveControl)
         .expect("generation publishes");
@@ -2126,13 +2203,19 @@ fn verified_sealed_lexical_page_transition_is_canonical_across_importing_files()
 
     let sealed = PartitionedSealV1::of(&generation);
     let mut source = sealed
-        .lexical_source(usize::MAX, 1024 * 1024)
+        .lexical_source(usize::MAX, 1024 * 1024, &operation)
         .expect("verified page source opens");
+    let mut read_pack = source
+        .begin_read_pass(&ActiveControl)
+        .expect("begin transition read");
     let mut previous_cursor = None;
     let mut observed_chunks = Vec::new();
     let mut observed_imports = Vec::new();
     let receipt = loop {
-        match source.next_page(&ActiveControl).expect("verified page") {
+        match source
+            .next_page(&ActiveControl, read_pack.as_mut())
+            .expect("verified page")
+        {
             VerifiedSealedLexicalPageReadV1::Page(page) => {
                 assert!(page.payload_bytes() + page.import_payload_bytes() <= 1024 * 1024);
                 page.verify_transition(previous_cursor.as_ref())
@@ -2175,21 +2258,26 @@ fn rejected_sealed_lexical_page_admission_does_not_advance_the_source() {
     let store = SharedPublicationStore::default();
     let mut owner =
         CodeIndexProductionOwnerV1::new(config(), store.clone()).expect("production owner");
+    let request = request("file.lexical-admission", 1_266_500);
+    let operation = request.resident_memory.begin_operation();
     let generation = owner
-        .build_and_publish(request("file.lexical-admission", 1_266_500), &ActiveControl)
+        .build_and_publish(request, &ActiveControl)
         .expect("generation publishes");
     let generation = store.generation(&generation);
     let sealed = PartitionedSealV1::of(&generation);
     let mut source = sealed
-        .lexical_source(usize::MAX, 1024 * 1024)
+        .lexical_source(usize::MAX, 1024 * 1024, &operation)
         .expect("verified page source opens");
+    let mut read_pack = source
+        .begin_read_pass(&ActiveControl)
+        .expect("begin admission read");
     let cursor_before = source
         .cursor()
         .persisted_bytes()
         .expect("initial cursor persists");
     let mut rejected_page_bytes = None;
     let rejected = source
-        .next_page_if(&ActiveControl, |page| {
+        .next_page_if(&ActiveControl, read_pack.as_mut(), |page| {
             page.verify_transition(None)
                 .expect("source-minted page verifies before admission");
             rejected_page_bytes = Some(sealed_lexical_page_bytes(page));
@@ -2208,10 +2296,14 @@ fn rejected_sealed_lexical_page_admission_does_not_advance_the_source() {
         cursor_before,
         "caller rejection must not advance any persisted source authority"
     );
+    drop(read_pack);
+    let mut read_pack = source
+        .begin_read_pass(&ActiveControl)
+        .expect("begin retried read");
 
     let mut accepted_page_bytes = None;
     let accepted = source
-        .next_page_if(&ActiveControl, |page| {
+        .next_page_if(&ActiveControl, read_pack.as_mut(), |page| {
             page.verify_transition(None)
                 .expect("retried source-minted page verifies");
             accepted_page_bytes = Some(sealed_lexical_page_bytes(page));
@@ -2275,15 +2367,22 @@ fn verified_sealed_lexical_page_retained_bytes_include_real_owned_capacities() {
         .snapshot
         .validate()
         .expect("TypeScript import snapshot is canonical");
+    let operation = request.resident_memory.begin_operation();
     let generation = owner
         .build_and_publish(request, &ActiveControl)
         .expect("generation publishes");
     let generation = store.generation(&generation);
     let sealed = PartitionedSealV1::of(&generation);
     let mut source = sealed
-        .lexical_source(usize::MAX, 1024 * 1024)
+        .lexical_source(usize::MAX, 1024 * 1024, &operation)
         .expect("verified page source opens");
-    let page = match source.next_page(&ActiveControl).expect("verified page") {
+    let mut read_pack = source
+        .begin_read_pass(&ActiveControl)
+        .expect("begin retained-page read");
+    let page = match source
+        .next_page(&ActiveControl, read_pack.as_mut())
+        .expect("verified page")
+    {
         VerifiedSealedLexicalPageReadV1::Page(page) => page,
         VerifiedSealedLexicalPageReadV1::Complete(_) => panic!("fixture must emit a page"),
     };
@@ -2585,7 +2684,7 @@ fn misclassified_non_git_scope_reaches_a_terminal_reset_state_instead_of_retryin
     assert_eq!(non_git_scope.worktree, None);
 
     let read = owner
-        .active_generation(&non_git_scope)
+        .active_generation(&non_git_scope, &non_git.resident_memory.begin_operation())
         .expect_err("a git-identified generation never dispatches onto a non-git scope");
     assert!(
         matches!(
@@ -2636,6 +2735,7 @@ fn non_git_scope_stays_independently_active_beside_git_identified_generations() 
         "commit.hawk.1",
     );
     let hawk_scope = CodeIndexGenerationScopeV1::for_snapshot(&hawk_request.snapshot);
+    let hawk_memory = Arc::clone(&hawk_request.resident_memory);
     let hawk = owner
         .build_and_publish(hawk_request, &ActiveControl)
         .expect("git-identified generation publishes");
@@ -2643,6 +2743,7 @@ fn non_git_scope_stays_independently_active_beside_git_identified_generations() 
 
     let non_git_request = request("file.terminal.non-git", 1_200_000);
     let non_git_scope = CodeIndexGenerationScopeV1::for_snapshot(&non_git_request.snapshot);
+    let non_git_memory = Arc::clone(&non_git_request.resident_memory);
     let non_git = owner
         .build_and_publish(non_git_request, &ActiveControl)
         .expect("a non-git snapshot indexes as its own terminal outcome");
@@ -2652,7 +2753,7 @@ fn non_git_scope_stays_independently_active_beside_git_identified_generations() 
     assert_eq!(store.scope_count(), 2);
     assert_eq!(
         owner
-            .active_generation(&hawk_scope)
+            .active_generation(&hawk_scope, &hawk_memory.begin_operation())
             .expect("hawk scope read")
             .expect("hawk stays active")
             .metadata()
@@ -2662,7 +2763,7 @@ fn non_git_scope_stays_independently_active_beside_git_identified_generations() 
     );
     assert_eq!(
         owner
-            .active_generation(&non_git_scope)
+            .active_generation(&non_git_scope, &non_git_memory.begin_operation())
             .expect("non-git scope read")
             .expect("non-git stays active")
             .metadata()
@@ -2691,6 +2792,7 @@ fn config_dispatch_refuses_a_generation_sealed_for_another_full_scope() {
         "commit.hawk.1",
     );
     let hawk_scope = CodeIndexGenerationScopeV1::for_snapshot(&hawk_request.snapshot);
+    let hawk_memory = Arc::clone(&hawk_request.resident_memory);
     let hawk = owner
         .build_and_publish(hawk_request, &ActiveControl)
         .expect("hawk generation publishes");
@@ -2707,7 +2809,7 @@ fn config_dispatch_refuses_a_generation_sealed_for_another_full_scope() {
         worktree: hawk_scope.worktree.clone(),
     };
     let refused = owner
-        .active_generation(&pr_worktree_scope)
+        .active_generation(&pr_worktree_scope, &hawk_memory.begin_operation())
         .expect_err("a generation sealed for hawk never dispatches onto a foreign checkout");
     assert!(
         matches!(
@@ -2721,7 +2823,7 @@ fn config_dispatch_refuses_a_generation_sealed_for_another_full_scope() {
 
     assert!(
         owner
-            .active_generation(&moved_label_scope)
+            .active_generation(&moved_label_scope, &hawk_memory.begin_operation())
             .expect("same-checkout label move rebuilds instead of resetting")
             .is_none(),
         "a label move must not reuse the previous label's generation"
@@ -2731,7 +2833,7 @@ fn config_dispatch_refuses_a_generation_sealed_for_another_full_scope() {
     // in the slot, before the label-move publish replaces it.
     assert_eq!(
         owner
-            .active_generation(&hawk_scope)
+            .active_generation(&hawk_scope, &hawk_memory.begin_operation())
             .expect("exact scope read")
             .expect("hawk stays active for its own scope")
             .metadata()
@@ -2743,26 +2845,29 @@ fn config_dispatch_refuses_a_generation_sealed_for_another_full_scope() {
     let mut competing = store.clone();
     assert!(
         matches!(
-            competing.prepare(&moved_label_scope, None),
+            competing.prepare(&moved_label_scope, None, &hawk_memory.begin_operation()),
             Err(CodeIndexPublicationStoreErrorV1::CompareAndSwap)
         ),
         "a label move must name the occupied physical slot's incumbent"
     );
     let mut stale_preparation = competing
-        .prepare(&moved_label_scope, Some(&hawk.manifest().generation_id))
+        .prepare(
+            &moved_label_scope,
+            Some(&hawk.manifest().generation_id),
+            &hawk_memory.begin_operation(),
+        )
         .expect("competing label move prepares against the same incumbent");
 
+    let moved_request = request_in_scope(
+        "file.dispatch.moved",
+        1_200_000,
+        "refs/heads/pr-1234",
+        Some("worktree.hawk"),
+        "commit.pr.1",
+    );
+    let moved_memory = Arc::clone(&moved_request.resident_memory);
     let moved = owner
-        .build_and_publish(
-            request_in_scope(
-                "file.dispatch.moved",
-                1_200_000,
-                "refs/heads/pr-1234",
-                Some("worktree.hawk"),
-                "commit.pr.1",
-            ),
-            &ActiveControl,
-        )
+        .build_and_publish(moved_request, &ActiveControl)
         .expect("label-move publish must CAS against the prior-label incumbent");
     assert!(
         matches!(
@@ -2787,7 +2892,7 @@ fn config_dispatch_refuses_a_generation_sealed_for_another_full_scope() {
     assert_eq!(selected.manifest(), moved.manifest());
     assert!(
         matches!(
-            owner.active_generation(&pr_worktree_scope),
+            owner.active_generation(&pr_worktree_scope, &moved_memory.begin_operation()),
             Err(CodeIndexProductionErrorV1::Publication(
                 CodeIndexPublicationStoreErrorV1::CorruptionResetRequired(_)
             ))
@@ -2818,17 +2923,16 @@ fn code_shard_slot_key_is_the_sealed_branch_label_not_a_generation_id() {
         )
         .expect("first hawk generation publishes");
     let first = store.generation(&first);
+    let second_request = request_in_scope(
+        "file.shard.hawk.2",
+        1_200_000,
+        "refs/heads/hawk",
+        Some("worktree.shared"),
+        "commit.hawk.1",
+    );
+    let second_memory = Arc::clone(&second_request.resident_memory);
     let second = owner
-        .build_and_publish(
-            request_in_scope(
-                "file.shard.hawk.2",
-                1_200_000,
-                "refs/heads/hawk",
-                Some("worktree.shared"),
-                "commit.hawk.1",
-            ),
-            &ActiveControl,
-        )
+        .build_and_publish(second_request, &ActiveControl)
         .expect("second hawk generation publishes");
     let second = store.generation(&second);
 
@@ -2864,7 +2968,7 @@ fn code_shard_slot_key_is_the_sealed_branch_label_not_a_generation_id() {
     assert_eq!(store.scope_count(), 2);
     assert_eq!(
         owner
-            .active_generation(&second.sealed_scope())
+            .active_generation(&second.sealed_scope(), &second_memory.begin_operation())
             .expect("hawk slot read")
             .expect("hawk slot stays active")
             .metadata()
@@ -3083,45 +3187,118 @@ fn partitioned_codec_request(beta_value: u64, sealed_at: i64) -> CodeIndexBuildR
     partitioned_request(&sources, changed_files, sealed_at)
 }
 
-/// A segment publisher that stores every published segment under its digest
-/// (evidence pages assembled into one pack under the commit digest) and counts
-/// the file segments the encoder actually published, as opposed to reused.
-fn collect_published_segments<'a>(
-    segments: &'a mut BTreeMap<String, Vec<u8>>,
-    published_files: &'a mut usize,
-) -> impl FnMut(SealedGenerationSegmentPublicationV1<'_>) -> Result<(), CodeIndexProductionErrorV1> + 'a
+/// Observe logical writes while the canonical store owns packing and parent binding.
+struct ObservedPreparation<F> {
+    inner: MemoryCodeIndexPreparationV1,
+    observe: F,
+    operation: ResidentMemoryOperationV1,
+}
+
+impl<F: FnMut(SealedGenerationSegmentPublicationV1<'_>)> CodeIndexPreparationPort
+    for ObservedPreparation<F>
 {
-    let mut evidence_pack = Vec::new();
-    move |publication| {
-        match publication {
-            SealedGenerationSegmentPublicationV1::File { digest, bytes } => {
-                *published_files += 1;
-                segments.insert(digest.as_str().to_owned(), bytes.to_vec());
-            }
-            SealedGenerationSegmentPublicationV1::FileEvidence { digest, bytes }
-            | SealedGenerationSegmentPublicationV1::ResolutionIndex { digest, bytes } => {
-                segments.insert(digest.as_str().to_owned(), bytes.to_vec());
-            }
-            SealedGenerationSegmentPublicationV1::CodeGraphPage {
-                page_digest, bytes, ..
-            } => {
-                segments.insert(page_digest.as_str().to_owned(), bytes.to_vec());
-            }
-            SealedGenerationSegmentPublicationV1::GenerationEvidencePage { bytes, .. } => {
-                evidence_pack.extend_from_slice(bytes);
-            }
-            SealedGenerationSegmentPublicationV1::GenerationEvidenceCommit {
-                segment_digest,
-                ..
-            } => {
-                segments.insert(
-                    segment_digest.as_str().to_owned(),
-                    std::mem::take(&mut evidence_pack),
-                );
-            }
-        }
+    fn bind_parent(
+        &mut self,
+        parent: &CodeIndexSealedGenerationV1,
+    ) -> Result<(), CodeIndexPublicationStoreErrorV1> {
+        self.inner.bind_parent(parent)
+    }
+
+    fn write_segment(
+        &mut self,
+        publication: SealedGenerationSegmentPublicationV1<'_>,
+    ) -> Result<(), CodeIndexPublicationStoreErrorV1> {
+        self.inner.write_segment(publication)?;
+        (self.observe)(publication);
         Ok(())
     }
+
+    fn segment_reader(&self) -> Arc<SealedSegmentReaderV1> {
+        self.inner.segment_reader()
+    }
+
+    fn finalize_content_pack(
+        &mut self,
+        segments: &[SealedGenerationSegmentIdentityV1],
+    ) -> Result<SealedGenerationContentPackV1, CodeIndexPublicationStoreErrorV1> {
+        self.inner.finalize_content_pack(segments)
+    }
+
+    fn pack_reader(&self) -> Arc<SealedSegmentReaderV1> {
+        self.inner.pack_reader()
+    }
+
+    fn read_pass_factory(&self) -> Arc<SealedGenerationPackReadFactoryV1> {
+        self.inner.read_pass_factory()
+    }
+
+    fn abort(self) -> Result<(), CodeIndexPublicationStoreErrorV1> {
+        self.inner.abort()
+    }
+}
+
+fn observed_preparation<F: FnMut(SealedGenerationSegmentPublicationV1<'_>)>(
+    store: &mut MemorySealedPublicationStoreV1,
+    generation: &CodeIndexPublishedGenerationV1,
+    observe: F,
+) -> ObservedPreparation<F> {
+    let scope = generation.sealed_scope();
+    let incumbent = store
+        .load_active(&scope)
+        .expect("load fixture incumbent")
+        .map(|sealed| {
+            sealed
+                .metadata()
+                .expect("incumbent metadata")
+                .manifest()
+                .generation_id
+                .clone()
+        });
+    let operation = memory_operation();
+    ObservedPreparation {
+        inner: store
+            .prepare(&scope, incumbent.as_ref(), &operation)
+            .expect("prepare observed seal"),
+        observe,
+        operation,
+    }
+}
+
+fn publish_fixture_parent(
+    store: &mut MemorySealedPublicationStoreV1,
+    generation: &CodeIndexPublishedGenerationV1,
+    observe: impl FnMut(SealedGenerationSegmentPublicationV1<'_>),
+) -> (PartitionedSealV1, CodeIndexSealedGenerationV1) {
+    let mut preparation = observed_preparation(store, generation, observe);
+    let operation = preparation.operation.clone();
+    let publication = generation
+        .stage_publication(&mut preparation, &operation)
+        .expect("stage fixture parent");
+    let sealed =
+        PartitionedSealV1::from_preparation(publication.manifest_bytes().to_vec(), &preparation);
+    store
+        .commit(&mut preparation.inner, &publication)
+        .expect("commit fixture parent");
+    let parent = store
+        .load_active(&generation.sealed_scope())
+        .expect("load fixture parent")
+        .expect("parent is active");
+    (sealed, parent)
+}
+
+fn encode_fixture_child(
+    store: &mut MemorySealedPublicationStoreV1,
+    generation: &CodeIndexPublishedGenerationV1,
+    parent: Option<&CodeIndexSealedGenerationV1>,
+    observe: impl FnMut(SealedGenerationSegmentPublicationV1<'_>),
+) -> PartitionedSealV1 {
+    let mut preparation = observed_preparation(store, generation, observe);
+    let manifest = generation
+        .encode_partitioned_sealed_with_parent(parent, &mut preparation)
+        .expect("encode fixture child");
+    let sealed = PartitionedSealV1::from_preparation(manifest, &preparation);
+    preparation.abort().expect("release observed staging");
+    sealed
 }
 
 fn partitioned_codec_fixture() -> (
@@ -3136,25 +3313,21 @@ fn partitioned_codec_fixture() -> (
         .build_and_publish(partitioned_codec_request(1, 1_100_000), &ActiveControl)
         .expect("partitioned parent generation");
     let first = store.generation(&first);
-    let mut segments = BTreeMap::new();
-    let mut parent_file_segments = 0;
-    let parent_manifest = first
-        .encode_partitioned_sealed(collect_published_segments(
-            &mut segments,
-            &mut parent_file_segments,
-        ))
-        .expect("partitioned parent encoding");
+    let mut encoding_store = MemorySealedPublicationStoreV1::default();
+    let (_, parent) = publish_fixture_parent(&mut encoding_store, &first, |_| {});
     let second = owner
         .build_and_publish(partitioned_codec_request(2, 1_200_000), &ActiveControl)
         .expect("partitioned child generation");
     let second = store.generation(&second);
     let mut child_file_segments = 0;
-    let manifest = second
-        .encode_partitioned_sealed_with_parent(
-            Some(&parent_manifest),
-            collect_published_segments(&mut segments, &mut child_file_segments),
-        )
-        .expect("partitioned child encoding");
+    let sealed = encode_fixture_child(&mut encoding_store, &second, Some(&parent), |publication| {
+        if matches!(
+            publication,
+            SealedGenerationSegmentPublicationV1::File { .. }
+        ) {
+            child_file_segments += 1;
+        }
+    });
     assert!(
         child_file_segments < second.snapshot().files.len(),
         "the child fixture must reuse at least one parent file segment"
@@ -3167,12 +3340,127 @@ fn partitioned_codec_fixture() -> (
         !second.edges().is_empty(),
         "the child fixture needs edge evidence"
     );
-    (second.as_ref().clone(), manifest, segments)
+    (second.as_ref().clone(), sealed.manifest, sealed.segments)
 }
 
 // The sealed generation revision is part of the authenticated manifest payload.
 const PARTITIONED_FORMAT_STATE_DIGEST: &str =
-    "sha256:9dfca7e0f68bbe8502dfe19bef6b9e202b4e444a068b91ddee77a2c047d89a37";
+    "sha256:59c65ca2016673cecf09843cf09cceb6779f41590271e0c85e54f7a6e42276db";
+
+#[test]
+fn admitted_partitioned_source_refuses_before_decode_and_releases_parse_workspace() {
+    let refused = SealedGenerationFileWindowsV1::open_admitted(b"not a JSON manifest", &mut |_| {
+        Err(CodeIndexProductionErrorV1::Publication(
+            CodeIndexPublicationStoreErrorV1::ResidentMemoryRefused(
+                "fixture manifest admission".to_owned(),
+            ),
+        ))
+    })
+    .expect_err("admission must refuse before the decoder examines the input");
+    assert!(matches!(
+        refused,
+        CodeIndexProductionErrorV1::Publication(
+            CodeIndexPublicationStoreErrorV1::ResidentMemoryRefused(_)
+        )
+    ));
+
+    let (expected, manifest, packs) = partitioned_codec_fixture();
+    let admission_calls = Cell::new(0_usize);
+    let payload_reads = Cell::new(0_usize);
+    let refused = CodeIndexPublishedGenerationV1::decode_partitioned_sealed(
+        &manifest,
+        &SharedDecodedContentPoolV1::default(),
+        |request, buffer| {
+            payload_reads.set(payload_reads.get() + 1);
+            read_pack_bytes(&packs, request, buffer)
+        },
+        &mut |_| {
+            admission_calls.set(admission_calls.get() + 1);
+            if admission_calls.get() == 1 {
+                // Admit the envelope, then refuse the canonical DTO's first growth.
+                Ok(())
+            } else {
+                Err(CodeIndexProductionErrorV1::Publication(
+                    CodeIndexPublicationStoreErrorV1::ResidentMemoryRefused(
+                        "fixture full manifest growth".to_owned(),
+                    ),
+                ))
+            }
+        },
+    )
+    .expect_err("full restoration must honor manifest admission before reading packs");
+    assert!(matches!(
+        refused,
+        CodeIndexProductionErrorV1::Publication(
+            CodeIndexPublicationStoreErrorV1::ResidentMemoryRefused(reason)
+        ) if reason == "fixture full manifest growth"
+    ));
+    assert_eq!(admission_calls.get(), 2);
+    assert_eq!(payload_reads.get(), 0);
+
+    let admitted_manifest = Cell::new(0_usize);
+    let restored = CodeIndexPublishedGenerationV1::decode_partitioned_sealed(
+        &manifest,
+        &SharedDecodedContentPoolV1::default(),
+        |request, buffer| {
+            assert!(
+                admitted_manifest.get() > 0,
+                "the manifest charge must remain held throughout payload restoration"
+            );
+            payload_reads.set(payload_reads.get() + 1);
+            read_pack_bytes(&packs, request, buffer)
+        },
+        &mut |bytes| {
+            admitted_manifest.set(bytes);
+            Ok(())
+        },
+    )
+    .expect("admitted full restoration succeeds");
+    assert_eq!(
+        restored.manifest().generation_id,
+        expected.manifest().generation_id
+    );
+    assert!(payload_reads.get() > 0);
+    assert!(
+        admitted_manifest.get() > 0,
+        "the caller releases its reservation only after the decoded result returns"
+    );
+
+    let mut required = Vec::new();
+    let source = SealedGenerationFileWindowsV1::open_admitted(&manifest, &mut |bytes| {
+        required.push(bytes);
+        Ok(())
+    })
+    .expect("the admitted canonical source opens");
+    assert_eq!(source.generation_id(), &expected.manifest().generation_id);
+    let retained = required
+        .pop()
+        .expect("the final callback retains the source");
+    assert_eq!(retained, source.retained_bytes());
+    assert!(
+        required
+            .into_iter()
+            .max()
+            .expect("decode is admitted first")
+            > retained
+    );
+
+    let mut largest_read = 0_u64;
+    source
+        .verify_segments(
+            |_, _| false,
+            |request, buffer| {
+                let length = match request {
+                    SealedGenerationSegmentReadV1::Whole { size_bytes, .. } => size_bytes,
+                    SealedGenerationSegmentReadV1::Range { length, .. } => length,
+                };
+                largest_read = largest_read.max(length);
+                read_pack_bytes(&packs, request, buffer)
+            },
+        )
+        .expect("the same parsed source authenticates its physical and logical payloads");
+    assert!(largest_read > 0 && largest_read <= source.verification_scratch_bytes() as u64);
+}
 const PARTITIONED_FORMAT_SEGMENTS: &[(&str, u64)] = &[
     (
         "sha256:49ac89476728e3983d94d2fa74f2844144dd800e6df4a82fe24484c5a7369518",
@@ -3287,10 +3575,12 @@ const PARTITIONED_FORMAT_SEGMENTS: &[(&str, u64)] = &[
 #[test]
 fn partitioned_file_segments_omit_the_identities_they_determine() {
     let (_, manifest, segments) = partitioned_codec_fixture();
-    let identities = CodeIndexPublishedGenerationV1::partitioned_segment_identities(&manifest)
-        .expect("partitioned segment identities parse");
+    let sealed = PartitionedSealV1 { manifest, segments };
+    let identities =
+        CodeIndexPublishedGenerationV1::partitioned_segment_identities(&sealed.manifest)
+            .expect("partitioned segment identities parse");
     let envelope: serde_json::Value =
-        serde_json::from_slice(&manifest).expect("partitioned manifest JSON");
+        serde_json::from_slice(&sealed.manifest).expect("partitioned manifest JSON");
     let file_segment_count = envelope["generation"]["file_segments"]
         .as_array()
         .expect("file segment descriptors")
@@ -3300,8 +3590,9 @@ fn partitioned_file_segments_omit_the_identities_they_determine() {
     let mut explicit_ids = 0;
     let mut whole_symbol_terms = 0;
     for identity in files {
+        let encoded = sealed.logical_segment_bytes(&identity.digest, identity.size_bytes);
         let mut decoded = Vec::new();
-        flate2::read::DeflateDecoder::new(segments[identity.digest.as_str()].as_slice())
+        flate2::read::DeflateDecoder::new(encoded.as_slice())
             .read_to_end(&mut decoded)
             .expect("file segment inflates");
         let segment: serde_json::Value =
@@ -3344,11 +3635,13 @@ fn partitioned_file_segments_omit_the_identities_they_determine() {
 
 #[test]
 fn partitioned_codec_has_stable_bytes_and_round_trips() {
+    let operation = memory_operation();
     let (expected, manifest, segments) = partitioned_codec_fixture();
+    let layout = SealedGenerationPackLayoutV1::open(&manifest).expect("canonical pack layout");
     let envelope: serde_json::Value =
         serde_json::from_slice(&manifest).expect("partitioned manifest JSON");
     assert_eq!(
-        envelope["generation"]["format_revision"], 23,
+        envelope["generation"]["format_revision"], 24,
         "the canonical fixture pins the sealed generation revision"
     );
     assert_eq!(
@@ -3506,32 +3799,43 @@ fn partitioned_codec_has_stable_bytes_and_round_trips() {
         &SharedDecodedContentPoolV1::default(),
         |request, buffer| {
             let address = buffer as *const Vec<u8> as usize;
-            let (digest, offset, length, reading_file) = match request {
+            let (pack_digest, pack_size, offset, length) = match request {
                 SealedGenerationSegmentReadV1::Whole { digest, size_bytes } => {
-                    (digest, 0, size_bytes, true)
+                    (digest, size_bytes, 0, size_bytes)
                 }
                 SealedGenerationSegmentReadV1::Range {
                     digest,
+                    size_bytes,
                     offset,
                     length,
-                    ..
-                } => (digest, offset, length, false),
+                } => (digest, size_bytes, offset, length),
             };
-            let bytes = segments.get(digest.as_str()).ok_or_else(|| {
-                CodeIndexProductionErrorV1::Contract("golden segment is missing".to_owned())
-            })?;
-            let start = usize::try_from(offset).expect("segment range offset");
-            let end = start + usize::try_from(length).expect("segment range length");
+            let reading_content = pack_digest == &layout.content_pack().digest;
+            let digest = if reading_content {
+                assert_eq!(pack_size, layout.content_pack().size_bytes);
+                &layout
+                    .content_pack()
+                    .extents
+                    .iter()
+                    .find(|extent| extent.offset == offset && extent.size_bytes == length)
+                    .expect("text decode reads one complete logical content extent")
+                    .digest
+            } else {
+                assert_eq!(pack_digest, &layout.evidence_pack().digest);
+                assert_eq!(pack_size, layout.evidence_pack().size_bytes);
+                &layout.evidence_pack().digest
+            };
+            let length = usize::try_from(length).expect("segment range length");
             buffer.clear();
             // Exact growth, so a buffer's capacity records the largest read
             // it served rather than the allocator's amortized doubling.
-            buffer.reserve_exact(end - start);
-            buffer.extend_from_slice(&bytes[start..end]);
-            if reading_file && file_evidence_digests.contains(digest.as_str()) {
-                largest_file_evidence.set(largest_file_evidence.get().max(bytes.len()));
+            buffer.reserve_exact(length);
+            read_pack_bytes(&segments, request, buffer)?;
+            if reading_content && file_evidence_digests.contains(digest.as_str()) {
+                largest_file_evidence.set(largest_file_evidence.get().max(length));
                 file_evidence_buffers.insert(address, buffer.capacity());
-            } else if reading_file {
-                largest_file_segment.set(largest_file_segment.get().max(bytes.len()));
+            } else if reading_content {
+                largest_file_segment.set(largest_file_segment.get().max(length));
                 file_buffers.insert(address, buffer.capacity());
             } else {
                 if let Some(first_address) = evidence_buffer_address.get() {
@@ -3542,7 +3846,7 @@ fn partitioned_codec_has_stable_bytes_and_round_trips() {
                 } else {
                     evidence_buffer_address.set(Some(address));
                 }
-                largest_evidence_page.set(largest_evidence_page.get().max(end - start));
+                largest_evidence_page.set(largest_evidence_page.get().max(length));
                 evidence_buffer_capacity.set(buffer.capacity());
             }
             segment_reads
@@ -3550,6 +3854,8 @@ fn partitioned_codec_has_stable_bytes_and_round_trips() {
                 .insert(digest.as_str().to_owned());
             Ok(())
         },
+        // Buffer-reuse accounting excludes the independent admission policy.
+        &mut |_| Ok(()),
     )
     .expect("partitioned bytes decode");
     assert!(
@@ -3605,8 +3911,8 @@ fn partitioned_codec_has_stable_bytes_and_round_trips() {
         "the evidence allocation must be bounded by the largest evidence page"
     );
     assert_eq!(
-        sealed_clone_bindings(&restored),
-        sealed_clone_bindings(&expected),
+        sealed_clone_bindings(&restored, &operation),
+        sealed_clone_bindings(&expected, &operation),
         "decode must restore every file's clone bodies"
     );
     let restored_seal = PartitionedSealV1::of(&restored);
@@ -3622,39 +3928,42 @@ fn partitioned_codec_has_stable_bytes_and_round_trips() {
     // and evidence segments it consumes; graph pages stay lazy and authenticate
     // when the graph store reads them.
     let read = |request: SealedGenerationSegmentReadV1<'_>, buffer: &mut Vec<u8>| {
-        let (digest, offset, length) = match request {
-            SealedGenerationSegmentReadV1::Whole { digest, size_bytes } => (digest, 0, size_bytes),
-            SealedGenerationSegmentReadV1::Range {
-                digest,
-                offset,
-                length,
-                ..
-            } => (digest, offset, length),
-        };
-        let bytes = segments.get(digest.as_str()).ok_or_else(|| {
-            CodeIndexProductionErrorV1::Contract("golden segment is missing".to_owned())
-        })?;
-        let start = usize::try_from(offset).expect("segment range offset");
-        let end = start + usize::try_from(length).expect("segment range length");
-        buffer.clear();
-        buffer.extend_from_slice(&bytes[start..end]);
-        Ok(())
+        read_pack_bytes(&segments, request, buffer)
     };
     CodeIndexPublishedGenerationV1::verify_partitioned_sealed(&manifest, |_, _| false, read)
         .expect("the fixture's own segments must verify against its manifest");
-    for (corrupted, _) in PARTITIONED_FORMAT_SEGMENTS {
+    for (corrupted, size_bytes) in PARTITIONED_FORMAT_SEGMENTS {
+        let logical_digest = id::<ManifestDigest>(corrupted);
+        let physical = layout
+            .resolve(SealedGenerationSegmentReadV1::Whole {
+                digest: &logical_digest,
+                size_bytes: *size_bytes,
+            })
+            .expect("golden logical segment maps to its physical extent");
+        let (corrupted_pack, corrupted_offset) = match physical {
+            SealedGenerationSegmentReadV1::Whole { digest, .. } => (digest, 0),
+            SealedGenerationSegmentReadV1::Range { digest, offset, .. } => (digest, offset),
+        };
         let flip = |request: SealedGenerationSegmentReadV1<'_>, buffer: &mut Vec<u8>| {
-            let hit = match &request {
-                SealedGenerationSegmentReadV1::Whole { digest, .. }
-                | SealedGenerationSegmentReadV1::Range { digest, .. } => {
-                    digest.as_str() == *corrupted
+            let (digest, offset, length) = match request {
+                SealedGenerationSegmentReadV1::Whole { digest, size_bytes } => {
+                    (digest, 0, size_bytes)
                 }
+                SealedGenerationSegmentReadV1::Range {
+                    digest,
+                    offset,
+                    length,
+                    ..
+                } => (digest, offset, length),
             };
             read(request, buffer)?;
-            if hit {
-                *buffer
-                    .first_mut()
-                    .expect("an authenticated segment read is never empty") ^= 1;
+            if digest == corrupted_pack
+                && corrupted_offset >= offset
+                && corrupted_offset - offset < length
+            {
+                let index = usize::try_from(corrupted_offset - offset)
+                    .expect("corrupt byte lies inside the returned extent");
+                buffer[index] ^= 1;
             }
             Ok(())
         };
@@ -3671,6 +3980,7 @@ fn partitioned_codec_has_stable_bytes_and_round_trips() {
             &manifest,
             &SharedDecodedContentPoolV1::default(),
             flip,
+            &mut |_| Ok(()),
         );
         if graph_page_digests.contains(*corrupted) || resolution_index_digests.contains(*corrupted)
         {
@@ -3680,42 +3990,18 @@ fn partitioned_codec_has_stable_bytes_and_round_trips() {
         }
     }
 
-    let mut reencoded_segments = BTreeMap::new();
-    let mut reencoded_evidence_pack = Vec::new();
-    let reencoded_manifest = restored
-        .encode_partitioned_sealed(|publication| {
-            match publication {
-                SealedGenerationSegmentPublicationV1::File { digest, bytes }
-                | SealedGenerationSegmentPublicationV1::FileEvidence { digest, bytes }
-                | SealedGenerationSegmentPublicationV1::ResolutionIndex { digest, bytes } => {
-                    reencoded_segments.insert(digest.as_str().to_owned(), bytes.to_vec());
-                }
-                SealedGenerationSegmentPublicationV1::CodeGraphPage {
-                    page_digest, bytes, ..
-                } => {
-                    reencoded_segments.insert(page_digest.as_str().to_owned(), bytes.to_vec());
-                }
-                SealedGenerationSegmentPublicationV1::GenerationEvidencePage { bytes, .. } => {
-                    reencoded_evidence_pack.extend_from_slice(bytes);
-                }
-                SealedGenerationSegmentPublicationV1::GenerationEvidenceCommit {
-                    segment_digest,
-                    ..
-                } => {
-                    reencoded_segments.insert(
-                        segment_digest.as_str().to_owned(),
-                        std::mem::take(&mut reencoded_evidence_pack),
-                    );
-                }
-            }
-            Ok(())
-        })
-        .expect("restored partitioned generation re-encodes");
-    assert_eq!(reencoded_manifest, manifest);
-    for (digest, _) in PARTITIONED_FORMAT_SEGMENTS {
+    let reencoded = PartitionedSealV1::of(&restored);
+    assert_eq!(reencoded.manifest, manifest);
+    assert_eq!(
+        reencoded.segments, segments,
+        "round-trip physical packs changed bytes"
+    );
+    let original = PartitionedSealV1 { manifest, segments };
+    for (digest, size_bytes) in PARTITIONED_FORMAT_SEGMENTS {
+        let digest = id::<ManifestDigest>(digest);
         assert_eq!(
-            reencoded_segments.get(*digest),
-            segments.get(*digest),
+            reencoded.logical_segment_bytes(&digest, *size_bytes),
+            original.logical_segment_bytes(&digest, *size_bytes),
             "round-trip segment {digest} changed bytes"
         );
     }
@@ -3745,6 +4031,7 @@ fn partitioned_text_metadata_exposes_commitments_without_payload_reads() {
                 "payload segment requested".to_owned(),
             ))
         },
+        &mut |_| Ok(()),
     )
     .expect_err("full decode must request payload segments");
     assert_eq!(
@@ -3753,18 +4040,15 @@ fn partitioned_text_metadata_exposes_commitments_without_payload_reads() {
     );
 }
 
-/// Live encoder bytes relabelled to the previous manifest revision, resealed
+/// Live encoder bytes relabelled to a retired manifest revision, resealed
 /// so they pass outer authentication and reach the revision gate.
-fn relabel_to_previous_revision(manifest: &[u8]) -> Vec<u8> {
+fn relabel_to_revision(manifest: &[u8], revision: u32) -> Vec<u8> {
     let mut retired: serde_json::Value =
         serde_json::from_slice(manifest).expect("partitioned manifest JSON");
     retired["generation"]
         .as_object_mut()
         .expect("generation payload")
-        .insert(
-            "format_revision".to_owned(),
-            serde_json::json!(SEALED_GENERATION_FORMAT_REVISION_V1 - 1),
-        );
+        .insert("format_revision".to_owned(), serde_json::json!(revision));
     retired["state_digest"] = serde_json::json!(format!(
         "sha256:{}",
         hex::encode(Sha256::digest(
@@ -3782,58 +4066,65 @@ fn relabel_to_previous_revision(manifest: &[u8]) -> Vec<u8> {
 #[test]
 fn retired_partitioned_revision_is_refused_by_every_manifest_reader() {
     let (_, current, _) = partitioned_codec_fixture();
-    let manifest = relabel_to_previous_revision(&current);
-    let retired = SEALED_GENERATION_FORMAT_REVISION_V1 - 1;
+    for retired in [22, 23] {
+        let manifest = relabel_to_revision(&current, retired);
 
-    let segment_reads = Cell::new(0_usize);
-    let read = |_: SealedGenerationSegmentReadV1<'_>, _: &mut Vec<u8>| {
-        segment_reads.set(segment_reads.get() + 1);
-        Err(CodeIndexProductionErrorV1::Contract(
-            "a retired manifest must not request segments".to_owned(),
-        ))
-    };
+        let segment_reads = Cell::new(0_usize);
+        let read = |_: SealedGenerationSegmentReadV1<'_>, _: &mut Vec<u8>| {
+            segment_reads.set(segment_reads.get() + 1);
+            Err(CodeIndexProductionErrorV1::Contract(
+                "a retired manifest must not request segments".to_owned(),
+            ))
+        };
 
-    for refusal in [
-        CodeIndexPublishedGenerationV1::partitioned_segment_identities(&manifest).err(),
-        CodeIndexPublishedGenerationV1::partitioned_text_metadata(&manifest).err(),
-        CodeIndexPublishedGenerationV1::verify_partitioned_sealed(&manifest, |_, _| false, read)
+        for refusal in [
+            CodeIndexPublishedGenerationV1::partitioned_segment_identities(&manifest).err(),
+            CodeIndexPublishedGenerationV1::partitioned_text_metadata(&manifest).err(),
+            CodeIndexPublishedGenerationV1::verify_partitioned_sealed(
+                &manifest,
+                |_, _| false,
+                read,
+            )
             .err(),
-        CodeIndexPublishedGenerationV1::decode_partitioned_sealed(
-            &manifest,
-            &SharedDecodedContentPoolV1::default(),
-            read,
-        )
-        .err(),
-    ] {
-        let error = refusal.expect("a retired manifest revision must be refused, never migrated");
-        assert!(
-            matches!(
-                error,
-                CodeIndexProductionErrorV1::SupersededSealedGenerationRevision(revision)
-                    if revision == retired
-            ),
-            "retired carrier reached the wrong rejection: {error}"
+            CodeIndexPublishedGenerationV1::decode_partitioned_sealed(
+                &manifest,
+                &SharedDecodedContentPoolV1::default(),
+                read,
+                &mut |_| Ok(()),
+            )
+            .err(),
+        ] {
+            let error =
+                refusal.expect("a retired manifest revision must be refused, never migrated");
+            assert!(
+                matches!(
+                    error,
+                    CodeIndexProductionErrorV1::SupersededSealedGenerationRevision(revision)
+                        if revision == retired
+                ),
+                "retired carrier reached the wrong rejection: {error}"
+            );
+            assert!(
+                error.to_string().contains("will be rebuilt from source"),
+                "a retired revision must tell the operator it rebuilds: {error}"
+            );
+        }
+        assert_eq!(
+            segment_reads.get(),
+            0,
+            "a retired manifest revision must be refused before any segment read"
         );
-        assert!(
-            error.to_string().contains("will be rebuilt from source"),
-            "a retired revision must tell the operator it rebuilds: {error}"
+
+        // Retention's projection abstains instead, so the sweep that would
+        // reclaim this generation's now-unreferenced segments still runs.
+        assert_eq!(
+            CodeIndexPublishedGenerationV1::partitioned_pack_identities_from_reader(
+                manifest.as_slice(),
+            )
+            .expect("retention reader projects a retired manifest"),
+            None,
         );
     }
-    assert_eq!(
-        segment_reads.get(),
-        0,
-        "a retired manifest revision must be refused before any segment read"
-    );
-
-    // Retention's projection abstains instead, so the sweep that would
-    // reclaim this generation's now-unreferenced segments still runs.
-    assert_eq!(
-        CodeIndexPublishedGenerationV1::partitioned_segment_identities_from_reader(
-            manifest.as_slice(),
-        )
-        .expect("retention reader projects a retired manifest"),
-        None,
-    );
 }
 
 /// Segment reuse is an optimization over a readable parent, never a
@@ -3851,104 +4142,60 @@ fn a_retired_parent_manifest_yields_no_reuse_instead_of_refusing_the_child() {
         .build_and_publish(partitioned_codec_request(1, 1_100_000), &ActiveControl)
         .expect("parent generation");
     let parent = store.generation(&parent);
-    let parent_manifest = parent
-        .encode_partitioned_sealed(|_| Ok(()))
-        .expect("parent encoding");
+    let mut encoding_store = MemorySealedPublicationStoreV1::default();
+    let (parent_seal, parent) = publish_fixture_parent(&mut encoding_store, &parent, |_| {});
     let child = owner
         .build_and_publish(partitioned_codec_request(2, 1_200_000), &ActiveControl)
         .expect("child generation");
     let child = store.generation(&child);
 
-    let encode = |parent_manifest_bytes: Option<&[u8]>| {
-        let mut segments = BTreeMap::new();
-        let mut evidence_pack = Vec::new();
+    let mut encode = |parent: Option<&CodeIndexSealedGenerationV1>| {
         let mut file_segments = 0_usize;
-        let manifest = child
-            .encode_partitioned_sealed_with_parent(parent_manifest_bytes, |publication| {
-                match publication {
-                    SealedGenerationSegmentPublicationV1::File { digest, bytes } => {
-                        file_segments += 1;
-                        segments.insert(digest.as_str().to_owned(), bytes.to_vec());
-                    }
-                    SealedGenerationSegmentPublicationV1::FileEvidence { digest, bytes }
-                    | SealedGenerationSegmentPublicationV1::ResolutionIndex { digest, bytes } => {
-                        segments.insert(digest.as_str().to_owned(), bytes.to_vec());
-                    }
-                    SealedGenerationSegmentPublicationV1::CodeGraphPage {
-                        page_digest,
-                        bytes,
-                        ..
-                    } => {
-                        segments.insert(page_digest.as_str().to_owned(), bytes.to_vec());
-                    }
-                    SealedGenerationSegmentPublicationV1::GenerationEvidencePage {
-                        bytes, ..
-                    } => {
-                        evidence_pack.extend_from_slice(bytes);
-                    }
-                    SealedGenerationSegmentPublicationV1::GenerationEvidenceCommit {
-                        segment_digest,
-                        ..
-                    } => {
-                        segments.insert(
-                            segment_digest.as_str().to_owned(),
-                            std::mem::take(&mut evidence_pack),
-                        );
-                    }
-                }
-                Ok(())
-            })
-            .expect("child encoding");
-        (manifest, segments, file_segments)
+        let sealed = encode_fixture_child(&mut encoding_store, &child, parent, |publication| {
+            if matches!(
+                publication,
+                SealedGenerationSegmentPublicationV1::File { .. }
+            ) {
+                file_segments += 1;
+            }
+        });
+        (sealed, file_segments)
     };
-
-    let (reusing_manifest, _, reused_file_segments) = encode(Some(&parent_manifest));
+    let (reusing, reused_file_segments) = encode(Some(&parent));
     assert!(
         reused_file_segments < child.snapshot().files.len(),
         "the fixture child must reuse a segment from its readable parent"
     );
 
-    let retired_parent = relabel_to_previous_revision(&parent_manifest);
-    let (manifest, segments, published_file_segments) = encode(Some(&retired_parent));
+    let retired_parent = CodeIndexSealedGenerationV1::new(
+        Arc::from(relabel_to_revision(
+            &parent_seal.manifest,
+            SEALED_GENERATION_FORMAT_REVISION_V1 - 1,
+        )),
+        Arc::new(move || parent.begin_read_pass()),
+    );
+    let (sealed, published_file_segments) = encode(Some(&retired_parent));
     assert_eq!(
         published_file_segments,
         child.snapshot().files.len(),
         "a retired parent offers no reuse, so every file segment is re-encoded"
     );
     assert_eq!(
-        manifest, reusing_manifest,
+        sealed.manifest, reusing.manifest,
         "reuse decides which segment bytes are published, never the manifest"
     );
 
-    let read = |request: SealedGenerationSegmentReadV1<'_>, buffer: &mut Vec<u8>| {
-        let (digest, offset, length) = match request {
-            SealedGenerationSegmentReadV1::Whole { digest, size_bytes } => (digest, 0, size_bytes),
-            SealedGenerationSegmentReadV1::Range {
-                digest,
-                offset,
-                length,
-                ..
-            } => (digest, offset, length),
-        };
-        let bytes = segments.get(digest.as_str()).ok_or_else(|| {
-            CodeIndexProductionErrorV1::Contract("re-encoded segment is missing".to_owned())
-        })?;
-        let start = usize::try_from(offset).expect("segment range offset");
-        let end = start + usize::try_from(length).expect("segment range length");
-        buffer.clear();
-        buffer.extend_from_slice(&bytes[start..end]);
-        Ok(())
-    };
-    CodeIndexPublishedGenerationV1::verify_partitioned_sealed(&manifest, |_, _| false, read)
-        .expect("a child encoded without reuse must be self-sufficient");
+    CodeIndexPublishedGenerationV1::verify_partitioned_sealed(
+        &sealed.manifest,
+        |_, _| false,
+        |request, buffer| sealed.read_pack(request, buffer),
+    )
+    .expect("a child encoded without reuse must be self-sufficient");
     assert_eq!(
-        CodeIndexPublishedGenerationV1::decode_partitioned_sealed(
-            &manifest,
-            &SharedDecodedContentPoolV1::default(),
-            read
-        )
-        .map(|restored| PartitionedSealV1::of(&restored))
-        .expect("the child decodes from its own segments"),
+        sealed
+            .restore(&sealed.manifest)
+            .map(|restored| PartitionedSealV1::of(&restored))
+            .expect("the child decodes from its own segments"),
         PartitionedSealV1::of(&child),
         "no reuse must restore the same typed generation"
     );
@@ -3962,10 +4209,10 @@ fn a_retired_parent_manifest_yields_no_reuse_instead_of_refusing_the_child() {
 #[test]
 fn partitioned_descriptor_readers_share_validation_without_sharing_authentication() {
     let (_, manifest, _) = partitioned_codec_fixture();
-    let authenticated = CodeIndexPublishedGenerationV1::partitioned_segment_identities(&manifest)
+    let authenticated = CodeIndexPublishedGenerationV1::partitioned_pack_identities(&manifest)
         .expect("authenticate current manifest");
     assert_eq!(
-        CodeIndexPublishedGenerationV1::partitioned_segment_identities_from_reader(
+        CodeIndexPublishedGenerationV1::partitioned_pack_identities_from_reader(
             manifest.as_slice(),
         )
         .expect("read caller-authenticated descriptors"),
@@ -3983,11 +4230,11 @@ fn partitioned_descriptor_readers_share_validation_without_sharing_authenticatio
         .expect("current descriptor carries evidence pages");
     let historical_bytes = reseal_manifest(historical);
     assert!(
-        CodeIndexPublishedGenerationV1::partitioned_segment_identities(&historical_bytes).is_err(),
+        CodeIndexPublishedGenerationV1::partitioned_pack_identities(&historical_bytes).is_err(),
         "the full reader refuses an unpaged descriptor"
     );
     assert!(
-        CodeIndexPublishedGenerationV1::partitioned_segment_identities_from_reader(
+        CodeIndexPublishedGenerationV1::partitioned_pack_identities_from_reader(
             historical_bytes.as_slice(),
         )
         .is_err(),
@@ -4050,11 +4297,11 @@ fn partitioned_descriptor_readers_share_validation_without_sharing_authenticatio
         // than being masked by the full reader's outer digest check.
         let bytes = reseal_manifest(envelope);
         assert!(
-            CodeIndexPublishedGenerationV1::partitioned_segment_identities(&bytes).is_err(),
+            CodeIndexPublishedGenerationV1::partitioned_pack_identities(&bytes).is_err(),
             "full reader accepted {mutation}"
         );
         assert!(
-            CodeIndexPublishedGenerationV1::partitioned_segment_identities_from_reader(
+            CodeIndexPublishedGenerationV1::partitioned_pack_identities_from_reader(
                 bytes.as_slice()
             )
             .is_err(),
@@ -4067,26 +4314,21 @@ fn partitioned_descriptor_readers_share_validation_without_sharing_authenticatio
     let bytes = serde_json::to_vec(&unauthenticated).expect("unauthenticated envelope");
     assert!(
         matches!(
-            CodeIndexPublishedGenerationV1::partitioned_segment_identities(&bytes),
+            CodeIndexPublishedGenerationV1::partitioned_pack_identities(&bytes),
             Err(CodeIndexProductionErrorV1::Contract(message))
                 if message == "sealed generation manifest state digest does not match its payload"
         ),
         "an unauthenticated envelope must be refused as a digest mismatch"
     );
     assert_eq!(
-        CodeIndexPublishedGenerationV1::partitioned_segment_identities_from_reader(
-            bytes.as_slice()
-        )
-        .expect("retention leaves outer authentication to its caller"),
+        CodeIndexPublishedGenerationV1::partitioned_pack_identities_from_reader(bytes.as_slice())
+            .expect("retention leaves outer authentication to its caller"),
         Some(authenticated),
     );
 }
 
-/// One edited file must publish exactly one file segment, whatever the rest of
-/// the repository holds: every unchanged file keeps the parent generation's
-/// content address, so its bytes are never re-encoded, re-hashed or rewritten.
-/// Generation evidence is emitted as bounded authenticated pages in one pack
-/// beside that delta-proportional file publication.
+/// A different extractor revision invalidates every parent file segment,
+/// including source files whose bytes are unchanged.
 #[test]
 fn partitioned_encode_rewrites_file_segments_across_extractor_revisions() {
     let store = SharedPublicationStore::default();
@@ -4096,11 +4338,9 @@ fn partitioned_encode_rewrites_file_segments_across_extractor_revisions() {
         .build_and_publish(partitioned_codec_request(1, 1_100_000), &ActiveControl)
         .expect("revision parent generation");
     let parent = store.generation(&parent);
-    let parent_manifest = parent
-        .encode_partitioned_sealed(|_| Ok(()))
-        .expect("revision parent encoding");
+    let parent_seal = PartitionedSealV1::of(&parent);
     let mut parent_envelope: serde_json::Value =
-        serde_json::from_slice(&parent_manifest).expect("parent manifest JSON");
+        serde_json::from_slice(&parent_seal.manifest).expect("parent manifest JSON");
     let mut historical_manifest: CodeGenerationManifestV1 =
         serde_json::from_value(parent_envelope["generation"]["manifest"].clone())
             .expect("parent generation manifest");
@@ -4113,25 +4353,33 @@ fn partitioned_encode_rewrites_file_segments_across_extractor_revisions() {
     historical_manifest.seal.expected_digest =
         expected_seal_digest(&historical_manifest).expect("historical manifest seal");
     parent_envelope["generation"]["manifest"] =
-        serde_json::to_value(historical_manifest).expect("historical manifest JSON");
+        serde_json::to_value(&historical_manifest).expect("historical manifest JSON");
     let historical_parent = reseal_manifest(parent_envelope);
+    let historical = parent_seal
+        .restore(&historical_parent)
+        .expect("historical extractor manifest restores its authenticated parent packs");
+    assert_eq!(historical.manifest(), &historical_manifest);
+    let mut encoding_store = MemorySealedPublicationStoreV1::default();
+    let (_, historical_parent) = publish_fixture_parent(&mut encoding_store, &historical, |_| {});
 
     let child = owner
         .build_and_publish(partitioned_codec_request(2, 1_200_000), &ActiveControl)
         .expect("revision child generation");
     let child = store.generation(&child);
     let mut published_files = 0;
-    child
-        .encode_partitioned_sealed_with_parent(Some(&historical_parent), |publication| {
+    encode_fixture_child(
+        &mut encoding_store,
+        &child,
+        Some(&historical_parent),
+        |publication| {
             if matches!(
                 publication,
                 SealedGenerationSegmentPublicationV1::File { .. }
             ) {
                 published_files += 1;
             }
-            Ok(())
-        })
-        .expect("revision child encoding");
+        },
+    );
 
     assert_eq!(
         published_files,
@@ -4190,6 +4438,9 @@ fn file_segment_digests_by_path(manifest: &[u8]) -> BTreeMap<String, String> {
         .collect()
 }
 
+/// Only the edited file emits a newly encoded logical segment. Unchanged
+/// segments keep their exact bytes while the writer assembles a self-contained
+/// content pack; generation evidence is published and committed separately.
 #[test]
 fn partitioned_encode_publishes_only_the_edited_file_segment() {
     let store = SharedPublicationStore::default();
@@ -4199,9 +4450,9 @@ fn partitioned_encode_publishes_only_the_edited_file_segment() {
         .build_and_publish(partitioned_codec_request(1, 1_100_000), &ActiveControl)
         .expect("delta parent generation");
     let parent = store.generation(&parent);
-    let parent_manifest = parent
-        .encode_partitioned_sealed(|_| Ok(()))
-        .expect("delta parent encoding");
+    let mut encoding_store = MemorySealedPublicationStoreV1::default();
+    let (parent_seal, parent_sealed) = publish_fixture_parent(&mut encoding_store, &parent, |_| {});
+    let parent_manifest = parent_seal.manifest;
     let child = owner
         .build_and_publish(partitioned_codec_request(2, 1_200_000), &ActiveControl)
         .expect("delta child generation");
@@ -4210,34 +4461,33 @@ fn partitioned_encode_publishes_only_the_edited_file_segment() {
     let mut published_files = Vec::new();
     let mut published_evidence_pages = BTreeSet::new();
     let mut committed_evidence_pages = None;
-    let child_manifest = child
-        .encode_partitioned_sealed_with_parent(Some(&parent_manifest), |publication| {
-            match publication {
-                SealedGenerationSegmentPublicationV1::File { digest, bytes } => {
-                    published_files.push((digest.as_str().to_owned(), bytes.len()));
-                }
-                SealedGenerationSegmentPublicationV1::FileEvidence { .. }
-                | SealedGenerationSegmentPublicationV1::ResolutionIndex { .. }
-                | SealedGenerationSegmentPublicationV1::CodeGraphPage { .. } => {}
-                SealedGenerationSegmentPublicationV1::GenerationEvidencePage {
-                    page_ordinal,
-                    ..
-                } => {
-                    published_evidence_pages.insert(page_ordinal);
-                }
-                SealedGenerationSegmentPublicationV1::GenerationEvidenceCommit {
-                    page_count,
-                    ..
-                } => {
-                    assert!(
-                        committed_evidence_pages.replace(page_count).is_none(),
-                        "generation evidence must commit exactly once"
-                    );
-                }
+    let child_seal = encode_fixture_child(
+        &mut encoding_store,
+        &child,
+        Some(&parent_sealed),
+        |publication| match publication {
+            SealedGenerationSegmentPublicationV1::File { digest, bytes } => {
+                published_files.push((digest.as_str().to_owned(), bytes.len()));
             }
-            Ok(())
-        })
-        .expect("delta child encoding");
+            SealedGenerationSegmentPublicationV1::FileEvidence { .. }
+            | SealedGenerationSegmentPublicationV1::ResolutionIndex { .. }
+            | SealedGenerationSegmentPublicationV1::CodeGraphPage { .. } => {}
+            SealedGenerationSegmentPublicationV1::GenerationEvidencePage {
+                page_ordinal, ..
+            } => {
+                published_evidence_pages.insert(page_ordinal);
+            }
+            SealedGenerationSegmentPublicationV1::GenerationEvidenceCommit {
+                page_count, ..
+            } => {
+                assert!(
+                    committed_evidence_pages.replace(page_count).is_none(),
+                    "generation evidence must commit exactly once"
+                );
+            }
+        },
+    );
+    let child_manifest = child_seal.manifest;
 
     assert!(
         child.snapshot().files.len() > published_files.len(),
@@ -4332,14 +4582,18 @@ fn increment_wedge_request(edited_value: u64, sealed_at: i64) -> CodeIndexBuildR
 /// them, read back through the generation's sealed lexical page source.
 fn sealed_clone_bindings(
     generation: &CodeIndexPublishedGenerationV1,
+    operation: &ResidentMemoryOperationV1,
 ) -> BTreeMap<String, Vec<CloneBodyOccurrenceV1>> {
     let mut source = PartitionedSealV1::of(generation)
-        .lexical_source(64, 1 << 20)
+        .lexical_source(64, 1 << 20, operation)
         .expect("sealed generation opens as a lexical source");
+    let mut read_pack = source
+        .begin_read_pass(&ActiveControl)
+        .expect("begin clone-body read");
     let mut bindings: BTreeMap<String, Vec<CloneBodyOccurrenceV1>> = BTreeMap::new();
     loop {
         match source
-            .next_page(&ActiveControl)
+            .next_page(&ActiveControl, read_pack.as_mut())
             .expect("sealed generation pages")
         {
             VerifiedSealedLexicalPageReadV1::Page(page) => {
@@ -4367,34 +4621,51 @@ fn carried_forward_clone_bodies_admit_through_the_reused_sealed_segment() {
     let store = SharedPublicationStore::default();
     let mut owner =
         CodeIndexProductionOwnerV1::new(config(), store.clone()).expect("increment owner");
+    let parent_request = increment_wedge_request(1, 1_100_000);
+    let parent_operation = parent_request.resident_memory.begin_operation();
     let parent = owner
-        .build_and_publish(increment_wedge_request(1, 1_100_000), &ActiveControl)
+        .build_and_publish(parent_request, &ActiveControl)
         .expect("parent generation");
     let parent = store.generation(&parent);
-    let mut segments = BTreeMap::new();
+    let mut encoding_store = MemorySealedPublicationStoreV1::default();
     let mut parent_file_segments = 0;
-    let parent_manifest = parent
-        .encode_partitioned_sealed(collect_published_segments(
-            &mut segments,
-            &mut parent_file_segments,
-        ))
-        .expect("parent encoding");
+    let (parent_seal, parent_sealed) =
+        publish_fixture_parent(&mut encoding_store, &parent, |publication| {
+            if matches!(
+                publication,
+                SealedGenerationSegmentPublicationV1::File { .. }
+            ) {
+                parent_file_segments += 1;
+            }
+        });
+    let parent_manifest = parent_seal.manifest;
     assert_eq!(
         parent_file_segments,
         parent.snapshot().files.len(),
         "a parentless encoding publishes every file segment"
     );
+    let child_request = increment_wedge_request(2, 1_200_000);
+    let child_operation = child_request.resident_memory.begin_operation();
     let child = owner
-        .build_and_publish(increment_wedge_request(2, 1_200_000), &ActiveControl)
+        .build_and_publish(child_request, &ActiveControl)
         .expect("child generation");
     let child = store.generation(&child);
     let mut child_file_segments = 0;
-    let child_manifest = child
-        .encode_partitioned_sealed_with_parent(
-            Some(&parent_manifest),
-            collect_published_segments(&mut segments, &mut child_file_segments),
-        )
-        .expect("child encoding");
+    let child_seal = encode_fixture_child(
+        &mut encoding_store,
+        &child,
+        Some(&parent_sealed),
+        |publication| {
+            if matches!(
+                publication,
+                SealedGenerationSegmentPublicationV1::File { .. }
+            ) {
+                child_file_segments += 1;
+            }
+        },
+    );
+    let child_manifest = child_seal.manifest;
+    let segments = child_seal.segments;
     // Counted at the publisher, not inferred from store growth: a re-encoded
     // carried file hashes to its parent's digest (the encoder writes the
     // generation as a marker), so only the publication itself proves the
@@ -4420,7 +4691,7 @@ fn carried_forward_clone_bodies_admit_through_the_reused_sealed_segment() {
         "the edited file must replace its parent's content address"
     );
 
-    let expected = sealed_clone_bindings(&child);
+    let expected = sealed_clone_bindings(&child, &child_operation);
     let carried = expected
         .get("src/carried.rs")
         .expect("carried file is in the child generation");
@@ -4453,23 +4724,27 @@ fn carried_forward_clone_bodies_admit_through_the_reused_sealed_segment() {
     let mut source = VerifiedSealedLexicalPageSourceV1::open_partitioned_sealed(
         &child_manifest,
         state_digest,
-        move |digest, _, buffer, _control| {
-            let bytes = segments.get(digest.as_str()).ok_or_else(|| {
-                CodeIndexProductionErrorV1::Contract("published segment is missing".to_owned())
-            })?;
-            buffer.clear();
-            buffer.extend_from_slice(bytes);
-            Ok(())
+        move |_control, _layout| {
+            let segments = Arc::clone(&segments);
+            let read_pack: Box<SealedGenerationPackReadPassV1> =
+                Box::new(move |request, buffer, _control| {
+                    read_pack_bytes(&segments, request, buffer)
+                });
+            Ok(read_pack)
         },
         64,
         1 << 20,
+        &child_operation,
     )
     .expect("child manifest opens through the daemon's text projection path");
+    let mut read_pack = source
+        .begin_read_pass(&ActiveControl)
+        .expect("begin carried clone-body read");
 
     let mut restored: BTreeMap<String, Vec<CloneBodyOccurrenceV1>> = BTreeMap::new();
     let receipt = loop {
         match source
-            .next_page(&ActiveControl)
+            .next_page(&ActiveControl, read_pack.as_mut())
             .expect("every carried and re-extracted file admits under sealed validation")
         {
             VerifiedSealedLexicalPageReadV1::Page(page) => {
@@ -4493,7 +4768,7 @@ fn carried_forward_clone_bodies_admit_through_the_reused_sealed_segment() {
     // binding is generation-independent: the parent's segment bytes restore
     // under the child's manifest to exactly the child's in-memory binding,
     // which differs from the parent's only in the generation it now serves.
-    let rebound_from_parent = sealed_clone_bindings(&parent)
+    let rebound_from_parent = sealed_clone_bindings(&parent, &parent_operation)
         .remove("src/carried.rs")
         .expect("carried file is in the parent generation")
         .into_iter()
@@ -4529,6 +4804,7 @@ def publish(value):
     request.snapshot.content_identity = content_digest(PYTHON_SOURCE.as_bytes());
     request.captured_files[0].sanitized_bytes = Arc::from(PYTHON_SOURCE.as_bytes());
 
+    let operation = request.resident_memory.begin_operation();
     let generation = applying_owner()
         .build_and_publish(request, &ActiveControl)
         .expect("one empty Python suite must not refuse the generation");
@@ -4547,7 +4823,7 @@ def publish(value):
         names.iter().any(|name| name.ends_with("::publish")),
         "the neighboring function remains a symbol: {names:?}"
     );
-    let bindings = sealed_clone_bindings(&generation);
+    let bindings = sealed_clone_bindings(&generation, &operation);
     assert!(
         bindings
             .values()

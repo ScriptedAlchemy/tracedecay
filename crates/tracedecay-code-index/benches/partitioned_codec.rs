@@ -8,7 +8,8 @@ use std::{
     time::Instant,
 };
 use tracedecay_runtime_core::resident_memory::{
-    ProcessResidentMemoryV1, detected_process_resident_memory_limit_v1,
+    ProcessResidentMemoryV1, ProcessSharedMemoryReservationV1, ResidentMemoryComponentIdV1,
+    ResidentMemoryOperationV1, detected_process_resident_memory_limit_v1,
 };
 
 use ignore::WalkBuilder;
@@ -17,10 +18,11 @@ use sha2::{Digest, Sha256};
 use tracedecay_code_index::{
     chunks::content_digest,
     production::{
-        CodeIndexBuildRequestV1, CodeIndexCapturedFileV1, CodeIndexExecutionControlV1,
-        CodeIndexProductionConfigV1, CodeIndexProductionErrorV1, CodeIndexProductionOwnerV1,
+        CodeIndexAtomicPublicationPort, CodeIndexBuildRequestV1, CodeIndexCapturedFileV1,
+        CodeIndexExecutionControlV1, CodeIndexPreparationPort, CodeIndexProductionConfigV1,
+        CodeIndexProductionErrorV1, CodeIndexProductionOwnerV1, CodeIndexPublicationStoreErrorV1,
         CodeIndexPublishedGenerationV1, CodeIndexRepositoryParseIdentityV1,
-        MemorySealedPublicationStoreV1, SealedGenerationSegmentPublicationV1,
+        MemorySealedPublicationStoreV1, SealedGenerationPackReadPassV1,
         SealedGenerationSegmentReadV1, SharedDecodedContentPoolV1, VerifiedSealedLexicalPageReadV1,
         VerifiedSealedLexicalPageSourceV1,
     },
@@ -73,6 +75,7 @@ impl CodeIndexExecutionControlV1 for ActiveControl {
 struct EncodedFixture {
     manifest: Vec<u8>,
     segments: Arc<BTreeMap<String, Vec<u8>>>,
+    operation: ResidentMemoryOperationV1,
 }
 
 #[derive(Serialize)]
@@ -302,13 +305,45 @@ fn build_generation(
         production_config()?,
         MemorySealedPublicationStoreV1::default(),
     )?;
+    let operation = request.resident_memory.begin_operation();
     let published = owner.build_and_publish(request, &ActiveControl)?;
-    let reader = published.sealed_generation().segment_reader();
+    let reader = published.sealed_generation().begin_read_pass()?;
+    let mut manifest_reservation: Option<ProcessSharedMemoryReservationV1> = None;
+    let mut admit_manifest = |bytes: usize| {
+        let bytes = u64::try_from(bytes)
+            .map_err(|error| CodeIndexProductionErrorV1::Contract(error.to_string()))?;
+        let held = manifest_reservation
+            .as_ref()
+            .map_or(0, |guard| guard.reserved_bytes());
+        if let Some(additional) = std::num::NonZeroU64::new(bytes.saturating_sub(held)) {
+            let refused = |error: tracedecay_runtime_core::resident_memory::ResidentMemoryAdmissionFailureV1| {
+                CodeIndexProductionErrorV1::Publication(
+                    CodeIndexPublicationStoreErrorV1::ResidentMemoryRefused(error.to_string()),
+                )
+            };
+            match manifest_reservation.as_mut() {
+                Some(guard) => guard.try_grow(additional).map_err(refused)?,
+                None => {
+                    let component = ResidentMemoryComponentIdV1::new(
+                        "code_index.manifest_decode.v1",
+                    )
+                    .map_err(|error| CodeIndexProductionErrorV1::Contract(error.to_string()))?;
+                    manifest_reservation = Some(
+                        operation
+                            .reserve_process_shared(component, additional)
+                            .map_err(refused)?,
+                    );
+                }
+            }
+        }
+        Ok(())
+    };
     Ok(Arc::new(
         CodeIndexPublishedGenerationV1::decode_partitioned_sealed(
             published.manifest_bytes(),
             &SharedDecodedContentPoolV1::default(),
             |request, buffer| reader(request, buffer),
+            &mut admit_manifest,
         )?,
     ))
 }
@@ -329,69 +364,70 @@ fn production_config() -> Result<CodeIndexProductionConfigV1, Box<dyn Error>> {
 fn encode_once(
     generation: &CodeIndexPublishedGenerationV1,
 ) -> Result<EncodedFixture, CodeIndexProductionErrorV1> {
+    let resident_memory = Arc::new(ProcessResidentMemoryV1::new(
+        detected_process_resident_memory_limit_v1(),
+    ));
+    let operation = resident_memory.begin_operation();
+    let mut store = MemorySealedPublicationStoreV1::default();
+    let mut preparation = store
+        .prepare(&generation.sealed_scope(), None, &operation)
+        .map_err(CodeIndexProductionErrorV1::Publication)?;
+    let manifest = generation.encode_partitioned_sealed(&mut preparation)?;
+    let reader = preparation.pack_reader();
+    let identities = CodeIndexPublishedGenerationV1::partitioned_pack_identities(&manifest)?;
     let mut segments = BTreeMap::new();
-    let mut evidence_pack = Vec::new();
-    let manifest = generation.encode_partitioned_sealed(|publication| {
-        match publication {
-            SealedGenerationSegmentPublicationV1::File { digest, bytes }
-            | SealedGenerationSegmentPublicationV1::FileEvidence { digest, bytes }
-            | SealedGenerationSegmentPublicationV1::ResolutionIndex { digest, bytes } => {
-                segments.insert(digest.as_str().to_owned(), bytes.to_vec());
-            }
-            SealedGenerationSegmentPublicationV1::CodeGraphPage {
-                page_digest, bytes, ..
-            } => {
-                segments.insert(page_digest.as_str().to_owned(), bytes.to_vec());
-            }
-            SealedGenerationSegmentPublicationV1::GenerationEvidencePage { bytes, .. } => {
-                evidence_pack.extend_from_slice(bytes);
-            }
-            SealedGenerationSegmentPublicationV1::GenerationEvidenceCommit {
-                segment_digest,
-                ..
-            } => {
-                segments.insert(
-                    segment_digest.as_str().to_owned(),
-                    std::mem::take(&mut evidence_pack),
-                );
-            }
-        }
-        Ok(())
-    })?;
+    for identity in identities {
+        let mut bytes = Vec::new();
+        reader(
+            SealedGenerationSegmentReadV1::Whole {
+                digest: &identity.digest,
+                size_bytes: identity.size_bytes,
+            },
+            &mut bytes,
+        )?;
+        segments.insert(identity.digest.as_str().to_owned(), bytes);
+    }
     Ok(EncodedFixture {
         manifest,
         segments: Arc::new(segments),
+        operation,
     })
+}
+
+fn read_pack(
+    packs: &BTreeMap<String, Vec<u8>>,
+    request: SealedGenerationSegmentReadV1<'_>,
+    buffer: &mut Vec<u8>,
+) -> Result<(), CodeIndexProductionErrorV1> {
+    let (digest, offset, length) = match request {
+        SealedGenerationSegmentReadV1::Whole { digest, size_bytes } => (digest, 0, size_bytes),
+        SealedGenerationSegmentReadV1::Range {
+            digest,
+            offset,
+            length,
+            ..
+        } => (digest, offset, length),
+    };
+    let bytes = packs.get(digest.as_str()).ok_or_else(|| {
+        CodeIndexProductionErrorV1::Contract("benchmark physical pack is missing".to_owned())
+    })?;
+    let start = usize::try_from(offset)
+        .map_err(|error| CodeIndexProductionErrorV1::Contract(error.to_string()))?;
+    let end = start
+        + usize::try_from(length)
+            .map_err(|error| CodeIndexProductionErrorV1::Contract(error.to_string()))?;
+    buffer.clear();
+    buffer.extend_from_slice(&bytes[start..end]);
+    Ok(())
 }
 
 fn decode_and_open(fixture: &EncodedFixture) -> Result<(), CodeIndexProductionErrorV1> {
     let decoded = CodeIndexPublishedGenerationV1::decode_partitioned_sealed(
         &fixture.manifest,
         &SharedDecodedContentPoolV1::default(),
-        |request, buffer| {
-            let (digest, offset, length) = match request {
-                SealedGenerationSegmentReadV1::Whole { digest, size_bytes } => {
-                    (digest, 0, size_bytes)
-                }
-                SealedGenerationSegmentReadV1::Range {
-                    digest,
-                    offset,
-                    length,
-                    ..
-                } => (digest, offset, length),
-            };
-            let bytes = fixture.segments.get(digest.as_str()).ok_or_else(|| {
-                CodeIndexProductionErrorV1::Contract("benchmark segment is missing".to_owned())
-            })?;
-            let start = usize::try_from(offset)
-                .map_err(|error| CodeIndexProductionErrorV1::Contract(error.to_string()))?;
-            let end = start
-                + usize::try_from(length)
-                    .map_err(|error| CodeIndexProductionErrorV1::Contract(error.to_string()))?;
-            buffer.clear();
-            buffer.extend_from_slice(&bytes[start..end]);
-            Ok(())
-        },
+        |request, buffer| read_pack(&fixture.segments, request, buffer),
+        // Measure codec restoration independently of resident-memory admission.
+        &mut |_| Ok(()),
     )?;
     black_box(decoded);
     black_box(open_lexical(fixture)?);
@@ -408,23 +444,23 @@ fn open_lexical(
     VerifiedSealedLexicalPageSourceV1::open_partitioned_sealed(
         &fixture.manifest,
         source_digest,
-        move |digest, _, buffer, _control| {
-            let bytes = segments.get(digest.as_str()).ok_or_else(|| {
-                CodeIndexProductionErrorV1::Contract("benchmark segment is missing".to_owned())
-            })?;
-            buffer.clear();
-            buffer.extend_from_slice(bytes);
-            Ok(())
+        move |_control, _layout| {
+            let segments = Arc::clone(&segments);
+            let reader: Box<SealedGenerationPackReadPassV1> =
+                Box::new(move |request, buffer, _control| read_pack(&segments, request, buffer));
+            Ok(reader)
         },
         256,
         1024 * 1024,
+        &fixture.operation,
     )
 }
 
 fn drain_lexical(fixture: &EncodedFixture) -> Result<(), CodeIndexProductionErrorV1> {
     let mut source = open_lexical(fixture)?;
+    let mut read_pass = source.begin_read_pass(&ActiveControl)?;
     loop {
-        match source.next_page(&ActiveControl)? {
+        match source.next_page(&ActiveControl, read_pass.as_mut())? {
             VerifiedSealedLexicalPageReadV1::Page(page) => {
                 black_box(page);
             }

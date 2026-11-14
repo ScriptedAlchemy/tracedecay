@@ -54,8 +54,9 @@ use tracedecay_code_index_runtime::code_index_scheduler::{
 };
 use tracedecay_daemon_identity::profile_identity;
 use tracedecay_runtime_core::resident_memory::{
-    ProcessResidentSampleV1, RESIDENT_MEMORY_CHECKPOINT_SAMPLE_INTERVAL_V1,
-    ResidentMemoryPressureV1,
+    ProcessResidentMemoryV1, ProcessResidentSampleV1,
+    RESIDENT_MEMORY_CHECKPOINT_SAMPLE_INTERVAL_V1, ResidentMemoryPressureV1,
+    detected_process_resident_memory_limit_v1,
 };
 
 fn git(root: &Path, args: &[&str]) {
@@ -192,6 +193,7 @@ fn publication_replay(
         super::super::code_graph_manifest::spill_sealed_generation_graph_from_roots(
             &runtime.generations_root,
             &runtime.replay_root,
+            &runtime.resident_memory,
             &runtime.sealed_state_digest,
             &runtime.generation_id,
             projection.clone(),
@@ -436,6 +438,10 @@ async fn unreadable_pending_replay_is_discarded_before_fresh_publication() {
             latest.generation().manifest().generation_id.clone(),
             project_database,
             CodeGraphReplayBindingV1 {
+                resident_memory: scheduler
+                    .code_graph_replay_binding(&latest.generation().manifest().generation_id)
+                    .expect("fresh replay binding")
+                    .resident_memory,
                 generations_root: scoped_store.join("code-generations-v1"),
                 sealed_state_digest: SealedGraphStateDigest::try_from(pointer.state_digest)
                     .expect("fresh sealed state digest"),
@@ -476,6 +482,7 @@ async fn unreadable_pending_replay_is_discarded_before_fresh_publication() {
             historical_repository.clone(),
             generations_root,
             runtime.replay_root.clone(),
+            Arc::clone(&runtime.resident_memory),
         )
         .expect("bind historical generation source");
 
@@ -651,6 +658,10 @@ async fn a_pending_predecessor_pooled_by_retention_yields_to_the_next_generation
         (latest, pointer.state_digest)
     };
     let (predecessor, predecessor_digest) = sealed(&mut scheduler);
+    let resident_memory = scheduler
+        .code_graph_replay_binding(&predecessor.generation().manifest().generation_id)
+        .expect("predecessor replay binding")
+        .resident_memory;
 
     let identity = profile_identity::load_or_create(&profile_root).expect("profile identity");
     let _database_scope = tracedecay_runtime_core::db::enter_daemon_database_scope(
@@ -676,6 +687,7 @@ async fn a_pending_predecessor_pooled_by_retention_yields_to_the_next_generation
             predecessor.generation().manifest().generation_id.clone(),
             Arc::clone(&project_database),
             CodeGraphReplayBindingV1 {
+                resident_memory: Arc::clone(&resident_memory),
                 generations_root: generations_root.clone(),
                 sealed_state_digest: SealedGraphStateDigest::try_from(predecessor_digest.clone())
                     .expect("predecessor sealed state digest"),
@@ -705,6 +717,7 @@ async fn a_pending_predecessor_pooled_by_retention_yields_to_the_next_generation
             successor.generation().manifest().generation_id.clone(),
             Arc::clone(&project_database),
             CodeGraphReplayBindingV1 {
+                resident_memory: Arc::clone(&resident_memory),
                 generations_root: generations_root.clone(),
                 sealed_state_digest: SealedGraphStateDigest::try_from(successor_digest)
                     .expect("successor sealed state digest"),
@@ -816,6 +829,10 @@ async fn sealed_generation_publishes_and_republishes_without_eager_replay_payloa
     let reference = latest.generation().snapshot().reference.clone();
     let worktree_id = scheduler.identity().worktree_id().clone();
     let generation_id = latest.generation().manifest().generation_id.clone();
+    let resident_memory = scheduler
+        .code_graph_replay_binding(&generation_id)
+        .expect("sealed replay binding")
+        .resident_memory;
     drop(scheduler);
     let pointer: DurablePublicationPointerV1 = serde_json::from_slice(
         &std::fs::read(scoped_store.join("active-code-generation-v1.json"))
@@ -824,6 +841,7 @@ async fn sealed_generation_publishes_and_republishes_without_eager_replay_payloa
     .expect("decode active generation pointer");
     assert_eq!(pointer.generation_id, generation_id.as_str());
     let replay_binding = || CodeGraphReplayBindingV1 {
+        resident_memory: Arc::clone(&resident_memory),
         generations_root: scoped_store.join("code-generations-v1"),
         sealed_state_digest: tracedecay_graph_db::SealedGraphStateDigest::try_from(
             pointer.state_digest.clone(),
@@ -1053,6 +1071,7 @@ async fn sealed_generation_publishes_and_republishes_without_eager_replay_payloa
         Arc::new(SharedCodeIndexBytePoolV1::default()),
     )
     .expect("reopen worktree scheduler");
+    scheduler.bind_resident_memory(Arc::clone(&resident_memory));
     scheduler.reconcile_now().expect("seal next generation");
     let next = scheduler
         .latest_complete()
@@ -1063,6 +1082,7 @@ async fn sealed_generation_publishes_and_republishes_without_eager_replay_payloa
     )
     .expect("decode next active generation pointer");
     let next_binding = CodeGraphReplayBindingV1 {
+        resident_memory: Arc::clone(&resident_memory),
         generations_root: scoped_store.join("code-generations-v1"),
         sealed_state_digest: tracedecay_graph_db::SealedGraphStateDigest::try_from(
             next_pointer.state_digest,
@@ -1215,6 +1235,10 @@ async fn sealed_generation_fixture(project: &str, source: &str) -> SealedGenerat
     let reference = latest.generation().snapshot().reference.clone();
     let worktree_id = scheduler.identity().worktree_id().clone();
     let generation_id = latest.generation().manifest().generation_id.clone();
+    let resident_memory = scheduler
+        .code_graph_replay_binding(&generation_id)
+        .expect("sealed replay binding")
+        .resident_memory;
     drop(scheduler);
     let pointer: DurablePublicationPointerV1 = serde_json::from_slice(
         &std::fs::read(scoped_store.join("active-code-generation-v1.json"))
@@ -1252,6 +1276,7 @@ async fn sealed_generation_fixture(project: &str, source: &str) -> SealedGenerat
             generation_id.clone(),
             Arc::clone(&project_database),
             CodeGraphReplayBindingV1 {
+                resident_memory: Arc::clone(&resident_memory),
                 generations_root: generations_root.clone(),
                 sealed_state_digest,
             },
@@ -1895,6 +1920,10 @@ async fn historical_predecessor_rows_rebuild_from_the_seal_at_their_journaled_re
     let latest = scheduler.latest_complete().expect("complete generation");
     let generation_id = latest.generation().manifest().generation_id.clone();
     let repository_id = latest.generation().snapshot().repository.clone();
+    let resident_memory = scheduler
+        .code_graph_replay_binding(&generation_id)
+        .expect("sealed replay binding")
+        .resident_memory;
     drop(latest);
     drop(scheduler);
     let pointer: DurablePublicationPointerV1 = serde_json::from_slice(
@@ -1921,6 +1950,7 @@ async fn historical_predecessor_rows_rebuild_from_the_seal_at_their_journaled_re
             repository_id.clone(),
             generations_root.clone(),
             replay_root,
+            resident_memory,
         )
         .expect("bind code generation source");
     let namespace = GraphNamespace::new("namespace.predecessor-rows").expect("graph namespace");
@@ -2069,6 +2099,10 @@ async fn concurrent_sealed_publishers_share_one_gate_and_converge_on_one_head() 
     let reference = latest.generation().snapshot().reference.clone();
     let worktree_id = scheduler.identity().worktree_id().clone();
     let generation_id = latest.generation().manifest().generation_id.clone();
+    let resident_memory = scheduler
+        .code_graph_replay_binding(&generation_id)
+        .expect("sealed replay binding")
+        .resident_memory;
     drop(scheduler);
     let pointer: DurablePublicationPointerV1 = serde_json::from_slice(
         &std::fs::read(scoped_store.join("active-code-generation-v1.json"))
@@ -2076,6 +2110,7 @@ async fn concurrent_sealed_publishers_share_one_gate_and_converge_on_one_head() 
     )
     .expect("decode active generation pointer");
     let replay_binding = || CodeGraphReplayBindingV1 {
+        resident_memory: Arc::clone(&resident_memory),
         generations_root: scoped_store.join("code-generations-v1"),
         sealed_state_digest: tracedecay_graph_db::SealedGraphStateDigest::try_from(
             pointer.state_digest.clone(),
@@ -2272,6 +2307,10 @@ async fn sealed_publication_refuses_over_the_resident_memory_watermark() {
     let reference = latest.generation().snapshot().reference.clone();
     let worktree_id = scheduler.identity().worktree_id().clone();
     let generation_id = latest.generation().manifest().generation_id.clone();
+    let resident_memory = scheduler
+        .code_graph_replay_binding(&generation_id)
+        .expect("sealed replay binding")
+        .resident_memory;
     drop(scheduler);
     let pointer: DurablePublicationPointerV1 = serde_json::from_slice(
         &std::fs::read(scoped_store.join("active-code-generation-v1.json"))
@@ -2279,6 +2318,7 @@ async fn sealed_publication_refuses_over_the_resident_memory_watermark() {
     )
     .expect("decode active generation pointer");
     let replay_binding = CodeGraphReplayBindingV1 {
+        resident_memory: Arc::clone(&resident_memory),
         generations_root: scoped_store.join("code-generations-v1"),
         sealed_state_digest: tracedecay_graph_db::SealedGraphStateDigest::try_from(
             pointer.state_digest.clone(),
@@ -2666,6 +2706,10 @@ async fn worktree_scopes_share_one_project_publication_build_permit() {
     let repository_id = latest.generation().snapshot().repository.clone();
     let reference = latest.generation().snapshot().reference.clone();
     let generation_id = latest.generation().manifest().generation_id.clone();
+    let resident_memory = scheduler
+        .code_graph_replay_binding(&generation_id)
+        .expect("sealed replay binding")
+        .resident_memory;
     drop(scheduler);
     let pointer: DurablePublicationPointerV1 = serde_json::from_slice(
         &std::fs::read(scoped_store.join("active-code-generation-v1.json"))
@@ -2673,6 +2717,7 @@ async fn worktree_scopes_share_one_project_publication_build_permit() {
     )
     .expect("decode active generation pointer");
     let replay_binding = || CodeGraphReplayBindingV1 {
+        resident_memory: Arc::clone(&resident_memory),
         generations_root: scoped_store.join("code-generations-v1"),
         sealed_state_digest: tracedecay_graph_db::SealedGraphStateDigest::try_from(
             pointer.state_digest.clone(),
@@ -2889,6 +2934,14 @@ async fn concurrent_worktree_scopes_publish_with_one_corpus_build_and_bounded_rs
     let scopes_root = root.join("scopes");
     std::fs::create_dir_all(&scopes_root).expect("publication scopes directory");
     let store_root = root.join("code-index-store");
+    let limit = detected_process_resident_memory_limit_v1();
+    let resident_memory = Arc::new(ProcessResidentMemoryV1::with_pressure(
+        limit,
+        Arc::new(ResidentMemoryPressureV1::with_sampler(
+            limit,
+            Arc::new(|| None),
+        )),
+    ));
     let mut measurement_scopes = Vec::with_capacity(scope_count);
     for scope_index in 0..scope_count {
         let scope_root = scopes_root.join(format!("scope-{scope_index}"));
@@ -2932,6 +2985,7 @@ async fn concurrent_worktree_scopes_publish_with_one_corpus_build_and_bounded_rs
             Arc::new(SharedCodeIndexBytePoolV1::default()),
         )
         .expect("open publication scope scheduler");
+        scheduler.bind_resident_memory(Arc::clone(&resident_memory));
         scheduler
             .reconcile_now()
             .expect("seal publication scope generation");
@@ -3054,6 +3108,7 @@ async fn concurrent_worktree_scopes_publish_with_one_corpus_build_and_bounded_rs
                     scope.generation_id.clone(),
                     Arc::clone(&project_database),
                     CodeGraphReplayBindingV1 {
+                        resident_memory: Arc::clone(&resident_memory),
                         generations_root: publication_generations_root.clone(),
                         sealed_state_digest: scope.sealed_state_digest.clone(),
                     },
@@ -3245,6 +3300,10 @@ fn off_thread_staging_release_retains_its_permit_and_leases_until_terminal_drain
         let reference = latest.generation().snapshot().reference.clone();
         let worktree_id = scheduler.identity().worktree_id().clone();
         let generation_id = latest.generation().manifest().generation_id.clone();
+        let resident_memory = scheduler
+            .code_graph_replay_binding(&generation_id)
+            .expect("sealed replay binding")
+            .resident_memory;
         drop(scheduler);
         let pointer: DurablePublicationPointerV1 = serde_json::from_slice(
             &std::fs::read(scoped_store.join("active-code-generation-v1.json"))
@@ -3252,6 +3311,7 @@ fn off_thread_staging_release_retains_its_permit_and_leases_until_terminal_drain
         )
         .expect("decode active generation pointer");
         let replay_binding = CodeGraphReplayBindingV1 {
+            resident_memory: Arc::clone(&resident_memory),
             generations_root: scoped_store.join("code-generations-v1"),
             sealed_state_digest: tracedecay_graph_db::SealedGraphStateDigest::try_from(
                 pointer.state_digest.clone(),

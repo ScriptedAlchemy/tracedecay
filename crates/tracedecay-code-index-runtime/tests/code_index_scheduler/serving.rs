@@ -1703,14 +1703,21 @@ fn published_text_artifact_with_stale_search_revision_is_rebuilt() {
         let staging = root.join(".previous-search.staging");
         let mut builder = CodeLexicalArtifactBuilderV1::create(&staging, metadata.clone())
             .expect("previous-revision artifact builder");
+        let mut read_pass = source
+            .begin_read_pass(&control)
+            .expect("verified source read pass");
         let source_receipt = loop {
-            match source.next_page(&control).expect("verified page") {
+            match source
+                .next_page(&control, read_pass.as_mut())
+                .expect("verified page")
+            {
                 VerifiedSealedLexicalPageReadV1::Page(page) => {
                     builder.append_page(&page, &control).expect("append page");
                 }
                 VerifiedSealedLexicalPageReadV1::Complete(receipt) => break receipt,
             }
         };
+        drop(read_pass);
         let verified = loop {
             match builder
                 .advance_finalization(&source_receipt, 4_096, &control)
@@ -4697,7 +4704,17 @@ async fn search_refusal_with_nothing_servable_never_joins_the_decode() {
 async fn root_graph_ready_does_not_depend_on_the_publication_decode_cache() {
     let fixture = GitFixture::new(&[("src/main.rs", "fn main() {}\n")]);
     let store = TempDir::new().expect("store root");
-    let (registry, scope) = mounted_core_query_worktree(&fixture, &store).await;
+    let (registry, scope) = mounted_core_query_worktree_with_one_permit(&fixture, &store).await;
+    registry.request_complete_generation(fixture.path()).await;
+    // Graph preparation can outlive its reconcile-pass guard. Drain the
+    // worker through its parked phase before fencing new background passes,
+    // so every decode waiter below belongs to a readiness call.
+    settled_owners_with_idle_admission(&registry, &[fixture.path()]).await;
+    let admission = registry
+        .background_reconcile_admission()
+        .acquire_owned()
+        .await
+        .expect("hold the settled background owner at its dequeue point");
     let serving = registry
         .latest_complete_serving_for_scope(&scope)
         .await
@@ -4721,20 +4738,8 @@ async fn root_graph_ready_does_not_depend_on_the_publication_decode_cache() {
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .hold_active_decode();
 
-    // `waiter_count` counts every task parked on this store's active decode,
-    // not this call's. The owner's settle pass decodes the active generation
-    // inside graph prepare and drops its reconcile-pass guard before it gets
-    // there, so no admission or quiescence helper can fence it out of the
-    // hold, and against a bare `== 0` its park reads as a readiness park.
-    //
-    // Park the owner first and take its count as the floor instead. A park
-    // cannot end while the hold is up and the owner is blocked in the step it
-    // parked in, so every later rise is a readiness call joining the flight.
-    registry.request_complete_generation(fixture.path()).await;
-    // Park may already have finished the mount-era settle pass. The hold
-    // still proves readiness does not join a later decode: a rise from this
-    // floor is a readiness call entering the flight.
     let parked_owner = held_decode.waiter_count();
+    assert_eq!(parked_owner, 0, "the settled owner has no decode waiter");
 
     let ready = tokio::time::timeout(
         Duration::from_secs(30),
@@ -4773,6 +4778,7 @@ async fn root_graph_ready_does_not_depend_on_the_publication_decode_cache() {
     );
 
     drop(held_decode);
+    drop(admission);
     registry.shutdown().await;
 }
 

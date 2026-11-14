@@ -38,7 +38,7 @@ function replace() { captured = new Worker(); }
 export function reassigned() { captured.execute(); }
 "#;
     let store = MemorySealedPublicationStoreV1::default();
-    publish(
+    let (_, operation) = publish(
         &mut owner(&store),
         &[
             ("main.ts", "typescript", CALLER),
@@ -51,7 +51,7 @@ export function reassigned() { captured.execute(); }
         1_100_000,
     );
     let restored = store
-        .decode_active(&scope())
+        .decode_active(&scope(), &operation)
         .expect("sealed receiver context decodes")
         .expect("published generation");
     for (caller_name, reference, expected) in [
@@ -196,8 +196,11 @@ fn typescript_factory_return_edits_rebind_unchanged_receivers_after_restore() {
         }
     }
     let store = MemorySealedPublicationStoreV1::default();
-    publish(&mut owner(&store), &tree(FACTORY), 1_100_000);
-    let restored = store.decode_active(&scope()).unwrap().unwrap();
+    let (_, initial_operation) = publish(&mut owner(&store), &tree(FACTORY), 1_100_000);
+    let restored = store
+        .decode_active(&scope(), &initial_operation)
+        .unwrap()
+        .unwrap();
     assert_receiver(&restored, Some("workers.ts::Worker::execute"));
     let caller_file = restored
         .files
@@ -212,18 +215,20 @@ fn typescript_factory_return_edits_rebind_unchanged_receivers_after_restore() {
     let changed = FACTORY
         .replace("Promise<Created>", "Promise<Changed>")
         .replace("new Created()", "new Changed()");
+    let changed_request = request_capturing(&tree(&changed), &["factory.ts"], 1_200_000);
+    let changed_operation = changed_request.resident_memory.begin_operation();
     let after = owner(&store)
-        .build_and_publish(
-            request_capturing(&tree(&changed), &["factory.ts"], 1_200_000),
-            &UninterruptibleCodeIndexControlV1,
-        )
+        .build_and_publish(changed_request, &UninterruptibleCodeIndexControlV1)
         .unwrap();
     assert_eq!(
         after.cold_reason(),
         None,
         "only the factory file is re-extracted"
     );
-    let restored = store.decode_active(&scope()).unwrap().unwrap();
+    let restored = store
+        .decode_active(&scope(), &changed_operation)
+        .unwrap()
+        .unwrap();
     assert_receiver(&restored, Some("workers.ts::Alternate::execute"));
     assert_eq!(
         restored
@@ -236,19 +241,27 @@ fn typescript_factory_return_edits_rebind_unchanged_receivers_after_restore() {
         caller_file
     );
     let cold_store = MemorySealedPublicationStoreV1::default();
-    publish(&mut owner(&cold_store), &tree(&changed), 1_200_000);
-    assert_eq!(answers(&store), answers(&cold_store));
+    let (_, cold_operation) = publish(&mut owner(&cold_store), &tree(&changed), 1_200_000);
+    assert_eq!(
+        answers(&store, &changed_operation),
+        answers(&cold_store, &cold_operation)
+    );
     drop(restored);
 
     let unsupported = changed.replace("Promise<Changed>", "Promise<Created | Changed>");
+    let unsupported_request = request_capturing(&tree(&unsupported), &["factory.ts"], 1_300_000);
+    let unsupported_operation = unsupported_request.resident_memory.begin_operation();
     let after = owner(&store)
-        .build_and_publish(
-            request_capturing(&tree(&unsupported), &["factory.ts"], 1_300_000),
-            &UninterruptibleCodeIndexControlV1,
-        )
+        .build_and_publish(unsupported_request, &UninterruptibleCodeIndexControlV1)
         .unwrap();
     assert_eq!(after.cold_reason(), None);
-    assert_receiver(&store.decode_active(&scope()).unwrap().unwrap(), None);
+    assert_receiver(
+        &store
+            .decode_active(&scope(), &unsupported_operation)
+            .unwrap()
+            .unwrap(),
+        None,
+    );
 }
 
 fn occurrence(path: &str, source: &[u8]) -> FileOccurrenceId {
@@ -349,13 +362,13 @@ fn publish(
     owner: &mut Owner,
     files: &[(&str, &str, &str)],
     sealed_at: i64,
-) -> CodeIndexPublishedBuildV1 {
-    owner
-        .build_and_publish(
-            request(files, sealed_at),
-            &UninterruptibleCodeIndexControlV1,
-        )
-        .expect("published generation")
+) -> (CodeIndexPublishedBuildV1, ResidentMemoryOperationV1) {
+    let request = request(files, sealed_at);
+    let operation = request.resident_memory.begin_operation();
+    let published = owner
+        .build_and_publish(request, &UninterruptibleCodeIndexControlV1)
+        .expect("published generation");
+    (published, operation)
 }
 
 pub(super) fn scope() -> CodeIndexGenerationScopeV1 {
@@ -375,9 +388,12 @@ struct RestoredAnswersV1 {
     coverage: CoverageSummaryV1,
 }
 
-fn answers(store: &MemorySealedPublicationStoreV1) -> RestoredAnswersV1 {
+fn answers(
+    store: &MemorySealedPublicationStoreV1,
+    operation: &ResidentMemoryOperationV1,
+) -> RestoredAnswersV1 {
     let generation = store
-        .decode_active(&scope())
+        .decode_active(&scope(), operation)
         .expect("active generation decodes")
         .expect("an active generation");
     RestoredAnswersV1 {
@@ -426,12 +442,12 @@ fn assert_sparse_matches_cold(
 ) -> CodeIndexPublishedBuildV1 {
     let store = MemorySealedPublicationStoreV1::default();
     let mut incremental = owner(&store);
-    let parent = publish(&mut incremental, before, 1_100_000);
+    let (parent, _) = publish(&mut incremental, before, 1_100_000);
     assert_eq!(
         parent.cold_reason(),
         Some(CodeIndexColdBuildReasonV1::NoParent)
     );
-    let sparse = publish(&mut incremental, after, 1_200_000);
+    let (sparse, sparse_operation) = publish(&mut incremental, after, 1_200_000);
     assert_eq!(
         sparse.cold_reason(),
         None,
@@ -450,7 +466,7 @@ fn assert_sparse_matches_cold(
     );
 
     let cold_store = MemorySealedPublicationStoreV1::default();
-    let cold = publish(&mut owner(&cold_store), after, 1_200_000);
+    let (cold, cold_operation) = publish(&mut owner(&cold_store), after, 1_200_000);
     assert_eq!(
         cold.cold_reason(),
         Some(CodeIndexColdBuildReasonV1::NoParent)
@@ -469,7 +485,10 @@ fn assert_sparse_matches_cold(
         resolution_index(&store, &sparse),
         resolution_index(&cold_store, &cold)
     );
-    assert_eq!(answers(&store), answers(&cold_store));
+    assert_eq!(
+        answers(&store, &sparse_operation),
+        answers(&cold_store, &cold_operation)
+    );
     sparse
 }
 
@@ -506,7 +525,7 @@ fn a_comment_on_a_called_module_reseals_over_the_parent() {
 fn sparse_file_panic_identifies_the_changed_source_and_preserves_the_parent() {
     let store = MemorySealedPublicationStoreV1::default();
     let mut incremental = owner(&store);
-    let parent = publish(&mut incremental, &rust_tree(UTIL, MAIN), 1_100_000);
+    let (parent, _) = publish(&mut incremental, &rust_tree(UTIL, MAIN), 1_100_000);
     let edited = format!("{UTIL}// È\n");
     let request = request_capturing(&rust_tree(&edited, MAIN), &["src/util.rs"], 1_200_000);
     let expected_digest = content_digest(edited.as_bytes());
@@ -582,7 +601,7 @@ fn a_comment_beside_same_named_symbols_decodes_only_what_it_reaches() {
     }
     let store = MemorySealedPublicationStoreV1::default();
     let mut incremental = owner(&store);
-    let parent = publish(
+    let (parent, _) = publish(
         &mut incremental,
         &caller_tree(&util, other, &callers),
         1_100_000,
@@ -640,7 +659,7 @@ fn a_comment_beside_same_named_symbols_decodes_only_what_it_reaches() {
     let dependent_evidence = evidence_of("src/consumer.rs");
     let dependent_reads_before = store.segment_reads(&dependent_evidence);
 
-    let sparse = publish(
+    let (sparse, _) = publish(
         &mut incremental,
         &caller_tree(&edited, other, &callers),
         1_200_000,
@@ -693,23 +712,29 @@ fn successive_edits_reseal_explicit_parent_lineage_as_identity() {
     publish(&mut incremental, &rust_tree(UTIL, MAIN), 1_100_000);
     let first = format!("{UTIL}// first\n");
     assert_eq!(
-        publish(&mut incremental, &rust_tree(&first, MAIN), 1_200_000).cold_reason(),
+        publish(&mut incremental, &rust_tree(&first, MAIN), 1_200_000)
+            .0
+            .cold_reason(),
         None
     );
     let main = format!("{MAIN}// second\n");
-    let second = publish(&mut incremental, &rust_tree(&first, &main), 1_300_000);
+    let (second, second_operation) =
+        publish(&mut incremental, &rust_tree(&first, &main), 1_300_000);
     assert_eq!(second.cold_reason(), None);
 
     let cold_store = MemorySealedPublicationStoreV1::default();
-    let cold = publish(
+    let (cold, cold_operation) = publish(
         &mut owner(&cold_store),
         &rust_tree(&first, &main),
         1_300_000,
     );
     assert_eq!(second.lane_digest(), cold.lane_digest());
-    assert_eq!(answers(&store), answers(&cold_store));
+    assert_eq!(
+        answers(&store, &second_operation),
+        answers(&cold_store, &cold_operation)
+    );
     let restored = store
-        .decode_active(&scope())
+        .decode_active(&scope(), &second_operation)
         .expect("decodes")
         .expect("active");
     let util_symbols = restored
@@ -815,21 +840,21 @@ fn import_and_file_set_changes_build_cold() {
     let mut incremental = owner(&store);
     publish(&mut incremental, &rust_tree(UTIL, MAIN), 1_100_000);
     let main = format!("use crate::util::helper;\n{MAIN}");
-    let imported = publish(&mut incremental, &rust_tree(UTIL, &main), 1_200_000);
+    let (imported, _) = publish(&mut incremental, &rust_tree(UTIL, &main), 1_200_000);
     assert_eq!(
         imported.cold_reason(),
         Some(CodeIndexColdBuildReasonV1::MovesNameLookups)
     );
     let mut grown = rust_tree(UTIL, &main);
     grown.push(("src/f.rs", RUST, "pub fn f() {}\n"));
-    let added = publish(&mut incremental, &grown, 1_300_000);
+    let (added, added_operation) = publish(&mut incremental, &grown, 1_300_000);
     assert_eq!(
         added.cold_reason(),
         Some(CodeIndexColdBuildReasonV1::FilesAddedOrRemoved)
     );
     assert_eq!(
         store
-            .decode_active(&scope())
+            .decode_active(&scope(), &added_operation)
             .expect("decode cold publication")
             .expect("cold publication active")
             .statistics,
@@ -869,14 +894,14 @@ fn a_go_method_set_edit_builds_cold_and_seals_satisfaction() {
     let store = MemorySealedPublicationStoreV1::default();
     let mut incremental = owner(&store);
     publish(&mut incremental, &go_tree(GO_WRONG, GO_UTIL), 1_100_000);
-    let edited = publish(&mut incremental, &go_tree(wrong, GO_UTIL), 1_200_000);
+    let (edited, edited_operation) = publish(&mut incremental, &go_tree(wrong, GO_UTIL), 1_200_000);
     assert_eq!(
         edited.cold_reason(),
         Some(CodeIndexColdBuildReasonV1::MovesGoMethodSets)
     );
     let cold_store = MemorySealedPublicationStoreV1::default();
-    publish(&mut owner(&cold_store), &go_tree(wrong, GO_UTIL), 1_200_000);
-    let sealed = answers(&store);
+    let (_, cold_operation) = publish(&mut owner(&cold_store), &go_tree(wrong, GO_UTIL), 1_200_000);
+    let sealed = answers(&store, &edited_operation);
     assert!(
         sealed
             .edges
@@ -884,7 +909,7 @@ fn a_go_method_set_edit_builds_cold_and_seals_satisfaction() {
             .any(|edge| edge.kind == tracedecay_domain::RelationEdgeKindV1::Implements),
         "Wrong implements Adder"
     );
-    assert_eq!(sealed, answers(&cold_store));
+    assert_eq!(sealed, answers(&cold_store, &cold_operation));
 
     let util = format!("{GO_UTIL}// edit\n");
     assert_sparse_matches_cold(&go_tree(GO_WRONG, GO_UTIL), &go_tree(GO_WRONG, &util));
@@ -897,7 +922,7 @@ fn a_large_change_builds_cold() {
     publish(&mut incremental, &rust_tree(UTIL, MAIN), 1_100_000);
     let util = format!("{UTIL}// edit\n");
     let main = format!("{MAIN}// edit\n");
-    let changed = publish(&mut incremental, &rust_tree(&util, &main), 1_200_000);
+    let (changed, _) = publish(&mut incremental, &rust_tree(&util, &main), 1_200_000);
     assert_eq!(
         changed.cold_reason(),
         Some(CodeIndexColdBuildReasonV1::ChangedShare)
@@ -988,9 +1013,9 @@ fn sparse_local_shadowing_preserves_gaps_and_the_generic_ambiguity_census() {
     let mut incremental = owner(&store);
     publish(&mut incremental, &tree(clear), 1_100_000);
     for (app, expected_gaps, sealed_at) in [(shadowed, 1, 1_200_000), (clear, 0, 1_300_000)] {
-        let successor = publish(&mut incremental, &tree(app), sealed_at);
+        let (successor, operation) = publish(&mut incremental, &tree(app), sealed_at);
         assert_eq!(successor.cold_reason(), None);
-        let restored = answers(&store);
+        let restored = answers(&store, &operation);
         assert_eq!(restored.statistics.ambiguous_name_drops, 0);
         assert_eq!(
             restored
@@ -1011,9 +1036,13 @@ fn sparse_local_shadowing_preserves_gaps_and_the_generic_ambiguity_census() {
     }
 }
 
-fn symbol_query(store: &MemorySealedPublicationStoreV1, name: &str) -> Vec<String> {
+fn symbol_query(
+    store: &MemorySealedPublicationStoreV1,
+    name: &str,
+    operation: &ResidentMemoryOperationV1,
+) -> Vec<String> {
     let generation = store
-        .decode_active(&scope())
+        .decode_active(&scope(), operation)
         .expect("active generation decodes")
         .expect("an active generation");
     let mut hits = generation
@@ -1035,11 +1064,10 @@ fn a_go_method_set_edit_seals_cold_from_changed_bytes_only() {
     let store = MemorySealedPublicationStoreV1::default();
     let mut incremental = owner(&store);
     publish(&mut incremental, &go_tree(GO_WRONG, GO_UTIL), 1_100_000);
+    let request = request_capturing(&edited, &["calc/wrong.go"], 1_200_000);
+    let operation = request.resident_memory.begin_operation();
     let successor = incremental
-        .build_and_publish(
-            request_capturing(&edited, &["calc/wrong.go"], 1_200_000),
-            &UninterruptibleCodeIndexControlV1,
-        )
+        .build_and_publish(request, &UninterruptibleCodeIndexControlV1)
         .expect("cold successor from the edited file's bytes");
     assert_eq!(
         successor.cold_reason(),
@@ -1047,16 +1075,19 @@ fn a_go_method_set_edit_seals_cold_from_changed_bytes_only() {
     );
 
     let cold_store = MemorySealedPublicationStoreV1::default();
-    publish(&mut owner(&cold_store), &edited, 1_200_000);
-    assert_eq!(answers(&store), answers(&cold_store));
+    let (_, cold_operation) = publish(&mut owner(&cold_store), &edited, 1_200_000);
+    assert_eq!(
+        answers(&store, &operation),
+        answers(&cold_store, &cold_operation)
+    );
     for name in ["Add", "Util", "Adder"] {
         assert_eq!(
-            symbol_query(&store, name),
-            symbol_query(&cold_store, name),
+            symbol_query(&store, name, &operation),
+            symbol_query(&cold_store, name, &cold_operation),
             "spot-checked query {name}"
         );
         assert!(
-            !symbol_query(&store, name).is_empty(),
+            !symbol_query(&store, name, &operation).is_empty(),
             "spot-checked query {name} must hit"
         );
     }
@@ -1122,24 +1153,31 @@ fn sparse_lookup_window_shares_canonical_page_and_releases_it() {
         .build_and_publish(request, &UninterruptibleCodeIndexControlV1)
         .expect("publish canonical lookup fixture");
     let sealed = published.sealed_generation();
-    let canonical = sealed.segment_reader();
+    let canonical = sealed.clone();
     let reads = Arc::new(AtomicUsize::new(0));
     let fail = Arc::new(AtomicBool::new(false));
     let observed = Arc::clone(&reads);
     let failure = Arc::clone(&fail);
-    let reader: Arc<SealedSegmentReaderV1> = Arc::new(move |segment, bytes| {
-        observed.fetch_add(1, Ordering::Relaxed);
-        if failure.load(Ordering::Relaxed) {
-            return Err(CodeIndexProductionErrorV1::Contract(
-                "reader failure".to_owned(),
-            ));
-        }
-        canonical(segment, bytes)
+    let reader: Arc<SealedGenerationPackReadFactoryV1> = Arc::new(move || {
+        let canonical = canonical.begin_read_pass()?;
+        let observed = Arc::clone(&observed);
+        let failure = Arc::clone(&failure);
+        let read: Arc<SealedSegmentReaderV1> = Arc::new(move |segment, bytes| {
+            observed.fetch_add(1, Ordering::Relaxed);
+            if failure.load(Ordering::Relaxed) {
+                return Err(CodeIndexProductionErrorV1::Contract(
+                    "reader failure".to_owned(),
+                ));
+            }
+            canonical(segment, bytes)
+        });
+        Ok(read)
     });
-    let parent = SealedParentGenerationV1::open(CodeIndexSealedGenerationV1::new(
-        Arc::from(sealed.manifest_bytes()),
-        reader,
-    ))
+    let operation = memory.begin_operation();
+    let parent = SealedParentGenerationV1::open(
+        CodeIndexSealedGenerationV1::new(Arc::from(sealed.manifest_bytes()), reader),
+        &operation,
+    )
     .expect("open canonical parent");
     let mut present = parent
         .snapshot()
@@ -1156,7 +1194,6 @@ fn sparse_lookup_window_shares_canonical_page_and_releases_it() {
     let index = parent
         .resolution_index()
         .expect("canonical resolution index");
-    let operation = memory.begin_operation();
     let window = SparseDefinitionWindowV1::new(&index, &operation).expect("lookup window");
     let before =
         SparseSymbolsByNameV1::new(&index, &paths, &window, std::iter::empty(), &operation)
@@ -1193,7 +1230,7 @@ fn sparse_lookup_window_shares_canonical_page_and_releases_it() {
 fn ruby_require_memo_releases_its_charged_workspace_and_retries_errors() {
     let store = MemorySealedPublicationStoreV1::default();
     let mut owner = owner(&store);
-    publish(
+    let (_, operation) = publish(
         &mut owner,
         &[
             (
@@ -1210,7 +1247,7 @@ fn ruby_require_memo_releases_its_charged_workspace_and_retries_errors() {
         ],
         1_000_000,
     );
-    let decoded = store.decode_active(&scope()).unwrap().unwrap();
+    let decoded = store.decode_active(&scope(), &operation).unwrap().unwrap();
     let files = &decoded.files;
     let index = files
         .iter()
@@ -1280,9 +1317,14 @@ fn carried_evidence_visitors_release_each_files_scratch_before_the_next_file() {
     let published = owner
         .build_and_publish(request, &UninterruptibleCodeIndexControlV1)
         .unwrap();
-    let parent = SealedParentGenerationV1::open(published.sealed_generation().clone()).unwrap();
-    let decoded = store.decode_active(&scope()).unwrap().unwrap();
     let fixture_operation = fixture_memory.begin_operation();
+    let parent =
+        SealedParentGenerationV1::open(published.sealed_generation().clone(), &fixture_operation)
+            .unwrap();
+    let decoded = store
+        .decode_active(&scope(), &fixture_operation)
+        .unwrap()
+        .unwrap();
     let baseline = fixture_memory.snapshot().used_bytes;
     let mut one_file_peak = 0;
     for descriptor in &parent.generation().file_segments {

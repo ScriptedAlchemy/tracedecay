@@ -1,12 +1,14 @@
 use std::{
     collections::BTreeSet,
+    num::NonZeroU64,
     sync::{
         Arc,
         atomic::{AtomicUsize, Ordering},
     },
 };
 use tracedecay_runtime_core::resident_memory::{
-    ProcessResidentMemoryV1, detected_process_resident_memory_limit_v1,
+    ProcessResidentMemoryV1, ResidentMemoryComponentIdV1, ResidentMemoryOperationV1,
+    ResidentMemoryPressureV1, detected_process_resident_memory_limit_v1,
 };
 
 use tracedecay_domain::{
@@ -70,12 +72,14 @@ impl CodeIndexExecutionControlV1 for ActiveControl {
 }
 
 /// A partitioned sealed generation held in memory: the manifest, its content
-/// address, and every published file segment under its digest.
+/// address, and the real committed carrier that opens each active read pass.
 struct SealedSourceFixture {
     manifest: Vec<u8>,
-    segments: Arc<BTreeMap<ManifestDigest, Vec<u8>>>,
+    sealed: CodeIndexSealedGenerationV1,
+    _store: MemorySealedPublicationStoreV1,
     state_digest: ManifestDigest,
     generation: Arc<CodeIndexPublishedGenerationV1>,
+    operation: ResidentMemoryOperationV1,
 }
 
 impl SealedSourceFixture {
@@ -95,17 +99,19 @@ impl SealedSourceFixture {
         maximum_page_chunks: usize,
         maximum_page_bytes: usize,
     ) -> VerifiedSealedLexicalPageSourceV1 {
-        let segments = Arc::clone(&self.segments);
+        let sealed = self.sealed.clone();
         VerifiedSealedLexicalPageSourceV1::open_partitioned_sealed(
             &self.manifest,
             self.state_digest.clone(),
-            move |digest, _, buffer, _control| {
-                buffer.clear();
-                buffer.extend_from_slice(segments.get(digest).expect("sealed segment exists"));
-                Ok(())
+            move |_control, _layout| {
+                let reader = sealed.begin_read_pass()?;
+                let pass: Box<SealedGenerationPackReadPassV1> =
+                    Box::new(move |request, buffer, _control| reader(request, buffer));
+                Ok(pass)
             },
             maximum_page_chunks,
             maximum_page_bytes,
+            &self.operation,
         )
         .expect("real sealed fixture source opens")
     }
@@ -128,11 +134,117 @@ fn fixture() -> SealedSourceFixture {
 }
 
 #[test]
+fn partitioned_source_admits_its_map_before_reads_and_retains_it_while_parked() {
+    let limit = NonZeroU64::new(64 * 1024 * 1024).expect("fixture memory limit");
+    let pressure = Arc::new(ResidentMemoryPressureV1::with_sampler(
+        limit,
+        Arc::new(|| None),
+    ));
+    let memory = Arc::new(ProcessResidentMemoryV1::with_pressure(limit, pressure));
+    let SealedSourceFixture {
+        manifest,
+        sealed,
+        _store,
+        state_digest,
+        generation,
+        operation,
+    } = fixture_for_source_files_with_memory(
+        BATCH_FIXTURE_SOURCE,
+        "src/batch_fixture.rs",
+        "rust",
+        1,
+        Arc::clone(&memory),
+    );
+    assert!(Arc::ptr_eq(operation.authority(), &memory));
+    let baseline = memory.snapshot().used_bytes;
+    let standing = memory
+        .reserve_process_shared(
+            ResidentMemoryComponentIdV1::new("lexical-map.other-owner").expect("fixture component"),
+            NonZeroU64::new(limit.get() - baseline - 1).expect("remaining fixture headroom"),
+        )
+        .expect("the other owner fits beside the real publication");
+    let factory_opens = Arc::new(AtomicUsize::new(0));
+    let open_source = |operation: &ResidentMemoryOperationV1| {
+        let sealed = sealed.clone();
+        let factory_opens = Arc::clone(&factory_opens);
+        VerifiedSealedLexicalPageSourceV1::open_partitioned_sealed(
+            &manifest,
+            state_digest.clone(),
+            move |_control, _layout| {
+                factory_opens.fetch_add(1, Ordering::SeqCst);
+                let reader = sealed.begin_read_pass()?;
+                let pass: Box<SealedGenerationPackReadPassV1> =
+                    Box::new(move |request, buffer, _control| reader(request, buffer));
+                Ok(pass)
+            },
+            1,
+            1024 * 1024,
+            operation,
+        )
+    };
+    assert!(matches!(
+        open_source(&operation),
+        Err(CodeIndexProductionErrorV1::Publication(
+            CodeIndexPublicationStoreErrorV1::ResidentMemoryRefused(_)
+        ))
+    ));
+    assert_eq!(factory_opens.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        memory.snapshot().used_bytes,
+        baseline + standing.reserved_bytes()
+    );
+    drop(standing);
+    assert_eq!(memory.snapshot().used_bytes, baseline);
+
+    let mut source = open_source(&operation).expect("source opens after headroom returns");
+    assert!(source.admitted_pack_layout_bytes() > 0);
+    let parked = memory.snapshot().used_bytes;
+    assert!(parked > baseline);
+    assert_eq!(factory_opens.load(Ordering::SeqCst), 0);
+    drop(operation);
+    assert_eq!(memory.snapshot().used_bytes, parked);
+
+    let mut read_pass = source
+        .begin_read_pass(&ActiveControl)
+        .expect("parked source opens its actual payload pass");
+    let mut observed = Vec::new();
+    loop {
+        match source
+            .next_page(&ActiveControl, read_pass.as_mut())
+            .expect("source remains usable after the caller operation drops")
+        {
+            VerifiedSealedLexicalPageReadV1::Page(page) => {
+                observed.extend(page.chunks().iter().map(|chunk| chunk.chunk().id.clone()));
+            }
+            VerifiedSealedLexicalPageReadV1::Complete(receipt) => {
+                receipt
+                    .verify_completion(Some(source.cursor()))
+                    .expect("the real page journey completes");
+                break;
+            }
+        }
+    }
+    let mut expected = generation
+        .chunks()
+        .chunks()
+        .iter()
+        .map(|chunk| chunk.id.clone())
+        .collect::<Vec<_>>();
+    observed.sort();
+    expected.sort();
+    assert_eq!(observed, expected);
+    assert_eq!(factory_opens.load(Ordering::SeqCst), 1);
+    drop(read_pass);
+    drop(source);
+    assert_eq!(memory.snapshot().used_bytes, baseline);
+}
+
+#[test]
 fn partitioned_reopen_reports_encoded_byte_progress_and_bounds_prefetch() {
     let fixture =
         fixture_for_source_files(BATCH_FIXTURE_SOURCE, "src/batch_fixture.rs", "rust", 25);
     let manifest = fixture.manifest.clone();
-    let segments = Arc::clone(&fixture.segments);
+    let sealed = fixture.sealed.clone();
     let manifest_value: serde_json::Value =
         serde_json::from_slice(&manifest).expect("partitioned manifest envelope");
     let segment_sizes = manifest_value["generation"]["file_segments"]
@@ -155,22 +267,30 @@ fn partitioned_reopen_reports_encoded_byte_progress_and_bounds_prefetch() {
                 .expect("partitioned decoded segment size")
         })
         .sum::<u64>();
-    let read_segments = Arc::clone(&segments);
+    let read_sealed = sealed.clone();
     let reads = Arc::new(AtomicUsize::new(0));
     let read_count = Arc::clone(&reads);
     let mut source = VerifiedSealedLexicalPageSourceV1::open_partitioned_sealed(
         &manifest,
         fixture.state_digest.clone(),
-        move |digest, _, buffer, _control| {
-            read_count.fetch_add(1, Ordering::SeqCst);
-            buffer.clear();
-            buffer.extend_from_slice(read_segments.get(digest).expect("sealed segment exists"));
-            Ok(())
+        move |_control, _layout| {
+            let reader = read_sealed.begin_read_pass()?;
+            let read_count = Arc::clone(&read_count);
+            let pass: Box<SealedGenerationPackReadPassV1> =
+                Box::new(move |request, buffer, _control| {
+                    read_count.fetch_add(1, Ordering::SeqCst);
+                    reader(request, buffer)
+                });
+            Ok(pass)
         },
         1,
         1 << 20,
+        &fixture.operation,
     )
     .expect("partitioned source opens");
+    let mut read_pass = source
+        .begin_read_pass(&ActiveControl)
+        .expect("read pass opens");
     let total_segment_bytes = segment_sizes.iter().sum::<u64>();
     assert_eq!(source.total_lexical_units(), total_segment_bytes);
     assert!(source.total_lexical_units() > source.total_files());
@@ -185,7 +305,9 @@ fn partitioned_reopen_reports_encoded_byte_progress_and_bounds_prefetch() {
             < usize::try_from(decoded_segment_bytes).expect("segment bytes fit usize") / 8,
         "compact file identities must remain below an eighth of the decoded corpus"
     );
-    source.next_page(&ActiveControl).expect("first page admits");
+    source
+        .next_page(&ActiveControl, read_pass.as_mut())
+        .expect("first page admits");
     assert!(
         reads.load(Ordering::SeqCst)
             <= crate::parallelism::indexing_workers()
@@ -195,7 +317,10 @@ fn partitioned_reopen_reports_encoded_byte_progress_and_bounds_prefetch() {
     source.rewind().expect("rewind lazy source");
     let mut observed_encoded_byte_progress = false;
     loop {
-        match source.next_page(&ActiveControl).expect("lazy source page") {
+        match source
+            .next_page(&ActiveControl, read_pass.as_mut())
+            .expect("lazy source page")
+        {
             VerifiedSealedLexicalPageReadV1::Page(_) => {
                 let completed =
                     usize::try_from(source.completed_files()).expect("completed file count");
@@ -223,7 +348,7 @@ fn partitioned_reopen_reports_encoded_byte_progress_and_bounds_prefetch() {
     source.rewind().expect("rewind before cancellation");
     let cursor = source.cursor().clone();
     assert!(matches!(
-        source.next_page(&CancelDuringStaging::new()),
+        source.next_page(&CancelDuringStaging::new(), read_pass.as_mut()),
         Err(CodeIndexProductionErrorV1::Interrupted(
             CodeIndexInterruptionV1::Cancelled
         ))
@@ -233,22 +358,31 @@ fn partitioned_reopen_reports_encoded_byte_progress_and_bounds_prefetch() {
         source.cursor(),
         "cancelled reads preserve accepted progress"
     );
+    drop(read_pass);
     let mut corrupt = VerifiedSealedLexicalPageSourceV1::open_partitioned_sealed(
         &manifest,
         fixture.state_digest.clone(),
-        move |digest, _, buffer, _control| {
-            buffer.clear();
-            buffer.extend_from_slice(segments.get(digest).expect("sealed segment exists"));
-            buffer[0] ^= 1;
-            Ok(())
+        move |_control, _layout| {
+            let reader = sealed.begin_read_pass()?;
+            let pass: Box<SealedGenerationPackReadPassV1> =
+                Box::new(move |request, buffer, _control| {
+                    reader(request, buffer)?;
+                    buffer[0] ^= 1;
+                    Ok(())
+                });
+            Ok(pass)
         },
         1,
         1 << 20,
+        &fixture.operation,
     )
     .expect("lazy source authenticates manifest");
+    let mut corrupt_pass = corrupt
+        .begin_read_pass(&ActiveControl)
+        .expect("corrupt fixture pass opens");
     let initial = corrupt.cursor().clone();
     assert!(matches!(
-        corrupt.next_page(&ActiveControl),
+        corrupt.next_page(&ActiveControl, corrupt_pass.as_mut()),
         Err(CodeIndexProductionErrorV1::Contract(_))
     ));
     assert_eq!(
@@ -262,11 +396,14 @@ fn partitioned_reopen_reports_encoded_byte_progress_and_bounds_prefetch() {
 fn incompatible_cursor_restore_drops_the_stale_prefetch_window() {
     let fixture = fixture();
     let mut source = fixture.open();
+    let mut read_pass = source
+        .begin_read_pass(&ActiveControl)
+        .expect("read pass opens");
     let mut incompatible = source.cursor().clone();
     incompatible.next_chunk_ordinal = u64::MAX;
 
     assert!(matches!(
-        source.restore_cursor_classified(&incompatible, &ActiveControl),
+        source.restore_cursor_classified(&incompatible, &ActiveControl, read_pass.as_mut()),
         Err(VerifiedSealedLexicalCursorRestoreErrorV1::IncompatiblePosition)
     ));
     assert!(
@@ -303,10 +440,13 @@ fn fill_admitted_window_batches_worker_width_times_multiplier_files() {
         fixture_for_source_files(BATCH_FIXTURE_SOURCE, "src/window_fixture.rs", "rust", 40);
     let _width = ForcedWorkerWidth::install(4);
     let mut source = fixture.open();
+    let mut read_pass = source
+        .begin_read_pass(&ActiveControl)
+        .expect("read pass opens");
     let first_file_offset = source.file_ranges[0].0;
 
     source
-        .fill_admitted_window(first_file_offset, &ActiveControl)
+        .fill_admitted_window(first_file_offset, &ActiveControl, read_pass.as_mut())
         .expect("first window admits");
 
     assert_eq!(
@@ -334,6 +474,9 @@ fn draining_a_many_file_generation_amortizes_install_calls_by_the_multiplier() {
     let workers = 4usize;
     let _width = ForcedWorkerWidth::install(workers);
     let mut source = fixture.open();
+    let mut read_pass = source
+        .begin_read_pass(&ActiveControl)
+        .expect("read pass opens");
 
     let mut window_fills = 0usize;
     let mut start_index = 0usize;
@@ -342,7 +485,7 @@ fn draining_a_many_file_generation_amortizes_install_calls_by_the_multiplier() {
         // Mirrors `ensure_admitted_file`'s clear-then-refill on a window miss.
         source.admitted_window.clear();
         source
-            .fill_admitted_window(file_offset, &ActiveControl)
+            .fill_admitted_window(file_offset, &ActiveControl, read_pass.as_mut())
             .expect("window admits");
         window_fills += 1;
         start_index += source.admitted_window.len();
@@ -378,20 +521,28 @@ fn prefix_accepted_batches_read_each_sealed_segment_once() {
     let expected = one_page_expectations(&fixture);
     let reads = Arc::new(AtomicUsize::new(0));
     let read_count = Arc::clone(&reads);
-    let segments = Arc::clone(&fixture.segments);
+    let sealed = fixture.sealed.clone();
     let mut source = VerifiedSealedLexicalPageSourceV1::open_partitioned_sealed(
         &fixture.manifest,
         fixture.state_digest.clone(),
-        move |digest, _, buffer, _control| {
-            read_count.fetch_add(1, Ordering::SeqCst);
-            buffer.clear();
-            buffer.extend_from_slice(segments.get(digest).expect("sealed segment exists"));
-            Ok(())
+        move |_control, _layout| {
+            let reader = sealed.begin_read_pass()?;
+            let read_count = Arc::clone(&read_count);
+            let pass: Box<SealedGenerationPackReadPassV1> =
+                Box::new(move |request, buffer, _control| {
+                    read_count.fetch_add(1, Ordering::SeqCst);
+                    reader(request, buffer)
+                });
+            Ok(pass)
         },
         1,
         1024 * 1024,
+        &fixture.operation,
     )
     .expect("partitioned source opens");
+    let mut read_pass = source
+        .begin_read_pass(&ActiveControl)
+        .expect("read pass opens");
     let batch_pages = 8;
     let mut drained = Vec::new();
     loop {
@@ -399,6 +550,7 @@ fn prefix_accepted_batches_read_each_sealed_segment_once() {
         let read = source
             .next_page_batch_if(
                 &ActiveControl,
+                read_pass.as_mut(),
                 bounds_for(&expected[first..(first + batch_pages).min(expected.len())]),
                 |_| Ok::<_, std::convert::Infallible>(NonZeroUsize::MIN),
             )
@@ -467,11 +619,14 @@ fn accepted_import_cursor_resumes_a_fresh_source_after_cancellation() {
     );
 
     let mut source = target.open_with_bounds(usize::MAX, maximum_page_bytes);
+    let mut read_pass = source
+        .begin_read_pass(&ActiveControl)
+        .expect("read pass opens");
 
     let boundary_cursor = loop {
         let previous_cursor = source.cursor().clone();
         let read = source
-            .next_page_if(&ActiveControl, |page| {
+            .next_page_if(&ActiveControl, read_pass.as_mut(), |page| {
                 page.verify_transition(Some(&previous_cursor))
                     .expect("source-minted page verifies before acceptance");
                 Ok::<(), std::convert::Infallible>(())
@@ -495,7 +650,7 @@ fn accepted_import_cursor_resumes_a_fresh_source_after_cancellation() {
         .expect("accepted import cursor persists");
     let cursor_before_cancellation = source.cursor().clone();
     let error = source
-        .next_page(&CancelDuringStaging::new())
+        .next_page(&CancelDuringStaging::new(), read_pass.as_mut())
         .expect_err("cancellation interrupts the next import page");
     assert!(matches!(
         error,
@@ -509,12 +664,16 @@ fn accepted_import_cursor_resumes_a_fresh_source_after_cancellation() {
 
     let restored = VerifiedSealedLexicalCursorV1::restore_persisted(&persisted)
         .expect("accepted import cursor restores");
+    drop(read_pass);
     let mut resumed = target.open_with_bounds(usize::MAX, maximum_page_bytes);
+    let mut resumed_read_pass = resumed
+        .begin_read_pass(&ActiveControl)
+        .expect("resumed pass opens");
     resumed
-        .restore_cursor(&restored, &ActiveControl)
+        .restore_cursor(&restored, &ActiveControl, resumed_read_pass.as_mut())
         .expect("an accepted cursor must resume its authenticated source");
     let resumed_page = resumed
-        .next_page_if(&ActiveControl, |page| {
+        .next_page_if(&ActiveControl, resumed_read_pass.as_mut(), |page| {
             page.verify_transition(Some(&restored))
                 .expect("resumed import page continues the accepted cursor");
             Ok::<(), std::convert::Infallible>(())
@@ -551,6 +710,24 @@ fn fixture_for_source_files(
     logical_path: &str,
     language: &str,
     file_count: usize,
+) -> SealedSourceFixture {
+    fixture_for_source_files_with_memory(
+        source,
+        logical_path,
+        language,
+        file_count,
+        Arc::new(ProcessResidentMemoryV1::new(
+            detected_process_resident_memory_limit_v1(),
+        )),
+    )
+}
+
+fn fixture_for_source_files_with_memory(
+    source: &str,
+    logical_path: &str,
+    language: &str,
+    file_count: usize,
+    resident_memory: Arc<ProcessResidentMemoryV1>,
 ) -> SealedSourceFixture {
     let source = source.as_bytes();
     let file = SanitizedCodeFileV1 {
@@ -595,9 +772,7 @@ fn fixture_for_source_files(
         omitted_sources: Vec::new(),
     };
     let request = CodeIndexBuildRequestV1 {
-        resident_memory: std::sync::Arc::new(ProcessResidentMemoryV1::new(
-            detected_process_resident_memory_limit_v1(),
-        )),
+        resident_memory,
         snapshot,
         captured_files: files
             .into_iter()
@@ -622,6 +797,7 @@ fn fixture_for_source_files(
                 .expect("fixture projection profile digest"),
         },
     };
+    let store = MemorySealedPublicationStoreV1::default();
     let mut owner = CodeIndexProductionOwnerV1::new(
         CodeIndexProductionConfigV1 {
             project_id: ProjectId::new("project.lexical-page-batch").expect("fixture project ID"),
@@ -638,48 +814,52 @@ fn fixture_for_source_files(
             privacy_key_epoch: 7,
             max_snapshot_age_micros: None,
         },
-        super::super::MemorySealedPublicationStoreV1::default(),
+        store.clone(),
     )
     .expect("fixture production owner opens");
+    let operation = request.resident_memory.begin_operation();
     let generation = owner
         .build_and_publish(request, &ActiveControl)
         .expect("fixture generation publishes");
-    let reader = generation.sealed_generation().segment_reader();
+    let sealed = generation.sealed_generation().clone();
+    let manifest = generation.manifest_bytes().to_vec();
+    let reader = sealed.begin_read_pass().expect("published read pass opens");
+    let mut manifest_memory =
+        ConstructionMemoryV1::new(operation.clone()).expect("manifest admission");
     let generation = Arc::new(
         CodeIndexPublishedGenerationV1::decode_partitioned_sealed(
             generation.manifest_bytes(),
             &SharedDecodedContentPoolV1::default(),
             |request, buffer| reader(request, buffer),
+            &mut |bytes| {
+                let bytes = u64::try_from(bytes)
+                    .map_err(|error| CodeIndexProductionErrorV1::Contract(error.to_string()))?;
+                manifest_memory.resize(bytes)
+            },
         )
         .expect("fixture generation decodes"),
     );
-    let mut segments = BTreeMap::new();
-    let manifest = generation
-        .encode_partitioned_sealed(|request| {
-            if let super::super::SealedGenerationSegmentPublicationV1::File { digest, bytes } =
-                request
-            {
-                segments.insert(digest.clone(), bytes.to_vec());
-            }
-            Ok(())
-        })
-        .expect("fixture generation seals");
     let state_digest = ManifestDigest::from_sha256_bytes(&Sha256::digest(&manifest))
         .expect("fixture manifest digest is canonical");
     SealedSourceFixture {
         manifest,
-        segments: Arc::new(segments),
+        sealed,
+        _store: store,
         state_digest,
         generation,
+        operation,
     }
 }
 
 fn one_page_expectations(fixture: &SealedSourceFixture) -> Vec<OnePageExpectation> {
     let mut source = fixture.open();
+    let mut read_pass = source
+        .begin_read_pass(&ActiveControl)
+        .expect("read pass opens");
     let mut expectations = Vec::new();
     loop {
         match source
-            .next_page(&ActiveControl)
+            .next_page(&ActiveControl, read_pass.as_mut())
             .expect("fixture one-page read")
         {
             VerifiedSealedLexicalPageReadV1::Page(page) => {
@@ -770,15 +950,23 @@ fn rejected_batch_keeps_the_exact_cursor_and_retries_the_first_one_page_value() 
         "fixture must provide a multi-page source"
     );
     let mut source = fixture.open();
+    let mut read_pass = source
+        .begin_read_pass(&ActiveControl)
+        .expect("read pass opens");
     let cursor_before = source
         .cursor()
         .persisted_bytes()
         .expect("initial cursor persists");
     let rejected = source
-        .next_page_batch_if(&ActiveControl, bounds_for(&expected[..2]), |pages| {
-            assert_eq!(pages.len(), 2, "fixture stages a full two-page batch");
-            Err::<NonZeroUsize, _>("builder rejects the complete batch")
-        })
+        .next_page_batch_if(
+            &ActiveControl,
+            read_pass.as_mut(),
+            bounds_for(&expected[..2]),
+            |pages| {
+                assert_eq!(pages.len(), 2, "fixture stages a full two-page batch");
+                Err::<NonZeroUsize, _>("builder rejects the complete batch")
+            },
+        )
         .expect("source stages the rejected batch");
     assert_eq!(
         rejected.expect_err("callback refusal must be surfaced"),
@@ -792,7 +980,10 @@ fn rejected_batch_keeps_the_exact_cursor_and_retries_the_first_one_page_value() 
         cursor_before,
     );
 
-    let retried = match source.next_page(&ActiveControl).expect("one-page retry") {
+    let retried = match source
+        .next_page(&ActiveControl, read_pass.as_mut())
+        .expect("one-page retry")
+    {
         VerifiedSealedLexicalPageReadV1::Page(page) => page,
         VerifiedSealedLexicalPageReadV1::Complete(_) => panic!("fixture must retain pages"),
     };
@@ -803,6 +994,9 @@ fn rejected_batch_keeps_the_exact_cursor_and_retries_the_first_one_page_value() 
 fn rejected_page_can_tighten_future_chunk_bound_without_advancing_cursor() {
     let fixture = fixture();
     let mut source = fixture.open_with_page_chunks(4);
+    let mut read_pass = source
+        .begin_read_pass(&ActiveControl)
+        .expect("read pass opens");
     let cursor_before = source
         .cursor()
         .persisted_bytes()
@@ -810,7 +1004,7 @@ fn rejected_page_can_tighten_future_chunk_bound_without_advancing_cursor() {
     let bounds = VerifiedSealedLexicalPageBatchBoundsV1::new(1, 128 * 1024 * 1024)
         .expect("one-page fixture bound is valid");
     let rejected = source
-        .next_page_batch_if(&ActiveControl, bounds, |pages| {
+        .next_page_batch_if(&ActiveControl, read_pass.as_mut(), bounds, |pages| {
             assert_eq!(pages.len(), 1);
             assert_eq!(pages[0].chunk_count(), 4);
             Err::<NonZeroUsize, _>("builder rejects the four-chunk page")
@@ -829,7 +1023,10 @@ fn rejected_page_can_tighten_future_chunk_bound_without_advancing_cursor() {
     );
 
     assert_eq!(source.tighten_page_record_bound(), Some((4, 2)));
-    let retried = match source.next_page(&ActiveControl).expect("tightened retry") {
+    let retried = match source
+        .next_page(&ActiveControl, read_pass.as_mut())
+        .expect("tightened retry")
+    {
         VerifiedSealedLexicalPageReadV1::Page(page) => page,
         VerifiedSealedLexicalPageReadV1::Complete(_) => panic!("fixture must retain pages"),
     };
@@ -846,23 +1043,28 @@ fn rejected_import_page_subdivides_without_advancing_cursor() {
         "{imports}export function item(): number {{ return 1; }}\n"
     ));
     let mut source = fixture.open_with_page_chunks(4);
+    let mut read_pass = source
+        .begin_read_pass(&ActiveControl)
+        .expect("read pass opens");
     let bounds = VerifiedSealedLexicalPageBatchBoundsV1::new(1, 128 * 1024 * 1024)
         .expect("one-page fixture bound is valid");
     let cursor_before = loop {
         let cursor = source.cursor().clone();
-        let read = source.next_page(&ActiveControl).expect("fixture page");
+        let read = source
+            .next_page(&ActiveControl, read_pass.as_mut())
+            .expect("fixture page");
         let VerifiedSealedLexicalPageReadV1::Page(page) = read else {
             panic!("fixture must expose an import-only page");
         };
         if page.chunk_count() == 0 && page.imports().len() == 4 {
             source
-                .restore_cursor_classified(&cursor, &ActiveControl)
+                .restore_cursor_classified(&cursor, &ActiveControl, read_pass.as_mut())
                 .expect("restore uncommitted import page");
             break cursor;
         }
     };
     let rejected = source
-        .next_page_batch_if(&ActiveControl, bounds, |pages| {
+        .next_page_batch_if(&ActiveControl, read_pass.as_mut(), bounds, |pages| {
             assert_eq!(pages.len(), 1);
             assert_eq!(pages[0].chunk_count(), 0);
             assert_eq!(pages[0].imports().len(), 4);
@@ -877,7 +1079,7 @@ fn rejected_import_page_subdivides_without_advancing_cursor() {
     assert_eq!(source.tighten_page_record_bound(), Some((4, 2)));
     assert_eq!(source.cursor(), &cursor_before);
     let VerifiedSealedLexicalPageReadV1::Page(page) = source
-        .next_page(&ActiveControl)
+        .next_page(&ActiveControl, read_pass.as_mut())
         .expect("subdivided import page")
     else {
         panic!("fixture must retain import records");
@@ -895,18 +1097,26 @@ fn out_of_range_accepted_prefix_keeps_the_exact_cursor_and_retries_the_first_pag
         "fixture must provide a multi-page source"
     );
     let mut source = fixture.open();
+    let mut read_pass = source
+        .begin_read_pass(&ActiveControl)
+        .expect("read pass opens");
     let cursor_before = source
         .cursor()
         .persisted_bytes()
         .expect("initial cursor persists");
     let error = source
-        .next_page_batch_if(&ActiveControl, bounds_for(&expected[..2]), |pages| {
-            assert_eq!(pages.len(), 2, "fixture stages a full two-page batch");
-            Ok::<_, ()>(
-                NonZeroUsize::new(pages.len() + 1)
-                    .expect("out-of-range accepted prefix remains non-zero"),
-            )
-        })
+        .next_page_batch_if(
+            &ActiveControl,
+            read_pass.as_mut(),
+            bounds_for(&expected[..2]),
+            |pages| {
+                assert_eq!(pages.len(), 2, "fixture stages a full two-page batch");
+                Ok::<_, ()>(
+                    NonZeroUsize::new(pages.len() + 1)
+                        .expect("out-of-range accepted prefix remains non-zero"),
+                )
+            },
+        )
         .expect_err("out-of-range accepted prefix must be refused");
     assert!(matches!(error, CodeIndexProductionErrorV1::Contract(_)));
     assert_eq!(
@@ -917,7 +1127,10 @@ fn out_of_range_accepted_prefix_keeps_the_exact_cursor_and_retries_the_first_pag
         cursor_before,
     );
 
-    let retried = match source.next_page(&ActiveControl).expect("one-page retry") {
+    let retried = match source
+        .next_page(&ActiveControl, read_pass.as_mut())
+        .expect("one-page retry")
+    {
         VerifiedSealedLexicalPageReadV1::Page(page) => page,
         VerifiedSealedLexicalPageReadV1::Complete(_) => panic!("fixture must retain pages"),
     };
@@ -937,9 +1150,12 @@ fn retained_byte_bound_stops_before_the_next_larger_one_page_value() {
         })
         .expect("fixture has an increasing one-page retained-byte boundary");
     let mut source = fixture.open();
+    let mut read_pass = source
+        .begin_read_pass(&ActiveControl)
+        .expect("read pass opens");
     for _ in 0..start {
         let _ = source
-            .next_page(&ActiveControl)
+            .next_page(&ActiveControl, read_pass.as_mut())
             .expect("advance to retained boundary");
     }
     let page_slots = std::mem::size_of::<VerifiedSealedLexicalPageV1>()
@@ -953,7 +1169,7 @@ fn retained_byte_bound_stops_before_the_next_larger_one_page_value() {
     )
     .expect("first page fits the retained-byte bound");
     let batch = source
-        .next_page_batch_if(&ActiveControl, bounds, |pages| {
+        .next_page_batch_if(&ActiveControl, read_pass.as_mut(), bounds, |pages| {
             assert_eq!(pages.len(), 1, "larger next page must stay unstaged");
             Ok::<_, ()>(NonZeroUsize::new(pages.len()).expect("staged batch is non-empty"))
         })
@@ -971,7 +1187,7 @@ fn retained_byte_bound_stops_before_the_next_larger_one_page_value() {
     );
 
     let next = match source
-        .next_page(&ActiveControl)
+        .next_page(&ActiveControl, read_pass.as_mut())
         .expect("read byte-stopped page")
     {
         VerifiedSealedLexicalPageReadV1::Page(page) => page,
@@ -989,6 +1205,9 @@ fn cancellation_during_staging_keeps_the_exact_pre_batch_cursor() {
         "fixture must provide a multi-page source"
     );
     let mut source = fixture.open();
+    let mut read_pass = source
+        .begin_read_pass(&ActiveControl)
+        .expect("read pass opens");
     let cursor_before = source
         .cursor()
         .persisted_bytes()
@@ -996,10 +1215,15 @@ fn cancellation_during_staging_keeps_the_exact_pre_batch_cursor() {
     let control = CancelDuringStaging::new();
     let mut callback_called = false;
     let error = source
-        .next_page_batch_if(&control, bounds_for(&expected[..2]), |_| {
-            callback_called = true;
-            Ok::<_, ()>(NonZeroUsize::MIN)
-        })
+        .next_page_batch_if(
+            &control,
+            read_pass.as_mut(),
+            bounds_for(&expected[..2]),
+            |_| {
+                callback_called = true;
+                Ok::<_, ()>(NonZeroUsize::MIN)
+            },
+        )
         .expect_err("cancellation must interrupt batch staging");
     assert!(matches!(
         error,

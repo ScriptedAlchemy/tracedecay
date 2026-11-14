@@ -17,6 +17,9 @@ use tracedecay_graph_db::{
     GraphProjectionId, GraphProjectionIdentity, GraphWatermark, SourceGeneration,
 };
 use tracedecay_runtime_core::db::{DatabaseAccessMode, DatabaseAuthority};
+use tracedecay_runtime_core::resident_memory::{
+    ProcessResidentMemoryV1, ResidentMemoryPressureV1, detected_process_resident_memory_limit_v1,
+};
 use tracedecay_runtime_core::shard_runtime::registry::StoreRuntimeRegistryFailure;
 use tracedecay_rusqlite_runtime::remote::RemoteWriterPublicationErrorV1;
 use tracedecay_store::{FactReadControl, ProjectId, RetainedGraphStoreLeaseV1, StoreShardIdV1};
@@ -720,7 +723,16 @@ async fn linked_worktree_generations_share_the_project_graph_runtime() {
         .await
         .expect("mount project authority");
     let repository_id = tracedecay_domain::RepositoryId::new("repo:shared").expect("repository id");
+    let limit = detected_process_resident_memory_limit_v1();
+    let resident_memory = Arc::new(ProcessResidentMemoryV1::with_pressure(
+        limit,
+        Arc::new(ResidentMemoryPressureV1::with_sampler(
+            limit,
+            Arc::new(|| None),
+        )),
+    ));
     let replay_binding = || tracedecay_code_index_runtime::CodeGraphReplayBindingV1 {
+        resident_memory: Arc::clone(&resident_memory),
         generations_root: project_database
             .database_path()
             .with_extension("generations"),

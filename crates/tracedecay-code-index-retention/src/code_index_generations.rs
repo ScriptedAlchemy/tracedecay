@@ -10,7 +10,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::File;
-use std::io::{BufReader, Read};
+use std::io::{BufReader, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -112,7 +112,7 @@ use text_artifacts::{
     plan_collectable_text_artifacts_cancellable, stage_collectable_text_artifacts,
 };
 
-use generation_scan::{read_generation_format_revision, read_generation_metadata};
+use generation_scan::{read_generation_format_revision_from_file, read_generation_metadata};
 #[cfg(test)]
 use scope_quarantine::ScopeQuarantineAuthority;
 
@@ -1414,20 +1414,37 @@ fn sweep_unreferenced_generation_segments(
                     })?
                     .to_owned()
             };
-            if read_generation_format_revision(&path, is_cancelled)?
+            // The revision probe and full descriptor mark must observe the
+            // same opened inode. Reopening here paid a second endpoint-security
+            // authorization for every current-revision manifest and could read
+            // different bytes if the pathname changed between the two opens.
+            // Cancellation must win immediately before endpoint-authorized
+            // open(), including when a listed generation disappeared meanwhile.
+            if is_cancelled() {
+                return Err(CodeGenerationRetentionErrorV1::Cancelled);
+            }
+            let mut file = File::open(&path).map_err(|error| {
+                if is_cancelled() {
+                    CodeGenerationRetentionErrorV1::Cancelled
+                } else {
+                    deferred_if_absent(error)
+                }
+            })?;
+            if read_generation_format_revision_from_file(&mut file, &path, is_cancelled)?
                 != SEALED_GENERATION_FORMAT_REVISION_V1
             {
                 continue;
             }
+            file.seek(SeekFrom::Start(0)).map_err(storage)?;
             let mut reader = CancellableGenerationManifestReaderV1 {
-                file: File::open(&path).map_err(deferred_if_absent)?,
+                file,
                 hasher: Sha256::new(),
                 is_cancelled,
                 cancelled: false,
             };
             let identities = {
                 let buffered = BufReader::with_capacity(1024 * 1024, &mut reader);
-                tracedecay_code_index::production::CodeIndexPublishedGenerationV1::partitioned_segment_identities_from_reader(
+                tracedecay_code_index::production::CodeIndexPublishedGenerationV1::partitioned_pack_identities_from_reader(
                     buffered,
                 )
             };
@@ -1819,6 +1836,9 @@ pub fn execute_code_generation_retention_cancellable(
             "active generation changed after the retention mark phase".to_owned(),
         ));
     }
+    // Every active payload pass keeps its handles inside the shared store lease.
+    // Acquiring this exclusive lease therefore also proves that no reader can
+    // retain a payload inode while the following sweep retires its pathname.
     let mut generation_segment_batch_exhausted = if plan.collectable_generations.is_empty()
         && plan.collectable_generation_segments == GenerationSegmentCensusV1::Present
     {
