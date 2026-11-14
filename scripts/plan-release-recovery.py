@@ -4,16 +4,42 @@
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import json
 from pathlib import Path
 
 
 def load_targets(path: Path) -> list[dict[str, str]]:
-    value = json.loads(path.read_text(encoding="utf-8"))
-    targets = value.get("include")
-    if not isinstance(targets, list) or not targets:
-        raise SystemExit("release target manifest has no targets")
-    return targets
+    # Planning and final artifact coverage use the same manifest validator.
+    spec = importlib.util.spec_from_file_location(
+        "release_artifacts", Path(__file__).with_name("check-release-artifacts.py")
+    )
+    if spec is None or spec.loader is None:
+        raise SystemExit("release target validator is unavailable")
+    validator = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(validator)
+    return validator.target_matrix(path)
+
+
+def execution_matrix(
+    missing: list[dict[str, str]], current: list[dict[str, str]]
+) -> list[dict[str, str]]:
+    """Select current runners without changing an immutable release's identity."""
+    by_name = {target["name"]: target for target in current}
+    result = []
+    for target in missing:
+        name = target["name"]
+        execution = by_name.get(name)
+        if execution is None:
+            raise SystemExit(f"no execution runner for release target: {name}")
+        for field in ("target", "archive"):
+            if execution[field] != target[field]:
+                raise SystemExit(
+                    f"execution release target {name} changes {field}: "
+                    f"{target[field]!r} != {execution[field]!r}"
+                )
+        result.append({**target, "runner": execution["runner"]})
+    return result
 
 
 def target_assets(
@@ -85,6 +111,12 @@ def plan(
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--manifest", type=Path, required=True)
+    parser.add_argument(
+        "--execution-manifest",
+        type=Path,
+        required=True,
+        help="release target manifest from the running workflow revision",
+    )
     parser.add_argument("--tag", required=True)
     parser.add_argument("--profile", choices=("stable", "beta"), default="stable")
     parser.add_argument("--asset-names", type=Path, required=True)
@@ -93,12 +125,14 @@ def main() -> None:
     arguments = parser.parse_args()
 
     targets = load_targets(arguments.manifest)
+    execution_targets = load_targets(arguments.execution_manifest)
     existing = {
         line
         for line in arguments.asset_names.read_text(encoding="utf-8").splitlines()
         if line
     }
     missing, retained = plan(targets, arguments.tag, arguments.profile, existing)
+    missing = execution_matrix(missing, execution_targets)
     arguments.retained_output.write_text(
         "".join(f"{asset}\n" for asset in retained),
         encoding="utf-8",
