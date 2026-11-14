@@ -1894,14 +1894,18 @@ fn automation_config_enable_writes_canonical_project_setting_noninteractively() 
     std::fs::write(project.path().join("src/lib.rs"), "pub fn marker() {}\n").unwrap();
 
     init_project_fixture(home.path(), project.path());
-    let mut enable = tracedecay_command(home.path(), project.path());
+    let daemon_log = home.path().join("automation-config-daemon.log");
+    let _daemon = crate::common::spawn_tracedecay_daemon_logged(home.path(), &daemon_log, |_| {});
+    let mut enable = tracedecay_command_without_daemon(home.path(), project.path());
     enable.args(["automation", "config", "enable"]);
     let enable_output = run_with_timeout(enable, cli_timeout());
     assert!(
         enable_output.status.success(),
-        "automation config enable should succeed\nstdout:\n{}\nstderr:\n{}",
+        "automation config enable should succeed\nstdout:\n{}\nstderr:\n{}\ndaemon:\n{}",
         String::from_utf8_lossy(&enable_output.stdout),
-        String::from_utf8_lossy(&enable_output.stderr)
+        String::from_utf8_lossy(&enable_output.stderr),
+        std::fs::read_to_string(&daemon_log)
+            .unwrap_or_else(|error| format!("daemon log unavailable: {error}"))
     );
     let payload: serde_json::Value = serde_json::from_slice(&enable_output.stdout)
         .expect("automation config enable should print JSON");
@@ -1912,14 +1916,16 @@ fn automation_config_enable_writes_canonical_project_setting_noninteractively() 
     assert_eq!(payload["explanation"]["automatic_memory_apply"], true);
     assert_eq!(payload["explanation"]["automatic_skill_activation"], true);
 
-    let mut explain = tracedecay_command(home.path(), project.path());
+    let mut explain = tracedecay_command_without_daemon(home.path(), project.path());
     explain.args(["automation", "config", "explain", "--json"]);
     let explain_output = run_with_timeout(explain, cli_timeout());
     assert!(
         explain_output.status.success(),
-        "automation config explain should succeed\nstdout:\n{}\nstderr:\n{}",
+        "automation config explain should succeed\nstdout:\n{}\nstderr:\n{}\ndaemon:\n{}",
         String::from_utf8_lossy(&explain_output.stdout),
-        String::from_utf8_lossy(&explain_output.stderr)
+        String::from_utf8_lossy(&explain_output.stderr),
+        std::fs::read_to_string(&daemon_log)
+            .unwrap_or_else(|error| format!("daemon log unavailable: {error}"))
     );
     let explain_payload: serde_json::Value = serde_json::from_slice(&explain_output.stdout)
         .expect("automation config explain should print JSON");
@@ -1943,7 +1949,9 @@ fn automation_config_set_rejects_unimplemented_external_backend() {
     std::fs::write(project.path().join("src/lib.rs"), "pub fn marker() {}\n").unwrap();
     init_project_fixture(home.path(), project.path());
 
-    let mut set = tracedecay_command(home.path(), project.path());
+    let daemon_log = home.path().join("automation-config-daemon.log");
+    let _daemon = crate::common::spawn_tracedecay_daemon_logged(home.path(), &daemon_log, |_| {});
+    let mut set = tracedecay_command_without_daemon(home.path(), project.path());
     set.args([
         "automation",
         "config",
@@ -1954,22 +1962,28 @@ fn automation_config_set_rejects_unimplemented_external_backend() {
     let output = run_with_timeout(set, cli_timeout());
     assert!(
         !output.status.success(),
-        "external backend should be rejected\nstdout:\n{}\nstderr:\n{}",
+        "external backend should be rejected\nstdout:\n{}\nstderr:\n{}\ndaemon:\n{}",
         String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
+        String::from_utf8_lossy(&output.stderr),
+        std::fs::read_to_string(&daemon_log)
+            .unwrap_or_else(|error| format!("daemon log unavailable: {error}"))
     );
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
         stderr.contains("unknown automation backend"),
-        "external backend should report its refusal\nstatus: {}\nstdout:\n{}\nstderr:\n{stderr}",
+        "external backend should report its refusal\nstatus: {}\nstdout:\n{}\nstderr:\n{stderr}\ndaemon:\n{}",
         output.status,
-        String::from_utf8_lossy(&output.stdout)
+        String::from_utf8_lossy(&output.stdout),
+        std::fs::read_to_string(&daemon_log)
+            .unwrap_or_else(|error| format!("daemon log unavailable: {error}"))
     );
     assert!(
         stderr.contains("disabled, codex-app-server"),
-        "external backend refusal should list implemented choices\nstatus: {}\nstdout:\n{}\nstderr:\n{stderr}",
+        "external backend refusal should list implemented choices\nstatus: {}\nstdout:\n{}\nstderr:\n{stderr}\ndaemon:\n{}",
         output.status,
-        String::from_utf8_lossy(&output.stdout)
+        String::from_utf8_lossy(&output.stdout),
+        std::fs::read_to_string(&daemon_log)
+            .unwrap_or_else(|error| format!("daemon log unavailable: {error}"))
     );
 }
 
