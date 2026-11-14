@@ -205,6 +205,60 @@ async fn durable_recovery_progresses_before_another_discovery_scan() {
         report.saturated,
         "deferring discovery must schedule a follow-up pass"
     );
+
+    let completion = run_session_temporal_refresh_pass(
+        &harness.registered,
+        &state,
+        &CanonicalSessionTemporalProjector,
+        SessionTemporalRefreshPolicy {
+            max_operations_per_pass: 1,
+            ..SessionTemporalRefreshPolicy::default()
+        },
+    )
+    .await;
+    assert_eq!(completion.completed, 1);
+    assert_eq!(completion.backlog, Some(0));
+    assert!(
+        completion.saturated,
+        "the final durable completion still owes the deferred discovery scan"
+    );
+
+    // The bounded discovery sweep alternates pending-effect and
+    // active-generation pages, so the drain settles on the pass that confirms
+    // the active sweep is exhausted rather than on the first discovery pass.
+    let mut discovery = run_session_temporal_refresh_pass(
+        &harness.registered,
+        &state,
+        &CanonicalSessionTemporalProjector,
+        SessionTemporalRefreshPolicy {
+            max_operations_per_pass: 1,
+            ..SessionTemporalRefreshPolicy::default()
+        },
+    )
+    .await;
+    assert!(
+        discovery.discovery_advanced,
+        "the deferred discovery scan must run"
+    );
+    for _ in 0..4 {
+        assert_eq!(discovery.projected_batches, 0);
+        assert_eq!(discovery.completed, 0);
+        assert_eq!(discovery.backlog, Some(0));
+        if !discovery.saturated {
+            break;
+        }
+        discovery = run_session_temporal_refresh_pass(
+            &harness.registered,
+            &state,
+            &CanonicalSessionTemporalProjector,
+            SessionTemporalRefreshPolicy {
+                max_operations_per_pass: 1,
+                ..SessionTemporalRefreshPolicy::default()
+            },
+        )
+        .await;
+    }
+    assert!(!discovery.saturated, "discovery settles the bounded drain");
 }
 
 /// Never finishes a projection, so every operation outlives its deadline.
@@ -580,6 +634,85 @@ async fn a_retryable_projection_publishes_while_summary_admission_is_blocked() {
 }
 
 #[tokio::test]
+async fn retryable_projection_does_not_strand_refused_history_admission() {
+    let harness = RegisteredGlobalDbHarness::open("history-fifo-projection-retry").await;
+    let store = SessionTemporalStore::new(harness.registered.as_ref());
+    let session_id = SessionId::new("history-fifo-projection-retry").expect("session id");
+    let begun = store
+        .begin_or_join_session_refresh(SessionRefreshBeginOrJoinRequestV1::new(
+            session_id.clone(),
+            SessionRefreshFrontierV1::new(0, 0).expect("empty frontier"),
+        ))
+        .await
+        .expect("running refresh");
+
+    let state = Arc::new(SessionTemporalRefreshWakeState::default());
+    let history = Arc::new(GatedHistory {
+        entered: tokio::sync::Notify::new(),
+        release: tokio::sync::Notify::new(),
+    });
+    let ingestor: SharedSessionHistoricalIngestor = history.clone();
+    let admission = Arc::new(tokio::sync::Semaphore::new(0));
+    let projector = Arc::new(RetryOnceProjector {
+        retry_pending: AtomicBool::new(true),
+    });
+    state.wake_history();
+    state.wake();
+    let worker = tokio::spawn(run_session_temporal_refresh_scheduler(
+        harness.registered.clone(),
+        Arc::clone(&state),
+        projector.clone(),
+        Arc::new(std::sync::RwLock::new(Some(ingestor))),
+        Arc::clone(&admission),
+        SessionTemporalRefreshPolicy::default(),
+    ));
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let idle = enabled_idle_notification(&state);
+            if state.is_idle() {
+                break;
+            }
+            idle.await;
+        }
+    })
+    .await
+    .expect("retrying projection must finish without a historical permit");
+    assert!(
+        !projector.retry_pending.load(Ordering::Acquire),
+        "projection error must actually be exercised"
+    );
+    let receipt = store
+        .session_refresh_receipt(SessionRefreshReceiptRequestV1::new(
+            begun.operation_id().clone(),
+            session_id,
+        ))
+        .await
+        .expect("read durable receipt")
+        .expect("retried projection completes");
+    assert_eq!(receipt.state(), SessionRefreshTerminalStateV1::Complete);
+    assert!(
+        state.history_retry_pending(),
+        "refused historical admission must survive a projection retry"
+    );
+    assert!(
+        !state.history_held_for_projection(),
+        "the completed projection releases its publication hold"
+    );
+
+    // No new history or projection wake follows: only releasing capacity may
+    // resume the original historical waiter.
+    admission.add_permits(1);
+    tokio::time::timeout(Duration::from_secs(5), history.entered.notified())
+        .await
+        .expect("historical ingest must resume on its already queued permit");
+    history.release.notify_one();
+    state.cancel();
+    worker
+        .await
+        .expect("refreshed worker exits on cancellation");
+}
+
+#[tokio::test]
 async fn a_live_wake_during_summary_admission_preserves_the_queued_turn() {
     let harness = RegisteredGlobalDbHarness::open("refresh-join-during-summary-admission").await;
     let state = Arc::new(SessionTemporalRefreshWakeState::default());
@@ -649,6 +782,232 @@ async fn a_live_wake_during_summary_admission_preserves_the_queued_turn() {
     );
     state.cancel();
     worker.await.expect("refresh worker exits on cancellation");
+}
+
+#[tokio::test]
+async fn a_live_projection_keeps_its_queued_history_admission_turn() {
+    let harness = RegisteredGlobalDbHarness::open("history-fifo-survives-projection").await;
+    let state = Arc::new(SessionTemporalRefreshWakeState::default());
+    let history = Arc::new(GatedHistory {
+        entered: tokio::sync::Notify::new(),
+        release: tokio::sync::Notify::new(),
+    });
+    let ingestor: SharedSessionHistoricalIngestor = history.clone();
+    let admission = Arc::new(tokio::sync::Semaphore::new(0));
+    state.wake_history();
+    let worker = tokio::spawn(run_session_temporal_refresh_scheduler(
+        harness.registered.clone(),
+        Arc::clone(&state),
+        Arc::new(CanonicalSessionTemporalProjector),
+        Arc::new(std::sync::RwLock::new(Some(ingestor))),
+        Arc::clone(&admission),
+        SessionTemporalRefreshPolicy::default(),
+    ));
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let idle = enabled_idle_notification(&state);
+            if state.is_idle() {
+                break;
+            }
+            idle.await;
+        }
+    })
+    .await
+    .expect("refused historical worker must queue before advertising idle");
+
+    let later = Arc::clone(&admission).acquire_owned();
+    tokio::pin!(later);
+    assert!(
+        std::future::poll_fn(|cx| std::task::Poll::Ready(later.as_mut().poll(cx)))
+            .await
+            .is_pending()
+    );
+
+    let before = state.pass_count.load(Ordering::Acquire);
+    state.wake();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let idle = enabled_idle_notification(&state);
+            if state.pass_count.load(Ordering::Acquire) > before && state.is_idle() {
+                break;
+            }
+            idle.await;
+        }
+    })
+    .await
+    .expect("live projection must finish without consuming summary admission");
+
+    admission.add_permits(1);
+    tokio::time::timeout(Duration::from_secs(5), history.entered.notified())
+        .await
+        .expect("the original historical worker must receive the first permit");
+    assert!(
+        std::future::poll_fn(|cx| std::task::Poll::Ready(later.as_mut().poll(cx)))
+            .await
+            .is_pending(),
+        "another profile cannot overtake the historical worker after its live wake"
+    );
+    history.release.notify_one();
+    let later_permit = tokio::time::timeout(Duration::from_secs(5), later)
+        .await
+        .expect("later profile must receive the historical worker's released permit")
+        .expect("admission must remain open");
+    drop(later_permit);
+    state.cancel();
+    worker
+        .await
+        .expect("historical worker exits on cancellation");
+}
+
+#[tokio::test]
+async fn publishing_a_bounded_projection_backlog_keeps_the_original_history_turn() {
+    let harness = RegisteredGlobalDbHarness::open("history-fifo-projection-backlog").await;
+    let store = SessionTemporalStore::new(harness.registered.as_ref());
+    begin_empty_refreshes(&store, ["history-fifo-first", "history-fifo-second"]).await;
+    let recoveries = store
+        .running_session_refreshes()
+        .await
+        .expect("two durable projection obligations");
+    assert_eq!(recoveries.len(), 2);
+
+    let state = Arc::new(SessionTemporalRefreshWakeState::default());
+    let history = Arc::new(GatedHistory {
+        entered: tokio::sync::Notify::new(),
+        release: tokio::sync::Notify::new(),
+    });
+    let ingestor: SharedSessionHistoricalIngestor = history.clone();
+    let admission = Arc::new(tokio::sync::Semaphore::new(0));
+    state.wake_history();
+    state.wake();
+    let worker = tokio::spawn(run_session_temporal_refresh_scheduler(
+        harness.registered.clone(),
+        Arc::clone(&state),
+        Arc::new(CanonicalSessionTemporalProjector),
+        Arc::new(std::sync::RwLock::new(Some(ingestor))),
+        Arc::clone(&admission),
+        SessionTemporalRefreshPolicy {
+            max_operations_per_pass: 1,
+            ..SessionTemporalRefreshPolicy::default()
+        },
+    ));
+
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let idle = enabled_idle_notification(&state);
+            if state.is_idle() {
+                break;
+            }
+            idle.await;
+        }
+    })
+    .await
+    .expect("both projection batches must publish without a history permit");
+    assert!(
+        state.history_retry_pending(),
+        "historical admission remains queued"
+    );
+    assert!(
+        !state.history_held_for_projection(),
+        "publication hold is released before waiting for admission"
+    );
+    assert_eq!(
+        state.pass_count.load(Ordering::Acquire),
+        1 + 2 * recoveries.len() + 1,
+        "one history refusal, each projection and completion, then deferred discovery"
+    );
+    assert!(
+        store.running_session_refreshes().await.unwrap().is_empty(),
+        "the bounded drain leaves no durable recovery behind"
+    );
+    for recovery in recoveries {
+        let receipt = store
+            .session_refresh_receipt(SessionRefreshReceiptRequestV1::new(
+                recovery.operation_id().clone(),
+                recovery.session_id().clone(),
+            ))
+            .await
+            .expect("read durable projection receipt")
+            .expect("both projections must settle");
+        assert_eq!(receipt.state(), SessionRefreshTerminalStateV1::Complete);
+    }
+
+    let later = Arc::clone(&admission).acquire_owned();
+    tokio::pin!(later);
+    assert!(
+        std::future::poll_fn(|cx| std::task::Poll::Ready(later.as_mut().poll(cx)))
+            .await
+            .is_pending()
+    );
+    admission.add_permits(1);
+    tokio::time::timeout(Duration::from_secs(5), history.entered.notified())
+        .await
+        .expect("original historical waiter must retain the first admission");
+    assert!(
+        std::future::poll_fn(|cx| std::task::Poll::Ready(later.as_mut().poll(cx)))
+            .await
+            .is_pending(),
+        "a later profile cannot overtake publication's queued history turn"
+    );
+    history.release.notify_one();
+    let later_permit = tokio::time::timeout(Duration::from_secs(5), later)
+        .await
+        .expect("later profile receives the released history permit")
+        .expect("admission remains open");
+    drop(later_permit);
+    state.cancel();
+    worker
+        .await
+        .expect("historical worker exits on cancellation");
+}
+
+#[tokio::test]
+async fn cancelled_historical_waiter_releases_its_queued_turn() {
+    let harness = RegisteredGlobalDbHarness::open("history-fifo-cancel").await;
+    let state = Arc::new(SessionTemporalRefreshWakeState::default());
+    let history = Arc::new(GatedHistory {
+        entered: tokio::sync::Notify::new(),
+        release: tokio::sync::Notify::new(),
+    });
+    let ingestor: SharedSessionHistoricalIngestor = history;
+    let admission = Arc::new(tokio::sync::Semaphore::new(0));
+    state.wake_history();
+    let worker = tokio::spawn(run_session_temporal_refresh_scheduler(
+        harness.registered.clone(),
+        Arc::clone(&state),
+        Arc::new(CanonicalSessionTemporalProjector),
+        Arc::new(std::sync::RwLock::new(Some(ingestor))),
+        Arc::clone(&admission),
+        SessionTemporalRefreshPolicy::default(),
+    ));
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let idle = enabled_idle_notification(&state);
+            if state.is_idle() {
+                break;
+            }
+            idle.await;
+        }
+    })
+    .await
+    .expect("refused history wait must be queued");
+
+    let later = Arc::clone(&admission).acquire_owned();
+    tokio::pin!(later);
+    assert!(
+        std::future::poll_fn(|cx| std::task::Poll::Ready(later.as_mut().poll(cx)))
+            .await
+            .is_pending()
+    );
+    state.cancel();
+    worker
+        .await
+        .expect("cancelled worker must exit and drop its FIFO turn");
+    admission.add_permits(1);
+    let later_permit = tokio::time::timeout(Duration::from_secs(5), later)
+        .await
+        .expect("later profile must receive the cancelled worker's permit")
+        .expect("admission must remain open");
+    drop(later_permit);
 }
 
 struct ControlledProjector {

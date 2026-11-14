@@ -19,6 +19,10 @@ const OBSERVATION_PROJECTION_SCHEMA_SQL: &str =
             FOREIGN KEY(observation_id) REFERENCES observations(observation_id),
             FOREIGN KEY(receipt_id) REFERENCES sanitization_receipts(receipt_id)
         );
+        CREATE TABLE IF NOT EXISTS projection_retry_owners (
+            observation_id TEXT PRIMARY KEY NOT NULL REFERENCES projection_queue(observation_id) ON DELETE CASCADE,
+            mount TEXT NOT NULL
+        ) WITHOUT ROWID;
         CREATE TABLE IF NOT EXISTS observation_projection_checkpoints (
             projector_version TEXT PRIMARY KEY,
             last_sequence INTEGER NOT NULL CHECK(last_sequence >= 0)
@@ -310,9 +314,20 @@ const OBSERVATION_PROJECTION_SCHEMA_SQL: &str =
 const OBSERVATION_PROJECTION_BINDING_TRIGGERS_SQL: &str =
     include_str!("projection_binding_triggers.sql");
 
+/// Queue-head reads share this partial index's terminal collision bound.
+pub(crate) const ACTIVE_QUEUE_INDEX_SQL: &str =
+    "CREATE INDEX IF NOT EXISTS idx_projection_queue_active_sequence
+     ON projection_queue (observation_sequence, next_retry_at_micros)
+     WHERE next_retry_at_micros < 9223372036854775807;";
+
 /// Historical-data indexes the schema contract requires on the projection
 /// authority.
 pub(crate) const OBSERVATION_PROJECTION_PERFORMANCE_INDEX_SQL: &[&str] = &[
+    ACTIVE_QUEUE_INDEX_SQL,
+    // Nonterminal queue probes must not scan every permanently parked collision
+    // on every idle pass. SQLite can also use this for retry frontier reads.
+    "CREATE INDEX IF NOT EXISTS idx_projection_queue_retry_deadline
+     ON projection_queue (next_retry_at_micros);",
     "CREATE INDEX IF NOT EXISTS idx_observation_projection_provenance_output
      ON observation_projection_provenance
         (projector_version, output_provider, output_message_id);",
@@ -361,6 +376,12 @@ pub(crate) const OBSERVATION_PROJECTION_PERFORMANCE_INDEX_SQL: &[&str] = &[
 pub(in super::super) async fn ensure_observation_projection_schema(
     conn: &impl Executor,
 ) -> Result<(), Error> {
+    // Existing queue shapes are immutable. A previous binary's queue cannot
+    // be upgraded behind the registered schema contract: refuse before DDL.
+    let queue_columns = projection_rebuild_column_names(conn, "projection_queue").await?;
+    if !queue_columns.is_empty() && !queue_columns.iter().any(|column| column == "attempt_count") {
+        return Err(unsupported_projection_schema("projection_queue"));
+    }
     conn.execute_batch(OBSERVATION_PROJECTION_SCHEMA_SQL)
         .await?;
     verify_final_projection_shape(conn).await?;
@@ -623,6 +644,112 @@ mod tests {
         );
     }
 
+    /// A queue missing its retry counter must remain untouched on refusal.
+    #[tokio::test]
+    async fn incompatible_retry_queue_is_refused_without_schema_mutation() {
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join("global.db");
+        drop(open_registered_schema(&path).await.unwrap());
+
+        let conn = TestConnection::open(&path);
+        conn.execute_batch("ALTER TABLE projection_queue DROP COLUMN attempt_count")
+            .await
+            .unwrap();
+        drop(conn);
+
+        let Err(error) = open_registered_schema(&path).await else {
+            panic!("a prior retry queue must be refused, not upgraded in place");
+        };
+        let message = error.to_string();
+        assert!(
+            message.contains("projection_queue"),
+            "the refusal must identify the incompatible queue: {message}"
+        );
+        assert!(
+            message.contains("create a fresh one"),
+            "a prior schema must get the reset remedy: {message}"
+        );
+
+        let conn = TestConnection::open(&path);
+        let mut rows = conn
+            .query(
+                "SELECT name FROM pragma_table_xinfo('projection_queue')
+                 WHERE name = 'attempt_count'",
+                (),
+            )
+            .await
+            .unwrap();
+        assert!(
+            rows.next().await.unwrap().is_none(),
+            "refused admission must preserve the old queue shape unchanged"
+        );
+    }
+
+    /// Real registered-store admission must accept the two queue indexes while
+    /// preserving the strict authority inventory and the partial-index contract.
+    #[tokio::test]
+    async fn registered_projection_queue_indexes_match_authority_schema() {
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join("global.db");
+        drop(open_registered_schema(&path).await.unwrap());
+        // Reopening validates the persisted index inventory, not just creation.
+        drop(open_registered_schema(&path).await.unwrap());
+
+        let conn = TestConnection::open(&path);
+        let mut rows = conn
+            .query(
+                "SELECT name, partial FROM pragma_index_list('projection_queue')
+                 WHERE name IN (
+                     'idx_projection_queue_active_sequence',
+                     'idx_projection_queue_retry_deadline'
+                 ) ORDER BY name",
+                (),
+            )
+            .await
+            .unwrap();
+        let mut indexes = Vec::new();
+        while let Some(row) = rows.next().await.unwrap() {
+            indexes.push((row.get::<String>(0).unwrap(), row.get::<i64>(1).unwrap()));
+        }
+        assert_eq!(
+            indexes,
+            vec![
+                ("idx_projection_queue_active_sequence".to_owned(), 1),
+                ("idx_projection_queue_retry_deadline".to_owned(), 0),
+            ],
+            "the registered store must retain both exact queue indexes"
+        );
+    }
+
+    #[tokio::test]
+    async fn registered_projection_queue_rejects_wrong_partial_predicate() {
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join("global.db");
+        drop(open_registered_schema(&path).await.unwrap());
+
+        // IF NOT EXISTS must not make a same-named but incompatible index
+        // look admitted. The narrower predicate cannot serve a queue-head
+        // query that includes every nonterminal retry deadline.
+        let conn = TestConnection::open(&path);
+        conn.execute_batch(
+            "DROP INDEX idx_projection_queue_active_sequence;
+             CREATE INDEX idx_projection_queue_active_sequence
+             ON projection_queue (observation_sequence, next_retry_at_micros)
+             WHERE next_retry_at_micros < 0;",
+        )
+        .await
+        .unwrap();
+        drop(conn);
+
+        let Err(error) = open_registered_schema(&path).await else {
+            panic!("a same-shaped queue index with the wrong predicate must be refused");
+        };
+        assert!(
+            error.to_string().contains("projection_queue"),
+            "schema refusal must identify the incompatible queue index: {error}"
+        );
+    }
+
     #[tokio::test]
     async fn performance_indexes_install_outside_schema_transaction() {
         let temp = TempDir::new().unwrap();
@@ -630,7 +757,9 @@ mod tests {
         drop(open_registered_schema(&path).await.unwrap());
         let conn = TestConnection::open(&path);
         conn.execute_batch(
-            "DROP INDEX idx_observation_projection_provenance_output;
+            "DROP INDEX idx_projection_queue_active_sequence;
+             DROP INDEX idx_projection_queue_retry_deadline;
+             DROP INDEX idx_observation_projection_provenance_output;
              DROP INDEX idx_observation_projection_provenance_global_output;
              DROP INDEX idx_observation_workflow_facts_query;
              DROP INDEX idx_observation_workflow_facts_item;
@@ -656,6 +785,8 @@ mod tests {
             .query(
                 "SELECT name FROM sqlite_schema
                  WHERE name IN (
+                    'idx_projection_queue_active_sequence',
+                    'idx_projection_queue_retry_deadline',
                     'idx_observation_projection_provenance_output',
                     'idx_observation_projection_provenance_global_output',
                     'idx_observation_workflow_facts_query',

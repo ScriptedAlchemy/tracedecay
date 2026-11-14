@@ -161,7 +161,7 @@ pub(crate) fn starts_with_ignore_ascii_case(value: &str, prefix: &str) -> bool {
         .is_some_and(|head| head.eq_ignore_ascii_case(prefix.as_bytes()))
 }
 
-fn normalize_trigger_sql(sql: &str) -> String {
+fn normalize_schema_sql(sql: &str) -> String {
     sql.trim_end_matches(';')
         .split_whitespace()
         .collect::<Vec<_>>()

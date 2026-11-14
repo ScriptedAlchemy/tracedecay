@@ -10,11 +10,14 @@ use tracedecay_rusqlite_runtime::repository::{
     GraphPublicationSchemaObjectV1, canonical_graph_publication_schema_inventory,
 };
 
+use crate::observation_projection::ACTIVE_QUEUE_INDEX_SQL;
+
 use super::super::{global_db_operation_error, global_db_operation_message};
 use super::definitions::{
     Column, INDEX_DESCENDING_COLUMNS, INDEX_EXPRESSION_COLUMN, INDEXES, Index,
     REGISTRY_TABLE_NAMES, TABLES, Table,
 };
+use super::normalize_schema_sql;
 use super::pragma::{
     ActualColumn, ActualForeignKey, ActualIndex, ActualTableMetadata, read_table_metadata,
 };
@@ -151,11 +154,25 @@ fn foreign_keys_match(actual: &[ActualForeignKey], contract: &Table) -> bool {
         })
 }
 
+// SQLite's partial-index boolean does not establish which rows the index
+// covers. The queue's ordered-head plan depends on this exact terminal bound;
+// a same-named index with a narrower predicate is not interchangeable.
+fn queue_active_index_predicate_matches(definition_sql: Option<&str>) -> bool {
+    let Some(sql) = definition_sql else {
+        return false;
+    };
+    // sqlite_schema stores CREATE INDEX without IF NOT EXISTS. Compare the
+    // complete stored definition so SQL comments cannot stand in for a predicate.
+    let expected = ACTIVE_QUEUE_INDEX_SQL.replacen(" IF NOT EXISTS", "", 1);
+    normalize_schema_sql(sql) == normalize_schema_sql(&expected)
+}
+
 fn index_matches(actual: &ActualIndex, expected: &Index) -> bool {
     let expected_partial = expected.name.is_some_and(|name| {
         name.eq_ignore_ascii_case("idx_session_temporal_generations_one_active")
             || name.eq_ignore_ascii_case("idx_session_refresh_operations_one_running")
             || name.eq_ignore_ascii_case("idx_observations_valid_session_sequence")
+            || name.eq_ignore_ascii_case("idx_projection_queue_active_sequence")
     });
     if expected
         .name
@@ -164,6 +181,8 @@ fn index_matches(actual: &ActualIndex, expected: &Index) -> bool {
         || !actual.origin.eq_ignore_ascii_case(expected.origin)
         || actual.partial != expected_partial
         || actual.columns.len() != expected.columns.len()
+        || (expected.name == Some("idx_projection_queue_active_sequence")
+            && !queue_active_index_predicate_matches(actual.definition_sql.as_deref()))
     {
         return false;
     }

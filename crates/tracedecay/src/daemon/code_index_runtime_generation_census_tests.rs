@@ -1,16 +1,21 @@
 //! Mounted sealed-generation runtime-census journey coverage.
 
 use std::fs;
+use std::sync::Arc;
 
 use serde_json::{Value, json};
 use tempfile::TempDir;
 
 use crate::mcp::tools::handlers::{ToolCallRegistryOptions, dispatch_on_graph_authority};
 use crate::test_support::git::git;
-use tracedecay_code_index_runtime::code_index_scheduler::CodeIndexSchedulerRegistryV1;
+use tracedecay_code_index_runtime::code_index_scheduler::{
+    CodeIndexReconcileOutcomeV1, CodeIndexSchedulerRegistryV1, CodeIndexWorktreeSchedulerV1,
+    SharedCodeIndexBytePoolV1, scoped_code_index_store_root,
+};
 use tracedecay_code_index_runtime::project_reads::project_code_index_generation_census_reader;
 use tracedecay_code_index_runtime::resolved_scope_for_project;
 use tracedecay_project::project::TraceDecay;
+use tracedecay_runtime_core::native_runtime;
 use tracedecay_runtime_core::path_safety::canonical_existing_identity;
 use tracedecay_runtime_core::runtime_telemetry::{
     GenerationCensusSnapshot, GenerationCensusUnavailableReason,
@@ -36,9 +41,31 @@ async fn runtime_mcp_refuses_counts_until_the_mounted_graph_can_serve_queries() 
     )
     .await
     .expect("open v32 mounted runtime fixture");
-    let schedulers = CodeIndexSchedulerRegistryV1::new(1);
-    let mut publications = schedulers.subscribe_generation_publications();
     let sealed_store = dir.path().join("sealed-code-index");
+    let canonical_project = canonical_existing_identity(&project).expect("canonical fixture root");
+    let scoped_store = scoped_code_index_store_root(&sealed_store, &canonical_project);
+    let seed_project_id = project_id.clone();
+    // Census readiness needs a real decoded generation. Prepare its immutable
+    // input before mounting so the serving deadline measures that prerequisite,
+    // without also racing an unrelated cold capture and seal.
+    let prepared_generation = native_runtime::spawn_blocking(move || {
+        let mut scheduler = CodeIndexWorktreeSchedulerV1::open(
+            seed_project_id,
+            &canonical_project,
+            scoped_store,
+            Arc::new(SharedCodeIndexBytePoolV1::default()),
+        )
+        .expect("open fixture generation owner");
+        match scheduler.reconcile_now().expect("seal fixture generation") {
+            CodeIndexReconcileOutcomeV1::Published(evidence) => evidence.generation_id,
+            CodeIndexReconcileOutcomeV1::Noop(_) => {
+                panic!("fresh fixture must publish a generation")
+            }
+        }
+    })
+    .await
+    .expect("prepare fixture generation");
+    let schedulers = CodeIndexSchedulerRegistryV1::new(1);
     schedulers
         .mount_worktree(project_id.clone(), &project, sealed_store)
         .await
@@ -48,19 +75,45 @@ async fn runtime_mcp_refuses_counts_until_the_mounted_graph_can_serve_queries() 
     let generation_census_reader =
         project_code_index_generation_census_reader(schedulers.clone(), project.clone(), scope);
 
-    if schedulers.latest_generation_id(&project).await.is_none() {
-        let canonical_project =
-            canonical_existing_identity(&project).expect("canonical fixture root");
-        tokio::time::timeout(std::time::Duration::from_secs(5), async {
-            loop {
-                let publication = publications.recv().await.expect("generation publication");
-                if publication.project_root == canonical_project {
-                    break;
-                }
+    let seated_generation = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        let mut serving_changes = schedulers
+            .subscribe_serving_generation_changes(&project)
+            .await
+            .expect("mounted serving-generation watch");
+        assert!(
+            schedulers.request_complete_generation(&project).await,
+            "mounted fixture admits complete-generation demand"
+        );
+        loop {
+            if let Some(generation) = schedulers
+                .serving_code_scope(&project)
+                .await
+                .expect("mounted fixture scope")
+                .serving_generation
+            {
+                break generation;
             }
-        })
-        .await
-        .expect("sealed generation must publish for the mounted root");
+            serving_changes
+                .changed()
+                .await
+                .expect("serving-generation owner stays mounted");
+        }
+    })
+    .await
+    .expect("decoded generation must seat for the mounted root");
+    assert_eq!(
+        seated_generation.manifest().generation_id,
+        prepared_generation
+    );
+    for name in ["alpha", "beta"] {
+        assert!(
+            seated_generation
+                .symbols()
+                .symbols
+                .iter()
+                .any(|symbol| symbol.simple_name == name),
+            "the mounted decoded generation contains fixture symbol {name}"
+        );
     }
 
     let result = dispatch_on_graph_authority(
