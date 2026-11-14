@@ -18,6 +18,7 @@ mkdir inventories new-inventories
 gh api "repos/${repo}/releases/tags/${tag}" --jq '.assets[].name' > "$retained_dir/remote-names"
 python3 .release-automation/scripts/plan-release-recovery.py \
   --manifest .github/release-targets.json --tag "$tag" --profile "$profile" \
+  --execution-manifest .release-automation/.github/release-targets.json \
   --asset-names "$retained_dir/remote-names" \
   --retained-output "$retained_dir/names" --github-output "$retained_dir/planner-output"
 mkdir "$retained_dir/assets"
