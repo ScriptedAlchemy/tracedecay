@@ -80,6 +80,13 @@ impl DatabaseEngineWriteConnection {
         self.conn.execute_batch(sql).await
     }
 
+    pub async fn execute_statements(
+        &self,
+        statements: Vec<crate::db::engine::WriteStatement>,
+    ) -> crate::db::engine::Result<Vec<u64>> {
+        self.conn.execute_statements(statements).await
+    }
+
     pub(crate) async fn authorized_long_lease_transaction(
         &self,
     ) -> crate::db::engine::Result<DatabaseEngineLongLeaseTransaction> {
@@ -112,6 +119,13 @@ impl crate::db::engine::Executor for DatabaseEngineWriteConnection {
         P: crate::db::engine::IntoParams,
     {
         DatabaseEngineWriteConnection::execute(self, sql, params).await
+    }
+
+    async fn execute_statements(
+        &self,
+        statements: Vec<crate::db::engine::WriteStatement>,
+    ) -> crate::db::engine::Result<Vec<u64>> {
+        DatabaseEngineWriteConnection::execute_statements(self, statements).await
     }
 
     async fn execute_batch(&self, sql: &str) -> crate::db::engine::Result<()> {
@@ -257,6 +271,13 @@ impl DatabaseEngineLongLeaseTransaction {
     pub(crate) async fn rollback(self) -> crate::db::engine::Result<()> {
         self.transaction.rollback().await
     }
+
+    pub(crate) async fn execute_statements(
+        &self,
+        statements: Vec<crate::db::engine::WriteStatement>,
+    ) -> crate::db::engine::Result<Vec<u64>> {
+        self.transaction.execute_statements(statements).await
+    }
 }
 
 impl crate::db::engine::QueryExecutor for DatabaseEngineLongLeaseTransaction {
@@ -278,6 +299,13 @@ impl crate::db::engine::Executor for DatabaseEngineLongLeaseTransaction {
         P: crate::db::engine::IntoParams,
     {
         self.transaction.execute(sql, params).await
+    }
+
+    async fn execute_statements(
+        &self,
+        statements: Vec<crate::db::engine::WriteStatement>,
+    ) -> crate::db::engine::Result<Vec<u64>> {
+        DatabaseEngineLongLeaseTransaction::execute_statements(self, statements).await
     }
 
     async fn execute_batch(&self, sql: &str) -> crate::db::engine::Result<()> {
@@ -326,6 +354,18 @@ impl<'a> DatabaseMemoryTransaction<'a> {
                 "cannot execute a write in a memory read snapshot".to_owned(),
             )),
             Self::Write(transaction) => transaction.execute_batch_engine(sql).await,
+        }
+    }
+
+    pub async fn execute_statements(
+        &self,
+        statements: Vec<crate::db::engine::WriteStatement>,
+    ) -> crate::db::engine::Result<Vec<u64>> {
+        match self {
+            Self::Read(_) => Err(crate::db::engine::Error::Runtime(
+                "cannot execute a write in a memory read snapshot".to_owned(),
+            )),
+            Self::Write(transaction) => transaction.execute_statements(statements).await,
         }
     }
 
@@ -393,6 +433,13 @@ impl crate::db::engine::Executor for DatabaseMemoryTransaction<'_> {
         DatabaseMemoryTransaction::execute(self, sql, params).await
     }
 
+    async fn execute_statements(
+        &self,
+        statements: Vec<crate::db::engine::WriteStatement>,
+    ) -> crate::db::engine::Result<Vec<u64>> {
+        DatabaseMemoryTransaction::execute_statements(self, statements).await
+    }
+
     async fn execute_batch(&self, sql: &str) -> crate::db::engine::Result<()> {
         DatabaseMemoryTransaction::execute_batch(self, sql).await
     }
@@ -419,6 +466,18 @@ impl DatabaseWriteTransaction<'_> {
 
     pub async fn execute_batch(&self, sql: &str) -> crate::db::engine::Result<()> {
         self.transaction.execute_batch(sql).await
+    }
+
+    /// Submits owned writes in one writer admission.
+    ///
+    /// The wrapper must forward to the engine transaction's batched
+    /// submission; a per-statement loop here would turn a bounded page into
+    /// one writer admission per statement.
+    pub async fn execute_statements(
+        &self,
+        statements: Vec<crate::db::engine::WriteStatement>,
+    ) -> crate::db::engine::Result<Vec<u64>> {
+        self.transaction.execute_statements(statements).await
     }
 
     pub async fn execute_batch_engine(&self, sql: &str) -> crate::db::engine::Result<()> {
@@ -519,6 +578,13 @@ impl crate::db::engine::Executor for DatabaseWriteTransaction<'_> {
         P: crate::db::engine::IntoParams,
     {
         self.execute_engine(sql, params).await
+    }
+
+    async fn execute_statements(
+        &self,
+        statements: Vec<crate::db::engine::WriteStatement>,
+    ) -> crate::db::engine::Result<Vec<u64>> {
+        DatabaseWriteTransaction::execute_statements(self, statements).await
     }
 
     async fn execute_batch(&self, sql: &str) -> crate::db::engine::Result<()> {

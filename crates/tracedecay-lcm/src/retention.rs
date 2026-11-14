@@ -660,6 +660,17 @@ impl Executor for RetentionWriteTransaction<'_> {
             Self::Connection(transaction) => transaction.execute_batch(sql).await,
         }
     }
+
+    async fn execute_statements(
+        &self,
+        statements: Vec<tracedecay_runtime_core::db::engine::WriteStatement>,
+    ) -> tracedecay_runtime_core::db::engine::Result<Vec<u64>> {
+        match self {
+            Self::Database(transaction) => transaction.execute_statements(statements).await,
+            #[cfg(test)]
+            Self::Connection(transaction) => transaction.execute_statements(statements).await,
+        }
+    }
 }
 
 #[derive(Clone, Copy)]

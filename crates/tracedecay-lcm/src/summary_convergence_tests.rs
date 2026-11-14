@@ -52,6 +52,17 @@ impl Executor for CountingExecutor<'_> {
         self.executes.set(self.executes.get() + 1);
         self.inner.execute_batch(sql).await
     }
+
+    async fn execute_statements(
+        &self,
+        statements: Vec<tracedecay_runtime_core::db::engine::WriteStatement>,
+    ) -> EngineResult<Vec<u64>> {
+        self.executes.set(self.executes.get() + statements.len());
+        let results = self.inner.execute_statements(statements).await?;
+        let changed = results.iter().copied().sum::<u64>();
+        self.rows_changed.set(self.rows_changed.get() + changed);
+        Ok(results)
+    }
 }
 
 async fn fetch_i64(conn: &TestConnection, sql: &str, params: impl IntoParams) -> i64 {

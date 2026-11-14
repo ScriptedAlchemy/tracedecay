@@ -250,6 +250,8 @@ async fn structured_different_media_and_external_representations_are_retained() 
     let report = store.tick(48).await;
     assert_eq!(report.rows_scanned, 5);
     assert_eq!(report.rows_compacted, 0);
+    assert_eq!(report.rows_skipped, 5);
+    assert_eq!(report.rows_skipped_oversized, 0);
     assert_eq!(report.metadata_bytes_removed, 0);
     // All five provider representations still carry their original content.
     assert_eq!(scalar(&store.conn, "SELECT COUNT(*) FROM lcm_raw_messages WHERE json_type(metadata_json, '$.active_replay.content') IS NOT NULL").await, 5);
@@ -348,14 +350,20 @@ async fn stale_metadata_cannot_be_overwritten_and_missing_guard_refuses_repair()
 async fn row_and_byte_budgets_advance_a_durable_frontier_and_finished_pages_are_noops() {
     let store = Store::open().await;
     let text = "bounded replay text ".repeat(35_000);
+    let mut metadata_bytes = Vec::new();
     for ordinal in 1..=4 {
-        store
+        let id = store
             .insert(ordinal, &text, Value::String(text.clone()), true)
             .await;
+        let message = raw::load_raw_message_by_store_id(&store.conn, id)
+            .await
+            .unwrap();
+        metadata_bytes.push(message.metadata_json.unwrap().len() as u64);
     }
     let first = store.tick(1).await;
     assert_eq!(first.rows_scanned, 1);
     assert_eq!(first.rows_compacted, 1);
+    assert_eq!(first.metadata_bytes_examined, metadata_bytes[0]);
     assert!(first.has_more);
     assert_eq!(frontier(&store.conn).await.unwrap(), 1);
     let second = store.tick(48).await;
@@ -364,8 +372,339 @@ async fn row_and_byte_budgets_advance_a_durable_frontier_and_finished_pages_are_
         "byte cap stops before the third large row"
     );
     assert!(second.has_more);
+    assert_eq!(
+        second.metadata_bytes_examined,
+        metadata_bytes[1..1 + second.rows_scanned as usize]
+            .iter()
+            .sum::<u64>(),
+        "the body budget must not pre-parse replay metadata for deferred rows"
+    );
     let last = store.tick(48).await;
+    assert_eq!(
+        last.metadata_bytes_examined,
+        metadata_bytes[1 + second.rows_scanned as usize..]
+            .iter()
+            .sum::<u64>()
+    );
     assert!(!last.has_more);
     let idle = store.tick(48).await;
     assert_eq!(idle, ReplayMetadataCompactionReport::default());
+}
+
+#[tokio::test]
+async fn zero_compaction_pages_advance_distinct_durable_frontiers() {
+    let store = Store::open().await;
+    for ordinal in 1..=52 {
+        store
+            .insert(
+                ordinal,
+                "canonical source",
+                Value::String("different replay".to_owned()),
+                false,
+            )
+            .await;
+    }
+    let first = store.tick(48).await;
+    assert_eq!(first.rows_scanned, 48);
+    assert_eq!(first.rows_compacted, 0);
+    assert_eq!(first.rows_skipped, 48);
+    assert_eq!(first.rows_skipped_oversized, 0);
+    assert_eq!(first.frontier_before, Some(0));
+    assert_eq!(first.frontier_after, Some(48));
+    assert!(first.has_more);
+
+    let second = store.tick(48).await;
+    assert_eq!(second.rows_scanned, 4);
+    assert_eq!(second.rows_compacted, 0);
+    assert_eq!(second.rows_skipped, 4);
+    assert_eq!(second.rows_skipped_oversized, 0);
+    assert_eq!(second.frontier_before, Some(48));
+    assert_eq!(second.frontier_after, Some(52));
+    assert!(!second.has_more);
+    assert_eq!(frontier(&store.conn).await.unwrap(), 52);
+
+    assert_eq!(
+        store.tick(48).await,
+        ReplayMetadataCompactionReport::default()
+    );
+}
+
+#[tokio::test]
+async fn large_ineligible_metadata_is_bounded_before_eligibility_checks() {
+    let store = Store::open().await;
+    let structured = serde_json::json!([{
+        "type": "text",
+        "text": "retained structured replay ".repeat(20_000)
+    }]);
+    let mut originals = Vec::new();
+    for ordinal in 1..=9 {
+        let id = store
+            .insert(ordinal, "small verified body", structured.clone(), false)
+            .await;
+        originals.push((
+            id,
+            raw::load_raw_message_by_store_id(&store.conn, id)
+                .await
+                .unwrap(),
+        ));
+    }
+    let total_metadata_bytes: u64 = originals
+        .iter()
+        .map(|(_, message)| message.metadata_json.as_ref().unwrap().len() as u64)
+        .sum();
+    assert!(total_metadata_bytes > MAX_BATCH_BYTES);
+    assert!(
+        originals
+            .iter()
+            .all(|(_, message)| { message.metadata_json.as_ref().unwrap().len() < 1024 * 1024 })
+    );
+
+    let mut after = 0;
+    let mut examined = 0;
+    let mut scanned = 0;
+    let mut ticks = 0;
+    for _ in 0..originals.len() {
+        let report = store.tick(MAX_REPLAY_METADATA_COMPACTION_ROWS).await;
+        ticks += 1;
+        assert!(report.rows_scanned > 0);
+        assert_eq!(report.rows_compacted, 0);
+        assert_eq!(report.rows_skipped, report.rows_scanned);
+        assert_eq!(report.rows_skipped_oversized, 0);
+        assert_eq!(report.metadata_bytes_removed, 0);
+        assert!(report.metadata_bytes_examined > 0);
+        assert!(report.metadata_bytes_examined <= MAX_BATCH_BYTES);
+        assert_eq!(report.frontier_before, Some(after));
+        let next = report.frontier_after.unwrap();
+        assert!(next > after);
+        assert_eq!(frontier(&store.conn).await.unwrap(), next);
+        after = next;
+        examined += report.metadata_bytes_examined;
+        scanned += report.rows_scanned;
+        if !report.has_more {
+            break;
+        }
+    }
+    assert!(ticks > 1, "ineligible JSON must obey the byte budget too");
+    assert_eq!(scanned, originals.len() as u64);
+    assert_eq!(examined, total_metadata_bytes, "no document is revisited");
+    assert_eq!(after, originals.last().unwrap().0);
+    assert_eq!(
+        store.tick(MAX_REPLAY_METADATA_COMPACTION_ROWS).await,
+        ReplayMetadataCompactionReport::default()
+    );
+    for (id, original) in originals {
+        assert_eq!(
+            raw::load_raw_message_by_store_id(&store.conn, id)
+                .await
+                .unwrap(),
+            original,
+            "bounded scanning must preserve the body, replay and receipts"
+        );
+    }
+}
+
+#[tokio::test]
+async fn oversized_metadata_is_preserved_without_blocking_later_compaction() {
+    let store = Store::open().await;
+    let text = "verified duplicate content ".repeat(80);
+    let oversized_id = store
+        .insert(1, &text, Value::String(text.clone()), false)
+        .await;
+    let next_id = store
+        .insert(2, &text, Value::String(text.clone()), false)
+        .await;
+    // Bypass ingress only to exercise a pre-existing oversized stored document.
+    // The repair must not parse or rewrite it, nor pin the durable frontier.
+    let oversized = serde_json::json!({
+        "lcm_active_replay": true,
+        "active_replay": {"content": text},
+        "padding": "x".repeat(MAX_BATCH_BYTES as usize)
+    })
+    .to_string();
+    store
+        .conn
+        .execute(
+            "UPDATE lcm_raw_messages SET metadata_json = ?1 WHERE store_id = ?2",
+            params![oversized.as_str(), oversized_id],
+        )
+        .await
+        .unwrap();
+    let report = store.tick(MAX_REPLAY_METADATA_COMPACTION_ROWS).await;
+    assert_eq!(report.rows_scanned, 2);
+    assert_eq!(report.rows_skipped, 1);
+    assert_eq!(report.rows_skipped_oversized, 1);
+    assert_eq!(report.rows_compacted, 1);
+    assert!(report.metadata_bytes_examined > 0);
+    assert!(report.metadata_bytes_examined < MAX_BATCH_BYTES);
+    assert_eq!(report.frontier_after, Some(next_id));
+    assert_eq!(frontier(&store.conn).await.unwrap(), next_id);
+    assert!(!report.has_more);
+    let mut rows = store
+        .conn
+        .query(
+            "SELECT metadata_json FROM lcm_raw_messages WHERE store_id = ?1",
+            params![oversized_id],
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        rows.next()
+            .await
+            .unwrap()
+            .unwrap()
+            .get::<String>(0)
+            .unwrap(),
+        oversized
+    );
+    drop(rows);
+    assert_eq!(
+        store.tick(MAX_REPLAY_METADATA_COMPACTION_ROWS).await,
+        ReplayMetadataCompactionReport::default()
+    );
+    summary_convergence::validate_raw_update_guard(&store.conn)
+        .await
+        .unwrap();
+}
+
+async fn assert_checkpoint_refusal_is_atomic(store: &Store, id: i64, trigger_sql: &str) {
+    let checkpoint = schema::get_gc_meta(&store.conn, FRONTIER_KEY)
+        .await
+        .unwrap();
+    let before = frontier(&store.conn).await.unwrap();
+    let original = raw::load_raw_message_by_store_id(&store.conn, id)
+        .await
+        .unwrap();
+    assert!(compacted_metadata(&original).unwrap().is_some());
+    let revision = scalar(
+        &store.conn,
+        "SELECT raw_revision_generation FROM lcm_summary_convergence_queue",
+    )
+    .await;
+    store.conn.execute_batch(trigger_sql).await.unwrap();
+    let transaction = store
+        .conn
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .await
+        .unwrap();
+    let error = step(&transaction, 48).await.unwrap_err();
+    assert!(error.to_string().contains("frontier was not persisted"));
+    let staged = raw::load_raw_message_by_store_id(&transaction, id)
+        .await
+        .unwrap();
+    assert_ne!(staged.metadata_json, original.metadata_json);
+    assert!(metadata(&staged)["active_replay"].get("content").is_none());
+    transaction.rollback().await.unwrap();
+
+    assert_eq!(
+        schema::get_gc_meta(&store.conn, FRONTIER_KEY)
+            .await
+            .unwrap(),
+        checkpoint,
+        "rollback preserves even an absent checkpoint"
+    );
+    assert_eq!(
+        raw::load_raw_message_by_store_id(&store.conn, id)
+            .await
+            .unwrap(),
+        original,
+        "a refused checkpoint must restore the complete message and receipts"
+    );
+    assert_eq!(
+        scalar(
+            &store.conn,
+            "SELECT raw_revision_generation FROM lcm_summary_convergence_queue"
+        )
+        .await,
+        revision
+    );
+    summary_convergence::validate_raw_update_guard(&store.conn)
+        .await
+        .unwrap();
+
+    store
+        .conn
+        .execute_batch("DROP TRIGGER refuse_replay_checkpoint")
+        .await
+        .unwrap();
+    let recovered = store.tick(48).await;
+    assert_eq!(recovered.rows_scanned, 1);
+    assert_eq!(recovered.rows_compacted, 1);
+    assert!(recovered.metadata_bytes_removed > 0);
+    assert_eq!(recovered.frontier_before, Some(before));
+    assert_eq!(recovered.frontier_after, Some(id));
+    assert_eq!(frontier(&store.conn).await.unwrap(), id);
+    assert!(!recovered.has_more);
+    let repaired = raw::load_raw_message_by_store_id(&store.conn, id)
+        .await
+        .unwrap();
+    assert_eq!(repaired.content, original.content);
+    assert_eq!(repaired.content_hash, original.content_hash);
+    assert_eq!(
+        crate::replay_transactions::raw_replay_message(&repaired),
+        crate::replay_transactions::raw_replay_message(&original)
+    );
+    assert_eq!(
+        store.tick(48).await,
+        ReplayMetadataCompactionReport::default()
+    );
+}
+
+#[tokio::test]
+async fn ignored_initial_checkpoint_rolls_back_compaction() {
+    let store = Store::open().await;
+    let text = "verified replay checkpoint content ".repeat(80);
+    let id = store
+        .insert(1, &text, Value::String(text.clone()), false)
+        .await;
+    let trigger = format!(
+        "CREATE TRIGGER refuse_replay_checkpoint BEFORE INSERT ON lcm_gc_meta
+         WHEN NEW.key = '{FRONTIER_KEY}' BEGIN SELECT RAISE(IGNORE); END"
+    );
+    assert_checkpoint_refusal_is_atomic(&store, id, &trigger).await;
+}
+
+#[tokio::test]
+async fn rewritten_checkpoint_cannot_claim_durable_progress() {
+    let store = Store::open().await;
+    let text = "verified replay checkpoint content ".repeat(80);
+    let previous_id = store
+        .insert(1, &text, Value::String(text.clone()), false)
+        .await;
+    let first = store.tick(48).await;
+    assert_eq!(first.rows_compacted, 1);
+    assert_eq!(first.frontier_after, Some(previous_id));
+    let id = store
+        .insert(2, &text, Value::String(text.clone()), false)
+        .await;
+    // A successful INSERT can still leave a different checkpoint behind.
+    // Counting affected rows alone cannot detect this failure.
+    let trigger = format!(
+        "CREATE TRIGGER refuse_replay_checkpoint AFTER INSERT ON lcm_gc_meta
+         WHEN NEW.key = '{FRONTIER_KEY}' BEGIN
+             UPDATE lcm_gc_meta SET value = '{previous_id}' WHERE key = NEW.key;
+         END"
+    );
+    assert_checkpoint_refusal_is_atomic(&store, id, &trigger).await;
+}
+
+#[tokio::test]
+async fn idle_page_does_not_initialize_a_checkpoint() {
+    let store = Store::open().await;
+    let trigger = format!(
+        "CREATE TRIGGER refuse_replay_checkpoint BEFORE INSERT ON lcm_gc_meta
+         WHEN NEW.key = '{FRONTIER_KEY}' BEGIN
+             SELECT RAISE(ABORT, 'idle page attempted a checkpoint write');
+         END"
+    );
+    store.conn.execute_batch(&trigger).await.unwrap();
+    assert_eq!(
+        store.tick(48).await,
+        ReplayMetadataCompactionReport::default()
+    );
+    assert_eq!(
+        schema::get_gc_meta(&store.conn, FRONTIER_KEY)
+            .await
+            .unwrap(),
+        None
+    );
 }
