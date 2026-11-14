@@ -276,28 +276,18 @@ where
     let (ready_tx, ready_rx) = mpsc::channel();
     let (request_tx, request_rx) = mpsc::channel();
     let script = Arc::new(script);
-    let startup = Arc::new(Mutex::new(("await thread start", Instant::now())));
-    let server_startup = Arc::clone(&startup);
     let server = std::thread::spawn(move || {
-        let phase = |name| {
-            *server_startup.lock().expect("fake daemon startup phase") = (name, Instant::now());
-        };
-        phase("remove prior socket");
         let _ = std::fs::remove_file(&socket);
-        phase("acquire durable authority");
         let authority = DaemonAuthority::acquire(
             socket.parent().expect("socket parent"),
             &DaemonEndpoint::Unix(socket.clone()),
             env!("CARGO_PKG_VERSION"),
         )
         .expect("seed fake daemon authority");
-        phase("bind listener");
         let listener = UnixListener::bind(&socket).expect("bind fake daemon");
-        phase("set nonblocking listener");
         listener
             .set_nonblocking(true)
             .expect("nonblocking listener");
-        phase("signal readiness");
         ready_tx.send(()).expect("signal daemon ready");
         let accept_deadline = Instant::now() + ACCEPT_HANG_GUARD;
         let mut workers = Vec::new();
@@ -372,15 +362,7 @@ where
     });
     ready_rx
         .recv_timeout(LOCAL_TIMEOUT)
-        .unwrap_or_else(|error| {
-            let phase = startup
-                .try_lock()
-                .map(|progress| (progress.0, progress.1.elapsed()));
-            panic!(
-                "fake daemon ready: {error:?}; phase={phase:?}; server_finished={}",
-                server.is_finished(),
-            );
-        });
+        .expect("fake daemon ready");
     (request_rx, server)
 }
 
