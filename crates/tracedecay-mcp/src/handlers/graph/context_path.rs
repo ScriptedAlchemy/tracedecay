@@ -5,11 +5,11 @@ mod tests;
 
 use std::collections::{BTreeMap, HashSet};
 use std::future::Future;
-use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use tracedecay_code_index::graph_projection::CodeGraphSymbolSummaryV1;
+use tracedecay_code_index::source_walk::submodules::LiveSourceBoundaries;
 use tracedecay_code_index_runtime::code_index_scheduler::sealed_source_bytes;
 use tracedecay_contracts::code_index_freshness::CodeIndexFreshnessPayloadV1;
 use tracedecay_contracts::retrieval::{
@@ -157,7 +157,14 @@ pub(super) async fn context_call_path(
     let code = if let Some(max_code_blocks) = code_block_limit
         && let ContextCallPathOutcomeV1::Found { nodes, .. } = &mut result.outcome
     {
-        match path_source(graph, symbols, max_code_blocks).await {
+        match path_source(
+            graph,
+            symbols,
+            max_code_blocks,
+            ctx.index_path_policy().includes_submodules(),
+        )
+        .await
+        {
             Ok((sources, code)) => {
                 for (node, source) in nodes.iter_mut().zip(sources) {
                     node.source = source;
@@ -355,6 +362,7 @@ async fn path_source(
     graph: &VerifiedGraphQuery,
     symbols: Vec<CodeGraphSymbolSummaryV1>,
     max_code_blocks: usize,
+    include_submodules: bool,
 ) -> Result<(Vec<ContextPathSourceV1>, Vec<ContextCodeBlockV1>)> {
     let project_root = graph.project_root()?.to_path_buf();
     let mut files = BTreeMap::new();
@@ -372,8 +380,17 @@ async fn path_source(
     let worker_control = Arc::clone(&control);
     await_path_source(control, async move {
         tracedecay_runtime_core::native_runtime::spawn_blocking(move || {
+            worker_control.check()?;
+            let boundaries = LiveSourceBoundaries::open(&project_root, include_submodules)
+                .map_err(|error| {
+                    TraceDecayError::project_route(
+                        "context-call-path-source-unavailable",
+                        true,
+                        error.message,
+                    )
+                })?;
             read_path_source(
-                &project_root,
+                &boundaries,
                 &symbols,
                 &files,
                 max_code_blocks,
@@ -393,7 +410,7 @@ async fn path_source(
 }
 
 fn read_path_source(
-    project_root: &Path,
+    boundaries: &LiveSourceBoundaries,
     symbols: &[CodeGraphSymbolSummaryV1],
     files: &BTreeMap<String, Option<SanitizedCodeFileV1>>,
     max_code_blocks: usize,
@@ -423,7 +440,7 @@ fn read_path_source(
             continue;
         }
         let source = source_by_file.entry(path.to_owned()).or_insert_with(|| {
-            sealed_path_source(project_root, path, files.get(path).and_then(Option::as_ref))
+            sealed_path_source(boundaries, path, files.get(path).and_then(Option::as_ref))
                 .map_err(|error| unavailable_evidence(&error))
         });
         let block = match source {
@@ -444,7 +461,7 @@ fn read_path_source(
 }
 
 fn sealed_path_source(
-    project_root: &Path,
+    boundaries: &LiveSourceBoundaries,
     path: &str,
     file: Option<&SanitizedCodeFileV1>,
 ) -> Result<String> {
@@ -458,7 +475,7 @@ fn sealed_path_source(
     let language = file.language.as_ref().ok_or_else(|| {
         graph_symbol_corrupt(format!("call-path file '{path}' has no indexed language"))
     })?;
-    let source = sealed_source_bytes(project_root, path, language, &file.content_digest)
+    let source = sealed_source_bytes(boundaries, path, language, &file.content_digest)
         .map_err(|error| {
             TraceDecayError::project_route(
                 "context-call-path-source-unavailable",

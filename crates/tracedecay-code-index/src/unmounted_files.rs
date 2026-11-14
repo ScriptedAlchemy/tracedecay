@@ -48,10 +48,14 @@ mod rust;
 mod typescript;
 
 use std::collections::BTreeMap;
+use std::io;
 use std::path::{Component, Path, PathBuf};
+use std::sync::Arc;
 
 use tracedecay_domain::IndexPathPolicyV1;
 use tracedecay_domain::errors::{Result, TraceDecayError};
+
+use crate::source_walk::submodules::AuthenticatedSubmodule;
 
 /// One orphaned file and, where the ecosystem admits one, the smallest repair
 /// that would mount it.
@@ -152,29 +156,117 @@ pub struct ProjectAudit {
 pub(super) struct ProjectFiles {
     root: PathBuf,
     files: Vec<PathBuf>,
+    canonical_root: Option<PathBuf>,
+    checkouts: BTreeMap<PathBuf, Arc<AuthenticatedSubmodule>>,
+    nested_repository_note: Option<String>,
 }
 
 impl ProjectFiles {
     fn collect(project_root: &Path, path_policy: &IndexPathPolicyV1) -> Result<Self> {
-        let walk =
-            crate::source_walk::source_walk(project_root, None, path_policy).map_err(|error| {
-                TraceDecayError::Config {
+        let (walk, diagnostics) =
+            crate::source_walk::source_walk_with_diagnostics(project_root, None, path_policy)
+                .map_err(|error| TraceDecayError::Config {
                     message: format!("source walk rejected its own scope: {}", error.message),
-                }
-            })?;
+                })?;
         let mut files = Vec::new();
+        let mut checkouts = BTreeMap::new();
         for entry in walk {
-            let Ok(entry) = entry else { continue };
+            let entry = entry.map_err(|error| TraceDecayError::File {
+                message: format!("source walk did not complete: {error}"),
+                path: project_root.display().to_string(),
+            })?;
+            if let Some(child) = entry.child_binding() {
+                checkouts
+                    .entry(child.worktree.clone())
+                    .or_insert_with(|| Arc::clone(child));
+            }
             if !entry.file_type().is_some_and(|kind| kind.is_file()) {
                 continue;
             }
             files.push(entry.into_path());
         }
         files.sort();
-        Ok(Self {
+        let canonical_root = if checkouts.is_empty() {
+            None
+        } else {
+            Some(
+                project_root
+                    .canonicalize()
+                    .map_err(|error| input_error(project_root, error))?,
+            )
+        };
+        let files = Self {
             root: project_root.to_path_buf(),
             files,
+            canonical_root,
+            checkouts,
+            nested_repository_note: diagnostics.skipped_nested_repositories_note(),
+        };
+        files.require_live_checkouts()?;
+        Ok(files)
+    }
+
+    /// A declared Rust target or module may be outside the walked inventory.
+    /// Keep that reachability, while retaining the checkout authority for any
+    /// later read beneath an admitted child. Map the caller's root spelling to
+    /// its original canonical identity without resolving a possibly replaced
+    /// child directory during the lookup.
+    fn with_live_checkout<T>(
+        &self,
+        path: &Path,
+        read: impl FnOnce() -> io::Result<T>,
+    ) -> io::Result<T> {
+        if self.checkouts.is_empty() {
+            return read();
+        }
+        let path = normalized(path);
+        let identity = self
+            .canonical_root
+            .as_ref()
+            .and_then(|root| {
+                path.strip_prefix(normalized(&self.root))
+                    .ok()
+                    .map(|relative| root.join(relative))
+            })
+            .unwrap_or(path);
+        let child = identity
+            .ancestors()
+            .find_map(|root| self.checkouts.get(root));
+        match child {
+            Some(child) => child.with_live_checkout(read),
+            None => read(),
+        }
+    }
+
+    fn read_to_string(&self, path: &Path) -> io::Result<String> {
+        self.with_live_checkout(path, || std::fs::read_to_string(path))
+    }
+
+    fn metadata(&self, path: &Path) -> Result<Option<std::fs::Metadata>> {
+        self.with_live_checkout(path, || match std::fs::metadata(path) {
+            Ok(metadata) => Ok(Some(metadata)),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(error),
         })
+        .map_err(|error| input_error(path, error))
+    }
+
+    fn read_dir(&self, path: &Path) -> Result<Vec<std::fs::DirEntry>> {
+        self.with_live_checkout(path, || match std::fs::read_dir(path) {
+            Ok(entries) => entries.collect(),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(Vec::new()),
+            Err(error) => Err(error),
+        })
+        .map_err(|error| input_error(path, error))
+    }
+
+    fn require_live_checkouts(&self) -> Result<()> {
+        for (path, child) in &self.checkouts {
+            child
+                .require_live_checkout()
+                .map_err(|error| input_error(path, error))?;
+        }
+        Ok(())
     }
 
     pub(super) fn root(&self) -> &Path {
@@ -211,6 +303,13 @@ impl ProjectFiles {
     /// platform, so the same repository reads the same way everywhere.
     pub(super) fn relative(&self, path: &Path) -> String {
         relative_display(&self.root, path)
+    }
+}
+
+fn input_error(path: &Path, error: io::Error) -> TraceDecayError {
+    TraceDecayError::File {
+        message: format!("unmounted-file audit input is unavailable: {error}"),
+        path: path.display().to_string(),
     }
 }
 
@@ -258,6 +357,15 @@ pub fn audit_project(project_root: &Path, path_policy: &IndexPathPolicyV1) -> Re
     };
     let mut ecosystems = vec![rust, typescript];
     ecosystems.extend(unmodelled_ecosystems(&files));
+    if let Some(summary) = &files.nested_repository_note {
+        for ecosystem in &mut ecosystems {
+            ecosystem.note = Some(match ecosystem.note.take() {
+                Some(existing) => format!("{existing} {summary}"),
+                None => summary.clone(),
+            });
+        }
+    }
+    files.require_live_checkouts()?;
     Ok(ProjectAudit { ecosystems })
 }
 
@@ -372,6 +480,67 @@ mod tests {
         );
     }
 
+    #[test]
+    fn retained_audit_inputs_require_the_original_submodule_binding() {
+        let fixture = crate::source_walk::submodules::tests::fixture();
+        let root = fixture.path().join("parent");
+        write(
+            &root,
+            "app/Cargo.toml",
+            "[package]\nname = \"child\"\nversion = \"0.0.0\"\n",
+        );
+        write(
+            &root,
+            "app/src/lib.rs",
+            "#[path = \"../excluded/bridge.rs\"] mod bridge;\n",
+        );
+        write(
+            &root,
+            "app/excluded/bridge.rs",
+            "#[path = \"../src/mounted.rs\"] mod mounted;\n",
+        );
+        write(&root, "app/src/mounted.rs", "pub fn mounted() {}\n");
+        write(&root, "app/src/orphan.rs", "pub fn orphan() {}\n");
+        write(
+            &root,
+            "app/package.json",
+            r#"{"name":"child","main":"web/index.js"}"#,
+        );
+        write(&root, "app/web/index.js", "import './mounted';\n");
+        write(&root, "app/web/mounted.js", "export const mounted = 1;\n");
+        write(&root, "app/web/orphan.js", "export const orphan = 1;\n");
+        let policy = IndexPathPolicyV1::new(vec!["app/excluded/**".to_owned()], Vec::new())
+            .expect("excluded bridge policy")
+            .with_submodules(true);
+        let files = ProjectFiles::collect(&root, &policy).expect("authenticated inventory");
+        assert_eq!(files.checkouts.len(), 1);
+        assert!(!files.files.contains(&root.join("app/excluded/bridge.rs")));
+
+        let rust = super::rust::audit(&files).expect("declared paths retain reachability");
+        assert_eq!(rust.mounted_file_count, 3);
+        assert_eq!(rust.unmounted.len(), 1);
+        assert_eq!(rust.unmounted[0].file, "app/src/orphan.rs");
+        let typescript = super::typescript::audit(&files).expect("live TypeScript audit");
+        assert_eq!(typescript.status.as_str(), "audited");
+        assert_eq!(typescript.unmounted.len(), 1);
+        assert_eq!(typescript.unmounted[0].file, "app/web/orphan.js");
+
+        std::fs::remove_file(root.join(".gitmodules")).expect("retire child registration");
+        let denied = files
+            .read_to_string(&root.join("app/excluded/bridge.rs"))
+            .expect_err("declared paths retain the retired checkout binding");
+        assert_eq!(denied.kind(), std::io::ErrorKind::InvalidData);
+        assert!(matches!(
+            super::rust::audit(&files),
+            Err(tracedecay_domain::errors::TraceDecayError::File { .. })
+        ));
+        let typescript = super::typescript::audit(&files).expect("incomplete TypeScript audit");
+        assert_eq!(typescript.status.as_str(), "partial");
+        assert!(typescript.unmounted.is_empty());
+        assert!(files.require_live_checkouts().is_err());
+        assert!(files.read_to_string(&root.join("parent.rs")).is_ok());
+    }
+
     /// A language with no reachability model is named with its file count, so
     /// "no findings" can never be mistaken for "nothing was looked at".
     #[test]
@@ -393,6 +562,44 @@ mod tests {
             ecosystem(&audit, "typescript").status.as_str(),
             "not_present"
         );
+    }
+
+    #[test]
+    fn audit_reports_nested_repository_exclusion_without_claiming_child_code() {
+        let root = tempfile::tempdir().expect("project fixture");
+        write(
+            root.path(),
+            "Cargo.toml",
+            "[package]\nname = \"parent\"\nversion = \"0.0.0\"\n",
+        );
+        write(root.path(), "src/lib.rs", "pub fn parent() {}\n");
+        write(root.path(), "app/.git", "gitdir: ../.git/modules/app\n");
+        write(root.path(), "app/src/child.rs", "pub fn child() {}\n");
+        write(root.path(), "unrelated/.git/HEAD", "ref: refs/heads/main\n");
+        write(
+            root.path(),
+            "unrelated/src/foreign.rs",
+            "pub fn foreign() {}\n",
+        );
+
+        let audit = audit_project(root.path(), &no_exclusions()).expect("audit");
+        let rust = ecosystem(&audit, "rust");
+        assert_eq!(
+            rust.scanned_file_count, 1,
+            "child repositories are not parent source"
+        );
+        assert!(rust.unmounted.iter().all(|file| {
+            !file.file.starts_with("app/") && !file.file.starts_with("unrelated/")
+        }));
+        let note = rust.note.as_deref().expect("explicit scope diagnostic");
+        assert!(note.contains("Skipped nested repositories"), "{note}");
+        assert!(note.contains("app") && note.contains("unrelated"), "{note}");
+        assert!(audit.ecosystems.iter().all(|ecosystem| {
+            ecosystem
+                .note
+                .as_deref()
+                .is_some_and(|note| note.contains("Skipped nested repositories"))
+        }));
     }
 
     /// Both modelled ecosystems report in one pass over a polyglot repository.

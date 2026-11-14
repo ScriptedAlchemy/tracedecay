@@ -1,5 +1,6 @@
 //! `tracedecay_field_sites`, read and write references to a named field.
 
+use tracedecay_code_index::source_walk::submodules::LiveSourceBoundaries;
 use tracedecay_code_index_runtime::code_index_scheduler::sealed_source_bytes;
 use tracedecay_contracts::retrieval::{
     FieldSiteV1, FieldSitesResultV1, FieldSitesSurfaceRequestV1,
@@ -13,6 +14,7 @@ pub(super) async fn compute_field_sites(
     graph: &tracedecay_graph_query::VerifiedGraphQuery,
     args: Value,
     scope_prefix: Option<&str>,
+    include_submodules: bool,
 ) -> Result<GraphToolCompletionV1> {
     let request: FieldSitesSurfaceRequestV1 =
         decode_primitive_request(&args, "tracedecay_field_sites")?;
@@ -61,9 +63,16 @@ pub(super) async fn compute_field_sites(
             let mut reads: Vec<FieldSiteV1> = Vec::new();
             let mut touched: Vec<String> = Vec::new();
 
+            let boundaries = LiveSourceBoundaries::open(&project_root, include_submodules)
+                .map_err(|error| TraceDecayError::project_route(
+                    "verified-field-source-unavailable", true, error.message,
+                ))?;
             let needle = format!(".{field_name}");
             'outer: for file in &files {
-                let abs = project_root.join(file);
+                let Some((root, relative)) = boundaries.resolve(Path::new(file))? else {
+                    continue;
+                };
+                let abs = root.join(relative);
                 let Ok(disk_source) = tracedecay_runtime_core::sync::read_source_file(&abs) else {
                     continue;
                 };
@@ -76,7 +85,7 @@ pub(super) async fn compute_field_sites(
                 if !disk_source.contains(&needle) {
                     continue;
                 }
-                let source = sealed_field_source(&project_root, file, sealed_files.get(file))?;
+                let source = sealed_field_source(&boundaries, file, sealed_files.get(file))?;
                 let masked = path_is_rust(file).then(|| {
                     tracedecay_code_extraction::source_mask::masked_rust_source_with(
                         &source,
@@ -195,7 +204,7 @@ pub(super) async fn compute_field_sites(
 /// the generation sealed, which differ from the checkout when git's clean
 /// filters rewrite it (a CRLF checkout under `core.autocrlf=true`).
 fn sealed_field_source(
-    project_root: &Path,
+    boundaries: &LiveSourceBoundaries,
     file: &str,
     sealed: Option<&(LanguageId, ContentDigest)>,
 ) -> Result<String> {
@@ -208,7 +217,7 @@ fn sealed_field_source(
             ),
         ));
     };
-    let bytes = sealed_source_bytes(project_root, file, language, digest)
+    let bytes = sealed_source_bytes(boundaries, file, language, digest)
         .map_err(|error| {
             TraceDecayError::project_route(
                 "verified-field-source-unavailable",
