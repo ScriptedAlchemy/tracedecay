@@ -17,41 +17,6 @@ use tracedecay_global_db::{AnalyticsEventInsert, RegisteredGlobalDb};
 #[cfg(feature = "test-transport")]
 #[cfg(feature = "test-transport")]
 use tracedecay_runtime_core::tracedecay::current_timestamp;
-#[cfg(feature = "test-transport")]
-use tracing_subscriber::{
-    Layer,
-    filter::{LevelFilter, filter_fn},
-    fmt::format::FmtSpan,
-    layer::SubscriberExt,
-    util::SubscriberInitExt,
-};
-
-#[cfg(feature = "test-transport")]
-fn install_publication_phase_logging() {
-    static INIT: std::sync::Once = std::sync::Once::new();
-    INIT.call_once(|| {
-        let filter = filter_fn(|metadata| {
-            *metadata.level() <= tracing::Level::WARN
-                || matches!(
-                    metadata.target(),
-                    "tracedecay_code_index::production"
-                        | "tracedecay_code_index_runtime::code_index_scheduler::publication_store"
-                )
-        })
-        .with_max_level_hint(LevelFilter::TRACE);
-        let _ = tracing_subscriber::registry()
-            .with(
-                tracing_subscriber::fmt::layer()
-                    .with_ansi(false)
-                    .with_writer(std::io::stderr)
-                    .with_thread_ids(true)
-                    .with_span_events(FmtSpan::NEW | FmtSpan::CLOSE)
-                    .compact()
-                    .with_filter(filter),
-            )
-            .try_init();
-    });
-}
 
 #[cfg(feature = "test-transport")]
 fn assert_invalid_request(response: &Value, message: &str) {
@@ -134,7 +99,6 @@ fn ledger_row(run_id: &str, task: &str, status: &str, started_at: i64) -> String
 #[cfg(feature = "test-transport")]
 #[tokio::test]
 async fn analytics_automation_reports_a_ledger_that_exactly_fills_the_page_as_complete() {
-    install_publication_phase_logging();
     // The newest-rows page is bounded. A ledger holding exactly that many rows
     // is the whole ledger, not a truncated window: nothing was left behind.
     let fixture = production_composition_fixture().await;
@@ -896,7 +860,6 @@ async fn analytics_reconciles_public_catalog_with_alias_internal_and_unknown_or_
 #[cfg(feature = "test-transport")]
 #[tokio::test]
 async fn analytics_counts_a_rewrite_call_as_an_available_tool() {
-    install_publication_phase_logging();
     let fixture = production_composition_fixture().await;
     let project_id = RegisteredGlobalDb::canonical_project_key(&fixture.project_root);
     let timestamp = current_timestamp() - 60;
@@ -941,7 +904,6 @@ async fn analytics_counts_a_rewrite_call_as_an_available_tool() {
 #[cfg(feature = "test-transport")]
 #[tokio::test]
 async fn analytics_aggregates_sections_before_any_event_sample_cap() {
-    install_publication_phase_logging();
     let fixture = production_composition_fixture().await;
     let project_id = RegisteredGlobalDb::canonical_project_key(&fixture.project_root);
     let timestamp = current_timestamp() - 60;
@@ -1157,7 +1119,6 @@ async fn analytics_scope_all_counts_foreign_project_events_and_keeps_project_fac
 #[cfg(feature = "test-transport")]
 #[tokio::test]
 async fn analytics_applies_the_requested_window_and_refuses_one_out_of_range() {
-    install_publication_phase_logging();
     let fixture = production_composition_fixture().await;
     let project_id = RegisteredGlobalDb::canonical_project_key(&fixture.project_root);
     let now = current_timestamp();
