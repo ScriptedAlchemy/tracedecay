@@ -41,7 +41,7 @@ fn git(root: &Path, args: &[&str]) {
     );
 }
 
-fn fixture() -> TempDir {
+pub(crate) fn fixture() -> TempDir {
     let fixture = TempDir::new().unwrap();
     let parent = fixture.path().join("parent");
     let child = fixture.path().join("child");

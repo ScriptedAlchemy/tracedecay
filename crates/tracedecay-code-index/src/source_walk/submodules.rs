@@ -678,4 +678,4 @@ pub fn pinned_submodules(
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
