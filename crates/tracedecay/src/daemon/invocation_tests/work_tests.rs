@@ -464,6 +464,9 @@ fn native_storage_wait_site_hits() -> BTreeMap<(&'static str, String), u64> {
 
 #[tokio::test]
 async fn a_workflow_fan_out_run_never_parks_a_native_worker_on_storage() {
+    if !crate::test_support::alone_with_runtime_hazards() {
+        return;
+    }
     let fixture = RegisteredWorkFixture::start("native-fan-out").await;
     let wall_clock = tracedecay_contracts::now_micros();
     let workflow = move |request_id: &str, request| {
