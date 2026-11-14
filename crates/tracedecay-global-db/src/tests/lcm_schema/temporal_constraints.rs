@@ -71,10 +71,9 @@ async fn temporal_schema_rejects_cross_session_and_generation_rows() {
 async fn temporal_schema_rejects_invalid_current_assertion_and_valid_time_rows() {
     let tmp = TempDir::new().unwrap();
     let db_path = tmp.path().join(".tracedecay").join("sessions.db");
-    let db = open_global_db(&db_path)
+    initialize_global_db(&db_path)
         .await
         .expect("temporal schema initialization should not error");
-    drop(db);
 
     let raw_db = TestConnection::open(&db_path);
     let conn = (*raw_db).clone();
@@ -258,10 +257,9 @@ async fn temporal_schema_rejects_invalid_current_assertion_and_valid_time_rows()
 async fn temporal_schema_uses_explicit_projection_receipt_progress_counts() {
     let tmp = TempDir::new().unwrap();
     let db_path = tmp.path().join(".tracedecay").join("sessions.db");
-    let db = open_global_db(&db_path)
+    initialize_global_db(&db_path)
         .await
         .expect("temporal schema initialization should not error");
-    drop(db);
 
     let raw_db = TestConnection::open(&db_path);
     let conn = (*raw_db).clone();
@@ -365,10 +363,9 @@ async fn temporal_schema_uses_explicit_projection_receipt_progress_counts() {
 async fn temporal_schema_enforces_refresh_progress_and_terminal_receipts() {
     let tmp = TempDir::new().unwrap();
     let db_path = tmp.path().join(".tracedecay").join("sessions.db");
-    let db = open_global_db(&db_path)
+    initialize_global_db(&db_path)
         .await
         .expect("temporal schema initialization should not error");
-    drop(db);
 
     let raw_db = TestConnection::open(&db_path);
     let conn = (*raw_db).clone();
@@ -1160,10 +1157,9 @@ async fn temporal_schema_enforces_refresh_progress_and_terminal_receipts() {
 async fn temporal_schema_enforces_generation_state_machine_and_durability() {
     let tmp = TempDir::new().unwrap();
     let db_path = tmp.path().join(".tracedecay").join("sessions.db");
-    let db = open_global_db(&db_path)
+    initialize_global_db(&db_path)
         .await
         .expect("temporal schema initialization should not error");
-    drop(db);
 
     let raw_db = TestConnection::open(&db_path);
     let conn = (*raw_db).clone();
@@ -1271,10 +1267,9 @@ async fn temporal_schema_enforces_generation_state_machine_and_durability() {
 async fn temporal_schema_keeps_append_only_authority_immutable() {
     let tmp = TempDir::new().unwrap();
     let db_path = tmp.path().join(".tracedecay").join("sessions.db");
-    let db = open_global_db(&db_path)
+    initialize_global_db(&db_path)
         .await
         .expect("temporal schema initialization should not error");
-    drop(db);
 
     let raw_db = TestConnection::open(&db_path);
     let conn = (*raw_db).clone();
