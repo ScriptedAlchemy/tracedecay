@@ -10,8 +10,9 @@ use std::collections::BTreeMap;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use tracedecay_domain::{
-    CodeGenerationId, CommitId, ComplexityAnalysisV1, ManifestDigest, ProjectId, ProviderId,
-    RepositoryId, SourceSpan, SymbolOccurrenceId, WorktreeId,
+    CodeGenerationId, CommitId, ComplexityAnalysisV1, EdgeAuthorityV1, FileOccurrenceId,
+    ManifestDigest, ProjectId, ProviderId, RepositoryId, SourceSpan, SymbolOccurrenceId,
+    WorktreeId,
 };
 
 use crate::code_index_freshness::{CodeIndexConvergenceParkedV1, CodeIndexStalenessStateV1};
@@ -61,10 +62,109 @@ pub struct ContextSurfaceRequestV1 {
     /// Add a symbol-name lexical route for the identifier-shaped words of the
     /// task text.
     pub prefer_symbol: Option<bool>,
+    /// Find one shortest directed call path between exact graph occurrence
+    /// IDs (or `code-symbol:` evidence anchors). Task text and fuzzy matches
+    /// never choose the endpoints. Source for every path node is eligible
+    /// when `include_code` is true, before ordinary search-match source.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub call_path: Option<ContextCallPathRequestV1>,
     /// Cap the ranked sections of the answer at about this many tokens.
     /// Quotas are fixed shares of the budget. The cut is reported on the result.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub budget_tokens: Option<u32>,
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ContextCallPathRequestV1 {
+    pub from_node_id: String,
+    pub to_node_id: String,
+    /// Maximum number of call edges; defaults to 8, accepts 1 through 32.
+    #[schemars(range(min = 1, max = 32))]
+    pub max_depth: Option<u32>,
+}
+
+/// One generation-pinned call-path search, independent of whether task
+/// search found either endpoint. An unavailable authority is never an empty
+/// or disconnected path.
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ContextCallPathResultV1 {
+    pub from_node_id: String,
+    pub to_node_id: String,
+    pub max_depth: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub code_generation: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub freshness: Option<PrimitiveSearchFreshnessV1>,
+    pub outcome: ContextCallPathOutcomeV1,
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case", tag = "state")]
+pub enum ContextCallPathOutcomeV1 {
+    Found {
+        /// Includes both endpoints and every intermediate symbol, in order.
+        nodes: Vec<ContextCallPathNodeV1>,
+        /// Each edge is an indexed `calls` edge joining adjacent nodes.
+        edges: Vec<ContextCallPathEdgeV1>,
+        /// Absent only for the zero-edge path from a symbol to itself.
+        weakest_authority: Option<EdgeAuthorityV1>,
+    },
+    /// The reachable indexed call graph was exhausted. This does not prove
+    /// the absence of runtime paths through unresolved or dynamic calls.
+    NoPath,
+    /// Search stopped before the reachable frontier was exhausted.
+    Truncated { limit: ContextCallPathLimitV1 },
+    Unavailable {
+        evidence: PrimitiveUnavailableEvidenceV1,
+    },
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ContextCallPathLimitV1 {
+    Depth,
+    Relations,
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ContextCallPathNodeV1 {
+    pub symbol: PrimitiveSymbolLocationV1,
+    /// `included` refers to this node's block in the result's `code` array.
+    pub source: ContextPathSourceV1,
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ContextCallPathEdgeV1 {
+    pub from_node_id: String,
+    pub to_node_id: String,
+    pub authority: EdgeAuthorityV1,
+    /// Byte range in the caller's sanitized, generation-attested file.
+    pub evidence_span: SourceSpan,
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case", tag = "state")]
+pub enum ContextPathSourceV1 {
+    NotRequested,
+    Included,
+    Omitted {
+        reason: ContextPathSourceOmissionV1,
+    },
+    Unavailable {
+        evidence: PrimitiveUnavailableEvidenceV1,
+    },
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ContextPathSourceOmissionV1 {
+    CodeBlockLimit,
+    TokenBudget,
+    Oversized,
 }
 
 /// Whether the served code generation is known current at serve time.
@@ -440,6 +540,8 @@ pub struct ContextResultV1 {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub related_omission: Option<ContextRelatedOmissionV1>,
     pub code: Vec<ContextCodeBlockV1>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub call_path: Option<ContextCallPathResultV1>,
     /// Matched symbols whose declaration is larger than one code block.
     /// Their code is withheld rather than served as a partial window.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -603,6 +705,62 @@ pub struct NodeExpansionCostV1 {
     pub full_file: u64,
 }
 
+/// Evidence retained for one exact caller in the served graph generation.
+/// Completeness describes these recorded limitations only: the extractor
+/// may not model every dynamic dispatch form or runtime target.
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct NodeUnresolvedCallReportV1 {
+    pub code_generation: CodeGenerationId,
+    pub caller_node_id: SymbolOccurrenceId,
+    pub file_occurrence_id: FileOccurrenceId,
+    pub file: String,
+    pub outcome: NodeUnresolvedCallOutcomeV1,
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case", tag = "state")]
+pub enum NodeUnresolvedCallOutcomeV1 {
+    /// Every retained unresolved call for this caller was examined.
+    Complete {
+        sites: Vec<NodeUnresolvedCallSiteV1>,
+    },
+    /// The bounded read stopped before all retained evidence was examined.
+    /// Non-call limitations also consume the evidence-record budget.
+    Truncated {
+        sites: Vec<NodeUnresolvedCallSiteV1>,
+        maximum_references: u32,
+    },
+    Unavailable {
+        evidence: PrimitiveUnavailableEvidenceV1,
+    },
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct NodeUnresolvedCallSiteV1 {
+    /// Exact spelling retained by extraction; not a resolved target name.
+    pub reference_name: String,
+    /// Extraction-recorded byte span in the bound file. This may cover the
+    /// enclosing declaration when extraction could not attest a token span.
+    pub evidence_span: SourceSpan,
+    /// Present only when extraction counted the call's arguments.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub argument_count: Option<u32>,
+    pub reasons: Vec<NodeUnresolvedCallReasonV1>,
+}
+
+/// Only distinctions attested by the existing sealed reference evidence.
+/// A dotted spelling alone never proves dynamic dispatch or a receiver type.
+#[derive(Clone, Copy, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NodeUnresolvedCallReasonV1 {
+    TargetUnresolved,
+    AmbiguousLocal,
+    UnmodeledBlockGlob,
+    UnmodeledInlineModuleGlob,
+}
+
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct NodeDetailsV1 {
@@ -626,6 +784,7 @@ pub struct NodeDetailsV1 {
     pub cyclomatic_complexity: Option<u32>,
     pub complexity_analysis: ComplexityAnalysisV1,
     pub cost_to_expand: NodeExpansionCostV1,
+    pub unresolved_calls: NodeUnresolvedCallReportV1,
     pub unavailable_fields: Vec<String>,
     /// The worktree verdict a served graph read opens with.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -981,6 +1140,7 @@ mod tests {
             related_symbols: vec![],
             related_omission: None,
             code: vec![],
+            call_path: None,
             oversized_symbols: vec![],
             coverage: PrimitiveSearchCoverageV1 {
                 exact: PrimitiveLaneStatusV1::Complete(PrimitiveLaneCompleteV1::Complete),

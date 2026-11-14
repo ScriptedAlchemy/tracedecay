@@ -10,7 +10,7 @@ use tracing::Instrument as _;
 use super::projection::{base_source_frontier, canonical_parent_message_resolver};
 use super::query::{ACTIVATE_OPERATION, now_micros, storage, storage_message};
 use super::relation_projection::candidate_session_relation_projection;
-use super::relation_receipts::{record_relation_receipt, write_relation_projection_on_snapshot};
+use super::relation_receipts::{record_relation_receipt, write_relation_projection};
 use super::relations::{SessionRelationError, SessionRelationProjection};
 use super::store::execution_control_graph_cancellation;
 use crate::handle::{SessionTemporalExec, SessionTemporalRegisteredDb, SessionTemporalWriteTxn};
@@ -52,20 +52,7 @@ pub(super) async fn rebuild_candidate_session_relations(
         .map_err(|error| storage(operation, error))?;
     checkpoint_relation_rebuild_control(control)?;
 
-    let snapshot = database
-        .read_snapshot()
-        .await
-        .map_err(|error| storage(operation, error))?;
-    let applied = apply_candidate_relation_projection(
-        database,
-        &snapshot,
-        &reconstructed,
-        control,
-        operation,
-    )
-    .await;
-    drop(snapshot);
-    applied
+    apply_candidate_relation_projection(database, &reconstructed, control, operation).await
 }
 
 pub(super) async fn reconstruct_candidate_session_relations(
@@ -204,10 +191,10 @@ pub(super) async fn record_relation_receipts_group(
     Ok(outcomes)
 }
 
-/// `snapshot` already contains the pending receipt.
+/// The candidate's pending receipt must already be committed. Its reader is
+/// released before native graph publication and verification.
 pub(super) async fn apply_candidate_relation_projection(
     database: &impl SessionTemporalRegisteredDb,
-    snapshot: &tracedecay_runtime_core::db::DatabaseEngineReadSnapshot,
     projection: &SessionRelationProjection,
     control: &ExecutionControl,
     operation: &'static str,
@@ -217,9 +204,7 @@ pub(super) async fn apply_candidate_relation_projection(
         .map_err(|error| storage(operation, error))?;
     let apply_cancellation = execution_control_graph_cancellation(control);
     checkpoint_relation_rebuild_control(control)?;
-    let applied =
-        write_relation_projection_on_snapshot(database, snapshot, projection, apply_cancellation)
-            .await;
+    let applied = write_relation_projection(database, projection, apply_cancellation).await;
     checkpoint_relation_rebuild_control(control)?;
     applied?;
 

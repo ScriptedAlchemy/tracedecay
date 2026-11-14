@@ -128,18 +128,28 @@ impl BoundedDeliverySettlementRecorderV1 {
         })
     }
 
+    #[tracing::instrument(
+        name = "observability.delivery_recorder.admit",
+        level = "trace",
+        skip_all,
+        fields(receipt_id = tracing::field::Empty)
+    )]
     pub fn try_record(
         &self,
         settlement: DeliverySettlementV1,
     ) -> Result<DeliverySettlementRecordOutcomeV1, &'static str> {
+        tracing::trace!(phase = "validate", "delivery receipt admission");
         settlement.validate()?;
         let receipt = DeliveryRecorderSourceReceiptV1::new(settlement, self.identity.clone())
             .map_err(map_spool_admission_error)?;
+        tracing::Span::current().record("receipt_id", tracing::field::debug(receipt.receipt_id));
+        tracing::trace!(phase = "admission_lock", "delivery receipt admission");
         let _admission = self
             .core
             .admission
             .lock()
             .map_err(|_| "delivery_settlement_recorder_lock_poisoned")?;
+        tracing::trace!(phase = "check_lifecycle", "delivery receipt admission");
         if self.core.state.load(Ordering::Acquire) != RECORDER_RUNNING {
             return Err("delivery_settlement_recorder_closed");
         }
@@ -152,6 +162,7 @@ impl BoundedDeliverySettlementRecorderV1 {
         }
         // A full wake queue is safe: the durable receipt is already visible to
         // the active worker's bounded scan and periodic restart replay.
+        tracing::trace!(phase = "wake", "delivery receipt admission");
         match self.core.wake.try_send(()) {
             Ok(()) | Err(mpsc::error::TrySendError::Full(())) => {
                 Ok(DeliverySettlementRecordOutcomeV1::Enqueued)

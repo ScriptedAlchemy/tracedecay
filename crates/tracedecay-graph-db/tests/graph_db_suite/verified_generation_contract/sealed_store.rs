@@ -1187,8 +1187,8 @@ fn restart_recovery_adopts_or_discards_the_on_disk_artifact() {
     assert!(registered.close().unwrap());
     drop(registered);
 
-    // Tamper with the receipt: recovery must discard the artifact and serve
-    // from the staging database.
+    // Tamper with the receipt: recovery must refuse adoption and serve from
+    // staging, without deleting bytes that no longer prove our ownership.
     let root = sealed_store_root(temp.path());
     let mut tampered = None;
     for entry in std::fs::read_dir(&root).unwrap().map(Result::unwrap) {
@@ -1200,6 +1200,7 @@ fn restart_recovery_adopts_or_discards_the_on_disk_artifact() {
         }
     }
     let tampered = tampered.expect("the sealed artifact directory must exist");
+    let tampered_receipt = std::fs::read(tampered.join("sealed.json")).unwrap();
     let registered = RegisteredGraph::new_mounted(temp.path()).unwrap();
     let (control, probe) = control_and_probe();
     let context = GraphPublicationOperationContextV1::new(&control, &probe).unwrap();
@@ -1217,18 +1218,22 @@ fn restart_recovery_adopts_or_discards_the_on_disk_artifact() {
         "a tampered artifact must not be adopted"
     );
     assert!(
-        !tampered.exists(),
-        "a tampered artifact must be discarded from disk"
+        tampered.is_dir(),
+        "recovery must preserve an artifact with an unverified receipt"
+    );
+    assert_eq!(
+        std::fs::read(tampered.join("sealed.json")).unwrap(),
+        tampered_receipt,
+        "recovery must not modify the unverified receipt"
     );
     assert_snapshot_reads(&snapshot, &identity, "durable");
 }
 
-/// A seal that died between container write and rename leaves
-/// `.staging-<digest>` under the sealed root. Nothing reads it, so the next
-/// open of the store removes every such directory while leaving installed
-/// artifacts untouched.
+/// A copied installed receipt is not a staging-owner receipt. Recovery must
+/// preserve that lookalike alongside unreceipted, mismatched, oversized and
+/// linked entries, rather than deleting them based on their names.
 #[test]
-fn reopening_the_store_sweeps_staging_left_by_an_interrupted_seal() {
+fn reopening_the_store_reclaims_only_receipted_staging() {
     let temp = TempDir::new().unwrap();
     let registered = RegisteredGraph::new_mounted(temp.path()).unwrap();
     let mut authority = RelationalAuthority::default();
@@ -1254,25 +1259,62 @@ fn reopening_the_store_sweeps_staging_left_by_an_interrupted_seal() {
     assert!(registered.close().unwrap());
     drop(registered);
 
-    // Two interrupted seals: one of a generation that never installed and one
-    // whose digest matches the installed artifact but was started again.
     let root = sealed_store_root(temp.path());
     let installed = std::fs::read_dir(&root)
         .unwrap()
         .map(Result::unwrap)
         .map(|entry| entry.path())
         .find(|path| path.join("sealed.json").is_file())
-        .expect("the sealed artifact directory must exist");
-    let abandoned = [
-        root.join(format!(".staging-{}", "c".repeat(64))),
-        root.join(format!(
-            ".staging-{}",
-            installed.file_name().unwrap().to_str().unwrap()
-        )),
-    ];
-    for staging in &abandoned {
-        std::fs::create_dir_all(staging).unwrap();
-        std::fs::write(staging.join("generation.grafeo"), b"partial container").unwrap();
+        .expect("the installed sealed artifact directory must exist");
+    let receipt = std::fs::read(installed.join("sealed.json")).unwrap();
+    let installed_name = installed.file_name().unwrap().to_str().unwrap();
+    let verified = root.join(format!(".staging-{installed_name}"));
+    std::fs::create_dir(&verified).unwrap();
+    std::fs::copy(
+        installed.join("generation.grafeo"),
+        verified.join("generation.grafeo"),
+    )
+    .unwrap();
+    std::fs::write(verified.join("sealed.json"), &receipt).unwrap();
+
+    let unowned = root.join(format!(".staging-{}", "c".repeat(64)));
+    std::fs::create_dir(&unowned).unwrap();
+    std::fs::write(unowned.join("generation.grafeo"), b"foreign bytes").unwrap();
+    let mismatched = root.join(format!(".staging-{}", "d".repeat(64)));
+    std::fs::create_dir(&mismatched).unwrap();
+    std::fs::write(mismatched.join("sealed.json"), &receipt).unwrap();
+    std::fs::write(mismatched.join("sentinel"), b"wrong identity").unwrap();
+    // A copied receipt whose physical namespace was rewritten to fit the
+    // staging filename still does not bind the original logical generation.
+    let forged_name = "a".repeat(64);
+    let forged = root.join(format!(".staging-{forged_name}"));
+    std::fs::create_dir(&forged).unwrap();
+    let mut forged_receipt: serde_json::Value = serde_json::from_slice(&receipt).unwrap();
+    forged_receipt["physical_namespace"] =
+        serde_json::Value::String(format!("generation:{forged_name}"));
+    let forged_bytes = serde_json::to_vec(&forged_receipt).unwrap();
+    std::fs::write(forged.join("sealed.json"), &forged_bytes).unwrap();
+    std::fs::write(forged.join("sentinel"), b"forged receipt").unwrap();
+    let malformed = root.join(format!(".staging-{}", "b".repeat(64)));
+    std::fs::create_dir(&malformed).unwrap();
+    std::fs::write(malformed.join("sealed.json"), b"not-json").unwrap();
+    std::fs::write(malformed.join("sentinel"), b"malformed receipt").unwrap();
+    let oversized = root.join(format!(".staging-{}", "e".repeat(64)));
+    std::fs::create_dir(&oversized).unwrap();
+    std::fs::write(oversized.join("sealed.json"), vec![b'x'; 128 * 1024]).unwrap();
+    std::fs::write(oversized.join("sentinel"), b"too large").unwrap();
+    let unrelated = root.join(".staging-notes");
+    std::fs::create_dir(&unrelated).unwrap();
+    std::fs::write(unrelated.join("notes"), b"keep").unwrap();
+
+    #[cfg(unix)]
+    let outside = TempDir::new().unwrap();
+    #[cfg(unix)]
+    let linked = root.join(format!(".staging-{}", "f".repeat(64)));
+    #[cfg(unix)]
+    {
+        std::fs::write(outside.path().join("sentinel"), b"outside").unwrap();
+        std::os::unix::fs::symlink(outside.path(), &linked).unwrap();
     }
 
     let registered = RegisteredGraph::new_mounted(temp.path()).unwrap();
@@ -1287,27 +1329,76 @@ fn reopening_the_store_sweeps_staging_left_by_an_interrupted_seal() {
             &record.publication.key.projection,
         )
         .unwrap();
-    for staging in &abandoned {
+
+    assert!(
+        verified.is_dir(),
+        "a copied final receipt must not authorize abandoned-stage cleanup"
+    );
+    assert_eq!(
+        std::fs::read(verified.join("sealed.json")).unwrap(),
+        receipt,
+        "recovery must preserve the copied final receipt byte-for-byte"
+    );
+    assert_eq!(
+        std::fs::read(unowned.join("generation.grafeo")).unwrap(),
+        b"foreign bytes",
+        "missing receipt is not deletion authority"
+    );
+    assert_eq!(
+        std::fs::read(mismatched.join("sealed.json")).unwrap(),
+        receipt,
+        "a receipt for a different generation cannot authorize cleanup"
+    );
+    assert_eq!(
+        std::fs::read(mismatched.join("sentinel")).unwrap(),
+        b"wrong identity"
+    );
+    assert_eq!(
+        std::fs::read(forged.join("sealed.json")).unwrap(),
+        forged_bytes,
+        "a rewritten physical namespace is not generation ownership"
+    );
+    assert_eq!(
+        std::fs::read(forged.join("sentinel")).unwrap(),
+        b"forged receipt"
+    );
+    assert_eq!(
+        std::fs::read(malformed.join("sentinel")).unwrap(),
+        b"malformed receipt"
+    );
+    assert_eq!(
+        std::fs::read(oversized.join("sentinel")).unwrap(),
+        b"too large",
+        "oversized receipts must be refused without recursive removal"
+    );
+    assert_eq!(std::fs::read(unrelated.join("notes")).unwrap(), b"keep");
+    #[cfg(unix)]
+    {
         assert!(
-            !staging.exists(),
-            "opening the store removes abandoned staging {}",
-            staging.display()
+            std::fs::symlink_metadata(&linked)
+                .unwrap()
+                .file_type()
+                .is_symlink(),
+            "a linked staging entry must not be followed or removed"
+        );
+        assert_eq!(
+            std::fs::read(outside.path().join("sentinel")).unwrap(),
+            b"outside"
         );
     }
     assert!(
         installed.join("sealed.json").is_file(),
-        "the installed sealed artifact is untouched by the sweep"
+        "the installed generation must remain untouched"
     );
     assert!(snapshot.serves_from_sealed_store());
     assert_snapshot_reads(&snapshot, &identity, "durable");
 }
 
-/// The sealed census splits the sealed root into what serves and what does
-/// not: the head's artifact, a superseded generation's artifact, and staging
-/// an interrupted seal left behind are each counted where they belong, and a
-/// directory without a readable receipt is reported rather than classed.
+/// The sealed census splits the sealed root into verified head and
+/// superseded artifacts. Unreceipted staging and unrelated directories remain
+/// unrecognized rather than falsely counted as reclaimable garbage.
 #[test]
-fn sealed_census_separates_heads_from_superseded_and_abandoned_bytes() {
+fn sealed_census_separates_heads_and_preserves_unproven_staging() {
     let temp = TempDir::new().unwrap();
     let registered = RegisteredGraph::new_mounted(temp.path()).unwrap();
     let mut authority = RelationalAuthority::default();
@@ -1363,9 +1454,9 @@ fn sealed_census_separates_heads_from_superseded_and_abandoned_bytes() {
         census.superseded_count, 1,
         "g1 is sealed but no longer the head"
     );
-    assert_eq!(census.abandoned_staging_count, 1);
-    assert_eq!(census.abandoned_staging_bytes, 4096);
-    assert_eq!(census.unrecognized_count, 1);
+    assert_eq!(census.abandoned_staging_count, 0);
+    assert_eq!(census.abandoned_staging_bytes, 0);
+    assert_eq!(census.unrecognized_count, 2);
     assert!(census.head_bytes > 0 && census.superseded_bytes > 0);
 
     // With no heads journaled every sealed artifact reads as superseded, and
@@ -1515,6 +1606,105 @@ fn retirement_deletes_the_superseded_sealed_artifact() {
         !database.is_generation_sealed_only(&g1.identity()).unwrap(),
         "retirement must remove the locator from sealed-only state"
     );
+}
+
+/// A real sequence of five published sealed replay generations must retire
+/// all four superseded artifacts independently, not merely the oldest one.
+/// Each retirement goes through the same production registry API used by
+/// code-generation retention, and the newest reader stays usable throughout.
+#[test]
+fn five_sealed_replay_generations_retire_to_the_live_head() {
+    let temp = TempDir::new().unwrap();
+    let registered = RegisteredGraph::new_mounted(temp.path()).unwrap();
+    let mut authority = RelationalAuthority::default();
+    let identity = projection("sealed-store:five-generation-retire", "code");
+    let mut prior_head = None;
+    let mut superseded = Vec::new();
+    let mut serving = None;
+
+    for (ordinal, digit) in (1..=5).zip(['1', '2', '3', '4', '5']) {
+        let generation = format!("five-retire-g{ordinal}");
+        let manifest = rich_manifest(identity.clone(), &generation, &format!("marker-{ordinal}"));
+        let record = stage_sealed_manifest(
+            &mut authority,
+            &registered.binding,
+            &manifest,
+            &format!("publish:{generation}"),
+            prior_head.take(),
+            digit,
+        );
+        let commit = publish_sealed(&registered, temp.path(), &mut authority, &record, &manifest);
+        prior_head = Some(commit.head.clone());
+        assert!(
+            receipt_for_generation(temp.path(), &generation).is_some(),
+            "each published generation must have its own sealed artifact"
+        );
+        if ordinal == 5 {
+            serving = Some(commit);
+        } else {
+            superseded.push((
+                generation,
+                manifest.identity(),
+                CodeGenerationId::new(format!("code-generation.{}", manifest.generation.as_str()))
+                    .unwrap(),
+                SealedGraphStateDigest::try_from(format!(
+                    "sha256:{}",
+                    digit.to_string().repeat(64)
+                ))
+                .unwrap(),
+            ));
+            drop(commit);
+        }
+    }
+
+    assert_eq!(superseded.len(), 4);
+    assert_eq!(
+        sealed_receipts(temp.path()).len(),
+        5,
+        "five distinct generations must exist before retirement"
+    );
+    let serving = serving.unwrap();
+    assert_snapshot_reads(&serving.snapshot, &identity, "marker-5");
+
+    let database = registered
+        .registry
+        .resolve(registration(registered.binding.clone(), temp.path()))
+        .unwrap();
+    let (control, probe) = control_and_probe();
+    let context = GraphPublicationOperationContextV1::new(&control, &probe).unwrap();
+    for (generation, manifest_identity, code_generation, sealed_digest) in superseded {
+        assert!(matches!(
+            registered
+                .registry
+                .retire_one_code_generation_replay(
+                    registration(registered.binding.clone(), temp.path()),
+                    &mut authority,
+                    &context,
+                    &code_generation,
+                    &sealed_digest,
+                )
+                .unwrap(),
+            GraphReplayCollectionOutcome::Retired(_)
+        ));
+        assert!(
+            receipt_for_generation(temp.path(), &generation).is_none(),
+            "retired generation {generation} must be absent from disk"
+        );
+        assert!(
+            !database
+                .is_generation_sealed_only(&manifest_identity)
+                .unwrap(),
+            "retired generation {generation} must leave sealed-only state"
+        );
+        assert_snapshot_reads(&serving.snapshot, &identity, "marker-5");
+    }
+    assert_eq!(
+        sealed_receipts(temp.path()).len(),
+        1,
+        "only the live sealed generation should remain"
+    );
+    assert!(receipt_for_generation(temp.path(), "five-retire-g5").is_some());
+    assert_snapshot_reads(&serving.snapshot, &identity, "marker-5");
 }
 
 /// A live direct-sealed reader (recovered through
@@ -2364,14 +2554,63 @@ fn spilled_rows_refuse_conflicting_repeats_and_dangling_endpoints() {
 /// own live publisher's and stays.
 #[test]
 fn store_open_sweeps_row_spills_abandoned_by_another_process() {
-    let temp = TempDir::new().unwrap();
-    let root = sealed_store_root(temp.path());
-    std::fs::create_dir_all(root.join(".rows-4194305-0")).unwrap();
-    std::fs::write(root.join(".rows-4194305-0/entities-0.run"), b"abandoned").unwrap();
-    let own = format!(".rows-{}-999999", std::process::id());
-    std::fs::create_dir_all(root.join(&own)).unwrap();
+    const CHILD_ROOT: &str = "TRACEDECAY_TEST_ABANDONED_GRAPH_SPILL";
+    const SPILLED: i32 = 42;
+    let identity = projection("code", "store-open-spill");
+    if let Some(root) = std::env::var_os(CHILD_ROOT) {
+        let root = PathBuf::from(root);
+        let registered = RegisteredGraph::new_mounted(&root).unwrap();
+        let spill = registered
+            .registry
+            .generation_row_spill(registration(registered.binding.clone(), &root), identity)
+            .unwrap();
+        std::fs::write(spill.attachment_path(), b"abandoned").unwrap();
+        std::process::exit(SPILLED);
+    }
 
+    let temp = TempDir::new().unwrap();
+    let child = std::process::Command::new(std::env::current_exe().unwrap())
+        .arg("--exact")
+        .arg(std::thread::current().name().unwrap())
+        .env(CHILD_ROOT, temp.path())
+        .output()
+        .unwrap();
+    assert_eq!(child.status.code(), Some(SPILLED), "{child:?}");
+    let root = sealed_store_root(temp.path());
+    let abandoned = row_spills(temp.path());
+    assert_eq!(abandoned.len(), 1);
+    let abandoned = root.join(&abandoned[0]);
+    let registered = RegisteredGraph::new_mounted(temp.path()).unwrap();
+    assert!(!abandoned.exists());
+    let live_spill = registered
+        .registry
+        .generation_row_spill(
+            registration(registered.binding.clone(), temp.path()),
+            identity,
+        )
+        .unwrap();
+    let attachment = live_spill.attachment_path();
+    std::fs::write(&attachment, b"live peer attachment").unwrap();
+    drop(registered);
+
+    // A different producer's name is not authority to reclaim foreign bytes.
+    // Even a well-shaped abandoned-spill entry with a wrong receipt survives
+    // store opening, while the authentic abandoned spill above was reclaimed.
+    std::fs::create_dir(&abandoned).unwrap();
+    std::fs::write(abandoned.join(".row-spill-owner-v1"), b"wrong owner").unwrap();
+    std::fs::write(abandoned.join("foreign"), b"preserve").unwrap();
+    let foreign = ".rows-notes";
+    std::fs::create_dir(root.join(foreign)).unwrap();
+    std::fs::write(root.join(foreign).join("notes"), b"keep").unwrap();
     let _registered = RegisteredGraph::new_mounted(temp.path()).unwrap();
 
-    assert_eq!(row_spills(temp.path()), vec![own]);
+    assert_eq!(
+        std::fs::read(root.join(foreign).join("notes")).unwrap(),
+        b"keep"
+    );
+    assert_eq!(
+        std::fs::read(abandoned.join("foreign")).unwrap(),
+        b"preserve"
+    );
+    assert_eq!(std::fs::read(attachment).unwrap(), b"live peer attachment");
 }

@@ -9,6 +9,8 @@
 //! `tracedecay_find_exact_symbol` only so the call has an address; every
 //! assertion is on `tracedecay_node`.
 
+mod unresolved_calls;
+
 use std::fs;
 
 use serde_json::{Value, json};
@@ -103,15 +105,25 @@ async fn tracedecay_node_reports_declared_symbols_and_typed_refusals() {
     let fetch_text_format =
         tool_text(&node_call(&server, json!({"node_id": fetch_id, "format": "text"})).await);
     let expected_fetch_markdown = fetch_markdown(&fetch_id);
-    assert_eq!(fetch_text, expected_fetch_markdown);
-    assert_eq!(fetch_markdown_text, expected_fetch_markdown);
-    assert_eq!(fetch_text_format, expected_fetch_markdown);
+    assert_eq!(metadata_markdown(&fetch_text), expected_fetch_markdown);
     assert_eq!(
-        tool_text(&node_call(&server, json!({"node_id": widget_id})).await),
+        metadata_markdown(&fetch_markdown_text),
+        expected_fetch_markdown
+    );
+    assert_eq!(
+        metadata_markdown(&fetch_text_format),
+        expected_fetch_markdown
+    );
+    assert_eq!(
+        metadata_markdown(&tool_text(
+            &node_call(&server, json!({"node_id": widget_id})).await
+        )),
         widget_markdown(&widget_id)
     );
     assert_eq!(
-        tool_text(&node_call(&server, json!({"node_id": cached_id})).await),
+        metadata_markdown(&tool_text(
+            &node_call(&server, json!({"node_id": cached_id})).await
+        )),
         cached_markdown(&cached_id)
     );
 
@@ -523,7 +535,40 @@ async fn node_json(server: &McpServer, mut arguments: Value) -> Value {
         .expect("node arguments")
         .entry("format")
         .or_insert_with(|| json!("json"));
-    parse_json(&tool_text(&node_call(server, arguments).await))
+    let mut value = parse_json(&tool_text(&node_call(server, arguments).await));
+    // This fixture owns the exact metadata contract. The dedicated
+    // unresolved_calls module checks site contents, bounds, file isolation
+    // and catalog availability through the same production tool.
+    let report = value
+        .as_object_mut()
+        .expect("node object")
+        .remove("unresolved_calls")
+        .expect("required unresolved-call report");
+    let report: tracedecay_contracts::retrieval::NodeUnresolvedCallReportV1 =
+        serde_json::from_value(report).expect("typed unresolved-call report");
+    assert_eq!(
+        report.caller_node_id.as_str(),
+        value["id"].as_str().unwrap()
+    );
+    assert_eq!(report.file, value["file"].as_str().unwrap());
+    assert!(matches!(
+        report.outcome,
+        tracedecay_contracts::retrieval::NodeUnresolvedCallOutcomeV1::Complete { .. }
+            | tracedecay_contracts::retrieval::NodeUnresolvedCallOutcomeV1::Unavailable { .. }
+    ));
+    value
+}
+
+fn metadata_markdown(text: &str) -> &str {
+    let (metadata, report) = text
+        .split_once("\n## Recorded unresolved calls\n\n")
+        .expect("node Markdown includes its unresolved-call report");
+    assert!(
+        report.starts_with("Complete for recorded evidence:")
+            || report.starts_with("Unavailable (")
+    );
+    assert!(report.contains("not all possible runtime calls"));
+    metadata
 }
 
 async fn node_call(server: &McpServer, arguments: Value) -> Value {

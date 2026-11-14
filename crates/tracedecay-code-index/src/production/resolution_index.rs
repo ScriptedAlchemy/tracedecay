@@ -134,6 +134,10 @@ impl<'a> FileRowsV1<'a> {
                 .unresolved_references()
                 .iter()
                 .flat_map(|reference| name_segments(&reference.reference_name))
+                .chain(
+                    super::typescript_receivers::referenced_type_names(file)
+                        .flat_map(name_segments),
+                )
                 .collect(),
             aliases: file
                 .imports()
@@ -268,6 +272,7 @@ pub(super) fn seal_resolution_index_charged<T: ResolutionFileV1>(
             .unresolved_references()
             .iter()
             .flat_map(|reference| name_segments(&reference.reference_name))
+            .chain(super::typescript_receivers::referenced_type_names(file).flat_map(name_segments))
         {
             let page = page_of(segment, pages);
             super::resolution_view::reserve_resolution_vec(

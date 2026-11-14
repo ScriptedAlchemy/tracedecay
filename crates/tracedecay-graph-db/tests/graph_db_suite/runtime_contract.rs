@@ -5,6 +5,7 @@ use std::time::Duration;
 
 use grafeo_common::types::Value;
 use tempfile::TempDir;
+use tracedecay_domain::canonical_text::sha256_hex;
 use tracedecay_graph_db::{
     GraphBudgetKind, GraphCancellation, GraphDbError, GraphDbLeaseV1, GraphDbOwner, GraphEntity,
     GraphEntityId, GraphFormatVersion, GraphIdempotencyKey, GraphLabel, GraphMutation,
@@ -1026,7 +1027,7 @@ fn wrong_tracedecay_format_requires_reset() {
 }
 
 #[test]
-fn superseded_format_store_is_rebuilt_fresh_keeping_only_current_sealed_generations() {
+fn superseded_format_store_rebuild_removes_proven_old_seals_but_keeps_unproven() {
     let temp = TempDir::new().unwrap();
     let path = graph_path(temp.path());
     // Format 4 kept a relation's payload properties on its locator as well as
@@ -1063,17 +1064,52 @@ fn superseded_format_store_is_rebuilt_fresh_keeping_only_current_sealed_generati
         )
         .unwrap();
     raw.close().unwrap();
-    let sealed_generation = temp.path().join("graph.sealed").join("0".repeat(64));
+    // The on-disk name is the digest of the receipt's JSON identity tuple.
+    let sealed_generation_name = sha256_hex(br#"["project","code","g0"]"#);
+    let sealed_generation = temp
+        .path()
+        .join("graph.sealed")
+        .join(&sealed_generation_name);
     std::fs::create_dir_all(&sealed_generation).unwrap();
     std::fs::write(
         sealed_generation.join("generation.grafeo"),
         b"format 4 bytes",
     )
     .unwrap();
+    // A prior-format sealed directory is deletable only when its receipt
+    // proves both the old format and the matching physical namespace.
+    std::fs::write(
+        sealed_generation.join("sealed.json"),
+        serde_json::json!({
+            "version": 1,
+            "form": "compact",
+            "namespace": "project",
+            "projection": "code",
+            "generation": "g0",
+            "physical_namespace": format!("generation:{sealed_generation_name}"),
+            "recovered_digest": "sha256:old",
+            "entities": 1,
+            "relations": 0,
+            "graph_format": previous_format as u32,
+        })
+        .to_string(),
+    )
+    .unwrap();
+
+    // An unverified artifact may belong to a future build. A format reset
+    // cannot infer its age or ownership from a directory name alone.
+    let unproven_generation = temp.path().join("graph.sealed").join("2".repeat(64));
+    std::fs::create_dir_all(&unproven_generation).unwrap();
+    std::fs::write(
+        unproven_generation.join("generation.grafeo"),
+        b"unknown sealed bytes",
+    )
+    .unwrap();
 
     // A generation this build sealed before the staging container was
     // replaced, as a publication racing the rebuild leaves it.
-    let current_generation = temp.path().join("graph.sealed").join("1".repeat(64));
+    let current_name = sha256_hex(br#"["project","code","g1"]"#);
+    let current_generation = temp.path().join("graph.sealed").join(&current_name);
     std::fs::create_dir_all(&current_generation).unwrap();
     std::fs::write(
         current_generation.join("sealed.json"),
@@ -1083,7 +1119,7 @@ fn superseded_format_store_is_rebuilt_fresh_keeping_only_current_sealed_generati
             "namespace": "project",
             "projection": "code",
             "generation": "g1",
-            "physical_namespace": format!("generation:{}", "1".repeat(64)),
+            "physical_namespace": format!("generation:{current_name}"),
             "recovered_digest": "sha256:1",
             "entities": 1,
             "relations": 0,
@@ -1096,6 +1132,10 @@ fn superseded_format_store_is_rebuilt_fresh_keeping_only_current_sealed_generati
     let (_registered, db) = RegisteredGraph::open_lease(temp.path()).unwrap();
 
     assert!(!sealed_generation.exists());
+    assert!(
+        unproven_generation.join("generation.grafeo").exists(),
+        "an unverified generation must survive a format reset"
+    );
     assert!(current_generation.join("sealed.json").exists());
     assert_eq!(
         db.entity(&namespace(), &entity_id("stale"), live())

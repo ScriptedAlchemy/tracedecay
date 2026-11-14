@@ -245,6 +245,19 @@ fn merge_changed_artifact_unmeasured(
         .cloned()
         .collect::<Vec<_>>();
     go_method_sets.extend(delta.go_method_sets);
+    let mut typescript_types = previous
+        .typescript_types
+        .iter()
+        .filter(|row| !superseded.contains(row.node_id.as_str()))
+        .cloned()
+        .map(|mut row| {
+            if let crate::TypeScriptTypeRowV1::ReceiverCall { span, .. } = &mut row.row {
+                *span = shift_unaffected_span(*span, edit)?.0;
+            }
+            Some(row)
+        })
+        .collect::<Option<Vec<_>>>()?;
+    typescript_types.extend(delta.typescript_types);
     let mut artifact = ExtractionArtifactV1 {
         result,
         imports,
@@ -252,6 +265,7 @@ fn merge_changed_artifact_unmeasured(
         schema_evidence: None,
         callable_arities,
         go_method_sets,
+        typescript_types,
     };
     artifact.canonicalize_order();
     Some(artifact)

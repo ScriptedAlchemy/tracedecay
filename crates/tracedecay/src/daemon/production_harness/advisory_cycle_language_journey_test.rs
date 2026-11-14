@@ -53,63 +53,70 @@ async fn settled_advisory_cycle(
     }
 }
 
-#[tokio::test(flavor = "multi_thread")]
-async fn typescript_only_checkout_runs_the_pull_request_advisory_cycle() {
-    let isolation = tempfile::TempDir::new().expect("production harness isolation");
-    let project = isolation.path().join("project");
-    std::fs::create_dir_all(project.join("src")).expect("project source dir");
-    std::fs::write(
-        project.join("src/index.ts"),
-        "export function admitPullRequest(number: number): string {\n  return `pr-${number}`;\n}\n",
-    )
-    .expect("typescript source");
-    git(&project, &["init", "--quiet", "-b", "feature/ts-admission"]);
-    git(
-        &project,
-        &[
-            "remote",
-            "add",
-            "origin",
-            "https://git.example.invalid/tracedecay-fixture/typescript-admission.git",
-        ],
-    );
-    git(&project, &["add", "."]);
-    git(
-        &project,
-        &["commit", "--quiet", "-m", "seed typescript admission"],
-    );
+#[test]
+fn typescript_only_checkout_runs_the_pull_request_advisory_cycle() {
+    tracedecay_runtime_core::native_runtime::default_builder()
+        .build()
+        .expect("advisory journey runtime")
+        .block_on(async {
+            let isolation = tempfile::TempDir::new().expect("production harness isolation");
+            let project = isolation.path().join("project");
+            std::fs::create_dir_all(project.join("src")).expect("project source dir");
+            std::fs::write(
+                project.join("src/index.ts"),
+                "export function admitPullRequest(number: number): string {\n  return `pr-${number}`;\n}\n",
+            )
+            .expect("typescript source");
+            git(&project, &["init", "--quiet", "-b", "feature/ts-admission"]);
+            git(
+                &project,
+                &[
+                    "remote",
+                    "add",
+                    "origin",
+                    "https://git.example.invalid/tracedecay-fixture/typescript-admission.git",
+                ],
+            );
+            git(&project, &["add", "."]);
+            git(
+                &project,
+                &["commit", "--quiet", "-m", "seed typescript admission"],
+            );
 
-    let harness = ProductionProjectCompositionHarnessV1::open(isolation.path(), [project.clone()])
-        .await
-        .expect("production composition opens a TypeScript-only checkout");
+            let harness =
+                ProductionProjectCompositionHarnessV1::open(isolation.path(), [project.clone()])
+                    .await
+                    .expect("production composition opens a TypeScript-only checkout");
 
-    let (refused, payload) = settled_advisory_cycle(&harness, &project, "src/index.ts").await;
-    assert!(
-        !refused,
-        "the cycle must run over the TypeScript generation: {payload}"
-    );
-    assert_eq!(
-        payload["outcome"]["outcome"],
-        json!("evidence"),
-        "{payload}"
-    );
-    let cycle = &payload["outcome"]["value"]["payload"]["cycle"];
-    let producers: Vec<&Value> = cycle["advisory_provider_states"]
-        .as_array()
-        .unwrap_or_else(|| panic!("advisory provider states: {payload}"))
-        .iter()
-        .map(|state| &state["producer"])
-        .collect();
-    assert_eq!(
-        producers,
-        [
-            &json!("git_hub_review"),
-            &json!("ci_localization"),
-            &json!("proximity")
-        ],
-        "{payload}"
-    );
-    harness.shutdown().await;
+            let (refused, payload) =
+                settled_advisory_cycle(&harness, &project, "src/index.ts").await;
+            assert!(
+                !refused,
+                "the cycle must run over the TypeScript generation: {payload}"
+            );
+            assert_eq!(
+                payload["outcome"]["outcome"],
+                json!("evidence"),
+                "{payload}"
+            );
+            let cycle = &payload["outcome"]["value"]["payload"]["cycle"];
+            let producers: Vec<&Value> = cycle["advisory_provider_states"]
+                .as_array()
+                .unwrap_or_else(|| panic!("advisory provider states: {payload}"))
+                .iter()
+                .map(|state| &state["producer"])
+                .collect();
+            assert_eq!(
+                producers,
+                [
+                    &json!("git_hub_review"),
+                    &json!("ci_localization"),
+                    &json!("proximity")
+                ],
+                "{payload}"
+            );
+            harness.shutdown().await;
+        });
 }
 
 /// A reopened project already holds a ready sealed generation, so the first

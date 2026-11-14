@@ -50,7 +50,8 @@ pub use self::interactive::{
     CodeGraphReadCostMeter, CodeGraphRelationKeyV1, CodeGraphRelationKeysV1,
     CodeGraphSemanticEdgeV1, CodeGraphSymbolDegreesV1, CodeGraphSymbolPageV1,
     CodeGraphSymbolPredicate, CodeGraphSymbolRefV1, CodeGraphSymbolSearchPageV1,
-    CodeGraphSymbolSummaryV1, InteractiveCatalogReaderLeaseV1, UnresolvedCallerGapsV1,
+    CodeGraphSymbolSummaryV1, CodeGraphUnresolvedCallSitesV1, InteractiveCatalogReaderLeaseV1,
+    UnresolvedCallerGapsV1,
 };
 pub use self::layered::{
     CodeGraphLayeredBuildV1, CodeGraphLayeredDeclineV1, CodeGraphLayeredReportV1,

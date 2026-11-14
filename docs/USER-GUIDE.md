@@ -986,14 +986,75 @@ When running as an MCP server, tracedecay exposes typed operations that AI agent
 
 | Tool | What it does |
 |------|-------------|
-| `tracedecay_context` | Find relevant symbols, relationships, and optional snippets for a broad task whose entrypoints are unknown. Start PR review with `pr_context`; use direct lookup when the file or symbol is already known. |
+| `tracedecay_context` | Find relevant symbols, relationships, and optional snippets for a broad task. Add `call_path` with exact symbol IDs to include a connecting call path and its source. Start PR review with `pr_context`; use direct lookup when the file or symbol is already known. |
 | `tracedecay_grep` | Search UTF-8 working-tree content by literal string or regex, with enclosing-symbol enrichment when available. |
 | `tracedecay_search` | Find symbols by name. Supports filtering by kind (function, class, method, etc.). |
-| `tracedecay_node` | Read one symbol's metadata, location, available complexity metrics, and estimated expansion cost. |
+| `tracedecay_node` | Read one symbol's metadata, location, available complexity metrics, estimated expansion cost, and recorded unresolved-call evidence. |
 | `tracedecay_signature` | Read a known symbol's signature and documentation without its body. |
 | `tracedecay_source_body` | Read the current indexed source body using a returned `node_id`. |
 | `tracedecay_files` | List indexed files, optionally filtered by directory or glob pattern. |
 | `tracedecay_status` | Index statistics: file counts, symbol counts, language distribution, and tokens saved. |
+
+#### Inspect where a call trace stops
+
+Call `tracedecay_node` with a returned `node_id` to inspect that exact symbol's
+`unresolved_calls` report. It preserves the graph generation, caller and file
+identities, reference spelling, extraction-recorded byte span, and only the
+limitation reasons the sealed evidence supports. A span may cover the enclosing
+declaration when extraction could not attest an exact call token.
+
+The outcome is `complete`, `truncated`, or `unavailable`. A complete report
+means all recorded unresolved sites for that caller were examined; an empty
+report does not prove that every possible runtime call was resolved. The read
+examines at most 16 retained evidence records, including non-call limitations,
+and discloses truncation when records remain. If the interactive catalog is
+unavailable, ordinary node metadata still returns with an unavailable report.
+
+The ChatGPT extension's symbol detail view displays the same recorded sites and
+coverage state. Sending symbol evidence to chat preserves the report and its
+graph generation alongside the separately fetched relationships.
+
+This report does not infer target edges, search the reachable frontier, read
+source bodies, or classify unmodeled dispatch from name similarity. Use its
+reference spelling and span to continue inspecting the relevant source.
+
+#### Include a connecting call path
+
+When you know the beginning and end of a flow, pass their returned `node_id`
+values in `call_path`. Context finds one shortest directed path through indexed
+call edges and returns the endpoints, intermediate symbols, and each edge's
+authority. The task text still drives the usual search and memory results; it
+does not select or replace the path endpoints.
+
+```json
+{
+  "task": "How does request handling reach persistence?",
+  "call_path": {
+    "from_node_id": "<entrypoint node_id>",
+    "to_node_id": "<persistence node_id>",
+    "max_depth": 8
+  },
+  "include_code": true,
+  "max_code_blocks": 8,
+  "budget_tokens": 4000
+}
+```
+
+`max_depth` defaults to 8 call edges and accepts values from 1 through 32.
+Source remains opt-in with `include_code`; when requested, path symbols take
+priority over ordinary search matches within `max_code_blocks`. Each path
+symbol reports whether its source was included, omitted by a limit, too large,
+or unavailable. Source must match the indexed generation, so editing a file
+after indexing can withhold its code until the index catches up.
+
+Inspect `call_path.outcome.state` before interpreting the result:
+
+| State | Meaning |
+|-------|---------|
+| `found` | An indexed path connects the supplied symbols. Read its edge authorities and `weakest_authority` when assessing the evidence. |
+| `no_path` | The reachable indexed call graph was exhausted without a connection. Unresolved or dynamic calls may still connect the symbols at runtime. |
+| `truncated` | A depth or relation limit stopped the search before it exhausted the reachable graph. |
+| `unavailable` | The graph or endpoints could not be admitted. Ordinary task search can still return useful results. |
 
 ### Navigating relationships
 
@@ -1005,6 +1066,26 @@ When running as an MCP server, tracedecay exposes typed operations that AI agent
 | `tracedecay_affected` | Select candidate test files for a supplied file manifest, ranked by dependency distance. |
 | `tracedecay_similar` | Find token-verified exact or rename-normalized shared implementations for a symbol or source range. |
 | `tracedecay_rename_preview` | Preview all references to a symbol before renaming it. |
+
+TypeScript callers and callees can follow instance methods from named type
+annotations on parameters and local variables, `const` values constructed with
+`new`, and `const` values obtained by awaiting a function with a named declared
+return type. Import aliases are resolved in the module that declares the type;
+an awaited factory's return type is resolved in the factory's module. These
+edges carry `name_resolved` authority from indexed source evidence.
+
+Immutable `const copy = receiver` chains preserve that constructor, parameter,
+or awaited-factory evidence. Each alias binds in the scope of its declaration,
+so a later inner declaration with the same name cannot change the captured
+type. Generic constraints and parameter default expressions do not introduce
+bindings for names they merely reference.
+
+This resolution deliberately requires a unique declaration and an unambiguous
+receiver binding. Reassignment, mutable aliases, optional receivers, shadowed
+factories, computed members, unions, type aliases, and generic type evaluation
+can leave calls unresolved. Inspect
+coverage and omission evidence before treating an empty callers or callees
+result as complete.
 
 ### Code quality analysis
 

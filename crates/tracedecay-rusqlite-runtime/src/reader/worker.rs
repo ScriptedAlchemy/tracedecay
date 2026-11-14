@@ -556,9 +556,19 @@ pub(crate) fn spawn<E: ReaderQueryExecutor>(
         .await;
     })
     .map_err(|_| ReaderStartError::RuntimeUnavailable)?;
-    let (interrupt, opened_file_identity) = startup
-        .recv()
-        .map_err(|_| ReaderStartError::StartupChannelClosed)??;
+    let (interrupt, opened_file_identity) = match startup.recv() {
+        Ok(Ok(started)) => started,
+        Ok(Err(error)) => {
+            // Reporting failure precedes the worker future's destruction.
+            // Join before initialization can reclaim its original file pins.
+            let _ = join.join();
+            return Err(error);
+        }
+        Err(_) => {
+            let _ = join.join();
+            return Err(ReaderStartError::StartupChannelClosed);
+        }
+    };
     Ok(SpawnedWorker {
         client: WorkerClient {
             sender,

@@ -117,7 +117,19 @@ pub struct LanguageCapabilitySetV1 {
 /// (`syntax_exact | name_resolved | compiler_or_lsp_resolved |
 /// dynamic_observed | heuristic_candidate | unknown_unsupported`). Every
 /// graph path preserves its weakest edge authority.
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    Serialize,
+    Deserialize,
+    schemars::JsonSchema,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum EdgeAuthorityV1 {
     SyntaxExact,

@@ -32,7 +32,7 @@ use crate::handlers::graph::{
     compute_by_qualified_name, compute_context, compute_derives, compute_find_exact_symbol,
     compute_impact, compute_node, compute_redundancy, compute_rename_preview, compute_search,
     compute_signature, compute_similar, freshness_lines, not_found_tool_result, render_context,
-    render_search,
+    render_node_md, render_search,
 };
 use crate::handlers::grep::{compute_grep, render_grep};
 use crate::handlers::health::{
@@ -110,7 +110,8 @@ pub async fn compute_graph_tool(
             compute_impact(&open(read("impact")?.engine_only()).await?, args).await
         }
         ApplicationSurfaceOperation::Node => {
-            compute_node(&open(read("node")?.engine_only()).await?, args).await
+            let graph = open(read("node")?.engine_only()).await?;
+            with_read_cost(&graph, compute_node(&graph, args).await)
         }
         ApplicationSurfaceOperation::Similar => compute_similar(ctx, args).await,
         ApplicationSurfaceOperation::Redundancy => compute_redundancy(ctx, args).await,
@@ -360,6 +361,12 @@ pub fn render_graph_tool(
         }
         GraphToolResultV1::Node(NodeResultV1::NotFound(not_found)) => {
             not_found_tool_result(not_found)?
+        }
+        GraphToolResultV1::Node(NodeResultV1::Found(node)) => {
+            let value = body()?;
+            rendered_tool_result(response_handle_root, args, &value, Vec::new(), || {
+                render_node_md(node, &value)
+            })
         }
         GraphToolResultV1::Impact(ImpactResultV1::NotFound(not_found))
         | GraphToolResultV1::RenamePreview(RenamePreviewPrimitiveOutcomeV1::NotFound(not_found)) => {
@@ -661,6 +668,7 @@ mod tests {
             related_symbols: Vec::new(),
             related_omission: None,
             code: Vec::new(),
+            call_path: None,
             oversized_symbols: Vec::new(),
             coverage: PrimitiveSearchCoverageV1 {
                 exact: PrimitiveLaneStatusV1::Complete(PrimitiveLaneCompleteV1::Complete),

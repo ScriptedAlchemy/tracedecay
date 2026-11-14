@@ -71,6 +71,7 @@ mod module_resolution;
 mod projection_rows;
 mod resolution_index;
 mod resolution_view;
+mod typescript_receivers;
 mod typescript_resolution;
 pub use helpers::generation_language_revisions_are_current;
 use helpers::*;
@@ -146,7 +147,7 @@ pub use sealed_codec::{
 ///
 /// `v5` resolves constructor and associated owner uses to type definitions
 /// and preserves each parser-observed call token as its relation evidence.
-pub const DAEMON_CODE_INDEX_CHUNKER_REVISION: &str = "chunker.daemon.v5";
+pub const DAEMON_CODE_INDEX_CHUNKER_REVISION: &str = "chunker.daemon.v6";
 
 /// Immutable configuration retained by one production index owner.
 #[derive(Clone, Debug)]
@@ -2360,7 +2361,12 @@ where
     /// from the files the edit changed and never decodes it; a generation
     /// without one, or an edit that needs every file's resolution, is built
     /// whole.
-    #[tracing::instrument(name = "code_index.build.and_publish", level = "trace", skip_all)]
+    #[tracing::instrument(
+        name = "code_index.build.and_publish",
+        level = "trace",
+        skip_all,
+        fields(project_id = %self.config.project_id)
+    )]
     pub fn build_and_publish(
         &mut self,
         request: CodeIndexBuildRequestV1,

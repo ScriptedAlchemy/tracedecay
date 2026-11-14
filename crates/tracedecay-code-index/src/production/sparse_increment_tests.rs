@@ -24,6 +24,233 @@ use super::*;
 
 const RUST: &str = "rust";
 
+#[test]
+fn typescript_shadowed_local_writes_preserve_sealed_module_receivers() {
+    const CALLER: &str = r#"import { Worker } from './workers';
+const worker = new Worker();
+function shadow() {
+  let worker: Worker = new Worker();
+  worker = new Worker();
+}
+export function stable() { worker.execute(); }
+let captured: Worker = new Worker();
+function replace() { captured = new Worker(); }
+export function reassigned() { captured.execute(); }
+"#;
+    let store = MemorySealedPublicationStoreV1::default();
+    publish(
+        &mut owner(&store),
+        &[
+            ("main.ts", "typescript", CALLER),
+            (
+                "workers.ts",
+                "typescript",
+                "export class Worker { execute() {} }\nexport class Alternate { execute() {} }\n",
+            ),
+        ],
+        1_100_000,
+    );
+    let restored = store
+        .decode_active(&scope())
+        .expect("sealed receiver context decodes")
+        .expect("published generation");
+    for (caller_name, reference, expected) in [
+        (
+            "main.ts::stable",
+            "worker.execute",
+            Some("workers.ts::Worker::execute"),
+        ),
+        ("main.ts::reassigned", "captured.execute", None),
+    ] {
+        let caller = &restored
+            .symbols()
+            .symbols
+            .iter()
+            .find(|symbol| symbol.qualified_name == caller_name)
+            .expect("fixture caller")
+            .occurrence;
+        let calls = restored
+            .edges()
+            .iter()
+            .filter(|edge| {
+                edge.from_occurrence == *caller && edge.kind == RelationEdgeKindV1::Calls
+            })
+            .collect::<Vec<_>>();
+        if let Some(expected) = expected {
+            assert_eq!(calls.len(), 1, "{caller_name}");
+            let edge = calls[0];
+            assert_eq!(
+                edge.authority,
+                tracedecay_domain::EdgeAuthorityV1::NameResolved
+            );
+            assert_eq!(
+                &CALLER
+                    [edge.evidence_span.start_byte as usize..edge.evidence_span.end_byte as usize],
+                reference
+            );
+            assert_eq!(
+                restored
+                    .symbols()
+                    .symbols
+                    .iter()
+                    .find(|symbol| symbol.occurrence == edge.to_occurrence)
+                    .expect("resolved target")
+                    .qualified_name,
+                expected
+            );
+        } else {
+            assert!(calls.is_empty(), "a written captured binding must abstain");
+        }
+        assert_eq!(
+            restored
+                .unresolved_import_calls()
+                .expect("restored unresolved receiver evidence")
+                .iter()
+                .any(|gap| gap.from_occurrence == *caller && gap.reference_name == reference),
+            expected.is_none(),
+            "{caller_name}"
+        );
+    }
+}
+
+#[test]
+fn typescript_factory_return_edits_rebind_unchanged_receivers_after_restore() {
+    const CALLER: &str = "import { makeWorker as acquire } from './factory';\nclass Created { execute() {} }\nexport async function run() { const worker = await acquire(); const alias = worker; alias.execute(); }\n";
+    const FACTORY: &str = "import { Worker as Created, Alternate as Changed } from './workers';\nexport async function makeWorker(): Promise<Created> { return new Created(); }\n";
+    fn tree(factory: &str) -> Vec<(&str, &str, &str)> {
+        vec![
+            ("main.ts", "typescript", CALLER),
+            ("factory.ts", "typescript", factory),
+            (
+                "workers.ts",
+                "typescript",
+                "export class Worker { execute() {} }\nexport class Alternate { execute() {} }\n",
+            ),
+            ("a.ts", "typescript", "export const a = 1;"),
+            ("b.ts", "typescript", "export const b = 1;"),
+            ("c.ts", "typescript", "export const c = 1;"),
+            ("d.ts", "typescript", "export const d = 1;"),
+            ("e.ts", "typescript", "export const e = 1;"),
+            ("f.ts", "typescript", "export const f = 1;"),
+        ]
+    }
+    fn assert_receiver(generation: &CodeIndexPublishedGenerationV1, target: Option<&str>) {
+        let caller = &generation
+            .symbols()
+            .symbols
+            .iter()
+            .find(|symbol| symbol.qualified_name == "main.ts::run")
+            .unwrap()
+            .occurrence;
+        let edges = generation
+            .edges()
+            .iter()
+            .filter(|edge| {
+                edge.from_occurrence == *caller
+                    && edge.kind == RelationEdgeKindV1::Calls
+                    && generation.symbols().symbols.iter().any(|symbol| {
+                        symbol.occurrence == edge.to_occurrence && symbol.simple_name == "execute"
+                    })
+            })
+            .collect::<Vec<_>>();
+        if let Some(target) = target {
+            assert_eq!(edges.len(), 1);
+            let edge = edges[0];
+            assert_eq!(
+                edge.authority,
+                tracedecay_domain::EdgeAuthorityV1::NameResolved
+            );
+            assert_eq!(
+                &CALLER
+                    [edge.evidence_span.start_byte as usize..edge.evidence_span.end_byte as usize],
+                "alias.execute"
+            );
+            assert_eq!(
+                generation
+                    .symbols()
+                    .symbols
+                    .iter()
+                    .find(|symbol| symbol.occurrence == edge.to_occurrence)
+                    .unwrap()
+                    .qualified_name,
+                target
+            );
+            assert!(
+                !generation
+                    .unresolved_import_calls()
+                    .unwrap()
+                    .iter()
+                    .any(|gap| gap.from_occurrence == *caller
+                        && gap.reference_name == "alias.execute")
+            );
+        } else {
+            assert!(edges.is_empty());
+            assert!(
+                generation
+                    .unresolved_import_calls()
+                    .unwrap()
+                    .iter()
+                    .any(|gap| gap.from_occurrence == *caller
+                        && gap.reference_name == "alias.execute")
+            );
+        }
+    }
+    let store = MemorySealedPublicationStoreV1::default();
+    publish(&mut owner(&store), &tree(FACTORY), 1_100_000);
+    let restored = store.decode_active(&scope()).unwrap().unwrap();
+    assert_receiver(&restored, Some("workers.ts::Worker::execute"));
+    let caller_file = restored
+        .files
+        .iter()
+        .find(|file| file.authority.logical_path == "main.ts")
+        .unwrap()
+        .extraction
+        .file_occurrence_id
+        .clone();
+    drop(restored);
+
+    let changed = FACTORY
+        .replace("Promise<Created>", "Promise<Changed>")
+        .replace("new Created()", "new Changed()");
+    let after = owner(&store)
+        .build_and_publish(
+            request_capturing(&tree(&changed), &["factory.ts"], 1_200_000),
+            &UninterruptibleCodeIndexControlV1,
+        )
+        .unwrap();
+    assert_eq!(
+        after.cold_reason(),
+        None,
+        "only the factory file is re-extracted"
+    );
+    let restored = store.decode_active(&scope()).unwrap().unwrap();
+    assert_receiver(&restored, Some("workers.ts::Alternate::execute"));
+    assert_eq!(
+        restored
+            .files
+            .iter()
+            .find(|file| file.authority.logical_path == "main.ts")
+            .unwrap()
+            .extraction
+            .file_occurrence_id,
+        caller_file
+    );
+    let cold_store = MemorySealedPublicationStoreV1::default();
+    publish(&mut owner(&cold_store), &tree(&changed), 1_200_000);
+    assert_eq!(answers(&store), answers(&cold_store));
+    drop(restored);
+
+    let unsupported = changed.replace("Promise<Changed>", "Promise<Created | Changed>");
+    let after = owner(&store)
+        .build_and_publish(
+            request_capturing(&tree(&unsupported), &["factory.ts"], 1_300_000),
+            &UninterruptibleCodeIndexControlV1,
+        )
+        .unwrap();
+    assert_eq!(after.cold_reason(), None);
+    assert_receiver(&store.decode_active(&scope()).unwrap().unwrap(), None);
+}
+
 fn occurrence(path: &str, source: &[u8]) -> FileOccurrenceId {
     let digest = sha2::Sha256::digest([path.as_bytes(), b"\0", source].concat());
     worker_id(&format!(

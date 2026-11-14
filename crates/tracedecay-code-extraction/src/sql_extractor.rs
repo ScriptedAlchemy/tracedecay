@@ -357,6 +357,7 @@ impl SqlExtractor {
             clone_bodies: Vec::new(),
             callable_arities: Vec::new(),
             go_method_sets: Vec::new(),
+            typescript_types: Vec::new(),
             schema_evidence: Some(ExtractedSchemaEvidenceV1 {
                 logical_path: state.file_path,
                 language: SchemaEvidenceLanguageV1::Sql,

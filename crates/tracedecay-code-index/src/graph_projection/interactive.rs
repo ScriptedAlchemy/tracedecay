@@ -57,7 +57,8 @@ pub use self::models::{
     CodeGraphImpactedSymbolV1, CodeGraphPathSearchV1, CodeGraphRankedNeighborsV1,
     CodeGraphRankedSymbolV1, CodeGraphRelationKeyV1, CodeGraphRelationKeysV1,
     CodeGraphSemanticEdgeV1, CodeGraphSymbolDegreesV1, CodeGraphSymbolPageV1, CodeGraphSymbolRefV1,
-    CodeGraphSymbolSearchPageV1, CodeGraphSymbolSummaryV1, UnresolvedCallerGapsV1,
+    CodeGraphSymbolSearchPageV1, CodeGraphSymbolSummaryV1, CodeGraphUnresolvedCallSitesV1,
+    UnresolvedCallerGapsV1,
 };
 
 pub type CodeGraphSymbolPredicate<'a> = dyn Fn(
@@ -795,6 +796,51 @@ impl CodeGraphInteractiveReader {
             }
         }
         Ok(gaps)
+    }
+
+    /// Reads only the requested caller's retained evidence. The record cap
+    /// bounds work even when non-call limitations are interleaved with calls.
+    /// A released catalog refuses promptly; this never performs a disk scan.
+    pub fn unresolved_call_sites(
+        &self,
+        occurrence: &SymbolOccurrenceId,
+        max_references: usize,
+        request_cancellation: Arc<dyn GraphCancellation>,
+    ) -> Result<Option<CodeGraphUnresolvedCallSitesV1>, CodeGraphProjectionError> {
+        let cancellation = self.read_cancellation(request_cancellation)?;
+        occurrence
+            .validate()
+            .map_err(|error| CodeGraphProjectionError::Contract(error.to_string()))?;
+        require_positive(max_references, "unresolved call evidence limit")?;
+        if !self.catalog_is_resident() {
+            return Err(CodeGraphProjectionError::Unavailable(
+                "unresolved-call evidence requires the resident code graph catalog".to_owned(),
+            ));
+        }
+        let catalog = self.catalog(Arc::clone(&cancellation))?;
+        let Some(symbol) = catalog.symbols.get(occurrence) else {
+            return Ok(None);
+        };
+        if let Some(meter) = &self.meter {
+            meter.record_catalog_symbols(1);
+        }
+        let mut references = Vec::new();
+        for reference in symbol.unresolved_calls.iter().take(max_references) {
+            catalog::check_cancelled(cancellation.as_ref())?;
+            if reference.from_occurrence != *occurrence {
+                return Err(CodeGraphProjectionError::Corrupt(
+                    "unresolved call evidence belongs to a different caller".to_owned(),
+                ));
+            }
+            if reference.kind == RelationEdgeKindV1::Calls {
+                references.push(reference.clone());
+            }
+        }
+        catalog::check_cancelled(cancellation.as_ref())?;
+        Ok(Some(CodeGraphUnresolvedCallSitesV1 {
+            references,
+            has_more: symbol.unresolved_calls.len() > max_references,
+        }))
     }
 
     /// Whether the seal could not decide the implementor set of any of

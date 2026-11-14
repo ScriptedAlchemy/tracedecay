@@ -59,7 +59,10 @@ pub use replay::{
 pub(crate) use replay::{
     checked_decode_replay_source, metadata_manifest_from_source, validate_supplied_rows_binding,
 };
-pub(crate) use spill::{ENTITIES_FILE, read_spilled_entity};
+pub(crate) use spill::{
+    AbandonedRowSpill, ENTITIES_FILE, MAX_ROW_SPILL_OWNER_RECEIPT_BYTES,
+    ROW_SPILL_OWNER_RECEIPT_FILE, ROW_SPILL_PREFIX, read_spilled_entity, row_spill_owner,
+};
 pub use spill::{
     GRAPH_ROW_SPILL_RUN_BYTES, GraphGenerationRowSpill, GraphGenerationRows,
     GraphSpillRowFootprint, SpilledGraphGeneration,

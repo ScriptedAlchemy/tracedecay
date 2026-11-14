@@ -909,8 +909,10 @@ fn release_sweep_retries_idle_sealed_reader_hibernation() {
     let root = temp.path().to_path_buf();
     let projection = replay.publication.key.projection.clone();
     let (result_tx, result_rx) = mpsc::channel();
+    let (started_tx, started_rx) = mpsc::channel();
     let sweep = thread::spawn(move || {
         let (control, probe) = control_and_probe();
+        started_tx.send(()).unwrap();
         let result = registry.release_sealed_generation_staging_rows(
             registration(binding, &root),
             &mut authority,
@@ -920,6 +922,10 @@ fn release_sweep_retries_idle_sealed_reader_hibernation() {
         result_tx.send(()).unwrap();
         (authority, result)
     });
+    // Start the bound only after the sweep thread has actually been
+    // scheduled; otherwise the test measures worker startup under CI load,
+    // not whether a live sealed reader blocks staging cleanup.
+    started_rx.recv().unwrap();
     let busy_completion = result_rx.recv_timeout(Duration::from_millis(100));
     let engines_during_read = database.sealed_generation_engine_census();
     release.wait();
