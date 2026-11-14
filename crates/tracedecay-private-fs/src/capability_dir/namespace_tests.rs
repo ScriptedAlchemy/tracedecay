@@ -1,5 +1,12 @@
+#[cfg(any(unix, windows))]
+use std::io::Write;
 use std::{ffi::OsStr, fs, io, path::Path};
 
+#[cfg(any(unix, windows))]
+use cap_std::fs::{File, OpenOptions};
+
+#[cfg(any(unix, windows))]
+use super::write_pending_receipt;
 use super::{Dir, rename_noreplace, replace_file};
 
 const FAMILY: [&str; 4] = [
@@ -11,6 +18,62 @@ const FAMILY: [&str; 4] = [
 
 fn open(path: &Path) -> Dir {
     Dir::open_ambient_dir(path, cap_std::ambient_authority()).unwrap()
+}
+
+#[cfg(any(unix, windows))]
+fn read_only_pending_marker(path: &Path) -> (Dir, File) {
+    fs::create_dir(path).unwrap();
+    let directory = open(path);
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    let mut marker = directory.open_with("owner", &options).unwrap();
+    marker.write_all(b"partial receipt").unwrap();
+    marker.sync_all().unwrap();
+    drop(marker);
+    // A real read-only handle makes the production write fail without
+    // replacing its filesystem or cleanup operations with an injected result.
+    let marker = directory.open("owner").unwrap();
+    (directory, marker)
+}
+
+#[cfg(any(unix, windows))]
+#[test]
+fn failed_pending_receipt_removes_its_marker_and_empty_directory() {
+    let root = tempfile::tempdir().unwrap();
+    let pending = root.path().join("pending");
+    let (directory, marker) = read_only_pending_marker(&pending);
+
+    assert!(
+        write_pending_receipt(directory, OsStr::new("owner"), marker, b"complete receipt")
+            .is_err()
+    );
+    assert!(
+        !pending.exists(),
+        "failed unpublished receipts must not leave owned staging behind"
+    );
+}
+
+#[cfg(any(unix, windows))]
+#[test]
+fn failed_pending_receipt_preserves_a_replaced_marker() {
+    let root = tempfile::tempdir().unwrap();
+    let pending = root.path().join("pending");
+    let (directory, marker) = read_only_pending_marker(&pending);
+    directory.rename("owner", &directory, "original").unwrap();
+    fs::write(pending.join("owner"), b"replacement receipt").unwrap();
+
+    assert!(
+        write_pending_receipt(directory, OsStr::new("owner"), marker, b"complete receipt")
+            .is_err()
+    );
+    assert_eq!(
+        fs::read(pending.join("owner")).unwrap(),
+        b"replacement receipt"
+    );
+    assert_eq!(
+        fs::read(pending.join("original")).unwrap(),
+        b"partial receipt"
+    );
 }
 
 #[test]

@@ -21,6 +21,8 @@ use cap_fs_ext::DirExt;
 use cap_fs_ext::OpenOptionsMaybeDirExt;
 use cap_fs_ext::{FollowSymlinks, OpenOptionsFollowExt};
 pub use cap_std::fs::Dir;
+#[cfg(unix)]
+use cap_std::fs::MetadataExt;
 use cap_std::fs::{File, OpenOptions};
 
 /// Pins the parent of a cross-directory publication. On Windows the no-delete
@@ -329,35 +331,53 @@ pub fn write_exclusive_pending_receipt_nofollow(
     let directory = open_root_nofollow(directory_path)?;
     let mut options = OpenOptions::new();
     options.write(true).create_new(true);
-    let mut marker = directory.open_with(filename, &options)?;
+    let marker = directory.open_with(filename, &options)?;
+    write_pending_receipt(directory, filename, marker, contents)
+}
+
+/// The caller exclusively created `marker` beneath this held directory.
+fn write_pending_receipt(
+    directory: Dir,
+    filename: &OsStr,
+    mut marker: File,
+    contents: &[u8],
+) -> io::Result<()> {
     #[cfg(unix)]
-    let marker_identity = {
-        use cap_std::fs::MetadataExt;
-        marker
-            .metadata()
-            .ok()
-            .map(|metadata| (metadata.dev(), metadata.ino()))
-    };
+    let marker_identity = marker
+        .metadata()
+        .ok()
+        .map(|metadata| (metadata.dev(), metadata.ino()));
+    #[cfg(windows)]
+    let marker_identity = crate::windows_file::information(&marker)
+        .ok()
+        .map(|information| (information.volume_serial_number, information.file_index));
     let written = marker.write_all(contents).and_then(|()| marker.sync_all());
-    drop(marker);
     if let Err(error) = written {
         // Keep the original write failure. A different marker entry is not
         // ours to delete, and a nonempty substituted directory is not ours
         // to remove. Neither cleanup operation follows an ambient pathname.
         #[cfg(unix)]
-        let same_marker = {
-            use cap_std::fs::MetadataExt;
-            marker_identity.is_some_and(|identity| {
-                directory
-                    .symlink_metadata(filename)
-                    .ok()
-                    .is_some_and(|metadata| {
-                        metadata.is_file() && (metadata.dev(), metadata.ino()) == identity
-                    })
-            })
-        };
-        #[cfg(not(unix))]
+        let same_marker = marker_identity.is_some_and(|identity| {
+            directory
+                .symlink_metadata(filename)
+                .ok()
+                .is_some_and(|metadata| {
+                    metadata.is_file() && (metadata.dev(), metadata.ino()) == identity
+                })
+        });
+        #[cfg(windows)]
+        let same_marker = marker_identity.is_some_and(|identity| {
+            open_regular_nofollow(&directory, filename)
+                .and_then(|file| crate::windows_file::information(&file))
+                .is_ok_and(|information| {
+                    (information.volume_serial_number, information.file_index) == identity
+                })
+        });
+        #[cfg(not(any(unix, windows)))]
         let same_marker = false;
+        // Retain the original file through the comparison so its identity
+        // cannot be recycled, then close it before removing its name.
+        drop(marker);
         if same_marker {
             if let Err(cleanup) = directory.remove_file(filename) {
                 tracing::warn!(%cleanup, "pending owner marker could not be removed");
