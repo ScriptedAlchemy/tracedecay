@@ -1,5 +1,6 @@
 use crate::common;
 
+use std::cell::RefCell;
 use std::path::Path;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
@@ -175,6 +176,9 @@ async fn selected_project_source_route_survives_physical_daemon_restart() {
 pub(crate) fn await_published_code_index(home: &Path, project: &Path) {
     let project_arg = project.to_string_lossy().into_owned();
     let deadline = Instant::now() + Duration::from_secs(110);
+    // Keep the last completed observation when the deadline falls between
+    // probes; the timeout itself must not issue another status request.
+    let last_status = RefCell::new(None::<Value>);
     // CLI admission spends part of the request budget before status runs, so
     // a nested 110-second wait can exceed the remaining dispatch deadline.
     // Sample the same typed predicate under one end-to-end fixture deadline.
@@ -185,7 +189,12 @@ pub(crate) fn await_published_code_index(home: &Path, project: &Path) {
             let remaining_ms = deadline
                 .saturating_duration_since(Instant::now())
                 .as_millis();
-            assert!(remaining_ms > 0, "code-index publication deadline elapsed");
+            assert!(
+                remaining_ms > 0,
+                "code-index publication deadline elapsed for {}; last status: {}",
+                project.display(),
+                last_status.borrow().as_ref().unwrap_or(&Value::Null),
+            );
             let output = common::tracedecay_command_with_home(home)
                 .current_dir(project)
                 .env(TOOL_REQUEST_DEADLINE_ENV, remaining_ms.to_string())
@@ -225,6 +234,7 @@ pub(crate) fn await_published_code_index(home: &Path, project: &Path) {
                 {
                     // The canonical readiness wait allows a scheduler to mount
                     // inside its budget. This status sample has no mount refusal.
+                    *last_status.borrow_mut() = Some(status);
                     return None;
                 }
                 StatusCodeIndexFreshnessV1::MountFailed { .. }
@@ -234,7 +244,10 @@ pub(crate) fn await_published_code_index(home: &Path, project: &Path) {
             };
             match worktree.readiness(CodeIndexReadinessTargetV1::GraphReady) {
                 CodeIndexReadinessV1::Reached => Some(()),
-                CodeIndexReadinessV1::Pending => None,
+                CodeIndexReadinessV1::Pending => {
+                    *last_status.borrow_mut() = Some(status);
+                    None
+                }
                 CodeIndexReadinessV1::Unreachable { reason } => {
                     panic!("code-index readiness cannot be reached: {reason}; {status}")
                 }
@@ -242,8 +255,9 @@ pub(crate) fn await_published_code_index(home: &Path, project: &Path) {
         },
         || {
             format!(
-                "daemon never published a serving generation for {}",
-                project.display()
+                "daemon never published a serving generation for {}; last status: {}",
+                project.display(),
+                last_status.borrow().as_ref().unwrap_or(&Value::Null),
             )
         },
     );

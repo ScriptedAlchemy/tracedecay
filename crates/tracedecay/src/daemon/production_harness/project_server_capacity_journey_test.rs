@@ -190,8 +190,16 @@ fn assert_generation_contains_probe(latest: &LatestCompleteCodeIndexV1, probe: &
     );
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn project_full_publication_precedes_registered_schema_convergence() {
+#[test]
+fn project_full_publication_precedes_registered_schema_convergence() {
+    tracedecay_runtime_core::native_runtime::default_builder()
+        .worker_threads(2)
+        .build()
+        .expect("native project composition runtime")
+        .block_on(verify_project_full_publication_precedes_registered_schema_convergence());
+}
+
+async fn verify_project_full_publication_precedes_registered_schema_convergence() {
     let isolation = TempDir::new().expect("production harness isolation");
     let bootstrap_project = isolation.path().join("bootstrap-project");
     let target_project = isolation.path().join("target-project");
@@ -265,8 +273,16 @@ async fn project_full_publication_precedes_registered_schema_convergence() {
     harness.shutdown().await;
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn twelve_project_journey_retires_idle_owners_without_empty_graphs() {
+#[test]
+fn twelve_project_journey_retires_idle_owners_without_empty_graphs() {
+    tracedecay_runtime_core::native_runtime::default_builder()
+        .worker_threads(2)
+        .build()
+        .expect("native project composition runtime")
+        .block_on(verify_twelve_project_journey_retires_idle_owners_without_empty_graphs());
+}
+
+async fn verify_twelve_project_journey_retires_idle_owners_without_empty_graphs() {
     let isolation = TempDir::new().expect("production harness isolation");
     let mut projects = Vec::new();
     for ordinal in 0..12 {

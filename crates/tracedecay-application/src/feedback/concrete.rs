@@ -47,6 +47,7 @@ use tracedecay_domain::{
 };
 use tracedecay_store::DiagnosticStore;
 use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
+use tracing::Instrument;
 
 use super::concrete_evidence::{complete, cursor_refused, interruption, unavailable};
 use super::observations::{
@@ -294,11 +295,24 @@ impl ProjectFeedbackObservationSinkV1 {
         Ok(())
     }
 
-    #[tracing::instrument(name = "usecases.feedback.close_drain", level = "trace", skip_all)]
+    #[tracing::instrument(
+        name = "usecases.feedback.close_drain",
+        level = "trace",
+        skip_all,
+        fields(producer_boot_id = %self.boot_id)
+    )]
     async fn join_worker(&self) -> Result<(), FeedbackRuntimeError> {
-        let mut worker = self.worker.lock().await;
+        let mut worker = self
+            .worker
+            .lock()
+            .instrument(tracing::trace_span!("usecases.feedback.close_drain.lock"))
+            .await;
         let outcome = match worker.as_ref() {
-            Some(task) => match task.wait().await {
+            Some(task) => match task
+                .wait()
+                .instrument(tracing::trace_span!("usecases.feedback.close_drain.worker"))
+                .await
+            {
                 NativeTaskOutcome::Completed(Ok(())) => Ok(()),
                 NativeTaskOutcome::Completed(Err(())) => Err(FeedbackRuntimeError::Store),
                 NativeTaskOutcome::Cancelled | NativeTaskOutcome::Panicked(_) => {
@@ -1783,7 +1797,11 @@ fn interruption_outcome(context: &RequestContext, observed_at: UtcMicros) -> Fee
 #[tracing::instrument(
     name = "usecases.feedback.persist_observation",
     level = "trace",
-    skip_all
+    skip_all,
+    fields(
+        producer_boot_id = ?envelope.producer_boot_id,
+        producer_sequence = ?envelope.producer_sequence
+    )
 )]
 async fn persist_feedback_observation(
     database: &Database,
@@ -1794,9 +1812,12 @@ async fn persist_feedback_observation(
     }
     let transaction = database
         .begin_write_transaction("record feedback observation")
+        .instrument(tracing::trace_span!("usecases.feedback.writer_admission"))
         .await
         .map_err(|_| FeedbackRuntimeError::Store)?;
-    let mut ledger = load_observation_ledger(&transaction).await?;
+    let mut ledger = load_observation_ledger(&transaction)
+        .instrument(tracing::trace_span!("usecases.feedback.load_ledger"))
+        .await?;
     if ledger
         .observations
         .iter()
@@ -1850,18 +1871,27 @@ async fn persist_feedback_observation(
     }
     ledger.observations.push(envelope);
     ledger.schema_version = OBSERVATION_LEDGER_SCHEMA_VERSION;
-    let encoded = encode_bounded_observation_ledger(
-        &mut ledger,
-        MAX_STORED_OBSERVATIONS,
-        MAX_STORED_OBSERVATION_BOOTS,
-        MAX_OBSERVATION_LEDGER_BYTES,
-    )?;
+    let encoded = tracing::trace_span!(
+        "usecases.feedback.encode_ledger",
+        observations = ledger.observations.len(),
+        boots = ledger.producer_boots.len()
+    )
+    .in_scope(|| {
+        encode_bounded_observation_ledger(
+            &mut ledger,
+            MAX_STORED_OBSERVATIONS,
+            MAX_STORED_OBSERVATION_BOOTS,
+            MAX_OBSERVATION_LEDGER_BYTES,
+        )
+    })?;
     database
         .set_metadata_unguarded(&transaction, OBSERVATION_LEDGER_METADATA_KEY, &encoded)
+        .instrument(tracing::trace_span!("usecases.feedback.persist_ledger"))
         .await
         .map_err(|_| FeedbackRuntimeError::Store)?;
     transaction
         .commit()
+        .instrument(tracing::trace_span!("usecases.feedback.commit"))
         .await
         .map_err(|_| FeedbackRuntimeError::Store)
 }
