@@ -2,7 +2,14 @@ module(name = "tracedecay", version = "0.0.0")
 
 bazel_dep(name = "platforms", version = "1.1.0")
 bazel_dep(name = "bazel_skylib", version = "1.9.2")
-bazel_dep(name = "bazel_lib", version = "3.7.2")
+bazel_dep(name = "bazel_lib", version = "3.8.0")
+# Its sibling-script fast path must publish the batch launcher's manifest to
+# the shell payload, whose path does not own the .bat.runfiles tree.
+single_version_override(
+    module_name = "bazel_lib",
+    patches = ["//scripts:bazel/patches/windows-launcher-runfiles-manifest.patch"],
+    patch_strip = 1,
+)
 bazel_dep(name = "rules_python", version = "2.5.1")
 bazel_dep(name = "rules_rust", version = "0.75.0")
 # Rustc adds every dependency search directory to PATH on Windows; large

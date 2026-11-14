@@ -2562,11 +2562,13 @@ async fn production_lsp_negotiates_and_projects_canonical_context() {
         initialized["result"]["capabilities"]["documentSymbolProvider"],
         true,
         "a routed analyzer must negotiate the declared document-symbol capability: {initialized}\nIsolated daemon log:\n{}",
-        fixture.daemon_log_tail()
+        fixture.daemon_log()
     );
     assert_eq!(
-        initialized["result"]["capabilities"]["hoverProvider"], true,
-        "a routed analyzer must negotiate the declared hover capability: {initialized}"
+        initialized["result"]["capabilities"]["hoverProvider"],
+        true,
+        "a routed analyzer must negotiate the declared hover capability: {initialized}\nIsolated daemon log:\n{}",
+        fixture.daemon_log()
     );
     assert!(
         initialized["result"]["capabilities"]["definitionProvider"].is_null(),

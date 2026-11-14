@@ -279,34 +279,21 @@ impl FormattedTracingCapture {
     /// before the first captured event.
     #[must_use]
     pub fn start() -> Self {
-        Self::start_with_output(false, false)
+        Self::start_with_output(false)
     }
 
     /// Also writes each line to stderr so a terminated measurement retains
     /// the events emitted before its deadline.
     #[must_use]
     pub fn start_with_stderr() -> Self {
-        Self::start_with_output(true, false)
+        Self::start_with_output(true)
     }
 
-    /// Captures span admission and completion timings as well as events,
-    /// retaining live stderr if the measurement is terminated before reporting.
-    #[must_use]
-    pub fn start_with_span_timings() -> Self {
-        Self::start_with_output(true, true)
-    }
-
-    fn start_with_output(stderr: bool, span_timings: bool) -> Self {
+    fn start_with_output(stderr: bool) -> Self {
         let bytes = std::sync::Arc::new(Mutex::new(Vec::new()));
         let subscriber = tracing_subscriber::fmt()
             .with_max_level(tracing::Level::TRACE)
             .with_ansi(false)
-            .with_span_events(if span_timings {
-                tracing_subscriber::fmt::format::FmtSpan::NEW
-                    | tracing_subscriber::fmt::format::FmtSpan::CLOSE
-            } else {
-                tracing_subscriber::fmt::format::FmtSpan::NONE
-            })
             .with_writer(CaptureBuffer(std::sync::Arc::clone(&bytes), stderr));
         let guard = if stderr {
             set_tracing_capture(
