@@ -151,9 +151,20 @@ pub(crate) async fn write_relation_projection(
         .read_snapshot()
         .await
         .map_err(|error| storage(RECEIPT_OPERATION, error))?;
-    write_relation_projection_on_snapshot(database, &snapshot, projection, cancellation).await
+    let (expected, _) = expected_receipt(
+        &snapshot,
+        &projection.session_id,
+        SessionProjectionGenerationV1::new(projection.generation)
+            .map_err(|error| storage(RECEIPT_OPERATION, error))?,
+    )
+    .await?;
+    // Native graph I/O does not read this snapshot. Release its WAL slot
+    // before publishing; the completion writer rechecks the exact receipt.
+    drop(snapshot);
+    write_relation_projection_with_receipt(database, projection, expected, cancellation)
 }
 
+#[cfg(any(test, feature = "test-helpers"))]
 pub(crate) async fn write_relation_projection_on_snapshot(
     database: &impl SessionTemporalRegisteredDb,
     snapshot: &tracedecay_runtime_core::db::DatabaseEngineReadSnapshot,
@@ -167,6 +178,15 @@ pub(crate) async fn write_relation_projection_on_snapshot(
             .map_err(|error| storage(RECEIPT_OPERATION, error))?,
     )
     .await?;
+    write_relation_projection_with_receipt(database, projection, expected, cancellation)
+}
+
+fn write_relation_projection_with_receipt(
+    database: &impl SessionTemporalRegisteredDb,
+    projection: &SessionRelationProjection,
+    expected: GraphWatermark,
+    cancellation: Arc<dyn GraphCancellation>,
+) -> SessionStoreResult<GraphWatermark> {
     let actual =
         projection_watermark(projection).map_err(|error| storage(RECEIPT_OPERATION, error))?;
     if actual != expected {
@@ -330,5 +350,125 @@ async fn expected_receipt(
             RECEIPT_OPERATION,
             "relation receipt has an invalid state",
         )),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use tracedecay_global_db::tests::harness::{HostAdmissionScope, HostAdmissionTestRuntimeV1};
+    use tracedecay_graph_db::NeverCancelled;
+    use tracedecay_runtime_core::db::DatabaseEngineReadConnection;
+    use tracedecay_store::{SessionRefreshBeginOrJoinRequestV1, SessionRefreshFrontierV1};
+    use tracedecay_temporal_query::execution::ExecutionControl;
+
+    use super::*;
+    use crate::SessionTemporalAccess;
+
+    struct ReaderReleaseProbe {
+        reader: DatabaseEngineReadConnection,
+        checkpoints: AtomicUsize,
+    }
+
+    impl GraphCancellation for ReaderReleaseProbe {
+        fn is_cancelled(&self) -> bool {
+            self.checkpoints.fetch_add(1, Ordering::Relaxed);
+            let occupancy = self.reader.reader_pool_occupancy().unwrap();
+            assert_eq!(
+                occupancy.leased_general, 0,
+                "native relation work must not retain the receipt's SQL snapshot"
+            );
+            false
+        }
+    }
+
+    #[test]
+    fn receipt_reader_is_released_before_each_native_relation_publication() {
+        tracedecay_runtime_core::native_runtime::default_builder()
+            .worker_threads(2)
+            .build()
+            .unwrap()
+            .block_on(async {
+                let directory = tempfile::tempdir().unwrap();
+                let runtime = HostAdmissionTestRuntimeV1::profile(directory.path())
+                    .await
+                    .unwrap();
+                let database = runtime
+                    .registered_database(HostAdmissionScope::Profile)
+                    .unwrap();
+                let (scope, relations) = database.session_relation_store().unwrap();
+                let access = SessionTemporalAccess::new(database);
+                let mut projections = Vec::new();
+                for id in ["receipt-reader-a", "receipt-reader-b"] {
+                    let session_id = SessionId::new(id).unwrap();
+                    let request = SessionRefreshBeginOrJoinRequestV1::new(
+                        session_id.clone(),
+                        SessionRefreshFrontierV1::new(0, 0).unwrap(),
+                    );
+                    access
+                        .begin_or_join_session_refresh_result(request)
+                        .await
+                        .unwrap();
+                    let recovery = access
+                        .session_refresh_recovery_result(&session_id)
+                        .await
+                        .unwrap()
+                        .unwrap();
+                    projections.push(SessionRelationProjection {
+                        scope: scope.clone(),
+                        session_id,
+                        generation: recovery.candidate_generation().value(),
+                        summaries: Vec::new(),
+                        logical_copies: Vec::new(),
+                        thread_hierarchy: Vec::new(),
+                        agent_hierarchy: Vec::new(),
+                        parent_session_id: None,
+                        workflow_agents: Vec::new(),
+                    });
+                }
+                let expected = access
+                    .record_relation_receipts_group(&projections, &ExecutionControl::default())
+                    .await
+                    .unwrap();
+                let probe = Arc::new(ReaderReleaseProbe {
+                    reader: database.read_connection(),
+                    checkpoints: AtomicUsize::new(0),
+                });
+                for (projection, expected) in projections.iter().zip(expected) {
+                    let before = probe.checkpoints.load(Ordering::Relaxed);
+                    let applied = apply_relation_projection(
+                        database,
+                        projection,
+                        Arc::clone(&probe) as Arc<dyn GraphCancellation>,
+                    )
+                    .await
+                    .unwrap();
+                    assert_eq!(applied, expected.unwrap());
+                    assert!(probe.checkpoints.load(Ordering::Relaxed) > before);
+                    assert!(
+                        relation_receipt_applied(
+                            database,
+                            &projection.session_id,
+                            SessionProjectionGenerationV1::new(projection.generation).unwrap(),
+                        )
+                        .await
+                        .unwrap()
+                    );
+                    assert_eq!(
+                        relations
+                            .load_projection(
+                                &scope,
+                                &projection.session_id,
+                                projection.generation,
+                                100,
+                                100,
+                                Arc::new(NeverCancelled),
+                            )
+                            .unwrap(),
+                        *projection
+                    );
+                }
+            });
     }
 }

@@ -868,12 +868,10 @@ async fn grouped_completion_revalidates_evidence_after_staging() {
         .unwrap()
         .remove(0)
         .unwrap();
-    let snapshot = database.read_snapshot().await.unwrap();
     let verified = access
-        .apply_candidate_relation_projection(&snapshot, &relation_projection, &control)
+        .apply_candidate_relation_projection(&relation_projection, &control)
         .await
         .unwrap();
-    drop(snapshot);
     let generation =
         tracedecay_domain::SessionProjectionGenerationV1::new(verified.generation).unwrap();
     let validation_snapshot = database.read_snapshot().await.unwrap();

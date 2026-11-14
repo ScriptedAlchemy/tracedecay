@@ -1607,7 +1607,6 @@ async fn commit_deferred_begins<'a>(
 }
 
 async fn drain_staged_completions<'a>(
-    database: &RegisteredGlobalDbLeaseV1,
     access: &SessionTemporalAccess<'_, RegisteredGlobalDb>,
     store: &SessionTemporalStore<'_, tracedecay_global_db::RegisteredGlobalDb>,
     state: &'a SessionTemporalRefreshWakeState,
@@ -1654,28 +1653,11 @@ async fn drain_staged_completions<'a>(
             }
         }
     }
-    let snapshot =
-        match native_runtime::timeout(policy.operation_deadline, database.as_ref().read_snapshot())
-            .await
-        {
-            Err(error) => {
-                record_deadline_failure(report, "snapshot", error);
-                return;
-            }
-            Ok(Ok(snapshot)) => snapshot,
-            Ok(Err(error)) => {
-                report.last_error = Some(format!("{error:?}"));
-                report.retryable_errors += 1;
-                report.observe_retry(SessionTemporalRefreshRetryClass::Storage);
-                return;
-            }
-        };
     let mut applied = Vec::with_capacity(survivors.len());
     for item in survivors {
         match native_runtime::timeout(
             policy.operation_deadline,
             access.apply_candidate_relation_projection(
-                &snapshot,
                 &item.projection,
                 &state.completion_control(),
             ),
@@ -1691,9 +1673,6 @@ async fn drain_staged_completions<'a>(
             }
         }
     }
-    // The commit below is a writer phase; the verification snapshot must not
-    // hold its WAL read slot through it.
-    drop(snapshot);
     if applied.is_empty() {
         return;
     }
@@ -2320,7 +2299,6 @@ pub async fn run_session_temporal_refresh_pass(
     committed.await;
     let drained: Pin<Box<dyn Future<Output = ()> + Send + '_>> =
         Box::pin(drain_staged_completions(
-            database,
             &access,
             &store,
             state,
