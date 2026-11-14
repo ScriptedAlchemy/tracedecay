@@ -17,7 +17,6 @@ use super::owners::{
 use tracedecay_runtime_core::logging::log_daemon_event;
 use tracedecay_runtime_core::native_runtime::{self, TimeoutError};
 use tracedecay_store_runtime::{ShutdownTaskOutcome, ShutdownTaskReceipt};
-use tracing::instrument::WithSubscriber;
 
 type ProjectServerShutdownFuture =
     Pin<Box<dyn Future<Output = ShutdownTaskReceipt> + Send + 'static>>;
@@ -338,20 +337,17 @@ where
             let coordinator_attempt = Arc::clone(&attempt);
             let mut coordinator_failures = failures.clone();
             let coordinator = runner_runtime.map(|runtime| async move {
-                let mut runner = runtime.spawn(
-                    async move {
-                        let prepare_started = Instant::now();
-                        let plan = prepare.await;
-                        log_shutdown_phase(
-                            "plan_prepare",
-                            "complete",
-                            prepare_started,
-                            shutdown_deadline,
-                        );
-                        run_daemon_shutdown(runner_lifecycle, plan, shutdown_deadline).await
-                    }
-                    .with_current_subscriber(),
-                );
+                let mut runner = runtime.spawn(async move {
+                    let prepare_started = Instant::now();
+                    let plan = prepare.await;
+                    log_shutdown_phase(
+                        "plan_prepare",
+                        "complete",
+                        prepare_started,
+                        shutdown_deadline,
+                    );
+                    run_daemon_shutdown(runner_lifecycle, plan, shutdown_deadline).await
+                });
                 let (mut receipt, runner_needs_join) = tokio::select! {
                     biased;
                     result = &mut runner => {
@@ -403,8 +399,7 @@ where
             let spawned = coordinator
                 .ok_or_else(|| "daemon shutdown runner found no Tokio runtime".to_owned())
                 .and_then(|coordinator| {
-                    lifecycle
-                        .spawn_shutdown_coordinator(&attempt, coordinator.with_current_subscriber())
+                    lifecycle.spawn_shutdown_coordinator(&attempt, coordinator)
                 });
             if let Err(error) = spawned {
                 let receipt = Arc::new(DaemonShutdownReceipt::coordinator_failed(

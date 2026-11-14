@@ -19,10 +19,6 @@ use tracedecay_hooks::core_events::DaemonHookEvent;
 use tracedecay_runtime_core::cancellation::CancellationToken;
 #[cfg(unix)]
 use tracedecay_runtime_core::path_safety::canonical_existing_identity;
-#[cfg(unix)]
-use tracing::instrument::WithSubscriber;
-#[cfg(unix)]
-use tracing_subscriber::{filter::Targets, fmt::format::FmtSpan, layer::SubscriberExt};
 
 use super::*;
 
@@ -1461,108 +1457,77 @@ async fn serve_proxy_cancels_running_and_queued_requests_without_host_disconnect
 #[cfg(unix)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn deadline_reply_does_not_wait_for_a_worker_that_ignores_cancellation() {
-    let dispatch = {
-        let targets = Targets::new().with_targets([
-            (
-                "tracedecay_application::feedback::concrete",
-                tracing::Level::TRACE,
-            ),
-            (
-                "tracedecay_daemon_service::project_runtime::shutdown",
-                tracing::Level::TRACE,
-            ),
-            ("tracedecay_daemon_service::shutdown", tracing::Level::TRACE),
-            ("tracedecay::mcp::server::connection", tracing::Level::TRACE),
-            ("tracedecay_runtime_core::db::engine", tracing::Level::TRACE),
-        ]);
-        let subscriber = tracing_subscriber::registry()
-            .with(
-                tracing_subscriber::fmt::layer()
-                    .with_span_events(FmtSpan::NEW | FmtSpan::CLOSE)
-                    .with_timer(tracing_subscriber::fmt::time::uptime())
-                    .with_thread_names(true)
-                    .with_ansi(false)
-                    .with_writer(std::io::stderr),
-            )
-            .with(targets);
-        let _capture = tracedecay_runtime_core::logging::set_tracing_capture(subscriber);
-        tracing::dispatcher::get_default(Clone::clone)
-    };
-    async {
-        let fixture = rmcp_route_fixture("rmcp-deadline-uncooperative").await;
-        let (executor, controlled_server) = mount_cancellation_executor(&fixture).await;
-        let (reader, mut writer, server_task) =
-            super::handshake_authenticated_test_client(fixture.engine.clone(), &fixture.handshake)
-                .await;
-        let mut reader = tokio::io::BufReader::new(reader);
-        write_line(&mut writer, &initialize_request()).await;
-        assert_eq!(
-            read_value(&mut reader, "initialize deadline route").await["id"],
-            json!(1)
-        );
+    let fixture = rmcp_route_fixture("rmcp-deadline-uncooperative").await;
+    let (executor, controlled_server) = mount_cancellation_executor(&fixture).await;
+    let (reader, mut writer, server_task) =
+        super::handshake_authenticated_test_client(fixture.engine.clone(), &fixture.handshake)
+            .await;
+    let mut reader = tokio::io::BufReader::new(reader);
+    write_line(&mut writer, &initialize_request()).await;
+    assert_eq!(
+        read_value(&mut reader, "initialize deadline route").await["id"],
+        json!(1)
+    );
 
-        let budget = Duration::from_secs(5);
-        let mut request = blocked_tool_request(10);
-        request["params"]["_meta"] =
-            tracedecay_mcp::tool_call_deadline_meta(tracedecay_domain::UtcMicros(
-                tracedecay_contracts::clock::now_micros().0
-                    + i64::try_from(budget.as_micros()).expect("budget micros"),
-            ));
-        let sent = std::time::Instant::now();
-        write_line(&mut writer, &request).await;
-        wait_for_count(
-            &executor.started,
-            1,
-            "deadline request never reached executor",
-        )
-        .await;
-        let response = read_value(
-            &mut reader,
-            "deadline reply waited for a worker that ignores cancellation",
-        )
-        .await;
-        let elapsed = sent.elapsed();
-        assert_eq!(response["id"], json!(10), "{response}");
-        wait_for_count(
-            &executor.cancellation_observed,
-            1,
-            "the deadline must cancel the admitted worker",
-        )
-        .await;
-        assert_eq!(
-            executor.completed.load(Ordering::SeqCst),
-            0,
-            "the reply must not wait for the worker to exit"
-        );
-        assert!(
-            elapsed < budget + Duration::from_secs(2),
-            "deadline reply took {elapsed:?} for a {budget:?} budget"
-        );
-        assert!(
-            response
-                .to_string()
-                .contains("tool_dispatch_deadline_exceeded"),
-            "expected the typed dispatch deadline terminal: {response}"
-        );
-
-        executor.release_first.store(true, Ordering::SeqCst);
-        wait_for_count(&executor.completed, 1, "released worker did not exit").await;
-        writer.shutdown().await.expect("shutdown deadline client");
-        drop(writer);
-        drop(reader);
-        tokio::time::timeout(PHASE_TIMEOUT, server_task)
-            .await
-            .expect("deadline RMCP connection did not close")
-            .expect("join deadline RMCP task")
-            .expect("serve deadline RMCP task");
-        fixture.server.shutdown().await;
-        drop((controlled_server, fixture.server));
-        let shutdown = fixture.engine.shutdown_all().await;
-        assert!(
-            shutdown.project_servers.is_clean(),
-            "deadline route shutdown: {shutdown:?}"
-        );
-    }
-    .with_subscriber(dispatch)
+    let budget = Duration::from_secs(5);
+    let mut request = blocked_tool_request(10);
+    request["params"]["_meta"] =
+        tracedecay_mcp::tool_call_deadline_meta(tracedecay_domain::UtcMicros(
+            tracedecay_contracts::clock::now_micros().0
+                + i64::try_from(budget.as_micros()).expect("budget micros"),
+        ));
+    let sent = std::time::Instant::now();
+    write_line(&mut writer, &request).await;
+    wait_for_count(
+        &executor.started,
+        1,
+        "deadline request never reached executor",
+    )
     .await;
+    let response = read_value(
+        &mut reader,
+        "deadline reply waited for a worker that ignores cancellation",
+    )
+    .await;
+    let elapsed = sent.elapsed();
+    assert_eq!(response["id"], json!(10), "{response}");
+    wait_for_count(
+        &executor.cancellation_observed,
+        1,
+        "the deadline must cancel the admitted worker",
+    )
+    .await;
+    assert_eq!(
+        executor.completed.load(Ordering::SeqCst),
+        0,
+        "the reply must not wait for the worker to exit"
+    );
+    assert!(
+        elapsed < budget + Duration::from_secs(2),
+        "deadline reply took {elapsed:?} for a {budget:?} budget"
+    );
+    assert!(
+        response
+            .to_string()
+            .contains("tool_dispatch_deadline_exceeded"),
+        "expected the typed dispatch deadline terminal: {response}"
+    );
+
+    executor.release_first.store(true, Ordering::SeqCst);
+    wait_for_count(&executor.completed, 1, "released worker did not exit").await;
+    writer.shutdown().await.expect("shutdown deadline client");
+    drop(writer);
+    drop(reader);
+    tokio::time::timeout(PHASE_TIMEOUT, server_task)
+        .await
+        .expect("deadline RMCP connection did not close")
+        .expect("join deadline RMCP task")
+        .expect("serve deadline RMCP task");
+    fixture.server.shutdown().await;
+    drop((controlled_server, fixture.server));
+    let shutdown = fixture.engine.shutdown_all().await;
+    assert!(
+        shutdown.project_servers.is_clean(),
+        "deadline route shutdown: {shutdown:?}"
+    );
 }

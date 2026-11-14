@@ -47,7 +47,7 @@ use tracedecay_domain::{
 };
 use tracedecay_store::DiagnosticStore;
 use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
-use tracing::{Instrument, instrument::WithSubscriber};
+use tracing::Instrument;
 
 use super::concrete_evidence::{complete, cursor_refused, interruption, unavailable};
 use super::observations::{
@@ -212,52 +212,49 @@ impl ProjectFeedbackObservationSinkV1 {
             mpsc::channel::<FeedbackObservationEnvelopeV1>(1);
         let dropped_count = Arc::new(AtomicU64::new(0));
         let worker_dropped_count = Arc::clone(&dropped_count);
-        let worker = NativeTask::spawn(
-            async move {
-                let mut data_open = true;
-                let mut control_open = true;
-                while data_open || control_open {
-                    let envelope = tokio::select! {
-                        biased;
-                        envelope = receiver.recv(), if data_open => {
-                            if envelope.is_none() {
-                                data_open = false;
-                            }
-                            envelope
-                        },
-                        envelope = control_receiver.recv(), if control_open => {
-                            if envelope.is_none() {
-                                control_open = false;
-                            }
-                            envelope
-                        },
-                    };
-                    let Some(mut envelope) = envelope else {
-                        continue;
-                    };
-                    let terminal = matches!(
-                        envelope.source_event.as_ref(),
-                        Some(FeedbackSourceEventV1::TelemetryDropObserved { terminal: true, .. })
-                    );
-                    let reported_drops =
-                        apply_pending_worker_drops(&mut envelope, &worker_dropped_count);
-                    if persist_feedback_observation(&database, envelope)
-                        .await
-                        .is_err()
-                    {
-                        saturating_add(&worker_dropped_count, reported_drops.saturating_add(1));
-                        if terminal {
-                            return Err(());
+        let worker = NativeTask::spawn(async move {
+            let mut data_open = true;
+            let mut control_open = true;
+            while data_open || control_open {
+                let envelope = tokio::select! {
+                    biased;
+                    envelope = receiver.recv(), if data_open => {
+                        if envelope.is_none() {
+                            data_open = false;
                         }
-                    }
+                        envelope
+                    },
+                    envelope = control_receiver.recv(), if control_open => {
+                        if envelope.is_none() {
+                            control_open = false;
+                        }
+                        envelope
+                    },
+                };
+                let Some(mut envelope) = envelope else {
+                    continue;
+                };
+                let terminal = matches!(
+                    envelope.source_event.as_ref(),
+                    Some(FeedbackSourceEventV1::TelemetryDropObserved { terminal: true, .. })
+                );
+                let reported_drops =
+                    apply_pending_worker_drops(&mut envelope, &worker_dropped_count);
+                if persist_feedback_observation(&database, envelope)
+                    .await
+                    .is_err()
+                {
+                    saturating_add(&worker_dropped_count, reported_drops.saturating_add(1));
                     if terminal {
-                        return Ok(());
+                        return Err(());
                     }
                 }
-                Ok(())
+                if terminal {
+                    return Ok(());
+                }
             }
-            .with_current_subscriber(),
-        )
+            Ok(())
+        })
         .map_err(|_| FeedbackRuntimeError::ObservationWorker)?;
         Ok(Self {
             sender,

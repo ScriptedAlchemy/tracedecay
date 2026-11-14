@@ -5,7 +5,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use tracedecay_runtime_core::native_runtime::{NativeTask, NativeTaskOutcome};
 use tracedecay_store_runtime::ShutdownStatus;
-use tracing::instrument::WithSubscriber;
 
 pub struct ShutdownCoordinatorV1 {
     state: Arc<ShutdownCoordinatorState>,
@@ -92,13 +91,10 @@ impl ShutdownCoordinatorV1 {
                 .ok_or_else(|| "MCP shutdown coordinator lost its work future".to_owned())
                 .and_then(|work| {
                     let state = Arc::clone(&self.state);
-                    NativeTask::spawn(
-                        async move {
-                            let _completion = ShutdownCoordinatorCompletion(Arc::clone(&state));
-                            state.finish(work.await);
-                        }
-                        .with_current_subscriber(),
-                    )
+                    NativeTask::spawn(async move {
+                        let _completion = ShutdownCoordinatorCompletion(Arc::clone(&state));
+                        state.finish(work.await);
+                    })
                     .map_err(|error| format!("MCP shutdown coordinator was not started: {error}"))
                 });
             match started {
