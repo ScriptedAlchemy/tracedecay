@@ -55,10 +55,10 @@ use tracedecay_code_index::{
     },
     production::{
         CodeIndexExecutionControlV1, CodeIndexProductionErrorV1, CodeIndexPublicationStoreErrorV1,
-        CodeIndexPublishedGenerationV1, SealedGenerationSegmentReadV1,
-        VerifiedSealedLexicalCursorRestoreErrorV1, VerifiedSealedLexicalPageBatchBoundsV1,
-        VerifiedSealedLexicalPageBatchReadV1, VerifiedSealedLexicalPageSourceV1,
-        VerifiedSealedLexicalSourceReceiptV1, VerifiedSealedTextGenerationMetadataV1,
+        CodeIndexPublishedGenerationV1, VerifiedSealedLexicalCursorRestoreErrorV1,
+        VerifiedSealedLexicalPageBatchBoundsV1, VerifiedSealedLexicalPageBatchReadV1,
+        VerifiedSealedLexicalPageSourceV1, VerifiedSealedLexicalSourceReceiptV1,
+        VerifiedSealedTextGenerationMetadataV1,
     },
 };
 use tracedecay_query::retrieval::{
@@ -824,6 +824,11 @@ pub(super) struct CodeTextArtifactBuildV1 {
     _build_reservation: ResidentMemoryReservationV1,
 }
 
+struct ParentTextArtifactSourceV1 {
+    descriptor: DurableCodeTextArtifactDescriptorV1,
+    source: VerifiedSealedLexicalPageSourceV1,
+}
+
 /// Singleflight authority for one generation's durable text projection.
 ///
 /// The slot is the generation-owned partial-state authority; the condvar
@@ -985,6 +990,9 @@ pub(super) fn map_sealed_page_source_error(
         | CodeIndexProductionErrorV1::Publication(
             CodeIndexPublicationStoreErrorV1::CorruptionResetRequired(detail),
         ) => RetrievalPortError::Contract(detail),
+        CodeIndexProductionErrorV1::Publication(
+            CodeIndexPublicationStoreErrorV1::ResidentMemoryRefused(detail),
+        ) => RetrievalPortError::ResidentMemoryRefused(detail),
         error => RetrievalPortError::AuthorityUnavailable(error.to_string()),
     }
 }
@@ -1525,9 +1533,9 @@ impl DaemonCodeTextArtifactStoreV1 {
         })
     }
 
-    /// Open the exact durable sealed file after the caller has admitted the
-    /// build's resident-memory ceiling. The manifest is verified against its
-    /// content address here; each segment authenticates as the source reads it.
+    /// Open the exact durable sealed file under its own manifest admission.
+    /// The manifest is verified against its content address here; each segment
+    /// authenticates as the source reads it.
     pub(super) fn open_sealed_source(
         &self,
         identity: &DurableSealedCodeGenerationIdentityV1,
@@ -1556,7 +1564,35 @@ impl DaemonCodeTextArtifactStoreV1 {
         }
         checkpoint_text_artifact_control(control)?;
         progress(0, identity.size_bytes);
-        let manifest_bytes = std::fs::read(&path).map_err(text_artifact_unavailable)?;
+        let operation = self.resident_memory.begin_operation();
+        let byte_len = usize::try_from(identity.size_bytes).map_err(|error| {
+            RetrievalPortError::Contract(format!(
+                "durable sealed lexical manifest exceeds address space: {error}"
+            ))
+        })?;
+        let input_bytes = identity
+            .size_bytes
+            .checked_add(("sha256:".len() + 64) as u64)
+            .and_then(std::num::NonZeroU64::new)
+            .ok_or_else(|| {
+                RetrievalPortError::Contract(
+                    "durable sealed lexical manifest admission overflowed".to_owned(),
+                )
+            })?;
+        let component = ResidentMemoryComponentIdV1::new("code-text-manifest-input")
+            .map_err(|error| RetrievalPortError::Contract(error.to_string()))?;
+        let _input_reservation = operation
+            .reserve_process_shared(component, input_bytes)
+            .map_err(|error| RetrievalPortError::ResidentMemoryRefused(error.to_string()))?;
+        let mut file = std::fs::File::open(&path).map_err(text_artifact_unavailable)?;
+        let mut manifest_bytes = vec![0_u8; byte_len];
+        file.read_exact(&mut manifest_bytes)
+            .map_err(text_artifact_unavailable)?;
+        if file.metadata().map_err(text_artifact_unavailable)?.len() != identity.size_bytes {
+            return Err(RetrievalPortError::Contract(
+                "durable sealed lexical manifest changed extent while reading".to_owned(),
+            ));
+        }
         checkpoint_text_artifact_control(control)?;
         if DaemonCodeIndexPublicationStoreV1::state_digest(&manifest_bytes)
             != identity.digest.as_str()
@@ -1566,24 +1602,17 @@ impl DaemonCodeTextArtifactStoreV1 {
             ));
         }
         progress(identity.size_bytes, identity.size_bytes);
-        let publication = self.publication.clone();
-        let source_identity = identity.clone();
+        let read_factory = self
+            .publication
+            .retained_pack_read_factory(identity.clone())
+            .map_err(|error| RetrievalPortError::AuthorityUnavailable(error.to_string()))?;
         VerifiedSealedLexicalPageSourceV1::open_partitioned_sealed(
             &manifest_bytes,
             identity.digest.clone(),
-            move |digest, expected_size, buffer, control| {
-                publication.read_retained_partitioned_segment(
-                    &source_identity,
-                    SealedGenerationSegmentReadV1::Whole {
-                        digest,
-                        size_bytes: expected_size,
-                    },
-                    buffer,
-                    control,
-                )
-            },
+            read_factory,
             TEXT_ARTIFACT_PAGE_CHUNKS_V1,
             TEXT_ARTIFACT_PAGE_BYTES_V1,
+            &operation,
         )
         .map_err(map_sealed_page_source_error)
     }
@@ -3139,15 +3168,23 @@ impl LatestCodeTextGenerationV1 {
         source: &mut VerifiedSealedLexicalPageSourceV1,
         metadata: &CodeLexicalProjectionMetadataV1,
         builder_budget: usize,
+        prepared: Result<Option<ParentTextArtifactSourceV1>, RetrievalPortError>,
         control: &dyn CodeIndexExecutionControlV1,
     ) -> Result<Option<CodeLexicalArtifactBuilderV1>, RetrievalPortError> {
-        match self.carry_nearest_ancestor_text_artifact(
-            staging_path,
-            source,
-            metadata,
-            builder_budget,
-            control,
-        ) {
+        let carried = prepared.and_then(|prepared| {
+            let Some(prepared) = prepared else {
+                return Ok(None);
+            };
+            self.carry_prepared_ancestor_text_artifact(
+                staging_path,
+                source,
+                metadata,
+                builder_budget,
+                prepared,
+                control,
+            )
+        });
+        match carried {
             Ok(carried) => Ok(carried),
             Err(error @ (RetrievalPortError::Cancelled | RetrievalPortError::BudgetExceeded)) => {
                 Err(error)
@@ -3166,20 +3203,16 @@ impl LatestCodeTextGenerationV1 {
         }
     }
 
-    fn carry_nearest_ancestor_text_artifact(
+    fn prepare_ancestor_text_source(
         &self,
-        staging_path: &Path,
-        source: &mut VerifiedSealedLexicalPageSourceV1,
-        metadata: &CodeLexicalProjectionMetadataV1,
-        builder_budget: usize,
         control: &dyn CodeIndexExecutionControlV1,
-    ) -> Result<Option<CodeLexicalArtifactBuilderV1>, RetrievalPortError> {
+    ) -> Result<Option<ParentTextArtifactSourceV1>, RetrievalPortError> {
         let store = &self.text_artifact_store;
         // The nearest retained ancestor with a published artifact: an edit
         // that superseded its parent before the parent's text sealed carries
         // from the generation before.
         let mut ancestor = self.metadata.manifest().parent_generation.clone();
-        let (descriptor, parent_source) = loop {
+        loop {
             let Some(ancestor_id) = ancestor.take() else {
                 return Ok(None);
             };
@@ -3190,10 +3223,29 @@ impl LatestCodeTextGenerationV1 {
             };
             let ancestor_source = store.open_sealed_source(&identity, control)?;
             if let Some(descriptor) = store.published_descriptor(&ancestor_id)? {
-                break (descriptor, ancestor_source);
+                return Ok(Some(ParentTextArtifactSourceV1 {
+                    descriptor,
+                    source: ancestor_source,
+                }));
             }
             ancestor.clone_from(&ancestor_source.metadata().manifest().parent_generation);
-        };
+        }
+    }
+
+    fn carry_prepared_ancestor_text_artifact(
+        &self,
+        staging_path: &Path,
+        source: &mut VerifiedSealedLexicalPageSourceV1,
+        metadata: &CodeLexicalProjectionMetadataV1,
+        builder_budget: usize,
+        prepared: ParentTextArtifactSourceV1,
+        control: &dyn CodeIndexExecutionControlV1,
+    ) -> Result<Option<CodeLexicalArtifactBuilderV1>, RetrievalPortError> {
+        let store = &self.text_artifact_store;
+        let ParentTextArtifactSourceV1 {
+            descriptor,
+            source: parent_source,
+        } = prepared;
         let replacements = source.file_replacements_since(&parent_source);
         drop(parent_source);
         let Some(replacements) = replacements else {
@@ -3212,16 +3264,21 @@ impl LatestCodeTextGenerationV1 {
             .map_err(text_artifact_unavailable)?;
         let source_state_digest = source.source_state_digest().clone();
         let source_format_revision = source.format_revision();
-        let mut stage_file_pages = |file: u64, first_page: u64, first_chunk: u64| {
-            source
-                .stage_file_pages(file, first_page, first_chunk, control)
-                .map_err(carried_source_error)
-        };
         // Opened under the store lock, so retention cannot collect the file
         // first; the open handle keeps its bytes readable for the copy.
         let parent_file = {
             let _lock = store.acquire_store_write_lock()?;
             std::fs::File::open(&parent_path).map_err(text_artifact_unavailable)?
+        };
+        // Acquire the child's shared payload lease only after the ancestor's
+        // exclusive open has completed. It lasts for this synchronous copy.
+        let mut read_pass = source
+            .begin_read_pass(control)
+            .map_err(carried_source_error)?;
+        let mut stage_file_pages = |file: u64, first_page: u64, first_chunk: u64| {
+            source
+                .stage_file_pages(file, first_page, first_chunk, control, read_pass.as_mut())
+                .map_err(carried_source_error)
         };
         CodeLexicalArtifactBuilderV1::carry_parent_with_memory_budget(
             staging_path,
@@ -3264,19 +3321,10 @@ impl LatestCodeTextGenerationV1 {
         if let Some(outcome) = self.adopt_shared_text_artifact(&generation_id, control)? {
             return Ok(outcome);
         }
-        // The builder's advertised memory ceiling is reserved through the
-        // process resident-memory authority before the build allocates. The
-        // host-scaled figure is a preferred ceiling, not a minimum: under a
-        // large stale serving graph, admit any supported budget down to the
-        // builder's established 1.5 GiB floor so the replacement can finish
-        // and release that graph.
-        let (build_reservation, build_memory_budget) = store.reserve_resident_memory_up_to(
-            &generation_id,
-            "code-text-artifact-build",
-            preferred_build_memory_budget,
-            CODE_LEXICAL_ARTIFACT_BUILD_MEMORY_BUDGET_BYTES_V1,
-        )?;
         let sealed_identity = store.sealed_identity(&generation_id)?;
+        // Every source owns its map before the enclosing build asks for the
+        // remaining process headroom, including a source opened on this pass.
+        let mut source = self.take_preopened_source_or_open(&sealed_identity, control)?;
         let sealed_hex = sha256_hex_suffix(sealed_identity.digest.as_str()).ok_or_else(|| {
             RetrievalPortError::Contract(
                 "durable sealed lexical source digest is not SHA-256".to_owned(),
@@ -3286,22 +3334,47 @@ impl LatestCodeTextGenerationV1 {
         ensure_private_text_artifacts_root(&staging_root)?;
         let staging_path = staging_root.join(format!(".text-artifact-{sealed_hex}.staging"));
         prepare_absent_text_artifact_staging(&staging_path).map_err(text_artifact_unavailable)?;
-        let mut source = self.take_preopened_source_or_open(&sealed_identity, control)?;
-        let builder_budget =
-            text_artifact_builder_budget(build_memory_budget, source.staging_window_bytes())?;
+        // The source retains its new physical map charge even while parked.
+        // The shared build allowance still covers every legacy descriptor,
+        // offset, prefetch and page term, without charging that map twice.
+        let source_window = source
+            .staging_window_bytes()
+            .checked_sub(source.admitted_pack_layout_bytes())
+            .ok_or_else(|| {
+                RetrievalPortError::Contract(
+                    "admitted pack map exceeds the lexical source window".to_owned(),
+                )
+            })?;
         let metadata = self.text_projection_metadata()?;
         let content_key = text_artifact_content_key(&source, &metadata)?;
+        // The builder's advertised memory ceiling is reserved through the
+        // process resident-memory authority before the build allocates. The
+        // preferred ceiling and established 1.5 GiB floor are unchanged.
+        let reserve_build = || {
+            let (reservation, build_memory_budget) = store.reserve_resident_memory_up_to(
+                &generation_id,
+                "code-text-artifact-build",
+                preferred_build_memory_budget,
+                CODE_LEXICAL_ARTIFACT_BUILD_MEMORY_BUDGET_BYTES_V1,
+            )?;
+            let builder_budget = text_artifact_builder_budget(build_memory_budget, source_window)?;
+            Ok::<_, RetrievalPortError>((reservation, builder_budget))
+        };
         let resumed = if staging_path.exists() {
+            let (reservation, builder_budget) = reserve_build()?;
             match CodeLexicalArtifactBuilderV1::open_or_resume_with_memory_budget_and_control(
                 &staging_path,
                 metadata.clone(),
                 builder_budget,
                 control,
             ) {
-                Ok(builder) => Some(builder),
+                Ok(builder) => Some((builder, reservation, builder_budget)),
                 // Includes a carry interrupted before it committed, which
                 // leaves the parent's metadata behind.
                 Err(CodeLexicalArtifactErrorV1::Incompatible(_)) => {
+                    // A fresh carry must admit its ancestor before the child
+                    // takes the remaining builder headroom again.
+                    drop(reservation);
                     store.discard_incompatible_staging(&staging_path, control)?;
                     None
                 }
@@ -3314,23 +3387,39 @@ impl LatestCodeTextGenerationV1 {
         // this sealed generation. Its committed counters legitimately start
         // at zero; the old attempt must not fence that fresh boundary.
         let mut fresh_staging_attempt = resumed.is_none();
-        let mut builder = match resumed {
-            Some(builder) => builder,
-            None => match self.carry_parent_text_artifact(
-                &staging_path,
-                &mut source,
-                &metadata,
-                builder_budget,
-                control,
-            )? {
-                Some(carried) => carried,
-                None => CodeLexicalArtifactBuilderV1::create_with_memory_budget(
+        let (mut builder, build_reservation, builder_budget) = match resumed {
+            Some(resumed) => resumed,
+            None => {
+                // Parent manifests own their map admission just like the
+                // child. Select one before reserving the remaining ceiling;
+                // no source is opened beneath that encompassing reservation.
+                // Roster comparison and copying remain inside its allowance.
+                let prepared = self.prepare_ancestor_text_source(control);
+                if let Err(
+                    error @ (RetrievalPortError::Cancelled | RetrievalPortError::BudgetExceeded),
+                ) = &prepared
+                {
+                    return Err(error.clone());
+                }
+                let (reservation, builder_budget) = reserve_build()?;
+                let builder = match self.carry_parent_text_artifact(
                     &staging_path,
-                    metadata.clone(),
+                    &mut source,
+                    &metadata,
                     builder_budget,
-                )
-                .map_err(map_text_artifact_error)?,
-            },
+                    prepared,
+                    control,
+                )? {
+                    Some(carried) => carried,
+                    None => CodeLexicalArtifactBuilderV1::create_with_memory_budget(
+                        &staging_path,
+                        metadata.clone(),
+                        builder_budget,
+                    )
+                    .map_err(map_text_artifact_error)?,
+                };
+                (builder, reservation, builder_budget)
+            }
         };
         // A staging file sealed before its publication was interrupted keeps
         // no source cursor; it is complete and is published as it stands.
@@ -3351,7 +3440,14 @@ impl LatestCodeTextGenerationV1 {
         }
         let mut progress = builder.progress(control).map_err(map_text_artifact_error)?;
         if let Some(cursor) = progress.next_cursor.as_ref() {
-            match source.restore_cursor_classified(cursor, control) {
+            let mut read_pass = source
+                .begin_read_pass(control)
+                .map_err(map_sealed_page_source_error)?;
+            let restored = source.restore_cursor_classified(cursor, control, read_pass.as_mut());
+            // Refused cursor recovery may retire staging under the exclusive
+            // store lock, so the source pass must end before that branch.
+            drop(read_pass);
+            match restored {
                 Ok(()) => {}
                 Err(VerifiedSealedLexicalCursorRestoreErrorV1::IncompatiblePosition) => {
                     drop(builder);
@@ -3495,6 +3591,19 @@ impl LatestCodeTextGenerationV1 {
         let (source_batch_pages, source_batch_bytes, source_work_limit) =
             text_artifact_source_batch_limits(build_memory_budget);
         let mut remaining = maximum_work.min(source_work_limit);
+        let mut read_pass = if remaining > 0
+            && !artifact_build.finalizing
+            && artifact_build.source_receipt.is_none()
+        {
+            Some(
+                artifact_build
+                    .source
+                    .begin_read_pass(control)
+                    .map_err(map_sealed_page_source_error)?,
+            )
+        } else {
+            None
+        };
         while remaining > 0 && !artifact_build.finalizing && artifact_build.source_receipt.is_none()
         {
             let maximum_batch_pages = remaining.clamp(1, source_batch_pages);
@@ -3510,7 +3619,12 @@ impl LatestCodeTextGenerationV1 {
             let mut clone_scratch_bytes = 0_usize;
             let admitted = {
                 let (source, builder) = (&mut artifact_build.source, &mut artifact_build.builder);
-                source.next_page_batch_if(control, bounds, |pages| {
+                let pass = read_pass.as_mut().ok_or_else(|| {
+                    RetrievalPortError::Contract(
+                        "active lexical drain has no payload pass".to_owned(),
+                    )
+                })?;
+                source.next_page_batch_if(control, pass.as_mut(), bounds, |pages| {
                     let offered_batch_pages = u64::try_from(pages.len()).map_err(|_| {
                         CodeLexicalArtifactErrorV1::Contract(
                             "text-artifact batch page count exceeds u64".to_owned(),
@@ -3647,6 +3761,9 @@ impl LatestCodeTextGenerationV1 {
                 }
             }
         }
+        // Finalization and publication do not read source packs; release
+        // their lease before any exclusive store operation or parked state.
+        drop(read_pass);
         if !artifact_build.finalizing && artifact_build.source_receipt.is_none() {
             return Ok(false);
         }

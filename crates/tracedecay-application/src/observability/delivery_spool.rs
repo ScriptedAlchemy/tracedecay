@@ -147,16 +147,25 @@ impl DeliveryRecorderSpoolV1 {
         Ok(spool)
     }
 
+    #[tracing::instrument(
+        name = "observability.delivery_spool.append",
+        level = "trace",
+        skip_all,
+        fields(receipt_id = ?receipt.receipt_id)
+    )]
     pub fn append(
         &self,
         receipt: &DeliveryRecorderSourceReceiptV1,
     ) -> Result<bool, DeliveryRecorderSpoolError> {
+        tracing::trace!(phase = "validate", "delivery spool append");
         receipt.validate()?;
+        tracing::trace!(phase = "state_lock", "delivery spool append");
         let mut state = self
             .state
             .lock()
             .map_err(|_| DeliveryRecorderSpoolError::LockPoisoned)?;
         let path = self.receipt_path(receipt.receipt_id);
+        tracing::trace!(phase = "read_existing", "delivery spool append");
         if let Some(bytes) = read_bounded(&path, MAX_RECEIPT_BYTES).map_err(map_read_error)? {
             if !state.receipt_paths.contains(&path) {
                 return Err(DeliveryRecorderSpoolError::Corrupt);
@@ -170,25 +179,39 @@ impl DeliveryRecorderSpoolV1 {
         if state.receipt_paths.len() >= MAX_PENDING_RECEIPTS {
             return Err(DeliveryRecorderSpoolError::Full);
         }
+        tracing::trace!(phase = "encode", "delivery spool append");
         let bytes = canonical_json_bytes(receipt)
             .map_err(|_| DeliveryRecorderSpoolError::InvalidReceipt)?;
         if bytes.is_empty() || bytes.len() > MAX_RECEIPT_BYTES {
             return Err(DeliveryRecorderSpoolError::InvalidReceipt);
         }
+        tracing::trace!(
+            phase = "publish",
+            bytes = bytes.len(),
+            "delivery spool append"
+        );
         atomic_write(&path, "delivery", &bytes, DIRECTORY_POLICY)
             .map_err(|_| DeliveryRecorderSpoolError::Io)?;
         state.receipt_paths.insert(path);
+        tracing::trace!(phase = "completed", "delivery spool append");
         Ok(true)
     }
 
+    #[tracing::instrument(
+        name = "observability.delivery_spool.pending",
+        level = "trace",
+        skip_all
+    )]
     pub fn pending(
         &self,
         limit: usize,
     ) -> Result<Vec<DeliveryRecorderSourceReceiptV1>, DeliveryRecorderSpoolError> {
+        tracing::trace!(phase = "state_lock", "delivery spool pending read");
         let state = self
             .state
             .lock()
             .map_err(|_| DeliveryRecorderSpoolError::LockPoisoned)?;
+        tracing::trace!(phase = "read_batch", "delivery spool pending read");
         let mut receipts = Vec::new();
         for path in state
             .receipt_paths
@@ -218,14 +241,21 @@ impl DeliveryRecorderSpoolV1 {
     /// Removes settled receipts and syncs the spool directory once for all of
     /// them. A removal lost before that sync only replays a settled receipt,
     /// which settlement answers idempotently.
+    #[tracing::instrument(
+        name = "observability.delivery_spool.acknowledge",
+        level = "trace",
+        skip_all
+    )]
     pub fn acknowledge(
         &self,
         receipt_ids: &[[u8; 16]],
     ) -> Result<usize, DeliveryRecorderSpoolError> {
+        tracing::trace!(phase = "state_lock", "delivery spool acknowledgement");
         let mut state = self
             .state
             .lock()
             .map_err(|_| DeliveryRecorderSpoolError::LockPoisoned)?;
+        tracing::trace!(phase = "unlink_batch", "delivery spool acknowledgement");
         let mut removed = 0;
         for receipt_id in receipt_ids {
             let path = self.receipt_path(*receipt_id);
@@ -245,6 +275,7 @@ impl DeliveryRecorderSpoolV1 {
             removed += 1;
         }
         if removed > 0 {
+            tracing::trace!(phase = "sync_directory", "delivery spool acknowledgement");
             sync_directory(&self.root, DIRECTORY_POLICY)
                 .map_err(|_| DeliveryRecorderSpoolError::Io)?;
         }

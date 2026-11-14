@@ -18,7 +18,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
 use tracedecay_runtime_core::resident_memory::{
-    ProcessResidentMemoryV1, detected_process_resident_memory_limit_v1,
+    ProcessResidentMemoryV1, ProcessSharedMemoryReservationV1, ResidentMemoryComponentIdV1,
+    ResidentMemoryOperationV1, detected_process_resident_memory_limit_v1,
 };
 
 use serde::Serialize;
@@ -30,10 +31,11 @@ use tracedecay_code_index::graph_projection::CodeGraphEvidenceReader;
 use tracedecay_code_index::languages::{LanguageRegistry, StaticLanguageRegistry};
 use tracedecay_code_index::production::{
     CodeIndexBuildRequestV1, CodeIndexCapturedFileV1, CodeIndexProductionConfigV1,
-    CodeIndexProductionErrorV1, CodeIndexProductionOwnerV1, CodeIndexPublishedGenerationV1,
-    CodeIndexRepositoryParseIdentityV1, DAEMON_CODE_INDEX_CHUNKER_REVISION,
-    MemorySealedPublicationStoreV1, SealedGenerationSegmentPublicationV1,
-    SharedDecodedContentPoolV1, VerifiedSealedLexicalPageReadV1, VerifiedSealedLexicalPageSourceV1,
+    CodeIndexProductionErrorV1, CodeIndexProductionOwnerV1, CodeIndexPublicationStoreErrorV1,
+    CodeIndexPublishedGenerationV1, CodeIndexRepositoryParseIdentityV1,
+    CodeIndexSealedGenerationV1, DAEMON_CODE_INDEX_CHUNKER_REVISION,
+    MemorySealedPublicationStoreV1, SealedGenerationPackReadPassV1, SharedDecodedContentPoolV1,
+    VerifiedSealedLexicalPageReadV1, VerifiedSealedLexicalPageSourceV1,
     VerifiedSealedLexicalSymbolDisplayV1,
 };
 use tracedecay_contracts::ResolvedScope;
@@ -162,79 +164,50 @@ fn canonical_scope_key(scopes: &[String]) -> Vec<String> {
     key
 }
 
-/// Seal `generation` into the production lexical artifact and reopen it for
-/// serving: the same partitioned encoding, verified page source, builder, and
-/// reader the daemon runs, over an in-memory segment store and a private
-/// temporary directory.
+/// Build the production lexical artifact from `generation`'s canonical sealed
+/// publication and reopen it for serving: the same verified page source,
+/// builder, and reader the daemon runs, over an in-memory publication store
+/// and a private temporary directory.
 #[tracing::instrument(
     name = "search_eval.corpus.lexical_artifact",
     level = "trace",
     skip_all
 )]
 fn seal_lexical_artifact(
-    generation: &CodeIndexPublishedGenerationV1,
+    generation: &CodeIndexSealedGenerationV1,
     metadata: &CodeLexicalProjectionMetadataV1,
+    operation: &ResidentMemoryOperationV1,
 ) -> Result<(TempDir, CodeLexicalArtifactReaderV1), CandidateOutputError> {
     let contract =
         |error: &dyn std::fmt::Display| CandidateOutputError::Contract(error.to_string());
-    let mut segments = BTreeMap::new();
-    let mut evidence_pack = Vec::new();
-    let manifest = generation
-        .encode_partitioned_sealed(|publication| {
-            match publication {
-                SealedGenerationSegmentPublicationV1::File { digest, bytes }
-                | SealedGenerationSegmentPublicationV1::FileEvidence { digest, bytes }
-                | SealedGenerationSegmentPublicationV1::ResolutionIndex { digest, bytes } => {
-                    segments.insert(digest.as_str().to_owned(), bytes.to_vec());
-                }
-                SealedGenerationSegmentPublicationV1::CodeGraphPage {
-                    page_digest, bytes, ..
-                } => {
-                    segments.insert(page_digest.as_str().to_owned(), bytes.to_vec());
-                }
-                SealedGenerationSegmentPublicationV1::GenerationEvidencePage { bytes, .. } => {
-                    evidence_pack.extend_from_slice(bytes);
-                }
-                SealedGenerationSegmentPublicationV1::GenerationEvidenceCommit {
-                    segment_digest,
-                    ..
-                } => {
-                    segments.insert(
-                        segment_digest.as_str().to_owned(),
-                        std::mem::take(&mut evidence_pack),
-                    );
-                }
-            }
-            Ok(())
-        })
+    let manifest = generation.manifest_bytes();
+    let state_digest = ManifestDigest::from_sha256_bytes(&Sha256::digest(manifest))
         .map_err(|error| contract(&error))?;
-    let state_digest = ManifestDigest::from_sha256_bytes(&Sha256::digest(&manifest))
-        .map_err(|error| contract(&error))?;
-    let segments = Arc::new(segments);
+    let generation = generation.clone();
     let mut source = VerifiedSealedLexicalPageSourceV1::open_partitioned_sealed(
-        &manifest,
+        manifest,
         state_digest,
-        move |digest, _, buffer, _control| {
-            let bytes = segments.get(digest.as_str()).ok_or_else(|| {
-                CodeIndexProductionErrorV1::Contract(
-                    "sealed evaluation segment is missing".to_owned(),
-                )
-            })?;
-            buffer.clear();
-            buffer.extend_from_slice(bytes);
-            Ok(())
+        move |_control, _layout| {
+            let reader = generation.begin_read_pass()?;
+            let pass: Box<SealedGenerationPackReadPassV1> =
+                Box::new(move |request, buffer, _control| reader(request, buffer));
+            Ok(pass)
         },
         TEXT_ARTIFACT_PAGE_CHUNKS_V1,
         TEXT_ARTIFACT_PAGE_BYTES_V1,
+        operation,
     )
     .map_err(|error| contract(&error))?;
     let directory = tempfile::tempdir().map_err(|error| contract(&error))?;
     let path = directory.path().join("lexical-artifact.sqlite");
     let mut builder = CodeLexicalArtifactBuilderV1::create(&path, metadata.clone())
         .map_err(|error| contract(&error))?;
+    let mut read_pack = source
+        .begin_read_pass(&ActiveControl)
+        .map_err(|error| contract(&error))?;
     let receipt = loop {
         match source
-            .next_page(&ActiveControl)
+            .next_page(&ActiveControl, read_pack.as_mut())
             .map_err(|error| contract(&error))?
         {
             VerifiedSealedLexicalPageReadV1::Page(page) => {
@@ -245,6 +218,7 @@ fn seal_lexical_artifact(
             VerifiedSealedLexicalPageReadV1::Complete(receipt) => break receipt,
         }
     };
+    drop(read_pack);
     let verified = loop {
         match builder
             .advance_finalization(&receipt, 4_096, &ActiveControl)
@@ -269,6 +243,8 @@ fn seal_lexical_artifact(
 /// The lexical artifact and graph evidence over every file of `generation`.
 fn scoped_retrieval(
     generation: Arc<CodeIndexPublishedGenerationV1>,
+    sealed: CodeIndexSealedGenerationV1,
+    operation: &ResidentMemoryOperationV1,
 ) -> Result<ScopedCorpus, CandidateOutputError> {
     let generation_id = generation.manifest().generation_id.clone();
     let freshness = production_code_index_freshness(
@@ -299,7 +275,7 @@ fn scoped_retrieval(
             snapshot_digest: generation.manifest().snapshot_digest.clone(),
         }),
     };
-    let (artifact_directory, lexical) = seal_lexical_artifact(&generation, &metadata)?;
+    let (artifact_directory, lexical) = seal_lexical_artifact(&sealed, &metadata, operation)?;
     let graph = CodeGraphEvidenceReader::new_for_evaluation(
         generation_id,
         Some(generation.snapshot().repository.clone()),
@@ -1152,7 +1128,7 @@ fn publish_corpus_with_scale(
             .iter()
             .filter(|document| scope_key.contains(&document.scope))
             .collect::<Vec<_>>();
-        let Some((generation, file_to_document)) =
+        let Some((generation, sealed, file_to_document, operation)) =
             publish_scope_generation(repo_root, &corpus_digest, &scope_key, &documents, copies)?
         else {
             scopes.insert(scope_key, None);
@@ -1209,7 +1185,7 @@ fn publish_corpus_with_scale(
             scope_key,
             Some({
                 let _span = tracing::trace_span!("search_eval.corpus.scope_retrieval").entered();
-                scoped_retrieval(generation)
+                scoped_retrieval(generation, sealed, &operation)
             }?),
         );
     }
@@ -1229,7 +1205,9 @@ fn publish_corpus_with_scale(
 /// A published generation and the corpus document behind each file path.
 type ScopeGeneration = (
     Arc<CodeIndexPublishedGenerationV1>,
+    CodeIndexSealedGenerationV1,
     BTreeMap<String, CorpusDocumentV1>,
+    ResidentMemoryOperationV1,
 );
 
 /// Publish one generation over `documents` (each copied `copies` times) with
@@ -1342,6 +1320,7 @@ fn publish_scope_generation(
         privacy_key_epoch: 1,
         max_snapshot_age_micros: None,
     };
+    let operation = request.resident_memory.begin_operation();
     let published =
         CodeIndexProductionOwnerV1::new(config, MemorySealedPublicationStoreV1::default())
             .map_err(|error| {
@@ -1351,18 +1330,59 @@ fn publish_scope_generation(
             .map_err(|error| {
                 CandidateOutputError::Contract(format!("publish generation: {error}"))
             })?;
-    let reader = published.sealed_generation().segment_reader();
+    let reader = published
+        .sealed_generation()
+        .begin_read_pass()
+        .map_err(|error| {
+            CandidateOutputError::Contract(format!("begin published generation decode: {error}"))
+        })?;
+    let mut manifest_reservation: Option<ProcessSharedMemoryReservationV1> = None;
+    let mut admit_manifest = |bytes: usize| {
+        let bytes = u64::try_from(bytes)
+            .map_err(|error| CodeIndexProductionErrorV1::Contract(error.to_string()))?;
+        let held = manifest_reservation
+            .as_ref()
+            .map_or(0, |guard| guard.reserved_bytes());
+        if let Some(additional) = std::num::NonZeroU64::new(bytes.saturating_sub(held)) {
+            let refused = |error: tracedecay_runtime_core::resident_memory::ResidentMemoryAdmissionFailureV1| {
+                CodeIndexProductionErrorV1::Publication(
+                    CodeIndexPublicationStoreErrorV1::ResidentMemoryRefused(error.to_string()),
+                )
+            };
+            match manifest_reservation.as_mut() {
+                Some(guard) => guard.try_grow(additional).map_err(refused)?,
+                None => {
+                    let component = ResidentMemoryComponentIdV1::new(
+                        "code_index.manifest_decode.v1",
+                    )
+                    .map_err(|error| CodeIndexProductionErrorV1::Contract(error.to_string()))?;
+                    manifest_reservation = Some(
+                        operation
+                            .reserve_process_shared(component, additional)
+                            .map_err(refused)?,
+                    );
+                }
+            }
+        }
+        Ok(())
+    };
     let generation = Arc::new(
         CodeIndexPublishedGenerationV1::decode_partitioned_sealed(
             published.manifest_bytes(),
             &SharedDecodedContentPoolV1::default(),
             |request, buffer| reader(request, buffer),
+            &mut admit_manifest,
         )
         .map_err(|error| {
             CandidateOutputError::Contract(format!("decode published generation: {error}"))
         })?,
     );
-    Ok(Some((generation, file_to_document)))
+    Ok(Some((
+        generation,
+        published.sealed_generation().clone(),
+        file_to_document,
+        operation,
+    )))
 }
 
 fn display_anchors_for_chunk(

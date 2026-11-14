@@ -9,7 +9,7 @@ use tracedecay_code_extraction::parsed_extraction::{
 };
 use tracedecay_code_extraction::{
     ExtractionArtifactV1, ImportModuleKindV1, ImportNamespaceV1, LanguageExtractor, RustExtractor,
-    TypeScriptExtractor,
+    TypeScriptExtractor, TypeScriptReceiverV1, TypeScriptTypeRowV1,
 };
 use tracedecay_domain::{
     CommitId, ContentDigest, ExtractionResult, ManifestDigest, NodeKind, ProjectId, RefId,
@@ -90,6 +90,164 @@ fn assert_artifact_rows_match_fresh_parse(
     assert_eq!(incremental_result.errors, fresh_result.errors);
     assert_eq!(incremental.imports, fresh.imports);
     assert_eq!(incremental.clone_bodies, fresh.clone_bodies);
+    assert_eq!(incremental.typescript_types, fresh.typescript_types);
+}
+
+#[test]
+fn typescript_module_edits_invalidate_receiver_proof_in_unchanged_functions() {
+    let before = "import { Generic as Other } from './custom';\nclass Worker { execute() {} }\nasync function factory(): Promise<Worker> { return new Worker(); }\nfunction run() { const worker = new Worker(); worker.execute(); }\nfunction mutate() { return 1; }\n";
+    let (mut document, opened) = RetainedParseDocument::open(
+        typescript_identity("commit-a", "tree-a", RepositoryDirtyStateV1::Clean),
+        "typescript",
+        before,
+        ParseLimits::default(),
+    )
+    .unwrap();
+    let initial = document
+        .extract_canonical_artifact(&TypeScriptExtractor, &opened, None)
+        .unwrap();
+    assert!(initial.artifact.typescript_types.iter().any(|row| matches!(
+        &row.row,
+        TypeScriptTypeRowV1::CallableReturn { promise: true, .. }
+    )));
+    assert!(
+        initial
+            .artifact
+            .typescript_types
+            .iter()
+            .any(|row| matches!(&row.row, TypeScriptTypeRowV1::ReceiverCall { .. }))
+    );
+
+    let shadowed = before.replace("as Other", "as Promise");
+    let report = document
+        .reparse(
+            typescript_identity("commit-b", "tree-b", RepositoryDirtyStateV1::Dirty),
+            &shadowed,
+        )
+        .unwrap();
+    assert_eq!(report.reuse, ParseReuse::Incremental);
+    assert!(report.metrics.reused_prior_tree);
+    let changed = document
+        .extract_canonical_artifact(&TypeScriptExtractor, &report, Some(&initial.artifact))
+        .unwrap();
+    assert_eq!(
+        changed.disposition,
+        ParsedExtractionDisposition::Reset {
+            reason: ParsedExtractionResetReason::ModuleBindingsChanged
+        }
+    );
+    assert!(
+        !changed
+            .artifact
+            .typescript_types
+            .iter()
+            .any(|row| matches!(&row.row, TypeScriptTypeRowV1::CallableReturn { .. }))
+    );
+    assert_artifact_rows_match_fresh_parse(
+        &changed.artifact,
+        &TypeScriptExtractor.extract_artifact("src/imports.ts", &shadowed),
+    );
+
+    let rebound = before.replace("return 1;", "Worker = Other;");
+    let report = document
+        .reparse(
+            typescript_identity("commit-c", "tree-c", RepositoryDirtyStateV1::Dirty),
+            &rebound,
+        )
+        .unwrap();
+    let changed = document
+        .extract_canonical_artifact(&TypeScriptExtractor, &report, Some(&changed.artifact))
+        .unwrap();
+    assert!(
+        !changed
+            .artifact
+            .typescript_types
+            .iter()
+            .any(|row| matches!(&row.row, TypeScriptTypeRowV1::ReceiverCall { .. }))
+    );
+    assert_artifact_rows_match_fresh_parse(
+        &changed.artifact,
+        &TypeScriptExtractor.extract_artifact("src/imports.ts", &rebound),
+    );
+}
+
+#[test]
+fn typescript_alias_initializer_edits_replace_and_remove_receiver_proof() {
+    let before = "import { Worker, Other } from './workers';\nfunction run(first: Worker, second: Other) { const local = first; const alias = local; alias.execute(); }\n";
+    let (mut document, opened) = RetainedParseDocument::open(
+        typescript_identity("commit-a", "tree-a", RepositoryDirtyStateV1::Clean),
+        "typescript",
+        before,
+        ParseLimits::default(),
+    )
+    .unwrap();
+    let initial = document
+        .extract_canonical_artifact(&TypeScriptExtractor, &opened, None)
+        .unwrap();
+    let receivers = |artifact: &ExtractionArtifactV1| {
+        artifact
+            .typescript_types
+            .iter()
+            .filter_map(|row| match &row.row {
+                TypeScriptTypeRowV1::ReceiverCall { receiver, .. } => Some(receiver.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        receivers(&initial.artifact),
+        [TypeScriptReceiverV1::Named {
+            name: "Worker".to_owned(),
+            constructor: false
+        }]
+    );
+
+    let after = before.replace("local = first", "local = second");
+    let report = document
+        .reparse(
+            typescript_identity("commit-b", "tree-b", RepositoryDirtyStateV1::Dirty),
+            &after,
+        )
+        .unwrap();
+    assert_eq!(report.reuse, ParseReuse::Incremental);
+    let changed = document
+        .extract_canonical_artifact(&TypeScriptExtractor, &report, Some(&initial.artifact))
+        .unwrap();
+    assert_eq!(
+        receivers(&changed.artifact),
+        [TypeScriptReceiverV1::Named {
+            name: "Other".to_owned(),
+            constructor: false
+        }]
+    );
+    assert_artifact_rows_match_fresh_parse(
+        &changed.artifact,
+        &TypeScriptExtractor.extract_artifact("src/imports.ts", &after),
+    );
+
+    let mutable = after.replace("const local", "let local");
+    let report = document
+        .reparse(
+            typescript_identity("commit-c", "tree-c", RepositoryDirtyStateV1::Dirty),
+            &mutable,
+        )
+        .unwrap();
+    let changed = document
+        .extract_canonical_artifact(&TypeScriptExtractor, &report, Some(&changed.artifact))
+        .unwrap();
+    assert!(receivers(&changed.artifact).is_empty());
+    assert!(
+        changed
+            .artifact
+            .result
+            .unresolved_refs
+            .iter()
+            .any(|reference| reference.reference_name == "alias.execute")
+    );
+    assert_artifact_rows_match_fresh_parse(
+        &changed.artifact,
+        &TypeScriptExtractor.extract_artifact("src/imports.ts", &mutable),
+    );
 }
 
 #[test]
@@ -683,7 +841,9 @@ fn incremental_edit_after_same_line_import_matches_fresh_parser_artifact() {
         .expect("incremental extraction artifact");
     assert_eq!(
         incremental.disposition,
-        ParsedExtractionDisposition::ChangedRegions
+        ParsedExtractionDisposition::Reset {
+            reason: ParsedExtractionResetReason::ModuleBindingsChanged
+        }
     );
 
     assert_eq!(
@@ -731,7 +891,9 @@ fn incremental_edit_of_duplicate_module_import_matches_fresh_parser_artifact() {
         .expect("incremental duplicate-module extraction artifact");
     assert_eq!(
         incremental.disposition,
-        ParsedExtractionDisposition::ChangedRegions
+        ParsedExtractionDisposition::Reset {
+            reason: ParsedExtractionResetReason::ModuleBindingsChanged
+        }
     );
 
     assert_eq!(
@@ -798,7 +960,9 @@ fn incremental_edit_after_multiline_import_closing_line_matches_fresh_parser_art
         .expect("incremental multiline extraction artifact");
     assert_eq!(
         incremental.disposition,
-        ParsedExtractionDisposition::ChangedRegions
+        ParsedExtractionDisposition::Reset {
+            reason: ParsedExtractionResetReason::ModuleBindingsChanged
+        }
     );
 
     assert_eq!(
@@ -873,7 +1037,9 @@ fn incremental_import_artifact_does_not_keep_stale_rows_after_add_change_and_del
     );
     assert_eq!(
         added.disposition,
-        ParsedExtractionDisposition::ChangedRegions
+        ParsedExtractionDisposition::Reset {
+            reason: ParsedExtractionResetReason::ModuleBindingsChanged
+        }
     );
     assert_eq!(
         added
@@ -925,7 +1091,9 @@ fn incremental_import_artifact_does_not_keep_stale_rows_after_add_change_and_del
     );
     assert_eq!(
         changed.disposition,
-        ParsedExtractionDisposition::ChangedRegions
+        ParsedExtractionDisposition::Reset {
+            reason: ParsedExtractionResetReason::ModuleBindingsChanged
+        }
     );
     assert_eq!(
         changed
@@ -981,7 +1149,9 @@ fn incremental_import_artifact_does_not_keep_stale_rows_after_add_change_and_del
     );
     assert_eq!(
         deleted.disposition,
-        ParsedExtractionDisposition::ChangedRegions
+        ParsedExtractionDisposition::Reset {
+            reason: ParsedExtractionResetReason::ModuleBindingsChanged
+        }
     );
     assert!(
         deleted.artifact.imports.is_empty(),

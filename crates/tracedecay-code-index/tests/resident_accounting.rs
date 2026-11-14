@@ -18,11 +18,11 @@ use tracedecay_code_index::graph_projection::{
     CODE_GRAPH_PROJECTOR_REVISION, build_sealed_code_graph_rows, code_graph_projection_identity,
 };
 use tracedecay_code_index::production::{
-    CodeIndexBuildRequestV1, CodeIndexCapturedFileV1, CodeIndexExecutionControlV1,
-    CodeIndexProductionConfigV1, CodeIndexProductionErrorV1, CodeIndexProductionOwnerV1,
-    CodeIndexPublishedBuildV1, CodeIndexPublishedGenerationV1, CodeIndexRepositoryParseIdentityV1,
-    MemorySealedPublicationStoreV1, SealedGenerationFileWindowsV1,
-    SealedGenerationSegmentPublicationV1, SealedGenerationSegmentReadV1,
+    CodeIndexAtomicPublicationPort, CodeIndexBuildRequestV1, CodeIndexCapturedFileV1,
+    CodeIndexExecutionControlV1, CodeIndexPreparationPort, CodeIndexProductionConfigV1,
+    CodeIndexProductionErrorV1, CodeIndexProductionOwnerV1, CodeIndexPublishedBuildV1,
+    CodeIndexPublishedGenerationV1, CodeIndexRepositoryParseIdentityV1,
+    MemorySealedPublicationStoreV1, SealedGenerationFileWindowsV1, SealedGenerationSegmentReadV1,
     SharedDecodedContentPoolV1, SharedPhysicalCodeArtifactPoolV1,
 };
 use tracedecay_domain::test_fixtures::id;
@@ -70,11 +70,16 @@ static ALLOCATOR: CountingAllocator = CountingAllocator;
 static MEASUREMENT: Mutex<()> = Mutex::new(());
 
 fn decoded(built: &CodeIndexPublishedBuildV1) -> CodeIndexPublishedGenerationV1 {
-    let reader = built.sealed_generation().segment_reader();
+    let reader = built
+        .sealed_generation()
+        .begin_read_pass()
+        .expect("published read pass");
+    // Measure the codec allocations themselves, excluding a resident-admission guard.
     CodeIndexPublishedGenerationV1::decode_partitioned_sealed(
         built.manifest_bytes(),
         &SharedDecodedContentPoolV1::default(),
         |request, buffer| reader(request, buffer),
+        &mut |_| Ok(()),
     )
     .expect("published generation decodes")
 }
@@ -180,37 +185,33 @@ fn config() -> CodeIndexProductionConfigV1 {
 }
 
 fn seal(generation: &CodeIndexPublishedGenerationV1) -> (Vec<u8>, BTreeMap<String, Vec<u8>>) {
-    let mut segments = BTreeMap::new();
-    let mut evidence = Vec::new();
+    let resident_memory = Arc::new(ProcessResidentMemoryV1::new(
+        detected_process_resident_memory_limit_v1(),
+    ));
+    let operation = resident_memory.begin_operation();
+    let mut store = MemorySealedPublicationStoreV1::default();
+    let mut preparation = store
+        .prepare(&generation.sealed_scope(), None, &operation)
+        .expect("canonical publication preparation");
     let manifest = generation
-        .encode_partitioned_sealed(|publication| {
-            match publication {
-                SealedGenerationSegmentPublicationV1::File { digest, bytes }
-                | SealedGenerationSegmentPublicationV1::FileEvidence { digest, bytes }
-                | SealedGenerationSegmentPublicationV1::ResolutionIndex { digest, bytes } => {
-                    segments.insert(digest.as_str().to_owned(), bytes.to_vec());
-                }
-                SealedGenerationSegmentPublicationV1::CodeGraphPage {
-                    page_digest, bytes, ..
-                } => {
-                    segments.insert(page_digest.as_str().to_owned(), bytes.to_vec());
-                }
-                SealedGenerationSegmentPublicationV1::GenerationEvidencePage { bytes, .. } => {
-                    evidence.extend_from_slice(bytes);
-                }
-                SealedGenerationSegmentPublicationV1::GenerationEvidenceCommit {
-                    segment_digest,
-                    ..
-                } => {
-                    segments.insert(
-                        segment_digest.as_str().to_owned(),
-                        std::mem::take(&mut evidence),
-                    );
-                }
-            }
-            Ok(())
-        })
+        .encode_partitioned_sealed(&mut preparation)
         .expect("seal");
+    let reader = preparation.pack_reader();
+    let identities = CodeIndexPublishedGenerationV1::partitioned_pack_identities(&manifest)
+        .expect("canonical physical pack roster");
+    let mut segments = BTreeMap::new();
+    for identity in identities {
+        let mut bytes = Vec::new();
+        reader(
+            SealedGenerationSegmentReadV1::Whole {
+                digest: &identity.digest,
+                size_bytes: identity.size_bytes,
+            },
+            &mut bytes,
+        )
+        .expect("prepared physical pack");
+        segments.insert(identity.digest.as_str().to_owned(), bytes);
+    }
     (manifest, segments)
 }
 
@@ -243,6 +244,8 @@ fn decode(manifest: &[u8], segments: &BTreeMap<String, Vec<u8>>) -> CodeIndexPub
         manifest,
         &SharedDecodedContentPoolV1::default(),
         |request, buffer| read_segment(segments, request, buffer),
+        // The counting allocator is the authority under test here.
+        &mut |_| Ok(()),
     )
     .expect("decode")
 }
@@ -290,7 +293,11 @@ fn a_sealed_graph_build_holds_windows_not_the_decoded_generation() {
     let spilled = build_sealed_code_graph_rows(
         projection,
         &source,
-        &mut |request, buffer| read_segment(&segments, request, buffer),
+        &mut |request, buffer| {
+            source.read_segment(request, buffer, |request, buffer| {
+                read_segment(&segments, request, buffer)
+            })
+        },
         &revision,
         spill,
         &mut |_| Ok(()),

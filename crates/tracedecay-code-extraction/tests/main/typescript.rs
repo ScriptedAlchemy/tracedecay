@@ -1,9 +1,433 @@
 use tracedecay_code_extraction::LanguageExtractor;
 use tracedecay_code_extraction::TypeScriptExtractor;
+use tracedecay_code_extraction::{TypeScriptReceiverV1, TypeScriptTypeRowV1};
 use tracedecay_domain::*;
 
 include!("support/calls.rs");
 include!("support/edges.rs");
+
+#[test]
+fn receiver_types_bind_stable_scopes_and_reject_rebinding() {
+    let source = r#"import { Worker as Real, createWorker as acquire } from './workers';
+export async function consume(param: Real, values: any[]) {
+  const local = new Real();
+  local.execute();
+  param.execute();
+  const loaded = await acquire();
+  loaded.execute();
+  { const local = values[0]; local.execute(); }
+  let mutable: Real = new Real();
+  mutable = values[0];
+  mutable.execute();
+}
+function loopWrite(worker: Real, values: any[]) {
+  for (worker of values) {}
+  worker.execute();
+}
+function varWrite(worker: Real, value: any) {
+  if (value) { var worker = value; }
+  worker.execute();
+}
+function shadowed<Real>(worker: Real) { worker.execute(); }
+const recursive = function Real() { const worker = new Real(); worker.execute(); };
+const expression = class Real { method() { const worker = new Real(); worker.execute(); } };
+class Methods {
+  constructor() {}
+  static execute() {}
+  get value() { return 1; }
+  instance() {}
+}
+"#;
+    let artifact = TypeScriptExtractor.extract_artifact("receivers.ts", source);
+    assert!(
+        artifact.result.errors.is_empty(),
+        "{:?}",
+        artifact.result.errors
+    );
+    for owner in ["recursive", "expression"] {
+        let node = artifact
+            .result
+            .nodes
+            .iter()
+            .find(|node| node.name == owner)
+            .unwrap();
+        assert!(
+            artifact
+                .result
+                .unresolved_refs
+                .iter()
+                .any(|reference| reference.from_node_id == node.id
+                    && reference.reference_name == "worker.execute"),
+            "named expression body must remain visible: {owner}"
+        );
+        assert!(
+            !artifact
+                .typescript_types
+                .iter()
+                .any(|row| row.node_id == node.id
+                    && matches!(&row.row, TypeScriptTypeRowV1::ReceiverCall { .. })),
+            "self name must shadow the imported class: {owner}"
+        );
+    }
+    let calls = artifact
+        .typescript_types
+        .iter()
+        .filter_map(|row| match &row.row {
+            TypeScriptTypeRowV1::ReceiverCall { span, receiver } => Some((
+                source[span.start_byte as usize..span.end_byte as usize].to_owned(),
+                receiver.clone(),
+            )),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        calls,
+        vec![
+            (
+                "local.execute".to_owned(),
+                TypeScriptReceiverV1::Named {
+                    name: "Real".to_owned(),
+                    constructor: true
+                }
+            ),
+            (
+                "param.execute".to_owned(),
+                TypeScriptReceiverV1::Named {
+                    name: "Real".to_owned(),
+                    constructor: false
+                }
+            ),
+            (
+                "loaded.execute".to_owned(),
+                TypeScriptReceiverV1::AwaitedFactory {
+                    name: "acquire".to_owned()
+                }
+            ),
+        ]
+    );
+    let instances = artifact
+        .typescript_types
+        .iter()
+        .filter(|row| row.row == TypeScriptTypeRowV1::InstanceMethod)
+        .map(|row| {
+            artifact
+                .result
+                .nodes
+                .iter()
+                .find(|node| node.id == row.node_id)
+                .unwrap()
+                .name
+                .as_str()
+        })
+        .collect::<Vec<_>>();
+    assert!(instances.contains(&"instance"));
+    assert!(
+        !instances
+            .iter()
+            .any(|name| matches!(*name, "constructor" | "execute" | "value"))
+    );
+}
+
+#[test]
+fn receiver_writes_follow_their_lexical_binding() {
+    let source = r#"import { Worker as Real } from './workers';
+const worker = new Real();
+let assigned: Real = new Real();
+function unrelated() { let worker = 0; worker = 1; }
+function unrelatedParameter(worker: number) { worker++; }
+function unrelatedVar() { worker = 1; var worker = 0; }
+function unrelatedPattern() { let { worker } = { worker: 0 }; ({ worker } = { worker: 1 }); }
+function unrelatedConstructor() { let Real = 0; Real++; }
+function defaultWrite(value = (assigned = new Real())) { var assigned; }
+export function moduleReceiver() { worker.execute(); }
+export function blockReceiver() {
+  const local = new Real();
+  { let local = 0; local++; }
+  local.execute();
+}
+export function parameterReceiver(worker: Real) {
+  function shadow(worker: number) { worker++; }
+  worker.execute();
+}
+export function captured(receiver: Real) {
+  function mutate() { receiver = new Real(); }
+  receiver.execute();
+}
+export function capturedPattern(receiver: Real) {
+  const mutate = () => { ({ value: receiver } = { value: new Real() }); };
+  receiver.execute();
+}
+export function defaultCapture() { assigned.execute(); }
+"#;
+    let artifact = TypeScriptExtractor.extract_artifact("writes.ts", source);
+    assert!(
+        artifact.result.errors.is_empty(),
+        "{:?}",
+        artifact.result.errors
+    );
+    let mut calls = artifact
+        .typescript_types
+        .iter()
+        .filter_map(|row| match &row.row {
+            TypeScriptTypeRowV1::ReceiverCall { span, receiver } => {
+                let owner = artifact
+                    .result
+                    .nodes
+                    .iter()
+                    .find(|node| node.id == row.node_id)
+                    .unwrap();
+                Some((
+                    owner.name.as_str(),
+                    &source[span.start_byte as usize..span.end_byte as usize],
+                    receiver.clone(),
+                ))
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    calls.sort_by_key(|(owner, _, _)| *owner);
+    assert_eq!(
+        calls,
+        [
+            (
+                "blockReceiver",
+                "local.execute",
+                TypeScriptReceiverV1::Named {
+                    name: "Real".to_owned(),
+                    constructor: true,
+                },
+            ),
+            (
+                "moduleReceiver",
+                "worker.execute",
+                TypeScriptReceiverV1::Named {
+                    name: "Real".to_owned(),
+                    constructor: true,
+                },
+            ),
+            (
+                "parameterReceiver",
+                "worker.execute",
+                TypeScriptReceiverV1::Named {
+                    name: "Real".to_owned(),
+                    constructor: false,
+                },
+            ),
+        ],
+        "writes to shadows preserve proof, but captured writes still invalidate it",
+    );
+    for (name, reference_name) in [
+        ("captured", "receiver.execute"),
+        ("capturedPattern", "receiver.execute"),
+        ("defaultCapture", "assigned.execute"),
+    ] {
+        let owner = artifact
+            .result
+            .nodes
+            .iter()
+            .find(|node| node.name == name)
+            .unwrap();
+        assert!(
+            artifact
+                .result
+                .unresolved_refs
+                .iter()
+                .any(|reference| reference.from_node_id == owner.id
+                    && reference.reference_name == reference_name),
+            "captured rebinding must retain the unresolved call: {name}",
+        );
+    }
+}
+
+#[test]
+fn declared_factory_returns_require_an_unshadowed_native_promise() {
+    let source = r#"class Worker {}
+export async function valid(): Promise<Worker> { return new Worker(); }
+function generic<Promise>(): Promise<Worker> { throw 1; }
+function union(): Promise<Worker | undefined> { throw 1; }
+"#;
+    let artifact = TypeScriptExtractor.extract_artifact("returns.ts", source);
+    let returned = artifact
+        .typescript_types
+        .iter()
+        .filter_map(|row| match &row.row {
+            TypeScriptTypeRowV1::CallableReturn { name, promise } => Some((
+                artifact
+                    .result
+                    .nodes
+                    .iter()
+                    .find(|node| node.id == row.node_id)
+                    .unwrap()
+                    .name
+                    .as_str(),
+                name.as_str(),
+                *promise,
+            )),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(returned, [("valid", "Worker", true)]);
+    let imported = format!("import {{ Promise }} from './custom';\n{source}");
+    let artifact = TypeScriptExtractor.extract_artifact("returns.ts", &imported);
+    assert!(
+        !artifact
+            .typescript_types
+            .iter()
+            .any(|row| matches!(row.row, TypeScriptTypeRowV1::CallableReturn { .. }))
+    );
+}
+
+#[test]
+fn immutable_receiver_aliases_keep_declaration_scope_and_parameter_types() {
+    let source = r#"import { Worker as Real, makeWorker as acquire } from './workers';
+export function bounded<T extends Real = Real>(worker: Real) {
+  const first = worker;
+  const alias = (first);
+  { const worker = {}; alias.execute(); }
+}
+export function constructed() { const worker = new Real(); const alias = worker; alias.execute(); }
+export async function awaited() { const worker = await acquire(); const alias = worker; alias.execute(); }
+function mutated(worker: Real, replacement: Real) { const alias = worker; worker = replacement; alias.execute(); }
+function mutableAlias(worker: Real) { let alias = worker; alias.execute(); }
+function optional(worker?: Real) { const alias = worker; alias.execute(); }
+function untyped(worker) { const alias = worker; alias.execute(); }
+function constructorValue() { const alias = Real; alias.execute(); }
+function shadowed<Real>(worker: Real) { const alias = worker; alias.execute(); }
+function cyclic() { const alias = next; const next = alias; alias.execute(); }
+"#;
+    let artifact = TypeScriptExtractor.extract_artifact("aliases.ts", source);
+    assert!(
+        artifact.result.errors.is_empty(),
+        "{:?}",
+        artifact.result.errors
+    );
+    let mut calls = artifact
+        .typescript_types
+        .iter()
+        .filter_map(|row| match &row.row {
+            TypeScriptTypeRowV1::ReceiverCall { span, receiver } => {
+                assert_eq!(
+                    &source[span.start_byte as usize..span.end_byte as usize],
+                    "alias.execute"
+                );
+                let owner = artifact
+                    .result
+                    .nodes
+                    .iter()
+                    .find(|node| node.id == row.node_id)
+                    .unwrap();
+                Some((owner.name.as_str(), receiver.clone()))
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    calls.sort_by_key(|(owner, _)| *owner);
+    assert_eq!(
+        calls,
+        [
+            (
+                "awaited",
+                TypeScriptReceiverV1::AwaitedFactory {
+                    name: "acquire".to_owned()
+                }
+            ),
+            (
+                "bounded",
+                TypeScriptReceiverV1::Named {
+                    name: "Real".to_owned(),
+                    constructor: false
+                }
+            ),
+            (
+                "constructed",
+                TypeScriptReceiverV1::Named {
+                    name: "Real".to_owned(),
+                    constructor: true
+                }
+            ),
+        ]
+    );
+    for name in [
+        "mutated",
+        "mutableAlias",
+        "optional",
+        "untyped",
+        "constructorValue",
+        "shadowed",
+        "cyclic",
+    ] {
+        let owner = artifact
+            .result
+            .nodes
+            .iter()
+            .find(|node| node.name == name)
+            .unwrap();
+        assert!(
+            artifact
+                .result
+                .unresolved_refs
+                .iter()
+                .any(|reference| reference.from_node_id == owner.id
+                    && reference.reference_name == "alias.execute"),
+            "unsupported alias must remain a visible call: {name}"
+        );
+    }
+}
+
+#[test]
+fn javascript_parameter_defaults_and_property_keys_do_not_declare_receiver_names() {
+    let source = r#"class Worker { execute() {} }
+class Other { execute() {} }
+const shared = new Worker();
+export function run() {
+  const worker = new Worker();
+  const callback = function(value = worker) { worker.execute(); };
+  const pattern = function({ [worker]: value } = {}) { worker.execute(); };
+}
+export function parameterScope(value = shared.execute()) { var shared = new Other(); }
+"#;
+    let artifact = TypeScriptExtractor.extract_artifact("defaults.js", source);
+    assert!(
+        artifact.result.errors.is_empty(),
+        "{:?}",
+        artifact.result.errors
+    );
+    let mut calls = artifact
+        .typescript_types
+        .iter()
+        .filter_map(|row| match &row.row {
+            TypeScriptTypeRowV1::ReceiverCall { span, receiver } => {
+                assert_eq!(
+                    *receiver,
+                    TypeScriptReceiverV1::Named {
+                        name: "Worker".to_owned(),
+                        constructor: true
+                    }
+                );
+                let owner = artifact
+                    .result
+                    .nodes
+                    .iter()
+                    .find(|node| node.id == row.node_id)
+                    .unwrap();
+                Some((
+                    owner.name.as_str(),
+                    &source[span.start_byte as usize..span.end_byte as usize],
+                ))
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    calls.sort();
+    assert_eq!(
+        calls,
+        [
+            ("parameterScope", "shared.execute"),
+            ("run", "worker.execute"),
+            ("run", "worker.execute"),
+        ]
+    );
+}
 
 #[test]
 fn test_ts_file_node_is_root() {

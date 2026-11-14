@@ -694,6 +694,7 @@ impl DaemonCodeIndexPublicationStoreV1 {
             generations_root: self.generations_root.clone(),
             sealed_state_digest: SealedGraphStateDigest::try_from(entry.state_digest.clone())
                 .map_err(Self::unavailable)?,
+            resident_memory: self.resident_memory_authority()?,
         })
     }
 }

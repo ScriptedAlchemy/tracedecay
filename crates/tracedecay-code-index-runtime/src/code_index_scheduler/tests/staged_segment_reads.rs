@@ -18,18 +18,17 @@ use tempfile::TempDir;
 use tracedecay_code_index::production::{
     CodeIndexAtomicPublicationPort, CodeIndexExecutionControlV1, CodeIndexInterruptionV1,
     CodeIndexPreparationPort, CodeIndexProductionErrorV1, CodeIndexPublicationStoreErrorV1,
-    CodeIndexPublishedGenerationV1, SealedGenerationSegmentPublicationV1,
+    CodeIndexPublishedGenerationV1, SealedGenerationContentPackV1, SealedGenerationPackLayoutV1,
+    SealedGenerationSegmentIdentityV1, SealedGenerationSegmentPublicationV1,
     SealedGenerationSegmentReadV1,
 };
 use tracedecay_code_index_retention::code_index_generations::DurableSealedCodeGenerationIdentityV1;
-use tracedecay_domain::{ManifestDigest, ProjectId, SanitizerRevision, sha256_hex_suffix};
-#[cfg(target_os = "linux")]
-use tracedecay_runtime_core::logging::set_tracing_capture;
+use tracedecay_domain::{ManifestDigest, ProjectId, sha256_hex_suffix};
 
 use super::{
     DaemonCodeIndexPreparationStateV1, DaemonCodeIndexPreparationV1,
-    DaemonCodeIndexPublicationStoreV1, MAX_STAGED_SEGMENT_READ_HANDLES,
-    PREPARED_SEGMENT_DIGEST_OPENS, SharedCodeIndexBytePoolV1, StagedGenerationSegmentsV1,
+    DaemonCodeIndexPublicationStoreV1, PREPARED_SEGMENT_DIGEST_OPENS, SharedCodeIndexBytePoolV1,
+    StagedGenerationSegmentsV1,
 };
 use crate::code_index_scheduler::tests::GitFixture;
 use crate::code_index_scheduler::{CodeIndexReconcileOutcomeV1, CodeIndexWorktreeSchedulerV1};
@@ -52,14 +51,37 @@ fn source_generation(
     Arc::clone(&source.latest_complete().expect("decode source").generation)
 }
 
-fn target_store(root: &Path, fixture: &GitFixture) -> DaemonCodeIndexPublicationStoreV1 {
-    DaemonCodeIndexPublicationStoreV1::new(
-        root,
+pub(super) struct PublicationFixture {
+    store: DaemonCodeIndexPublicationStoreV1,
+    _scheduler: CodeIndexWorktreeSchedulerV1,
+}
+
+impl std::ops::Deref for PublicationFixture {
+    type Target = DaemonCodeIndexPublicationStoreV1;
+
+    fn deref(&self) -> &Self::Target {
+        &self.store
+    }
+}
+
+impl std::ops::DerefMut for PublicationFixture {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.store
+    }
+}
+
+pub(super) fn target_store(root: &Path, fixture: &GitFixture) -> PublicationFixture {
+    let scheduler = CodeIndexWorktreeSchedulerV1::open(
+        ProjectId::new("project.code-index-tests").expect("project identity"),
         fixture.path(),
-        SanitizerRevision::new(tracedecay_privacy::CODE_SOURCE_SANITIZER_VERSION_V1)
-            .expect("sanitizer revision"),
+        root.to_path_buf(),
+        Arc::new(SharedCodeIndexBytePoolV1::default()),
     )
-    .expect("target publication store")
+    .expect("target scheduler binds its canonical memory authority");
+    PublicationFixture {
+        store: scheduler.publication.clone(),
+        _scheduler: scheduler,
+    }
 }
 
 fn segment_digest(bytes: &[u8]) -> ManifestDigest {
@@ -83,23 +105,69 @@ fn staged_path(preparation: &DaemonCodeIndexPreparationV1, digest: &ManifestDige
         .clone()
 }
 
-fn pinned_handle_count(preparation: &DaemonCodeIndexPreparationV1) -> usize {
+fn logical_path(preparation: &DaemonCodeIndexPreparationV1) -> PathBuf {
     let state = preparation.state.lock().expect("preparation state");
     let DaemonCodeIndexPreparationStateV1::Open(files) = &*state else {
         panic!("preparation must still be open");
     };
-    files.pinned_segment_reads.len()
+    files.logical.path.clone()
+}
+
+#[cfg(target_os = "linux")]
+fn live_inode_handles(identity: &std::fs::Metadata) -> usize {
+    std::fs::read_dir("/proc/self/fd")
+        .expect("inspect real process descriptors")
+        .filter(|entry| {
+            let path = entry.as_ref().expect("descriptor entry").path();
+            match std::fs::metadata(path) {
+                Ok(opened) => (opened.dev(), opened.ino()) == (identity.dev(), identity.ino()),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+                Err(error) => panic!("inspect live descriptor: {error}"),
+            }
+        })
+        .count()
+}
+
+fn finalize_payloads(
+    preparation: &mut DaemonCodeIndexPreparationV1,
+    contents: &[Vec<u8>],
+) -> SealedGenerationContentPackV1 {
+    let empty = segment_digest(&[]);
+    preparation
+        .write_segment(
+            SealedGenerationSegmentPublicationV1::GenerationEvidenceCommit {
+                segment_digest: &empty,
+                segment_size_bytes: 0,
+                page_count: 0,
+            },
+        )
+        .expect("finalize the real empty evidence role");
+    let mut identities = contents
+        .iter()
+        .map(|bytes| SealedGenerationSegmentIdentityV1 {
+            digest: segment_digest(bytes),
+            size_bytes: bytes.len() as u64,
+        })
+        .collect::<Vec<_>>();
+    identities.sort_by(|left, right| left.digest.cmp(&right.digest));
+    preparation
+        .finalize_content_pack(&identities)
+        .expect("finalize the complete canonical content roster")
 }
 
 #[test]
-fn staged_segment_range_reads_open_once_per_cached_file_and_revalidate_replacements() {
+fn staged_logical_ranges_share_one_stream_and_refuse_replacement() {
     let fixture = GitFixture::new(&[("src/lib.rs", "pub fn fixture() -> u32 { 7 }\n")]);
     let source_root = TempDir::new().expect("source store");
     let generation = source_generation(&fixture, source_root.path());
     let target_root = TempDir::new().expect("target store");
     let mut target = target_store(target_root.path(), &fixture);
+    let operation = target
+        .resident_memory_authority()
+        .expect("fixture process authority")
+        .begin_operation();
     let mut preparation = target
-        .prepare(&generation.sealed_scope(), None)
+        .prepare(&generation.sealed_scope(), None, &operation)
         .expect("prepare target");
     let contents = (0..9)
         .map(|index| format!("sealed-staged-segment-{index}-bytes").into_bytes())
@@ -113,6 +181,13 @@ fn staged_segment_range_reads_open_once_per_cached_file_and_revalidate_replaceme
             .write_segment(SealedGenerationSegmentPublicationV1::File { digest, bytes })
             .expect("write exact staged segment");
     }
+    let path = logical_path(&preparation);
+    let staged_bytes = std::fs::read(&path).expect("read the real shared logical stream");
+    assert_eq!(staged_bytes, contents.concat());
+    #[cfg(target_os = "linux")]
+    let stream_identity = path.symlink_metadata().expect("owned stream inode");
+    #[cfg(target_os = "linux")]
+    assert_eq!(live_inode_handles(&stream_identity), 1);
     let reader = preparation.segment_reader();
     let mut read = Vec::new();
     for offset in 0..16 {
@@ -130,8 +205,8 @@ fn staged_segment_range_reads_open_once_per_cached_file_and_revalidate_replaceme
     }
     assert_eq!(
         preparation.staged_segment_read_open_attempts_for_test(),
-        1,
-        "16 overlapping production reads must open the first file once",
+        0,
+        "overlapping logical reads reuse the original writer handle without pathname opens",
     );
     let invalid_range = reader(
         SealedGenerationSegmentReadV1::Range {
@@ -147,9 +222,9 @@ fn staged_segment_range_reads_open_once_per_cached_file_and_revalidate_replaceme
         Err(CodeIndexProductionErrorV1::Contract(_))
     ));
     assert!(read.is_empty(), "a bad range must not expose stale bytes");
-    assert_eq!(preparation.staged_segment_read_open_attempts_for_test(), 1);
+    assert_eq!(preparation.staged_segment_read_open_attempts_for_test(), 0);
 
-    // Alternating ranges exercise LRU promotion, not just consecutive reads.
+    // Interleaved ranges exercise distinct logical extents in the same stream.
     for offset in 0..16 {
         for index in [0, 1] {
             reader(
@@ -168,7 +243,7 @@ fn staged_segment_range_reads_open_once_per_cached_file_and_revalidate_replaceme
             );
         }
     }
-    assert_eq!(preparation.staged_segment_read_open_attempts_for_test(), 2);
+    assert_eq!(preparation.staged_segment_read_open_attempts_for_test(), 0);
     for (digest, bytes) in digests.iter().zip(&contents).skip(1) {
         reader(
             SealedGenerationSegmentReadV1::Whole {
@@ -182,13 +257,11 @@ fn staged_segment_range_reads_open_once_per_cached_file_and_revalidate_replaceme
     }
     assert_eq!(
         preparation.staged_segment_read_open_attempts_for_test(),
-        9,
-        "nine distinct segments must each need a real file open",
+        0,
+        "nine distinct logical extents need no additional file open",
     );
-    assert_eq!(
-        pinned_handle_count(&preparation),
-        MAX_STAGED_SEGMENT_READ_HANDLES
-    );
+    #[cfg(target_os = "linux")]
+    assert_eq!(live_inode_handles(&stream_identity), 1);
     reader(
         SealedGenerationSegmentReadV1::Whole {
             digest: &digests[0],
@@ -196,17 +269,16 @@ fn staged_segment_range_reads_open_once_per_cached_file_and_revalidate_replaceme
         },
         &mut read,
     )
-    .expect("reopen the evicted first segment");
+    .expect("read the first logical extent again");
     assert_eq!(&read, &contents[0]);
     assert_eq!(
         preparation.staged_segment_read_open_attempts_for_test(),
-        10,
-        "an eight-handle bound must evict and reopen the ninth distinct file",
+        0,
+        "revisiting the first extent retains the same single stream handle",
     );
 
-    let path = staged_path(&preparation, &digests[0]);
     let replacement_path = path.with_extension("replacement.tmp");
-    std::fs::write(&replacement_path, vec![b'Z'; contents[0].len()])
+    std::fs::write(&replacement_path, vec![b'Z'; staged_bytes.len()])
         .expect("write replacement bytes");
     std::fs::rename(&replacement_path, &path).expect("replace the pinned path");
     for _ in 0..2 {
@@ -223,18 +295,24 @@ fn staged_segment_range_reads_open_once_per_cached_file_and_revalidate_replaceme
             Err(CodeIndexProductionErrorV1::Contract(_))
         ));
         assert!(read.is_empty(), "replacement and retry must clear output");
-        assert_eq!(preparation.staged_segment_read_open_attempts_for_test(), 10);
+        assert_eq!(preparation.staged_segment_read_open_attempts_for_test(), 0);
     }
-    assert_eq!(pinned_handle_count(&preparation), 0);
     assert!(matches!(
         preparation.write_segment(SealedGenerationSegmentPublicationV1::File {
             digest: &digests[1],
             bytes: &contents[1],
         }),
-        Err(CodeIndexPublicationStoreErrorV1::Unavailable(_))
+        Err(CodeIndexPublicationStoreErrorV1::Unavailable(_)
+            | CodeIndexPublicationStoreErrorV1::CorruptionResetRequired(_))
     ));
     preparation.abort().expect("abort and clean staged files");
     assert!(!path.exists(), "abort removes replaced staged files");
+    #[cfg(target_os = "linux")]
+    assert_eq!(
+        live_inode_handles(&stream_identity),
+        0,
+        "abort closes the original unlinked stream"
+    );
     // An escaped reader must not keep the preparation or its staged bytes live.
     read.extend_from_slice(b"stale after abort");
     assert!(matches!(
@@ -257,92 +335,67 @@ fn staged_segment_cold_digest_mismatch_poison_survives_restoration() {
     let generation = source_generation(&fixture, source_root.path());
     let target_root = TempDir::new().expect("target store");
     let mut target = target_store(target_root.path(), &fixture);
+    let operation = target
+        .resident_memory_authority()
+        .expect("fixture process authority")
+        .begin_operation();
     let mut preparation = target
-        .prepare(&generation.sealed_scope(), None)
+        .prepare(&generation.sealed_scope(), None, &operation)
         .expect("prepare target");
     let publication = generation
-        .stage_publication(&mut preparation)
-        .expect("stage real generation");
+        .stage_publication(&mut preparation, &operation)
+        .expect("stage a real packed generation");
+    let content = publication.pack_layout().content_pack();
+    let path = staged_path(&preparation, &content.digest);
+    let original = std::fs::read(&path).expect("original content pack");
+    assert!(!original.is_empty());
+    assert_eq!(segment_digest(&original), content.digest);
+    let mut corrupt = original.clone();
+    corrupt[0] ^= 1;
+    std::fs::write(&path, &corrupt).expect("corrupt the same pack inode before first read");
 
-    // An auxiliary segment outside the manifest can still invalidate the
-    // transaction. Corrupt it *before* the first pinned read, so all inode
-    // metadata stays unchanged during that read and only SHA-256 catches it.
-    let original = b"auxiliary sealed segment";
-    let digest = segment_digest(original);
-    preparation
-        .write_segment(SealedGenerationSegmentPublicationV1::File {
-            digest: &digest,
-            bytes: original,
-        })
-        .expect("stage auxiliary segment");
-    let path = staged_path(&preparation, &digest);
-    let corrupted = vec![b'X'; original.len()];
-    std::fs::write(&path, &corrupted).expect("corrupt the same staged inode");
-    assert_eq!(std::fs::read(&path).expect("corrupt bytes"), corrupted);
-
-    let reader = preparation.segment_reader();
+    let reader = preparation.pack_reader();
     let opens_before = preparation.staged_segment_read_open_attempts_for_test();
     let request = SealedGenerationSegmentReadV1::Whole {
-        digest: &digest,
-        size_bytes: original.len() as u64,
+        digest: &content.digest,
+        size_bytes: content.size_bytes,
     };
     let mut read = b"prior success sentinel".to_vec();
     assert!(matches!(
         reader(request, &mut read),
-        Err(CodeIndexProductionErrorV1::Contract(detail))
-            if detail.contains("content address")
+        Err(CodeIndexProductionErrorV1::Contract(detail)) if detail.contains("content address")
     ));
-    assert!(read.is_empty(), "corrupt bytes must not escape");
-    assert_eq!(
-        preparation.staged_segment_read_open_attempts_for_test(),
-        opens_before + 1,
-        "the checksum refusal must follow a real pathname open"
+    assert!(
+        read.is_empty(),
+        "cold digest failure must not expose corrupt bytes"
     );
     assert_eq!(
-        pinned_handle_count(&preparation),
-        0,
-        "a failed digest must invalidate the pinned cache even when metadata is stable"
+        preparation.staged_segment_read_open_attempts_for_test(),
+        opens_before + 2,
+        "cold pack admission opens the two physical roles exactly once"
     );
 
-    // Neither retries nor restoration can make a poisoned transaction valid.
-    read.extend_from_slice(b"stale retry");
-    assert!(matches!(
-        reader(request, &mut read),
-        Err(CodeIndexProductionErrorV1::Contract(detail))
-            if detail.contains("identity was invalidated")
-    ));
-    assert_eq!(read, Vec::<u8>::new());
-    std::fs::write(&path, original).expect("restore exact original bytes");
-    assert!(matches!(
-        reader(request, &mut read),
-        Err(CodeIndexProductionErrorV1::Contract(detail))
-            if detail.contains("identity was invalidated")
-    ));
-    assert_eq!(read, Vec::<u8>::new());
+    // Restoring the exact bytes cannot revive an invalidated transaction.
+    std::fs::write(&path, &original).expect("restore the original complete pack");
+    for _ in 0..2 {
+        read.extend_from_slice(b"stale retry");
+        assert!(matches!(reader(request, &mut read),
+            Err(CodeIndexProductionErrorV1::Contract(detail)) if detail.contains("invalidated")));
+        assert!(read.is_empty());
+    }
     assert_eq!(
         preparation.staged_segment_read_open_attempts_for_test(),
-        opens_before + 1,
-        "poisoned reads must not cause another endpoint-scanned open"
+        opens_before + 2,
+        "poisoned reads never reopen the restored path"
     );
-    assert!(matches!(
-        preparation.write_segment(SealedGenerationSegmentPublicationV1::File {
-            digest: &digest,
-            bytes: original,
-        }),
-        Err(CodeIndexPublicationStoreErrorV1::Unavailable(detail))
-            if detail.contains("identity was invalidated")
-    ));
-    assert!(matches!(
-        target.commit(&mut preparation, &publication),
-        Err(CodeIndexPublicationStoreErrorV1::Unavailable(detail))
-            if detail.contains("identity was invalidated")
-    ));
+    assert!(matches!(target.commit(&mut preparation, &publication),
+        Err(CodeIndexPublicationStoreErrorV1::Unavailable(detail)) if detail.contains("identity was invalidated")));
     assert!(
         target
             .load_active_manifest()
-            .expect("active manifest probe")
+            .expect("active pointer probe")
             .is_none(),
-        "a poisoned preparation must not publish its valid-looking manifest"
+        "a poisoned preparation cannot publish its otherwise valid manifest"
     );
     preparation.abort().expect("discard poisoned preparation");
     assert!(!path.exists());
@@ -355,12 +408,13 @@ fn staged_segment_in_place_mutation_poison_survives_restoration_and_refuses_comm
     let generation = source_generation(&fixture, source_root.path());
     let target_root = TempDir::new().expect("target store");
     let mut target = target_store(target_root.path(), &fixture);
+    let operation = target
+        .resident_memory_authority()
+        .expect("fixture process authority")
+        .begin_operation();
     let mut preparation = target
-        .prepare(&generation.sealed_scope(), None)
+        .prepare(&generation.sealed_scope(), None, &operation)
         .expect("prepare target");
-    let publication = generation
-        .stage_publication(&mut preparation)
-        .expect("stage a real valid publication");
 
     // This auxiliary segment is deliberately outside the valid manifest.
     // Commit must refuse the poisoned transaction, not just a digest mismatch
@@ -373,6 +427,10 @@ fn staged_segment_in_place_mutation_poison_survives_restoration_and_refuses_comm
             bytes,
         })
         .expect("write auxiliary staged segment");
+    let publication = generation
+        .stage_publication(&mut preparation, &operation)
+        .expect("stage a real valid publication");
+
     let opens_before = preparation.staged_segment_read_open_attempts_for_test();
     let reader = preparation.segment_reader();
     let mut read = Vec::new();
@@ -387,9 +445,10 @@ fn staged_segment_in_place_mutation_poison_survives_restoration_and_refuses_comm
     assert_eq!(read.as_slice(), bytes);
     assert_eq!(
         preparation.staged_segment_read_open_attempts_for_test(),
-        opens_before + 1
+        opens_before
     );
-    let path = staged_path(&preparation, &digest);
+    let path = logical_path(&preparation);
+    let original_stream = std::fs::read(&path).expect("complete logical staging stream");
     let before = path.symlink_metadata().expect("original metadata");
     let mut writer = File::options()
         .write(true)
@@ -424,10 +483,9 @@ fn staged_segment_in_place_mutation_poison_survives_restoration_and_refuses_comm
         Err(CodeIndexProductionErrorV1::Contract(_))
     ));
     assert!(read.is_empty(), "mutated bytes must never escape");
-    assert_eq!(pinned_handle_count(&preparation), 0);
 
     // Restoration cannot unpoison an already-invalidated transaction.
-    std::fs::write(&path, bytes).expect("restore original bytes");
+    std::fs::write(&path, &original_stream).expect("restore every original staging byte");
     read.extend_from_slice(b"stale after mutation");
     assert!(matches!(
         reader(
@@ -442,7 +500,7 @@ fn staged_segment_in_place_mutation_poison_survives_restoration_and_refuses_comm
     assert_eq!(read, [] as [u8; 0]);
     assert_eq!(
         preparation.staged_segment_read_open_attempts_for_test(),
-        opens_before + 1
+        opens_before
     );
     assert!(matches!(
         preparation.write_segment(SealedGenerationSegmentPublicationV1::File {
@@ -474,8 +532,12 @@ fn staged_segment_cold_refusals_clear_output_without_poisoning_valid_reads() {
     let generation = source_generation(&fixture, source_root.path());
     let target_root = TempDir::new().expect("target store");
     let mut target = target_store(target_root.path(), &fixture);
+    let operation = target
+        .resident_memory_authority()
+        .expect("fixture process authority")
+        .begin_operation();
     let mut preparation = target
-        .prepare(&generation.sealed_scope(), None)
+        .prepare(&generation.sealed_scope(), None, &operation)
         .expect("prepare target");
     let first = b"first staged bytes";
     let cold = b"cold staged bytes";
@@ -499,9 +561,9 @@ fn staged_segment_cold_refusals_clear_output_without_poisoning_valid_reads() {
         },
         &mut read,
     )
-    .expect("prime buffer and first handle");
+    .expect("read the first owned logical extent");
     assert_eq!(read.as_slice(), first);
-    assert_eq!(preparation.staged_segment_read_open_attempts_for_test(), 1);
+    assert_eq!(preparation.staged_segment_read_open_attempts_for_test(), 0);
     for request in [
         SealedGenerationSegmentReadV1::Range {
             digest: &cold_digest,
@@ -527,7 +589,7 @@ fn staged_segment_cold_refusals_clear_output_without_poisoning_valid_reads() {
             read.is_empty(),
             "even a refusal before File::open must clear output"
         );
-        assert_eq!(preparation.staged_segment_read_open_attempts_for_test(), 1);
+        assert_eq!(preparation.staged_segment_read_open_attempts_for_test(), 0);
     }
     reader(
         SealedGenerationSegmentReadV1::Whole {
@@ -538,7 +600,7 @@ fn staged_segment_cold_refusals_clear_output_without_poisoning_valid_reads() {
     )
     .expect("invalid requests must not poison an unchanged preparation");
     assert_eq!(read.as_slice(), first);
-    assert_eq!(preparation.staged_segment_read_open_attempts_for_test(), 1);
+    assert_eq!(preparation.staged_segment_read_open_attempts_for_test(), 0);
     reader(
         SealedGenerationSegmentReadV1::Whole {
             digest: &cold_digest,
@@ -546,21 +608,25 @@ fn staged_segment_cold_refusals_clear_output_without_poisoning_valid_reads() {
         },
         &mut read,
     )
-    .expect("valid cold request still opens its file");
+    .expect("valid previously unread extent uses the same owned stream");
     assert_eq!(read.as_slice(), cold);
-    assert_eq!(preparation.staged_segment_read_open_attempts_for_test(), 2);
+    assert_eq!(preparation.staged_segment_read_open_attempts_for_test(), 0);
     preparation.abort().expect("clean up preparation");
 }
 
 #[test]
-fn staged_segment_evicted_path_replacement_poison_without_reopen() {
+fn staged_pack_path_replacement_invalidates_fixed_handles_without_reopen() {
     let fixture = GitFixture::new(&[("src/lib.rs", "pub fn alpha() -> u32 { 1 }\n")]);
     let source_root = TempDir::new().expect("source store");
     let generation = source_generation(&fixture, source_root.path());
     let target_root = TempDir::new().expect("target store");
     let mut target = target_store(target_root.path(), &fixture);
+    let operation = target
+        .resident_memory_authority()
+        .expect("fixture process authority")
+        .begin_operation();
     let mut preparation = target
-        .prepare(&generation.sealed_scope(), None)
+        .prepare(&generation.sealed_scope(), None, &operation)
         .expect("prepare target");
     let contents = (0..9)
         .map(|index| format!("eviction-identity-segment-{index}").into_bytes())
@@ -574,60 +640,76 @@ fn staged_segment_evicted_path_replacement_poison_without_reopen() {
             .write_segment(SealedGenerationSegmentPublicationV1::File { digest, bytes })
             .expect("stage sealed segment");
     }
-    let first_path = staged_path(&preparation, &digests[0]);
-    let reader = preparation.segment_reader();
+
+    let content = finalize_payloads(&mut preparation, &contents);
+    let path = staged_path(&preparation, &content.digest);
+    let original = std::fs::read(&path).expect("complete physical content pack");
+    #[cfg(target_os = "linux")]
+    let original_identity = path.symlink_metadata().expect("original pack inode");
+    let reader = preparation.pack_reader();
     let mut read = Vec::new();
     for (digest, bytes) in digests.iter().zip(&contents) {
+        let extent = content
+            .extents
+            .iter()
+            .find(|extent| &extent.digest == digest)
+            .unwrap();
         reader(
-            SealedGenerationSegmentReadV1::Whole {
-                digest,
-                size_bytes: bytes.len() as u64,
+            SealedGenerationSegmentReadV1::Range {
+                digest: &content.digest,
+                size_bytes: content.size_bytes,
+                offset: extent.offset,
+                length: extent.size_bytes,
             },
             &mut read,
         )
-        .expect("pin distinct segment");
+        .expect("read every logical extent through one physical pack");
         assert_eq!(&read, bytes);
     }
-    assert_eq!(preparation.staged_segment_read_open_attempts_for_test(), 9);
     assert_eq!(
-        pinned_handle_count(&preparation),
-        MAX_STAGED_SEGMENT_READ_HANDLES
+        preparation.staged_segment_read_open_attempts_for_test(),
+        2,
+        "all nine extents share exactly two admitted physical-role handles"
     );
+    #[cfg(target_os = "linux")]
+    assert_eq!(live_inode_handles(&original_identity), 1);
 
-    let replacement_path = first_path.with_extension("eviction-replacement.tmp");
-    std::fs::write(&replacement_path, vec![b'Z'; contents[0].len()])
-        .expect("same-length replacement");
-    std::fs::rename(&replacement_path, &first_path).expect("replace evicted segment pathname");
+    let replacement = path.with_extension("equal-byte-replacement.tmp");
+    std::fs::write(&replacement, &original).expect("same-content replacement");
+    std::fs::rename(&replacement, &path).expect("replace the admitted physical pack pathname");
     read.extend_from_slice(b"old data");
     assert!(matches!(
         reader(
             SealedGenerationSegmentReadV1::Whole {
-                digest: &digests[0],
-                size_bytes: contents[0].len() as u64,
+                digest: &content.digest,
+                size_bytes: content.size_bytes,
             },
-            &mut read,
+            &mut read
         ),
         Err(CodeIndexProductionErrorV1::Contract(_))
     ));
     assert!(
         read.is_empty(),
-        "replacement cannot expose stale or new bytes"
+        "replacement cannot expose old or substituted bytes"
     );
     assert_eq!(
         preparation.staged_segment_read_open_attempts_for_test(),
-        9,
-        "replaced evicted path must be rejected before another File::open"
+        2,
+        "identity refusal must not reopen the replaced physical pack"
     );
-    assert_eq!(pinned_handle_count(&preparation), 0);
-    assert!(matches!(
-        preparation.write_segment(SealedGenerationSegmentPublicationV1::File {
-            digest: &digests[1],
-            bytes: &contents[1],
-        }),
-        Err(CodeIndexPublicationStoreErrorV1::Unavailable(_))
-    ));
+    #[cfg(target_os = "linux")]
+    assert_eq!(
+        live_inode_handles(&original_identity),
+        0,
+        "invalidation immediately closes the original unlinked pack"
+    );
+    assert!(
+        matches!(preparation.write_segment(SealedGenerationSegmentPublicationV1::File {
+        digest: &digests[1], bytes: &contents[1],
+    }), Err(CodeIndexPublicationStoreErrorV1::Unavailable(detail)) if detail.contains("invalidated"))
+    );
     preparation.abort().expect("remove poisoned staging");
-    assert!(!first_path.exists());
+    assert!(!path.exists());
 }
 
 #[test]
@@ -637,17 +719,20 @@ fn staged_preparation_exact_segment_bytes_commit_and_reload() {
     let generation = source_generation(&fixture, source_root.path());
     let target_root = TempDir::new().expect("target store");
     let mut target = target_store(target_root.path(), &fixture);
+    let operation = target
+        .resident_memory_authority()
+        .expect("fixture process authority")
+        .begin_operation();
     let mut preparation = target
-        .prepare(&generation.sealed_scope(), None)
+        .prepare(&generation.sealed_scope(), None, &operation)
         .expect("prepare target");
     let publication = generation
-        .stage_publication(&mut preparation)
+        .stage_publication(&mut preparation, &operation)
         .expect("stage real generation");
-    let identities = CodeIndexPublishedGenerationV1::partitioned_segment_identities_from_reader(
+    let identities = CodeIndexPublishedGenerationV1::partitioned_segment_identities(
         publication.manifest_bytes().as_ref(),
     )
-    .expect("parse staged segment identities")
-    .expect("current partitioned generation revision");
+    .expect("parse staged segment identities");
     let identity = identities
         .into_iter()
         .find(|identity| identity.size_bytes > 4)
@@ -684,8 +769,8 @@ fn staged_preparation_exact_segment_bytes_commit_and_reload() {
         assert_eq!(range.as_slice(), &exact[1..4]);
     }
     assert!(
-        preparation.staged_segment_read_open_attempts_for_test() - initial_opens <= 1,
-        "whole and repeated range reads may open the segment only once"
+        preparation.staged_segment_read_open_attempts_for_test() == initial_opens,
+        "logical whole and range reads reuse the staging stream without a pathname open"
     );
     let committed = target
         .commit(&mut preparation, &publication)
@@ -723,17 +808,20 @@ fn staged_writer_authentication_avoids_commit_reopens_and_rejects_replaced_inode
     let generation = source_generation(&fixture, source_root.path());
     let target_root = TempDir::new().expect("target store");
     let mut target = target_store(target_root.path(), &fixture);
+    let operation = target
+        .resident_memory_authority()
+        .expect("fixture process authority")
+        .begin_operation();
     let mut preparation = target
-        .prepare(&generation.sealed_scope(), None)
+        .prepare(&generation.sealed_scope(), None, &operation)
         .expect("prepare target");
     let publication = generation
-        .stage_publication(&mut preparation)
+        .stage_publication(&mut preparation, &operation)
         .expect("stage real generation");
-    let identities = CodeIndexPublishedGenerationV1::partitioned_segment_identities_from_reader(
+    let identities = CodeIndexPublishedGenerationV1::partitioned_pack_identities(
         publication.manifest_bytes().as_ref(),
     )
-    .expect("parse staged segment identities")
-    .expect("partitioned generation");
+    .expect("parse staged segment identities");
     let identity = identities
         .into_iter()
         .find(|identity| identity.size_bytes > 0)
@@ -760,7 +848,7 @@ fn staged_writer_authentication_avoids_commit_reopens_and_rejects_replaced_inode
             "new staged bytes must be verified through their original writer"
         );
         target
-            .verify_prepared_segments(files, publication.manifest_bytes().as_ref())
+            .verify_prepared_segments(files, &publication)
             .expect("authenticate exact pending generation without reopening");
     }
     assert_eq!(
@@ -782,7 +870,7 @@ fn staged_writer_authentication_avoids_commit_reopens_and_rejects_replaced_inode
         };
         assert!(
             target
-                .verify_prepared_segments(files, publication.manifest_bytes().as_ref())
+                .verify_prepared_segments(files, &publication)
                 .is_err(),
             "replacing a staged inode must fail even if its bytes are identical"
         );
@@ -804,17 +892,20 @@ fn cold_staged_whole_segment_read_rejects_same_inode_content_corruption() {
     let generation = source_generation(&fixture, source_root.path());
     let target_root = TempDir::new().expect("target store");
     let mut target = target_store(target_root.path(), &fixture);
+    let operation = target
+        .resident_memory_authority()
+        .expect("fixture process authority")
+        .begin_operation();
     let mut preparation = target
-        .prepare(&generation.sealed_scope(), None)
+        .prepare(&generation.sealed_scope(), None, &operation)
         .expect("prepare target");
     let publication = generation
-        .stage_publication(&mut preparation)
+        .stage_publication(&mut preparation, &operation)
         .expect("stage real generation");
-    let identity = CodeIndexPublishedGenerationV1::partitioned_segment_identities_from_reader(
+    let identity = CodeIndexPublishedGenerationV1::partitioned_pack_identities(
         publication.manifest_bytes().as_ref(),
     )
     .expect("parse staged segment identities")
-    .expect("partitioned generation")
     .into_iter()
     .find(|segment| segment.size_bytes > 4)
     .expect("nonempty staged segment");
@@ -836,7 +927,7 @@ fn cold_staged_whole_segment_read_rejects_same_inode_content_corruption() {
         "the regression must preserve the pathname, inode and extent"
     );
 
-    let reader = preparation.segment_reader();
+    let reader = preparation.pack_reader();
     let open_count = preparation.staged_segment_read_open_attempts_for_test();
     assert_eq!(open_count, 0, "exercise an actual cold pinned read");
     let mut output = b"stale response".to_vec();
@@ -852,8 +943,8 @@ fn cold_staged_whole_segment_read_rejects_same_inode_content_corruption() {
     ));
     assert_eq!(
         preparation.staged_segment_read_open_attempts_for_test(),
-        open_count + 1,
-        "the digest refusal must follow one real pinned-file open"
+        open_count + 2,
+        "the digest refusal must follow admission of the two physical pack roles"
     );
     assert!(output.is_empty(), "corrupt bytes must not escape");
     preparation
@@ -868,11 +959,15 @@ fn committed_whole_segment_read_refuses_same_length_corruption() {
     let generation = source_generation(&fixture, source_root.path());
     let target_root = TempDir::new().expect("target store");
     let mut target = target_store(target_root.path(), &fixture);
+    let operation = target
+        .resident_memory_authority()
+        .expect("fixture process authority")
+        .begin_operation();
     let mut preparation = target
-        .prepare(&generation.sealed_scope(), None)
+        .prepare(&generation.sealed_scope(), None, &operation)
         .expect("prepare target");
     let publication = generation
-        .stage_publication(&mut preparation)
+        .stage_publication(&mut preparation, &operation)
         .expect("stage real generation");
     target
         .commit(&mut preparation, &publication)
@@ -881,11 +976,10 @@ fn committed_whole_segment_read_refuses_same_length_corruption() {
     drop(target);
 
     let cold = target_store(target_root.path(), &fixture);
-    let identity = CodeIndexPublishedGenerationV1::partitioned_segment_identities_from_reader(
+    let identity = CodeIndexPublishedGenerationV1::partitioned_pack_identities(
         publication.manifest_bytes().as_ref(),
     )
     .expect("parse real manifest")
-    .expect("partitioned generation")
     .into_iter()
     .find(|segment| segment.size_bytes > 4)
     .expect("nonempty addressed segment");
@@ -893,12 +987,18 @@ fn committed_whole_segment_read_refuses_same_length_corruption() {
         digest: &identity.digest,
         size_bytes: identity.size_bytes,
     };
+    let sealed = cold
+        .load_active(&generation.sealed_scope())
+        .expect("load canonical carrier")
+        .expect("active generation");
+    let reader = sealed
+        .begin_read_pass()
+        .expect("open one actual fixed-role pass");
     let mut bytes = Vec::new();
-    cold.read_partitioned_segment(request, &mut bytes)
-        .expect("cold valid whole-segment read");
+    reader(request, &mut bytes).expect("cold valid whole-segment read");
     assert_eq!(segment_digest(&bytes), identity.digest);
     let mut range = Vec::new();
-    cold.read_partitioned_segment(
+    reader(
         SealedGenerationSegmentReadV1::Range {
             digest: &identity.digest,
             size_bytes: identity.size_bytes,
@@ -928,21 +1028,25 @@ fn committed_whole_segment_read_refuses_same_length_corruption() {
     );
     let mut reused = b"stale output".to_vec();
     assert!(matches!(
-        cold.read_partitioned_segment(request, &mut reused),
+        reader(request, &mut reused),
         Err(CodeIndexProductionErrorV1::Contract(_))
     ));
     assert_eq!(reused, [] as [u8; 0], "corrupt bytes must not escape");
 }
 
 #[test]
-fn staged_segment_rejected_reads_preserve_full_cache_and_recency() {
+fn staged_pack_rejected_requests_preserve_fixed_handles_and_valid_reads() {
     let fixture = GitFixture::new(&[("src/lib.rs", "pub fn alpha() -> u32 { 1 }\n")]);
     let source_root = TempDir::new().expect("source store");
     let generation = source_generation(&fixture, source_root.path());
     let target_root = TempDir::new().expect("target store");
     let mut target = target_store(target_root.path(), &fixture);
+    let operation = target
+        .resident_memory_authority()
+        .expect("fixture process authority")
+        .begin_operation();
     let mut preparation = target
-        .prepare(&generation.sealed_scope(), None)
+        .prepare(&generation.sealed_scope(), None, &operation)
         .expect("prepare target");
     let contents = (0..9)
         .map(|index| format!("admission-staged-segment-{index}-bytes").into_bytes())
@@ -956,258 +1060,153 @@ fn staged_segment_rejected_reads_preserve_full_cache_and_recency() {
             .write_segment(SealedGenerationSegmentPublicationV1::File { digest, bytes })
             .expect("stage real segment");
     }
-    let reader = preparation.segment_reader();
-    let mut read = Vec::new();
-    for (digest, bytes) in digests.iter().zip(&contents).take(8) {
-        reader(
-            SealedGenerationSegmentReadV1::Whole {
-                digest,
-                size_bytes: bytes.len() as u64,
-            },
-            &mut read,
-        )
-        .expect("fill the handle cache");
-        assert_eq!(&read, bytes);
-    }
-    assert_eq!(preparation.staged_segment_read_open_attempts_for_test(), 8);
-    assert_eq!(pinned_handle_count(&preparation), 8);
-    let missing_digest = segment_digest(b"never staged admission");
-    for request in [
+
+    let content = finalize_payloads(&mut preparation, &contents);
+    let reader = preparation.pack_reader();
+    let missing = segment_digest(b"never staged admission");
+    let invalid = [
         SealedGenerationSegmentReadV1::Range {
-            digest: &digests[8],
-            size_bytes: contents[8].len() as u64,
-            offset: contents[8].len() as u64 - 1,
+            digest: &content.digest,
+            size_bytes: content.size_bytes,
+            offset: content.size_bytes - 1,
             length: 2,
         },
         SealedGenerationSegmentReadV1::Range {
-            digest: &digests[8],
-            size_bytes: contents[8].len() as u64,
+            digest: &content.digest,
+            size_bytes: content.size_bytes,
             offset: u64::MAX,
             length: 2,
         },
         SealedGenerationSegmentReadV1::Whole {
-            digest: &digests[8],
-            size_bytes: contents[8].len() as u64 + 1,
+            digest: &content.digest,
+            size_bytes: content.size_bytes + 1,
         },
         SealedGenerationSegmentReadV1::Whole {
-            digest: &missing_digest,
-            size_bytes: b"never staged admission".len() as u64,
+            digest: &missing,
+            size_bytes: 12,
         },
-        SealedGenerationSegmentReadV1::Range {
-            digest: &digests[0],
-            size_bytes: contents[0].len() as u64,
-            offset: contents[0].len() as u64 - 1,
-            length: 2,
-        },
-        SealedGenerationSegmentReadV1::Whole {
-            digest: &digests[0],
-            size_bytes: contents[0].len() as u64 + 1,
-        },
-    ] {
-        read.extend_from_slice(b"stale rejected-read sentinel");
-        assert!(matches!(
-            reader(request, &mut read),
-            Err(CodeIndexProductionErrorV1::Contract(_))
-        ));
-        assert_eq!(read, [] as [u8; 0]);
-        assert_eq!(preparation.staged_segment_read_open_attempts_for_test(), 8);
-        assert_eq!(
-            pinned_handle_count(&preparation),
-            8,
-            "a rejected request must not evict a valid handle"
-        );
-    }
-
-    // The next valid cold read must evict zero, not one: invalid accesses
-    // to zero above must not make it more recent than the other seven files.
-    reader(
-        SealedGenerationSegmentReadV1::Whole {
-            digest: &digests[8],
-            size_bytes: contents[8].len() as u64,
-        },
-        &mut read,
-    )
-    .expect("admit valid cold read after refusals");
-    assert_eq!(read, contents[8]);
-    assert_eq!(preparation.staged_segment_read_open_attempts_for_test(), 9);
-    assert_eq!(pinned_handle_count(&preparation), 8);
-    reader(
-        SealedGenerationSegmentReadV1::Whole {
-            digest: &digests[1],
-            size_bytes: contents[1].len() as u64,
-        },
-        &mut read,
-    )
-    .expect("second-oldest handle must still be cached");
-    assert_eq!(read, contents[1]);
-    assert_eq!(
-        preparation.staged_segment_read_open_attempts_for_test(),
-        9,
-        "invalid cache hits must not change the eviction victim"
-    );
-    reader(
+        // A raw physical pass never accepts an addressed logical extent as a file.
         SealedGenerationSegmentReadV1::Whole {
             digest: &digests[0],
             size_bytes: contents[0].len() as u64,
         },
-        &mut read,
-    )
-    .expect("reopen the actual least-recently-used segment");
-    assert_eq!(read, contents[0]);
-    assert_eq!(preparation.staged_segment_read_open_attempts_for_test(), 10);
-    preparation.abort().expect("clean up staged cache fixture");
+    ];
+    let mut read = Vec::new();
+    for expected_opens in [0, 2] {
+        for request in invalid {
+            read.extend_from_slice(b"stale rejected-read sentinel");
+            assert!(matches!(
+                reader(request, &mut read),
+                Err(CodeIndexProductionErrorV1::Contract(_))
+            ));
+            assert!(read.is_empty());
+            assert_eq!(
+                preparation.staged_segment_read_open_attempts_for_test(),
+                expected_opens,
+                "malformed requests neither open nor invalidate healthy physical handles"
+            );
+        }
+        reader(
+            SealedGenerationSegmentReadV1::Whole {
+                digest: &content.digest,
+                size_bytes: content.size_bytes,
+            },
+            &mut read,
+        )
+        .expect("valid whole pack remains readable after refusal");
+        assert_eq!(segment_digest(&read), content.digest);
+        assert_eq!(preparation.staged_segment_read_open_attempts_for_test(), 2);
+        for extent in &content.extents {
+            reader(
+                SealedGenerationSegmentReadV1::Range {
+                    digest: &content.digest,
+                    size_bytes: content.size_bytes,
+                    offset: extent.offset,
+                    length: extent.size_bytes,
+                },
+                &mut read,
+            )
+            .expect("every admitted extent remains readable");
+            let expected = contents
+                .iter()
+                .find(|bytes| segment_digest(bytes) == extent.digest)
+                .unwrap();
+            assert_eq!(&read, expected);
+        }
+        assert_eq!(preparation.staged_segment_read_open_attempts_for_test(), 2);
+    }
+    preparation
+        .abort()
+        .expect("close the fixed payload pass and remove staging");
 }
 
-// A pathname may disappear after its metadata was validated but before the
-// first open. Exercise that real syscall boundary without depending on races
-// or the runner's permissions.
-#[cfg(target_os = "linux")]
-struct MoveStagedCandidateBeforeOpen {
-    source: PathBuf,
-    destination: PathBuf,
-    observed: Arc<AtomicUsize>,
-}
-
-#[cfg(target_os = "linux")]
-impl tracing::Subscriber for MoveStagedCandidateBeforeOpen {
-    fn enabled(&self, metadata: &tracing::Metadata<'_>) -> bool {
-        metadata.is_event()
-            && metadata.target() == "tracedecay::code_index"
-            && metadata
-                .fields()
-                .field("staged_segment_file_open_count")
-                .is_some()
-    }
-
-    fn max_level_hint(&self) -> Option<tracing::level_filters::LevelFilter> {
-        Some(tracing::level_filters::LevelFilter::TRACE)
-    }
-
-    fn new_span(&self, _attributes: &tracing::span::Attributes<'_>) -> tracing::span::Id {
-        tracing::span::Id::from_u64(1)
-    }
-
-    fn record(&self, _span: &tracing::span::Id, _values: &tracing::span::Record<'_>) {}
-
-    fn record_follows_from(&self, _span: &tracing::span::Id, _follows: &tracing::span::Id) {}
-
-    fn event(&self, _event: &tracing::Event<'_>) {
-        assert_eq!(
-            self.observed.fetch_add(1, Ordering::SeqCst),
-            0,
-            "the candidate must attempt one real pathname open"
-        );
-        std::fs::rename(&self.source, &self.destination)
-            .expect("move the candidate between metadata validation and File::open");
-    }
-
-    fn enter(&self, _span: &tracing::span::Id) {}
-
-    fn exit(&self, _span: &tracing::span::Id) {}
-}
-
+// Admission of the second physical role can fail after the first real open.
 #[cfg(target_os = "linux")]
 #[test]
-fn staged_failed_cold_open_preserves_eight_healthy_handles() {
-    let fixture = GitFixture::new(&[("src/lib.rs", "pub fn alpha() -> u32 { 1 }\n")]);
+fn staged_pack_admission_failure_closes_partial_handles_and_records_opens() {
+    let fixture = GitFixture::new(&[("src/lib.rs", "pub fn fixture() -> u32 { 7 }\n")]);
     let source_root = TempDir::new().expect("source store");
     let generation = source_generation(&fixture, source_root.path());
     let target_root = TempDir::new().expect("target store");
     let mut target = target_store(target_root.path(), &fixture);
+    let operation = target
+        .resident_memory_authority()
+        .expect("owning memory authority")
+        .begin_operation();
     let mut preparation = target
-        .prepare(&generation.sealed_scope(), None)
+        .prepare(&generation.sealed_scope(), None, &operation)
         .expect("prepare target");
-    let contents = (0..9)
-        .map(|index| format!("staged-open-race-{index}-bytes").into_bytes())
-        .collect::<Vec<_>>();
-    let digests = contents
-        .iter()
-        .map(|bytes| segment_digest(bytes))
-        .collect::<Vec<_>>();
-    for (digest, bytes) in digests.iter().zip(&contents) {
-        preparation
-            .write_segment(SealedGenerationSegmentPublicationV1::File { digest, bytes })
-            .expect("stage real nonempty segment");
-    }
-
-    let reader = preparation.segment_reader();
-    let mut read = Vec::new();
-    for index in 0..8 {
-        reader(
-            SealedGenerationSegmentReadV1::Whole {
-                digest: &digests[index],
-                size_bytes: contents[index].len() as u64,
-            },
-            &mut read,
-        )
-        .expect("admit real healthy descriptor");
-        assert_eq!(read, contents[index]);
-    }
-    assert_eq!(preparation.staged_segment_read_open_attempts_for_test(), 8);
-    assert_eq!(pinned_handle_count(&preparation), 8);
-
-    let candidate = staged_path(&preparation, &digests[8]);
-    let moved = candidate.with_extension("moved-before-open");
-    let observed = Arc::new(AtomicUsize::new(0));
-    let injector = MoveStagedCandidateBeforeOpen {
-        source: candidate.clone(),
-        destination: moved.clone(),
-        observed: Arc::clone(&observed),
+    let contents = vec![b"first physical role with real bytes".to_vec()];
+    let digest = segment_digest(&contents[0]);
+    preparation
+        .write_segment(SealedGenerationSegmentPublicationV1::File {
+            digest: &digest,
+            bytes: &contents[0],
+        })
+        .expect("stage the real content extent");
+    let content = finalize_payloads(&mut preparation, &contents);
+    let content_path = staged_path(&preparation, &content.digest);
+    let content_identity = content_path.symlink_metadata().expect("content pack inode");
+    let evidence_digest = segment_digest(&[]);
+    let evidence_path = staged_path(&preparation, &evidence_digest);
+    let moved = evidence_path.with_extension("unavailable-during-admission");
+    std::fs::rename(&evidence_path, &moved).expect("withdraw the second physical role");
+    let reader = preparation.pack_reader();
+    let request = SealedGenerationSegmentReadV1::Whole {
+        digest: &content.digest,
+        size_bytes: content.size_bytes,
     };
-    read.extend_from_slice(b"stale before the failed open");
-    let refused = {
-        let _capture = set_tracing_capture(injector);
-        reader(
-            SealedGenerationSegmentReadV1::Whole {
-                digest: &digests[8],
-                size_bytes: contents[8].len() as u64,
-            },
-            &mut read,
-        )
-    };
+    let mut output = b"stale output".to_vec();
     assert!(matches!(
-        refused,
+        reader(request, &mut output),
         Err(CodeIndexProductionErrorV1::Contract(_))
     ));
-    assert_eq!(observed.load(Ordering::SeqCst), 1);
-    assert!(
-        read.is_empty(),
-        "a failed first open cannot return stale bytes"
-    );
-    assert_eq!(preparation.staged_segment_read_open_attempts_for_test(), 9);
-    assert_eq!(
-        pinned_handle_count(&preparation),
-        8,
-        "the failed open must not evict the oldest valid descriptor"
-    );
-
-    std::fs::rename(&moved, &candidate).expect("restore the same original inode");
-    reader(
-        SealedGenerationSegmentReadV1::Whole {
-            digest: &digests[0],
-            size_bytes: contents[0].len() as u64,
-        },
-        &mut read,
-    )
-    .expect("previous oldest handle must remain cached");
-    assert_eq!(read, contents[0]);
+    assert!(output.is_empty());
     assert_eq!(
         preparation.staged_segment_read_open_attempts_for_test(),
-        9,
-        "a failed admission must not cause a second endpoint-scanned open"
+        1,
+        "the successful first open remains counted when second-role admission fails"
     );
-    reader(
-        SealedGenerationSegmentReadV1::Whole {
-            digest: &digests[8],
-            size_bytes: contents[8].len() as u64,
-        },
-        &mut read,
-    )
-    .expect("restored candidate must be readable");
-    assert_eq!(read, contents[8]);
-    assert_eq!(preparation.staged_segment_read_open_attempts_for_test(), 10);
-    assert_eq!(pinned_handle_count(&preparation), 8);
-    preparation.abort().expect("remove staged files");
+    assert_eq!(
+        live_inode_handles(&content_identity),
+        0,
+        "a partially admitted pass must close the first pack handle on refusal"
+    );
+
+    std::fs::rename(&moved, &evidence_path).expect("restore the original evidence inode");
+    output.extend_from_slice(b"stale after restoration");
+    assert!(matches!(reader(request, &mut output),
+        Err(CodeIndexProductionErrorV1::Contract(detail)) if detail.contains("invalidated")));
+    assert!(output.is_empty());
+    assert_eq!(
+        preparation.staged_segment_read_open_attempts_for_test(),
+        1,
+        "an invalidated transaction cannot retry pathname admission"
+    );
+    preparation.abort().expect("remove all temporary owners");
+    assert!(!content_path.exists());
+    assert!(!evidence_path.exists());
+    assert_eq!(live_inode_handles(&content_identity), 0);
 }
 
 #[test]
@@ -1266,52 +1265,60 @@ fn repeated_pending_segment_accepts_identical_concurrent_canonical_publication()
     let generation = source_generation(&fixture, source_root.path());
     let target_root = TempDir::new().expect("target store");
     let mut target = target_store(target_root.path(), &fixture);
+    let operation = target
+        .resident_memory_authority()
+        .expect("fixture process authority")
+        .begin_operation();
     let mut preparation = target
-        .prepare(&generation.sealed_scope(), None)
+        .prepare(&generation.sealed_scope(), None, &operation)
         .expect("prepare target");
     let publication = generation
-        .stage_publication(&mut preparation)
+        .stage_publication(&mut preparation, &operation)
         .expect("stage real generation");
+    let pack = publication.pack_layout().content_pack();
+    let temporary = staged_path(&preparation, &pack.digest);
+    let suffix = sha256_hex_suffix(pack.digest.as_str()).expect("content pack digest suffix");
+    let canonical = target.segments_root.join(format!("segment-{suffix}.json"));
+    let bytes = std::fs::read(&temporary).expect("staged content pack bytes");
+    let original = temporary.metadata().expect("original pack writer inode");
+    assert_eq!(segment_digest(&bytes), pack.digest);
+    assert!(!canonical.exists(), "the content pack is still pending");
 
-    let (canonical, temporary) = {
-        let state = preparation.state.lock().expect("preparation state");
-        let DaemonCodeIndexPreparationStateV1::Open(files) = &*state else {
-            panic!("preparation must remain open");
-        };
-        files
-            .segments
-            .pending
-            .iter()
-            .next()
-            .map(|(name, temporary)| (name.clone(), temporary.clone()))
-            .expect("a real generation must stage at least one segment")
-    };
-    let bytes = std::fs::read(&temporary).expect("staged segment bytes");
-    let digest = segment_digest(&bytes);
-    assert!(
-        !canonical.exists(),
-        "the first stage has not named its segment"
-    );
+    let logical = pack.extents.first().expect("real logical content extent");
+    let mut logical_bytes = Vec::new();
+    preparation.segment_reader()(
+        SealedGenerationSegmentReadV1::Whole {
+            digest: &logical.digest,
+            size_bytes: logical.size_bytes,
+        },
+        &mut logical_bytes,
+    )
+    .expect("read the logical bytes whose writes are now frozen");
 
-    // A separate publisher wins the canonical name after this preparation
-    // writes its own temporary file. It has the same authenticated bytes but
-    // a different inode. Repeating the write must not confuse their identities.
+    // A separate publisher wins the physical pack name after finalization.
+    // Equal bytes do not transfer ownership of this preparation's writer inode.
     let mut foreign = std::fs::OpenOptions::new()
         .create_new(true)
         .write(true)
         .open(&canonical)
-        .expect("concurrent canonical publication");
+        .expect("concurrent canonical pack publication");
     foreign.write_all(&bytes).expect("canonical bytes");
-    foreign.sync_all().expect("durable competing segment");
+    foreign.sync_all().expect("durable competing pack");
     let foreign_identity = foreign.metadata().expect("canonical inode");
+    assert_ne!(
+        (original.dev(), original.ino()),
+        (foreign_identity.dev(), foreign_identity.ino()),
+    );
     drop(foreign);
-    preparation
-        .write_segment(SealedGenerationSegmentPublicationV1::File {
-            digest: &digest,
-            bytes: &bytes,
-        })
-        .expect("repeat an already-pending segment after concurrent naming");
-    {
+    let before = PREPARED_SEGMENT_DIGEST_OPENS.with(std::cell::Cell::get);
+    assert!(matches!(
+        preparation.write_segment(SealedGenerationSegmentPublicationV1::File {
+            digest: &logical.digest,
+            bytes: &logical_bytes,
+        }),
+        Err(CodeIndexPublicationStoreErrorV1::Unavailable(_))
+    ));
+    for _ in 0..16 {
         let state = preparation.state.lock().expect("preparation state");
         let DaemonCodeIndexPreparationStateV1::Open(files) = &*state else {
             panic!("preparation must remain open");
@@ -1319,23 +1326,34 @@ fn repeated_pending_segment_accepts_identical_concurrent_canonical_publication()
         assert_eq!(
             files.segments.pending.get(&canonical),
             Some(&temporary),
-            "this preparation still owns its original temporary bytes"
+            "a refused frozen write must retain the original pending pack"
+        );
+        assert!(
+            files
+                .segments
+                .authenticated_segments
+                .contains_key(&temporary)
         );
         assert!(
             !files
                 .segments
                 .authenticated_segments
                 .contains_key(&canonical),
-            "the concurrently named inode must not masquerade as our pending inode"
+            "the concurrently named inode must not inherit our writer witness"
         );
         target
-            .verify_prepared_segments(files, publication.manifest_bytes().as_ref())
-            .expect("verification authenticates pending bytes instead of another inode");
+            .verify_prepared_segments(files, &publication)
+            .expect("verification authenticates the original pending pack");
     }
+    assert_eq!(
+        PREPARED_SEGMENT_DIGEST_OPENS.with(std::cell::Cell::get),
+        before,
+        "repeated verification reuses the actual writer's authentication"
+    );
 
     target
         .commit(&mut preparation, &publication)
-        .expect("identical canonical bytes deduplicate at commit");
+        .expect("identical canonical pack bytes deduplicate at commit");
     assert!(!temporary.exists(), "deduplicated temporary is discharged");
     assert_eq!(
         std::fs::read(&canonical).expect("canonical bytes after commit"),
@@ -1354,11 +1372,15 @@ fn prepared_generation_rechecks_directory_identity_without_reopening_paths() {
     let generation = source_generation(&fixture, source_root.path());
     let target_root = TempDir::new().expect("target store");
     let mut target = target_store(target_root.path(), &fixture);
+    let operation = target
+        .resident_memory_authority()
+        .expect("fixture process authority")
+        .begin_operation();
     let mut preparation = target
-        .prepare(&generation.sealed_scope(), None)
+        .prepare(&generation.sealed_scope(), None, &operation)
         .expect("prepare target");
     let publication = generation
-        .stage_publication(&mut preparation)
+        .stage_publication(&mut preparation, &operation)
         .expect("stage generation");
 
     target
@@ -1467,6 +1489,25 @@ impl InterruptOnCheckpoint {
             checks: AtomicUsize::new(0),
         }
     }
+
+    fn assert_refusal(&self, error: CodeIndexProductionErrorV1) {
+        if self.deadline {
+            assert!(matches!(
+                error,
+                CodeIndexProductionErrorV1::Interrupted(CodeIndexInterruptionV1::DeadlineExceeded)
+            ));
+        } else {
+            assert!(matches!(
+                error,
+                CodeIndexProductionErrorV1::Interrupted(CodeIndexInterruptionV1::Cancelled)
+            ));
+        }
+        assert_eq!(
+            self.checks.load(Ordering::SeqCst),
+            self.interrupt_at,
+            "interrupt must occur at the intended pre/post-I/O checkpoint"
+        );
+    }
 }
 
 impl CodeIndexExecutionControlV1 for InterruptOnCheckpoint {
@@ -1488,11 +1529,15 @@ fn retained_generation_read_refuses_pre_and_post_io_interruptions_without_leakin
     let generation = source_generation(&fixture, source_root.path());
     let target_root = TempDir::new().expect("target store");
     let mut target = target_store(target_root.path(), &fixture);
+    let operation = target
+        .resident_memory_authority()
+        .expect("owning store memory authority")
+        .begin_operation();
     let mut preparation = target
-        .prepare(&generation.sealed_scope(), None)
+        .prepare(&generation.sealed_scope(), None, &operation)
         .expect("prepare target");
     let publication = generation
-        .stage_publication(&mut preparation)
+        .stage_publication(&mut preparation, &operation)
         .expect("stage real generation");
     target
         .commit(&mut preparation, &publication)
@@ -1513,11 +1558,10 @@ fn retained_generation_read_refuses_pre_and_post_io_interruptions_without_leakin
         digest: ManifestDigest::new(active.state_digest.clone()).expect("canonical digest"),
         size_bytes: active.size_bytes,
     };
-    let segment = CodeIndexPublishedGenerationV1::partitioned_segment_identities_from_reader(
+    let segment = CodeIndexPublishedGenerationV1::partitioned_pack_identities(
         publication.manifest_bytes().as_ref(),
     )
     .expect("parse real manifest")
-    .expect("current generation revision")
     .into_iter()
     .find(|segment| segment.size_bytes > 0)
     .expect("nonempty retained segment");
@@ -1525,44 +1569,38 @@ fn retained_generation_read_refuses_pre_and_post_io_interruptions_without_leakin
         digest: &segment.digest,
         size_bytes: segment.size_bytes,
     };
-    let mut expected = Vec::new();
-    target
-        .read_partitioned_segment(request, &mut expected)
-        .expect("read exact committed segment");
+    let suffix = sha256_hex_suffix(segment.digest.as_str()).expect("pack digest suffix");
+    let expected = std::fs::read(target.segments_root.join(format!("segment-{suffix}.json")))
+        .expect("read exact committed pack independently");
     assert_eq!(segment_digest(&expected), segment.digest);
+    let layout = SealedGenerationPackLayoutV1::open(publication.manifest_bytes())
+        .expect("canonical packed layout");
+    let factory = target
+        .retained_pack_read_factory(sealed)
+        .expect("retained generation factory");
+    let uninterrupted = tracedecay_code_index::production::UninterruptibleCodeIndexControlV1;
 
-    // A control refuses after the initial two checks, i.e. after the real
-    // pointer and segment reads. A stale successful result is not acceptable.
+    // Both activation and payload reads preserve typed pre/post-I/O refusal.
     for (checkpoint, deadline) in [(1, false), (2, true), (3, false), (4, true)] {
         let control = InterruptOnCheckpoint::new(checkpoint, deadline);
+        let error = factory(&control, &layout)
+            .err()
+            .expect("interrupted pass activation must refuse");
+        control.assert_refusal(error);
+
+        let mut read = factory(&uninterrupted, &layout).expect("activate payload read pass");
+        let control = InterruptOnCheckpoint::new(checkpoint, deadline);
         let mut bytes = b"previous successful read must not survive".to_vec();
-        let error = target
-            .read_retained_partitioned_segment(&sealed, request, &mut bytes, &control)
-            .expect_err("interrupted retained read must refuse");
-        if deadline {
-            assert!(matches!(
-                error,
-                CodeIndexProductionErrorV1::Interrupted(CodeIndexInterruptionV1::DeadlineExceeded)
-            ));
-        } else {
-            assert!(matches!(
-                error,
-                CodeIndexProductionErrorV1::Interrupted(CodeIndexInterruptionV1::Cancelled)
-            ));
-        }
+        let error =
+            read(request, &mut bytes, &control).expect_err("interrupted retained read must refuse");
+        control.assert_refusal(error);
         assert_eq!(bytes, [] as [u8; 0], "no earlier or late bytes may escape");
-        assert_eq!(
-            control.checks.load(Ordering::SeqCst),
-            checkpoint,
-            "interrupt must occur at the intended pre/post-I/O checkpoint"
-        );
     }
 
     let active = InterruptOnCheckpoint::new(usize::MAX, false);
     let mut bytes = b"stale".to_vec();
-    target
-        .read_retained_partitioned_segment(&sealed, request, &mut bytes, &active)
-        .expect("unchanged generation remains readable");
+    let mut read = factory(&uninterrupted, &layout).expect("activate unchanged generation");
+    read(request, &mut bytes, &active).expect("unchanged generation remains readable");
     assert_eq!(bytes, expected);
 }
 
@@ -1573,41 +1611,78 @@ fn staged_existing_segments_reuse_authenticated_inodes_without_reopening() {
     let generation = source_generation(&fixture, source_root.path());
     let target_root = TempDir::new().expect("target store");
     let mut target = target_store(target_root.path(), &fixture);
+    let operation = target
+        .resident_memory_authority()
+        .expect("fixture process authority")
+        .begin_operation();
     let mut first = target
-        .prepare(&generation.sealed_scope(), None)
+        .prepare(&generation.sealed_scope(), None, &operation)
         .expect("first preparation");
     let publication = generation
-        .stage_publication(&mut first)
+        .stage_publication(&mut first, &operation)
         .expect("stage real generation");
     target
         .commit(&mut first, &publication)
-        .expect("publish canonical sealed segments");
+        .expect("publish canonical sealed packs");
     drop(first);
 
-    // A manifest supplied without stage ownership must authenticate every
-    // canonical file, not trust its digest-shaped filename.
-    let unproven = target
+    // A publication from another preparation cannot supply this owner's
+    // missing pack layout, even when all canonical files already exist.
+    let mut unproven = target
         .prepare(
             &generation.sealed_scope(),
             Some(&generation.manifest().generation_id),
+            &operation,
         )
         .expect("unproven preparation");
-    let full_before = PREPARED_SEGMENT_DIGEST_OPENS.with(std::cell::Cell::get);
+    let unopened = PREPARED_SEGMENT_DIGEST_OPENS.with(std::cell::Cell::get);
     {
         let state = unproven.state.lock().expect("unproven state");
         let DaemonCodeIndexPreparationStateV1::Open(files) = &*state else {
             panic!("unproven preparation must remain open");
         };
+        assert!(matches!(
+            target.verify_prepared_segments(files, &publication),
+            Err(CodeIndexPublicationStoreErrorV1::CorruptionResetRequired(_))
+        ));
+    }
+    assert_eq!(
+        PREPARED_SEGMENT_DIGEST_OPENS.with(std::cell::Cell::get),
+        unopened
+    );
+
+    // Establish the real packed lifecycle, then discard only its inode memo.
+    // Without that proof, verification must hash the canonical physical files.
+    let unproven_publication = generation
+        .stage_publication(&mut unproven, &operation)
+        .expect("stage the real canonical layout");
+    let full_before = PREPARED_SEGMENT_DIGEST_OPENS.with(std::cell::Cell::get);
+    {
+        let mut state = unproven.state.lock().expect("unproven staged state");
+        let DaemonCodeIndexPreparationStateV1::Open(files) = &mut *state else {
+            panic!("staged preparation must remain open");
+        };
+        assert!(
+            files.segments.pending.is_empty(),
+            "both packs already exist"
+        );
+        files.segments.authenticated_segments.clear();
         target
-            .verify_prepared_segments(files, publication.manifest_bytes().as_ref())
-            .expect("authenticate independently supplied manifest");
+            .verify_prepared_segments(files, &unproven_publication)
+            .expect("authenticate canonical files without a retained inode memo");
     }
     let full_opens = PREPARED_SEGMENT_DIGEST_OPENS
         .with(std::cell::Cell::get)
         .saturating_sub(full_before);
-    assert!(
-        full_opens > 0,
-        "the counter must observe canonical file opens"
+    let layout = unproven_publication.pack_layout();
+    let physical_packs = if layout.content_pack().digest == layout.evidence_pack().digest {
+        1
+    } else {
+        2
+    };
+    assert_eq!(
+        full_opens, physical_packs,
+        "hash each distinct physical pack once"
     );
     unproven.abort().expect("abort unproven preparation");
 
@@ -1615,68 +1690,59 @@ fn staged_existing_segments_reuse_authenticated_inodes_without_reopening() {
         .prepare(
             &generation.sealed_scope(),
             Some(&generation.manifest().generation_id),
+            &operation,
         )
         .expect("new preparation");
     let staged_publication = generation
-        .stage_publication(&mut staged)
+        .stage_publication(&mut staged, &operation)
         .expect("restage existing canonical bytes");
+    let pack = staged_publication.pack_layout().content_pack();
+    let suffix = sha256_hex_suffix(pack.digest.as_str()).expect("content pack digest suffix");
+    let existing_path = target.segments_root.join(format!("segment-{suffix}.json"));
     let before = PREPARED_SEGMENT_DIGEST_OPENS.with(std::cell::Cell::get);
-    let existing_path = {
+    for _ in 0..16 {
         let state = staged.state.lock().expect("staged state");
         let DaemonCodeIndexPreparationStateV1::Open(files) = &*state else {
             panic!("staged preparation must remain open");
         };
-        let path = files
-            .segments
-            .authenticated_segments
-            .keys()
-            .find(|path| {
-                !files
-                    .segments
-                    .pending
-                    .values()
-                    .any(|pending| pending == *path)
-            })
-            .expect("previously verified canonical segment, not an uncommitted temporary")
-            .clone();
+        assert!(files.segments.pending.is_empty());
+        assert!(
+            files
+                .segments
+                .authenticated_segments
+                .contains_key(&existing_path)
+        );
         target
-            .verify_prepared_segments(files, staged_publication.manifest_bytes().as_ref())
-            .expect("reuse sealed inode authentication");
-        path
-    };
-    let warm_opens = PREPARED_SEGMENT_DIGEST_OPENS
-        .with(std::cell::Cell::get)
-        .saturating_sub(before);
+            .verify_prepared_segments(files, &staged_publication)
+            .expect("reuse sealed pack inode authentication");
+    }
     assert_eq!(
-        warm_opens, 0,
-        "the pack and all other authenticated segments must stay closed during verification"
+        PREPARED_SEGMENT_DIGEST_OPENS.with(std::cell::Cell::get),
+        before,
+        "authenticated physical packs must stay closed during repeated verification"
     );
 
-    // Equal bytes do not authorize silently replacing an already witnessed
-    // immutable inode between stage and commit.
+    // Equal bytes do not authorize replacing a witnessed immutable inode.
     let replacement = existing_path.with_extension("witness-replacement.tmp");
     std::fs::write(
         &replacement,
-        std::fs::read(&existing_path).expect("canonical bytes"),
+        std::fs::read(&existing_path).expect("canonical pack bytes"),
     )
     .expect("same-content replacement");
     std::fs::rename(&replacement, &existing_path).expect("replace canonical inode");
-    let opens_before_refusal = PREPARED_SEGMENT_DIGEST_OPENS.with(std::cell::Cell::get);
     {
         let state = staged.state.lock().expect("staged state after replacement");
         let DaemonCodeIndexPreparationStateV1::Open(files) = &*state else {
             panic!("staged preparation must remain open");
         };
-        assert!(
-            target
-                .verify_prepared_segments(files, staged_publication.manifest_bytes().as_ref())
-                .is_err(),
-            "a substituted inode must be refused even with identical bytes"
-        );
+        assert!(matches!(
+            target.verify_prepared_segments(files, &staged_publication),
+            Err(CodeIndexPublicationStoreErrorV1::CorruptionResetRequired(_))
+        ));
     }
     assert_eq!(
         PREPARED_SEGMENT_DIGEST_OPENS.with(std::cell::Cell::get),
-        opens_before_refusal,
+        before,
         "identity refusal must not reopen the replaced pathname"
     );
     staged.abort().expect("abort changed preparation");
@@ -1689,80 +1755,143 @@ fn repeated_canonical_segment_writes_reuse_witness_and_refuse_replacement() {
     let generation = source_generation(&fixture, source_root.path());
     let target_root = TempDir::new().expect("target store");
     let mut target = target_store(target_root.path(), &fixture);
+    let operation = target
+        .resident_memory_authority()
+        .expect("fixture process authority")
+        .begin_operation();
     let mut first = target
-        .prepare(&generation.sealed_scope(), None)
+        .prepare(&generation.sealed_scope(), None, &operation)
         .expect("first preparation");
     let publication = generation
-        .stage_publication(&mut first)
+        .stage_publication(&mut first, &operation)
         .expect("stage canonical generation");
     target
         .commit(&mut first, &publication)
-        .expect("publish canonical segments");
-    drop(first);
-
-    let identity = CodeIndexPublishedGenerationV1::partitioned_segment_identities_from_reader(
-        publication.manifest_bytes().as_ref(),
+        .expect("publish canonical packs");
+    let layout = publication.pack_layout();
+    let logical = layout
+        .content_pack()
+        .extents
+        .iter()
+        .find(|extent| extent.size_bytes > 0)
+        .expect("nonempty logical extent in the canonical content pack");
+    let mut bytes = Vec::new();
+    first.segment_reader()(
+        SealedGenerationSegmentReadV1::Whole {
+            digest: &logical.digest,
+            size_bytes: logical.size_bytes,
+        },
+        &mut bytes,
     )
-    .expect("read real segment identities")
-    .expect("current partitioned generation")
-    .into_iter()
-    .find(|identity| identity.size_bytes > 0)
-    .expect("nonempty canonical segment");
-    let suffix = sha256_hex_suffix(identity.digest.as_str()).expect("canonical digest suffix");
-    let canonical = target.segments_root.join(format!("segment-{suffix}.json"));
-    let bytes = std::fs::read(&canonical).expect("canonical segment");
-    assert_eq!(segment_digest(&bytes), identity.digest);
+    .expect("read one real logical extent through its committed pack");
+    assert_eq!(segment_digest(&bytes), logical.digest);
+    drop(first);
 
     let mut preparation = target
         .prepare(
             &generation.sealed_scope(),
             Some(&generation.manifest().generation_id),
+            &operation,
         )
         .expect("repeated-write preparation");
     let before = PREPARED_SEGMENT_DIGEST_OPENS.with(std::cell::Cell::get);
     for _ in 0..16 {
         preparation
             .write_segment(SealedGenerationSegmentPublicationV1::File {
-                digest: &identity.digest,
+                digest: &logical.digest,
                 bytes: &bytes,
             })
-            .expect("authenticate or reuse exact existing segment");
+            .expect("append or reuse the exact logical extent");
         assert_eq!(
-            PREPARED_SEGMENT_DIGEST_OPENS.with(std::cell::Cell::get) - before,
-            1,
-            "sixteen repeated writes must open and hash the canonical file only once"
+            PREPARED_SEGMENT_DIGEST_OPENS.with(std::cell::Cell::get),
+            before,
+            "logical writes must not reopen a canonical file per extent"
         );
     }
-    let reader = preparation.segment_reader();
+    {
+        let state = preparation.state.lock().expect("logical stream state");
+        let DaemonCodeIndexPreparationStateV1::Open(files) = &*state else {
+            panic!("preparation must remain open");
+        };
+        assert_eq!(files.logical.extents.len(), 1);
+        assert_eq!(files.logical.size_bytes, logical.size_bytes);
+        assert_eq!(
+            files
+                .logical
+                .file
+                .metadata()
+                .expect("writer metadata")
+                .len(),
+            logical.size_bytes
+        );
+    }
     let mut read = Vec::new();
-    reader(
+    preparation.segment_reader()(
         SealedGenerationSegmentReadV1::Whole {
-            digest: &identity.digest,
-            size_bytes: identity.size_bytes,
+            digest: &logical.digest,
+            size_bytes: logical.size_bytes,
         },
         &mut read,
     )
-    .expect("read the exact staged canonical segment");
+    .expect("read the repeated logical extent from its original writer");
     assert_eq!(read, bytes);
+    assert_eq!(preparation.staged_segment_read_open_attempts_for_test(), 0);
 
-    // A byte-identical inode replacement is not the file that was hashed.
-    // A subsequent write must reject it without another File::open.
-    let replacement = canonical.with_extension("repeat-witness.tmp");
-    std::fs::write(&replacement, &bytes).expect("same-byte replacement");
-    std::fs::rename(&replacement, &canonical).expect("replace canonical inode");
-    assert!(
-        preparation
-            .write_segment(SealedGenerationSegmentPublicationV1::File {
-                digest: &identity.digest,
-                bytes: &bytes,
-            })
-            .is_err(),
-        "a replaced immutable inode must not inherit the prior witness"
-    );
+    let staged_publication = generation
+        .stage_publication(&mut preparation, &operation)
+        .expect("finalize the full real generation after repeated logical writes");
+    let physical_packs = if layout.content_pack().digest == layout.evidence_pack().digest {
+        1
+    } else {
+        2
+    };
     assert_eq!(
         PREPARED_SEGMENT_DIGEST_OPENS.with(std::cell::Cell::get) - before,
-        1,
-        "identity refusal should not reopen a substituted inode"
+        physical_packs,
+        "finalization hashes each existing physical pack only once"
+    );
+    for _ in 0..16 {
+        let state = preparation
+            .state
+            .lock()
+            .expect("finalized preparation state");
+        let DaemonCodeIndexPreparationStateV1::Open(files) = &*state else {
+            panic!("preparation must remain open");
+        };
+        target
+            .verify_prepared_segments(files, &staged_publication)
+            .expect("reuse the finalized physical pack witnesses");
+    }
+    assert_eq!(
+        PREPARED_SEGMENT_DIGEST_OPENS.with(std::cell::Cell::get) - before,
+        physical_packs,
+        "repeated verification must not hash the canonical packs again"
+    );
+
+    let suffix = sha256_hex_suffix(layout.content_pack().digest.as_str())
+        .expect("content pack digest suffix");
+    let canonical = target.segments_root.join(format!("segment-{suffix}.json"));
+    let replacement = canonical.with_extension("repeat-witness.tmp");
+    std::fs::write(
+        &replacement,
+        std::fs::read(&canonical).expect("canonical pack bytes"),
+    )
+    .expect("same-byte replacement");
+    std::fs::rename(&replacement, &canonical).expect("replace canonical inode");
+    {
+        let state = preparation.state.lock().expect("changed finalized state");
+        let DaemonCodeIndexPreparationStateV1::Open(files) = &*state else {
+            panic!("preparation must remain open");
+        };
+        assert!(matches!(
+            target.verify_prepared_segments(files, &staged_publication),
+            Err(CodeIndexPublicationStoreErrorV1::CorruptionResetRequired(_))
+        ));
+    }
+    assert_eq!(
+        PREPARED_SEGMENT_DIGEST_OPENS.with(std::cell::Cell::get) - before,
+        physical_packs,
+        "identity refusal should not reopen a substituted physical pack"
     );
     preparation
         .abort()
@@ -1777,33 +1906,58 @@ fn failed_durability_admission_cannot_leave_a_publishable_segment() {
     let generation = source_generation(&fixture, source_root.path());
     let target_root = TempDir::new().expect("target store");
     let mut target = target_store(target_root.path(), &fixture);
+    let operation = target
+        .resident_memory_authority()
+        .expect("fixture process authority")
+        .begin_operation();
     let mut preparation = target
-        .prepare(&generation.sealed_scope(), None)
+        .prepare(&generation.sealed_scope(), None, &operation)
         .expect("prepare target");
-
-    // The 33rd admission flushes the first 32 real writer handles on Linux.
-    // Mutating a member makes that barrier fail after the 33rd temporary was
-    // created, exposing the old bug that nevertheless enrolled the temporary.
-    let contents = (0..33)
-        .map(|index| format!("durability-admission-{index}-bytes").into_bytes())
-        .collect::<Vec<_>>();
+    let contents = [
+        b"durability-admission-first-bytes".to_vec(),
+        b"durability-admission-refused-bytes".to_vec(),
+    ];
     let digests = contents
         .iter()
         .map(|bytes| segment_digest(bytes))
         .collect::<Vec<_>>();
-    for (digest, bytes) in digests.iter().zip(&contents).take(32) {
-        preparation
-            .write_segment(SealedGenerationSegmentPublicationV1::File { digest, bytes })
-            .expect("stage first durability window");
-    }
+    preparation
+        .write_segment(SealedGenerationSegmentPublicationV1::File {
+            digest: &digests[0],
+            bytes: &contents[0],
+        })
+        .expect("stage the original logical extent");
+    let empty = segment_digest(&[]);
+    preparation
+        .write_segment(
+            SealedGenerationSegmentPublicationV1::GenerationEvidenceCommit {
+                segment_digest: &empty,
+                segment_size_bytes: 0,
+                page_count: 0,
+            },
+        )
+        .expect("admit the independent empty evidence pack");
+    let (stream_path, directory, initial_pending) = {
+        let state = preparation.state.lock().expect("preparation state");
+        let DaemonCodeIndexPreparationStateV1::Open(files) = &*state else {
+            panic!("preparation must remain open");
+        };
+        assert_eq!(files.segments.pending.len(), 1);
+        (
+            files.logical.path.clone(),
+            files.directory.path().to_path_buf(),
+            files.segments.pending.clone(),
+        )
+    };
 
-    let first_path = staged_path(&preparation, &digests[0]);
-    let prior = first_path
+    // Every new extent authenticates the one original writer stream. A changed
+    // earlier extent must poison the owner before another append is enrolled.
+    let prior = stream_path
         .symlink_metadata()
-        .expect("first member metadata");
+        .expect("original stream metadata");
     let mut writer = File::options()
         .write(true)
-        .open(&first_path)
+        .open(&stream_path)
         .expect("mutate same inode");
     writer
         .write_all(&vec![b'X'; contents[0].len()])
@@ -1812,51 +1966,80 @@ fn failed_durability_admission_cannot_leave_a_publishable_segment() {
         .set_modified(prior.modified().expect("mtime") + Duration::from_secs(2))
         .expect("force distinct mtime");
     drop(writer);
-
-    let pending_path = {
-        let state = preparation.state.lock().expect("preparation state");
-        let DaemonCodeIndexPreparationStateV1::Open(files) = &*state else {
-            panic!("preparation must be open");
-        };
-        let suffix = sha256_hex_suffix(digests[32].as_str()).expect("digest suffix");
-        files
-            .directory
-            .path()
-            .join(format!("segment-{suffix}.json"))
-    };
-    for _ in 0..2 {
+    let changed = stream_path.metadata().expect("mutated stream metadata");
+    assert_eq!((changed.dev(), changed.ino()), (prior.dev(), prior.ino()));
+    for attempt in 0..2 {
         let result = preparation.write_segment(SealedGenerationSegmentPublicationV1::File {
-            digest: &digests[32],
-            bytes: &contents[32],
+            digest: &digests[1],
+            bytes: &contents[1],
         });
-        assert!(matches!(
-            result,
-            Err(CodeIndexPublicationStoreErrorV1::Unavailable(_))
-        ));
-        assert!(
-            !pending_path.exists(),
-            "a failed writer must clean its temporary, including on retry"
-        );
-        let state = preparation.state.lock().expect("preparation state");
+        if attempt == 0 {
+            assert!(matches!(
+                result,
+                Err(CodeIndexPublicationStoreErrorV1::CorruptionResetRequired(_))
+            ));
+        } else {
+            assert!(matches!(
+                result,
+                Err(CodeIndexPublicationStoreErrorV1::Unavailable(_))
+            ));
+        }
+        let state = preparation.state.lock().expect("failed append state");
         let DaemonCodeIndexPreparationStateV1::Open(files) = &*state else {
             panic!("preparation must remain abortable");
         };
-        assert!(
-            !files
-                .segments
-                .pending
-                .values()
-                .any(|path| path == &pending_path),
-            "failed durable admission must not be treated as staged"
+        assert!(files.logical.poisoned);
+        assert_eq!(files.logical.extents.len(), 1);
+        assert!(files.logical.extents.contains_key(&digests[0]));
+        assert!(!files.logical.extents.contains_key(&digests[1]));
+        assert_eq!(files.logical.size_bytes, contents[0].len() as u64);
+        assert_eq!(
+            files
+                .logical
+                .file
+                .metadata()
+                .expect("failed stream metadata")
+                .len(),
+            contents[0].len() as u64
         );
         assert_eq!(
-            files.segments.pending.len(),
-            32,
-            "only the initially admitted members remain owned"
+            files.segments.pending, initial_pending,
+            "a refused append must not enroll another physical pack"
+        );
+        assert!(files.content_pack.is_none());
+    }
+    let mut identities = digests
+        .iter()
+        .zip(&contents)
+        .map(|(digest, bytes)| SealedGenerationSegmentIdentityV1 {
+            digest: digest.clone(),
+            size_bytes: bytes.len() as u64,
+        })
+        .collect::<Vec<_>>();
+    identities.sort_by(|left, right| left.digest.cmp(&right.digest));
+    assert!(matches!(
+        preparation.finalize_content_pack(&identities),
+        Err(CodeIndexPublicationStoreErrorV1::Unavailable(_))
+    ));
+    assert!(
+        !directory.join("content-pack.tmp").exists(),
+        "a poisoned stream cannot produce a content pack"
+    );
+    preparation
+        .abort()
+        .expect("abort the poisoned append owner");
+    assert!(!stream_path.exists());
+    assert!(!directory.exists());
+    for (canonical, temporary) in initial_pending {
+        assert!(
+            !canonical.exists(),
+            "failed preparation must not publish evidence alone"
+        );
+        assert!(
+            !temporary.exists(),
+            "abort removes the already-staged evidence pack"
         );
     }
-    preparation.abort().expect("abort failed durability window");
-    assert!(!pending_path.exists());
 }
 
 #[cfg(target_os = "linux")]
@@ -1886,11 +2069,15 @@ fn publication_pointer_cas_reads_exact_bytes_with_one_kernel_open() {
     let generation = source_generation(&fixture, source_root.path());
     let target_root = TempDir::new().expect("target store");
     let mut publisher = target_store(target_root.path(), &fixture);
+    let operation = publisher
+        .resident_memory_authority()
+        .expect("fixture process authority")
+        .begin_operation();
     let mut preparation = publisher
-        .prepare(&generation.sealed_scope(), None)
+        .prepare(&generation.sealed_scope(), None, &operation)
         .expect("prepare real generation");
     let publication = generation
-        .stage_publication(&mut preparation)
+        .stage_publication(&mut preparation, &operation)
         .expect("stage real snapshot");
     publisher
         .commit(&mut preparation, &publication)
@@ -1950,11 +2137,15 @@ fn cached_publication_pointer_refuses_equal_byte_symlink_and_recovers_snapshot()
     let generation = source_generation(&fixture, source_root.path());
     let target_root = TempDir::new().expect("target store");
     let mut publisher = target_store(target_root.path(), &fixture);
+    let operation = publisher
+        .resident_memory_authority()
+        .expect("fixture process authority")
+        .begin_operation();
     let mut preparation = publisher
-        .prepare(&generation.sealed_scope(), None)
+        .prepare(&generation.sealed_scope(), None, &operation)
         .expect("prepare real generation");
     let publication = generation
-        .stage_publication(&mut preparation)
+        .stage_publication(&mut preparation, &operation)
         .expect("stage generation");
     publisher
         .commit(&mut preparation, &publication)
@@ -2013,11 +2204,15 @@ fn cold_publication_pointer_validation_uses_one_kernel_open_and_recovers_snapsho
     let generation = source_generation(&fixture, source_root.path());
     let target_root = TempDir::new().expect("target store");
     let mut publisher = target_store(target_root.path(), &fixture);
+    let operation = publisher
+        .resident_memory_authority()
+        .expect("fixture process authority")
+        .begin_operation();
     let mut preparation = publisher
-        .prepare(&generation.sealed_scope(), None)
+        .prepare(&generation.sealed_scope(), None, &operation)
         .expect("prepare published generation");
     let publication = generation
-        .stage_publication(&mut preparation)
+        .stage_publication(&mut preparation, &operation)
         .expect("stage source snapshot");
     publisher
         .commit(&mut preparation, &publication)
@@ -2094,17 +2289,20 @@ fn retained_generation_ranges_reuse_one_open_and_refuse_a_replaced_inode() {
     let generation = source_generation(&fixture, source_root.path());
     let target_root = TempDir::new().expect("target store");
     let mut publisher = target_store(target_root.path(), &fixture);
+    let operation = publisher
+        .resident_memory_authority()
+        .expect("owning store memory authority")
+        .begin_operation();
     let mut preparation = publisher
-        .prepare(&generation.sealed_scope(), None)
+        .prepare(&generation.sealed_scope(), None, &operation)
         .expect("prepare real generation");
     let publication = generation
-        .stage_publication(&mut preparation)
+        .stage_publication(&mut preparation, &operation)
         .expect("stage source snapshot");
-    let identities = CodeIndexPublishedGenerationV1::partitioned_segment_identities_from_reader(
+    let identities = CodeIndexPublishedGenerationV1::partitioned_pack_identities(
         publication.manifest_bytes().as_ref(),
     )
-    .expect("parse sealed segment identities")
-    .expect("partitioned generation");
+    .expect("parse sealed pack identities");
     let identity = identities
         .into_iter()
         .find(|identity| identity.size_bytes > 4)
@@ -2123,7 +2321,7 @@ fn retained_generation_ranges_reuse_one_open_and_refuse_a_replaced_inode() {
     assert_eq!(
         reloaded.snapshot().content_identity,
         generation.snapshot().content_identity,
-        "retained segment caching must preserve the exact sealed snapshot"
+        "retained pack reads must preserve the exact sealed snapshot"
     );
     let suffix = sha256_hex_suffix(identity.digest.as_str()).expect("digest suffix");
     let path = cold.segments_root.join(format!("segment-{suffix}.json"));
@@ -2136,7 +2334,13 @@ fn retained_generation_ranges_reuse_one_open_and_refuse_a_replaced_inode() {
         .watch(&cold.segments_root, notify::RecursiveMode::NonRecursive)
         .expect("watch sealed segment directory");
 
-    let reader = cold.segment_reader();
+    let sealed = cold
+        .load_active(&generation.sealed_scope())
+        .expect("load committed carrier")
+        .expect("published generation");
+    let reader = sealed
+        .begin_read_pass()
+        .expect("activate fixed-role read pass");
     let mut whole = Vec::new();
     reader(
         SealedGenerationSegmentReadV1::Whole {
@@ -2165,7 +2369,7 @@ fn retained_generation_ranges_reuse_one_open_and_refuse_a_replaced_inode() {
     assert_eq!(
         observed_named_opens(&receiver, &path),
         1,
-        "one whole and sixteen range reads must cause exactly one kernel open"
+        "one active pass must serve whole and range reads with one kernel open per pack"
     );
     // Prove the observer itself records a real open.
     drop(File::open(&path).expect("control pathname open"));
@@ -2217,6 +2421,10 @@ fn initial_pointer_publication_reuses_persisted_descriptor_without_pathname_open
     let generation = source_generation(&fixture, source_root.path());
     let target_root = TempDir::new().expect("target store");
     let mut publisher = target_store(target_root.path(), &fixture);
+    let operation = publisher
+        .resident_memory_authority()
+        .expect("fixture process authority")
+        .begin_operation();
     let active_path = publisher.active_path.clone();
 
     // Watch the parent: the final pathname does not exist until the first
@@ -2234,10 +2442,10 @@ fn initial_pointer_publication_reuses_persisted_descriptor_without_pathname_open
         .expect("watch publication directory");
 
     let mut preparation = publisher
-        .prepare(&generation.sealed_scope(), None)
+        .prepare(&generation.sealed_scope(), None, &operation)
         .expect("prepare first generation");
     let publication = generation
-        .stage_publication(&mut preparation)
+        .stage_publication(&mut preparation, &operation)
         .expect("stage source snapshot");
     publisher
         .commit(&mut preparation, &publication)
@@ -2280,8 +2488,12 @@ fn staged_evidence_pack_writer_authentication_avoids_extra_opens_and_refuses_rep
     let generation = source_generation(&fixture, source_root.path());
     let target_root = TempDir::new().expect("target store");
     let mut target = target_store(target_root.path(), &fixture);
+    let operation = target
+        .resident_memory_authority()
+        .expect("fixture process authority")
+        .begin_operation();
     let mut preparation = target
-        .prepare(&generation.sealed_scope(), None)
+        .prepare(&generation.sealed_scope(), None, &operation)
         .expect("prepare target");
     let bytes = b"nonempty evidence pack data, authenticated after the staging rename";
     let digest = segment_digest(bytes);
@@ -2369,9 +2581,8 @@ fn staged_evidence_pack_writer_authentication_avoids_extra_opens_and_refuses_rep
         "equal bytes cannot reuse an authenticated inode witness"
     );
     // The real publication path must reject the substituted temporary before
-    // it gains a durable canonical name. The evidence writer is already synced
-    // and does not enter the ordinary DurableFileBatch, so its batch sync alone
-    // cannot supply this check.
+    // it gains a durable canonical name. The payload writer is already synced;
+    // promotion must still prove the identity of its authenticated staged inode.
     let canonical = target.segments_root.join(format!(
         "segment-{}.json",
         sha256_hex_suffix(digest.as_str()).expect("digest suffix")
@@ -2410,23 +2621,26 @@ fn staged_evidence_pack_writer_authentication_avoids_extra_opens_and_refuses_rep
 
 #[cfg(target_os = "linux")]
 #[test]
-fn retained_history_reads_across_requests_share_one_segment_open_and_refuse_replacement() {
+fn retained_history_requests_own_fixed_pack_passes_and_refuse_replacement() {
     let fixture = GitFixture::new(&[("src/lib.rs", "pub fn retained() -> u32 { 9 }\n")]);
     let source_root = TempDir::new().expect("source store");
     let generation = source_generation(&fixture, source_root.path());
     let target_root = TempDir::new().expect("target store");
     let mut publisher = target_store(target_root.path(), &fixture);
+    let operation = publisher
+        .resident_memory_authority()
+        .expect("owning store memory authority")
+        .begin_operation();
     let mut preparation = publisher
-        .prepare(&generation.sealed_scope(), None)
+        .prepare(&generation.sealed_scope(), None, &operation)
         .expect("prepare generation");
     let publication = generation
-        .stage_publication(&mut preparation)
+        .stage_publication(&mut preparation, &operation)
         .expect("stage production evidence");
-    let segment = CodeIndexPublishedGenerationV1::partitioned_segment_identities_from_reader(
+    let segment = CodeIndexPublishedGenerationV1::partitioned_pack_identities(
         publication.manifest_bytes().as_ref(),
     )
-    .expect("sealed segment identities")
-    .expect("partitioned generation")
+    .expect("sealed physical pack identities")
     .into_iter()
     .find(|identity| identity.size_bytes > 4)
     .expect("nonempty real segment");
@@ -2465,6 +2679,11 @@ fn retained_history_reads_across_requests_share_one_segment_open_and_refuse_repl
         digest: ManifestDigest::new(pointer.state_digest.clone()).expect("generation digest"),
         size_bytes: entry.size_bytes,
     };
+    let layout = SealedGenerationPackLayoutV1::open(publication.manifest_bytes())
+        .expect("canonical packed layout");
+    let factory = cold
+        .retained_pack_read_factory(identity.clone())
+        .expect("retained generation factory");
     let suffix = sha256_hex_suffix(segment.digest.as_str()).expect("segment digest");
     let path = cold.segments_root.join(format!("segment-{suffix}.json"));
     let (sender, receiver) = std::sync::mpsc::channel();
@@ -2476,7 +2695,8 @@ fn retained_history_reads_across_requests_share_one_segment_open_and_refuse_repl
         .watch(&cold.segments_root, notify::RecursiveMode::NonRecursive)
         .expect("watch real sealed segment directory");
 
-    let lock_path = target_root.path().join(".code-generation-retention.lock");
+    let store_root = cold.active_path.parent().expect("owning store root");
+    let lock_path = store_root.join(".code-generation-retention.lock");
     let (lock_sender, lock_receiver) = std::sync::mpsc::channel();
     let mut lock_watcher =
         notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
@@ -2484,12 +2704,12 @@ fn retained_history_reads_across_requests_share_one_segment_open_and_refuse_repl
         })
         .expect("native generation-store lock open observer");
     lock_watcher
-        .watch(target_root.path(), notify::RecursiveMode::NonRecursive)
+        .watch(store_root, notify::RecursiveMode::NonRecursive)
         .expect("watch the real generation-store lock directory");
     let control = tracedecay_code_index::production::UninterruptibleCodeIndexControlV1;
     let mut whole = Vec::new();
-    cold.read_retained_partitioned_segment(
-        &identity,
+    let mut read = factory(&control, &layout).expect("activate first historical request");
+    read(
         SealedGenerationSegmentReadV1::Whole {
             digest: &segment.digest,
             size_bytes: segment.size_bytes,
@@ -2501,10 +2721,11 @@ fn retained_history_reads_across_requests_share_one_segment_open_and_refuse_repl
     assert_eq!(whole.len() as u64, segment.size_bytes);
     assert_eq!(segment_digest(&whole), segment.digest);
     assert!(whole.len() > 4);
+    drop(read);
     let mut range = Vec::new();
     for _ in 0..16 {
-        cold.read_retained_partitioned_segment(
-            &identity,
+        let mut read = factory(&control, &layout).expect("activate another historical request");
+        read(
             SealedGenerationSegmentReadV1::Range {
                 digest: &segment.digest,
                 size_bytes: segment.size_bytes,
@@ -2514,18 +2735,18 @@ fn retained_history_reads_across_requests_share_one_segment_open_and_refuse_repl
             &mut range,
             &control,
         )
-        .expect("read historical page without reopening segment");
+        .expect("read historical page through its request-owned pack pass");
         assert_eq!(range, whole[1..4]);
     }
     assert_eq!(
         observed_named_opens(&receiver, &path),
-        1,
-        "one whole and sixteen historical reads must require one segment open"
+        17,
+        "each historical request must own one fresh open of this physical pack"
     );
     assert_eq!(
         observed_named_opens(&lock_receiver, &lock_path),
-        1,
-        "17 real historical reads must perform one cold lock-file open, not 17"
+        17,
+        "each historical request acquires and releases its own retention lease"
     );
     drop(File::open(&lock_path).expect("positive lock pathname-open control"));
     assert_eq!(
@@ -2552,8 +2773,11 @@ fn retained_history_reads_across_requests_share_one_segment_open_and_refuse_repl
     );
 
     let peer = cold.clone();
-    peer.read_retained_partitioned_segment(
-        &identity,
+    let peer_factory = peer
+        .retained_pack_read_factory(identity)
+        .expect("cloned store retained factory");
+    let mut peer_read = peer_factory(&control, &layout).expect("activate cloned-store request");
+    peer_read(
         SealedGenerationSegmentReadV1::Range {
             digest: &segment.digest,
             size_bytes: segment.size_bytes,
@@ -2563,12 +2787,12 @@ fn retained_history_reads_across_requests_share_one_segment_open_and_refuse_repl
         &mut range,
         &control,
     )
-    .expect("a second store handle shares the bounded retained cache");
+    .expect("a second store handle activates its own bounded read pass");
     assert_eq!(range, whole[2..4]);
     assert_eq!(
         observed_named_opens(&receiver, &path),
-        0,
-        "a cloned publication store must not repeat the endpoint open"
+        1,
+        "a cloned publication store activates a fresh payload handle for its request"
     );
     assert_eq!(
         observed_pointer_opens(&pointer_receiver),
@@ -2577,8 +2801,8 @@ fn retained_history_reads_across_requests_share_one_segment_open_and_refuse_repl
     );
     assert_eq!(
         observed_named_opens(&lock_receiver, &lock_path),
-        0,
-        "a cloned store must reuse the same lock descriptor while reacquiring the kernel lease"
+        1,
+        "a cloned store owns its retention lease only while its request is active"
     );
 
     let previous = target_root.path().join("retained-history-original-inode");
@@ -2597,8 +2821,7 @@ fn retained_history_reads_across_requests_share_one_segment_open_and_refuse_repl
     let _ = observed_named_opens(&receiver, &path);
     range = vec![0x11, 0x22];
     assert!(
-        peer.read_retained_partitioned_segment(
-            &identity,
+        peer_read(
             SealedGenerationSegmentReadV1::Range {
                 digest: &segment.digest,
                 size_bytes: segment.size_bytes,
@@ -2609,7 +2832,7 @@ fn retained_history_reads_across_requests_share_one_segment_open_and_refuse_repl
             &control,
         )
         .is_err(),
-        "a replaced pathname must not inherit a cached segment's identity"
+        "a replaced pathname must not inherit an active pass's pinned pack identity"
     );
     assert_eq!(
         range,

@@ -25,15 +25,28 @@ use tracedecay_domain::errors::Result;
 use tracedecay_domain::{CodeGenerationId, ProjectId, RefId, RepositoryId, WorktreeId};
 use tracedecay_graph_db::{GraphDbError, SealedGraphStateDigest, VerifiedGraphSnapshot};
 use tracedecay_runtime_core::db::Database;
+use tracedecay_runtime_core::resident_memory::ProcessResidentMemoryV1;
 use tracedecay_runtime_core::shard_runtime::registry::CanonicalCodeGraphStoreLeaseV1;
 use tracedecay_store::GraphNativeWorkObserverV1;
 
 /// Sealed-generation replay identity the seat port needs to retain a runtime.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug)]
 pub struct CodeGraphReplayBindingV1 {
     pub generations_root: PathBuf,
     pub sealed_state_digest: SealedGraphStateDigest,
+    /// The publication owner's existing process ledger, retained by every replay route.
+    pub resident_memory: Arc<ProcessResidentMemoryV1>,
 }
+
+impl PartialEq for CodeGraphReplayBindingV1 {
+    fn eq(&self, other: &Self) -> bool {
+        self.generations_root == other.generations_root
+            && self.sealed_state_digest == other.sealed_state_digest
+            && Arc::ptr_eq(&self.resident_memory, &other.resident_memory)
+    }
+}
+
+impl Eq for CodeGraphReplayBindingV1 {}
 
 /// Process-memory admission authority invoked after a sealed build has
 /// selected its cold or changed-page plan and before it materializes a page.

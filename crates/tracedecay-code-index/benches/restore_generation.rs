@@ -1,20 +1,22 @@
-//! Restore one already-published generation the way a daemon restart does.
+//! Restore one copied, already-published generation through the full codec.
 //!
 //! The corpus bench (`partitioned_codec`) builds a generation before it decodes
 //! one, so it cannot answer what restoring an operator-scale store costs on the
 //! bytes that store actually holds. This target takes a directory holding a
-//! revision-7 generation manifest plus its file and evidence segments, decodes
+//! current-format generation manifest plus its content and evidence packs, decodes
 //! it once through the production entry point, and reports the wall time, the
 //! process CPU the decode consumed, and the byte rate per segment; tracing
 //! spans decompose the phases inside one segment decode.
 //!
 //! ```text
-//! cargo bench -p tracedecay-code-index --bench restore_generation -- <dir> [restores]
+//! bazel run //crates/tracedecay-code-index:restore_generation -- <dir> [restores]
 //! ```
 //!
 //! `<dir>/manifest.json` is the generation file copied from
 //! `code-generations-v1/`, and `<dir>/segments/segment-<digest>.json` are the
-//! segments it names, copied from `code-generation-segments-v1/`.
+//! physical packs it names, copied from `code-generation-segments-v1/`. The
+//! benchmark directory reader opens each requested range directly; it does not
+//! measure the daemon's operation-owned handle admission or retention locks.
 //!
 //! `[restores]` restores that generation from that many threads at once, which
 //! is what a daemon does when several retained scope roots come back together.
@@ -33,16 +35,17 @@ use std::{
 
 use serde::Serialize;
 use tracedecay_code_index::production::{
-    CodeIndexProductionErrorV1, CodeIndexPublishedGenerationV1, SealedGenerationSegmentReadV1,
-    SharedDecodedContentPoolV1,
+    CodeIndexProductionErrorV1, CodeIndexPublishedGenerationV1, SealedGenerationPackLayoutV1,
+    SealedGenerationSegmentReadV1, SharedDecodedContentPoolV1,
 };
 
 #[derive(Serialize)]
 struct Measurement {
     schema_version: u32,
     manifest_bytes: usize,
+    /// Logical source-file segments restored from the physical content pack.
     file_segments: usize,
-    file_segment_bytes: u64,
+    content_pack_bytes: u64,
     evidence_bytes: u64,
     restored_files: usize,
     decode_wall_ns: u64,
@@ -51,6 +54,7 @@ struct Measurement {
     /// the daemon's `code_index.restore.segment_decode` average must match
     /// once contention is removed.
     cpu_ns_per_file_segment: u64,
+    /// Manifest-declared payload bytes per CPU second, not measured I/O throughput.
     cpu_mib_per_second: f64,
     /// CPU demand over wall time: how many cores the restore actually kept
     /// busy. Segment decoding fans out over the indexing pool, so a ratio far
@@ -92,18 +96,18 @@ fn main() -> Result<(), Box<dyn Error>> {
     let decode_cpu_ns = process_cpu_ns()?.saturating_sub(cpu_before);
 
     let restored_files = completions.restored_files;
-    let (file_segment_bytes, evidence_bytes) = directory_bytes(&segments)?;
+    let (content_pack_bytes, evidence_bytes) = payload_bytes(&manifest, &segments)?;
     let measurement = Measurement {
-        schema_version: 2,
+        schema_version: 3,
         manifest_bytes: manifest.len(),
         file_segments: restored_files,
-        file_segment_bytes,
+        content_pack_bytes,
         evidence_bytes,
         restored_files,
         decode_wall_ns,
         decode_cpu_ns,
         cpu_ns_per_file_segment: decode_cpu_ns / u64::try_from(restored_files.max(1))?,
-        cpu_mib_per_second: (file_segment_bytes + evidence_bytes) as f64
+        cpu_mib_per_second: (content_pack_bytes + evidence_bytes) as f64
             * concurrent_restores as f64
             / 1_048_576.0
             / (decode_cpu_ns as f64 / 1e9),
@@ -175,6 +179,8 @@ fn restore_once(
         manifest,
         &SharedDecodedContentPoolV1::default(),
         |request, buffer| read_segment(segments, request, buffer),
+        // Measure the full codec without adding a resident-admission boundary.
+        &mut |_| Ok(()),
     )
     .map_err(|error| error.to_string())?;
     let mut coverage = restored
@@ -194,22 +200,37 @@ fn read_segment(
     request: SealedGenerationSegmentReadV1<'_>,
     buffer: &mut Vec<u8>,
 ) -> Result<(), CodeIndexProductionErrorV1> {
-    let (digest, offset, length) = match request {
-        SealedGenerationSegmentReadV1::Whole { digest, size_bytes } => (digest, 0, size_bytes),
+    let (digest, size_bytes, offset, length) = match request {
+        SealedGenerationSegmentReadV1::Whole { digest, size_bytes } => {
+            (digest, size_bytes, 0, size_bytes)
+        }
         SealedGenerationSegmentReadV1::Range {
             digest,
             offset,
             length,
-            ..
-        } => (digest, offset, length),
+            size_bytes,
+        } => (digest, size_bytes, offset, length),
     };
     let name = digest
         .as_str()
         .strip_prefix("sha256:")
         .ok_or_else(|| contract("segment digest is not a sha256 identity"))?;
+    let end = offset
+        .checked_add(length)
+        .ok_or_else(|| contract("pack range overflowed"))?;
+    if end > size_bytes {
+        return Err(contract("pack range exceeds its authenticated extent"));
+    }
     let length = usize::try_from(length).map_err(|_| contract("segment range exceeds memory"))?;
     let mut file = File::open(segments.join(format!("segment-{name}.json")))
         .map_err(|error| contract(&format!("segment open failed: {error}")))?;
+    let actual_size = file
+        .metadata()
+        .map_err(|error| contract(&format!("pack metadata failed: {error}")))?
+        .len();
+    if actual_size != size_bytes {
+        return Err(contract("pack size does not match its manifest"));
+    }
     buffer.clear();
     buffer.resize(length, 0);
     file.seek(SeekFrom::Start(offset))
@@ -221,15 +242,26 @@ fn contract(message: &str) -> CodeIndexProductionErrorV1 {
     CodeIndexProductionErrorV1::Contract(message.to_owned())
 }
 
-/// Total bytes of the copied segments, split into the file segments and the
-/// single largest one, which is the generation evidence pack.
-fn directory_bytes(segments: &Path) -> Result<(u64, u64), Box<dyn Error>> {
-    let mut sizes = std::fs::read_dir(segments)?
-        .map(|entry| Ok::<u64, Box<dyn Error>>(entry?.metadata()?.len()))
-        .collect::<Result<Vec<_>, _>>()?;
-    sizes.sort_unstable();
-    let evidence = sizes.pop().unwrap_or(0);
-    Ok((sizes.iter().sum(), evidence))
+/// Physical payload bytes by their canonical roles; directory size order
+/// cannot identify the evidence pack and may include unrelated generations.
+fn payload_bytes(manifest: &[u8], segments: &Path) -> Result<(u64, u64), Box<dyn Error>> {
+    let layout = SealedGenerationPackLayoutV1::open(manifest)?;
+    let content = layout.content_pack();
+    let evidence = layout.evidence_pack();
+    for (digest, size_bytes) in [
+        (&content.digest, content.size_bytes),
+        (&evidence.digest, evidence.size_bytes),
+    ] {
+        let name = digest
+            .as_str()
+            .strip_prefix("sha256:")
+            .ok_or("pack digest is not a sha256 identity")?;
+        let actual_size = std::fs::metadata(segments.join(format!("segment-{name}.json")))?.len();
+        if actual_size != size_bytes {
+            return Err("pack size does not match its manifest".into());
+        }
+    }
+    Ok((content.size_bytes, evidence.size_bytes))
 }
 
 /// Process CPU nanoseconds across every thread, from the scheduler's own

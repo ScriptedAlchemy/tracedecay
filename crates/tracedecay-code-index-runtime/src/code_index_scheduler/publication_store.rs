@@ -4,7 +4,9 @@ use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
     fs::File,
     io::{Read, Seek, SeekFrom, Write},
+    mem::size_of,
     num::NonZeroU64,
+    ops::Deref,
     path::{Path, PathBuf},
     sync::{
         Arc, Condvar, Mutex, MutexGuard, PoisonError, Weak,
@@ -28,28 +30,26 @@ thread_local! {
 use same_file::Handle;
 use sha2::{Digest, Sha256};
 use tracedecay_application::code_index::DaemonCodeIndexControlV1;
-#[cfg(unix)]
-use tracedecay_code_index_retention::code_index_generations::CachedCodeGenerationStoreReadLockV1;
 use tracedecay_code_index_retention::code_index_generations::{
     CODE_INDEX_PREPARATION_DIRECTORY_PREFIX_V1, CodeGenerationRetentionErrorV1,
     CodeGenerationStoreLockV1, CodeIndexScopeStoreResetV1, DurableGenerationCardinalityV1,
     DurableGenerationIndexEntryV1, DurablePublicationPointerV1,
     DurableSealedCodeGenerationIdentityV1, MAX_DURABLE_GENERATION_INDEX_BYTES_V1,
-    MAX_DURABLE_GENERATION_INDEX_ENTRIES_V1, RetainedSegmentHandleRetirementV1,
-    acquire_generation_segments_publication_lock, code_generation_segments_root,
-    durable_generation_index_digest, reset_code_index_scope_store, retain_bounded_generation_index,
-    try_acquire_code_generation_store_lock, try_acquire_code_generation_store_read_lock,
+    MAX_DURABLE_GENERATION_INDEX_ENTRIES_V1, acquire_generation_segments_publication_lock,
+    code_generation_segments_root, durable_generation_index_digest, reset_code_index_scope_store,
+    retain_bounded_generation_index, try_acquire_code_generation_store_lock,
+    try_acquire_code_generation_store_read_lock,
 };
 use tracedecay_domain::{
     CodeGenerationId, ContentDigest, ManifestDigest, ProjectId, SanitizerRevision, WorktreeId,
     canonical_text::encode_tagged_lowercase_hex, sha256_hex_suffix,
 };
 use tracedecay_graph_db::{GraphBudgetKind, GraphDbError};
-use tracedecay_private_fs::framed_log::{DirectorySyncPolicy, DurableFileBatch};
+use tracedecay_private_fs::framed_log::DirectorySyncPolicy;
 use tracedecay_runtime_core::resident_memory::{
-    ProcessResidentMemoryV1, ResidentMemoryComponentIdV1, ResidentMemoryKeyV1,
-    ResidentMemoryReservationV1, ResidentOwnersV1, log_resident_owner_release_v1,
-    release_process_allocator_memory_v1,
+    ProcessResidentMemoryV1, ProcessSharedMemoryReservationV1, ResidentMemoryComponentIdV1,
+    ResidentMemoryKeyV1, ResidentMemoryOperationV1, ResidentMemoryReservationV1, ResidentOwnersV1,
+    log_resident_owner_release_v1, release_process_allocator_memory_v1,
 };
 
 use tracedecay_code_index::{
@@ -59,6 +59,9 @@ use tracedecay_code_index::{
         CodeIndexGenerationScopeV1, CodeIndexInterruptionV1, CodeIndexPreparationPort,
         CodeIndexProductionErrorV1, CodeIndexPublicationStoreErrorV1,
         CodeIndexPublishedGenerationV1, CodeIndexSealedGenerationV1, CodeIndexSealedPublicationV1,
+        SealedGenerationContentExtentV1, SealedGenerationContentPackV1,
+        SealedGenerationPackLayoutV1, SealedGenerationPackReadFactoryV1,
+        SealedGenerationPackReadPassV1, SealedGenerationSegmentIdentityV1,
         SealedGenerationSegmentPublicationV1, SealedGenerationSegmentReadV1, SealedSegmentReaderV1,
         SharedDecodedContentPoolV1, SharedPhysicalCodeArtifactPoolV1,
         VerifiedSealedTextGenerationMetadataV1,
@@ -67,6 +70,10 @@ use tracedecay_code_index::{
 
 use super::{CodeIndexSchedulerErrorV1, PendingHintsV1};
 use crate::code_graph_seat::CodeGraphBuildAdmissionV1;
+
+#[path = "publication_store/pack_read_pass.rs"]
+mod pack_read_pass;
+use pack_read_pass::GenerationPackReadPassV1;
 
 #[cfg(all(test, unix))]
 #[path = "tests/staged_segment_reads.rs"]
@@ -529,13 +536,6 @@ pub struct DaemonCodeIndexPublicationStoreV1 {
     expected_sanitizer_revision: SanitizerRevision,
     disposition: CodeIndexPublicationDispositionV1,
     pointer_memo: Arc<std::sync::Mutex<Option<PublicationPointerMemoV1>>>,
-    /// A fresh shared kernel lock per historical read, without a new open(2).
-    #[cfg(unix)]
-    retained_generation_lock: Arc<CachedCodeGenerationStoreReadLockV1>,
-    /// One bounded descriptor cache for retained page reads across requests.
-    /// Cloned stores share its identity checks; retirement discards it.
-    #[cfg(unix)]
-    pub(super) retained_segment_reads: Arc<Mutex<VecDeque<PinnedPreparationSegmentV1>>>,
     undecoded_active_expectation: Option<UndecodedActivePublicationExpectationV1>,
     /// The canonical source-hint authority plus the exact pre-capture epoch
     /// used by a retained rebuild. Ordinary publication leaves this absent.
@@ -565,7 +565,23 @@ pub struct DaemonCodeIndexPublicationStoreV1 {
 pub(super) struct ActiveSealedManifestV1 {
     state_digest: String,
     pub(super) manifest_bytes: Arc<[u8]>,
-    pub(super) metadata: Arc<VerifiedSealedTextGenerationMetadataV1>,
+    pub(super) metadata: Arc<AdmittedSealedMetadataV1>,
+}
+
+/// Cloned metadata shares its allocation charge and authenticated pack map.
+pub(super) struct AdmittedSealedMetadataV1 {
+    value: VerifiedSealedTextGenerationMetadataV1,
+    layout: SealedGenerationPackLayoutV1,
+    manifest_bytes: Arc<[u8]>,
+    _memory: PreparedPackMemoryV1,
+}
+
+impl Deref for AdmittedSealedMetadataV1 {
+    type Target = VerifiedSealedTextGenerationMetadataV1;
+
+    fn deref(&self) -> &Self::Target {
+        &self.value
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -614,6 +630,7 @@ pub struct DaemonCodeIndexPreparationV1 {
     expected_active_generation: Option<CodeGenerationId>,
     undecoded_expectation: Option<UndecodedActivePublicationExpectationV1>,
     incumbent_bytes: Option<Vec<u8>>,
+    incumbent_manifest: Option<Arc<AdmittedSealedMetadataV1>>,
     #[cfg(unix)]
     store_identity: UnixDirectoryIdentityV1,
     #[cfg(not(unix))]
@@ -643,28 +660,140 @@ pub struct DaemonCodeIndexPreparationV1 {
 
 enum DaemonCodeIndexPreparationStateV1 {
     Open(Box<DaemonCodeIndexPreparationFilesV1>),
-    Committed,
+    Committed(Arc<CommittedPreparationPacksV1>),
     Aborted,
+}
+
+struct BoundParentPacksV1 {
+    manifest: Arc<AdmittedSealedMetadataV1>,
+    read: GenerationPackReadPassV1,
+    bytes_read: Arc<AtomicU64>,
+}
+
+struct CommittedPreparationPacksV1 {
+    layout: Arc<AdmittedPackLayoutV1>,
+    open_read_pass: Arc<SealedGenerationPackReadFactoryV1>,
+}
+
+struct AdmittedPackLayoutV1 {
+    layout: SealedGenerationPackLayoutV1,
+    _memory: PreparedPackMemoryV1,
+}
+
+/// Payloads close before this operation releases its shared store lease.
+/// Idle factories retain only path, pointer and admitted manifest authority.
+struct RetainedPackReadPassV1 {
+    payloads: GenerationPackReadPassV1,
+    _memory: PreparedPackMemoryV1,
+    _lease: CodeGenerationStoreLockV1,
+}
+
+impl RetainedPackReadPassV1 {
+    fn read(
+        &mut self,
+        request: SealedGenerationSegmentReadV1<'_>,
+        buffer: &mut Vec<u8>,
+    ) -> Result<(), CodeIndexProductionErrorV1> {
+        self.payloads.read(request, buffer)
+    }
+}
+
+#[derive(Clone)]
+struct GenerationReadAuthorityV1 {
+    active_path: PathBuf,
+    segments_root: PathBuf,
+    pointer_memo: Arc<Mutex<Option<PublicationPointerMemoV1>>>,
+}
+
+fn pack_read_workspace_bytes(root: &Path, digest_bytes: usize) -> usize {
+    let path_bytes = root
+        .as_os_str()
+        .len()
+        .saturating_add(1 + "segment-".len() + 64 + ".json".len());
+    // Two retained paths and the cold-open pathname/string temporaries can
+    // coexist. PathBuf growth may double its existing allocation.
+    size_of::<RetainedPackReadPassV1>()
+        .saturating_add(size_of::<SealedGenerationSegmentIdentityV1>().saturating_mul(2))
+        .saturating_add(path_bytes.saturating_mul(8))
+        .saturating_add(digest_bytes.saturating_mul(4))
+}
+
+impl GenerationReadAuthorityV1 {
+    fn try_lease(
+        &self,
+    ) -> Result<Option<CodeGenerationStoreLockV1>, CodeIndexPublicationStoreErrorV1> {
+        let root = self.active_path.parent().ok_or_else(|| {
+            DaemonCodeIndexPublicationStoreV1::unavailable(
+                "active code-generation pointer has no store root",
+            )
+        })?;
+        try_acquire_code_generation_store_read_lock(root)
+            .map_err(DaemonCodeIndexPublicationStoreV1::unavailable)
+    }
+
+    fn open_under_lease(
+        &self,
+        identity: &DurableSealedCodeGenerationIdentityV1,
+        layout: &SealedGenerationPackLayoutV1,
+        operation: &ResidentMemoryOperationV1,
+        lease: CodeGenerationStoreLockV1,
+    ) -> Result<RetainedPackReadPassV1, CodeIndexProductionErrorV1> {
+        let pointer = DaemonCodeIndexPublicationStoreV1::read_publication_pointer_at(
+            &self.active_path,
+            &self.pointer_memo,
+        )?;
+        if !pointer.as_ref().is_some_and(|(pointer, _)| {
+            pointer.generation_index.iter().any(|entry| {
+                entry.generation_file == identity.locator
+                    && entry.state_digest == identity.digest.as_str()
+                    && entry.size_bytes == identity.size_bytes
+            })
+        }) {
+            return Err(CodeIndexProductionErrorV1::Interrupted(
+                CodeIndexInterruptionV1::Cancelled,
+            ));
+        }
+        let content = layout.content_pack();
+        let evidence = layout.evidence_pack();
+        let mut memory = PreparedPackMemoryV1::new(operation)?;
+        memory.admit(pack_read_workspace_bytes(
+            &self.segments_root,
+            content
+                .digest
+                .as_str()
+                .len()
+                .saturating_add(evidence.digest.as_str().len()),
+        ))?;
+        let identities = [
+            SealedGenerationSegmentIdentityV1 {
+                digest: content.digest.clone(),
+                size_bytes: content.size_bytes,
+            },
+            evidence.clone(),
+        ];
+        let payloads =
+            GenerationPackReadPassV1::open(&self.segments_root, &identities, None, &mut 0)?;
+        Ok(RetainedPackReadPassV1 {
+            payloads,
+            _memory: memory,
+            _lease: lease,
+        })
+    }
 }
 
 struct DaemonCodeIndexPreparationFilesV1 {
     // File owners drop before the directory, including on platforms that
     // prohibit removing an open file. Retention outlives all staging cleanup.
+    payload_reads: Option<GenerationPackReadPassV1>,
+    parent: Option<BoundParentPacksV1>,
+    logical: StagedContentV1,
+    evidence: TemporaryPayloadPackV1,
     segments: StagedGenerationSegmentsV1,
-    evidence: TemporaryEvidencePackV1,
-    // Only the open preparation owns these handles. Its retention lease
-    // prevents an authorized sweep from unlinking their sealed paths.
-    #[cfg(unix)]
-    pinned_segment_reads: VecDeque<PinnedPreparationSegmentV1>,
-    // Eviction limits descriptors but must not discard the identity recorded
-    // on the first open of any sealed pathname in this preparation.
-    #[cfg(unix)]
-    observed_segment_identities: BTreeMap<PathBuf, std::fs::Metadata>,
-    #[cfg(unix)]
+    content_pack: Option<SealedGenerationContentPackV1>,
+    evidence_identity: Option<SealedGenerationSegmentIdentityV1>,
     segment_read_open_attempts: u64,
     // One changed sealed pathname invalidates the entire transaction. Retrying
     // must not silently accept substituted bytes under the same digest name.
-    #[cfg(unix)]
     segment_reads_poisoned: bool,
     directory: tempfile::TempDir,
     _retention: CodeGenerationStoreLockV1,
@@ -672,6 +801,514 @@ struct DaemonCodeIndexPreparationFilesV1 {
     manifest_identity: Option<String>,
     pending_pointer: Option<Vec<u8>>,
     segments_durable: bool,
+    memory: PreparedPackMemoryV1,
+}
+
+impl DaemonCodeIndexPreparationFilesV1 {
+    fn retained_bytes(&self) -> usize {
+        #[cfg(unix)]
+        let authenticated = self.segments.authenticated_segments.iter().fold(
+            self.evidence
+                .authenticated
+                .as_ref()
+                .map_or(0, |(path, _)| path.capacity()),
+            |bytes, (path, _)| {
+                bytes
+                    .saturating_add(path.capacity())
+                    .saturating_add(size_of::<(PathBuf, std::fs::Metadata)>().saturating_mul(11))
+            },
+        );
+        #[cfg(not(unix))]
+        let authenticated = 0;
+        size_of::<Self>()
+            .saturating_add(self.directory.path().as_os_str().len().saturating_mul(2))
+            .saturating_add(self.logical.path.capacity())
+            .saturating_add(self.evidence.path.capacity())
+            .saturating_add(
+                self.evidence
+                    .published_path
+                    .as_ref()
+                    .map_or(0, PathBuf::capacity),
+            )
+            .saturating_add(
+                self.parent
+                    .as_ref()
+                    .map_or(0, |parent| parent.read.retained_heap_bytes()),
+            )
+            .saturating_add(
+                self.payload_reads
+                    .as_ref()
+                    .map_or(0, GenerationPackReadPassV1::retained_heap_bytes),
+            )
+            .saturating_add(self.manifest_identity.as_ref().map_or(0, String::capacity))
+            .saturating_add(self.pending_pointer.as_ref().map_or(0, Vec::capacity))
+            .saturating_add(authenticated)
+            .saturating_add(self.logical.index_bytes(None))
+            .saturating_add(
+                self.content_pack
+                    .as_ref()
+                    .map_or(0, |pack| pack.retained_bytes()),
+            )
+            .saturating_add(
+                self.evidence_identity
+                    .as_ref()
+                    .map_or(0, |pack| pack.digest.as_str().len()),
+            )
+            .saturating_add(self.segments.pending.iter().fold(
+                0_usize,
+                |bytes, (canonical, staged)| {
+                    bytes
+                        .saturating_add(canonical.capacity())
+                        .saturating_add(staged.capacity())
+                        .saturating_add(size_of::<(PathBuf, PathBuf)>().saturating_mul(11))
+                },
+            ))
+    }
+
+    fn admit(&mut self, additional: usize) -> Result<(), CodeIndexPublicationStoreErrorV1> {
+        self.memory
+            .admit(self.retained_bytes().saturating_add(additional))
+    }
+
+    fn physical_identities(&self) -> Vec<SealedGenerationSegmentIdentityV1> {
+        let mut identities = Vec::with_capacity(2);
+        if let Some(pack) = &self.content_pack {
+            identities.push(SealedGenerationSegmentIdentityV1 {
+                digest: pack.digest.clone(),
+                size_bytes: pack.size_bytes,
+            });
+        }
+        if let Some(pack) = &self.evidence_identity {
+            identities.push(pack.clone());
+        }
+        identities
+    }
+
+    fn invalidate_reads(&mut self) {
+        self.segment_reads_poisoned = true;
+        self.payload_reads = None;
+        self.parent = None;
+    }
+
+    fn require_physical_request(
+        &self,
+        request: SealedGenerationSegmentReadV1<'_>,
+    ) -> Result<(), CodeIndexProductionErrorV1> {
+        let (digest, size_bytes, offset, length) = match request {
+            SealedGenerationSegmentReadV1::Whole { digest, size_bytes } => {
+                (digest, size_bytes, 0, size_bytes)
+            }
+            SealedGenerationSegmentReadV1::Range {
+                digest,
+                size_bytes,
+                offset,
+                length,
+            } => (digest, size_bytes, offset, length),
+        };
+        let expected = self
+            .content_pack
+            .as_ref()
+            .filter(|pack| &pack.digest == digest)
+            .map(|pack| pack.size_bytes)
+            .or_else(|| {
+                self.evidence_identity
+                    .as_ref()
+                    .filter(|pack| &pack.digest == digest)
+                    .map(|pack| pack.size_bytes)
+            });
+        if expected != Some(size_bytes)
+            || offset
+                .checked_add(length)
+                .is_none_or(|end| end > size_bytes)
+            || usize::try_from(length).is_err()
+        {
+            return Err(CodeIndexProductionErrorV1::Contract(
+                "prepared payload request is outside its authenticated pack identity".to_owned(),
+            ));
+        }
+        Ok(())
+    }
+
+    fn read_physical(
+        &mut self,
+        root: &Path,
+        request: SealedGenerationSegmentReadV1<'_>,
+        buffer: &mut Vec<u8>,
+    ) -> Result<(), CodeIndexProductionErrorV1> {
+        buffer.clear();
+        if self.segment_reads_poisoned {
+            return Err(CodeIndexProductionErrorV1::Contract(
+                "prepared payload identity was invalidated".to_owned(),
+            ));
+        }
+        self.require_physical_request(request)?;
+        if self.payload_reads.is_none() {
+            let digest_bytes = self
+                .content_pack
+                .as_ref()
+                .map_or(0, |pack| pack.digest.as_str().len())
+                .saturating_add(
+                    self.evidence_identity
+                        .as_ref()
+                        .map_or(0, |pack| pack.digest.as_str().len()),
+                );
+            let workspace = pack_read_workspace_bytes(root, digest_bytes).max(
+                pack_read_workspace_bytes(self.directory.path(), digest_bytes),
+            );
+            self.admit(workspace)?;
+            let identities = self.physical_identities();
+            let pass = GenerationPackReadPassV1::open(
+                root,
+                &identities,
+                Some(&self.segments.pending),
+                &mut self.segment_read_open_attempts,
+            );
+            match pass {
+                Ok(pass) => self.payload_reads = Some(pass),
+                Err(error) => {
+                    self.invalidate_reads();
+                    return Err(error);
+                }
+            }
+        }
+        let pass = self.payload_reads.as_mut().ok_or_else(|| {
+            CodeIndexProductionErrorV1::Contract("prepared payload pass is absent".to_owned())
+        })?;
+        let result = pass.read(request, buffer);
+        if pass.is_invalidated() {
+            self.invalidate_reads();
+        }
+        result
+    }
+
+    fn read_logical(
+        &mut self,
+        root: &Path,
+        request: SealedGenerationSegmentReadV1<'_>,
+        buffer: &mut Vec<u8>,
+    ) -> Result<(), CodeIndexProductionErrorV1> {
+        buffer.clear();
+        if self.segment_reads_poisoned {
+            return Err(CodeIndexProductionErrorV1::Contract(
+                "prepared payload identity was invalidated".to_owned(),
+            ));
+        }
+        let staged = self.logical.read(request, buffer);
+        if self.logical.poisoned {
+            self.invalidate_reads();
+        }
+        if staged? {
+            return Ok(());
+        }
+        let digest = match request {
+            SealedGenerationSegmentReadV1::Whole { digest, .. }
+            | SealedGenerationSegmentReadV1::Range { digest, .. } => digest,
+        };
+        if self
+            .evidence_identity
+            .as_ref()
+            .is_some_and(|pack| &pack.digest == digest)
+        {
+            return self.read_physical(root, request, buffer);
+        }
+        if let Some(parent) = self.parent.as_mut() {
+            let result = parent.manifest.layout.read(request, buffer, |raw, into| {
+                parent.read.read(raw, into)?;
+                parent
+                    .bytes_read
+                    .fetch_add(into.len() as u64, Ordering::Relaxed);
+                Ok(())
+            });
+            if parent.read.is_invalidated() {
+                self.invalidate_reads();
+            }
+            return result;
+        }
+        Err(CodeIndexProductionErrorV1::Contract(
+            "logical segment is absent from this preparation and its bound parent".to_owned(),
+        ))
+    }
+}
+
+/// The new descriptor indexes and copy scratch belong to the actual build's
+/// resident-memory operation. A refused growth leaves the prior owner intact.
+struct PreparedPackMemoryV1 {
+    operation: ResidentMemoryOperationV1,
+    component: ResidentMemoryComponentIdV1,
+    charge: Option<ProcessSharedMemoryReservationV1>,
+}
+
+impl PreparedPackMemoryV1 {
+    fn operation(&self) -> &ResidentMemoryOperationV1 {
+        &self.operation
+    }
+
+    fn new(
+        operation: &ResidentMemoryOperationV1,
+    ) -> Result<Self, CodeIndexPublicationStoreErrorV1> {
+        Ok(Self {
+            operation: operation.clone(),
+            component: ResidentMemoryComponentIdV1::new("code_index.prepared_packs.v1")
+                .map_err(DaemonCodeIndexPublicationStoreV1::unavailable)?,
+            charge: None,
+        })
+    }
+
+    fn admit(&mut self, bytes: usize) -> Result<(), CodeIndexPublicationStoreErrorV1> {
+        let bytes = u64::try_from(bytes).map_err(DaemonCodeIndexPublicationStoreV1::unavailable)?;
+        let retained = self
+            .charge
+            .as_ref()
+            .map_or(0, |charge| charge.reserved_bytes());
+        if bytes <= retained {
+            return Ok(());
+        }
+        let additional = NonZeroU64::new(bytes - retained).ok_or_else(|| {
+            DaemonCodeIndexPublicationStoreV1::unavailable("prepared pack charge overflowed")
+        })?;
+        let refused =
+            |error: tracedecay_runtime_core::resident_memory::ResidentMemoryAdmissionFailureV1| {
+                CodeIndexPublicationStoreErrorV1::ResidentMemoryRefused(error.to_string())
+            };
+        if let Some(charge) = self.charge.as_mut() {
+            charge.try_grow(additional).map_err(refused)?;
+        } else {
+            self.charge = Some(
+                self.operation
+                    .reserve_process_shared(self.component, additional)
+                    .map_err(refused)?,
+            );
+        }
+        Ok(())
+    }
+
+    fn resize(&mut self, bytes: usize) -> Result<(), CodeIndexPublicationStoreErrorV1> {
+        self.admit(bytes)?;
+        let bytes = u64::try_from(bytes).map_err(DaemonCodeIndexPublicationStoreV1::unavailable)?;
+        if bytes == 0 {
+            drop(self.charge.take());
+        } else if let Some(charge) = self.charge.as_mut() {
+            charge
+                .shrink_to(bytes)
+                .map_err(DaemonCodeIndexPublicationStoreV1::unavailable)?;
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Copy)]
+struct StagedContentExtentV1 {
+    offset: u64,
+    size_bytes: u64,
+}
+
+/// Logical writes share one unpublished append stream. Its index never names
+/// a published file; finalization copies a frozen canonical roster into one
+/// immutable content pack and authenticates every copied logical digest.
+struct StagedContentV1 {
+    file: File,
+    path: PathBuf,
+    extents: BTreeMap<ManifestDigest, StagedContentExtentV1>,
+    digest_bytes: usize,
+    size_bytes: u64,
+    identity: std::fs::Metadata,
+    poisoned: bool,
+}
+
+impl StagedContentV1 {
+    fn create(path: PathBuf) -> Result<Self, CodeIndexPublicationStoreErrorV1> {
+        let file = std::fs::OpenOptions::new()
+            .create_new(true)
+            .read(true)
+            .write(true)
+            .open(&path)
+            .map_err(DaemonCodeIndexPublicationStoreV1::unavailable)?;
+        let identity = file
+            .metadata()
+            .map_err(DaemonCodeIndexPublicationStoreV1::unavailable)?;
+        Ok(Self {
+            file,
+            path,
+            extents: BTreeMap::new(),
+            digest_bytes: 0,
+            size_bytes: 0,
+            identity,
+            poisoned: false,
+        })
+    }
+
+    fn index_bytes(&self, next: Option<&ManifestDigest>) -> usize {
+        let entries = self
+            .extents
+            .len()
+            .saturating_add(usize::from(next.is_some()));
+        // std's degree-six BTreeMap has eleven entries per node, at least
+        // five occupied entries per non-root node, and twelve child slots.
+        let nodes = if entries == 0 {
+            0
+        } else {
+            entries.saturating_sub(1) / 5 + 1
+        };
+        let leaf = size_of::<usize>().saturating_mul(2).saturating_add(
+            size_of::<(ManifestDigest, StagedContentExtentV1)>().saturating_mul(11),
+        );
+        nodes
+            .saturating_mul(leaf)
+            .saturating_add(
+                (nodes.saturating_add(3) / 6)
+                    .saturating_mul(12)
+                    .saturating_mul(size_of::<usize>()),
+            )
+            .saturating_add(self.digest_bytes)
+            .saturating_add(next.map_or(0, |digest| digest.as_str().len()))
+    }
+
+    fn unchanged(&self) -> bool {
+        let Ok(opened) = self.file.metadata() else {
+            return false;
+        };
+        #[cfg(unix)]
+        {
+            self.path.symlink_metadata().is_ok_and(|named| {
+                DaemonCodeIndexPublicationStoreV1::same_unix_segment_identity(
+                    &self.identity,
+                    &opened,
+                ) && DaemonCodeIndexPublicationStoreV1::same_unix_segment_identity(
+                    &self.identity,
+                    &named,
+                )
+            })
+        }
+        #[cfg(not(unix))]
+        {
+            opened.is_file()
+                && opened.len() == self.identity.len()
+                && opened.modified().ok() == self.identity.modified().ok()
+        }
+    }
+
+    fn append(
+        &mut self,
+        digest: &ManifestDigest,
+        bytes: &[u8],
+    ) -> Result<(), CodeIndexPublicationStoreErrorV1> {
+        if self.poisoned || !self.unchanged() {
+            self.poisoned = true;
+            return Err(DaemonCodeIndexPublicationStoreV1::corruption(
+                "logical staging stream changed before append",
+            ));
+        }
+        let size_bytes =
+            u64::try_from(bytes.len()).map_err(DaemonCodeIndexPublicationStoreV1::unavailable)?;
+        if DaemonCodeIndexPublicationStoreV1::state_digest(bytes) != digest.as_str() {
+            return Err(DaemonCodeIndexPublicationStoreV1::corruption(
+                "logical segment bytes do not match their content address",
+            ));
+        }
+        if let Some(existing) = self.extents.get(digest) {
+            if existing.size_bytes != size_bytes {
+                return Err(DaemonCodeIndexPublicationStoreV1::corruption(
+                    "logical staging address has conflicting extents",
+                ));
+            }
+            return Ok(());
+        }
+        let end = self.size_bytes.checked_add(size_bytes).ok_or_else(|| {
+            DaemonCodeIndexPublicationStoreV1::unavailable(
+                "logical staging stream length overflowed",
+            )
+        })?;
+        self.poisoned = true;
+        self.file
+            .seek(SeekFrom::Start(self.size_bytes))
+            .and_then(|_| self.file.write_all(bytes))
+            .map_err(DaemonCodeIndexPublicationStoreV1::unavailable)?;
+        self.identity = self
+            .file
+            .metadata()
+            .map_err(DaemonCodeIndexPublicationStoreV1::unavailable)?;
+        if self.identity.len() != end || !self.unchanged() {
+            return Err(DaemonCodeIndexPublicationStoreV1::corruption(
+                "logical staging stream changed during append",
+            ));
+        }
+        self.extents.insert(
+            digest.clone(),
+            StagedContentExtentV1 {
+                offset: self.size_bytes,
+                size_bytes,
+            },
+        );
+        self.digest_bytes = self.digest_bytes.saturating_add(digest.as_str().len());
+        self.size_bytes = end;
+        self.poisoned = false;
+        Ok(())
+    }
+
+    fn read(
+        &mut self,
+        request: SealedGenerationSegmentReadV1<'_>,
+        buffer: &mut Vec<u8>,
+    ) -> Result<bool, CodeIndexProductionErrorV1> {
+        buffer.clear();
+        if self.poisoned || !self.unchanged() {
+            self.poisoned = true;
+            return Err(CodeIndexProductionErrorV1::Contract(
+                "logical staging stream was invalidated".to_owned(),
+            ));
+        }
+        let (digest, size_bytes, offset, length, whole) = match request {
+            SealedGenerationSegmentReadV1::Whole { digest, size_bytes } => {
+                (digest, size_bytes, 0, size_bytes, true)
+            }
+            SealedGenerationSegmentReadV1::Range {
+                digest,
+                size_bytes,
+                offset,
+                length,
+            } => (digest, size_bytes, offset, length, false),
+        };
+        let Some(extent) = self.extents.get(digest) else {
+            return Ok(false);
+        };
+        if extent.size_bytes != size_bytes
+            || offset
+                .checked_add(length)
+                .is_none_or(|end| end > size_bytes)
+        {
+            return Err(CodeIndexProductionErrorV1::Contract(
+                "logical staging range disagrees with its authenticated extent".to_owned(),
+            ));
+        }
+        let position = extent.offset.checked_add(offset).ok_or_else(|| {
+            CodeIndexProductionErrorV1::Contract("logical staging offset overflowed".to_owned())
+        })?;
+        let length = usize::try_from(length).map_err(|_| {
+            CodeIndexProductionErrorV1::Contract(
+                "logical staging range exceeds addressable memory".to_owned(),
+            )
+        })?;
+        buffer.resize(length, 0);
+        let result = self
+            .file
+            .seek(SeekFrom::Start(position))
+            .and_then(|_| self.file.read_exact(buffer));
+        if !self.unchanged() || result.is_err() {
+            buffer.clear();
+            self.poisoned = true;
+            return Err(CodeIndexProductionErrorV1::Contract(
+                "logical staging stream changed or failed during read".to_owned(),
+            ));
+        }
+        if whole && DaemonCodeIndexPublicationStoreV1::state_digest(buffer) != digest.as_str() {
+            buffer.clear();
+            self.poisoned = true;
+            return Err(CodeIndexProductionErrorV1::Contract(
+                "logical staged bytes do not match their content address".to_owned(),
+            ));
+        }
+        Ok(true)
+    }
 }
 
 impl DaemonCodeIndexPreparationV1 {
@@ -713,7 +1350,7 @@ impl DaemonCodeIndexPreparationV1 {
     }
 
     fn abort_open(&self) -> Result<(), CodeIndexPublicationStoreErrorV1> {
-        let files = {
+        let mut files = {
             let mut state = self.state.lock().map_err(|_| Self::closed())?;
             if !matches!(&*state, DaemonCodeIndexPreparationStateV1::Open(_)) {
                 return Ok(());
@@ -723,21 +1360,29 @@ impl DaemonCodeIndexPreparationV1 {
                 _ => return Err(Self::closed()),
             }
         };
+        // Rollback can unlink a staged pack. Close its active read owners first,
+        // while the owning struct still retains the directory and retention lease.
+        drop(files.payload_reads.take());
+        drop(files.parent.take());
+        // If rollback fails, the remaining field order keeps staging cleanup
+        // inside the retention lease as well.
+        files.evidence.rollback_unattached(files.directory.path())?;
         let DaemonCodeIndexPreparationFilesV1 {
             directory,
             segments,
-            mut evidence,
+            evidence,
+            logical,
+            parent,
+            payload_reads,
             _retention,
-            #[cfg(unix)]
-            pinned_segment_reads,
             ..
         } = *files;
-        evidence.rollback_unattached(directory.path())?;
-        drop(evidence);
         // Release pinned descriptors before staged cleanup so a failed
         // preparation cannot retain unlinked sealed content.
-        #[cfg(unix)]
-        drop(pinned_segment_reads);
+        drop(payload_reads);
+        drop(parent);
+        drop(logical);
+        drop(evidence);
         drop(segments);
         let result = directory
             .close()
@@ -754,6 +1399,70 @@ impl Drop for DaemonCodeIndexPreparationV1 {
 }
 
 impl CodeIndexPreparationPort for DaemonCodeIndexPreparationV1 {
+    fn bind_parent(
+        &mut self,
+        parent: &CodeIndexSealedGenerationV1,
+    ) -> Result<(), CodeIndexPublicationStoreErrorV1> {
+        let mut state = self.state.lock().map_err(|_| Self::closed())?;
+        let DaemonCodeIndexPreparationStateV1::Open(files) = &mut *state else {
+            return Err(Self::closed());
+        };
+        if files.parent.is_some()
+            || !files.logical.extents.is_empty()
+            || files.evidence.size_bytes != 0
+            || files.manifest_identity.is_some()
+        {
+            return Err(DaemonCodeIndexPublicationStoreV1::unavailable(
+                "parent binding must precede publication staging",
+            ));
+        }
+        let manifest = self
+            .incumbent_manifest
+            .as_ref()
+            .ok_or(CodeIndexPublicationStoreErrorV1::CompareAndSwap)?;
+        if self.expected_active_generation.as_ref() != Some(&manifest.manifest().generation_id)
+            || manifest.manifest_bytes.as_ref() != parent.manifest_bytes()
+            || manifest.sealed_scope() != self.scope
+        {
+            return Err(CodeIndexPublicationStoreErrorV1::CompareAndSwap);
+        }
+        let content = manifest.layout.content_pack();
+        let evidence = manifest.layout.evidence_pack();
+        files.admit(pack_read_workspace_bytes(
+            &self.segments_root,
+            content
+                .digest
+                .as_str()
+                .len()
+                .saturating_add(evidence.digest.as_str().len()),
+        ))?;
+        let identities = [
+            SealedGenerationSegmentIdentityV1 {
+                digest: content.digest.clone(),
+                size_bytes: content.size_bytes,
+            },
+            evidence.clone(),
+        ];
+        // The preparation already holds the shared segment-retention lease.
+        // Re-entering the main store lease here would invert commit ordering.
+        let read = GenerationPackReadPassV1::open(
+            &self.segments_root,
+            &identities,
+            None,
+            &mut files.segment_read_open_attempts,
+        )
+        .map_err(|error| {
+            files.segment_reads_poisoned = true;
+            DaemonCodeIndexPublicationStoreV1::corruption(error)
+        })?;
+        files.parent = Some(BoundParentPacksV1 {
+            manifest: Arc::clone(manifest),
+            read,
+            bytes_read: Arc::clone(&self.existing_segment_bytes_read),
+        });
+        Ok(())
+    }
+
     fn write_segment(
         &mut self,
         publication: SealedGenerationSegmentPublicationV1<'_>,
@@ -771,13 +1480,12 @@ impl CodeIndexPreparationPort for DaemonCodeIndexPreparationV1 {
         let DaemonCodeIndexPreparationStateV1::Open(files) = &mut *state else {
             return Err(Self::closed());
         };
-        #[cfg(unix)]
-        if files.segment_reads_poisoned {
+        if files.segment_reads_poisoned || files.logical.poisoned {
             return Err(DaemonCodeIndexPublicationStoreV1::unavailable(
                 "staged sealed segment identity was invalidated",
             ));
         }
-        if files.manifest_identity.is_some() {
+        if files.manifest_identity.is_some() || files.content_pack.is_some() {
             return Err(DaemonCodeIndexPublicationStoreV1::unavailable(
                 "code-index preparation already entered commit",
             ));
@@ -829,6 +1537,19 @@ impl CodeIndexPreparationPort for DaemonCodeIndexPreparationV1 {
                     pages = page_count,
                 )
                 .entered();
+                if files.evidence_identity.is_some() {
+                    return Err(DaemonCodeIndexPublicationStoreV1::unavailable(
+                        "generation evidence is already finalized",
+                    ));
+                }
+                files.admit(
+                    segment_digest
+                        .as_str()
+                        .len()
+                        .saturating_add(self.segments_root.as_os_str().len().saturating_mul(4))
+                        .saturating_add(files.directory.path().as_os_str().len().saturating_mul(4))
+                        .saturating_add(size_of::<(PathBuf, PathBuf)>().saturating_mul(11)),
+                )?;
                 // The existing pack authority validates every page and the
                 // complete digest, but names it only inside this session.
                 if files.evidence.commit(
@@ -859,9 +1580,11 @@ impl CodeIndexPreparationPort for DaemonCodeIndexPreparationV1 {
                 if let Some((path, identity)) = files.evidence.authenticated.take() {
                     files.segments.authenticated_segments.insert(path, identity);
                 }
-                files.referenced_segment_bytes = files
-                    .referenced_segment_bytes
-                    .saturating_add(segment_size_bytes);
+                files.evidence_identity = Some(SealedGenerationSegmentIdentityV1 {
+                    digest: segment_digest.clone(),
+                    size_bytes: segment_size_bytes,
+                });
+                files.referenced_segment_bytes = segment_size_bytes;
                 return Ok(());
             }
         };
@@ -869,14 +1592,16 @@ impl CodeIndexPreparationPort for DaemonCodeIndexPreparationV1 {
             u64::try_from(bytes.len()).map_err(DaemonCodeIndexPublicationStoreV1::unavailable)?;
         {
             let _span = durable_span.entered();
-            DaemonCodeIndexPublicationStoreV1::stage_segment(
-                &self.segments_root,
-                files.directory.path(),
-                &self.existing_segment_bytes_read,
-                digest,
-                bytes,
-                &mut files.segments,
-            )?;
+            let additional = if files.logical.extents.contains_key(digest) {
+                0
+            } else {
+                files
+                    .logical
+                    .index_bytes(Some(digest))
+                    .saturating_sub(files.logical.index_bytes(None))
+            };
+            files.admit(additional)?;
+            files.logical.append(digest, bytes)?;
         }
         if is_file {
             self.encoded_segment_bytes
@@ -886,16 +1611,13 @@ impl CodeIndexPreparationPort for DaemonCodeIndexPreparationV1 {
                 observer();
             }
         }
-        files.referenced_segment_bytes =
-            files.referenced_segment_bytes.saturating_add(segment_size);
         Ok(())
     }
 
     fn segment_reader(&self) -> Arc<SealedSegmentReaderV1> {
         let state = Arc::clone(&self.state);
-        let segments_root = self.segments_root.clone();
-        Arc::new(move |request, buffer| {
-            // Refusals before a handle is acquired must not expose a prior read.
+        let root = self.segments_root.clone();
+        Arc::new(move |request, buffer: &mut Vec<u8>| {
             buffer.clear();
             let mut state = state
                 .lock()
@@ -904,201 +1626,205 @@ impl CodeIndexPreparationPort for DaemonCodeIndexPreparationV1 {
                 DaemonCodeIndexPreparationStateV1::Aborted => {
                     Err(CodeIndexProductionErrorV1::Publication(Self::closed()))
                 }
-                DaemonCodeIndexPreparationStateV1::Committed => {
-                    DaemonCodeIndexPublicationStoreV1::read_segment_under(
-                        &segments_root,
-                        request,
-                        buffer,
-                    )
-                }
                 DaemonCodeIndexPreparationStateV1::Open(files) => {
-                    #[cfg(unix)]
-                    if files.segment_reads_poisoned {
-                        return Err(CodeIndexProductionErrorV1::Contract(
-                            "staged sealed segment identity was invalidated".to_owned(),
-                        ));
-                    }
-                    let (digest, size_bytes, offset, length) = match request {
-                        SealedGenerationSegmentReadV1::Whole { digest, size_bytes } => {
-                            (digest, size_bytes, 0, size_bytes)
-                        }
-                        SealedGenerationSegmentReadV1::Range {
-                            digest,
-                            size_bytes,
-                            offset,
-                            length,
-                        } => (digest, size_bytes, offset, length),
-                    };
-                    // Rejected requests are not cache accesses: they must not
-                    // evict a good handle or change the next eviction victim.
-                    if offset
-                        .checked_add(length)
-                        .is_none_or(|end| end > size_bytes)
-                    {
-                        return Err(CodeIndexProductionErrorV1::Contract(
-                            "sealed generation segment range exceeds its manifest identity"
-                                .to_owned(),
-                        ));
-                    }
-                    usize::try_from(length).map_err(|_| {
-                        CodeIndexProductionErrorV1::Contract(
-                            "sealed generation segment range exceeds addressable memory".to_owned(),
-                        )
-                    })?;
-                    let suffix = sha256_hex_suffix(digest.as_str()).ok_or_else(|| {
-                        CodeIndexProductionErrorV1::Contract(
-                            "sealed segment digest is not sha256".to_owned(),
-                        )
-                    })?;
-                    let canonical = segments_root.join(format!("segment-{suffix}.json"));
-                    let path = files
-                        .segments
-                        .pending
-                        .get(&canonical)
-                        .cloned()
-                        .unwrap_or(canonical);
-                    #[cfg(not(unix))]
-                    {
-                        DaemonCodeIndexPublicationStoreV1::read_segment_at(&path, request, buffer)
-                    }
-                    #[cfg(unix)]
-                    {
-                        // Range reads from the same staged segment can be
-                        // interleaved by the sparse successor. Keep at most
-                        // eight handles, in least-recently-used order.
-                        if let Some(position) = files
-                            .pinned_segment_reads
-                            .iter()
-                            .position(|entry| entry.path == path)
-                        {
-                            let cached = &files.pinned_segment_reads[position];
-                            if cached.segment.size_bytes != size_bytes {
-                                return Err(CodeIndexProductionErrorV1::Contract(
-                                    "sealed generation segment identity does not match its manifest"
-                                        .to_owned(),
-                                ));
-                            }
-                            let unchanged = cached.unchanged();
-                            let entry =
-                                files.pinned_segment_reads.remove(position).ok_or_else(|| {
-                                    CodeIndexProductionErrorV1::Contract(
-                                        "staged segment read cache lost a handle".to_owned(),
-                                    )
-                                })?;
-                            if unchanged {
-                                files.pinned_segment_reads.push_back(entry);
-                            } else {
-                                // A sealed pathname and its inode must still
-                                // match the snapshot captured at the first open.
-                                files.segment_reads_poisoned = true;
-                                files.pinned_segment_reads.clear();
-                                return Err(CodeIndexProductionErrorV1::Contract(
-                                    "staged sealed segment identity changed while pinned"
-                                        .to_owned(),
-                                ));
-                            }
-                        }
-                        if files
-                            .pinned_segment_reads
-                            .back()
-                            .is_none_or(|entry| entry.path != path)
-                        {
-                            // An evicted pathname cannot acquire a new
-                            // identity merely because its handle was closed.
-                            let observed = files.observed_segment_identities.get(&path).cloned();
-                            let named = path.symlink_metadata();
-                            if let Some(original) = observed.as_ref()
-                                && !named.as_ref().is_ok_and(|current| {
-                                    DaemonCodeIndexPublicationStoreV1::same_unix_segment_identity(
-                                        original, current,
-                                    )
-                                })
-                            {
-                                files.segment_reads_poisoned = true;
-                                files.pinned_segment_reads.clear();
-                                return Err(CodeIndexProductionErrorV1::Contract(
-                                    "staged sealed segment identity changed after eviction"
-                                        .to_owned(),
-                                ));
-                            }
-                            let named = named.map_err(|error| {
-                                CodeIndexProductionErrorV1::Contract(format!(
-                                    "staged sealed segment is unavailable: {error}"
-                                ))
-                            })?;
-                            if !named.file_type().is_file() || named.len() != size_bytes {
-                                return Err(CodeIndexProductionErrorV1::Contract(
-                                    "staged sealed segment identity does not match its manifest"
-                                        .to_owned(),
-                                ));
-                            }
-                            // Authenticate the candidate before displacing a
-                            // healthy cached handle. A failed open must not
-                            // cause another endpoint-authorized open later.
-                            // Admission holds at most one transient descriptor
-                            // beyond the eight-entry retained cache.
-                            let pinned =
-                                DaemonCodeIndexPublicationStoreV1::open_pinned_staged_segment(
-                                    &path,
-                                    request,
-                                    &named,
-                                    &mut files.segment_read_open_attempts,
-                                )?;
-                            if let Some(original) = observed.as_ref() {
-                                if !DaemonCodeIndexPublicationStoreV1::same_unix_segment_identity(
-                                    original,
-                                    &pinned.identity,
-                                ) {
-                                    files.segment_reads_poisoned = true;
-                                    files.pinned_segment_reads.clear();
-                                    return Err(CodeIndexProductionErrorV1::Contract(
-                                        "staged sealed segment identity changed while reopening"
-                                            .to_owned(),
-                                    ));
-                                }
-                            } else {
-                                files
-                                    .observed_segment_identities
-                                    .insert(path.clone(), pinned.identity.clone());
-                            }
-                            if files.pinned_segment_reads.len() == MAX_STAGED_SEGMENT_READ_HANDLES {
-                                files.pinned_segment_reads.pop_front();
-                            }
-                            files.pinned_segment_reads.push_back(pinned);
-                        }
-                        let pinned = files.pinned_segment_reads.back_mut().ok_or_else(|| {
-                            CodeIndexProductionErrorV1::Contract(
-                                "staged segment read cache has no handle".to_owned(),
-                            )
-                        })?;
-                        let result =
-                            DaemonCodeIndexPublicationStoreV1::read_pinned_partitioned_segment(
-                                &mut pinned.segment,
-                                request,
-                                buffer,
-                            );
-                        // The read itself may race an in-place write or path
-                        // replacement. Never expose bytes after that change.
-                        if !pinned.unchanged() {
-                            buffer.clear();
-                            files.segment_reads_poisoned = true;
-                            files.pinned_segment_reads.clear();
-                            return Err(CodeIndexProductionErrorV1::Contract(
-                                "staged sealed segment identity changed during read".to_owned(),
-                            ));
-                        }
-                        // A failed authenticated read (including a digest mismatch
-                        // without a metadata change) invalidates the preparation.
-                        // A retry must not reauthorize these staged bytes.
-                        if result.is_err() {
-                            buffer.clear();
-                            files.segment_reads_poisoned = true;
-                            files.pinned_segment_reads.clear();
-                        }
-                        result
-                    }
+                    files.read_logical(&root, request, buffer)
+                }
+                DaemonCodeIndexPreparationStateV1::Committed(committed) => {
+                    let read = (committed.open_read_pass)()?;
+                    committed.layout.layout.read(request, buffer, read.as_ref())
                 }
             }
+        })
+    }
+
+    fn finalize_content_pack(
+        &mut self,
+        identities: &[SealedGenerationSegmentIdentityV1],
+    ) -> Result<SealedGenerationContentPackV1, CodeIndexPublicationStoreErrorV1> {
+        let mut state = self.state.lock().map_err(|_| Self::closed())?;
+        let DaemonCodeIndexPreparationStateV1::Open(files) = &mut *state else {
+            return Err(Self::closed());
+        };
+        if files.content_pack.is_some()
+            || files.evidence_identity.is_none()
+            || files.segment_reads_poisoned
+            || files.logical.poisoned
+        {
+            return Err(DaemonCodeIndexPublicationStoreV1::unavailable(
+                "content pack finalization is not admitted",
+            ));
+        }
+        let mut total = 0_u64;
+        let mut previous = None;
+        let mut descriptor_bytes = size_of::<SealedGenerationContentPackV1>().saturating_add(
+            identities
+                .len()
+                .saturating_mul(size_of::<SealedGenerationContentExtentV1>()),
+        );
+        for identity in identities {
+            if previous.is_some_and(|prior: &ManifestDigest| prior >= &identity.digest) {
+                return Err(DaemonCodeIndexPublicationStoreV1::corruption(
+                    "content pack roster is not strictly canonical",
+                ));
+            }
+            previous = Some(&identity.digest);
+            total = total.checked_add(identity.size_bytes).ok_or_else(|| {
+                DaemonCodeIndexPublicationStoreV1::unavailable("content pack length overflowed")
+            })?;
+            descriptor_bytes = descriptor_bytes.saturating_add(identity.digest.as_str().len());
+        }
+        let scratch_bytes = usize::try_from(total.min(DURABLE_GENERATION_IO_CHUNK_BYTES_V1 as u64))
+            .map_err(DaemonCodeIndexPublicationStoreV1::unavailable)?;
+        files.admit(
+            descriptor_bytes
+                .saturating_mul(2)
+                .saturating_add(scratch_bytes)
+                .saturating_add(self.segments_root.as_os_str().len().saturating_mul(8))
+                .saturating_add(files.directory.path().as_os_str().len().saturating_mul(8)),
+        )?;
+        let mut content =
+            TemporaryPayloadPackV1::create(files.directory.path().join("content-pack.tmp"))?;
+        let mut scratch = Vec::with_capacity(scratch_bytes);
+        let mut extents = Vec::with_capacity(identities.len());
+        let mut offset = 0_u64;
+        for identity in identities {
+            DaemonCodeIndexPublicationStoreV1::publication_checkpoint(
+                self.shutdown_signal.as_deref(),
+                self.capture_control.as_ref(),
+            )?;
+            let mut digest = Sha256::new();
+            let mut copied = 0_u64;
+            while copied < identity.size_bytes {
+                DaemonCodeIndexPublicationStoreV1::publication_checkpoint(
+                    self.shutdown_signal.as_deref(),
+                    self.capture_control.as_ref(),
+                )?;
+                let length =
+                    (identity.size_bytes - copied).min(DURABLE_GENERATION_IO_CHUNK_BYTES_V1 as u64);
+                files
+                    .read_logical(
+                        &self.segments_root,
+                        SealedGenerationSegmentReadV1::Range {
+                            digest: &identity.digest,
+                            size_bytes: identity.size_bytes,
+                            offset: copied,
+                            length,
+                        },
+                        &mut scratch,
+                    )
+                    .map_err(|error| match error {
+                        CodeIndexProductionErrorV1::Publication(error) => error,
+                        error => DaemonCodeIndexPublicationStoreV1::corruption(error),
+                    })?;
+                if scratch.len() as u64 != length {
+                    files.invalidate_reads();
+                    return Err(DaemonCodeIndexPublicationStoreV1::corruption(
+                        "content pack copy returned an incomplete logical extent",
+                    ));
+                }
+                digest.update(&scratch);
+                content.append_bytes(&scratch)?;
+                copied += length;
+            }
+            let actual = ManifestDigest::from_sha256_bytes(&digest.finalize())
+                .map_err(DaemonCodeIndexPublicationStoreV1::unavailable)?;
+            if actual != identity.digest {
+                files.invalidate_reads();
+                return Err(DaemonCodeIndexPublicationStoreV1::corruption(
+                    "copied content extent does not match its logical digest",
+                ));
+            }
+            extents.push(SealedGenerationContentExtentV1 {
+                digest: identity.digest.clone(),
+                offset,
+                size_bytes: identity.size_bytes,
+            });
+            offset = offset.checked_add(identity.size_bytes).ok_or_else(|| {
+                DaemonCodeIndexPublicationStoreV1::unavailable("content pack offset overflowed")
+            })?;
+        }
+        let descriptor = SealedGenerationContentPackV1 {
+            digest: content.digest()?,
+            size_bytes: total,
+            extents,
+        };
+        descriptor
+            .validate(identities)
+            .map_err(DaemonCodeIndexPublicationStoreV1::corruption)?;
+        let created = content.commit(
+            &self.segments_root,
+            files.directory.path(),
+            &descriptor.digest,
+            descriptor.size_bytes,
+            0,
+        )?;
+        if created {
+            let suffix = sha256_hex_suffix(descriptor.digest.as_str()).ok_or_else(|| {
+                DaemonCodeIndexPublicationStoreV1::corruption("content pack digest is not sha256")
+            })?;
+            let name = format!("segment-{suffix}.json");
+            files.segments.pending.insert(
+                self.segments_root.join(&name),
+                files.directory.path().join(name),
+            );
+            content.attach_to_manifest();
+        }
+        #[cfg(unix)]
+        if let Some((path, identity)) = content.authenticated.take() {
+            files.segments.authenticated_segments.insert(path, identity);
+        }
+        // A prior evidence-only pass has at most one role. Replace it once
+        // before the full finalized pass; never reopen per logical extent.
+        files.payload_reads = None;
+        files.content_pack = Some(descriptor.clone());
+        files.referenced_segment_bytes = descriptor.size_bytes.saturating_add(
+            files
+                .evidence_identity
+                .as_ref()
+                .filter(|pack| pack.digest != descriptor.digest)
+                .map_or(0, |pack| pack.size_bytes),
+        );
+        Ok(descriptor)
+    }
+
+    fn pack_reader(&self) -> Arc<SealedSegmentReaderV1> {
+        let state = Arc::clone(&self.state);
+        let root = self.segments_root.clone();
+        Arc::new(move |request, buffer: &mut Vec<u8>| {
+            buffer.clear();
+            let mut state = state
+                .lock()
+                .map_err(|_| CodeIndexProductionErrorV1::Publication(Self::closed()))?;
+            match &mut *state {
+                DaemonCodeIndexPreparationStateV1::Open(files) => {
+                    files.read_physical(&root, request, buffer)
+                }
+                DaemonCodeIndexPreparationStateV1::Committed(committed) => {
+                    let read = (committed.open_read_pass)()?;
+                    read(request, buffer)
+                }
+                DaemonCodeIndexPreparationStateV1::Aborted => {
+                    Err(CodeIndexProductionErrorV1::Publication(Self::closed()))
+                }
+            }
+        })
+    }
+
+    fn read_pass_factory(&self) -> Arc<SealedGenerationPackReadFactoryV1> {
+        let state = Arc::clone(&self.state);
+        Arc::new(move || {
+            let factory = {
+                let state = state
+                    .lock()
+                    .map_err(|_| CodeIndexProductionErrorV1::Publication(Self::closed()))?;
+                match &*state {
+                    DaemonCodeIndexPreparationStateV1::Committed(committed) => {
+                        Arc::clone(&committed.open_read_pass)
+                    }
+                    _ => return Err(CodeIndexProductionErrorV1::Publication(Self::closed())),
+                }
+            };
+            factory()
         })
     }
 
@@ -1107,7 +1833,7 @@ impl CodeIndexPreparationPort for DaemonCodeIndexPreparationV1 {
     }
 }
 
-pub(super) struct TemporaryEvidencePackV1 {
+pub(super) struct TemporaryPayloadPackV1 {
     path: PathBuf,
     file: Option<File>,
     hasher: Sha256,
@@ -1123,7 +1849,6 @@ pub(super) struct TemporaryEvidencePackV1 {
 /// batch is durable, so a content-addressed segment name always holds its
 /// complete bytes, even across a power loss mid-seal.
 struct StagedGenerationSegmentsV1 {
-    durable: DurableFileBatch,
     /// Temporary path of every written segment, keyed by its final name.
     pending: BTreeMap<PathBuf, PathBuf>,
     // Canonical files and newly written temporaries are authenticated by
@@ -1131,22 +1856,15 @@ struct StagedGenerationSegmentsV1 {
     // than reopening and hashing already authenticated segment pathnames.
     #[cfg(unix)]
     authenticated_segments: BTreeMap<PathBuf, std::fs::Metadata>,
-    flushed: bool,
 }
 
 impl StagedGenerationSegmentsV1 {
     fn new() -> Self {
         Self {
-            durable: DurableFileBatch::new(),
             pending: BTreeMap::new(),
             #[cfg(unix)]
             authenticated_segments: BTreeMap::new(),
-            flushed: false,
         }
-    }
-
-    fn contains(&self, final_path: &Path) -> bool {
-        self.pending.contains_key(final_path)
     }
 
     // A staged inode was authenticated before the collision read. The
@@ -1200,22 +1918,16 @@ impl StagedGenerationSegmentsV1 {
         }
     }
 
-    /// Flush every staged segment once, then name each. A retry resumes the
-    /// remaining names without trying to sync paths already renamed.
+    /// Name the already-fsynced payload packs without replacing an existing
+    /// content address. A retry resumes only the remaining canonical names.
     fn publish(&mut self) -> Result<(), CodeIndexPublicationStoreErrorV1> {
-        if !self.flushed {
-            self.durable
-                .sync()
-                .map_err(DaemonCodeIndexPublicationStoreV1::unavailable)?;
-            self.flushed = true;
-        }
         while let Some((final_path, temporary)) = self
             .pending
             .first_key_value()
             .map(|(final_path, temporary)| (final_path.clone(), temporary.clone()))
         {
-            // Evidence packs are already fsynced before they enter pending,
-            // so the ordinary writer batch cannot detect a later inode swap.
+            // Both payload roles are fsynced before they enter pending.
+            // Their original writer witness must still authorize this name.
             // Bind every pending pathname to the bytes authenticated during
             // staging before any immutable canonical name is published.
             #[cfg(unix)]
@@ -1269,44 +1981,10 @@ struct PinnedGenerationSegmentV1 {
     file: File,
 }
 
-// The file count is bounded independently of the number of staged segments.
-#[cfg(unix)]
-const MAX_STAGED_SEGMENT_READ_HANDLES: usize = 8;
-
-#[cfg(unix)]
-pub(super) struct PinnedPreparationSegmentV1 {
-    path: PathBuf,
-    segment: PinnedGenerationSegmentV1,
-    // Both stat and fstat reflect later writes. Keep the original metadata,
-    // otherwise comparing them to each other accepts same-inode mutations.
-    identity: std::fs::Metadata,
-}
-
-#[cfg(unix)]
-impl PinnedPreparationSegmentV1 {
-    fn unchanged(&self) -> bool {
-        self.path
-            .symlink_metadata()
-            .ok()
-            .zip(self.segment.file.metadata().ok())
-            .is_some_and(|(named, pinned)| {
-                DaemonCodeIndexPublicationStoreV1::same_unix_segment_identity(
-                    &self.identity,
-                    &named,
-                ) && DaemonCodeIndexPublicationStoreV1::same_unix_segment_identity(
-                    &self.identity,
-                    &pinned,
-                )
-            })
-    }
-}
-
-impl TemporaryEvidencePackV1 {
+impl TemporaryPayloadPackV1 {
     pub(super) fn create(path: PathBuf) -> Result<Self, CodeIndexPublicationStoreErrorV1> {
         let mut options = std::fs::OpenOptions::new();
-        options.create_new(true).write(true);
-        #[cfg(unix)]
-        options.read(true);
+        options.create_new(true).write(true).read(true);
         let file = options
             .open(&path)
             .map_err(DaemonCodeIndexPublicationStoreV1::unavailable)?;
@@ -1339,6 +2017,32 @@ impl TemporaryEvidencePackV1 {
                 "sealed evidence page bytes do not match their content address",
             ));
         }
+        self.append_bytes(bytes)?;
+        self.page_count = self.page_count.checked_add(1).ok_or_else(|| {
+            DaemonCodeIndexPublicationStoreV1::unavailable(
+                "sealed evidence pack page count exceeds u32",
+            )
+        })?;
+        Ok(())
+    }
+
+    fn append_bytes(&mut self, bytes: &[u8]) -> Result<(), CodeIndexPublicationStoreErrorV1> {
+        if self.committed {
+            return Err(DaemonCodeIndexPublicationStoreV1::unavailable(
+                "sealed payload pack is already committed",
+            ));
+        }
+        let next_size = self
+            .size_bytes
+            .checked_add(
+                u64::try_from(bytes.len())
+                    .map_err(DaemonCodeIndexPublicationStoreV1::unavailable)?,
+            )
+            .ok_or_else(|| {
+                DaemonCodeIndexPublicationStoreV1::unavailable(
+                    "sealed payload pack length exceeds u64",
+                )
+            })?;
         self.file
             .as_mut()
             .ok_or_else(|| {
@@ -1349,23 +2053,13 @@ impl TemporaryEvidencePackV1 {
             .write_all(bytes)
             .map_err(DaemonCodeIndexPublicationStoreV1::unavailable)?;
         self.hasher.update(bytes);
-        self.size_bytes = self
-            .size_bytes
-            .checked_add(
-                u64::try_from(bytes.len())
-                    .map_err(DaemonCodeIndexPublicationStoreV1::unavailable)?,
-            )
-            .ok_or_else(|| {
-                DaemonCodeIndexPublicationStoreV1::unavailable(
-                    "sealed evidence pack length exceeds u64",
-                )
-            })?;
-        self.page_count = self.page_count.checked_add(1).ok_or_else(|| {
-            DaemonCodeIndexPublicationStoreV1::unavailable(
-                "sealed evidence pack page count exceeds u32",
-            )
-        })?;
+        self.size_bytes = next_size;
         Ok(())
+    }
+
+    fn digest(&self) -> Result<ManifestDigest, CodeIndexPublicationStoreErrorV1> {
+        ManifestDigest::from_sha256_bytes(&self.hasher.clone().finalize())
+            .map_err(DaemonCodeIndexPublicationStoreV1::unavailable)
     }
 
     fn commit(
@@ -1573,7 +2267,7 @@ impl TemporaryEvidencePackV1 {
     }
 }
 
-impl Drop for TemporaryEvidencePackV1 {
+impl Drop for TemporaryPayloadPackV1 {
     fn drop(&mut self) {
         if !self.committed {
             drop(self.file.take());
@@ -1626,12 +2320,6 @@ impl DaemonCodeIndexPublicationStoreV1 {
             expected_sanitizer_revision,
             disposition: CodeIndexPublicationDispositionV1::Active,
             pointer_memo: Arc::new(Mutex::new(None)),
-            #[cfg(unix)]
-            retained_generation_lock: Arc::new(CachedCodeGenerationStoreReadLockV1::new(
-                store_root,
-            )),
-            #[cfg(unix)]
-            retained_segment_reads: Arc::new(Mutex::new(VecDeque::new())),
             undecoded_active_expectation: None,
             reconcile_publication_fence: None,
             shutdown_signal: None,
@@ -1846,155 +2534,6 @@ impl DaemonCodeIndexPublicationStoreV1 {
     /// verifies the already-named segment with its content address. A new
     /// segment takes its name only when [`StagedGenerationSegmentsV1::publish`]
     /// has made the whole seal's segments durable.
-    #[tracing::instrument(
-        name = "code_index.generation.publish.segment",
-        level = "trace",
-        skip_all
-    )]
-    fn stage_segment(
-        segments_root: &Path,
-        staging_root: &Path,
-        existing_segment_bytes_read: &AtomicU64,
-        digest: &ManifestDigest,
-        bytes: &[u8],
-        staged: &mut StagedGenerationSegmentsV1,
-    ) -> Result<(), CodeIndexPublicationStoreErrorV1> {
-        let digest_hex = sha256_hex_suffix(digest.as_str())
-            .ok_or_else(|| Self::unavailable("sealed segment digest is not sha256"))?;
-        let expected_digest = digest.as_str();
-        if Self::state_digest(bytes) != expected_digest {
-            return Err(Self::corruption(
-                "sealed segment bytes do not match their content address",
-            ));
-        }
-        let final_path = segments_root.join(format!("segment-{digest_hex}.json"));
-        // A pending file remains this preparation's verification authority even
-        // when another publisher installs its canonical name in the meantime.
-        // Verify its bytes at commit; publish() authenticates the competing
-        // canonical bytes before deduplicating without replacing them.
-        if staged.contains(&final_path) {
-            return Ok(());
-        }
-        // A repeated write of an already authenticated canonical segment
-        // should not pay another endpoint-scanned open and SHA-256 read.
-        // The original opened-file witness is authoritative only while its
-        // exact pathname inode and metadata remain unchanged.
-        #[cfg(unix)]
-        if let Some(original) = staged.authenticated_segments.get(&final_path) {
-            let current = final_path.symlink_metadata().map_err(Self::unavailable)?;
-            if !Self::same_unix_segment_identity(original, &current) {
-                return Err(Self::corruption(
-                    "previously authenticated sealed segment changed before repeated write",
-                ));
-            }
-            return Ok(());
-        }
-        match final_path.symlink_metadata() {
-            Ok(metadata) => {
-                existing_segment_bytes_read.fetch_add(metadata.len(), Ordering::Relaxed);
-                if !metadata.file_type().is_file()
-                    || metadata.len() != u64::try_from(bytes.len()).map_err(Self::unavailable)?
-                {
-                    return Err(Self::corruption(
-                        "existing sealed segment does not match its content address",
-                    ));
-                }
-                #[cfg(unix)]
-                {
-                    if Self::state_digest_existing_segment(&final_path, &metadata)?
-                        != expected_digest
-                    {
-                        return Err(Self::corruption(
-                            "existing sealed segment does not match its content address",
-                        ));
-                    }
-                    staged.authenticated_segments.insert(final_path, metadata);
-                }
-                #[cfg(not(unix))]
-                if Self::state_digest_file(&final_path)? != expected_digest {
-                    return Err(Self::corruption(
-                        "existing sealed segment does not match its content address",
-                    ));
-                }
-                return Ok(());
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => return Err(Self::unavailable(error)),
-        }
-        let temporary_path = staging_root.join(format!("segment-{digest_hex}.json"));
-        let mut options = std::fs::OpenOptions::new();
-        options.create_new(true).write(true);
-        #[cfg(unix)]
-        options.read(true);
-        let mut file = options.open(&temporary_path).map_err(Self::unavailable)?;
-        // Read the actual staged bytes through their writer descriptor.
-        // A read and an inode/metadata witness prove the bytes at write time;
-        // no second endpoint-authorized pathname open is required at commit.
-        // Non-Unix durability and verification remain unchanged.
-        let admitted =
-            (|| -> Result<Option<std::fs::Metadata>, CodeIndexPublicationStoreErrorV1> {
-                file.write_all(bytes).map_err(Self::unavailable)?;
-                #[cfg(unix)]
-                let original = {
-                    let before = file.metadata().map_err(Self::unavailable)?;
-                    file.seek(SeekFrom::Start(0)).map_err(Self::unavailable)?;
-                    if Self::state_digest_reader(&mut file)? != expected_digest {
-                        return Err(Self::corruption(
-                            "newly staged segment differs from its content address",
-                        ));
-                    }
-                    let after = file.metadata().map_err(Self::unavailable)?;
-                    if !Self::same_unix_segment_identity(&before, &after) {
-                        return Err(Self::corruption(
-                            "newly staged segment changed during authentication",
-                        ));
-                    }
-                    after
-                };
-                #[cfg(not(unix))]
-                let original = file.metadata().map_err(Self::unavailable)?;
-                staged
-                    .durable
-                    .written_with_identity(&temporary_path, &file, &original)
-                    .map_err(Self::unavailable)?;
-                // The batch performed its final identity checks
-                // before enrolling the member. No fallible post-admission
-                // check may remove its pathname while retaining its handle.
-                #[cfg(unix)]
-                {
-                    Ok(Some(original))
-                }
-                #[cfg(not(unix))]
-                {
-                    Ok(None)
-                }
-            })();
-        drop(file);
-        // The pending index is publication authority. Never enroll a file
-        // whose write, content authentication or durability admission failed.
-        let witness = match admitted {
-            Ok(witness) => witness,
-            Err(error) => {
-                std::fs::remove_file(&temporary_path).map_err(|cleanup| {
-                    Self::unavailable(format!(
-                        "staged segment admission failed: {error}; temporary cleanup failed: {cleanup}"
-                    ))
-                })?;
-                return Err(error);
-            }
-        };
-        if let Some(witness) = witness {
-            #[cfg(unix)]
-            staged
-                .authenticated_segments
-                .insert(temporary_path.clone(), witness);
-            #[cfg(not(unix))]
-            let _ = witness;
-        }
-        staged.pending.insert(final_path, temporary_path);
-        Ok(())
-    }
-
     #[cfg(unix)]
     fn state_digest_existing_segment(
         path: &Path,
@@ -2197,17 +2736,22 @@ impl DaemonCodeIndexPublicationStoreV1 {
         &self,
     ) -> Result<Option<(DurablePublicationPointerV1, Vec<u8>)>, CodeIndexPublicationStoreErrorV1>
     {
+        Self::read_publication_pointer_at(&self.active_path, &self.pointer_memo)
+    }
+
+    fn read_publication_pointer_at(
+        active_path: &Path,
+        pointer_memo: &Mutex<Option<PublicationPointerMemoV1>>,
+    ) -> Result<Option<(DurablePublicationPointerV1, Vec<u8>)>, CodeIndexPublicationStoreErrorV1>
+    {
         // The named pointer must itself be a regular file. Following a
         // symlink would let an equal-byte replacement inherit the memo.
         // Never follow a pointer alias when deciding whether its slot is valid.
-        let named = std::fs::symlink_metadata(&self.active_path);
+        let named = std::fs::symlink_metadata(active_path);
         let metadata = match named {
             Ok(metadata) => metadata,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                *self
-                    .pointer_memo
-                    .lock()
-                    .unwrap_or_else(PoisonError::into_inner) = None;
+                *pointer_memo.lock().unwrap_or_else(PoisonError::into_inner) = None;
                 return Ok(None);
             }
             Err(error) => return Err(Self::map_pointer_io(error)),
@@ -2229,10 +2773,7 @@ impl DaemonCodeIndexPublicationStoreV1 {
         // this inode and falls through to the ordinary cold validation.
         #[cfg(unix)]
         {
-            let mut cached = self
-                .pointer_memo
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner);
+            let mut cached = pointer_memo.lock().unwrap_or_else(PoisonError::into_inner);
             if let Some(entry) = cached.as_mut()
                 && let Some(file) = entry.file.as_mut()
             {
@@ -2247,7 +2788,7 @@ impl DaemonCodeIndexPublicationStoreV1 {
                         .map_err(Self::map_pointer_io)?;
                     let after = file.metadata().map_err(Self::map_pointer_io)?;
                     Self::require_pointer_identity_witness(
-                        &self.active_path,
+                        active_path,
                         &metadata,
                         &before,
                         &after,
@@ -2270,14 +2811,11 @@ impl DaemonCodeIndexPublicationStoreV1 {
         // in this call; races during cold validation still refuse.
         #[cfg(not(unix))]
         {
-            let mut cached = self
-                .pointer_memo
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner);
+            let mut cached = pointer_memo.lock().unwrap_or_else(PoisonError::into_inner);
             if let Some(entry) = cached.as_mut()
                 && let Some(file) = entry.file.as_mut()
             {
-                match Self::read_cached_non_unix_pointer(&self.active_path, file, &entry.digest) {
+                match Self::read_cached_non_unix_pointer(active_path, file, &entry.digest) {
                     Ok(current) => {
                         entry.mtime = mtime;
                         entry.size = size;
@@ -2301,7 +2839,7 @@ impl DaemonCodeIndexPublicationStoreV1 {
         // open merely to populate the memo. Keep the original descriptor
         // through parsing and authenticate its bytes again before memoizing.
         let (bytes, mut opened_pointer) = {
-            let mut file = File::open(&self.active_path).map_err(|error| {
+            let mut file = File::open(active_path).map_err(|error| {
                 if error.kind() == std::io::ErrorKind::NotFound {
                     // The pointer existed at this call's first metadata probe.
                     // A concurrent atomic publisher can withdraw it before
@@ -2327,10 +2865,7 @@ impl DaemonCodeIndexPublicationStoreV1 {
         };
         let digest = Self::state_digest(&bytes);
         {
-            let mut memo = self
-                .pointer_memo
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner);
+            let mut memo = pointer_memo.lock().unwrap_or_else(PoisonError::into_inner);
             if let Some(memo) = memo.as_mut()
                 && memo.digest == digest
             {
@@ -2341,18 +2876,14 @@ impl DaemonCodeIndexPublicationStoreV1 {
                 {
                     let opened = opened_pointer.metadata().map_err(Self::map_pointer_io)?;
                     Self::require_pointer_identity_witness(
-                        &self.active_path,
+                        active_path,
                         &metadata,
                         &opened,
                         &opened,
                     )?;
                 }
                 #[cfg(not(unix))]
-                Self::require_non_unix_pointer_witness(
-                    &self.active_path,
-                    &mut opened_pointer,
-                    &bytes,
-                )?;
+                Self::require_non_unix_pointer_witness(active_path, &mut opened_pointer, &bytes)?;
                 memo.mtime = mtime;
                 memo.size = size;
                 memo.file = Some(opened_pointer);
@@ -2468,10 +2999,7 @@ impl DaemonCodeIndexPublicationStoreV1 {
                 "durable code-generation index exceeds its retention bounds",
             ));
         }
-        let mut memo = self
-            .pointer_memo
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner);
+        let mut memo = pointer_memo.lock().unwrap_or_else(PoisonError::into_inner);
         // Install only when the file is still the bytes just parsed. A rename
         // that landed during validation owns the memo.
         // On Unix, re-read through the authenticated descriptor rather than
@@ -2479,14 +3007,9 @@ impl DaemonCodeIndexPublicationStoreV1 {
         // witnesses reject a concurrent rename; the second byte comparison
         // rejects an in-place change during parsing, even on coarse clocks.
         #[cfg(unix)]
-        Self::require_cold_pointer_witness(
-            &self.active_path,
-            &mut opened_pointer,
-            &metadata,
-            &bytes,
-        )?;
+        Self::require_cold_pointer_witness(active_path, &mut opened_pointer, &metadata, &bytes)?;
         #[cfg(not(unix))]
-        Self::require_non_unix_pointer_witness(&self.active_path, &mut opened_pointer, &bytes)?;
+        Self::require_non_unix_pointer_witness(active_path, &mut opened_pointer, &bytes)?;
         *memo = Some(PublicationPointerMemoV1 {
             mtime,
             size,
@@ -2780,403 +3303,132 @@ impl DaemonCodeIndexPublicationStoreV1 {
         Ok(())
     }
 
-    pub(super) fn read_retained_partitioned_segment(
-        &self,
-        identity: &DurableSealedCodeGenerationIdentityV1,
-        request: SealedGenerationSegmentReadV1<'_>,
-        buffer: &mut Vec<u8>,
+    fn read_authority(&self) -> GenerationReadAuthorityV1 {
+        GenerationReadAuthorityV1 {
+            active_path: self.active_path.clone(),
+            segments_root: self.segments_root.clone(),
+            pointer_memo: Arc::clone(&self.pointer_memo),
+        }
+    }
+
+    fn require_read_control(
         control: &dyn CodeIndexExecutionControlV1,
     ) -> Result<(), CodeIndexProductionErrorV1> {
-        // A rejected or interrupted request must not return bytes left by
-        // an earlier successful read, even when it never reaches the file.
-        buffer.clear();
-        #[cfg(not(unix))]
-        let root = self
-            .active_path
-            .parent()
-            .ok_or_else(|| Self::unavailable("active code-generation pointer has no store root"))?;
-        let _lock = loop {
-            if control.is_cancelled() {
-                return Err(CodeIndexProductionErrorV1::Interrupted(
-                    CodeIndexInterruptionV1::Cancelled,
-                ));
-            }
-            if control.is_deadline_exceeded() {
-                return Err(CodeIndexProductionErrorV1::Interrupted(
-                    CodeIndexInterruptionV1::DeadlineExceeded,
-                ));
-            }
-            #[cfg(unix)]
-            let candidate = self
-                .retained_generation_lock
-                .try_acquire()
-                .map_err(Self::unavailable)?;
-            #[cfg(not(unix))]
-            let candidate =
-                try_acquire_code_generation_store_read_lock(root).map_err(Self::unavailable)?;
-            if let Some(lock) = candidate {
-                break lock;
-            }
-            std::thread::park_timeout(Duration::from_millis(1));
-        };
-        let pointer = self.read_publication_pointer()?;
-        if !pointer.as_ref().is_some_and(|pointer| {
-            pointer.generation_index.iter().any(|entry| {
-                entry.generation_file == identity.locator
-                    && entry.state_digest == identity.digest.as_str()
-                    && entry.size_bytes == identity.size_bytes
-            })
-        }) {
-            return Err(CodeIndexProductionErrorV1::Interrupted(
-                CodeIndexInterruptionV1::Cancelled,
-            ));
-        }
-        #[cfg(unix)]
-        let result = self
-            .retained_segment_reads
-            .lock()
-            .map_err(|_| {
-                CodeIndexProductionErrorV1::Contract(
-                    "retained generation segment reader cache was poisoned".to_owned(),
-                )
-            })
-            .and_then(|mut pinned| {
-                Self::read_cached_retained_segment(
-                    &self.segments_root,
-                    request,
-                    buffer,
-                    &mut pinned,
-                )
-            });
-        #[cfg(not(unix))]
-        let result = self.read_partitioned_segment(request, buffer);
-        // Endpoint authorization may block inside open(). A request that was
-        // live before I/O must not return data after its deadline or cancel.
         if control.is_cancelled() {
-            buffer.clear();
             return Err(CodeIndexProductionErrorV1::Interrupted(
                 CodeIndexInterruptionV1::Cancelled,
             ));
         }
         if control.is_deadline_exceeded() {
-            buffer.clear();
             return Err(CodeIndexProductionErrorV1::Interrupted(
                 CodeIndexInterruptionV1::DeadlineExceeded,
             ));
         }
-        result
+        Ok(())
     }
 
-    fn read_partitioned_segment(
+    pub(super) fn retained_pack_read_factory(
         &self,
-        request: SealedGenerationSegmentReadV1<'_>,
-        buffer: &mut Vec<u8>,
-    ) -> Result<(), CodeIndexProductionErrorV1> {
-        Self::read_segment_under(&self.segments_root, request, buffer)
-    }
-
-    /// A reader over this store's segments that outlives any one borrow of
-    /// the store, for a build over the sealed active generation.
-    pub(super) fn segment_reader(&self) -> Arc<SealedSegmentReaderV1> {
-        let segments_root = self.segments_root.clone();
-        // Escaped readers must share the store's retirement authority. A
-        // reader-private descriptor cache would keep an unlinked inode alive
-        // after reset or normal generation retention.
-        #[cfg(unix)]
-        let pinned_reads = Arc::clone(&self.retained_segment_reads);
-        #[cfg(unix)]
-        let read_lock = Arc::clone(&self.retained_generation_lock);
-        #[cfg(not(unix))]
-        let active_path = self.active_path.clone();
-        Arc::new(move |request, buffer: &mut Vec<u8>| {
-            buffer.clear();
-            // Retention holds the exclusive store lease from cache retirement
-            // through unlink. Admit before the cache mutex, and never wait for
-            // a writer while a successor may hold its preparation lease.
-            #[cfg(unix)]
-            let candidate = read_lock.try_acquire_serialized();
-            #[cfg(not(unix))]
-            let candidate = {
-                let root = active_path.parent().ok_or_else(|| {
-                    Self::unavailable("active code-generation pointer has no store root")
-                })?;
-                try_acquire_code_generation_store_read_lock(root)
+        identity: DurableSealedCodeGenerationIdentityV1,
+    ) -> Result<
+        impl Fn(
+            &dyn CodeIndexExecutionControlV1,
+            &SealedGenerationPackLayoutV1,
+        ) -> Result<Box<SealedGenerationPackReadPassV1>, CodeIndexProductionErrorV1>
+        + Send
+        + Sync
+        + 'static,
+        CodeIndexPublicationStoreErrorV1,
+    > {
+        let resident_memory = self.resident_memory_authority()?;
+        let mut memory = PreparedPackMemoryV1::new(&resident_memory.begin_operation())?;
+        memory.admit(
+            size_of::<GenerationReadAuthorityV1>()
+                .saturating_add(size_of::<DurableSealedCodeGenerationIdentityV1>())
+                .saturating_add(size_of::<PreparedPackMemoryV1>())
+                .saturating_add(self.active_path.as_os_str().len())
+                .saturating_add(self.segments_root.as_os_str().len())
+                .saturating_add(identity.locator.len())
+                .saturating_add(identity.digest.as_str().len()),
+        )?;
+        let authority = self.read_authority();
+        Ok(move |control, layout| {
+            let lease = loop {
+                Self::require_read_control(control)?;
+                if let Some(lease) = authority.try_lease()? {
+                    break lease;
+                }
+                std::thread::park_timeout(Duration::from_millis(1));
             };
-            let _store_lock = candidate
-                .map_err(Self::unavailable)?
-                .ok_or(CodeIndexPublicationStoreErrorV1::StoreLockContended)?;
-            #[cfg(unix)]
-            {
-                let mut pinned = pinned_reads.lock().map_err(|_| {
-                    CodeIndexProductionErrorV1::Contract(
-                        "sealed generation reader cache was poisoned".to_owned(),
-                    )
-                })?;
-                Self::read_cached_retained_segment(&segments_root, request, buffer, &mut pinned)
-            }
-            #[cfg(not(unix))]
-            {
-                Self::read_segment_under(&segments_root, request, buffer)
-            }
+            let opened = authority.open_under_lease(&identity, layout, memory.operation(), lease);
+            Self::require_read_control(control)?;
+            let mut pass = opened?;
+            Ok(Box::new(
+                move |request, buffer: &mut Vec<u8>, control: &dyn CodeIndexExecutionControlV1| {
+                    buffer.clear();
+                    Self::require_read_control(control)?;
+                    let result = pass.read(request, buffer);
+                    if let Err(error) = Self::require_read_control(control) {
+                        buffer.clear();
+                        return Err(error);
+                    }
+                    result
+                },
+            ) as Box<SealedGenerationPackReadPassV1>)
         })
     }
 
-    #[tracing::instrument(
-        name = "code_index.generation.decode.segment",
-        level = "trace",
-        skip_all
-    )]
-    fn read_segment_under(
-        segments_root: &Path,
-        request: SealedGenerationSegmentReadV1<'_>,
-        buffer: &mut Vec<u8>,
-    ) -> Result<(), CodeIndexProductionErrorV1> {
-        buffer.clear();
-        let digest = match request {
-            SealedGenerationSegmentReadV1::Whole { digest, .. }
-            | SealedGenerationSegmentReadV1::Range { digest, .. } => digest,
+    fn active_pack_read_factory(
+        &self,
+        active: &ActiveSealedManifestV1,
+    ) -> Result<Arc<SealedGenerationPackReadFactoryV1>, CodeIndexPublicationStoreErrorV1> {
+        let digest = ManifestDigest::new(active.state_digest.clone()).map_err(Self::corruption)?;
+        let suffix = sha256_hex_suffix(digest.as_str())
+            .ok_or_else(|| Self::corruption("sealed generation digest is not sha256"))?;
+        let mut memory = PreparedPackMemoryV1::new(&active.metadata._memory.operation)?;
+        memory.admit(
+            size_of::<GenerationReadAuthorityV1>()
+                .saturating_add(size_of::<DurableSealedCodeGenerationIdentityV1>())
+                .saturating_add(size_of::<PreparedPackMemoryV1>())
+                .saturating_add(size_of::<usize>().saturating_mul(6))
+                .saturating_add(self.active_path.as_os_str().len())
+                .saturating_add(self.segments_root.as_os_str().len())
+                .saturating_add(digest.as_str().len().saturating_mul(2)),
+        )?;
+        let identity = DurableSealedCodeGenerationIdentityV1 {
+            locator: format!("generation-{suffix}.json"),
+            digest,
+            size_bytes: u64::try_from(active.manifest_bytes.len()).map_err(Self::unavailable)?,
         };
-        let digest_hex = sha256_hex_suffix(digest.as_str()).ok_or_else(|| {
-            CodeIndexProductionErrorV1::Contract("sealed segment digest is not sha256".to_owned())
-        })?;
-        let path = segments_root.join(format!("segment-{digest_hex}.json"));
-        Self::read_segment_at(&path, request, buffer)
+        let authority = self.read_authority();
+        let metadata = Arc::clone(&active.metadata);
+        Ok(Arc::new(move || {
+            let lease = authority
+                .try_lease()?
+                .ok_or(CodeIndexPublicationStoreErrorV1::StoreLockContended)?;
+            let pass = Mutex::new(authority.open_under_lease(
+                &identity,
+                &metadata.layout,
+                memory.operation(),
+                lease,
+            )?);
+            Ok(Arc::new(move |request, buffer: &mut Vec<u8>| {
+                buffer.clear();
+                pass.lock()
+                    .map_err(|_| {
+                        CodeIndexProductionErrorV1::Contract(
+                            "sealed pack read pass was poisoned".to_owned(),
+                        )
+                    })?
+                    .read(request, buffer)
+            }) as Arc<SealedSegmentReaderV1>)
+        }))
     }
 
-    /// Reuse endpoint-authorized opens for repeated pages of a retained
-    /// generation. Every hit still checks the named and opened inode: a pinned
-    /// descriptor cannot authorize reads through a replaced pathname.
-    #[cfg(unix)]
-    #[tracing::instrument(
-        name = "code_index.generation.decode.segment",
-        level = "trace",
-        skip_all
-    )]
-    fn read_cached_retained_segment(
-        segments_root: &Path,
-        request: SealedGenerationSegmentReadV1<'_>,
-        buffer: &mut Vec<u8>,
-        pinned_reads: &mut VecDeque<PinnedPreparationSegmentV1>,
-    ) -> Result<(), CodeIndexProductionErrorV1> {
-        buffer.clear();
-        let (digest, size_bytes, offset, length) = match request {
-            SealedGenerationSegmentReadV1::Whole { digest, size_bytes } => {
-                (digest, size_bytes, 0, size_bytes)
-            }
-            SealedGenerationSegmentReadV1::Range {
-                digest,
-                size_bytes,
-                offset,
-                length,
-            } => (digest, size_bytes, offset, length),
-        };
-        if offset
-            .checked_add(length)
-            .is_none_or(|end| end > size_bytes)
-        {
-            return Err(CodeIndexProductionErrorV1::Contract(
-                "sealed generation segment range exceeds its manifest identity".to_owned(),
-            ));
-        }
-        usize::try_from(length).map_err(|_| {
-            CodeIndexProductionErrorV1::Contract(
-                "sealed generation segment range exceeds addressable memory".to_owned(),
-            )
-        })?;
-        let suffix = sha256_hex_suffix(digest.as_str()).ok_or_else(|| {
-            CodeIndexProductionErrorV1::Contract("sealed segment digest is not sha256".to_owned())
-        })?;
-        let path = segments_root.join(format!("segment-{suffix}.json"));
-        if let Some(index) = pinned_reads.iter().position(|entry| entry.path == path) {
-            if pinned_reads[index].segment.size_bytes != size_bytes {
-                return Err(CodeIndexProductionErrorV1::Contract(
-                    "sealed generation segment identity does not match its manifest".to_owned(),
-                ));
-            }
-            if !pinned_reads[index].unchanged() {
-                pinned_reads.clear();
-                return Err(CodeIndexProductionErrorV1::Contract(
-                    "retained sealed segment changed while pinned".to_owned(),
-                ));
-            }
-            if let Err(error) =
-                Self::read_checked_retained_segment(&mut pinned_reads[index], request, buffer)
-            {
-                pinned_reads.clear();
-                return Err(error);
-            }
-            // Only a successful read changes recency. A failed cache hit
-            // retains the existing fail-closed invalidation behavior.
-            let entry = pinned_reads.remove(index).ok_or_else(|| {
-                CodeIndexProductionErrorV1::Contract(
-                    "sealed generation read cache lost a handle".to_owned(),
-                )
-            })?;
-            pinned_reads.push_back(entry);
-        } else {
-            let named = path.symlink_metadata().map_err(|error| {
-                CodeIndexProductionErrorV1::Contract(format!(
-                    "sealed generation segment is unavailable: {error}"
-                ))
-            })?;
-            if !named.file_type().is_file() || named.len() != size_bytes {
-                return Err(CodeIndexProductionErrorV1::Contract(
-                    "sealed generation segment identity does not match its manifest".to_owned(),
-                ));
-            }
-            // Opening is not admission: the first authenticated read must
-            // also succeed before a healthy cached handle can be evicted.
-            // Handle::from_path would trigger an additional authorized open.
-            let file = File::open(&path).map_err(|error| {
-                CodeIndexProductionErrorV1::Contract(format!(
-                    "sealed generation segment cannot be opened: {error}"
-                ))
-            })?;
-            let opened = file.metadata().map_err(|error| {
-                CodeIndexProductionErrorV1::Contract(format!(
-                    "sealed generation segment metadata cannot be read: {error}"
-                ))
-            })?;
-            let named_after = path.symlink_metadata().map_err(|error| {
-                CodeIndexProductionErrorV1::Contract(format!(
-                    "sealed generation segment pathname cannot be rechecked: {error}"
-                ))
-            })?;
-            if !Self::same_unix_segment_identity(&named, &opened)
-                || !Self::same_unix_segment_identity(&named_after, &opened)
-            {
-                return Err(CodeIndexProductionErrorV1::Contract(
-                    "sealed generation segment identity changed while opening".to_owned(),
-                ));
-            }
-            let mut candidate = PinnedPreparationSegmentV1 {
-                path,
-                identity: opened,
-                segment: PinnedGenerationSegmentV1 {
-                    digest: digest.as_str().to_owned(),
-                    size_bytes,
-                    file,
-                },
-            };
-            // A failed cold candidate owns no cache authority. Drop only
-            // that candidate; existing handles still validate on every use.
-            Self::read_checked_retained_segment(&mut candidate, request, buffer)?;
-            if pinned_reads.len() == MAX_STAGED_SEGMENT_READ_HANDLES {
-                pinned_reads.pop_front();
-            }
-            pinned_reads.push_back(candidate);
-        }
-        Ok(())
-    }
-
-    #[cfg(unix)]
-    fn read_checked_retained_segment(
-        pinned: &mut PinnedPreparationSegmentV1,
-        request: SealedGenerationSegmentReadV1<'_>,
-        buffer: &mut Vec<u8>,
-    ) -> Result<(), CodeIndexProductionErrorV1> {
-        let result = Self::read_pinned_partitioned_segment(&mut pinned.segment, request, buffer);
-        if !pinned.unchanged() {
-            buffer.clear();
-            return Err(CodeIndexProductionErrorV1::Contract(
-                "retained sealed segment changed during read".to_owned(),
-            ));
-        }
-        if result.is_err() {
-            buffer.clear();
-        }
-        result
-    }
-
-    fn read_segment_at(
+    fn open_pinned_partitioned_segment_at(
         path: &Path,
         request: SealedGenerationSegmentReadV1<'_>,
-        buffer: &mut Vec<u8>,
-    ) -> Result<(), CodeIndexProductionErrorV1> {
-        buffer.clear();
-        let (digest, expected_size, offset, length, whole) = match request {
-            SealedGenerationSegmentReadV1::Whole { digest, size_bytes } => {
-                (digest, size_bytes, 0, size_bytes, true)
-            }
-            SealedGenerationSegmentReadV1::Range {
-                digest,
-                size_bytes,
-                offset,
-                length,
-            } => (digest, size_bytes, offset, length, false),
-        };
-        if offset
-            .checked_add(length)
-            .is_none_or(|end| end > expected_size)
-        {
-            return Err(CodeIndexProductionErrorV1::Contract(
-                "sealed generation segment range exceeds its manifest identity".to_owned(),
-            ));
-        }
-        let metadata = path.symlink_metadata().map_err(|error| {
-            CodeIndexProductionErrorV1::Contract(format!(
-                "sealed generation segment is unavailable: {error}"
-            ))
-        })?;
-        if !metadata.file_type().is_file() || metadata.len() != expected_size {
-            return Err(CodeIndexProductionErrorV1::Contract(
-                "sealed generation segment identity does not match its manifest".to_owned(),
-            ));
-        }
-        let length = usize::try_from(length).map_err(|_| {
-            CodeIndexProductionErrorV1::Contract(
-                "sealed generation segment range exceeds addressable memory".to_owned(),
-            )
-        })?;
-        buffer.resize(length, 0);
-        let read = (|| -> std::io::Result<()> {
-            let mut file = File::open(path)?;
-            #[cfg(unix)]
-            {
-                let opened = file.metadata()?;
-                if !Self::same_unix_segment_identity(&metadata, &opened) {
-                    return Err(std::io::Error::other(
-                        "sealed segment pathname changed while opening",
-                    ));
-                }
-            }
-            file.seek(SeekFrom::Start(offset))?;
-            file.read_exact(buffer)?;
-            #[cfg(unix)]
-            {
-                let opened = file.metadata()?;
-                let named = path.symlink_metadata()?;
-                if !Self::same_unix_segment_identity(&metadata, &opened)
-                    || !Self::same_unix_segment_identity(&metadata, &named)
-                {
-                    return Err(std::io::Error::other(
-                        "sealed segment pathname or bytes changed during read",
-                    ));
-                }
-            }
-            Ok(())
-        })();
-        if let Err(error) = read {
-            buffer.clear();
-            return Err(CodeIndexProductionErrorV1::Contract(format!(
-                "sealed generation segment read failed: {error}"
-            )));
-        }
-        // A full segment has its content address available without another
-        // pathname open. Never return same-length corrupt bytes to a caller.
-        // Range callers retain their existing per-page digest authority.
-        if whole && Self::state_digest(buffer) != digest.as_str() {
-            buffer.clear();
-            return Err(CodeIndexProductionErrorV1::Contract(
-                "sealed generation segment does not match its content address".to_owned(),
-            ));
-        }
-        Ok(())
-    }
-
-    fn open_pinned_partitioned_segment(
-        &self,
-        request: SealedGenerationSegmentReadV1<'_>,
+        open_attempts: &mut u64,
     ) -> Result<PinnedGenerationSegmentV1, CodeIndexProductionErrorV1> {
         let (digest, expected_size, offset, length) = match request {
             SealedGenerationSegmentReadV1::Whole { digest, size_bytes } => {
@@ -3197,12 +3449,6 @@ impl DaemonCodeIndexPublicationStoreV1 {
                 "sealed generation segment range exceeds its manifest identity".to_owned(),
             ));
         }
-        let digest_hex = sha256_hex_suffix(digest).ok_or_else(|| {
-            CodeIndexProductionErrorV1::Contract("sealed segment digest is not sha256".to_owned())
-        })?;
-        let path = self
-            .segments_root
-            .join(format!("segment-{digest_hex}.json"));
         let path_metadata = path.symlink_metadata().map_err(|error| {
             CodeIndexProductionErrorV1::Contract(format!(
                 "sealed generation segment is unavailable: {error}"
@@ -3213,7 +3459,8 @@ impl DaemonCodeIndexPublicationStoreV1 {
                 "sealed generation segment identity does not match its manifest".to_owned(),
             ));
         }
-        let file = File::open(&path).map_err(|error| {
+        *open_attempts = open_attempts.saturating_add(1);
+        let file = File::open(path).map_err(|error| {
             CodeIndexProductionErrorV1::Contract(format!(
                 "sealed generation segment cannot be opened: {error}"
             ))
@@ -3250,7 +3497,8 @@ impl DaemonCodeIndexPublicationStoreV1 {
                     "sealed generation segment handle identity cannot be read: {error}"
                 ))
             })?;
-            let path_identity = Handle::from_path(&path).map_err(|error| {
+            *open_attempts = open_attempts.saturating_add(1);
+            let path_identity = Handle::from_path(path).map_err(|error| {
                 CodeIndexProductionErrorV1::Contract(format!(
                     "sealed generation segment path identity cannot be read: {error}"
                 ))
@@ -3280,61 +3528,6 @@ impl DaemonCodeIndexPublicationStoreV1 {
             && named.mtime_nsec() == pinned.mtime_nsec()
             && named.ctime() == pinned.ctime()
             && named.ctime_nsec() == pinned.ctime_nsec()
-    }
-
-    /// Open an admitted staged pathname without another pre-open stat or
-    /// `Handle::from_path` open. The caller validates the request and metadata
-    /// before evicting a cached handle; this checks identity across the open.
-    #[cfg(unix)]
-    fn open_pinned_staged_segment(
-        path: &Path,
-        request: SealedGenerationSegmentReadV1<'_>,
-        named: &std::fs::Metadata,
-        open_attempts: &mut u64,
-    ) -> Result<PinnedPreparationSegmentV1, CodeIndexProductionErrorV1> {
-        let (digest, size_bytes) = match request {
-            SealedGenerationSegmentReadV1::Whole { digest, size_bytes }
-            | SealedGenerationSegmentReadV1::Range {
-                digest, size_bytes, ..
-            } => (digest.as_str(), size_bytes),
-        };
-        *open_attempts = (*open_attempts).saturating_add(1);
-        tracing::trace!(
-            target: "tracedecay::code_index",
-            staged_segment_file_open_count = *open_attempts,
-            "attempted staged segment pathname open after an LRU miss"
-        );
-        let file = File::open(path).map_err(|error| {
-            CodeIndexProductionErrorV1::Contract(format!(
-                "staged sealed segment cannot be opened: {error}"
-            ))
-        })?;
-        let opened = file.metadata().map_err(|error| {
-            CodeIndexProductionErrorV1::Contract(format!(
-                "staged sealed segment metadata cannot be read: {error}"
-            ))
-        })?;
-        let named_after_open = path.symlink_metadata().map_err(|error| {
-            CodeIndexProductionErrorV1::Contract(format!(
-                "staged sealed segment pathname cannot be rechecked: {error}"
-            ))
-        })?;
-        if !Self::same_unix_segment_identity(named, &opened)
-            || !Self::same_unix_segment_identity(&named_after_open, &opened)
-        {
-            return Err(CodeIndexProductionErrorV1::Contract(
-                "staged sealed segment was replaced while opening".to_owned(),
-            ));
-        }
-        Ok(PinnedPreparationSegmentV1 {
-            path: path.to_path_buf(),
-            identity: opened,
-            segment: PinnedGenerationSegmentV1 {
-                digest: digest.to_owned(),
-                size_bytes,
-                file,
-            },
-        })
     }
 
     fn read_pinned_partitioned_segment(
@@ -3410,15 +3603,40 @@ impl DaemonCodeIndexPublicationStoreV1 {
                 "partitioned generation manifest identity is corrupt",
             ));
         }
-        let bytes = std::fs::read(path).map_err(Self::unavailable)?;
+        let operation = self.resident_memory_authority()?.begin_operation();
+        let mut memory = PreparedPackMemoryV1::new(&operation)?;
+        let byte_len = usize::try_from(identity.size_bytes).map_err(Self::unavailable)?;
+        // The raw manifest and its temporary tagged SHA-256 string coexist.
+        memory.admit(byte_len.saturating_add("sha256:".len() + 64))?;
+        let mut file = File::open(path).map_err(Self::unavailable)?;
+        let mut bytes = vec![0_u8; byte_len];
+        file.read_exact(&mut bytes).map_err(Self::unavailable)?;
+        if file.metadata().map_err(Self::unavailable)?.len() != identity.size_bytes {
+            return Err(Self::corruption(
+                "partitioned generation manifest changed extent while reading",
+            ));
+        }
         if Self::state_digest(&bytes) != identity.digest.as_str() {
             return Err(Self::corruption(
                 "partitioned generation manifest digest does not verify",
             ));
         }
-        match CodeIndexPublishedGenerationV1::partitioned_text_metadata(&bytes) {
-            Ok(metadata) => Ok(Some(metadata)),
+        match CodeIndexPublishedGenerationV1::partitioned_metadata_and_layout_admitted(
+            &bytes,
+            &mut |needed| {
+                memory
+                    .admit(byte_len.saturating_add(needed))
+                    .map_err(Into::into)
+            },
+        ) {
+            Ok((metadata, layout)) => {
+                // This route returns only the existing compact metadata. The new
+                // packed map dies while its parse reservation is still retained.
+                drop(layout);
+                Ok(Some(metadata))
+            }
             Err(CodeIndexProductionErrorV1::SupersededSealedGenerationRevision(_)) => Ok(None),
+            Err(CodeIndexProductionErrorV1::Publication(error)) => Err(error),
             Err(error) => Err(Self::corruption(error.to_string())),
         }
     }
@@ -3435,58 +3653,84 @@ impl DaemonCodeIndexPublicationStoreV1 {
         expected_file_digest: &ManifestDigest,
         lifetime_lock: CodeGenerationStoreLockV1,
     ) -> Result<Option<CodeIndexPublishedGenerationV1>, CodeIndexProductionErrorV1> {
+        let operation = self.resident_memory_authority()?.begin_operation();
+        let byte_len = usize::try_from(admitted_len).map_err(Self::unavailable)?;
+        let mut manifest_memory = PreparedPackMemoryV1::new(&operation)?;
+        manifest_memory.admit(byte_len.saturating_add("sha256:".len() + 64))?;
         file.seek(SeekFrom::Start(0)).map_err(|error| {
             CodeIndexProductionErrorV1::Contract(format!(
                 "sealed generation manifest seek failed: {error}"
             ))
         })?;
-        let mut manifest = Vec::new();
-        Read::by_ref(file)
-            .take(admitted_len)
-            .read_to_end(&mut manifest)
-            .map_err(|error| {
-                CodeIndexProductionErrorV1::Contract(format!(
-                    "sealed generation manifest read failed: {error}"
-                ))
-            })?;
-        if u64::try_from(manifest.len()).ok() != Some(admitted_len) {
-            return Err(CodeIndexProductionErrorV1::Contract(
-                "sealed generation length does not match its admitted length".to_owned(),
-            ));
-        }
+        let mut manifest = vec![0_u8; byte_len];
+        file.read_exact(&mut manifest).map_err(|error| {
+            CodeIndexProductionErrorV1::Contract(format!(
+                "sealed generation manifest read failed: {error}"
+            ))
+        })?;
         if Self::state_digest(&manifest) != expected_file_digest.as_str() {
             return Err(CodeIndexProductionErrorV1::Contract(
                 "sealed generation manifest filename digest does not match its bytes".to_owned(),
             ));
         }
-        let mut lifetime_lock = Some(lifetime_lock);
-        let mut pinned_evidence = None;
+        // The canonical decoder validates the full map before issuing raw
+        // requests. Lazily pin each of its at most two physical identities,
+        // without a second manifest parse or a per-logical-file open.
+        let _lifetime_lock = lifetime_lock;
+        let mut memory = PreparedPackMemoryV1::new(&operation)?;
+        let mut pinned: [Option<(ManifestDigest, GenerationPackReadPassV1)>; 2] = [None, None];
         match CodeIndexPublishedGenerationV1::decode_partitioned_sealed(
             &manifest,
             &self.decoded_content,
             |request, buffer| {
-                match request {
-                    SealedGenerationSegmentReadV1::Whole { .. } => {
-                        self.read_partitioned_segment(request, buffer)
+                buffer.clear();
+                let (digest, size_bytes) = match request {
+                    SealedGenerationSegmentReadV1::Whole { digest, size_bytes }
+                    | SealedGenerationSegmentReadV1::Range {
+                        digest, size_bytes, ..
+                    } => (digest, size_bytes),
+                };
+                let index = match pinned
+                    .iter()
+                    .position(|slot| slot.as_ref().is_some_and(|(known, _)| known == digest))
+                {
+                    Some(index) => index,
+                    None => {
+                        let index = pinned.iter().position(Option::is_none).ok_or_else(|| {
+                            CodeIndexProductionErrorV1::Contract(
+                                "sealed decode requested more than two physical packs".to_owned(),
+                            )
+                        })?;
+                        memory.admit(
+                            pack_read_workspace_bytes(
+                                &self.segments_root,
+                                digest.as_str().len().saturating_mul(2),
+                            )
+                            .saturating_mul(2),
+                        )?;
+                        let identity = SealedGenerationSegmentIdentityV1 {
+                            digest: digest.clone(),
+                            size_bytes,
+                        };
+                        let pass = GenerationPackReadPassV1::open(
+                            &self.segments_root,
+                            std::slice::from_ref(&identity),
+                            None,
+                            &mut 0,
+                        )?;
+                        pinned[index] = Some((identity.digest, pass));
+                        index
                     }
-                    SealedGenerationSegmentReadV1::Range { .. } => {
-                        if pinned_evidence.is_none() {
-                            pinned_evidence = Some(self.open_pinned_partitioned_segment(request)?);
-                            // The store lock proves the pack pathname is live through
-                            // this open. The handle then owns all remaining page reads.
-                            drop(lifetime_lock.take());
-                        }
-                        Self::read_pinned_partitioned_segment(
-                            pinned_evidence.as_mut().ok_or_else(|| {
-                                CodeIndexProductionErrorV1::Contract(
-                                    "sealed generation evidence handle was not pinned".to_owned(),
-                                )
-                            })?,
-                            request,
-                            buffer,
-                        )
-                    }
-                }
+                };
+                let (_, pass) = pinned[index].as_mut().ok_or_else(|| {
+                    CodeIndexProductionErrorV1::Contract("sealed decode pack is absent".to_owned())
+                })?;
+                pass.read(request, buffer)
+            },
+            &mut |needed| {
+                manifest_memory
+                    .admit(byte_len.saturating_add(needed))
+                    .map_err(Into::into)
             },
         ) {
             // A generation is a pure function of its source tree, so a
@@ -3867,25 +4111,47 @@ impl DaemonCodeIndexPublicationStoreV1 {
                 "active code-generation byte size does not match its durable entry",
             ));
         }
-        let bytes = std::fs::read(&path).map_err(Self::unavailable)?;
-        if Self::state_digest(&bytes) != pointer.state_digest {
-            return Err(Self::corruption(
-                "active code-generation manifest digest does not verify",
-            ));
-        }
-        let manifest = match CodeIndexPublishedGenerationV1::partitioned_text_metadata(&bytes) {
-            Ok(manifest) => manifest,
-            Err(CodeIndexProductionErrorV1::SupersededSealedGenerationRevision(revision)) => {
-                tracing::warn!(
-                    target: "tracedecay::code_index",
-                    sealed_format_revision = revision,
-                    "{}",
-                    CodeIndexProductionErrorV1::SupersededSealedGenerationRevision(revision)
-                );
-                return Ok(None);
-            }
-            Err(error) => return Err(Self::corruption(error)),
+        let operation = self.resident_memory_authority()?.begin_operation();
+        let mut memory = PreparedPackMemoryV1::new(&operation)?;
+        let byte_len = usize::try_from(entry.size_bytes).map_err(Self::unavailable)?;
+        let base = size_of::<ActiveSealedManifestV1>()
+            .saturating_add(size_of::<AdmittedSealedMetadataV1>())
+            .saturating_add(size_of::<usize>().saturating_mul(4))
+            .saturating_add(byte_len.saturating_mul(2))
+            .saturating_add(pointer.state_digest.len());
+        memory.admit(base)?;
+        let digest = ManifestDigest::new(pointer.state_digest.clone()).map_err(Self::corruption)?;
+        let request = SealedGenerationSegmentReadV1::Whole {
+            digest: &digest,
+            size_bytes: entry.size_bytes,
         };
+        let mut opened = Self::open_pinned_partitioned_segment_at(&path, request, &mut 0)
+            .map_err(Self::corruption)?;
+        let mut bytes = Vec::with_capacity(byte_len);
+        Self::read_pinned_partitioned_segment(&mut opened, request, &mut bytes)
+            .map_err(Self::corruption)?;
+        let (manifest, layout) =
+            match CodeIndexPublishedGenerationV1::partitioned_metadata_and_layout_admitted(
+                &bytes,
+                &mut |needed| {
+                    memory
+                        .admit(base.saturating_add(needed))
+                        .map_err(Into::into)
+                },
+            ) {
+                Ok(manifest) => manifest,
+                Err(CodeIndexProductionErrorV1::SupersededSealedGenerationRevision(revision)) => {
+                    tracing::warn!(
+                        target: "tracedecay::code_index",
+                        sealed_format_revision = revision,
+                        "{}",
+                        CodeIndexProductionErrorV1::SupersededSealedGenerationRevision(revision)
+                    );
+                    return Ok(None);
+                }
+                Err(CodeIndexProductionErrorV1::Publication(error)) => return Err(error),
+                Err(error) => return Err(Self::corruption(error)),
+            };
         if manifest.manifest().sanitizer_revision != self.expected_sanitizer_revision {
             return Ok(None);
         }
@@ -3897,10 +4163,27 @@ impl DaemonCodeIndexPublicationStoreV1 {
                 "active code-generation pointer does not match the sealed generation",
             ));
         }
+        let retained = size_of::<ActiveSealedManifestV1>()
+            .saturating_add(size_of::<AdmittedSealedMetadataV1>())
+            .saturating_sub(size_of::<VerifiedSealedTextGenerationMetadataV1>())
+            .saturating_sub(size_of::<SealedGenerationPackLayoutV1>())
+            .saturating_add(size_of::<usize>().saturating_mul(4))
+            .saturating_add(manifest.retained_bytes())
+            .saturating_add(layout.retained_bytes())
+            .saturating_add(bytes.len())
+            .saturating_add(pointer.state_digest.len());
+        let manifest_bytes: Arc<[u8]> = Arc::from(bytes);
+        memory.resize(retained)?;
+        let metadata = Arc::new(AdmittedSealedMetadataV1 {
+            value: manifest,
+            layout,
+            manifest_bytes: Arc::clone(&manifest_bytes),
+            _memory: memory,
+        });
         let active = ActiveSealedManifestV1 {
             state_digest: pointer.state_digest,
-            manifest_bytes: Arc::from(bytes),
-            metadata: Arc::new(manifest),
+            manifest_bytes,
+            metadata,
         };
         *self
             .active_manifest_memo
@@ -4071,6 +4354,23 @@ impl DaemonCodeIndexPublicationStoreV1 {
             .decode_admission
             .lock()
             .unwrap_or_else(PoisonError::into_inner) = Some(admission);
+    }
+
+    /// Replay and parsing must use the scheduler's exact process authority.
+    /// A store without that binding cannot invent a separate memory ledger.
+    pub(super) fn resident_memory_authority(
+        &self,
+    ) -> Result<Arc<ProcessResidentMemoryV1>, CodeIndexPublicationStoreErrorV1> {
+        self.decode_admission
+            .lock()
+            .map_err(|_| Self::unavailable("generation decode admission was poisoned"))?
+            .as_ref()
+            .map(|admission| Arc::clone(&admission.resident_memory))
+            .ok_or_else(|| {
+                CodeIndexPublicationStoreErrorV1::ResidentMemoryRefused(
+                    "generation store has no process resident-memory authority".to_owned(),
+                )
+            })
     }
 
     /// Charge a whole-generation decode against the process authority before
@@ -4291,28 +4591,6 @@ impl DaemonCodeIndexPublicationStoreV1 {
     /// entry shape digests differently, is deleted outright: no copy is kept
     /// and nothing is migrated. A store another owner holds is a typed busy
     /// refusal the caller retries; every other failure is reported as is.
-    pub(super) fn retained_segment_reclaimer(&self) -> RetainedSegmentHandleRetirementV1 {
-        #[cfg(unix)]
-        {
-            let cached = Arc::clone(&self.retained_segment_reads);
-            Arc::new(move || {
-                cached
-                    .lock()
-                    .map_err(|_| {
-                        CodeGenerationRetentionErrorV1::UnsafeState(
-                            "retained segment cache is poisoned".to_owned(),
-                        )
-                    })?
-                    .clear();
-                Ok(())
-            })
-        }
-        #[cfg(not(unix))]
-        {
-            Arc::new(|| Ok(()))
-        }
-    }
-
     pub(super) fn reset_corrupt_store(
         &self,
     ) -> Result<CodeIndexScopeStoreResetV1, CodeIndexPublicationStoreErrorV1> {
@@ -4323,14 +4601,6 @@ impl DaemonCodeIndexPublicationStoreV1 {
         let store_lock = try_acquire_code_generation_store_lock(store_root)
             .map_err(Self::unavailable)?
             .ok_or(CodeIndexPublicationStoreErrorV1::StoreLockContended)?;
-        // Do not let an old retained descriptor keep deleted segment bytes
-        // resident after this scope's reset, even when another store clone
-        // served the last page.
-        #[cfg(unix)]
-        self.retained_segment_reads
-            .lock()
-            .map_err(|_| Self::unavailable("retained segment read cache was poisoned"))?
-            .clear();
         let receipt = {
             // Release the shared pointer descriptor before any unlink, even
             // when later cleanup or reconstruction fails. Keep the memo locked
@@ -4399,15 +4669,21 @@ impl CodeIndexAtomicPublicationPort for DaemonCodeIndexPublicationStoreV1 {
         if self.undecoded_active_expectation.is_some() {
             return Ok(None);
         }
-        Ok(self.load_active_manifest()?.map(|active| {
-            CodeIndexSealedGenerationV1::new(active.manifest_bytes, self.segment_reader())
-        }))
+        let Some(active) = self.load_active_manifest()? else {
+            return Ok(None);
+        };
+        let factory = self.active_pack_read_factory(&active)?;
+        Ok(Some(CodeIndexSealedGenerationV1::new(
+            Arc::clone(&active.metadata.manifest_bytes),
+            factory,
+        )))
     }
 
     fn prepare(
         &mut self,
         scope: &CodeIndexGenerationScopeV1,
         expected_active_generation: Option<&CodeGenerationId>,
+        operation: &ResidentMemoryOperationV1,
     ) -> Result<Self::Preparation, CodeIndexPublicationStoreErrorV1> {
         scope.validate().map_err(Self::unavailable)?;
         self.seal_checkpoint()?;
@@ -4428,15 +4704,18 @@ impl CodeIndexAtomicPublicationPort for DaemonCodeIndexPublicationStoreV1 {
         self.seal_checkpoint()?;
         // Manifest abstention still binds the exact incumbent this rebuild
         // replaces. This happens before any exclusive scope transaction.
+        let incumbent_manifest = if self.undecoded_active_expectation.is_none() {
+            self.load_active_manifest()?.map(|active| active.metadata)
+        } else {
+            None
+        };
         let undecoded_expectation = match self.undecoded_active_expectation.clone() {
             Some(expectation) => Some(expectation),
-            None => match self.load_active_manifest()? {
-                Some(_) => None,
-                None => self
-                    .read_publication_pointer()?
-                    .as_ref()
-                    .map(UndecodedActivePublicationExpectationV1::from_pointer),
-            },
+            None if incumbent_manifest.is_some() => None,
+            None => self
+                .read_publication_pointer()?
+                .as_ref()
+                .map(UndecodedActivePublicationExpectationV1::from_pointer),
         };
         let (incumbent_bytes, pointer) = {
             let _read = self.acquire_generation_read_lock()?;
@@ -4482,7 +4761,13 @@ impl CodeIndexAtomicPublicationPort for DaemonCodeIndexPublicationStoreV1 {
             .tempdir_in(&self.segments_root)
             .map_err(Self::unavailable)?;
         let evidence =
-            TemporaryEvidencePackV1::create(directory.path().join("generation-evidence.tmp"))?;
+            TemporaryPayloadPackV1::create(directory.path().join("generation-evidence.tmp"))?;
+        let mut memory = PreparedPackMemoryV1::new(operation)?;
+        memory.admit(
+            size_of::<DaemonCodeIndexPreparationFilesV1>()
+                .saturating_add(directory.path().as_os_str().len().saturating_mul(4)),
+        )?;
+        let logical = StagedContentV1::create(directory.path().join("logical-content.tmp"))?;
         self.seal_encoded_segment_bytes.store(0, Ordering::Relaxed);
         self.seal_existing_segment_bytes_read
             .store(0, Ordering::Relaxed);
@@ -4494,6 +4779,7 @@ impl CodeIndexAtomicPublicationPort for DaemonCodeIndexPublicationStoreV1 {
             expected_active_generation: expected_active_generation.cloned(),
             undecoded_expectation,
             incumbent_bytes,
+            incumbent_manifest,
             store_identity,
             segments_identity,
             generations_identity,
@@ -4506,19 +4792,19 @@ impl CodeIndexAtomicPublicationPort for DaemonCodeIndexPublicationStoreV1 {
                     directory,
                     segments: StagedGenerationSegmentsV1::new(),
                     evidence,
-                    #[cfg(unix)]
-                    pinned_segment_reads: VecDeque::new(),
-                    #[cfg(unix)]
-                    observed_segment_identities: BTreeMap::new(),
-                    #[cfg(unix)]
+                    logical,
+                    parent: None,
+                    content_pack: None,
+                    evidence_identity: None,
+                    payload_reads: None,
                     segment_read_open_attempts: 0,
-                    #[cfg(unix)]
                     segment_reads_poisoned: false,
                     _retention: retention,
                     referenced_segment_bytes: 0,
                     manifest_identity: None,
                     pending_pointer: None,
                     segments_durable: false,
+                    memory,
                 }),
             ))),
             shutdown_signal: self.shutdown_signal.clone(),
@@ -4555,6 +4841,70 @@ impl CodeIndexAtomicPublicationPort for DaemonCodeIndexPublicationStoreV1 {
 }
 
 impl DaemonCodeIndexPublicationStoreV1 {
+    fn committed_preparation_owner(
+        &self,
+        files: &DaemonCodeIndexPreparationFilesV1,
+        generation: &CodeIndexSealedPublicationV1,
+    ) -> Result<Arc<CommittedPreparationPacksV1>, CodeIndexPublicationStoreErrorV1> {
+        let state_digest = files
+            .manifest_identity
+            .as_ref()
+            .ok_or_else(|| Self::unavailable("prepared manifest identity is absent"))?;
+        let suffix = sha256_hex_suffix(state_digest)
+            .ok_or_else(|| Self::corruption("prepared manifest digest is not sha256"))?;
+        let mut memory = PreparedPackMemoryV1::new(files.memory.operation())?;
+        memory.admit(
+            generation
+                .pack_layout()
+                .retained_bytes()
+                .saturating_add(size_of::<AdmittedPackLayoutV1>())
+                .saturating_add(size_of::<CommittedPreparationPacksV1>())
+                .saturating_add(size_of::<GenerationReadAuthorityV1>())
+                .saturating_add(size_of::<DurableSealedCodeGenerationIdentityV1>())
+                .saturating_add(size_of::<usize>().saturating_mul(10))
+                .saturating_add(self.active_path.as_os_str().len())
+                .saturating_add(self.segments_root.as_os_str().len())
+                .saturating_add(state_digest.len().saturating_mul(2)),
+        )?;
+        let identity = DurableSealedCodeGenerationIdentityV1 {
+            locator: format!("generation-{suffix}.json"),
+            digest: ManifestDigest::new(state_digest.clone()).map_err(Self::corruption)?,
+            size_bytes: u64::try_from(generation.manifest_bytes().len())
+                .map_err(Self::unavailable)?,
+        };
+        let layout = Arc::new(AdmittedPackLayoutV1 {
+            layout: generation.pack_layout().clone(),
+            _memory: memory,
+        });
+        let factory_layout = Arc::clone(&layout);
+        let authority = self.read_authority();
+        let open_read_pass: Arc<SealedGenerationPackReadFactoryV1> = Arc::new(move || {
+            let lease = authority
+                .try_lease()?
+                .ok_or(CodeIndexPublicationStoreErrorV1::StoreLockContended)?;
+            let pass = Mutex::new(authority.open_under_lease(
+                &identity,
+                &factory_layout.layout,
+                factory_layout._memory.operation(),
+                lease,
+            )?);
+            Ok(Arc::new(move |request, buffer: &mut Vec<u8>| {
+                buffer.clear();
+                pass.lock()
+                    .map_err(|_| {
+                        CodeIndexProductionErrorV1::Contract(
+                            "sealed pack read pass was poisoned".to_owned(),
+                        )
+                    })?
+                    .read(request, buffer)
+            }) as Arc<SealedSegmentReaderV1>)
+        });
+        Ok(Arc::new(CommittedPreparationPacksV1 {
+            layout,
+            open_read_pass,
+        }))
+    }
+
     fn commit_prepared(
         &self,
         preparation: &DaemonCodeIndexPreparationV1,
@@ -4573,8 +4923,7 @@ impl DaemonCodeIndexPublicationStoreV1 {
         let DaemonCodeIndexPreparationStateV1::Open(files) = &mut *session else {
             return Err(DaemonCodeIndexPreparationV1::closed());
         };
-        #[cfg(unix)]
-        if files.segment_reads_poisoned {
+        if files.segment_reads_poisoned || files.logical.poisoned {
             return Err(Self::unavailable(
                 "staged sealed segment identity was invalidated",
             ));
@@ -4600,7 +4949,10 @@ impl DaemonCodeIndexPublicationStoreV1 {
         // against this session's staged files or the canonical shared store.
         // Stream under the shared retention lease, before the final scope and
         // cache locks; canonical names are immutable and staging is frozen.
-        self.verify_prepared_segments(files, manifest_bytes)?;
+        self.verify_prepared_segments(files, generation)?;
+        // Finish all allocations and admission before either pointer commit.
+        // Replacing the open state then drops staging and its larger charge.
+        let committed = self.committed_preparation_owner(files, generation)?;
         let _store_lock = try_acquire_code_generation_store_lock(store_root)
             .map_err(Self::unavailable)?
             .ok_or(CodeIndexPublicationStoreErrorV1::StoreLockContended)?;
@@ -4652,7 +5004,7 @@ impl DaemonCodeIndexPublicationStoreV1 {
             Self::sync_directory(store_root)?;
             self.finish_prepared_cache(&mut cache, generation, generation_size);
             drop(source_fence);
-            *session = DaemonCodeIndexPreparationStateV1::Committed;
+            *session = DaemonCodeIndexPreparationStateV1::Committed(committed);
             return Ok(Arc::clone(manifest_bytes));
         }
         drop(cache);
@@ -4866,7 +5218,7 @@ impl DaemonCodeIndexPublicationStoreV1 {
         }
         drop(source_fence);
         self.finish_prepared_cache(&mut cache, generation, generation_size);
-        *session = DaemonCodeIndexPreparationStateV1::Committed;
+        *session = DaemonCodeIndexPreparationStateV1::Committed(committed);
         Ok(Arc::clone(manifest_bytes))
     }
 
@@ -4908,26 +5260,35 @@ impl DaemonCodeIndexPublicationStoreV1 {
     fn verify_prepared_segments(
         &self,
         files: &DaemonCodeIndexPreparationFilesV1,
-        manifest: &[u8],
+        publication: &CodeIndexSealedPublicationV1,
     ) -> Result<(), CodeIndexPublicationStoreErrorV1> {
-        let identities =
-            CodeIndexPublishedGenerationV1::partitioned_segment_identities_from_reader(manifest)
-                .map_err(Self::corruption)?
-                .ok_or_else(|| {
-                    Self::corruption("prepared generation manifest has an incompatible revision")
-                })?;
-        let mut verified = BTreeMap::new();
-        for identity in identities {
+        let layout = publication.pack_layout();
+        if files.content_pack.as_ref() != Some(layout.content_pack())
+            || files.evidence_identity.as_ref() != Some(layout.evidence_pack())
+        {
+            return Err(Self::corruption(
+                "prepared payload packs do not match this generation's authenticated layout",
+            ));
+        }
+        let content = layout.content_pack();
+        let evidence = layout.evidence_pack();
+        let mut verified: Option<(&ManifestDigest, u64)> = None;
+        for (digest, size_bytes) in [
+            (&content.digest, content.size_bytes),
+            (&evidence.digest, evidence.size_bytes),
+        ] {
             self.seal_checkpoint()?;
-            if let Some(size) = verified.get(&identity.digest) {
-                if *size != identity.size_bytes {
+            if let Some((prior_digest, prior_size)) = verified
+                && prior_digest == digest
+            {
+                if prior_size != size_bytes {
                     return Err(Self::corruption(
-                        "prepared segment carries conflicting manifest extents",
+                        "prepared pack carries conflicting extents",
                     ));
                 }
                 continue;
             }
-            let suffix = sha256_hex_suffix(identity.digest.as_str())
+            let suffix = sha256_hex_suffix(digest.as_str())
                 .ok_or_else(|| Self::corruption("prepared segment digest is not sha256"))?;
             let canonical = self.segments_root.join(format!("segment-{suffix}.json"));
             let path = files.segments.pending.get(&canonical).unwrap_or(&canonical);
@@ -4938,7 +5299,7 @@ impl DaemonCodeIndexPublicationStoreV1 {
                     Self::unavailable(error)
                 }
             })?;
-            if !metadata.file_type().is_file() || metadata.len() != identity.size_bytes {
+            if !metadata.file_type().is_file() || metadata.len() != size_bytes {
                 return Err(Self::corruption(
                     "prepared generation segment does not match its manifest identity",
                 ));
@@ -4950,15 +5311,15 @@ impl DaemonCodeIndexPublicationStoreV1 {
                         "previously verified sealed segment changed before commit",
                     ));
                 }
-                verified.insert(identity.digest, identity.size_bytes);
+                verified = Some((digest, size_bytes));
                 continue;
             }
-            if Self::state_digest_file(path)? != identity.digest.as_str() {
+            if Self::state_digest_file(path)? != digest.as_str() {
                 return Err(Self::corruption(
                     "prepared generation segment does not match its manifest identity",
                 ));
             }
-            verified.insert(identity.digest, identity.size_bytes);
+            verified = Some((digest, size_bytes));
         }
         Ok(())
     }

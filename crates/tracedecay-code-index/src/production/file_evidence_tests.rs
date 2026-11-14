@@ -28,6 +28,13 @@ struct CountingPreparationV1 {
 }
 
 impl CodeIndexPreparationPort for CountingPreparationV1 {
+    fn bind_parent(
+        &mut self,
+        parent: &CodeIndexSealedGenerationV1,
+    ) -> Result<(), CodeIndexPublicationStoreErrorV1> {
+        self.inner.bind_parent(parent)
+    }
+
     fn write_segment(
         &mut self,
         publication: SealedGenerationSegmentPublicationV1<'_>,
@@ -49,6 +56,21 @@ impl CodeIndexPreparationPort for CountingPreparationV1 {
         self.inner.segment_reader()
     }
 
+    fn finalize_content_pack(
+        &mut self,
+        segments: &[SealedGenerationSegmentIdentityV1],
+    ) -> Result<SealedGenerationContentPackV1, CodeIndexPublicationStoreErrorV1> {
+        self.inner.finalize_content_pack(segments)
+    }
+
+    fn pack_reader(&self) -> Arc<SealedSegmentReaderV1> {
+        self.inner.pack_reader()
+    }
+
+    fn read_pass_factory(&self) -> Arc<SealedGenerationPackReadFactoryV1> {
+        self.inner.read_pass_factory()
+    }
+
     fn abort(self) -> Result<(), CodeIndexPublicationStoreErrorV1> {
         self.inner.abort()
     }
@@ -64,22 +86,48 @@ impl CodeIndexAtomicPublicationPort for CountingStoreV1 {
         let Some(active) = self.inner.load_active(scope)? else {
             return Ok(None);
         };
-        let read = self.inner.segment_reader();
+        let pack = Arc::new(
+            partitioned_codec::parse_partitioned_manifest(active.manifest_bytes())
+                .map_err(|error| CodeIndexPublicationStoreErrorV1::Unavailable(error.to_string()))?
+                .content_pack,
+        );
         let reads = Arc::clone(&self.reads);
         let read_digests = Arc::clone(&self.read_digests);
         Ok(Some(CodeIndexSealedGenerationV1::new(
             Arc::from(active.manifest_bytes()),
-            Arc::new(
-                move |request: SealedGenerationSegmentReadV1<'_>, buffer: &mut Vec<u8>| {
+            Arc::new(move || {
+                let read = active.begin_read_pass()?;
+                let reads = Arc::clone(&reads);
+                let read_digests = Arc::clone(&read_digests);
+                let pack = Arc::clone(&pack);
+                let observed: Arc<SealedSegmentReaderV1> = Arc::new(move |request, buffer| {
                     reads.fetch_add(1, Ordering::Relaxed);
-                    let digest = match &request {
-                        SealedGenerationSegmentReadV1::Whole { digest, .. }
-                        | SealedGenerationSegmentReadV1::Range { digest, .. } => (*digest).clone(),
+                    let (digest, offset, length) = match request {
+                        SealedGenerationSegmentReadV1::Whole { digest, size_bytes } => {
+                            (digest, 0, size_bytes)
+                        }
+                        SealedGenerationSegmentReadV1::Range {
+                            digest,
+                            offset,
+                            length,
+                            ..
+                        } => (digest, offset, length),
                     };
-                    read_digests.lock().expect("read log").push(digest);
+                    let logical = (digest == &pack.digest)
+                        .then(|| {
+                            pack.extents.iter().find(|extent| {
+                                offset >= extent.offset
+                                    && offset - extent.offset <= extent.size_bytes
+                                    && length <= extent.size_bytes - (offset - extent.offset)
+                            })
+                        })
+                        .flatten()
+                        .map_or(digest, |extent| &extent.digest);
+                    read_digests.lock().expect("read log").push(logical.clone());
                     read(request, buffer)
-                },
-            ),
+                });
+                Ok(observed)
+            }),
         )))
     }
 
@@ -87,8 +135,11 @@ impl CodeIndexAtomicPublicationPort for CountingStoreV1 {
         &mut self,
         scope: &CodeIndexGenerationScopeV1,
         expected_active_generation: Option<&CodeGenerationId>,
+        operation: &ResidentMemoryOperationV1,
     ) -> Result<Self::Preparation, CodeIndexPublicationStoreErrorV1> {
-        let inner = self.inner.prepare(scope, expected_active_generation)?;
+        let inner = self
+            .inner
+            .prepare(scope, expected_active_generation, operation)?;
         self.writes.lock().expect("write log").clear();
         Ok(CountingPreparationV1 {
             inner,
@@ -146,7 +197,7 @@ fn sealed_file_evidence_restores_the_built_edges_calls_and_lineage() {
         let tree = fixture_files(&Path::new(FIXTURE_ROOT).join(language));
         let store = WorkerPublicationStore::default();
         let mut owner = OwnerV1::new(worker_config(), store.clone()).expect("production owner");
-        let cold = publish(&mut owner, &tree, None, false, 1_000_000);
+        let (cold, cold_operation) = publish(&mut owner, &tree, None, false, 1_000_000);
         let built = decoded_generation(&cold);
         assert!(
             built
@@ -157,7 +208,7 @@ fn sealed_file_evidence_restores_the_built_edges_calls_and_lineage() {
         );
         let scope = CodeIndexGenerationScopeV1::for_snapshot(built.snapshot());
         let restored = store
-            .decode_active(&scope)
+            .decode_active(&scope, &cold_operation)
             .expect("restores")
             .expect("active");
         assert_eq!(restored.edges, built.edges, "{language} cold: edges");
@@ -186,14 +237,15 @@ fn sealed_file_evidence_restores_the_built_edges_calls_and_lineage() {
             .expect("a source file with symbols");
         let mut edited_tree = tree.clone();
         edited_tree[index].1 = format!("\n\n{}", tree[index].1);
-        let edited = publish(&mut owner, &edited_tree, Some(index), true, 1_100_000);
+        let (edited, edited_operation) =
+            publish(&mut owner, &edited_tree, Some(index), true, 1_100_000);
         assert_eq!(
             edited.cold_reason(),
             None,
             "{language}: the edit seals over its parent"
         );
         let restored = store
-            .decode_active(&scope)
+            .decode_active(&scope, &edited_operation)
             .expect("restores")
             .expect("active");
         let continuations = restored
@@ -261,7 +313,7 @@ fn an_edit_reads_and_writes_only_what_it_changes() {
         .iter()
         .position(|(path, _)| path == "src/leaf_000.rs")
         .expect("the edited leaf");
-    let base = publish(&mut owner, &base_tree, None, false, 2_000_000);
+    let (base, _) = publish(&mut owner, &base_tree, None, false, 2_000_000);
     assert_eq!(
         decoded_generation(&base)
             .edges
@@ -271,9 +323,10 @@ fn an_edit_reads_and_writes_only_what_it_changes() {
         LEAVES,
         "every leaf binds its call into the hub"
     );
+    let mut latest_operation = None;
     for (sealed_at, offset) in [(2_100_000, "1000"), (2_200_000, "2000")] {
         store.reads.store(0, Ordering::Relaxed);
-        let edited = publish(
+        let (edited, operation) = publish(
             &mut owner,
             &hub_tree(LEAVES, offset),
             Some(edited_leaf),
@@ -294,11 +347,12 @@ fn an_edit_reads_and_writes_only_what_it_changes() {
             ["src/leaf_000.rs"]
         );
         assert!(written.iter().map(|(_, bytes)| bytes).sum::<usize>() < 4096);
+        latest_operation = Some(operation);
     }
     let scope = CodeIndexGenerationScopeV1::for_snapshot(base.snapshot());
     let restored = store
         .inner
-        .decode_active(&scope)
+        .decode_active(&scope, latest_operation.as_ref().expect("published edit"))
         .expect("restores")
         .expect("active");
     assert_eq!(
@@ -355,7 +409,7 @@ fn a_body_edit_re_resolves_none_of_the_files_sharing_its_names() {
         .iter()
         .position(|(path, _)| path == "src/hub.rs")
         .expect("the edited hub");
-    let base = publish(&mut owner, &base_tree, None, false, 2_000_000);
+    let (base, _) = publish(&mut owner, &base_tree, None, false, 2_000_000);
     let parent = super::partitioned_codec::parse_partitioned_manifest(base.manifest_bytes())
         .expect("sealed manifest");
     let file_segments = parent
@@ -373,7 +427,7 @@ fn a_body_edit_re_resolves_none_of_the_files_sharing_its_names() {
 
     store.read_digests.lock().expect("read log").clear();
     let edited_tree = shared_name_tree(LEAVES, "8");
-    let edited = publish(&mut owner, &edited_tree, Some(hub), true, 2_100_000);
+    let (edited, _) = publish(&mut owner, &edited_tree, Some(hub), true, 2_100_000);
     assert_eq!(
         edited.cold_reason(),
         None,
@@ -400,7 +454,7 @@ fn a_body_edit_re_resolves_none_of_the_files_sharing_its_names() {
     let mut cold =
         CodeIndexProductionOwnerV1::new(worker_config(), WorkerPublicationStore::default())
             .expect("cold owner");
-    let rebuilt = publish(&mut cold, &edited_tree, Some(hub), false, 2_100_000);
+    let (rebuilt, _) = publish(&mut cold, &edited_tree, Some(hub), false, 2_100_000);
     assert_eq!(
         edited.lane_digest(),
         rebuilt.lane_digest(),

@@ -4,7 +4,7 @@ use std::os::unix::fs::MetadataExt;
 use std::path::PathBuf;
 use std::sync::{
     Arc,
-    atomic::{AtomicU64, AtomicUsize, Ordering},
+    atomic::{AtomicUsize, Ordering},
 };
 
 use sha2::{Digest, Sha256};
@@ -15,7 +15,10 @@ use tracing::level_filters::LevelFilter;
 use tracing::span::{Attributes, Id, Record};
 use tracing::{Event, Metadata, Subscriber};
 
-use super::{DaemonCodeIndexPublicationStoreV1, StagedGenerationSegmentsV1};
+use super::{
+    DaemonCodeIndexPublicationStoreV1, PREPARED_SEGMENT_DIGEST_OPENS, StagedGenerationSegmentsV1,
+    TemporaryPayloadPackV1,
+};
 
 struct ReplaceCanonicalDuringComparison {
     canonical: PathBuf,
@@ -171,21 +174,24 @@ fn staged_deduplication_refuses_a_swapped_temporary_before_comparison() {
     let suffix = sha256_hex_suffix(digest.as_str()).expect("canonical hex suffix");
     let canonical = segments.join(format!("segment-{suffix}.json"));
     let mut staged = StagedGenerationSegmentsV1::new();
-    let already_read = AtomicU64::new(0);
-    DaemonCodeIndexPublicationStoreV1::stage_segment(
-        &segments,
-        &temporary_root,
-        &already_read,
-        &digest,
-        bytes,
-        &mut staged,
-    )
-    .expect("real stage with authenticated writer and durability admission");
-    let temporary = staged
-        .pending
-        .get(&canonical)
-        .expect("pending content-addressed segment")
-        .clone();
+    let digest_opens = PREPARED_SEGMENT_DIGEST_OPENS.with(std::cell::Cell::get);
+    let mut pack = TemporaryPayloadPackV1::create(temporary_root.join("payload.tmp"))
+        .expect("real payload writer");
+    pack.append_page(0, &digest, bytes)
+        .expect("append the authenticated payload");
+    assert!(
+        pack.commit(&segments, &temporary_root, &digest, bytes.len() as u64, 1)
+            .expect("durably stage the payload through its original writer")
+    );
+    let (temporary, identity) = pack
+        .authenticated
+        .take()
+        .expect("the real writer must issue its staged inode witness");
+    staged.pending.insert(canonical.clone(), temporary.clone());
+    staged
+        .authenticated_segments
+        .insert(temporary.clone(), identity);
+    pack.attach_to_manifest();
     let original = fs::symlink_metadata(&temporary).expect("authenticated inode");
     fs::write(&canonical, bytes).expect("concurrently named canonical bytes");
     let replacement = temporary_root.join("replacement");
@@ -196,7 +202,11 @@ fn staged_deduplication_refuses_a_swapped_temporary_before_comparison() {
         (original.dev(), original.ino()),
         (changed.dev(), changed.ino())
     );
-    assert_eq!(already_read.load(Ordering::Relaxed), 0);
+    assert_eq!(
+        PREPARED_SEGMENT_DIGEST_OPENS.with(std::cell::Cell::get),
+        digest_opens,
+        "staging authenticates the original writer without opening a canonical payload"
+    );
 
     let observed = Arc::new(AtomicUsize::new(0));
     let swap = ReplacePendingBeforeComparison {

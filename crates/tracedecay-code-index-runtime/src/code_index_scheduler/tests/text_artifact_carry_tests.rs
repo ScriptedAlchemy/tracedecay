@@ -6,10 +6,14 @@ use std::{
 };
 
 use tempfile::TempDir;
+use tracedecay_code_index::production::CodeIndexPublishedGenerationV1;
+use tracedecay_code_index_retention::code_index_generations::DurablePublicationPointerV1;
+use tracedecay_domain::sha256_hex_suffix;
 
 use super::{GitFixture, UNTOUCHED_FILLERS, active_text_artifact_path, published, scheduler};
 use crate::code_index_scheduler::{
     CodeIndexWorktreeSchedulerV1, LatestCompleteCodeIndexV1, SharedCodeIndexBytePoolV1,
+    serving::CodeTextProjectionSlotV1,
 };
 
 const SEGMENTS: &str = "code-generation-segments-v1";
@@ -78,6 +82,29 @@ fn drain_latest_text(latest: &LatestCompleteCodeIndexV1) {
     }
 }
 
+fn assert_parent_carry_started(latest: &LatestCompleteCodeIndexV1) {
+    // The first zero-page wake may carry the parent, but cannot scan source
+    // pages or advance finalization. A cold fallback remains unfinalized.
+    assert!(
+        !latest
+            .advance_text_serving(0)
+            .expect("open the successor's text build without scanning pages"),
+        "the successor still requires finalization"
+    );
+    let control = latest.text_execution_control();
+    let slot = latest.text_projection_build.lock_slot();
+    let CodeTextProjectionSlotV1::Building(build) = &*slot else {
+        panic!("the zero-page wake must retain the successor's builder");
+    };
+    assert!(
+        build
+            .builder
+            .finalization_started(&control)
+            .expect("read the real builder's finalization state"),
+        "the initial zero-page wake must carry the parent instead of building cold"
+    );
+}
+
 /// The bytes of the active generation's published text artifact.
 fn active_artifact(store: &Path) -> Vec<u8> {
     std::fs::read(active_text_artifact_path(store)).expect("read artifact")
@@ -101,6 +128,29 @@ fn segment_files(store: &Path) -> BTreeSet<PathBuf> {
         .collect()
 }
 
+fn active_pack_files(store: &Path) -> BTreeSet<PathBuf> {
+    let pointer: DurablePublicationPointerV1 = serde_json::from_slice(
+        &std::fs::read(store.join("active-code-generation-v1.json")).expect("active pointer"),
+    )
+    .expect("decode active pointer");
+    let manifest = std::fs::read(
+        store
+            .join("code-generations-v1")
+            .join(pointer.generation_file),
+    )
+    .expect("active manifest");
+    CodeIndexPublishedGenerationV1::partitioned_pack_identities(&manifest)
+        .expect("canonical physical pack roster")
+        .into_iter()
+        .map(|identity| {
+            store.join(SEGMENTS).join(format!(
+                "segment-{}.json",
+                sha256_hex_suffix(identity.digest.as_str()).expect("pack digest")
+            ))
+        })
+        .collect()
+}
+
 /// A cold build of the fixture's current tree in a fresh store.
 fn cold_artifact(fixture: &GitFixture) -> Vec<u8> {
     let store = TempDir::new().expect("cold store");
@@ -114,11 +164,10 @@ fn cold_artifact(fixture: &GitFixture) -> Vec<u8> {
     active_artifact(store.path())
 }
 
-/// An edit's text artifact is built from the parent's artifact and only the
-/// edited files' segments: while the successor builds, every segment the
-/// parent generation wrote is out of the store, so a build that decoded an
-/// unchanged file could not finish. What it seals is byte for byte what a
-/// cold build of the same tree seals, through edits that keep the page count
+/// An edit carries the parent's text artifact into a self-contained successor:
+/// while its text build runs, every pack owned only by an ancestor is absent.
+/// What it seals is byte for byte what a cold build of the same tree seals,
+/// through edits that keep the page count
 /// (documents and clones move, pages stay), an edit that spills the edited
 /// file onto a second page (every later page moves forward), one that pulls
 /// it back beside a later edited file staged at the shifted position, and
@@ -143,8 +192,6 @@ fn an_edit_carries_the_parent_text_artifact_byte_identical_to_a_cold_build() {
     let shrunk = "use crate::m05::helper_05;\n\npub fn call_04() -> u64 {\n    helper_05(4)\n}\n";
     let body_edit = module(7, "").replace("wrapping_mul(31)", "wrapping_mul(37)");
     let second_body_edit = module(7, "").replace("wrapping_mul(31)", "wrapping_mul(41)");
-    // Not module(4, "") itself: segments are content-addressed, so restoring
-    // the first generation's text would reuse a segment hidden as the parent's.
     let one_page_04 = module(4, "").replace("wrapping_mul(31)", "wrapping_mul(43)");
     let two_pages_04 = long_module(4, 150);
     let two_pages_02 = long_module(2, 140);
@@ -184,10 +231,16 @@ fn an_edit_carries_the_parent_text_artifact_byte_identical_to_a_cold_build() {
         fixture.commit_all(&format!("edit {round}"));
         published(scheduler.reconcile_now().expect("publish the successor"));
         let successor = scheduler.latest_complete().expect("successor generation");
-        // Retire cached descriptors before changing sealed path identities.
-        // Hidden parent bytes must not remain readable through an open handle.
-        scheduler.publication.retained_segment_reclaimer()()
-            .expect("release segment handles before hiding parent files");
+        // Idle sources own no payload handles. A successor may reuse a whole
+        // identical pack, but cannot depend on any pack owned only by an ancestor.
+        let parent_segments = parent_segments
+            .difference(&active_pack_files(store.path()))
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        assert!(
+            !parent_segments.is_empty(),
+            "the edit replaces a physical pack"
+        );
         for segment in &parent_segments {
             std::fs::rename(
                 segment,
@@ -195,6 +248,7 @@ fn an_edit_carries_the_parent_text_artifact_byte_identical_to_a_cold_build() {
             )
             .expect("hide a parent segment");
         }
+        assert_parent_carry_started(&successor);
         drain_latest_text(&successor);
         drop(successor);
         for segment in &parent_segments {
@@ -229,7 +283,7 @@ fn an_edit_carries_the_parent_text_artifact_byte_identical_to_a_cold_build() {
 type RosterChange<'a> = (Vec<(&'a str, &'a str)>, Vec<&'a str>);
 
 /// Files added and removed shift every later file's ordinal, yet the edit
-/// still carries: with every parent segment out of the store, the successor
+/// still carries: with every ancestor-only pack out of the store, the successor
 /// seals byte for byte what a cold build seals through an added file, a
 /// removed one, a file replaced by its neighbour beside a body edit, a
 /// rename across the roster, and a file added first and removed last.
@@ -276,10 +330,16 @@ fn an_added_or_removed_file_carries_the_parent_text_artifact_byte_identical_to_a
         fixture.commit_all(&format!("roster change {round}"));
         published(scheduler.reconcile_now().expect("publish the successor"));
         let successor = scheduler.latest_complete().expect("successor generation");
-        // Retire cached descriptors before changing sealed path identities.
-        // Hidden parent bytes must not remain readable through an open handle.
-        scheduler.publication.retained_segment_reclaimer()()
-            .expect("release segment handles before hiding parent files");
+        // Idle sources own no payload handles. A successor may reuse a whole
+        // identical pack, but cannot depend on any pack owned only by an ancestor.
+        let parent_segments = parent_segments
+            .difference(&active_pack_files(store.path()))
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        assert!(
+            !parent_segments.is_empty(),
+            "the edit replaces a physical pack"
+        );
         for segment in &parent_segments {
             std::fs::rename(
                 segment,
@@ -287,6 +347,7 @@ fn an_added_or_removed_file_carries_the_parent_text_artifact_byte_identical_to_a
             )
             .expect("hide a parent segment");
         }
+        assert_parent_carry_started(&successor);
         drain_latest_text(&successor);
         drop(successor);
         for segment in &parent_segments {

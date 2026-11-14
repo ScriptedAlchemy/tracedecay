@@ -14,8 +14,8 @@ use crate::lease::ProjectStoreMaintenanceLeaseV1;
 use crate::telemetry::StoreTelemetrySamplingRegistry;
 use tracedecay_code_index_retention::code_index_generations::{
     CodeGenerationRetentionErrorV1, CodeGenerationRetentionModeV1, CodeGenerationRetentionPlanV1,
-    CodeGenerationRetentionReportV1, CodeIndexScopeV1, RetainedSegmentHandleRetirementV1,
-    code_index_scopes, code_index_store_root, execute_code_generation_retention_cancellable,
+    CodeGenerationRetentionReportV1, CodeIndexScopeV1, code_index_scopes, code_index_store_root,
+    execute_code_generation_retention_cancellable,
 };
 use tracedecay_code_index_runtime::code_index_scheduler::CodeIndexSchedulerRegistryV1;
 use tracedecay_domain::CodeGenerationId;
@@ -220,7 +220,6 @@ async fn execute_collection(
     scan_owner_root: &Path,
     observations: &StoreTelemetrySamplingRegistry,
     cancellation: &CancellationToken,
-    retire_cached_segments: Option<RetainedSegmentHandleRetirementV1>,
 ) -> Result<CodeGenerationRetentionReportV1, CodeGenerationRetentionOutcomeV1> {
     // `current_timestamp()` counts seconds; wrapping it in `UtcMicros` stamped
     // every deletion receipt with a seconds value in a micros-typed field
@@ -239,7 +238,6 @@ async fn execute_collection(
             completed_at,
             Some(&execution_pool_root),
             &|| execution_cancellation.is_cancelled(),
-            retire_cached_segments.as_ref(),
         )?;
         scan.lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -469,9 +467,6 @@ pub async fn run_code_generation_retention(
         log_code_generation_retention_degraded(observations, "retention_cancelled");
         return CodeGenerationRetentionOutcomeV1::Failed;
     }
-    let retire_cached_segments = schedulers
-        .retained_segment_reclaimer(lease.project_root())
-        .await;
     let report = match execute_collection(
         &store_root,
         plan,
@@ -480,7 +475,6 @@ pub async fn run_code_generation_retention(
         &layout.data_root,
         observations,
         cancellation,
-        retire_cached_segments,
     )
     .await
     {
@@ -651,7 +645,6 @@ pub async fn run_registered_code_generation_retention(
             }
             continue;
         }
-        let retire_cached_segments = schedulers.retained_segment_reclaimer(&root).await;
         match execute_collection(
             &scope.store_root,
             plan,
@@ -660,7 +653,6 @@ pub async fn run_registered_code_generation_retention(
             &store.data_root,
             observations,
             cancellation,
-            retire_cached_segments,
         )
         .await
         {

@@ -6,13 +6,10 @@
 //! timestamp quantum can share a stamp, so a change time is proof the bytes
 //! are stable only once the clock has left the quantum it was stamped in.
 
-use std::collections::hash_map::RandomState;
 use std::fs::Metadata;
-use std::hash::BuildHasher;
 #[cfg(unix)]
 use std::os::unix::fs::MetadataExt;
 use std::path::Path;
-use std::sync::LazyLock;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 const NANOS_PER_SECOND: i128 = 1_000_000_000;
@@ -120,10 +117,9 @@ impl ChangeStamp {
     fn unvouched() -> Self {
         // The random half keeps samples from different processes apart where
         // an identity is persisted as a digest.
-        static PROCESS: LazyLock<u64> = LazyLock::new(|| RandomState::new().hash_one(0_u8));
         static SAMPLE: AtomicU64 = AtomicU64::new(0);
         let sample = SAMPLE.fetch_add(1, Ordering::Relaxed);
-        Self::Unvouched((u128::from(*PROCESS) << 64) | u128::from(sample))
+        Self::Unvouched((u128::from(crate::process_instance_nonce()) << 64) | u128::from(sample))
     }
 
     #[must_use]

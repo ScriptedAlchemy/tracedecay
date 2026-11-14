@@ -13,6 +13,7 @@ use std::sync::Arc;
 
 use tracedecay_code_extraction::{
     GoMethodSetRowV1, GoMethodSignatureV1, GoTypeTokenV1, GoTypeV1, ImportReexportScopeV1,
+    TypeScriptReceiverV1, TypeScriptTypeRowV1,
 };
 use tracedecay_domain::{
     CanonicalRelationEdgeV1, ChangedCodeChunkV1, CodeSearchChunkV1, ExactTechnicalTermV1,
@@ -24,7 +25,7 @@ use super::{
 };
 use crate::chunks::{
     CodeIndexEdgeAbstentionV1, CodeIndexGoMethodSetRowV1, CodeIndexImportEvidenceV1,
-    CodeIndexUnresolvedReferenceV1, CodeSearchEligibilityV1,
+    CodeIndexTypeScriptTypeRowV1, CodeIndexUnresolvedReferenceV1, CodeSearchEligibilityV1,
 };
 use crate::lineage::{LineageSymbolRecordV1, SymbolLineageCandidateV1};
 use crate::projection::ProjectionPublicationHandoffV1;
@@ -296,6 +297,18 @@ pub(super) fn go_method_set_heap_bytes(row: &CodeIndexGoMethodSetRowV1) -> usize
         GoMethodSetRowV1::GenericInterface
         | GoMethodSetRowV1::EmptyInterface
         | GoMethodSetRowV1::NamedType => 0,
+    };
+    row.occurrence.as_str().len().saturating_add(row_bytes)
+}
+
+pub(super) fn typescript_type_heap_bytes(row: &CodeIndexTypeScriptTypeRowV1) -> usize {
+    let row_bytes = match &row.row {
+        TypeScriptTypeRowV1::InstanceMethod => 0,
+        TypeScriptTypeRowV1::CallableReturn { name, .. } => name.capacity(),
+        TypeScriptTypeRowV1::ReceiverCall { receiver, .. } => match receiver {
+            TypeScriptReceiverV1::Named { name, .. }
+            | TypeScriptReceiverV1::AwaitedFactory { name } => name.capacity(),
+        },
     };
     row.occurrence.as_str().len().saturating_add(row_bytes)
 }
@@ -626,20 +639,7 @@ pub(super) fn staged_resolution_descriptors_bytes(
 fn resolution_index_descriptor_bytes(
     index: &super::resolution_index::PartitionedResolutionIndexDescriptorV1,
 ) -> usize {
-    // Cold index sealing reserves each private page vector at its exact
-    // final page count. The import-alias singleton is inline.
-    let count = index.segments().count();
-    count
-        .saturating_sub(1)
-        .saturating_mul(size_of::<
-            super::resolution_index::PartitionedIndexSegmentDescriptorV1,
-        >())
-        .saturating_add(
-            index
-                .segments()
-                .map(|segment| segment.segment_digest.as_str().len())
-                .sum::<usize>(),
-        )
+    index.retained_heap_bytes()
 }
 
 pub(super) fn generation_evidence_descriptor_bytes(
@@ -745,116 +745,96 @@ fn manifest_heap_bytes(manifest: &tracedecay_domain::CodeGenerationManifestV1) -
         ))
 }
 
-/// Serde's sequence visitors can hold an old vector beside its doubled
-/// replacement. Count inline slots separately from string/byte payloads: the
-/// typed JSON length bounds those payloads and the unescape scratch buffer.
-/// This is a pre-decode bound over this exact manifest, not a JSON multiplier
-/// standing in for a decoded object tree.
-pub(super) fn partitioned_decode_workspace_bytes(
-    generation: &super::partitioned_codec::PartitionedPublishedGenerationRefV1<'_>,
-    json_bytes: usize,
-    string_scratch: usize,
+/// The returned footprint includes the canonical parsed DTO's inline body and
+/// every owned allocation. Borrowed input bytes and any Arc header belong to
+/// its caller, so sharing a parsed owner does not charge the map twice.
+pub(super) fn partitioned_manifest_retained_bytes(
+    generation: &super::partitioned_codec::PartitionedPublishedGenerationV1,
 ) -> usize {
-    fn slots<T>(values: &[T]) -> usize {
-        // Vec's minimum nonzero allocation for these DTO elements is four.
-        if values.is_empty() {
-            0
-        } else {
-            values
-                .len()
-                .max(4)
-                .saturating_mul(3)
-                .saturating_mul(size_of::<T>())
-        }
-    }
-    let snapshot = generation.snapshot;
-    let capability = generation.capability;
-    let index_count = generation
-        .resolution_index
-        .segments()
-        .count()
-        .saturating_sub(1);
-    let inline = slots(&snapshot.files)
-        .saturating_add(slots(&snapshot.sanitization_receipts))
-        .saturating_add(slots(&snapshot.omitted_sources))
-        .saturating_add(
-            snapshot
-                .omitted_sources
-                .iter()
-                .map(|source| {
-                    if source.git_path.is_empty() {
-                        0
-                    } else {
-                        source.git_path.len().max(8).saturating_mul(3)
-                    }
-                })
-                .sum::<usize>(),
-        )
-        .saturating_add(slots(&generation.manifest.grammar_revisions))
-        .saturating_add(slots(&generation.manifest.extractor_revisions))
-        .saturating_add(slots(generation.ignored_source_admissions))
-        .saturating_add(slots(generation.file_segments))
-        .saturating_add(slots(generation.file_evidence))
-        .saturating_add(slots(generation.code_graph_pages))
-        .saturating_add(slots(&generation.generation_evidence.pages))
-        .saturating_add(
-            index_count
-                .max(8)
-                .saturating_mul(3)
-                .saturating_mul(size_of::<
-                    super::resolution_index::PartitionedIndexSegmentDescriptorV1,
-                >()),
-        )
-        .saturating_add(slots(&capability.language_descriptor_revisions))
-        .saturating_add(slots(&capability.available_grains))
-        .saturating_add(slots(&capability.exact_term_kinds))
-        .saturating_add(slots(&capability.supported_languages))
-        .saturating_add(slots(&capability.edge_authority_classes))
-        .saturating_add(slots(&capability.sanitization_receipts));
-    let present = generation.file_segments.len();
-    let validation = present
-        .max(4)
-        .saturating_mul(3)
-        .saturating_mul(size_of::<(usize, &tracedecay_domain::FileOccurrenceId)>())
-        // HashMap rehash can retain the preceding table beside its replacement.
-        .saturating_add(
-            hash_table_bytes::<(usize, &tracedecay_domain::FileOccurrenceId)>(
-                super::helpers::resolution_hash_capacity(present),
-            )
-            .saturating_mul(2),
-        )
-        .saturating_add(btree_bytes(
-            snapshot.files.len(),
-            size_of::<&tracedecay_domain::FileOccurrenceId>(),
-        ))
-        .saturating_add(btree_bytes(snapshot.files.len(), size_of::<&String>()));
-    let cloned_sources = generation
-        .ignored_source_admissions
-        .len()
-        .saturating_mul(size_of::<super::CodeIndexIgnoredSourceAdmissionV1>())
-        .saturating_add(
-            generation
-                .ignored_source_admissions
-                .iter()
-                .map(|source| source.logical_path.len())
-                .sum::<usize>(),
-        )
+    size_of::<super::partitioned_codec::PartitionedPublishedGenerationV1>()
+        .saturating_add(manifest_heap_bytes(&generation.manifest))
+        .saturating_add(snapshot_heap_bytes(&generation.snapshot))
+        .saturating_add(capability_heap_bytes(&generation.capability))
+        .saturating_add(chunk_policy_heap_bytes(&generation.chunk_policy))
         .saturating_add(opt(generation
             .repository_parse_identity
             .tree
             .as_ref()
             .map(|id| id.as_str())))
-        .saturating_add(generation.ignored_source_admissions_digest.as_str().len());
-    // All decoded scalar payloads, then one unescape buffer bounded by the
-    // largest known DTO row. Its geometric growth can overlap old/new buffers.
-    json_bytes
-        .saturating_add(string_scratch.saturating_mul(3))
-        .saturating_add(inline)
-        .saturating_add(validation)
-        .saturating_add(cloned_sources)
-        .saturating_add(ARC_HEADER_BYTES)
-        .saturating_add(size_of::<super::VerifiedSealedTextGenerationMetadataV1>())
-        .saturating_add(71) // The newly computed lane digest survives the parsed descriptors.
+        .saturating_add(generation.ignored_source_admissions_digest.as_str().len())
+        .saturating_add(vec_bytes(
+            &generation.ignored_source_admissions,
+            generation.ignored_source_admissions.capacity(),
+            |source| source.logical_path.capacity(),
+        ))
+        .saturating_add(file_segment_descriptors_bytes(
+            &generation.file_segments,
+            generation.file_segments.capacity(),
+        ))
+        .saturating_add(vec_bytes(
+            &generation.file_evidence,
+            generation.file_evidence.capacity(),
+            |evidence| {
+                evidence
+                    .file_occurrence_id
+                    .as_str()
+                    .len()
+                    .saturating_add(evidence.segment_digest.as_str().len())
+            },
+        ))
+        .saturating_add(vec_bytes(
+            &generation.code_graph_pages,
+            generation.code_graph_pages.capacity(),
+            |page| {
+                page.file_occurrence_id
+                    .as_str()
+                    .len()
+                    .saturating_add(page.logical_path.capacity())
+                    .saturating_add(page.page_digest.as_str().len())
+            },
+        ))
+        .saturating_add(generation_evidence_descriptor_bytes(
+            &generation.generation_evidence,
+        ))
+        .saturating_add(resolution_index_descriptor_bytes(
+            &generation.resolution_index,
+        ))
+        .saturating_add(
+            generation
+                .content_pack
+                .retained_bytes()
+                .saturating_sub(size_of::<super::SealedGenerationContentPackV1>()),
+        )
+}
+
+/// The canonical logical roster is collected before sorting and deduplication.
+/// Admit the collection's growth and every cloned digest before allocation.
+pub(super) fn content_pack_roster_workspace_bytes(
+    files: &[super::partitioned_codec::PartitionedFileSegmentDescriptorV1],
+    evidence: &[super::partitioned_codec::PartitionedFileEvidenceDescriptorV1],
+    graph: &[super::partitioned_codec::PartitionedCodeGraphPageDescriptorV1],
+    resolution: &super::resolution_index::PartitionedResolutionIndexDescriptorV1,
+) -> usize {
+    let (count, digest_bytes) = files
+        .iter()
+        .map(|file| &file.segment_digest)
+        .chain(evidence.iter().map(|file| &file.segment_digest))
+        .chain(graph.iter().map(|page| &page.page_digest))
+        .chain(resolution.segments().map(|segment| &segment.segment_digest))
+        .fold((0_usize, 0_usize), |(count, bytes), digest| {
+            (
+                count.saturating_add(1),
+                bytes.saturating_add(digest.as_str().len()),
+            )
+        });
+    if count == 0 {
+        return 0;
+    }
+    count
+        .max(4)
+        .saturating_mul(3)
+        .saturating_mul(size_of::<super::SealedGenerationSegmentIdentityV1>())
+        .saturating_add(digest_bytes)
 }
 
 pub(super) fn chunk_policy_heap_bytes(policy: &super::ChunkPolicyRevisionSummaryV1) -> usize {
@@ -884,7 +864,7 @@ pub(super) fn compact_metadata_bytes(
         .saturating_add(metadata.ignored_source_admissions_digest().as_str().len())
         .saturating_add(vec_bytes(
             metadata.ignored_source_admissions(),
-            metadata.ignored_source_admissions().len(),
+            metadata.ignored_source_admissions_capacity(),
             |source| source.logical_path.capacity(),
         ))
         .saturating_add(policy_bytes)
@@ -901,6 +881,8 @@ pub(super) fn sealed_publication_bytes(
         .saturating_add(publication.manifest_bytes.len())
         .saturating_add(ARC_HEADER_BYTES)
         .saturating_add(publication.lane_digest.as_str().len())
+        .saturating_add(publication.pack_layout.retained_bytes())
+        .saturating_add(ARC_HEADER_BYTES)
         .saturating_add(compact_metadata_bytes(&publication.metadata, policy_bytes))
         .saturating_add(ARC_HEADER_BYTES)
         .saturating_add(size_of::<super::ConstructionMemoryV1>())
@@ -1029,6 +1011,11 @@ pub(super) fn file_bytes(file: &FileGenerationArtifactsV1) -> usize {
             &artifacts.go_method_sets,
             artifacts.go_method_sets.capacity(),
             go_method_set_heap_bytes,
+        ))
+        .saturating_add(vec_bytes(
+            &artifacts.typescript_types,
+            artifacts.typescript_types.capacity(),
+            typescript_type_heap_bytes,
         ))
         .saturating_add(exact_authority_bytes)
 }

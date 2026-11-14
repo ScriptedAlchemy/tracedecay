@@ -14,8 +14,8 @@ use tracedecay_domain::{
 
 use crate::chunks::{
     CodeFileChunksV1, CodeIndexCallableArityV1, CodeIndexGoMethodSetRowV1,
-    CodeIndexUnresolvedReferenceV1, CodeSearchDocumentV1, CodeSearchEligibilityV1, code_chunk_id,
-    code_file_identity, published_symbol_spans,
+    CodeIndexTypeScriptTypeRowV1, CodeIndexUnresolvedReferenceV1, CodeSearchDocumentV1,
+    CodeSearchEligibilityV1, code_chunk_id, code_file_identity, published_symbol_spans,
 };
 use crate::extract::ExtractionBatchV1;
 use crate::intake::content_digest;
@@ -54,8 +54,11 @@ use super::*;
 /// [`superseded_sealed_generation_revision`], and the generation is rebuilt
 /// from source rather than migrated. Revisions through eight also predate
 /// required clone-body source rows, so the rebuild keeps them from reading as
-/// successful empty clone evidence.
-pub const SEALED_GENERATION_FORMAT_REVISION_V1: u32 = 22;
+/// successful empty clone evidence. Revision 23 requires the TypeScript
+/// receiver facts used by both full and sparse generation resolution.
+/// Revision 24 stores all logical payloads in the two self-contained pack
+/// roles authenticated by the manifest's extent map.
+pub const SEALED_GENERATION_FORMAT_REVISION_V1: u32 = 24;
 
 /// The typed refusal for a sealed generation this build no longer reads.
 pub fn superseded_sealed_generation_revision(revision: u32) -> CodeIndexProductionErrorV1 {
@@ -182,6 +185,7 @@ struct PersistedFileIndexArtifactsRefV2<'a> {
     callable_arities: &'a [CodeIndexCallableArityV1],
     #[serde(skip_serializing_if = "<[_]>::is_empty")]
     go_method_sets: &'a [CodeIndexGoMethodSetRowV1],
+    typescript_types: &'a [CodeIndexTypeScriptTypeRowV1],
 }
 
 #[derive(Deserialize)]
@@ -199,6 +203,7 @@ struct PersistedFileIndexArtifactsV2 {
     callable_arities: Vec<CodeIndexCallableArityV1>,
     #[serde(default)]
     go_method_sets: Vec<CodeIndexGoMethodSetRowV1>,
+    typescript_types: Vec<CodeIndexTypeScriptTypeRowV1>,
 }
 
 #[derive(Serialize)]
@@ -812,6 +817,7 @@ impl<'a> PersistedFileGenerationArtifactsRefV2<'a> {
                 unresolved_references: &artifacts.unresolved_references,
                 callable_arities: &artifacts.callable_arities,
                 go_method_sets: &artifacts.go_method_sets,
+                typescript_types: &artifacts.typescript_types,
             },
         })
     }
@@ -1061,6 +1067,7 @@ impl PersistedFileGenerationArtifactsV2 {
                 unresolved_references: artifacts.unresolved_references,
                 callable_arities: artifacts.callable_arities,
                 go_method_sets: artifacts.go_method_sets,
+                typescript_types: artifacts.typescript_types,
             },
         })
     }

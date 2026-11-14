@@ -4,8 +4,6 @@ use std::fs::{File, OpenOptions};
 #[cfg(unix)]
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
-#[cfg(unix)]
-use std::sync::{Mutex, MutexGuard, TryLockError};
 use std::time::Instant;
 
 use tracedecay_private_fs::FileLease;
@@ -51,121 +49,19 @@ impl CodeGenerationStoreLockV1 {
     }
 }
 
-/// Reuses the same lock-file descriptor for successive bounded historical reads.
-///
-/// Every read still obtains a fresh kernel shared lock. Cancellable callers
-/// probe the descriptor mutex; synchronous sealed reads can serialize on it.
-/// The pathname and opened inode are authenticated before and after locking;
-/// a replaced lock authority must never silently authorize an old inode.
 #[cfg(unix)]
-pub struct CachedCodeGenerationStoreReadLockV1 {
-    store_root: PathBuf,
-    file: Mutex<Option<File>>,
-}
-
-#[cfg(unix)]
-pub struct CachedCodeGenerationStoreReadGuardV1<'a> {
-    file: MutexGuard<'a, Option<File>>,
-}
-
-#[cfg(unix)]
-impl Drop for CachedCodeGenerationStoreReadGuardV1<'_> {
-    fn drop(&mut self) {
-        if let Some(file) = self.file.as_ref()
-            && let Err(error) = file.unlock()
-        {
-            tracing::warn!(lease = CODE_GENERATION_LEASE_LABEL, %error, "cached read lock release failed");
-        }
-    }
-}
-
-#[cfg(unix)]
-impl CachedCodeGenerationStoreReadLockV1 {
-    pub fn new(store_root: &Path) -> Self {
-        Self {
-            store_root: store_root.to_path_buf(),
-            file: Mutex::new(None),
-        }
-    }
-
-    fn verify_named_inode(file: &File, path: &Path) -> Result<(), CodeGenerationRetentionErrorV1> {
-        let opened = file.metadata().map_err(storage)?;
-        // A symlink to the retired inode is not the original lock authority.
-        // lstat authenticates the directory entry without another open().
-        let named = std::fs::symlink_metadata(path).map_err(super::deferred_if_absent)?;
-        if !named.is_file() || (opened.dev(), opened.ino()) != (named.dev(), named.ino()) {
-            return Err(CodeGenerationRetentionErrorV1::UnsafeState(
-                "generation-store lock pathname no longer names the opened inode".to_owned(),
-            ));
-        }
-        Ok(())
-    }
-
-    pub fn try_acquire(
-        &self,
-    ) -> Result<Option<CachedCodeGenerationStoreReadGuardV1<'_>>, CodeGenerationRetentionErrorV1>
+fn verify_named_lock_inode(file: &File, path: &Path) -> Result<(), CodeGenerationRetentionErrorV1> {
+    let opened = file.metadata().map_err(storage)?;
+    let named = std::fs::symlink_metadata(path).map_err(super::deferred_if_absent)?;
+    if !opened.is_file()
+        || !named.file_type().is_file()
+        || (opened.dev(), opened.ino()) != (named.dev(), named.ino())
     {
-        let cached = match self.file.try_lock() {
-            Ok(guard) => guard,
-            Err(TryLockError::WouldBlock) => return Ok(None),
-            Err(TryLockError::Poisoned(_)) => {
-                return Err(CodeGenerationRetentionErrorV1::UnsafeState(
-                    "cached generation-store read lock is poisoned".to_owned(),
-                ));
-            }
-        };
-        self.try_acquire_cached(cached)
+        return Err(CodeGenerationRetentionErrorV1::UnsafeState(
+            "generation-store lock pathname no longer names the opened inode".to_owned(),
+        ));
     }
-
-    /// Wait for another bounded reader of this descriptor, then try the store
-    /// lease without waiting for an exclusive writer. Sealed build workers
-    /// already serialize segment cache access and must not mistake a sibling
-    /// read for a publication conflict.
-    pub fn try_acquire_serialized(
-        &self,
-    ) -> Result<Option<CachedCodeGenerationStoreReadGuardV1<'_>>, CodeGenerationRetentionErrorV1>
-    {
-        let cached = self.file.lock().map_err(|_| {
-            CodeGenerationRetentionErrorV1::UnsafeState(
-                "cached generation-store read lock is poisoned".to_owned(),
-            )
-        })?;
-        self.try_acquire_cached(cached)
-    }
-
-    fn try_acquire_cached<'a>(
-        &self,
-        mut cached: MutexGuard<'a, Option<File>>,
-    ) -> Result<Option<CachedCodeGenerationStoreReadGuardV1<'a>>, CodeGenerationRetentionErrorV1>
-    {
-        let root = canonical_store_root(&self.store_root)?;
-        let path = root.join(STORE_LOCK_FILE);
-        if cached.is_none() {
-            *cached = Some(open_lock_file(&path)?);
-        }
-        let Some(file) = cached.as_ref() else {
-            return Err(CodeGenerationRetentionErrorV1::UnsafeState(
-                "cached generation-store lock was not initialized".to_owned(),
-            ));
-        };
-        Self::verify_named_inode(file, &path)?;
-        match file.try_lock_shared().map_err(std::io::Error::from) {
-            Ok(()) => {
-                let lease = CachedCodeGenerationStoreReadGuardV1 { file: cached };
-                // Recheck after kernel admission, before any pointer/segment read.
-                // On an error the guard's Drop explicitly unlocks the descriptor.
-                let Some(file) = lease.file.as_ref() else {
-                    return Err(CodeGenerationRetentionErrorV1::UnsafeState(
-                        "cached generation-store lock disappeared".to_owned(),
-                    ));
-                };
-                Self::verify_named_inode(file, &path)?;
-                Ok(Some(lease))
-            }
-            Err(error) if tracedecay_private_fs::is_lock_contended(&error) => Ok(None),
-            Err(error) => Err(storage(error)),
-        }
-    }
+    Ok(())
 }
 
 pub fn acquire_code_generation_store_lock(
@@ -205,14 +101,23 @@ pub fn try_acquire_code_generation_store_read_lock(
         fence => fence,
     };
     let store_root = canonical_store_root(store_root)?;
-    let lock = open_lock_file(&store_root.join(STORE_LOCK_FILE))?;
+    let path = store_root.join(STORE_LOCK_FILE);
+    let lock = open_lock_file(&path)?;
+    #[cfg(unix)]
+    verify_named_lock_inode(&lock, &path)?;
     match lock.try_lock_shared().map_err(std::io::Error::from) {
-        Ok(()) => Ok(Some(CodeGenerationStoreLockV1 {
-            _file: FileLease::held(lock, CODE_GENERATION_LEASE_LABEL),
-            store_root,
-            generation_store: true,
-            shared: true,
-        })),
+        Ok(()) => {
+            // The operation owns this descriptor until its payload handles
+            // are dropped. Authenticate the named authority after admission.
+            #[cfg(unix)]
+            verify_named_lock_inode(&lock, &path)?;
+            Ok(Some(CodeGenerationStoreLockV1 {
+                _file: FileLease::held(lock, CODE_GENERATION_LEASE_LABEL),
+                store_root,
+                generation_store: true,
+                shared: true,
+            }))
+        }
         Err(error) if tracedecay_private_fs::is_lock_contended(&error) => Ok(None),
         Err(error) => Err(storage(error)),
     }
@@ -526,111 +431,61 @@ fn open_lock_file(path: &Path) -> Result<File, CodeGenerationRetentionErrorV1> {
 }
 
 #[cfg(all(test, unix))]
-mod cached_read_lock_tests {
-    use super::*;
+mod read_lock_tests {
+    use super::{
+        STORE_LOCK_FILE, try_acquire_code_generation_store_lock,
+        try_acquire_code_generation_store_read_lock,
+    };
+    use crate::code_index_generations::CodeGenerationRetentionErrorV1;
 
     #[test]
-    fn cached_reader_keeps_exclusive_fencing_and_refuses_replaced_lock_file() {
+    fn operation_readers_fence_writers_and_refuse_a_symlink_lock_authority() {
         let store = tempfile::tempdir().expect("isolated generation-store root");
-        let cached = CachedCodeGenerationStoreReadLockV1::new(store.path());
-
-        let read = cached
-            .try_acquire()
-            .expect("first shared kernel lock")
-            .expect("uncontended shared lease");
+        let first = try_acquire_code_generation_store_read_lock(store.path())
+            .unwrap()
+            .expect("first shared read pass");
+        let second = try_acquire_code_generation_store_read_lock(store.path())
+            .unwrap()
+            .expect("independent shared read pass");
         assert!(
             try_acquire_code_generation_store_lock(store.path())
-                .expect("probe a real exclusive kernel lock")
-                .is_none(),
-            "a writer must not enter a protected historical page read"
+                .unwrap()
+                .is_none()
         );
+        drop(first);
         assert!(
-            cached
-                .try_acquire()
-                .expect("second in-process probe")
-                .is_none(),
-            "the single descriptor must not be concurrently unlocked by another reader"
+            try_acquire_code_generation_store_lock(store.path())
+                .unwrap()
+                .is_none()
         );
-        drop(read);
-
+        drop(second);
         let writer = try_acquire_code_generation_store_lock(store.path())
-            .expect("exclusive acquisition after reader release")
-            .expect("read guard must explicitly unlock");
+            .unwrap()
+            .expect("all read passes released");
         assert!(
-            cached
-                .try_acquire()
-                .expect("shared probe under writer")
-                .is_none(),
-            "a real exclusive lock must prevent a cached shared lease"
+            try_acquire_code_generation_store_read_lock(store.path())
+                .unwrap()
+                .is_none()
         );
         drop(writer);
-        drop(
-            cached
-                .try_acquire()
-                .expect("reader recovers from write lock")
-                .expect("shared lease after exclusive release"),
-        );
 
         let path = store.path().join(STORE_LOCK_FILE);
-        let original = std::fs::metadata(&path).expect("cached lock inode");
         let retired = store.path().join("retired-lock-inode");
-        std::fs::rename(&path, &retired)
-            .expect("replace the lock pathname without closing the original inode");
-        std::fs::File::create(&path).expect("different lock file at the same pathname");
-        let replacement = std::fs::metadata(&path).expect("new lock inode");
-        assert_ne!(
-            (original.dev(), original.ino()),
-            (replacement.dev(), replacement.ino()),
-            "replacement must be a different real inode"
-        );
-        assert!(
-            matches!(
-                cached.try_acquire(),
-                Err(CodeGenerationRetentionErrorV1::UnsafeState(_))
-            ),
-            "a cached descriptor must not lock a retired inode to authorize a new scope"
-        );
-
-        // A symlink back to the retired inode has the same dev/ino when
-        // followed. The cached reader must still refuse this replacement:
-        // verifying metadata(path) would wrongly accept it.
-        std::fs::remove_file(&path).expect("remove replacement lock inode");
-        std::os::unix::fs::symlink(&retired, &path)
-            .expect("replace the lock with an alias of the retired inode");
-        let followed = std::fs::metadata(&path).expect("follow symlink as positive control");
-        assert_eq!(
-            (followed.dev(), followed.ino()),
-            (original.dev(), original.ino()),
-            "the symlink must resolve to exactly the still-open cached inode"
-        );
-        assert!(
-            std::fs::symlink_metadata(&path)
-                .expect("inspect replacement type")
-                .file_type()
-                .is_symlink(),
-            "the replacement must be a real symlink"
-        );
-        assert!(
-            matches!(
-                cached.try_acquire(),
-                Err(CodeGenerationRetentionErrorV1::UnsafeState(_))
-            ),
-            "a lock-file symlink must not authorize a retired cached inode"
-        );
-
-        // Recovery through the original pathname must not require another
-        // cache entry or skip the real shared kernel-lock acquisition.
-        std::fs::remove_file(&path).expect("remove lock symlink");
-        std::fs::rename(&retired, &path).expect("restore exact original lock inode");
-        let read = cached
-            .try_acquire()
-            .expect("recheck restored original lock")
-            .expect("reacquire real shared kernel lock");
+        std::fs::rename(&path, &retired).unwrap();
+        std::os::unix::fs::symlink(&retired, &path).unwrap();
+        assert!(matches!(
+            try_acquire_code_generation_store_read_lock(store.path()),
+            Err(CodeGenerationRetentionErrorV1::UnsafeState(_))
+        ));
+        std::fs::remove_file(&path).unwrap();
+        std::fs::rename(&retired, &path).unwrap();
+        let read = try_acquire_code_generation_store_read_lock(store.path())
+            .unwrap()
+            .expect("restored named authority");
         assert!(
             try_acquire_code_generation_store_lock(store.path())
-                .expect("probe exclusive lock after recovery")
-                .is_none(),
-            "restored cached read must still fence exclusive writers"
+                .unwrap()
+                .is_none()
         );
         drop(read);
     }

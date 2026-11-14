@@ -12,6 +12,7 @@ use crate::{
 };
 
 use super::partitioned_codec::PartitionedLexicalFileSourceV1;
+use super::resident_bytes::{ARC_HEADER_BYTES, chunk_policy_heap_bytes, compact_metadata_bytes};
 use super::{FileGenerationArtifactsV1, *};
 
 const PAGE_DIGEST_DOMAIN: &[u8] = b"tracedecay.sealed-lexical-page.v1\0";
@@ -1252,6 +1253,12 @@ pub(super) struct SealedGenerationSourcesV1 {
 }
 
 impl VerifiedSealedTextGenerationMetadataV1 {
+    /// The value and its owned allocations, excluding an enclosing Arc header.
+    pub fn retained_bytes(&self) -> usize {
+        compact_metadata_bytes(self, chunk_policy_heap_bytes(&self.chunk_policy))
+            .saturating_sub(ARC_HEADER_BYTES)
+    }
+
     pub fn from_published_generation(generation: &CodeIndexPublishedGenerationV1) -> Self {
         Self {
             manifest: generation.manifest().clone(),
@@ -1311,6 +1318,10 @@ impl VerifiedSealedTextGenerationMetadataV1 {
 
     pub fn ignored_source_admissions(&self) -> &[CodeIndexIgnoredSourceAdmissionV1] {
         &self.sources.ignored_source_admissions
+    }
+
+    pub(super) fn ignored_source_admissions_capacity(&self) -> usize {
+        self.sources.ignored_source_admissions.capacity()
     }
 
     pub fn ignored_source_admissions_digest(&self) -> &ManifestDigest {
@@ -1383,7 +1394,7 @@ impl VerifiedSealedLexicalPageSourceV1 {
         statistics: CodeIndexGenerationStatisticsV1,
         chunk_policy: ChunkPolicyRevisionSummaryV1,
         sources: SealedGenerationSourcesV1,
-        source: PartitionedLexicalFileSourceV1,
+        mut source: PartitionedLexicalFileSourceV1,
         source_state_digest: ManifestDigest,
         maximum_page_chunks: usize,
         maximum_page_bytes: usize,
@@ -1393,6 +1404,7 @@ impl VerifiedSealedLexicalPageSourceV1 {
                 "sealed lexical page bounds must be non-zero".to_owned(),
             ));
         }
+        let canonical_scratch = ConstructionCanonicalScratchV1;
         let metadata = VerifiedSealedTextGenerationMetadataV1::from_partitioned_manifest(
             manifest,
             snapshot,
@@ -1416,6 +1428,8 @@ impl VerifiedSealedLexicalPageSourceV1 {
         })?;
         let maximum_file_bytes = source.maximum_file_bytes();
         let cursor = VerifiedSealedLexicalCursorV1::initial(source_state_digest.clone(), 0)?;
+        drop(canonical_scratch);
+        source.retain_pack_layout()?;
         Ok(Self {
             file_count,
             first_file_offset: 0,
@@ -1433,6 +1447,16 @@ impl VerifiedSealedLexicalPageSourceV1 {
             admitted_window: BTreeMap::new(),
             file_source: source,
         })
+    }
+
+    /// Acquire payload handles only for the active caller operation. Dropping
+    /// this pass releases its storage admission while this source keeps only
+    /// metadata, the cursor, and already-admitted decoded pages.
+    pub fn begin_read_pass(
+        &self,
+        control: &dyn CodeIndexExecutionControlV1,
+    ) -> Result<Box<SealedGenerationPackReadPassV1>, CodeIndexProductionErrorV1> {
+        self.file_source.begin_read_pass(control)
     }
 
     pub fn metadata(&self) -> &VerifiedSealedTextGenerationMetadataV1 {
@@ -1510,6 +1534,7 @@ impl VerifiedSealedLexicalPageSourceV1 {
         first_page_ordinal: u64,
         first_chunk: u64,
         control: &dyn CodeIndexExecutionControlV1,
+        read_pack: &mut SealedGenerationPackReadPassV1,
     ) -> Result<Vec<VerifiedSealedLexicalPageV1>, CodeIndexProductionErrorV1> {
         if file_ordinal >= self.file_count {
             return Err(CodeIndexProductionErrorV1::Contract(
@@ -1522,7 +1547,7 @@ impl VerifiedSealedLexicalPageSourceV1 {
         cursor.next_page_ordinal = first_page_ordinal;
         cursor.emitted_chunks = first_chunk;
         self.admitted_window.clear();
-        self.admit_files(file_ordinal, 1, control)?;
+        self.admit_files(file_ordinal, 1, control, read_pack)?;
         let admitted = self.admitted_arc(file_ordinal)?;
         let mut pages = Vec::new();
         if !(admitted.chunks.is_empty()
@@ -1530,7 +1555,7 @@ impl VerifiedSealedLexicalPageSourceV1 {
             && admitted.clone_bodies.is_empty())
         {
             while cursor.next_file_ordinal == file_ordinal {
-                match self.stage_next_page_at(&cursor, file_ordinal + 1, control)? {
+                match self.stage_next_page_at(&cursor, file_ordinal + 1, control, read_pack)? {
                     StagedSealedLexicalPageReadV1::Page(staged) => {
                         cursor = staged.cursor;
                         pages.push(staged.page);
@@ -1549,8 +1574,9 @@ impl VerifiedSealedLexicalPageSourceV1 {
         &mut self,
         cursor: &VerifiedSealedLexicalCursorV1,
         control: &dyn CodeIndexExecutionControlV1,
+        read_pack: &mut SealedGenerationPackReadPassV1,
     ) -> Result<(), CodeIndexProductionErrorV1> {
-        self.restore_cursor_classified(cursor, control)
+        self.restore_cursor_classified(cursor, control, read_pack)
             .map_err(VerifiedSealedLexicalCursorRestoreErrorV1::into_production_error)
     }
 
@@ -1561,6 +1587,7 @@ impl VerifiedSealedLexicalPageSourceV1 {
         &mut self,
         cursor: &VerifiedSealedLexicalCursorV1,
         control: &dyn CodeIndexExecutionControlV1,
+        read_pack: &mut SealedGenerationPackReadPassV1,
     ) -> Result<(), VerifiedSealedLexicalCursorRestoreErrorV1> {
         let production = VerifiedSealedLexicalCursorRestoreErrorV1::Production;
         checkpoint(control).map_err(production)?;
@@ -1597,7 +1624,7 @@ impl VerifiedSealedLexicalPageSourceV1 {
                     ),
                 ));
             }
-            self.ensure_admitted_file(cursor.next_file_offset, control)
+            self.ensure_admitted_file(cursor.next_file_offset, control, read_pack)
                 .map_err(production)?;
             let admitted = self
                 .admitted_arc(cursor.next_file_offset)
@@ -1708,6 +1735,13 @@ impl VerifiedSealedLexicalPageSourceV1 {
             .saturating_add(self.maximum_page_bytes)
     }
 
+    /// The new physical map already has a source-owned reservation. Subtract
+    /// only this amount from an additional staging allowance; the remaining
+    /// descriptors, offsets, prefetch, and page bytes still need their owner.
+    pub fn admitted_pack_layout_bytes(&self) -> usize {
+        self.file_source.admitted_pack_layout_bytes()
+    }
+
     /// Halve the record bound used to mint the next page after a downstream
     /// batch authority refuses the current page. The source cursor is not
     /// advanced until the downstream callback accepts a page, so tightening
@@ -1749,8 +1783,11 @@ impl VerifiedSealedLexicalPageSourceV1 {
     pub fn next_page(
         &mut self,
         control: &dyn CodeIndexExecutionControlV1,
+        read_pack: &mut SealedGenerationPackReadPassV1,
     ) -> Result<VerifiedSealedLexicalPageReadV1, CodeIndexProductionErrorV1> {
-        match self.next_page_if(control, |_| Ok::<(), std::convert::Infallible>(()))? {
+        match self.next_page_if(control, read_pack, |_| {
+            Ok::<(), std::convert::Infallible>(())
+        })? {
             Ok(read) => Ok(read),
             Err(never) => match never {},
         }
@@ -1764,10 +1801,11 @@ impl VerifiedSealedLexicalPageSourceV1 {
     pub fn next_page_if<E>(
         &mut self,
         control: &dyn CodeIndexExecutionControlV1,
+        read_pack: &mut SealedGenerationPackReadPassV1,
         admit: impl FnOnce(&VerifiedSealedLexicalPageV1) -> Result<(), E>,
     ) -> Result<Result<VerifiedSealedLexicalPageReadV1, E>, CodeIndexProductionErrorV1> {
         let cursor = self.cursor.clone();
-        match self.stage_next_page_at(&cursor, self.file_count, control)? {
+        match self.stage_next_page_at(&cursor, self.file_count, control, read_pack)? {
             StagedSealedLexicalPageReadV1::Page(staged) => {
                 if let Err(error) = admit(&staged.page) {
                     return Ok(Err(error));
@@ -1797,6 +1835,7 @@ impl VerifiedSealedLexicalPageSourceV1 {
     pub fn next_page_batch_if<E>(
         &mut self,
         control: &dyn CodeIndexExecutionControlV1,
+        read_pack: &mut SealedGenerationPackReadPassV1,
         bounds: VerifiedSealedLexicalPageBatchBoundsV1,
         admit: impl FnOnce(&[VerifiedSealedLexicalPageV1]) -> Result<NonZeroUsize, E>,
     ) -> Result<Result<VerifiedSealedLexicalPageBatchReadV1, E>, CodeIndexProductionErrorV1> {
@@ -1833,7 +1872,12 @@ impl VerifiedSealedLexicalPageSourceV1 {
                     let mut retained_bytes = retained_page_slots;
                     let mut completion = None;
                     while pages.len() < bounds.maximum_pages() {
-                        match self.stage_next_page_at(&working_cursor, self.file_count, control)? {
+                        match self.stage_next_page_at(
+                            &working_cursor,
+                            self.file_count,
+                            control,
+                            read_pack,
+                        )? {
                             StagedSealedLexicalPageReadV1::Page(staged) => {
                                 let next_retained_bytes = retained_bytes
                                     .checked_add(staged.page.retained_owned_bytes())
@@ -1904,6 +1948,7 @@ impl VerifiedSealedLexicalPageSourceV1 {
         previous_cursor: &VerifiedSealedLexicalCursorV1,
         files_end: u64,
         control: &dyn CodeIndexExecutionControlV1,
+        read_pack: &mut SealedGenerationPackReadPassV1,
     ) -> Result<StagedSealedLexicalPageReadV1, CodeIndexProductionErrorV1> {
         checkpoint(control)?;
         let mut cursor = previous_cursor.clone();
@@ -1920,7 +1965,7 @@ impl VerifiedSealedLexicalPageSourceV1 {
 
         while cursor.next_file_ordinal < files_end {
             checkpoint(control)?;
-            self.ensure_admitted_file(cursor.next_file_offset, control)?;
+            self.ensure_admitted_file(cursor.next_file_offset, control, read_pack)?;
             let admitted = self.admitted_arc(cursor.next_file_offset)?;
             let mut chunk_ordinal = usize::try_from(cursor.next_chunk_ordinal).map_err(|_| {
                 CodeIndexProductionErrorV1::Contract(
@@ -2214,6 +2259,7 @@ impl VerifiedSealedLexicalPageSourceV1 {
         &mut self,
         file_offset: u64,
         control: &dyn CodeIndexExecutionControlV1,
+        read_pack: &mut SealedGenerationPackReadPassV1,
     ) -> Result<(), CodeIndexProductionErrorV1> {
         if self.admitted_window.contains_key(&file_offset) {
             return Ok(());
@@ -2222,13 +2268,14 @@ impl VerifiedSealedLexicalPageSourceV1 {
         // accepted only up to a prefix restages them on its retry.
         let accepted = self.cursor.next_file_offset;
         self.admitted_window.retain(|offset, _| *offset >= accepted);
-        self.fill_admitted_window(file_offset, control)
+        self.fill_admitted_window(file_offset, control, read_pack)
     }
 
     fn fill_admitted_window(
         &mut self,
         file_offset: u64,
         control: &dyn CodeIndexExecutionControlV1,
+        read_pack: &mut SealedGenerationPackReadPassV1,
     ) -> Result<(), CodeIndexProductionErrorV1> {
         self.admit_files(
             file_offset,
@@ -2236,6 +2283,7 @@ impl VerifiedSealedLexicalPageSourceV1 {
                 .max(1)
                 .saturating_mul(LEXICAL_DECODE_WINDOW_FILES_PER_WORKER_V1),
             control,
+            read_pack,
         )
     }
 
@@ -2249,6 +2297,7 @@ impl VerifiedSealedLexicalPageSourceV1 {
         file_offset: u64,
         maximum_files: usize,
         control: &dyn CodeIndexExecutionControlV1,
+        read_pack: &mut SealedGenerationPackReadPassV1,
     ) -> Result<(), CodeIndexProductionErrorV1> {
         let snapshot_digest = self.metadata.manifest().snapshot_digest.clone();
         let start = self.file_range_index(file_offset)?;
@@ -2257,6 +2306,7 @@ impl VerifiedSealedLexicalPageSourceV1 {
             maximum_files,
             LEXICAL_FILE_PREFETCH_BYTES_V1,
             control,
+            read_pack,
         )?;
         let inputs = files.into_iter().enumerate().collect::<Vec<_>>();
         let admitted = collect_source_files_bounded_ordered(

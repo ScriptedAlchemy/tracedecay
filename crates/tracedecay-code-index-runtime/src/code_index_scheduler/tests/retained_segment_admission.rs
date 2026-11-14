@@ -1,37 +1,20 @@
-//! Failed first reads must not discard unrelated authenticated segment handles.
-use std::collections::VecDeque;
+//! A refused read cannot discard another operation's authenticated pack handles.
+use super::{GenerationPackReadPassV1, StagedGenerationSegmentsV1, TemporaryPayloadPackV1};
+#[cfg(target_os = "linux")]
+use notify::{RecommendedWatcher, Watcher};
+use sha2::{Digest, Sha256};
 use std::fs;
 #[cfg(target_os = "linux")]
 use std::fs::File;
-use std::os::fd::{AsRawFd, RawFd};
-#[cfg(target_os = "linux")]
 use std::path::Path;
-use std::path::PathBuf;
-use std::sync::atomic::AtomicU64;
 #[cfg(target_os = "linux")]
 use std::sync::mpsc::{self, Receiver};
 #[cfg(target_os = "linux")]
 use std::time::Duration;
-
-#[cfg(target_os = "linux")]
-use notify::{RecommendedWatcher, Watcher};
-use sha2::{Digest, Sha256};
 use tracedecay_code_index::production::{
-    CodeIndexProductionErrorV1, SealedGenerationSegmentReadV1,
+    CodeIndexProductionErrorV1, SealedGenerationSegmentIdentityV1, SealedGenerationSegmentReadV1,
 };
 use tracedecay_domain::{ManifestDigest, sha256_hex_suffix};
-
-use super::{
-    DaemonCodeIndexPublicationStoreV1, MAX_STAGED_SEGMENT_READ_HANDLES, PinnedPreparationSegmentV1,
-    StagedGenerationSegmentsV1,
-};
-
-fn cache_handles(cache: &VecDeque<PinnedPreparationSegmentV1>) -> Vec<(PathBuf, RawFd)> {
-    cache
-        .iter()
-        .map(|entry| (entry.path.clone(), entry.segment.file.as_raw_fd()))
-        .collect()
-}
 
 #[cfg(target_os = "linux")]
 struct OpenObserver {
@@ -70,192 +53,189 @@ impl OpenObserver {
     }
 }
 
-#[test]
-fn retained_failed_first_read_preserves_healthy_handles_and_recovers() {
-    let root = tempfile::tempdir().expect("isolated segment store");
-    let segments = root.path().join("segments");
-    fs::create_dir(&segments).expect("canonical segment directory");
-    let staging = tempfile::tempdir_in(root.path()).expect("private staging directory");
-    let mut staged = StagedGenerationSegmentsV1::new();
-    let bytes: Vec<Vec<u8>> = (0..=MAX_STAGED_SEGMENT_READ_HANDLES)
-        .map(|index| format!("nonempty retained segment {index:04}: exact bytes").into_bytes())
-        .collect();
-    let digests: Vec<ManifestDigest> = bytes
-        .iter()
-        .map(|bytes| {
-            ManifestDigest::from_sha256_bytes(&Sha256::digest(bytes)).expect("segment digest")
-        })
-        .collect();
-    let paths: Vec<PathBuf> = digests
-        .iter()
-        .map(|digest| {
-            segments.join(format!(
-                "segment-{}.json",
-                sha256_hex_suffix(digest.as_str()).expect("canonical digest suffix")
-            ))
-        })
-        .collect();
-    let existing_bytes = AtomicU64::new(0);
-    for (digest, bytes) in digests.iter().zip(&bytes) {
-        DaemonCodeIndexPublicationStoreV1::stage_segment(
-            &segments,
-            staging.path(),
-            &existing_bytes,
-            digest,
-            bytes,
-            &mut staged,
-        )
-        .expect("stage through the production writer");
-    }
-    staged
-        .publish()
-        .expect("durably publish actual segment files");
-    drop(staged);
-
-    let candidate = MAX_STAGED_SEGMENT_READ_HANDLES;
-    let mut damaged = bytes[candidate].clone();
-    damaged[0] ^= 1;
-    fs::write(&paths[candidate], &damaged).expect("corrupt the disposable cold candidate");
-    assert_eq!(damaged.len(), bytes[candidate].len());
-    assert_ne!(
-        DaemonCodeIndexPublicationStoreV1::state_digest(&damaged),
-        digests[candidate].as_str()
+fn publish_pack(
+    root: &Path,
+    staging: &Path,
+    ordinal: usize,
+    bytes: &[u8],
+) -> SealedGenerationSegmentIdentityV1 {
+    let digest = ManifestDigest::from_sha256_bytes(&Sha256::digest(bytes)).expect("pack digest");
+    let mut pack = TemporaryPayloadPackV1::create(staging.join(format!("pack-{ordinal}.tmp")))
+        .expect("create actual pack writer");
+    pack.append_page(0, &digest, bytes)
+        .expect("append exact pack bytes");
+    assert!(
+        pack.commit(root, staging, &digest, bytes.len() as u64, 1)
+            .expect("durably stage through the production writer")
     );
+    let (temporary, identity) = pack.authenticated.take().expect("original writer witness");
+    let canonical = root.join(format!(
+        "segment-{}.json",
+        sha256_hex_suffix(digest.as_str()).expect("pack digest suffix")
+    ));
+    let mut pending = StagedGenerationSegmentsV1::new();
+    pending.pending.insert(canonical, temporary.clone());
+    pending.authenticated_segments.insert(temporary, identity);
+    pending
+        .publish()
+        .expect("publish the authenticated immutable pack");
+    pack.attach_to_manifest();
+    SealedGenerationSegmentIdentityV1 {
+        digest,
+        size_bytes: bytes.len() as u64,
+    }
+}
 
+#[test]
+fn retained_failed_read_preserves_other_operation_handles_and_recovers() {
+    let root = tempfile::tempdir().expect("isolated pack store");
+    let segments = root.path().join("segments");
+    fs::create_dir(&segments).expect("canonical pack directory");
+    let staging = tempfile::tempdir_in(root.path()).expect("private staging directory");
+    let bytes: Vec<Vec<u8>> = (0..3)
+        .map(|index| format!("nonempty retained pack {index:04}: exact bytes").into_bytes())
+        .collect();
+    let identities = bytes
+        .iter()
+        .enumerate()
+        .map(|(index, bytes)| publish_pack(&segments, staging.path(), index, bytes))
+        .collect::<Vec<_>>();
+    let path = |index: usize| {
+        segments.join(format!(
+            "segment-{}.json",
+            sha256_hex_suffix(identities[index].digest.as_str()).expect("pack digest suffix")
+        ))
+    };
+    let mut damaged = bytes[2].clone();
+    damaged[0] ^= 1;
+    fs::write(path(2), &damaged).expect("corrupt the disposable cold candidate");
+    assert_eq!(damaged.len(), bytes[2].len());
+    let request = |index: usize| SealedGenerationSegmentReadV1::Whole {
+        digest: &identities[index].digest,
+        size_bytes: identities[index].size_bytes,
+    };
     #[cfg(target_os = "linux")]
     let observer = OpenObserver::new(&segments);
     #[cfg(target_os = "linux")]
     {
         let _ = observer.opens();
-        drop(File::open(&paths[0]).expect("positive observer control"));
-        assert_eq!(observer.opens(), 1, "the observer must count a real open");
+        drop(File::open(path(0)).expect("positive observer control"));
+        assert_eq!(observer.opens(), 1, "the observer counts a real open");
     }
-
-    let request = |index: usize| SealedGenerationSegmentReadV1::Whole {
-        digest: &digests[index],
-        size_bytes: bytes[index].len() as u64,
-    };
-    let mut cache = VecDeque::new();
+    let mut healthy_opens = 0;
+    let mut healthy =
+        GenerationPackReadPassV1::open(&segments, &identities[..2], None, &mut healthy_opens)
+            .expect("pin the two healthy generation roles");
     let mut output = Vec::new();
-    for (index, expected) in bytes.iter().take(candidate).enumerate() {
-        DaemonCodeIndexPublicationStoreV1::read_cached_retained_segment(
-            &segments,
-            request(index),
-            &mut output,
-            &mut cache,
-        )
-        .expect("authenticate every healthy segment");
+    for (index, expected) in bytes.iter().take(2).enumerate() {
+        healthy
+            .read(request(index), &mut output)
+            .expect("authenticate healthy pack");
         assert_eq!(&output, expected);
     }
-    assert_eq!(cache.len(), MAX_STAGED_SEGMENT_READ_HANDLES);
+    assert_eq!(healthy_opens, 2);
     #[cfg(target_os = "linux")]
-    assert_eq!(observer.opens(), MAX_STAGED_SEGMENT_READ_HANDLES);
-    let healthy = cache_handles(&cache);
-
+    assert_eq!(observer.opens(), 2, "only the two payload roles are opened");
     for _ in 0..2 {
         output = vec![0x55, 0xaa];
-        let error = DaemonCodeIndexPublicationStoreV1::read_cached_retained_segment(
-            &segments,
-            request(candidate),
-            &mut output,
-            &mut cache,
-        )
-        .expect_err("a corrupt candidate must fail its first authenticated read");
+        assert!(
+            healthy.read(request(2), &mut output).is_err(),
+            "an outside-roster request is refused"
+        );
+        assert!(output.is_empty());
+        assert!(
+            !healthy.is_invalidated(),
+            "malformed requests preserve admitted handles"
+        );
+        let mut candidate_opens = 0;
+        let mut candidate =
+            GenerationPackReadPassV1::open(&segments, &identities[2..], None, &mut candidate_opens)
+                .expect("pin a separate cold operation");
+        let error = candidate
+            .read(request(2), &mut output)
+            .expect_err("the first read authenticates the candidate");
         let CodeIndexProductionErrorV1::Contract(detail) = error else {
-            panic!("expected an authenticated read refusal, got {error}");
+            panic!("expected an authenticated refusal, got {error}");
         };
         assert_eq!(
             detail,
             "sealed generation segment does not match its content address"
         );
-        assert_eq!(
-            output,
-            Vec::<u8>::new(),
-            "refusal clears stale and corrupt bytes"
-        );
-        assert_eq!(
-            cache_handles(&cache),
-            healthy,
-            "failed admission preserves healthy descriptors and their LRU positions"
-        );
+        assert!(output.is_empty(), "refusal clears stale and corrupt bytes");
+        assert!(candidate.is_invalidated());
+        assert_eq!(candidate_opens, 1);
+        assert_eq!(healthy_opens, 2);
         #[cfg(target_os = "linux")]
-        assert_eq!(observer.opens(), 1, "the refused read must open its file");
+        assert_eq!(observer.opens(), 1, "only the cold candidate was opened");
     }
-
-    for (index, expected) in bytes.iter().take(candidate).enumerate() {
-        DaemonCodeIndexPublicationStoreV1::read_cached_retained_segment(
-            &segments,
-            request(index),
+    // Many logical windows share the same fixed-role handles.
+    for offset in 0..16 {
+        for index in 0..2 {
+            healthy
+                .read(
+                    SealedGenerationSegmentReadV1::Range {
+                        digest: &identities[index].digest,
+                        size_bytes: identities[index].size_bytes,
+                        offset,
+                        length: 3,
+                    },
+                    &mut output,
+                )
+                .expect("healthy range after candidate refusal");
+            assert_eq!(output, bytes[index][offset as usize..offset as usize + 3]);
+        }
+    }
+    assert_eq!(healthy_opens, 2);
+    #[cfg(target_os = "linux")]
+    assert_eq!(observer.opens(), 0, "healthy handles are never reopened");
+    fs::write(path(2), &bytes[2]).expect("repair disposable candidate");
+    #[cfg(target_os = "linux")]
+    assert_eq!(observer.opens(), 1, "observe fixture write separately");
+    let mut candidate_opens = 0;
+    let mut candidate =
+        GenerationPackReadPassV1::open(&segments, &identities[2..], None, &mut candidate_opens)
+            .expect("new operation over repaired candidate");
+    candidate
+        .read(request(2), &mut output)
+        .expect("authenticate repaired candidate");
+    assert_eq!(output, bytes[2]);
+    candidate
+        .read(
+            SealedGenerationSegmentReadV1::Range {
+                digest: &identities[2].digest,
+                size_bytes: identities[2].size_bytes,
+                offset: 1,
+                length: 3,
+            },
             &mut output,
-            &mut cache,
         )
-        .expect("healthy data remains readable after candidate refusal");
-        assert_eq!(&output, expected);
-    }
-    assert_eq!(cache_handles(&cache), healthy);
-    #[cfg(target_os = "linux")]
-    assert_eq!(observer.opens(), 0, "healthy handles must not be reopened");
-
-    fs::write(&paths[candidate], &bytes[candidate]).expect("repair disposable candidate");
-    #[cfg(target_os = "linux")]
-    assert_eq!(observer.opens(), 1, "observe the fixture write separately");
-    DaemonCodeIndexPublicationStoreV1::read_cached_retained_segment(
-        &segments,
-        request(candidate),
-        &mut output,
-        &mut cache,
-    )
-    .expect("the repaired cold candidate can pass authentication and enter the cache");
-    assert_eq!(output, bytes[candidate]);
-    assert_eq!(cache.len(), MAX_STAGED_SEGMENT_READ_HANDLES);
-    assert_eq!(
-        cache.front().expect("remaining healthy handle").path,
-        paths[1]
-    );
-    assert_eq!(
-        cache.back().expect("admitted candidate").path,
-        paths[candidate]
-    );
+        .expect("exact admitted range without reopening");
+    assert_eq!(output, bytes[2][1..4]);
+    assert_eq!(candidate_opens, 1);
     #[cfg(target_os = "linux")]
     assert_eq!(observer.opens(), 1);
-
-    DaemonCodeIndexPublicationStoreV1::read_cached_retained_segment(
-        &segments,
-        SealedGenerationSegmentReadV1::Range {
-            digest: &digests[candidate],
-            size_bytes: bytes[candidate].len() as u64,
-            offset: 1,
-            length: 3,
-        },
-        &mut output,
-        &mut cache,
-    )
-    .expect("admitted candidate serves an exact range without reopening");
-    assert_eq!(output, bytes[candidate][1..4]);
-    #[cfg(target_os = "linux")]
-    assert_eq!(observer.opens(), 0);
-
-    // Failed admission is cache-neutral, not permission to trust changed
-    // cached data. A later mutation must retain the fail-closed hit behavior.
-    fs::write(&paths[candidate], &damaged).expect("mutate the now-cached disposable file");
+    fs::write(path(2), &damaged).expect("mutate the admitted file");
     #[cfg(target_os = "linux")]
     let _ = observer.opens();
     assert!(
-        DaemonCodeIndexPublicationStoreV1::read_cached_retained_segment(
-            &segments,
-            request(candidate),
-            &mut output,
-            &mut cache,
-        )
-        .is_err(),
-        "an admitted handle still refuses a changed inode or digest"
+        candidate.read(request(2), &mut output).is_err(),
+        "admitted authority rejects later mutation"
     );
-    assert_eq!(output, Vec::<u8>::new());
-    assert_eq!(
-        cache.len(),
-        0,
-        "changed cached authority still invalidates handles"
-    );
+    assert!(output.is_empty());
+    assert!(candidate.is_invalidated());
     #[cfg(target_os = "linux")]
-    assert_eq!(observer.opens(), 0);
+    assert_eq!(
+        observer.opens(),
+        0,
+        "changed authority is refused without reopening"
+    );
+    fs::write(path(2), &bytes[2]).expect("restore bytes after invalidation");
+    assert!(
+        candidate.read(request(2), &mut output).is_err(),
+        "restoration cannot revive an invalidated pass"
+    );
+    healthy
+        .read(request(0), &mut output)
+        .expect("independent healthy operation remains admitted");
+    assert_eq!(output, bytes[0]);
 }

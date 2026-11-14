@@ -1799,8 +1799,10 @@ impl CodeIndexWorktreeSchedulerV1 {
         control.finish_preseal_observation();
         match store.commit(&mut pending.preparation, &pending.publication) {
             Ok(bytes) => {
-                let sealed =
-                    CodeIndexSealedGenerationV1::new(bytes, pending.preparation.segment_reader());
+                let sealed = CodeIndexSealedGenerationV1::new(
+                    bytes,
+                    pending.preparation.read_pass_factory(),
+                );
                 CodeIndexPublishedBuildV1::new(pending.publication, sealed).map_err(Into::into)
             }
             Err(error) => {
@@ -3065,7 +3067,7 @@ impl CodeIndexWorktreeSchedulerV1 {
             });
             let latest_snapshot = active_generation
                 .as_deref()
-                .map(VerifiedSealedTextGenerationMetadataV1::snapshot);
+                .map(|generation| generation.snapshot());
             let unchanged_source = latest_snapshot.is_some_and(|latest| {
                 latest.reference == captured.snapshot.reference
                     && latest.source_revision == captured.snapshot.source_revision

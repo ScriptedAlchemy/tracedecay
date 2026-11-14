@@ -13,6 +13,7 @@ use tracedecay_graph_query::VerifiedGraphQuery;
 
 use crate::decode_primitive_request;
 
+use super::node_unresolved::node_unresolved_calls;
 use super::primitive_surface::symbol_location;
 use super::{
     GRAPH_RELATION_READ_LIMIT, cost_to_expand_verified, graph_occurrence_id, graph_symbol_corrupt,
@@ -155,6 +156,7 @@ pub async fn compute_node(
                     body: u64::from(line_count) * 20,
                     full_file: file_size_bytes / 4,
                 },
+                unresolved_calls: node_unresolved_calls(graph, &n)?,
                 unavailable_fields: unavailable_fields.into_iter().map(str::to_owned).collect(),
                 freshness: None,
             };

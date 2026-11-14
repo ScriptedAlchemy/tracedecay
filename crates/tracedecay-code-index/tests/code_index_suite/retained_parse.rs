@@ -207,7 +207,9 @@ fn composite_source_masking_preserves_incremental_astro_canonical_rows() {
     assert_eq!(report.reuse, ParseReuse::Incremental);
     assert_eq!(
         incremental.disposition,
-        ParsedExtractionDisposition::ChangedRegions
+        ParsedExtractionDisposition::Reset {
+            reason: tracedecay_code_extraction::parsed_extraction::ParsedExtractionResetReason::ModuleBindingsChanged,
+        }
     );
     assert_eq!(
         normalize_extraction(incremental.result),

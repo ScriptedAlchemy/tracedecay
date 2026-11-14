@@ -1,0 +1,18 @@
+diff --git a/lib/windows_utils.bzl b/lib/windows_utils.bzl
+--- a/lib/windows_utils.bzl
++++ b/lib/windows_utils.bzl
+@@ -90,6 +90,14 @@
+ SETLOCAL ENABLEDELAYEDEXPANSION
+ set RUNFILES_MANIFEST_ONLY=1
+ {rlocation_function}
++rem A sibling shell payload has no runfiles tree of its own. Publish the
++rem batch launcher's manifest even when the sibling path skips rlocation.
++if exist "%~f0.runfiles\MANIFEST" (
++  set "RUNFILES_MANIFEST_FILE=%~f0.runfiles\MANIFEST"
++) else if exist "%~f0.runfiles_manifest" (
++  set "RUNFILES_MANIFEST_FILE=%~f0.runfiles_manifest"
++)
++
+ set "run_script=%~dp0{sh_basename}"
+ if not exist "!run_script!" call :rlocation "{sh_script}" run_script
+ set "run_script=!run_script:\=/!"

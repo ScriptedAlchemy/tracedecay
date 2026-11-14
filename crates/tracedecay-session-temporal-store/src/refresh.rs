@@ -1325,13 +1325,11 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
 
     pub async fn apply_candidate_relation_projection(
         &self,
-        snapshot: &tracedecay_runtime_core::db::DatabaseEngineReadSnapshot,
         projection: &SessionRelationProjection,
         execution_control: &ExecutionControl,
     ) -> SessionStoreResult<SessionRelationProjection> {
         apply_candidate_relation_projection(
             self.inner(),
-            snapshot,
             projection,
             execution_control,
             COMPLETE_REFRESH,

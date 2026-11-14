@@ -1,14 +1,11 @@
 //! Sealed segments this process already authenticated.
 //!
 //! Every sealed graph publication proves its generation's durable source
-//! before it builds rows. Segments are content-addressed and written once, so
-//! a successor shares all but the few segments its edit re-sealed. Re-reading
-//! and re-hashing the unchanged ones made each one-file refresh read the
-//! whole generation. A segment hashed against its digest is recorded with the
-//! exact file identity it was read at; while the path still names that
-//! identity, its bytes are the ones that were proven, and a later proof skips
-//! it. Any rewrite, truncation, or replacement moves the identity and the
-//! segment is read and hashed again.
+//! before it builds rows. A logical segment's proof binds its physical pack,
+//! the authenticated extent in that pack, and the exact file identity read.
+//! An operation owns and revalidates the pack handles; this cache retains
+//! metadata only. A new pack, changed extent, rewrite or replacement requires
+//! the logical bytes to be authenticated again.
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
@@ -16,7 +13,7 @@ use std::sync::{Arc, Mutex};
 
 use tracedecay_domain::ManifestDigest;
 
-/// The file identity a segment's bytes were hashed at. Rewriting a file
+/// The file identity a pack's bytes were hashed at. Rewriting a file
 /// advances its change time, which user space cannot set back, and replacing
 /// it changes the inode.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -53,7 +50,39 @@ impl SealedSegmentFingerprintV1 {
     }
 }
 
-type VerifiedSegmentMap = BTreeMap<ManifestDigest, SealedSegmentFingerprintV1>;
+/// An authenticated logical extent in one exact physical pack.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct SealedSegmentWitnessV1 {
+    pack_digest: ManifestDigest,
+    fingerprint: SealedSegmentFingerprintV1,
+    offset: u64,
+    size_bytes: u64,
+}
+
+impl SealedSegmentWitnessV1 {
+    pub(super) fn new(
+        pack_digest: &ManifestDigest,
+        fingerprint: Option<SealedSegmentFingerprintV1>,
+        offset: u64,
+        size_bytes: u64,
+    ) -> Option<Self> {
+        let fingerprint = fingerprint?;
+        if offset
+            .checked_add(size_bytes)
+            .is_none_or(|end| end > fingerprint.len)
+        {
+            return None;
+        }
+        Some(Self {
+            pack_digest: pack_digest.clone(),
+            fingerprint,
+            offset,
+            size_bytes,
+        })
+    }
+}
+
+type VerifiedSegmentMap = BTreeMap<ManifestDigest, SealedSegmentWitnessV1>;
 
 // A root cache is a performance hint, not durable proof. Cap the number of
 // generations held by one daemon; an evicted root is verified from disk again.
@@ -113,7 +142,7 @@ pub(super) struct SealedSegmentProofV1<'v> {
     segments_root: PathBuf,
     prior: Option<Arc<VerifiedSegmentMap>>,
     proven: VerifiedSegmentMap,
-    has_new_fingerprints: bool,
+    has_new_witnesses: bool,
 }
 
 impl VerifiedSealedSegmentsV1 {
@@ -140,50 +169,40 @@ impl VerifiedSealedSegmentsV1 {
             segments_root: segments_root.to_path_buf(),
             prior,
             proven: BTreeMap::new(),
-            has_new_fingerprints: false,
+            has_new_witnesses: false,
         }
     }
 }
 
 impl SealedSegmentProofV1<'_> {
-    /// Whether `path` still names the identity `digest` was proven at and
-    /// its byte length matches this manifest's declared extent.
+    /// Whether the admitted pack handle and authenticated extent are exactly
+    /// the physical source at which this logical digest was proven.
     pub(super) fn already_verified(
         &mut self,
         digest: &ManifestDigest,
-        expected_size: u64,
-        path: &Path,
+        witness: Option<SealedSegmentWitnessV1>,
     ) -> bool {
-        let Some(prior) = self
-            .prior
-            .as_ref()
-            .and_then(|prior| prior.get(digest))
-            .copied()
-        else {
+        let Some(witness) = witness else {
             return false;
         };
-        let current = path
-            .symlink_metadata()
-            .ok()
-            .and_then(|metadata| SealedSegmentFingerprintV1::of(&metadata));
-        if current != Some(prior) || prior.len != expected_size {
+        if self.prior.as_ref().and_then(|prior| prior.get(digest)) != Some(&witness) {
             return false;
         }
-        self.proven.insert(digest.clone(), prior);
+        self.proven.insert(digest.clone(), witness);
         true
     }
 
-    /// Record that the bytes read at `fingerprint` will be hashed against
+    /// Record that the bytes read at `witness` will be hashed against
     /// `digest`; kept only if the whole proof succeeds.
     pub(super) fn hashed(
         &mut self,
         digest: &ManifestDigest,
-        fingerprint: Option<SealedSegmentFingerprintV1>,
+        witness: Option<SealedSegmentWitnessV1>,
     ) {
-        if let Some(fingerprint) = fingerprint {
+        if let Some(witness) = witness {
             let prior = self.prior.as_ref().and_then(|prior| prior.get(digest));
-            self.has_new_fingerprints |= prior != Some(&fingerprint);
-            self.proven.insert(digest.clone(), fingerprint);
+            self.has_new_witnesses |= prior != Some(&witness);
+            self.proven.insert(digest.clone(), witness);
         }
     }
 
@@ -194,7 +213,7 @@ impl SealedSegmentProofV1<'_> {
         // equal cardinality proves the same map without another full scan.
         // Keep that snapshot's identity: an unchanged overlapping proof must
         // not make a genuinely changed successor lose its commit below.
-        if !self.has_new_fingerprints
+        if !self.has_new_witnesses
             && self
                 .prior
                 .as_ref()
@@ -252,7 +271,7 @@ mod tests {
 
     use super::{
         MAX_VERIFIED_SEGMENT_ROOTS, SealedSegmentFingerprintV1, SealedSegmentProofV1,
-        VerifiedSealedSegmentsV1,
+        SealedSegmentWitnessV1, VerifiedSealedSegmentsV1,
     };
 
     fn write_segment(root: &Path, bytes: &[u8]) -> (ManifestDigest, PathBuf) {
@@ -275,7 +294,22 @@ mod tests {
             ManifestDigest::from_sha256_bytes(&Sha256::digest(&bytes)).unwrap(),
             *digest
         );
-        proof.hashed(digest, fingerprint);
+        proof.hashed(
+            digest,
+            SealedSegmentWitnessV1::new(digest, fingerprint, 0, bytes.len() as u64),
+        );
+    }
+
+    fn witness(
+        digest: &ManifestDigest,
+        size_bytes: u64,
+        path: &Path,
+    ) -> Option<SealedSegmentWitnessV1> {
+        let fingerprint = path
+            .symlink_metadata()
+            .ok()
+            .and_then(|metadata| SealedSegmentFingerprintV1::of(&metadata));
+        SealedSegmentWitnessV1::new(digest, fingerprint, 0, size_bytes)
     }
 
     #[test]
@@ -289,23 +323,20 @@ mod tests {
         first.commit();
 
         let mut interrupted = verified.begin(root.path());
-        assert!(interrupted.already_verified(&parent, 3, &parent_path));
+        assert!(interrupted.already_verified(&parent, witness(&parent, 3, &parent_path)));
         // The reader records an identity before the caller checks its digest.
         // A failed or cancelled proof must never publish that tentative fact.
         std::fs::write(&candidate_path, b"[3]").unwrap();
-        interrupted.hashed(
-            &candidate,
-            SealedSegmentFingerprintV1::of(&std::fs::metadata(&candidate_path).unwrap()),
-        );
+        interrupted.hashed(&candidate, witness(&candidate, 3, &candidate_path));
         drop(interrupted);
 
         let mut retry = verified.begin(root.path());
         assert!(
-            retry.already_verified(&parent, 3, &parent_path),
+            retry.already_verified(&parent, witness(&parent, 3, &parent_path)),
             "an interrupted successor must not make its authenticated parent cold"
         );
         assert!(
-            !retry.already_verified(&candidate, 3, &candidate_path),
+            !retry.already_verified(&candidate, witness(&candidate, 3, &candidate_path)),
             "a tentative digest from a failed proof must not become reusable"
         );
     }
@@ -322,11 +353,11 @@ mod tests {
         first.commit();
 
         let mut stale = verified.begin(root.path());
-        assert!(stale.already_verified(&parent, 3, &parent_path));
+        assert!(stale.already_verified(&parent, witness(&parent, 3, &parent_path)));
         authenticate(&mut stale, &abandoned, &abandoned_path);
         let mut sibling = verified.begin(root.path());
         assert!(
-            sibling.already_verified(&parent, 3, &parent_path),
+            sibling.already_verified(&parent, witness(&parent, 3, &parent_path)),
             "an in-flight proof must not evict the parent's authenticated identities"
         );
         drop(sibling);
@@ -336,12 +367,12 @@ mod tests {
         stale.commit();
 
         let mut latest = verified.begin(root.path());
-        assert!(latest.already_verified(&successor, 3, &successor_path));
+        assert!(latest.already_verified(&successor, witness(&successor, 3, &successor_path)));
         assert!(
-            !latest.already_verified(&parent, 3, &parent_path),
+            !latest.already_verified(&parent, witness(&parent, 3, &parent_path)),
             "a stale proof must not resurrect segments pruned by a committed successor"
         );
-        assert!(!latest.already_verified(&abandoned, 3, &abandoned_path));
+        assert!(!latest.already_verified(&abandoned, witness(&abandoned, 3, &abandoned_path)));
     }
 
     #[test]
@@ -357,24 +388,24 @@ mod tests {
         parent.commit();
 
         let mut successor = verified.begin(root.path());
-        assert!(successor.already_verified(&retained, 3, &retained_path));
+        assert!(successor.already_verified(&retained, witness(&retained, 3, &retained_path)));
         authenticate(&mut successor, &changed, &changed_path);
 
         // A completed parent recheck must not invalidate the in-flight edit.
         let mut unchanged = verified.begin(root.path());
-        assert!(unchanged.already_verified(&retained, 3, &retained_path));
-        assert!(unchanged.already_verified(&replaced, 3, &replaced_path));
+        assert!(unchanged.already_verified(&retained, witness(&retained, 3, &retained_path)));
+        assert!(unchanged.already_verified(&replaced, witness(&replaced, 3, &replaced_path)));
         unchanged.commit();
         successor.commit();
 
         let mut latest = verified.begin(root.path());
-        assert!(latest.already_verified(&retained, 3, &retained_path));
+        assert!(latest.already_verified(&retained, witness(&retained, 3, &retained_path)));
         assert!(
-            latest.already_verified(&changed, 3, &changed_path),
+            latest.already_verified(&changed, witness(&changed, 3, &changed_path)),
             "an unchanged overlapping proof must not discard authenticated edited source"
         );
         assert!(
-            !latest.already_verified(&replaced, 3, &replaced_path),
+            !latest.already_verified(&replaced, witness(&replaced, 3, &replaced_path)),
             "equal segment counts must not hide a genuinely changed proof"
         );
     }
@@ -391,19 +422,19 @@ mod tests {
         parent.commit();
 
         let mut successor = verified.begin(root.path());
-        assert!(successor.already_verified(&retained, 3, &retained_path));
+        assert!(successor.already_verified(&retained, witness(&retained, 3, &retained_path)));
         successor.commit();
 
         let mut latest = verified.begin(root.path());
-        assert!(latest.already_verified(&retained, 3, &retained_path));
+        assert!(latest.already_verified(&retained, witness(&retained, 3, &retained_path)));
         assert!(
-            !latest.already_verified(&removed, 3, &removed_path),
+            !latest.already_verified(&removed, witness(&removed, 3, &removed_path)),
             "a deletion-only successor must still prune obsolete authentication entries"
         );
         drop(latest);
         verified.begin(root.path()).commit();
         let mut empty = verified.begin(root.path());
-        assert!(!empty.already_verified(&retained, 3, &retained_path));
+        assert!(!empty.already_verified(&retained, witness(&retained, 3, &retained_path)));
     }
 
     #[test]
@@ -424,7 +455,7 @@ mod tests {
         // A completed read without a commit still makes this root recently used.
         let (recent_root, recent_digest, recent_path) = &roots[0];
         let mut recent = verified.begin(recent_root);
-        assert!(recent.already_verified(recent_digest, 3, recent_path));
+        assert!(recent.already_verified(recent_digest, witness(recent_digest, 3, recent_path)));
         drop(recent);
 
         let incoming_root = temp.path().join("incoming-root");
@@ -448,18 +479,21 @@ mod tests {
         let (cold_root, cold_digest, cold_path) = &roots[1];
         let mut cold = verified.begin(cold_root);
         assert!(
-            !cold.already_verified(cold_digest, 3, cold_path),
+            !cold.already_verified(cold_digest, witness(cold_digest, 3, cold_path)),
             "the least-recently-used source must be hashed again after eviction"
         );
         drop(cold);
 
         let mut retained = verified.begin(recent_root);
         assert!(
-            retained.already_verified(recent_digest, 3, recent_path),
+            retained.already_verified(recent_digest, witness(recent_digest, 3, recent_path)),
             "the recently accessed root must remain warm"
         );
         let mut newest = verified.begin(&incoming_root);
-        assert!(newest.already_verified(&incoming_digest, 3, &incoming_path));
+        assert!(newest.already_verified(
+            &incoming_digest,
+            witness(&incoming_digest, 3, &incoming_path)
+        ));
     }
 
     #[test]
@@ -486,7 +520,10 @@ mod tests {
         let (active_root, inherited_digest, inherited_path) = &roots[0];
         let (replaced_digest, replaced_path) = replaced.unwrap();
         let mut successor = verified.begin(active_root);
-        assert!(successor.already_verified(inherited_digest, 3, inherited_path));
+        assert!(successor.already_verified(
+            inherited_digest,
+            witness(inherited_digest, 3, inherited_path)
+        ));
         let (changed_digest, changed_path) = write_segment(active_root, b"[2]");
         authenticate(&mut successor, &changed_digest, &changed_path);
 
@@ -494,7 +531,7 @@ mod tests {
         // An unpinned LRU cache would evict this root on the next insertion.
         for (root, digest, path) in roots.iter().skip(1) {
             let mut proof = verified.begin(root);
-            assert!(proof.already_verified(digest, 3, path));
+            assert!(proof.already_verified(digest, witness(digest, 3, path)));
         }
 
         let incoming_root = temp.path().join("incoming-root");
@@ -507,22 +544,28 @@ mod tests {
 
         let mut latest = verified.begin(active_root);
         assert!(
-            latest.already_verified(inherited_digest, 3, inherited_path),
+            latest.already_verified(
+                inherited_digest,
+                witness(inherited_digest, 3, inherited_path)
+            ),
             "an in-flight edit must keep its inherited authenticated source"
         );
         assert!(
-            latest.already_verified(&changed_digest, 3, &changed_path),
+            latest.already_verified(&changed_digest, witness(&changed_digest, 3, &changed_path)),
             "evicting other roots must not discard the edited generation's proof"
         );
         assert!(
-            !latest.already_verified(&replaced_digest, 3, &replaced_path),
+            !latest.already_verified(
+                &replaced_digest,
+                witness(&replaced_digest, 3, &replaced_path)
+            ),
             "the successor must not resurrect a replaced parent segment"
         );
 
         let (evicted_root, evicted_digest, evicted_path) = &roots[1];
         let mut evicted = verified.begin(evicted_root);
         assert!(
-            !evicted.already_verified(evicted_digest, 3, evicted_path),
+            !evicted.already_verified(evicted_digest, witness(evicted_digest, 3, evicted_path)),
             "the oldest idle root, rather than an active proof, must be evicted"
         );
         let cache = verified
@@ -552,7 +595,7 @@ mod tests {
         let mut pinned = Vec::new();
         for (root, digest, path) in &existing {
             let mut proof = verified.begin(root);
-            assert!(proof.already_verified(digest, 3, path));
+            assert!(proof.already_verified(digest, witness(digest, 3, path)));
             pinned.push(proof);
         }
         let new_root = temp.path().join("new-root");
@@ -564,7 +607,7 @@ mod tests {
 
         let mut warm = verified.begin(&new_root);
         assert!(
-            warm.already_verified(&new_digest, 3, &new_path),
+            warm.already_verified(&new_digest, witness(&new_digest, 3, &new_path)),
             "a complete new-root proof must not be its own eviction victim"
         );
         drop(warm);
@@ -583,7 +626,7 @@ mod tests {
         // discarding new source or reintroducing a stale parent entry.
         drop(pinned);
         let mut retained = verified.begin(&new_root);
-        assert!(retained.already_verified(&new_digest, 3, &new_path));
+        assert!(retained.already_verified(&new_digest, witness(&new_digest, 3, &new_path)));
         assert_eq!(
             verified
                 .roots
@@ -596,7 +639,7 @@ mod tests {
         let (old_root, old_digest, old_path) = &existing[0];
         let mut evicted = verified.begin(old_root);
         assert!(
-            !evicted.already_verified(old_digest, 3, old_path),
+            !evicted.already_verified(old_digest, witness(old_digest, 3, old_path)),
             "the oldest retired root, not the new generation, must be evicted"
         );
     }
@@ -635,10 +678,47 @@ mod tests {
         );
         let mut retry = verified.begin(root.path());
         assert!(
-            !retry.already_verified(&digest, 3, &path),
+            !retry.already_verified(&digest, witness(&digest, 3, &path)),
             "retaining an old proof must not trust a replacement's same length and mtime"
         );
         drop(original);
+    }
+
+    #[test]
+    fn retained_proof_binds_pack_identity_and_logical_extent() {
+        let root = TempDir::new().unwrap();
+        let bytes = b"prefix[1]tail";
+        let path = root.path().join("pack");
+        std::fs::write(&path, bytes).unwrap();
+        let mut file = File::open(&path).unwrap();
+        let fingerprint = SealedSegmentFingerprintV1::of(&file.metadata().unwrap());
+        let mut actual = Vec::new();
+        file.read_to_end(&mut actual).unwrap();
+        assert_eq!(actual, bytes);
+        let pack = ManifestDigest::from_sha256_bytes(&Sha256::digest(&actual)).unwrap();
+        let logical = ManifestDigest::from_sha256_bytes(&Sha256::digest(&actual[6..9])).unwrap();
+        let source = SealedSegmentWitnessV1::new(&pack, fingerprint, 6, 3);
+        let verified = VerifiedSealedSegmentsV1::default();
+        let mut first = verified.begin(root.path());
+        first.hashed(&logical, source.clone());
+        first.commit();
+
+        let mut next = verified.begin(root.path());
+        assert!(next.already_verified(&logical, source));
+        for (offset, size_bytes) in [(0, 3), (6, 4), (u64::MAX, 3)] {
+            assert!(!next.already_verified(
+                &logical,
+                SealedSegmentWitnessV1::new(&pack, fingerprint, offset, size_bytes),
+            ));
+        }
+        let other_pack = ManifestDigest::from_sha256_bytes(&Sha256::digest(b"other pack")).unwrap();
+        assert!(!next.already_verified(
+            &logical,
+            SealedSegmentWitnessV1::new(&other_pack, fingerprint, 6, 3),
+        ));
+        assert!(
+            !next.already_verified(&pack, SealedSegmentWitnessV1::new(&pack, fingerprint, 6, 3),)
+        );
     }
 
     #[test]
@@ -652,11 +732,11 @@ mod tests {
         first.commit();
 
         let mut foreign = verified.begin(other_root.path());
-        assert!(!foreign.already_verified(&digest, 3, &path));
+        assert!(!foreign.already_verified(&digest, witness(&digest, 3, &path)));
         let mut retry = verified.begin(root.path());
-        assert!(!retry.already_verified(&digest, 4, &path));
-        assert!(retry.already_verified(&digest, 3, &path));
+        assert!(!retry.already_verified(&digest, witness(&digest, 4, &path)));
+        assert!(retry.already_verified(&digest, witness(&digest, 3, &path)));
         std::fs::remove_file(&path).unwrap();
-        assert!(!retry.already_verified(&digest, 3, &path));
+        assert!(!retry.already_verified(&digest, witness(&digest, 3, &path)));
     }
 }

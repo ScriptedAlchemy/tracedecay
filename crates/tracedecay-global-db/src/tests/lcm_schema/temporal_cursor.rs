@@ -87,10 +87,9 @@ async fn temporal_schema_persists_cursor_keys_without_read_creation() {
 async fn temporal_schema_rejects_direct_cursor_retirement() {
     let tmp = TempDir::new().unwrap();
     let db_path = tmp.path().join(".tracedecay").join("sessions.db");
-    let db = open_global_db(&db_path)
+    initialize_global_db(&db_path)
         .await
         .expect("temporal schema initialization should not error");
-    drop(db);
 
     let raw_db = TestConnection::open(&db_path);
     let conn = (*raw_db).clone();
@@ -121,10 +120,9 @@ async fn temporal_schema_rejects_direct_cursor_retirement() {
 async fn temporal_schema_rotates_cursor_keys_atomically_and_survives_restart() {
     let tmp = TempDir::new().unwrap();
     let db_path = tmp.path().join(".tracedecay").join("sessions.db");
-    let db = open_global_db(&db_path)
+    initialize_global_db(&db_path)
         .await
         .expect("temporal schema initialization should not error");
-    drop(db);
 
     let raw_db = TestConnection::open(&db_path);
     let conn = (*raw_db).clone();
@@ -250,10 +248,9 @@ async fn temporal_schema_rotates_cursor_keys_atomically_and_survives_restart() {
 async fn temporal_schema_cursor_audit_rejects_nonmax_active_key() {
     let tmp = TempDir::new().unwrap();
     let db_path = tmp.path().join(".tracedecay").join("sessions.db");
-    let db = open_global_db(&db_path)
+    initialize_global_db(&db_path)
         .await
         .expect("temporal schema initialization should not error");
-    drop(db);
 
     let raw_db = TestConnection::open(&db_path);
     let conn = (*raw_db).clone();
@@ -304,10 +301,9 @@ async fn temporal_schema_cursor_audit_rejects_skipped_successor_chain() {
             .join(fixture)
             .join(".tracedecay")
             .join("sessions.db");
-        let db = open_global_db(&db_path)
+        initialize_global_db(&db_path)
             .await
             .expect("temporal schema initialization should not error");
-        drop(db);
 
         let raw_db = TestConnection::open(&db_path);
         let conn = (*raw_db).clone();
@@ -362,10 +358,9 @@ async fn temporal_schema_cursor_audit_accepts_valid_successor_chains() {
             .join(fixture)
             .join(".tracedecay")
             .join("sessions.db");
-        let db = open_global_db(&db_path)
+        initialize_global_db(&db_path)
             .await
             .expect("temporal schema initialization should not error");
-        drop(db);
 
         let raw_db = TestConnection::open(&db_path);
         let conn = (*raw_db).clone();

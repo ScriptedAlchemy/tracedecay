@@ -1,13 +1,15 @@
 //! A sealed generation read as the parent of a sparse successor.
 //!
 //! The parent is its authenticated partitioned manifest and a reader over
-//! its content-addressed segments. Nothing is decoded until the successor
+//! its two content-addressed payload packs. Nothing is decoded until the successor
 //! asks for one file, one file's evidence, one graph page, or one resolution
 //! index page, so what a successor build holds is proportional to what it
 //! reads.
 
 use std::collections::{BTreeMap, HashMap};
-use std::sync::{Arc, OnceLock};
+use std::mem::{size_of, size_of_val};
+use std::ops::Deref;
+use std::sync::{Arc, Mutex, OnceLock};
 use tracedecay_runtime_core::resident_memory::ResidentMemoryOperationV1;
 
 use tracedecay_domain::{
@@ -20,7 +22,10 @@ use super::partitioned_codec::{
     PartitionedCodeGraphPageDescriptorV1, PartitionedFileEvidenceDescriptorV1,
     PartitionedFileSegmentDescriptorV1, PartitionedGenerationEvidenceV1,
     PartitionedPublishedGenerationV1, SealedGenerationSegmentReadV1, decode_file_evidence_segment,
-    decode_file_segment, decode_generation_evidence, parse_partitioned_manifest,
+    decode_file_segment, decode_generation_evidence, parse_partitioned_manifest_admitted,
+};
+use super::resident_bytes::{
+    ARC_HEADER_BYTES, hash_table_bytes, hash_table_capacity, partitioned_manifest_retained_bytes,
 };
 use super::resolution_index::ResolutionIndexReaderV1;
 use super::resolution_view::{
@@ -29,7 +34,7 @@ use super::resolution_view::{
 use super::sealed_codec::{FileScopeIdentityV1, restore_file_pages};
 use super::{
     ChunkPolicyRevisionSummaryV1, CodeIndexGenerationStatisticsV1, CodeIndexProductionErrorV1,
-    CodeIndexPublishedGenerationV1, FileGenerationArtifactsV1,
+    CodeIndexPublishedGenerationV1, ConstructionMemoryV1, FileGenerationArtifactsV1,
     VerifiedSealedTextGenerationMetadataV1,
 };
 
@@ -39,12 +44,18 @@ pub type SealedSegmentReaderV1 = dyn Fn(SealedGenerationSegmentReadV1<'_>, &mut 
     + Send
     + Sync;
 
+/// Opens the fixed physical payload readers for one active operation. An idle
+/// sealed carrier owns this factory without retaining filesystem handles or
+/// a store lease.
+pub type SealedGenerationPackReadFactoryV1 =
+    dyn Fn() -> Result<Arc<SealedSegmentReaderV1>, CodeIndexProductionErrorV1> + Send + Sync;
+
 /// The active generation of one scope as its publication store holds it:
-/// the authenticated manifest bytes and a reader over its segments.
+/// the authenticated manifest bytes and an operation-scoped pack factory.
 #[derive(Clone)]
 pub struct CodeIndexSealedGenerationV1 {
     manifest_bytes: Arc<[u8]>,
-    read_segment: Arc<SealedSegmentReaderV1>,
+    open_read_pass: Arc<SealedGenerationPackReadFactoryV1>,
 }
 
 impl std::fmt::Debug for CodeIndexSealedGenerationV1 {
@@ -57,10 +68,13 @@ impl std::fmt::Debug for CodeIndexSealedGenerationV1 {
 }
 
 impl CodeIndexSealedGenerationV1 {
-    pub fn new(manifest_bytes: Arc<[u8]>, read_segment: Arc<SealedSegmentReaderV1>) -> Self {
+    pub fn new(
+        manifest_bytes: Arc<[u8]>,
+        open_read_pass: Arc<SealedGenerationPackReadFactoryV1>,
+    ) -> Self {
         Self {
             manifest_bytes,
-            read_segment,
+            open_read_pass,
         }
     }
 
@@ -68,8 +82,10 @@ impl CodeIndexSealedGenerationV1 {
         &self.manifest_bytes
     }
 
-    pub fn segment_reader(&self) -> Arc<SealedSegmentReaderV1> {
-        Arc::clone(&self.read_segment)
+    pub fn begin_read_pass(
+        &self,
+    ) -> Result<Arc<SealedSegmentReaderV1>, CodeIndexProductionErrorV1> {
+        (self.open_read_pass)()
     }
 
     /// The authenticated manifest, snapshot, and statistics this generation
@@ -190,19 +206,112 @@ impl<'a> StagedFileSourceV1<'a> {
 /// A parsed sealed parent.
 pub(super) struct SealedParentGenerationV1 {
     sealed: CodeIndexSealedGenerationV1,
-    generation: PartitionedPublishedGenerationV1,
+    generation: Arc<AdmittedParentManifestV1>,
     scope: FileScopeIdentityV1,
     segments_by_path: HashMap<String, usize>,
     evidence_by_key: HashMap<u32, usize>,
+    read: Arc<SealedSegmentReaderV1>,
+    _index_memory: ConstructionMemoryV1,
+}
+
+struct AdmittedParentManifestV1 {
+    generation: PartitionedPublishedGenerationV1,
+    _memory: ConstructionMemoryV1,
+}
+
+impl Deref for AdmittedParentManifestV1 {
+    type Target = PartitionedPublishedGenerationV1;
+
+    fn deref(&self) -> &Self::Target {
+        &self.generation
+    }
 }
 
 impl SealedParentGenerationV1 {
     pub(super) fn open(
         sealed: CodeIndexSealedGenerationV1,
+        operation: &ResidentMemoryOperationV1,
     ) -> Result<Self, CodeIndexProductionErrorV1> {
-        let generation = parse_partitioned_manifest(&sealed.manifest_bytes)?;
+        let mut memory = ConstructionMemoryV1::new(operation.clone())?;
+        let owner_bytes = ARC_HEADER_BYTES.saturating_add(
+            size_of::<AdmittedParentManifestV1>()
+                .saturating_sub(size_of::<PartitionedPublishedGenerationV1>()),
+        );
+        let generation =
+            parse_partitioned_manifest_admitted(&sealed.manifest_bytes, &mut |bytes| {
+                let bytes = u64::try_from(bytes.saturating_add(owner_bytes))
+                    .map_err(|_| contract("sealed parent allocation exceeds u64"))?;
+                memory.resize(bytes)
+            })?;
+        let retained = partitioned_manifest_retained_bytes(&generation).saturating_add(owner_bytes);
+        memory.resize(
+            u64::try_from(retained)
+                .map_err(|_| contract("sealed parent allocation exceeds u64"))?,
+        )?;
+        let generation = Arc::new(AdmittedParentManifestV1 {
+            generation,
+            _memory: memory,
+        });
+        let path_capacity = hash_table_capacity::<(String, usize)>(generation.file_segments.len())?;
+        let evidence_capacity =
+            hash_table_capacity::<(u32, usize)>(generation.file_evidence.len())?;
+        let path_bytes =
+            generation
+                .file_segments
+                .iter()
+                .try_fold(0_usize, |bytes, descriptor| {
+                    let file = generation
+                        .snapshot
+                        .files
+                        .get(descriptor.file_key as usize)
+                        .ok_or_else(|| contract("sealed file segment is outside its snapshot"))?;
+                    Ok::<_, CodeIndexProductionErrorV1>(
+                        bytes.saturating_add(file.logical_path.len()),
+                    )
+                })?;
+        let mut index_memory = ConstructionMemoryV1::new(operation.clone())?;
+        let index_bytes = size_of::<Self>()
+            .saturating_add(hash_table_bytes::<(String, usize)>(path_capacity))
+            .saturating_add(hash_table_bytes::<(u32, usize)>(evidence_capacity))
+            .saturating_add(path_bytes)
+            .saturating_add(generation.manifest.project_id.as_str().len())
+            .saturating_add(generation.snapshot.repository.as_str().len());
+        index_memory.resize(
+            u64::try_from(index_bytes)
+                .map_err(|_| contract("sealed parent index allocation exceeds u64"))?,
+        )?;
+        let read_generation = Arc::clone(&generation);
+        let read_carrier = sealed.clone();
+        let read_pass = Mutex::new(None::<Arc<SealedSegmentReaderV1>>);
+        // Metadata lookup opens no payload handle. A standalone parent read
+        // activates one pass; a successor replaces this operation-local
+        // reader with its preparation's authority before reading any payload.
+        let read = move |request, buffer: &mut Vec<u8>| {
+            buffer.clear();
+            let read_pack = {
+                let mut pass = read_pass
+                    .lock()
+                    .map_err(|_| contract("sealed parent read pass was poisoned"))?;
+                if pass.is_none() {
+                    *pass = Some(read_carrier.begin_read_pass()?);
+                }
+                pass.as_ref()
+                    .cloned()
+                    .ok_or_else(|| contract("sealed parent read pass is absent"))?
+            };
+            read_generation.read_segment(request, buffer, read_pack.as_ref())
+        };
+        index_memory.resize(
+            u64::try_from(
+                index_bytes
+                    .saturating_add(ARC_HEADER_BYTES)
+                    .saturating_add(size_of_val(&read)),
+            )
+            .map_err(|_| contract("sealed parent reader allocation exceeds u64"))?,
+        )?;
+        let read: Arc<SealedSegmentReaderV1> = Arc::new(read);
         let scope = FileScopeIdentityV1::of(&generation.manifest, &generation.snapshot);
-        let mut segments_by_path = HashMap::with_capacity(generation.file_segments.len());
+        let mut segments_by_path = HashMap::with_capacity(path_capacity);
         for (position, descriptor) in generation.file_segments.iter().enumerate() {
             let file = generation
                 .snapshot
@@ -211,23 +320,33 @@ impl SealedParentGenerationV1 {
                 .ok_or_else(|| contract("sealed file segment is outside its snapshot"))?;
             segments_by_path.insert(file.logical_path.clone(), position);
         }
-        let evidence_by_key = generation
-            .file_evidence
-            .iter()
-            .enumerate()
-            .map(|(position, descriptor)| (descriptor.file_key, position))
-            .collect();
+        let mut evidence_by_key = HashMap::with_capacity(evidence_capacity);
+        evidence_by_key.extend(
+            generation
+                .file_evidence
+                .iter()
+                .enumerate()
+                .map(|(position, descriptor)| (descriptor.file_key, position)),
+        );
         Ok(Self {
             sealed,
             generation,
             scope,
             segments_by_path,
             evidence_by_key,
+            read,
+            _index_memory: index_memory,
         })
     }
 
     pub(super) fn sealed(&self) -> &CodeIndexSealedGenerationV1 {
         &self.sealed
+    }
+
+    /// Reuse the successor preparation's existing retention owner and fixed
+    /// parent-pack handles throughout its carried-content reads.
+    pub(super) fn bind_preparation_reader(&mut self, read: Arc<SealedSegmentReaderV1>) {
+        self.read = read;
     }
 
     pub(super) fn manifest(&self) -> &CodeGenerationManifestV1 {
@@ -259,7 +378,7 @@ impl SealedParentGenerationV1 {
     }
 
     pub(super) fn read(&self) -> &SealedSegmentReaderV1 {
-        self.sealed.read_segment.as_ref()
+        self.read.as_ref()
     }
 
     pub(super) fn file_segment(&self, path: &str) -> Option<&PartitionedFileSegmentDescriptorV1> {

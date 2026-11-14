@@ -1,4 +1,4 @@
-//! Failed scope resets must release cached descriptors before unlinking files.
+//! Failed scope resets release pointer descriptors and respect active read passes.
 use std::fs;
 use std::os::unix::fs::MetadataExt;
 use std::sync::Arc;
@@ -6,16 +6,17 @@ use std::sync::Arc;
 use tempfile::TempDir;
 use tracedecay_code_index::production::{
     CodeIndexAtomicPublicationPort, CodeIndexProductionErrorV1, CodeIndexPublicationStoreErrorV1,
-    CodeIndexPublishedGenerationV1, SealedGenerationSegmentReadV1,
+    SealedGenerationSegmentReadV1,
 };
 use tracedecay_code_index_retention::code_index_generations::{
     try_acquire_code_generation_store_lock, try_acquire_code_generation_store_read_lock,
 };
+use tracedecay_domain::ProjectId;
 #[cfg(target_os = "linux")]
 use tracedecay_domain::sha256_hex_suffix;
-use tracedecay_domain::{ProjectId, SanitizerRevision};
 
-use super::{DaemonCodeIndexPublicationStoreV1, SharedCodeIndexBytePoolV1};
+use super::SharedCodeIndexBytePoolV1;
+use super::staged_segment_reads::target_store;
 use crate::code_index_scheduler::tests::GitFixture;
 use crate::code_index_scheduler::{CodeIndexReconcileOutcomeV1, CodeIndexWorktreeSchedulerV1};
 
@@ -56,21 +57,22 @@ fn failed_reset_releases_publication_handles_across_store_clones() {
     drop(source);
 
     let target_root = TempDir::new().expect("isolated target store");
-    let open_target = || {
-        DaemonCodeIndexPublicationStoreV1::new(
-            target_root.path(),
-            fixture.path(),
-            SanitizerRevision::new(tracedecay_privacy::CODE_SOURCE_SANITIZER_VERSION_V1)
-                .expect("sanitizer revision"),
-        )
-        .expect("target publication store")
-    };
+    let open_target = || target_store(target_root.path(), &fixture);
     let mut target = open_target();
+    let store_root = target
+        .active_path
+        .parent()
+        .expect("owning store root")
+        .to_path_buf();
+    let operation = target
+        .resident_memory_authority()
+        .expect("owning memory authority")
+        .begin_operation();
     let mut preparation = target
-        .prepare(&generation.sealed_scope(), None)
+        .prepare(&generation.sealed_scope(), None, &operation)
         .expect("prepare actual generation");
     let publication = generation
-        .stage_publication(&mut preparation)
+        .stage_publication(&mut preparation, &operation)
         .expect("stage actual generation");
     target
         .commit(&mut preparation, &publication)
@@ -112,22 +114,18 @@ fn failed_reset_releases_publication_handles_across_store_clones() {
         "positive live-pointer-handle control"
     );
 
-    let segment_identity =
-        CodeIndexPublishedGenerationV1::partitioned_segment_identities_from_reader(
-            publication.manifest_bytes().as_ref(),
-        )
-        .expect("parse published segment identities")
-        .expect("partitioned generation")
-        .into_iter()
-        .find(|identity| identity.size_bytes > 0)
-        .expect("real generation has a nonempty segment");
+    let segment_identity = publication.pack_layout().content_pack();
+    assert!(
+        segment_identity.size_bytes > 0,
+        "real nonempty content pack"
+    );
     let sealed = target
         .load_active(&generation.sealed_scope())
         .expect("load sealed reader")
         .expect("active generation");
-    // Keep the sealed reader alive across reset. Its descriptor cache still
-    // belongs to the store's shared retirement authority, not this reader.
-    let segment_reader = sealed.segment_reader();
+    // The carrier may escape the request, but actual handles and their
+    // retention lease belong to this explicit operation.
+    let segment_reader = sealed.begin_read_pass().expect("open one active read pass");
     let mut segment_bytes = Vec::new();
     segment_reader(
         SealedGenerationSegmentReadV1::Whole {
@@ -138,14 +136,6 @@ fn failed_reset_releases_publication_handles_across_store_clones() {
     )
     .expect("pin one exact active segment through the production reader");
     assert_eq!(segment_bytes.len() as u64, segment_identity.size_bytes);
-    assert_eq!(
-        target
-            .retained_segment_reads
-            .lock()
-            .expect("shared segment cache")
-            .len(),
-        1
-    );
     #[cfg(target_os = "linux")]
     let segment_path = target.segments_root.join(format!(
         "segment-{}.json",
@@ -160,36 +150,32 @@ fn failed_reset_releases_publication_handles_across_store_clones() {
         "positive live-segment-handle control"
     );
 
-    // The escaped reader must not refill the cache between retirement and
-    // unlink, even though the segment pathname still exists in this window.
+    assert!(
+        try_acquire_code_generation_store_lock(&store_root)
+            .expect("probe retirement while the pass is alive")
+            .is_none(),
+        "an active payload pass prevents retirement"
+    );
+    drop(segment_reader);
+    #[cfg(target_os = "linux")]
+    assert_eq!(
+        live_inode_handles(&segment_file_identity),
+        0,
+        "finishing the pass closes its payload handles while the carrier remains alive"
+    );
+
+    // The escaped carrier must not admit a new operation between retirement
+    // and unlink, even though the pack pathname still exists in this window.
     {
-        let _retirement = try_acquire_code_generation_store_lock(target_root.path())
+        let _retirement = try_acquire_code_generation_store_lock(&store_root)
             .expect("acquire retirement authority")
-            .expect("completed reads release their store lease");
-        let retire = target.retained_segment_reclaimer();
-        retire().expect("retire shared segment handles");
-        let mut refused = segment_bytes.clone();
+            .expect("completed read passes release their store lease");
         assert!(matches!(
-            segment_reader(
-                SealedGenerationSegmentReadV1::Whole {
-                    digest: &segment_identity.digest,
-                    size_bytes: segment_identity.size_bytes,
-                },
-                &mut refused,
-            ),
+            sealed.begin_read_pass(),
             Err(CodeIndexProductionErrorV1::Publication(
                 CodeIndexPublicationStoreErrorV1::StoreLockContended
             ))
         ));
-        assert!(refused.is_empty(), "refused admission returns no old bytes");
-        assert!(
-            target
-                .retained_segment_reads
-                .lock()
-                .expect("retired segment cache")
-                .is_empty(),
-            "the escaped reader must not repin the retired segment"
-        );
         #[cfg(target_os = "linux")]
         assert_eq!(
             live_inode_handles(&segment_file_identity),
@@ -199,9 +185,10 @@ fn failed_reset_releases_publication_handles_across_store_clones() {
     }
 
     // A rejected reset owns no deletion authority and must preserve its memo.
-    let reader = try_acquire_code_generation_store_read_lock(target_root.path())
+    let reader = try_acquire_code_generation_store_read_lock(&store_root)
         .expect("acquire production read lock")
         .expect("uncontended read lock");
+    let segment_reader = sealed.begin_read_pass().expect("begin a later read pass");
     segment_reader(
         SealedGenerationSegmentReadV1::Whole {
             digest: &segment_identity.digest,
@@ -220,6 +207,7 @@ fn failed_reset_releases_publication_handles_across_store_clones() {
         pointer_bytes
     );
     assert!(clone.pointer_memo.lock().expect("preserved memo").is_some());
+    drop(segment_reader);
     drop(reader);
 
     // The existing fault fixture makes cache reset fail after real on-disk
@@ -258,11 +246,8 @@ fn failed_reset_releases_publication_handles_across_store_clones() {
         "an escaped sealed reader must not retain the deleted segment inode"
     );
     assert!(
-        target
-            .retained_segment_reads
-            .lock()
-            .expect("reset segment cache")
-            .is_empty()
+        sealed.begin_read_pass().is_err(),
+        "an escaped carrier cannot reopen deleted payloads after reset"
     );
     assert!(target.pointer_memo.lock().expect("reset memo").is_none());
     assert!(
@@ -276,6 +261,10 @@ fn failed_reset_releases_publication_handles_across_store_clones() {
     // A fresh store must be able to rebuild the reset scope and recover the
     // same snapshot, independently of the deliberately poisoned old cache.
     let mut recovered = open_target();
+    let recovered_operation = recovered
+        .resident_memory_authority()
+        .expect("recovered process authority")
+        .begin_operation();
     assert!(
         recovered
             .load_active_shared()
@@ -283,10 +272,10 @@ fn failed_reset_releases_publication_handles_across_store_clones() {
             .is_none()
     );
     let mut preparation = recovered
-        .prepare(&generation.sealed_scope(), None)
+        .prepare(&generation.sealed_scope(), None, &recovered_operation)
         .expect("prepare after failed reset");
     let publication = generation
-        .stage_publication(&mut preparation)
+        .stage_publication(&mut preparation, &recovered_operation)
         .expect("restage exact source snapshot");
     recovered
         .commit(&mut preparation, &publication)

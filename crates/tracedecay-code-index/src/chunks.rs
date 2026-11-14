@@ -17,8 +17,8 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tracedecay_code_extraction::{
     CallableArityV1, ExtractedCallableArityV1, ExtractedCloneBodyV1, ExtractedGoMethodSetRowV1,
-    ExtractedImportEvidenceV1, ExtractionArtifactV1, ImportNamespaceV1,
-    is_test_framework_call_signature,
+    ExtractedImportEvidenceV1, ExtractedTypeScriptTypeRowV1, ExtractionArtifactV1,
+    ImportNamespaceV1, TypeScriptTypeRowV1, is_test_framework_call_signature,
 };
 use tracedecay_domain::{
     BoundedSanitizedText, CanonicalRelationEdgeV1, ChunkLogicalIdentityV1, ChunkerRevision,
@@ -47,7 +47,7 @@ mod artifacts;
 pub use artifacts::{
     CodeFileIndexArtifactsV1, CodeIndexCallableArityV1, CodeIndexEdgeAbstentionReasonV1,
     CodeIndexEdgeAbstentionV1, CodeIndexGoMethodSetRowV1, CodeIndexImportEvidenceV1,
-    CodeIndexUnresolvedReferenceV1,
+    CodeIndexTypeScriptTypeRowV1, CodeIndexUnresolvedReferenceV1,
 };
 
 /// Eligibility of one generation-bound file document for chunk production.
@@ -811,6 +811,37 @@ fn bind_go_method_sets(
     bound
 }
 
+fn bind_typescript_types(
+    extracted: &[ExtractedTypeScriptTypeRowV1],
+    symbols: &[SymbolRow],
+) -> Vec<CodeIndexTypeScriptTypeRowV1> {
+    let mut by_node_id = HashMap::<&str, Option<&SymbolRow>>::new();
+    for symbol in symbols {
+        by_node_id
+            .entry(&symbol.node_id)
+            .and_modify(|row| *row = None)
+            .or_insert(Some(symbol));
+    }
+    let mut bound = extracted
+        .iter()
+        .filter_map(|row| {
+            let symbol = (*by_node_id.get(row.node_id.as_str())?)?;
+            if matches!(&row.row, TypeScriptTypeRowV1::ReceiverCall { span, .. }
+            if span.start_byte < symbol.span.start_byte || span.end_byte > symbol.span.end_byte)
+            {
+                return None;
+            }
+            Some(CodeIndexTypeScriptTypeRowV1 {
+                occurrence: symbol.occurrence.clone(),
+                row: row.row.clone(),
+            })
+        })
+        .collect::<Vec<_>>();
+    bound.sort();
+    bound.dedup();
+    bound
+}
+
 fn bind_clone_bodies(
     extracted: &[ExtractedCloneBodyV1],
     symbols: &[SymbolRow],
@@ -1250,6 +1281,7 @@ impl DeterministicCodeChunker {
         }?;
         let callable_arities = bind_callable_arities(&artifact.callable_arities, &mut symbol_rows);
         let go_method_sets = bind_go_method_sets(&artifact.go_method_sets, &symbol_rows);
+        let mut typescript_types = bind_typescript_types(&artifact.typescript_types, &symbol_rows);
         let chunks = {
             let _span = tracing::trace_span!("code_index.chunk.build").entered();
             {
@@ -1293,6 +1325,16 @@ impl DeterministicCodeChunker {
             &symbol_rows,
             &artifact.imports,
         );
+        typescript_types.retain(|row| match &row.row {
+            TypeScriptTypeRowV1::ReceiverCall { span, .. } => {
+                unresolved_references.iter().any(|reference| {
+                    reference.from_occurrence == row.occurrence
+                        && reference.kind == RelationEdgeKindV1::Calls
+                        && reference.evidence_span == *span
+                })
+            }
+            _ => true,
+        });
         edges.extend(same_file_edges);
         edges.sort_by(|left, right| canonical_edge_key(left).cmp(&canonical_edge_key(right)));
 
@@ -1322,6 +1364,7 @@ impl DeterministicCodeChunker {
             clone_bodies,
             callable_arities,
             go_method_sets,
+            typescript_types,
             artifact,
             batch,
         )
@@ -2362,7 +2405,6 @@ fn resolve_file_references(
     let mut retained = Vec::new();
     // A receiver call is gap evidence only; one site per caller and callee
     // spelling is all of it, so a minified loop does not retain thousands.
-    let mut typescript_receiver_calls = HashSet::new();
     for reference in unresolved {
         let candidates = if reference.reference_name.contains("::") {
             by_file_relative_name.get(reference.reference_name.as_str())
@@ -2472,17 +2514,7 @@ fn resolve_file_references(
                     &by_node_id,
                     &imported_locals,
                     &rust_root_modules,
-                ) && !(typescript
-                    && (candidate
-                        .reference_name
-                        .starts_with(TYPESCRIPT_COMPUTED_RECEIVER)
-                        || typescript_member_call_path(&candidate.reference_name)
-                            .is_some_and(|(head, _)| !imported_locals.contains(head)))
-                    && !typescript_receiver_calls.insert((
-                        candidate.from_occurrence.clone(),
-                        candidate.reference_name.clone(),
-                    )))
-                {
+                ) {
                     candidate.ambiguous_local = !compatible.is_empty() && language != "java";
                     retained.push(candidate);
                 }

@@ -704,6 +704,7 @@ pub(crate) struct RetainedCodeGraphRuntimeV1 {
     /// authority; tests substitute an isolated cell.
     resident_memory_pressure:
         Arc<tracedecay_runtime_core::resident_memory::ResidentMemoryPressureV1>,
+    resident_memory: Arc<tracedecay_runtime_core::resident_memory::ProcessResidentMemoryV1>,
 }
 
 /// Memory-shard publication runtime for immutable non-code graph journeys.
@@ -1936,6 +1937,7 @@ impl RetainedCodeGraphRuntimeV1 {
         super::code_graph_manifest::graph_rows_from_roots(
             &self.generations_root,
             &self.replay_root,
+            &self.resident_memory,
             &self.sealed_state_digest,
             &self.generation_id,
             projection.clone(),
@@ -2005,6 +2007,7 @@ impl RetainedCodeGraphRuntimeV1 {
                 super::code_graph_manifest::verify_sealed_generation_source_from_roots(
                     &self.generations_root,
                     &self.replay_root,
+                    &self.resident_memory,
                     &self.sealed_state_digest,
                     &self.verified_segments,
                     &check,
@@ -2014,8 +2017,12 @@ impl RetainedCodeGraphRuntimeV1 {
         };
         // The generation's graph rows, built from its sealed segments the
         // first time an arm needs them and shared by every later use.
-        let built_rows = std::cell::OnceCell::new();
         let admission_reservation = RefCell::new(None::<Box<dyn Send>>);
+        let direct_admission = RefCell::new(super::code_graph_manifest::CodeGraphMemoryV1::new(
+            &self.resident_memory,
+            "code_graph.build.v1",
+        )?);
+        let built_rows = std::cell::OnceCell::new();
         let rows = || -> std::result::Result<GraphGenerationRows, GraphDbError> {
             if let Some(rows) = built_rows.get() {
                 return Ok(GraphGenerationRows::clone(rows));
@@ -2035,7 +2042,7 @@ impl RetainedCodeGraphRuntimeV1 {
             }
             let mut admit = |bound: tracedecay_code_index::production::CodeGraphBuildBoundV1| {
                 let Some(admission) = admission else {
-                    return Ok(());
+                    return direct_admission.borrow_mut().resize(bound.peak_bytes());
                 };
                 drop(admission_reservation.borrow_mut().take());
                 let reservation = admission.admit(bound)?;
@@ -2707,6 +2714,7 @@ impl DaemonSessionRuntimeRegistryV1 {
                 repository_id.clone(),
                 replay_binding.generations_root.clone(),
                 replay_root.clone(),
+                Arc::clone(&replay_binding.resident_memory),
             )
             .map_err(|error| {
                 session_registry_error("bind code graph replay route", error.to_string())
@@ -2718,6 +2726,7 @@ impl DaemonSessionRuntimeRegistryV1 {
             resident_memory_pressure: Arc::clone(
                 self.graph_manifest_provider.resident_memory_pressure(),
             ),
+            resident_memory: replay_binding.resident_memory,
             _manifest_route: manifest_route,
             authority,
             project_database,

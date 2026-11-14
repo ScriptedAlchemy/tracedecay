@@ -271,7 +271,7 @@ pub type CodeIndexGenerationPublishedV1 = registry::CodeIndexGenerationPublished
 #[cfg(test)]
 pub use publication_store::{CodeIndexBytePoolStatsV1, HeldActiveDecodeV1};
 #[cfg(test)]
-use publication_store::{DECODED_GENERATION_CACHE_CAPACITY, TemporaryEvidencePackV1};
+use publication_store::{DECODED_GENERATION_CACHE_CAPACITY, TemporaryPayloadPackV1};
 pub use publication_store::{
     DaemonCodeIndexPublicationStoreV1, GenerationDecodeAdmissionV1, SharedCodeIndexBytePoolV1,
 };

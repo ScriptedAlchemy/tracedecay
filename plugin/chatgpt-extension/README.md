@@ -12,11 +12,11 @@ From a ChatGPT conversation or the plugin's global entrypoint you can:
 - Pick a recent project or search the daemon's isolated profile registry by
   project path, alias, id, or default branch.
 - Search code symbols by name.
-- Inspect a symbol with its callers, callees, impact, and a bounded call
-  graph.
+- Inspect a symbol with its callers, callees, recorded unresolved calls,
+  impact, and a bounded call graph.
 - See reported project status: repository root, worktree, branch, commit,
-  generation, and index freshness. Relations carry their served generation;
-  symbol and impact reads do not report snapshot identity.
+  generation, and index freshness. Relations and unresolved-call evidence carry
+  their served generation; impact reads do not report snapshot identity.
 - Send the selected evidence back to the model as context or a message.
 - Follow deep links into a specific symbol view and toggle fullscreen.
 

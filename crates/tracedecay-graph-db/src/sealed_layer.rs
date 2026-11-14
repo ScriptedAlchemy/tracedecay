@@ -34,6 +34,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 
 use serde::{Deserialize, Serialize};
+use tracedecay_private_fs::capability_dir::HeldDirectory;
 use tracedecay_store::runtime::GraphRecoveredGenerationDigestV1;
 
 use crate::generation::{
@@ -861,7 +862,9 @@ impl LayeredGraphGeneration {
 
     /// Moves the pinned base links into `staging` and records the hidden
     /// rows, completing a layered artifact directory beside its container.
-    pub(crate) fn install_base_files(&self, staging: &Path) -> Result<(), GraphDbError> {
+    /// Every write is relative to the held staging directory, so a replaced
+    /// staging pathname cannot redirect a base link or hidden-row file.
+    pub(crate) fn install_base_files(&self, staging: &HeldDirectory) -> Result<(), GraphDbError> {
         let pinned = self.delta.directory();
         for file in [
             LAYERED_BASE_CONTAINER_FILE,
@@ -870,21 +873,23 @@ impl LayeredGraphGeneration {
             LAYERED_BASE_ENTITY_ROWS_FILE,
             LAYERED_BASE_ENTITY_ROW_OFFSETS_FILE,
         ] {
-            std::fs::hard_link(pinned.join(file), staging.join(file))
+            staging
+                .hard_link_from(&pinned.join(file), std::ffi::OsStr::new(file))
                 .map_err(|error| layered_io("base link", error))?;
         }
         let container = Path::new(LAYERED_BASE_CONTAINER_FILE);
-        match std::fs::copy(
-            pinned.join(marker_path(container)),
-            staging.join(marker_path(container)),
-        ) {
-            Ok(_) => {}
+        let marker = marker_path(container);
+        match std::fs::read(pinned.join(&marker)) {
+            Ok(bytes) => staging
+                .write_new_file(marker.as_os_str(), &bytes)
+                .map_err(|error| layered_io("base marker link", error))?,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(error) => return Err(layered_io("base marker link", error)),
         }
         let encoded = serde_json::to_vec(&self.hidden)
             .map_err(|error| GraphDbError::unavailable(format!("hidden rows encode: {error}")))?;
-        std::fs::write(staging.join(LAYERED_HIDDEN_FILE), encoded)
+        staging
+            .write_new_file(std::ffi::OsStr::new(LAYERED_HIDDEN_FILE), &encoded)
             .map_err(|error| layered_io("hidden rows write", error))
     }
 }

@@ -63,10 +63,9 @@ async fn fresh_temporal_schema_stores_and_searches_a_summary_node() {
 async fn temporal_payload_manifest_schema_is_payload_global() {
     let tmp = TempDir::new().unwrap();
     let db_path = tmp.path().join(".tracedecay").join("sessions.db");
-    let db = open_global_db(&db_path)
+    initialize_global_db(&db_path)
         .await
         .expect("temporal schema initialization should not error");
-    drop(db);
 
     let raw_db = TestConnection::open(&db_path);
     let conn = (*raw_db).clone();
@@ -175,10 +174,9 @@ mod admission;
 async fn temporal_schema_query_indexes_cover_exact_lookup_shapes() {
     let tmp = TempDir::new().unwrap();
     let db_path = tmp.path().join(".tracedecay").join("sessions.db");
-    let db = open_global_db(&db_path)
+    initialize_global_db(&db_path)
         .await
         .expect("temporal schema initialization should not error");
-    drop(db);
 
     let raw_db = TestConnection::open(&db_path);
     let conn = (*raw_db).clone();
@@ -305,10 +303,9 @@ async fn temporal_schema_root_retrieval_indexes_cover_catalog_and_large_query_sh
 
     let tmp = TempDir::new().unwrap();
     let db_path = tmp.path().join(".tracedecay").join("sessions.db");
-    let db = open_global_db(&db_path)
+    initialize_global_db(&db_path)
         .await
         .expect("temporal schema initialization should not error");
-    drop(db);
 
     let raw_db = TestConnection::open(&db_path);
     let conn = (*raw_db).clone();
@@ -608,10 +605,9 @@ async fn temporal_schema_root_retrieval_indexes_cover_catalog_and_large_query_sh
 async fn temporal_schema_rejects_unexpected_indexes_without_dropping_them() {
     let tmp = TempDir::new().unwrap();
     let db_path = tmp.path().join(".tracedecay").join("sessions.db");
-    let db = open_global_db(&db_path)
+    initialize_global_db(&db_path)
         .await
         .expect("temporal schema initialization should not error");
-    drop(db);
 
     let raw_db = TestConnection::open(&db_path);
     let conn = (*raw_db).clone();
@@ -719,10 +715,9 @@ async fn temporal_schema_refuses_markerless_malformed_fts_without_mutation() {
 async fn temporal_schema_rejects_missing_fts_without_rebuilding_it() {
     let tmp = TempDir::new().unwrap();
     let db_path = tmp.path().join(".tracedecay").join("sessions.db");
-    let db = open_global_db(&db_path)
+    initialize_global_db(&db_path)
         .await
         .expect("temporal schema initialization should not error");
-    drop(db);
 
     let raw_db = TestConnection::open(&db_path);
     let conn = (*raw_db).clone();
@@ -791,10 +786,9 @@ async fn temporal_schema_rejects_missing_fts_without_rebuilding_it() {
 async fn temporal_schema_rejects_missing_graph_publication_authority_without_rebuilding_it() {
     let tmp = TempDir::new().unwrap();
     let db_path = tmp.path().join(".tracedecay").join("sessions.db");
-    let db = open_global_db(&db_path)
+    initialize_global_db(&db_path)
         .await
         .expect("temporal schema initialization should not error");
-    drop(db);
 
     let raw_db = TestConnection::open(&db_path);
     let conn = (*raw_db).clone();
