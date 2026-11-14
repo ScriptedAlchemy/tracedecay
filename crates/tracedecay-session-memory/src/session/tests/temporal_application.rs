@@ -526,7 +526,15 @@ fn admitted_digest<A: SessionScopeAuthorizer>(
     estimator: Words,
     configuration: SessionRetrievalConfiguration,
 ) -> String {
-    admitted_digests(harness, authorizer, context, query, estimator, configuration).0
+    admitted_digests(
+        harness,
+        authorizer,
+        context,
+        query,
+        estimator,
+        configuration,
+    )
+    .0
 }
 
 const BASELINE_GRANT: GrantAuthorizer = GrantAuthorizer {
