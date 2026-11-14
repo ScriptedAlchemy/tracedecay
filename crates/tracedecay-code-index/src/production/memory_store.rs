@@ -694,15 +694,17 @@ impl CodeIndexPreparationPort for MemoryCodeIndexPreparationV1 {
                     )
                 })?;
             let published = Arc::clone(&published);
-            Ok(Arc::new(move |request, buffer: &mut Vec<u8>| {
-                buffer.clear();
-                if !owner.packs.contains_key(request_digest(request)) {
-                    return Err(CodeIndexProductionErrorV1::Contract(
-                        "payload pack is absent from this generation".to_owned(),
-                    ));
-                }
-                published(request, buffer)
-            }) as Arc<SealedSegmentReaderV1>)
+            Ok(Arc::new(
+                move |request: SealedGenerationSegmentReadV1<'_>, buffer: &mut Vec<u8>| {
+                    buffer.clear();
+                    if !owner.packs.contains_key(request_digest(request)) {
+                        return Err(CodeIndexProductionErrorV1::Contract(
+                            "payload pack is absent from this generation".to_owned(),
+                        ));
+                    }
+                    published(request, buffer)
+                },
+            ) as Arc<SealedSegmentReaderV1>)
         })
     }
 
@@ -731,15 +733,17 @@ impl CodeIndexAtomicPublicationPort for MemorySealedPublicationStoreV1 {
                 Arc::new(move || {
                     let owner = Arc::clone(&owner);
                     let published = Arc::clone(&published);
-                    Ok(Arc::new(move |request, buffer: &mut Vec<u8>| {
-                        buffer.clear();
-                        if !owner.packs.contains_key(request_digest(request)) {
-                            return Err(CodeIndexProductionErrorV1::Contract(
-                                "payload pack is absent from this generation".to_owned(),
-                            ));
-                        }
-                        published(request, buffer)
-                    }) as Arc<SealedSegmentReaderV1>)
+                    Ok(Arc::new(
+                        move |request: SealedGenerationSegmentReadV1<'_>, buffer: &mut Vec<u8>| {
+                            buffer.clear();
+                            if !owner.packs.contains_key(request_digest(request)) {
+                                return Err(CodeIndexProductionErrorV1::Contract(
+                                    "payload pack is absent from this generation".to_owned(),
+                                ));
+                            }
+                            published(request, buffer)
+                        },
+                    ) as Arc<SealedSegmentReaderV1>)
                 }),
             )
         }))

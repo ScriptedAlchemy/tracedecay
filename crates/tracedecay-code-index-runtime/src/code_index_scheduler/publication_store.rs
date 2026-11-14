@@ -17,6 +17,8 @@ use std::{
 
 #[cfg(unix)]
 use std::os::unix::fs::MetadataExt;
+#[cfg(windows)]
+use std::os::windows::fs::MetadataExt;
 #[cfg(test)]
 use std::sync::atomic::AtomicUsize;
 
@@ -684,6 +686,7 @@ struct AdmittedPackLayoutV1 {
 /// Idle factories retain only path, pointer and admitted manifest authority.
 struct RetainedPackReadPassV1 {
     payloads: GenerationPackReadPassV1,
+    open_attempts: u64,
     _memory: PreparedPackMemoryV1,
     _lease: CodeGenerationStoreLockV1,
 }
@@ -694,7 +697,7 @@ impl RetainedPackReadPassV1 {
         request: SealedGenerationSegmentReadV1<'_>,
         buffer: &mut Vec<u8>,
     ) -> Result<(), CodeIndexProductionErrorV1> {
-        self.payloads.read(request, buffer)
+        self.payloads.read(request, buffer, &mut self.open_attempts)
     }
 }
 
@@ -710,8 +713,9 @@ fn pack_read_workspace_bytes(root: &Path, digest_bytes: usize) -> usize {
         .as_os_str()
         .len()
         .saturating_add(1 + "segment-".len() + 64 + ".json".len());
-    // Two retained paths and the cold-open pathname/string temporaries can
-    // coexist. PathBuf growth may double its existing allocation.
+    // Two retained paths on every platform and cold-open pathname/string
+    // temporaries can coexist. Windows identity checks also encode one path
+    // as UTF-16; PathBuf growth may double its existing allocation.
     size_of::<RetainedPackReadPassV1>()
         .saturating_add(size_of::<SealedGenerationSegmentIdentityV1>().saturating_mul(2))
         .saturating_add(path_bytes.saturating_mul(8))
@@ -771,10 +775,16 @@ impl GenerationReadAuthorityV1 {
             },
             evidence.clone(),
         ];
-        let payloads =
-            GenerationPackReadPassV1::open(&self.segments_root, &identities, None, &mut 0)?;
+        let mut open_attempts = 0;
+        let payloads = GenerationPackReadPassV1::open(
+            &self.segments_root,
+            &identities,
+            None,
+            &mut open_attempts,
+        )?;
         Ok(RetainedPackReadPassV1 {
             payloads,
+            open_attempts,
             _memory: memory,
             _lease: lease,
         })
@@ -974,7 +984,7 @@ impl DaemonCodeIndexPreparationFilesV1 {
         let pass = self.payload_reads.as_mut().ok_or_else(|| {
             CodeIndexProductionErrorV1::Contract("prepared payload pass is absent".to_owned())
         })?;
-        let result = pass.read(request, buffer);
+        let result = pass.read(request, buffer, &mut self.segment_read_open_attempts);
         if pass.is_invalidated() {
             self.invalidate_reads();
         }
@@ -1013,7 +1023,9 @@ impl DaemonCodeIndexPreparationFilesV1 {
         }
         if let Some(parent) = self.parent.as_mut() {
             let result = parent.manifest.layout.read(request, buffer, |raw, into| {
-                parent.read.read(raw, into)?;
+                parent
+                    .read
+                    .read(raw, into, &mut self.segment_read_open_attempts)?;
                 parent
                     .bytes_read
                     .fetch_add(into.len() as u64, Ordering::Relaxed);
@@ -1979,6 +1991,7 @@ struct PinnedGenerationSegmentV1 {
     digest: String,
     size_bytes: u64,
     file: File,
+    admitted_metadata: std::fs::Metadata,
 }
 
 impl TemporaryPayloadPackV1 {
@@ -3364,7 +3377,9 @@ impl DaemonCodeIndexPublicationStoreV1 {
             Self::require_read_control(control)?;
             let mut pass = opened?;
             Ok(Box::new(
-                move |request, buffer: &mut Vec<u8>, control: &dyn CodeIndexExecutionControlV1| {
+                move |request: SealedGenerationSegmentReadV1<'_>,
+                      buffer: &mut Vec<u8>,
+                      control: &dyn CodeIndexExecutionControlV1| {
                     buffer.clear();
                     Self::require_read_control(control)?;
                     let result = pass.read(request, buffer);
@@ -3412,16 +3427,18 @@ impl DaemonCodeIndexPublicationStoreV1 {
                 memory.operation(),
                 lease,
             )?);
-            Ok(Arc::new(move |request, buffer: &mut Vec<u8>| {
-                buffer.clear();
-                pass.lock()
-                    .map_err(|_| {
-                        CodeIndexProductionErrorV1::Contract(
-                            "sealed pack read pass was poisoned".to_owned(),
-                        )
-                    })?
-                    .read(request, buffer)
-            }) as Arc<SealedSegmentReaderV1>)
+            Ok(Arc::new(
+                move |request: SealedGenerationSegmentReadV1<'_>, buffer: &mut Vec<u8>| {
+                    buffer.clear();
+                    pass.lock()
+                        .map_err(|_| {
+                            CodeIndexProductionErrorV1::Contract(
+                                "sealed pack read pass was poisoned".to_owned(),
+                            )
+                        })?
+                        .read(request, buffer)
+                },
+            ) as Arc<SealedSegmentReaderV1>)
         }))
     }
 
@@ -3485,7 +3502,10 @@ impl DaemonCodeIndexPublicationStoreV1 {
             Self::same_unix_segment_identity(&path_metadata, &file_metadata)
                 && Self::same_unix_segment_identity(&path_after_open, &file_metadata)
         };
-        #[cfg(not(unix))]
+        #[cfg(windows)]
+        let same_identity =
+            Self::same_windows_segment_identity(path, &path_metadata, &file, open_attempts)?;
+        #[cfg(not(any(unix, windows)))]
         let same_identity = {
             let file_identity = Handle::from_file(file.try_clone().map_err(|error| {
                 CodeIndexProductionErrorV1::Contract(format!(
@@ -3514,7 +3534,54 @@ impl DaemonCodeIndexPublicationStoreV1 {
             digest: digest.to_owned(),
             size_bytes: expected_size,
             file,
+            admitted_metadata: path_metadata,
         })
+    }
+
+    #[cfg(windows)]
+    fn same_windows_segment_identity(
+        path: &Path,
+        admitted: &std::fs::Metadata,
+        file: &File,
+        open_attempts: &mut u64,
+    ) -> Result<bool, CodeIndexProductionErrorV1> {
+        let unavailable = |error: std::io::Error| {
+            CodeIndexProductionErrorV1::Contract(format!(
+                "sealed generation pack identity cannot be rechecked: {error}"
+            ))
+        };
+        let same_metadata = |current: &std::fs::Metadata| {
+            const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+            admitted.file_type().is_file()
+                && current.file_type().is_file()
+                && admitted.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT == 0
+                && current.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT == 0
+                && admitted.file_size() == current.file_size()
+                && admitted.creation_time() == current.creation_time()
+                && admitted.last_write_time() == current.last_write_time()
+        };
+        if !same_metadata(&file.metadata().map_err(unavailable)?) {
+            return Ok(false);
+        }
+        let opened_identity =
+            tracedecay_private_fs::windows_file::information(file).map_err(unavailable)?;
+        // This is a real pathname open, even though it is used only to prove
+        // volume/file-index equality with the retained payload handle. The
+        // canonical no-follow opener lets the metadata check refuse reparse
+        // aliases without relying on a preliminary pathname check.
+        *open_attempts = open_attempts.saturating_add(1);
+        let named = tracedecay_private_fs::framed_log::open_no_follow(path).map_err(unavailable)?;
+        if !same_metadata(&named.metadata().map_err(unavailable)?) {
+            return Ok(false);
+        }
+        let named_identity =
+            tracedecay_private_fs::windows_file::information(&named).map_err(unavailable)?;
+        Ok(
+            opened_identity.volume_serial_number == named_identity.volume_serial_number
+                && opened_identity.file_index == named_identity.file_index
+                && same_metadata(&path.symlink_metadata().map_err(unavailable)?)
+                && same_metadata(&file.metadata().map_err(unavailable)?),
+        )
     }
 
     #[cfg(unix)]
@@ -3679,6 +3746,7 @@ impl DaemonCodeIndexPublicationStoreV1 {
         let _lifetime_lock = lifetime_lock;
         let mut memory = PreparedPackMemoryV1::new(&operation)?;
         let mut pinned: [Option<(ManifestDigest, GenerationPackReadPassV1)>; 2] = [None, None];
+        let mut open_attempts = 0;
         match CodeIndexPublishedGenerationV1::decode_partitioned_sealed(
             &manifest,
             &self.decoded_content,
@@ -3716,7 +3784,7 @@ impl DaemonCodeIndexPublicationStoreV1 {
                             &self.segments_root,
                             std::slice::from_ref(&identity),
                             None,
-                            &mut 0,
+                            &mut open_attempts,
                         )?;
                         pinned[index] = Some((identity.digest, pass));
                         index
@@ -3725,7 +3793,7 @@ impl DaemonCodeIndexPublicationStoreV1 {
                 let (_, pass) = pinned[index].as_mut().ok_or_else(|| {
                     CodeIndexProductionErrorV1::Contract("sealed decode pack is absent".to_owned())
                 })?;
-                pass.read(request, buffer)
+                pass.read(request, buffer, &mut open_attempts)
             },
             &mut |needed| {
                 manifest_memory
@@ -4888,16 +4956,18 @@ impl DaemonCodeIndexPublicationStoreV1 {
                 factory_layout._memory.operation(),
                 lease,
             )?);
-            Ok(Arc::new(move |request, buffer: &mut Vec<u8>| {
-                buffer.clear();
-                pass.lock()
-                    .map_err(|_| {
-                        CodeIndexProductionErrorV1::Contract(
-                            "sealed pack read pass was poisoned".to_owned(),
-                        )
-                    })?
-                    .read(request, buffer)
-            }) as Arc<SealedSegmentReaderV1>)
+            Ok(Arc::new(
+                move |request: SealedGenerationSegmentReadV1<'_>, buffer: &mut Vec<u8>| {
+                    buffer.clear();
+                    pass.lock()
+                        .map_err(|_| {
+                            CodeIndexProductionErrorV1::Contract(
+                                "sealed pack read pass was poisoned".to_owned(),
+                            )
+                        })?
+                        .read(request, buffer)
+                },
+            ) as Arc<SealedSegmentReaderV1>)
         });
         Ok(Arc::new(CommittedPreparationPacksV1 {
             layout,

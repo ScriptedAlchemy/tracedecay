@@ -14,35 +14,42 @@ use super::{DaemonCodeIndexPublicationStoreV1, PinnedGenerationSegmentV1};
 
 struct PinnedPackV1 {
     segment: PinnedGenerationSegmentV1,
-    #[cfg(unix)]
     path: PathBuf,
-    #[cfg(unix)]
-    identity: std::fs::Metadata,
 }
 
 impl PinnedPackV1 {
-    fn require_unchanged(&self) -> Result<(), CodeIndexProductionErrorV1> {
+    fn require_unchanged(
+        &self,
+        _open_attempts: &mut u64,
+    ) -> Result<(), CodeIndexProductionErrorV1> {
         #[cfg(unix)]
-        {
-            let unchanged = self
-                .path
-                .symlink_metadata()
-                .ok()
-                .zip(self.segment.file.metadata().ok())
-                .is_some_and(|(named, opened)| {
-                    DaemonCodeIndexPublicationStoreV1::same_unix_segment_identity(
-                        &self.identity,
-                        &named,
-                    ) && DaemonCodeIndexPublicationStoreV1::same_unix_segment_identity(
-                        &self.identity,
-                        &opened,
-                    )
-                });
-            if !unchanged {
-                return Err(CodeIndexProductionErrorV1::Contract(
-                    "sealed generation pack changed during its read pass".to_owned(),
-                ));
-            }
+        let unchanged = self
+            .path
+            .symlink_metadata()
+            .ok()
+            .zip(self.segment.file.metadata().ok())
+            .is_some_and(|(named, opened)| {
+                DaemonCodeIndexPublicationStoreV1::same_unix_segment_identity(
+                    &self.segment.admitted_metadata,
+                    &named,
+                ) && DaemonCodeIndexPublicationStoreV1::same_unix_segment_identity(
+                    &self.segment.admitted_metadata,
+                    &opened,
+                )
+            });
+        #[cfg(windows)]
+        let unchanged = DaemonCodeIndexPublicationStoreV1::same_windows_segment_identity(
+            &self.path,
+            &self.segment.admitted_metadata,
+            &self.segment.file,
+            _open_attempts,
+        )?;
+        #[cfg(not(any(unix, windows)))]
+        let unchanged = false;
+        if !unchanged {
+            return Err(CodeIndexProductionErrorV1::Contract(
+                "sealed generation pack changed during its read pass".to_owned(),
+            ));
         }
         Ok(())
     }
@@ -106,14 +113,8 @@ impl GenerationPackReadPassV1 {
             let path = pending
                 .and_then(|pending| pending.get(&canonical))
                 .unwrap_or(&canonical);
-            // Keep the identity from before admission, so a same-inode edit
-            // between the canonical opener and this pass cannot become baseline.
-            #[cfg(unix)]
-            let original = path.symlink_metadata().map_err(|error| {
-                CodeIndexProductionErrorV1::Contract(format!(
-                    "sealed generation pack is unavailable: {error}"
-                ))
-            })?;
+            // The canonical opener retains its original pre-open metadata.
+            // Never establish a later baseline while assembling the pass.
             let segment = DaemonCodeIndexPublicationStoreV1::open_pinned_partitioned_segment_at(
                 path,
                 SealedGenerationSegmentReadV1::Whole {
@@ -124,12 +125,8 @@ impl GenerationPackReadPassV1 {
             )?;
             let pinned = PinnedPackV1 {
                 segment,
-                #[cfg(unix)]
                 path: path.to_path_buf(),
-                #[cfg(unix)]
-                identity: original,
             };
-            pinned.require_unchanged()?;
             *slot = Some(pinned);
         }
         Ok(pass)
@@ -141,10 +138,9 @@ impl GenerationPackReadPassV1 {
 
     pub(super) fn retained_heap_bytes(&self) -> usize {
         self.packs.iter().flatten().fold(0_usize, |bytes, pack| {
-            let bytes = bytes.saturating_add(pack.segment.digest.capacity());
-            #[cfg(unix)]
-            let bytes = bytes.saturating_add(pack.path.capacity());
             bytes
+                .saturating_add(pack.segment.digest.capacity())
+                .saturating_add(pack.path.capacity())
         })
     }
 
@@ -152,6 +148,7 @@ impl GenerationPackReadPassV1 {
         &mut self,
         request: SealedGenerationSegmentReadV1<'_>,
         into: &mut Vec<u8>,
+        open_attempts: &mut u64,
     ) -> Result<(), CodeIndexProductionErrorV1> {
         into.clear();
         if self.failed {
@@ -161,7 +158,7 @@ impl GenerationPackReadPassV1 {
         }
         // Malformed requests do not revoke healthy admitted pack handles.
         let index = self.validate_request(request)?;
-        let result = self.read_inner(index, request, into);
+        let result = self.read_inner(index, request, into, open_attempts);
         if result.is_err() {
             into.clear();
             self.packs = [None, None];
@@ -218,19 +215,20 @@ impl GenerationPackReadPassV1 {
         index: usize,
         request: SealedGenerationSegmentReadV1<'_>,
         into: &mut Vec<u8>,
+        open_attempts: &mut u64,
     ) -> Result<(), CodeIndexProductionErrorV1> {
         let pinned = self.packs[index].as_mut().ok_or_else(|| {
             CodeIndexProductionErrorV1::Contract(
                 "sealed generation read pass lost an admitted pack".to_owned(),
             )
         })?;
-        pinned.require_unchanged()?;
+        pinned.require_unchanged(open_attempts)?;
         let result = DaemonCodeIndexPublicationStoreV1::read_pinned_partitioned_segment(
             &mut pinned.segment,
             request,
             into,
         );
-        pinned.require_unchanged()?;
+        pinned.require_unchanged(open_attempts)?;
         result
     }
 }
@@ -239,6 +237,9 @@ impl GenerationPackReadPassV1 {
 mod tests {
     use std::{collections::BTreeMap, path::Path};
 
+    #[cfg(windows)]
+    use std::os::windows::fs::{FileTimesExt, MetadataExt, OpenOptionsExt};
+
     use sha2::{Digest, Sha256};
     use tempfile::TempDir;
     use tracedecay_code_index::production::{
@@ -246,7 +247,7 @@ mod tests {
     };
     use tracedecay_domain::{ManifestDigest, sha256_hex_suffix};
 
-    use super::GenerationPackReadPassV1;
+    use super::{DaemonCodeIndexPublicationStoreV1, GenerationPackReadPassV1, PinnedPackV1};
 
     fn identity(bytes: &[u8]) -> SealedGenerationSegmentIdentityV1 {
         SealedGenerationSegmentIdentityV1 {
@@ -275,7 +276,8 @@ mod tests {
             &mut open_attempts,
         )
         .unwrap();
-        let expected_opens = if cfg!(unix) { 2 } else { 4 };
+        let mut expected_opens = if cfg!(windows) { 4 } else { 2 };
+        let validation_opens = if cfg!(windows) { 2 } else { 0 };
         assert_eq!(open_attempts, expected_opens);
         let mut bytes = Vec::new();
         for _ in 0..32 {
@@ -288,8 +290,10 @@ mod tests {
                         length: 7,
                     },
                     &mut bytes,
+                    &mut open_attempts,
                 )
                 .unwrap();
+                expected_opens += validation_opens;
                 assert_eq!(bytes, expected);
             }
         }
@@ -303,6 +307,7 @@ mod tests {
                     length: 1,
                 },
                 &mut bytes,
+                &mut open_attempts,
             )
             .is_err()
         );
@@ -318,19 +323,24 @@ mod tests {
                 size_bytes: unknown.size_bytes,
             },
         ] {
-            assert!(pass.read(request, &mut bytes).is_err());
+            assert!(pass.read(request, &mut bytes, &mut open_attempts).is_err());
             assert!(bytes.is_empty());
         }
+        assert_eq!(
+            open_attempts, expected_opens,
+            "malformed reads do not open paths"
+        );
         pass.read(
             SealedGenerationSegmentReadV1::Whole {
                 digest: &content.digest,
                 size_bytes: content.size_bytes,
             },
             &mut bytes,
+            &mut open_attempts,
         )
         .unwrap();
         assert_eq!(bytes, b"content payload");
-        assert_eq!(open_attempts, expected_opens);
+        assert_eq!(open_attempts, expected_opens + validation_opens);
     }
 
     #[test]
@@ -353,6 +363,7 @@ mod tests {
                 size_bytes: pack.size_bytes,
             },
             &mut read,
+            &mut 0,
         )
         .unwrap();
         assert_eq!(read, bytes);
@@ -396,7 +407,7 @@ mod tests {
             )
             .is_err()
         );
-        let one_pack_opens = if cfg!(unix) { 1 } else { 2 };
+        let one_pack_opens = if cfg!(windows) { 2 } else { 1 };
         assert_eq!(opens, one_pack_opens);
         let pass =
             GenerationPackReadPassV1::open(root.path(), &[content], None, &mut opens).unwrap();
@@ -404,7 +415,6 @@ mod tests {
         drop(pass);
     }
 
-    #[cfg(unix)]
     #[test]
     fn pass_refuses_same_inode_mutation_and_replaced_path() {
         let root = TempDir::new().unwrap();
@@ -413,34 +423,111 @@ mod tests {
         let path = root.path().join(format!("segment-{suffix}.json"));
         for replace in [false, true] {
             std::fs::write(&path, b"original").unwrap();
-            std::fs::File::open(&path)
-                .unwrap()
-                .set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(1))
-                .unwrap();
+            set_modified(&path, 1);
+            let mut opens = 0;
             let mut pass =
-                GenerationPackReadPassV1::open(root.path(), &[pack.clone()], None, &mut 0).unwrap();
+                GenerationPackReadPassV1::open(root.path(), &[pack.clone()], None, &mut opens)
+                    .unwrap();
+            let request = SealedGenerationSegmentReadV1::Range {
+                digest: &pack.digest,
+                size_bytes: pack.size_bytes,
+                offset: 0,
+                length: 3,
+            };
+            let mut bytes = Vec::new();
+            pass.read(request, &mut bytes, &mut opens).unwrap();
+            assert_eq!(bytes, b"ori");
             if replace {
-                std::fs::remove_file(&path).unwrap();
+                std::fs::rename(&path, root.path().join("displaced-pack")).unwrap();
             }
             std::fs::write(&path, b"modified").unwrap();
-            std::fs::File::open(&path)
-                .unwrap()
-                .set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(2))
-                .unwrap();
-            let mut bytes = vec![1, 2, 3];
-            assert!(
-                pass.read(
-                    SealedGenerationSegmentReadV1::Range {
-                        digest: &pack.digest,
-                        size_bytes: pack.size_bytes,
-                        offset: 0,
-                        length: 3,
-                    },
-                    &mut bytes,
-                )
-                .is_err()
-            );
+            set_modified(&path, if replace { 1 } else { 2 });
+            #[cfg(windows)]
+            if replace {
+                let original = &pass.packs[0].as_ref().unwrap().segment.admitted_metadata;
+                let replacement = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
+                replacement
+                    .set_times(
+                        std::fs::FileTimes::new()
+                            .set_created(original.created().unwrap())
+                            .set_modified(original.modified().unwrap()),
+                    )
+                    .unwrap();
+                let metadata = replacement.metadata().unwrap();
+                assert!(metadata.is_file());
+                assert_eq!(metadata.file_attributes(), original.file_attributes());
+                assert_eq!(metadata.file_size(), original.file_size());
+                assert_eq!(metadata.creation_time(), original.creation_time());
+                assert_eq!(metadata.last_write_time(), original.last_write_time());
+            }
+            assert!(pass.read(request, &mut bytes, &mut opens).is_err());
             assert!(bytes.is_empty());
+            assert!(pass.is_invalidated());
+            let refused_opens = opens;
+            std::fs::write(&path, b"original").unwrap();
+            set_modified(&path, 1);
+            bytes.extend_from_slice(b"stale");
+            assert!(pass.read(request, &mut bytes, &mut opens).is_err());
+            assert!(bytes.is_empty());
+            assert_eq!(opens, refused_opens, "an invalidated pass never reopens");
         }
+    }
+
+    #[test]
+    fn pass_keeps_the_canonical_openers_original_metadata_baseline() {
+        let root = TempDir::new().unwrap();
+        let pack = write_pack(root.path(), b"original");
+        let suffix = sha256_hex_suffix(pack.digest.as_str()).unwrap();
+        let path = root.path().join(format!("segment-{suffix}.json"));
+        set_modified(&path, 1);
+        let mut opens = 0;
+        let segment = DaemonCodeIndexPublicationStoreV1::open_pinned_partitioned_segment_at(
+            &path,
+            SealedGenerationSegmentReadV1::Whole {
+                digest: &pack.digest,
+                size_bytes: pack.size_bytes,
+            },
+            &mut opens,
+        )
+        .unwrap();
+        std::fs::write(&path, b"modified").unwrap();
+        set_modified(&path, 2);
+        let pinned = PinnedPackV1 { segment, path };
+        assert!(pinned.require_unchanged(&mut opens).is_err());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn named_validation_counts_failed_pathname_opens() {
+        let root = TempDir::new().unwrap();
+        let pack = write_pack(root.path(), b"original");
+        let suffix = sha256_hex_suffix(pack.digest.as_str()).unwrap();
+        let path = root.path().join(format!("segment-{suffix}.json"));
+        let exclusive = std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(0)
+            .open(&path)
+            .unwrap();
+        let admitted = exclusive.metadata().unwrap();
+        let mut opens = 0;
+        assert!(
+            DaemonCodeIndexPublicationStoreV1::same_windows_segment_identity(
+                &path, &admitted, &exclusive, &mut opens,
+            )
+            .is_err()
+        );
+        assert_eq!(
+            opens, 1,
+            "sharing denial is still a real pathname open attempt"
+        );
+    }
+
+    fn set_modified(path: &Path, seconds: u64) {
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(path)
+            .unwrap()
+            .set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(seconds))
+            .unwrap();
     }
 }

@@ -286,7 +286,7 @@ impl SealedParentGenerationV1 {
         // Metadata lookup opens no payload handle. A standalone parent read
         // activates one pass; a successor replaces this operation-local
         // reader with its preparation's authority before reading any payload.
-        let read = move |request, buffer: &mut Vec<u8>| {
+        let read = move |request: SealedGenerationSegmentReadV1<'_>, buffer: &mut Vec<u8>| {
             buffer.clear();
             let read_pack = {
                 let mut pass = read_pass
