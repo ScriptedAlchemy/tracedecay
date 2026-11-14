@@ -41,6 +41,12 @@ use windows_sys::Win32::System::SystemServices::{
 };
 use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 
+mod immutable_read;
+
+pub use immutable_read::{
+    ImmutableReadFile, immutable_read_workspace_bytes, open_immutable_read_file,
+};
+
 const SECURITY_ACCESS: u32 = READ_CONTROL | FILE_READ_ATTRIBUTES;
 const SHARE_READ_WRITE: u32 = FILE_SHARE_READ | FILE_SHARE_WRITE;
 const SHARE_READ_WRITE_DELETE: u32 = SHARE_READ_WRITE | FILE_SHARE_DELETE;
@@ -727,7 +733,26 @@ fn open_raw_handle(
     extra_flags: u32,
 ) -> io::Result<File> {
     let encoded = encode_path(path)?;
+    open_encoded_handle(
+        path,
+        &encoded,
+        disposition,
+        access,
+        security_attributes,
+        share_mode,
+        extra_flags,
+    )
+}
 
+fn open_encoded_handle(
+    path: &Path,
+    encoded: &[u16],
+    disposition: u32,
+    access: u32,
+    security_attributes: *const SECURITY_ATTRIBUTES,
+    share_mode: u32,
+    extra_flags: u32,
+) -> io::Result<File> {
     // SAFETY: `encoded` is NUL-terminated, the optional security attributes
     // remain valid for the call, and a successful handle transfers into `File`.
     let handle = unsafe {
