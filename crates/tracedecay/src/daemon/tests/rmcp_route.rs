@@ -1463,8 +1463,14 @@ async fn serve_proxy_cancels_running_and_queued_requests_without_host_disconnect
 async fn deadline_reply_does_not_wait_for_a_worker_that_ignores_cancellation() {
     let dispatch = {
         let targets = Targets::new().with_targets([
-            ("tracedecay_application::feedback::concrete", tracing::Level::TRACE),
-            ("tracedecay_daemon_service::project_runtime::shutdown", tracing::Level::TRACE),
+            (
+                "tracedecay_application::feedback::concrete",
+                tracing::Level::TRACE,
+            ),
+            (
+                "tracedecay_daemon_service::project_runtime::shutdown",
+                tracing::Level::TRACE,
+            ),
             ("tracedecay_daemon_service::shutdown", tracing::Level::TRACE),
             ("tracedecay::mcp::server::connection", tracing::Level::TRACE),
             ("tracedecay_runtime_core::db::engine", tracing::Level::TRACE),
