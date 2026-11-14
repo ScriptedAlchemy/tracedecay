@@ -2806,7 +2806,9 @@ mod tests {
         registry
             .retain_verification_fault_for_lease(&lease, &fault)
             .unwrap();
-        let path = corrupt_registration.canonical_path().to_path_buf();
+        // TempDir may live under a symlinked temporary root. The registry
+        // reports the physical canonical path selected at admission.
+        let path = std::fs::canonicalize(corrupt_registration.canonical_path()).unwrap();
         let bytes = std::fs::read(&path).unwrap();
 
         for _ in 0..2 {

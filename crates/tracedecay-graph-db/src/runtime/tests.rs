@@ -6,6 +6,7 @@ use std::time::Duration;
 
 use grafeo_common::types::Value;
 
+use super::test_seams::{self, Seam};
 use super::{GraphDb, sync_wal};
 use crate::location::PersistentGraphStoreState;
 use crate::recovery::set_projection_quarantine;
@@ -27,6 +28,78 @@ fn memory_db() -> GraphDbLeaseV1 {
     .unwrap()
     .issue_lease()
     .unwrap()
+}
+
+#[test]
+fn lazy_open_rechecks_close_before_materializing_an_engine() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("graph.grafeo");
+    let options = || GraphDbOpenOptions {
+        location: GraphDbLocation::Persistent(path.clone()),
+        expected_format: GraphFormatVersion::current(),
+        durability: GraphDurability::WalSync,
+        cancellation: Arc::new(NeverCancelled),
+    };
+    let seed = GraphDb::open(options()).unwrap();
+    seed.apply_unverified(scalar_batch("retained")).unwrap();
+    seed.close().unwrap();
+    drop(seed);
+
+    // Both a never-materialized mount and a hibernated engine can be absent
+    // when close races a lazy reader's admission.
+    for hibernated in [false, true] {
+        let database =
+            GraphDb::open_lazy_with_store_state(options(), PersistentGraphStoreState::Existing)
+                .unwrap();
+        if hibernated {
+            database.ensure_opened().unwrap();
+            database.hibernate_if_lazy().unwrap();
+        }
+        assert!(database.inner.database.read().unwrap().is_none());
+
+        let closing = Arc::clone(&database);
+        let admissions = Arc::new(AtomicUsize::new(0));
+        let observed = Arc::clone(&admissions);
+        let hook = test_seams::install(move |seam| {
+            if seam == Seam::LazyOpenAdmission {
+                observed.fetch_add(1, Ordering::Relaxed);
+                // The opener has already observed Ready. Complete the real
+                // close before it takes its database write lock.
+                closing.close().unwrap();
+            }
+        });
+        let result = database.ensure_opened();
+        drop(hook);
+
+        assert_eq!(admissions.load(Ordering::Relaxed), 1);
+        assert_eq!(result, Err(GraphDbError::Closed));
+        assert_eq!(database.runtime_state(), GraphDbRuntimeState::Closed);
+        assert!(
+            database.inner.database.read().unwrap().is_none(),
+            "a completed close must not be followed by a resurrected engine"
+        );
+    }
+
+    // Refusing the stale opener must not corrupt the durable store or block
+    // a new, independently authorized mount from reading the committed row.
+    let reopened = GraphDb::open(options()).unwrap();
+    let snapshot = reopened.snapshot().unwrap();
+    let entity = snapshot
+        .entity(
+            &GraphNamespace::new("project").unwrap(),
+            &GraphEntityId::new("a").unwrap(),
+            Arc::new(NeverCancelled),
+        )
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        entity
+            .properties
+            .get(&GraphPropertyName::new("name").unwrap()),
+        Some(&GraphProperty::String("retained".to_owned()))
+    );
+    drop(snapshot);
+    reopened.close().unwrap();
 }
 
 #[test]
@@ -63,10 +136,17 @@ fn owner_close_releases_the_physical_database_after_durability_uncertainty() {
                 .to_owned(),
         })
     );
+    assert!(
+        !owner.engine_is_open().unwrap(),
+        "the poisoned close must release the physical database"
+    );
     assert_eq!(
         owner.close(),
-        Err(GraphDbError::Closed),
-        "the poisoned close must release the physical database before a second close"
+        Err(GraphDbError::DurabilityUncertain {
+            message: "the handle was poisoned after an observed post-commit persistence failure"
+                .to_owned(),
+        }),
+        "a retry after a poisoned close must stay uncertain, never idempotent Closed"
     );
 }
 
