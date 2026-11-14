@@ -323,8 +323,15 @@ async fn settled_checkout_with_language_less_file(
     (harness, project)
 }
 
-#[tokio::test(flavor = "multi_thread")]
-async fn language_less_document_is_a_terminal_advisory_request() {
+#[test]
+fn language_less_document_is_a_terminal_advisory_request() {
+    tracedecay_runtime_core::native_runtime::default_builder()
+        .build()
+        .expect("native test runtime")
+        .block_on(verify_language_less_document_terminal_advisory_request());
+}
+
+async fn verify_language_less_document_terminal_advisory_request() {
     let isolation = tempfile::TempDir::new().expect("production harness isolation");
     let (harness, project) = settled_checkout_with_language_less_file(isolation.path()).await;
 
