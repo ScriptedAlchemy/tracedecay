@@ -764,17 +764,11 @@ fn publish_under_ledger_lock(
             bytes = publication.payload_len
         )
         .entered();
-        {
-            let _span = tracing::trace_span!("hosts.automation.run_ledger.seek_output").entered();
-            ledger
-                .seek(SeekFrom::Start(pre_append_eof))
-                .map_err(TraceDecayError::from)?;
-        }
+        ledger
+            .seek(SeekFrom::Start(pre_append_eof))
+            .map_err(TraceDecayError::from)?;
         copy_exact_payload(&mut spool, &mut ledger, publication.payload_len)?;
-        {
-            let _span = tracing::trace_span!("hosts.automation.run_ledger.newline").entered();
-            ledger.write_all(b"\n").map_err(TraceDecayError::from)?;
-        }
+        ledger.write_all(b"\n").map_err(TraceDecayError::from)?;
     }
     sync_run_ledger_file_and_parent(ledger_path, &ledger)?;
     verify_published_range(&mut ledger, &mut spool, &intent)?;
@@ -934,16 +928,11 @@ fn copy_exact_payload(
     destination: &mut std::fs::File,
     payload_len: u64,
 ) -> Result<()> {
-    {
-        let _span = tracing::trace_span!("hosts.automation.run_ledger.seek_input").entered();
-        source
-            .seek(SeekFrom::Start(0))
-            .map_err(TraceDecayError::from)?;
-    }
-    let copied = {
-        let _span = tracing::trace_span!("hosts.automation.run_ledger.copy_payload").entered();
-        std::io::copy(&mut source.take(payload_len), destination).map_err(TraceDecayError::from)?
-    };
+    source
+        .seek(SeekFrom::Start(0))
+        .map_err(TraceDecayError::from)?;
+    let copied =
+        std::io::copy(&mut source.take(payload_len), destination).map_err(TraceDecayError::from)?;
     if copied != payload_len {
         return Err(config_error(
             "automation run spool ended before its bound payload length",
