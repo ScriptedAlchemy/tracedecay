@@ -27,6 +27,8 @@ use tracedecay_contracts::{
 use tracedecay_domain::configuration::ConfigurationRevisionId;
 use tracedecay_domain::{FactOwnerV1, ManifestDigest, RunId, UtcMicros};
 use tracedecay_private_fs::framed_log::{DirectorySyncPolicy, sync_parent_directory};
+#[cfg(test)]
+use tracedecay_runtime_core::logging::FormattedTracingCapture;
 use tracedecay_runtime_core::native_runtime;
 use tracedecay_store::{FactReadControl, ProjectMemoryAutomationRunReceiptsV1};
 
@@ -1717,6 +1719,19 @@ fn settle_bound_owner_with_budget(
     mut state: RetainedBoundSettlement,
     budget: Duration,
 ) -> Result<RetainedOwnerValue<(AutomationSettledTerminal, AutomationRunLedgerRecord)>> {
+    #[cfg(test)]
+    let _capture = state.phase_hook.as_ref().map(|_| {
+        FormattedTracingCapture::start_with_target_span_timings(&[
+            module_path!(),
+            "tracedecay_automation_runtime::automation::run_ledger",
+            "tracedecay_private_fs::framed_log",
+        ])
+    });
+    #[cfg(test)]
+    let _capture_span = state.phase_hook.as_ref().map(|_| {
+        tracing::info_span!("daemon.automation.retained_owner", run_id = %state.ledger.run_id)
+            .entered()
+    });
     let started = std::time::Instant::now();
     let mut delay = Duration::from_millis(25);
     loop {
