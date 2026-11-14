@@ -60,6 +60,7 @@ pub struct IndexPathPatternError {
 /// files.
 #[derive(Clone, Debug)]
 pub struct IndexPathPolicyV1 {
+    include_submodules: bool,
     exclude: Vec<String>,
     include: Vec<String>,
     exclude_set: GlobSet,
@@ -78,7 +79,9 @@ pub struct IndexPathPolicyV1 {
 
 impl PartialEq for IndexPathPolicyV1 {
     fn eq(&self, other: &Self) -> bool {
-        self.exclude == other.exclude && self.include == other.include
+        self.include_submodules == other.include_submodules
+            && self.exclude == other.exclude
+            && self.include == other.include
     }
 }
 
@@ -109,6 +112,7 @@ impl IndexPathPolicyV1 {
             .then(|| Self::new(configured, include.clone()).map(Box::new))
             .transpose()?;
         Ok(Self {
+            include_submodules: false,
             exclude,
             include,
             exclude_set,
@@ -130,6 +134,18 @@ impl IndexPathPolicyV1 {
         self.without_generated_dir_defaults
             .as_deref()
             .unwrap_or(self)
+    }
+
+    pub fn with_submodules(mut self, enabled: bool) -> Self {
+        self.include_submodules = enabled;
+        if let Some(scoped) = self.without_generated_dir_defaults.as_mut() {
+            scoped.include_submodules = enabled;
+        }
+        self
+    }
+
+    pub fn includes_submodules(&self) -> bool {
+        self.include_submodules
     }
 
     pub fn exclude_patterns(&self) -> &[String] {

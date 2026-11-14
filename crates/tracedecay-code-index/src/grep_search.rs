@@ -2,12 +2,12 @@ use std::collections::VecDeque;
 use std::path::Path;
 use std::sync::Arc;
 
-use ignore::DirEntry;
 use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
 use regex::{Regex, RegexBuilder};
 use tracedecay_domain::{IndexPathPolicyV1, forward_slash_path};
 
 use crate::parallelism::{CodeIndexParallelismErrorV1, install_interactive};
+use crate::source_walk::submodules::SourceWalkEntry;
 use crate::source_walk::{forward_slash_relative, source_walk};
 
 const MAX_HITS_PER_FILE: usize = 20;
@@ -170,7 +170,7 @@ pub fn search_tree_with_cancel(
     .map_err(GrepSearchError::Parallelism)
 }
 
-fn in_scope(entry: &DirEntry, project_root: &Path, scope_prefix: Option<&str>) -> bool {
+fn in_scope(entry: &SourceWalkEntry, project_root: &Path, scope_prefix: Option<&str>) -> bool {
     scope_prefix.is_none_or(|scope| {
         entry
             .path()
@@ -182,7 +182,7 @@ fn in_scope(entry: &DirEntry, project_root: &Path, scope_prefix: Option<&str>) -
 }
 
 fn scan_grep_file(
-    entry: &DirEntry,
+    entry: &SourceWalkEntry,
     project_root: &Path,
     matcher: &Regex,
     query: &GrepSearchQuery,
@@ -210,7 +210,7 @@ fn scan_grep_file(
         result.cancelled = true;
         return result;
     }
-    let Ok(bytes) = std::fs::read(path) else {
+    let Ok(bytes) = entry.read() else {
         result.omissions.unavailable_sources += 1;
         return result;
     };

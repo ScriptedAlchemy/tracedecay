@@ -39,6 +39,7 @@ where
 
 pub(super) fn worker_config() -> CodeIndexProductionConfigV1 {
     CodeIndexProductionConfigV1 {
+        include_submodules: false,
         project_id: worker_id("project.worker"),
         repository: worker_id("repository.worker"),
         sanitizer_revision: worker_id::<SanitizerRevision>("sanitizer.v1"),
@@ -87,6 +88,7 @@ pub(super) fn worker_request_with_source(
         invalidations: BTreeSet::new(),
         ignored_source_admissions: Vec::new(),
         repository_parse_identity: CodeIndexRepositoryParseIdentityV1 {
+            include_submodules: false,
             tree: None,
             dirty: tracedecay_domain::RepositoryDirtyStateV1::Dirty,
         },

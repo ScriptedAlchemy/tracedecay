@@ -16,6 +16,7 @@
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::ffi::{OsStr, OsString};
+use std::io;
 use std::path::{Path, PathBuf};
 
 use ignore::overrides::OverrideBuilder;
@@ -23,7 +24,8 @@ use tracedecay_domain::errors::{Result, TraceDecayError};
 use tree_sitter::{Node, Parser};
 
 use super::{
-    EcosystemAudit, EcosystemStatus, ProjectFiles, UnmountedFile, normalized, relative_display,
+    EcosystemAudit, EcosystemStatus, ProjectFiles, UnmountedFile, input_error, normalized,
+    relative_display,
 };
 
 /// True for the bytes that may appear inside a Rust identifier, so `path`
@@ -144,7 +146,7 @@ pub(super) fn audit(files: &ProjectFiles) -> Result<EcosystemAudit> {
         return Ok(EcosystemAudit::not_present("rust", RUST_VERDICT));
     }
 
-    let (excluded_globs, workspace_excluded_dirs) = workspace_declarations(project_root)?;
+    let (excluded_globs, workspace_excluded_dirs) = workspace_declarations(files)?;
     let manifests = manifest_paths
         .iter()
         .filter_map(|manifest| manifest.parent())
@@ -155,10 +157,10 @@ pub(super) fn audit(files: &ProjectFiles) -> Result<EcosystemAudit> {
                 .any(|excluded| dir.starts_with(excluded))
         })
         .map(|dir| {
-            let package = cargo_package(project_root, &dir);
-            ManifestEntry { dir, package }
+            let package = cargo_package(files, &dir)?;
+            Ok(ManifestEntry { dir, package })
         })
-        .collect::<Vec<_>>();
+        .collect::<Result<Vec<_>>>()?;
 
     // One mounted set across all packages: a file is mounted if *any* target in
     // the tree reaches it, and asking per package would report a file
@@ -170,7 +172,13 @@ pub(super) fn audit(files: &ProjectFiles) -> Result<EcosystemAudit> {
     let mut entry_point_count = 0usize;
     for package in manifests.iter().filter_map(|entry| entry.package.as_ref()) {
         entry_point_count += package.roots.len();
-        walk_mounted_files(&package.roots, &mut mounted, &mut visited, &mut directories);
+        walk_mounted_files(
+            files,
+            &package.roots,
+            &mut mounted,
+            &mut visited,
+            &mut directories,
+        )?;
     }
 
     let excluded = build_excluded_matcher(project_root, &excluded_globs);
@@ -256,11 +264,17 @@ pub(super) fn audit(files: &ProjectFiles) -> Result<EcosystemAudit> {
     level = "trace",
     skip_all
 )]
-fn workspace_declarations(project_root: &Path) -> Result<(Vec<String>, Vec<PathBuf>)> {
-    let Ok(text) = std::fs::read_to_string(project_root.join("Cargo.toml")) else {
-        // Not a cargo project at the root. Packages may still exist deeper in
-        // the tree, so this is a missing declaration, not a missing audit.
-        return Ok((Vec::new(), Vec::new()));
+fn workspace_declarations(files: &ProjectFiles) -> Result<(Vec<String>, Vec<PathBuf>)> {
+    let project_root = files.root();
+    let path = project_root.join("Cargo.toml");
+    let text = match files.read_to_string(&path) {
+        Ok(text) => text,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            // Not a cargo project at the root. Packages may still exist deeper
+            // in the tree, so this is a missing declaration, not a missing audit.
+            return Ok((Vec::new(), Vec::new()));
+        }
+        Err(error) => return Err(input_error(&path, error)),
     };
     let Ok(manifest) = toml::from_str::<toml::Value>(&text) else {
         return Err(TraceDecayError::Config {
@@ -320,11 +334,18 @@ fn build_excluded_matcher(
 /// audit walks. Returns `None` for a manifest with no `[package]` (a virtual
 /// workspace root owns no targets) and for one whose declared targets do not
 /// exist on disk, both are claim boundaries with nothing to audit.
-fn cargo_package(project_root: &Path, dir: &Path) -> Option<CratePackage> {
+fn cargo_package(files: &ProjectFiles, dir: &Path) -> Result<Option<CratePackage>> {
+    let project_root = files.root();
     let manifest_path = dir.join("Cargo.toml");
-    let manifest_text = std::fs::read_to_string(&manifest_path).ok()?;
-    let manifest = toml::from_str::<toml::Value>(&manifest_text).ok()?;
-    let package = manifest.get("package")?;
+    let manifest_text = files
+        .read_to_string(&manifest_path)
+        .map_err(|error| input_error(&manifest_path, error))?;
+    let Ok(manifest) = toml::from_str::<toml::Value>(&manifest_text) else {
+        return Ok(None);
+    };
+    let Some(package) = manifest.get("package") else {
+        return Ok(None);
+    };
     let name = package
         .get("name")
         .and_then(toml::Value::as_str)
@@ -380,7 +401,7 @@ fn cargo_package(project_root: &Path, dir: &Path) -> Option<CratePackage> {
             .and_then(toml::Value::as_bool)
             .unwrap_or(true);
         if auto_discovers {
-            roots.extend(auto_discovered_roots(&dir.join(directory)));
+            roots.extend(auto_discovered_roots(files, &dir.join(directory))?);
         }
     }
 
@@ -388,7 +409,11 @@ fn cargo_package(project_root: &Path, dir: &Path) -> Option<CratePackage> {
     let mut seen: HashSet<PathBuf> = HashSet::new();
     for root in roots {
         let root = normalized(&root);
-        if !root.is_file() || !seen.insert(root.clone()) {
+        if !files
+            .metadata(&root)?
+            .is_some_and(|metadata| metadata.is_file())
+            || !seen.insert(root.clone())
+        {
             continue;
         }
         // A crate root's own `mod` declarations resolve against its parent
@@ -399,22 +424,26 @@ fn cargo_package(project_root: &Path, dir: &Path) -> Option<CratePackage> {
         deduped.push((root, parent));
     }
     if deduped.is_empty() {
-        return None;
+        return Ok(None);
     }
 
-    let source_dirs = CARGO_SOURCE_DIRS
-        .iter()
-        .map(|name| dir.join(name))
-        .filter(|candidate| candidate.is_dir())
-        .map(|candidate| normalized(&candidate))
-        .collect::<Vec<_>>();
+    let mut source_dirs = Vec::new();
+    for name in CARGO_SOURCE_DIRS {
+        let candidate = dir.join(name);
+        if files
+            .metadata(&candidate)?
+            .is_some_and(|metadata| metadata.is_dir())
+        {
+            source_dirs.push(normalized(&candidate));
+        }
+    }
 
-    Some(CratePackage {
+    Ok(Some(CratePackage {
         name,
         manifest: relative_display(project_root, &manifest_path),
         roots: deduped,
         source_dirs,
-    })
+    }))
 }
 
 /// Cargo's convention for a target directory: every `<dir>/*.rs`, plus every
@@ -424,16 +453,19 @@ fn cargo_package(project_root: &Path, dir: &Path) -> Option<CratePackage> {
 /// a root; every other file under `tests/mcp_suite/` is reachable only through
 /// that root's own `mod` declarations, so a file added to the directory without
 /// a matching `mod` line compiles nowhere and is seen by no one.
-fn auto_discovered_roots(directory: &Path) -> Vec<PathBuf> {
-    let Ok(entries) = std::fs::read_dir(directory) else {
-        return Vec::new();
-    };
+fn auto_discovered_roots(files: &ProjectFiles, directory: &Path) -> Result<Vec<PathBuf>> {
     let mut roots = Vec::new();
-    for entry in entries.flatten() {
+    for entry in files.read_dir(directory)? {
         let path = entry.path();
-        if path.is_dir() {
+        if files
+            .metadata(&path)?
+            .is_some_and(|metadata| metadata.is_dir())
+        {
             let main = path.join("main.rs");
-            if main.is_file() {
+            if files
+                .metadata(&main)?
+                .is_some_and(|metadata| metadata.is_file())
+            {
                 roots.push(main);
             }
         } else if path.extension().is_some_and(|ext| ext == "rs") {
@@ -441,7 +473,7 @@ fn auto_discovered_roots(directory: &Path) -> Vec<PathBuf> {
         }
     }
     roots.sort();
-    roots
+    Ok(roots)
 }
 
 /// Directory listings, cached, so a resolved candidate carries the file's real
@@ -458,36 +490,41 @@ struct DirIndex {
 }
 
 impl DirIndex {
-    fn resolve(&mut self, candidate: &Path) -> Option<PathBuf> {
-        if !candidate.is_file() {
-            return None;
+    fn resolve(&mut self, files: &ProjectFiles, candidate: &Path) -> Result<Option<PathBuf>> {
+        if !files
+            .metadata(candidate)?
+            .is_some_and(|metadata| metadata.is_file())
+        {
+            return Ok(None);
         }
         let candidate = normalized(candidate);
         let (Some(parent), Some(name)) = (candidate.parent(), candidate.file_name()) else {
-            return Some(candidate.clone());
+            return Ok(Some(candidate.clone()));
         };
-        let listing = self
-            .entries
-            .entry(parent.to_path_buf())
-            .or_insert_with(|| read_dir_index(parent));
-        match on_disk_spelling(listing, name) {
-            Some(actual) if actual != name => Some(parent.join(actual)),
-            _ => Some(candidate.clone()),
-        }
+        let listing = match self.entries.entry(parent.to_path_buf()) {
+            std::collections::hash_map::Entry::Occupied(entry) => entry.into_mut(),
+            std::collections::hash_map::Entry::Vacant(entry) => {
+                entry.insert(read_dir_index(files, parent)?)
+            }
+        };
+        Ok(Some(match on_disk_spelling(listing, name) {
+            Some(actual) if actual != name => parent.join(actual),
+            _ => candidate.clone(),
+        }))
     }
 }
 
-fn read_dir_index(directory: &Path) -> HashMap<String, Vec<OsString>> {
+fn read_dir_index(
+    files: &ProjectFiles,
+    directory: &Path,
+) -> Result<HashMap<String, Vec<OsString>>> {
     let mut index: HashMap<String, Vec<OsString>> = HashMap::new();
-    let Ok(entries) = std::fs::read_dir(directory) else {
-        return index;
-    };
-    for entry in entries.flatten() {
+    for entry in files.read_dir(directory)? {
         let name = entry.file_name();
         let lowered = name.to_string_lossy().to_ascii_lowercase();
         index.entry(lowered).or_default().push(name);
     }
-    index
+    Ok(index)
 }
 
 /// The on-disk name for `wanted`: itself when the directory really holds that
@@ -519,11 +556,12 @@ fn on_disk_spelling(listing: &HashMap<String, Vec<OsString>>, wanted: &OsStr) ->
     skip_all
 )]
 fn walk_mounted_files(
+    files: &ProjectFiles,
     roots: &[(PathBuf, PathBuf)],
     mounted: &mut HashSet<PathBuf>,
     visited: &mut HashSet<(PathBuf, PathBuf)>,
     directories: &mut DirIndex,
-) {
+) -> Result<()> {
     let mut queue: VecDeque<(PathBuf, PathBuf)> = VecDeque::new();
     for (root, directory) in roots {
         mounted.insert(root.clone());
@@ -532,9 +570,9 @@ fn walk_mounted_files(
         }
     }
     while let Some((file, directory)) = queue.pop_front() {
-        let Ok(source) = std::fs::read_to_string(&file) else {
-            continue;
-        };
+        let source = files
+            .read_to_string(&file)
+            .map_err(|error| input_error(&file, error))?;
         let Some(tree) = parse_rust(&source) else {
             continue;
         };
@@ -563,12 +601,12 @@ fn walk_mounted_files(
             // rather than looking in a phantom `automation/tests/` directory.
             let mut reached = Vec::new();
             for candidate in inclusive {
-                if let Some(actual) = directories.resolve(&candidate) {
+                if let Some(actual) = directories.resolve(files, &candidate)? {
                     reached.push((actual, true));
                 }
             }
             for candidate in exclusive {
-                if let Some(actual) = directories.resolve(&candidate) {
+                if let Some(actual) = directories.resolve(files, &candidate)? {
                     reached.push((actual, false));
                     break;
                 }
@@ -592,7 +630,7 @@ fn walk_mounted_files(
         let mut includes = Vec::new();
         collect_include_paths(&source, tree.root_node(), &file_directory, &mut includes);
         for include in includes {
-            let Some(actual) = directories.resolve(&include) else {
+            let Some(actual) = directories.resolve(files, &include)? else {
                 continue;
             };
             mounted.insert(actual.clone());
@@ -601,6 +639,7 @@ fn walk_mounted_files(
             }
         }
     }
+    Ok(())
 }
 
 #[tracing::instrument(

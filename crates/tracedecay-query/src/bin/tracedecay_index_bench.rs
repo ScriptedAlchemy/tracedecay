@@ -561,6 +561,7 @@ fn run(options: &Options) -> Result<String, String> {
     let repository = identity::<RepositoryId>("repository.index-bench");
     let sanitizer_revision = identity::<SanitizerRevision>("sanitizer.index-bench.v1");
     let config = CodeIndexProductionConfigV1 {
+        include_submodules: false,
         project_id: identity::<ProjectId>("project.index-bench"),
         repository: repository.clone(),
         sanitizer_revision: sanitizer_revision.clone(),
@@ -736,6 +737,7 @@ fn build_request(
         invalidations: BTreeSet::new(),
         ignored_source_admissions: Vec::new(),
         repository_parse_identity: CodeIndexRepositoryParseIdentityV1 {
+            include_submodules: false,
             tree: Some(identity::<TreeId>(tree)),
             dirty: RepositoryDirtyStateV1::Clean,
         },

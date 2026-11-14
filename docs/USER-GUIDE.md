@@ -209,6 +209,24 @@ The value replaces the whole list, so start from the current effective value
 malformed pattern is refused before anything is written. There is no per-run
 folder exclusion; `init` and `sync` take no folder flags.
 
+Direct Git submodules are excluded by default. To index their checked-out
+files under parent-relative paths, set the project’s Boolean
+`index.include_submodules.v1` setting and restart the daemon.
+
+```bash
+tracedecay tool configuration_set --args '{"layer":{"kind":"project","project_id":"<id>"},"key":"index.include_submodules.v1","value":{"kind":"boolean","value":true},"expected_revision":"<revision>","idempotency_key":"<key>"}'
+```
+
+The parent index and `.gitmodules` must identify the child, and its checkout
+must use the matching repository under the parent's Git modules directory.
+Live indexing includes child worktree changes. The parent graph retains tracked
+source aliases that resolve through tracked links to a tracked parent file. A
+parent alias cannot cross into a child checkout. Historical indexing reads the
+child commit recorded by the selected parent revision from the local object
+store. Initialize the submodule locally before requesting that history.
+Linked worktrees, unrelated clones, and deeper nested repositories stay
+outside the parent index.
+
 ### Seeing what changed
 
 Use the daemon's status/coverage result to see the selected generation, exact
