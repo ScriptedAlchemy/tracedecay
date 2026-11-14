@@ -1723,6 +1723,7 @@ fn settle_bound_owner_with_budget(
     let _capture = state.phase_hook.as_ref().map(|_| {
         FormattedTracingCapture::start_with_target_span_timings(&[
             module_path!(),
+            "tracedecay_automation_runtime::automation::effect_runtime::journal",
             "tracedecay_automation_runtime::automation::run_ledger",
             "tracedecay_private_fs::framed_log",
         ])
