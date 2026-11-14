@@ -179,7 +179,16 @@ fn queued_submodule_entry_keeps_its_read_authority_after_the_walk_drops() {
         .expect("queued parent source");
     assert_eq!(child.read().unwrap(), b"pub fn first() {}\n");
 
-    fs::remove_file(root.join(".gitmodules")).unwrap();
+    let error = child
+        .child_binding()
+        .expect("queued child binding")
+        .with_live_checkout(|| {
+            let bytes = fs::read(child.path())?;
+            fs::remove_file(root.join(".gitmodules"))?;
+            Ok(bytes)
+        })
+        .expect_err("revocation during the read must discard its bytes");
+    assert_eq!(error.kind(), io::ErrorKind::InvalidData);
 
     let error = child
         .read()
