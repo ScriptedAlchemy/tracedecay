@@ -5,9 +5,9 @@ use std::{ffi::OsStr, fs, io, path::Path};
 #[cfg(any(unix, windows))]
 use cap_std::fs::{File, OpenOptions};
 
+use super::{Dir, rename_noreplace, replace_file};
 #[cfg(any(unix, windows))]
 use super::{HeldDirectory, require_entry_name, write_pending_receipt};
-use super::{Dir, rename_noreplace, replace_file};
 
 const FAMILY: [&str; 4] = [
     "sessions.db",
@@ -70,7 +70,10 @@ fn initial_receipt_open_failure_releases_directory_for_retry() {
     directory
         .write_new_file(OsStr::new("payload"), b"sealed rows")
         .unwrap();
-    assert_eq!(fs::read(pending.join("owner")).unwrap(), b"complete receipt");
+    assert_eq!(
+        fs::read(pending.join("owner")).unwrap(),
+        b"complete receipt"
+    );
     assert_eq!(fs::read(pending.join("payload")).unwrap(), b"sealed rows");
 }
 
