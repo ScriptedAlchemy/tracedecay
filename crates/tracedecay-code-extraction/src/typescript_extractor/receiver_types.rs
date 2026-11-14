@@ -66,14 +66,14 @@ impl<'t> ReceiverLookup<'t> {
     }
 
     fn has_write(&mut self, state: &ExtractionState<'_>, scope: TsNode<'t>, name: &str) -> bool {
-        self.writes
-            .entry(scope.id())
-            .or_insert_with(|| {
-                let mut found = HashSet::new();
-                collect_writes(state, scope, &mut found);
-                found
-            })
-            .contains(name)
+        if let Some(writes) = self.writes.get(&scope.id()) {
+            return writes.contains(name);
+        }
+        let mut found = HashSet::new();
+        collect_writes(state, scope, scope, self, &mut found);
+        let written = found.contains(name);
+        self.writes.insert(scope.id(), found);
+        written
     }
 }
 
@@ -282,6 +282,21 @@ fn binding<'t>(
     name: &str,
     lookup: &mut ReceiverLookup<'t>,
 ) -> Option<Option<(TsNode<'t>, TsNode<'t>)>> {
+    let (scope, binding) = binding_owner(state, site, name, lookup)?;
+    Some(match binding {
+        ScopeBinding::Declared(declaration) => Some((declaration, scope)),
+        ScopeBinding::Missing | ScopeBinding::Blocked => None,
+    })
+}
+
+/// Keep the owner even when a binding cannot prove a receiver. A write to a
+/// local shadow must not invalidate a different binding with the same name.
+fn binding_owner<'t>(
+    state: &ExtractionState<'_>,
+    site: TsNode<'t>,
+    name: &str,
+    lookup: &mut ReceiverLookup<'t>,
+) -> Option<(TsNode<'t>, ScopeBinding<'t>)> {
     let mut parent = site.parent();
     while let Some(scope) = parent {
         if is_scope(scope) {
@@ -294,12 +309,11 @@ fn binding<'t>(
             if (body_scope || scope.kind() == "program")
                 && lookup.has_var_binding(state, scope, name)
             {
-                return Some(None);
+                return Some((scope, ScopeBinding::Blocked));
             }
             match lookup.binding_in_scope(state, scope, name) {
                 ScopeBinding::Missing => {}
-                ScopeBinding::Blocked => return Some(None),
-                ScopeBinding::Declared(declaration) => return Some(Some((declaration, scope))),
+                binding => return Some((scope, binding)),
             }
         }
         parent = scope.parent();
@@ -307,7 +321,13 @@ fn binding<'t>(
     None
 }
 
-fn collect_writes(state: &ExtractionState<'_>, node: TsNode<'_>, found: &mut HashSet<String>) {
+fn collect_writes<'t>(
+    state: &ExtractionState<'_>,
+    scope: TsNode<'t>,
+    node: TsNode<'t>,
+    lookup: &mut ReceiverLookup<'t>,
+    found: &mut HashSet<String>,
+) {
     #[cfg(test)]
     SCOPE_LOOKUP_NODE_VISITS.with(|visits| visits.set(visits.get() + 1));
     let target = match node.kind() {
@@ -323,12 +343,16 @@ fn collect_writes(state: &ExtractionState<'_>, node: TsNode<'_>, found: &mut Has
         && target.kind() != "subscript_expression"
     {
         visit_binding_names(state, target, &mut |name| {
-            found.insert(name.to_owned());
+            if binding_owner(state, target, name, lookup)
+                .is_some_and(|(owner, _)| owner == scope)
+            {
+                found.insert(name.to_owned());
+            }
         });
     }
     let mut cursor = node.walk();
     for child in node.named_children(&mut cursor) {
-        collect_writes(state, child, found);
+        collect_writes(state, scope, child, lookup, found);
     }
 }
 

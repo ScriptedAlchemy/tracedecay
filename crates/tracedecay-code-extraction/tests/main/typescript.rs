@@ -129,6 +129,117 @@ class Methods {
 }
 
 #[test]
+fn receiver_writes_follow_their_lexical_binding() {
+    let source = r#"import { Worker as Real } from './workers';
+const worker = new Real();
+let assigned: Real = new Real();
+function unrelated() { let worker = 0; worker = 1; }
+function unrelatedParameter(worker: number) { worker++; }
+function unrelatedVar() { worker = 1; var worker = 0; }
+function unrelatedPattern() { let { worker } = { worker: 0 }; ({ worker } = { worker: 1 }); }
+function unrelatedConstructor() { let Real = 0; Real++; }
+function defaultWrite(value = (assigned = new Real())) { var assigned; }
+export function moduleReceiver() { worker.execute(); }
+export function blockReceiver() {
+  const local = new Real();
+  { let local = 0; local++; }
+  local.execute();
+}
+export function parameterReceiver(worker: Real) {
+  function shadow(worker: number) { worker++; }
+  worker.execute();
+}
+export function captured(receiver: Real) {
+  function mutate() { receiver = new Real(); }
+  receiver.execute();
+}
+export function capturedPattern(receiver: Real) {
+  const mutate = () => { ({ value: receiver } = { value: new Real() }); };
+  receiver.execute();
+}
+export function defaultCapture() { assigned.execute(); }
+"#;
+    let artifact = TypeScriptExtractor.extract_artifact("writes.ts", source);
+    assert!(
+        artifact.result.errors.is_empty(),
+        "{:?}",
+        artifact.result.errors
+    );
+    let mut calls = artifact
+        .typescript_types
+        .iter()
+        .filter_map(|row| match &row.row {
+            TypeScriptTypeRowV1::ReceiverCall { span, receiver } => {
+                let owner = artifact
+                    .result
+                    .nodes
+                    .iter()
+                    .find(|node| node.id == row.node_id)
+                    .unwrap();
+                Some((
+                    owner.name.as_str(),
+                    &source[span.start_byte as usize..span.end_byte as usize],
+                    receiver.clone(),
+                ))
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    calls.sort_by_key(|(owner, _, _)| *owner);
+    assert_eq!(
+        calls,
+        [
+            (
+                "blockReceiver",
+                "local.execute",
+                TypeScriptReceiverV1::Named {
+                    name: "Real".to_owned(),
+                    constructor: true,
+                },
+            ),
+            (
+                "moduleReceiver",
+                "worker.execute",
+                TypeScriptReceiverV1::Named {
+                    name: "Real".to_owned(),
+                    constructor: true,
+                },
+            ),
+            (
+                "parameterReceiver",
+                "worker.execute",
+                TypeScriptReceiverV1::Named {
+                    name: "Real".to_owned(),
+                    constructor: false,
+                },
+            ),
+        ],
+        "writes to shadows preserve proof, but captured writes still invalidate it",
+    );
+    for (name, reference_name) in [
+        ("captured", "receiver.execute"),
+        ("capturedPattern", "receiver.execute"),
+        ("defaultCapture", "assigned.execute"),
+    ] {
+        let owner = artifact
+            .result
+            .nodes
+            .iter()
+            .find(|node| node.name == name)
+            .unwrap();
+        assert!(
+            artifact
+                .result
+                .unresolved_refs
+                .iter()
+                .any(|reference| reference.from_node_id == owner.id
+                    && reference.reference_name == reference_name),
+            "captured rebinding must retain the unresolved call: {name}",
+        );
+    }
+}
+
+#[test]
 fn declared_factory_returns_require_an_unshadowed_native_promise() {
     let source = r#"class Worker {}
 export async function valid(): Promise<Worker> { return new Worker(); }
