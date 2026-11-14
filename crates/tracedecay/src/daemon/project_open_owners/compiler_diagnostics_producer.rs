@@ -15,14 +15,17 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use tracedecay_application::diagnostics_producer::{
-    CompilerProducerRunV1, TypeScriptProducerStateV1, TypeScriptProducerStatusHandleV1,
-    publish_typescript_discovery_v1, run_typescript_producer_v1,
+    CompilerProducerRunV1, TypeScriptProducerStateV1, publish_typescript_discovery_v1,
+    run_typescript_producer_v1,
 };
 use tracedecay_application::diagnostics_store::DiagnosticsStore;
 use tracedecay_code_index_runtime::code_index_scheduler::CodeIndexOwnerSignalsV1;
 use tracedecay_contracts::now_micros;
 use tracedecay_domain::CodeGenerationId;
-use tracedecay_lsp::{TypeScriptProject, TypeScriptProjectDiscoveryError, typescript_projects};
+use tracedecay_lsp::{
+    TypeScriptCompilerAdmission, TypeScriptProject, TypeScriptProjectDiscoveryError,
+    typescript_projects,
+};
 use tracedecay_runtime_core::logging::log_daemon_event;
 
 use crate::daemon::invocation_state::DaemonInvocationState;
@@ -31,34 +34,37 @@ use crate::daemon::invocation_state::DaemonInvocationState;
 /// per checked tsconfig; it leaves with the store.
 const BUILD_INFO_DIR: &str = "typescript-build-info";
 
-/// Spawns the TypeScript producer for `project_root`. Returns `false` when
-/// nothing was spawned: a route that indexes no code by contract, so there is
-/// never a generation to publish against. The spawned task publishes its
-/// discovery and ends at once when no TypeScript project under the root has a
+/// The compiler authority for a route that can publish code generations.
+/// Routes that never index code must not appoint a producer that cannot run.
+pub(super) fn compiler_admission_for_project(
+    invocation: &DaemonInvocationState,
+    project_root: &Path,
+    scope: &tracedecay_contracts::ResolvedScope,
+) -> Option<TypeScriptCompilerAdmission> {
+    if tracedecay_code_index_runtime::project_reads::code_index_disabled_for_scope(
+        &invocation.code_index_schedulers,
+        scope,
+    ) {
+        log_producer_event(project_root, "code_index_disabled");
+        return None;
+    }
+    let Some(admission) = invocation.compiler_admission.get().cloned() else {
+        log_producer_event(project_root, "compiler_admission_unavailable");
+        return None;
+    };
+    Some(admission)
+}
+
+/// Runs the producer already appointed when its primitive runtime was
+/// registered. Discovery ends the task when no TypeScript project has a
 /// compiler; reads then describe the missing compiler from that record.
 pub(super) fn spawn_typescript_diagnostics_producer(
     owner: &crate::mcp::McpServer,
     invocation: DaemonInvocationState,
     project_root: PathBuf,
-    scope: &tracedecay_contracts::ResolvedScope,
     graph: Arc<tracedecay_project::project::TraceDecay>,
-    status: TypeScriptProducerStatusHandleV1,
+    mut state: TypeScriptProducerStateV1,
 ) -> bool {
-    if tracedecay_code_index_runtime::project_reads::code_index_disabled_for_scope(
-        &invocation.code_index_schedulers,
-        scope,
-    ) {
-        log_producer_event(&project_root, "code_index_disabled");
-        return false;
-    }
-    let Some(admission) = invocation.compiler_admission.get().cloned() else {
-        log_producer_event(&project_root, "compiler_admission_unavailable");
-        return false;
-    };
-    // Reopen can retain the primitive runtime while the prior server's
-    // compiler task is still retiring. Fence it before this task can yield
-    // in discovery; scheduling order must not choose the current producer.
-    let mut state = TypeScriptProducerStateV1::new(status, admission);
     owner.spawn_background_task(tracing::Instrument::instrument(
         async move {
             let schedulers = invocation.code_index_schedulers.clone();

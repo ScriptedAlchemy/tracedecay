@@ -20,11 +20,10 @@ use tracedecay_application::observability::RegisteredObservabilityPortV1;
 use tracedecay_contracts::context_scout::{
     ContextScoutAddressV1, ContextScoutCandidateV1, ContextScoutCategoryV1,
     ContextScoutDeliveryOutcomeV1, ContextScoutDeliveryReceiptV1, ContextScoutDeliveryWindowV1,
-    ContextScoutDurableQueueEntryV1, ContextScoutEvidenceAvailabilityV1,
-    ContextScoutIntentAnswerV1, ContextScoutIntentKindV1, ContextScoutIntentReceiptV1,
-    ContextScoutModelOutcomeV1, ContextScoutRedactionReceiptV1, ContextScoutRouteV1,
-    ContextScoutSessionEvidenceV1, ContextScoutSessionWindowV1, ContextScoutSuggestionEnvelopeV1,
-    ContextScoutWorkV1, DecisionEngineIdentityV1, IntentDecisionSourceV1,
+    ContextScoutDurableQueueEntryV1, ContextScoutEvidenceAvailabilityV1, ContextScoutIntentKindV1,
+    ContextScoutIntentReceiptV1, ContextScoutModelOutcomeV1, ContextScoutRedactionReceiptV1,
+    ContextScoutRouteV1, ContextScoutSessionEvidenceV1, ContextScoutSessionWindowV1,
+    ContextScoutSuggestionEnvelopeV1, ContextScoutWorkV1, IntentDecisionSourceV1,
 };
 use tracedecay_contracts::{
     AuthorityReceipt, CapabilityGrantId, DisclosureClass, ObservabilityHorizonV1,
@@ -390,19 +389,9 @@ fn delivered_intent_hint(
         },
         availability: ContextScoutEvidenceAvailabilityV1::Complete,
         decision: ContextScoutIntentReceiptV1 {
-            engine: Some(DecisionEngineIdentityV1 {
-                base_url_digest: digest('d'),
-                model: Some("kev-4b".to_owned()),
-            }),
-            outcome: ContextScoutModelOutcomeV1::Succeeded,
-            answers: vec![ContextScoutIntentAnswerV1 {
-                intent,
-                probability_permille: 910,
-                threshold_permille: 600,
-            }],
-            facts: Vec::new(),
+            facts: vec![intent],
             selected: intent,
-            source: IntentDecisionSourceV1::Model,
+            source: IntentDecisionSourceV1::ActionFact,
         },
         claimed_at: UtcMicros(2),
     })
@@ -423,8 +412,8 @@ fn delivered_intent_hint(
             generation: 1,
             input_watermark: [9; 32],
         },
-        route: ContextScoutRouteV1::DecisionEngine,
-        model_outcome: ContextScoutModelOutcomeV1::Succeeded,
+        route: ContextScoutRouteV1::Deterministic,
+        model_outcome: ContextScoutModelOutcomeV1::NotRequested,
         model_receipt: None,
         envelope: ContextScoutSuggestionEnvelopeV1 {
             envelope_id,
