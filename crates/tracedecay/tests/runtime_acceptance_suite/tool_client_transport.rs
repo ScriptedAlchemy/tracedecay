@@ -23,7 +23,6 @@ use tracedecay_daemon_protocol::{
     DaemonInvocationResponse,
 };
 use tracedecay_domain::ProjectId;
-use tracedecay_runtime_core::logging::FormattedTracingCapture;
 use tracedecay_tool_catalog::ApplicationSurfaceOperation;
 
 const LOCAL_TIMEOUT: Duration = Duration::from_secs(5);
@@ -277,44 +276,19 @@ where
     let (ready_tx, ready_rx) = mpsc::channel();
     let (request_tx, request_rx) = mpsc::channel();
     let script = Arc::new(script);
-    let test_name = std::thread::current()
-        .name()
-        .unwrap_or("unnamed test")
-        .to_owned();
     let server = std::thread::spawn(move || {
-        let capture = FormattedTracingCapture::start_with_target_span_timings(&[
-            module_path!(),
-            "tracedecay_daemon_identity::authority",
-            "tracedecay_daemon_identity::profile_identity",
-            "tracedecay_private_fs",
-        ]);
-        let startup = tracing::info_span!(
-            "runtime.tool_transport.scripted_daemon.startup",
-            test = %test_name,
-        )
-        .entered();
-        tracing::info_span!("runtime.tool_transport.scripted_daemon.remove_socket").in_scope(
-            || {
-                let _ = std::fs::remove_file(&socket);
-            },
-        );
+        let _ = std::fs::remove_file(&socket);
         let authority = DaemonAuthority::acquire(
             socket.parent().expect("socket parent"),
             &DaemonEndpoint::Unix(socket.clone()),
             env!("CARGO_PKG_VERSION"),
         )
         .expect("seed fake daemon authority");
-        let listener = tracing::info_span!("runtime.tool_transport.scripted_daemon.bind_socket")
-            .in_scope(|| {
-                let listener = UnixListener::bind(&socket).expect("bind fake daemon");
-                listener
-                    .set_nonblocking(true)
-                    .expect("nonblocking listener");
-                listener
-            });
+        let listener = UnixListener::bind(&socket).expect("bind fake daemon");
+        listener
+            .set_nonblocking(true)
+            .expect("nonblocking listener");
         ready_tx.send(()).expect("signal daemon ready");
-        drop(startup);
-        drop(capture);
         let accept_deadline = Instant::now() + ACCEPT_HANG_GUARD;
         let mut workers = Vec::new();
         while workers.len() < connections {

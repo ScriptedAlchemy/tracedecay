@@ -15,10 +15,6 @@ use std::io::Write as _;
 use std::os::fd::{FromRawFd, RawFd};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, PoisonError};
-#[cfg(feature = "test-helpers")]
-use tracing_subscriber::Layer;
-#[cfg(feature = "test-helpers")]
-use tracing_subscriber::layer::SubscriberExt;
 
 /// Opening marker of every bespoke daemon log line. Watcher recovery anchors
 /// on it, so `tracing` output, which never carries the marker, cannot forge
@@ -291,32 +287,6 @@ impl FormattedTracingCapture {
     #[must_use]
     pub fn start_with_stderr() -> Self {
         Self::start_with_output(true)
-    }
-
-    /// Captures existing span timings for the selected targets on this thread,
-    /// mirroring each line to stderr so a terminated measurement retains it.
-    #[must_use]
-    pub fn start_with_target_span_timings(targets: &[&str]) -> Self {
-        let bytes = std::sync::Arc::new(Mutex::new(Vec::new()));
-        let filter = targets.iter().fold(
-            tracing_subscriber::filter::Targets::new(),
-            |filter, target| filter.with_target(*target, tracing::Level::TRACE),
-        );
-        let subscriber = tracing_subscriber::registry().with(
-            tracing_subscriber::fmt::layer()
-                .with_ansi(false)
-                .with_timer(tracing_subscriber::fmt::time::uptime())
-                .with_span_events(
-                    tracing_subscriber::fmt::format::FmtSpan::NEW
-                        | tracing_subscriber::fmt::format::FmtSpan::CLOSE,
-                )
-                .with_writer(CaptureBuffer(std::sync::Arc::clone(&bytes), true))
-                .with_filter(filter),
-        );
-        Self {
-            bytes,
-            _guard: set_tracing_capture(subscriber),
-        }
     }
 
     fn start_with_output(stderr: bool) -> Self {
