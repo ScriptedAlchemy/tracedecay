@@ -662,12 +662,16 @@ async fn unix_fire_and_forget_hook(fixture: &RmcpRouteFixture, event: DaemonHook
 }
 
 #[cfg(unix)]
-async fn wait_for_new_generation(
+async fn wait_for_new_text_generation(
     fixture: &RmcpRouteFixture,
     project: &std::path::Path,
     prior: Option<&CodeGenerationId>,
+    expected_paths: &[&str],
     step: &str,
 ) -> CodeGenerationId {
+    // Queryable text is the edit's reconciliation receipt. The complete graph
+    // slot can still name its predecessor while optional graph activation runs.
+    // Match the source paths too: an unrelated generation change proves no edit.
     // Well inside the 30 s query-admission backstop, so only this step's
     // own hook wake can publish in time.
     tokio::time::timeout(PHASE_TIMEOUT, async {
@@ -676,17 +680,26 @@ async fn wait_for_new_generation(
                 .engine
                 .invocation
                 .code_index_schedulers
-                .latest_generation_id(project)
+                .latest_text_serving_for_root(project)
                 .await
-                && Some(&current) != prior
             {
-                return current;
+                let metadata = current.metadata();
+                if Some(&metadata.manifest().generation_id) != prior
+                    && metadata
+                        .snapshot()
+                        .files
+                        .iter()
+                        .map(|file| file.logical_path.as_str())
+                        .eq(expected_paths.iter().copied())
+                {
+                    return metadata.manifest().generation_id.clone();
+                }
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
     })
     .await
-    .unwrap_or_else(|_| panic!("{step} hook did not wake a reconcile pass"))
+    .unwrap_or_else(|_| panic!("{step} hook did not reconcile source paths {expected_paths:?}"))
 }
 
 /// Save, rename, and delete each arrive as a fire-and-forget after-edit
@@ -713,20 +726,43 @@ async fn fire_and_forget_edit_hooks_each_wake_a_reconcile() {
         )
     };
 
-    let initial = wait_for_new_generation(&fixture, &project, None, "initial mount").await;
+    let initial =
+        wait_for_new_text_generation(&fixture, &project, None, &["src/main.rs"], "initial mount")
+            .await;
 
     std::fs::write(project.join("src/saved.rs"), "pub fn saved() {}\n").expect("save source");
     unix_fire_and_forget_hook(&fixture, edit(&["src/saved.rs"])).await;
-    let saved = wait_for_new_generation(&fixture, &project, Some(&initial), "save").await;
+    let saved = wait_for_new_text_generation(
+        &fixture,
+        &project,
+        Some(&initial),
+        &["src/main.rs", "src/saved.rs"],
+        "save",
+    )
+    .await;
 
     std::fs::rename(project.join("src/saved.rs"), project.join("src/renamed.rs"))
         .expect("rename source");
     unix_fire_and_forget_hook(&fixture, edit(&["src/saved.rs", "src/renamed.rs"])).await;
-    let renamed = wait_for_new_generation(&fixture, &project, Some(&saved), "rename").await;
+    let renamed = wait_for_new_text_generation(
+        &fixture,
+        &project,
+        Some(&saved),
+        &["src/main.rs", "src/renamed.rs"],
+        "rename",
+    )
+    .await;
 
     std::fs::remove_file(project.join("src/renamed.rs")).expect("delete source");
     unix_fire_and_forget_hook(&fixture, edit(&["src/renamed.rs"])).await;
-    wait_for_new_generation(&fixture, &project, Some(&renamed), "delete").await;
+    wait_for_new_text_generation(
+        &fixture,
+        &project,
+        Some(&renamed),
+        &["src/main.rs"],
+        "delete",
+    )
+    .await;
 }
 
 async fn portable_one_request(fixture: &RmcpRouteFixture, request: &Value) -> Vec<Value> {

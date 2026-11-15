@@ -1230,15 +1230,14 @@ mod recent_first_discovery_tests {
     use crate::runtime::hosts::codex::{
         CodexCorpusEpoch, CodexDiscoveryDelivery, CodexDiscoveryFrontier, CodexDiscoveryHub,
         CodexDiscoverySourceKey, CodexDiscoveryState, CodexExactSessionPathAuthority,
-        CodexIndexedPath, CodexReplayIndex, EXACT_HOOK_DISCOVERY_UNITS_PER_CALL,
-        IDLE_FULL_VALIDATION_CYCLES, MAX_EXACT_HOOK_SESSION_REQUESTS,
-        MAX_EXACT_HOOK_SOURCE_AUTHORITIES, MAX_SCAN_DEPTH, codex_corpus_identity,
-        codex_directory_changed, codex_directory_stat_identity, codex_directory_witness,
-        directory_entry_fingerprint, directory_stat_witness, indexed_replay_pass,
+        CodexIndexedPath, CodexReplayIndex, CodexScanPhase, DirectoryStatWitness,
+        EXACT_HOOK_DISCOVERY_UNITS_PER_CALL, IDLE_FULL_VALIDATION_CYCLES,
+        MAX_EXACT_HOOK_SESSION_REQUESTS, MAX_EXACT_HOOK_SOURCE_AUTHORITIES, MAX_SCAN_DEPTH,
+        codex_corpus_identity, codex_directory_changed, codex_directory_changed_since,
+        codex_directory_stat_identity, codex_directory_witness, directory_entry_fingerprint,
+        directory_scan_witness, directory_stat_witness, indexed_replay_pass,
         replay_index_entries_visited_for_test, reset_replay_index_entries_visited_for_test,
     };
-    #[cfg(unix)]
-    use crate::runtime::hosts::codex::{DirectoryStatWitness, codex_directory_changed_since};
     use crate::runtime::ingest::quarantine::SourceSweep;
     use crate::runtime::jsonl_observation_admission::{
         SHARED_JSONL_PIN_GATES, install_test_shared_jsonl_preparation_authority,
@@ -2686,6 +2685,46 @@ mod recent_first_discovery_tests {
     }
 
     #[test]
+    fn ignored_codex_archive_entries_do_not_change_candidate_fingerprint() {
+        let temp = TempDir::new().unwrap();
+        let archive = temp.path().join("archived_sessions");
+        std::fs::create_dir_all(&archive).unwrap();
+        std::fs::write(archive.join("rollout-existing.jsonl"), b"{}\n").unwrap();
+        let initial = directory_entry_fingerprint(&archive).unwrap();
+
+        // Non-JSONL names are in the directory but not in the candidate
+        // set. The previous fingerprint changed for every ignored addition.
+        for index in 0..128 {
+            std::fs::write(
+                archive.join(format!("rollout-{index:04}.jsonl.zst")),
+                b"zst",
+            )
+            .unwrap();
+        }
+        assert_eq!(directory_entry_fingerprint(&archive).unwrap(), initial);
+
+        std::fs::rename(
+            archive.join("rollout-0000.jsonl.zst"),
+            archive.join("rollout-renamed.jsonl.zst"),
+        )
+        .unwrap();
+        assert_eq!(directory_entry_fingerprint(&archive).unwrap(), initial);
+
+        let eligible = archive.join("rollout-new.jsonl");
+        std::fs::write(&eligible, b"{}\n").unwrap();
+        assert_ne!(directory_entry_fingerprint(&archive).unwrap(), initial);
+        std::fs::remove_file(eligible).unwrap();
+        assert_eq!(directory_entry_fingerprint(&archive).unwrap(), initial);
+
+        std::fs::create_dir(archive.join("2026")).unwrap();
+        assert_ne!(
+            directory_entry_fingerprint(&archive).unwrap(),
+            initial,
+            "child directories must remain part of traversal authority"
+        );
+    }
+
+    #[test]
     #[cfg(unix)]
     fn unsettled_directory_stat_does_not_change_with_each_sample() {
         let temp = TempDir::new().unwrap();
@@ -2853,6 +2892,571 @@ mod recent_first_discovery_tests {
             directory_scan.directories.len() <= structural_work_limit,
             "one call must not traverse the entire directory corpus"
         );
+    }
+
+    #[test]
+    fn archived_non_jsonl_entries_yield_directory_enumeration_across_windows() {
+        let temp = TempDir::new().unwrap();
+        let archive = temp.path().join(".codex/archived_sessions");
+        std::fs::create_dir_all(&archive).unwrap();
+        for index in 0..64 {
+            std::fs::write(
+                archive.join(format!("rollout-{index:03}.zst")),
+                b"compressed",
+            )
+            .unwrap();
+        }
+        let admitted = archive.join("rollout-admitted.jsonl");
+        std::fs::write(&admitted, b"{}\n").unwrap();
+        // Isolate bounded enumeration from the file's coarse-clock transition.
+        spin_until_jsonl_change_settled(&admitted);
+
+        let source = CodexSource::with_home(temp.path());
+        let bounds = TranscriptDiscoveryBounds::from_discovered_units(1);
+        let mut state = CodexDiscoveryState::default();
+        let mut frontier = CodexDiscoveryFrontier::initial();
+        let first = retained_pass(&source, &mut state, bounds, frontier);
+        assert!(first.report.is_truncated());
+        assert!(first.report.paths.is_empty());
+        assert!(
+            matches!(
+                state.scan.as_ref().map(|scan| &scan.phase),
+                Some(CodexScanPhase::Directories {
+                    current: Some(_),
+                    ..
+                })
+            ),
+            "non-transcript directory entries must not exhaust one discovery turn"
+        );
+        frontier = first.next_frontier;
+
+        let mut covered = BTreeSet::new();
+        for _ in 0..256 {
+            let pass = retained_pass(&source, &mut state, bounds, frontier);
+            covered.extend(pass.report.paths);
+            frontier = pass.next_frontier;
+            if frontier.is_complete() {
+                break;
+            }
+        }
+        assert_eq!(covered, BTreeSet::from([admitted]));
+        assert!(frontier.is_complete(), "bounded pages must converge");
+        let idle = retained_pass(&source, &mut state, bounds, frontier);
+        assert!(idle.report.paths.is_empty());
+    }
+
+    #[test]
+    fn file_walk_detects_a_new_rollout_while_its_directory_cursor_is_retained() {
+        let temp = TempDir::new().unwrap();
+        let archive = temp.path().join(".codex/archived_sessions");
+        std::fs::create_dir_all(&archive).unwrap();
+        for index in 0..64 {
+            std::fs::write(archive.join(format!("rollout-{index:03}.zst")), b"ignored").unwrap();
+        }
+        std::fs::write(archive.join("rollout-existing.jsonl"), b"{}\n").unwrap();
+
+        let source = CodexSource::with_home(temp.path());
+        let bounds = TranscriptDiscoveryBounds::from_discovered_units(1);
+        let mut state = CodexDiscoveryState::default();
+        let mut frontier = CodexDiscoveryFrontier::initial();
+        let mut active = false;
+        for _ in 0..256 {
+            let pass = retained_pass(&source, &mut state, bounds, frontier);
+            frontier = pass.next_frontier;
+            if let Some(scan) = state.scan.as_ref()
+                && let CodexScanPhase::Files {
+                    current: Some(current),
+                    ..
+                } = &scan.phase
+            {
+                let directory = &scan.directories[current.0];
+                assert_eq!(directory.path, archive);
+                assert!(directory.identity.is_some());
+                active = true;
+                break;
+            }
+        }
+        assert!(active, "the file-phase iterator must retain its position");
+        let prior = directory_stat_witness(&archive).unwrap().unwrap().stat;
+        let arrived = archive.join("rollout-added-during-file-walk.jsonl");
+        std::fs::write(&arrived, b"{}\n").unwrap();
+        assert_ne!(
+            directory_stat_witness(&archive).unwrap().unwrap().stat,
+            prior,
+            "the mutation must change the native directory witness"
+        );
+        let mut finished = false;
+        for _ in 0..1024 {
+            let pass = retained_pass(&source, &mut state, bounds, frontier);
+            frontier = pass.next_frontier;
+            if state.scan.is_none() {
+                finished = true;
+                assert!(
+                    !frontier.is_complete(),
+                    "a new file during the retained file walk must invalidate its coverage"
+                );
+                break;
+            }
+        }
+        assert!(
+            finished,
+            "the bounded file traversal must reach its frontier"
+        );
+    }
+
+    #[test]
+    fn aliased_coarse_directory_stamp_cannot_certify_a_stale_file_walk() {
+        let temp = TempDir::new().unwrap();
+        let archive = temp.path().join(".codex/archived_sessions");
+        std::fs::create_dir_all(&archive).unwrap();
+        for index in 0..64 {
+            std::fs::write(archive.join(format!("rollout-{index:03}.zst")), b"ignored").unwrap();
+        }
+        std::fs::write(archive.join("rollout-existing.jsonl"), b"{}\n").unwrap();
+        let source = CodexSource::with_home(temp.path());
+        let bounds = TranscriptDiscoveryBounds::from_discovered_units(1);
+        let mut state = CodexDiscoveryState::default();
+        let mut frontier = CodexDiscoveryFrontier::initial();
+        let mut active = false;
+        for _ in 0..256 {
+            let pass = retained_pass(&source, &mut state, bounds, frontier);
+            frontier = pass.next_frontier;
+            if let Some(scan) = state.scan.as_ref()
+                && let CodexScanPhase::Files {
+                    current: Some(current),
+                    ..
+                } = &scan.phase
+                && scan.directories[current.0].path == archive
+            {
+                active = true;
+                break;
+            }
+        }
+        assert!(active, "the file reader must remain suspended across turns");
+        let original_names = directory_entry_fingerprint(&archive).unwrap();
+        let late = archive.join("rollout-after-file-reader-open.jsonl");
+        std::fs::write(&late, b"{}\n").unwrap();
+        // Model two writes within one filesystem timestamp quantum: the
+        // directory stat aliases the scan's authority despite a new file.
+        let witness = directory_scan_witness(&archive).unwrap().unwrap();
+        let alias = witness.stat;
+        let alias_stable = witness.stable_stat;
+        let scan = state.scan.as_mut().unwrap();
+        let CodexScanPhase::Files {
+            current: Some(current),
+            ..
+        } = &scan.phase
+        else {
+            panic!("the file-phase iterator must still be retained");
+        };
+        let directory_index = current.0;
+        let identity = scan.directories[directory_index].identity.as_mut().unwrap();
+        identity.stat = alias;
+        identity.stable_stat = alias_stable;
+        identity.entries = Some(original_names);
+
+        let mut finished = false;
+        for _ in 0..2048 {
+            // Preserve the intentionally aliased stat through an arbitrarily
+            // slow test run: elapsed wall time must not make this regression
+            // pass by turning the native clock into a separate detection.
+            let witness = directory_scan_witness(&archive).unwrap().unwrap();
+            if let Some(scan) = state.scan.as_mut() {
+                let directory = scan
+                    .directories
+                    .iter_mut()
+                    .find(|directory| directory.path == archive)
+                    .expect("retained archive directory identity");
+                let identity = directory.identity.as_mut().unwrap();
+                identity.stat = witness.stat;
+                identity.stable_stat = witness.stable_stat;
+            }
+            let pass = retained_pass(&source, &mut state, bounds, frontier);
+            frontier = pass.next_frontier;
+            if state.scan.is_none() {
+                assert!(
+                    !frontier.is_complete(),
+                    "an aliased directory timestamp hid a new eligible rollout"
+                );
+                finished = true;
+                break;
+            }
+        }
+        assert!(finished, "the bounded verification must terminate");
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn chunked_archive_alias_cannot_complete_without_file_name_witness() {
+        let temp = TempDir::new().unwrap();
+        let archive = temp.path().join(".codex/archived_sessions");
+        std::fs::create_dir_all(archive.join("deferred")).unwrap();
+        std::fs::write(archive.join("rollout-existing.jsonl"), b"{}\n").unwrap();
+        let source = CodexSource::with_home(temp.path());
+        let mut bounds = TranscriptDiscoveryBounds::from_discovered_units(1);
+        let metadata_charge = std::mem::size_of::<std::fs::Metadata>() as u64;
+        let sessions = temp.path().join(".codex/sessions");
+        // Retain both roots, but force the archive's child into a later
+        // structural chunk while the archive's file walk owns the iterator.
+        bounds.max_discovery_bytes =
+            crate::runtime::hosts::codex::candidate_charge(&sessions, metadata_charge).unwrap()
+                + crate::runtime::hosts::codex::candidate_charge(&archive, metadata_charge)
+                    .unwrap();
+        let mut state = CodexDiscoveryState::default();
+        let mut frontier = CodexDiscoveryFrontier::initial();
+        let mut suspended = false;
+        for _ in 0..256 {
+            let pass = retained_pass(&source, &mut state, bounds, frontier);
+            frontier = pass.next_frontier;
+            if let Some(scan) = state.scan.as_mut()
+                && let CodexScanPhase::Files {
+                    current: Some(current),
+                    resume_directories: Some(_),
+                    ..
+                } = &mut scan.phase
+                && scan.directories[current.0].path == archive
+            {
+                let identity = scan.directories[current.0].identity.as_ref().unwrap();
+                assert!(
+                    identity.entries.is_none(),
+                    "retention must interrupt the structural name witness"
+                );
+                // A native ReadDir may buffer every old name before the late
+                // creation. Exhaust it now so omission is deterministic.
+                for entry in current.1.by_ref() {
+                    entry.unwrap();
+                }
+                suspended = true;
+                break;
+            }
+        }
+        assert!(suspended, "the chunked file reader must be retained");
+
+        let arrived = archive.join("rollout-after-chunked-file-reader-open.jsonl");
+        std::fs::write(&arrived, b"{}\n").unwrap();
+        assert!(spin_until_jsonl_change_settled(&archive));
+        let metadata = std::fs::metadata(&archive).unwrap();
+        let closing = directory_scan_witness(&archive).unwrap().unwrap();
+        assert!(closing.settled);
+        let scan = state.scan.as_mut().unwrap();
+        let CodexScanPhase::Files {
+            current: Some(current),
+            resume_directories: Some(resume),
+            ..
+        } = &mut scan.phase
+        else {
+            panic!("the chunked file reader must still be retained");
+        };
+        // Model an unsettled opening sample whose native timestamp aliases
+        // the new entry, then closes after settlement. Derive it from the real
+        // directory metadata so scheduler delay cannot choose the clock branch.
+        // The resumed structural walk cannot vouch for the stale file listing.
+        let identity = scan.directories[current.0].identity.as_mut().unwrap();
+        identity.stat =
+            codex_directory_stat_identity(&archive, &metadata, ChangeStamp::Unvouched(0)).unwrap();
+        identity.stable_stat = closing.stable_stat;
+        let resumed = resume.current.as_deref_mut().unwrap();
+        assert_eq!(resumed.path, archive);
+        resumed.opening_stat = closing.stable_stat;
+        assert!(scan.complete);
+
+        let mut observed = BTreeSet::new();
+        let mut finished = false;
+        for _ in 0..2048 {
+            let pass = retained_pass(&source, &mut state, bounds, frontier);
+            observed.extend(pass.report.paths);
+            frontier = pass.next_frontier;
+            if state.scan.is_none() {
+                assert!(
+                    observed.contains(&arrived) || !frontier.is_complete(),
+                    "the resumed structural walk cannot vouch for rollout files"
+                );
+                finished = true;
+                break;
+            }
+        }
+        assert!(finished, "the chunked sweep must terminate");
+
+        for _ in 0..2048 {
+            let pass = retained_pass(&source, &mut state, bounds, frontier);
+            observed.extend(pass.report.paths);
+            frontier = pass.next_frontier;
+            if frontier.is_complete() {
+                break;
+            }
+        }
+        assert!(frontier.is_complete(), "a fresh sweep must converge");
+        assert!(observed.contains(&arrived));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn verification_cannot_settle_over_an_aliased_new_rollout() {
+        let temp = TempDir::new().unwrap();
+        let archive = temp.path().join(".codex/archived_sessions");
+        std::fs::create_dir_all(&archive).unwrap();
+        for index in 0..64 {
+            std::fs::write(archive.join(format!("rollout-{index:03}.zst")), b"ignored").unwrap();
+        }
+        let existing = archive.join("rollout-existing.jsonl");
+        std::fs::write(&existing, b"{}\n").unwrap();
+        let original_names = directory_entry_fingerprint(&archive).unwrap();
+        let source = CodexSource::with_home(temp.path());
+        let bounds = TranscriptDiscoveryBounds::from_discovered_units(1);
+        let mut state = CodexDiscoveryState::default();
+        let mut frontier = CodexDiscoveryFrontier::initial();
+        let mut verifying = false;
+        for _ in 0..256 {
+            let pass = retained_pass(&source, &mut state, bounds, frontier);
+            frontier = pass.next_frontier;
+            if let Some(scan) = state.scan.as_mut()
+                && let CodexScanPhase::Files {
+                    current,
+                    verification,
+                    ..
+                } = &mut scan.phase
+            {
+                if let Some(current) = current
+                    && scan.directories[current.0].path == archive
+                {
+                    // Keep the coarse-clock name witness independent of how
+                    // quickly this runner finishes the structural traversal.
+                    scan.directories[current.0]
+                        .identity
+                        .as_mut()
+                        .unwrap()
+                        .entries = Some(original_names);
+                }
+                if let Some(verification) = verification
+                    && scan.directories[verification.0].path == archive
+                {
+                    // A retained ReadDir may buffer every old name before a
+                    // concurrent creation. Exhaust that real listing now so
+                    // omission of the later rollout is deterministic.
+                    for entry in verification.1.by_ref() {
+                        let entry = entry.unwrap();
+                        verification
+                            .2
+                            .observe(&entry.file_name(), entry.file_type().unwrap())
+                            .unwrap();
+                    }
+                    verifying = true;
+                    break;
+                }
+            }
+        }
+        assert!(
+            verifying,
+            "the bounded verification must retain its iterator"
+        );
+        let arrived = archive.join("rollout-after-verification-open.jsonl");
+        std::fs::write(&arrived, b"{}\n").unwrap();
+        assert!(spin_until_jsonl_change_settled(&archive));
+        let metadata = std::fs::metadata(&archive).unwrap();
+        let closing = directory_scan_witness(&archive).unwrap().unwrap();
+        assert!(closing.settled);
+        let scan = state.scan.as_mut().unwrap();
+        let CodexScanPhase::Files {
+            verification: Some(verification),
+            ..
+        } = &scan.phase
+        else {
+            panic!("the verification iterator must still be retained");
+        };
+        let identity = scan.directories[verification.0].identity.as_mut().unwrap();
+        // Model a native timestamp that aliases the new entry, while keeping
+        // the verification-opening sample unsettled. The names and stable
+        // stat alone must not promote this stale listing to settled coverage.
+        identity.stat =
+            codex_directory_stat_identity(&archive, &metadata, ChangeStamp::Unvouched(0)).unwrap();
+        identity.stable_stat = closing.stable_stat;
+        identity.entries = Some(original_names);
+        assert!(scan.complete);
+
+        let pass = retained_pass(&source, &mut state, bounds, frontier);
+        frontier = pass.next_frontier;
+        assert!(state.scan.is_none(), "verification must finish this sweep");
+        assert!(!frontier.is_complete(), "the new rollout was not observed");
+        let idle = state.idle.as_ref().unwrap();
+        let stored = idle
+            .directories
+            .iter()
+            .find(|item| item.path == archive)
+            .unwrap();
+        assert!(
+            codex_directory_changed(&archive, stored.identity).unwrap(),
+            "the next idle probe must restart instead of waiting for periodic validation"
+        );
+
+        let mut observed = BTreeSet::new();
+        for _ in 0..1024 {
+            let pass = retained_pass(&source, &mut state, bounds, frontier);
+            observed.extend(pass.report.paths);
+            frontier = pass.next_frontier;
+            if frontier.is_complete() {
+                break;
+            }
+        }
+        assert!(
+            frontier.is_complete(),
+            "a fresh settled sweep must converge"
+        );
+        assert!(observed.contains(&arrived));
+    }
+
+    #[test]
+    fn a_mutated_directory_cannot_complete_a_budgeted_codex_sweep() {
+        let temp = TempDir::new().unwrap();
+        let archive = temp.path().join(".codex/archived_sessions");
+        std::fs::create_dir_all(&archive).unwrap();
+        for index in 0..64 {
+            std::fs::write(archive.join(format!("rollout-{index:03}.zst")), b"ignored").unwrap();
+        }
+        let source = CodexSource::with_home(temp.path());
+        let bounds = TranscriptDiscoveryBounds::from_discovered_units(1);
+        let mut state = CodexDiscoveryState::default();
+        let mut frontier = CodexDiscoveryFrontier::initial();
+        let first = retained_pass(&source, &mut state, bounds, frontier);
+        let initial_stat = {
+            let scan = state.scan.as_ref().expect("partial structural scan");
+            let CodexScanPhase::Directories {
+                current: Some(current),
+                ..
+            } = &scan.phase
+            else {
+                panic!("a flat archive must leave its directory reader active");
+            };
+            assert_eq!(current.path, archive);
+            scan.directories[current.directory_index]
+                .identity
+                .expect("initial directory witness")
+                .stat
+        };
+        frontier = first.next_frontier;
+
+        // The initial iterator may or may not see the new entry. Regardless,
+        // its opening stat no longer proves a complete, coherent sweep.
+        let added = archive.join("rollout-arrived-during-scan.jsonl");
+        std::fs::write(&added, b"{}\n").unwrap();
+        assert_ne!(
+            directory_stat_witness(&archive).unwrap().unwrap().stat,
+            initial_stat,
+            "the fixture must cause a real directory authority transition"
+        );
+
+        let mut observed = BTreeSet::new();
+        let mut ended_first_sweep = false;
+        for _ in 0..512 {
+            let pass = retained_pass(&source, &mut state, bounds, frontier);
+            observed.extend(pass.report.paths);
+            frontier = pass.next_frontier;
+            if state.scan.is_none() {
+                assert!(
+                    !frontier.is_complete(),
+                    "a changed directory must not earn complete coverage from a stale iterator"
+                );
+                ended_first_sweep = true;
+                break;
+            }
+        }
+        assert!(ended_first_sweep, "the first bounded sweep must terminate");
+
+        for _ in 0..1024 {
+            let pass = retained_pass(&source, &mut state, bounds, frontier);
+            observed.extend(pass.report.paths);
+            frontier = pass.next_frontier;
+            if frontier.is_complete() {
+                break;
+            }
+        }
+        assert!(
+            frontier.is_complete(),
+            "a stable subsequent sweep must converge"
+        );
+        assert!(
+            observed.contains(&added),
+            "the new source must be rediscovered before complete coverage"
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn unsettled_flat_archive_fingerprint_is_incremental_across_budgeted_passes() {
+        let temp = TempDir::new().unwrap();
+        let archive = temp.path().join(".codex/archived_sessions");
+        std::fs::create_dir_all(&archive).unwrap();
+        for index in 0..128 {
+            std::fs::write(
+                archive.join(format!("rollout-{index:04}.jsonl.zst")),
+                b"compressed",
+            )
+            .unwrap();
+        }
+        let eligible = archive.join("rollout-eligible.jsonl");
+        std::fs::write(&eligible, b"{}\n").unwrap();
+        spin_until_jsonl_change_settled(&eligible);
+        let expected = directory_entry_fingerprint(&archive).unwrap();
+
+        let source = CodexSource::with_home(temp.path());
+        let bounds = TranscriptDiscoveryBounds::from_discovered_units(1);
+        let mut state = CodexDiscoveryState::default();
+        let mut frontier = CodexDiscoveryFrontier::initial();
+        let first = retained_pass(&source, &mut state, bounds, frontier);
+        assert!(first.report.is_truncated());
+        let scan = state.scan.as_mut().expect("unfinished structural scan");
+        let CodexScanPhase::Directories {
+            current: Some(current),
+            ..
+        } = &mut scan.phase
+        else {
+            panic!("the archive must retain a live directory iterator");
+        };
+        assert_eq!(current.path, archive);
+        assert!(
+            scan.directories[current.directory_index]
+                .identity
+                .expect("directory stat witness")
+                .entries
+                .is_none(),
+            "no eager whole-archive fingerprint before bounded traversal"
+        );
+        // Model an initially unsettled directory witness independently of the
+        // native clock. Restart its iterator with the empty fingerprint so
+        // entries consumed by the first pass cannot be omitted from the witness.
+        current.entries = std::fs::read_dir(&archive).unwrap();
+        current.fingerprint = Some(Default::default());
+        frontier = first.next_frontier;
+
+        let mut covered = BTreeSet::new();
+        for _ in 0..512 {
+            let pass = retained_pass(&source, &mut state, bounds, frontier);
+            covered.extend(pass.report.paths);
+            frontier = pass.next_frontier;
+            if frontier.is_complete() {
+                break;
+            }
+        }
+        assert!(frontier.is_complete(), "bounded traversal must converge");
+        assert_eq!(covered, BTreeSet::from([eligible]));
+        let idle = state
+            .idle
+            .as_ref()
+            .expect("completed sweep retains witnesses");
+        let archive_identity = idle
+            .directories
+            .iter()
+            .find(|directory| directory.path == archive)
+            .and_then(|directory| directory.identity)
+            .expect("archive directory witness");
+        assert_eq!(
+            archive_identity.entries,
+            Some(expected),
+            "the same full candidate witness must be assembled exactly once"
+        );
+
+        let stable = retained_pass(&source, &mut state, bounds, frontier);
+        assert!(stable.report.paths.is_empty());
+        assert!(stable.next_frontier.is_complete());
     }
 
     /// Sweep-complete is store-durable: a fresh source reading only admission

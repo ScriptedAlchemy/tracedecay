@@ -470,8 +470,17 @@ async fn persistent_graph_activation_publishes_a_small_generation() {
         .expect("join graph reconciliation tasks");
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn persistent_callers_cursor_keeps_generation_a_without_repointing_generation_b() {
+#[test]
+fn persistent_callers_cursor_keeps_generation_a_without_repointing_generation_b() {
+    // Native tasks inherit this runtime, including the daemon's wake policy.
+    tracedecay_runtime_core::native_runtime::default_builder()
+        .worker_threads(2)
+        .build()
+        .expect("persistent graph cursor runtime")
+        .block_on(persistent_callers_cursor_across_generations());
+}
+
+async fn persistent_callers_cursor_across_generations() {
     let fixture = GitFixture::new(&[(
         "src/lib.rs",
         "pub fn hub() {}\npub fn caller_a() { hub(); }\npub fn caller_b() { hub(); }\n",

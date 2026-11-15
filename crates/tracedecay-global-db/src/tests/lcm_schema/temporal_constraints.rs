@@ -4,10 +4,9 @@ use super::*;
 async fn temporal_schema_rejects_cross_session_and_generation_rows() {
     let tmp = TempDir::new().unwrap();
     let db_path = tmp.path().join(".tracedecay").join("sessions.db");
-    let db = open_global_db(&db_path)
+    initialize_global_db(&db_path)
         .await
         .expect("temporal schema initialization should not error");
-    drop(db);
     assert!(
         table_exists(&db_path, "session_temporal_generations").await,
         "the temporal generation owner table must exist before ownership checks"

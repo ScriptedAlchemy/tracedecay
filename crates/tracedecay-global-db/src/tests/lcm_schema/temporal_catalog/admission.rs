@@ -74,7 +74,7 @@ async fn temporal_schema_accepts_only_fresh_or_exact_final_stores() {
     drop(conn);
     drop(raw_db);
 
-    let error = match open_global_db(&db_path).await {
+    let error = match initialize_global_db(&db_path).await {
         Ok(_) => panic!("a partial temporal schema must require reset"),
         Err(error) => error,
     };
@@ -105,7 +105,7 @@ async fn temporal_schema_accepts_only_fresh_or_exact_final_stores() {
 
     // Removing an application table does not make a previously opened SQLite
     // namespace freshly owned. Existing sidecars remain unclaimed.
-    let error = match open_global_db(&db_path).await {
+    let error = match initialize_global_db(&db_path).await {
         Ok(_) => panic!("unpublished existing SQLite must not be reinitialized"),
         Err(error) => error,
     };
@@ -119,19 +119,17 @@ async fn temporal_schema_accepts_only_fresh_or_exact_final_stores() {
     );
 
     let fresh_path = tmp.path().join(".tracedecay").join("fresh.db");
-    let db = open_global_db(&fresh_path)
+    initialize_global_db(&fresh_path)
         .await
         .expect("a new prospective store should receive the final temporal schema");
-    drop(db);
     let initial_catalog = temporal_schema_object_catalog(&fresh_path).await;
     let initial_version = temporal_schema_version(&fresh_path).await;
 
     let restart_path = tmp.path().join(".tracedecay").join("restart.db");
     copy_database_for_temporal_restart(&fresh_path, &restart_path).await;
-    let reopened = open_global_db(&restart_path)
+    initialize_global_db(&restart_path)
         .await
         .expect("idempotent temporal reopen should succeed");
-    drop(reopened);
     assert_eq!(
         temporal_schema_version(&restart_path).await,
         initial_version
@@ -163,7 +161,7 @@ async fn temporal_schema_malformed_marker_requires_reset_without_mutation() {
     drop(conn);
     drop(raw_db);
 
-    let error = match open_global_db(&db_path).await {
+    let error = match initialize_global_db(&db_path).await {
         Ok(_) => panic!("a malformed temporal marker must require reset"),
         Err(error) => error,
     };
@@ -187,10 +185,9 @@ async fn temporal_schema_malformed_marker_requires_reset_without_mutation() {
 async fn temporal_schema_lower_marker_requires_reset_without_repairing_guards() {
     let tmp = TempDir::new().unwrap();
     let db_path = tmp.path().join(".tracedecay").join("sessions.db");
-    let db = open_global_db(&db_path)
+    initialize_global_db(&db_path)
         .await
         .expect("temporal schema initialization should not error");
-    drop(db);
 
     let previous = SESSION_TEMPORAL_SCHEMA_VERSION - 1;
     let raw_db = TestConnection::open(&db_path);
@@ -226,21 +223,17 @@ async fn temporal_schema_lower_marker_requires_reset_without_repairing_guards() 
 async fn temporal_schema_replaces_an_empty_earlier_authority_with_the_final_contract() {
     let tmp = TempDir::new().unwrap();
     let fresh_path = tmp.path().join("fresh").join("sessions.db");
-    drop(
-        open_global_db(&fresh_path)
-            .await
-            .expect("fresh store should receive the final temporal schema"),
-    );
+    initialize_global_db(&fresh_path)
+        .await
+        .expect("fresh store should receive the final temporal schema");
     let final_catalog = temporal_schema_object_catalog(&fresh_path).await;
     let final_guard =
         normalized_trigger_sql(&fresh_path, "session_refresh_progress_insert_guard_v1").await;
 
     let db_path = tmp.path().join(".tracedecay").join("sessions.db");
-    drop(
-        open_global_db(&db_path)
-            .await
-            .expect("temporal schema initialization should not error"),
-    );
+    initialize_global_db(&db_path)
+        .await
+        .expect("temporal schema initialization should not error");
     let raw_db = TestConnection::open(&db_path);
     let conn = (*raw_db).clone();
     conn.execute_batch(&format!(
@@ -262,11 +255,9 @@ async fn temporal_schema_replaces_an_empty_earlier_authority_with_the_final_cont
         "the earlier shape lacks the introduced-row index"
     );
 
-    drop(
-        open_global_db(&db_path)
-            .await
-            .expect("an earlier authority holding no rows is replaced, not refused"),
-    );
+    initialize_global_db(&db_path)
+        .await
+        .expect("an earlier authority holding no rows is replaced, not refused");
     assert_eq!(
         temporal_schema_version(&db_path).await,
         SESSION_TEMPORAL_SCHEMA_VERSION
@@ -303,7 +294,7 @@ async fn temporal_schema_rejects_transition_storage_without_mutating_it() {
     let before_catalog = temporal_schema_object_catalog(&db_path).await;
     let before_version = temporal_schema_version(&db_path).await;
 
-    let error = match open_global_db(&db_path).await {
+    let error = match initialize_global_db(&db_path).await {
         Ok(_) => panic!("branch-local transition storage must require reset"),
         Err(error) => error,
     };
@@ -348,7 +339,7 @@ async fn temporal_schema_rejects_foreign_summary_namespace_tables_without_mutati
     let before_catalog = temporal_schema_object_catalog(&db_path).await;
     let before_version = temporal_schema_version(&db_path).await;
 
-    let error = match open_global_db(&db_path).await {
+    let error = match initialize_global_db(&db_path).await {
         Ok(_) => panic!("foreign summary-namespace storage must require reset"),
         Err(error) => error,
     };
@@ -399,7 +390,7 @@ async fn final_store_missing_temporal_marker_requires_reset_without_mutation() {
     drop(raw_db);
     let before_catalog = temporal_schema_object_catalog(&db_path).await;
 
-    let error = match open_global_db(&db_path).await {
+    let error = match initialize_global_db(&db_path).await {
         Ok(_) => panic!("a final LCM store without temporal identity must require reset"),
         Err(error) => error,
     };
@@ -452,7 +443,7 @@ async fn temporal_schema_is_not_installed_into_a_nonempty_store() {
     drop(conn);
     drop(raw_db);
 
-    let error = match open_global_db(&db_path).await {
+    let error = match initialize_global_db(&db_path).await {
         Ok(_) => panic!("a nonempty store without temporal identity must require reset"),
         Err(error) => error,
     };
@@ -482,7 +473,7 @@ async fn unpublished_writer_ledger_is_preserved_and_fresh_publication_still_work
         "the seeded store must hold writer ledger tables"
     );
 
-    let error = match open_global_db(&db_path).await {
+    let error = match initialize_global_db(&db_path).await {
         Ok(_) => panic!("an unpublished writer-ledger database is not a fresh store"),
         Err(error) => error,
     };
@@ -500,10 +491,9 @@ async fn unpublished_writer_ledger_is_preserved_and_fresh_publication_still_work
     );
 
     let fresh_path = tmp.path().join("fresh").join("sessions.db");
-    let db = open_global_db(&fresh_path)
+    initialize_global_db(&fresh_path)
         .await
         .expect("new prospective publication must install the final schema and writer ledger");
-    drop(db);
     assert!(
         table_exists(&fresh_path, "tracedecay_schema_version").await
             && table_exists(&fresh_path, "td_runtime_writer_idempotency_v2").await,
@@ -525,7 +515,7 @@ async fn writer_ledger_does_not_hide_a_nonempty_unmarked_store() {
     drop(conn);
     drop(raw_db);
 
-    let error = match open_global_db(&db_path).await {
+    let error = match initialize_global_db(&db_path).await {
         Ok(_) => panic!("an application table without a temporal marker must require reset"),
         Err(error) => error,
     };
@@ -568,7 +558,7 @@ async fn final_schema_admission_rejects_extra_temporal_column_metadata() {
     drop(conn);
     drop(raw_db);
 
-    let error = match open_global_db(&db_path).await {
+    let error = match initialize_global_db(&db_path).await {
         Ok(_) => panic!("extra persisted temporal column metadata must require reset"),
         Err(error) => error,
     };
@@ -607,7 +597,7 @@ async fn final_schema_admission_rejects_missing_temporal_occurrence_time_index()
     drop(raw_db);
     let rejected_catalog = temporal_schema_object_catalog(&db_path).await;
 
-    let error = match open_global_db(&db_path).await {
+    let error = match initialize_global_db(&db_path).await {
         Ok(_) => panic!("a missing required temporal query index must require reset"),
         Err(error) => error,
     };
@@ -642,7 +632,7 @@ async fn final_schema_admission_rejects_missing_graph_publication_table() {
     drop(conn);
     drop(raw_db);
 
-    let error = match open_global_db(&db_path).await {
+    let error = match initialize_global_db(&db_path).await {
         Ok(_) => panic!("a missing graph publication table must require reset"),
         Err(error) => error,
     };
@@ -679,7 +669,7 @@ async fn final_schema_admission_rejects_incompatible_graph_publication_column_me
     drop(conn);
     drop(raw_db);
 
-    let error = match open_global_db(&db_path).await {
+    let error = match initialize_global_db(&db_path).await {
         Ok(_) => panic!("incompatible graph publication column metadata must require reset"),
         Err(error) => error,
     };
@@ -722,7 +712,7 @@ async fn final_schema_admission_rejects_extra_graph_publication_table() {
     drop(conn);
     drop(raw_db);
 
-    let error = match open_global_db(&db_path).await {
+    let error = match initialize_global_db(&db_path).await {
         Ok(_) => panic!("an extra graph publication table must require reset"),
         Err(error) => error,
     };
@@ -762,7 +752,7 @@ async fn final_schema_admission_rejects_mixed_case_extra_temporal_table() {
     drop(conn);
     drop(raw_db);
 
-    let error = match open_global_db(&db_path).await {
+    let error = match initialize_global_db(&db_path).await {
         Ok(_) => panic!("a mixed-case extra temporal table must require reset"),
         Err(error) => error,
     };
@@ -802,7 +792,7 @@ async fn final_schema_admission_rejects_mixed_case_extra_graph_publication_table
     drop(conn);
     drop(raw_db);
 
-    let error = match open_global_db(&db_path).await {
+    let error = match initialize_global_db(&db_path).await {
         Ok(_) => panic!("a mixed-case extra graph publication table must require reset"),
         Err(error) => error,
     };
@@ -840,7 +830,7 @@ async fn final_schema_admission_rejects_extra_index_on_canonical_graph_table() {
     drop(conn);
     drop(raw_db);
 
-    let error = match open_global_db(&db_path).await {
+    let error = match initialize_global_db(&db_path).await {
         Ok(_) => panic!("an extra index on a canonical graph table must require reset"),
         Err(error) => error,
     };
@@ -862,10 +852,9 @@ async fn final_schema_admission_rejects_extra_index_on_canonical_graph_table() {
 async fn temporal_schema_refuses_future_version_without_mutation() {
     let tmp = TempDir::new().unwrap();
     let db_path = tmp.path().join(".tracedecay").join("sessions.db");
-    let db = open_global_db(&db_path)
+    initialize_global_db(&db_path)
         .await
         .expect("temporal schema initialization should not error");
-    drop(db);
     assert!(
         table_exists(&db_path, "tracedecay_schema_version").await,
         "the temporal schema must install a version marker before a future version is tested"
