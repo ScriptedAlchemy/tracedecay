@@ -19,20 +19,22 @@ use std::path::Path;
 use std::sync::Arc;
 
 use tempfile::TempDir;
+use tracedecay_code_index::production::{
+    SealedGenerationFileWindowsV1, SealedGenerationSegmentReadV1,
+};
 use tracedecay_code_index_retention::code_index_generations::{
     CodeGenerationRetentionModeV1, run_code_generation_retention,
 };
 use tracedecay_domain::{
-    CodeGenerationId, ProjectId, SanitizerRevision, UtcMicros, sha256_hex_suffix,
+    CodeGenerationId, ManifestDigest, ProjectId, UtcMicros, sha256_hex_suffix,
 };
 use tracedecay_runtime_core::path_safety::canonical_root_identity;
 
 use super::tests::git;
 use super::{
     CodeIndexReconcileOutcomeV1, CodeIndexSchedulerRegistryV1, CodeIndexWorktreeSchedulerV1,
-    DaemonCodeIndexPublicationStoreV1, SharedCodeIndexBytePoolV1,
+    SharedCodeIndexBytePoolV1,
 };
-use tracedecay_privacy::CODE_SOURCE_SANITIZER_VERSION_V1;
 use tracedecay_runtime_core::path_safety::canonical_existing_identity;
 
 /// Base directory for fixture temporary roots, resolved through every symlink.
@@ -95,15 +97,6 @@ fn publish(scheduler: &mut CodeIndexWorktreeSchedulerV1) -> CodeGenerationId {
         CodeIndexReconcileOutcomeV1::Published(evidence) => evidence.generation_id,
         CodeIndexReconcileOutcomeV1::Noop(_) => panic!("expected a published generation"),
     }
-}
-
-fn publication_store(store_root: &Path) -> DaemonCodeIndexPublicationStoreV1 {
-    DaemonCodeIndexPublicationStoreV1::new(
-        store_root,
-        store_root,
-        SanitizerRevision::new(CODE_SOURCE_SANITIZER_VERSION_V1).expect("sanitizer revision"),
-    )
-    .expect("open publication store")
 }
 
 /// A cold mount is a foreground routing operation, not a repository or sealed-
@@ -281,9 +274,10 @@ fn concurrent_cold_readers_share_one_in_flight_decode() {
         store.path().to_path_buf()
     };
 
-    // A fresh publication store is the cold state the daemon starts from: the
-    // sealed pointer exists on disk and nothing is decoded yet.
-    let publication = publication_store(&scoped_root);
+    // Reopen through the scheduler so the cold store retains its process
+    // admission authority. The sealed pointer exists and nothing is decoded.
+    let cold = open(project.path(), &scoped_root);
+    let publication = cold.publication.clone();
     assert_eq!(publication.sealed_decode_count(), 0);
 
     let readers = 8;
@@ -335,7 +329,8 @@ fn the_decode_free_admission_abstains_instead_of_reading_sealed_bytes() {
         let _ = publish(&mut scheduler);
     }
 
-    let publication = publication_store(store.path());
+    let cold = open(project.path(), store.path());
+    let publication = cold.publication.clone();
     assert_eq!(publication.sealed_decode_count(), 0);
     assert!(
         publication
@@ -386,7 +381,8 @@ fn the_awaiting_admission_still_joins_an_in_flight_decode() {
         let _ = publish(&mut scheduler);
     }
 
-    let publication = publication_store(store.path());
+    let cold = open(project.path(), store.path());
+    let publication = cold.publication.clone();
     let expected = publication
         .load_active_shared()
         .expect("load active generation")
@@ -524,44 +520,79 @@ fn superseded_generation_churn_never_evicts_the_pinned_active_generation() {
 fn a_corrupt_sealed_generation_fails_closed_on_every_request() {
     let project = fixture();
     let store = TempDir::new().expect("store root");
-    {
+    let pointer = {
         let mut scheduler = open(project.path(), store.path());
-        let _ = publish(&mut scheduler);
-    }
+        let generation_id = publish(&mut scheduler);
+        let pointer = scheduler
+            .publication
+            .read_publication_pointer()
+            .expect("read active publication pointer")
+            .expect("published generation has an active pointer");
+        assert_eq!(pointer.generation_id, generation_id.as_str());
+        pointer
+    };
 
-    // Tamper with one content-addressed component while leaving the manifest
-    // and pointer intact. The component digest, never a cached failure
-    // verdict, must reject every attempted activation.
-    let generations_root = store.path().join("code-generations-v1");
-    let sealed_path = fs::read_dir(&generations_root)
-        .expect("read generations root")
-        .filter_map(Result::ok)
-        .map(|entry| entry.path())
-        .find(|path| {
-            path.file_name()
-                .and_then(|name| name.to_str())
-                .is_some_and(|name| name.starts_with("generation-") && name.ends_with(".json"))
+    // Corrupt the same file-content component consumed by text restoration,
+    // leaving its manifest and pointer intact. A physical pack also contains
+    // graph and resolution extents that their separate owners read lazily.
+    let sealed_path = store
+        .path()
+        .join("code-generations-v1")
+        .join(&pointer.generation_file);
+    let manifest = fs::read(&sealed_path).expect("read generation manifest");
+    let source =
+        SealedGenerationFileWindowsV1::open(&manifest).expect("open canonical packed manifest");
+    assert_eq!(source.generation_id().as_str(), pointer.generation_id);
+    let envelope: serde_json::Value =
+        serde_json::from_slice(&manifest).expect("decode authenticated generation manifest");
+    let file = &envelope["generation"]["file_segments"][0];
+    let file_digest = ManifestDigest::new(
+        file["segment_digest"]
+            .as_str()
+            .expect("file segment digest")
+            .to_owned(),
+    )
+    .expect("canonical file segment digest");
+    let file_size = file["segment_size_bytes"]
+        .as_u64()
+        .expect("file segment byte size");
+    let SealedGenerationSegmentReadV1::Range {
+        digest,
+        size_bytes,
+        offset,
+        length,
+    } = source
+        .resolve_pack_request(SealedGenerationSegmentReadV1::Whole {
+            digest: &file_digest,
+            size_bytes: file_size,
         })
-        .expect("sealed generation file");
-    let manifest: serde_json::Value =
-        serde_json::from_slice(&fs::read(&sealed_path).expect("read generation manifest"))
-            .expect("decode generation manifest");
-    let segment_digest = manifest["generation"]["file_segments"][0]["segment_digest"]
-        .as_str()
-        .and_then(|digest| sha256_hex_suffix(digest))
-        .expect("file segment digest");
+        .expect("file segment maps to its authenticated content extent")
+    else {
+        panic!("file content must occupy an extent inside the content pack");
+    };
+    assert!(
+        length > 0,
+        "the file extent must contain the corrupted byte"
+    );
+    let segment_digest = sha256_hex_suffix(digest.as_str()).expect("physical content pack digest");
     let segment_path = store
         .path()
         .join("code-generation-segments-v1")
         .join(format!("segment-{segment_digest}.json"));
-    let mut corrupted = fs::read(&segment_path).expect("read file segment");
-    let middle = corrupted.len() / 2;
+    let mut corrupted = fs::read(&segment_path).expect("read content pack");
+    assert_eq!(u64::try_from(corrupted.len()).unwrap(), size_bytes);
+    let middle = usize::try_from(offset + length / 2).expect("file midpoint fits in the pack");
     corrupted[middle] ^= 1;
-    fs::write(segment_path, corrupted).expect("write corrupt file segment");
+    fs::write(segment_path, corrupted).expect("write corrupt content pack");
 
-    let publication = publication_store(store.path());
+    let cold = open(project.path(), store.path());
+    let publication = cold.publication.clone();
     let first = publication.load_active_shared();
-    assert!(first.is_err(), "a corrupt generation must not serve");
+    assert!(
+        first.is_err(),
+        "a corrupt generation must not serve (active generation present: {:?})",
+        first.as_ref().map(Option::is_some)
+    );
     let decodes_after_first = publication.sealed_decode_count();
     assert_eq!(
         decodes_after_first, 1,
@@ -571,7 +602,8 @@ fn a_corrupt_sealed_generation_fails_closed_on_every_request() {
     let second = publication.load_active_shared();
     assert!(
         second.is_err(),
-        "a failed decode must never be memoized as a served generation"
+        "a failed decode must never be memoized as a served generation (active generation present: {:?})",
+        second.as_ref().map(Option::is_some)
     );
     assert_eq!(
         publication.sealed_decode_count(),

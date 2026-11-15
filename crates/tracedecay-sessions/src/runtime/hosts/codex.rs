@@ -1037,11 +1037,12 @@ struct CodexRetainedScan {
 enum CodexScanPhase {
     Directories {
         queued: VecDeque<(PathBuf, u8, u8, u64)>,
-        current: Option<Box<(PathBuf, u8, u8, std::fs::ReadDir)>>,
+        current: Option<Box<CodexDirectoryListing>>,
     },
     Files {
         next_directory: usize,
         current: Option<Box<(usize, std::fs::ReadDir)>>,
+        verification: Option<Box<(usize, std::fs::ReadDir, CodexDirectoryEntryFingerprint)>>,
         deferred: Option<Box<(PathBuf, std::fs::Metadata)>>,
         resume_directories: Option<CodexDirectoryResume>,
     },
@@ -1049,12 +1050,25 @@ enum CodexScanPhase {
 
 struct CodexDirectoryResume {
     queued: VecDeque<(PathBuf, u8, u8, u64)>,
-    current: Option<Box<(PathBuf, u8, u8, std::fs::ReadDir)>>,
+    current: Option<Box<CodexDirectoryListing>>,
+}
+
+/// Retain both the native iterator and its unfinished name witness across
+/// budgeted discovery passes; neither can be reconstructed from an offset.
+struct CodexDirectoryListing {
+    path: PathBuf,
+    depth: u8,
+    root_order: u8,
+    entries: std::fs::ReadDir,
+    opening_stat: [u8; 32],
+    fingerprint: Option<CodexDirectoryEntryFingerprint>,
+    directory_index: usize,
 }
 
 #[derive(Clone, Copy)]
 struct CodexDirectoryWitness {
     stat: [u8; 32],
+    stable_stat: [u8; 32],
     entries: Option<[u8; 32]>,
 }
 
@@ -2076,6 +2090,10 @@ fn retained_scan_step(
     let directory_work_limit =
         work_limit.saturating_mul(usize::from(MAX_SCAN_DEPTH).saturating_add(2));
     let mut directory_work = 0usize;
+    // Flat archived directories can contain thousands of non-transcript
+    // entries. Retain their ReadDir cursor across turns, just as for child
+    // directories, instead of enumerating the whole archive in one call.
+    let mut directory_entries = 0usize;
     let mut file_work = 0usize;
     let mut paths = Vec::new();
     let mut selected_sources = Vec::new();
@@ -2100,6 +2118,7 @@ fn retained_scan_step(
                     scan.phase = CodexScanPhase::Files {
                         next_directory: 0,
                         current: None,
+                        verification: None,
                         deferred: None,
                         resume_directories: Some(resume_directories),
                     };
@@ -2120,6 +2139,7 @@ fn retained_scan_step(
                         scan.phase = CodexScanPhase::Files {
                             next_directory: 0,
                             current: None,
+                            verification: None,
                             deferred: None,
                             resume_directories: None,
                         };
@@ -2170,6 +2190,7 @@ fn retained_scan_step(
                         scan.phase = CodexScanPhase::Files {
                             next_directory: 0,
                             current: None,
+                            verification: None,
                             deferred: None,
                             resume_directories: Some(resume_directories),
                         };
@@ -2182,15 +2203,23 @@ fn retained_scan_step(
                             },
                         )?;
                     }
-                    let identity = codex_directory_witness(&path)?;
+                    // Do not enumerate a potentially huge unsettled archive
+                    // just to obtain its witness before the bounded iterator.
+                    let stat = directory_scan_witness(&path)?;
+                    let identity = stat.as_ref().map(|witness| CodexDirectoryWitness {
+                        stat: witness.stat,
+                        stable_stat: witness.stable_stat,
+                        entries: None,
+                    });
+                    let directory_index = scan.directories.len();
                     scan.directories.push(CodexDirectoryIdentity {
                         path: path.clone(),
                         root_order,
                         identity,
                     });
-                    if identity.is_none() {
+                    let Some(opening_stat) = identity.map(|witness| witness.stable_stat) else {
                         continue;
-                    }
+                    };
                     let listed = std::fs::read_dir(&path).map_err(|source| {
                         TranscriptIngestError::ScanIo {
                             operation: "enumerate Codex transcript directories",
@@ -2198,19 +2227,33 @@ fn retained_scan_step(
                             source,
                         }
                     })?;
-                    *current = Some(Box::new((path, depth, root_order, listed)));
+                    *current = Some(Box::new(CodexDirectoryListing {
+                        path,
+                        depth,
+                        root_order,
+                        entries: listed,
+                        opening_stat,
+                        fingerprint: stat
+                            .filter(|witness| !witness.settled)
+                            .map(|_| CodexDirectoryEntryFingerprint::default()),
+                        directory_index,
+                    }));
                     continue;
                 }
-                let (dir, depth, root_order, listed) = current.as_deref_mut().ok_or(
+                let directory = current.as_deref_mut().ok_or(
                     TranscriptIngestError::InvalidCodexDiscoveryFrontier {
                         detail: "retained Codex directory iterator disappeared",
                     },
                 )?;
-                match listed.next() {
+                if directory_entries >= directory_work_limit {
+                    break;
+                }
+                match directory.entries.next() {
                     Some(entry) => {
+                        directory_entries += 1;
                         let entry = entry.map_err(|source| TranscriptIngestError::ScanIo {
                             operation: "read Codex transcript directory entry",
-                            path: dir.clone(),
+                            path: directory.path.clone(),
                             source,
                         })?;
                         let file_type =
@@ -2221,13 +2264,16 @@ fn retained_scan_step(
                                     path: entry.path(),
                                     source,
                                 })?;
+                        if let Some(fingerprint) = directory.fingerprint.as_mut() {
+                            fingerprint.observe(&entry.file_name(), file_type)?;
+                        }
                         // Rollout files are not structural work. Charging them
                         // here spends the pass on names that are not child
                         // directories, so the newest sessions are not emitted
                         // until every older day has been listed.
                         if file_type.is_dir() && !file_type.is_symlink() {
                             directory_work += 1;
-                            if *depth >= MAX_SCAN_DEPTH {
+                            if directory.depth >= MAX_SCAN_DEPTH {
                                 return Err(TranscriptIngestError::ScanIo {
                                     operation: "traverse Codex transcript directory depth",
                                     path: entry.path(),
@@ -2269,12 +2315,12 @@ fn retained_scan_step(
                                     }
                                     queued.push_front((
                                         child,
-                                        depth.checked_add(1).ok_or(
+                                        directory.depth.checked_add(1).ok_or(
                                             TranscriptIngestError::InvalidCodexDiscoveryFrontier {
                                                 detail: "Codex transcript directory depth overflowed",
                                             },
                                         )?,
-                                        *root_order,
+                                        directory.root_order,
                                         0,
                                     ));
                                     let resume_directories = CodexDirectoryResume {
@@ -2284,6 +2330,7 @@ fn retained_scan_step(
                                     scan.phase = CodexScanPhase::Files {
                                         next_directory: 0,
                                         current: None,
+                                        verification: None,
                                         deferred: None,
                                         resume_directories: Some(resume_directories),
                                     };
@@ -2292,23 +2339,59 @@ fn retained_scan_step(
                                 scan.directory_bytes = charged;
                                 queued.push_front((
                                     child,
-                                    depth.checked_add(1).ok_or(
+                                    directory.depth.checked_add(1).ok_or(
                                         TranscriptIngestError::InvalidCodexDiscoveryFrontier {
                                             detail: "Codex transcript directory depth overflowed",
                                         },
                                     )?,
-                                    *root_order,
+                                    directory.root_order,
                                     charge,
                                 ));
                             }
                         }
                     }
-                    None => *current = None,
+                    None => {
+                        // A budgeted ReadDir can span many scheduler turns.
+                        // If the directory changed while we held it, the
+                        // iterator may omit new entries. Never publish a
+                        // complete corpus frontier from that mixed snapshot.
+                        let closing_stat = directory_scan_witness(&directory.path)?;
+                        if closing_stat.as_ref().map(|stat| stat.stable_stat)
+                            != Some(directory.opening_stat)
+                        {
+                            scan.complete = false;
+                        }
+                        // Chunks can retire their directory identity while
+                        // retaining the unfinished iterator. The opening
+                        // witness still fences coverage in that case.
+                        if let Some(identity) = scan
+                            .directories
+                            .get_mut(directory.directory_index)
+                            .filter(|item| {
+                                item.path == directory.path
+                                    && item.root_order == directory.root_order
+                            })
+                            .and_then(|item| item.identity.as_mut())
+                        {
+                            if let Some(fingerprint) = directory.fingerprint.take() {
+                                identity.entries = Some(fingerprint.finish());
+                            }
+                            // Commit the closing witness so the idle probe
+                            // compares against the state this sweep actually
+                            // certified, not a stale unsettled sample.
+                            if let Some(closing) = closing_stat {
+                                identity.stat = closing.stat;
+                                identity.stable_stat = closing.stable_stat;
+                            }
+                        }
+                        *current = None;
+                    }
                 }
             }
             CodexScanPhase::Files {
                 next_directory,
                 current,
+                verification,
                 deferred,
                 resume_directories,
             } => {
@@ -2323,6 +2406,71 @@ fn retained_scan_step(
                     Some(*candidate)
                 } else {
                     loop {
+                        // An unsettled directory's native timestamp can alias
+                        // a new entry while a file iterator is suspended.
+                        // Verify eligible names through a fresh, bounded walk.
+                        if let Some((directory_index, entries, fingerprint)) =
+                            verification.as_deref_mut()
+                        {
+                            if file_work >= work_limit {
+                                break None;
+                            }
+                            match entries.next() {
+                                Some(entry) => {
+                                    file_work += 1;
+                                    let entry =
+                                        entry.map_err(|source| TranscriptIngestError::ScanIo {
+                                            operation: "verify Codex transcript directory entry",
+                                            path: scan.directories[*directory_index].path.clone(),
+                                            source,
+                                        })?;
+                                    let file_type = entry.file_type().map_err(|source| {
+                                        TranscriptIngestError::ScanIo {
+                                            operation: "verify Codex transcript entry type",
+                                            path: entry.path(),
+                                            source,
+                                        }
+                                    })?;
+                                    fingerprint.observe(&entry.file_name(), file_type)?;
+                                    continue;
+                                }
+                                None => {
+                                    let directory_index = *directory_index;
+                                    let closing = {
+                                        let directory = &scan.directories[directory_index];
+                                        directory_scan_witness(&directory.path)?
+                                    };
+                                    let identity = scan.directories[directory_index].identity;
+                                    // The verification iterator may itself span
+                                    // the coarse timestamp window. Its opening
+                                    // witness must not gain settled authority
+                                    // from a closing stat after that window.
+                                    if closing.as_ref().map(|stamp| stamp.stat)
+                                        != identity.map(|identity| identity.stat)
+                                        || identity.and_then(|identity| identity.entries)
+                                            != Some(std::mem::take(fingerprint).finish())
+                                    {
+                                        scan.complete = false;
+                                        // Force the next idle probe to restart
+                                        // discovery; the failed name witness
+                                        // cannot certify the closing snapshot.
+                                        scan.directories[directory_index].identity = None;
+                                    }
+                                    // Commit the closing witness so the idle
+                                    // probe compares against the state this
+                                    // sweep actually certified.
+                                    if let Some(closing) = closing
+                                        && let Some(identity) =
+                                            scan.directories[directory_index].identity.as_mut()
+                                    {
+                                        identity.stat = closing.stat;
+                                        identity.stable_stat = closing.stable_stat;
+                                    }
+                                    *verification = None;
+                                    continue;
+                                }
+                            }
+                        }
                         if current.is_none() {
                             let Some(directory) = scan.directories.get(*next_directory) else {
                                 break None;
@@ -2374,12 +2522,71 @@ fn retained_scan_step(
                                     break Some((path, metadata));
                                 }
                             }
-                            None => *current = None,
+                            None => {
+                                // This file iterator is retained across
+                                // scheduler turns. A new directory entry can
+                                // arrive after the structural walk but before
+                                // file enumeration finishes. Recheck its native
+                                // identity before granting full coverage: a
+                                // stale ReadDir may have omitted that entry.
+                                let directory_index = *directory_index;
+                                let closing = {
+                                    let directory = &scan.directories[directory_index];
+                                    directory_scan_witness(&directory.path)?
+                                };
+                                let identity = scan.directories[directory_index].identity;
+                                if closing.as_ref().map(|stat| stat.stable_stat)
+                                    != identity.map(|identity| identity.stable_stat)
+                                {
+                                    scan.complete = false;
+                                } else if identity.and_then(|identity| identity.entries).is_some() {
+                                    // This initially unsettled listing needs an
+                                    // independent current-name check, even if the
+                                    // filesystem clock settled during the walk.
+                                    let path = scan.directories[directory_index].path.clone();
+                                    let reopened = std::fs::read_dir(&path).map_err(|source| {
+                                        TranscriptIngestError::ScanIo {
+                                            operation: "verify Codex transcript bucket",
+                                            path,
+                                            source,
+                                        }
+                                    })?;
+                                    *verification = Some(Box::new((
+                                        directory_index,
+                                        reopened,
+                                        CodexDirectoryEntryFingerprint::default(),
+                                    )));
+                                } else if closing.as_ref().is_some_and(|stamp| !stamp.settled)
+                                    || closing.as_ref().map(|stamp| stamp.stat)
+                                        != identity.map(|identity| identity.stat)
+                                {
+                                    // Neither an unsettled native stat nor a
+                                    // transition to settled authority can vouch
+                                    // for a retained listing without a name
+                                    // witness, even if structural work resumes.
+                                    scan.complete = false;
+                                    scan.directories[directory_index].identity = None;
+                                }
+                                // Commit the closing witness so the idle probe
+                                // compares against the state this sweep actually
+                                // certified, not a stale unsettled sample.
+                                if let Some(closing) = closing
+                                    && let Some(identity) =
+                                        scan.directories[directory_index].identity.as_mut()
+                                {
+                                    identity.stat = closing.stat;
+                                    identity.stable_stat = closing.stable_stat;
+                                }
+                                *current = None;
+                            }
                         }
                     }
                 };
                 let Some((path, metadata)) = candidate else {
-                    if *next_directory >= scan.directories.len() && current.is_none() {
+                    if *next_directory >= scan.directories.len()
+                        && current.is_none()
+                        && verification.is_none()
+                    {
                         if let Some(resume) = resume_directories.take() {
                             scan.directories.clear();
                             scan.directory_bytes = 0;
@@ -2573,6 +2780,16 @@ struct DirectoryStatWitness {
     settled: bool,
 }
 
+/// A directory witness for a budgeted sweep. `stable_stat` drops the
+/// settled/unsettled encoding so a directory that settles mid-sweep is not
+/// mistaken for a changed one; its name witness still describes the same
+/// entries.
+struct DirectoryScanWitness {
+    stat: [u8; 32],
+    stable_stat: [u8; 32],
+    settled: bool,
+}
+
 fn codex_directory_changed(
     path: &Path,
     stored: Option<CodexDirectoryWitness>,
@@ -2610,12 +2827,14 @@ fn codex_directory_changed_since(
     Ok(directory_entry_fingerprint(path)? != entries)
 }
 
+#[cfg(test)]
 fn codex_directory_witness(path: &Path) -> TranscriptIngestResult<Option<CodexDirectoryWitness>> {
-    let Some(current) = directory_stat_witness(path)? else {
+    let Some(current) = directory_scan_witness(path)? else {
         return Ok(None);
     };
     Ok(Some(CodexDirectoryWitness {
         stat: current.stat,
+        stable_stat: current.stable_stat,
         // In the settled case, a later stat comparison proves stability.
         // Avoid eagerly listing and sorting all historical rollout names;
         // an entry-name witness is needed only for a coarse-clock window.
@@ -2627,7 +2846,7 @@ fn codex_directory_witness(path: &Path) -> TranscriptIngestResult<Option<CodexDi
     }))
 }
 
-fn directory_stat_witness(path: &Path) -> TranscriptIngestResult<Option<DirectoryStatWitness>> {
+fn stat_directory(path: &Path) -> TranscriptIngestResult<Option<std::fs::Metadata>> {
     let Some(metadata) = stat_if_present(path, "stat Codex transcript directory")? else {
         return Ok(None);
     };
@@ -2641,11 +2860,43 @@ fn directory_stat_witness(path: &Path) -> TranscriptIngestResult<Option<Director
             ),
         });
     }
+    Ok(Some(metadata))
+}
+
+fn directory_stat_witness(path: &Path) -> TranscriptIngestResult<Option<DirectoryStatWitness>> {
+    let Some(metadata) = stat_directory(path)? else {
+        return Ok(None);
+    };
     let changed = change_stamp(path, &metadata);
     Ok(Some(DirectoryStatWitness {
         stat: codex_directory_stat_identity(path, &metadata, changed)?,
         settled: changed.is_settled(),
     }))
+}
+
+fn directory_scan_witness(path: &Path) -> TranscriptIngestResult<Option<DirectoryScanWitness>> {
+    let Some(metadata) = stat_directory(path)? else {
+        return Ok(None);
+    };
+    let changed = change_stamp(path, &metadata);
+    Ok(Some(DirectoryScanWitness {
+        stat: codex_directory_stat_identity(path, &metadata, changed)?,
+        stable_stat: codex_directory_stable_identity(path, &metadata)?,
+        settled: changed.is_settled(),
+    }))
+}
+
+/// The directory identity without the settled/unsettled encoding. A budgeted
+/// sweep compares this across slices: a directory that settles mid-sweep has
+/// not changed, and its name witness still describes the same entries.
+fn codex_directory_stable_identity(
+    path: &Path,
+    metadata: &std::fs::Metadata,
+) -> TranscriptIngestResult<[u8; 32]> {
+    let native_change_time = RewriteWitness::NATIVE
+        .change_time_nanos(metadata)
+        .map_or(0, |time| u128::from_le_bytes(time.to_le_bytes()));
+    codex_corpus_identity(path, metadata, ChangeStamp::Unvouched(native_change_time))
 }
 
 // An unsettled ChangeStamp has a different random sample token on *every*
@@ -2672,13 +2923,66 @@ fn codex_directory_stat_identity(
     codex_corpus_identity(path, metadata, stat_change)
 }
 
+/// Order-independent bounded-memory set witness. Directory entries are
+/// unique names, so their separately domain-hashed names can be combined
+/// without storing and sorting an unbounded filename list.
+#[derive(Default)]
+struct CodexDirectoryEntryFingerprint {
+    names: u64,
+    xor: [u8; 32],
+}
+
+impl CodexDirectoryEntryFingerprint {
+    fn observe(
+        &mut self,
+        name: &std::ffi::OsStr,
+        file_type: std::fs::FileType,
+    ) -> TranscriptIngestResult<()> {
+        if !file_type.is_dir()
+            && Path::new(name).extension().and_then(|ext| ext.to_str()) != Some("jsonl")
+        {
+            return Ok(());
+        }
+        let tag = if file_type.is_symlink() {
+            2_u8
+        } else if file_type.is_dir() {
+            1
+        } else {
+            0
+        };
+        let mut hasher = Sha256::new();
+        hasher.update(b"tracedecay-codex-directory-entry-v2");
+        hasher.update([tag]);
+        hash_directory_name(&mut hasher, name);
+        let digest: [u8; 32] = hasher.finalize().into();
+        for (accumulator, byte) in self.xor.iter_mut().zip(digest) {
+            *accumulator ^= byte;
+        }
+        self.names = self.names.checked_add(1).ok_or(
+            TranscriptIngestError::InvalidCodexDiscoveryFrontier {
+                detail: "Codex directory fingerprint entry count overflowed",
+            },
+        )?;
+        Ok(())
+    }
+
+    fn finish(self) -> [u8; 32] {
+        let mut hasher = Sha256::new();
+        // These witnesses are process-local, not durable corpus identities.
+        hasher.update(b"tracedecay-codex-directory-entries-v2");
+        hasher.update(self.names.to_le_bytes());
+        hasher.update(self.xor);
+        hasher.finalize().into()
+    }
+}
+
 fn directory_entry_fingerprint(path: &Path) -> TranscriptIngestResult<[u8; 32]> {
     let listed = std::fs::read_dir(path).map_err(|source| TranscriptIngestError::ScanIo {
         operation: "fingerprint Codex transcript directory",
         path: path.to_path_buf(),
         source,
     })?;
-    let mut names = Vec::new();
+    let mut fingerprint = CodexDirectoryEntryFingerprint::default();
     for entry in listed {
         let entry = entry.map_err(|source| TranscriptIngestError::ScanIo {
             operation: "fingerprint Codex transcript directory entry",
@@ -2692,24 +2996,9 @@ fn directory_entry_fingerprint(path: &Path) -> TranscriptIngestResult<[u8; 32]> 
                 path: entry.path(),
                 source,
             })?;
-        let tag = if file_type.is_symlink() {
-            2_u8
-        } else if file_type.is_dir() {
-            1
-        } else {
-            0
-        };
-        names.push((entry.file_name(), tag));
+        fingerprint.observe(&entry.file_name(), file_type)?;
     }
-    names.sort();
-    let mut hasher = Sha256::new();
-    hasher.update(b"tracedecay-codex-directory-entries-v1");
-    for (name, tag) in names {
-        hasher.update([tag]);
-        hash_directory_name(&mut hasher, &name);
-        hasher.update([0xff]);
-    }
-    Ok(hasher.finalize().into())
+    Ok(fingerprint.finish())
 }
 
 fn hash_directory_name(hasher: &mut Sha256, name: &std::ffi::OsStr) {

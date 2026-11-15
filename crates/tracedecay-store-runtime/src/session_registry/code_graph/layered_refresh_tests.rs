@@ -24,7 +24,9 @@ use tracedecay_graph_db::{
     NeverCancelled, VerifiedGraphSnapshot,
 };
 use tracedecay_runtime_core::path_safety::{plain_git_args, plain_host_path};
-use tracedecay_runtime_core::resident_memory::{ProcessResidentMemoryV1, ResidentMemoryPressureV1};
+use tracedecay_runtime_core::resident_memory::{
+    ProcessResidentMemoryV1, ResidentMemoryPressureV1, detected_process_resident_memory_limit_v1,
+};
 
 use super::super::DaemonSessionRuntimeRegistryV1;
 
@@ -92,7 +94,10 @@ fn edit_three_files(project_root: &Path, modules: usize) {
     std::fs::write(project_root.join("src/m020.rs"), without_value).expect("edit m020");
 }
 
-fn sealed_binding(scoped_store: &Path) -> (CodeGenerationId, CodeGraphReplayBindingV1) {
+fn sealed_binding(
+    scoped_store: &Path,
+    resident_memory: &Arc<ProcessResidentMemoryV1>,
+) -> (CodeGenerationId, CodeGraphReplayBindingV1) {
     let pointer: DurablePublicationPointerV1 = serde_json::from_slice(
         &std::fs::read(scoped_store.join("active-code-generation-v1.json"))
             .expect("active generation pointer"),
@@ -101,6 +106,7 @@ fn sealed_binding(scoped_store: &Path) -> (CodeGenerationId, CodeGraphReplayBind
     (
         CodeGenerationId::new(pointer.generation_id).expect("generation id"),
         CodeGraphReplayBindingV1 {
+            resident_memory: Arc::clone(resident_memory),
             generations_root: scoped_store.join("code-generations-v1"),
             sealed_state_digest: tracedecay_graph_db::SealedGraphStateDigest::try_from(
                 pointer.state_digest,
@@ -292,6 +298,7 @@ struct RefreshFixture {
     canonical_project: PathBuf,
     scoped_store: PathBuf,
     project_id: ProjectId,
+    resident_memory: Arc<ProcessResidentMemoryV1>,
 }
 
 impl RefreshFixture {
@@ -312,6 +319,14 @@ impl RefreshFixture {
         )
         .expect("project enrollment");
         let canonical_project = project_root.canonicalize().expect("canonical project root");
+        let limit = detected_process_resident_memory_limit_v1();
+        let resident_memory = Arc::new(ProcessResidentMemoryV1::with_pressure(
+            limit,
+            Arc::new(ResidentMemoryPressureV1::with_sampler(
+                limit,
+                Arc::new(|| None),
+            )),
+        ));
         let fixture = Self {
             scoped_store: scoped_code_index_store_root(
                 &root.join("code-index-store"),
@@ -321,6 +336,7 @@ impl RefreshFixture {
             project_root,
             canonical_project,
             project_id,
+            resident_memory,
         };
         fixture.commit("layered refresh corpus");
         fixture
@@ -352,6 +368,7 @@ impl RefreshFixture {
             project_root,
             canonical_project,
             project_id: self.project_id.clone(),
+            resident_memory: Arc::clone(&self.resident_memory),
         }
     }
 
@@ -377,6 +394,7 @@ impl RefreshFixture {
             Arc::new(SharedCodeIndexBytePoolV1::default()),
         )
         .expect("open worktree scheduler");
+        scheduler.bind_resident_memory(Arc::clone(&self.resident_memory));
         scheduler.reconcile_now().expect("seal a generation");
         let latest = scheduler.latest_complete().expect("complete generation");
         let generation = latest.generation();
@@ -389,7 +407,7 @@ impl RefreshFixture {
         let parent = generation.manifest().parent_generation.clone();
         drop(latest);
         drop(scheduler);
-        let (sealed, binding) = sealed_binding(&self.scoped_store);
+        let (sealed, binding) = sealed_binding(&self.scoped_store, &self.resident_memory);
         (source, sealed, parent, binding)
     }
 
@@ -439,6 +457,7 @@ async fn assert_matches_cold_build(
         super::super::code_graph_manifest::spill_sealed_generation_graph_from_roots(
             &runtime.generations_root,
             &runtime.replay_root,
+            &runtime.resident_memory,
             &runtime.sealed_state_digest,
             &generation,
             layered.projection().clone(),

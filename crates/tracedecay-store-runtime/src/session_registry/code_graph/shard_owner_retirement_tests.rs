@@ -9,6 +9,9 @@ use std::sync::Arc;
 use tracedecay_code_index_runtime::CodeGraphReplayBindingV1;
 use tracedecay_domain::{CodeGenerationId, ProjectId, RepositoryId, WorktreeId};
 use tracedecay_graph_db::SealedGraphStateDigest;
+use tracedecay_runtime_core::resident_memory::{
+    ProcessResidentMemoryV1, ResidentMemoryPressureV1, detected_process_resident_memory_limit_v1,
+};
 
 use super::super::DaemonSessionRuntimeRegistryV1;
 use tracedecay_daemon_identity::profile_identity;
@@ -47,6 +50,14 @@ async fn code_graph_seat_ahead_of_the_memory_graph_open_leaves_the_project_retir
         .project_memory(project_id.clone(), [project_root])
         .await
         .expect("project memory database");
+    let limit = detected_process_resident_memory_limit_v1();
+    let resident_memory = Arc::new(ProcessResidentMemoryV1::with_pressure(
+        limit,
+        Arc::new(ResidentMemoryPressureV1::with_sampler(
+            limit,
+            Arc::new(|| None),
+        )),
+    ));
     let seat = registry
         .retain_code_graph_runtime(
             project_id.clone(),
@@ -56,6 +67,7 @@ async fn code_graph_seat_ahead_of_the_memory_graph_open_leaves_the_project_retir
             CodeGenerationId::new("generation:seat-first").expect("generation id"),
             Arc::clone(&project_database),
             CodeGraphReplayBindingV1 {
+                resident_memory: Arc::clone(&resident_memory),
                 generations_root: project_database
                     .database_path()
                     .with_extension("generations"),

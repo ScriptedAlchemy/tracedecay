@@ -5,6 +5,27 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.0-beta.105](https://github.com/ScriptedAlchemy/tracedecay/compare/v1.0.0-beta.104...v1.0.0-beta.105) (2026-11-15)
+
+
+### Performance Improvements
+
+* **code-index:** reuse staged read and durability handles ([3372add](https://github.com/ScriptedAlchemy/tracedecay/commit/3372add1c025242d4e1c0cbe0dbe2e24b8047e0a))
+* **sessions:** bound flat Codex directory entry traversal ([0405564](https://github.com/ScriptedAlchemy/tracedecay/commit/04055647b0cabd93e76ca7c738f06979ed254716))
+
+## [1.0.0-beta.104](https://github.com/ScriptedAlchemy/tracedecay/compare/v1.0.0-beta.103...v1.0.0-beta.104) (2026-11-14)
+
+
+### Features
+
+* **code-index:** index authenticated Git submodules ([97caca9](https://github.com/ScriptedAlchemy/tracedecay/commit/97caca9f0e53be3649019a469bbb165a1e55ebce))
+
+
+### Bug Fixes
+
+* **release:** resolve supported runners for immutable tag recovery ([6a8d7e5](https://github.com/ScriptedAlchemy/tracedecay/commit/6a8d7e5264adb391c4665aa89c8cf7a912cedc1c))
+* **release:** use supported runners for immutable tag recovery ([aa5b722](https://github.com/ScriptedAlchemy/tracedecay/commit/aa5b722ae3a47bd3028c0e8a521252e0a37bb6b6))
+
 ## [1.0.0-beta.103](https://github.com/ScriptedAlchemy/tracedecay/compare/v1.0.0-beta.102...v1.0.0-beta.103) (2026-11-14)
 
 
