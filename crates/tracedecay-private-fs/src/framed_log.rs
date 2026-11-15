@@ -5,6 +5,8 @@ use std::io::{self, Read, Seek, SeekFrom, Write};
 #[cfg(target_os = "linux")]
 use std::os::fd::AsRawFd;
 #[cfg(unix)]
+use std::os::unix::fs::MetadataExt;
+#[cfg(unix)]
 use std::os::unix::fs::OpenOptionsExt;
 #[cfg(windows)]
 use std::os::windows::fs::OpenOptionsExt;
@@ -15,6 +17,14 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use windows_sys::Win32::Storage::FileSystem::{
     FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
 };
+
+#[cfg(all(test, unix))]
+#[path = "framed_log_batch_tests.rs"]
+mod batch_tests;
+
+#[cfg(all(test, unix, feature = "test-helpers"))]
+#[path = "framed_log_window_tests.rs"]
+mod window_tests;
 
 #[cfg(test)]
 thread_local! {
@@ -67,23 +77,140 @@ pub fn sync_parent_directory(path: &Path, policy: DirectorySyncPolicy) -> io::Re
     }
 }
 
-/// New files whose contents become durable together, before any is renamed
-/// into place.
+/// New, fully written files whose contents become durable before any is renamed.
+/// Members must remain immutable until publication.
 ///
-/// On Linux each member's writeback starts as soon as it is written, and
-/// [`Self::sync`] then fsyncs the members concurrently. Concurrent fsyncs
-/// share a commit on a journaling filesystem and on ZFS's intent log alike,
-/// but on ZFS one fsync after another pays one intent-log commit each, so a
-/// seal of a hundred segments waited out a hundred commits. The cost stays
-/// proportional to the batch's own bytes. `syncfs(2)` also paid one
-/// commit, but waited for every dirty inode on the filesystem, so a one-file
-/// seal stalled for seconds behind unrelated writers. Other platforms fsync
-/// each file as it is written.
+/// Every supported platform retains at most one concurrency window of
+/// duplicated writer handles. When that window fills, its members are fsynced
+/// concurrently before their handles are released, so the filesystem can fold
+/// their barriers into shared log commits instead of paying one per segment.
+/// Flushing uses retained writer handles without reopening member pathnames;
+/// Windows pathname identity checks still open each member. The batch never
+/// holds a descriptor per segment of a large seal. Linux additionally starts
+/// each member's writeback as soon as it is admitted. [`Self::sync`] flushes
+/// the final window and checks that earlier members still name the same
+/// immutable files. It never flushes unrelated filesystem data. Unix
+/// authenticates members by device, inode, size and timestamps; Windows also
+/// authenticates each retained handle and pathname by volume and file index.
 #[derive(Default)]
 pub struct DurableFileBatch {
-    /// Paths rather than open handles, so a large seal holds no descriptors.
-    #[cfg(target_os = "linux")]
-    members: Vec<PathBuf>,
+    #[cfg(any(unix, windows))]
+    pending: Vec<PendingDurableFile>,
+    #[cfg(any(unix, windows))]
+    synced: Vec<DurableFileIdentity>,
+}
+
+#[cfg(any(unix, windows))]
+struct PendingDurableFile {
+    identity: DurableFileIdentity,
+    file: File,
+}
+
+#[cfg(any(unix, windows))]
+struct DurableFileIdentity {
+    path: PathBuf,
+    metadata: fs::Metadata,
+    #[cfg(windows)]
+    volume_serial_number: u32,
+    #[cfg(windows)]
+    file_index: u64,
+}
+
+#[cfg(unix)]
+impl DurableFileIdentity {
+    fn new(path: &Path, metadata: fs::Metadata, _file: &File) -> io::Result<Self> {
+        Ok(Self {
+            path: path.to_path_buf(),
+            metadata,
+        })
+    }
+
+    fn validate_metadata(&self, current: &fs::Metadata) -> io::Result<()> {
+        let original = &self.metadata;
+        if !original.file_type().is_file()
+            || !current.file_type().is_file()
+            || original.dev() != current.dev()
+            || original.ino() != current.ino()
+            || original.len() != current.len()
+            || original.mtime() != current.mtime()
+            || original.mtime_nsec() != current.mtime_nsec()
+            || original.ctime() != current.ctime()
+            || original.ctime_nsec() != current.ctime_nsec()
+        {
+            return Err(changed_durable_member());
+        }
+        Ok(())
+    }
+
+    fn validate_file(&self, file: &File) -> io::Result<()> {
+        self.validate_metadata(&file.metadata()?)
+    }
+
+    fn validate_path(&self) -> io::Result<()> {
+        self.validate_metadata(&fs::symlink_metadata(&self.path)?)
+    }
+}
+
+#[cfg(windows)]
+impl DurableFileIdentity {
+    fn new(path: &Path, metadata: fs::Metadata, file: &File) -> io::Result<Self> {
+        let identity = crate::windows_file::information(file)?;
+        Ok(Self {
+            path: path.to_path_buf(),
+            metadata,
+            volume_serial_number: identity.volume_serial_number,
+            file_index: identity.file_index,
+        })
+    }
+
+    fn validate_metadata(&self, current: &fs::Metadata) -> io::Result<()> {
+        let original = &self.metadata;
+        if !original.file_type().is_file()
+            || !current.file_type().is_file()
+            || original.len() != current.len()
+            || original.modified().ok() != current.modified().ok()
+        {
+            return Err(changed_durable_member());
+        }
+        Ok(())
+    }
+
+    fn validate_file(&self, file: &File) -> io::Result<()> {
+        self.validate_metadata(&file.metadata()?)?;
+        let current = crate::windows_file::information(file)?;
+        if self.volume_serial_number != current.volume_serial_number
+            || self.file_index != current.file_index
+        {
+            return Err(changed_durable_member());
+        }
+        Ok(())
+    }
+
+    fn validate_path(&self) -> io::Result<()> {
+        self.validate_metadata(&fs::symlink_metadata(&self.path)?)?;
+        self.validate_file(&open_no_follow(&self.path)?)
+    }
+}
+
+#[cfg(any(unix, windows))]
+fn changed_durable_member() -> io::Error {
+    io::Error::new(
+        io::ErrorKind::InvalidData,
+        "durable batch member changed after it was written",
+    )
+}
+
+#[cfg(any(unix, windows))]
+impl PendingDurableFile {
+    fn sync(&self) -> io::Result<()> {
+        self.identity.validate_path()?;
+        self.identity.validate_file(&self.file)?;
+        sync_owned_file(&self.identity.path, &self.file)?;
+        // A replacement or in-place write during the barrier must not be
+        // reported as a successful flush of the originally admitted bytes.
+        self.identity.validate_file(&self.file)?;
+        self.identity.validate_path()
+    }
 }
 
 impl DurableFileBatch {
@@ -93,66 +220,145 @@ impl DurableFileBatch {
 
     /// Record one fully written member file, created at `path`.
     pub fn written(&mut self, path: &Path, file: &File) -> io::Result<()> {
-        #[cfg(target_os = "linux")]
+        let observed = file.metadata()?;
+        self.written_with_identity(path, file, &observed)
+    }
+
+    /// Record the exact inode and metadata that the caller already authenticated
+    /// through its writer. A changed member must fail before admission, not
+    /// leave a stale handle in a later durability window.
+    pub fn written_with_identity(
+        &mut self,
+        path: &Path,
+        file: &File,
+        authenticated: &fs::Metadata,
+    ) -> io::Result<()> {
+        #[cfg(any(unix, windows))]
         {
-            // SAFETY: `file` is an open descriptor for the whole call.
-            let started = unsafe {
-                libc::sync_file_range(file.as_raw_fd(), 0, 0, libc::SYNC_FILE_RANGE_WRITE)
-            };
-            if started != 0 {
-                return Err(io::Error::last_os_error());
+            let identity = DurableFileIdentity::new(path, authenticated.clone(), file)?;
+            identity.validate_file(file)?;
+            // An invalid incoming member must not force a full, otherwise
+            // healthy window to fsync before its admission is rejected.
+            identity.validate_path()?;
+            if self.pending.len() == DURABLE_BATCH_CONCURRENT_SYNCS {
+                // Keep ownership on failure: no unproven member may move to
+                // the synced set, and no additional descriptor is admitted.
+                self.sync_pending()?;
+                self.synced
+                    .extend(self.pending.drain(..).map(|member| member.identity));
+                // A slow filesystem barrier leaves time for the incoming
+                // path or descriptor to change. Do not admit that change.
+                identity.validate_file(file)?;
+                identity.validate_path()?;
             }
-            self.members.push(path.to_path_buf());
+            // Duplication retains the writer's inode without a pathname open.
+            let retained = file.try_clone()?;
+            #[cfg(target_os = "linux")]
+            {
+                // SAFETY: `retained` is an open descriptor for the whole call.
+                let started = unsafe {
+                    libc::sync_file_range(retained.as_raw_fd(), 0, 0, libc::SYNC_FILE_RANGE_WRITE)
+                };
+                if started != 0 {
+                    return Err(io::Error::last_os_error());
+                }
+            }
+            // This is the last fallible check before admission. There must
+            // be no caller-side validation that could delete a registered
+            // member after a successful return.
+            identity.validate_file(&retained)?;
+            identity.validate_path()?;
+            self.pending.push(PendingDurableFile {
+                identity,
+                file: retained,
+            });
             Ok(())
         }
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(not(any(unix, windows)))]
         {
+            let _ = authenticated;
             sync_owned_file(path, file)
         }
     }
 
-    /// Make every member file's contents durable.
+    /// Make every member file's contents durable, refusing changed members.
     #[tracing::instrument(
         name = "private_fs.framed_log.sync_file_batch",
         level = "trace",
         skip_all
     )]
     pub fn sync(&self) -> io::Result<()> {
-        #[cfg(target_os = "linux")]
+        #[cfg(any(unix, windows))]
         {
-            let next = std::sync::atomic::AtomicUsize::new(0);
-            let syncer = || -> io::Result<()> {
-                while let Some(member) = self.members.get(next.fetch_add(1, Ordering::Relaxed)) {
-                    sync_file_at(member)?;
-                }
-                Ok(())
-            };
-            let syncers = self.members.len().min(DURABLE_BATCH_CONCURRENT_SYNCS);
-            std::thread::scope(|scope| {
-                let helpers = (1..syncers)
-                    .map(|_| scope.spawn(syncer))
-                    .collect::<Vec<_>>();
-                let mut outcome = syncer();
-                for helper in helpers {
-                    let helped = helper
-                        .join()
-                        .unwrap_or_else(|panic| std::panic::resume_unwind(panic));
-                    outcome = outcome.and(helped);
-                }
-                outcome
-            })
+            // Already-flushed windows need no further barriers, but missing
+            // or substituted names must still refuse publication.
+            for identity in &self.synced {
+                identity.validate_path()?;
+            }
+            self.sync_pending()?;
+            // The final barriers may block long enough for an earlier window
+            // to change. Its pre-barrier observation cannot authorize the
+            // whole batch after those barriers return.
+            for identity in &self.synced {
+                identity.validate_path()?;
+            }
+            Ok(())
         }
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(not(any(unix, windows)))]
         {
             Ok(())
         }
+    }
+
+    /// Flush the retained window. A full window flushes during admission, so
+    /// its own span keeps those barriers distinguishable from staging work.
+    #[cfg(any(unix, windows))]
+    fn sync_pending(&self) -> io::Result<()> {
+        let _window_span = tracing::trace_span!(
+            "private_fs.framed_log.sync_file_batch_window",
+            members = self.pending.len()
+        )
+        .entered();
+        let next = std::sync::atomic::AtomicUsize::new(0);
+        let syncer = || -> io::Result<()> {
+            while let Some(member) = self.pending.get(next.fetch_add(1, Ordering::Relaxed)) {
+                member.sync()?;
+                #[cfg(all(test, unix, feature = "test-helpers"))]
+                sync_latency::after_batch_member_sync(&member.identity.path);
+            }
+            Ok(())
+        };
+        let syncers = self.pending.len().min(DURABLE_BATCH_CONCURRENT_SYNCS);
+        std::thread::scope(|scope| {
+            let helpers = (1..syncers)
+                .map(|_| scope.spawn(syncer))
+                .collect::<Vec<_>>();
+            let mut outcome = syncer();
+            for helper in helpers {
+                let helped = match helper.join() {
+                    Ok(helped) => helped,
+                    Err(panic) => std::panic::resume_unwind(panic),
+                };
+                outcome = outcome.and(helped);
+            }
+            outcome
+        })?;
+        // An early member may change after its own barrier and validation
+        // while another worker is still syncing. Authenticate the whole
+        // window after every worker finishes, before success or handle release.
+        for member in &self.pending {
+            let identity = &member.identity;
+            identity.validate_file(&member.file)?;
+            identity.validate_path()?;
+        }
+        Ok(())
     }
 }
 
 /// Barriers one batch keeps in flight together: enough for the filesystem to
 /// fold them into a shared log commit, bounded so a large seal does not
-/// spawn a thread per segment.
-#[cfg(target_os = "linux")]
+/// spawn a thread or retain a descriptor per segment.
+#[cfg(any(unix, windows))]
 const DURABLE_BATCH_CONCURRENT_SYNCS: usize = 32;
 
 /// Flush an already-written file's contents so its bytes are durable.
@@ -234,7 +440,7 @@ pub fn tighten_existing_file(path: &Path) -> io::Result<()> {
 /// A symlink at the final component is reported as `InvalidInput`, the same
 /// kind [`validate_regular_or_missing`] uses for a non-regular path, so the
 /// callers that map `InvalidInput` to their unsafe-path outcome keep doing so.
-fn open_no_follow(path: &Path) -> io::Result<File> {
+pub fn open_no_follow(path: &Path) -> io::Result<File> {
     let mut options = OpenOptions::new();
     options.read(true);
     #[cfg(unix)]
@@ -380,6 +586,8 @@ fn remove_owned_temp(path: &Path) {
 pub mod sync_latency {
     use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicU64, Ordering};
+    #[cfg(all(test, unix))]
+    use std::sync::mpsc;
     use std::sync::{Arc, Condvar, Mutex, PoisonError};
     use std::time::Duration;
 
@@ -389,12 +597,52 @@ pub mod sync_latency {
         delay: Duration,
         syncs: Arc<AtomicU64>,
         held: Option<Arc<HeldSyncState>>,
+        #[cfg(all(test, unix))]
+        pause: Option<Arc<SyncPauseSignal>>,
     }
 
     #[derive(Default)]
     struct HeldSyncState {
         released: Mutex<bool>,
         changed: Condvar,
+    }
+
+    // A fixture can synchronize exactly at a real fsync, without wall-time
+    // races, mock barriers, or changes to production file I/O.
+    #[cfg(all(test, unix))]
+    struct SyncPauseSignal {
+        entered: mpsc::Sender<()>,
+        resume: Mutex<mpsc::Receiver<()>>,
+        after_member: bool,
+    }
+
+    #[cfg(all(test, unix))]
+    impl SyncPauseSignal {
+        fn wait(&self) {
+            let _ = self.entered.send(());
+            let _ = self
+                .resume
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .recv();
+        }
+    }
+
+    #[cfg(all(test, unix))]
+    pub(super) struct SyncPause {
+        entered: mpsc::Receiver<()>,
+        resume: mpsc::Sender<()>,
+    }
+
+    #[cfg(all(test, unix))]
+    impl SyncPause {
+        pub(super) fn wait_for_sync(&self, timeout: Duration) -> bool {
+            self.entered.recv_timeout(timeout).is_ok()
+        }
+
+        pub(super) fn resume(self) {
+            let _ = self.resume.send(());
+        }
     }
 
     static INJECTIONS: Mutex<Vec<Injection>> = Mutex::new(Vec::new());
@@ -471,6 +719,9 @@ pub mod sync_latency {
     #[must_use]
     pub fn hold(root: &Path) -> HeldSyncBarriers {
         let state = Arc::new(HeldSyncState::default());
+        #[cfg(all(test, unix))]
+        let registration = register(root, Duration::ZERO, Some(Arc::clone(&state)), None);
+        #[cfg(not(all(test, unix)))]
         let registration = register(root, Duration::ZERO, Some(Arc::clone(&state)));
         HeldSyncBarriers {
             registration,
@@ -478,16 +729,11 @@ pub mod sync_latency {
         }
     }
 
-    /// Delay every fsync of `root` or a path below it by `delay`.
-    #[must_use]
-    pub fn inject(root: &Path, delay: Duration) -> SyncLatencyGuard {
-        register(root, delay, None)
-    }
-
     fn register(
         root: &Path,
         delay: Duration,
         held: Option<Arc<HeldSyncState>>,
+        #[cfg(all(test, unix))] pause: Option<Arc<SyncPauseSignal>>,
     ) -> SyncLatencyGuard {
         let id = NEXT_ID.fetch_add(1, Ordering::SeqCst);
         let syncs = Arc::new(AtomicU64::new(0));
@@ -500,8 +746,78 @@ pub mod sync_latency {
                 delay,
                 syncs: Arc::clone(&syncs),
                 held,
+                #[cfg(all(test, unix))]
+                pause,
             });
         SyncLatencyGuard { id, syncs }
+    }
+
+    /// Delay every fsync of root or a path below it by delay.
+    #[must_use]
+    pub fn inject(root: &Path, delay: Duration) -> SyncLatencyGuard {
+        #[cfg(all(test, unix))]
+        {
+            register(root, delay, None, None)
+        }
+        #[cfg(not(all(test, unix)))]
+        {
+            register(root, delay, None)
+        }
+    }
+
+    /// Pause one actual barrier under a private fixture root until released.
+    #[cfg(all(test, unix))]
+    #[must_use]
+    pub(super) fn pause(root: &Path) -> (SyncLatencyGuard, SyncPause) {
+        pause_at(root, false)
+    }
+
+    /// Observe a completed member before the concurrent window joins.
+    #[cfg(all(test, unix))]
+    #[must_use]
+    pub(super) fn pause_after_batch_member(root: &Path) -> (SyncLatencyGuard, SyncPause) {
+        pause_at(root, true)
+    }
+
+    #[cfg(all(test, unix))]
+    fn pause_at(root: &Path, after_member: bool) -> (SyncLatencyGuard, SyncPause) {
+        let (entered_sender, entered_receiver) = mpsc::channel();
+        let (resume_sender, resume_receiver) = mpsc::channel();
+        let signal = SyncPauseSignal {
+            entered: entered_sender,
+            resume: Mutex::new(resume_receiver),
+            after_member,
+        };
+        let guard = register(root, Duration::ZERO, None, Some(Arc::new(signal)));
+        (
+            guard,
+            SyncPause {
+                entered: entered_receiver,
+                resume: resume_sender,
+            },
+        )
+    }
+
+    #[cfg(all(test, unix))]
+    pub(super) fn after_batch_member_sync(path: &Path) {
+        let pause = INJECTIONS
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .iter()
+            .find(|injection| path.starts_with(&injection.root))
+            .and_then(|injection| injection.pause.clone())
+            .filter(|pause| pause.after_member);
+        if let Some(pause) = pause {
+            pause.wait();
+        }
+    }
+
+    struct MatchedInjection {
+        delay: Duration,
+        syncs: Arc<AtomicU64>,
+        held: Option<Arc<HeldSyncState>>,
+        #[cfg(all(test, unix))]
+        pause: Option<Arc<SyncPauseSignal>>,
     }
 
     pub(super) fn before_sync(path: &Path) {
@@ -510,16 +826,16 @@ pub mod sync_latency {
             .unwrap_or_else(PoisonError::into_inner)
             .iter()
             .find(|injection| path.starts_with(&injection.root))
-            .map(|injection| {
-                (
-                    injection.delay,
-                    Arc::clone(&injection.syncs),
-                    injection.held.clone(),
-                )
+            .map(|injection| MatchedInjection {
+                delay: injection.delay,
+                syncs: Arc::clone(&injection.syncs),
+                held: injection.held.clone(),
+                #[cfg(all(test, unix))]
+                pause: injection.pause.clone(),
             });
-        if let Some((delay, syncs, held)) = matched {
-            syncs.fetch_add(1, Ordering::SeqCst);
-            if let Some(held) = held {
+        if let Some(matched) = matched {
+            matched.syncs.fetch_add(1, Ordering::SeqCst);
+            if let Some(held) = matched.held {
                 let released = held.released.lock().unwrap_or_else(PoisonError::into_inner);
                 held.changed.notify_all();
                 let _released = held
@@ -527,7 +843,11 @@ pub mod sync_latency {
                     .wait_while(released, |released| !*released)
                     .unwrap_or_else(PoisonError::into_inner);
             }
-            std::thread::sleep(delay);
+            #[cfg(all(test, unix))]
+            if let Some(pause) = matched.pause.filter(|pause| !pause.after_member) {
+                pause.wait();
+            }
+            std::thread::sleep(matched.delay);
         }
     }
 }
@@ -841,12 +1161,144 @@ pub fn truncate_file(path: &Path, len: u64) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use std::fs;
+    #[cfg(any(unix, windows))]
+    use std::fs::File;
+    #[cfg(any(unix, windows))]
+    use std::io::{ErrorKind, Write};
+    #[cfg(unix)]
+    use std::os::unix::fs::MetadataExt;
     use std::path::Path;
 
     use super::{
         DIRECTORY_SYNC_CALLS, DirectorySyncPolicy, append_durable, atomic_write_accelerator,
         atomic_write_prepared, rename_noreplace, replace_via_rename,
     };
+
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn staged_durability_refuses_replaced_writer_path_before_barrier() {
+        let root = tempfile::tempdir().expect("isolated staging root");
+        let path = root.path().join("staged.tmp");
+        let mut writer = File::create(&path).expect("original staged writer");
+        writer
+            .write_all(b"exact sealed bytes")
+            .expect("original bytes");
+        let original = writer.metadata().expect("authenticated writer inode");
+
+        let replacement = root.path().join("replacement.tmp");
+        fs::write(&replacement, b"exact sealed bytes").expect("same-byte replacement");
+        fs::rename(&replacement, &path).expect("substitute the named inode");
+        #[cfg(unix)]
+        let named = fs::metadata(&path).expect("replacement metadata");
+        #[cfg(unix)]
+        assert_ne!(
+            (original.dev(), original.ino()),
+            (named.dev(), named.ino()),
+            "the replacement must be a different inode with identical bytes"
+        );
+        #[cfg(windows)]
+        {
+            let replacement = File::open(&path).expect("open replacement identity");
+            let original = crate::windows_file::information(&writer).expect("original file index");
+            let current =
+                crate::windows_file::information(&replacement).expect("replacement file index");
+            assert_ne!(
+                (original.volume_serial_number, original.file_index),
+                (current.volume_serial_number, current.file_index),
+                "the replacement must be a different file index with identical bytes"
+            );
+        }
+
+        let mut batch = super::DurableFileBatch::new();
+        let error = batch
+            .written_with_identity(&path, &writer, &original)
+            .expect_err("the original writer must not authorize a foreign pathname");
+        assert_eq!(error.kind(), ErrorKind::InvalidData);
+        assert_eq!(
+            fs::read(&path).expect("substitute bytes remain"),
+            b"exact sealed bytes"
+        );
+    }
+
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn staged_durability_refuses_replacement_after_successful_admission() {
+        let root = tempfile::tempdir().expect("isolated staging root");
+        let path = root.path().join("staged.tmp");
+        let mut writer = File::create(&path).expect("original staged writer");
+        writer
+            .write_all(b"exact sealed bytes")
+            .expect("original bytes");
+        let original = writer.metadata().expect("authenticated original inode");
+        let mut batch = super::DurableFileBatch::new();
+        batch
+            .written_with_identity(&path, &writer, &original)
+            .expect("authenticate and retain original member");
+        #[cfg(windows)]
+        let original_file_index =
+            crate::windows_file::information(&writer).expect("original file index");
+        drop(writer);
+        batch
+            .sync()
+            .expect("unchanged identity is still publishable");
+
+        let replacement = root.path().join("replacement.tmp");
+        fs::write(&replacement, b"exact sealed bytes").expect("same-byte replacement");
+        fs::rename(&replacement, &path).expect("atomic inode substitution");
+        #[cfg(unix)]
+        let named = fs::metadata(&path).expect("replacement metadata");
+        #[cfg(unix)]
+        assert_ne!(
+            (original.dev(), original.ino()),
+            (named.dev(), named.ino()),
+            "the replacement must name a different real inode"
+        );
+        #[cfg(windows)]
+        {
+            let replacement = File::open(&path).expect("open replacement identity");
+            let current =
+                crate::windows_file::information(&replacement).expect("replacement file index");
+            assert_ne!(
+                (
+                    original_file_index.volume_serial_number,
+                    original_file_index.file_index
+                ),
+                (current.volume_serial_number, current.file_index),
+                "the replacement must name a different real file index"
+            );
+        }
+
+        assert_eq!(
+            batch
+                .sync()
+                .expect_err("final sync must refuse a replacement after admission")
+                .kind(),
+            ErrorKind::InvalidData
+        );
+        assert_eq!(
+            fs::read(&path).expect("replacement bytes preserved"),
+            b"exact sealed bytes"
+        );
+
+        // Reauthentication starts a new batch, never silently mutates the
+        // already-admitted batch's authority.
+        let current = File::options()
+            .read(true)
+            .write(true)
+            .open(&path)
+            .expect("current named writer");
+        let mut fresh = super::DurableFileBatch::new();
+        fresh
+            .written(&path, &current)
+            .expect("authenticate the replacement");
+        fresh
+            .sync()
+            .expect("new batch publishes the exact replacement");
+        assert_eq!(
+            fs::read(&path).expect("freshly durable bytes"),
+            b"exact sealed bytes"
+        );
+    }
 
     #[test]
     fn rebuildable_accelerators_publish_without_directory_sync() {

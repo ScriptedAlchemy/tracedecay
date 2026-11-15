@@ -116,13 +116,16 @@ pub fn build_layered_code_graph_rows(
             files: child_files,
         }));
     }
-    admit(layered_page_graph_build_bound(
-        plan.changed
-            .iter()
-            .map(|page| (page.child.as_ref(), page.base.as_ref())),
-        base.pages(),
-        projection_identity.namespace.as_str().len(),
-    ))?;
+    admit(
+        layered_page_graph_build_bound(
+            plan.changed
+                .iter()
+                .map(|page| (page.child.as_ref(), page.base.as_ref())),
+            base.pages(),
+            projection_identity.namespace.as_str().len(),
+        )
+        .with_retained_source_bytes(source.retained_pack_bytes()),
+    )?;
     let report = {
         let _span = tracing::trace_span!("code_index.graph.build_layered_rows.emit").entered();
         emit_page_delta(

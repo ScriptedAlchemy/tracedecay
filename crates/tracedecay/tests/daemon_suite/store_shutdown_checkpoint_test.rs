@@ -176,17 +176,18 @@ async fn stop_during_project_open_truncates_project_store_wals() {
     stop_daemon_gracefully(&mut daemon);
     settle_interrupted_init(init, &socket);
 
+    let log = fs::read_to_string(&log_path).expect("daemon log");
     let (graph_db, sessions_db) = project_stores(environment.home(), &project);
     for store in [&graph_db, &sessions_db] {
         assert!(store.is_file(), "{} was mounted", store.display());
         assert_eq!(
             wal_bytes(store),
             0,
-            "a stop during project open keeps no WAL for {}",
+            "a stop during project open keeps no WAL for {}; log={log}",
             store.display()
         );
     }
-    assert_clean_shutdown_log(&fs::read_to_string(&log_path).expect("daemon log"));
+    assert_clean_shutdown_log(&log);
 }
 
 /// The open is parked after its independent owners registered, so the Hook V2
@@ -257,7 +258,7 @@ async fn stop_after_independent_owners_releases_every_project_store() {
         assert_eq!(
             wal_bytes(store),
             0,
-            "a stop after owner registration keeps no WAL for {}",
+            "a stop after owner registration keeps no WAL for {}; log={log}",
             store.display()
         );
     }

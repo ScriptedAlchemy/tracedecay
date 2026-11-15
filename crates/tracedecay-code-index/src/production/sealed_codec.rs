@@ -56,7 +56,9 @@ use super::*;
 /// required clone-body source rows, so the rebuild keeps them from reading as
 /// successful empty clone evidence. Revision 23 requires the TypeScript
 /// receiver facts used by both full and sparse generation resolution.
-pub const SEALED_GENERATION_FORMAT_REVISION_V1: u32 = 23;
+/// Revision 24 stores all logical payloads in the two self-contained pack
+/// roles authenticated by the manifest's extent map.
+pub const SEALED_GENERATION_FORMAT_REVISION_V1: u32 = 24;
 
 /// The typed refusal for a sealed generation this build no longer reads.
 pub fn superseded_sealed_generation_revision(revision: u32) -> CodeIndexProductionErrorV1 {

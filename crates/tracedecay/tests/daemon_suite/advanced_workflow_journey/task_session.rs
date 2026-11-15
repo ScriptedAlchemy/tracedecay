@@ -1,7 +1,7 @@
 //! Typed SDK proof for provider-qualified Work-to-TaskSession availability.
 
 use std::collections::BTreeSet;
-use std::io::{Read, Write};
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::Path;
 use std::process::{Child, Stdio};
 use std::time::{Duration, Instant};
@@ -424,19 +424,30 @@ fn read_active_code_generation(
             };
             let digest_hex =
                 sha256_hex_suffix(digest.as_str()).expect("sealed segment digest is sha256");
-            let segment = std::fs::read(segments_root.join(format!("segment-{digest_hex}.json")))
-                .expect("sealed generation segment");
+            let mut segment =
+                std::fs::File::open(segments_root.join(format!("segment-{digest_hex}.json")))
+                    .expect("sealed generation payload pack");
             assert_eq!(
-                segment.len() as u64,
+                segment.metadata().expect("payload pack metadata").len(),
                 size_bytes,
                 "segment size matches manifest"
             );
-            let start = usize::try_from(offset).expect("segment offset");
-            let end = start + usize::try_from(length).expect("segment length");
+            let end = offset.checked_add(length).expect("segment range");
+            assert!(
+                end <= size_bytes,
+                "segment range stays within its payload pack"
+            );
+            let length = usize::try_from(length).expect("segment length");
             buffer.clear();
-            buffer.extend_from_slice(&segment[start..end]);
+            buffer.resize(length, 0);
+            segment
+                .seek(SeekFrom::Start(offset))
+                .expect("seek payload range");
+            segment.read_exact(buffer).expect("read payload range");
             Ok(())
         },
+        // This process decodes daemon output as an oracle; daemon admission runs in the child.
+        &mut |_| Ok(()),
     )
     .ok()
 }
