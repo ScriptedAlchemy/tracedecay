@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.0-beta.105](https://github.com/ScriptedAlchemy/tracedecay/compare/v1.0.0-beta.104...v1.0.0-beta.105) (2026-11-15)
+
+
+### Performance Improvements
+
+* **code-index:** reuse staged read and durability handles ([3372add](https://github.com/ScriptedAlchemy/tracedecay/commit/3372add1c025242d4e1c0cbe0dbe2e24b8047e0a))
+* **sessions:** bound flat Codex directory entry traversal ([0405564](https://github.com/ScriptedAlchemy/tracedecay/commit/04055647b0cabd93e76ca7c738f06979ed254716))
+
 ## [1.0.0-beta.104](https://github.com/ScriptedAlchemy/tracedecay/compare/v1.0.0-beta.103...v1.0.0-beta.104) (2026-11-14)
 
 
