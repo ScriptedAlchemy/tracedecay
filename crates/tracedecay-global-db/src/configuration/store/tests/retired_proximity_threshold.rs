@@ -1,46 +1,38 @@
-//! A released configuration key set that still holds
-//! `feedback.proximity.risk_threshold`. Registry removal is a fail-closed
-//! cutover, not a data migration: the store surfaces typed `ResetRequired`
-//! and refuses the retired setter.
-
-use super::{control_authority_with_key_for_layer, global_setup};
+use super::{control_authority_with_key_for_layer, global_setup, point_revision_at_snapshot};
 use crate::configuration::contracts::DirectConfigurationMutation;
 use crate::configuration::contracts::ports::ConfigurationControlStore;
 use crate::configuration::store::GlobalDbConfigurationControlStore;
 use crate::tests::harness::HostAdmissionScope;
 use tracedecay_domain::configuration::{
     ConfigurationIdempotencyKey, ConfigurationLayerIdV1, ConfigurationMutationOperationV1,
-    ConfigurationValueV1, SettingKey,
+    ConfigurationSnapshotV1, ConfigurationValueV1, SettingKey,
 };
 use tracedecay_domain::feedback::PROXIMITY_RELATIONSHIP_HINTS_SETTING_KEY_V1;
 use tracedecay_domain::{ProjectId, UtcMicros};
 
-/// Configuration rows for the released registry key set that still holds the
-/// retired threshold; see the fixture header for its capture.
-const RETIRED_THRESHOLD_STORE_FIXTURE: &str =
-    include_str!("fixtures/configuration-registry-proximity-threshold.sql");
+const REGISTRY_REVISION_9_STORE_FIXTURE: &str =
+    include_str!("fixtures/configuration-registry-revision9.sql");
 
 const RETIRED_PROXIMITY_THRESHOLD_SETTING_KEY: &str = "feedback.proximity.risk_threshold";
 
 const PROJECT_ID: &str = "project.configuration-store.fixture";
 
-/// The five populated configuration tables the released key set replaces.
 const REPLACED_TABLES: &str = "'configuration_format', 'configuration_revisions', \
      'configuration_entries', 'configuration_topology_policies', \
      'configuration_topology_protected_refs'";
 
-async fn immutability_triggers(
+async fn replaced_table_triggers(
     transaction: &crate::registered::RegisteredGlobalDbWriteTransaction<'_>,
-) -> Result<Vec<String>, tracedecay_runtime_core::db::engine::Error> {
+) -> Result<Vec<(String, String)>, tracedecay_runtime_core::db::engine::Error> {
     let sql = format!(
-        "SELECT sql FROM sqlite_master
+        "SELECT name, sql FROM sqlite_master
          WHERE type = 'trigger' AND tbl_name IN ({REPLACED_TABLES})
          ORDER BY name"
     );
     let mut rows = transaction.query(&sql, ()).await?;
     let mut triggers = Vec::new();
     while let Some(row) = rows.next().await? {
-        triggers.push(row.get::<String>(0)?);
+        triggers.push((row.get::<String>(0)?, row.get::<String>(1)?));
     }
     Ok(triggers)
 }
@@ -62,38 +54,30 @@ async fn trigger_names(
     Ok(names)
 }
 
-/// Replaces the rows of the five populated configuration tables with the
-/// released key set. The delete requires the table's own immutability
-/// triggers to step aside, so they are re-created from their production
-/// definitions before this returns.
 async fn seed_released_registry_key_set(
     transaction: &crate::registered::RegisteredGlobalDbWriteTransaction<'_>,
 ) -> Result<(), tracedecay_runtime_core::db::engine::Error> {
-    let triggers = immutability_triggers(transaction).await?;
+    let triggers = replaced_table_triggers(transaction).await?;
+    let mut replace_rows = String::new();
+    for (name, _) in &triggers {
+        replace_rows.push_str(&format!(
+            "DROP TRIGGER \"{}\";\n",
+            name.replace('"', "\"\"")
+        ));
+    }
+    replace_rows.push_str(
+        "DELETE FROM configuration_topology_protected_refs;
+         DELETE FROM configuration_entries;
+         DELETE FROM configuration_topology_policies;
+         DELETE FROM configuration_revisions;
+         DELETE FROM configuration_format;",
+    );
+    transaction.execute_batch(&replace_rows).await?;
     transaction
-        .execute_batch(
-            "DROP TRIGGER IF EXISTS configuration_format_immutable_update;
-             DROP TRIGGER IF EXISTS configuration_format_immutable_delete;
-             DROP TRIGGER IF EXISTS configuration_revisions_immutable_update;
-             DROP TRIGGER IF EXISTS configuration_revisions_immutable_delete;
-             DROP TRIGGER IF EXISTS configuration_entries_immutable_update;
-             DROP TRIGGER IF EXISTS configuration_entries_immutable_delete;
-             DROP TRIGGER IF EXISTS configuration_topology_policy_immutable_update;
-             DROP TRIGGER IF EXISTS configuration_topology_policy_immutable_delete;
-             DROP TRIGGER IF EXISTS configuration_topology_protected_refs_immutable_update;
-             DROP TRIGGER IF EXISTS configuration_topology_protected_refs_immutable_delete;
-             DELETE FROM configuration_topology_protected_refs;
-             DELETE FROM configuration_entries;
-             DELETE FROM configuration_topology_policies;
-             DELETE FROM configuration_revisions;
-             DELETE FROM configuration_format;",
-        )
+        .execute_batch(REGISTRY_REVISION_9_STORE_FIXTURE)
         .await?;
-    transaction
-        .execute_batch(RETIRED_THRESHOLD_STORE_FIXTURE)
-        .await?;
-    for trigger in triggers {
-        transaction.execute_batch(&trigger).await?;
+    for (_, definition) in triggers {
+        transaction.execute_batch(&definition).await?;
     }
     Ok(())
 }
@@ -199,28 +183,103 @@ async fn snapshot_holding_the_retired_proximity_threshold_is_reset_required() {
 }
 
 #[tokio::test]
-async fn canonical_snapshot_with_the_relationship_hint_key_converges() {
+async fn snapshot_holding_both_proximity_keys_is_reset_required() {
     let (_directory, runtime, root) = global_setup().await;
-    let key = SettingKey::new(PROXIMITY_RELATIONSHIP_HINTS_SETTING_KEY_V1).unwrap();
+    let current_key = SettingKey::new(PROXIMITY_RELATIONSHIP_HINTS_SETTING_KEY_V1).unwrap();
+    let retired_key = SettingKey::new(RETIRED_PROXIMITY_THRESHOLD_SETTING_KEY).unwrap();
     assert_eq!(
-        root.snapshot.effective_values.get(&key),
+        root.snapshot.effective_values.get(&current_key),
         Some(&ConfigurationValueV1::Boolean(true))
     );
-    let retired = SettingKey::new(RETIRED_PROXIMITY_THRESHOLD_SETTING_KEY).unwrap();
-    assert!(!root.snapshot.effective_values.contains_key(&retired));
+    assert!(!root.snapshot.effective_values.contains_key(&retired_key));
+
+    let mut effective_values = root.snapshot.effective_values.clone();
+    effective_values.insert(retired_key.clone(), ConfigurationValueV1::Unsigned(7_000));
+    let mut provenance = root.snapshot.provenance.clone();
+    provenance.insert(
+        retired_key.clone(),
+        root.snapshot.provenance[&current_key].clone(),
+    );
+    let legacy_snapshot = ConfigurationSnapshotV1::new(effective_values, provenance).unwrap();
+
     let db = runtime
         .registered_database(HostAdmissionScope::Project)
         .expect("registered project database");
+    let transaction = db.begin_write_transaction().await.unwrap();
+    transaction
+        .execute_batch("DROP TRIGGER configuration_revisions_immutable_update;")
+        .await
+        .unwrap();
+    transaction
+        .execute(
+            "INSERT INTO configuration_entries (
+                revision_id, key, layer_kind, layer_id, schema_revision, typed_value
+             ) VALUES (?1, ?2, 'default', '', 1, ?3)",
+            tracedecay_runtime_core::db::engine::params![
+                root.revision_id.as_str(),
+                retired_key.as_str(),
+                serde_json::json!({
+                    "schema_version": 1,
+                    "value": ConfigurationValueV1::Unsigned(7_000),
+                    "provenance": legacy_snapshot.provenance[&retired_key],
+                })
+                .to_string(),
+            ],
+        )
+        .await
+        .unwrap();
+    point_revision_at_snapshot(&transaction, &root.revision_id, &legacy_snapshot).await;
+    transaction.commit().await.unwrap();
     let store = GlobalDbConfigurationControlStore::new_registered(db);
 
-    let converged = store
+    let error = store
         .converge_registered_registry_shape(&root.revision_id, UtcMicros(2))
         .await
-        .expect("the registered relationship-hint key is an additive registered default");
+        .expect_err(
+            "a snapshot holding both proximity keys must return configuration ResetRequired",
+        );
+    assert!(
+        matches!(
+            error,
+            crate::configuration::contracts::ConfigurationError::ResetRequired { .. }
+        ),
+        "the legacy numeric entry must surface the typed reset state: {error:?}"
+    );
 
-    assert_eq!(converged.revision_id, root.revision_id);
+    let read = db.read_snapshot().await.unwrap();
+    let mut rows = read
+        .query(
+            "SELECT COUNT(*) FROM configuration_entries WHERE key = ?1",
+            tracedecay_runtime_core::db::engine::params![RETIRED_PROXIMITY_THRESHOLD_SETTING_KEY],
+        )
+        .await
+        .unwrap();
     assert_eq!(
-        converged.snapshot.effective_values.get(&key),
-        Some(&ConfigurationValueV1::Boolean(true))
+        rows.next().await.unwrap().unwrap().get::<i64>(0).unwrap(),
+        1,
+        "the refused convergence must leave the legacy numeric entry untouched"
+    );
+    let mut rows = read
+        .query(
+            "SELECT COUNT(*) FROM configuration_entries WHERE key = ?1",
+            tracedecay_runtime_core::db::engine::params![
+                PROXIMITY_RELATIONSHIP_HINTS_SETTING_KEY_V1
+            ],
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        rows.next().await.unwrap().unwrap().get::<i64>(0).unwrap(),
+        1,
+        "the refused convergence must leave the relationship-hint entry untouched"
+    );
+    let mut rows = read
+        .query("SELECT COUNT(*) FROM configuration_revisions", ())
+        .await
+        .unwrap();
+    assert_eq!(
+        rows.next().await.unwrap().unwrap().get::<i64>(0).unwrap(),
+        1,
+        "the refused convergence must not write a revision"
     );
 }

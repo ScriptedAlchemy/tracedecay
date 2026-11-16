@@ -472,9 +472,9 @@ where
     A: CanonicalProximityEvidenceAuthorityV1 + Sync,
     C: ConfigurationControlStore,
 {
-    /// Aggregate advisory runtime entry. The current policy is accepted only
-    /// when its behavior digest is the exact configuration identity already
-    /// authorized by the enclosing request.
+    /// The current policy is accepted only when its behavior digest is the
+    /// exact configuration identity already authorized by the enclosing
+    /// request.
     pub async fn evaluate_for_configuration_digest(
         &self,
         context: &RequestContext,

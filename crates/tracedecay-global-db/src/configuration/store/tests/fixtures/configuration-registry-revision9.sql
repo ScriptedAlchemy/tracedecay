@@ -1,9 +1,3 @@
--- Configuration rows for the released registry key set that still holds
--- `feedback.proximity.risk_threshold`, captured at tip
--- f8878bf7e8f17287e6e00929cf5c61da90e42632 before the key was retired. The
--- five populated configuration tables are reproduced row for row; table DDL,
--- the remaining member tables, and the immutability triggers come from the
--- registered store these rows are seeded into.
 INSERT INTO "configuration_format" VALUES(1,1);
 INSERT INTO "configuration_revisions" VALUES('configuration.revision.root',NULL,'tracedecay.configuration.snapshot.v1.e4e16ae48fa864f997a4151ca35d66319b796f53f25d1c6a9e32657c467cab35','sha256:5d59396db8b24fb8b0ad0309dc8df48e0ad104917006792066f95297cdb9cf31','sha256:f6234e098ad2b851ddb6727f1c2a74648ea974c31bdebe21ecb5c6b0a2a3d272','actor.configuration.fixture','canonical_initialization',1);
 INSERT INTO "configuration_entries" VALUES('configuration.revision.root','analyzer.settings.v1','default','',1,'{"schema_version":1,"value":{"kind":"analyzer_settings","value":{"schema_version":1,"selections":[]}},"provenance":[{"layer":{"kind":"default"},"revision_id":"configuration.registry.default.v1","disposition":"defaulted","safe_reason":"registry_default"}]}');

@@ -332,8 +332,6 @@ async fn configuration_batch_applies_both_settings_and_refuses_the_other_inputs(
         observed_payload["outcome"]["value"]["payload"],
         json!([{
             "component": "configuration.runtime-cache",
-            // `sync.read_cooldown_secs.v1` declares a daemon restart, so the
-            // runtime cache reports the committed revision as still pending.
             "desired_revision_id": committed_revision,
             "observed_revision_id": "configuration.initial.canonical.v1",
             "last_working_revision_id": "configuration.initial.canonical.v1",
