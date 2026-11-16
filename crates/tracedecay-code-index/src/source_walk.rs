@@ -911,7 +911,10 @@ mod tests {
             .with_submodules(true);
         let walked = walked_files(&parent, &policy);
         assert!(walked.contains(&PathBuf::from("parent.rs")), "{walked:?}");
-        assert!(walked.contains(&PathBuf::from("app/first.rs")), "{walked:?}");
+        assert!(
+            walked.contains(&PathBuf::from("app/first.rs")),
+            "{walked:?}"
+        );
         assert!(
             !walked.iter().any(|path| path.starts_with("linked")),
             "a linked worktree is not a registered submodule: {walked:?}"

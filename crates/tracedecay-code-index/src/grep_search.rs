@@ -600,7 +600,10 @@ mod tests {
             disabled.hits
         );
         assert!(
-            disabled.hits.iter().all(|hit| !hit.file.starts_with("app/")),
+            disabled
+                .hits
+                .iter()
+                .all(|hit| !hit.file.starts_with("app/")),
             "{:?}",
             disabled.hits
         );
