@@ -260,10 +260,9 @@ impl ExplorerStream {
                         "dashboard request was cancelled",
                     ),
                 };
-                self.frames
-                    .push_back(ExplorerQueryEventV1::Source {
-                        source: Box::new(source),
-                    });
+                self.frames.push_back(ExplorerQueryEventV1::Source {
+                    source: Box::new(source),
+                });
             }
         }
         self.frames.push_back(ExplorerQueryEventV1::Final {
