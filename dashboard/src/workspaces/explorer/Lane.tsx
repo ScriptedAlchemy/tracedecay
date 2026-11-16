@@ -245,9 +245,9 @@ function LaneBody({
     switch (read.state) {
       case 'pending':
         return {
-          title: read.phase === 'queued' ? 'Queued' : 'Reading',
+          title: 'Reading',
           body: searching
-            ? `${spec.label} is ${read.phase ?? 'reading'}; nothing is shown until it answers.`
+            ? `${spec.label} has not answered yet; nothing is shown until it does.`
             : `Loading ${spec.browseLabel}.`,
         };
       case 'ready':

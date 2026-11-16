@@ -5,7 +5,7 @@ use crate::common::{
     canonicalize_test_dir, create_runtime, get_json, http_agent, isolated_profile_under_home,
     tempdir_or_panic, wait_for_dashboard,
 };
-use crate::dashboard_api_support::{post_json_body, rg_word_paths, write_file};
+use crate::dashboard_api_support::{post_explorer_stream, rg_word_paths, write_file};
 use crate::runtime::DashboardTestRuntimeV1;
 use serde_json::Value;
 use tempfile::TempDir;
@@ -1382,38 +1382,17 @@ fn graph_reads_answer_a_generation_larger_than_a_whole_census_page() {
             "the seeded slice reaches the seed's callee: {seeded}"
         );
 
-        let (status, accepted) = post_json_body(
+        let (status, frames) = post_explorer_stream(
             &agent,
             &format!("{}/api/explorer/queries", fixture.base_url),
             &serde_json::json!({"query": "bulk_symbol", "limit": 25, "offset": 0}),
         );
-        assert_eq!(status, 202, "{accepted}");
-        let run_id = accepted["payload"]["run_id"]
-            .as_str()
-            .unwrap_or_else(|| panic!("accepted query needs a run id: {accepted}"))
-            .to_owned();
-        let code_lane = (0..500)
-            .find_map(|_| {
-                let (status, body) = get_json(
-                    &agent,
-                    &format!("{}/api/explorer/queries/{run_id}", fixture.base_url),
-                );
-                assert_eq!(status, 200, "{body}");
-                let lane = body["payload"]["sources"]
-                    .as_array()
-                    .and_then(|sources| {
-                        sources
-                            .iter()
-                            .find(|source| source["source_id"] == "code_graph")
-                    })
-                    .filter(|source| source["phase"] == "completed")
-                    .cloned();
-                if lane.is_none() {
-                    std::thread::sleep(std::time::Duration::from_millis(10));
-                }
-                lane
-            })
-            .unwrap_or_else(|| panic!("explorer code lane never completed"));
+        assert_eq!(status, 200, "{frames:?}");
+        let code_lane = frames
+            .iter()
+            .filter_map(|frame| frame.get("source"))
+            .find(|source| source["source_id"] == "code_graph")
+            .unwrap_or_else(|| panic!("explorer code lane never completed: {frames:?}"));
         assert_eq!(code_lane["outcome"], "ready", "{code_lane}");
         assert_eq!(
             code_lane["page"]["rows"].as_array().map(Vec::len),

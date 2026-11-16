@@ -261,6 +261,59 @@ fn project_scoped_plugin_routes_read_selected_project_store() {
             }),
             "graph fact identities must remain canonical strings: {selected_payload}"
         );
+
+        let query = serde_json::json!({"query": "selector", "limit": 10, "offset": 0});
+        let (selected_status, selected_frames) = post_explorer_stream(
+            &agent,
+            &format!(
+                "{}/api/projects/{target_project_id}/explorer/queries",
+                fixture.base_url
+            ),
+            &query,
+        );
+        assert_eq!(selected_status, 200, "{selected_frames:?}");
+        let selected_knowledge = selected_frames
+            .iter()
+            .filter_map(|frame| frame.get("source"))
+            .find(|source| source["source_id"] == "knowledge")
+            .expect("selected project knowledge frame");
+        assert!(
+            selected_knowledge["page"]["rows"].as_array().is_some_and(|rows| {
+                rows.iter().any(|row| row["fact_id"] == target_fact_id.as_str())
+            }),
+            "selected Explorer stream must use the selected store: {selected_frames:?}"
+        );
+
+        let (active_status, active_frames) = post_explorer_stream(
+            &agent,
+            &format!("{}/api/explorer/queries", fixture.base_url),
+            &query,
+        );
+        assert_eq!(active_status, 200);
+        let active_knowledge = active_frames
+            .iter()
+            .filter_map(|frame| frame.get("source"))
+            .find(|source| source["source_id"] == "knowledge")
+            .expect("active project knowledge frame");
+        assert!(
+            active_knowledge["page"]["rows"].as_array().is_some_and(|rows| {
+                rows.iter().all(|row| row["fact_id"] != target_fact_id.as_str())
+            }),
+            "active store must not alias selected knowledge: {active_frames:?}"
+        );
+
+        let foreign = crate::common::http_call_with_retry("foreign Explorer POST", || {
+            agent
+                .post(&format!(
+                    "{}/api/projects/dashboard_fixture_unregistered/explorer/queries",
+                    fixture.base_url
+                ))
+                .send_json(&query)
+        });
+        let (foreign_status, foreign_body) = crate::common::response_to_json(foreign);
+        assert_eq!(foreign_status, 404, "{foreign_body}");
+        assert_eq!(foreign_body["status"], "not_found");
+        assert!(!foreign_body.to_string().contains(&target_fact_id.to_string()));
     });
 }
 

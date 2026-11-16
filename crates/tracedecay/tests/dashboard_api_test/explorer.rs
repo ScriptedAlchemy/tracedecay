@@ -1,37 +1,7 @@
-use std::time::{Duration, Instant};
-
 use crate::dashboard_api_support::*;
 use serde_json::{Value, json};
 
 const EXPLORER_QUERY_ROUTE: &str = "/api/explorer/queries";
-
-/// A run reaches a terminal state by the deadline admission binds to its
-/// create request, so the poll waits for that contract instead of a guess.
-fn wait_for_query(agent: &ureq::Agent, base_url: &str, run_id: &str) -> Value {
-    let started = Instant::now();
-    let deadline_micros = u64::try_from(
-        tracedecay_dashboard_api::dashboard_http_request_deadline_micros(EXPLORER_QUERY_ROUTE),
-    )
-    .expect("dashboard admission deadlines are positive");
-    let limit = Duration::from_micros(deadline_micros) + Duration::from_secs(5);
-    loop {
-        let (status, body) = get_json(agent, &format!("{base_url}{EXPLORER_QUERY_ROUTE}/{run_id}"));
-        assert_eq!(status, 200, "query status should resolve: {body}");
-        if matches!(
-            body["payload"]["state"].as_str(),
-            Some("completed" | "partial" | "cancelled" | "timed_out" | "error")
-        ) {
-            return body;
-        }
-        let elapsed = started.elapsed();
-        if elapsed >= limit {
-            panic!(
-                "explorer query {run_id} did not reach a terminal state after {elapsed:?}; last response: {body:?}"
-            );
-        }
-        std::thread::sleep(Duration::from_millis(10));
-    }
-}
 
 #[test]
 fn explorer_query_coordinates_real_sources_without_inventing_a_merge() {
@@ -40,37 +10,21 @@ fn explorer_query_coordinates_real_sources_without_inventing_a_merge() {
         let fixture = start_dashboard_fixture(true).await;
         let agent = http_agent();
 
-        let (status, accepted) = post_json_body(
+        let (status, frames) = post_explorer_stream(
             &agent,
             &format!("{}{EXPLORER_QUERY_ROUTE}", fixture.base_url),
             &json!({"query": "cache", "limit": 25, "offset": 0}),
         );
-        assert_eq!(status, 202, "query should be admitted: {accepted}");
-        assert_eq!(accepted["schema_revision"], 1);
-        assert_eq!(accepted["domain_state"], "loading");
-        assert_eq!(accepted["payload"]["state"], "pending");
-        assert_eq!(
-            accepted["payload"]["required_source_ids"],
-            json!(["code_graph", "sessions", "knowledge"])
-        );
-        assert_eq!(
-            accepted["payload"]["ordering_policy"],
-            "source_local_no_cross_source_merge"
-        );
-        let run_id = accepted["payload"]["run_id"]
-            .as_str()
-            .unwrap_or_else(|| panic!("accepted query needs a run id: {accepted}"));
-
-        let completed = wait_for_query(&agent, &fixture.base_url, run_id);
+        assert_eq!(status, 200, "query should stream: {frames:?}");
+        assert_eq!(frames.len(), 4, "three sources and one terminal event");
+        assert!(frames[..3].iter().all(|frame| frame["kind"] == "source"));
+        let completed = &frames[3];
         // Every source answers, but the canonical temporal search carries no
         // denominator, so the run truthfully stays partial rather than
         // claiming complete coverage it cannot account for.
-        assert_eq!(completed["domain_state"], "partial", "{completed}");
-        assert_eq!(completed["payload"]["state"], "partial");
-        assert_eq!(completed["payload"]["finality"], "partial");
-        let sources = completed["payload"]["sources"]
-            .as_array()
-            .unwrap_or_else(|| panic!("query sources missing: {completed}"));
+        assert_eq!(completed["kind"], "final");
+        assert_eq!(completed["state"], "partial");
+        let sources: Vec<&Value> = frames[..3].iter().map(|frame| &frame["source"]).collect();
         assert_eq!(sources.len(), 3);
         for source_id in ["code_graph", "sessions", "knowledge"] {
             let source = sources
@@ -132,7 +86,7 @@ fn explorer_query_coordinates_real_sources_without_inventing_a_merge() {
             "knowledge page should contain the seeded cache fact: {knowledge}"
         );
         assert!(
-            completed["payload"].get("merged_results").is_none(),
+            completed.get("merged_results").is_none(),
             "the coordinator must not invent a cross-source merge"
         );
     });

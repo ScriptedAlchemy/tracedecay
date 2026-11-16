@@ -1,5 +1,6 @@
 import type { EvidenceQuality } from '../../ui/EvidencePattern.tsx';
-import type { ExplorerQueryRunV1, ExplorerSourceProgressV1 } from '../../contracts/generated.ts';
+import type { ExplorerSourceProgressV1 } from '../../contracts/generated.ts';
+import type { ExplorerStreamSnapshot } from './laneModel.ts';
 
 /**
  * Whether Explorer has earned the right to say a term is absent from the index.
@@ -48,7 +49,6 @@ function coverageBlocker(source: ExplorerSourceProgressV1): string | null {
       return `${label} answered from a stale store`;
     case 'timed_out':
       return `${label} timed out before answering`;
-    case 'pending':
     case 'unavailable':
     case 'error':
     case 'cancelled':
@@ -94,36 +94,35 @@ function coverageBlocker(source: ExplorerSourceProgressV1): string | null {
 }
 
 /**
- * The verdict for a whole coordinator run.
+ * The verdict for one submitted stream.
  *
- * Sources are checked before finality, because a source's own numbers are
- * evidence the surface can see, whereas finality is the coordinator's summary of
- * them, and when the two disagree the surface sides with the evidence.
+ * A terminal frame alone cannot confirm absence: each source must report
+ * complete coverage and an accounted denominator.
  */
-export function absenceVerdict(run: ExplorerQueryRunV1 | undefined): AbsenceVerdict {
+export function absenceVerdict(run: ExplorerStreamSnapshot | undefined): AbsenceVerdict {
   if (run === undefined) {
     return {
       confirmed: false,
       quality: 'unknown',
-      reason: 'no coordinator run has answered for this query',
+      reason: 'no stream has answered for this query',
     };
   }
-  if (run.sources.length === 0) {
+  if (run.sources.length !== 3) {
     return {
       confirmed: false,
       quality: 'unknown',
-      reason: 'the coordinator named no required sources',
+      reason: 'not all required sources have answered',
     };
   }
   for (const source of run.sources) {
     const blocker = coverageBlocker(source);
     if (blocker !== null) return { confirmed: false, quality: 'unknown', reason: blocker };
   }
-  if (run.finality !== 'complete') {
+  if (run.state !== 'completed') {
     return {
       confirmed: false,
       quality: 'unknown',
-      reason: 'the coordinator has not declared canonical finality',
+      reason: 'the stream has not completed with complete coverage',
     };
   }
   return { confirmed: true, quality: 'measured' };

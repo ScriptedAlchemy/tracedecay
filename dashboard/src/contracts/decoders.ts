@@ -314,9 +314,7 @@ import type {
   ExecutionTopologyMetricsV1,
   ExecutionTopologyViewV1,
   ExecutionWidthBucketV1,
-  ExplorerFinalityV1,
-  ExplorerQueryRequestV1,
-  ExplorerQueryRunV1,
+  ExplorerQueryEventV1,
   ExplorerReadContextV1,
   ExplorerResultPageV1,
   ExplorerRunStateV1,
@@ -4737,49 +4735,14 @@ export const ExecutionTopologyViewV1Schema: z.ZodType<ExecutionTopologyViewV1, u
 bucket counts leave the projection. */
 export const ExecutionWidthBucketV1Schema: z.ZodEnum<{ "from17_to32": "from17_to32"; "from33_to64": "from33_to64"; "from3_to4": "from3_to4"; "from5_to8": "from5_to8"; "from9_to16": "from9_to16"; "one": "one"; "over64": "over64"; "two": "two"; "zero": "zero" }> = z.enum(["from17_to32", "from33_to64", "from3_to4", "from5_to8", "from9_to16", "one", "over64", "two", "zero"]);
 
-export const ExplorerFinalityV1Schema: z.ZodEnum<{ "cancelled": "cancelled"; "complete": "complete"; "error": "error"; "partial": "partial"; "pending": "pending"; "timed_out": "timed_out" }> = z.enum(["cancelled", "complete", "error", "partial", "pending", "timed_out"]);
-
-export const ExplorerQueryRequestV1Schema: z.ZodObject<{
-  limit: z.ZodType<number, unknown>;
-  offset: z.ZodType<number, unknown>;
-  query: z.ZodType<string, unknown>;
-}, z.core.$strict> = z.object({
-  limit: z.number().int(),
-  offset: z.number().int(),
-  query: z.string(),
-}).strict();
-
-export const ExplorerQueryRunV1Schema: z.ZodObject<{
-  completed_at_micros: z.ZodType<number | null, unknown>;
-  elapsed_micros: z.ZodType<number, unknown>;
-  explanation: z.ZodType<string, unknown>;
-  finality: z.ZodType<ExplorerFinalityV1, unknown>;
-  merge_revision: z.ZodType<string, unknown>;
-  ordering_policy: z.ZodType<string, unknown>;
-  plan_revision: z.ZodType<string, unknown>;
-  request: z.ZodType<ExplorerQueryRequestV1, unknown>;
-  request_revision: z.ZodType<string, unknown>;
-  required_source_ids: z.ZodType<Array<ExplorerSourceIdV1>, unknown>;
-  run_id: z.ZodType<string, unknown>;
-  sources: z.ZodType<Array<ExplorerSourceProgressV1>, unknown>;
-  state: z.ZodType<ExplorerRunStateV1, unknown>;
-  submitted_at_micros: z.ZodType<number, unknown>;
-}> = z.object({
-  completed_at_micros: z.number().int().nullable(),
+export const ExplorerQueryEventV1Schema: z.ZodType<ExplorerQueryEventV1, unknown> = z.discriminatedUnion("kind", [z.object({
   elapsed_micros: z.number().int(),
-  explanation: z.string(),
-  finality: z.lazy(() => ExplorerFinalityV1Schema),
-  merge_revision: z.string(),
-  ordering_policy: z.string(),
-  plan_revision: z.string(),
-  request: z.lazy(() => ExplorerQueryRequestV1Schema),
-  request_revision: z.string(),
-  required_source_ids: z.array(z.lazy(() => ExplorerSourceIdV1Schema)),
-  run_id: z.string(),
-  sources: z.array(z.lazy(() => ExplorerSourceProgressV1Schema)),
+  kind: z.literal("final"),
   state: z.lazy(() => ExplorerRunStateV1Schema),
-  submitted_at_micros: z.number().int(),
-});
+}), z.object({
+  kind: z.literal("source"),
+  source: z.lazy(() => ExplorerSourceProgressV1Schema),
+})]);
 
 export const ExplorerReadContextV1Schema: z.ZodObject<{
   counts: z.ZodType<ExplorerSessionCountsV1, unknown>;
@@ -4823,7 +4786,7 @@ export const ExplorerResultPageV1Schema: z.ZodObject<{
   total: z.number().int().min(0).nullable(),
 });
 
-export const ExplorerRunStateV1Schema: z.ZodEnum<{ "cancelled": "cancelled"; "completed": "completed"; "error": "error"; "partial": "partial"; "pending": "pending"; "timed_out": "timed_out" }> = z.enum(["cancelled", "completed", "error", "partial", "pending", "timed_out"]);
+export const ExplorerRunStateV1Schema: z.ZodEnum<{ "cancelled": "cancelled"; "completed": "completed"; "error": "error"; "partial": "partial"; "timed_out": "timed_out" }> = z.enum(["cancelled", "completed", "error", "partial", "timed_out"]);
 
 export const ExplorerSessionCountsV1Schema: z.ZodObject<{
   message_count: z.ZodType<number, unknown>;
@@ -4860,9 +4823,9 @@ producer; none is speculative:
 - `Stale`: the source's store exists but does not match the current
   generation (verified graph stale reads, LCM stale projections).
 - `TimedOut`: the source's own read exceeded the admitted deadline. */
-export const ExplorerSourceOutcomeV1Schema: z.ZodEnum<{ "cancelled": "cancelled"; "error": "error"; "partial": "partial"; "pending": "pending"; "ready": "ready"; "stale": "stale"; "timed_out": "timed_out"; "unavailable": "unavailable" }> = z.enum(["cancelled", "error", "partial", "pending", "ready", "stale", "timed_out", "unavailable"]);
+export const ExplorerSourceOutcomeV1Schema: z.ZodEnum<{ "cancelled": "cancelled"; "error": "error"; "partial": "partial"; "ready": "ready"; "stale": "stale"; "timed_out": "timed_out"; "unavailable": "unavailable" }> = z.enum(["cancelled", "error", "partial", "ready", "stale", "timed_out", "unavailable"]);
 
-export const ExplorerSourcePhaseV1Schema: z.ZodEnum<{ "cancelled": "cancelled"; "completed": "completed"; "queued": "queued"; "reading": "reading" }> = z.enum(["cancelled", "completed", "queued", "reading"]);
+export const ExplorerSourcePhaseV1Schema: z.ZodEnum<{ "cancelled": "cancelled"; "completed": "completed" }> = z.enum(["cancelled", "completed"]);
 
 export const ExplorerSourceProgressV1Schema: z.ZodObject<{
   completed_units: z.ZodType<number | null, unknown>;

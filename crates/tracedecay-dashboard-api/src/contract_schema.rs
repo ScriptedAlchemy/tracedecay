@@ -55,7 +55,7 @@ use super::automation_skills_api::AutomationSkillsPayloadV1;
 use super::code_read_api::RevisionPairUnionLayoutV1;
 use super::delivery_api::{DeliveryInboxV1, DeliveryOverviewV1};
 use super::doctor_findings_api::DoctorFindingsPayloadV1;
-use super::explorer_api::{ExplorerQueryRunV1, ExplorerReadContextV1, ExplorerSessionSizeV1};
+use super::explorer_api::{ExplorerQueryEventV1, ExplorerReadContextV1, ExplorerSessionSizeV1};
 use super::graph_service::{
     GraphNeighborsPayloadV1, GraphNodePayloadV1, GraphOverviewPayloadV1, GraphPathPayloadV1,
     GraphSearchPayloadV1, GraphSubgraphPayloadV1,
@@ -96,7 +96,7 @@ struct DashboardContractCatalogV1 {
     storage_telemetry: StorageTelemetryPayloadV1,
     doctor_findings: DoctorFindingsPayloadV1,
     remote_operational_status: RemoteOperationalStatusPayloadV1,
-    explorer_query_run: ExplorerQueryRunV1,
+    explorer_query_event: ExplorerQueryEventV1,
     explorer_session_size: DashboardEnvelopeV1<Option<ExplorerSessionSizeV1>>,
     explorer_read_context: DashboardEnvelopeV1<Option<ExplorerReadContextV1>>,
     projects: DashboardEnvelopeV1<ProjectsPayloadV1>,

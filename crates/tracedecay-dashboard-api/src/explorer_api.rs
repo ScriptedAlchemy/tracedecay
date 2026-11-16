@@ -1,28 +1,22 @@
-//! Explorer planner/coordinator and session-context HTTP binding.
-//!
-//! The coordinator composes existing graph, session, and memory authorities.
-//! It preserves source-local ordering and coverage instead of manufacturing a
-//! cross-source rank. Query cancellation is bound to the opaque run identity
-//! stored here and reaches the live work through `CancellationToken`.
+//! Request-owned Explorer source stream and session-context HTTP binding.
 
-use std::collections::HashMap;
+use std::collections::VecDeque;
 use std::panic::AssertUnwindSafe;
-use std::sync::{Arc, Mutex, OnceLock};
 
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
+use axum::response::sse::{Event, Sse};
 use axum::response::{IntoResponse, Json, Response};
-use futures_util::FutureExt;
-use futures_util::stream::{FuturesUnordered, StreamExt};
+use futures_util::future::{BoxFuture, FutureExt};
+use futures_util::stream::{self, FuturesUnordered, StreamExt};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use tokio::sync::RwLock;
 
 mod knowledge;
 mod lifecycle;
 
-use lifecycle::{admitted_deadline_elapsed, mark_cancelled, mark_timed_out};
+use lifecycle::admitted_deadline_elapsed;
 
 use super::lcm_api::{
     DashboardLcmCanonicalMessageV1, DashboardLcmCanonicalPageV1, DashboardLcmCanonicalStatsV1,
@@ -31,21 +25,18 @@ use super::lcm_api::{
     message_tool_use_id,
 };
 use super::read_model::{
-    DashboardCoverageV1, DashboardDomainStateV1, DashboardEnvelopeV1, DashboardFreshnessV1,
-    DashboardLegalActionKindV1, DashboardLegalActionRefV1, now_micros, scope_from_state,
+    DashboardCoverageCompletenessV1, DashboardCoverageV1, DashboardEnvelopeV1, now_micros,
+    scope_from_state,
 };
 use super::util::json_error;
 use super::{DashboardHttpRequestControlV1, DashboardState, RequestControl, graph_service};
-use crate::request_identity::{GlobalOpaqueIdentityKind, mint_global_opaque_id};
 use tracedecay_runtime_core::cancellation::CancellationToken;
-use tracedecay_runtime_core::native_runtime;
 
 const SOURCE_IDS: [ExplorerSourceIdV1; 3] = [
     ExplorerSourceIdV1::CodeGraph,
     ExplorerSourceIdV1::Sessions,
     ExplorerSourceIdV1::Knowledge,
 ];
-const MAX_QUERY_RUNS: usize = 256;
 const QUERY_LIMIT_DEFAULT: i64 = 25;
 const QUERY_LIMIT_MAX: i64 = 100;
 
@@ -84,7 +75,6 @@ impl ExplorerSourceIdV1 {
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub(super) enum ExplorerRunStateV1 {
-    Pending,
     Completed,
     Partial,
     Cancelled,
@@ -94,20 +84,7 @@ pub(super) enum ExplorerRunStateV1 {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
-pub(super) enum ExplorerFinalityV1 {
-    Pending,
-    Complete,
-    Partial,
-    Cancelled,
-    TimedOut,
-    Error,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, JsonSchema)]
-#[serde(rename_all = "snake_case")]
 pub(super) enum ExplorerSourcePhaseV1 {
-    Queued,
-    Reading,
     Completed,
     Cancelled,
 }
@@ -122,7 +99,6 @@ pub(super) enum ExplorerSourcePhaseV1 {
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub(super) enum ExplorerSourceOutcomeV1 {
-    Pending,
     Ready,
     Partial,
     Stale,
@@ -159,23 +135,6 @@ pub(super) struct ExplorerSourceProgressV1 {
 }
 
 impl ExplorerSourceProgressV1 {
-    fn pending(source_id: ExplorerSourceIdV1) -> Self {
-        Self {
-            source_id,
-            source_label: source_id.label(),
-            phase: ExplorerSourcePhaseV1::Queued,
-            outcome: ExplorerSourceOutcomeV1::Pending,
-            completed_units: None,
-            total_units: None,
-            coverage: DashboardCoverageV1::unknown(),
-            freshness: "unknown",
-            watermark: None,
-            error_code: None,
-            message: None,
-            page: None,
-        }
-    }
-
     fn unavailable(
         source_id: ExplorerSourceIdV1,
         error_code: &'static str,
@@ -232,61 +191,19 @@ impl ExplorerSourceProgressV1 {
 }
 
 #[derive(Clone, Debug, Serialize, JsonSchema)]
-pub(super) struct ExplorerQueryRunV1 {
-    run_id: String,
-    request: ExplorerQueryRequestV1,
-    request_revision: &'static str,
-    plan_revision: &'static str,
-    merge_revision: &'static str,
-    required_source_ids: [ExplorerSourceIdV1; 3],
-    ordering_policy: &'static str,
-    explanation: &'static str,
-    submitted_at_micros: i64,
-    completed_at_micros: Option<i64>,
-    elapsed_micros: i64,
-    state: ExplorerRunStateV1,
-    finality: ExplorerFinalityV1,
-    sources: Vec<ExplorerSourceProgressV1>,
-}
-
-#[derive(Clone)]
-struct StoredExplorerRun {
-    owner: String,
-    cancellation: CancellationToken,
-    run: Arc<RwLock<ExplorerQueryRunV1>>,
-}
-
-static QUERY_RUNS: OnceLock<Mutex<HashMap<String, StoredExplorerRun>>> = OnceLock::new();
-
-fn query_runs() -> &'static Mutex<HashMap<String, StoredExplorerRun>> {
-    QUERY_RUNS.get_or_init(|| Mutex::new(HashMap::new()))
-}
-
-fn run_owner(state: &DashboardState) -> Option<String> {
-    state
-        .resolved_scope
-        .as_ref()
-        .map(|scope| scope.scope_digest.to_string())
-}
-
-fn new_run_id() -> Option<String> {
-    mint_global_opaque_id(GlobalOpaqueIdentityKind::ExplorerRun).ok()
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub(super) enum ExplorerQueryEventV1 {
+    Source {
+        source: ExplorerSourceProgressV1,
+    },
+    Final {
+        state: ExplorerRunStateV1,
+        elapsed_micros: i64,
+    },
 }
 
 fn bad_request(message: impl Into<String>) -> Response {
     json_error(StatusCode::BAD_REQUEST, message).into_response()
-}
-
-fn not_found(run_id: &str) -> Response {
-    json_error(
-        StatusCode::NOT_FOUND,
-        format!("explorer query run not found: {run_id}"),
-    )
-    .into_response()
-}
-
-fn internal_error(message: impl Into<String>) -> Response {
-    json_error(StatusCode::INTERNAL_SERVER_ERROR, message).into_response()
 }
 
 fn validate_query(request: &mut ExplorerQueryRequestV1) -> Result<(), &'static str> {
@@ -303,342 +220,175 @@ fn validate_query(request: &mut ExplorerQueryRequestV1) -> Result<(), &'static s
     Ok(())
 }
 
-fn initial_run(run_id: String, request: ExplorerQueryRequestV1) -> ExplorerQueryRunV1 {
-    ExplorerQueryRunV1 {
-        run_id,
-        request,
-        request_revision: "explorer-query-request-v1",
-        plan_revision: "explorer-query-plan-v1",
-        merge_revision: "source-local-no-merge-v1",
-        required_source_ids: SOURCE_IDS,
-        ordering_policy: "source_local_no_cross_source_merge",
-        explanation: "Search the code graph, active-project session store, and bounded project fact authority in parallel; preserve each source's own order and coverage.",
-        submitted_at_micros: now_micros(),
-        completed_at_micros: None,
-        elapsed_micros: 0,
-        state: ExplorerRunStateV1::Pending,
-        finality: ExplorerFinalityV1::Pending,
-        sources: SOURCE_IDS
-            .into_iter()
-            .map(ExplorerSourceProgressV1::pending)
-            .collect(),
+struct ExplorerStream {
+    control: DashboardHttpRequestControlV1,
+    cancellation: CancellationToken,
+    tasks: FuturesUnordered<BoxFuture<'static, ExplorerSourceProgressV1>>,
+    sources: Vec<ExplorerSourceProgressV1>,
+    frames: VecDeque<ExplorerQueryEventV1>,
+    started_at: i64,
+    terminal: bool,
+}
+
+impl Drop for ExplorerStream {
+    fn drop(&mut self) {
+        self.cancellation.cancel();
+        let _ = self
+            .control
+            .cancellation()
+            .cancel(tracedecay_session_memory::context::application_observed_at());
     }
 }
 
-fn envelope_for_run(
-    state: &DashboardState,
-    run: ExplorerQueryRunV1,
-) -> DashboardEnvelopeV1<ExplorerQueryRunV1> {
-    let complete_sources = run
-        .sources
-        .iter()
-        .filter(|source| source.coverage.is_complete())
-        .count() as u64;
-    let coverage = if complete_sources == SOURCE_IDS.len() as u64 {
-        DashboardCoverageV1::complete(SOURCE_IDS.len() as u64, "sources")
-    } else {
-        DashboardCoverageV1::partial(
-            SOURCE_IDS.len() as u64,
-            complete_sources,
-            "sources",
-            vec!["one or more required sources has unknown or partial coverage".to_owned()],
-        )
-    };
-    let domain_state = match run.state {
-        ExplorerRunStateV1::Pending => DashboardDomainStateV1::Loading,
-        ExplorerRunStateV1::Completed => DashboardDomainStateV1::Ready,
-        ExplorerRunStateV1::Partial => DashboardDomainStateV1::Partial,
-        ExplorerRunStateV1::Cancelled => DashboardDomainStateV1::Cancelled,
-        ExplorerRunStateV1::TimedOut => DashboardDomainStateV1::TimedOut,
-        ExplorerRunStateV1::Error => DashboardDomainStateV1::Error,
-    };
-    let mut envelope = DashboardEnvelopeV1::new(
-        scope_from_state(state),
-        domain_state,
-        coverage,
-        DashboardFreshnessV1::unknown(),
-        run,
-    );
-    if envelope.payload.state == ExplorerRunStateV1::Pending {
-        envelope = envelope.with_legal_actions(vec![DashboardLegalActionRefV1::new(
-            DashboardLegalActionKindV1::RequestCancel,
-            "dashboard.explorer.query.cancel",
-        )]);
+impl ExplorerStream {
+    fn finish(&mut self, state: ExplorerRunStateV1) {
+        if self.terminal {
+            return;
+        }
+        if matches!(
+            state,
+            ExplorerRunStateV1::TimedOut | ExplorerRunStateV1::Cancelled
+        ) {
+            for source_id in SOURCE_IDS {
+                if self
+                    .sources
+                    .iter()
+                    .any(|source| source.source_id == source_id)
+                {
+                    continue;
+                }
+                let source = match state {
+                    ExplorerRunStateV1::TimedOut => ExplorerSourceProgressV1::timed_out(
+                        source_id,
+                        "request_deadline_elapsed",
+                        "dashboard request deadline elapsed",
+                    ),
+                    _ => ExplorerSourceProgressV1::cancelled(
+                        source_id,
+                        "request_cancelled",
+                        "dashboard request was cancelled",
+                    ),
+                };
+                self.frames
+                    .push_back(ExplorerQueryEventV1::Source { source });
+            }
+        }
+        self.frames.push_back(ExplorerQueryEventV1::Final {
+            state,
+            elapsed_micros: now_micros().saturating_sub(self.started_at),
+        });
+        self.terminal = true;
     }
-    envelope
-}
 
-fn remember_run(run: StoredExplorerRun, run_id: String) -> Result<(), &'static str> {
-    let mut runs = query_runs()
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    if runs.contains_key(&run_id) {
-        return Err("explorer query run identity collision");
-    }
-    if runs.len() >= MAX_QUERY_RUNS {
-        let oldest_terminal = runs
-            .iter()
-            .filter(|(_, stored)| {
-                stored
-                    .run
-                    .try_read()
-                    .is_ok_and(|run| run.state != ExplorerRunStateV1::Pending)
-            })
-            .min_by_key(|(_, stored)| {
-                stored
-                    .run
-                    .try_read()
-                    .map_or(i64::MIN, |run| run.submitted_at_micros)
-            })
-            .map(|(run_id, _)| run_id.clone());
-        let Some(oldest_terminal) = oldest_terminal else {
-            return Err("explorer query run capacity is exhausted");
+    fn finish_from_sources(&mut self) {
+        let complete = self.sources.len() == SOURCE_IDS.len()
+            && self.sources.iter().all(|source| {
+                source.outcome == ExplorerSourceOutcomeV1::Ready
+                    && source.coverage.completeness == DashboardCoverageCompletenessV1::Complete
+            });
+        let state = if complete {
+            ExplorerRunStateV1::Completed
+        } else if self.sources.iter().any(|source| {
+            matches!(
+                source.outcome,
+                ExplorerSourceOutcomeV1::Ready | ExplorerSourceOutcomeV1::Partial
+            )
+        }) {
+            ExplorerRunStateV1::Partial
+        } else {
+            ExplorerRunStateV1::Error
         };
-        runs.remove(&oldest_terminal);
+        self.finish(state);
     }
-    runs.insert(run_id, run);
-    Ok(())
 }
 
-fn find_run(state: &DashboardState, run_id: &str) -> Option<StoredExplorerRun> {
-    let runs = query_runs()
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    runs.get(run_id)
-        .filter(|stored| run_owner(state).as_ref() == Some(&stored.owner))
-        .cloned()
+fn frame(event: ExplorerQueryEventV1) -> Result<Event, std::io::Error> {
+    serde_json::to_string(&event)
+        .map(|data| Event::default().data(data))
+        .map_err(std::io::Error::other)
 }
 
-pub async fn create_query(
+#[tracing::instrument(name = "dashboard_api.query.stream", level = "trace", skip_all)]
+pub async fn stream_query(
     State(state): State<DashboardState>,
     RequestControl(control): RequestControl,
     Json(mut request): Json<ExplorerQueryRequestV1>,
 ) -> Response {
-    tracing::Instrument::instrument(
-        async move {
-            if let Err(message) = validate_query(&mut request) {
-                return bad_request(message);
-            }
-            let Some(owner) = run_owner(&state) else {
-                return json_error(
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    "exact registered project scope is unavailable",
-                )
-                .into_response();
-            };
-            let Some(run_id) = new_run_id() else {
-                return internal_error("could not allocate explorer query run identity");
-            };
-            let run = Arc::new(RwLock::new(initial_run(run_id.clone(), request.clone())));
-            let cancellation = CancellationToken::new();
-            if let Err(message) = remember_run(
-                StoredExplorerRun {
-                    owner,
-                    cancellation: cancellation.clone(),
-                    run: Arc::clone(&run),
-                },
-                run_id.clone(),
-            ) {
-                return internal_error(message);
-            }
-            let initial = run.read().await.clone();
-            let response = envelope_for_run(&state, initial);
-            if let Err(error) = native_runtime::NativeTask::spawn(execute_query(
-                state,
-                request,
-                Arc::clone(&run),
-                cancellation,
-                control,
-            )) {
-                query_runs()
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .remove(&run_id);
-                return json_error(
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    format!("explorer query could not start: {error}"),
-                )
-                .into_response();
-            }
-            (StatusCode::ACCEPTED, Json(response)).into_response()
-        },
-        tracing::trace_span!("dashboard_api.query.create"),
-    )
-    .await
-}
-
-pub async fn query_status(
-    State(state): State<DashboardState>,
-    Path(run_id): Path<String>,
-) -> Response {
-    tracing::Instrument::instrument(
-        async move {
-            let Some(stored) = find_run(&state, &run_id) else {
-                return not_found(&run_id);
-            };
-            let mut run = stored.run.read().await.clone();
-            run.elapsed_micros = run
-                .completed_at_micros
-                .unwrap_or_else(now_micros)
-                .saturating_sub(run.submitted_at_micros);
-            Json(envelope_for_run(&state, run)).into_response()
-        },
-        tracing::trace_span!("dashboard_api.query.status"),
-    )
-    .await
-}
-
-#[tracing::instrument(name = "dashboard_api.query.cancel", level = "trace", skip_all)]
-pub async fn cancel_query(
-    State(state): State<DashboardState>,
-    Path(run_id): Path<String>,
-) -> Response {
-    let Some(stored) = find_run(&state, &run_id) else {
-        return not_found(&run_id);
-    };
-    let mut run = stored.run.write().await;
-    if run.state != ExplorerRunStateV1::Pending {
+    if let Err(message) = validate_query(&mut request) {
+        return bad_request(message);
+    }
+    if state.resolved_scope.is_none() {
         return json_error(
-            StatusCode::CONFLICT,
-            format!("explorer query run is already terminal: {run_id}"),
+            StatusCode::SERVICE_UNAVAILABLE,
+            "exact registered project scope is unavailable",
         )
         .into_response();
     }
-    stored.cancellation.cancel();
-    mark_cancelled(&mut run);
-    Json(envelope_for_run(&state, run.clone())).into_response()
-}
-
-#[tracing::instrument(name = "dashboard_api.query.execute", level = "trace", skip_all)]
-async fn execute_query(
-    state: DashboardState,
-    request: ExplorerQueryRequestV1,
-    run: Arc<RwLock<ExplorerQueryRunV1>>,
-    cancellation: CancellationToken,
-    control: DashboardHttpRequestControlV1,
-) {
-    let request_cancellation = control.cancellation().clone();
-    let deadline = control.deadline();
-    let deadline_wait = admitted_deadline_elapsed(deadline.clone());
-    tokio::pin!(deadline_wait);
-    {
-        let mut current = run.write().await;
-        for source in &mut current.sources {
-            source.phase = ExplorerSourcePhaseV1::Reading;
-        }
-    }
-
-    // Polled in place, so dropping `tasks` on any exit cancels the
-    // unfinished reads.
-    let mut tasks: FuturesUnordered<_> = SOURCE_IDS
+    let cancellation = CancellationToken::new();
+    let tasks: FuturesUnordered<BoxFuture<'static, ExplorerSourceProgressV1>> = SOURCE_IDS
         .into_iter()
         .map(|source_id| {
-            let source = execute_source(
+            let read = execute_source(
                 state.clone(),
                 request.clone(),
                 source_id,
                 control.clone(),
                 cancellation.clone(),
             );
-            AssertUnwindSafe(source).catch_unwind().map(move |outcome| {
-                outcome.unwrap_or_else(|_| {
-                    ExplorerSourceProgressV1::error(
-                        source_id,
-                        "source_task_failed",
-                        "explorer source read panicked",
-                    )
+            AssertUnwindSafe(read)
+                .catch_unwind()
+                .map(move |outcome| {
+                    outcome.unwrap_or_else(|_| {
+                        ExplorerSourceProgressV1::error(
+                            source_id,
+                            "source_task_failed",
+                            "explorer source read panicked",
+                        )
+                    })
                 })
-            })
+                .boxed()
         })
         .collect();
-
-    let mut completed = 0;
-    while completed < SOURCE_IDS.len() {
+    let stream_state = ExplorerStream {
+        control,
+        cancellation,
+        tasks,
+        sources: Vec::with_capacity(SOURCE_IDS.len()),
+        frames: VecDeque::new(),
+        started_at: now_micros(),
+        terminal: false,
+    };
+    Sse::new(stream::unfold(stream_state, |mut stream| async move {
+        if let Some(event) = stream.frames.pop_front() {
+            return Some((frame(event), stream));
+        }
+        if stream.terminal {
+            return None;
+        }
+        let admitted = stream.control.cancellation().clone();
+        let deadline = stream.control.deadline();
         tokio::select! {
             biased;
-            () = &mut deadline_wait => {
-                let mut current = run.write().await;
-                if current.state == ExplorerRunStateV1::Pending {
-                    mark_timed_out(&mut current);
+            () = admitted_deadline_elapsed(deadline) => stream.finish(ExplorerRunStateV1::TimedOut),
+            () = admitted.cancelled() => stream.finish(ExplorerRunStateV1::Cancelled),
+            source = stream.tasks.next() => {
+                if let Some(source) = source {
+                    stream.sources.push(source.clone());
+                    stream.frames.push_back(ExplorerQueryEventV1::Source { source });
+                    if stream.sources.len() == SOURCE_IDS.len() {
+                        stream.finish_from_sources();
+                    }
+                } else {
+                    stream.finish_from_sources();
                 }
-                return;
-            }
-            () = cancellation.cancelled() => {
-                let mut current = run.write().await;
-                if current.state == ExplorerRunStateV1::Pending {
-                    mark_cancelled(&mut current);
-                }
-                return;
-            }
-            () = request_cancellation.cancelled() => {
-                let mut current = run.write().await;
-                if current.state == ExplorerRunStateV1::Pending {
-                    mark_cancelled(&mut current);
-                }
-                return;
-            }
-            source = tasks.next() => {
-                let Some(source) = source else {
-                    break;
-                };
-                completed += 1;
-                let mut current = run.write().await;
-                if current.state != ExplorerRunStateV1::Pending {
-                    return;
-                }
-                if let Some(slot) = current
-                    .sources
-                    .iter_mut()
-                    .find(|slot| slot.source_id == source.source_id)
-                {
-                    *slot = source;
-                }
-                current.elapsed_micros = now_micros().saturating_sub(current.submitted_at_micros);
             }
         }
-    }
-
-    let mut current = run.write().await;
-    if current.state != ExplorerRunStateV1::Pending {
-        return;
-    }
-    if deadline.is_elapsed_at(tracedecay_session_memory::context::application_observed_at()) {
-        mark_timed_out(&mut current);
-        return;
-    }
-    if cancellation.is_cancelled() || request_cancellation.is_cancelled() {
-        mark_cancelled(&mut current);
-        return;
-    }
-    let every_concluded = current
-        .sources
-        .iter()
-        .all(|source| matches!(source.outcome, ExplorerSourceOutcomeV1::Ready));
-    let complete = every_concluded
-        && current
-            .sources
-            .iter()
-            .all(|source| source.coverage.is_complete());
-    current.completed_at_micros = Some(now_micros());
-    current.elapsed_micros = current
-        .completed_at_micros
-        .unwrap_or(current.submitted_at_micros)
-        .saturating_sub(current.submitted_at_micros);
-    if complete {
-        current.state = ExplorerRunStateV1::Completed;
-        current.finality = ExplorerFinalityV1::Complete;
-    } else if current.sources.iter().any(|source| {
-        matches!(
-            source.outcome,
-            ExplorerSourceOutcomeV1::Ready | ExplorerSourceOutcomeV1::Partial
-        )
-    }) {
-        current.state = ExplorerRunStateV1::Partial;
-        current.finality = ExplorerFinalityV1::Partial;
-    } else {
-        current.state = ExplorerRunStateV1::Error;
-        current.finality = ExplorerFinalityV1::Error;
-    }
+        stream
+            .frames
+            .pop_front()
+            .map(|event| (frame(event), stream))
+    }))
+    .into_response()
 }
 
 async fn execute_source(
@@ -1311,27 +1061,330 @@ const fn explorer_lcm_error_code(state: DashboardLcmReadStateV1) -> &'static str
 #[cfg(test)]
 #[allow(clippy::expect_used)]
 mod native_tests {
-    use std::time::{Duration, Instant};
+    use std::pin::Pin;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::Duration;
+
+    use axum::body::HttpBody;
+    use tokio::sync::Notify;
+    use tracedecay_domain::{Confidence, FactCategoryV1, ProvenanceId};
+    use tracedecay_privacy::{MemoryFactSanitizationV1, sanitize_memory_fact_payload};
+    use tracedecay_runtime_core::native_runtime;
+    use tracedecay_session_memory::fact_store::DatabaseFactStore;
+    use tracedecay_store::{
+        FactWriteControl, ProjectMemoryFactAddMaterialV1, ProjectMemoryFactStore,
+    };
 
     use super::*;
 
-    #[test]
-    fn explorer_query_settles_on_the_process_runtime() {
-        if !crate::test_support::alone_with_storage_wait_counters() {
-            return;
+    struct HeldSessions {
+        started: Arc<Notify>,
+        release: Arc<Notify>,
+        dropped: Arc<AtomicBool>,
+    }
+
+    impl super::super::lcm_api::DashboardLcmReadPortV1 for HeldSessions {
+        fn read(
+            &self,
+            _control: DashboardHttpRequestControlV1,
+            _project_id: Option<&str>,
+            _request: DashboardLcmReadRequestV1,
+        ) -> super::super::lcm_api::DashboardLcmReadFutureV1<'_> {
+            struct DropMarker(Arc<AtomicBool>);
+            impl Drop for DropMarker {
+                fn drop(&mut self) {
+                    self.0.store(true, Ordering::SeqCst);
+                }
+            }
+            Box::pin(async {
+                let _marker = DropMarker(Arc::clone(&self.dropped));
+                self.started.notify_one();
+                self.release.notified().await;
+                DashboardLcmReadOutcomeV1::NotReady {
+                    state: super::super::lcm_api::DashboardLcmReadStateV1::Unavailable,
+                    reason: "held session read unavailable".to_owned(),
+                }
+            })
         }
+    }
+
+    struct StaleSessions;
+    impl super::super::lcm_api::DashboardLcmReadPortV1 for StaleSessions {
+        fn read(
+            &self,
+            _control: DashboardHttpRequestControlV1,
+            _project_id: Option<&str>,
+            _request: DashboardLcmReadRequestV1,
+        ) -> super::super::lcm_api::DashboardLcmReadFutureV1<'_> {
+            Box::pin(async {
+                DashboardLcmReadOutcomeV1::NotReady {
+                    state: super::super::lcm_api::DashboardLcmReadStateV1::Stale,
+                    reason: "session projection is stale".to_owned(),
+                }
+            })
+        }
+    }
+
+    async fn seed_fast_knowledge_row(state: &DashboardState) {
+        let payload = json!({
+            "content": "fixture memory row",
+            "category": "project",
+            "tags": ["explorer"],
+            "entities": ["Fixture"],
+            "metadata": {},
+        });
+        let receipt =
+            match sanitize_memory_fact_payload(payload).expect("sanitize fixture knowledge row") {
+                MemoryFactSanitizationV1::Durable { receipt, .. } => receipt,
+                MemoryFactSanitizationV1::Quarantined => panic!("fixture fact must be durable"),
+            };
+        let command = ProjectMemoryFactAddMaterialV1::new(
+            state.memory_owner.clone(),
+            "fixture memory row".to_owned(),
+            FactCategoryV1::Project,
+            None,
+            vec!["explorer".to_owned()],
+            vec!["Fixture".to_owned()],
+            json!({}),
+            receipt,
+            None,
+            Confidence::new(0.8).expect("fixture confidence"),
+            None,
+        )
+        .and_then(|material| {
+            material.into_command(
+                ProvenanceId::new("dashboard.explorer.stream.fixture".to_owned())
+                    .expect("fixture provenance"),
+            )
+        })
+        .expect("fixture fact command");
+        DatabaseFactStore::new(&state.mem_db)
+            .add_project_memory_fact(
+                command,
+                &FactWriteControl::new(Arc::new(|| false), Arc::new(|| true)),
+            )
+            .await
+            .expect("seed fixture knowledge row");
+    }
+
+    async fn next_frame(body: &mut axum::body::Body) -> Value {
+        let frame = native_runtime::timeout(Duration::from_secs(15), async {
+            std::future::poll_fn(|cx| Pin::new(&mut *body).poll_frame(cx)).await
+        })
+        .await
+        .expect("stream frame before deadline")
+        .expect("stream has next frame")
+        .expect("stream frame reads")
+        .into_data()
+        .expect("SSE data");
+        let text = String::from_utf8(frame.to_vec()).expect("utf8 frame");
+        text.lines()
+            .find_map(|line| line.strip_prefix("data: "))
+            .map(|data| serde_json::from_str(data).expect("event JSON"))
+            .unwrap_or(Value::Null)
+    }
+
+    fn assert_knowledge_coverage(source: &Value) {
+        let omissions = source["coverage"]["omission_reasons"]
+            .as_array()
+            .expect("knowledge coverage reasons");
+        match source["coverage"]["completeness"].as_str() {
+            Some("complete") => assert!(omissions.is_empty(), "complete coverage has no gaps"),
+            Some("unknown") => assert!(
+                omissions
+                    .iter()
+                    .any(|reason| reason == "verified memory graph coverage is incomplete"),
+                "unknown knowledge coverage names its missing graph: {source}"
+            ),
+            other => panic!("ready knowledge did not account for its coverage: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn fast_explorer_source_precedes_held_source() {
         let fixture = tokio::runtime::Runtime::new().expect("fixture runtime");
-        let (_project, dash) = fixture.block_on(crate::events_api::dashboard_state_fixture(
-            "project.dashboard-explorer-native",
+        let (_project, mut dash) = fixture.block_on(crate::events_api::dashboard_state_fixture(
+            "project.dashboard-explorer-stream",
         ));
-        let writer_waits = native_runtime::native_thread_writer_waits();
-        let process_runtime = native_runtime::handle().expect("process runtime").id();
-        let state = native_runtime::block_on(async move {
-            assert_eq!(tokio::runtime::Handle::current().id(), process_runtime);
-            let response = create_query(
-                State(dash.clone()),
+        fixture.block_on(seed_fast_knowledge_row(&dash));
+        let held = Arc::new(HeldSessions {
+            started: Arc::new(Notify::new()),
+            release: Arc::new(Notify::new()),
+            dropped: Arc::new(AtomicBool::new(false)),
+        });
+        dash.lcm_read_authority = Some(held.clone());
+        let response = native_runtime::block_on(async {
+            stream_query(
+                State(dash),
                 RequestControl(DashboardHttpRequestControlV1::test_fixture(
-                    "dashboard-explorer-native",
+                    "dashboard-explorer-stream",
+                )),
+                Json(ExplorerQueryRequestV1 {
+                    query: "fixture".to_owned(),
+                    limit: 1,
+                    offset: 0,
+                }),
+            )
+            .await
+        })
+        .expect("native block_on");
+        native_runtime::block_on(async {
+            let mut body = response.into_body();
+            let first = next_frame(&mut body).await;
+            assert_eq!(
+                first["kind"], "source",
+                "the first explorer frame was not a source frame"
+            );
+            assert_ne!(first["source"]["source_id"], "sessions");
+            let mut fast = first;
+            while fast["source"]["source_id"] != "knowledge" {
+                fast = next_frame(&mut body).await;
+                assert_ne!(fast["source"]["source_id"], "sessions");
+            }
+            assert!(
+                fast["source"]["page"]["rows"]
+                    .as_array()
+                    .is_some_and(|rows| rows
+                        .iter()
+                        .any(|row| { row["content"] == "fixture memory row" })),
+                "knowledge rows arrived before the held session read: {fast}"
+            );
+            assert_knowledge_coverage(&fast["source"]);
+            assert_eq!(fast["source"]["outcome"], "ready");
+            held.release.notify_one();
+            let mut saw_sessions = false;
+            loop {
+                let event = next_frame(&mut body).await;
+                if event["kind"] == "final" {
+                    assert!(
+                        saw_sessions,
+                        "released source emitted before terminal event"
+                    );
+                    break;
+                }
+                saw_sessions |= event["source"]["source_id"] == "sessions";
+            }
+        })
+        .expect("native block_on");
+    }
+
+    #[test]
+    fn disconnect_drops_unfinished_explorer_sources() {
+        let fixture = tokio::runtime::Runtime::new().expect("fixture runtime");
+        let (_project, mut dash) = fixture.block_on(crate::events_api::dashboard_state_fixture(
+            "project.dashboard-explorer-disconnect",
+        ));
+        let held = Arc::new(HeldSessions {
+            started: Arc::new(Notify::new()),
+            release: Arc::new(Notify::new()),
+            dropped: Arc::new(AtomicBool::new(false)),
+        });
+        dash.lcm_read_authority = Some(held.clone());
+        native_runtime::block_on(async {
+            let control = DashboardHttpRequestControlV1::test_fixture("explorer-disconnect");
+            let cancellation = control.cancellation().clone();
+            let response = stream_query(
+                State(dash),
+                RequestControl(control),
+                Json(ExplorerQueryRequestV1 {
+                    query: "fixture".to_owned(),
+                    limit: 1,
+                    offset: 0,
+                }),
+            )
+            .await;
+            let mut body = response.into_body();
+            let first = next_frame(&mut body).await;
+            assert_eq!(first["kind"], "source");
+            let second = next_frame(&mut body).await;
+            assert_eq!(second["kind"], "source");
+            assert_ne!(first["source"]["source_id"], second["source"]["source_id"]);
+            assert_ne!(first["source"]["source_id"], "sessions");
+            assert_ne!(second["source"]["source_id"], "sessions");
+            {
+                let next = next_frame(&mut body);
+                tokio::pin!(next);
+                tokio::select! {
+                    () = held.started.notified() => {}
+                    event = &mut next => panic!("held source finished before disconnect: {event}"),
+                }
+            }
+            drop(body);
+            assert!(
+                cancellation.is_cancelled(),
+                "body drop cancels admitted request"
+            );
+            assert!(
+                held.dropped.load(Ordering::SeqCst),
+                "body drop releases held source"
+            );
+        })
+        .expect("native block_on");
+    }
+
+    #[test]
+    fn admitted_cancellation_concludes_each_source_once() {
+        let fixture = tokio::runtime::Runtime::new().expect("fixture runtime");
+        let (_project, mut dash) = fixture.block_on(crate::events_api::dashboard_state_fixture(
+            "project.dashboard-explorer-cancellation",
+        ));
+        fixture.block_on(seed_fast_knowledge_row(&dash));
+        dash.lcm_read_authority = Some(Arc::new(HeldSessions {
+            started: Arc::new(Notify::new()),
+            release: Arc::new(Notify::new()),
+            dropped: Arc::new(AtomicBool::new(false)),
+        }));
+        let frames = native_runtime::block_on(async {
+            let control = DashboardHttpRequestControlV1::test_fixture("explorer-cancellation");
+            let cancellation = control.cancellation().clone();
+            let response = stream_query(
+                State(dash),
+                RequestControl(control),
+                Json(ExplorerQueryRequestV1 {
+                    query: "fixture".to_owned(),
+                    limit: 1,
+                    offset: 0,
+                }),
+            )
+            .await;
+            let mut body = response.into_body();
+            let first = next_frame(&mut body).await;
+            let second = next_frame(&mut body).await;
+            assert_eq!(first["kind"], "source");
+            assert_eq!(second["kind"], "source");
+            assert_ne!(first["source"]["source_id"], "sessions");
+            assert_ne!(second["source"]["source_id"], "sessions");
+            cancellation.cancel(tracedecay_session_memory::context::application_observed_at());
+            let third = next_frame(&mut body).await;
+            let final_frame = next_frame(&mut body).await;
+            let eof = native_runtime::timeout(Duration::from_secs(15), async {
+                std::future::poll_fn(|cx| Pin::new(&mut body).poll_frame(cx)).await
+            })
+            .await
+            .expect("stream ends after terminal frame");
+            assert!(eof.is_none(), "stream emitted more than one terminal frame");
+            [first, second, third, final_frame]
+        })
+        .expect("native block_on");
+        assert_eq!(frames[2]["source"]["source_id"], "sessions");
+        assert_eq!(frames[2]["source"]["outcome"], "cancelled");
+        assert_eq!(frames[3]["kind"], "final");
+        assert_eq!(frames[3]["state"], "cancelled");
+    }
+
+    #[test]
+    fn explorer_source_outcomes_remain_distinct() {
+        let fixture = tokio::runtime::Runtime::new().expect("fixture runtime");
+        let (_project, mut dash) = fixture.block_on(crate::events_api::dashboard_state_fixture(
+            "project.dashboard-explorer-outcomes",
+        ));
+        dash.lcm_read_authority = Some(Arc::new(StaleSessions));
+        let frames = native_runtime::block_on(async {
+            let response = stream_query(
+                State(dash),
+                RequestControl(DashboardHttpRequestControlV1::test_fixture(
+                    "explorer-outcomes",
                 )),
                 Json(ExplorerQueryRequestV1 {
                     query: "fixture".to_owned(),
@@ -1340,35 +1393,54 @@ mod native_tests {
                 }),
             )
             .await;
-            assert_eq!(response.status(), StatusCode::ACCEPTED);
-            let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
-                .await
-                .expect("accepted body");
-            let accepted: Value = serde_json::from_slice(&body).expect("accepted json");
-            let run_id = accepted["payload"]["run_id"]
-                .as_str()
-                .expect("accepted run id")
-                .to_owned();
-            let run = find_run(&dash, &run_id).expect("remembered run").run;
-            native_runtime::timeout(Duration::from_secs(60), async {
-                loop {
-                    let state = run.read().await.state;
-                    if state != ExplorerRunStateV1::Pending {
-                        return state;
-                    }
-                    let _ = native_runtime::sleep_until(Instant::now() + Duration::from_millis(10))
-                        .await;
+            let mut body = response.into_body();
+            let mut frames = Vec::new();
+            loop {
+                let frame = next_frame(&mut body).await;
+                let final_frame = frame["kind"] == "final";
+                frames.push(frame);
+                if final_frame {
+                    break;
                 }
-            })
-            .await
-            .expect("the explorer run settles")
+            }
+            frames
         })
         .expect("native block_on");
-        assert_eq!(state, ExplorerRunStateV1::Partial);
+        assert_eq!(frames.len(), 4);
         assert_eq!(
-            native_runtime::native_thread_writer_waits(),
-            writer_waits,
-            "the explorer run parked no native thread on a writer"
+            frames.last().map(|frame| &frame["state"]),
+            Some(&json!("partial"))
         );
+        assert_eq!(
+            frames
+                .iter()
+                .filter(|frame| frame["kind"] == "final")
+                .count(),
+            1
+        );
+        let sources: Vec<&Value> = frames
+            .iter()
+            .filter(|frame| frame["kind"] == "source")
+            .collect();
+        assert_eq!(sources.len(), 3);
+        let source = |id| {
+            sources
+                .iter()
+                .find(|frame| frame["source"]["source_id"] == id)
+                .map(|frame| &frame["source"])
+                .expect("required source frame")
+        };
+        assert_eq!(source("code_graph")["outcome"], "unavailable");
+        assert_eq!(source("code_graph")["error_code"], "missing_registry");
+        assert!(source("code_graph")["page"].is_null());
+        assert_eq!(source("sessions")["outcome"], "stale");
+        assert_eq!(
+            source("sessions")["error_code"],
+            "lcm_temporal_projection_stale"
+        );
+        assert!(source("sessions")["page"].is_null());
+        assert_eq!(source("knowledge")["outcome"], "ready");
+        assert_eq!(source("knowledge")["page"]["rows"], json!([]));
+        assert_knowledge_coverage(source("knowledge"));
     }
 }

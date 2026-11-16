@@ -128,7 +128,7 @@ export function ExplorerPage() {
           />
           {explorer.searching ? (
             <RunRegister
-              result={explorer.runResult}
+              transport={explorer.transport}
               run={explorer.run}
               writability={explorer.writability}
               progress={explorer.runProgress}
@@ -290,10 +290,8 @@ const LANE_PARAM = 'lane';
 
 /**
  * The query and lane filter in the address bar, so a result can be left and
- * returned to. `q` restores by submitting: a run is created for it against
- * the current scope, exactly as if it had been typed, and the lanes report
- * whatever that run answers. Nothing about the previous run's results is
- * carried in the URL, because none of it is addressable state.
+ * returned to. `q` starts a new exact-scope stream. Results are never
+ * carried in the URL.
  */
 function useExplorerUrlState(explorer: ExplorerController) {
   const [searchParams, setSearchParams] = useSearchParams();

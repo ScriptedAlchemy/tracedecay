@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { absenceVerdict } from './absence.ts';
-import { ExplorerQueryRunV1Schema } from '../../contracts/generated.ts';
+import { ExplorerSourceProgressV1Schema } from '../../contracts/generated.ts';
 
 /**
  * Coverage fields a source may report. Defaults describe a source that examined
@@ -50,22 +50,12 @@ function source(id: keyof typeof SOURCE_LABELS, over: Record<string, unknown> = 
 /** Parsed through the real schema, so a fixture that the contract would reject
  * cannot quietly prove anything here. */
 function run(sources: unknown[], finality: 'complete' | 'partial' = 'complete') {
-  return ExplorerQueryRunV1Schema.parse({
-    run_id: 'run-1',
-    request: { query: 'missing', limit: 50, offset: 0 },
-    request_revision: 'explorer-query-request-v1',
-    plan_revision: 'explorer-query-plan-v1',
-    merge_revision: 'source-local-no-merge-v1',
-    required_source_ids: ['code_graph', 'sessions', 'knowledge'],
-    ordering_policy: 'source_local_no_cross_source_merge',
-    explanation: 'test',
-    submitted_at_micros: 1,
-    completed_at_micros: 2,
+  return {
+    query: 'missing',
     elapsed_micros: 1,
-    state: finality === 'complete' ? 'completed' : 'partial',
-    finality,
-    sources,
-  });
+    state: finality === 'complete' ? 'completed' as const : 'partial' as const,
+    sources: sources.map((item) => ExplorerSourceProgressV1Schema.parse(item)),
+  };
 }
 
 describe('absenceVerdict', () => {
@@ -211,17 +201,17 @@ describe('absenceVerdict', () => {
     );
   });
 
-  it('refuses absence while the coordinator withholds canonical finality', () => {
+  it('refuses absence until the stream completes', () => {
     const verdict = absenceVerdict(
       run([source('code_graph'), source('sessions'), source('knowledge')], 'partial'),
     );
     expect(verdict.confirmed).toBe(false);
     expect(verdict.confirmed === false && verdict.reason).toBe(
-      'the coordinator has not declared canonical finality',
+      'the stream has not completed with complete coverage',
     );
   });
 
-  it('refuses absence when no run has answered', () => {
+  it('refuses absence when no stream has answered', () => {
     expect(absenceVerdict(undefined).confirmed).toBe(false);
   });
 });

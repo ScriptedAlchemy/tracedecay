@@ -20,6 +20,7 @@ import {
   READ_ONLY_SCOPE_STATUS,
   UNSCOPED_CACHE_KEY,
   activationFor,
+  explorerReadScope,
   launchBindingCaption,
   readOnlyScopeRefusal,
   reconciledLabel,
@@ -102,6 +103,14 @@ describe('scopeWritable', () => {
     expect(writability.reason).toContain('not the active project');
     // Actionable, not merely negative: the reason has to say what to do.
     expect(writability.reason).toContain('Switch scope');
+  });
+
+  it('admits only a registered selected Explorer read without granting a write', () => {
+    const selected = project('proj_b', 'selected');
+    expect(scopeWritable(selected).state).toBe('read_only');
+    expect(explorerReadScope(selected)).toEqual({ state: 'writable', target: 'label-proj_b' });
+    expect(explorerReadScope(project('proj_b', 'unresolved')).state).toBe('unknown');
+    expect(explorerReadScope(project('proj_ghost', 'absent')).state).toBe('read_only');
   });
 
   // Guessing either way is a defect: `writable` offers a write that will be

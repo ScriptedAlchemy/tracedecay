@@ -1,34 +1,30 @@
-/**
- * Explorer's orchestration: every route it calls, every piece of query state it
- * holds, and the typed lane read models it hands to the views.
- *
- * Kept apart from the JSX so the surface has exactly one place that knows a
- * coordinator run is created, polled, and cancelled, and so the views below it
- * render a lane condition rather than deciding one.
- */
-import { useMutation, useQuery } from '@tanstack/react-query';
+/** Explorer source reads and abort ownership, apart from lane presentation. */
+import { useQuery } from '@tanstack/react-query';
 import { useEffect, useMemo, useRef, useState } from 'react';
+import { z } from 'zod';
 import {
-  ExplorerQueryRunV1Schema,
+  DashboardEnvelopeV1Schema,
+  ExplorerQueryEventV1Schema,
   ExplorerReadContextV1Schema,
   ExplorerSessionSizeV1Schema,
   GraphOverviewPayloadV1Schema,
   LcmOverviewPayloadV1Schema,
   MemoryOverviewPayloadV1Schema,
   type DashboardDomainStateV1,
-  type ExplorerQueryRunV1,
+  type ExplorerQueryEventV1,
   type ExplorerReadContextV1,
   type ExplorerSessionSizeV1,
 } from '../../contracts/generated.ts';
+import { dashboardFetch } from '../../data/auth/credential.ts';
 import { fetchEnvelope, type EnvelopeResult } from '../../data/query/envelope.ts';
+import { decodeJsonBody } from '../../data/query/responseBody.ts';
 import { useEnvelope } from '../../data/query/useEnvelope.ts';
 import {
   scopeKey,
-  scopeWritable,
+  explorerReadScope,
   scopedUrl,
   useScope,
   type DashboardScope,
-  type ScopeWritability,
 } from '../../data/scope/store.ts';
 import { queryTerms } from '../../ui/search/terms.ts';
 import { absenceVerdict, type AbsenceVerdict } from './absence.ts';
@@ -38,9 +34,9 @@ import {
   laneFromScope,
   laneHits,
   lanePending,
-  runIsTerminal,
   searchLane,
   type ExplorerLaneReadModel,
+  type ExplorerStreamSnapshot,
 } from './laneModel.ts';
 import { LANES, type Hit, type LaneId } from './model.ts';
 
@@ -48,45 +44,88 @@ import { LANES, type Hit, type LaneId } from './model.ts';
 
 const QUERIES_ROUTE = '/api/explorer/queries';
 
-/**
- * Every Explorer route is rewritten for the current scope. A selected project
- * routes through the project gateway so the run is created against THAT
- * project's state; the all-projects default and the active project stay
- * unprefixed. Without this a query under a selected scope would silently be
- * answered by the active project, and the lanes would attribute one
- * project's rows to another's name in the scope register.
- */
-function runRoute(scope: DashboardScope, runId?: string): string {
-  const path = runId === undefined ? QUERIES_ROUTE : `${QUERIES_ROUTE}/${encodeURIComponent(runId)}`;
-  return scopedUrl(scope, path);
+class ExplorerHttpError extends Error {
+  constructor(
+    readonly state: DashboardDomainStateV1,
+    status: number,
+    detail?: string,
+  ) {
+    super(detail ?? `HTTP ${status}`);
+  }
 }
 
-function createPlannerQuery(
+/** The selected project gateway resolves the exact project before any read. */
+export async function readExplorerStream(
   scope: DashboardScope,
   query: string,
-): Promise<EnvelopeResult<ExplorerQueryRunV1>> {
-  return fetchEnvelope(runRoute(scope), ExplorerQueryRunV1Schema, {
+  signal: AbortSignal,
+  onEvent: (event: ExplorerQueryEventV1) => void,
+): Promise<void> {
+  const response = await dashboardFetch(scopedUrl(scope, QUERIES_ROUTE), {
     method: 'POST',
     headers: {
-      accept: 'application/json',
+      accept: 'text/event-stream',
       'content-type': 'application/json',
     },
     body: JSON.stringify({ query, limit: 50, offset: 0 }),
+    signal,
   });
-}
-
-function readPlannerQuery(
-  scope: DashboardScope,
-  runId: string,
-): Promise<EnvelopeResult<ExplorerQueryRunV1>> {
-  return fetchEnvelope(runRoute(scope, runId), ExplorerQueryRunV1Schema);
-}
-
-function cancelPlannerQuery(
-  scope: DashboardScope,
-  runId: string,
-): Promise<EnvelopeResult<ExplorerQueryRunV1>> {
-  return fetchEnvelope(runRoute(scope, runId), ExplorerQueryRunV1Schema, { method: 'DELETE' });
+  const contentType = response.headers.get('content-type') ?? '';
+  if (contentType.includes('application/json')) {
+    const parsed = DashboardEnvelopeV1Schema(z.unknown()).safeParse(
+      await decodeJsonBody(response, signal),
+    );
+    if (parsed.success && parsed.data.domain_state !== 'ready') {
+      throw new ExplorerHttpError(
+        parsed.data.domain_state,
+        response.status,
+        parsed.data.coverage.omission_reasons[0],
+      );
+    }
+  }
+  if (!response.ok) {
+    throw new ExplorerHttpError(
+      response.status === 401 ? 'unauthorized' : response.status === 403 ? 'denied' : 'error',
+      response.status,
+    );
+  }
+  if (!contentType.startsWith('text/event-stream')) {
+    throw new ExplorerHttpError('unsupported_schema', response.status, 'Explorer response is not an event stream');
+  }
+  if (!response.body) throw new Error('Explorer response has no stream');
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+  let final = false;
+  try {
+    while (!final) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer = (buffer + decoder.decode(value, { stream: true })).replaceAll('\r\n', '\n');
+      let boundary = buffer.indexOf('\n\n');
+      while (boundary !== -1) {
+        const frame = buffer.slice(0, boundary);
+        buffer = buffer.slice(boundary + 2);
+        const data = frame.split('\n')
+          .filter((line) => line.startsWith('data:'))
+          .map((line) => line.slice(5).trimStart())
+          .join('\n');
+        if (data !== '') {
+          const event = ExplorerQueryEventV1Schema.parse(JSON.parse(data));
+          onEvent(event);
+          if (event.kind === 'final') {
+            final = true;
+            break;
+          }
+        }
+        boundary = buffer.indexOf('\n\n');
+      }
+    }
+    if (!final && !signal.aborted) throw new Error('Explorer stream ended without a final frame');
+  } finally {
+    await reader.cancel();
+    reader.releaseLock();
+  }
 }
 
 function readSessionSize(
@@ -112,61 +151,11 @@ function readSessionContext(
   );
 }
 
-/* ------------------------------------------------------- run-status polling */
-
-/**
- * Transport states a repeat read can clear on its own: the daemon was
- * unreachable, answered a bare non-2xx, or said it had nothing ready yet.
- *
- * Every other transport state is a standing condition, a refusal
- * (`unauthorized`, `denied`), a scope that will not serve the read (`locked`),
- * a body this client cannot read (`unsupported_schema`), and re-asking gets
- * the same answer, so the poll stops and the state is rendered.
- */
-const RETRYABLE_TRANSPORT_STATES: ReadonlySet<DashboardDomainStateV1> = new Set<
-  DashboardDomainStateV1
->(['offline', 'error', 'loading']);
-
-/**
- * How long a retried status read waits, by how many consecutive transport
- * failures precede it: 1 s, 2 s, 5 s, 10 s, and then the ceiling below for as
- * long as the failure lasts.
- *
- * A ladder rather than an attempt budget. An admitted run does not stop
- * existing because the daemon blinked, and this poll is the only thing that
- * can ever resolve it, so a budget strands every run that outlives it, the
- * daemon comes back, the run completes, and the surface never finds out.
- * Backing off instead keeps the run reachable while making a dead daemon cost
- * two reads a minute, and the failing reads stay on screen the whole time
- * because `fetchEnvelope` reports them as data the lanes render.
- */
-const TRANSPORT_BACKOFF_MS: readonly number[] = [1000, 2000, 5000, 10_000];
-
-/** The slowest the poll ever ticks, held until the run terminates or the
- * surface goes away. */
-const TRANSPORT_BACKOFF_CEILING_MS = 30_000;
-
-function transportBackoffMs(consecutiveFailures: number): number {
-  return TRANSPORT_BACKOFF_MS[consecutiveFailures - 1] ?? TRANSPORT_BACKOFF_CEILING_MS;
-}
-
 /* -------------------------------------------------------------- controller */
 
 interface ExplorerFacet {
   readonly lane: LaneId;
   readonly value: string;
-}
-
-/** The request owns its admission scope, regardless of later UI selections. */
-interface PlannerRequest {
-  readonly scope: DashboardScope;
-  readonly query: string;
-  readonly generation: number;
-}
-
-interface AcceptedPlannerRun {
-  readonly scope: DashboardScope;
-  readonly id: string;
 }
 
 /** How far the coordinator has got, counted in sources rather than in a
@@ -182,9 +171,9 @@ export interface ExplorerController {
   readonly submitted: string;
   readonly searching: boolean;
   readonly terms: readonly string[];
-  /** Whether the current scope accepts a query run, from the scope authority.
-   * Anything but `writable` means no run was, or will be, dispatched. */
-  readonly writability: ScopeWritability;
+  /** Whether the current scope accepts an Explorer read, from the scope authority.
+   * Anything but `writable` means no request is dispatched. */
+  readonly writability: ReturnType<typeof explorerReadScope>;
   /** One read model per lane, in `LANES` order. */
   readonly lanes: readonly ExplorerLaneReadModel[];
   /** The lanes the current lane filter admits. */
@@ -196,9 +185,8 @@ export interface ExplorerController {
   readonly unansweredLanes: readonly ExplorerLaneReadModel[];
   readonly answeredLaneCount: number;
   readonly absence: AbsenceVerdict;
-  readonly runResult: EnvelopeResult<ExplorerQueryRunV1> | undefined;
-  /** The coordinator run for the submitted query, when one has answered. */
-  readonly run: ExplorerQueryRunV1 | undefined;
+  readonly transport: { state: DashboardDomainStateV1; detail?: string } | undefined;
+  readonly run: ExplorerStreamSnapshot | undefined;
   readonly runProgress: RunProgress | null;
   readonly cancelling: boolean;
   /** Present only while a cancellable run is in flight. */
@@ -222,114 +210,31 @@ export interface ExplorerController {
 
 export function useExplorerController(): ExplorerController {
   const scope = useScope((s) => s.scope);
-  const writability = useMemo(() => scopeWritable(scope), [scope]);
+  const writability = useMemo(() => explorerReadScope(scope), [scope]);
   const [query, setQuery] = useState('');
   const [submitted, setSubmitted] = useState('');
-  const [activeRunId, setActiveRunId] = useState<string | null>(null);
+  const [run, setRun] = useState<ExplorerStreamSnapshot>();
+  const [transport, setTransport] = useState<{ state: DashboardDomainStateV1; detail?: string }>();
+  const [cancelling, setCancelling] = useState(false);
   const [laneFilter, setLaneFilter] = useState<LaneId | null>(null);
   const [facet, setFacet] = useState<ExplorerFacet | null>(null);
   const [selected, setSelected] = useState<Hit | null>(null);
   const [peeked, setPeeked] = useState<Hit | null>(null);
   const searching = submitted !== '';
   const terms = useMemo(() => queryTerms(submitted), [submitted]);
-  // A superseded POST can still be admitted after a newer search or after
-  // unmount. Its accepted run must be explicitly cancelled, not orphaned.
   const requestGeneration = useRef(0);
-  const acceptedRun = useRef<AcceptedPlannerRun | null>(null);
-  const retireAcceptedRun = () => {
-    const previous = acceptedRun.current;
-    acceptedRun.current = null;
-    if (previous !== null) void cancelPlannerQuery(previous.scope, previous.id);
+  const activeRequest = useRef<AbortController | null>(null);
+  const retireRequest = () => {
+    activeRequest.current?.abort();
+    activeRequest.current = null;
   };
   useEffect(() => {
     return () => {
       requestGeneration.current += 1;
-      const previous = acceptedRun.current;
-      acceptedRun.current = null;
-      if (previous !== null) void cancelPlannerQuery(previous.scope, previous.id);
+      activeRequest.current?.abort();
+      activeRequest.current = null;
     };
   }, []);
-
-  const planner = useMutation({
-    mutationFn: async (request: PlannerRequest) => {
-      const result = await createPlannerQuery(request.scope, request.query);
-      if (result.outcome === 'envelope') {
-        const run = result.envelope.payload;
-        const live = !runIsTerminal(run.state);
-        // Record ownership as soon as the daemon admits the request. The
-        // observer can unmount before React Query runs its success callbacks.
-        if (request.generation === requestGeneration.current) {
-          acceptedRun.current = live ? { id: run.run_id, scope: request.scope } : null;
-          setActiveRunId(run.run_id);
-        } else if (live) {
-          void cancelPlannerQuery(request.scope, run.run_id);
-        }
-      }
-      return result;
-    },
-  });
-  const activeRunIdForQuery = activeRunId ?? '';
-  // `fetchEnvelope` reports a transport failure as data rather than throwing,
-  // so react-query's own failure count never moves and cannot pace the retry
-  // below. This is that count, how far down the backoff ladder the poll has
-  // walked, reset by the first read that lands an envelope.
-  const transportFailures = useRef(0);
-  const runStatus = useQuery({
-    queryKey: ['explorer', 'query-run', scopeKey(scope), activeRunIdForQuery],
-    queryFn: async () => {
-      const result = await readPlannerQuery(scope, activeRunIdForQuery);
-      transportFailures.current = result.outcome === 'transport' ? transportFailures.current + 1 : 0;
-      return result;
-    },
-    enabled: activeRunIdForQuery !== '',
-    refetchInterval: (queryState) => {
-      const result = queryState.state.data;
-      // No data yet: the first read has not landed, keep the fast tick.
-      if (result === undefined) return 250;
-      if (result.outcome === 'transport') {
-        // This poll is the only thing that resolves an admitted run, run
-        // completion publishes no targeted invalidation, so a transport
-        // failure a repeat read could clear must not end it, at any count: a
-        // run whose daemon blinks more times than some budget allows is still
-        // a live run, and abandoning it is the stuck surface this poll exists
-        // to prevent. What is bounded is the rate, not the attempts. A
-        // standing refusal still stops immediately, because re-asking it only
-        // ever gets the same answer.
-        if (!RETRYABLE_TRANSPORT_STATES.has(result.state)) return false;
-        return transportBackoffMs(transportFailures.current);
-      }
-      if (runIsTerminal(result.envelope.payload.state)) return false;
-      // A long-pending run escalates off the fast tick rather than holding
-      // 250 ms for its whole life: 250 ms → 1 s → 2 s.
-      const reads = queryState.state.dataUpdateCount;
-      if (reads <= 4) return 250;
-      return reads <= 8 ? 1000 : 2000;
-    },
-  });
-  const cancelRun = useMutation({
-    mutationFn: (runId: string) => cancelPlannerQuery(scope, runId),
-    onSuccess: () => {
-      void runStatus.refetch();
-    },
-  });
-  const runResult = runStatus.data ?? planner.data;
-  const run =
-    runResult?.outcome === 'envelope' && runResult.envelope.payload.request.query === submitted
-      ? runResult.envelope.payload
-      : undefined;
-  const currentRunId = run?.run_id;
-  const currentRunState = run?.state;
-  useEffect(() => {
-    // A completed read no longer needs an explicit cancel on unmount/reset.
-    if (
-      currentRunId !== undefined &&
-      currentRunState !== undefined &&
-      runIsTerminal(currentRunState) &&
-      acceptedRun.current?.id === currentRunId
-    ) {
-      acceptedRun.current = null;
-    }
-  }, [currentRunId, currentRunState]);
 
   const graphBrowse = useEnvelope(
     ['explorer', 'graph-overview'],
@@ -360,14 +265,9 @@ export function useExplorerController(): ExplorerController {
     () =>
       LANES.map((spec): ExplorerLaneReadModel => {
         if (searching) {
-          // A run is created with a POST, and the project gateway refuses
-          // writes for every project but the active one. The gate is read
-          // here, before any request, so a refused scope is rendered from the
-          // scope authority's own reason and nothing is asked of a daemon that
-          // would have to say no.
           const refused = laneFromScope(spec.id, writability);
           if (refused !== null) return refused;
-          return searchLane(spec.id, runResult, submitted, terms);
+          return searchLane(spec.id, run, transport, submitted, terms);
         }
         switch (spec.id) {
           case 'code':
@@ -407,7 +307,8 @@ export function useExplorerController(): ExplorerController {
       lcmBrowsePending,
       memoryData,
       memoryPending,
-      runResult,
+      run,
+      transport,
       searching,
       submitted,
       terms,
@@ -431,23 +332,47 @@ export function useExplorerController(): ExplorerController {
 
   const dispatch = (nextQuery: string) => {
     requestGeneration.current += 1;
-    retireAcceptedRun();
-    setActiveRunId(null);
-    // A fresh run starts at the top of the backoff ladder: the previous
-    // run's failures are not this one's, and must not slow its first reads.
-    transportFailures.current = 0;
-    planner.reset();
-    // Nothing is dispatched under a scope that will refuse it; the lanes
-    // render the refusal instead.
-    if (writability.state === 'writable') {
-      planner.mutate({ query: nextQuery, scope, generation: requestGeneration.current });
-    }
+    retireRequest();
+    setRun(undefined);
+    setTransport(undefined);
+    setCancelling(false);
+    if (writability.state !== 'writable') return;
+    const generation = requestGeneration.current;
+    const controller = new AbortController();
+    activeRequest.current = controller;
+    setRun({ query: nextQuery, state: 'pending', elapsed_micros: 0, sources: [] });
+    void readExplorerStream(scope, nextQuery, controller.signal, (event) => {
+      if (controller.signal.aborted || generation !== requestGeneration.current) return;
+      setRun((current) => {
+        if (
+          controller.signal.aborted ||
+          generation !== requestGeneration.current ||
+          current?.query !== nextQuery
+        ) return current;
+        if (event.kind === 'final') {
+          return { ...current, state: event.state, elapsed_micros: event.elapsed_micros };
+        }
+        return {
+          ...current,
+          sources: [
+            ...current.sources.filter((source) => source.source_id !== event.source.source_id),
+            event.source,
+          ],
+        };
+      });
+    }).catch((error: unknown) => {
+      if (controller.signal.aborted || generation !== requestGeneration.current) return;
+      setTransport({
+        state: error instanceof ExplorerHttpError ? error.state
+          : error instanceof TypeError ? 'offline' : 'error',
+        detail: error instanceof Error ? error.message : 'Explorer stream failed',
+      });
+    }).finally(() => {
+      if (activeRequest.current === controller) activeRequest.current = null;
+    });
   };
 
-  // The rows on screen must belong to the scope in the register. When the
-  // scope changes under a submitted query, a project selected, a deep link
-  // resolving from `unresolved` to `active`, the run is re-created against
-  // the new scope rather than left showing the old project's answer.
+  // A scope change aborts the old project read before starting the new one.
   const requestScope = `${scopeKey(scope)}:${writability.state}`;
   const lastRequestScope = useRef(requestScope);
   useEffect(() => {
@@ -457,30 +382,29 @@ export function useExplorerController(): ExplorerController {
     setSelected(null);
     setPeeked(null);
     dispatch(submitted);
-    // `dispatch` closes over the current planner and writability; the scope
-    // key is the only trigger this effect is meant to have.
+    // The scope key is the only trigger; dispatch uses the current scope.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [requestScope]);
 
   const reset = () => {
     requestGeneration.current += 1;
-    retireAcceptedRun();
+    retireRequest();
     setQuery('');
     setSubmitted('');
-    setActiveRunId(null);
-    transportFailures.current = 0;
-    planner.reset();
+    setRun(undefined);
+    setTransport(undefined);
+    setCancelling(false);
     setFacet(null);
     setSelected(null);
     setPeeked(null);
   };
 
   const runProgress: RunProgress | null =
-    run === undefined || run.sources.length === 0
+    run === undefined
       ? null
       : {
-          concluded: run.sources.filter((source) => source.outcome !== 'pending').length,
-          total: run.sources.length,
+          concluded: run.sources.length,
+          total: 3,
         };
 
   return {
@@ -495,18 +419,19 @@ export function useExplorerController(): ExplorerController {
     anyPending: lanes.some((lane) => lanePending(lane)),
     unansweredLanes: lanes.filter((lane) => !laneAnswered(lane) && !lanePending(lane)),
     answeredLaneCount: lanes.filter((lane) => laneAnswered(lane)).length,
-    // A confirmed global absence is a claim about the whole index, so it is
-    // re-derived from the coordinator's own unit accounting rather than
-    // reprinted from the `finality` scalar. See `absence.ts`.
     absence: absenceVerdict(run),
-    runResult,
+    transport,
     run,
     runProgress,
-    cancelling: cancelRun.isPending,
-    cancel:
-      activeRunId !== null && run?.state === 'pending'
-        ? () => cancelRun.mutate(activeRunId)
-        : undefined,
+    cancelling,
+    cancel: activeRequest.current !== null && run?.state === 'pending'
+      ? () => {
+          requestGeneration.current += 1;
+          retireRequest();
+          setCancelling(true);
+          setRun((current) => current ? { ...current, state: 'cancelled' } : current);
+        }
+      : undefined,
     laneFilter,
     facet,
     selected,
