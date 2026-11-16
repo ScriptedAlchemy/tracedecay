@@ -58,7 +58,7 @@
 **Interfaces:**
 - Consumes: `RegisteredGlobalDb::upsert_code_project(&str, &Path, Option<&Path>, Option<&str>, Option<&str>) -> Result<CodeProjectRecord>`.
 - Consumes: `RegisteredGlobalDb::resolve_project_store_by_identity(&Path, Option<&Path>) -> Result<Option<ProjectStoreResolution>>`.
-- Consumes: `tracedecay_runtime_core::worktree::{git_common_dir, is_linked_worktree}` and `tracedecay_runtime_core::storage::{repository_identity_path, write_repository_identity_marker}`.
+- Consumes: `tracedecay_runtime_core::worktree::{git_common_dir, is_linked_worktree, primary_checkout_root}`, `tracedecay_runtime_core::path_safety::canonical_root_identity`, and `tracedecay_runtime_core::storage::{repository_identity_path, write_repository_identity_marker}`.
 - Consumes: `StoreInstanceUpsert` and the `git`/`repo_with_worktrees` fixture pattern from `project_identity_collapse_test.rs`.
 - Consumes (unchanged guard): `schema_stages::tests::registry_with_non_final_code_project_shape_requires_typed_reset` in `crates/tracedecay-global-db/src/schema_stages.rs`.
 - Produces (private, `project_registry.rs`): `async fn registered_canonical_root(executor, project_id: &str) -> Result<Option<PathBuf>>`, generic over the same executor bound that `alias_project_id` accepts, so both the write transaction and the read snapshot use it.
@@ -78,8 +78,25 @@ Build a primary checkout `main/` with three linked worktrees, `wt1/`, `wt2/`, an
 
 No statement drops, adds, or renames a column. `init` also writes the repository identity marker in the shared common directory (`repository_identity_path(main)`), and resolution reads it before any `git_common_dir` candidate. A marker naming `proj_a` would resolve `wt3` without reading the sibling candidates, so the fixture rewrites it with `write_repository_identity_marker(main, "proj_other")`. That models the production state in which another profile enrolled the repository first: this profile holds no store for `proj_other`, so resolution falls through to the candidates. Record in the lane report that a marker naming `proj_a` resolves first.
 
-Write `new_worktree_with_two_sibling_worktree_shards_resolves_to_the_primary_store`. It runs `tracedecay tool active_project --args '{}'` with `cwd = wt3` and asserts:
-- exit 0, with `assert!(output.status.success(), "active_project from a new worktree failed: {stderr}")`;
+Write `new_worktree_with_two_sibling_worktree_shards_resolves_to_the_primary_store`. Before it runs the tool, the test builds the pre-fix conflict text from the fixture it just created. A writable open from `wt3` registers the primary checkout, not `wt3`. `register_project_store` passes `primary_checkout_root(wt3, git_common_dir(wt3))` to `upsert_code_project`, whose conflict message prints that root through `canonical_root_identity` and the ids in `BTreeSet` order. The test derives both the same way and never spells `main/`, `wt3`, or a temp path by hand:
+
+```rust
+let registered_root = canonical_root_identity(
+    &primary_checkout_root(&wt3, git_common_dir(&wt3).as_deref())
+        .expect("wt3 is a linked worktree of the fixture's primary checkout"),
+);
+let authorities = BTreeSet::from([proj_a.as_str(), proj_b, proj_c])
+    .into_iter()
+    .collect::<Vec<_>>()
+    .join(", ");
+let pre_fix_conflict = format!(
+    "conflicting project authorities [{authorities}] already claim '{}'",
+    registered_root.display()
+);
+```
+
+It then runs `tracedecay tool active_project --args '{}'` with `cwd = wt3` and asserts:
+- exit 0, with `assert!(output.status.success(), "active_project from a new worktree failed (pre-fix conflict in stderr: {}): {stderr}", stderr.contains(&pre_fix_conflict))`;
 - the reported project id is `proj_a`;
 - `projects search` still lists exactly `proj_a`, `proj_b`, and `proj_c` (no row rewritten or deleted).
 
@@ -91,7 +108,7 @@ Run the reproduction directly:
 
 `bazel test //crates/tracedecay:storage_suite --test_output=all --test_arg=sibling_worktree_shard_resolution_test::new_worktree_with_two_sibling_worktree_shards_resolves_to_the_primary_store --test_arg=--exact`
 
-Expected red: Bazel exits nonzero, and the log shows `test sibling_worktree_shard_resolution_test::new_worktree_with_two_sibling_worktree_shards_resolves_to_the_primary_store ... FAILED`, the panic text `active_project from a new worktree failed:`, and `test result: FAILED. 0 passed; 1 failed`. The quoted stderr must carry one of the two final-schema sibling errors: the multi-authority error `conflicting project authorities [proj_a, proj_b, proj_c] already claim '<wt3>'`, or the `project_identity_conflict` route error naming the sibling ids. Record which one. A schema `ResetRequired` (`incompatible number of columns`) or any other error is not the reproduction; fix the fixture.
+Expected red: Bazel exits nonzero, and the log shows `test sibling_worktree_shard_resolution_test::new_worktree_with_two_sibling_worktree_shards_resolves_to_the_primary_store ... FAILED`, the panic text `active_project from a new worktree failed (pre-fix conflict in stderr: true):`, and `test result: FAILED. 0 passed; 1 failed`. The `true` means stderr carries `conflicting project authorities [proj_a, proj_b, proj_c] already claim '<registered_root>'` exactly, with the ids and root Step 1 derived. It comes from the writable open's upsert of the primary checkout, whose `code_projects.git_common_dir` query returns all three ids. The `project_identity_conflict` route cannot produce it in this fixture. From `wt3` that route finds no held marker and no `wt3` root alias, and the common-dir alias names `proj_a` alone. Quote the conflict line from the stderr in the lane report. A run that shows `pre-fix conflict in stderr: false` is not the reproduction; fix the fixture. That covers a schema `ResetRequired` (`incompatible number of columns`), a conflict naming `wt3`, a `project_identity_conflict` route error, and any other error.
 
 Then run both guards through the helper:
 
