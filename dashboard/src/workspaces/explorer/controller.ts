@@ -17,7 +17,7 @@ import {
 } from '../../contracts/generated.ts';
 import { dashboardFetch } from '../../data/auth/credential.ts';
 import { fetchEnvelope, type EnvelopeResult } from '../../data/query/envelope.ts';
-import { decodeJsonBody } from '../../data/query/responseBody.ts';
+import { decodeJsonBody, isRecord } from '../../data/query/responseBody.ts';
 import { useEnvelope } from '../../data/query/useEnvelope.ts';
 import {
   scopeKey,
@@ -54,6 +54,14 @@ class ExplorerHttpError extends Error {
   }
 }
 
+/** The daemon's own sentence from a non-envelope problem body, so a refusal
+ * keeps its exact reason instead of collapsing to the HTTP status. */
+function problemDetail(body: unknown): string | undefined {
+  if (!isRecord(body)) return undefined;
+  const detail = body.detail;
+  return typeof detail === 'string' && detail !== '' ? detail : undefined;
+}
+
 /** The selected project gateway resolves the exact project before any read. */
 export async function readExplorerStream(
   scope: DashboardScope,
@@ -71,10 +79,10 @@ export async function readExplorerStream(
     signal,
   });
   const contentType = response.headers.get('content-type') ?? '';
+  let body: unknown;
   if (contentType.includes('application/json')) {
-    const parsed = DashboardEnvelopeV1Schema(z.unknown()).safeParse(
-      await decodeJsonBody(response, signal),
-    );
+    body = await decodeJsonBody(response, signal);
+    const parsed = DashboardEnvelopeV1Schema(z.unknown()).safeParse(body);
     if (parsed.success && parsed.data.domain_state !== 'ready') {
       throw new ExplorerHttpError(
         parsed.data.domain_state,
@@ -87,6 +95,7 @@ export async function readExplorerStream(
     throw new ExplorerHttpError(
       response.status === 401 ? 'unauthorized' : response.status === 403 ? 'denied' : 'error',
       response.status,
+      problemDetail(body),
     );
   }
   if (!contentType.startsWith('text/event-stream')) {
@@ -97,6 +106,7 @@ export async function readExplorerStream(
   const decoder = new TextDecoder();
   let buffer = '';
   let final = false;
+  let failure: unknown;
   try {
     while (!final) {
       const { done, value } = await reader.read();
@@ -122,10 +132,19 @@ export async function readExplorerStream(
       }
     }
     if (!final && !signal.aborted) throw new Error('Explorer stream ended without a final frame');
-  } finally {
+  } catch (error) {
+    failure = error;
+  }
+  try {
     await reader.cancel();
+  } catch (error) {
+    // A cleanup failure cannot change what the sources already reported, so it
+    // becomes the error only when the read itself never concluded.
+    if (!final) failure ??= error;
+  } finally {
     reader.releaseLock();
   }
+  if (failure !== undefined) throw failure;
 }
 
 function readSessionSize(
@@ -340,7 +359,7 @@ export function useExplorerController(): ExplorerController {
     const generation = requestGeneration.current;
     const controller = new AbortController();
     activeRequest.current = controller;
-    setRun({ query: nextQuery, state: 'pending', elapsed_micros: 0, sources: [] });
+    setRun({ query: nextQuery, state: 'pending', elapsed_micros: null, sources: [] });
     void readExplorerStream(scope, nextQuery, controller.signal, (event) => {
       if (controller.signal.aborted || generation !== requestGeneration.current) return;
       setRun((current) => {
@@ -404,7 +423,7 @@ export function useExplorerController(): ExplorerController {
       ? null
       : {
           concluded: run.sources.length,
-          total: 3,
+          total: LANES.length,
         };
 
   return {

@@ -35,8 +35,7 @@ function progress(over: Record<string, unknown>): ExplorerSourceProgressV1 {
   return ExplorerSourceProgressV1Schema.parse({
     source_id: 'code_graph',
     source_label: 'Code graph',
-    phase: 'completed',
-    outcome: 'ready',
+        outcome: 'ready',
     completed_units: 0,
     total_units: 0,
     coverage: {

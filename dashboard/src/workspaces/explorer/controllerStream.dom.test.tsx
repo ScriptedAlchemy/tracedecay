@@ -72,8 +72,7 @@ it('superseded_explorer_stream_cannot_replace_new_results', async () => {
   const source = (query: string) => ({
     kind: 'source',
     source: {
-      source_id: 'code_graph', source_label: 'Code graph', phase: 'completed',
-      outcome: 'ready', completed_units: 1, total_units: 1,
+      source_id: 'code_graph', source_label: 'Code graph', outcome: 'ready', completed_units: 1, total_units: 1,
       coverage: { completeness: 'complete', eligible: 1, examined: 1, matched: 1,
         excluded: 0, omitted: 0, unknown: 0, denominator: 1, unit: 'symbols',
         omission_reasons: [] },
@@ -131,8 +130,7 @@ it('reports premature EOF without hiding a delivered source', async () => {
   const source = {
     kind: 'source',
     source: {
-      source_id: 'code_graph', source_label: 'Code graph', phase: 'completed',
-      outcome: 'ready', completed_units: 0, total_units: 0,
+      source_id: 'code_graph', source_label: 'Code graph', outcome: 'ready', completed_units: 0, total_units: 0,
       coverage: { completeness: 'complete', eligible: 0, examined: 0, matched: 0,
         excluded: 0, omitted: 0, unknown: 0, denominator: 0, unit: 'symbols',
         omission_reasons: [] },
@@ -160,6 +158,84 @@ it('reports premature EOF without hiding a delivered source', async () => {
       detail: 'Explorer stream ended without a final frame',
     });
     expect(view.result.current.absence.confirmed).toBe(false);
+  } finally {
+    view.unmount();
+  }
+});
+
+it('keeps a terminal outcome when stream cleanup fails', async () => {
+  const encoder = new TextEncoder();
+  vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+    if (init?.method !== 'POST' || !String(input).endsWith('/api/explorer/queries')) {
+      return jsonResponse(404, { error: 'not found' });
+    }
+    return new Response(new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(encoder.encode('data: {"kind":"final","state":"completed","elapsed_micros":7}\n\n'));
+      },
+      cancel() {
+        throw new Error('cleanup failed');
+      },
+    }), { status: 200, headers: { 'content-type': 'text/event-stream' } });
+  }));
+  const view = renderHook(() => useExplorerController(), { wrapper });
+  try {
+    await act(async () => {
+      view.result.current.submit('graph');
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    expect(view.result.current.run?.state).toBe('completed');
+    expect(view.result.current.run?.elapsed_micros).toBe(7);
+    expect(view.result.current.transport).toBeUndefined();
+  } finally {
+    view.unmount();
+  }
+});
+
+it('preserves the read error when stream cleanup also fails', async () => {
+  const encoder = new TextEncoder();
+  vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+    if (init?.method !== 'POST' || !String(input).endsWith('/api/explorer/queries')) {
+      return jsonResponse(404, { error: 'not found' });
+    }
+    return new Response(new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(encoder.encode('data: not-json\n\n'));
+      },
+      cancel() {
+        throw new Error('cleanup failed');
+      },
+    }), { status: 200, headers: { 'content-type': 'text/event-stream' } });
+  }));
+  const view = renderHook(() => useExplorerController(), { wrapper });
+  try {
+    await act(async () => {
+      view.result.current.submit('graph');
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    expect(view.result.current.transport?.state).toBe('error');
+    expect(view.result.current.transport?.detail).not.toBe('cleanup failed');
+  } finally {
+    view.unmount();
+  }
+});
+
+it('keeps the daemon sentence from a non-envelope refusal', async () => {
+  vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) =>
+    init?.method === 'POST' && String(input).endsWith('/api/explorer/queries')
+      ? jsonResponse(503, { detail: 'exact registered project scope is unavailable' })
+      : jsonResponse(404, { error: 'not found' }),
+  ));
+  const view = renderHook(() => useExplorerController(), { wrapper });
+  try {
+    await act(async () => {
+      view.result.current.submit('graph');
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    expect(view.result.current.transport).toMatchObject({
+      state: 'error',
+      detail: 'exact registered project scope is unavailable',
+    });
   } finally {
     view.unmount();
   }

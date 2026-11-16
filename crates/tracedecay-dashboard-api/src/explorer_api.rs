@@ -82,13 +82,6 @@ pub(super) enum ExplorerRunStateV1 {
     Error,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, JsonSchema)]
-#[serde(rename_all = "snake_case")]
-pub(super) enum ExplorerSourcePhaseV1 {
-    Completed,
-    Cancelled,
-}
-
 /// What one source truthfully concluded for this run. Every member has a real
 /// producer; none is speculative:
 /// - `Partial`: the source answered with rows but its own read reported
@@ -122,7 +115,6 @@ pub(super) struct ExplorerResultPageV1 {
 pub(super) struct ExplorerSourceProgressV1 {
     source_id: ExplorerSourceIdV1,
     source_label: &'static str,
-    phase: ExplorerSourcePhaseV1,
     outcome: ExplorerSourceOutcomeV1,
     completed_units: Option<u64>,
     total_units: Option<u64>,
@@ -143,7 +135,6 @@ impl ExplorerSourceProgressV1 {
         Self {
             source_id,
             source_label: source_id.label(),
-            phase: ExplorerSourcePhaseV1::Completed,
             outcome: ExplorerSourceOutcomeV1::Unavailable,
             completed_units: None,
             total_units: None,
@@ -483,16 +474,11 @@ fn code_graph_error(error: crate::graph::CodeGraphReadError) -> ExplorerSourcePr
             "graph_generation_stale",
             detail,
         ),
-        CodeGraphReadError::Cancelled => {
-            let mut source = ExplorerSourceProgressV1::unavailable(
-                ExplorerSourceIdV1::CodeGraph,
-                "graph_read_cancelled",
-                "the graph read was cancelled",
-            );
-            source.phase = ExplorerSourcePhaseV1::Cancelled;
-            source.outcome = ExplorerSourceOutcomeV1::Cancelled;
-            source
-        }
+        CodeGraphReadError::Cancelled => ExplorerSourceProgressV1::cancelled(
+            ExplorerSourceIdV1::CodeGraph,
+            "graph_read_cancelled",
+            "the graph read was cancelled",
+        ),
         CodeGraphReadError::TimedOut => ExplorerSourceProgressV1::timed_out(
             ExplorerSourceIdV1::CodeGraph,
             "graph_read_timed_out",
@@ -647,7 +633,6 @@ fn ready_source(
     ExplorerSourceProgressV1 {
         source_id,
         source_label: source_id.label(),
-        phase: ExplorerSourcePhaseV1::Completed,
         outcome: ExplorerSourceOutcomeV1::Ready,
         completed_units: Some(completed),
         total_units: total,
@@ -1371,6 +1356,80 @@ mod native_tests {
         assert_eq!(frames[2]["source"]["outcome"], "cancelled");
         assert_eq!(frames[3]["kind"], "final");
         assert_eq!(frames[3]["state"], "cancelled");
+    }
+
+    #[test]
+    fn request_deadline_concludes_each_missing_source_once() {
+        let fixture = tokio::runtime::Runtime::new().expect("fixture runtime");
+        let (_project, mut dash) = fixture.block_on(crate::events_api::dashboard_state_fixture(
+            "project.dashboard-explorer-deadline",
+        ));
+        dash.lcm_read_authority = Some(Arc::new(HeldSessions {
+            started: Arc::new(Notify::new()),
+            release: Arc::new(Notify::new()),
+            dropped: Arc::new(AtomicBool::new(false)),
+        }));
+        let frames = native_runtime::block_on(async {
+            let control = DashboardHttpRequestControlV1::test_fixture_with(
+                "explorer-deadline",
+                tracedecay_contracts::CancellationSignal::active("cancel.explorer-deadline")
+                    .expect("test cancellation"),
+                tracedecay_domain::UtcMicros(1),
+                tracedecay_domain::UtcMicros(1),
+            );
+            let response = stream_query(
+                State(dash),
+                RequestControl(control),
+                Json(ExplorerQueryRequestV1 {
+                    query: "fixture".to_owned(),
+                    limit: 1,
+                    offset: 0,
+                }),
+            )
+            .await;
+            let mut body = response.into_body();
+            let mut frames = Vec::new();
+            loop {
+                let frame = next_frame(&mut body).await;
+                let final_frame = frame["kind"] == "final";
+                frames.push(frame);
+                if final_frame {
+                    break;
+                }
+            }
+            let eof = native_runtime::timeout(Duration::from_secs(15), async {
+                std::future::poll_fn(|cx| Pin::new(&mut body).poll_frame(cx)).await
+            })
+            .await
+            .expect("stream ends after terminal frame");
+            assert!(eof.is_none(), "stream emitted more than one terminal frame");
+            frames
+        })
+        .expect("native block_on");
+        assert_eq!(frames.len(), 4, "three sources then one terminal frame");
+        assert_eq!(
+            frames
+                .iter()
+                .filter(|frame| frame["kind"] == "final")
+                .count(),
+            1
+        );
+        let sources: Vec<&Value> = frames
+            .iter()
+            .filter(|frame| frame["kind"] == "source")
+            .collect();
+        assert_eq!(sources.len(), 3);
+        for source_id in ["code_graph", "sessions", "knowledge"] {
+            let source = sources
+                .iter()
+                .find(|frame| frame["source"]["source_id"] == source_id)
+                .map(|frame| &frame["source"])
+                .unwrap_or_else(|| panic!("deadline must conclude {source_id}"));
+            assert_eq!(source["outcome"], "timed_out", "{source}");
+            assert_eq!(source["error_code"], "request_deadline_elapsed");
+            assert!(source["page"].is_null());
+        }
+        assert_eq!(frames[3]["state"], "timed_out");
     }
 
     #[test]

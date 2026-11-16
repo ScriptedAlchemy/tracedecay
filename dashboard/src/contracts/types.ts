@@ -2538,8 +2538,6 @@ export type ExplorerSourceIdV1 = "code_graph" | "knowledge" | "sessions";
 
 export type ExplorerSourceOutcomeV1 = "cancelled" | "error" | "partial" | "ready" | "stale" | "timed_out" | "unavailable";
 
-export type ExplorerSourcePhaseV1 = "cancelled" | "completed";
-
 export type ExplorerSourceProgressV1 = {
   completed_units: number | null;
   coverage: DashboardCoverageV1;
@@ -2548,7 +2546,6 @@ export type ExplorerSourceProgressV1 = {
   message: string | null;
   outcome: ExplorerSourceOutcomeV1;
   page: ExplorerResultPageV1 | null;
-  phase: ExplorerSourcePhaseV1;
   source_id: ExplorerSourceIdV1;
   source_label: string;
   total_units: number | null;

@@ -5,9 +5,7 @@ use std::time::{Duration, Instant};
 use tracedecay_contracts::Deadline;
 use tracedecay_runtime_core::native_runtime;
 
-use super::{
-    ExplorerSourceIdV1, ExplorerSourceOutcomeV1, ExplorerSourcePhaseV1, ExplorerSourceProgressV1,
-};
+use super::{ExplorerSourceIdV1, ExplorerSourceOutcomeV1, ExplorerSourceProgressV1};
 
 impl ExplorerSourceProgressV1 {
     pub(super) fn cancelled(
@@ -16,7 +14,6 @@ impl ExplorerSourceProgressV1 {
         message: impl Into<String>,
     ) -> Self {
         Self {
-            phase: ExplorerSourcePhaseV1::Cancelled,
             outcome: ExplorerSourceOutcomeV1::Cancelled,
             ..Self::unavailable(source_id, error_code, message)
         }

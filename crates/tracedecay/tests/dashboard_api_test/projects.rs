@@ -302,6 +302,44 @@ fn project_scoped_plugin_routes_read_selected_project_store() {
             "active store must not alias selected knowledge: {active_frames:?}"
         );
 
+        // The selected state mounts no exact-project code or session authority,
+        // so those sources report their own unavailability instead of borrowing
+        // the active project's ports.
+        let selected_source = |source_id: &str| {
+            selected_frames
+                .iter()
+                .filter_map(|frame| frame.get("source"))
+                .find(|source| source["source_id"] == source_id)
+                .unwrap_or_else(|| panic!("selected project {source_id} frame: {selected_frames:?}"))
+        };
+        let selected_code = selected_source("code_graph");
+        assert_eq!(selected_code["outcome"], "unavailable", "{selected_frames:?}");
+        assert_eq!(selected_code["error_code"], "missing_registry");
+        assert!(selected_code["page"].is_null());
+        let selected_sessions = selected_source("sessions");
+        assert_eq!(
+            selected_sessions["outcome"], "unavailable",
+            "{selected_frames:?}"
+        );
+        assert_eq!(
+            selected_sessions["error_code"],
+            "lcm_daemon_authority_unavailable"
+        );
+        assert!(selected_sessions["page"].is_null());
+
+        // Only the Explorer POST-shaped read is admitted for a selected project;
+        // every other write still meets the read-only gateway refusal.
+        let (settings_status, settings_body) = patch_json_body(
+            &agent,
+            &format!(
+                "{}/api/projects/{target_project_id}/settings/project",
+                fixture.base_url
+            ),
+            &serde_json::json!({ "patch": {} }),
+        );
+        assert_eq!(settings_status, 405, "{settings_body}");
+        assert_eq!(settings_body["status"], "read_only_project");
+
         let foreign = crate::common::http_call_with_retry("foreign Explorer POST", || {
             agent
                 .post(&format!(

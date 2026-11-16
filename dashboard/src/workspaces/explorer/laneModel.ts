@@ -43,7 +43,10 @@ const LANE_SOURCE_ID: Record<LaneId, ExplorerSourceIdV1> = {
 export interface ExplorerStreamSnapshot {
   readonly query: string;
   readonly state: ExplorerRunStateV1 | 'pending';
-  readonly elapsed_micros: number;
+  /** The coordinator's own terminal timing, or `null` until the terminal frame
+   * arrives. A pending or client-cancelled run has no measured duration, so it
+   * reports none rather than a fabricated zero. */
+  readonly elapsed_micros: number | null;
   readonly sources: readonly ExplorerSourceProgressV1[];
 }
 
@@ -141,9 +144,8 @@ export type ExplorerLaneReadModel =
   | { readonly state: 'unauthorized'; readonly lane: LaneId }
   /** The daemon knows the identity and will not serve this scope. */
   | { readonly state: 'denied'; readonly lane: LaneId }
-  /** The project gateway serves the selected scope read-only, so the query
-   * run this lane needs cannot be created there. Nothing was dispatched;
-   * `detail` is the scope authority's own sentence. */
+  /** The scope authority refuses this read, so nothing was dispatched;
+   * `detail` is the authority's own sentence. */
   | { readonly state: 'locked'; readonly lane: LaneId; readonly detail: string }
   /** The response did not decode against the contract. */
   | { readonly state: 'unsupported_schema'; readonly lane: LaneId }
@@ -159,14 +161,15 @@ export type ExplorerLaneReadModel =
     };
 
 /**
- * The lane's condition when the current scope will not accept the query run.
+ * The lane's condition when the current scope will not accept the query read.
  *
- * Creating a run is a POST, and the project gateway refuses every non-read
- * request for a project that is not the active one. The controller consults
- * the scope authority before dispatching, so a refused scope is rendered from
- * its reason rather than from a 405 the daemon would have had to send back , 
- * and a scope the registry has not yet resolved is `unknown`, not refused.
- * Returns `null` when the scope is writable and the run may proceed.
+ * The exact selected-project Explorer POST is admitted, so a registered
+ * selected project is writable here. The scope authority still refuses a scope
+ * it cannot resolve, such as a link naming a project the registry no longer
+ * holds. The controller consults it before dispatching, so a refused scope is
+ * rendered from its reason rather than from a daemon refusal, and a scope the
+ * registry has not yet resolved is `unknown`, not refused. Returns `null` when
+ * the scope is writable and the read may proceed.
  */
 export function laneFromScope(
   lane: LaneId,
@@ -363,10 +366,10 @@ export function laneFromTransport(
       return { state: 'cancelled', lane, errorCode: null, detail };
     case 'error':
       return { state: 'error', lane, errorCode: null, detail };
-    // The gateway refused the run as a write against a read-only scope. The
-    // controller normally catches this before dispatch, so reaching it here
-    // means the scope changed under an in-flight read; the daemon's sentence
-    // is carried as the detail either way.
+    // The scope authority refused this read as a write against a read-only
+    // scope. The controller normally catches this before dispatch, so reaching
+    // it here means the scope changed under an in-flight read; the daemon's
+    // sentence is carried as the detail either way.
     case 'locked':
       return {
         state: 'locked',

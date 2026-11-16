@@ -20,7 +20,6 @@ function serve(routes: Record<string, Route>) {
       return new Response(new ReadableStream({
         start(controller) {
           for (const item of body.sources) {
-            if (item.outcome === 'pending') continue;
             controller.enqueue(encoder.encode(`data: ${JSON.stringify({ kind: 'source', source: item })}\n\n`));
           }
           if (body.state !== 'pending') {
@@ -116,7 +115,6 @@ function source(sourceId: SourceId, rows: Record<string, unknown>[], total: numb
   return {
     source_id: sourceId,
     source_label: SOURCE_LABELS[sourceId],
-    phase: 'completed',
     outcome: 'ready',
     completed_units: rows.length,
     total_units: total,
@@ -148,23 +146,12 @@ function source(sourceId: SourceId, rows: Record<string, unknown>[], total: numb
   };
 }
 
-/** A source the coordinator is still reading. */
-function reading(sourceId: SourceId) {
-  const base = source(sourceId, [], null);
-  return {
-    ...base,
-    phase: 'reading',
-    outcome: 'pending',
-    completed_units: null,
-    total_units: null,
-    page: null,
-  };
-}
-
+/** A source the coordinator is still reading is expressed by its absence: the
+ * stream carries no frame for it until it concludes. */
 type StreamState = 'pending' | 'partial' | 'completed';
 
 function streamFixture(
-  sources: Array<ReturnType<typeof source> | ReturnType<typeof reading> | ReturnType<typeof withoutAnswer>> = [
+  sources: Array<ReturnType<typeof source> | ReturnType<typeof withoutAnswer>> = [
     source('code_graph', [CODE_ROW], 1),
     source('sessions', [MESSAGE_ROW, SUMMARY_ROW], 2),
     source('knowledge', [FACT_ROW], null),
@@ -247,7 +234,6 @@ function withoutAnswer(
   return {
     ...base,
     outcome,
-    phase: outcome === 'cancelled' ? 'cancelled' : 'completed',
     freshness: 'unknown',
     watermark: null,
     completed_units: null,
@@ -320,12 +306,16 @@ describe('ExplorerPage independent lane lifecycle', () => {
     await screen.findByRole('button', { name: /graph_search/ });
     expect(lane('Sessions').getAttribute('data-lane-state')).toBe('pending');
     expect(screen.getByRole('img', { name: '1 of 3 sources concluded' })).toBeTruthy();
+    // A pending run has no measured duration yet, so it reports none.
+    expect(document.querySelector('[data-run-register]')?.textContent).not.toMatch(/\d+ ms/);
     await act(async () => { finish(); });
     await waitFor(() => {
       expect(lane('Sessions').getAttribute('data-lane-state')).toBe('stale');
       expect(lane('Knowledge').getAttribute('data-lane-state')).toBe('unavailable');
       expect(document.querySelector('[data-run-register]')?.getAttribute('data-run-state')).toBe('partial');
     });
+    // The terminal frame carries the coordinator's own timing.
+    expect(document.querySelector('[data-run-register]')?.textContent).toMatch(/9 ms/);
     expect(screen.getByRole('button', { name: /graph_search/ })).toBeTruthy();
   });
 
@@ -375,7 +365,7 @@ describe('ExplorerPage independent lane lifecycle', () => {
       '/api/explorer/queries': {
         status: 200,
         body: streamFixture(
-          [source('code_graph', [CODE_ROW], 1), reading('sessions'), reading('knowledge')],
+          [source('code_graph', [CODE_ROW], 1)],
           'pending',
         ),
       },
@@ -398,7 +388,7 @@ describe('ExplorerPage independent lane lifecycle', () => {
       '/api/explorer/queries': {
         status: 200,
         body: streamFixture(
-          [source('code_graph', [CODE_ROW], 1), reading('sessions'), reading('knowledge')],
+          [source('code_graph', [CODE_ROW], 1)],
           'pending',
         ),
       },

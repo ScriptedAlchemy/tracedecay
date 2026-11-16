@@ -93,9 +93,11 @@ export function RunRegister({
           <span className="text-sm text-text-muted">sources concluded</span>
         </span>
       ) : null}
-      <span className="td-value text-xs text-text-muted" data-cell="numeric">
-        {Math.round(run.elapsed_micros / 1_000).toLocaleString()} ms
-      </span>
+      {run.elapsed_micros !== null ? (
+        <span className="td-value text-xs text-text-muted" data-cell="numeric">
+          {Math.round(run.elapsed_micros / 1_000).toLocaleString()} ms
+        </span>
+      ) : null}
       {onCancel ? (
         <button
           type="button"

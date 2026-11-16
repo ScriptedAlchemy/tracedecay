@@ -31,7 +31,6 @@ fn explorer_query_coordinates_real_sources_without_inventing_a_merge() {
                 .iter()
                 .find(|source| source["source_id"] == source_id)
                 .unwrap_or_else(|| panic!("missing {source_id} source: {completed}"));
-            assert_eq!(source["phase"], "completed");
             assert_eq!(
                 source["outcome"], "ready",
                 "{source_id} source must be ready: {source}"

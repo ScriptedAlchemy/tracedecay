@@ -13793,13 +13793,6 @@
       ],
       "type": "string"
     },
-    "ExplorerSourcePhaseV1": {
-      "enum": [
-        "completed",
-        "cancelled"
-      ],
-      "type": "string"
-    },
     "ExplorerSourceProgressV1": {
       "properties": {
         "completed_units": {
@@ -13841,9 +13834,6 @@
             }
           ]
         },
-        "phase": {
-          "$ref": "#/$defs/ExplorerSourcePhaseV1"
-        },
         "source_id": {
           "$ref": "#/$defs/ExplorerSourceIdV1"
         },
@@ -13868,7 +13858,6 @@
       "required": [
         "source_id",
         "source_label",
-        "phase",
         "outcome",
         "completed_units",
         "total_units",

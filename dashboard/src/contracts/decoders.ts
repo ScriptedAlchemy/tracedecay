@@ -322,7 +322,6 @@ import type {
   ExplorerSessionSizeV1,
   ExplorerSourceIdV1,
   ExplorerSourceOutcomeV1,
-  ExplorerSourcePhaseV1,
   ExplorerSourceProgressV1,
   FactArmCoverageV1,
   FactAssertionId,
@@ -4825,8 +4824,6 @@ producer; none is speculative:
 - `TimedOut`: the source's own read exceeded the admitted deadline. */
 export const ExplorerSourceOutcomeV1Schema: z.ZodEnum<{ "cancelled": "cancelled"; "error": "error"; "partial": "partial"; "ready": "ready"; "stale": "stale"; "timed_out": "timed_out"; "unavailable": "unavailable" }> = z.enum(["cancelled", "error", "partial", "ready", "stale", "timed_out", "unavailable"]);
 
-export const ExplorerSourcePhaseV1Schema: z.ZodEnum<{ "cancelled": "cancelled"; "completed": "completed" }> = z.enum(["cancelled", "completed"]);
-
 export const ExplorerSourceProgressV1Schema: z.ZodObject<{
   completed_units: z.ZodType<number | null, unknown>;
   coverage: z.ZodType<DashboardCoverageV1, unknown>;
@@ -4835,7 +4832,6 @@ export const ExplorerSourceProgressV1Schema: z.ZodObject<{
   message: z.ZodType<string | null, unknown>;
   outcome: z.ZodType<ExplorerSourceOutcomeV1, unknown>;
   page: z.ZodType<ExplorerResultPageV1 | null, unknown>;
-  phase: z.ZodType<ExplorerSourcePhaseV1, unknown>;
   source_id: z.ZodType<ExplorerSourceIdV1, unknown>;
   source_label: z.ZodType<string, unknown>;
   total_units: z.ZodType<number | null, unknown>;
@@ -4848,7 +4844,6 @@ export const ExplorerSourceProgressV1Schema: z.ZodObject<{
   message: z.string().nullable(),
   outcome: z.lazy(() => ExplorerSourceOutcomeV1Schema),
   page: z.union([z.lazy(() => ExplorerResultPageV1Schema), z.null()]),
-  phase: z.lazy(() => ExplorerSourcePhaseV1Schema),
   source_id: z.lazy(() => ExplorerSourceIdV1Schema),
   source_label: z.string(),
   total_units: z.number().int().min(0).nullable(),

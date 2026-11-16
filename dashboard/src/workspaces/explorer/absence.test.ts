@@ -33,8 +33,7 @@ function source(id: keyof typeof SOURCE_LABELS, over: Record<string, unknown> = 
   return {
     source_id: id,
     source_label: SOURCE_LABELS[id],
-    phase: 'completed',
-    outcome: 'ready',
+        outcome: 'ready',
     completed_units: 0,
     total_units: 5,
     coverage: coverage(),
