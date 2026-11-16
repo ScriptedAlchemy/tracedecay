@@ -185,7 +185,7 @@ impl ExplorerSourceProgressV1 {
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub(super) enum ExplorerQueryEventV1 {
     Source {
-        source: ExplorerSourceProgressV1,
+        source: Box<ExplorerSourceProgressV1>,
     },
     Final {
         state: ExplorerRunStateV1,
@@ -261,7 +261,9 @@ impl ExplorerStream {
                     ),
                 };
                 self.frames
-                    .push_back(ExplorerQueryEventV1::Source { source });
+                    .push_back(ExplorerQueryEventV1::Source {
+                        source: Box::new(source),
+                    });
             }
         }
         self.frames.push_back(ExplorerQueryEventV1::Final {
@@ -365,7 +367,9 @@ pub async fn stream_query(
             source = stream.tasks.next() => {
                 if let Some(source) = source {
                     stream.sources.push(source.clone());
-                    stream.frames.push_back(ExplorerQueryEventV1::Source { source });
+                    stream.frames.push_back(ExplorerQueryEventV1::Source {
+                        source: Box::new(source),
+                    });
                     if stream.sources.len() == SOURCE_IDS.len() {
                         stream.finish_from_sources();
                     }
