@@ -5,6 +5,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.0-beta.106](https://github.com/ScriptedAlchemy/tracedecay/compare/v1.0.0-beta.105...v1.0.0-beta.106) (2026-11-16)
+
+
+### Features
+
+* **explorer:** stream request-owned results for exact projects ([5eb0f2c](https://github.com/ScriptedAlchemy/tracedecay/commit/5eb0f2c5dddc6b757dbc661773bba57b967c6758))
+* **explorer:** stream results for exact projects ([80ebe1b](https://github.com/ScriptedAlchemy/tracedecay/commit/80ebe1bf65b5708f44a4b4d6df0148cefe024284))
+
+
+### Bug Fixes
+
+* **explorer:** box streamed source event payload ([7227aeb](https://github.com/ScriptedAlchemy/tracedecay/commit/7227aeb3322272393c649f11a68c282bf84fbb6d))
+* **explorer:** close stream review findings ([5207c2b](https://github.com/ScriptedAlchemy/tracedecay/commit/5207c2ba06de92a4bfd82a0dd154dce63dad81e6))
+* **explorer:** distinguish cancellation from cleanup failure ([9b183c1](https://github.com/ScriptedAlchemy/tracedecay/commit/9b183c137666389599a211462b3a87a370bade05))
+* **explorer:** report stream cleanup failures ([e1a835c](https://github.com/ScriptedAlchemy/tracedecay/commit/e1a835c0703781289d385916d6989c773584de86))
+
 ## [1.0.0-beta.105](https://github.com/ScriptedAlchemy/tracedecay/compare/v1.0.0-beta.104...v1.0.0-beta.105) (2026-11-15)
 
 
