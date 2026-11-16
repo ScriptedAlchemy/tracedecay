@@ -16,11 +16,12 @@ use tracedecay_domain::{
     DurableObservationV1, ObservationId, ObservationIdentityMaterialV1,
     ObservationOrderingDomainV1, ObservationScopeV1, ObservationSourceCursorV1,
     ObservationSourceGenerationV1, ObservationSourceIdentityV1, ObservationSourceRangeV1,
-    PayloadReferenceV1, ProjectionGenerationId, ProviderId, RetentionClass, SanitizationReceiptId,
-    SanitizationReceiptRefV1, SanitizationReceiptV1, SanitizerDispositionV1, SensitivityV1,
-    SessionId, UtcMicros,
+    PayloadReferenceV1, ProjectId, ProjectionGenerationId, ProviderId, RetentionClass,
+    SanitizationReceiptId, SanitizationReceiptRefV1, SanitizationReceiptV1, SanitizerDispositionV1,
+    SensitivityV1, SessionId, UtcMicros,
 };
 use tracedecay_global_db::{RegisteredGlobalDb, RegisteredGlobalDbLeaseV1};
+use tracedecay_session_runtime::StoreOwnerKey;
 use tracedecay_session_runtime::session_sync::test_harness::configure_scheduler;
 use tracedecay_session_runtime::session_temporal_refresh_scheduler::history::{
     SessionHistoricalCapacityRelease, SessionHistoricalIngestOutcome, SessionHistoricalIngestPass,
@@ -847,6 +848,186 @@ async fn saturated_history_admission_defers_the_pass_and_resumes() {
         .wait_profile_idle(authority.database().db_path())
         .await;
 
+    registry.shutdown().await;
+}
+
+#[tokio::test]
+async fn saturated_history_cancellation_does_not_reenter_or_lose_release() {
+    let temp = TempDir::new().unwrap();
+    let profile_root = temp.path().join("profile");
+    let first_id = ProjectId::new("project.history-first").unwrap();
+    let second_id = ProjectId::new("project.history-cancelled").unwrap();
+    let first = HostAdmissionTestRuntimeV1::project(
+        &profile_root,
+        temp.path().join("first"),
+        first_id.clone(),
+    )
+    .await
+    .unwrap();
+    let second = first
+        .sibling_project(temp.path().join("second"), second_id.clone())
+        .await
+        .unwrap();
+    let profile = first
+        .registered_database_arc(HostAdmissionScope::Profile)
+        .unwrap();
+    let first_db = first
+        .registered_database_arc(HostAdmissionScope::Project)
+        .unwrap();
+    let second_db = second
+        .registered_database_arc(HostAdmissionScope::Project)
+        .unwrap();
+    let owner = |id: ProjectId, database: &RegisteredGlobalDb| {
+        let store_root = database.db_path().parent().unwrap().to_path_buf();
+        StoreOwnerKey {
+            profile_root: profile_root.clone(),
+            global_db_path: first.profile_database_lease().db_path().to_path_buf(),
+            project_id: Some(id.as_str().to_owned()),
+            graph_db_path: store_root.join("graph.db"),
+            store_root,
+        }
+    };
+    let first_owner = owner(first_id, &first_db);
+    let second_owner = owner(second_id, &second_db);
+    let registry = SessionTemporalRefreshSchedulerRegistry::default();
+    let admission = registry.historical_ingest_admission();
+    let mut held = (0..admission.available_permits())
+        .map(|_| admission.clone().try_acquire_owned().unwrap())
+        .collect::<Vec<_>>();
+    assert!(!held.is_empty(), "history admission must provide capacity");
+    let first_history = Arc::new(CancelAwareHistoricalIngestor::new());
+    let cancelled_history = Arc::new(CancelAwareHistoricalIngestor::new());
+    let profile_history = Arc::new(ScriptedHistoricalIngestor::new([
+        SessionHistoricalIngestOutcome::Complete,
+    ]));
+    let first_wake = registry
+        .ensure_project_with_history(first_owner.clone(), first_db.clone(), first_history.clone())
+        .await;
+    registry.wait_project_idle(&first_owner).await;
+    let second_wake = registry
+        .ensure_project_with_history(
+            second_owner.clone(),
+            second_db.clone(),
+            cancelled_history.clone(),
+        )
+        .await;
+    registry.wait_project_idle(&second_owner).await;
+    let profile_wake = registry
+        .ensure_profile_with_history(
+            profile.db_path().to_path_buf(),
+            profile.clone(),
+            profile_history.clone(),
+        )
+        .await;
+    registry.wait_profile_idle(profile.db_path()).await;
+
+    for _ in 0..4 {
+        registry
+            .ensure_project_with_history(
+                first_owner.clone(),
+                first_db.clone(),
+                first_history.clone(),
+            )
+            .await;
+        registry
+            .ensure_project_with_history(
+                second_owner.clone(),
+                second_db.clone(),
+                cancelled_history.clone(),
+            )
+            .await;
+        registry
+            .ensure_profile_with_history(
+                profile.db_path().to_path_buf(),
+                profile.clone(),
+                profile_history.clone(),
+            )
+            .await;
+        assert!(first_wake.wake() && second_wake.wake() && profile_wake.wake());
+        for status in [
+            first_wake.serving_status(),
+            second_wake.serving_status(),
+            profile_wake.serving_status(),
+        ] {
+            assert!(
+                status.state
+                    == SessionProjectionServingState::Stale {
+                        reason: SessionProjectionStaleReason::HistoricalConvergence,
+                    }
+                    || status.state
+                        == SessionProjectionServingState::Stale {
+                            reason: SessionProjectionStaleReason::HistoricalRetry {
+                                reason_code: "history_admission_saturated".to_owned(),
+                            },
+                        },
+                "a capacity-blocked historical owner must remain stale: {status:?}"
+            );
+            assert_eq!(
+                status.convergence.state,
+                SessionConvergenceState::Converging
+            );
+        }
+        registry.wait_project_idle(&first_owner).await;
+        registry.wait_project_idle(&second_owner).await;
+        registry.wait_profile_idle(profile.db_path()).await;
+    }
+    assert!(
+        !*first_history.entered.borrow()
+            && !*cancelled_history.entered.borrow()
+            && profile_history.passes.get() == 0,
+        "historical callback ran while capacity was saturated"
+    );
+    let live = HealthyProvidersWithBlockedCursorIngestor::new(profile.clone());
+    assert!(
+        live.admit_healthy_provider("claude", "session.healthy.claude")
+            .await
+    );
+    assert!(profile_wake.wake());
+    tokio::time::timeout(
+        Duration::from_secs(2),
+        registry.wait_profile_idle(profile.db_path()),
+    )
+    .await
+    .expect("foreground projection was blocked by saturated history");
+    assert_eq!(
+        scalar(
+            &profile,
+            "SELECT COUNT(*) FROM session_occurrences WHERE session_id = 'session.healthy.claude'"
+        )
+        .await,
+        1,
+        "foreground projection was blocked by saturated history"
+    );
+
+    held.pop();
+    tokio::time::timeout(
+        Duration::from_secs(2),
+        first_history
+            .entered
+            .subscribe()
+            .wait_for(|entered| *entered),
+    )
+    .await
+    .expect("owed history was lost after release")
+    .unwrap();
+    registry.retire_project(&second_owner).await;
+    assert!(cancelled_history.cancelled.load(Ordering::Acquire));
+    assert!(!*cancelled_history.entered.borrow());
+    assert!(!second_wake.wake(), "retirement must join the queued owner");
+    registry.retire_project(&first_owner).await;
+    assert!(
+        first_history.exited.load(Ordering::Acquire),
+        "retirement must join active history"
+    );
+    drop(held);
+    tokio::time::timeout(
+        Duration::from_secs(2),
+        profile_history.passes.wait_for(|passes| *passes == 1),
+    )
+    .await
+    .expect("owed history was lost after release");
+    registry.wait_profile_idle(profile.db_path()).await;
+    assert_eq!(profile_history.passes.get(), 1);
     registry.shutdown().await;
 }
 
