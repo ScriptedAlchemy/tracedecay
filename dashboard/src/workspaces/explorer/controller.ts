@@ -62,7 +62,6 @@ function problemDetail(body: unknown): string | undefined {
   return typeof detail === 'string' && detail !== '' ? detail : undefined;
 }
 
-/** The selected project gateway resolves the exact project before any read. */
 export async function readExplorerStream(
   scope: DashboardScope,
   query: string,
@@ -138,10 +137,8 @@ export async function readExplorerStream(
   try {
     await reader.cancel();
   } catch (error) {
-    if (final || failure !== undefined) {
+    if (error !== failure) {
       console.warn('Explorer stream cleanup failed', error);
-    } else {
-      failure = error;
     }
   } finally {
     reader.releaseLock();
@@ -393,7 +390,6 @@ export function useExplorerController(): ExplorerController {
     });
   };
 
-  // A scope change aborts the old project read before starting the new one.
   const requestScope = `${scopeKey(scope)}:${writability.state}`;
   const lastRequestScope = useRef(requestScope);
   useEffect(() => {
@@ -403,7 +399,6 @@ export function useExplorerController(): ExplorerController {
     setSelected(null);
     setPeeked(null);
     dispatch(submitted);
-    // The scope key is the only trigger; dispatch uses the current scope.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [requestScope]);
 

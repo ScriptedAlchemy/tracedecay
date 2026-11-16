@@ -24,9 +24,11 @@ afterEach(() => {
   useScope.getState().selectAllProjects();
   vi.useRealTimers();
   vi.unstubAllGlobals();
+  vi.restoreAllMocks();
 });
 
 it('aborts exact requests on reset, scope change, and unmount', async () => {
+  const diagnostic = vi.spyOn(console, 'warn').mockImplementation(() => {});
   const requests: Array<{ url: string; signal: AbortSignal }> = [];
   vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     if (init?.method !== 'POST' || !String(input).endsWith('/explorer/queries')) {
@@ -62,6 +64,8 @@ it('aborts exact requests on reset, scope change, and unmount', async () => {
   expect(requests[2]?.url).toBe('/api/projects/proj_other/explorer/queries');
   view.unmount();
   expect(requests[2]?.signal.aborted).toBe(true);
+  await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+  expect(diagnostic).not.toHaveBeenCalled();
 });
 
 it('superseded_explorer_stream_cannot_replace_new_results', async () => {

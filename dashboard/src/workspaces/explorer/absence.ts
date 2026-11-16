@@ -1,6 +1,7 @@
 import type { EvidenceQuality } from '../../ui/EvidencePattern.tsx';
 import type { ExplorerSourceProgressV1 } from '../../contracts/generated.ts';
 import type { ExplorerStreamSnapshot } from './laneModel.ts';
+import { LANES } from './model.ts';
 
 /**
  * Whether Explorer has earned the right to say a term is absent from the index.
@@ -107,7 +108,7 @@ export function absenceVerdict(run: ExplorerStreamSnapshot | undefined): Absence
       reason: 'no stream has answered for this query',
     };
   }
-  if (run.sources.length !== 3) {
+  if (run.sources.length !== LANES.length) {
     return {
       confirmed: false,
       quality: 'unknown',

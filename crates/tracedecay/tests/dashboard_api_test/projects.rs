@@ -302,9 +302,6 @@ fn project_scoped_plugin_routes_read_selected_project_store() {
             "active store must not alias selected knowledge: {active_frames:?}"
         );
 
-        // The selected state mounts no exact-project code or session authority,
-        // so those sources report their own unavailability instead of borrowing
-        // the active project's ports.
         let selected_source = |source_id: &str| {
             selected_frames
                 .iter()
@@ -327,8 +324,6 @@ fn project_scoped_plugin_routes_read_selected_project_store() {
         );
         assert!(selected_sessions["page"].is_null());
 
-        // Only the Explorer POST-shaped read is admitted for a selected project;
-        // every other write still meets the read-only gateway refusal.
         let (settings_status, settings_body) = patch_json_body(
             &agent,
             &format!(

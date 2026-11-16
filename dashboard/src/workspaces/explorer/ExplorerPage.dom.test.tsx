@@ -306,7 +306,6 @@ describe('ExplorerPage independent lane lifecycle', () => {
     await screen.findByRole('button', { name: /graph_search/ });
     expect(lane('Sessions').getAttribute('data-lane-state')).toBe('pending');
     expect(screen.getByRole('img', { name: '1 of 3 sources concluded' })).toBeTruthy();
-    // A pending run has no measured duration yet, so it reports none.
     expect(document.querySelector('[data-run-register]')?.textContent).not.toMatch(/\d+ ms/);
     await act(async () => { finish(); });
     await waitFor(() => {
@@ -314,7 +313,6 @@ describe('ExplorerPage independent lane lifecycle', () => {
       expect(lane('Knowledge').getAttribute('data-lane-state')).toBe('unavailable');
       expect(document.querySelector('[data-run-register]')?.getAttribute('data-run-state')).toBe('partial');
     });
-    // The terminal frame carries the coordinator's own timing.
     expect(document.querySelector('[data-run-register]')?.textContent).toMatch(/9 ms/);
     expect(screen.getByRole('button', { name: /graph_search/ })).toBeTruthy();
   });

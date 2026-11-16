@@ -366,10 +366,6 @@ export function laneFromTransport(
       return { state: 'cancelled', lane, errorCode: null, detail };
     case 'error':
       return { state: 'error', lane, errorCode: null, detail };
-    // The scope authority refused this read as a write against a read-only
-    // scope. The controller normally catches this before dispatch, so reaching
-    // it here means the scope changed under an in-flight read; the daemon's
-    // sentence is carried as the detail either way.
     case 'locked':
       return {
         state: 'locked',
