@@ -65,6 +65,95 @@ async fn retained_history_precedes_summary_admission_on_worker_start() {
     registry.shutdown().await;
 }
 
+struct ReleaseThenClosedHistory {
+    sender: std::sync::Mutex<Option<tokio::sync::watch::Sender<u64>>>,
+    signal: tokio::sync::watch::Receiver<u64>,
+    passes: AtomicUsize,
+    entered: tokio::sync::Notify,
+    cancelled: AtomicBool,
+}
+
+impl SessionHistoricalIngestor for ReleaseThenClosedHistory {
+    fn run_pass(&self) -> SessionHistoricalIngestPass<'_> {
+        Box::pin(async move {
+            let pass = self.passes.fetch_add(1, Ordering::AcqRel);
+            let mut sender = self.sender.lock().unwrap();
+            match pass {
+                0 => sender.as_ref().unwrap().send_replace(1),
+                1 => {
+                    sender.take();
+                    1
+                }
+                _ => panic!("closed capacity source admitted an extra history pass"),
+            };
+            self.entered.notify_one();
+            SessionHistoricalIngestOutcome::Retryable {
+                reason_code: "history_capacity_saturated".to_owned(),
+                made_progress: false,
+            }
+            .into()
+        })
+    }
+
+    fn capacity_release(&self) -> SessionHistoricalCapacityRelease {
+        let mut signal = self.signal.clone();
+        signal.borrow_and_update();
+        SessionHistoricalCapacityRelease::new(vec![signal])
+    }
+
+    fn cancel(&self) {
+        self.cancelled.store(true, Ordering::Release);
+    }
+}
+
+#[tokio::test]
+async fn saturated_history_release_race_and_closed_signal_stay_quiescent() {
+    let harness = RegisteredGlobalDbHarness::open("refresh-release-closed-signal").await;
+    let registry = SessionTemporalRefreshSchedulerRegistry::default();
+    let owner = project_owner("release-closed-signal");
+    let (sender, signal) = tokio::sync::watch::channel(0);
+    let history = Arc::new(ReleaseThenClosedHistory {
+        sender: std::sync::Mutex::new(Some(sender)),
+        signal,
+        passes: AtomicUsize::new(0),
+        entered: tokio::sync::Notify::new(),
+        cancelled: AtomicBool::new(false),
+    });
+    registry
+        .ensure_project_with_history(owner.clone(), harness.registered.clone(), history.clone())
+        .await;
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while history.passes.load(Ordering::Acquire) < 2 {
+            history.entered.notified().await;
+        }
+        registry.wait_project_idle(&owner).await;
+    })
+    .await
+    .expect("release published before waiting must resume owed history");
+    assert!(
+        history.signal.has_changed().is_err(),
+        "capacity source must be closed"
+    );
+    let mut closed = history.capacity_release();
+    for _ in 0..16 {
+        assert!(closed.released().now_or_never().is_none());
+        registry
+            .ensure_project(owner.clone(), harness.registered.clone())
+            .await;
+        tokio::time::timeout(Duration::from_secs(2), registry.wait_project_idle(&owner))
+            .await
+            .expect("foreground wakes must settle with a closed capacity source");
+        assert_eq!(history.passes.load(Ordering::Acquire), 2);
+    }
+    tokio::time::timeout(Duration::from_secs(2), registry.retire_project(&owner))
+        .await
+        .expect("cancellation must join the worker waiting on a closed signal");
+    assert!(history.cancelled.load(Ordering::Acquire));
+    assert_eq!(registry.project_worker_count().await, 0);
+    assert_eq!(history.passes.load(Ordering::Acquire), 2);
+    registry.shutdown().await;
+}
+
 /// A history pass that ignores cancellation until the test releases it. The
 /// pass holds a clone of `held` for as long as the worker owns it, standing in
 /// for the lease clones a live worker retains. A `busy` pass is never released
