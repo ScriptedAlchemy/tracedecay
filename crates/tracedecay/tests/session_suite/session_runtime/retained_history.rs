@@ -944,11 +944,29 @@ async fn saturated_history_cancellation_does_not_reenter_or_lose_release() {
             )
             .await;
         assert!(first_wake.wake() && second_wake.wake() && profile_wake.wake());
-        let _ = (
+        for status in [
             first_wake.serving_status(),
             second_wake.serving_status(),
             profile_wake.serving_status(),
-        );
+        ] {
+            assert!(
+                status.state
+                    == SessionProjectionServingState::Stale {
+                        reason: SessionProjectionStaleReason::HistoricalConvergence,
+                    }
+                    || status.state
+                        == SessionProjectionServingState::Stale {
+                            reason: SessionProjectionStaleReason::HistoricalRetry {
+                                reason_code: "history_admission_saturated".to_owned(),
+                            },
+                        },
+                "a capacity-blocked historical owner must remain stale: {status:?}"
+            );
+            assert_eq!(
+                status.convergence.state,
+                SessionConvergenceState::Converging
+            );
+        }
         registry.wait_project_idle(&first_owner).await;
         registry.wait_project_idle(&second_owner).await;
         registry.wait_profile_idle(profile.db_path()).await;
