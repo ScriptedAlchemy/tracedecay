@@ -1924,11 +1924,17 @@ fn ordinary_retention_waits_for_active_pack_reads_and_leaves_no_idle_payload_han
         !expected.is_empty(),
         "the retired pack contains actual bytes"
     );
-    let inode = std::fs::metadata(&path).expect("original pack inode");
+    // Retention unlinks this pack while sibling tests open files on the same
+    // filesystem. The pin keeps the inode allocated, so its number cannot be
+    // reused by an unrelated descriptor; the census counts every other holder.
+    let pin = std::fs::File::open(&path).expect("pin the retired pack inode");
+    let pin_entry = std::os::fd::AsRawFd::as_raw_fd(&pin).to_string();
+    let inode = pin.metadata().expect("original pack inode");
     let holders = || {
         std::fs::read_dir("/proc/self/fd")
             .expect("inspect actual process descriptor table")
             .filter_map(Result::ok)
+            .filter(|entry| entry.file_name().to_str() != Some(pin_entry.as_str()))
             .filter_map(|entry| std::fs::metadata(entry.path()).ok())
             .filter(|metadata| metadata.dev() == inode.dev() && metadata.ino() == inode.ino())
             .count()
@@ -2008,11 +2014,7 @@ fn ordinary_retention_waits_for_active_pack_reads_and_leaves_no_idle_payload_han
             .any(|item| item.generation_id == generation_ids[0])
     );
     assert!(!path.exists(), "the old-only pack pathname is reclaimed");
-    assert_eq!(
-        holders(),
-        0,
-        "idle owners must not keep a deleted inode allocated"
-    );
+    assert_eq!(holders(), 0, "idle owners must not hold the deleted inode");
     assert!(
         publication
             .load_generation(&generation_ids[1])
