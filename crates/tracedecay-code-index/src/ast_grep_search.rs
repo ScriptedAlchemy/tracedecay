@@ -831,4 +831,52 @@ mod tests {
         );
         assert!(result.lines_visited < TOTAL_LINES);
     }
+
+    #[test]
+    fn submodule_sources_are_parsed_only_under_the_opt_in() {
+        let fixture = crate::source_walk::submodules::tests::fixture();
+        let parent = fixture.path().join("parent");
+        let disabled = search_tree(
+            &parent,
+            "pub fn $N() {}",
+            Some("rust"),
+            None,
+            10,
+            &no_exclusions(),
+        )
+        .expect("default ast-grep");
+        assert!(
+            disabled
+                .matches
+                .iter()
+                .any(|hit| hit.file.as_ref() == "parent.rs"),
+            "the parent source is parsed: {:?}",
+            disabled.matches
+        );
+        assert!(
+            disabled
+                .matches
+                .iter()
+                .all(|hit| !hit.file.starts_with("app/")),
+            "{:?}",
+            disabled.matches
+        );
+        let enabled = search_tree(
+            &parent,
+            "pub fn $N() {}",
+            Some("rust"),
+            None,
+            10,
+            &no_exclusions().with_submodules(true),
+        )
+        .expect("opt-in ast-grep");
+        assert!(
+            enabled
+                .matches
+                .iter()
+                .any(|hit| hit.file.as_ref() == "app/first.rs"),
+            "{:?}",
+            enabled.matches
+        );
+    }
 }

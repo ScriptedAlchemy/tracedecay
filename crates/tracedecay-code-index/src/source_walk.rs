@@ -901,6 +901,23 @@ mod tests {
         );
     }
 
+    #[test]
+    fn linked_worktree_inside_the_parent_stays_pruned_under_submodule_opt_in() {
+        let fixture = crate::source_walk::submodules::tests::fixture();
+        let parent = fixture.path().join("parent");
+        fixture_git(&parent, &["worktree", "add", "-q", "linked"]);
+        let policy = IndexPathPolicyV1::new(Vec::new(), Vec::new())
+            .expect("empty policy")
+            .with_submodules(true);
+        let walked = walked_files(&parent, &policy);
+        assert!(walked.contains(&PathBuf::from("parent.rs")), "{walked:?}");
+        assert!(walked.contains(&PathBuf::from("app/first.rs")), "{walked:?}");
+        assert!(
+            !walked.iter().any(|path| path.starts_with("linked")),
+            "a linked worktree is not a registered submodule: {walked:?}"
+        );
+    }
+
     fn fixture_git(root: &std::path::Path, args: &[&str]) -> std::process::Output {
         let program = tracedecay_runtime_core::git::try_git_program().expect("Git program");
         let mut command = std::process::Command::new(program);
