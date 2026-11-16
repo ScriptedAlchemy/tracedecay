@@ -138,9 +138,11 @@ export async function readExplorerStream(
   try {
     await reader.cancel();
   } catch (error) {
-    // A cleanup failure cannot change what the sources already reported, so it
-    // becomes the error only when the read itself never concluded.
-    if (!final) failure ??= error;
+    if (final || failure !== undefined) {
+      console.warn('Explorer stream cleanup failed', error);
+    } else {
+      failure = error;
+    }
   } finally {
     reader.releaseLock();
   }

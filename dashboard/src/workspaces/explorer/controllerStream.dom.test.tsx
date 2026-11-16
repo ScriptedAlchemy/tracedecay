@@ -164,6 +164,7 @@ it('reports premature EOF without hiding a delivered source', async () => {
 });
 
 it('keeps a terminal outcome when stream cleanup fails', async () => {
+  const diagnostic = vi.spyOn(console, 'warn').mockImplementation(() => {});
   const encoder = new TextEncoder();
   vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     if (init?.method !== 'POST' || !String(input).endsWith('/api/explorer/queries')) {
@@ -187,12 +188,15 @@ it('keeps a terminal outcome when stream cleanup fails', async () => {
     expect(view.result.current.run?.state).toBe('completed');
     expect(view.result.current.run?.elapsed_micros).toBe(7);
     expect(view.result.current.transport).toBeUndefined();
+    expect(diagnostic).toHaveBeenCalledWith('Explorer stream cleanup failed', expect.any(Error));
   } finally {
     view.unmount();
+    diagnostic.mockRestore();
   }
 });
 
 it('preserves the read error when stream cleanup also fails', async () => {
+  const diagnostic = vi.spyOn(console, 'warn').mockImplementation(() => {});
   const encoder = new TextEncoder();
   vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     if (init?.method !== 'POST' || !String(input).endsWith('/api/explorer/queries')) {
@@ -215,8 +219,10 @@ it('preserves the read error when stream cleanup also fails', async () => {
     });
     expect(view.result.current.transport?.state).toBe('error');
     expect(view.result.current.transport?.detail).not.toBe('cleanup failed');
+    expect(diagnostic).toHaveBeenCalledWith('Explorer stream cleanup failed', expect.any(Error));
   } finally {
     view.unmount();
+    diagnostic.mockRestore();
   }
 });
 
