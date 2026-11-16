@@ -8,15 +8,16 @@ builder-check decisions and final plan rulings recorded under Decisions
 resolved. This document is ready to implement from, but it does not start any
 lane, branch, worktree, PR, or issue mutation.
 Approving it also does not authorize any service install or restart, or any
-action on the operator profile; the #4099 real-profile runbook has its own
-approval gate at execution time. Baseline: `master` at
+action on the operator profile or the operator's `~/.codex` corpus. The #4099
+real-profile runbook and the #4374 operator-corpus measurement each have their
+own approval gate at execution time. Baseline: `master` at
 `58ccb41d66cdf96fa1dfbe0165dccd662e75ea5f` (2026-11-15).
 
 The program finishes in two stages:
 
 - **Implementation complete.** Every assigned issue is merged and closed with
   evidence, or recorded with an honest disposition. All six lane worktrees are
-  removed. #4099, #4616, and #4861 may still be open as tracked
+  removed. #4099, #4374, #4616, and #4861 may still be open as tracked
   `pending-long-acceptance`. Final product acceptance is not claimed at this
   point.
 - **Final acceptance.** Each authorized long-acceptance run finishes, its
@@ -60,11 +61,12 @@ every acceptance criterion.
 5. **At implementation complete:** exactly one worktree, the primary checkout
    on `master`. No lane worktrees, staging, or lane-owned temporary state
    remain. The only exception is each specifically authorized long-acceptance
-   process (for #4099, #4616, or #4861) and the state that run requires. Each
-   one is recorded with its owner, path, PID, and expected end.
+   process (for #4099, #4374, #4616, or #4861) and the state that run
+   requires. Each one is recorded with its owner, path, PID, and expected end.
 6. **At final acceptance:** those runs have finished, their state has been
    cleaned up (isolated state deleted; the operator's real profile is never
-   deleted, reset, or copied), and nothing program-owned remains beyond the
+   deleted, reset, or copied; the operator's `~/.codex` corpus is never
+   written, moved, or copied), and nothing program-owned remains beyond the
    primary checkout. The physical `sdks/codegen/.pnpm/` store is preserved
    untouched in both stages; it is ignored by `.gitignore`.
 
@@ -98,10 +100,12 @@ These are explicitly rejected:
 - Raising timeouts, budgets, or bounds to make a symptom go away without
   measurement (AGENTS "Limits are symptoms, not knobs").
 - Touching operator production data: `~/.tracedecay`, `~/.claude`, `~/.codex`,
-  `~/.agents`, installed launchd services, or real host config. The only
-  exception is the #4099 real-profile runbook. It runs normal TraceDecay use
-  on the operator profile, and only after the user separately approves the
-  exact runbook at execution time (see Long-running acceptance).
+  `~/.agents`, installed launchd services, or real host config. There are two
+  exceptions, and each runs only after the user separately approves its exact
+  runbook at execution time (see Long-running acceptance). The #4099
+  real-profile runbook runs normal TraceDecay use on the operator profile. The
+  #4374 operator-corpus measurement observes the canonical Codex re-offer
+  route reading the operator's `~/.codex` corpus in place, read-only.
 - Secondary copies of any project or operator data, binaries, or profiles,
   including backups, snapshots, or copies of the operator profile.
 
@@ -124,7 +128,7 @@ inherits them:
 
 - **Bazel only.** Every build, test, check, run, bench, and codegen goes
   through Bazel (`bazel build //...`, `bazel test //<target>
-  --test_output=errors`, `bazel run //sdks/codegen:generate`). Never invoke
+  --test_output=all`, `bazel run //sdks/codegen:generate`). Never invoke
   `cargo` directly. pnpm is only for JavaScript packages and the dashboard
   (`pnpm run build|typecheck|test` in `dashboard/`). After Rust dependency
   changes: `CARGO_BAZEL_REPIN=workspace bazel fetch --repo=@c`, then
@@ -134,10 +138,10 @@ inherits them:
   `ResetRequired` or refusal path. The released-store admission exception in
   the plan index (2026-09-16) still applies to released relational stores, and
   only to them. A configuration snapshot that holds a key the registry no
-  longer defines returns typed configuration `ResetRequired`
-  (`converge_registry_shape` in the global-db configuration store), as
-  `bd64621c12` established for retired keys. #4416 and #4419 retire keys
-  through that path.
+  longer defines returns typed configuration `ResetRequired` (the public
+  `GlobalDbConfigurationControlStore::converge_registered_registry_shape` in
+  the global-db configuration store), as `bd64621c12` established for retired
+  keys. #4416 and #4419 retire keys through that path.
 - **L1 persisted moves.** This rule applies to every L1 move: #4448
   (response-handle JSON), #4427 (automation JSONL), and #4447 (historical
   saved-token totals). For each, the lane identifies where the old data lives
@@ -153,13 +157,37 @@ inherits them:
   caller and is exercised through its real route: daemon operation, MCP tool,
   CLI, or dashboard handler. Tests are falsifiable and cover failure, denial,
   staleness, isolation, cancellation, and rollback where relevant.
-- **No fabricated acceptance.** A name-filtered libtest run must show a
-  non-zero count, through `scripts/require-exact-test.sh` or a full module
-  path. Bazel prints a passing test's log only with `--test_output=all`, so
-  every helper run and every run whose counts or test names are cited as
-  evidence uses that flag. Measurements come from `tracing` spans
-  (`TRACEDECAY_SPAN_TIMINGS=1`) or real resource sampling, never from source
-  inspection.
+- **No fabricated acceptance.** Every plan uses two run shapes, and only
+  these two:
+  - **Green named run.** `REQUIRE_EXACT_TEST_COUNT=<n>
+    scripts/require-exact-test.sh bazel test <one target> --test_output=all
+    --test_arg=<full module path> --test_arg=--exact`, with `<n>` the
+    positive count expected (1 for one exact test). The helper proves only
+    a pass. When the command fails, it exits with that status and checks no
+    failure signature, so it never proves an expected red.
+  - **Expected red run.** `bazel test <one target> --test_output=all
+    --test_arg=<full module path> --test_arg=--exact`, invoked directly. It
+    counts as red only when Bazel exits nonzero and the log shows the
+    step's exact signature. That is either a rustc `error[E…]` line naming
+    the stated missing symbol, or `test <full module path> ... FAILED`, the
+    stated assertion text, and `test result: FAILED. 0 passed; 1 failed`. A
+    different test, a different message, or a build error in an unrelated
+    file is not the reproduction. When one target holds several new tests
+    and any of them references a missing symbol, that compile failure is the
+    target's only observable red, so a plan runs its assertion reds before
+    it adds tests that reference new symbols.
+
+  A reproduce-first run whose outcome is genuinely unknown uses the green
+  shape. A pass is the regression pin. A failure is classified only by the
+  signature its step names in the `--test_output=all` log.
+
+  Substring filters (`--test_filter=<part>`, or `--test_arg=<part>` without
+  `--exact`) never stand as evidence. Bazel prints a passing test's log only
+  with `--test_output=all`, so every run whose counts or test names are
+  recorded uses that flag. `--test_output=errors` is used only where the
+  exit status alone is the evidence, such as a `bazel test //...` gate.
+  Measurements come from `tracing` spans (`TRACEDECAY_SPAN_TIMINGS=1`) or
+  real resource sampling, never from source inspection.
 - **Generated sources are never hand-edited.** These are
   `dashboard/src/contracts/`, `sdks/typescript/src/`, and
   `crates/tracedecay-sdk/src/operations.rs`. After any schema or operation
@@ -206,7 +234,10 @@ Several issues touch neighboring code. Each seam has one default owner:
   format's public retention interface. If #4616 needs a format change, L2
   asks the coordinator, who either has L3 make it or reassigns that path.
 - **Project and worktree registry resolution** (#4876 ambiguous legacy
-  profile stores): **L2**. **Git worktree inventory bounds and the cost of
+  profile stores): **L2**. #4876 narrows final-schema candidates at
+  resolution time. It never admits a non-final registry: a `code_projects`
+  table that is not the final shape still returns the project-registry
+  `ResetRequired`. **Git worktree inventory bounds and the cost of
   session projection admission** (#4861): **L3**. If #4861's inventory fix
   needs registry changes, they go through the coordinator.
 - **Registered-store schema additions** for response handles, automation
@@ -245,6 +276,24 @@ Several issues touch neighboring code. Each seam has one default owner:
   only *regenerates* these outputs after its own schema changes. No other
   lane edits SDK source.
 
+### Shared files
+
+These files are edited by more than one lane. The first owner in each row
+holds the file until its PR merges. A later lane may prepare its change on its
+own branch from `master`, but it integrates only after the earlier owner's PR
+merges. It then rebases, regenerates contracts when a schema changed, and
+reruns its focused verification. Every other path stays with its single seam
+owner above.
+
+| Shared files | Order | Notes |
+|---|---|---|
+| `crates/tracedecay/src/daemon/project_open_owners.rs`, `crates/tracedecay-application/src/advisory/runtime/local_cycle_tests.rs` | L1 Task 1 (#4448), then L5 Task 1 (#4436), then L6 Task 3 (#4423) | L6 #4423 waits for both L1's and L5's `local_cycle_tests.rs` harness changes to merge before it adds its harness helper and test. |
+| `crates/tracedecay/src/mcp/server.rs`, `crates/tracedecay-dashboard-api/src/state.rs` | L1 (#4448 and #4447 edit `server.rs`; #4427 edits `state.rs`), then L5 Task 4 (#4419) | L5 rebases onto each merged L1 PR and regenerates contracts between them. |
+| `crates/tracedecay/src/daemon/maintenance.rs` | L1 Task 1 (#4448), then L2 Task 12 (#4099) | L2 adds the hook-analytics pass on the merged L1 tick. |
+
+The configuration registry files (L6 #4416, then L5 #4419) and the #4419
+dashboard settings child (L4) keep the ownership stated above.
+
 If a seam not listed here shows up during implementation, the lane stops
 editing that path and reports it to the coordinator.
 
@@ -269,13 +318,15 @@ coupled, and the PR must state that.
   set. Its historical totals follow the same rule, so no separate decision is
   needed.
 - **L2:** #4876 (blocks every tool call in multi-worktree repos; regression of
-  #477), then #4513 (sqlite3 CLI open of a live `sessions.db` causes disk I/O
+  #477; reproduced on a final-schema registry, never on a non-final one),
+  then #4513 (sqlite3 CLI open of a live `sessions.db` causes disk I/O
   or corruption reports; reproduce first), then #4152 (TEMP page corruption
   and unlinked temp files; reproduce first), then #4616 (collect superseded
   sealed generations), then #4099 (size observability, retention through the
   daemon maintenance path, and the regression check). #4099 goes last because
   its observable bound findings and GC depend on #4616 reclamation and on L1's
-  removal of retired file stores. L2 also drafts the #4099 real-profile
+  removal of retired file stores. Its `daemon/maintenance.rs` edit integrates
+  after L1 #4448 (Shared files). L2 also drafts the #4099 real-profile
   runbook inputs (doctor and `tracedecay storage report` sampling commands,
   per-store bounds, stop conditions). The coordinator executes that runbook
   after implementation completes; see Long-running acceptance.
@@ -299,10 +350,13 @@ coupled, and the PR must state that.
   (stop retaining full settled notification payloads), then #4215 (Work
   scope independence), then #4419 (retire automatic all-PR worktree
   indexing), then #4229 (measured opt-in niche grammar sets), then #4226
-  (Node SDK through thin napi-rs over shared Rust client logic). #4419 may be
-  analyzed early but cannot be integrated before L2's #4876 merges. It edits
-  the configuration registry files only after L6's #4416 merges, and it
-  merges only with L4's dashboard child PR folded in.
+  (Node SDK through thin napi-rs over shared Rust client logic). #4436
+  integrates after L1 #4448, because both edit `project_open_owners.rs` and
+  `local_cycle_tests.rs` (Shared files). #4419 may be analyzed early but
+  cannot be integrated before L2's #4876 merges. It edits the configuration
+  registry files only after L6's #4416 merges, integrates its
+  `mcp/server.rs` and dashboard-api `state.rs` edits only after L1's PRs that
+  edit them merge, and merges only with L4's dashboard child PR folded in.
   #4226 starts as soon as L5's earlier issues are done, built against the
   operation registry on `master` at that time, rather than idling until other
   lanes finish. It rebases and regenerates whenever a contract-changing PR
@@ -312,8 +366,12 @@ coupled, and the PR must state that.
 - **L6:** #4593 evidence closure first, then #4416 (retire constant-score
   risk machinery), then #4423 (remove remote refresh from the local editor
   feedback path), then #4440 (compiler-owned tsconfig evidence), then #4374
-  (Codex discovery re-offer cost). #4374 goes last because of its seam with
-  L3's session work.
+  (Codex discovery re-offer cost). #4423 waits until L1 #4448 and L5 #4436
+  have merged their `local_cycle_tests.rs` harness changes; L6 may run #4440
+  first while it waits. #4374 goes last because of its seam with L3's session
+  work. Its acceptance needs the operator's real `~/.codex` corpus, so the
+  lane delivers fixture measurements and a runbook draft, and #4374 stays
+  `pending-long-acceptance` (see Long-running acceptance).
 
 ### Across lanes
 
@@ -323,7 +381,10 @@ and is rebased and regenerated onto it.
 | Prerequisite | Dependent | Reason |
 |---|---|---|
 | L2 #4616 | L3 #4533 | Layout change must preserve the new sealed-generation collection. |
-| L1 #4448, #4427 | L2 #4099 | #4099 retention targets only stores that still exist. |
+| L1 #4448, #4427 | L2 #4099 | #4099 retention targets only stores that still exist, and L1 #4448 edits `daemon/maintenance.rs` first (Shared files). |
+| L1 #4448 | L5 #4436 | Both edit `project_open_owners.rs` and `local_cycle_tests.rs`; L1 first (Shared files). |
+| L1 #4448, L5 #4436 | L6 #4423 | #4423 adds its harness helper to `local_cycle_tests.rs` after both harness changes merge (Shared files). |
+| L1 #4448, #4427, #4447 | L5 #4419 | L1 edits `mcp/server.rs` and dashboard-api `state.rs` first; L5 rebases and regenerates after each (Shared files). |
 | L5 #4215 | L4 #4223 | Footprint decisions consume the final Work scope semantics. |
 | L3 #4861, #4756 | L6 #4374 | Shared session discovery and admission paths. |
 | L2 #4876 | L3 #4861 (inventory part) and L5 #4419 | Registry resolution is settled before inventory bounds and branch-demand activation build on it. |
@@ -383,13 +444,14 @@ dependencies above still apply.
 4. **Isolated runtime state.** Every daemon, profile, home, and project used
    for reproduction or acceptance lives under a lane-owned temporary
    directory with explicit `HOME`, profile, and socket overrides. It never
-   uses `~/.tracedecay`, the operator's launchd service, or real host config.
-   The lane removes this state when its issue finishes. The only exception is
-   a long-acceptance run the coordinator has specifically authorized (see
-   Long-running acceptance). Any such run that must outlive the lane is run
-   from a binary built from merged `master` and keeps its state outside the
-   lane worktree, so removing the worktree does not affect the run. The
-   coordinator records its owner, state path, PID, and expected end.
+   uses `~/.tracedecay`, `~/.codex`, the operator's launchd service, or real
+   host config. The lane removes this state when its issue finishes. The only
+   exception is a long-acceptance run the coordinator has specifically
+   authorized (see Long-running acceptance). Any such run that must outlive
+   the lane is run from a binary built from merged `master` and keeps its
+   state outside the lane worktree, so removing the worktree does not affect
+   the run. The coordinator records its owner, state path, PID, and expected
+   end.
 5. **Return (lane).** When the lane's last issue is in a terminal or
    `pending-long-acceptance` state, the lane stops every daemon and test
    process it owns that is not an authorized long-acceptance run. It confirms
@@ -407,9 +469,12 @@ dependencies above still apply.
 7. **Cleanup at final acceptance (coordinator).** As each authorized run
    finishes or is stopped, the coordinator stops its processes and deletes
    its isolated state. The #4099 run uses the operator's real profile, which
-   is never deleted, reset, or copied. Its cleanup is limited to stopping any
-   sampling the coordinator started and, if the approved runbook changed
-   daemon or service ownership, restoring it as that runbook specifies.
+   is never deleted, reset, or copied. The #4374 run reads the operator's
+   `~/.codex` corpus in place, which is never written, moved, or copied. For
+   both, cleanup is limited to stopping any sampling or measurement process
+   the coordinator started, deleting the coordinator's own sample files
+   outside the operator's data, and, if the approved runbook changed daemon or
+   service ownership, restoring it as that runbook specifies.
 
 ### Bazel and machine contention
 
@@ -442,8 +507,9 @@ product regression. Its bound is never loosened.
   the evidence (see Closure rules). Lanes may draft closure comments. They
   close an issue only if the coordinator explicitly delegates that closure.
 - Authorizes long-running acceptance runs and tracks them while they are
-  pending. Presents the #4099 real-profile runbook to the user for separate
-  approval and executes it only after that approval.
+  pending. Presents the #4099 real-profile runbook and the #4374
+  operator-corpus runbook to the user for separate approval, and executes
+  each only after its own approval.
 - Performs final independent verification and both cleanup stages.
 
 ### Lane implementers
@@ -464,7 +530,8 @@ product regression. Its bound is never loosened.
    `needs-decision`.
 2. Changed paths, the exact list from `git diff --name-only origin/master...`.
 3. Tests added or changed, and the Bazel commands run with pass and test
-   counts. Name-filtered runs must show non-zero counts.
+   counts. Green named runs show the helper's exact count. Each expected red
+   quotes the signature lines from its `--test_output=all` log.
 4. PR URL(s), head SHA, and check status.
 5. An acceptance map: each acceptance criterion from the issue body, the
    evidence that satisfies it, or the reason it is still open.
@@ -521,7 +588,7 @@ product regression. Its bound is never loosened.
 5. #3099 is never closed. #4230 depends only on its five named open children
    (#4215, #4220, #4223, #4226, #4229). It closes once all five have closed
    with evidence, whether or not unrelated long-acceptance runs (#4099,
-   #4616, #4861) are still pending. Until then, the coordinator only updates
+   #4374, #4616, #4861) are still pending. Until then, the coordinator only updates
    its status section and checkboxes.
 6. When an issue proves invalid, duplicated, or superseded, closing it as
    "not planned" requires the evidence for that and coordinator approval. It
@@ -603,6 +670,38 @@ reportedly fixes it fully. L6 does the following:
     shows per-store sizes and that no store crossed its bound without a
     named finding. It then closes #4099 with the cited samples, binary SHA,
     and window.
+- **#4374 operator-corpus measurement.** #4374's acceptance is the re-offer
+  cost of the operator's actual `~/.codex` corpus of about 2,010 rollouts on
+  the affected host. An isolated fixture cannot stand in for it, so no plan
+  promises isolated acceptance. L6's sized fixture measurement is supporting
+  evidence only. #4374 is the fourth long-acceptance issue, beside #4099,
+  #4616, and #4861. The rules are:
+
+  - **What runs.** A read-only measurement of the canonical production route
+    on a build of the final merged `master`. The operator's normal
+    TraceDecay authority re-offers the real corpus as it does in normal use,
+    and the coordinator records the existing spans and read-only product
+    surfaces that L6's runbook draft names.
+  - **Forbidden throughout.** Nothing under `~/.codex` is written, moved,
+    renamed, deleted, or copied. No backup, snapshot, fixture, or excerpt of
+    the corpus or of any data derived from it is made. No second daemon races
+    the normal authority. The recorded evidence is counts and timings only,
+    never transcript content.
+  - **Execution-time approval gate.** The coordinator presents the exact
+    binary or release, the process that performs the measured pass, how
+    timings are captured, any restart or environment change with how it is
+    undone, the read and write boundaries, and the stop conditions. The user
+    approves it separately from this design and from the #4099 runbook. The
+    two may share one approved window only if the user approves that.
+  - **Stop and report.** The coordinator stops on any write under
+    `~/.codex`, any store error or refusal, any daemon or tool-call failure
+    attributable to the program, or CPU or I/O saturation. It records what it
+    saw, leaves #4374 open, and reports to the user. It never attempts repair
+    without a new approval.
+  - **Closure.** #4374 stays `pending-long-acceptance` until the approved
+    run completes and its numbers are checked against the issue's baseline.
+    If the run is not approved or cannot complete, the issue stays open with
+    a comment that lists the fixture evidence and what remains.
 - **Operator-machine acceptance for #4616 and #4861** (#4616's multi-day
   collection on a busy monorepo, #4861's multi-day CPU profile). Lanes
   reproduce these on isolated fixtures with sized inputs that approximate the
@@ -632,6 +731,8 @@ reportedly fixes it fully. L6 does the following:
 | Persistence move drops user-visible history (#4448, #4427, #4447) | L1 persisted-move rule: preserve only through the genuine 2026-09-16 exception, otherwise typed `ResetRequired` or refusal. No silent migration or silent loss. |
 | Retired configuration keys reset upgraded installs (#4416, #4419) | Typed configuration `ResetRequired`, a test that seeds a captured pre-change store, setters that refuse the retired keys, and an upgrade-impact paragraph in each commit body. |
 | #4099 real-profile run harms operator data | Separate execution-time runbook approval, read-only sampling, no copies or resets, no racing daemon, and hard stop conditions that leave the issue open. |
+| #4374 corpus measurement exposes or alters `~/.codex` | Separate execution-time approval, in-place read-only measurement, no copies or excerpts, counts and timings only in evidence, and stop conditions that leave the issue open. |
+| Two lanes edit one shared file at once | The Shared files table fixes the order; a later lane integrates only after the earlier owner merges, then rebases and regenerates. |
 | Test flakiness from machine contention | Isolated reruns, the coordinator throttles suite runs, and no bound is loosened. |
 | A lane drifts outside its assignment | Coordinator reviews changed paths against the ownership table. Any cross-lane edit is reverted or reassigned. |
 | False closure | Closure rules, `Refs` vs `Fixes`, coordinator verification, non-zero test counts. |
@@ -669,8 +770,9 @@ reportedly fixes it fully. L6 does the following:
    that the program introduced is fixed before implementation counts as
    complete. A failure that predates the program is reported with its owner.
    Then come issue closure decisions, the #4230 reconciliation, cleanup at
-   implementation complete, and execution-time approval for the #4099
-   runbook. Final acceptance follows as the long runs finish.
+   implementation complete, and separate execution-time approvals for the
+   #4099 and #4374 runbooks. Final acceptance follows as the long runs
+   finish.
 
 ## Decision authority
 
@@ -703,16 +805,16 @@ reportedly fixes it fully. L6 does the following:
   invalid, a duplicate, or already fixed;
 - any closure, and anything touching #3099 or #4230.
 
-**The coordinator escalates to the user**: the #4099 runbook approval (and any
-other step on operator data or host services), human PR approval when branch
-protection requires it, policy conflicts between issue acceptance and the plan
-index or `AGENTS.md`, and scope decisions on proposal issues (#4223, #4229)
-where measurement doesn't settle the choice.
+**The coordinator escalates to the user**: the #4099 and #4374 runbook
+approvals (and any other step on operator data or host services), human PR
+approval when branch protection requires it, policy conflicts between issue
+acceptance and the plan index or `AGENTS.md`, and scope decisions on proposal
+issues (#4223, #4229) where measurement doesn't settle the choice.
 
 ## Decisions resolved
 
-1. **Two-stage completion.** Implementation may complete with #4099, #4616,
-   and #4861 open as tracked `pending-long-acceptance`. All six lane
+1. **Two-stage completion.** Implementation may complete with #4099, #4374,
+   #4616, and #4861 open as tracked `pending-long-acceptance`. All six lane
    worktrees are removed at implementation completion. Only specifically
    authorized long-acceptance processes and their required state remain
    until those runs finish. Final product acceptance is not claimed until
@@ -757,14 +859,18 @@ where measurement doesn't settle the choice.
     validation. Nothing maps old values, and no `from_legacy_threshold` path
     exists. One boolean project setting,
     `feedback.proximity.relationship_hints.v1`, is the explicit hint policy the
-    issue asks for. Its default `true` keeps the shipped default's behavior
-    (threshold 7,000 admits the 7,500 neighborhood candidates). A persisted
-    configuration that holds the retired key returns typed configuration
-    `ResetRequired`. The 2026-09-16 exception covers released project memory,
-    diagnostics, and receipts, not configuration snapshots, and `bd64621c12`
-    already applied this reset to retired keys. The criterion map records the
-    issue's legacy-mapping line as superseded by this ruling and cites the
-    reset test in its place.
+    issue asks for. Its default stays `true`, which keeps the shipped
+    default's behavior (threshold 7,000 admits the 7,500 neighborhood
+    candidates). Setting it to `false` is the opt-out: proximity then reports
+    only exact encounter evidence and admits no neighborhood relationship
+    hints, with the same freshness, permission, and generation checks. No
+    numeric value maps to either setting. A user who had tuned the old
+    threshold gets typed configuration `ResetRequired` and chooses `true` or
+    `false` again after the reset. The 2026-09-16 exception covers released
+    project memory, diagnostics, and receipts, not configuration snapshots,
+    and `bd64621c12` already applied this reset to retired keys. The
+    criterion map records the issue's legacy-mapping line as superseded by
+    this ruling and cites the reset test in its place.
 11. **#4419 retirement.** Removing automatic all-PR worktree indexing, the
     `tracedecay branch autotrack` command, and its two settings is the issue's
     explicit goal, and this design approves it. Settings removal follows the
@@ -774,7 +880,10 @@ where measurement doesn't settle the choice.
     #4416 and #4419 both reset configuration on upgrade. Each commit body
     carries an upgrade-impact paragraph that names the retired keys and the
     remedy (reset the project configuration and re-apply custom settings), as
-    `bd64621c12` did.
+    `bd64621c12` did. If L6's #4416 and L5's #4419 ship in separate
+    releases, an install that upgrades through both can hit configuration
+    `ResetRequired` twice, once per retirement. That is accepted. The merge
+    order stays L6 #4416 first, then L5 #4419.
 12. **#4229 decision.** The user already authorized a measured no-change as a
     completed closure when the full evidence exists. The decision rule in L5
     Task 5 turns the measurements into opt-in or no-change. The coordinator
@@ -783,13 +892,28 @@ where measurement doesn't settle the choice.
     whether a no-change counts for #4230.
 13. **#4436 restart criterion.** No production path reads persisted open
     drift intervals on `master` (`restore_open_drift_interval` has only test
-    callers). The lane does not add a production consumer to claim closure.
+    callers). The lane does not add a production consumer to claim closure,
+    and it does not keep a production method whose only callers are tests.
+    The ported `StackScopeHandleV1::restore_open_drift_interval` compiles
+    only under `#[cfg(any(test, feature = "test-helpers"))]`, the same gate
+    as `retained_scope_count`, because its callers live in the
+    `application_suite` integration test, which builds the library with
+    `test-helpers` rather than `cfg(test)`. No `allow(dead_code)` is added.
     Its PR says `Refs #4436`, the closure comment names the restart gap, and
     the issue stays open.
 14. **#4419 dashboard slice.** L4 owns every dashboard change that the #4419
     contract removal forces, through the stacked child PR in Across lanes. L5
     edits no hand-written dashboard path, so the two write scopes stay
     disjoint.
+15. **#4374 venue.** Acceptance uses the operator's actual `~/.codex` corpus
+    through the read-only, separately approved measurement in Long-running
+    acceptance. L6's isolated fixture measurement is supporting evidence and
+    never closes the issue. #4374 is the fourth `pending-long-acceptance`
+    issue in Decision 1 and both cleanup stages.
+16. **Shared files.** The order in the Shared files table is fixed:
+    `project_open_owners.rs` and `local_cycle_tests.rs` go L1, then L5, then
+    L6 #4423; `mcp/server.rs` and dashboard-api `state.rs` go L1, then L5;
+    `daemon/maintenance.rs` goes L1, then L2 #4099.
 
 ### Remaining gates
 
@@ -797,6 +921,9 @@ where measurement doesn't settle the choice.
   exact binary or release, daemon and service ownership, read and write
   boundaries, sampling cadence, stop conditions, and any install or restart
   action. Execution waits for the user's separate, explicit approval.
+- **#4374 runbook approval at execution time.** The coordinator presents the
+  items listed under #4374 operator-corpus measurement. Execution waits for
+  the user's separate, explicit approval.
 - **Unforeseen escalations.** New seams, a genuinely unclear released-store
   status, failed reproductions, budget or bound changes, and other items
   under Decision authority still go to the coordinator, and from there to the

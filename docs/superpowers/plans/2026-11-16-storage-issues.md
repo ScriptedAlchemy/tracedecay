@@ -6,7 +6,7 @@
 
 **Architecture:** Five PRs, one per issue. Each starts from the current `origin/master` in the L2 lane worktree.
 
-- **#4876** narrows repository-identity candidates in the profile registry, so a shard registered for a sibling linked worktree no longer claims a new checkout. It also makes the remaining genuine conflicts name their remedy in the tool error and in the hook status line.
+- **#4876** narrows final-schema repository-identity candidates in the profile registry, so a shard registered for a sibling linked worktree no longer claims a new checkout. It never admits a non-final registry: a `code_projects` table that is not the final shape still returns the project-registry `ResetRequired`. It also makes the remaining genuine conflicts name their remedy in the tool error and in the hook status line.
 - **#4513** pins safety for an external reader of a live daemon's `sessions.db` through a real daemon journey, then reproduces the reported `sqlite3` CLI workflow on an isolated profile.
 - **#4152** removes the last connection-local TEMP tables from projection-rebuild activation and moves the unlinked-temp census behind one process-descriptor authority that also works on macOS.
 - **#4616** pins sealed-generation collection through the daemon, isolates an unsafe text artifact from the rest of recovery, gives busy-store retention bounded progress, names the blocking refusal in Doctor, and proves the storage report's memory does not scale with generation count.
@@ -18,23 +18,24 @@
 
 ## Global Constraints
 
-- **Bazel only.** Every build, test, check, run, and measurement goes through Bazel (`bazel test //<target> --test_output=errors`, `bazel run //crates/tracedecay-cli:tracedecay -- …`). Never invoke `cargo`. This plan adds no Rust dependency. If one becomes necessary, escalate before running `CARGO_BAZEL_REPIN=workspace bazel fetch --repo=@c` and `bazel run //scripts:gen_builds`.
-- **Non-zero evidence.** Every name-filtered run goes through `scripts/require-exact-test.sh` with the full module path. Quote the reported executed count in the lane report. A run that reports `0 passed` is a failure, not evidence. Bazel prints a passing test's log only with `--test_output=all`, so helper runs and any run whose counts are cited use that flag.
+- **Bazel only.** Every build, test, check, run, and measurement goes through Bazel (`bazel test //<target> --test_output=all`, `bazel run //crates/tracedecay-cli:tracedecay -- …`). Never invoke `cargo`. This plan adds no Rust dependency. If one becomes necessary, escalate before running `CARGO_BAZEL_REPIN=workspace bazel fetch --repo=@c` and `bazel run //scripts:gen_builds`.
+- **Green and red runs.** A green named run is `REQUIRE_EXACT_TEST_COUNT=1 scripts/require-exact-test.sh bazel test <one target> --test_output=all --test_arg=<full module path> --test_arg=--exact`. The helper proves only a pass: when the command fails it exits with that status and checks no signature, so it never proves an expected red. An expected red invokes Bazel directly, `bazel test <one target> --test_output=all --test_arg=<full module path> --test_arg=--exact`, and counts only when Bazel exits nonzero and the log shows the step's exact signature: a rustc `error[E…]` line naming the stated missing symbol, or `test <full module path> ... FAILED` with the stated assertion text and `test result: FAILED. 0 passed; 1 failed`. A reproduce-first run with a genuinely unknown outcome uses the green shape; a pass is the pin, and a failure is classified only by the signatures its step names. No substring filter is evidence. Every unfiltered target run whose counts or test names are recorded uses `--test_output=all`. Quote counts and signature lines in the lane report.
 - **Reproduce first.** Each defect task runs its new test, or its measured reproduction, red on the unmodified tip before any production edit. If the reproduction does not fail, stop that slice and report `needs-decision` to the coordinator with the attempted conditions. Do not write a speculative fix.
 - **No compatibility, no backups.** A shape change migrates every caller and deletes the old one in the same slice. No aliases, dual writes, migrations, or secondary copies of project, profile, or operator data.
-- **Released stores.** The profile registry (`global.db`) is a released relational store. #4876 admits and converges its existing rows under the 2026-09-16 admission exception: rows are narrowed at resolution time and never rewritten, deleted, or reset. No other task changes a persisted shape.
+- **Released stores.** The profile registry (`global.db`) is a released relational store. #4876 narrows final-schema candidates at resolution time and never rewrites, deletes, or resets a row. It never admits a non-final registry: a registry whose `code_projects` is not the final shape, such as the 8-column table that binaries through 0.0.74 created, still returns the project-registry `ResetRequired`. `schema_stages::tests::registry_with_non_final_code_project_shape_requires_typed_reset` already proves that refusal and stays unchanged as a separate guard. No other task changes a persisted shape.
 - **Typed production failures.** No `unwrap`, `expect`, `panic`, silent fallback, empty success, or swallowed error in production code. Tests may assert and unwrap.
 - **Retention safety.** No retention change may remove a generation a live reader holds, a durable descriptor target, or a foreign-owned entry. All collection runs through the daemon maintenance path.
-- **Limits.** Task 9 introduces one new bound, `GENERATION_STORE_BUSY_DEFERRALS_BEFORE_WAIT = 3`. It is the behavior of Task 9's single commit, whose body carries the measured deferral counts, and the coordinator reviews it as a bound change. No existing timeout, deadline, or budget is raised.
+- **Limits.** Task 9 introduces one new bound, `GENERATION_STORE_BUSY_DEFERRALS_BEFORE_WAIT = 3`, in its own commit whose body carries the measured deferral counts. The coordinator reviews that commit as a bound change. Task 9's behavior commit adds no budget, bound, or deadline: its wait uses only the existing maintenance lease deadline. No existing timeout, deadline, or budget is raised.
 - **Generated sources.** No task here changes a schemars schema or the operation registry. Each PR runs `pnpm run contracts:check` from `dashboard/` as verification. If it reports drift, a step changed a contract and must stop and regenerate with `pnpm run contracts:generate` in its own step.
 - **Isolated state.** Every daemon, profile, home, and project lives under a lane-owned temporary directory (`IsolatedHome` in tests, an explicit `HOME` and profile root for measured runs). Never read or write `~/.tracedecay`, `~/.claude`, `~/.codex`, `~/.agents`, or installed services. The installed TraceDecay daemon is out of scope and must not be touched.
 - **Commits.** `<type>(<scope>): <subject>`, header ≤ 72 characters, commitlint-clean, no issue numbers. Issue numbers appear only in PR bodies, as `Fixes #N` when that PR alone meets every criterion and `Refs #N` otherwise.
-- **Heavy runs.** Tasks 3 (Step 5), 6, 11, and 13 are heavy or measured. Take a coordinator slot first. Rerun any timing-sensitive failure in isolation before treating it as a regression.
+- **Heavy runs.** Tasks 3 (Step 3), 6, 11, and 13 are heavy or measured. Take a coordinator slot first. Rerun any timing-sensitive failure in isolation before treating it as a regression.
 - **Cross-lane gates.**
   - **Start gate:** the planning PR has merged and the coordinator has created the L2 worktree.
   - **#4876 → L3 #4861 and L5 #4419:** #4876 must merge before L3's #4861 inventory slice and L5's #4419 can integrate. Report the merge SHA to the coordinator immediately.
   - **#4616 → L3 #4533:** #4616 must merge before L3's #4533 can integrate.
   - **#4099 integration gate:** the #4099 PR integrates only after L1's #4448 and #4427 have merged. Task 14 starts only after #4448 merges.
+  - **Shared `daemon/maintenance.rs`:** L1 Task 1 (#4448) edits `crates/tracedecay/src/daemon/maintenance.rs` first (design, Shared files). Task 12 may prepare its pass on a branch from `master`, but it rebases onto the `master` that contains #4448 and reruns its Step 4 runs before the #4099 PR opens.
   - **No cross-lane edits:** no task edits L3's code-index format, segment layout, or session admission; L5's SDK sources; or L1's registered-store schema.
 
 ## Review Focus
@@ -57,35 +58,47 @@
 **Interfaces:**
 - Consumes: `RegisteredGlobalDb::upsert_code_project(&str, &Path, Option<&Path>, Option<&str>, Option<&str>) -> Result<CodeProjectRecord>`.
 - Consumes: `RegisteredGlobalDb::resolve_project_store_by_identity(&Path, Option<&Path>) -> Result<Option<ProjectStoreResolution>>`.
-- Consumes: `tracedecay_runtime_core::worktree::{git_common_dir, is_linked_worktree}`.
+- Consumes: `tracedecay_runtime_core::worktree::{git_common_dir, is_linked_worktree}` and `tracedecay_runtime_core::storage::{repository_identity_path, write_repository_identity_marker}`.
 - Consumes: `StoreInstanceUpsert` and the `git`/`repo_with_worktrees` fixture pattern from `project_identity_collapse_test.rs`.
+- Consumes (unchanged guard): `schema_stages::tests::registry_with_non_final_code_project_shape_requires_typed_reset` in `crates/tracedecay-global-db/src/schema_stages.rs`.
 - Produces (private, `project_registry.rs`): `async fn registered_canonical_root(executor, project_id: &str) -> Result<Option<PathBuf>>`, generic over the same executor bound that `alias_project_id` accepts, so both the write transaction and the read snapshot use it.
 - Produces (private): `async fn narrow_sibling_worktree_authorities(executor, candidates: BTreeSet<String>, from_common_dir: &BTreeSet<String>, requested_root: &Path) -> Result<BTreeSet<String>>`. It drops a candidate only if all of the following hold:
   - it was contributed solely by the `git_common_dir` match;
   - its registered canonical root is an existing linked worktree (`is_linked_worktree`) different from `requested_root`;
   - at least one candidate that does not meet the first two conditions remains.
 
-- [ ] **Step 1: Write the released-shape reproduction and the sole-authority guard**
+- [ ] **Step 1: Write the final-schema reproduction and the sole-authority guard**
 
-Build a primary checkout `main/` with three linked worktrees, `wt1/`, `wt2/`, and `wt3/` (detached). Run `tracedecay init` in `main/` under an `IsolatedHome`, recording `proj_a`. Stop the daemon. Open `<profile>/global.db` with `rusqlite` and seed the released 0.0.74 shape. For each of `proj_b` and `proj_c`:
-- a `code_projects` row with `canonical_root` set to `wt1`/`wt2` and `git_common_dir` set to `main/.git`;
-- a `ProjectRoot` alias for `wt1`/`wt2`;
-- a store instance written through `StoreInstanceUpsert`.
+The reproduction uses only the final registry schema. It never seeds the 0.0.74 or any other non-final `code_projects` shape: admission refuses such a registry with the project-registry `ResetRequired` before resolution runs, and `registry_with_non_final_code_project_shape_requires_typed_reset` already proves that refusal. A schema `ResetRequired` is therefore a broken fixture, never the #4876 defect.
+
+Build a primary checkout `main/` with three linked worktrees, `wt1/`, `wt2/`, and `wt3/` (detached). Run `tracedecay init` in `main/` under an `IsolatedHome`, recording `proj_a`. Production enrollment creates the registry at the final schema and registers `proj_a` with its `git_common_dir` alias. Stop the daemon. Then seed `proj_b` and `proj_c` with current-schema statements only, through the registered `<profile>/global.db`:
+- one `INSERT INTO code_projects` per project that names every column the final table defines (`project_id`, `canonical_root`, `display_root`, `primary_root_platform`, `primary_root_bytes`, `primary_root_last_seen_at`, `git_common_dir`, `git_remote_url`, `default_branch`, `created_at`, `last_seen_at`), with `canonical_root` set to `wt1`/`wt2` and `git_common_dir` set to `main/.git`;
+- one `project_aliases` row per project for the `wt1`/`wt2` root alias;
+- a store instance written through `RegisteredGlobalDb::upsert_store_instance(StoreInstanceUpsert { .. })`.
+
+No statement drops, adds, or renames a column. `init` also writes the repository identity marker in the shared common directory (`repository_identity_path(main)`), and resolution reads it before any `git_common_dir` candidate. A marker naming `proj_a` would resolve `wt3` without reading the sibling candidates, so the fixture rewrites it with `write_repository_identity_marker(main, "proj_other")`. That models the production state in which another profile enrolled the repository first: this profile holds no store for `proj_other`, so resolution falls through to the candidates. Record in the lane report that a marker naming `proj_a` resolves first.
 
 Write `new_worktree_with_two_sibling_worktree_shards_resolves_to_the_primary_store`. It runs `tracedecay tool active_project --args '{}'` with `cwd = wt3` and asserts:
-- exit 0;
+- exit 0, with `assert!(output.status.success(), "active_project from a new worktree failed: {stderr}")`;
 - the reported project id is `proj_a`;
 - `projects search` still lists exactly `proj_a`, `proj_b`, and `proj_c` (no row rewritten or deleted).
 
-Write `sole_worktree_registered_authority_still_claims_a_new_worktree`. Here only `proj_b` is registered, with root `wt1`. Calling `upsert_code_project` for `wt3` must return `proj_b`, and no new project row may appear.
+Write `sole_worktree_registered_authority_still_claims_a_new_worktree`. Here only `proj_b` is registered, with root `wt1`, through the same current-schema statements. Calling `upsert_code_project` for `wt3` must return `proj_b`, and no new project row may appear.
 
-- [ ] **Step 2: Run both and observe the reproduction RED**
+- [ ] **Step 2: Run the reproduction red and both guards green**
 
-Run: `scripts/require-exact-test.sh bazel test //crates/tracedecay:storage_suite --test_output=all --test_arg=sibling_worktree_shard_resolution_test::new_worktree_with_two_sibling_worktree_shards_resolves_to_the_primary_store --test_arg=--exact`
+Run the reproduction directly:
 
-Expected: `1 failed`. The tool exits nonzero with a `ResetRequired`/`conflicting project authorities [proj_a, proj_b, proj_c]` or `project_identity_conflict` error. Record which one.
+`bazel test //crates/tracedecay:storage_suite --test_output=all --test_arg=sibling_worktree_shard_resolution_test::new_worktree_with_two_sibling_worktree_shards_resolves_to_the_primary_store --test_arg=--exact`
 
-Run the same command for `sibling_worktree_shard_resolution_test::sole_worktree_registered_authority_still_claims_a_new_worktree`. Expected: `1 passed`; it guards against over-narrowing. If the first test passes, stop and report #4876 as not reproduced on `master` (`needs-decision`).
+Expected red: Bazel exits nonzero, and the log shows `test sibling_worktree_shard_resolution_test::new_worktree_with_two_sibling_worktree_shards_resolves_to_the_primary_store ... FAILED`, the panic text `active_project from a new worktree failed:`, and `test result: FAILED. 0 passed; 1 failed`. The quoted stderr must carry one of the two final-schema sibling errors: the multi-authority error `conflicting project authorities [proj_a, proj_b, proj_c] already claim '<wt3>'`, or the `project_identity_conflict` route error naming the sibling ids. Record which one. A schema `ResetRequired` (`incompatible number of columns`) or any other error is not the reproduction; fix the fixture.
+
+Then run both guards through the helper:
+
+- `REQUIRE_EXACT_TEST_COUNT=1 scripts/require-exact-test.sh bazel test //crates/tracedecay:storage_suite --test_output=all --test_arg=sibling_worktree_shard_resolution_test::sole_worktree_registered_authority_still_claims_a_new_worktree --test_arg=--exact`
+- `REQUIRE_EXACT_TEST_COUNT=1 scripts/require-exact-test.sh bazel test //crates/tracedecay-global-db:unit_test --test_output=all --test_arg=schema_stages::tests::registry_with_non_final_code_project_shape_requires_typed_reset --test_arg=--exact`
+
+Expected: each reports `1 passed; 0 failed`. The first guards against over-narrowing. The second proves a non-final registry is still refused before narrowing exists. If the reproduction passes, stop and report #4876 as not reproduced on `master` (`needs-decision`).
 
 - [ ] **Step 3: Narrow common-dir candidates at both resolution sites**
 
@@ -97,9 +110,9 @@ Leave every row untouched; narrowing is read-time admission only.
 
 - [ ] **Step 4: Run GREEN and the existing identity suites**
 
-Run both exact commands from Step 2. Expected: each reports `1 passed`.
+Run the reproduction and both guards through the helper: `REQUIRE_EXACT_TEST_COUNT=1 scripts/require-exact-test.sh bazel test //crates/tracedecay:storage_suite --test_output=all --test_arg=sibling_worktree_shard_resolution_test::new_worktree_with_two_sibling_worktree_shards_resolves_to_the_primary_store --test_arg=--exact`, then the two Step 2 guard commands unchanged. Expected: each reports `1 passed; 0 failed`.
 
-Run: `bazel test //crates/tracedecay:storage_suite //crates/tracedecay-global-db:unit_test --test_output=errors`. Expected: PASS, including `project_identity_collapse_test` and `worktree_canonical_root_guard_test`.
+Run: `bazel test //crates/tracedecay:storage_suite //crates/tracedecay-global-db:unit_test --test_output=all`. Expected: PASS, each target's `test result:` line reports a nonzero passed count and `0 failed`, and the log lists the `project_identity_collapse_test` and `worktree_canonical_root_guard_test` tests as `ok`.
 
 - [ ] **Step 5: Commit**
 
@@ -130,22 +143,21 @@ git commit -m "fix(registry): keep sibling worktree shards from claiming new che
 
 - [ ] **Step 1: Write the two-primary conflict tests**
 
-In `sibling_worktree_shard_resolution_test.rs`, add `two_primary_claimants_report_the_forget_remedy`. Seed `proj_a` plus `proj_d`, both with the canonical root `main/`, and run `tracedecay tool active_project` from `wt3`. Assert:
+In `sibling_worktree_shard_resolution_test.rs`, add `two_primary_claimants_report_the_forget_remedy`. Seed `proj_a` plus `proj_d`, both with the canonical root `main/`, using Task 1's final-schema statements and marker setup, and run `tracedecay tool active_project` from `wt3`. Assert:
 - exit nonzero;
 - stderr names both ids;
-- stderr contains `tracedecay --dry-run projects forget`.
+- stderr contains `tracedecay --dry-run projects forget`, with `assert!(stderr.contains("tracedecay --dry-run projects forget"), "conflict error does not name the forget remedy: {stderr}")`.
 
-In `hooks_test.rs`, add `codex_prompt_in_conflicting_checkout_names_registry_conflict`. It drives the Codex user-prompt hook with `cwd = wt3` against the same profile. Assert the context contains `registry_conflict`-status text naming both ids and the forget command, and does not contain `run \`tracedecay init\``.
+In `hooks_test.rs`, add `codex_prompt_in_conflicting_checkout_names_registry_conflict`. It drives the Codex user-prompt hook with `cwd = wt3` against the same profile. It first asserts `assert!(context.contains("registry_conflict"), "hook context does not report the registry conflict: {context}")`, then that the context names both ids and the forget command and does not contain `run \`tracedecay init\``. Both tests assert on text only, so they compile on the unmodified tree.
 
 - [ ] **Step 2: Run RED**
 
-Run: `scripts/require-exact-test.sh bazel test //crates/tracedecay:storage_suite --test_output=all --test_arg=sibling_worktree_shard_resolution_test::two_primary_claimants_report_the_forget_remedy --test_arg=--exact`
+Run each directly:
 
-Expected: `1 failed`, because the error lacks the forget command.
+- `bazel test //crates/tracedecay:storage_suite --test_output=all --test_arg=sibling_worktree_shard_resolution_test::two_primary_claimants_report_the_forget_remedy --test_arg=--exact`
+- `bazel test //crates/tracedecay:hooks_lsp_suite --test_output=all --test_arg=hooks_test::codex_prompt_in_conflicting_checkout_names_registry_conflict --test_arg=--exact`
 
-Run: `scripts/require-exact-test.sh bazel test //crates/tracedecay:hooks_lsp_suite --test_output=all --test_arg=hooks_test::codex_prompt_in_conflicting_checkout_names_registry_conflict --test_arg=--exact`
-
-Expected: `1 failed`, because the context contains the `UNINDEXED_STATUS_LINE` init advice.
+Expected red: each Bazel run exits nonzero, and its log shows `test <full module path> ... FAILED` and `test result: FAILED. 0 passed; 1 failed`. The storage log carries the panic text `conflict error does not name the forget remedy`, and its quoted stderr names `proj_a` and `proj_d`. The hooks log carries `hook context does not report the registry conflict`, and its quoted context holds the `UNINDEXED_STATUS_LINE` init advice.
 
 - [ ] **Step 3: Implement typed conflict resolution for hooks**
 
@@ -157,11 +169,11 @@ Expected: `1 failed`, because the context contains the `UNINDEXED_STATUS_LINE` i
 
 - [ ] **Step 4: Run GREEN and the hook suites**
 
-Run both exact commands from Step 2. Expected: `1 passed` each.
+Run both Step 2 tests through the helper, `REQUIRE_EXACT_TEST_COUNT=1 scripts/require-exact-test.sh` followed by each Step 2 command unchanged. Expected: `1 passed; 0 failed` each.
 
-Run: `bazel test //crates/tracedecay:hooks_lsp_suite //crates/tracedecay-agent-hosts:unit_test //crates/tracedecay-agent-hosts:hooks_boundary //crates/tracedecay:storage_suite --test_output=errors`
+Run: `bazel test //crates/tracedecay:hooks_lsp_suite //crates/tracedecay-agent-hosts:unit_test //crates/tracedecay-agent-hosts:hooks_boundary //crates/tracedecay:storage_suite --test_output=all`
 
-Expected: PASS.
+Expected: PASS, and each target's `test result:` line reports a nonzero passed count and `0 failed`.
 
 Then run `pnpm run contracts:check` in `dashboard/`. Expected: no drift.
 
@@ -218,11 +230,11 @@ Assert:
 
 - [ ] **Step 2: Run both tests (reproduce first)**
 
-Run: `scripts/require-exact-test.sh bazel test //crates/tracedecay:daemon_suite --test_output=all --test_arg=external_sqlite_reader_test::external_readonly_reader_during_ingest_never_breaks_the_daemon --test_arg=--exact`
+Run: `REQUIRE_EXACT_TEST_COUNT=1 scripts/require-exact-test.sh bazel test //crates/tracedecay:daemon_suite --test_output=all --test_arg=external_sqlite_reader_test::external_readonly_reader_during_ingest_never_breaks_the_daemon --test_arg=--exact`
 
 Then run the same command for `external_sqlite_reader_test::external_default_mode_reader_across_daemon_restart_preserves_sessions`.
 
-Record each outcome and count. This is a darwin host, so these are native macOS Bazel results; record the platform. A pass is the regression pin for the merged #4803/#4805 fixes. A failure is the reproduction: capture the daemon log and the failing pragma, then go to Step 4.
+The outcome is unknown before the run. Record each outcome and count. This is a darwin host, so these are native macOS Bazel results; record the platform. A pass (`1 passed; 0 failed`) is the regression pin for the merged #4803/#4805 fixes. A failure counts as the reproduction only when the log shows `test <full module path> ... FAILED`, `test result: FAILED. 0 passed; 1 failed`, and an assertion naming `disk I/O error`, `file is not a database`, a non-`ok` `integrity_check`, or a lost pre-stop message count. Capture the daemon log and the failing pragma, then go to Step 4. Any other failure is a fixture defect to fix before you classify.
 
 - [ ] **Step 3: Reproduce the reported workflow with the real `sqlite3` CLI**
 
@@ -277,11 +289,11 @@ It runs `clear_active_projection` in a write transaction and commits. It then as
 
 - [ ] **Step 2: Run RED**
 
-Run: `scripts/require-exact-test.sh bazel test //crates/tracedecay-global-db:unit_test --test_output=all --test_arg=observation_projection::rebuild::temp_ownership_tests::rebuild_activation_leaves_no_temp_schema_on_the_writer_connection --test_arg=--exact`
+Run directly: `bazel test //crates/tracedecay-global-db:unit_test --test_output=all --test_arg=observation_projection::rebuild::temp_ownership_tests::rebuild_activation_leaves_no_temp_schema_on_the_writer_connection --test_arg=--exact`
 
-Expected: `1 failed` with `temp.sqlite_master` count `2`.
+Expected red: Bazel exits nonzero, and the log shows `test observation_projection::rebuild::temp_ownership_tests::rebuild_activation_leaves_no_temp_schema_on_the_writer_connection ... FAILED`, an `assert_eq!` failure with `left: 2` and `right: 0` for the `temp.sqlite_master` count, and `test result: FAILED. 0 passed; 1 failed`.
 
-Run the same command for `observation_projection::rebuild::temp_ownership_tests::rebuild_activation_clears_exactly_the_unretained_outputs`. Expected: `1 passed`; it pins current semantics before the rewrite.
+Run through the helper: `REQUIRE_EXACT_TEST_COUNT=1 scripts/require-exact-test.sh bazel test //crates/tracedecay-global-db:unit_test --test_output=all --test_arg=observation_projection::rebuild::temp_ownership_tests::rebuild_activation_clears_exactly_the_unretained_outputs --test_arg=--exact`. Expected: `1 passed; 0 failed`; it pins current semantics before the rewrite.
 
 - [ ] **Step 3: Rewrite activation with correlated index-backed subqueries**
 
@@ -291,11 +303,11 @@ Before committing, confirm on the test store that `EXPLAIN QUERY PLAN` for each 
 
 - [ ] **Step 4: Run GREEN and the projection suite**
 
-Run both exact commands from Step 2. Expected: `1 passed` each.
+Run both Step 2 tests through the helper (`REQUIRE_EXACT_TEST_COUNT=1 scripts/require-exact-test.sh` before each exact command). Expected: `1 passed; 0 failed` each.
 
-Run: `bazel test //crates/tracedecay-global-db:unit_test //crates/tracedecay:session_suite --test_output=errors`
+Run: `bazel test //crates/tracedecay-global-db:unit_test //crates/tracedecay:session_suite --test_output=all`
 
-Expected: PASS.
+Expected: PASS, and each target's `test result:` line reports a nonzero passed count and `0 failed`.
 
 - [ ] **Step 5: Commit**
 
@@ -334,9 +346,9 @@ Assert exactly one entry with `bytes >= 3 * 1024 * 1024`. After both descriptors
 
 - [ ] **Step 2: Run RED**
 
-Run: `scripts/require-exact-test.sh bazel test //crates/tracedecay-runtime-core:unit_test --test_output=all --test_arg=process_fds::tests::open_unlinked_sqlite_temp_file_is_counted_once --test_arg=--exact`
+Run directly: `bazel test //crates/tracedecay-runtime-core:unit_test --test_output=all --test_arg=process_fds::tests::open_unlinked_sqlite_temp_file_is_counted_once --test_arg=--exact`
 
-Expected: build failure (`process_fds` does not exist), which counts as red. Record that on this darwin host the existing census returns `None`.
+Expected red: Bazel exits nonzero before any test runs, and the log shows a rustc `error[E…]` line naming `unlinked_open_files_with_prefix`, with every rustc error in `process_fds.rs`. Write only the test module in `process_fds.rs` and the `pub mod process_fds;` line before this run, so the missing function is the only unresolved symbol. Record that on this darwin host the existing census returns `None`.
 
 - [ ] **Step 3: Implement `process_fds` and migrate the census**
 
@@ -347,11 +359,11 @@ Expected: build failure (`process_fds` does not exist), which counts as red. Rec
 
 - [ ] **Step 4: Run GREEN and the affected targets**
 
-Run the Step 2 command. Expected: `1 passed`.
+Run the Step 2 test through the helper (`REQUIRE_EXACT_TEST_COUNT=1 scripts/require-exact-test.sh` before the Step 2 command). Expected: `1 passed; 0 failed`.
 
-Run: `bazel test //crates/tracedecay-runtime-core:unit_test //crates/tracedecay-maintenance:unit_test //crates/tracedecay-daemon-service:unit_test //crates/tracedecay-cli:c_library_allocator --test_output=errors`
+Run: `bazel test //crates/tracedecay-runtime-core:unit_test //crates/tracedecay-maintenance:unit_test //crates/tracedecay-daemon-service:unit_test //crates/tracedecay-cli:c_library_allocator --test_output=all`
 
-Expected: PASS.
+Expected: PASS, and each target's `test result:` line reports a nonzero passed count and `0 failed`.
 
 - [ ] **Step 5: Commit**
 
@@ -372,13 +384,21 @@ git commit -m "feat(storage): census unlinked SQLite temp files on macOS"
 
 Take a coordinator slot. Run:
 
-`bazel test //crates/tracedecay-cli:c_library_allocator //crates/tracedecay-cli:process_allocator_heaps --runs_per_test=20 --test_output=errors`
+`bazel test //crates/tracedecay-cli:c_library_allocator //crates/tracedecay-cli:process_allocator_heaps --runs_per_test=20 --test_output=all`
 
-Then run:
+Expected: both targets report `PASSED` over 20 runs, and each run's `test result:` line reports a nonzero passed count and `0 failed`.
 
-`bazel test //crates/tracedecay-global-db:unit_test --test_filter=observation_projection::rebuild::temp_ownership_tests --runs_per_test=50 --test_output=all`
+Then run each Task 4 test 50 times, one helper invocation per run, so each run proves its own exact count:
 
-Expected: every run passes, and each run's log reports `2 passed`; a run reporting `0 passed` invalidates the evidence. Record run counts, platform, and any `integrity_check` or segfault output.
+```bash
+for test in rebuild_activation_clears_exactly_the_unretained_outputs rebuild_activation_leaves_no_temp_schema_on_the_writer_connection; do
+  for run in $(seq 50); do
+    REQUIRE_EXACT_TEST_COUNT=1 scripts/require-exact-test.sh bazel test //crates/tracedecay-global-db:unit_test --nocache_test_results --test_output=all --test_arg=observation_projection::rebuild::temp_ownership_tests::$test --test_arg=--exact || exit 1
+  done
+done
+```
+
+Expected: all 100 invocations report `1 passed; 0 failed`; the loop stops at the first that does not. `--runs_per_test` is not used here, because it prints one summary per run and the helper requires exactly one. Record run counts, platform, and any `integrity_check` or segfault output.
 
 - [ ] **Step 2: Open the #4152 PR and record the disposition**
 
@@ -416,11 +436,11 @@ Report #4152 as `needs-decision`. The coordinator chooses whether item 1 stays o
 
 - [ ] **Step 2: Run (reproduce first) and record the blocking stage**
 
-Run: `scripts/require-exact-test.sh bazel test //crates/tracedecay:daemon_suite --test_output=all --test_arg=sealed_generation_retention_test::superseded_sealed_generations_collect_to_live_plus_one --test_arg=--exact`
+Run: `REQUIRE_EXACT_TEST_COUNT=1 scripts/require-exact-test.sh bazel test //crates/tracedecay:daemon_suite --test_output=all --test_arg=sealed_generation_retention_test::superseded_sealed_generations_collect_to_live_plus_one --test_arg=--exact`
 
 Run the same command for `sealed_generation_retention_test::reader_held_previous_generation_survives_scheduled_retention`.
 
-Record the counts and the daemon-log retention events (`retention_degraded` with `failure=` and `graph_superseded_replays_retired` with `retained=`/`pending=`). If both pass, criterion 1 is met on `master` and the tests are its regression pins. If the first fails with `generation_store_busy`, Task 9 owns the fix. If it fails with `retention_plan_failed … durable descriptor target`, Task 8 owns it. Any other failure stops #4616 and goes to the coordinator as `needs-decision` with the log.
+The outcome is unknown before the run. Record the counts and the daemon-log retention events (`retention_degraded` with `failure=` and `graph_superseded_replays_retired` with `retained=`/`pending=`). If both report `1 passed; 0 failed`, criterion 1 is met on `master` and the tests are its regression pins. A failure is classified only from its `--test_output=all` log, which must show `test <full module path> ... FAILED` and `test result: FAILED. 0 passed; 1 failed`: with `retention_degraded … failure=generation_store_busy`, Task 9 owns the fix; with `retention_plan_failed … durable descriptor target`, Task 8 owns it. Any other failure stops #4616 and goes to the coordinator as `needs-decision` with the log.
 
 - [ ] **Step 3: Commit the pins only if they are green**
 
@@ -462,9 +482,9 @@ Assert:
 
 - [ ] **Step 2: Run RED**
 
-Run: `scripts/require-exact-test.sh bazel test //crates/tracedecay-code-index-retention:unit_test --test_output=all --test_arg=code_index_generations::tests::text_artifact_recovery_tests::committed_receipt_with_relivened_artifact_restores_it_and_finishes_recovery --test_arg=--exact`
+Run directly: `bazel test //crates/tracedecay-code-index-retention:unit_test --test_output=all --test_arg=code_index_generations::tests::text_artifact_recovery_tests::committed_receipt_with_relivened_artifact_restores_it_and_finishes_recovery --test_arg=--exact`
 
-Expected: `1 failed` with `refused unsafe state: text-artifact retention recovery would remove a durable descriptor target`.
+Expected red: Bazel exits nonzero, and the log shows `test code_index_generations::tests::text_artifact_recovery_tests::committed_receipt_with_relivened_artifact_restores_it_and_finishes_recovery ... FAILED`, the error text `refused unsafe state: text-artifact retention recovery would remove a durable descriptor target`, and `test result: FAILED. 0 passed; 1 failed`. The test drives only the existing recovery entry points, so it compiles on the unmodified tree.
 
 - [ ] **Step 3: Implement per-candidate restoration**
 
@@ -472,11 +492,11 @@ Rewrite `cleanup_committed_text_artifact_transaction` to compute the marks once.
 
 - [ ] **Step 4: Run GREEN and the retention crate**
 
-Run the Step 2 command. Expected: `1 passed`.
+Run the Step 2 test through the helper (`REQUIRE_EXACT_TEST_COUNT=1 scripts/require-exact-test.sh` before the Step 2 command). Expected: `1 passed; 0 failed`.
 
-Run: `bazel test //crates/tracedecay-code-index-retention:unit_test //crates/tracedecay-maintenance:unit_test --test_output=errors`
+Run: `bazel test //crates/tracedecay-code-index-retention:unit_test //crates/tracedecay-maintenance:unit_test --test_output=all`
 
-Expected: PASS.
+Expected: PASS, and each target's `test result:` line reports a nonzero passed count and `0 failed`.
 
 - [ ] **Step 5: Commit**
 
@@ -497,55 +517,73 @@ git commit -m "fix(retention): restore live text artifacts instead of stalling"
 - Modify: `crates/tracedecay-code-index-retention/src/code_index_generations/locking.rs` (make `acquire_code_generation_store_lock_checked` `pub`)
 
 **Interfaces:**
-- Produces: `pub enum StoreLockAdmissionV1 { TryOnce, WaitUntil(Instant) }` in `code_index_generations.rs`. It is a new parameter of `execute_code_generation_retention_cancellable` and `recover_code_generation_retention_cancellable`; `WaitUntil` uses `acquire_code_generation_store_lock_checked(store_root, deadline, is_cancelled)`.
-- Produces: `StoreTelemetrySamplingRegistry::record_generation_store_busy(&self, store_root: &Path) -> u32` and `clear_generation_store_busy(&self, store_root: &Path)`.
-- Produces: `const GENERATION_STORE_BUSY_DEFERRALS_BEFORE_WAIT: u32 = 3` in `store_maintenance/mod.rs`. `run_code_generation_retention` passes `WaitUntil(lease deadline)` once the count reaches it, and clears the count on any non-busy outcome.
+Task 9 lands as two commits. The behavior commit makes a busy store wait within the existing maintenance lease deadline and adds no number. The bound commit adds `GENERATION_STORE_BUSY_DEFERRALS_BEFORE_WAIT = 3` with its measured evidence, so the coordinator reviews the bound alone.
 
-- [ ] **Step 1: Write the sustained-writer and shutdown tests**
+- Produces (behavior commit): `pub enum StoreLockAdmissionV1 { TryOnce, WaitUntil(Instant) }` in `code_index_generations.rs`. It is a new parameter of `execute_code_generation_retention_cancellable` and `recover_code_generation_retention_cancellable`; `WaitUntil` uses `acquire_code_generation_store_lock_checked(store_root, deadline, is_cancelled)`. `run_code_generation_retention` passes `WaitUntil(lease deadline)`, the deadline the maintenance lease already carries, so a busy store is waited for rather than deferred.
+- Produces (bound commit): `StoreTelemetrySamplingRegistry::record_generation_store_busy(&self, store_root: &Path) -> u32`, `clear_generation_store_busy(&self, store_root: &Path)`, and `const GENERATION_STORE_BUSY_DEFERRALS_BEFORE_WAIT: u32 = 3` in `store_maintenance/mod.rs`. `run_code_generation_retention` passes `TryOnce` until a store's busy count reaches the constant, then `WaitUntil(lease deadline)`, and clears the count on any non-busy outcome.
 
-`retention_progresses_under_sustained_publication_lock_pressure`:
+- [ ] **Step 1: Write the behavior tests**
+
+`retention_waits_for_a_busy_store_within_the_lease_deadline`:
 - a writer thread loops: acquire `acquire_code_generation_store_lock`, signal `held`, hold 50 ms, release, sleep 20 ms;
-- the test waits for `held` before each of five retention attempts on a fixture store with three superseded generations.
+- after `held`, the test runs one retention attempt on a fixture store with three superseded generations.
 
-Assert:
-- attempts 1–3 return the busy deferral;
-- some attempt among 4–5 collects the superseded generations;
-- the writer never observes its lock lost.
+Assert, with `assert!(collected, "the busy store was not collected within the lease deadline: {outcome:?}")`, that this one attempt collects the superseded generations, and that the writer never observes its lock lost.
 
 `busy_store_wait_observes_shutdown_cancellation`:
 - the writer holds the lock indefinitely;
-- after three deferrals, the fourth attempt starts, and the test cancels its `CancellationToken` after 100 ms.
+- one retention attempt starts, and the test cancels its `CancellationToken` after 100 ms.
 
-Assert the attempt returns `Cancelled` within 1 s and that no generation was removed.
+Assert, with `assert!(matches!(outcome, Cancelled), "a waiting retention attempt did not return Cancelled: {outcome:?}")`, that the attempt returns `Cancelled` within 1 s, and that no generation was removed. Both tests call only `run_code_generation_retention`, so they compile on the unmodified tree.
 
 - [ ] **Step 2: Run RED**
 
-Run: `scripts/require-exact-test.sh bazel test //crates/tracedecay-maintenance:unit_test --test_output=all --test_arg=store_maintenance::busy_store_progress_tests::retention_progresses_under_sustained_publication_lock_pressure --test_arg=--exact`
+Run each directly:
 
-Expected: `1 failed`; all five attempts defer with `generation_store_busy`.
+- `bazel test //crates/tracedecay-maintenance:unit_test --test_output=all --test_arg=store_maintenance::busy_store_progress_tests::retention_waits_for_a_busy_store_within_the_lease_deadline --test_arg=--exact`
+- `bazel test //crates/tracedecay-maintenance:unit_test --test_output=all --test_arg=store_maintenance::busy_store_progress_tests::busy_store_wait_observes_shutdown_cancellation --test_arg=--exact`
 
-- [ ] **Step 3: Implement the bounded wait (behavior commit)**
+Expected red: each Bazel run exits nonzero, and its log shows `test <full module path> ... FAILED` and `test result: FAILED. 0 passed; 1 failed`. The first carries `the busy store was not collected within the lease deadline` with a `generation_store_busy` outcome. The second carries `a waiting retention attempt did not return Cancelled` with the same busy outcome, because the unmodified attempt defers at once instead of waiting.
 
-Add `StoreLockAdmissionV1` and the counter. Migrate every caller of the two retention entry points (`rg -n "execute_code_generation_retention_cancellable|recover_code_generation_retention_cancellable" crates`) in this slice.
+- [ ] **Step 3: Implement the lease-bounded wait (behavior commit)**
+
+Add `StoreLockAdmissionV1` and pass `WaitUntil(lease deadline)` from `run_code_generation_retention`. Migrate every caller of the two retention entry points (`rg -n "execute_code_generation_retention_cancellable|recover_code_generation_retention_cancellable" crates`) in this slice. Add no constant, counter, or new deadline.
 
 - [ ] **Step 4: Run GREEN, the shutdown guard, and the daemon pins**
 
-Run the Step 2 command, then the same command for `store_maintenance::busy_store_progress_tests::busy_store_wait_observes_shutdown_cancellation`. Expected: `1 passed` each.
+Run both Step 2 tests through the helper (`REQUIRE_EXACT_TEST_COUNT=1 scripts/require-exact-test.sh` before each Step 2 command). Expected: `1 passed; 0 failed` each.
 
-Run: `bazel test //crates/tracedecay-maintenance:unit_test //crates/tracedecay-code-index-retention:unit_test //crates/tracedecay:daemon_suite --test_output=errors`
+Run: `bazel test //crates/tracedecay-maintenance:unit_test //crates/tracedecay-code-index-retention:unit_test //crates/tracedecay:daemon_suite --test_output=all`
 
-Expected: PASS, including Task 7's pins.
+Expected: PASS, each target's `test result:` line reports a nonzero passed count and `0 failed`, and the log lists Task 7's pins as `ok`.
 
-- [ ] **Step 5: Commit with the bound's evidence**
+- [ ] **Step 5: Commit the behavior**
 
 If Task 7's pins were held back as red (Task 7 Step 3), add them to this commit now that they pass.
 
 ```bash
 git add crates/tracedecay-maintenance/src crates/tracedecay-code-index-retention/src
-git commit -m "fix(retention): wait for a busy generation store after deferrals"
+git commit -m "fix(retention): wait for a busy generation store within its lease"
 ```
 
-Put the measurement in the commit body: the deferral count observed in Task 7 Step 2 and the Step 4 attempt count. Flag the constant for coordinator bound review in the lane report.
+- [ ] **Step 6: Write the deferral test and run it red**
+
+Add `retention_progresses_under_sustained_publication_lock_pressure` to `busy_store_progress_tests.rs`. It uses the Step 1 writer loop, waits for `held` before each of five retention attempts, and asserts, with `assert!(deferred, "attempt {attempt} waited instead of deferring: {outcome:?}")`, that attempts 1 to 3 return the busy deferral. It then asserts that some attempt among 4 and 5 collects the superseded generations, and that the writer never observes its lock lost.
+
+Run directly: `bazel test //crates/tracedecay-maintenance:unit_test --test_output=all --test_arg=store_maintenance::busy_store_progress_tests::retention_progresses_under_sustained_publication_lock_pressure --test_arg=--exact`
+
+Expected red: Bazel exits nonzero, and the log shows `test store_maintenance::busy_store_progress_tests::retention_progresses_under_sustained_publication_lock_pressure ... FAILED`, the panic text `attempt 1 waited instead of deferring`, and `test result: FAILED. 0 passed; 1 failed`. The behavior commit waits on every busy attempt.
+
+- [ ] **Step 7: Add the deferral bound (bound commit)**
+
+Add the busy counter and `GENERATION_STORE_BUSY_DEFERRALS_BEFORE_WAIT = 3`, and change `run_code_generation_retention` to pass `TryOnce` until a store's count reaches it. Run the Step 6 test and both Step 2 tests through the helper. Expected: `1 passed; 0 failed` each. Rerun the Step 4 target command. Expected: PASS with nonzero counts.
+
+```bash
+git add crates/tracedecay-maintenance/src
+git commit -m "perf(retention): defer a busy generation store three times first"
+```
+
+The commit body carries the measurement that sets the value: the `generation_store_busy` deferral counts observed in Task 7 Step 2 and the attempt on which the Step 6 test collected. Flag the constant for coordinator bound review in the lane report. If the measurement does not support 3, report the observed counts as `needs-decision` instead of committing a different number.
 
 ### Task 10: #4616 Doctor names the refusal behind an over-bound store
 
@@ -564,13 +602,13 @@ Put the measurement in the commit body: the deferral count observed in Task 7 St
 - a fixture project store over a 1 MiB `store_soft_budgets_bytes` override, whose code-index store has a transaction journal that makes the plan return `UnsafeState`;
 - run the Doctor storage family read.
 
-Assert the project finding contains `retention blocked:`, the refusal text, and `tracedecay --dry-run projects forget`.
+Assert, starting with `assert!(finding.contains("retention blocked:"), "over-bound finding does not name the retention refusal: {finding}")`, that the project finding contains `retention blocked:`, the refusal text, and `tracedecay --dry-run projects forget`. The test reads the finding through the existing Doctor storage family read, so it compiles on the unmodified tree.
 
 - [ ] **Step 2: Run RED**
 
-Run: `scripts/require-exact-test.sh bazel test //crates/tracedecay-daemon-service:unit_test --test_output=all --test_arg=doctor_kernel::tests::over_bound_store_with_refused_retention_names_refusal_and_command --test_arg=--exact`
+Run directly: `bazel test //crates/tracedecay-daemon-service:unit_test --test_output=all --test_arg=doctor_kernel::tests::over_bound_store_with_refused_retention_names_refusal_and_command --test_arg=--exact`
 
-Expected: `1 failed`; the finding lacks `retention blocked:`.
+Expected red: Bazel exits nonzero, and the log shows `test doctor_kernel::tests::over_bound_store_with_refused_retention_names_refusal_and_command ... FAILED`, the panic text `over-bound finding does not name the retention refusal`, and `test result: FAILED. 0 passed; 1 failed`.
 
 - [ ] **Step 3: Thread the refusal into the finding**
 
@@ -578,9 +616,9 @@ Expected: `1 failed`; the finding lacks `retention blocked:`.
 
 - [ ] **Step 4: Run GREEN and commit**
 
-Run the Step 2 command. Expected: `1 passed`.
+Run the Step 2 test through the helper (`REQUIRE_EXACT_TEST_COUNT=1 scripts/require-exact-test.sh` before the Step 2 command). Expected: `1 passed; 0 failed`.
 
-Run: `bazel test //crates/tracedecay-daemon-service:unit_test //crates/tracedecay-maintenance:unit_test --test_output=errors`. Expected: PASS.
+Run: `bazel test //crates/tracedecay-daemon-service:unit_test //crates/tracedecay-maintenance:unit_test --test_output=all`. Expected: PASS, and each target's `test result:` line reports a nonzero passed count and `0 failed`.
 
 ```bash
 git add crates/tracedecay-daemon-service/src/doctor_kernel.rs crates/tracedecay-daemon-service/src/doctor_kernel/tests.rs crates/tracedecay-maintenance/src/retention/footprint.rs
@@ -599,7 +637,7 @@ git commit -m "fix(doctor): name the retention refusal behind over-bound stores"
 
 - [ ] **Step 1: Write the scale test**
 
-`storage_report_resident_growth_is_independent_of_generation_count` builds one profile with 5 superseded generations and one with 70. Each generation has a 700 MiB sparse segment file, so it uses no disk blocks. For each profile, run `build_storage_report` and sample peak resident bytes during the call.
+`storage_report_resident_growth_is_independent_of_generation_count` builds one profile with 5 superseded generations and one with 70. Each of the 75 generations has a 700 MiB segment file made sparse: the fixture creates an empty file and calls `std::fs::File::set_len(700 * 1024 * 1024)`, which leaves one hole and writes no data. The fixture never writes segment bytes, so it never writes the 51 GiB the logical sizes add up to. After the first `set_len`, it asserts with `std::os::unix::fs::MetadataExt::blocks` that the file holds less than 1 MiB of allocated blocks, and fails with `the fixture filesystem does not keep sparse holes` otherwise, before creating the other 74. For each profile, run `build_storage_report` and sample peak resident bytes during the call.
 
 Assert:
 - both reports complete with a size coverage of complete or partial;
@@ -608,11 +646,11 @@ Assert:
 
 - [ ] **Step 2: Run (reproduce first)**
 
-Take a coordinator slot. Run: `scripts/require-exact-test.sh bazel test //crates/tracedecay-maintenance:unit_test --test_output=all --test_arg=retention::storage_report::scale_tests::storage_report_resident_growth_is_independent_of_generation_count --test_arg=--exact`
+Take a coordinator slot. Run: `REQUIRE_EXACT_TEST_COUNT=1 scripts/require-exact-test.sh bazel test //crates/tracedecay-maintenance:unit_test --test_output=all --test_env=TRACEDECAY_SPAN_TIMINGS=1 --test_arg=retention::storage_report::scale_tests::storage_report_resident_growth_is_independent_of_generation_count --test_arg=--exact`
 
-Record both resident deltas and the `TRACEDECAY_SPAN_TIMINGS=1` close timings of `maintenance.footprint.census`.
+The outcome is unknown before the run. Record both resident deltas and the close timings of `maintenance.footprint.census`.
 
-If it passes, criterion 5 is met on `master` and the test is its pin. If it fails, stop and report `needs-decision` with the span that scales. That span names the accumulating owner, and the coordinator adds the fix task.
+If it reports `1 passed; 0 failed`, criterion 5 is met on `master` and the test is its pin. A failure counts as a reproduction only when the log shows `test retention::storage_report::scale_tests::storage_report_resident_growth_is_independent_of_generation_count ... FAILED`, `test result: FAILED. 0 passed; 1 failed`, and the resident-delta assertion. Then stop and report `needs-decision` with the span that scales. A `the fixture filesystem does not keep sparse holes` failure is a host problem, not a reproduction. That span names the accumulating owner, and the coordinator adds the fix task.
 
 - [ ] **Step 3: Commit the pin**
 
@@ -623,9 +661,9 @@ git commit -m "test(storage): bound storage report memory across generation coun
 
 - [ ] **Step 4: Re-verify #4616 and open the PR**
 
-Run: `bazel test //crates/tracedecay:daemon_suite //crates/tracedecay-maintenance:unit_test //crates/tracedecay-code-index-retention:unit_test //crates/tracedecay-daemon-service:unit_test --test_output=errors`
+Run: `bazel test //crates/tracedecay:daemon_suite //crates/tracedecay-maintenance:unit_test //crates/tracedecay-code-index-retention:unit_test //crates/tracedecay-daemon-service:unit_test --test_output=all`
 
-Expected: PASS, including both Task 7 pins.
+Expected: PASS, each target's `test result:` line reports a nonzero passed count and `0 failed`, and the log lists both Task 7 pins as `ok`.
 
 Run `pnpm run contracts:check`. Expected: no drift.
 
@@ -647,7 +685,7 @@ Open the PR for Tasks 7–11 with `Refs #4616`. Its criterion map covers the fiv
 - run one retention tick.
 
 Assert:
-- the file length is below 1 MiB;
+- the file length is below 1 MiB, with `assert!(len < 1024 * 1024, "the retention tick left {len} bytes of hook analytics")`;
 - `analytics_events` contains every written row exactly once.
 
 `concurrent_settlement_and_maintenance_imports_count_each_row_once`:
@@ -657,9 +695,9 @@ Assert every row is counted once.
 
 - [ ] **Step 2: Run RED**
 
-Run: `scripts/require-exact-test.sh bazel test //crates/tracedecay:unit_test --test_output=all --test_arg=daemon::maintenance::tests::retention_tick_rotates_unsettled_profile_hook_analytics --test_arg=--exact`
+Run directly: `bazel test //crates/tracedecay:unit_test --test_output=all --test_arg=daemon::maintenance::tests::retention_tick_rotates_unsettled_profile_hook_analytics --test_arg=--exact`
 
-Expected: `1 failed`; the file is still 70 MiB.
+Expected red: Bazel exits nonzero, and the log shows `test daemon::maintenance::tests::retention_tick_rotates_unsettled_profile_hook_analytics ... FAILED`, the panic text `the retention tick left <n> bytes of hook analytics` with `<n>` at least 73400320 (the unrotated 70 MiB), and `test result: FAILED. 0 passed; 1 failed`. The test drives the existing tick, so it compiles on the unmodified tree.
 
 - [ ] **Step 3: Add the pass to the retention tick**
 
@@ -667,9 +705,9 @@ Call `run_hook_analytics_rotation` from the tick, after the LCM payload GC pass,
 
 - [ ] **Step 4: Run GREEN and commit**
 
-Run the Step 2 command, then the same command for `daemon::maintenance::tests::concurrent_settlement_and_maintenance_imports_count_each_row_once`. Expected: `1 passed` each.
+Run the Step 2 test and `daemon::maintenance::tests::concurrent_settlement_and_maintenance_imports_count_each_row_once` through the helper (`REQUIRE_EXACT_TEST_COUNT=1 scripts/require-exact-test.sh bazel test //crates/tracedecay:unit_test --test_output=all --test_arg=<full module path> --test_arg=--exact`). Expected: `1 passed; 0 failed` each.
 
-Run: `bazel test //crates/tracedecay:unit_test --test_output=errors`. Expected: PASS.
+Run: `bazel test //crates/tracedecay:unit_test --test_output=all`. Expected: PASS, and the `test result:` line reports a nonzero passed count and `0 failed`.
 
 ```bash
 git add crates/tracedecay/src/daemon/maintenance.rs
@@ -700,11 +738,11 @@ Assert:
 
 - [ ] **Step 2: Run (reproduce first)**
 
-Take a coordinator slot. Run: `scripts/require-exact-test.sh bazel test //crates/tracedecay:daemon_suite --test_output=all --test_arg=storage_growth_finding_test::ingest_growth_past_a_bound_trips_a_named_finding --test_arg=--exact`
+Take a coordinator slot. Run: `REQUIRE_EXACT_TEST_COUNT=1 scripts/require-exact-test.sh bazel test //crates/tracedecay:daemon_suite --test_output=all --test_arg=storage_growth_finding_test::ingest_growth_past_a_bound_trips_a_named_finding --test_arg=--exact`
 
-Expected: `1 passed`. This is criterion 3's suite check, and its negative control proves the assertion is falsifiable.
+Expected: `1 passed; 0 failed`. This is criterion 3's suite check, and its negative control proves the assertion is falsifiable.
 
-If the `table_growth` assertion fails, stop and report `needs-decision` with the typed `TableGrowthUnavailableReasonV1` the document carries. Any other failure is a red reproduction to report with the Doctor JSON.
+A failure is classified from the `--test_output=all` log, which must show `test storage_growth_finding_test::ingest_growth_past_a_bound_trips_a_named_finding ... FAILED` and `test result: FAILED. 0 passed; 1 failed`. If the failing assertion is the `table_growth` one, stop and report `needs-decision` with the typed `TableGrowthUnavailableReasonV1` the document carries. A failing over-bound or per-store-size assertion is a red reproduction to report with the Doctor JSON.
 
 - [ ] **Step 3: Commit**
 
@@ -727,13 +765,13 @@ git commit -m "test(storage): trip a named finding when ingest outgrows a bound"
 
 - [ ] **Step 1: Write the classification test**
 
-In `footprint.rs` tests, write `retired_response_handle_directory_is_reported_as_unowned`. It census-walks a profile containing `response-handles/a.json` and asserts the entry's family is `Other`.
+In `footprint.rs` tests, write `retired_response_handle_directory_is_reported_as_unowned`. It census-walks a profile containing `response-handles/a.json` and asserts the entry's family is `Other` with `assert_eq!` on the `ProfileFamilyV1` value. It does not name `ProfileFamilyV1::ResponseHandles`, so it compiles on the unmodified tree.
 
 - [ ] **Step 2: Run RED**
 
-Run: `scripts/require-exact-test.sh bazel test //crates/tracedecay-maintenance:unit_test --test_output=all --test_arg=retention::footprint::tests::retired_response_handle_directory_is_reported_as_unowned --test_arg=--exact`
+Run directly: `bazel test //crates/tracedecay-maintenance:unit_test --test_output=all --test_arg=retention::footprint::tests::retired_response_handle_directory_is_reported_as_unowned --test_arg=--exact`
 
-Expected: `1 failed`; the family is `ResponseHandles`.
+Expected red: Bazel exits nonzero, and the log shows `test retention::footprint::tests::retired_response_handle_directory_is_reported_as_unowned ... FAILED`, an `assert_eq!` failure with `left: ResponseHandles` and `right: Other`, and `test result: FAILED. 0 passed; 1 failed`.
 
 - [ ] **Step 3: Delete the family**
 
@@ -741,9 +779,9 @@ Remove the variant and every arm that matches it. Run `rg -n "ResponseHandles|re
 
 - [ ] **Step 4: Run GREEN and commit**
 
-Run the Step 2 command. Expected: `1 passed`.
+Run the Step 2 test through the helper (`REQUIRE_EXACT_TEST_COUNT=1 scripts/require-exact-test.sh` before the Step 2 command). Expected: `1 passed; 0 failed`.
 
-Run: `bazel test //crates/tracedecay-maintenance:unit_test //crates/tracedecay-daemon-service:unit_test //crates/tracedecay-cli:core_cli_suite --test_output=errors`. Expected: PASS.
+Run: `bazel test //crates/tracedecay-maintenance:unit_test //crates/tracedecay-daemon-service:unit_test //crates/tracedecay-cli:core_cli_suite --test_output=all`. Expected: PASS, and each target's `test result:` line reports a nonzero passed count and `0 failed`.
 
 ```bash
 git add crates/tracedecay-maintenance/src/retention/footprint.rs crates/tracedecay-cli/src/commands/storage.rs

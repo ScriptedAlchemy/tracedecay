@@ -13,14 +13,15 @@
 ## Global Constraints
 
 - Deliver in this order: #4448, #4427, then #4447. Each task is one coherent issue PR and one coherent commit. Start the next issue from the merged previous issue; cross-lane dependencies are start/merge gates, never permission to edit another lane's files.
+- L1 is the first owner of five shared files (design, Shared files): `crates/tracedecay/src/daemon/project_open_owners.rs`, `crates/tracedecay-application/src/advisory/runtime/local_cycle_tests.rs`, and `crates/tracedecay/src/daemon/maintenance.rs` (Task 1), `crates/tracedecay/src/mcp/server.rs` (Tasks 1 and 3), and `crates/tracedecay-dashboard-api/src/state.rs` (Task 2). L5 #4436, L6 #4423, L2 #4099, and L5 #4419 integrate their edits to those files only after the L1 PR that edits them merges. Report each of those merge SHAs to the coordinator at once.
 - The 2026-09-16 exception applies only to genuinely released relational stores and rows. Preserve existing relational data through real additive admission; never import graph metadata. JSON/JSONL has no compatibility reader, migration, dual write, backup, or secondary copy.
 - A legacy response-handle JSON root produces feature-scoped `TraceDecayError::project_route("response_handle_legacy_json_refused", false, ...)`, not a broad profile/project reset. The response-handle feature reports that its legacy cache is not carried forward while unrelated source/session stores remain mounted and usable; the JSON bytes are untouched. Automation JSONL equivalently produces `project_route("automation_run_legacy_jsonl_refused", false, ...)` only for run-state operations, never a broad reset or deletion.
 - Use the existing `RegisteredGlobalDb` and exact admitted `StoreRuntimeBindingV1.shard_id`; do not add a SQLite database, global content-hash authorization, an ORM, another accounting authority, or a process-global lifecycle cache. Complete all callers and old-authority deletion in the owning issue task.
 - All new store APIs are async. Migrate sync render, CLI, feedback/LSP, and retained-settlement callers coherently; never use `block_on`, a hidden runtime, or a fallback writable connection.
 - Preserve typed errors, redaction, project/profile attribution, UTF-8 character paging, lifecycle history, cancellation ownership, monitor/analytics/cost behavior, and existing accounting opt-out semantics. Local registered totals and optional savings history/analytics need not share one transaction.
 - Tests use isolated home/profile/project/session inputs and shared production identity/enrollment authorities. Cover restart, wrong scope, concurrency, reorder, rollback, and cancellation where applicable. Named failing tests must fail a real behavior assertion or unresolved production symbol, never merely rely on a missing libtest filter.
-- Run builds, tests, checks, and codegen only through the prescribed Bazel/dashboard paths. Named libtest runs use `scripts/require-exact-test.sh` (or a full module path) with the stated non-zero count. Broad/heavy Bazel suites and measurement runs require coordinator slots under the design's at-most-two default; timing-sensitive checks rerun in isolation without loosening any bound. Measurements yield raw evidence, not speedup claims.
-- Never hand-edit `dashboard/src/contracts/`, `sdks/typescript/src/`, or `crates/tracedecay-sdk/src/operations.rs`; regenerate and check them in separate steps when implicated. Bazel prints a passing test's log only with `--test_output=all`; the helper runs below use it, and any run whose counts are cited must too. Commits use conventional headers of at most 72 characters without issue numbers and stage only the task's owned paths.
+- Run builds, tests, checks, and codegen only through the prescribed Bazel/dashboard paths. A green named run is `REQUIRE_EXACT_TEST_COUNT=1 scripts/require-exact-test.sh bazel test <one target> --test_output=all --test_arg=<full module path> --test_arg=--exact`; the helper proves only a pass and never an expected red, because it exits with a failing command's status and checks no signature. An expected red invokes Bazel directly, `bazel test <one target> --test_output=all --test_arg=<full module path> --test_arg=--exact`, and counts only when Bazel exits nonzero and the log shows the step's exact signature: rustc `error[E…]` lines naming the stated missing symbol, all in the stated file, or `test <full module path> ... FAILED` with the stated assertion text and `test result: FAILED. 0 passed; 1 failed`. A compile red covers every new test in its target, so assertion reds in the same target run before a test there names a new symbol. No substring filter is evidence. Broad/heavy Bazel suites and measurement runs require coordinator slots under the design's at-most-two default; timing-sensitive checks rerun in isolation without loosening any bound. Measurements yield raw evidence, not speedup claims.
+- Never hand-edit `dashboard/src/contracts/`, `sdks/typescript/src/`, or `crates/tracedecay-sdk/src/operations.rs`; regenerate and check them in separate steps when implicated. Bazel prints a passing test's log only with `--test_output=all`; the helper runs below use it, and so does every unfiltered target run whose counts are cited. Commits use conventional headers of at most 72 characters without issue numbers and stage only the task's owned paths.
 
 ## Review Focus
 
@@ -129,8 +130,8 @@
 
 - [ ] **Step 3: Run the new store tests to verify failure**
 
-  Run `REQUIRE_EXACT_TEST_COUNT=1 scripts/require-exact-test.sh bazel test //crates/tracedecay-global-db:unit_test --test_output=all --test_arg=response_handles::tests::published_replays_renewals_and_utf8_pages_survive_restart --test_arg=--exact`, then repeat for `truncated_hash_collisions_refuse`, `utf8_chunks_tamper_and_renewal_races_recover_exactly`, `page_reads_fetch_only_selected_chunks`, `cleanup_removes_only_expired_rows_in_the_admitted_namespace`, and `foreign_namespace_and_legacy_json_are_refused_without_touching_bytes`. Run `REQUIRE_EXACT_TEST_COUNT=1 scripts/require-exact-test.sh bazel test //crates/tracedecay-session-memory:unit_test --test_output=all --test_arg=response_handles::tests::legacy_adapter_refusal_is_scoped_and_metadata_failures_stay_typed --test_arg=--exact`.
-  Expected: all six global-store tests fail compilation on unresolved response-handle APIs, and the adapter test fails because metadata classification/forwarders do not exist; none passes or disappears from the filter.
+  Run directly `bazel test //crates/tracedecay-global-db:unit_test --test_output=all --test_arg=response_handles::tests::published_replays_renewals_and_utf8_pages_survive_restart --test_arg=--exact` and `bazel test //crates/tracedecay-session-memory:unit_test --test_output=all --test_arg=response_handles::tests::legacy_adapter_refusal_is_scoped_and_metadata_failures_stay_typed --test_arg=--exact`.
+  Expected red: each Bazel run exits nonzero before any test runs. The global-db log shows rustc `error[E…]` lines naming `publish_response_handle`, every one in `crates/tracedecay-global-db/src/response_handles/tests.rs`; that compile failure is the red for all six global-store tests. The session-memory log shows rustc `error[E…]` lines naming `ResponseHandleStore`, every one in `crates/tracedecay-session-memory/src/response_handles/tests.rs`. An error in any other file is not this red.
 
 - [ ] **Step 4: Implement the relational owner, metadata, and feature-scoped legacy refusal**
 
@@ -138,12 +139,12 @@
 
 - [ ] **Step 5: Run the store tests to verify passing**
 
-  Repeat all seven exact-test invocations from Step 3.
+  Run all seven tests through the helper, one invocation each: `REQUIRE_EXACT_TEST_COUNT=1 scripts/require-exact-test.sh bazel test //crates/tracedecay-global-db:unit_test --test_output=all --test_arg=response_handles::tests::<name> --test_arg=--exact` for `published_replays_renewals_and_utf8_pages_survive_restart`, `truncated_hash_collisions_refuse`, `utf8_chunks_tamper_and_renewal_races_recover_exactly`, `page_reads_fetch_only_selected_chunks`, `cleanup_removes_only_expired_rows_in_the_admitted_namespace`, and `foreign_namespace_and_legacy_json_are_refused_without_touching_bytes`, then the session-memory Step 3 command prefixed with the helper.
   Expected: each reports `1 passed; 0 failed`, including pre-commit rollback, post-commit replay without another row, metadata queries that touch no chunks, and unchanged legacy JSON. The adapter also serves a fresh namespace while reporting the legacy feature refusal and typed metadata failures without a production test-only constructor.
 
 - [ ] **Step 6: Write the failing production journeys**
 
-  Add `retrieve_chunk_tamper_returns_corrupt_record_not_content`, `feedback_handles_mint_and_resolve_through_registered_store`, `active_project_hides_legacy_response_handle_root`, `lsp_feedback_expansion_uses_registered_response_handle`, and `cli_truncated_output_retrieves_registered_page`. Update the existing large/multibyte retrieve journey to publish through the production lease and reconstruct its 16 KiB, 1 MiB, multibyte, and 4 MiB cases.
+  Add `retrieve_chunk_tamper_returns_corrupt_record_not_content`, `feedback_handles_mint_and_resolve_through_registered_store`, `active_project_hides_legacy_response_handle_root`, `lsp_feedback_expansion_uses_registered_response_handle`, and `cli_truncated_output_retrieves_registered_page`. `active_project_hides_legacy_response_handle_root` reads only the MCP tool's JSON and asserts with the message `active project still reports a response-handle root`. `cli_truncated_output_retrieves_registered_page` drives only the built CLI and asserts with the message `truncated CLI output wrote a legacy response-handles directory`. Both compile on the unmodified tree. Write those two first: Step 8 runs their reds before the tamper test and the journey update, which name `ResponseHandleStore`, are saved into `mcp_suite`. Update the existing large/multibyte retrieve journey to publish through the production lease and reconstruct its 16 KiB, 1 MiB, multibyte, and 4 MiB cases.
 
 - [ ] **Step 7: Register the application feedback test module**
 
@@ -151,8 +152,11 @@
 
 - [ ] **Step 8: Run the production journeys to verify old behavior fails**
 
-  Run `REQUIRE_EXACT_TEST_COUNT=1 scripts/require-exact-test.sh bazel test //crates/tracedecay:mcp_suite --test_output=all --test_arg=mcp_handler_test::retrieve_truncation_test::retrieve_pages_reconstruct_large_and_multibyte_handles_with_bounded_frames --test_arg=--exact`, then repeat the same helper for `mcp_server_test::retrieve_behavior_test::retrieve_chunk_tamper_returns_corrupt_record_not_content` and `mcp_handler_test::active_project_test::active_project_hides_legacy_response_handle_root`. Run `REQUIRE_EXACT_TEST_COUNT=1 scripts/require-exact-test.sh bazel test //crates/tracedecay-application:application_suite --test_output=all --test_arg=feedback_test::feedback_handles_mint_and_resolve_through_registered_store --test_arg=--exact`, `REQUIRE_EXACT_TEST_COUNT=1 scripts/require-exact-test.sh bazel test //crates/tracedecay-application:unit_test --test_output=all --test_arg=lsp_runtime::feedback_source::tests::lsp_feedback_expansion_uses_registered_response_handle --test_arg=--exact`, and `REQUIRE_EXACT_TEST_COUNT=1 scripts/require-exact-test.sh bazel test //crates/tracedecay-cli:core_cli_suite --test_output=all --test_arg=cli_non_interactive_test::cli_truncated_output_retrieves_registered_page --test_arg=--exact`.
-  Expected: each executes an actual test and fails against root-based storage, sync signatures, leaked payload, or legacy JSON serving.
+  Run each red directly, in this order:
+  1. Before the large/multibyte journey update and the tamper test are saved, `bazel test //crates/tracedecay:mcp_suite --test_output=all --test_arg=mcp_handler_test::active_project_test::active_project_hides_legacy_response_handle_root --test_arg=--exact`. Expected red: nonzero exit, `test mcp_handler_test::active_project_test::active_project_hides_legacy_response_handle_root ... FAILED`, the text `active project still reports a response-handle root`, and `test result: FAILED. 0 passed; 1 failed`.
+  2. With the journey update and tamper test saved, `bazel test //crates/tracedecay:mcp_suite --test_output=all --test_arg=mcp_handler_test::retrieve_truncation_test::retrieve_pages_reconstruct_large_and_multibyte_handles_with_bounded_frames --test_arg=--exact`. Expected red: nonzero exit before any test runs, with rustc `error[E…]` lines naming `ResponseHandleStore`, every one in `crates/tracedecay/tests/mcp_suite/`.
+  3. `bazel test //crates/tracedecay-application:application_suite --test_output=all --test_arg=feedback_test::feedback_handles_mint_and_resolve_through_registered_store --test_arg=--exact` and `bazel test //crates/tracedecay-application:unit_test --test_output=all --test_arg=lsp_runtime::feedback_source::tests::lsp_feedback_expansion_uses_registered_response_handle --test_arg=--exact`. Expected red: each exits nonzero before any test runs, with rustc `error[E…]` lines naming `ResponseHandleStore`, every one in `tests/application_suite/feedback_test.rs` and `src/lsp_runtime/feedback_source.rs` respectively.
+  4. `bazel test //crates/tracedecay-cli:core_cli_suite --test_output=all --test_arg=cli_non_interactive_test::cli_truncated_output_retrieves_registered_page --test_arg=--exact`. Expected red: nonzero exit, `test cli_non_interactive_test::cli_truncated_output_retrieves_registered_page ... FAILED`, the text `truncated CLI output wrote a legacy response-handles directory`, and `test result: FAILED. 0 passed; 1 failed`.
 
 - [ ] **Step 9: Cut over every production caller and delete the JSON authority**
 
@@ -165,12 +169,12 @@
 
 - [ ] **Step 11: Verify all response-handle production routes and generated output**
 
-  Run `pnpm --dir dashboard run contracts:check`, the exact MCP/application tests from Step 8, `bazel test //crates/tracedecay-global-db:unit_test --test_output=errors`, `bazel test //crates/tracedecay-session-memory:unit_test --test_output=errors`, `bazel test //crates/tracedecay-application:application_suite --test_output=errors`, `bazel test //crates/tracedecay-mcp:unit_test --test_output=errors`, `bazel test //crates/tracedecay:storage_suite --test_output=errors`, `bazel test //crates/tracedecay:runtime_acceptance_suite --test_output=errors`, `bazel test //crates/tracedecay:mcp_suite --test_output=errors`, and `bazel test //crates/tracedecay-cli:core_cli_suite --test_output=errors`.
-  Expected: every target has a non-empty passing summary; the active-project contract has no response-handle root, feedback/LSP/CLI continuations resolve exactly, and legacy refusal leaves unrelated source/session routes usable.
+  Run `pnpm --dir dashboard run contracts:check`, then each of the six Step 8 tests through the helper (`REQUIRE_EXACT_TEST_COUNT=1 scripts/require-exact-test.sh` before the Step 8 command), then `bazel test //crates/tracedecay-global-db:unit_test //crates/tracedecay-session-memory:unit_test //crates/tracedecay-application:application_suite //crates/tracedecay-mcp:unit_test //crates/tracedecay:storage_suite //crates/tracedecay:runtime_acceptance_suite //crates/tracedecay:mcp_suite //crates/tracedecay-cli:core_cli_suite --test_output=all`.
+  Expected: each helper run reports `1 passed; 0 failed`; every target's `test result:` line reports a nonzero passed count and `0 failed`; the active-project contract has no response-handle root, feedback/LSP/CLI continuations resolve exactly, and legacy refusal leaves unrelated source/session routes usable.
 
 - [ ] **Step 12: Measure the large-handle production journey**
 
-  With a coordinator measurement slot, rerun the large/multibyte MCP journey with `TRACEDECAY_SPAN_TIMINGS=1` and record publication, selected-chunk page retrieval, inventory/expiry, and writer-wait close timings. Report the timing and query evidence only; make no speedup claim.
+  With a coordinator measurement slot, rerun the large/multibyte MCP journey: `REQUIRE_EXACT_TEST_COUNT=1 scripts/require-exact-test.sh bazel test //crates/tracedecay:mcp_suite --nocache_test_results --test_output=all --test_env=TRACEDECAY_SPAN_TIMINGS=1 --test_arg=mcp_handler_test::retrieve_truncation_test::retrieve_pages_reconstruct_large_and_multibyte_handles_with_bounded_frames --test_arg=--exact`. Expect `1 passed; 0 failed`, and record publication, selected-chunk page retrieval, inventory/expiry, and writer-wait close timings. Report the timing and query evidence only; make no speedup claim.
 
 - [ ] **Step 13: Commit the complete response-handle issue slice**
 
@@ -278,8 +282,8 @@
 
 - [ ] **Step 3: Run the registered run-state tests to verify failure**
 
-  Run `REQUIRE_EXACT_TEST_COUNT=1 scripts/require-exact-test.sh bazel test //crates/tracedecay-automation-runtime:unit_test --test_output=all --test_arg=automation::registered_run_store::tests::ordinary_and_exact_publication_replay_conflict_and_restart --test_arg=--exact`, then repeat for `indexed_history_summary_cursor_and_scheduler_diagnostic`, `publication_commit_faults_leave_retryable_exact_state`, and `legacy_jsonl_is_refused_without_deletion`.
-  Expected: all four fail on unresolved store/exact-run APIs or old JSONL behavior, never on an empty filter.
+  Run directly `bazel test //crates/tracedecay-automation-runtime:unit_test --test_output=all --test_arg=automation::registered_run_store::tests::ordinary_and_exact_publication_replay_conflict_and_restart --test_arg=--exact`.
+  Expected red: Bazel exits nonzero before any test runs, and the log shows rustc `error[E…]` lines naming `RegisteredAutomationRunStore`, every one in `crates/tracedecay-automation-runtime/src/automation/registered_run_store/tests.rs`. That compile failure is the red for all four tests.
 
 - [ ] **Step 4: Implement schema, exact type ownership, and the runtime adapter**
 
@@ -287,12 +291,12 @@
 
 - [ ] **Step 5: Run the registered run-state tests to verify passing**
 
-  Repeat the four exact invocations from Step 3.
+  Run all four Step 3 tests through the helper, one invocation each: `REQUIRE_EXACT_TEST_COUNT=1 scripts/require-exact-test.sh bazel test //crates/tracedecay-automation-runtime:unit_test --test_output=all --test_arg=automation::registered_run_store::tests::<name> --test_arg=--exact` for `ordinary_and_exact_publication_replay_conflict_and_restart`, `indexed_history_summary_cursor_and_scheduler_diagnostic`, `publication_commit_faults_leave_retryable_exact_state`, and `legacy_jsonl_is_refused_without_deletion`.
   Expected: `1 passed; 0 failed` each, including rollback, post-commit replay without another transition, correct cursor lookup beneath `validation_report`, and unchanged legacy JSONL.
 
 - [ ] **Step 6: Write the failing production surface, isolation, and crash tests**
 
-  In the new automation integration module add `runner_publishes_and_reloads_registered_records`, `mcp_cli_and_dashboard_read_the_same_registered_history`, and `wrong_project_and_legacy_jsonl_refuse_without_touching_bytes`. In effect settlement tests add `external_effect_crash_and_cancellation_boundaries_settle_once` and `terminal_conflicting_replay_refuses_without_second_effect`. Cover one runner write through all readers, wrong project/profile refusal, untouched JSONL, before/after effect, before/after prepared, before/after SQL commit, journal terminal failure, cancellation after acceptance, exact duplicate replay, and conflicting replay.
+  In the new automation integration module add `runner_publishes_and_reloads_registered_records`, `mcp_cli_and_dashboard_read_the_same_registered_history`, and `wrong_project_and_legacy_jsonl_refuse_without_touching_bytes`. In effect settlement tests add `external_effect_crash_and_cancellation_boundaries_settle_once` and `terminal_conflicting_replay_refuses_without_second_effect`. They use only APIs that exist after Step 4, and each asserts first with its own message: `the runner's terminal record is not in the registered store`, `a reader served history the registered store does not hold`, `legacy JSONL was served instead of refused`, `an external effect settled twice across a crash boundary`, and `a conflicting terminal replay ran a second effect`. Cover one runner write through all readers, wrong project/profile refusal, untouched JSONL, before/after effect, before/after prepared, before/after SQL commit, journal terminal failure, cancellation after acceptance, exact duplicate replay, and conflicting replay.
 
 - [ ] **Step 7: Register the automation integration test module**
 
@@ -300,8 +304,8 @@
 
 - [ ] **Step 8: Run the production and crash tests to verify failure**
 
-  Run each integration test with `REQUIRE_EXACT_TEST_COUNT=1 scripts/require-exact-test.sh bazel test //crates/tracedecay:automation_runner_test --test_output=all --test_arg=registered_run_store::runner_publishes_and_reloads_registered_records --test_arg=--exact`, then repeat for `mcp_cli_and_dashboard_read_the_same_registered_history` and `wrong_project_and_legacy_jsonl_refuse_without_touching_bytes`. Run `REQUIRE_EXACT_TEST_COUNT=1 scripts/require-exact-test.sh bazel test //crates/tracedecay-automation-runtime:unit_test --test_output=all --test_arg=automation::effect_runtime::settlement::tests::external_effect_crash_and_cancellation_boundaries_settle_once --test_arg=--exact`, then repeat for `terminal_conflicting_replay_refuses_without_second_effect`.
-  Expected: every test executes and fails on root-based readers, duplicate/competing authorities, old spool behavior, or changed-replay acceptance.
+  Run each directly: `bazel test //crates/tracedecay:automation_runner_test --test_output=all --test_arg=registered_run_store::<name> --test_arg=--exact` for `runner_publishes_and_reloads_registered_records`, `mcp_cli_and_dashboard_read_the_same_registered_history`, and `wrong_project_and_legacy_jsonl_refuse_without_touching_bytes`, and `bazel test //crates/tracedecay-automation-runtime:unit_test --test_output=all --test_arg=automation::effect_runtime::settlement::tests::<name> --test_arg=--exact` for `external_effect_crash_and_cancellation_boundaries_settle_once` and `terminal_conflicting_replay_refuses_without_second_effect`.
+  Expected red: each Bazel run exits nonzero, and its log shows `test <full module path> ... FAILED`, that test's Step 6 message, and `test result: FAILED. 0 passed; 1 failed`. A compile error instead means a test named an API that Step 4 did not produce; fix the test.
 
 - [ ] **Step 9: Cut over all production callers and delete the JSONL authority**
 
@@ -309,8 +313,8 @@
 
 - [ ] **Step 10: Run all automation production routes and failure tests to verify passing**
 
-  Repeat the five exact invocations from Step 8 and run `bazel test //crates/tracedecay-automation-runtime:unit_test --test_output=errors`, `bazel test //crates/tracedecay-daemon-service:unit_test --test_output=errors`, `bazel test //crates/tracedecay:automation_runner_test --test_output=errors`, `bazel test //crates/tracedecay:dashboard_api_test --test_output=errors`, `bazel test //crates/tracedecay:mcp_suite --test_output=errors`, and `bazel test //crates/tracedecay-cli:core_cli_suite --test_output=errors`.
-  Expected: each exact test reports `1 passed; 0 failed`; every suite has a non-empty pass summary, identical history/artifact results across routes, and no JSONL API left to satisfy tests.
+  Run the five Step 8 tests through the helper (`REQUIRE_EXACT_TEST_COUNT=1 scripts/require-exact-test.sh` before each Step 8 command), then `bazel test //crates/tracedecay-automation-runtime:unit_test //crates/tracedecay-daemon-service:unit_test //crates/tracedecay:automation_runner_test //crates/tracedecay:dashboard_api_test //crates/tracedecay:mcp_suite //crates/tracedecay-cli:core_cli_suite --test_output=all`.
+  Expected: each exact test reports `1 passed; 0 failed`; every target's `test result:` line reports a nonzero passed count and `0 failed`, identical history/artifact results across routes, and no JSONL API left to satisfy tests.
 
 - [ ] **Step 11: Write the growing-history measurement test**
 
@@ -318,7 +322,7 @@
 
 - [ ] **Step 12: Run the growing-history measurement**
 
-  Run `REQUIRE_EXACT_TEST_COUNT=1 scripts/require-exact-test.sh bazel test //crates/tracedecay-automation-runtime:unit_test --test_output=all --test_arg=automation::registered_run_store::tests::growing_history_reports_indexed_read_write_and_lock_spans --test_arg=--exact` with `TRACEDECAY_SPAN_TIMINGS=1` under a coordinator measurement slot. Record raw span/query evidence only; require `1 passed; 0 failed`, no full-history selection for exact lookup, and no speedup claim.
+  Run `REQUIRE_EXACT_TEST_COUNT=1 scripts/require-exact-test.sh bazel test //crates/tracedecay-automation-runtime:unit_test --test_output=all --test_env=TRACEDECAY_SPAN_TIMINGS=1 --test_arg=automation::registered_run_store::tests::growing_history_reports_indexed_read_write_and_lock_spans --test_arg=--exact` under a coordinator measurement slot. Record raw span/query evidence only; require `1 passed; 0 failed`, no full-history selection for exact lookup, and no speedup claim.
 
 - [ ] **Step 13: Commit the complete automation issue slice**
 
@@ -380,8 +384,8 @@
 
 - [ ] **Step 3: Run the accounting tests to verify failure**
 
-  Run `REQUIRE_EXACT_TEST_COUNT=1 scripts/require-exact-test.sh bazel test //crates/tracedecay-global-db:unit_test --test_output=all --test_arg=registered_accounting::tests::reverse_completion_commits_each_response_once --test_arg=--exact`, then repeat for `pre_reset_reservation_conflict_and_overflow_keep_exact_epoch_state`, `accounting_stage_failures_leave_retryable_reservation`, `historical_project_total_survives_additive_schema_convergence`, and `savings_history_repairs_once_without_duplicate_rows`.
-  Expected: all five fail unresolved reservation/observation APIs or the behavioral assertion; the replay/history test actually executes its row-count checks rather than relying on a missing filter.
+  Run directly `bazel test //crates/tracedecay-global-db:unit_test --test_output=all --test_arg=registered_accounting::tests::reverse_completion_commits_each_response_once --test_arg=--exact`.
+  Expected red: Bazel exits nonzero before any test runs, and the log shows rustc `error[E…]` lines naming `reserve_project_token_response` and `record_savings_observation`, every one in `crates/tracedecay-global-db/src/registered_accounting/tests.rs`. That compile failure is the red for all five tests.
 
 - [ ] **Step 4: Implement canonical accounting and identity-bearing observations**
 
@@ -389,17 +393,16 @@
 
 - [ ] **Step 5: Run the accounting tests to verify passing**
 
-  Repeat all five exact invocations from Step 3 and `REQUIRE_EXACT_TEST_COUNT=1 scripts/require-exact-test.sh bazel test //crates/tracedecay-global-db:unit_test --test_output=all --test_arg=tests::registered_mount_publishes_complete_schema --test_arg=--exact`.
+  Run each of the five Step 3 tests through the helper, `REQUIRE_EXACT_TEST_COUNT=1 scripts/require-exact-test.sh bazel test //crates/tracedecay-global-db:unit_test --test_output=all --test_arg=registered_accounting::tests::<name> --test_arg=--exact` for `reverse_completion_commits_each_response_once`, `pre_reset_reservation_conflict_and_overflow_keep_exact_epoch_state`, `accounting_stage_failures_leave_retryable_reservation`, `historical_project_total_survives_additive_schema_convergence`, and `savings_history_repairs_once_without_duplicate_rows`, and `REQUIRE_EXACT_TEST_COUNT=1 scripts/require-exact-test.sh bazel test //crates/tracedecay-global-db:unit_test --test_output=all --test_arg=tests::registered_mount_publishes_complete_schema --test_arg=--exact`.
   Expected: each reports `1 passed; 0 failed`; history has one row after local-replay/history-repair/restart-replay, the conflicting observation writes none, and released totals/history remain unchanged.
 
 - [ ] **Step 6: Write failing production identity, scheduling, and enablement tests**
 
-  Add `reverse_scheduled_responses_commit_exactly_once`, `admin_reset_serializes_with_pending_delta`, `disconnect_restart_pending_stages_and_graph_totals_replay_once`, `accounting_failures_keep_response_nonblocking_and_monitor_honest`, `identity_unavailable_never_credits_positive_savings`, and `registered_lifetime_total_survives_restart`. Assert held-writer responses return before storage settles, identical response IDs credit once, changed IDs both count, pre-reset reservation stays in its epoch, disconnect/restart/retry does not duplicate, history repair inserts once, missing identity produces the typed diagnostic/monitor zero with no total/history/analytics credit, and disabled optional savings remains disabled while local registered totals retain their existing behavior. Seed conflicting graph metadata and prove it is ignored.
+  Add `reverse_scheduled_responses_commit_exactly_once`, `admin_reset_serializes_with_pending_delta`, `disconnect_restart_pending_stages_and_graph_totals_replay_once`, `accounting_failures_keep_response_nonblocking_and_monitor_honest`, `identity_unavailable_never_credits_positive_savings`, and `registered_lifetime_total_survives_restart`. Assert held-writer responses return before storage settles, identical response IDs credit once, changed IDs both count, pre-reset reservation stays in its epoch, disconnect/restart/retry does not duplicate, history repair inserts once, missing identity produces the typed diagnostic/monitor zero with no total/history/analytics credit, and disabled optional savings remains disabled while local registered totals retain their existing behavior. Seed conflicting graph metadata and prove it is ignored. `registered_lifetime_total_survives_restart` drives only the runtime and asserts with the message `the lifetime total did not survive restart from the registered store`, so it compiles on the unmodified tree.
 
 - [ ] **Step 7: Run the production tests to verify failure**
 
-  Run `REQUIRE_EXACT_TEST_COUNT=1 scripts/require-exact-test.sh bazel test //crates/tracedecay:unit_test --test_output=all --test_arg=mcp::server::ledger::tests::reverse_scheduled_responses_commit_exactly_once --test_arg=--exact`, then repeat for `admin_reset_serializes_with_pending_delta`, `disconnect_restart_pending_stages_and_graph_totals_replay_once`, `accounting_failures_keep_response_nonblocking_and_monitor_honest`, and `identity_unavailable_never_credits_positive_savings`. Run `REQUIRE_EXACT_TEST_COUNT=1 scripts/require-exact-test.sh bazel test //crates/tracedecay:runtime_acceptance_suite --test_output=all --test_arg=lifecycle_production_authority_test::registered_lifetime_total_survives_restart --test_arg=--exact`.
-  Expected: every invoked test executes and fails against graph metadata authority, an unscoped fallback, duplicated history, or wrong opt-out behavior.
+  Run directly `bazel test //crates/tracedecay:unit_test --test_output=all --test_arg=mcp::server::ledger::tests::reverse_scheduled_responses_commit_exactly_once --test_arg=--exact`. Expected red: Bazel exits nonzero before any test runs, and the log shows rustc `error[E…]` lines naming `commit_token_savings` or `accounting_request_id`, every one in `crates/tracedecay/src/mcp/server/ledger.rs`; that compile failure is the red for the five ledger tests. Run directly `bazel test //crates/tracedecay:runtime_acceptance_suite --test_output=all --test_arg=lifecycle_production_authority_test::registered_lifetime_total_survives_restart --test_arg=--exact`. Expected red: nonzero exit, `test lifecycle_production_authority_test::registered_lifetime_total_survives_restart ... FAILED`, the text `the lifetime total did not survive restart from the registered store`, and `test result: FAILED. 0 passed; 1 failed`.
 
 - [ ] **Step 8: Cut over every accounting caller and delete graph counter ownership**
 
@@ -407,12 +410,12 @@
 
 - [ ] **Step 9: Run all accounting production routes and failure tests to verify passing**
 
-  Repeat every exact invocation from Step 7 and run `bazel test //crates/tracedecay-global-db:unit_test --test_output=errors`, `bazel test //crates/tracedecay:unit_test --test_output=errors`, `bazel test //crates/tracedecay-project:unit_test --test_output=errors`, `bazel test //crates/tracedecay-mcp:unit_test --test_output=errors`, `bazel test //crates/tracedecay:mcp_suite --test_output=errors`, and `bazel test //crates/tracedecay:dashboard_api_test --test_output=errors`.
-  Expected: each named test reports `1 passed; 0 failed`; all suites pass non-empty; held writers prove nonblocking responses, pending shutdown drains accepted writes without an absolute rewrite, and no graph setter remains.
+  Run each of the six Step 7 tests through the helper, `REQUIRE_EXACT_TEST_COUNT=1 scripts/require-exact-test.sh bazel test //crates/tracedecay:unit_test --test_output=all --test_arg=mcp::server::ledger::tests::<name> --test_arg=--exact` for `reverse_scheduled_responses_commit_exactly_once`, `admin_reset_serializes_with_pending_delta`, `disconnect_restart_pending_stages_and_graph_totals_replay_once`, `accounting_failures_keep_response_nonblocking_and_monitor_honest`, and `identity_unavailable_never_credits_positive_savings`, and the runtime acceptance Step 7 command prefixed with the helper. Then run `bazel test //crates/tracedecay-global-db:unit_test //crates/tracedecay:unit_test //crates/tracedecay-project:unit_test //crates/tracedecay-mcp:unit_test //crates/tracedecay:mcp_suite //crates/tracedecay:dashboard_api_test --test_output=all`.
+  Expected: each named test reports `1 passed; 0 failed`; every target's `test result:` line reports a nonzero passed count and `0 failed`; held writers prove nonblocking responses, pending shutdown drains accepted writes without an absolute rewrite, and no graph setter remains.
 
 - [ ] **Step 10: Verify accounting enablement and historical surfaces**
 
-  Run the analytics suite's default and environment-disabled cases with `REQUIRE_EXACT_TEST_COUNT=nonzero scripts/require-exact-test.sh bazel test //crates/tracedecay:mcp_suite --test_output=all --test_arg=analytics_test`, plus `bazel test //crates/tracedecay:runtime_acceptance_suite --test_output=errors`.
+  Run the default, environment-override, and lifetime-counter cases through the helper by exact name: `REQUIRE_EXACT_TEST_COUNT=1 scripts/require-exact-test.sh bazel test //crates/tracedecay:mcp_suite --test_output=all --test_arg=mcp_server_test::analytics_test::<name> --test_arg=--exact` for `ledger_records_by_default_without_env_opt_in`, `global_accounting_env_overrides`, and `lifetime_counter_matches_ledger_net_savings`. Expect `1 passed; 0 failed` each. Then run `bazel test //crates/tracedecay:runtime_acceptance_suite --test_output=all` and expect a nonzero passed count with `0 failed`.
   Expected: local totals retain their existing enablement path, optional savings history/analytics remain disabled by the existing environment mode, monitor/cost output and historical savings stay readable, and released relational history never imports graph metadata. Record eliminated per-response graph writes and duplicate owners without claiming less I/O.
 
 - [ ] **Step 11: Commit the complete saved-token issue slice**

@@ -2,9 +2,9 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Close #4593, #4416, #4423, #4440, and #4374 on current `master` with cited, non-vacuous evidence, adding only the production-journey pins and the one residual simplification each issue still needs.
+**Goal:** Close #4593, #4416, #4423, and #4440 on current `master` with cited, non-vacuous evidence, adding only the production-journey pins and the one residual simplification each issue still needs. Deliver #4374's fixture measurement and operator runbook draft, and leave #4374 `pending-long-acceptance`.
 
-**Architecture:** Four of the five issues already have their production change merged (#4801, #4549/#4790, #4817, #4860/#4825). Each task therefore pins the issue's acceptance criteria through the real route that owns them, adds the one missing pin or residual simplification, and produces a criterion map the coordinator can close from. #4374 is the only issue whose acceptance is a measurement, so its task builds the sized fixture and records the span-attributed numbers.
+**Architecture:** Four of the five issues already have their production change merged (#4801, #4549/#4790, #4817, #4860/#4825). Each task therefore pins the issue's acceptance criteria through the real route that owns them, adds the one missing pin or residual simplification, and produces a criterion map the coordinator can close from. #4374 is the only issue whose acceptance is a measurement, and that measurement needs the operator's actual `~/.codex` corpus of about 2,010 rollouts. Its task builds a sized fixture and records span-attributed numbers as supporting evidence, then drafts the runbook for the coordinator's separately approved, read-only operator run (design, Long-running acceptance). The fixture never closes #4374.
 
 **Tech Stack:** Rust 2024 (Bazel only), `tracing` spans with `TRACEDECAY_SPAN_TIMINGS=1`, React/TypeScript dashboard (pnpm + vitest), git submodule fixtures.
 
@@ -13,15 +13,15 @@
 ## Global Constraints
 
 - **Bazel only.** Every build, test, check, and run goes through Bazel. Never invoke `cargo`. pnpm is only for `dashboard/` (`pnpm run typecheck`, `pnpm test`, `pnpm run build`, `pnpm run contracts:check`).
-- **Non-zero evidence.** A name-filtered libtest run must report a non-zero executed count. Use `scripts/require-exact-test.sh` or a full module path, and quote the reported count in the lane report. Bazel prints a passing test's log only with `--test_output=all`, so every helper run and every run whose counts are recorded uses that flag.
+- **Green and red runs.** A green named run is `REQUIRE_EXACT_TEST_COUNT=1 scripts/require-exact-test.sh bazel test <one target> --test_output=all --test_arg=<full module path> --test_arg=--exact`. The helper proves only a pass: when the command fails it exits with that status and checks no signature. An expected red invokes Bazel directly as `bazel test <one target> --test_output=all --test_arg=<full module path> --test_arg=--exact`. It counts as red only when Bazel exits nonzero and the log shows the step's exact signature: a rustc `error[E…]` line naming the stated missing symbol, or `test <full module path> ... FAILED` with the stated assertion text and `test result: FAILED. 0 passed; 1 failed`. No substring filter is evidence. Every unfiltered target run whose counts or test names are recorded uses `--test_output=all`, because Bazel prints a passing test's log only with that flag. Quote counts and signature lines in the lane report.
 - **No compatibility, no backups.** A shape change migrates every caller and deletes the old shape in the same slice. No aliases, dual writes, migrations, or secondary copies of project or operator data.
 - **Typed failures only.** No `unwrap`, `expect`, `panic`, silent fallback, empty success, or `allow(dead_code)` in production code. Tests may assert and unwrap.
 - **Generated sources are never hand-edited.** `dashboard/src/contracts/`, `sdks/typescript/src/`, and `crates/tracedecay-sdk/src/operations.rs` are regenerated with `pnpm run contracts:generate` and verified with `pnpm run contracts:check`. No task in this plan changes a schema or an operation (Task 2's setting key and pin are not generated contract types), so no regeneration is expected; if a task's diff reaches a generated file, regenerate instead of editing it and run `pnpm run contracts:check` from `dashboard/`.
-- **Isolated state.** Every daemon, profile, home, and project used for reproduction or measurement lives under a lane-owned temporary directory with explicit `HOME`, profile, and socket overrides. Never read or write `~/.tracedecay`, `~/.codex`, `~/.claude`, `~/.agents`, or installed services.
+- **Isolated state.** Every daemon, profile, home, and project used for reproduction or measurement lives under a lane-owned temporary directory with explicit `HOME`, profile, and socket overrides. Never read or write `~/.tracedecay`, `~/.codex`, `~/.claude`, `~/.agents`, or installed services. The #4374 operator-corpus run is the coordinator's, not the lane's (Task 5, Step 7).
 - **Commits.** `<type>(<scope>): <subject>`, header ≤ 72 characters, commitlint-clean. No issue numbers in commit subjects; issue numbers appear only in the PR body as `Refs #N`.
 - **Green-first verification tasks.** Tasks 1, 3, and 4 close already-merged fixes. Their new pins are expected to **pass** on current `master`; a red result means the merged fix does not cover that criterion and is a **blocker to report**, never something to patch inside the task. Task 2 carries the red-first type change; Task 5's first evidence is the measurement itself.
 - **Cross-lane gates.** #4374 (Task 5) shares session discovery and admission paths with L3's #4861 and #4756, which are still open. Partial fixes are on `master` at `58ccb41d66` (#4864 for #4861; #4857 and #4793 for #4756), but L3's program PRs for both issues have not merged. Task 5 may build its fixture and take a first measurement on a branch from `master`. It integrates only after both L3 PRs merge, and it rebases and repeats Step 2 on that `master`. No task in this plan edits L3's discovery module, L2's registry resolution, or L5's SDK sources.
-- **Shared paths.** Task 2 holds the configuration registry files (`crates/tracedecay-global-db/src/configuration/registry.rs`, `crates/tracedecay-domain/src/configuration.rs`, `crates/tracedecay-domain/src/lib.rs`, and the configuration store tests) first. L5 #4419 edits them only after Task 2's PR merges. Task 2's new `dashboard/src/viz/proximity/ProximityPanel.dom.test.tsx` is an L6-created file under L4's dashboard area; L4 does not edit it while #4416 is open.
+- **Shared paths.** Task 2 holds the configuration registry files (`crates/tracedecay-global-db/src/configuration/registry.rs`, `crates/tracedecay-domain/src/configuration.rs`, `crates/tracedecay-domain/src/lib.rs`, and the configuration store tests) first. L5 #4419 edits them only after Task 2's PR merges. Task 2's new `dashboard/src/viz/proximity/ProximityPanel.dom.test.tsx` is an L6-created file under L4's dashboard area; L4 does not edit it while #4416 is open. Task 3 is the last of three owners of `crates/tracedecay-application/src/advisory/runtime/local_cycle_tests.rs` (design, Shared files): L1 #4448 edits it first and L5 #4436 second. Task 3 starts only after both PRs have merged, on a branch from the `master` that contains them. If they have not merged when Task 3 is next, run Task 4 first.
 - **Heavy runs.** Tasks 4 and 5 are measured runs. Take a coordinator slot, run them alone, and never loosen a bound to make a number look better.
 
 ## Review Focus
@@ -31,7 +31,7 @@
 3. **A local editor cycle with a configured provider that never answers.** With CI configured and no retained evidence, a provider read that blocks forever must not consume the local cycle's deadline or cancel its diagnostics, and the cycle must never claim a complete pass. Pinned by `local_cycle_completes_with_a_configured_provider_that_never_answers` (Task 3).
 4. **A configuration that still carries the retired numeric threshold.** It must return typed configuration `ResetRequired`, and a setter for the retired key must be refused as unknown. No value maps to the new boolean policy. Pinned by `snapshot_holding_the_retired_proximity_threshold_is_reset_required` (Task 2).
 5. **A TypeScript project whose compiler is absent, unreadable, or unfamiliar.** The read must report unavailable or incomplete coverage, never republish a clean snapshot from guessed configuration semantics. Pinned by `an_unreadable_configuration_is_a_failure_until_repaired` and `generated_output_files_are_not_project_members` (Task 4).
-6. **A Codex corpus re-offered after a restart, with appends and archives.** Unchanged rollouts must not be re-read, an appended window must still be admitted, and an archived rollout must not replay the pass forever. Pinned by `codex_reoffer_measurement` and the existing `sessions` re-offer regressions (Task 5).
+6. **A Codex corpus re-offered after a restart, with appends and archives.** Unchanged rollouts must not be re-read, an appended window must still be admitted, and an archived rollout must not replay the pass forever. Pinned on the fixture by `codex_reoffer_measurement` and the existing `sessions` re-offer regressions (Task 5). Acceptance on the operator's real corpus is the coordinator's separately approved run, so this pin is supporting evidence only.
 
 ---
 
@@ -65,8 +65,6 @@ Add to `mod tests` in `crates/tracedecay-code-index/src/source_walk.rs`, using t
 fn linked_worktree_inside_the_parent_stays_pruned_under_submodule_opt_in() {
     let fixture = crate::source_walk::submodules::tests::fixture();
     let parent = fixture.path().join("parent");
-    // A linked worktree of the parent is not a gitlink, so the opt-in must not
-    // admit it even though its `.git` is a file exactly like a submodule's.
     fixture_git(&parent, &["worktree", "add", "-q", "linked"]);
     let policy = IndexPathPolicyV1::new(Vec::new(), Vec::new())
         .expect("empty policy")
@@ -83,9 +81,9 @@ fn linked_worktree_inside_the_parent_stays_pruned_under_submodule_opt_in() {
 
 - [ ] **Step 3: Run the linked-worktree pin**
 
-Run: `scripts/require-exact-test.sh bazel test //crates/tracedecay-code-index:unit_test --test_output=all --test_arg=source_walk::tests::linked_worktree_inside_the_parent_stays_pruned_under_submodule_opt_in --test_arg=--exact`
+Run: `REQUIRE_EXACT_TEST_COUNT=1 scripts/require-exact-test.sh bazel test //crates/tracedecay-code-index:unit_test --test_output=all --test_arg=source_walk::tests::linked_worktree_inside_the_parent_stays_pruned_under_submodule_opt_in --test_arg=--exact`
 
-Expected: PASS with `1 passed`. A failure means the opt-in admits a linked worktree; stop and report it as a blocker with the failing assertion.
+Expected: PASS with `1 passed; 0 failed`. A failure means the opt-in admits a linked worktree; stop and report it as a blocker with the failing assertion.
 
 - [ ] **Step 4: Write the grep parity pin**
 
@@ -127,9 +125,9 @@ fn submodule_sources_are_searchable_only_under_the_opt_in() {
 
 - [ ] **Step 5: Run the grep parity pin**
 
-Run: `scripts/require-exact-test.sh bazel test //crates/tracedecay-code-index:unit_test --test_output=all --test_arg=grep_search::tests::submodule_sources_are_searchable_only_under_the_opt_in --test_arg=--exact`
+Run: `REQUIRE_EXACT_TEST_COUNT=1 scripts/require-exact-test.sh bazel test //crates/tracedecay-code-index:unit_test --test_output=all --test_arg=grep_search::tests::submodule_sources_are_searchable_only_under_the_opt_in --test_arg=--exact`
 
-Expected: PASS with `1 passed`. A failure means grep does not share the submodule walker; report it as a blocker.
+Expected: PASS with `1 passed; 0 failed`. A failure means grep does not share the submodule walker; report it as a blocker.
 
 - [ ] **Step 6: Write the ast-grep parity pin**
 
@@ -166,21 +164,26 @@ fn submodule_sources_are_parsed_only_under_the_opt_in() {
 
 - [ ] **Step 7: Run the ast-grep parity pin**
 
-Run: `scripts/require-exact-test.sh bazel test //crates/tracedecay-code-index:unit_test --test_output=all --test_arg=ast_grep_search::tests::submodule_sources_are_parsed_only_under_the_opt_in --test_arg=--exact`
+Run: `REQUIRE_EXACT_TEST_COUNT=1 scripts/require-exact-test.sh bazel test //crates/tracedecay-code-index:unit_test --test_output=all --test_arg=ast_grep_search::tests::submodule_sources_are_parsed_only_under_the_opt_in --test_arg=--exact`
 
-Expected: PASS with `1 passed`. A failure means ast-grep does not share the submodule walker; report it as a blocker.
+Expected: PASS with `1 passed; 0 failed`. A failure means ast-grep does not share the submodule walker; report it as a blocker.
 
 - [ ] **Step 8: Run the submodule revocation pins**
 
-Run: `bazel test //crates/tracedecay-code-index:unit_test //crates/tracedecay-code-index-runtime:unit_test --test_output=all --test_arg=submodule --test_arg=--skip=linked_worktree_inside_the_parent_stays_pruned_under_submodule_opt_in`
+Run each pin through the helper by its exact full name, one command per test:
 
-Expected: PASS with a non-zero executed count covering `lazy_submodule_walk_refuses_retargeted_marker`, `lazy_submodule_walk_refuses_removed_staged_gitlink`, `submodule_revocation_during_capture_refuses_snapshot_and_preserves_publication`, and `retained_graph_checks_require_a_successful_submodule_probe_each_time`. Record the count.
+- `REQUIRE_EXACT_TEST_COUNT=1 scripts/require-exact-test.sh bazel test //crates/tracedecay-code-index:unit_test --test_output=all --test_arg=source_walk::submodules::tests::lazy_submodule_walk_refuses_retargeted_marker --test_arg=--exact`
+- `REQUIRE_EXACT_TEST_COUNT=1 scripts/require-exact-test.sh bazel test //crates/tracedecay-code-index:unit_test --test_output=all --test_arg=source_walk::submodules::tests::lazy_submodule_walk_refuses_removed_staged_gitlink --test_arg=--exact`
+- `REQUIRE_EXACT_TEST_COUNT=1 scripts/require-exact-test.sh bazel test //crates/tracedecay-code-index-runtime:unit_test --test_output=all --test_arg=code_index_scheduler::tests::index_path_policy_tests::submodule_revocation_during_capture_refuses_snapshot_and_preserves_publication --test_arg=--exact`
+- `REQUIRE_EXACT_TEST_COUNT=1 scripts/require-exact-test.sh bazel test //crates/tracedecay-code-index-runtime:unit_test --test_output=all --test_arg=code_index_scheduler::tests::index_path_policy_tests::retained_graph_checks_require_a_successful_submodule_probe_each_time --test_arg=--exact`
+
+Expected: each reports `1 passed; 0 failed`. A failure means the merged fix does not refuse a revoked binding; report it as a blocker with the failing assertion.
 
 - [ ] **Step 9: Run the #4801 behavioral targets on current `master`**
 
 Run: `bazel test //crates/tracedecay-code-index:unit_test //crates/tracedecay-code-index-runtime:unit_test //crates/tracedecay-configuration:unit_test --test_output=all`
 
-Expected: all three targets PASS. Record each target's executed test count from the output; a target reporting `0 tests` is not evidence.
+Expected: all three targets PASS. Record each target's executed test count from its `test result:` line; a target reporting `0 passed` is not evidence. This unfiltered log also lists `source_walk::tests::nested_repository_is_not_part_of_the_parent_source_tree` and `unmounted_files::tests::audit_reports_nested_repository_exclusion_without_claiming_child_code` as `ok`, which corroborates the Step 11 rows that cite them.
 
 - [ ] **Step 10: Commit**
 
@@ -193,7 +196,7 @@ git commit -m "test(code-index): pin submodule opt-in boundaries"
 
 - [ ] **Step 11: Draft the closure comment in the lane report**
 
-The report contains one row per #4593 request, each naming the file and test that proves it on `master`: opt-in setting default off (`crates/tracedecay-configuration/src/config/mod.rs`), descent only into gitlink-plus-`.gitmodules` children (`submodules.rs` tests), linked-worktree and nested-clone pruning (Step 2 and `nested_repository_is_not_part_of_the_parent_source_tree`), shared-walker coverage for grep, ast-grep, and unmounted files (Steps 4 and 6, plus `audit_reports_nested_repository_exclusion_without_claiming_child_code`), and the skip hint surfaced through `unmounted_files` (`ProjectAudit.nested_repository_note`). The comment cites PR #4801, merge commit `97caca9f0e53be3649019a469bbb165a1e55ebce`, and the Step 9 counts. The coordinator closes the issue.
+The report contains one row per #4593 request, each naming the file and test that proves it on `master`: opt-in setting default off (`crates/tracedecay-configuration/src/config/mod.rs`), descent only into gitlink-plus-`.gitmodules` children (`submodules.rs` tests), linked-worktree and nested-clone pruning (Step 2 and `nested_repository_is_not_part_of_the_parent_source_tree`), shared-walker coverage for grep, ast-grep, and unmounted files (Steps 4 and 6, plus `audit_reports_nested_repository_exclusion_without_claiming_child_code`), and the skip hint surfaced through `unmounted_files` (`EcosystemAudit.note`, which `audit_project` fills from the walk's skipped-nested-repository diagnostic for every ecosystem). The comment cites PR #4801, merge commit `97caca9f0e53be3649019a469bbb165a1e55ebce`, and the Step 9 counts. The coordinator closes the issue.
 
 ---
 
@@ -220,7 +223,7 @@ The root no-compatibility rule wins over the issue's request to map old threshol
 - Produces: `pub struct ProximityPolicyPinV1 { pub configuration_revision: ConfigurationRevisionId, pub configuration_digest: ManifestDigest, pub relationship_hints: bool }` with `from_current_configuration(&ConfigurationCurrentStateV1) -> Option<Self>` (reads only the boolean setting), `new(ConfigurationRevisionId, ManifestDigest, bool) -> Option<Self>`, and `validate(&self) -> bool`.
 - Produces: `ProximityRuntimeOwnerV1::evaluate_with_policy_pin(&self, context: &RequestContext, request: &ProximityEvaluationRequestV1, policy: &ProximityPolicyPinV1) -> ProximityRuntimeOutcomeV1`.
 - Removes: `PROXIMITY_RISK_THRESHOLD_SETTING_KEY_V1` and the `feedback.proximity.risk_threshold` registry definition, `DEFAULT_PROXIMITY_RISK_THRESHOLD_BASIS_POINTS_V1`, `MAX_PROXIMITY_RISK_THRESHOLD_BASIS_POINTS_V1`, the registry's threshold range check, `RELATIONSHIP_HINT_MAX_THRESHOLD_BASIS_POINTS_V1`, `ProximityThresholdPinV1` with `value_basis_points` and `admits_relationship_hints`, and `evaluate_with_threshold_pin`. No `from_legacy_threshold` or other value mapping exists, and the new key joins no additive-convergence list.
-- Consumes: the registry convergence in `converge_registered_registry_shape`, which returns `ResetRequired` for a snapshot that holds a key the registry no longer defines.
+- Consumes: the registry convergence in the public `GlobalDbConfigurationControlStore::converge_registered_registry_shape`, which returns `ResetRequired` for a snapshot that holds a key the registry no longer defines.
 
 - [ ] **Step 1: Write the failing policy-pin test**
 
@@ -242,9 +245,19 @@ fn policy_pin_reads_the_relationship_hint_setting() {
 }
 ```
 
-- [ ] **Step 2: Write the failing registry test**
+- [ ] **Step 2: Write the failing reset test and run it red**
 
-In `crates/tracedecay-global-db/src/configuration/registry.rs` tests, replace `proximity_threshold_has_one_bounded_project_default` with:
+Before any production edit, capture `fixtures/configuration-registry-proximity-threshold.sql`: a byte-exact dump of an isolated store canonically initialized by the unmodified registry, documented with its source tip as the revision-3 fixture is. The revision-3 fixture cannot serve, because it already fails closed on its retired `query.default_collection.v1` entry. In `store/tests/retired_proximity_threshold.rs` (registered as `mod retired_proximity_threshold;` in `store/tests/mod.rs`), add `snapshot_holding_the_retired_proximity_threshold_is_reset_required`. It seeds the dump and calls the public `GlobalDbConfigurationControlStore::converge_registered_registry_shape`. It then takes the error with `.expect_err("a snapshot holding feedback.proximity.risk_threshold must return configuration ResetRequired")`, asserts that error is typed configuration `ResetRequired`, asserts the stored entries are unchanged, and asserts that a setter call for `feedback.proximity.risk_threshold` is refused as unknown. It names the retired key only as a string, so it compiles on the unmodified tree.
+
+Run it before Step 3 adds a test that names a new symbol to the same target:
+
+`bazel test //crates/tracedecay-global-db:unit_test --test_output=all --test_arg=configuration::store::tests::retired_proximity_threshold::snapshot_holding_the_retired_proximity_threshold_is_reset_required --test_arg=--exact`
+
+Expected red: Bazel exits nonzero, and the log shows `test configuration::store::tests::retired_proximity_threshold::snapshot_holding_the_retired_proximity_threshold_is_reset_required ... FAILED`, the panic text `a snapshot holding feedback.proximity.risk_threshold must return configuration ResetRequired`, and `test result: FAILED. 0 passed; 1 failed`. The baseline registry still defines the threshold, so convergence succeeds. Any other failure means the fixture is wrong; fix it before continuing.
+
+- [ ] **Step 3: Write the failing registry test**
+
+In `crates/tracedecay-global-db/src/configuration/registry.rs`, rename `mod proximity_threshold_tests` to `mod proximity_relationship_hints_tests` and replace its `proximity_threshold_has_one_bounded_project_default` with:
 
 ```rust
 #[test]
@@ -260,15 +273,14 @@ fn proximity_relationship_hints_is_one_boolean_project_default() {
 }
 ```
 
-- [ ] **Step 3: Write the failing reset test**
+- [ ] **Step 4: Run the new type and key tests to verify they fail**
 
-Before any production edit, capture `fixtures/configuration-registry-proximity-threshold.sql`: a byte-exact dump of an isolated store canonically initialized by the unmodified registry, documented with its source tip as the revision-3 fixture is. The revision-3 fixture cannot serve, because it already fails closed on its retired `query.default_collection.v1` entry. In `store/tests/retired_proximity_threshold.rs` (registered in `store/tests/mod.rs`), add `snapshot_holding_the_retired_proximity_threshold_is_reset_required`. It seeds the dump, converges it through `converge_registered_registry_shape`, and asserts typed configuration `ResetRequired`, unchanged stored entries, and that a setter call for `feedback.proximity.risk_threshold` is refused as unknown.
+Run each directly:
 
-- [ ] **Step 4: Run the new tests to verify they fail**
+- `bazel test //crates/tracedecay-application:unit_test --test_output=all --test_arg=advisory::proximity_runtime::tests::policy_pin_reads_the_relationship_hint_setting --test_arg=--exact`
+- `bazel test //crates/tracedecay-global-db:unit_test --test_output=all --test_arg=configuration::registry::proximity_relationship_hints_tests::proximity_relationship_hints_is_one_boolean_project_default --test_arg=--exact`
 
-Run: `bazel test //crates/tracedecay-application:unit_test //crates/tracedecay-global-db:unit_test --test_output=errors`
-
-Expected: FAIL. The application target fails to compile on `cannot find type ProximityPolicyPinV1`, and the global-db target fails on the unresolved `PROXIMITY_RELATIONSHIP_HINTS_SETTING_KEY_V1`. Once the key exists, the reset test fails because the baseline registry still defines the threshold and converges the captured store cleanly.
+Expected red: each Bazel run exits nonzero before any test runs. The application log shows a rustc `error[E…]` line naming `ProximityPolicyPinV1`, and every rustc error it reports is in `advisory/proximity_runtime.rs`. The global-db log shows a rustc `error[E…]` line naming `PROXIMITY_RELATIONSHIP_HINTS_SETTING_KEY_V1`, and every rustc error it reports is in `configuration/registry.rs`. An error in any other file is not this red.
 
 - [ ] **Step 5: Replace the numeric setting and pin**
 
@@ -280,9 +292,13 @@ Update `advisory/mod.rs` and `cycle_production.rs` (field `threshold_pin` become
 
 - [ ] **Step 7: Run the new tests to verify they pass**
 
-Run each through `scripts/require-exact-test.sh` with `--test_output=all` and `--test_arg=--exact`: `advisory::proximity_runtime::tests::policy_pin_reads_the_relationship_hint_setting` on `//crates/tracedecay-application:unit_test`, and `configuration::registry::tests::proximity_relationship_hints_is_one_boolean_project_default` and `configuration::store::tests::retired_proximity_threshold::snapshot_holding_the_retired_proximity_threshold_is_reset_required` on `//crates/tracedecay-global-db:unit_test`.
+Run each through the helper:
 
-Expected: each reports `1 passed`. If a module path differs, use the path libtest lists for that file; the helper must still report `1 passed`.
+- `REQUIRE_EXACT_TEST_COUNT=1 scripts/require-exact-test.sh bazel test //crates/tracedecay-application:unit_test --test_output=all --test_arg=advisory::proximity_runtime::tests::policy_pin_reads_the_relationship_hint_setting --test_arg=--exact`
+- `REQUIRE_EXACT_TEST_COUNT=1 scripts/require-exact-test.sh bazel test //crates/tracedecay-global-db:unit_test --test_output=all --test_arg=configuration::registry::proximity_relationship_hints_tests::proximity_relationship_hints_is_one_boolean_project_default --test_arg=--exact`
+- `REQUIRE_EXACT_TEST_COUNT=1 scripts/require-exact-test.sh bazel test //crates/tracedecay-global-db:unit_test --test_output=all --test_arg=configuration::store::tests::retired_proximity_threshold::snapshot_holding_the_retired_proximity_threshold_is_reset_required --test_arg=--exact`
+
+Expected: each reports `1 passed; 0 failed`.
 
 - [ ] **Step 8: Write the read-page retention test**
 
@@ -318,9 +334,9 @@ async fn read_page_preserves_encounter_intervals_and_relation_evidence() {
 
 - [ ] **Step 9: Run the read-page test**
 
-Run: `scripts/require-exact-test.sh bazel test //crates/tracedecay-application:unit_test --test_output=all --test_arg=advisory::proximity_runtime::tests::read_page_preserves_encounter_intervals_and_relation_evidence --test_arg=--exact`
+Run: `REQUIRE_EXACT_TEST_COUNT=1 scripts/require-exact-test.sh bazel test //crates/tracedecay-application:unit_test --test_output=all --test_arg=advisory::proximity_runtime::tests::read_page_preserves_encounter_intervals_and_relation_evidence --test_arg=--exact`
 
-Expected: PASS with `1 passed`.
+Expected: PASS with `1 passed; 0 failed`. This pins retained read-page behavior, so a first-run pass is expected; a failure is a defect to report.
 
 - [ ] **Step 10: Write the Loom panel test**
 
@@ -328,17 +344,27 @@ Create `dashboard/src/viz/proximity/ProximityPanel.dom.test.tsx` asserting that 
 
 - [ ] **Step 11: Run the dashboard tests**
 
-Run: `pnpm test -- ProximityPanel` from `dashboard/`
+Run: `pnpm exec vitest run --reporter=verbose src/viz/proximity/ProximityPanel.dom.test.tsx` from `dashboard/`
 
-Expected: PASS with a non-zero test count for the new file.
+Expected: exit 0. The verbose log lists the new test as passed, and the summary reports a nonzero `passed` count and `0 failed` for this file. This pins retained Loom behavior, so a first-run pass is expected.
 
-- [ ] **Step 12: Run the owning targets**
+- [ ] **Step 12: Run each cited retained test by its exact name**
+
+Every test the closure map cites runs through the helper by its full name, one command each, with `REQUIRE_EXACT_TEST_COUNT=1 scripts/require-exact-test.sh bazel test <target> --test_output=all --test_arg=<path> --test_arg=--exact`:
+
+- `//crates/tracedecay-application:unit_test`: `advisory::proximity_runtime::tests::expired_evidence_returns_typed_stale_result`, `advisory::proximity_runtime::tests::encounter_policy_preserves_exact_identity_and_hint_admission`, `advisory::proximity_runtime::tests::policy_pin_is_immutable_in_cycle_and_refreshes_next_cycle`, `advisory::proximity_runtime::authority::tests::empty_neighborhoods_do_not_issue_additional_graph_reads`, `advisory::proximity_runtime::authority::tests::shared_caller_does_not_read_discarded_dependency_hops`, `advisory::proximity_runtime::authority::tests::dependency_neighborhood_reuses_adjacency_between_distinct_seeds`, and `advisory::runtime::local_cycle_tests::local_cycle_admits_retained_evidence_only_for_exact_scope_grant_and_policy`.
+- `//crates/tracedecay-configuration:unit_test`: `configuration::operations::tests::get_resolves_a_registered_setting_missing_from_the_snapshot_to_its_default`.
+- `//crates/tracedecay:unit_test`: `mcp::tools::handlers::configuration_batch_behavior_tests::configuration_batch_applies_both_settings_and_refuses_the_other_inputs`, the module's only test.
+
+Expected: each reports `1 passed; 0 failed`.
+
+- [ ] **Step 13: Run the owning targets**
 
 Run: `bazel test //crates/tracedecay-application:unit_test //crates/tracedecay-application:application_suite //crates/tracedecay-domain:unit_test //crates/tracedecay-global-db:unit_test //crates/tracedecay-configuration:unit_test //crates/tracedecay:unit_test //crates/tracedecay:runtime_acceptance_suite --test_output=all`, then `pnpm run contracts:check` from `dashboard/`.
 
-Expected: all PASS with non-zero executed counts, including `expired_evidence_returns_typed_stale_result`, `encounter_policy_preserves_exact_identity_and_hint_admission`, `policy_pin_is_immutable_in_cycle_and_refreshes_next_cycle`, and the configuration batch behavior tests, and `contracts:check` reports no drift. Record the counts, the retained types (`ProximityContributionV1`, `ProximityInclusionV1`, `ProximityRelationPathV1`), and the removed setting, constants, and field (`value_basis_points`) in the lane report.
+Expected: all PASS, each target's `test result:` line reports a nonzero passed count and `0 failed`, and `contracts:check` reports no drift. Record the counts, the retained types (`ProximityContributionV1`, `ProximityInclusionV1`, `ProximityRelationPathV1`), and the removed setting, constants, and field (`value_basis_points`) in the lane report.
 
-- [ ] **Step 13: Commit**
+- [ ] **Step 14: Commit**
 
 ```bash
 git add crates/tracedecay-application/src/advisory/proximity_runtime.rs \
@@ -363,36 +389,45 @@ git commit -m "feat(proximity): replace the risk threshold with a hint setting" 
 
 The commit removes a user-visible setting and resets configuration, so it uses a release-note type, not `simplify`. After it merges, report the merge to the coordinator, because L5 #4419 edits the same registry files only after this PR merges.
 
-- [ ] **Step 14: Draft the closure comment in the lane report**
+- [ ] **Step 15: Draft the closure comment in the lane report**
 
-The report maps each #4416 acceptance line to evidence: no graph-impact call on the encounter read (the `impact` entry point has no proximity caller; the neighborhood read counts are pinned by `empty_neighborhoods_do_not_issue_additional_graph_reads`, `shared_caller_does_not_read_discarded_dependency_hops`, and `dependency_neighborhood_reuses_adjacency_between_distinct_seeds`), exact-encounter identity and coverage (Step 8 and `encounter_policy_preserves_exact_identity_and_hint_admission`), retained permission, freshness, generation, and configuration checks (`expired_evidence_returns_typed_stale_result`, `local_cycle_admits_retained_evidence_only_for_exact_scope_grant_and_policy`, `policy_pin_is_immutable_in_cycle_and_refreshes_next_cycle`), historical feedback readability (no durable source data is deleted by this task), and Loom retention (Step 10). The legacy threshold-mapping line is superseded by the user's ruling (design Decision 10); the map says so and cites Steps 1 to 3 in its place. It cites merged #4549 and #4790 and the Step 12 counts. The coordinator closes the issue.
+The report maps each #4416 acceptance line to evidence: no graph-impact call on the encounter read (the `impact` entry point has no proximity caller; the neighborhood read counts are pinned by `empty_neighborhoods_do_not_issue_additional_graph_reads`, `shared_caller_does_not_read_discarded_dependency_hops`, and `dependency_neighborhood_reuses_adjacency_between_distinct_seeds`), exact-encounter identity and coverage (Step 8 and `encounter_policy_preserves_exact_identity_and_hint_admission`), retained permission, freshness, generation, and configuration checks (`expired_evidence_returns_typed_stale_result`, `local_cycle_admits_retained_evidence_only_for_exact_scope_grant_and_policy`, `policy_pin_is_immutable_in_cycle_and_refreshes_next_cycle`), historical feedback readability (no durable source data is deleted by this task), and Loom retention (Step 10). The legacy threshold-mapping line is superseded by the user's ruling (design Decision 10); the map says so and cites Steps 1 to 3 in its place. It cites merged #4549 and #4790, the Step 12 exact runs, and the Step 13 counts. The coordinator closes the issue.
 
 ---
 
 ### Task 3: #4423 local feedback isolation evidence closure
 
+**Gate:** start only after L1 #4448 and L5 #4436 have merged, on a branch from the `master` that contains both (Global Constraints, Shared paths).
+
 **Files:**
-- Test: `crates/tracedecay-application/src/advisory/runtime/local_cycle_tests.rs` (add to the existing `mod tests`)
+- Test: `crates/tracedecay-application/src/advisory/runtime/local_cycle_tests.rs` (the file is the `advisory::runtime::local_cycle_tests` module itself, with its tests at file level; add one `Harness` helper, migrate the two existing held-read tests to it, and add the new test)
 
 **Interfaces:**
-- Consumes: `Harness::open() -> Harness`, `Harness::local(&str) -> AdvisoryCycleRequest`, `Harness::context(bool) -> RequestContext`, `Harness::control(&RequestContext) -> AdvisoryCycleControl`, `Harness::remote_reads() -> (usize, usize)`, `Harness::ci_archive.arrived`/`.release` (`Mutex<Option<oneshot::Sender<()>>>` / `Mutex<Option<oneshot::Receiver<()>>>`).
+- Consumes: `Harness::open() -> Harness`, `Harness::local(&str) -> AdvisoryCycleRequest`, `Harness::explicit(&str) -> AdvisoryCycleRequest`, `Harness::context(bool) -> RequestContext`, `Harness::control(&RequestContext) -> AdvisoryCycleControl`, `Harness::remote_reads() -> (usize, usize)`, and the `completed` and `provider_state` helpers in the same file.
 - Consumes: `AdvisoryRuntime::run_once(&RequestContext, AdvisoryCycleControl, AdvisoryCycleRequest) -> Result<AdvisoryCycleOutcome, FeedbackCycleRuntimeError>`.
-- Produces: nothing. This task adds coverage only.
+- Produces (test-only, same file): `Harness::hold_next_ci_provider_read(&self) -> (oneshot::Receiver<()>, oneshot::Sender<()>)`. It arms `HeldLiveCiArchive` so its next `read_record` call holds open, and returns both ends the test owns: the receiver resolves when that CI provider read arrives, and sending on or dropping the sender releases it. The archive keeps the opposite ends, as it does today. This replaces the manual `ci_archive.arrived`/`ci_archive.release` setup in `local_cycle_publishes_retained_evidence_while_an_explicit_refresh_is_held` and `remote_and_local_cancellation_are_isolated`.
 
-- [ ] **Step 1: Write the silent-provider pin**
+- [ ] **Step 1: Add the held-read helper and the silent-provider pin**
 
-Add to `mod tests` in `crates/tracedecay-application/src/advisory/runtime/local_cycle_tests.rs`:
+Add to `impl Harness` in `crates/tracedecay-application/src/advisory/runtime/local_cycle_tests.rs`:
+
+```rust
+fn hold_next_ci_provider_read(&self) -> (oneshot::Receiver<()>, oneshot::Sender<()>) {
+    let (arrived_tx, arrived) = oneshot::channel();
+    let (release, release_rx) = oneshot::channel();
+    *self.ci_archive.arrived.lock().unwrap() = Some(arrived_tx);
+    *self.ci_archive.release.lock().unwrap() = Some(release_rx);
+    (arrived, release)
+}
+```
+
+Replace the four setup lines in `local_cycle_publishes_retained_evidence_while_an_explicit_refresh_is_held` with `let (arrived, release) = harness.hold_next_ci_provider_read();`, and those in `remote_and_local_cancellation_are_isolated` with `let (arrived, _release) = harness.hold_next_ci_provider_read();`. Their assertions do not change. Then add at file level:
 
 ```rust
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn local_cycle_completes_with_a_configured_provider_that_never_answers() {
     let harness = Arc::new(Harness::open().await);
-    // CI is configured for this scope, no retained evidence exists, and the
-    // provider read is held open: the local cycle must not join it.
-    let (arrived_tx, arrived) = oneshot::channel();
-    let (release, release_rx) = oneshot::channel();
-    *harness.ci_archive.arrived.lock().unwrap() = Some(arrived_tx);
-    *harness.ci_archive.release.lock().unwrap() = Some(release_rx);
+    let (arrived, release) = harness.hold_next_ci_provider_read();
     let explicit = {
         let harness = Arc::clone(&harness);
         tokio::spawn(async move {
@@ -435,17 +470,22 @@ async fn local_cycle_completes_with_a_configured_provider_that_never_answers() {
 }
 ```
 
-- [ ] **Step 2: Run the silent-provider pin**
+- [ ] **Step 2: Run the silent-provider pin and the migrated held-read tests**
 
-Run: `scripts/require-exact-test.sh bazel test //crates/tracedecay-application:unit_test --test_output=all --test_arg=advisory::runtime::local_cycle_tests::tests::local_cycle_completes_with_a_configured_provider_that_never_answers --test_arg=--exact`
+Run each through the helper, one command per test:
 
-Expected: PASS with `1 passed`. A failure means the local cycle joins a configured provider read; report it as a blocker.
+- `REQUIRE_EXACT_TEST_COUNT=1 scripts/require-exact-test.sh bazel test //crates/tracedecay-application:unit_test --test_output=all --test_arg=advisory::runtime::local_cycle_tests::local_cycle_completes_with_a_configured_provider_that_never_answers --test_arg=--exact`
+- `REQUIRE_EXACT_TEST_COUNT=1 scripts/require-exact-test.sh bazel test //crates/tracedecay-application:unit_test --test_output=all --test_arg=advisory::runtime::local_cycle_tests::local_cycle_publishes_retained_evidence_while_an_explicit_refresh_is_held --test_arg=--exact`
+- `REQUIRE_EXACT_TEST_COUNT=1 scripts/require-exact-test.sh bazel test //crates/tracedecay-application:unit_test --test_output=all --test_arg=advisory::runtime::local_cycle_tests::local_cycle_admits_retained_evidence_only_for_exact_scope_grant_and_policy --test_arg=--exact`
+- `REQUIRE_EXACT_TEST_COUNT=1 scripts/require-exact-test.sh bazel test //crates/tracedecay-application:unit_test --test_output=all --test_arg=advisory::runtime::local_cycle_tests::remote_and_local_cancellation_are_isolated --test_arg=--exact`
+
+Expected: each reports `1 passed; 0 failed`. A failure of the first means the local cycle joins a configured provider read; report it as a blocker. A failure of a migrated test means the helper changed its setup; fix the helper, not the assertion.
 
 - [ ] **Step 3: Run the owning targets**
 
-Run: `bazel test //crates/tracedecay-application:unit_test //crates/tracedecay-application:application_suite //crates/tracedecay:hooks_lsp_suite --test_output=errors`
+Run: `bazel test //crates/tracedecay-application:unit_test //crates/tracedecay-application:application_suite //crates/tracedecay:hooks_lsp_suite --test_output=all`
 
-Expected: all PASS with non-zero executed counts. Record the counts, the deleted orchestration surface (`AdvisoryRemoteReadMode::LocalFeedback` never constructs `AdvisoryRemoteEvidenceV1::Refresh`; no CI discovery call in the local preamble), and the before/after provider-call counts asserted by `local_cycle_publishes_retained_evidence_while_an_explicit_refresh_is_held` (`(0, 0)` local, `(1, ≥1)` explicit).
+Expected: all PASS, and each target's `test result:` line reports a nonzero passed count and `0 failed`. Record the counts, the deleted orchestration surface (`AdvisoryRemoteReadMode::LocalFeedback` never constructs `AdvisoryRemoteEvidenceV1::Refresh`; no CI discovery call in the local preamble), and the before/after provider-call counts asserted by `local_cycle_publishes_retained_evidence_while_an_explicit_refresh_is_held` (`(0, 0)` local, `(1, ≥1)` explicit).
 
 - [ ] **Step 4: Commit**
 
@@ -456,7 +496,7 @@ git commit -m "test(feedback): pin local cycles against a silent provider"
 
 - [ ] **Step 5: Draft the closure comment in the lane report**
 
-The report maps each #4423 requirement to evidence: local analysis proceeds while a remote read is held (`local_cycle_publishes_retained_evidence_while_an_explicit_refresh_is_held`), a configured-but-silent provider never blocks or cleans a local cycle (Step 1), retained evidence attaches only for exact scope, grant, and policy (`local_cycle_admits_retained_evidence_only_for_exact_scope_grant_and_policy`), local and remote cancellation are isolated (`remote_and_local_cancellation_are_isolated`), and explicit refresh still obtains updated data (the same held test's explicit cycle). It cites merged #4817 and the Step 3 counts. The coordinator closes the issue.
+The report maps each #4423 requirement to evidence: local analysis proceeds while a remote read is held (`local_cycle_publishes_retained_evidence_while_an_explicit_refresh_is_held`), a configured-but-silent provider never blocks or cleans a local cycle (Step 1), retained evidence attaches only for exact scope, grant, and policy (`local_cycle_admits_retained_evidence_only_for_exact_scope_grant_and_policy`), local and remote cancellation are isolated (`remote_and_local_cancellation_are_isolated`), and explicit refresh still obtains updated data (the same held test's explicit cycle). It cites merged #4817, the Step 2 exact runs, and the Step 3 counts. The coordinator closes the issue.
 
 ---
 
@@ -513,9 +553,9 @@ async fn generated_output_files_are_not_project_members() {
 
 - [ ] **Step 2: Run the generated-output pin**
 
-Run: `scripts/require-exact-test.sh bazel test //crates/tracedecay-application:unit_test --test_output=all --test_arg=diagnostics_producer::compiler_conformance_tests::generated_output_files_are_not_project_members --test_arg=--exact`
+Run: `REQUIRE_EXACT_TEST_COUNT=1 scripts/require-exact-test.sh bazel test //crates/tracedecay-application:unit_test --test_output=all --test_arg=diagnostics_producer::compiler_conformance_tests::generated_output_files_are_not_project_members --test_arg=--exact`
 
-Expected: PASS with `1 passed`. A failure means a generated output is owned by the project; report it as a blocker.
+Expected: PASS with `1 passed; 0 failed`. A failure means a generated output is owned by the project; report it as a blocker.
 
 - [ ] **Step 3: Write the manual preparation-cost measurement**
 
@@ -558,15 +598,15 @@ async fn measure_preparation_cost_and_incremental_reuse() {
 
 - [ ] **Step 4: Run the measurement and record the numbers**
 
-Run: `bazel test //crates/tracedecay-application:unit_test --test_output=all --test_arg=diagnostics_producer::installed_compiler_tests::measure_preparation_cost_and_incremental_reuse --test_arg=--exact --test_arg=--ignored --test_arg=--nocapture`
+Run: `REQUIRE_EXACT_TEST_COUNT=1 scripts/require-exact-test.sh bazel test //crates/tracedecay-application:unit_test --test_output=all --test_arg=diagnostics_producer::installed_compiler_tests::measure_preparation_cost_and_incremental_reuse --test_arg=--exact --test_arg=--ignored --test_arg=--nocapture`
 
-Expected: PASS with `1 passed` and a printed `cold=… warm=…` line. Record both durations, the compiler release, and the machine in the lane report. A warm run slower than cold is a finding to report, not a bound to loosen.
+Expected: PASS with `1 passed; 0 failed` and a printed `cold=… warm=…` line. Record both durations, the compiler release, and the machine in the lane report. A warm run slower than cold is a finding to report, not a bound to loosen.
 
 - [ ] **Step 5: Run the owning targets**
 
-Run: `bazel test //crates/tracedecay-application:unit_test //crates/tracedecay-lsp:unit_test //crates/tracedecay-lsp:lsp_suite --test_output=errors`
+Run: `bazel test //crates/tracedecay-application:unit_test //crates/tracedecay-lsp:unit_test //crates/tracedecay-lsp:lsp_suite --test_output=all`
 
-Expected: all PASS with non-zero executed counts, including `an_unreadable_configuration_is_a_failure_until_repaired`, `membership_is_the_program_the_compiler_checked`, and the new generated-output pin. Record the counts.
+Expected: all PASS, each target's `test result:` line reports a nonzero passed count and `0 failed`, and the log lists `an_unreadable_configuration_is_a_failure_until_repaired`, `membership_is_the_program_the_compiler_checked`, and the new generated-output pin as `ok`. Record the counts.
 
 - [ ] **Step 6: Commit**
 
@@ -582,7 +622,9 @@ The report maps each #4440 acceptance line to evidence: monorepo references and 
 
 ---
 
-### Task 5: #4374 Codex re-offer measurement
+### Task 5: #4374 Codex re-offer fixture measurement and operator runbook draft
+
+The fixture measurement in Steps 1 to 4 is supporting evidence. #4374's acceptance needs the operator's actual `~/.codex` corpus, which only the coordinator's separately approved run can measure (design, Long-running acceptance). This task never reads `~/.codex`.
 
 **Files:**
 - Create: `crates/tracedecay-sessions/src/runtime/ingest/codex_reoffer_measurement_tests.rs`
@@ -609,9 +651,9 @@ Create `crates/tracedecay-sessions/src/runtime/ingest/codex_reoffer_measurement_
 
 - [ ] **Step 2: Run the measurement**
 
-Run: `bazel test //crates/tracedecay-sessions:unit_test --test_output=all --test_arg=runtime::ingest::codex_reoffer_measurement_tests::codex_reoffer_measurement --test_arg=--exact --test_arg=--ignored --test_arg=--nocapture`
+Run: `REQUIRE_EXACT_TEST_COUNT=1 scripts/require-exact-test.sh bazel test //crates/tracedecay-sessions:unit_test --test_output=all --test_arg=runtime::ingest::codex_reoffer_measurement_tests::codex_reoffer_measurement --test_arg=--exact --test_arg=--ignored --test_arg=--nocapture`
 
-Expected: PASS with `1 passed` and four `phase=…` lines. Record every line, the machine, and the Bazel target in the lane report.
+Expected: PASS with `1 passed; 0 failed` and four `phase=…` lines. Record every line, the machine, and the Bazel target in the lane report.
 
 - [ ] **Step 3: Attribute the per-file cost**
 
@@ -619,9 +661,9 @@ For each phase, subtract `admit_ms` from `total_ms` and record the remainder as 
 
 - [ ] **Step 4: Run the owning targets**
 
-Run: `bazel test //crates/tracedecay-sessions:unit_test --test_output=errors`
+Run: `bazel test //crates/tracedecay-sessions:unit_test --test_output=all`
 
-Expected: PASS with a non-zero executed count that includes the existing re-offer regressions (`sessions` cold-cache, repeated re-offer, provenance, and rewrite-failure cases). Record the count.
+Expected: PASS, the `test result:` line reports a nonzero passed count and `0 failed`, and the log lists the existing re-offer regressions (`sessions` cold-cache, repeated re-offer, provenance, and rewrite-failure cases) as `ok`. Record the count and those test names.
 
 - [ ] **Step 5: Commit**
 
@@ -631,6 +673,21 @@ git add crates/tracedecay-sessions/src/runtime/ingest.rs \
 git commit -m "test(sessions): measure codex re-offer cost"
 ```
 
-- [ ] **Step 6: Draft the closure comment in the lane report**
+- [ ] **Step 6: Draft the status comment in the lane report**
 
-The report states the measured project-scope and profile-scope per-file costs, the restart result, the between-files remainder, and the span that owns it, against the issue's 2,010-rollout baseline. It cites merged #4380 (profile-scope replay), #4806 (skips empty JSONL scope resolution on re-offer), #4864 (#4861 history admission), #4857 and #4793 (#4756 directory and projection bounds), and L3's merged program PRs for #4861 and #4756, and the Step 4 count. The original-corpus run on the affected host is a named operator gate: it needs the operator's `~/.codex` corpus and therefore the coordinator's execution-time approval. Until that run is checked, the issue stays open as `pending-long-acceptance`; the coordinator decides closure.
+The report states the fixture's measured project-scope and profile-scope per-file costs, the restart result, the between-files remainder, and the span that owns it, beside the issue's 2,010-rollout baseline. It labels every number as fixture evidence, not acceptance. It cites merged #4380 (profile-scope replay), #4806 (skips empty JSONL scope resolution on re-offer), #4864 (#4861 history admission), #4857 and #4793 (#4756 directory and projection bounds), L3's merged program PRs for #4861 and #4756, and the Step 4 count. The PR says `Refs #4374`. The lane marks #4374 `pending-long-acceptance` and never drafts it as closed.
+
+- [ ] **Step 7: Draft the operator-corpus runbook (report only; never executed by the lane)**
+
+Put the draft in the lane-end report for the coordinator, who presents it to the user for separate approval at execution time. Commit nothing for it. The draft has these sections:
+
+1. **Binary.** The final merged `master` SHA and `bazel build //crates/tracedecay-cli:tracedecay`. The install location and method stay explicit fields that the coordinator fills and the user approves. The draft proposes none.
+2. **Measured route.** The operator's normal TraceDecay authority re-offers the real `~/.codex` corpus through the canonical Codex discovery and admission path, as it does in normal use. The draft names the spans to read (`sessions.ingest.project.codex.*` and the profile-scope re-offer spans that Step 3 attributed) and how they are captured. Any restart, or any environment change such as `TRACEDECAY_SPAN_TIMINGS=1` on the service, is its own line item with how it is undone. It proposes no second daemon.
+3. **Read and write boundaries.** `~/.codex` is read in place and never written, moved, renamed, deleted, or copied. The normal authority writes its own profile as normal use does. The coordinator writes only its own sample files, outside `~/.codex` and outside the profile.
+4. **Samples.** Rollout file count and total eligible bytes, the cold and restart re-offer pass wall times, per-file cost, admission time, the between-files remainder, and the daemon PID's CPU time and RSS. Counts and timings only, never transcript content or rollout text.
+5. **Comparison.** The same columns as Step 3's fixture table and the issue's baseline (about 62 s total, about 28 ms per file, admission under 1 s for 4,020 reads).
+6. **Stop conditions.** Verbatim from the design's #4374 operator-corpus measurement section.
+7. **Forbidden actions.** No copy, backup, snapshot, fixture, or excerpt of `~/.codex` or of data derived from it. No write under `~/.codex`. No racing daemon. No repair without a new approval.
+8. **Closure evidence.** The recorded samples, the binary SHA, and the comparison. If the run is not approved or does not complete, the issue stays open with the fixture evidence and what remains.
+
+Mark #4374 `pending-long-acceptance` in the lane report, with the draft attached and the statement "not executed; requires the user's separate approval". Do not run any part of it.
