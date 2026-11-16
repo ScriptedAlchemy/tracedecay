@@ -1,6 +1,6 @@
 /target
 /node_modules
-/.pnpm/
+.pnpm/
 .DS_Store
 .codegraph
 .tracedecay
