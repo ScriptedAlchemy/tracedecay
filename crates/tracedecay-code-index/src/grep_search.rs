@@ -582,4 +582,45 @@ mod tests {
         );
         assert!(result.lines_visited < TOTAL_LINES);
     }
+
+    #[test]
+    fn submodule_sources_are_searchable_only_under_the_opt_in() {
+        let fixture = crate::source_walk::submodules::tests::fixture();
+        let parent = fixture.path().join("parent");
+        let mut query = query("pub fn");
+        query.max_results = 10;
+        let disabled = search_tree_with_cancel(&parent, &query, &no_exclusions(), || false)
+            .expect("default grep");
+        assert!(
+            disabled
+                .hits
+                .iter()
+                .any(|hit| hit.file.as_ref() == "parent.rs"),
+            "the parent source is searched: {:?}",
+            disabled.hits
+        );
+        assert!(
+            disabled
+                .hits
+                .iter()
+                .all(|hit| !hit.file.starts_with("app/")),
+            "{:?}",
+            disabled.hits
+        );
+        let enabled = search_tree_with_cancel(
+            &parent,
+            &query,
+            &no_exclusions().with_submodules(true),
+            || false,
+        )
+        .expect("opt-in grep");
+        assert!(
+            enabled
+                .hits
+                .iter()
+                .any(|hit| hit.file.as_ref() == "app/first.rs"),
+            "{:?}",
+            enabled.hits
+        );
+    }
 }
