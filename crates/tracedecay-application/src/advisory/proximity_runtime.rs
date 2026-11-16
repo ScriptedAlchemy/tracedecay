@@ -1,7 +1,7 @@
 //! One-shot concurrent-work proximity provider.
 //!
 //! The provider consumes canonical observation/graph evidence, resolves the
-//! effective Plan 20 threshold, and projects one Plan 09 contribution batch.
+//! effective proximity policy, and projects one Plan 09 contribution batch.
 //! Shared feedback publication owns durable dedupe. This module creates no
 //! fixture authority, evidence store, lock, task, schedule, or continuation.
 
@@ -19,7 +19,7 @@ use tracedecay_contracts::{
 };
 use tracedecay_domain::configuration::{ConfigurationRevisionId, ConfigurationValueV1, SettingKey};
 use tracedecay_domain::feedback::{
-    FeedbackScopeV1, PROXIMITY_RISK_THRESHOLD_SETTING_KEY_V1, ProviderEvaluationStateV1,
+    FeedbackScopeV1, PROXIMITY_RELATIONSHIP_HINTS_SETTING_KEY_V1, ProviderEvaluationStateV1,
     ProximityAddressV1, ProximityContributionIdV1, ProximityContributionV1, ProximityCoverageV1,
     ProximityInclusionV1, ProximityObservationIdV1, ProximityRelationPathV1,
     ProximityWarningClassV1,
@@ -46,57 +46,50 @@ pub use authority::{
 const PROXIMITY_CONTRIBUTION_ID_DOMAIN_V1: &str =
     "tracedecay.advisory.proximity.contribution-id.v1";
 
-/// Preserves the published numeric setting's relationship-hint admission.
-const RELATIONSHIP_HINT_MAX_THRESHOLD_BASIS_POINTS_V1: u16 = 7_500;
-
-/// Exact Plan 20 threshold input for one evaluation. Revision and effective
+/// Exact proximity policy input for one evaluation. Revision and effective
 /// behavior digest are pinned together before provider evidence is read.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
-pub struct ProximityThresholdPinV1 {
+pub struct ProximityPolicyPinV1 {
     pub configuration_revision: ConfigurationRevisionId,
     pub configuration_digest: ManifestDigest,
-    pub value_basis_points: u16,
+    pub relationship_hints: bool,
 }
 
-impl ProximityThresholdPinV1 {
+impl ProximityPolicyPinV1 {
     pub fn from_current_configuration(current: &ConfigurationCurrentStateV1) -> Option<Self> {
         current.revision_id.validate().ok()?;
         current.snapshot.validate().ok()?;
-        let key = SettingKey::new(PROXIMITY_RISK_THRESHOLD_SETTING_KEY_V1).ok()?;
-        let ConfigurationValueV1::Unsigned(value) = current.snapshot.effective_values.get(&key)?
+        let key = SettingKey::new(PROXIMITY_RELATIONSHIP_HINTS_SETTING_KEY_V1).ok()?;
+        let ConfigurationValueV1::Boolean(relationship_hints) =
+            current.snapshot.effective_values.get(&key)?
         else {
             return None;
         };
         Self::new(
             current.revision_id.clone(),
             current.snapshot.effective_behavior_digest.clone(),
-            u16::try_from(*value).ok()?,
+            *relationship_hints,
         )
     }
 
     pub fn new(
         configuration_revision: ConfigurationRevisionId,
         configuration_digest: ManifestDigest,
-        value_basis_points: u16,
+        relationship_hints: bool,
     ) -> Option<Self> {
         configuration_revision.validate().ok()?;
         configuration_digest.validate().ok()?;
-        (value_basis_points <= 10_000).then_some(Self {
+        Some(Self {
             configuration_revision,
             configuration_digest,
-            value_basis_points,
+            relationship_hints,
         })
     }
 
     pub fn validate(&self) -> bool {
         self.configuration_revision.validate().is_ok()
             && self.configuration_digest.validate().is_ok()
-            && self.value_basis_points <= 10_000
-    }
-
-    const fn admits_relationship_hints(&self) -> bool {
-        self.value_basis_points <= RELATIONSHIP_HINT_MAX_THRESHOLD_BASIS_POINTS_V1
     }
 }
 
@@ -430,11 +423,11 @@ where
     /// Evaluates against the exact configuration snapshot already authorized
     /// for the enclosing feedback cycle. The provider never rereads mutable
     /// configuration while that cycle is in flight.
-    pub async fn evaluate_with_threshold_pin(
+    pub async fn evaluate_with_policy_pin(
         &self,
         context: &RequestContext,
         request: &ProximityEvaluationRequestV1,
-        threshold: &ProximityThresholdPinV1,
+        policy: &ProximityPolicyPinV1,
     ) -> ProximityRuntimeOutcomeV1 {
         if let Some(interruption) = interrupted(context) {
             return interruption;
@@ -450,7 +443,7 @@ where
         ) {
             return ProximityRuntimeOutcomeV1::Denied;
         }
-        if !threshold.validate() {
+        if !policy.validate() {
             return ProximityRuntimeOutcomeV1::Unavailable;
         }
         let Some(batch) = self.evidence.current_evidence(context, request).await else {
@@ -461,7 +454,7 @@ where
         }
         let mut contributions = Vec::with_capacity(batch.evidence.len());
         for item in batch.evidence {
-            let Some(contribution) = build_proximity_contribution(request, threshold, item) else {
+            let Some(contribution) = build_proximity_contribution(request, policy, item) else {
                 return ProximityRuntimeOutcomeV1::Unavailable;
             };
             contributions.push(contribution);
@@ -480,7 +473,7 @@ where
     C: ConfigurationControlStore,
 {
     /// Compatibility entry for the aggregate advisory runtime. The current
-    /// threshold is accepted only when its behavior digest is the exact
+    /// policy is accepted only when its behavior digest is the exact
     /// configuration identity already authorized by the enclosing request.
     pub async fn evaluate_for_configuration_digest(
         &self,
@@ -508,14 +501,13 @@ where
         if let Some(interruption) = interrupted(context) {
             return interruption;
         }
-        let Some(threshold) = ProximityThresholdPinV1::from_current_configuration(&configuration)
-        else {
+        let Some(policy) = ProximityPolicyPinV1::from_current_configuration(&configuration) else {
             return ProximityRuntimeOutcomeV1::Unavailable;
         };
-        if threshold.configuration_digest != *expected_configuration_digest {
+        if policy.configuration_digest != *expected_configuration_digest {
             return ProximityRuntimeOutcomeV1::Denied;
         }
-        self.evaluate_with_threshold_pin(context, request, &threshold)
+        self.evaluate_with_policy_pin(context, request, &policy)
             .await
     }
 }
@@ -532,10 +524,10 @@ fn interrupted(context: &RequestContext) -> Option<ProximityRuntimeOutcomeV1> {
 
 fn build_proximity_contribution(
     request: &ProximityEvaluationRequestV1,
-    threshold: &ProximityThresholdPinV1,
+    policy: &ProximityPolicyPinV1,
     evidence: CanonicalProximityEvidenceV1,
 ) -> Option<ProximityContributionV1> {
-    if !threshold.validate() || !evidence.validate_for(request) {
+    if !policy.validate() || !evidence.validate_for(request) {
         return None;
     }
     let source_observation_ids = evidence
@@ -549,7 +541,7 @@ fn build_proximity_contribution(
         || evidence.coverage == ProximityCoverageV1::Stale
     {
         ProximityInclusionV1::Stale
-    } else if exact || threshold.admits_relationship_hints() {
+    } else if exact || policy.relationship_hints {
         ProximityInclusionV1::Included
     } else {
         ProximityInclusionV1::BelowThreshold
@@ -570,10 +562,7 @@ fn build_proximity_contribution(
         evidence.observed_at,
         evidence.expires_at,
         if exact { "immediate" } else { "configured" },
-        (!exact).then_some((
-            &threshold.configuration_revision,
-            &threshold.configuration_digest,
-        )),
+        (!exact).then_some((&policy.configuration_revision, &policy.configuration_digest)),
     ))
     .ok()?;
     let suffix = sha256_hex_suffix(identity.as_str()).unwrap_or(identity.as_str());
@@ -725,20 +714,23 @@ mod tests {
         (scope, context)
     }
 
-    fn configuration(revision: &str, threshold: Option<u64>) -> ConfigurationCurrentStateV1 {
-        let layers = threshold
-            .map(
-                |threshold| tracedecay_configuration::config::resolver::ConfigurationLayerV1 {
+    fn configuration(
+        revision: &str,
+        relationship_hints: Option<bool>,
+    ) -> ConfigurationCurrentStateV1 {
+        let layers = relationship_hints
+            .map(|relationship_hints| {
+                tracedecay_configuration::config::resolver::ConfigurationLayerV1 {
                     layer: ConfigurationLayerIdV1::Project {
                         project_id: ProjectId::new("project.proximity-pin").expect("project"),
                     },
                     revision_id: ConfigurationRevisionId::new(revision).expect("revision"),
                     entries: BTreeMap::from([(
-                        SettingKey::new(PROXIMITY_RISK_THRESHOLD_SETTING_KEY_V1).expect("key"),
-                        ConfigurationValueV1::Unsigned(threshold),
+                        SettingKey::new(PROXIMITY_RELATIONSHIP_HINTS_SETTING_KEY_V1).expect("key"),
+                        ConfigurationValueV1::Boolean(relationship_hints),
                     )]),
-                },
-            )
+                }
+            })
             .into_iter()
             .collect::<Vec<_>>();
         let snapshot = tracedecay_configuration::config::resolver::resolve_configuration(
@@ -754,15 +746,35 @@ mod tests {
         }
     }
 
+    #[test]
+    fn policy_pin_reads_the_relationship_hint_setting() {
+        let default = configuration("configuration.proximity-policy.default", None);
+        let disabled = configuration("configuration.proximity-policy.disabled", Some(false));
+        let default_pin =
+            ProximityPolicyPinV1::from_current_configuration(&default).expect("default policy pin");
+        let disabled_pin = ProximityPolicyPinV1::from_current_configuration(&disabled)
+            .expect("disabled policy pin");
+        assert!(
+            default_pin.relationship_hints,
+            "the registry default admits relationship hints"
+        );
+        assert!(!disabled_pin.relationship_hints);
+        assert_ne!(
+            default_pin.configuration_digest,
+            disabled_pin.configuration_digest
+        );
+        assert!(default_pin.validate() && disabled_pin.validate());
+    }
+
     #[tokio::test]
-    async fn threshold_pin_is_immutable_in_cycle_and_refreshes_next_cycle() {
+    async fn policy_pin_is_immutable_in_cycle_and_refreshes_next_cycle() {
         let (scope, context) = scope_and_context();
         let authorized = configuration("configuration.proximity-pin.authorized", None);
-        let authorized_pin = ProximityThresholdPinV1::from_current_configuration(&authorized)
-            .expect("authorized threshold");
-        let drifted = configuration("configuration.proximity-pin.drifted", Some(7_500));
-        let drifted_pin = ProximityThresholdPinV1::from_current_configuration(&drifted)
-            .expect("drifted threshold");
+        let authorized_pin = ProximityPolicyPinV1::from_current_configuration(&authorized)
+            .expect("authorized policy");
+        let drifted = configuration("configuration.proximity-pin.drifted", Some(false));
+        let drifted_pin =
+            ProximityPolicyPinV1::from_current_configuration(&drifted).expect("drifted policy");
         assert_ne!(
             authorized_pin.configuration_revision,
             drifted_pin.configuration_revision
@@ -790,7 +802,7 @@ mod tests {
 
         assert!(matches!(
             owner
-                .evaluate_with_threshold_pin(&context, &request, &authorized_pin)
+                .evaluate_with_policy_pin(&context, &request, &authorized_pin)
                 .await,
             ProximityRuntimeOutcomeV1::Completed(_)
         ));
@@ -805,31 +817,15 @@ mod tests {
 
         assert!(matches!(
             owner
-                .evaluate_with_threshold_pin(&context, &request, &drifted_pin)
+                .evaluate_with_policy_pin(&context, &request, &drifted_pin)
                 .await,
             ProximityRuntimeOutcomeV1::Completed(_)
         ));
         assert_eq!(
             calls.load(Ordering::SeqCst),
             2,
-            "a later cycle must use its newly authorized threshold pin"
+            "a later cycle must use its newly authorized policy pin"
         );
-    }
-
-    #[test]
-    fn relationship_hints_follow_the_legacy_threshold_mapping() {
-        let revision = ConfigurationRevisionId::new("configuration.proximity-policy").unwrap();
-        let digest = ManifestDigest::new(format!("sha256:{}", "a".repeat(64))).unwrap();
-        for value in 0..=10_000_u16 {
-            let pin =
-                ProximityThresholdPinV1::new(revision.clone(), digest.clone(), value).expect("pin");
-            let legacy_hint_score = 7_500_u16;
-            assert_eq!(
-                pin.admits_relationship_hints(),
-                legacy_hint_score >= value,
-                "threshold {value}"
-            );
-        }
     }
 
     fn encounter_evidence(scope: &FeedbackScopeV1) -> CanonicalProximityEvidenceV1 {
@@ -937,9 +933,10 @@ mod tests {
             retrieval_anchor_id: Some(hint.retrieval_anchor_ids[0].clone()),
         });
         let mut exact_identity = None;
-        for value in [0, 7_500, 7_501, 10_000] {
+        for relationship_hints in [true, false] {
             let pin =
-                ProximityThresholdPinV1::new(revision.clone(), digest.clone(), value).unwrap();
+                ProximityPolicyPinV1::new(revision.clone(), digest.clone(), relationship_hints)
+                    .unwrap();
             let exact = build_proximity_contribution(&request, &pin, evidence.clone()).unwrap();
             assert_eq!(exact.inclusion, ProximityInclusionV1::Included);
             assert_eq!(exact.address.as_ref(), Some(&evidence.address));
@@ -950,7 +947,7 @@ mod tests {
             let related = build_proximity_contribution(&request, &pin, hint.clone()).unwrap();
             assert_eq!(
                 related.inclusion,
-                if value <= 7_500 {
+                if relationship_hints {
                     ProximityInclusionV1::Included
                 } else {
                     ProximityInclusionV1::BelowThreshold
@@ -963,7 +960,7 @@ mod tests {
                 })
                 .unwrap()
                 .findings;
-            if value <= 7_500 {
+            if relationship_hints {
                 assert_eq!(findings.len(), 1);
                 assert_eq!(
                     findings[0]
@@ -976,7 +973,7 @@ mod tests {
                 assert!(findings.is_empty());
             }
         }
-        let pin = ProximityThresholdPinV1::new(revision, digest, 0).unwrap();
+        let pin = ProximityPolicyPinV1::new(revision, digest, true).unwrap();
         let stale_request = ProximityEvaluationRequestV1 {
             observed_at: UtcMicros(4),
             ..request
@@ -984,6 +981,35 @@ mod tests {
         let stale = build_proximity_contribution(&stale_request, &pin, evidence).unwrap();
         assert_eq!(stale.inclusion, ProximityInclusionV1::Stale);
         assert_eq!(stale.coverage, ProximityCoverageV1::Stale);
+    }
+
+    #[tokio::test]
+    async fn read_page_preserves_encounter_intervals_and_relation_evidence() {
+        let (scope, context) = scope_and_context();
+        let evidence = encounter_evidence(&scope);
+        let expected = evidence.encounter.clone();
+        let authority: SharedCanonicalProximityEvidenceAuthorityV1 =
+            Arc::new(StaticEvidence(CanonicalProximityEvidenceBatchV1 {
+                evidence: vec![evidence],
+                coverage: ProximityCoverageV1::Complete,
+                source_generation: CodeGenerationId::new("generation.proximity-read").unwrap(),
+                observed_at: UtcMicros(1),
+                expires_at: UtcMicros(4),
+                omissions: Vec::new(),
+            }));
+        let runtime = FeedbackProximityReadRuntimeV1::new(scope, authority).unwrap();
+        let result = runtime
+            .read(
+                &context,
+                &FeedbackProximityReadRequestV1 {
+                    observed_at: UtcMicros(2),
+                },
+            )
+            .await;
+        let FeedbackProximityReadResultV1::Complete { page } = result else {
+            panic!("expected a complete read: {result:?}");
+        };
+        assert_eq!(page.encounters, vec![expected]);
     }
 
     #[tokio::test]

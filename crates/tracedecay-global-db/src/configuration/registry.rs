@@ -26,13 +26,9 @@ use tracedecay_domain::configuration::{
     USER_WORK_EXPERTISE_CONSENT_SETTING_KEY, WORK_EXECUTABLE_BINDINGS_SETTING_KEY,
     WORK_TOPOLOGY_POLICY_SETTING_KEY, WorkExpertiseConsentV1, safe_work_topology_policy_v1,
 };
-use tracedecay_domain::feedback::PROXIMITY_RISK_THRESHOLD_SETTING_KEY_V1;
+use tracedecay_domain::feedback::PROXIMITY_RELATIONSHIP_HINTS_SETTING_KEY_V1;
 use tracedecay_domain::source_path_policy::GENERATED_DIR_SEGMENTS;
 use tracedecay_domain::{DomainError, validate_index_path_patterns};
-
-/// Canonical default for configured-tier proximity warnings.
-pub const DEFAULT_PROXIMITY_RISK_THRESHOLD_BASIS_POINTS_V1: u64 = 7_000;
-pub const MAX_PROXIMITY_RISK_THRESHOLD_BASIS_POINTS_V1: u64 = 10_000;
 
 /// Registry schema revision. Increment only when setting-definition semantics
 /// change, not when a setting value changes.
@@ -180,12 +176,10 @@ impl ConfigurationRegistry {
             restart_requirement: RestartRequirementV1::None,
         })?;
         registry.register(SettingDefinitionV1 {
-            key: setting_key(PROXIMITY_RISK_THRESHOLD_SETTING_KEY_V1)?,
+            key: setting_key(PROXIMITY_RELATIONSHIP_HINTS_SETTING_KEY_V1)?,
             schema_revision: CONFIGURATION_REGISTRY_SCHEMA_REVISION,
-            value_kind: ConfigurationValueKindV1::Unsigned,
-            default_value: ConfigurationValueV1::Unsigned(
-                DEFAULT_PROXIMITY_RISK_THRESHOLD_BASIS_POINTS_V1,
-            ),
+            value_kind: ConfigurationValueKindV1::Boolean,
+            default_value: ConfigurationValueV1::Boolean(true),
             sensitivity: SettingSensitivityV1::Public,
             scope: SettingScopeV1::Project,
             restart_requirement: RestartRequirementV1::None,
@@ -278,23 +272,6 @@ impl ConfigurationRegistry {
             });
         }
         value.validate()?;
-        if key.as_str() == PROXIMITY_RISK_THRESHOLD_SETTING_KEY_V1 {
-            let ConfigurationValueV1::Unsigned(actual) = value else {
-                return Err(ConfigurationRegistryError::ValueKindMismatch {
-                    key: key.clone(),
-                    expected: ConfigurationValueKindV1::Unsigned,
-                    actual: value.kind(),
-                });
-            };
-            if *actual > MAX_PROXIMITY_RISK_THRESHOLD_BASIS_POINTS_V1 {
-                return Err(ConfigurationRegistryError::UnsignedValueOutOfRange {
-                    key: key.clone(),
-                    minimum: 0,
-                    maximum: MAX_PROXIMITY_RISK_THRESHOLD_BASIS_POINTS_V1,
-                    actual: *actual,
-                });
-            }
-        }
         if matches!(
             key.as_str(),
             USER_WATCHER_DEBOUNCE_MS_SETTING_KEY | USER_EXTRACTION_TIMEOUT_SECS_SETTING_KEY
@@ -668,43 +645,25 @@ fn setting_key(value: &str) -> Result<SettingKey, ConfigurationRegistryError> {
 }
 
 #[cfg(test)]
-mod proximity_threshold_tests {
+mod proximity_relationship_hints_tests {
     use super::*;
 
     #[test]
-    fn proximity_threshold_has_one_bounded_project_default() {
+    fn proximity_relationship_hints_is_one_boolean_project_default() {
         let registry = ConfigurationRegistry::core().expect("registry");
-        let key = SettingKey::new(PROXIMITY_RISK_THRESHOLD_SETTING_KEY_V1).expect("key");
+        let key = SettingKey::new(PROXIMITY_RELATIONSHIP_HINTS_SETTING_KEY_V1).expect("key");
         let definition = registry.definition(&key).expect("definition");
-
-        assert_eq!(definition.value_kind, ConfigurationValueKindV1::Unsigned);
+        assert_eq!(definition.value_kind, ConfigurationValueKindV1::Boolean);
         assert_eq!(
             definition.default_value,
-            ConfigurationValueV1::Unsigned(DEFAULT_PROXIMITY_RISK_THRESHOLD_BASIS_POINTS_V1)
+            ConfigurationValueV1::Boolean(true)
         );
         assert_eq!(definition.scope, SettingScopeV1::Project);
-        assert_eq!(definition.sensitivity, SettingSensitivityV1::Public);
-        assert_eq!(definition.restart_requirement, RestartRequirementV1::None);
+        let retired = SettingKey::new("feedback.proximity.risk_threshold").expect("key");
         assert!(
-            registry
-                .validate_value(&key, &ConfigurationValueV1::Unsigned(0))
-                .is_ok()
+            registry.definition(&retired).is_err(),
+            "the numeric threshold is retired"
         );
-        assert!(
-            registry
-                .validate_value(
-                    &key,
-                    &ConfigurationValueV1::Unsigned(MAX_PROXIMITY_RISK_THRESHOLD_BASIS_POINTS_V1),
-                )
-                .is_ok()
-        );
-        assert!(matches!(
-            registry.validate_value(
-                &key,
-                &ConfigurationValueV1::Unsigned(MAX_PROXIMITY_RISK_THRESHOLD_BASIS_POINTS_V1 + 1),
-            ),
-            Err(ConfigurationRegistryError::UnsignedValueOutOfRange { .. })
-        ));
     }
 }
 

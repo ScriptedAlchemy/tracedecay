@@ -56,7 +56,7 @@ use tracedecay_tool_catalog::CapabilityId;
 use super::cycle_runtime::FeedbackCycleRuntime;
 use super::cycle_runtime::{FeedbackCycleInvocation, FeedbackCycleLspInput};
 use crate::advisory::{
-    ConcreteProximityRuntimeOwnerV1, ProximityRuntimeOutcomeV1, ProximityThresholdPinV1,
+    ConcreteProximityRuntimeOwnerV1, ProximityPolicyPinV1, ProximityRuntimeOutcomeV1,
     SharedCanonicalProximityEvidenceAuthorityV1, open_proximity_runtime,
 };
 use crate::diagnostics_publication::{
@@ -194,7 +194,7 @@ struct ProductionFeedbackCycleProximityV1 {
     project_root: PathBuf,
     document_identity: Arc<dyn ProductionFeedbackDocumentIdentityPort + Send + Sync>,
     owner: ProductionProximityOwnerV1,
-    threshold_pin: ProximityThresholdPinV1,
+    policy_pin: ProximityPolicyPinV1,
 }
 
 impl ProductionFeedbackCycleProximityPortV1 for ProductionFeedbackCycleProximityV1 {
@@ -216,7 +216,7 @@ impl ProductionFeedbackCycleProximityPortV1 for ProductionFeedbackCycleProximity
                 };
                 match self
                 .owner
-                .evaluate_with_threshold_pin(context, &request, &self.threshold_pin)
+                .evaluate_with_policy_pin(context, &request, &self.policy_pin)
                 .await
             {
                 ProximityRuntimeOutcomeV1::Completed(contributor) => {
@@ -372,11 +372,11 @@ pub async fn resolve_production_feedback_cycle_parts(
     input: ProductionFeedbackCycleOpenV1,
 ) -> Result<ProductionFeedbackCyclePartsV1, ApplicationContractError> {
     let feedback_scope = resolve_project_feedback_scope_v1(&input.project_root, &input.scope)?;
-    let proximity_threshold_pin = ProximityThresholdPinV1::from_current_configuration(
+    let proximity_policy_pin = ProximityPolicyPinV1::from_current_configuration(
         &input.access_configuration,
     )
     .ok_or(ApplicationContractError::Inconsistent {
-        field: "project-open proximity threshold",
+        field: "project-open proximity policy",
     })?;
     let proximity_evidence =
         crate::advisory::proximity_runtime::production_proximity_evidence_authority_v1(
@@ -404,7 +404,7 @@ pub async fn resolve_production_feedback_cycle_parts(
             project_root: input.project_root.clone(),
             document_identity: Arc::clone(&input.document_identity),
             owner: proximity_owner,
-            threshold_pin: proximity_threshold_pin.clone(),
+            policy_pin: proximity_policy_pin.clone(),
         });
     let access_configuration_digest = input
         .access_configuration
@@ -506,7 +506,7 @@ pub async fn resolve_production_feedback_cycle_parts(
         scope: input.scope.clone(),
         requester: input.requester.clone(),
         authorization: input.authorization,
-        threshold_pin: proximity_threshold_pin,
+        policy_pin: proximity_policy_pin,
         policy_digest: policy_digest.clone(),
         providers: provider_candidates
             .iter()
@@ -862,7 +862,7 @@ struct ProductionLspInputContext {
     scope: ResolvedScope,
     requester: ActorId,
     authorization: Arc<dyn ProductionFeedbackCycleAuthorizationPort>,
-    threshold_pin: ProximityThresholdPinV1,
+    policy_pin: ProximityPolicyPinV1,
     policy_digest: ManifestDigest,
     providers: Vec<DiagnosticProviderIdentity>,
     project_root: PathBuf,
@@ -877,7 +877,7 @@ fn production_lsp_input(
         scope,
         requester,
         authorization,
-        threshold_pin,
+        policy_pin,
         policy_digest,
         providers,
         project_root,
@@ -902,7 +902,7 @@ fn production_lsp_input(
         let scope = scope.clone();
         let requester = requester.clone();
         let authorization = Arc::clone(&authorization);
-        let threshold_pin = threshold_pin.clone();
+        let policy_pin = policy_pin.clone();
         let policy_digest = policy_digest.clone();
         let providers = providers.clone();
         let project_root = project_root.clone();
@@ -926,8 +926,8 @@ fn production_lsp_input(
                 };
                 let observed_at = now_micros();
                 let access = authorization.authorize(observed_at).await?;
-                if access.configuration_revision != threshold_pin.configuration_revision
-                    || access.configuration_digest != threshold_pin.configuration_digest
+                if access.configuration_revision != policy_pin.configuration_revision
+                    || access.configuration_digest != policy_pin.configuration_digest
                 {
                     return Err(LspRuntimeFailure::new("feedback-cycle-configuration-drift"));
                 }
@@ -966,7 +966,7 @@ fn production_lsp_input(
                     },
                     trigger,
                     policy_digest,
-                    threshold_pin.configuration_digest,
+                    policy_pin.configuration_digest,
                     FeedbackBudgetV1::bounded(1_000, 1_000, 10_000, 10_000),
                 )
                 .map_err(|_| LspRuntimeFailure::new("feedback-cycle-request"))?;
@@ -1384,16 +1384,16 @@ mod tests {
         )
     }
 
-    fn threshold_pin(
+    fn policy_pin(
         configuration_revision: &ConfigurationRevisionId,
         configuration_digest: &ManifestDigest,
-    ) -> ProximityThresholdPinV1 {
-        ProximityThresholdPinV1::new(
+    ) -> ProximityPolicyPinV1 {
+        ProximityPolicyPinV1::new(
             configuration_revision.clone(),
             configuration_digest.clone(),
-            5_000,
+            true,
         )
-        .expect("threshold pin")
+        .expect("policy pin")
     }
 
     #[test]
@@ -1478,7 +1478,7 @@ mod tests {
             scope: scope.clone(),
             requester: ActorId::new("actor.cycle-production").expect("actor"),
             authorization: current,
-            threshold_pin: threshold_pin(&configuration_revision, &configuration),
+            policy_pin: policy_pin(&configuration_revision, &configuration),
             policy_digest: policy.clone(),
             providers: vec![provider.clone()],
             project_root: PathBuf::from(WORKSPACE_ROOT),
@@ -1497,7 +1497,7 @@ mod tests {
             scope,
             requester: ActorId::new("actor.cycle-production").expect("actor"),
             authorization: expired,
-            threshold_pin: threshold_pin(&configuration_revision, &configuration),
+            policy_pin: policy_pin(&configuration_revision, &configuration),
             policy_digest: policy,
             providers: vec![provider],
             project_root: PathBuf::from(WORKSPACE_ROOT),
@@ -1540,7 +1540,7 @@ mod tests {
             scope,
             requester: ActorId::new("actor.cycle-production").expect("actor"),
             authorization,
-            threshold_pin: threshold_pin(&configuration_revision, &authorized_configuration),
+            policy_pin: policy_pin(&configuration_revision, &authorized_configuration),
             policy_digest: policy,
             providers: vec![provider],
             project_root: PathBuf::from(WORKSPACE_ROOT),
@@ -1684,7 +1684,7 @@ mod tests {
             scope,
             requester: ActorId::new("actor.cycle-production").expect("actor"),
             authorization,
-            threshold_pin: threshold_pin(&configuration_revision, &configuration),
+            policy_pin: policy_pin(&configuration_revision, &configuration),
             policy_digest: policy,
             providers: vec![provider],
             project_root: PathBuf::from(WORKSPACE_ROOT),
@@ -1733,7 +1733,7 @@ mod tests {
             scope,
             requester: ActorId::new("actor.cycle-production").expect("actor"),
             authorization,
-            threshold_pin: threshold_pin(&configuration_revision, &configuration),
+            policy_pin: policy_pin(&configuration_revision, &configuration),
             policy_digest: policy,
             providers: vec![provider],
             project_root: PathBuf::from(WORKSPACE_ROOT),

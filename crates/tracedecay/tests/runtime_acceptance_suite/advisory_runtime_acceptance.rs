@@ -64,8 +64,8 @@ use tracedecay_application::ProjectSourceAccessSnapshot;
 use tracedecay_application::advisory::fixtures::AdvisoryProximityFixtureEvidenceV1;
 #[cfg(feature = "test-transport")]
 use tracedecay_application::advisory::proximity_runtime::{
-    CanonicalProximityEvidenceAuthorityV1, CanonicalProximityEvidenceBatchV1,
-    ProximityRuntimeOutcomeV1, ProximityRuntimeOwnerV1, ProximityThresholdPinV1,
+    CanonicalProximityEvidenceAuthorityV1, CanonicalProximityEvidenceBatchV1, ProximityPolicyPinV1,
+    ProximityRuntimeOutcomeV1, ProximityRuntimeOwnerV1,
 };
 #[cfg(feature = "test-transport")]
 use tracedecay_application::feedback::concrete::open_feedback_runtime;
@@ -1963,7 +1963,7 @@ async fn one_saved_edit_cycle_returns_all_four_advisory_pillars_together() {
             },
             relation_paths: Vec::new(),
             // Same file as the saved edit: the shipped owner classifies that as
-            // an exact overlap, so inclusion never depends on the threshold.
+            // an exact overlap, so inclusion never depends on the relationship-hint policy.
             warning_class: ProximityWarningClassV1::SameFile,
             observed_at: UtcMicros(now.0.saturating_sub(1_000_000)),
             expires_at: UtcMicros(now.0.saturating_add(600_000_000)),
@@ -1990,17 +1990,17 @@ async fn one_saved_edit_cycle_returns_all_four_advisory_pillars_together() {
         (),
     )
     .expect("proximity runtime owner");
-    let threshold = ProximityThresholdPinV1::new(
+    let policy = ProximityPolicyPinV1::new(
         tracedecay_domain::configuration::ConfigurationRevisionId::new(
             "configuration.advisory.four-pillar",
         )
         .unwrap(),
         four_pillar_digest('2'),
-        5_000,
+        true,
     )
-    .expect("effective Plan 20 threshold pin");
+    .expect("effective proximity policy pin");
     let ProximityRuntimeOutcomeV1::Completed(proximity) = proximity_owner
-        .evaluate_with_threshold_pin(&context, &proximity_request, &threshold)
+        .evaluate_with_policy_pin(&context, &proximity_request, &policy)
         .await
     else {
         panic!("recorded concurrent-agent evidence must complete the proximity provider");

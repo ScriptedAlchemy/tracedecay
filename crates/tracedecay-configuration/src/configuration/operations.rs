@@ -947,9 +947,10 @@ mod tests {
             clock,
         );
 
-        let key =
-            SettingKey::new(tracedecay_domain::feedback::PROXIMITY_RISK_THRESHOLD_SETTING_KEY_V1)
-                .unwrap();
+        let key = SettingKey::new(
+            tracedecay_domain::feedback::PROXIMITY_RELATIONSHIP_HINTS_SETTING_KEY_V1,
+        )
+        .unwrap();
         let expected = registry.definition(&key).unwrap().default_value.clone();
         let actor = AuthorizedActor {
             actor_id: id::<ActorId>("actor.configuration.default-fallback"),
@@ -961,7 +962,7 @@ mod tests {
         assert_eq!(resolved.effective_value, expected);
         assert_eq!(
             resolved.effective_value,
-            ConfigurationValueV1::Unsigned(7_000)
+            ConfigurationValueV1::Boolean(true)
         );
         assert!(
             resolved.candidates.is_empty(),
