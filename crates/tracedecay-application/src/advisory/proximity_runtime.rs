@@ -1,7 +1,7 @@
 //! One-shot concurrent-work proximity provider.
 //!
 //! The provider consumes canonical observation/graph evidence, resolves the
-//! effective proximity policy, and projects one Plan 09 contribution batch.
+//! effective proximity policy, and projects one canonical contribution batch.
 //! Shared feedback publication owns durable dedupe. This module creates no
 //! fixture authority, evidence store, lock, task, schedule, or continuation.
 
@@ -472,9 +472,9 @@ where
     A: CanonicalProximityEvidenceAuthorityV1 + Sync,
     C: ConfigurationControlStore,
 {
-    /// Compatibility entry for the aggregate advisory runtime. The current
-    /// policy is accepted only when its behavior digest is the exact
-    /// configuration identity already authorized by the enclosing request.
+    /// Aggregate advisory runtime entry. The current policy is accepted only
+    /// when its behavior digest is the exact configuration identity already
+    /// authorized by the enclosing request.
     pub async fn evaluate_for_configuration_digest(
         &self,
         context: &RequestContext,

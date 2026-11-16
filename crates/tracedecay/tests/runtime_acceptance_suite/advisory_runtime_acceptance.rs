@@ -1962,8 +1962,6 @@ async fn one_saved_edit_cycle_returns_all_four_advisory_pillars_together() {
                 symbol: Some(ci_symbol.symbol.clone()),
             },
             relation_paths: Vec::new(),
-            // Same file as the saved edit: the shipped owner classifies that as
-            // an exact overlap, so inclusion never depends on the relationship-hint policy.
             warning_class: ProximityWarningClassV1::SameFile,
             observed_at: UtcMicros(now.0.saturating_sub(1_000_000)),
             expires_at: UtcMicros(now.0.saturating_add(600_000_000)),

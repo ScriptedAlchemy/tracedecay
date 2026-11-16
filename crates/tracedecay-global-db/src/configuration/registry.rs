@@ -32,7 +32,7 @@ use tracedecay_domain::{DomainError, validate_index_path_patterns};
 
 /// Registry schema revision. Increment only when setting-definition semantics
 /// change, not when a setting value changes.
-pub const CONFIGURATION_REGISTRY_SCHEMA_REVISION: u16 = 9;
+pub const CONFIGURATION_REGISTRY_SCHEMA_REVISION: u16 = 10;
 
 #[derive(Debug, Error)]
 pub enum ConfigurationRegistryError {
@@ -650,6 +650,7 @@ mod proximity_relationship_hints_tests {
 
     #[test]
     fn proximity_relationship_hints_is_one_boolean_project_default() {
+        assert_eq!(CONFIGURATION_REGISTRY_SCHEMA_REVISION, 10);
         let registry = ConfigurationRegistry::core().expect("registry");
         let key = SettingKey::new(PROXIMITY_RELATIONSHIP_HINTS_SETTING_KEY_V1).expect("key");
         let definition = registry.definition(&key).expect("definition");

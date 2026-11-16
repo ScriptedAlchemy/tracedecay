@@ -12,9 +12,10 @@ use tracedecay_mcp::JsonRpcResponse;
 
 use crate::daemon::ProductionProjectCompositionHarnessV1;
 
-const PROJECT_UNSIGNED_KEY: &str = "sync.read_cooldown_secs.v1";
-const DEFAULT_PROJECT_UNSIGNED: u64 = 30;
-const OVERRIDE_PROJECT_UNSIGNED: u64 = 45;
+const DAEMON_RESTART_UNSIGNED_KEY: &str = "sync.read_cooldown_secs.v1";
+const DAEMON_RESTART_DEFAULT: u64 = 30;
+const DAEMON_RESTART_OVERRIDE: u64 = 45;
+const RELATIONSHIP_HINTS_KEY: &str = "feedback.proximity.relationship_hints.v1";
 const TIMINGS_KEY: &str = "telemetry.timings.v1";
 const BATCH_KEY: &str = "configuration.idempotency.mcp-batch-proof";
 const RESTORE_KEY: &str = "configuration.idempotency.mcp-batch-restore";
@@ -222,7 +223,7 @@ async fn configuration_batch_applies_both_settings_and_refuses_the_other_inputs(
         &harness,
         &project,
         "tracedecay_configuration_get",
-        json!({"key": PROJECT_UNSIGNED_KEY, "format": "json"}),
+        json!({"key": DAEMON_RESTART_UNSIGNED_KEY, "format": "json"}),
     )
     .await;
     let (refused, enrolled_payload) = tool_text(&enrolled);
@@ -231,22 +232,22 @@ async fn configuration_batch_applies_both_settings_and_refuses_the_other_inputs(
         .as_str()
         .expect("enrolled project id")
         .to_owned();
-    let unsigned_setting = enrolled_payload["outcome"]["value"]["payload"].clone();
+    let restart_setting = enrolled_payload["outcome"]["value"]["payload"].clone();
     let timings = read_setting(&harness, &project, TIMINGS_KEY).await;
-    let initial_revision = unsigned_setting["revision_id"]
+    let initial_revision = restart_setting["revision_id"]
         .as_str()
         .expect("initial revision")
         .to_owned();
     assert_eq!(initial_revision, "configuration.initial.canonical.v1");
     assert_eq!(timings["revision_id"], initial_revision);
-    assert_eq!(unsigned_setting["key"], PROJECT_UNSIGNED_KEY);
+    assert_eq!(restart_setting["key"], DAEMON_RESTART_UNSIGNED_KEY);
     assert_eq!(timings["key"], TIMINGS_KEY);
     assert_eq!(
-        unsigned_setting["effective_value"],
-        unsigned_value(DEFAULT_PROJECT_UNSIGNED)
+        restart_setting["effective_value"],
+        unsigned_value(DAEMON_RESTART_DEFAULT)
     );
     assert_eq!(timings["effective_value"], boolean_value(true));
-    assert_default_candidate(&unsigned_setting);
+    assert_default_candidate(&restart_setting);
     assert_default_candidate(&timings);
 
     let layer = project_layer(&project_id);
@@ -257,8 +258,8 @@ async fn configuration_batch_applies_both_settings_and_refuses_the_other_inputs(
             json!([
                 set_mutation(
                     layer.clone(),
-                    PROJECT_UNSIGNED_KEY,
-                    unsigned_value(OVERRIDE_PROJECT_UNSIGNED)
+                    DAEMON_RESTART_UNSIGNED_KEY,
+                    unsigned_value(DAEMON_RESTART_OVERRIDE)
                 ),
                 set_mutation(layer.clone(), TIMINGS_KEY, boolean_value(false))
             ]),
@@ -306,16 +307,16 @@ async fn configuration_batch_applies_both_settings_and_refuses_the_other_inputs(
         .to_owned();
     assert_ne!(committed_revision, initial_revision);
 
-    let committed_unsigned = read_setting(&harness, &project, PROJECT_UNSIGNED_KEY).await;
+    let committed_restart = read_setting(&harness, &project, DAEMON_RESTART_UNSIGNED_KEY).await;
     let committed_timings = read_setting(&harness, &project, TIMINGS_KEY).await;
     assert_eq!(
-        committed_unsigned["effective_value"],
-        unsigned_value(OVERRIDE_PROJECT_UNSIGNED)
+        committed_restart["effective_value"],
+        unsigned_value(DAEMON_RESTART_OVERRIDE)
     );
     assert_eq!(committed_timings["effective_value"], boolean_value(false));
-    assert_eq!(committed_unsigned["revision_id"], committed_revision);
+    assert_eq!(committed_restart["revision_id"], committed_revision);
     assert_eq!(committed_timings["revision_id"], committed_revision);
-    assert_winning_candidate(&committed_unsigned, &project_id, &committed_revision);
+    assert_winning_candidate(&committed_restart, &project_id, &committed_revision);
     assert_winning_candidate(&committed_timings, &project_id, &committed_revision);
 
     let observed = call_tool(
@@ -349,8 +350,8 @@ async fn configuration_batch_applies_both_settings_and_refuses_the_other_inputs(
             json!([
                 set_mutation(
                     layer.clone(),
-                    PROJECT_UNSIGNED_KEY,
-                    unsigned_value(OVERRIDE_PROJECT_UNSIGNED)
+                    DAEMON_RESTART_UNSIGNED_KEY,
+                    unsigned_value(DAEMON_RESTART_OVERRIDE)
                 ),
                 set_mutation(layer.clone(), TIMINGS_KEY, boolean_value(false))
             ]),
@@ -368,7 +369,7 @@ async fn configuration_batch_applies_both_settings_and_refuses_the_other_inputs(
         applied_payload["outcome"]["value"]
     );
     assert_eq!(
-        read_setting(&harness, &project, PROJECT_UNSIGNED_KEY).await["revision_id"],
+        read_setting(&harness, &project, DAEMON_RESTART_UNSIGNED_KEY).await["revision_id"],
         committed_revision
     );
 
@@ -379,8 +380,8 @@ async fn configuration_batch_applies_both_settings_and_refuses_the_other_inputs(
             json!([
                 set_mutation(
                     layer.clone(),
-                    PROJECT_UNSIGNED_KEY,
-                    unsigned_value(DEFAULT_PROJECT_UNSIGNED)
+                    DAEMON_RESTART_UNSIGNED_KEY,
+                    unsigned_value(DAEMON_RESTART_DEFAULT)
                 ),
                 set_mutation(layer.clone(), TIMINGS_KEY, boolean_value(false))
             ]),
@@ -405,8 +406,8 @@ async fn configuration_batch_applies_both_settings_and_refuses_the_other_inputs(
             json!([
                 set_mutation(
                     layer.clone(),
-                    PROJECT_UNSIGNED_KEY,
-                    unsigned_value(OVERRIDE_PROJECT_UNSIGNED)
+                    DAEMON_RESTART_UNSIGNED_KEY,
+                    unsigned_value(DAEMON_RESTART_OVERRIDE)
                 ),
                 set_mutation(layer.clone(), TIMINGS_KEY, boolean_value(true))
             ]),
@@ -452,13 +453,13 @@ async fn configuration_batch_applies_both_settings_and_refuses_the_other_inputs(
             json!([
                 set_mutation(
                     layer.clone(),
-                    PROJECT_UNSIGNED_KEY,
-                    unsigned_value(DEFAULT_PROJECT_UNSIGNED)
+                    DAEMON_RESTART_UNSIGNED_KEY,
+                    unsigned_value(DAEMON_RESTART_DEFAULT)
                 ),
                 set_mutation(
                     layer.clone(),
-                    PROJECT_UNSIGNED_KEY,
-                    unsigned_value(OVERRIDE_PROJECT_UNSIGNED)
+                    DAEMON_RESTART_UNSIGNED_KEY,
+                    unsigned_value(DAEMON_RESTART_OVERRIDE)
                 )
             ]),
             &committed_revision,
@@ -482,8 +483,8 @@ async fn configuration_batch_applies_both_settings_and_refuses_the_other_inputs(
             json!([
                 set_mutation(
                     layer.clone(),
-                    PROJECT_UNSIGNED_KEY,
-                    unsigned_value(DEFAULT_PROJECT_UNSIGNED)
+                    DAEMON_RESTART_UNSIGNED_KEY,
+                    unsigned_value(DAEMON_RESTART_DEFAULT)
                 ),
                 set_mutation(json!({"kind": "default"}), TIMINGS_KEY, boolean_value(true))
             ]),
@@ -531,8 +532,8 @@ async fn configuration_batch_applies_both_settings_and_refuses_the_other_inputs(
             json!([
                 set_mutation(
                     layer.clone(),
-                    PROJECT_UNSIGNED_KEY,
-                    unsigned_value(DEFAULT_PROJECT_UNSIGNED)
+                    DAEMON_RESTART_UNSIGNED_KEY,
+                    unsigned_value(DAEMON_RESTART_DEFAULT)
                 ),
                 set_mutation(
                     layer.clone(),
@@ -560,8 +561,8 @@ async fn configuration_batch_applies_both_settings_and_refuses_the_other_inputs(
         batch_arguments(
             json!([set_mutation(
                 project_layer("project.configuration-batch.foreign"),
-                PROJECT_UNSIGNED_KEY,
-                unsigned_value(DEFAULT_PROJECT_UNSIGNED)
+                DAEMON_RESTART_UNSIGNED_KEY,
+                unsigned_value(DAEMON_RESTART_DEFAULT)
             )]),
             &committed_revision,
             "configuration.idempotency.mcp-batch-foreign",
@@ -603,8 +604,8 @@ async fn configuration_batch_applies_both_settings_and_refuses_the_other_inputs(
     let mut unknown_field = batch_arguments(
         json!([set_mutation(
             layer.clone(),
-            PROJECT_UNSIGNED_KEY,
-            unsigned_value(DEFAULT_PROJECT_UNSIGNED)
+            DAEMON_RESTART_UNSIGNED_KEY,
+            unsigned_value(DAEMON_RESTART_DEFAULT)
         )]),
         &committed_revision,
         "configuration.idempotency.mcp-batch-unknown-field",
@@ -613,14 +614,14 @@ async fn configuration_batch_applies_both_settings_and_refuses_the_other_inputs(
     let schema = call_batch(&harness, &project, unknown_field).await;
     assert_schema_refusal(&schema);
 
-    let unchanged_unsigned = read_setting(&harness, &project, PROJECT_UNSIGNED_KEY).await;
+    let unchanged_restart = read_setting(&harness, &project, DAEMON_RESTART_UNSIGNED_KEY).await;
     let unchanged_timings = read_setting(&harness, &project, TIMINGS_KEY).await;
     assert_eq!(
-        unchanged_unsigned["effective_value"],
-        unsigned_value(OVERRIDE_PROJECT_UNSIGNED)
+        unchanged_restart["effective_value"],
+        unsigned_value(DAEMON_RESTART_OVERRIDE)
     );
     assert_eq!(unchanged_timings["effective_value"], boolean_value(false));
-    assert_eq!(unchanged_unsigned["revision_id"], committed_revision);
+    assert_eq!(unchanged_restart["revision_id"], committed_revision);
     assert_eq!(unchanged_timings["revision_id"], committed_revision);
 
     let restored = call_batch(
@@ -628,7 +629,7 @@ async fn configuration_batch_applies_both_settings_and_refuses_the_other_inputs(
         &project,
         batch_arguments(
             json!([
-                unset_mutation(layer.clone(), PROJECT_UNSIGNED_KEY),
+                unset_mutation(layer.clone(), DAEMON_RESTART_UNSIGNED_KEY),
                 unset_mutation(layer, TIMINGS_KEY)
             ]),
             &committed_revision,
@@ -647,17 +648,97 @@ async fn configuration_batch_applies_both_settings_and_refuses_the_other_inputs(
         .expect("restored revision")
         .to_owned();
     assert_ne!(restored_revision, committed_revision);
-    let restored_unsigned = read_setting(&harness, &project, PROJECT_UNSIGNED_KEY).await;
+    let restored_restart = read_setting(&harness, &project, DAEMON_RESTART_UNSIGNED_KEY).await;
     let restored_timings = read_setting(&harness, &project, TIMINGS_KEY).await;
     assert_eq!(
-        restored_unsigned["effective_value"],
-        unsigned_value(DEFAULT_PROJECT_UNSIGNED)
+        restored_restart["effective_value"],
+        unsigned_value(DAEMON_RESTART_DEFAULT)
     );
     assert_eq!(restored_timings["effective_value"], boolean_value(true));
-    assert_eq!(restored_unsigned["revision_id"], restored_revision);
+    assert_eq!(restored_restart["revision_id"], restored_revision);
     assert_eq!(restored_timings["revision_id"], restored_revision);
-    assert_default_candidate(&restored_unsigned);
+    assert_default_candidate(&restored_restart);
     assert_default_candidate(&restored_timings);
+
+    harness.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn configuration_batch_activates_a_no_restart_setting_in_the_live_runtime() {
+    let isolation = TempDir::new().expect("journey isolation");
+    let project = isolation.path().join("project");
+    initialize_project(&project);
+    let harness = ProductionProjectCompositionHarnessV1::open(isolation.path(), [project.clone()])
+        .await
+        .expect("production composition");
+
+    let enrolled = call_tool(
+        &harness,
+        &project,
+        "tracedecay_configuration_get",
+        json!({"key": RELATIONSHIP_HINTS_KEY, "format": "json"}),
+    )
+    .await;
+    let (refused, enrolled_payload) = tool_text(&enrolled);
+    assert!(!refused, "initial setting read refused: {enrolled_payload}");
+    let project_id = enrolled_payload["scope"]["project_id"]
+        .as_str()
+        .expect("enrolled project id")
+        .to_owned();
+    let initial = enrolled_payload["outcome"]["value"]["payload"].clone();
+    let initial_revision = initial["revision_id"]
+        .as_str()
+        .expect("initial revision")
+        .to_owned();
+    assert_eq!(initial["effective_value"], boolean_value(true));
+
+    let applied = call_batch(
+        &harness,
+        &project,
+        batch_arguments(
+            json!([set_mutation(
+                project_layer(&project_id),
+                RELATIONSHIP_HINTS_KEY,
+                boolean_value(false)
+            )]),
+            &initial_revision,
+            "configuration.idempotency.mcp-activation-proof",
+        ),
+    )
+    .await;
+    let (refused, applied_payload) = tool_text(&applied);
+    assert!(!refused, "activation batch refused: {applied_payload}");
+    let committed_revision = applied_payload["outcome"]["value"]["payload"]["result_revision_id"]
+        .as_str()
+        .expect("committed revision")
+        .to_owned();
+    assert_ne!(committed_revision, initial_revision);
+
+    let committed = read_setting(&harness, &project, RELATIONSHIP_HINTS_KEY).await;
+    assert_eq!(committed["effective_value"], boolean_value(false));
+    assert_eq!(committed["revision_id"], committed_revision);
+
+    let observed = call_tool(
+        &harness,
+        &project,
+        "tracedecay_configuration_observed_state",
+        json!({"format": "json"}),
+    )
+    .await;
+    let (refused, observed_payload) = tool_text(&observed);
+    assert!(!refused, "observed state refused: {observed_payload}");
+    assert_eq!(
+        observed_payload["outcome"]["value"]["payload"],
+        json!([{
+            "component": "configuration.runtime-cache",
+            "desired_revision_id": committed_revision,
+            "observed_revision_id": committed_revision,
+            "last_working_revision_id": committed_revision,
+            "restart_required": false,
+            "activation_error_code": null,
+            "drift": "current"
+        }])
+    );
 
     harness.shutdown().await;
 }
