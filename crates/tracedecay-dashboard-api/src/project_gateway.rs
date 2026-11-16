@@ -49,10 +49,12 @@ pub(super) async fn project_scoped_api_gateway(
     }
     let application_read = selected_project_application_read(req.method(), &tail);
     let event_delivery_ack = is_selected_project_event_delivery_ack(req.method(), &tail);
+    let explorer_read = req.method() == Method::POST && tail == "explorer/queries";
     if runtime.active_project_id().as_deref() != Some(project_id.as_str())
         && !matches!(req.method(), &Method::GET | &Method::HEAD)
         && application_read.is_none()
         && !event_delivery_ack
+        && !explorer_read
     {
         return gateway_problem(
             StatusCode::METHOD_NOT_ALLOWED,

@@ -1605,7 +1605,7 @@ async fn unavailable_savings_is_an_enveloped_unknown_read() {
 }
 
 #[test]
-fn a_selected_project_answers_feedback_and_work_reads_and_nothing_else_by_post() {
+fn a_selected_project_answers_application_reads_without_mutations() {
     assert!(is_selected_project_event_delivery_ack(
         &Method::POST,
         "events/delivery-ack"
@@ -1695,4 +1695,76 @@ fn a_selected_project_answers_feedback_and_work_reads_and_nothing_else_by_post()
             );
         }
     }
+}
+
+#[tokio::test]
+async fn foreign_project_explorer_stream_is_refused() {
+    use std::sync::atomic::AtomicUsize;
+
+    struct CountedSessions(Arc<AtomicUsize>);
+    impl DashboardLcmReadPortV1 for CountedSessions {
+        fn read(
+            &self,
+            _control: DashboardHttpRequestControlV1,
+            _project_id: Option<&str>,
+            _request: DashboardLcmReadRequestV1,
+        ) -> DashboardLcmReadFutureV1<'_> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Box::pin(async {
+                DashboardLcmReadOutcomeV1::NotReady {
+                    state: crate::DashboardLcmReadStateV1::Unavailable,
+                    reason: "source is not mounted".to_owned(),
+                }
+            })
+        }
+    }
+
+    let mut fixture = DashboardStateFixture::open("project.dashboard-explorer-gateway").await;
+    let reads = Arc::new(AtomicUsize::new(0));
+    fixture.state.lcm_read_authority = Some(Arc::new(CountedSessions(Arc::clone(&reads))));
+    let app = router_with_active_application(fixture.state, None, Router::new());
+    let body = json!({ "query": "fixture", "limit": 1, "offset": 0 }).to_string();
+    let request = |project: &str| {
+        Request::builder()
+            .method(Method::POST)
+            .uri(format!("/api/projects/{project}/explorer/queries"))
+            .header(header::CONTENT_TYPE, "application/json")
+            .extension(DashboardHttpRequestControlV1::test_fixture(
+                "explorer-gateway",
+            ))
+            .body(Body::from(body.clone()))
+            .expect("explorer POST")
+    };
+    let foreign = app
+        .clone()
+        .oneshot(request("project.dashboard-foreign"))
+        .await
+        .expect("gateway");
+    assert_eq!(foreign.status(), StatusCode::OK);
+    let payload = axum::body::to_bytes(foreign.into_body(), 1 << 20)
+        .await
+        .expect("refusal");
+    assert!(!String::from_utf8_lossy(&payload).contains("data:"));
+    let denial: Value = serde_json::from_slice(&payload).expect("typed registry denial");
+    assert_eq!(denial["domain_state"], "unknown");
+    assert_eq!(
+        reads.load(Ordering::SeqCst),
+        0,
+        "foreign scope never reads active sessions"
+    );
+
+    let admitted = app
+        .oneshot(request("project.dashboard-explorer-gateway"))
+        .await
+        .expect("active project route");
+    assert_eq!(admitted.status(), StatusCode::OK);
+    let frames = axum::body::to_bytes(admitted.into_body(), 1 << 20)
+        .await
+        .expect("SSE body");
+    assert!(String::from_utf8_lossy(&frames).contains("\"kind\":\"source\""));
+    assert_eq!(
+        reads.load(Ordering::SeqCst),
+        1,
+        "positive control reaches source read"
+    );
 }

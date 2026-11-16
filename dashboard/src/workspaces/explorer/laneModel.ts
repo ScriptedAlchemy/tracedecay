@@ -17,11 +17,9 @@
 import type { EvidenceQuality } from '../../ui/EvidencePattern.tsx';
 import type { DomainStateKind } from '../../ui/StateChip';
 import type {
-  ExplorerQueryRunV1,
   ExplorerResultPageV1,
   ExplorerRunStateV1,
   ExplorerSourceIdV1,
-  ExplorerSourcePhaseV1,
   ExplorerSourceProgressV1,
   DashboardDomainStateV1,
 } from '../../contracts/generated.ts';
@@ -42,6 +40,16 @@ const LANE_SOURCE_ID: Record<LaneId, ExplorerSourceIdV1> = {
   knowledge: 'knowledge',
 };
 
+export interface ExplorerStreamSnapshot {
+  readonly query: string;
+  readonly state: ExplorerRunStateV1 | 'pending';
+  /** The coordinator's own terminal timing, or `null` until the terminal frame
+   * arrives. A pending or client-cancelled run has no measured duration, so it
+   * reports none rather than a fabricated zero. */
+  readonly elapsed_micros: number | null;
+  readonly sources: readonly ExplorerSourceProgressV1[];
+}
+
 /**
  * One lane's condition, as a closed union.
  *
@@ -51,16 +59,13 @@ const LANE_SOURCE_ID: Record<LaneId, ExplorerSourceIdV1> = {
  * and every `switch` over `state` is `never`-checked, so a new wire outcome
  * fails the build instead of silently rendering as an error.
  *
- * A lane that is still working is `pending`, and it carries the wire's `phase`
- * so `queued` and `reading` stay apart.
+ * A lane is pending until its source's completed event arrives.
  */
 export type ExplorerLaneReadModel =
-  /** Still working. `phase` is the source's own; `null` when the pendingness
-   * is the client's (no coordinator answer yet, or a browse read in flight). */
+  /** No source event has concluded for this lane yet. */
   | {
       readonly state: 'pending';
       readonly lane: LaneId;
-      readonly phase: ExplorerSourcePhaseV1 | null;
     }
   /** The source answered. Zero `hits` here means "answered with nothing",
    * which is a different fact from every other member of this union. */
@@ -139,9 +144,8 @@ export type ExplorerLaneReadModel =
   | { readonly state: 'unauthorized'; readonly lane: LaneId }
   /** The daemon knows the identity and will not serve this scope. */
   | { readonly state: 'denied'; readonly lane: LaneId }
-  /** The project gateway serves the selected scope read-only, so the query
-   * run this lane needs cannot be created there. Nothing was dispatched;
-   * `detail` is the scope authority's own sentence. */
+  /** The scope authority refuses this read, so nothing was dispatched;
+   * `detail` is the authority's own sentence. */
   | { readonly state: 'locked'; readonly lane: LaneId; readonly detail: string }
   /** The response did not decode against the contract. */
   | { readonly state: 'unsupported_schema'; readonly lane: LaneId }
@@ -157,14 +161,15 @@ export type ExplorerLaneReadModel =
     };
 
 /**
- * The lane's condition when the current scope will not accept the query run.
+ * The lane's condition when the current scope will not accept the query read.
  *
- * Creating a run is a POST, and the project gateway refuses every non-read
- * request for a project that is not the active one. The controller consults
- * the scope authority before dispatching, so a refused scope is rendered from
- * its reason rather than from a 405 the daemon would have had to send back , 
- * and a scope the registry has not yet resolved is `unknown`, not refused.
- * Returns `null` when the scope is writable and the run may proceed.
+ * The exact selected-project Explorer POST is admitted, so a registered
+ * selected project is writable here. The scope authority still refuses a scope
+ * it cannot resolve, such as a link naming a project the registry no longer
+ * holds. The controller consults it before dispatching, so a refused scope is
+ * rendered from its reason rather than from a daemon refusal, and a scope the
+ * registry has not yet resolved is `unknown`, not refused. Returns `null` when
+ * the scope is writable and the read may proceed.
  */
 export function laneFromScope(
   lane: LaneId,
@@ -236,7 +241,7 @@ function hitsForLane(
 }
 
 /** Whether the coordinator has stopped working on this run. */
-export function runIsTerminal(state: ExplorerRunStateV1): boolean {
+export function runIsTerminal(state: ExplorerRunStateV1 | 'pending'): boolean {
   switch (state) {
     case 'pending':
       return false;
@@ -269,8 +274,6 @@ export function laneFromSourceProgress(
     return { state: 'unanswered', lane };
   }
   switch (source.outcome) {
-    case 'pending':
-      return { state: 'pending', lane, phase: source.phase };
     case 'ready': {
       // `page` is nullable on every outcome in the Rust type, so a `ready`
       // source that arrived without one has genuinely returned nothing to
@@ -350,7 +353,7 @@ export function laneFromTransport(
 ): ExplorerLaneReadModel {
   switch (domainState) {
     case 'loading':
-      return { state: 'pending', lane, phase: null };
+      return { state: 'pending', lane };
     case 'offline':
       return { state: 'offline', lane };
     case 'unauthorized':
@@ -363,10 +366,6 @@ export function laneFromTransport(
       return { state: 'cancelled', lane, errorCode: null, detail };
     case 'error':
       return { state: 'error', lane, errorCode: null, detail };
-    // The gateway refused the run as a write against a read-only scope. The
-    // controller normally catches this before dispatch, so reaching it here
-    // means the scope changed under an in-flight read; the daemon's sentence
-    // is carried as the detail either way.
     case 'locked':
       return {
         state: 'locked',
@@ -399,23 +398,21 @@ export function laneFromTransport(
  */
 export function searchLane(
   lane: LaneId,
-  result: EnvelopeResult<ExplorerQueryRunV1> | undefined,
+  snapshot: ExplorerStreamSnapshot | undefined,
+  transport: { state: DashboardDomainStateV1; detail?: string } | undefined,
   submittedQuery: string,
   terms: readonly string[],
 ): ExplorerLaneReadModel {
-  if (result === undefined) return { state: 'pending', lane, phase: null };
-  if (result.outcome === 'transport') {
-    return laneFromTransport(lane, result.state, result.detail ?? null);
+  if (snapshot?.query !== submittedQuery) {
+    return transport
+      ? laneFromTransport(lane, transport.state, transport.detail ?? null)
+      : { state: 'pending', lane };
   }
-  const run = result.envelope.payload;
-  if (run.request.query !== submittedQuery) return { state: 'pending', lane, phase: null };
-  const source = run.sources.find((candidate) => candidate.source_id === LANE_SOURCE_ID[lane]);
+  const source = snapshot.sources.find((candidate) => candidate.source_id === LANE_SOURCE_ID[lane]);
   if (source !== undefined) return laneFromSourceProgress(lane, source, terms);
-  // The coordinator has finished and never named this source. Leaving the lane
-  // on `pending` would show a spinner for a read that will never arrive.
-  return runIsTerminal(run.state)
-    ? { state: 'unanswered', lane }
-    : { state: 'pending', lane, phase: null };
+  if (transport) return laneFromTransport(lane, transport.state, transport.detail ?? null);
+  if (snapshot.state === 'cancelled') return { state: 'cancelled', lane, errorCode: null, detail: null };
+  return runIsTerminal(snapshot.state) ? { state: 'unanswered', lane } : { state: 'pending', lane };
 }
 
 /**
@@ -432,7 +429,7 @@ export function browseLane<T>(
   rowsOf: (data: T) => readonly Record<string, unknown>[],
   terms: readonly string[],
 ): ExplorerLaneReadModel {
-  if (isPending) return { state: 'pending', lane, phase: null };
+  if (isPending) return { state: 'pending', lane };
   if (result === undefined) return { state: 'unanswered', lane };
   if (result.outcome === 'transport') {
     return laneFromTransport(lane, result.state, result.detail ?? null);
@@ -520,7 +517,7 @@ export function laneStateKind(read: ExplorerLaneReadModel): DomainStateKind {
 }
 
 /** The chip for the coordinator's own reading of a whole run. */
-export function runStateKind(state: ExplorerRunStateV1): DomainStateKind {
+export function runStateKind(state: ExplorerRunStateV1 | 'pending'): DomainStateKind {
   switch (state) {
     case 'pending':
       return 'loading';
@@ -553,7 +550,7 @@ export function runStateKind(state: ExplorerRunStateV1): DomainStateKind {
 export function laneStateDetail(read: ExplorerLaneReadModel): string | undefined {
   switch (read.state) {
     case 'pending':
-      return read.phase ?? undefined;
+      return undefined;
     case 'ready':
       return undefined;
     case 'partial':
@@ -575,7 +572,7 @@ export function laneStateDetail(read: ExplorerLaneReadModel): string | undefined
     case 'locked':
       return read.detail;
     case 'unanswered':
-      return 'the run never named this source';
+      return 'the stream ended without this source';
     case 'indeterminate':
       return read.detail ?? read.domainState;
     default: {

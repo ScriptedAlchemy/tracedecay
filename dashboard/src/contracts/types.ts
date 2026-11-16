@@ -2483,30 +2483,16 @@ export type ExecutionTopologyViewV1 =
 
 export type ExecutionWidthBucketV1 = "from17_to32" | "from33_to64" | "from3_to4" | "from5_to8" | "from9_to16" | "one" | "over64" | "two" | "zero";
 
-export type ExplorerFinalityV1 = "cancelled" | "complete" | "error" | "partial" | "pending" | "timed_out";
-
-export type ExplorerQueryRequestV1 = {
-  limit: number;
-  offset: number;
-  query: string;
-};
-
-export type ExplorerQueryRunV1 = {
-  completed_at_micros: number | null;
-  elapsed_micros: number;
-  explanation: string;
-  finality: ExplorerFinalityV1;
-  merge_revision: string;
-  ordering_policy: string;
-  plan_revision: string;
-  request: ExplorerQueryRequestV1;
-  request_revision: string;
-  required_source_ids: Array<ExplorerSourceIdV1>;
-  run_id: string;
-  sources: Array<ExplorerSourceProgressV1>;
-  state: ExplorerRunStateV1;
-  submitted_at_micros: number;
-};
+export type ExplorerQueryEventV1 =
+  | {
+    elapsed_micros: number;
+    kind: "final";
+    state: ExplorerRunStateV1;
+  }
+  | {
+    kind: "source";
+    source: ExplorerSourceProgressV1;
+  };
 
 export type ExplorerReadContextV1 = {
   counts: ExplorerSessionCountsV1;
@@ -2531,7 +2517,7 @@ export type ExplorerResultPageV1 = {
   total: number | null;
 };
 
-export type ExplorerRunStateV1 = "cancelled" | "completed" | "error" | "partial" | "pending" | "timed_out";
+export type ExplorerRunStateV1 = "cancelled" | "completed" | "error" | "partial" | "timed_out";
 
 export type ExplorerSessionCountsV1 = {
   message_count: number;
@@ -2550,9 +2536,7 @@ export type ExplorerSessionSizeV1 = {
 
 export type ExplorerSourceIdV1 = "code_graph" | "knowledge" | "sessions";
 
-export type ExplorerSourceOutcomeV1 = "cancelled" | "error" | "partial" | "pending" | "ready" | "stale" | "timed_out" | "unavailable";
-
-export type ExplorerSourcePhaseV1 = "cancelled" | "completed" | "queued" | "reading";
+export type ExplorerSourceOutcomeV1 = "cancelled" | "error" | "partial" | "ready" | "stale" | "timed_out" | "unavailable";
 
 export type ExplorerSourceProgressV1 = {
   completed_units: number | null;
@@ -2562,7 +2546,6 @@ export type ExplorerSourceProgressV1 = {
   message: string | null;
   outcome: ExplorerSourceOutcomeV1;
   page: ExplorerResultPageV1 | null;
-  phase: ExplorerSourcePhaseV1;
   source_id: ExplorerSourceIdV1;
   source_label: string;
   total_units: number | null;

@@ -910,6 +910,27 @@ pub(crate) fn post_json_body(agent: &ureq::Agent, url: &str, body: &Value) -> (u
     response_to_json(response)
 }
 
+pub(crate) fn post_explorer_stream(
+    agent: &ureq::Agent,
+    url: &str,
+    body: &Value,
+) -> (u16, Vec<Value>) {
+    let mut response = crate::common::http_call_with_retry(&format!("POST {url} (stream)"), || {
+        agent.post(url).send_json(body)
+    });
+    let status = response.status().as_u16();
+    let text = response
+        .body_mut()
+        .read_to_string()
+        .expect("explorer stream body");
+    let frames = text
+        .lines()
+        .filter_map(|line| line.strip_prefix("data: "))
+        .map(|data| serde_json::from_str(data).expect("explorer event JSON"))
+        .collect();
+    (status, frames)
+}
+
 /// Binds `codex_bin` as the project's configured `codex` summarizer through
 /// the dashboard's application configuration routes: the automation backend
 /// spawns only the executable `lcm.summarizer_executables.v1` names.

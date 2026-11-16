@@ -1,10 +1,9 @@
 import { describe, expect, it } from 'vitest';
+import { z } from 'zod';
 import {
   DashboardEnvelopeV1Schema,
-  ExplorerQueryRunV1Schema,
   ExplorerSourceProgressV1Schema,
   type DashboardEnvelopeV1,
-  type ExplorerQueryRunV1,
   type ExplorerSourceProgressV1,
 } from '../../contracts/generated.ts';
 import type { EnvelopeResult } from '../../data/query/envelope.ts';
@@ -23,6 +22,7 @@ import {
   runStateKind,
   searchLane,
   type ExplorerLaneReadModel,
+  type ExplorerStreamSnapshot,
 } from './laneModel.ts';
 
 const KNOWLEDGE_FACT_ID = `fact.${'a'.repeat(64)}.${'7'.padStart(64, '0')}`;
@@ -35,8 +35,7 @@ function progress(over: Record<string, unknown>): ExplorerSourceProgressV1 {
   return ExplorerSourceProgressV1Schema.parse({
     source_id: 'code_graph',
     source_label: 'Code graph',
-    phase: 'completed',
-    outcome: 'ready',
+        outcome: 'ready',
     completed_units: 0,
     total_units: 0,
     coverage: {
@@ -60,30 +59,20 @@ function progress(over: Record<string, unknown>): ExplorerSourceProgressV1 {
   });
 }
 
-function run(over: Record<string, unknown> = {}): ExplorerQueryRunV1 {
-  return ExplorerQueryRunV1Schema.parse({
-    run_id: 'run-1',
-    request: { query: 'graph', limit: 50, offset: 0 },
-    request_revision: 'explorer-query-request-v1',
-    plan_revision: 'explorer-query-plan-v1',
-    merge_revision: 'source-local-no-merge-v1',
-    required_source_ids: ['code_graph', 'sessions', 'knowledge'],
-    ordering_policy: 'source_local_no_cross_source_merge',
-    explanation: 'test',
-    submitted_at_micros: 1,
-    completed_at_micros: 2,
+function run(over: Partial<ExplorerStreamSnapshot> = {}): ExplorerStreamSnapshot {
+  return {
+    query: 'graph',
     elapsed_micros: 1,
     state: 'completed',
-    finality: 'complete',
     sources: [],
     ...over,
-  });
+  };
 }
 
-function answered(payload: ExplorerQueryRunV1): EnvelopeResult<ExplorerQueryRunV1> {
+function browseAnswered<T>(payload: T): EnvelopeResult<T> {
   return {
     outcome: 'envelope',
-    envelope: DashboardEnvelopeV1Schema(ExplorerQueryRunV1Schema).parse({
+    envelope: DashboardEnvelopeV1Schema(z.unknown()).parse({
       schema_revision: 1,
       scope: { project_id: 'p', storage_mode: 'profile_sharded', store_root: '/data' },
       version: { entity_version: null, graph_version: null },
@@ -106,45 +95,32 @@ function answered(payload: ExplorerQueryRunV1): EnvelopeResult<ExplorerQueryRunV
       domain_state: 'ready',
       legal_actions: [],
       payload,
-    }),
+    }) as DashboardEnvelopeV1<T>,
   };
 }
 
-function browseAnswered<T>(payload: T): EnvelopeResult<T> {
-  const result = answered(run());
-  if (result.outcome !== 'envelope') throw new Error('test envelope must be accepted');
-  const envelope = result.envelope;
-  return { outcome: 'envelope', envelope: { ...envelope, payload } as DashboardEnvelopeV1<T> };
-}
-
 describe('laneFromSourceProgress', () => {
-  // Moved from model.test.ts, where these two shapes covered `plannerLaneState`.
-  // Both invariants are unchanged: a source that is still reading contributes
-  // no rows and no total, and a source that reports no matching total gets
-  // `null` rather than a stand-in zero.
-  it('retains pending and unknown-total source states without inventing rows or zero totals', () => {
-    expect(
-      laneFromSourceProgress(
-        'code',
-        progress({
-          phase: 'reading',
-          outcome: 'pending',
-          completed_units: null,
-          total_units: null,
-          page: null,
-        }),
-        [],
-      ),
-    ).toEqual({ state: 'pending', lane: 'code', phase: 'reading' });
-
+  it('retains unknown-total source states without inventing zero totals', () => {
     expect(
       laneFromSourceProgress(
         'knowledge',
         progress({
           source_id: 'knowledge',
           source_label: 'Knowledge',
-          completed_units: 2,
+          completed_units: 1,
           total_units: null,
+          coverage: {
+            completeness: 'unknown',
+            eligible: null,
+            examined: 1,
+            matched: null,
+            excluded: null,
+            omitted: null,
+            unknown: null,
+            denominator: null,
+            unit: 'facts',
+            omission_reasons: ['verified memory graph coverage is incomplete'],
+          },
           page: {
             offset: 0,
             limit: 25,
@@ -360,11 +336,10 @@ describe('laneFromSourceProgress', () => {
 
 describe('searchLane', () => {
   it('keeps a client that cannot reach the daemon apart from an unavailable source', () => {
-    const clientOffline = searchLane('code', { outcome: 'transport', state: 'offline' }, 'graph', []);
+    const clientOffline = searchLane('code', undefined, { state: 'offline' }, 'graph', []);
     const sourceUnavailable = searchLane(
       'code',
-      answered(
-        run({
+      run({
           sources: [
             progress({
               outcome: 'unavailable',
@@ -374,7 +349,7 @@ describe('searchLane', () => {
             }),
           ],
         }),
-      ),
+      undefined,
       'graph',
       [],
     );
@@ -418,63 +393,58 @@ describe('searchLane', () => {
   });
 
   it('says a terminal run never named a source instead of showing it as reading', () => {
-    expect(searchLane('sessions', answered(run({ state: 'completed' })), 'graph', [])).toEqual({
+    expect(searchLane('sessions', run({ state: 'completed' }), undefined, 'graph', [])).toEqual({
       state: 'unanswered',
       lane: 'sessions',
     });
-    expect(searchLane('sessions', answered(run({ state: 'pending' })), 'graph', [])).toEqual({
+    expect(searchLane('sessions', run({ state: 'pending' }), undefined, 'graph', [])).toEqual({
       state: 'pending',
       lane: 'sessions',
-      phase: null,
     });
   });
 
   it('does not attribute an earlier query\u2019s answer to the query on screen', () => {
-    const earlier = answered(
-      run({
-        request: { query: 'other', limit: 50, offset: 0 },
-        sources: [progress({})],
-      }),
-    );
+    const earlier = run({ query: 'other', sources: [progress({})] });
 
-    expect(searchLane('code', earlier, 'graph', [])).toEqual({
+    expect(searchLane('code', earlier, undefined, 'graph', [])).toEqual({
       state: 'pending',
       lane: 'code',
-      phase: null,
     });
   });
 
   it('waits rather than guessing before any coordinator answer', () => {
-    expect(searchLane('code', undefined, 'graph', [])).toEqual({
+    expect(searchLane('code', undefined, undefined, 'graph', [])).toEqual({
       state: 'pending',
       lane: 'code',
-      phase: null,
     });
   });
 
   it('keeps every lane condition distinct end to end', () => {
     const conditions: ExplorerLaneReadModel[] = [
-      searchLane('code', { outcome: 'transport', state: 'offline' }, 'graph', []),
+      searchLane('code', undefined, { state: 'offline' }, 'graph', []),
       searchLane(
         'code',
-        answered(run({ sources: [progress({ outcome: 'unavailable', page: null })] })),
+        run({ sources: [progress({ outcome: 'unavailable', page: null })] }),
+        undefined,
         'graph',
         [],
       ),
       searchLane(
         'code',
-        answered(run({ sources: [progress({ outcome: 'cancelled', page: null })] })),
+        run({ sources: [progress({ outcome: 'cancelled', page: null })] }),
+        undefined,
         'graph',
         [],
       ),
       searchLane(
         'code',
-        answered(run({ sources: [progress({ outcome: 'error', page: null })] })),
+        run({ sources: [progress({ outcome: 'error', page: null })] }),
+        undefined,
         'graph',
         [],
       ),
-      searchLane('code', answered(run({ sources: [progress({})] })), 'graph', []),
-      searchLane('code', answered(run({ state: 'completed' })), 'graph', []),
+      searchLane('code', run({ sources: [progress({})] }), undefined, 'graph', []),
+      searchLane('code', run({ state: 'completed' }), undefined, 'graph', []),
     ];
 
     expect(conditions.map((read) => read.state)).toEqual([
@@ -621,7 +591,7 @@ describe('laneEvidence', () => {
 describe('laneHits', () => {
   it('yields nothing for every lane that did not answer', () => {
     const notReady: ExplorerLaneReadModel[] = [
-      { state: 'pending', lane: 'code', phase: null },
+      { state: 'pending', lane: 'code' },
       { state: 'unavailable', lane: 'code', errorCode: null, detail: null },
       { state: 'cancelled', lane: 'code', errorCode: null, detail: null },
       { state: 'error', lane: 'code', errorCode: null, detail: null },

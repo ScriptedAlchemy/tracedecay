@@ -1,31 +1,27 @@
-/** Explorer's query register chrome: the coordinator run's own state, drawn
- * beside the query it answers, with the one explicit cancel control. Every
- * value is the run's; the lanes below render each source's condition. */
+/** Explorer stream state and source progress beside the submitted query. */
 import { StateChip, type DomainStateKind } from '../../ui/StateChip';
 import { cn } from '../../ui/cn';
 import { Meter } from '../../ui/instrument.tsx';
-import type { ExplorerQueryRunV1 } from '../../contracts/generated.ts';
-import type { EnvelopeResult } from '../../data/query/envelope.ts';
+import type { DashboardDomainStateV1 } from '../../contracts/generated.ts';
 import type { ScopeWritability } from '../../data/scope/store.ts';
 import type { RunProgress } from './controller.ts';
 import { runStateKind } from './laneModel.ts';
+import type { ExplorerStreamSnapshot } from './laneModel.ts';
 
-/** What the register says while no run exists: the scope's refusal when the
- * scope authority declined to dispatch one, otherwise the plan being admitted
- * or the transport failure that answered instead. */
+/** A refused scope or failed response before any source frame arrives. */
 function noRunReading(
   writability: ScopeWritability,
-  result: EnvelopeResult<ExplorerQueryRunV1> | undefined,
+  transport: { state: DashboardDomainStateV1; detail?: string } | undefined,
 ): { kind: DomainStateKind; detail: string } {
   switch (writability.state) {
     case 'read_only':
-      return { kind: 'locked', detail: 'no run created: the scope is read-only' };
+      return { kind: 'locked', detail: writability.reason };
     case 'unknown':
-      return { kind: 'unknown', detail: 'no run created until the scope is checked' };
+      return { kind: 'unknown', detail: writability.reason };
     case 'writable':
-      return result?.outcome === 'transport'
-        ? { kind: result.state, detail: result.detail ?? 'coordinator response unavailable' }
-        : { kind: 'loading', detail: 'admitting the source plan' };
+      return transport
+        ? { kind: transport.state, detail: transport.detail ?? 'coordinator response unavailable' }
+        : { kind: 'loading', detail: 'reading sources' };
     default: {
       const exhaustive: never = writability;
       return exhaustive;
@@ -43,7 +39,7 @@ function noRunReading(
  * act is not shown pretending it might.
  */
 export function RunRegister({
-  result,
+  transport,
   run,
   writability,
   progress,
@@ -51,8 +47,8 @@ export function RunRegister({
   onCancel,
   className,
 }: {
-  result: EnvelopeResult<ExplorerQueryRunV1> | undefined;
-  run: ExplorerQueryRunV1 | undefined;
+  transport: { state: DashboardDomainStateV1; detail?: string } | undefined;
+  run: ExplorerStreamSnapshot | undefined;
   writability: ScopeWritability;
   progress: RunProgress | null;
   cancelling: boolean;
@@ -60,7 +56,7 @@ export function RunRegister({
   className?: string;
 }) {
   if (!run) {
-    const blocked = noRunReading(writability, result);
+    const blocked = noRunReading(writability, transport);
     return (
       <div
         className={cn('flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1', className)}
@@ -82,7 +78,7 @@ export function RunRegister({
       data-run-state={run.state}
     >
       <span className="td-legend">Run</span>
-      <StateChip kind={runStateKind(run.state)} detail={run.finality} />
+      <StateChip kind={transport?.state ?? runStateKind(run.state)} detail={transport?.detail ?? run.state} />
       {progress !== null ? (
         <span className="flex items-center gap-2">
           <Meter
@@ -97,13 +93,11 @@ export function RunRegister({
           <span className="text-sm text-text-muted">sources concluded</span>
         </span>
       ) : null}
-      <span className="td-value text-xs text-text-muted" data-cell="numeric">
-        {Math.round(run.elapsed_micros / 1_000).toLocaleString()} ms
-      </span>
-      <span className="hidden min-w-0 truncate font-mono text-xs text-text-muted xl:inline" title={run.run_id}>
-        {run.run_id}
-      </span>
-      <span className="hidden text-sm text-text-muted 2xl:inline">{run.ordering_policy}</span>
+      {run.elapsed_micros !== null ? (
+        <span className="td-value text-xs text-text-muted" data-cell="numeric">
+          {Math.round(run.elapsed_micros / 1_000).toLocaleString()} ms
+        </span>
+      ) : null}
       {onCancel ? (
         <button
           type="button"

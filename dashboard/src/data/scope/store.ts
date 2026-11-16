@@ -5,8 +5,8 @@ import { z } from 'zod';
  * Whether the selected project is the one the daemon is actually serving.
  *
  * This is a scope fact, not a cosmetic one: the project gateway
- * (`src/dashboard/mod.rs` `project_scoped_api_gateway`) refuses every
- * non-GET/HEAD request for a project that is not the active one. So a control
+ * (`crates/tracedecay-dashboard-api/src/project_gateway.rs`) refuses mutations
+ * for a project that is not the active one. So a control
  * that can write under one selected project cannot write under another, and
  * the difference is invisible from the project id alone.
  *
@@ -214,10 +214,9 @@ export function scopedWorkspacePath(scope: DashboardScope, path: string): string
  * reading with its own sentence, so a control can stay disabled while saying
  * that the reason is a pending registry read rather than a refusal.
  *
- * The question is specifically whether a *mutation* is accepted. Three
- * POST-shaped reads (`feedback/get|expand|list`) are exempt in the gateway
- * because they change nothing, so a panel that only reads must not consult
- * this and disable itself against a refusal that will not happen.
+ * The question is specifically whether a mutation is accepted. POST-shaped
+ * reads, including Explorer queries, have their own gateway admission and
+ * must not use this predicate to decide whether they can read.
  */
 export type ScopeWritability =
   | { state: 'writable'; target: string }
@@ -264,6 +263,14 @@ export function scopeWritable(scope: DashboardScope): ScopeWritability {
       return exhaustive;
     }
   }
+}
+
+/** Explorer's POST starts a read and is admitted for an exact registered project. */
+export function explorerReadScope(scope: DashboardScope): ScopeWritability {
+  if (scope.kind === 'project' && scope.activation === 'selected') {
+    return { state: 'writable', target: scope.label };
+  }
+  return scopeWritable(scope);
 }
 
 /**
