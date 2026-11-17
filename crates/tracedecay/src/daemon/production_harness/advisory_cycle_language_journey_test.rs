@@ -172,8 +172,15 @@ async fn first_advisory_cycle_after_a_reopen_answers_without_a_retry() {
 /// A reopened checkout whose deferred advisory mount fails terminally names
 /// that failure as soon as the mount gives up, instead of holding the request
 /// to its deadline and then answering the retryable pre-mount state.
-#[tokio::test(flavor = "multi_thread")]
-async fn reopened_checkout_whose_advisory_mount_failed_names_the_failure() {
+#[test]
+fn reopened_checkout_whose_advisory_mount_failed_names_the_failure() {
+    tracedecay_runtime_core::native_runtime::default_builder()
+        .build()
+        .expect("advisory journey runtime")
+        .block_on(verify_reopened_advisory_mount_failure());
+}
+
+async fn verify_reopened_advisory_mount_failure() {
     let isolation = tempfile::TempDir::new().expect("production harness isolation");
     let project = isolation.path().join("project");
     std::fs::create_dir_all(project.join("src")).expect("project source dir");
