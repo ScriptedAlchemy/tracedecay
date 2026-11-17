@@ -214,6 +214,14 @@ async fn pr_context_default_brief_orients_from_exact_commits_through_mcp() {
     .await
     .expect("graph admission task")
     .expect("published graph catalog rewarms");
+    let diff = call_json(
+        &fixture,
+        "tracedecay_branch_diff",
+        json!({"base": "pr-feature", "head": "pr-feature"}),
+    )
+    .await;
+    let diff: Value = serde_json::from_str(&diff).unwrap();
+    assert_eq!(diff["reason"], "search_capacity_unavailable", "{diff}");
     let output = call_json(
         &fixture,
         "tracedecay_pr_context",
