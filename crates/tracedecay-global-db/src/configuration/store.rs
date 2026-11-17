@@ -24,6 +24,7 @@ use tracedecay_domain::configuration::{
     USER_REPEATED_QUERY_HINTS_SETTING_KEY, USER_WATCHER_DEBOUNCE_MS_SETTING_KEY, UserProfileId,
     WORK_TOPOLOGY_POLICY_SETTING_KEY,
 };
+use tracedecay_domain::feedback::PROXIMITY_RELATIONSHIP_HINTS_SETTING_KEY_V1;
 use tracedecay_domain::{AccessPolicyDigest, ActorId, ManifestDigest, UtcMicros, canonical_sha256};
 #[cfg(test)]
 use tracedecay_runtime_core::db::engine::TestConnection;
@@ -331,11 +332,12 @@ impl<'db> GlobalDbConfigurationControlStore<'db> {
     }
 
     /// Converge a snapshot written by an earlier published registry onto the
-    /// current one: registry-added settings receive their typed defaults and
-    /// a never-overridden setting follows a default that changed.
+    /// current one: registry-added settings receive their typed defaults, a
+    /// never-overridden setting follows a default that changed, and a retired
+    /// setting nobody overrode is dropped.
     ///
     /// This is exact schema convergence, not a runtime fallback: only the
-    /// closed set of known additive keys is accepted.
+    /// closed sets of known additive and retired keys are accepted.
     /// The result is an immutable child revision, and the expected parent is
     /// checked under the store's write transaction.
     pub async fn converge_registered_registry_shape(
@@ -353,7 +355,9 @@ impl<'db> GlobalDbConfigurationControlStore<'db> {
                 INDEX_NATIVE_GRAPH_ACTIVATION_SETTING_KEY,
                 LCM_SUMMARIZER_EXECUTABLES_SETTING_KEY,
                 SYNC_WATCH_LINKED_WORKTREES_SETTING_KEY,
+                PROXIMITY_RELATIONSHIP_HINTS_SETTING_KEY_V1,
             ],
+            PROJECT_RETIRED_SETTING_KEYS,
         )
         .await
     }
@@ -369,27 +373,26 @@ impl<'db> GlobalDbConfigurationControlStore<'db> {
         occurred_at: UtcMicros,
         registry: &ConfigurationRegistry,
         additive_keys: &[&str],
+        retired_keys: &[&str],
     ) -> Result<ConfigurationCurrentStateV1, ConfigurationError> {
         expected_revision_id
             .validate()
             .map_err(ConfigurationError::validation)?;
         let expected_revision_id = expected_revision_id.clone();
         let registry = registry.clone();
-        let additive_keys = additive_keys
-            .iter()
-            .map(|key| (*key).to_owned())
-            .collect::<Vec<_>>();
+        let setting_keys = |keys: &[&str]| {
+            keys.iter()
+                .map(|key| SettingKey::new(*key))
+                .collect::<Result<std::collections::BTreeSet<_>, _>>()
+                .map_err(ConfigurationError::validation)
+        };
+        let additive_keys = setting_keys(additive_keys)?;
+        let retired_keys = setting_keys(retired_keys)?;
         transact_config(self.db, |_| ConfigurationError::Unavailable, async move |transaction| {
             let current = current_state_from_transaction(&transaction).await?;
             if current.revision_id != expected_revision_id {
                 return Err(ConfigurationError::RevisionConflict);
             }
-            let additive_keys = additive_keys
-                .iter()
-                .cloned()
-                .map(SettingKey::new)
-                .collect::<Result<std::collections::BTreeSet<_>, _>>()
-                .map_err(ConfigurationError::validation)?;
             let expected_keys = registry
                 .definitions()
                 .map(|definition| definition.key.clone())
@@ -423,13 +426,23 @@ impl<'db> GlobalDbConfigurationControlStore<'db> {
                 })
                 .map(|definition| definition.key.clone())
                 .collect::<Vec<_>>();
-            if missing_keys.is_empty() && stale_defaults.is_empty() {
+            let unregistered_keys = actual_keys
+                .difference(&expected_keys)
+                .cloned()
+                .collect::<Vec<_>>();
+            if missing_keys.is_empty() && stale_defaults.is_empty() && unregistered_keys.is_empty()
+            {
                 validate_snapshot_registry_completeness_with_registry(&current.snapshot, &registry)
                     .map_err(map_store_error)?;
                 return Ok(current);
             }
+            // A retired setting still at its registry default carries no user
+            // intent, so dropping it loses nothing. An override of it does.
             if missing_keys.iter().any(|key| !additive_keys.contains(key))
-                || !actual_keys.is_subset(&expected_keys)
+                || unregistered_keys.iter().any(|key| {
+                    !retired_keys.contains(key)
+                        || current.snapshot.provenance.get(key) != Some(&default_provenance)
+                })
             {
                 return Err(ConfigurationError::ResetRequired {
                     reason: "configuration snapshot registry drift is not a registered additive-default upgrade"
@@ -450,6 +463,7 @@ impl<'db> GlobalDbConfigurationControlStore<'db> {
                 "tracedecay.configuration.registry-shape-convergence.v1",
                 &expected_revision_id,
                 &additions,
+                &unregistered_keys,
             ))
             .map_err(ConfigurationError::validation)?;
             let next_revision_id: ConfigurationRevisionId = derived_identifier(
@@ -467,6 +481,10 @@ impl<'db> GlobalDbConfigurationControlStore<'db> {
             for (key, default_value) in additions {
                 effective_values.insert(key.clone(), default_value);
                 provenance.insert(key, default_provenance.clone());
+            }
+            for key in &unregistered_keys {
+                effective_values.remove(key);
+                provenance.remove(key);
             }
             let snapshot = ConfigurationSnapshotV1::new(effective_values, provenance)
                 .map_err(ConfigurationError::validation)?;
@@ -638,6 +656,10 @@ pub struct ProfileCodeIndexWorkerCommitV1 {
     pub current: ProfileCodeIndexWorkerConfigurationV1,
 }
 
+/// Project settings a published registry removed. A store still holding one
+/// at its registry default converges by dropping it.
+const PROJECT_RETIRED_SETTING_KEYS: &[&str] = &["feedback.proximity.risk_threshold"];
+
 /// Profile settings registered after a profile store was first initialized.
 /// A store written before one existed converges by adding its default.
 const PROFILE_ADDITIVE_SETTING_KEYS: &[&str] = &[
@@ -714,6 +736,7 @@ impl<'db> ProfileConfigurationStore<'db> {
                 occurred_at,
                 &registry,
                 PROFILE_ADDITIVE_SETTING_KEYS,
+                &[],
             )
             .await
         {
