@@ -6,10 +6,10 @@ use std::sync::Arc;
 use tracedecay_code_index::production::CodeIndexRepositoryParseIdentityV1;
 use tracedecay_contracts::ResolvedScope;
 use tracedecay_domain::{
-    CodeGenerationId, CodeGenerationManifestV1, ContentDigest, CursorBindingMismatchV1,
+    CodeGenerationId, CodeGenerationManifestV1, CommitId, ContentDigest, CursorBindingMismatchV1,
     CursorBindingV1, FileIdentityDigest, FileOccurrenceId, FreshnessVectorDigest, GitOidV1, RefId,
     RepositoryDirtyStateV1, RetrievalRequest, RetrievalScope, RetrievalSnapshot,
-    SanitizedCodeSnapshotV1, SingleRootScopeV1, SnapshotFileDispositionV1, TemporalModeV1,
+    SanitizedCodeSnapshotV1, SingleRootScopeV1, SnapshotFileDispositionV1, TemporalModeV1, TreeId,
     VectorWatermark, canonical_sha256,
 };
 use tracedecay_query::code_search::{self, CodeIndexSearchUnavailableReasonV1};
@@ -459,14 +459,10 @@ async fn verified_graph_manifest(
             && snapshot.repository == scope.repository_id
             && snapshot.worktree.as_ref() == Some(&scope.worktree_id)
             && snapshot.reference.as_ref() == Some(&request.head_reference)
-            && snapshot
-                .source_revision
-                .as_ref()
-                .map(|commit| commit.as_str())
+            && snapshot.source_revision.as_ref().map(CommitId::as_str)
                 == Some(request.head_revision.as_str())
             && parse_identity.dirty == RepositoryDirtyStateV1::Clean
-            && parse_identity.tree.as_ref().map(|tree| tree.as_str())
-                == Some(request.head_tree.as_str())
+            && parse_identity.tree.as_ref().map(TreeId::as_str) == Some(request.head_tree.as_str())
     };
     if let Some(owner) = schedulers
         .retained_text_owner_for_root(&request.project_root)
