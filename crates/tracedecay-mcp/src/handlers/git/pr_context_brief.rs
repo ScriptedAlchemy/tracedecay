@@ -214,7 +214,7 @@ where
                     ctx,
                     "HEAD",
                     &brief.head_oid,
-                    graph.generation().as_str(),
+                    graph.generation(),
                 )
                 .await
                 {

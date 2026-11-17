@@ -176,6 +176,12 @@ async fn pr_context_default_brief_orients_from_exact_commits_through_mcp() {
              pub fn unchanged() -> u32 { 7 }\n",
         )
         .unwrap();
+        // The compared declaration is small; the unchanged graph exceeds the
+        // symbol budget of a full semantic branch diff.
+        let unchanged: String = (0..1025)
+            .map(|i| format!("pub fn unchanged_{i}() {{}}\n"))
+            .collect();
+        fs::write(project.join("src/unchanged.rs"), unchanged).unwrap();
         crate::support::commit_worktree(project, "base API");
         git_stdout(project, &["branch", "pr-base"]);
         git_stdout(project, &["checkout", "-b", "pr-feature"]);
@@ -289,15 +295,30 @@ async fn pr_context_default_brief_orients_from_exact_commits_through_mcp() {
     assert!(compact.contains("signature_changed"), "{compact}");
     assert!(compact.contains("Budget:"), "{compact}");
 
-    drop(graph_admission);
-    drop(graph);
-
     // Follow the briefing's exact revisions after the worktree has moved on.
     fs::write(
         fixture.project_root.join("src/lib.rs"),
         "pub fn local_only() -> u8 { 99 }\n",
     )
     .unwrap();
+    let dirty = call_json(
+        &fixture,
+        "tracedecay_pr_context",
+        json!({"base_ref": base_oid, "head_ref": head_oid, "format": "json"}),
+    )
+    .await;
+    let dirty: Value = serde_json::from_str(&dirty).unwrap();
+    assert_eq!(dirty["graph_analysis"]["state"], "stale", "{dirty}");
+    assert!(
+        dirty["entry_points"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|entry| entry["node_id"].is_null())
+    );
+    drop(graph_admission);
+    drop(graph);
+
     let changed = entries
         .iter()
         .find(|entry| entry["change"] == "signature_changed")

@@ -127,6 +127,7 @@ async fn exact_semantic_symbol_diff(
     head_ref: &str,
     expected_base_revision: Option<&str>,
     expected_head_revision: Option<&str>,
+    graph_generation: Option<&tracedecay_domain::CodeGenerationId>,
 ) -> std::result::Result<SemanticSymbolDiff, SemanticSymbolDiffUnavailable> {
     use tracedecay_query::code_search::{
         CODE_INDEX_BRANCH_DIFF_MAX_RESULTS_V1, CodeIndexBranchChangeV1,
@@ -211,6 +212,7 @@ async fn exact_semantic_symbol_diff(
     let mut modified = Vec::new();
     let (base_generation, head_generation) = loop {
         let outcome = executor(CodeIndexBranchDiffRequestV1 {
+            graph_generation: graph_generation.cloned(),
             project_root: ctx.project_root().to_path_buf(),
             base_reference: base_reference.clone(),
             base_revision: revisions.0.commit.clone(),
@@ -284,12 +286,19 @@ pub(super) async fn pr_context_graph_matches_head(
     ctx: &McpToolContext<'_>,
     head_ref: &str,
     head_oid: &str,
-    generation: &str,
+    generation: &tracedecay_domain::CodeGenerationId,
 ) -> std::result::Result<bool, String> {
-    exact_semantic_symbol_diff(ctx, head_ref, head_ref, Some(head_oid), Some(head_oid))
-        .await
-        .map(|diff| diff.head_generation == generation)
-        .map_err(|unavailable| unavailable.reason.to_owned())
+    exact_semantic_symbol_diff(
+        ctx,
+        head_ref,
+        head_ref,
+        Some(head_oid),
+        Some(head_oid),
+        Some(generation),
+    )
+    .await
+    .map(|diff| diff.head_generation == generation.as_str())
+    .map_err(|unavailable| unavailable.reason.to_owned())
 }
 
 fn symbol_path(symbol: &CodeGraphSymbolSummaryV1) -> Result<&str> {
@@ -896,7 +905,7 @@ pub async fn compute_changelog(
     let touched_files: Vec<String> = changed_files.clone();
 
     let symbol_diff = tracing::Instrument::instrument(
-        exact_semantic_symbol_diff(ctx, &from_ref, &to_ref, None, None),
+        exact_semantic_symbol_diff(ctx, &from_ref, &to_ref, None, None, None),
         tracing::trace_span!("mcp.git.changelog.symbol_diff"),
     )
     .await;
@@ -1618,6 +1627,7 @@ where
             &evidence.head,
             Some(evidence.merge_base.as_str()),
             Some(evidence.head_oid.as_str()),
+            None,
         ),
         tracing::trace_span!("mcp.pr_context.symbol_diff"),
     )

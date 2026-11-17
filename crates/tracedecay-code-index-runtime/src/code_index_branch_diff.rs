@@ -3,13 +3,16 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
+use tracedecay_code_index::production::CodeIndexRepositoryParseIdentityV1;
+use tracedecay_contracts::ResolvedScope;
 use tracedecay_domain::{
-    ContentDigest, CursorBindingMismatchV1, CursorBindingV1, FileIdentityDigest, FileOccurrenceId,
-    FreshnessVectorDigest, GitOidV1, RefId, RetrievalRequest, RetrievalScope, RetrievalSnapshot,
-    SingleRootScopeV1, SnapshotFileDispositionV1, TemporalModeV1, VectorWatermark,
-    canonical_sha256,
+    CodeGenerationId, CodeGenerationManifestV1, ContentDigest, CursorBindingMismatchV1,
+    CursorBindingV1, FileIdentityDigest, FileOccurrenceId, FreshnessVectorDigest, GitOidV1, RefId,
+    RepositoryDirtyStateV1, RetrievalRequest, RetrievalScope, RetrievalSnapshot,
+    SanitizedCodeSnapshotV1, SingleRootScopeV1, SnapshotFileDispositionV1, TemporalModeV1,
+    VectorWatermark, canonical_sha256,
 };
-use tracedecay_query::code_search;
+use tracedecay_query::code_search::{self, CodeIndexSearchUnavailableReasonV1};
 use tracedecay_query::retrieval::{PreparedQueryBindingsV1, PreparedQueryErrorV1, PreparedQueryV1};
 
 use crate::code_index_scheduler;
@@ -420,13 +423,75 @@ const BRANCH_DIFF_OPERATION: &str = "branch_diff";
 fn branch_diff_query_binding(
     request: &code_search::CodeIndexBranchDiffRequestV1,
 ) -> Result<CursorBindingV1, PreparedQueryErrorV1> {
-    CursorBindingV1::builder(BRANCH_DIFF_OPERATION)
+    let binding = CursorBindingV1::builder(BRANCH_DIFF_OPERATION)
         .parameter("base", &request.base_reference)
         .parameter("head", &request.head_reference)
         .parameter("file", &request.file_filter)
-        .parameter("kind", &request.kind_filter)
+        .parameter("kind", &request.kind_filter);
+    let binding = match &request.graph_generation {
+        Some(generation) => binding.parameter("graph_generation", generation),
+        None => binding,
+    };
+    binding
         .build()
         .map_err(|_| PreparedQueryErrorV1::Unavailable)
+}
+
+/// Compare the graph's immutable publication evidence to the Git reference resolved
+/// by the request. A current checkout can still be serving a different generation.
+async fn verified_graph_manifest(
+    schedulers: &code_index_scheduler::CodeIndexSchedulerRegistryV1,
+    scope: &ResolvedScope,
+    request: &code_search::CodeIndexBranchDiffRequestV1,
+    generation: &CodeGenerationId,
+) -> Result<CodeGenerationManifestV1, code_search::CodeIndexSearchUnavailableReasonV1> {
+    if request.base_reference != request.head_reference
+        || request.base_revision != request.head_revision
+        || request.base_tree != request.head_tree
+    {
+        return Err(CodeIndexSearchUnavailableReasonV1::InvalidRequest);
+    }
+    let verified = |manifest: &CodeGenerationManifestV1,
+                    snapshot: &SanitizedCodeSnapshotV1,
+                    parse_identity: &CodeIndexRepositoryParseIdentityV1| {
+        manifest.generation_id == *generation
+            && manifest.project_id == scope.project_id
+            && snapshot.repository == scope.repository_id
+            && snapshot.worktree.as_ref() == Some(&scope.worktree_id)
+            && snapshot.reference.as_ref() == Some(&request.head_reference)
+            && snapshot
+                .source_revision
+                .as_ref()
+                .map(|commit| commit.as_str())
+                == Some(request.head_revision.as_str())
+            && parse_identity.dirty == RepositoryDirtyStateV1::Clean
+            && parse_identity.tree.as_ref().map(|tree| tree.as_str())
+                == Some(request.head_tree.as_str())
+    };
+    if let Some(owner) = schedulers
+        .retained_text_owner_for_root(&request.project_root)
+        .await
+    {
+        let metadata = owner.metadata();
+        if verified(
+            metadata.manifest(),
+            metadata.snapshot(),
+            metadata.repository_parse_identity(),
+        ) {
+            return Ok(metadata.manifest().clone());
+        }
+    }
+    if let Some(owner) = schedulers.latest_complete_serving_for_scope(scope).await {
+        let sealed = owner.generation();
+        if verified(
+            sealed.manifest(),
+            sealed.snapshot(),
+            sealed.repository_parse_identity(),
+        ) {
+            return Ok(sealed.manifest().clone());
+        }
+    }
+    Err(CodeIndexSearchUnavailableReasonV1::GenerationUnavailable)
 }
 
 pub fn code_index_branch_diff_executor<A, S>(
@@ -492,56 +557,67 @@ where
                     Ok(permit) => permit,
                     Err(reason) => return unavailable(None, None, reason),
                 };
-                let generations = match schedulers
-                .bounded_generations_for_revisions(
-                    &scope,
-                    &request.base_reference,
-                    &request.base_revision,
-                    &request.base_tree,
-                    &request.head_reference,
-                    &request.head_revision,
-                    &request.head_tree,
-                    code_index_scheduler::branch_generations::BranchGenerationCardinalityBoundsV1 {
+                let graph_manifest;
+                let generations;
+                let (base, head, changes) = if let Some(generation) = &request.graph_generation {
+                    graph_manifest =
+                        match verified_graph_manifest(&schedulers, &scope, &request, generation)
+                            .await
+                        {
+                            Ok(manifest) => manifest,
+                            Err(reason) => return unavailable(None, None, reason),
+                        };
+                    (&graph_manifest, &graph_manifest, Vec::new())
+                } else {
+                    let bounds = code_index_scheduler::branch_generations::BranchGenerationCardinalityBoundsV1 {
                         maximum_files: MAX_BRANCH_DIFF_FILES_PER_GENERATION,
                         maximum_chunks: MAX_BRANCH_DIFF_CHUNKS_PER_GENERATION,
                         maximum_symbols: MAX_BRANCH_DIFF_SYMBOLS_PER_GENERATION,
-                    },
-                    control.clone(),
-                )
-                .await
-            {
-                Ok(generations) => generations,
-                Err(reason) => return unavailable(None, None, reason),
-            };
-                let base_id = generations
-                    .base
-                    .generation()
-                    .manifest()
-                    .generation_id
-                    .as_str()
-                    .to_owned();
-                let head_id = generations
-                    .head
-                    .generation()
-                    .manifest()
-                    .generation_id
-                    .as_str()
-                    .to_owned();
-                let match_result = {
-                    let _span =
-                        tracing::trace_span!("daemon.code_index.branch_diff.diff").entered();
-                    bounded_diff(
-                        generations.base.generation(),
-                        generations.head.generation(),
-                        request.file_filter.as_deref(),
-                        request.kind_filter.as_deref(),
-                        &control,
-                    )
+                    };
+                    generations = match schedulers
+                        .bounded_generations_for_revisions(
+                            &scope,
+                            &request.base_reference,
+                            &request.base_revision,
+                            &request.base_tree,
+                            &request.head_reference,
+                            &request.head_revision,
+                            &request.head_tree,
+                            bounds,
+                            control.clone(),
+                        )
+                        .await
+                    {
+                        Ok(generations) => generations,
+                        Err(reason) => return unavailable(None, None, reason),
+                    };
+                    let base = generations.base.generation().manifest();
+                    let head = generations.head.generation().manifest();
+                    let match_result = {
+                        let _span =
+                            tracing::trace_span!("daemon.code_index.branch_diff.diff").entered();
+                        bounded_diff(
+                            generations.base.generation(),
+                            generations.head.generation(),
+                            request.file_filter.as_deref(),
+                            request.kind_filter.as_deref(),
+                            &control,
+                        )
+                    };
+                    let changes = match match_result {
+                        Ok(completed) => completed.changes,
+                        Err(reason) => {
+                            return unavailable(
+                                Some(base.generation_id.as_str().to_owned()),
+                                Some(head.generation_id.as_str().to_owned()),
+                                reason,
+                            );
+                        }
+                    };
+                    (base, head, changes)
                 };
-                let completed = match match_result {
-                    Ok(completed) => completed,
-                    Err(reason) => return unavailable(Some(base_id), Some(head_id), reason),
-                };
+                let base_id = base.generation_id.as_str().to_owned();
+                let head_id = head.generation_id.as_str().to_owned();
                 let query_authority = match schedulers.query_authority_for_scope(&scope).await {
                     Some(authority) => authority,
                     None => {
@@ -554,18 +630,8 @@ where
                 };
                 let freshness_digest = match canonical_sha256(&(
                     "tracedecay.code-index-branch-diff.freshness.v1",
-                    generations
-                        .base
-                        .generation()
-                        .manifest()
-                        .snapshot_digest
-                        .as_str(),
-                    generations
-                        .head
-                        .generation()
-                        .manifest()
-                        .snapshot_digest
-                        .as_str(),
+                    base.snapshot_digest.as_str(),
+                    head.snapshot_digest.as_str(),
                 )) {
                     Ok(digest) => digest,
                     Err(_) => {
@@ -589,12 +655,7 @@ where
                 let retrieval_request = RetrievalRequest {
                     principal: authority.principal.clone(),
                     scope: RetrievalScope {
-                        privacy_domain: generations
-                            .head
-                            .generation()
-                            .manifest()
-                            .privacy_domain
-                            .clone(),
+                        privacy_domain: head.privacy_domain.clone(),
                         root: SingleRootScopeV1 {
                             repository: scope.repository_id.clone(),
                             worktree: Some(scope.worktree_id.clone()),
@@ -606,13 +667,7 @@ where
                         watermarks: VectorWatermark::default(),
                         freshness_digest: freshness,
                         authorization_revision: authority.authorization_revision.clone(),
-                        captured_at: generations
-                            .base
-                            .generation()
-                            .manifest()
-                            .seal
-                            .sealed_at
-                            .max(generations.head.generation().manifest().seal.sealed_at),
+                        captured_at: base.seal.sealed_at.max(head.seal.sealed_at),
                     },
                     profile_id: query_authority.profile().profile_id.clone(),
                     budget: query_authority.profile().retrieval_budget,
@@ -620,8 +675,8 @@ where
                 let scope_digest = match branch_diff_scope_digest(
                     &scope,
                     &request,
-                    &generations.base.generation().manifest().generation_id,
-                    &generations.head.generation().manifest().generation_id,
+                    &base.generation_id,
+                    &head.generation_id,
                 ) {
                     Ok(digest) => digest,
                     Err(_) => {
@@ -644,12 +699,7 @@ where
                 };
                 let bindings = match PreparedQueryBindingsV1::new(
                     scope_digest,
-                    generations
-                        .head
-                        .generation()
-                        .manifest()
-                        .generation_id
-                        .clone(),
+                    head.generation_id.clone(),
                     query_binding,
                 ) {
                     Ok(bindings) => bindings,
@@ -687,7 +737,7 @@ where
                 };
                 let page = match prepared.paginate(
                     &bindings,
-                    completed.changes,
+                    changes,
                     page_size,
                     tracedecay_contracts::clock::now_micros(),
                 ) {
@@ -968,6 +1018,7 @@ mod tests {
         )
         .expect("scope");
         let request = code_search::CodeIndexBranchDiffRequestV1 {
+            graph_generation: None,
             project_root: std::path::PathBuf::from("/project"),
             base_reference: tracedecay_domain::RefId::new("refs/heads/base")
                 .expect("base reference"),
