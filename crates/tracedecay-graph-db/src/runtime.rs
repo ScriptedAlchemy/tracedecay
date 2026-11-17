@@ -1988,6 +1988,9 @@ pub(crate) mod test_seams {
         /// After the engine has closed and synced the container, immediately
         /// before the verified-generation marker is published.
         MarkerPublish,
+        /// After a sealed build creates its staging directory, before the
+        /// owner receipt that authorizes reclaiming it is durable.
+        SealedStagingCreated,
     }
 
     type Hook = Box<dyn FnMut(Seam)>;
