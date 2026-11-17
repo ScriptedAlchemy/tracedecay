@@ -160,6 +160,7 @@ filegroup(
 
 rust_test(
     name = "unit_test",
+    size = "large",
     crate = ":tracedecay-global-db__+test-helpers__dev",
     crate_features = ["test-helpers"],
     edition = crate_edition(),
