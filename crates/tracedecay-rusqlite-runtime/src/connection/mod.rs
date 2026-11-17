@@ -166,6 +166,13 @@ impl OpenedDatabaseFile {
                 }
                 _ => Ok(false),
             };
+        // A published store owns its sidecars, so its WAL needs no shared
+        // index to prove ownership; it must still complete the schema view.
+        let published_wal_completes_view = |inspection: &Connection| {
+            Ok(main_header_declares_published_schema(inspection)
+                && sidecar("-wal")?.is_some_and(|wal| wal.is_file() && wal.len() > 0)
+                && live_wal_store_schema_reader(path).is_some())
+        };
         let initialized = match open_immutable_reader(path) {
             Ok(inspection) => {
                 let initialized = match has_store_schema(&inspection) {
@@ -174,6 +181,7 @@ impl OpenedDatabaseFile {
                     // checkpoint can expose pages from different committed
                     // generations in that main-only view, including a schema
                     // object whose parent table is still only in the WAL.
+                    Err(_) if published_wal_completes_view(&inspection)? => true,
                     Err(_) if live_wal_is_initialized()? => true,
                     Err(_) => return Err(OpenedDatabaseFileError::InvalidHeader),
                 };
@@ -1226,28 +1234,66 @@ fn has_store_schema(connection: &Connection) -> rusqlite::Result<bool> {
     )
 }
 
+/// `FinishInitialSchema` stamps the registered application ID and must then
+/// checkpoint it into the main file, so the main header alone proves the
+/// schema was published. A process killed mid-checkpoint leaves a main file
+/// mixing committed generations, and SQLite parses the schema before any
+/// statement, even a header pragma. Read the header through the connection's
+/// own VFS file instead: the WAL still holds every committed frame, and
+/// SQLite's ordinary recovery restores them on the next writable open.
+fn main_header_declares_published_schema(connection: &Connection) -> bool {
+    let mut file: *mut ffi::sqlite3_file = std::ptr::null_mut();
+    let mut header = [0_u8; 100];
+    // SAFETY: FILE_POINTER borrows the connection's open main file, which the
+    // live `connection` keeps valid for this call. `header` is writable
+    // storage of exactly the length passed to xRead.
+    let read = unsafe {
+        if ffi::sqlite3_file_control(
+            connection.handle(),
+            c"main".as_ptr(),
+            ffi::SQLITE_FCNTL_FILE_POINTER,
+            (&raw mut file).cast(),
+        ) != ffi::SQLITE_OK
+        {
+            return false;
+        }
+        let Some(read) = file
+            .as_ref()
+            .and_then(|file| file.pMethods.as_ref())
+            .and_then(|methods| methods.xRead)
+        else {
+            return false;
+        };
+        read(file, header.as_mut_ptr().cast(), header.len() as i32, 0)
+    };
+    read == ffi::SQLITE_OK
+        && header.starts_with(b"SQLite format 3\0")
+        && header[68..72] == crate::schema_version::REGISTERED_STORE_APPLICATION_ID.to_be_bytes()
+}
+
+/// A read transaction whose WAL-inclusive view holds the store schema. The
+/// connection never checkpoints and never writes the SHM.
+fn live_wal_store_schema_reader(path: &Path) -> Option<Connection> {
+    let uri = read_only_uri(&sqlite_host_path(path), "readonly_shm=1").ok()?;
+    let flags = OpenFlags::SQLITE_OPEN_READ_ONLY
+        | OpenFlags::SQLITE_OPEN_URI
+        | OpenFlags::SQLITE_OPEN_PRIVATE_CACHE;
+    let connection = Connection::open_with_flags(uri, flags).ok()?;
+    connection
+        .set_db_config(DbConfig::SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE, true)
+        .ok()?;
+    connection.execute_batch("BEGIN").ok()?;
+    matches!(has_store_schema(&connection), Ok(true)).then_some(connection)
+}
+
 /// A legacy store's first schema commit can still be in its live WAL.
 /// Ask SQLite to read that commit using the existing shared index. A read-only
 /// VFS can also recover a disconnected WAL into a *heap* index, which cannot
 /// establish that the adjacent SHM belongs to this active database.
 fn live_wal_has_store_schema(path: &Path) -> bool {
-    let Ok(uri) = read_only_uri(&sqlite_host_path(path), "readonly_shm=1") else {
+    let Some(connection) = live_wal_store_schema_reader(path) else {
         return false;
     };
-    let flags = OpenFlags::SQLITE_OPEN_READ_ONLY
-        | OpenFlags::SQLITE_OPEN_URI
-        | OpenFlags::SQLITE_OPEN_PRIVATE_CACHE;
-    let Ok(connection) = Connection::open_with_flags(uri, flags) else {
-        return false;
-    };
-    if connection
-        .set_db_config(DbConfig::SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE, true)
-        .is_err()
-        || connection.execute_batch("BEGIN").is_err()
-        || !matches!(has_store_schema(&connection), Ok(true))
-    {
-        return false;
-    }
     let mut file: *mut ffi::sqlite3_file = std::ptr::null_mut();
     // SAFETY: the read transaction keeps the main file and mapped WAL index
     // live. FILE_POINTER borrows the connection's file; xShmMap inspects page

@@ -766,6 +766,88 @@ fn live_wal_recovers_an_inconsistent_immutable_checkpoint_view() {
     drop(writer);
 }
 
+/// A process killed mid-checkpoint leaves a main file mixing committed
+/// generations beside a WAL that no live connection maps. SQLite recovers that
+/// state from the WAL, so a store whose main header proves the registered
+/// schema was published must stay attachable. Without that stamp the same
+/// files remain an ambiguous initialization and are still refused.
+#[test]
+fn crash_interrupted_checkpoint_of_a_published_store_remains_attachable() {
+    for published in [true, false] {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("sessions.db");
+        let wal_path = sidecar_path(&path, "-wal");
+        let shm_path = sidecar_path(&path, "-shm");
+        let journal_path = sidecar_path(&path, "-journal");
+        let writer = Connection::open(&path).unwrap();
+        if published {
+            writer
+                .pragma_update(
+                    None,
+                    "application_id",
+                    crate::schema_version::REGISTERED_STORE_APPLICATION_ID,
+                )
+                .unwrap();
+        }
+        writer
+            .execute_batch(
+                "PRAGMA journal_mode = WAL;
+                 PRAGMA wal_checkpoint(TRUNCATE);
+                 CREATE TABLE lcm_raw_messages(value INTEGER);
+                 INSERT INTO lcm_raw_messages VALUES (42);
+                 CREATE TRIGGER git_history_message_update
+                 AFTER UPDATE ON lcm_raw_messages BEGIN SELECT 1; END;",
+            )
+            .unwrap();
+        let main_header = std::fs::read(&path).unwrap()[..100].to_vec();
+        let wal = std::fs::read(&wal_path).unwrap();
+        let shm = std::fs::read(&shm_path).unwrap();
+        // Checkpoint a schema generation the WAL does not hold, so the
+        // main-only view has the trigger without its parent table.
+        writer
+            .execute_batch(
+                "PRAGMA writable_schema = ON;
+                 DELETE FROM sqlite_schema WHERE type = 'table' AND name = 'lcm_raw_messages';
+                 PRAGMA writable_schema = OFF;
+                 PRAGMA wal_checkpoint(TRUNCATE);",
+            )
+            .unwrap();
+        // The killed process held the only mapping of the WAL index.
+        drop(writer);
+        std::fs::write(&wal_path, wal).unwrap();
+        std::fs::write(&shm_path, shm).unwrap();
+        let mut main = std::fs::read(&path).unwrap();
+        main[..100].copy_from_slice(&main_header);
+        std::fs::write(&path, main).unwrap();
+        // Initialization leaves an empty rollback journal beside every store.
+        std::fs::write(&journal_path, b"").unwrap();
+
+        let opened = OpenedDatabaseFile::pin_initialized(&path);
+        if !published {
+            assert!(
+                matches!(opened, Err(OpenedDatabaseFileError::InvalidHeader)),
+                "an unstamped main with a disconnected WAL is still ambiguous"
+            );
+            continue;
+        }
+        opened
+            .expect("the published header admits SQLite's own WAL recovery")
+            .release_after_workers_exit();
+        let recovered = Connection::open(&path).unwrap();
+        assert_eq!(
+            recovered.query_row("SELECT value FROM lcm_raw_messages", [], |row| {
+                row.get::<_, i64>(0)
+            }),
+            Ok(42),
+            "recovery restores every committed WAL frame"
+        );
+        assert_eq!(
+            recovered.query_row("PRAGMA quick_check", [], |row| row.get::<_, String>(0)),
+            Ok("ok".to_owned())
+        );
+    }
+}
+
 #[test]
 fn create_new_refuses_to_replace_an_existing_database() {
     let file = NamedTempFile::new().unwrap();
