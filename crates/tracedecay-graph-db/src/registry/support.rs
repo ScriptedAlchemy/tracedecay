@@ -122,6 +122,17 @@ pub(super) fn open_registered_graph_lazy(
         registered_open_options(path, expected_format, registration, persistent_store_state),
         persistent_store_state,
     )?;
+    // The eager open reclaims an exited producer's staging and row spills as
+    // it opens the engine. A lazy mount defers that engine, but a
+    // dependency-free generation seals straight from its manifest without
+    // ever opening it, so deferring the reclaim to first engine use let a
+    // daemon killed mid-seal leave `.staging-<generation>` occupying that
+    // generation's exclusive create: every retry after the restart failed
+    // `File exists`. The daemon store authority this registration carries
+    // excludes every other process from this store, eager or lazy, and both
+    // sweeps skip this process's own in-flight producers.
+    crate::sealed_store::sweep_abandoned_sealed_staging(path);
+    crate::sealed_store::sweep_abandoned_row_spills(path);
     GraphDbOwner::register_database(database, authority_attachment)
 }
 

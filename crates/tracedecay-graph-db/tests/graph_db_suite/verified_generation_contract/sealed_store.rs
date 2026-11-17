@@ -1394,6 +1394,102 @@ fn reopening_the_store_reclaims_only_receipted_staging() {
     assert_snapshot_reads(&snapshot, &identity, "durable");
 }
 
+/// A daemon killed mid-seal leaves `.staging-<generation>` holding its
+/// producer's owner receipt. After a restart the store mounts lazily, and a
+/// dependency-free generation seals straight from its manifest without ever
+/// opening the native engine, so the reclaim cannot wait for engine open: the
+/// retry of that same generation must not meet the dead producer's directory
+/// at its exclusive create, which refused it as `File exists` on every attempt.
+#[test]
+fn lazily_mounted_store_reclaims_dead_producer_staging_before_sealing() {
+    let identity = projection("sealed-store:dead-producer", "code");
+    let manifest = rich_manifest(identity.clone(), "dead-producer-g1", "resealed");
+
+    // Learn the artifact name and receipt this generation seals to.
+    let scratch = TempDir::new().unwrap();
+    let (artifact_name, sealed_receipt) = {
+        let registered = RegisteredGraph::new_mounted(scratch.path()).unwrap();
+        let mut authority = RelationalAuthority::default();
+        let record = stage_sealed_manifest(
+            &mut authority,
+            &registered.binding,
+            &manifest,
+            "publish:dead-producer-g1",
+            None,
+            '7',
+        );
+        drop(publish_sealed(
+            &registered,
+            scratch.path(),
+            &mut authority,
+            &record,
+            &manifest,
+        ));
+        assert!(registered.close().unwrap());
+        let installed = std::fs::read_dir(sealed_store_root(scratch.path()))
+            .unwrap()
+            .map(Result::unwrap)
+            .map(|entry| entry.path())
+            .find(|path| path.join("sealed.json").is_file())
+            .expect("the scratch seal must install its artifact");
+        let receipt: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(installed.join("sealed.json")).unwrap()).unwrap();
+        (
+            installed.file_name().unwrap().to_str().unwrap().to_owned(),
+            receipt,
+        )
+    };
+
+    // What the killed producer left: its owner receipt and an anonymous
+    // spool it created but never unlinked.
+    let temp = TempDir::new().unwrap();
+    let root = sealed_store_root(temp.path());
+    let abandoned = root.join(format!(".staging-{artifact_name}"));
+    std::fs::create_dir_all(&abandoned).unwrap();
+    let owner = serde_json::json!({ "producer": "1", "receipt": sealed_receipt });
+    std::fs::write(
+        abandoned.join(".sealed-staging-owner-v1"),
+        serde_json::to_vec(&owner).unwrap(),
+    )
+    .unwrap();
+    std::fs::write(
+        abandoned.join(".spool-1-0000000000000000-0000000000000001"),
+        b"",
+    )
+    .unwrap();
+
+    let registered = RegisteredGraph::new_mounted_lazy(temp.path()).unwrap();
+    let mut authority = RelationalAuthority::default();
+    let record = stage_sealed_manifest(
+        &mut authority,
+        &registered.binding,
+        &manifest,
+        "publish:dead-producer-g1",
+        None,
+        '7',
+    );
+    let (control, probe) = control_and_probe();
+    let context = GraphPublicationOperationContextV1::new(&control, &probe).unwrap();
+    let commit = registered
+        .registry
+        .publish_verified(
+            registration(registered.binding.clone(), temp.path()),
+            &mut authority,
+            &context,
+            &record.publication.key,
+            Some(Arc::new(manifest.clone()).into()),
+        )
+        .expect("a dead producer's receipted staging must not block resealing its generation");
+
+    assert!(commit.snapshot.serves_from_sealed_store());
+    assert_snapshot_reads(&commit.snapshot, &identity, "resealed");
+    assert!(
+        !abandoned.exists(),
+        "the dead producer's staging must be reclaimed, not left beside the installed artifact"
+    );
+    assert!(root.join(&artifact_name).join("sealed.json").is_file());
+}
+
 /// The sealed census splits the sealed root into verified head and
 /// superseded artifacts. Unreceipted staging and unrelated directories remain
 /// unrecognized rather than falsely counted as reclaimable garbage.

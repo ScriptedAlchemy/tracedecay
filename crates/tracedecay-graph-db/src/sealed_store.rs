@@ -754,13 +754,28 @@ fn sealed_receipt_matches_generation_entry(
     })
 }
 
+/// A generation's staging entry, `.staging-<64 hex>`, or the producer-unique
+/// `.staging-<64 hex>.pending-<producer>-<attempt>` a build creates first and
+/// renames to the generation's name only once its owner receipt is durable.
+/// Returns the generation hex and, for a pending entry, the producer it names.
+fn sealed_staging_entry(name: &str) -> Option<(&str, Option<&str>)> {
+    let decimal = |text: &str| !text.is_empty() && text.bytes().all(|b| b.is_ascii_digit());
+    let (generation_hex, rest) = name.strip_prefix(".staging-")?.split_at_checked(64)?;
+    if !generation_hex
+        .bytes()
+        .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    {
+        return None;
+    }
+    if rest.is_empty() {
+        return Some((generation_hex, None));
+    }
+    let (producer, attempt) = rest.strip_prefix(".pending-")?.split_once('-')?;
+    (decimal(producer) && decimal(attempt)).then_some((generation_hex, Some(producer)))
+}
+
 fn sealed_staging_name(name: &str) -> bool {
-    name.strip_prefix(".staging-").is_some_and(|suffix| {
-        suffix.len() == 64
-            && suffix
-                .bytes()
-                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
-    })
+    sealed_staging_entry(name).is_some()
 }
 
 fn initial_sealed_staging_owner(
@@ -789,14 +804,12 @@ fn initial_sealed_staging_owner(
 }
 
 fn verified_staging_receipt(name: &std::ffi::OsStr, bytes: &[u8]) -> Option<SealedStagingOwnerV1> {
-    let name = name.to_str()?;
-    if !sealed_staging_name(name) {
-        return None;
-    }
-    let generation_hex = name.strip_prefix(".staging-")?;
+    let (generation_hex, pending_producer) = sealed_staging_entry(name.to_str()?)?;
     let owner = serde_json::from_slice::<SealedStagingOwnerV1>(bytes).ok()?;
     let instance = owner.producer.parse::<u128>().ok()?;
-    if instance.to_string() != owner.producer {
+    if instance.to_string() != owner.producer
+        || pending_producer.is_some_and(|producer| producer != owner.producer)
+    {
         return None;
     }
     let receipt = &owner.receipt;
@@ -896,9 +909,10 @@ pub(crate) fn sweep_abandoned_sealed_staging(database_path: &Path) {
 
 /// Removes every row spill another process left under the store's sealed
 /// root. Run at the eager open, whose exclusive store lock means no other
-/// process is producing rows for this store. Spills named for this process
-/// are skipped: a remount inside a live daemon may overlap its own publisher,
-/// whose spill removes itself when it drops.
+/// process is producing rows for this store, and at the registered lazy
+/// mount, whose daemon store authority excludes them. Spills named for this
+/// process are skipped: a remount inside a live daemon may overlap its own
+/// publisher, whose spill removes itself when it drops.
 pub(crate) fn sweep_abandoned_row_spills(database_path: &Path) {
     let root = sealed_store_root(database_path);
     let current_owner = row_spill_owner();
@@ -2143,8 +2157,26 @@ fn build_or_open_sealed_store_with_work(
     // Exclusive creation refuses an occupied name, and every byte below is
     // written through the held handle or the path it resolves to, so replacing
     // the staging name cannot redirect a producer write into a foreign tree.
-    let staging_directory = HeldDirectory::create_exclusive(&root, &staging_name)
+    //
+    // The directory is created under a name unique to this producer and
+    // attempt, and takes the generation's staging name only once its owner
+    // receipt is durable. A producer killed before then leaves an unproven
+    // directory that no sweep may delete; under the generation's own name it
+    // refused every later seal of that generation `File exists`.
+    static NEXT_STAGING_ATTEMPT: AtomicU64 = AtomicU64::new(0);
+    let pending_name = {
+        let mut name = staging_name.clone();
+        name.push(format!(
+            ".pending-{}-{}",
+            owner.producer,
+            NEXT_STAGING_ATTEMPT.fetch_add(1, AtomicOrdering::Relaxed)
+        ));
+        name
+    };
+    let staging_directory = HeldDirectory::create_exclusive(&root, &pending_name)
         .map_err(|error| sealed_store_io_failure("staging directory create failed", error))?;
+    #[cfg(test)]
+    crate::runtime::test_seams::fire(crate::runtime::test_seams::Seam::SealedStagingCreated);
     // Exclusive creation refuses a pre-existing marker. Flush before writing
     // rows so a killed producer leaves verifiable deletion authority.
     let staging_directory = staging_directory
@@ -2153,6 +2185,13 @@ fn build_or_open_sealed_store_with_work(
             &owner_bytes,
         )
         .map_err(|error| sealed_store_io_failure("staging owner persist failed", error))?;
+    // An occupied staging name is a live build of this generation or staging
+    // a sweep could not prove abandoned: refuse it as before, never replace it.
+    install_held_child_directory_noreplace(&root, &staging_directory, &pending_name, &staging_name)
+        .map_err(|error| {
+            discard_failed_sealed_staging(&root.join(&pending_name), &locator, expected.as_str());
+            sealed_store_io_failure("staging directory create failed", error)
+        })?;
     let receipt =
         stage_sealed_artifact(rows, identity, expected, &staging_directory, check, observe)
             .inspect_err(|_| {
@@ -4969,6 +5008,75 @@ mod build_tests {
         .unwrap();
         assert_eq!(store.recovered_digest(), expected.as_str());
         assert!(directory.join(SEALED_STORE_DATABASE_FILE).is_file());
+    }
+
+    /// Kill the real builder after it creates its staging directory but before
+    /// the owner receipt is durable. Nothing proves who owns that directory,
+    /// so no sweep may reclaim it; it must therefore never occupy the
+    /// generation's staging name, or every later seal of the generation is
+    /// refused `File exists` for the life of the store.
+    #[test]
+    fn seal_killed_before_its_owner_receipt_does_not_block_the_generation() {
+        const CHILD_ROOT: &str = "TRACEDECAY_TEST_UNRECEIPTED_SEAL_ROOT";
+        const CRASHED: i32 = 44;
+        let manifest = manifest(2, 1);
+        let identity = manifest.identity();
+        let expected = manifest.expected_recovered_digest(&|| Ok(())).unwrap();
+        if let Some(root) = std::env::var_os(CHILD_ROOT) {
+            let database_path = std::path::PathBuf::from(root).join("source.grafeo");
+            let _exit = crate::runtime::test_seams::install(|seam| {
+                if seam == crate::runtime::test_seams::Seam::SealedStagingCreated {
+                    std::process::exit(CRASHED);
+                }
+            });
+            let _ = build_or_open_sealed_store(
+                SealedRowSource::Manifest(&manifest),
+                &identity,
+                &expected,
+                &database_path,
+                &|| Ok(()),
+            );
+            panic!("the sealed build never created its staging directory");
+        }
+
+        let temp = tempfile::tempdir().unwrap();
+        let database_path = temp.path().join("source.grafeo");
+        let root = sealed_store_root(&database_path);
+        let directory = sealed_generation_directory(&root, &identity.physical_namespace().unwrap());
+        let child = std::process::Command::new(std::env::current_exe().unwrap())
+            .arg("--exact")
+            .arg(std::thread::current().name().unwrap())
+            .env(CHILD_ROOT, temp.path())
+            .output()
+            .unwrap();
+        assert_eq!(child.status.code(), Some(CRASHED), "{child:?}");
+        let left_behind: Vec<_> = std::fs::read_dir(&root)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .collect();
+        assert_eq!(left_behind.len(), 1, "{left_behind:?}");
+        assert!(
+            !left_behind[0].join(SEALED_STAGING_OWNER_FILE).exists(),
+            "the child must die before its owner receipt is written"
+        );
+
+        // A restart's store-open sweep cannot prove the unreceipted directory
+        // abandoned and keeps it; the generation must still seal.
+        sweep_abandoned_sealed_staging(&database_path);
+        let (store, _) = build_or_open_sealed_store(
+            SealedRowSource::Manifest(&manifest),
+            &identity,
+            &expected,
+            &database_path,
+            &|| Ok(()),
+        )
+        .expect("an unreceipted dead producer must not block its generation");
+        assert_eq!(store.recovered_digest(), expected.as_str());
+        assert!(directory.join(SEALED_STORE_DATABASE_FILE).is_file());
+        assert!(
+            left_behind[0].is_dir(),
+            "an unproven staging directory is preserved, never deleted by name"
+        );
     }
 
     /// The failed-builder cleanup must not delete a foreign replacement of a
