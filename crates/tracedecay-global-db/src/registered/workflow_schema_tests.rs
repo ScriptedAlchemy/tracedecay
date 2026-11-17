@@ -290,7 +290,7 @@ mod published_artifact_ceiling {
     use std::time::Duration;
 
     use rusqlite::Connection;
-    use rusqlite::backup::Backup;
+    use rusqlite::backup::{Backup, StepResult};
     use tempfile::TempDir;
     use tracedecay_domain::errors::TraceDecayError;
     use tracedecay_lcm::LCM_SCHEMA_VERSION;
@@ -362,6 +362,17 @@ mod published_artifact_ceiling {
             .unwrap();
     }
 
+    /// SQLite preserves rowids and coordinates with WAL sidecars when restoring
+    /// the original path. Both stores must be idle between cases.
+    fn copy_database(source: &Path, destination: &Path) {
+        let source = Connection::open(source).unwrap();
+        let mut destination = Connection::open(destination).unwrap();
+        source.busy_timeout(Duration::ZERO).unwrap();
+        destination.busy_timeout(Duration::ZERO).unwrap();
+        let backup = Backup::new(&source, &mut destination).unwrap();
+        assert_eq!(backup.step(-1).unwrap(), StepResult::Done);
+    }
+
     struct PublishedStore {
         path: PathBuf,
         _directory: TempDir,
@@ -397,28 +408,6 @@ mod published_artifact_ceiling {
             Connection::open(&self.path)
                 .unwrap()
                 .execute_batch(sql)
-                .unwrap();
-        }
-
-        /// Copies the store's pages into `snapshot`, rowids and free pages
-        /// included, so [`Self::restore`] returns it to exactly this shape.
-        fn snapshot(&self, snapshot: &Path) {
-            let source = Connection::open(&self.path).unwrap();
-            let mut copy = Connection::open(snapshot).unwrap();
-            Backup::new(&source, &mut copy)
-                .unwrap()
-                .run_to_completion(i32::MAX, Duration::ZERO, None)
-                .unwrap();
-        }
-
-        /// Overwrites the store with `snapshot` through SQLite's own locking,
-        /// so the store keeps its path, and with it its identity and profile.
-        fn restore(&self, snapshot: &Path) {
-            let source = Connection::open(snapshot).unwrap();
-            let mut store = Connection::open(&self.path).unwrap();
-            Backup::new(&source, &mut store)
-                .unwrap()
-                .run_to_completion(i32::MAX, Duration::ZERO, None)
                 .unwrap();
         }
 
@@ -757,12 +746,11 @@ mod published_artifact_ceiling {
         let published = store.state();
         let snapshots = TempDir::new().unwrap();
         let snapshot = snapshots.path().join("published.db");
-        store.snapshot(&snapshot);
+        copy_database(&store.path, &snapshot);
         for (case, shape, expected) in cases {
-            store.restore(&snapshot);
-            assert_eq!(
-                store.state(),
-                published,
+            copy_database(&snapshot, &store.path);
+            assert!(
+                store.state() == published,
                 "{case} must start from the published store"
             );
             if shape.contains("DROP TABLE workflow_artifact_payloads") {
