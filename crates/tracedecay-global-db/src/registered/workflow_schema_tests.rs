@@ -287,8 +287,10 @@ mod published_artifact_ceiling {
     use std::pin::Pin;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::task::Poll;
+    use std::time::Duration;
 
     use rusqlite::Connection;
+    use rusqlite::backup::Backup;
     use tempfile::TempDir;
     use tracedecay_domain::errors::TraceDecayError;
     use tracedecay_lcm::LCM_SCHEMA_VERSION;
@@ -395,6 +397,28 @@ mod published_artifact_ceiling {
             Connection::open(&self.path)
                 .unwrap()
                 .execute_batch(sql)
+                .unwrap();
+        }
+
+        /// Copies the store's pages into `snapshot`, rowids and free pages
+        /// included, so [`Self::restore`] returns it to exactly this shape.
+        fn snapshot(&self, snapshot: &Path) {
+            let source = Connection::open(&self.path).unwrap();
+            let mut copy = Connection::open(snapshot).unwrap();
+            Backup::new(&source, &mut copy)
+                .unwrap()
+                .run_to_completion(i32::MAX, Duration::ZERO, None)
+                .unwrap();
+        }
+
+        /// Overwrites the store with `snapshot` through SQLite's own locking,
+        /// so the store keeps its path, and with it its identity and profile.
+        fn restore(&self, snapshot: &Path) {
+            let source = Connection::open(snapshot).unwrap();
+            let mut store = Connection::open(&self.path).unwrap();
+            Backup::new(&source, &mut store)
+                .unwrap()
+                .run_to_completion(i32::MAX, Duration::ZERO, None)
                 .unwrap();
         }
 
@@ -727,8 +751,20 @@ mod published_artifact_ceiling {
                 "1 row(s)",
             ),
         ];
+        // Initializing a store and its profile costs far more than any case
+        // checks, so every case starts from a page copy of one published store.
+        let store = PublishedStore::create().await;
+        let published = store.state();
+        let snapshots = TempDir::new().unwrap();
+        let snapshot = snapshots.path().join("published.db");
+        store.snapshot(&snapshot);
         for (case, shape, expected) in cases {
-            let store = PublishedStore::create().await;
+            store.restore(&snapshot);
+            assert_eq!(
+                store.state(),
+                published,
+                "{case} must start from the published store"
+            );
             if shape.contains("DROP TABLE workflow_artifact_payloads") {
                 store.run("DELETE FROM workflow_artifact_payloads;");
             }
