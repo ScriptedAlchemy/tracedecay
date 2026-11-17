@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.0-beta.108](https://github.com/ScriptedAlchemy/tracedecay/compare/v1.0.0-beta.107...v1.0.0-beta.108) (2026-11-17)
+
+
+### Bug Fixes
+
+* **configuration:** converge a default-held retired proximity threshold ([347fa1b](https://github.com/ScriptedAlchemy/tracedecay/commit/347fa1bc8f112101d493991ebc5003ffe5dc86ae))
+* **configuration:** converge a default-held retired proximity threshold ([5a34ee4](https://github.com/ScriptedAlchemy/tracedecay/commit/5a34ee44af9db708cc53f49d2f91dd66b05e13bb))
+
 ## [1.0.0-beta.107](https://github.com/ScriptedAlchemy/tracedecay/compare/v1.0.0-beta.106...v1.0.0-beta.107) (2026-11-17)
 
 
