@@ -287,8 +287,10 @@ mod published_artifact_ceiling {
     use std::pin::Pin;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::task::Poll;
+    use std::time::Duration;
 
     use rusqlite::Connection;
+    use rusqlite::backup::{Backup, StepResult};
     use tempfile::TempDir;
     use tracedecay_domain::errors::TraceDecayError;
     use tracedecay_lcm::LCM_SCHEMA_VERSION;
@@ -358,6 +360,17 @@ mod published_artifact_ceiling {
                  UPDATE workflow_schema SET definition_digest = '{digest}';"
             ))
             .unwrap();
+    }
+
+    /// SQLite preserves rowids and coordinates with WAL sidecars when restoring
+    /// the original path. Both stores must be idle between cases.
+    fn copy_database(source: &Path, destination: &Path) {
+        let source = Connection::open(source).unwrap();
+        let mut destination = Connection::open(destination).unwrap();
+        source.busy_timeout(Duration::ZERO).unwrap();
+        destination.busy_timeout(Duration::ZERO).unwrap();
+        let backup = Backup::new(&source, &mut destination).unwrap();
+        assert_eq!(backup.step(-1).unwrap(), StepResult::Done);
     }
 
     struct PublishedStore {
@@ -727,8 +740,19 @@ mod published_artifact_ceiling {
                 "1 row(s)",
             ),
         ];
+        // Initializing a store and its profile costs far more than any case
+        // checks, so every case starts from a page copy of one published store.
+        let store = PublishedStore::create().await;
+        let published = store.state();
+        let snapshots = TempDir::new().unwrap();
+        let snapshot = snapshots.path().join("published.db");
+        copy_database(&store.path, &snapshot);
         for (case, shape, expected) in cases {
-            let store = PublishedStore::create().await;
+            copy_database(&snapshot, &store.path);
+            assert!(
+                store.state() == published,
+                "{case} must start from the published store"
+            );
             if shape.contains("DROP TABLE workflow_artifact_payloads") {
                 store.run("DELETE FROM workflow_artifact_payloads;");
             }
