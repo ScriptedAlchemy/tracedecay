@@ -13,8 +13,8 @@ use serde_json::{Value, json};
 use tracedecay_code_index::graph_projection::CodeGraphReadinessRequirement;
 
 use crate::support::{
-    ProductionCompositionFixture, extract_text, production_composition_fixture_with_sources,
-    refusal_problem, wait_for_current_graph,
+    ProductionCompositionFixture, extract_text, handle_real_server_tool_call,
+    production_composition_fixture_with_sources, refusal_problem, wait_for_current_graph,
 };
 
 fn write_probe_sources(project: &Path) {
@@ -214,13 +214,14 @@ async fn pr_context_default_brief_orients_from_exact_commits_through_mcp() {
     .await
     .expect("graph admission task")
     .expect("published graph catalog rewarms");
-    let diff = call_json(
-        &fixture,
+    let diff = handle_real_server_tool_call(
+        &server,
         "tracedecay_branch_diff",
         json!({"base": "pr-feature", "head": "pr-feature"}),
     )
     .await;
-    let diff: Value = serde_json::from_str(&diff).unwrap();
+    assert_eq!(diff["isError"], true, "{diff}");
+    let diff: Value = serde_json::from_str(extract_text(&diff)).expect("branch diff refusal JSON");
     assert_eq!(diff["reason"], "search_capacity_unavailable", "{diff}");
     let output = call_json(
         &fixture,
