@@ -405,10 +405,14 @@ fn git_stdout(project: &Path, args: &[&str]) -> String {
 
 static LSP_CONTROL_SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
+/// Acknowledging a frame admits a durable delivery receipt (file and
+/// directory fsyncs) before it answers. Polls return immediately, so this bound
+/// only matters for that disk-latency work, which a CI runner saturated by
+/// concurrently running test binaries can stretch past 5 s.
 fn lsp_control() -> (Deadline, CancellationSignal) {
     let sequence = LSP_CONTROL_SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     (
-        Deadline::new(UtcMicros(wall_clock_micros().0.saturating_add(5_000_000)))
+        Deadline::new(UtcMicros(wall_clock_micros().0.saturating_add(30_000_000)))
             .expect("LSP gateway deadline"),
         CancellationSignal::active(format!("cancel.lsp-gateway.{sequence}"))
             .expect("LSP gateway cancellation"),

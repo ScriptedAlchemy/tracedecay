@@ -1,5 +1,12 @@
 use crate::dashboard_api_support::*;
 
+/// Each retained mutation commits durably (fsyncs) before it answers. That
+/// takes ~0.25 s on an idle disk, but over the default 4 s client deadline on
+/// a CI runner whose disk is saturated by concurrently running test binaries.
+fn durable_write_agent() -> ureq::Agent {
+    http_agent_with_timeout(std::time::Duration::from_secs(20))
+}
+
 fn assert_canonical_fact_id(value: &Value, context: &str) {
     let raw = value
         .as_str()
@@ -58,7 +65,7 @@ fn retained_admin_journey_commits_add_update_feedback_and_remove() {
     let runtime = create_runtime();
     runtime.block_on(async {
         let fixture = start_dashboard_configuration_fixture().await;
-        let agent = http_agent();
+        let agent = durable_write_agent();
 
         let (status, added) = post_json_body(
             &agent,
@@ -215,7 +222,7 @@ fn fact_detail_keeps_a_superseded_fact_readable_by_id() {
     let runtime = create_runtime();
     runtime.block_on(async {
         let fixture = start_dashboard_configuration_fixture().await;
-        let agent = http_agent();
+        let agent = durable_write_agent();
         let add = |content: &str| {
             let (status, added) = post_json_body(
                 &agent,
@@ -277,7 +284,7 @@ fn retained_mutations_deny_foreign_project_scope_without_a_receipt() {
     let runtime = create_runtime();
     runtime.block_on(async {
         let fixture = start_dashboard_configuration_fixture().await;
-        let agent = http_agent();
+        let agent = durable_write_agent();
         let (_target_root, target_cg) = crate::projects::setup_target_project(&fixture).await;
         let target_project_id = target_cg
             .store_layout()
@@ -482,7 +489,7 @@ fn automatic_fact_receipt_endpoints_expose_terminal_applied_and_quarantined_rece
             .await
             .unwrap_or_else(|error| panic!("record automatic quarantined receipt: {error}"));
 
-        let agent = http_agent();
+        let agent = durable_write_agent();
         let endpoint = format!(
             "{}/api/automation/automatic-fact-receipts",
             fixture.base_url
