@@ -183,9 +183,7 @@ impl AdvisorySourceBackedCompositeFixtureV1 {
     }
 }
 
-/// Loads and cross-checks the captured source files. The acceptance agent can
-/// combine this identity with its existing diagnostic/impact result,
-/// authorized anchors, and effective Plan 20 threshold snapshot.
+/// Loads and cross-checks the captured source files.
 pub fn load_advisory_source_backed_composite_fixture_v1()
 -> Result<AdvisorySourceBackedCompositeFixtureV1, AdvisorySourceBackedFixtureErrorV1> {
     let scenario = parse(SCENARIO_JSON)?;

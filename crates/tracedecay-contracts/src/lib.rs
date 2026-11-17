@@ -113,10 +113,10 @@ pub use advisory::{
     GitHubReviewLifecycleV1, GitHubReviewRateLimitCheckpointV1, GitHubReviewReadCheckpointV1,
     GitHubReviewReadOperationV1, GitHubReviewRemapStateV1, GitHubReviewStateV1,
     GitHubReviewThreadIdV1, MAX_CI_FAILURE_CALLER_EVIDENCE_V1, MAX_CI_FAILURE_RERUN_HINTS_V1,
-    MAX_CI_FAILURE_TEST_EVIDENCE_V1, PROXIMITY_RISK_THRESHOLD_SETTING_KEY_V1, ProximityAddressV1,
-    ProximityContributionIdV1, ProximityContributionV1, ProximityCoverageV1, ProximityInclusionV1,
-    ProximityObservationIdV1, ProximityRelationPathKindV1, ProximityRelationPathV1,
-    ProximityWarningClassV1,
+    MAX_CI_FAILURE_TEST_EVIDENCE_V1, PROXIMITY_RELATIONSHIP_HINTS_SETTING_KEY_V1,
+    ProximityAddressV1, ProximityContributionIdV1, ProximityContributionV1, ProximityCoverageV1,
+    ProximityInclusionV1, ProximityObservationIdV1, ProximityRelationPathKindV1,
+    ProximityRelationPathV1, ProximityWarningClassV1,
 };
 pub use authorization::AuthorizationRequest;
 pub use clock::{ClockError, now_micros, try_now_micros};

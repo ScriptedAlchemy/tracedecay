@@ -183,7 +183,7 @@ pub use feedback::{
     GitHubReviewReadOperationV1, GitHubReviewRemapStateV1, GitHubReviewStateV1,
     GitHubReviewThreadIdV1, MAX_CI_FAILURE_CALLER_EVIDENCE_V1, MAX_CI_FAILURE_RERUN_HINTS_V1,
     MAX_CI_FAILURE_TEST_EVIDENCE_V1, MAX_GITHUB_PULL_REQUEST_TITLE_BYTES_V1,
-    MAX_GITHUB_REVIEW_THREAD_PATH_BYTES_V1, PROXIMITY_RISK_THRESHOLD_SETTING_KEY_V1,
+    MAX_GITHUB_REVIEW_THREAD_PATH_BYTES_V1, PROXIMITY_RELATIONSHIP_HINTS_SETTING_KEY_V1,
     ProviderEvaluationStateV1, ProximityAddressV1, ProximityContributionIdV1,
     ProximityContributionV1, ProximityCoverageV1, ProximityInclusionV1, ProximityObservationIdV1,
     ProximityRelationPathKindV1, ProximityRelationPathV1, ProximityWarningClassV1,

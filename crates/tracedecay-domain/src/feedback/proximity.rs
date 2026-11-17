@@ -13,7 +13,8 @@ use crate::research::{DomainError, RetrievalAnchorId, UtcMicros};
 
 use super::FeedbackScopeV1;
 
-pub const PROXIMITY_RISK_THRESHOLD_SETTING_KEY_V1: &str = "feedback.proximity.risk_threshold";
+pub const PROXIMITY_RELATIONSHIP_HINTS_SETTING_KEY_V1: &str =
+    "feedback.proximity.relationship_hints.v1";
 
 crate::canonical_text::validated_string_newtype!(
     plain,
