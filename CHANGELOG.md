@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.0-beta.109](https://github.com/ScriptedAlchemy/tracedecay/compare/v1.0.0-beta.108...v1.0.0-beta.109) (2026-11-18)
+
+
+### Bug Fixes
+
+* **graph-db:** reclaim dead producer staging on lazy store mount ([55ff4d0](https://github.com/ScriptedAlchemy/tracedecay/commit/55ff4d0d03931a7281c88e014398032d827317f2))
+* **mcp:** prove PR graph identity without scanning branch symbols ([0ad7f22](https://github.com/ScriptedAlchemy/tracedecay/commit/0ad7f223a575bc49a6cdeee080bfa24f5eb4ce20))
+* **mcp:** prove PR graph identity without scanning branch symbols ([c191707](https://github.com/ScriptedAlchemy/tracedecay/commit/c1917076f1b1420ceeeee3dc5d61426522e2efa2))
+* **mcp:** use typed Git identity accessors in graph proof ([3770d4f](https://github.com/ScriptedAlchemy/tracedecay/commit/3770d4fa96c96fc401fb0e72144fe7f3809df4a3))
+
 ## [1.0.0-beta.108](https://github.com/ScriptedAlchemy/tracedecay/compare/v1.0.0-beta.107...v1.0.0-beta.108) (2026-11-17)
 
 
