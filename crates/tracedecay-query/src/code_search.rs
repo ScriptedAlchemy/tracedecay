@@ -616,6 +616,9 @@ pub const CODE_INDEX_BRANCH_DIFF_MAX_RESULTS_V1: usize = 256;
 
 #[derive(Clone, Debug)]
 pub struct CodeIndexBranchDiffRequestV1 {
+    /// A PR brief proves its admitted graph against a single published revision.
+    /// It must not mint a historical generation or enumerate symbols for that proof.
+    pub graph_generation: Option<tracedecay_domain::CodeGenerationId>,
     pub project_root: PathBuf,
     pub base_reference: tracedecay_domain::RefId,
     pub base_revision: tracedecay_domain::GitOidV1,

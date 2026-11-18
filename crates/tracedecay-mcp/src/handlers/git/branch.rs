@@ -634,6 +634,7 @@ pub async fn compute_branch_diff(
     let outcome = tracing::Instrument::instrument(
         executor(
             tracedecay_query::code_search::CodeIndexBranchDiffRequestV1 {
+                graph_generation: None,
                 project_root: ctx.project_root().to_path_buf(),
                 base_reference: tracedecay_domain::RefId::new(format!("refs/heads/{base_name}"))
                     .map_err(|error| TraceDecayError::Config {

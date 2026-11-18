@@ -688,7 +688,7 @@ impl CodeGraphProjectionStore {
             })?;
             if slot.is_none() {
                 return Err(CodeGraphProjectionError::Unavailable(
-                    "code graph engine is not resident".to_owned(),
+                    "code graph engine is not resident; optional enrichment uses resident data only. An explicit graph read can warm it".to_owned(),
                 ));
             }
             InteractiveCatalogReaderLeaseV1::admit(
