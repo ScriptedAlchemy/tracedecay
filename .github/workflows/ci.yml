@@ -1073,7 +1073,7 @@ jobs:
           git -C "$RUNNER_TEMP/hermes-upstream" fetch --depth 1 origin "$HERMES_UPSTREAM_REF"
           git -C "$RUNNER_TEMP/hermes-upstream" checkout --detach FETCH_HEAD
 
-      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+      - uses: astral-sh/setup-uv@1db35dd8eee11c5894872e0b383ae6c406cf738d # v10.4.0
         with:
           enable-cache: true
           cache-dependency-glob: ${{ runner.temp }}/hermes-upstream/uv.lock
