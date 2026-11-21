@@ -1632,7 +1632,7 @@ createToken('GTE0PRE', '^\\s*>=\\s*0\\.0\\.0-0\\s*$')
 
 
 },
-"../../node_modules/.pnpm/vscode-jsonrpc@10.0.0/node_modules/vscode-jsonrpc/lib/common/api.js"(__unused_rspack_module, exports, __webpack_require__) {
+"../../node_modules/.pnpm/vscode-jsonrpc@10.0.1/node_modules/vscode-jsonrpc/lib/common/api.js"(__unused_rspack_module, exports, __webpack_require__) {
 
 /* --------------------------------------------------------------------------------------------
  * Copyright (c) Microsoft Corporation. All rights reserved.
@@ -1645,7 +1645,7 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
 Object.defineProperty(exports, "__esModule", ({ value: true }));
 exports.ProgressType = exports.ProgressToken = exports.createMessageConnection = exports.NullLogger = exports.ConnectionOptions = exports.ConnectionStrategy = exports.AbstractMessageBuffer = exports.WriteableStreamMessageWriter = exports.AbstractMessageWriter = exports.MessageWriter = exports.ReadableStreamMessageReader = exports.AbstractMessageReader = exports.MessageReader = exports.SharedArrayReceiverStrategy = exports.SharedArraySenderStrategy = exports.CancellationToken = exports.CancellationTokenSource = exports.Emitter = exports.Event = exports.Disposable = exports.LRUCache = exports.Touch = exports.LinkedMap = exports.ParameterStructures = exports.NotificationType9 = exports.NotificationType8 = exports.NotificationType7 = exports.NotificationType6 = exports.NotificationType5 = exports.NotificationType4 = exports.NotificationType3 = exports.NotificationType2 = exports.NotificationType1 = exports.NotificationType0 = exports.NotificationType = exports.ErrorCodes = exports.ResponseError = exports.RequestType9 = exports.RequestType8 = exports.RequestType7 = exports.RequestType6 = exports.RequestType5 = exports.RequestType4 = exports.RequestType3 = exports.RequestType2 = exports.RequestType1 = exports.RequestType0 = exports.RequestType = exports.Message = exports.RAL = void 0;
 exports.MessageStrategy = exports.CancellationStrategy = exports.CancellationSenderStrategy = exports.RequestCancellationReceiverStrategy = exports.IdCancellationReceiverStrategy = exports.CancellationReceiverStrategy = exports.ConnectionError = exports.ConnectionErrors = exports.LogTraceNotification = exports.SetTraceNotification = exports.TraceFormat = exports.TraceValues = exports.TraceValue = exports.Trace = void 0;
-const messages_1 = __webpack_require__("../../node_modules/.pnpm/vscode-jsonrpc@10.0.0/node_modules/vscode-jsonrpc/lib/common/messages.js");
+const messages_1 = __webpack_require__("../../node_modules/.pnpm/vscode-jsonrpc@10.0.1/node_modules/vscode-jsonrpc/lib/common/messages.js");
 Object.defineProperty(exports, "Message", ({ enumerable: true, get: function () { return messages_1.Message; } }));
 Object.defineProperty(exports, "RequestType", ({ enumerable: true, get: function () { return messages_1.RequestType; } }));
 Object.defineProperty(exports, "RequestType0", ({ enumerable: true, get: function () { return messages_1.RequestType0; } }));
@@ -1672,32 +1672,32 @@ Object.defineProperty(exports, "NotificationType7", ({ enumerable: true, get: fu
 Object.defineProperty(exports, "NotificationType8", ({ enumerable: true, get: function () { return messages_1.NotificationType8; } }));
 Object.defineProperty(exports, "NotificationType9", ({ enumerable: true, get: function () { return messages_1.NotificationType9; } }));
 Object.defineProperty(exports, "ParameterStructures", ({ enumerable: true, get: function () { return messages_1.ParameterStructures; } }));
-const linkedMap_1 = __webpack_require__("../../node_modules/.pnpm/vscode-jsonrpc@10.0.0/node_modules/vscode-jsonrpc/lib/common/linkedMap.js");
+const linkedMap_1 = __webpack_require__("../../node_modules/.pnpm/vscode-jsonrpc@10.0.1/node_modules/vscode-jsonrpc/lib/common/linkedMap.js");
 Object.defineProperty(exports, "LinkedMap", ({ enumerable: true, get: function () { return linkedMap_1.LinkedMap; } }));
 Object.defineProperty(exports, "LRUCache", ({ enumerable: true, get: function () { return linkedMap_1.LRUCache; } }));
 Object.defineProperty(exports, "Touch", ({ enumerable: true, get: function () { return linkedMap_1.Touch; } }));
-const disposable_1 = __webpack_require__("../../node_modules/.pnpm/vscode-jsonrpc@10.0.0/node_modules/vscode-jsonrpc/lib/common/disposable.js");
+const disposable_1 = __webpack_require__("../../node_modules/.pnpm/vscode-jsonrpc@10.0.1/node_modules/vscode-jsonrpc/lib/common/disposable.js");
 Object.defineProperty(exports, "Disposable", ({ enumerable: true, get: function () { return disposable_1.Disposable; } }));
-const events_1 = __webpack_require__("../../node_modules/.pnpm/vscode-jsonrpc@10.0.0/node_modules/vscode-jsonrpc/lib/common/events.js");
+const events_1 = __webpack_require__("../../node_modules/.pnpm/vscode-jsonrpc@10.0.1/node_modules/vscode-jsonrpc/lib/common/events.js");
 Object.defineProperty(exports, "Event", ({ enumerable: true, get: function () { return events_1.Event; } }));
 Object.defineProperty(exports, "Emitter", ({ enumerable: true, get: function () { return events_1.Emitter; } }));
-const cancellation_1 = __webpack_require__("../../node_modules/.pnpm/vscode-jsonrpc@10.0.0/node_modules/vscode-jsonrpc/lib/common/cancellation.js");
+const cancellation_1 = __webpack_require__("../../node_modules/.pnpm/vscode-jsonrpc@10.0.1/node_modules/vscode-jsonrpc/lib/common/cancellation.js");
 Object.defineProperty(exports, "CancellationTokenSource", ({ enumerable: true, get: function () { return cancellation_1.CancellationTokenSource; } }));
 Object.defineProperty(exports, "CancellationToken", ({ enumerable: true, get: function () { return cancellation_1.CancellationToken; } }));
-const sharedArrayCancellation_1 = __webpack_require__("../../node_modules/.pnpm/vscode-jsonrpc@10.0.0/node_modules/vscode-jsonrpc/lib/common/sharedArrayCancellation.js");
+const sharedArrayCancellation_1 = __webpack_require__("../../node_modules/.pnpm/vscode-jsonrpc@10.0.1/node_modules/vscode-jsonrpc/lib/common/sharedArrayCancellation.js");
 Object.defineProperty(exports, "SharedArraySenderStrategy", ({ enumerable: true, get: function () { return sharedArrayCancellation_1.SharedArraySenderStrategy; } }));
 Object.defineProperty(exports, "SharedArrayReceiverStrategy", ({ enumerable: true, get: function () { return sharedArrayCancellation_1.SharedArrayReceiverStrategy; } }));
-const messageReader_1 = __webpack_require__("../../node_modules/.pnpm/vscode-jsonrpc@10.0.0/node_modules/vscode-jsonrpc/lib/common/messageReader.js");
+const messageReader_1 = __webpack_require__("../../node_modules/.pnpm/vscode-jsonrpc@10.0.1/node_modules/vscode-jsonrpc/lib/common/messageReader.js");
 Object.defineProperty(exports, "MessageReader", ({ enumerable: true, get: function () { return messageReader_1.MessageReader; } }));
 Object.defineProperty(exports, "AbstractMessageReader", ({ enumerable: true, get: function () { return messageReader_1.AbstractMessageReader; } }));
 Object.defineProperty(exports, "ReadableStreamMessageReader", ({ enumerable: true, get: function () { return messageReader_1.ReadableStreamMessageReader; } }));
-const messageWriter_1 = __webpack_require__("../../node_modules/.pnpm/vscode-jsonrpc@10.0.0/node_modules/vscode-jsonrpc/lib/common/messageWriter.js");
+const messageWriter_1 = __webpack_require__("../../node_modules/.pnpm/vscode-jsonrpc@10.0.1/node_modules/vscode-jsonrpc/lib/common/messageWriter.js");
 Object.defineProperty(exports, "MessageWriter", ({ enumerable: true, get: function () { return messageWriter_1.MessageWriter; } }));
 Object.defineProperty(exports, "AbstractMessageWriter", ({ enumerable: true, get: function () { return messageWriter_1.AbstractMessageWriter; } }));
 Object.defineProperty(exports, "WriteableStreamMessageWriter", ({ enumerable: true, get: function () { return messageWriter_1.WriteableStreamMessageWriter; } }));
-const messageBuffer_1 = __webpack_require__("../../node_modules/.pnpm/vscode-jsonrpc@10.0.0/node_modules/vscode-jsonrpc/lib/common/messageBuffer.js");
+const messageBuffer_1 = __webpack_require__("../../node_modules/.pnpm/vscode-jsonrpc@10.0.1/node_modules/vscode-jsonrpc/lib/common/messageBuffer.js");
 Object.defineProperty(exports, "AbstractMessageBuffer", ({ enumerable: true, get: function () { return messageBuffer_1.AbstractMessageBuffer; } }));
-const connection_1 = __webpack_require__("../../node_modules/.pnpm/vscode-jsonrpc@10.0.0/node_modules/vscode-jsonrpc/lib/common/connection.js");
+const connection_1 = __webpack_require__("../../node_modules/.pnpm/vscode-jsonrpc@10.0.1/node_modules/vscode-jsonrpc/lib/common/connection.js");
 Object.defineProperty(exports, "ConnectionStrategy", ({ enumerable: true, get: function () { return connection_1.ConnectionStrategy; } }));
 Object.defineProperty(exports, "ConnectionOptions", ({ enumerable: true, get: function () { return connection_1.ConnectionOptions; } }));
 Object.defineProperty(exports, "NullLogger", ({ enumerable: true, get: function () { return connection_1.NullLogger; } }));
@@ -1718,12 +1718,12 @@ Object.defineProperty(exports, "CancellationSenderStrategy", ({ enumerable: true
 Object.defineProperty(exports, "CancellationStrategy", ({ enumerable: true, get: function () { return connection_1.CancellationStrategy; } }));
 Object.defineProperty(exports, "MessageStrategy", ({ enumerable: true, get: function () { return connection_1.MessageStrategy; } }));
 Object.defineProperty(exports, "TraceValues", ({ enumerable: true, get: function () { return connection_1.TraceValues; } }));
-const ral_1 = __importDefault(__webpack_require__("../../node_modules/.pnpm/vscode-jsonrpc@10.0.0/node_modules/vscode-jsonrpc/lib/common/ral.js"));
+const ral_1 = __importDefault(__webpack_require__("../../node_modules/.pnpm/vscode-jsonrpc@10.0.1/node_modules/vscode-jsonrpc/lib/common/ral.js"));
 exports.RAL = ral_1.default;
 
 
 },
-"../../node_modules/.pnpm/vscode-jsonrpc@10.0.0/node_modules/vscode-jsonrpc/lib/common/cancellation.js"(__unused_rspack_module, exports, __webpack_require__) {
+"../../node_modules/.pnpm/vscode-jsonrpc@10.0.1/node_modules/vscode-jsonrpc/lib/common/cancellation.js"(__unused_rspack_module, exports, __webpack_require__) {
 
 /*---------------------------------------------------------------------------------------------
  *  Copyright (c) Microsoft Corporation. All rights reserved.
@@ -1767,9 +1767,9 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
 };
 Object.defineProperty(exports, "__esModule", ({ value: true }));
 exports.CancellationTokenSource = exports.CancellationToken = void 0;
-const ral_1 = __importDefault(__webpack_require__("../../node_modules/.pnpm/vscode-jsonrpc@10.0.0/node_modules/vscode-jsonrpc/lib/common/ral.js"));
-const Is = __importStar(__webpack_require__("../../node_modules/.pnpm/vscode-jsonrpc@10.0.0/node_modules/vscode-jsonrpc/lib/common/is.js"));
-const events_1 = __webpack_require__("../../node_modules/.pnpm/vscode-jsonrpc@10.0.0/node_modules/vscode-jsonrpc/lib/common/events.js");
+const ral_1 = __importDefault(__webpack_require__("../../node_modules/.pnpm/vscode-jsonrpc@10.0.1/node_modules/vscode-jsonrpc/lib/common/ral.js"));
+const Is = __importStar(__webpack_require__("../../node_modules/.pnpm/vscode-jsonrpc@10.0.1/node_modules/vscode-jsonrpc/lib/common/is.js"));
+const events_1 = __webpack_require__("../../node_modules/.pnpm/vscode-jsonrpc@10.0.1/node_modules/vscode-jsonrpc/lib/common/events.js");
 var CancellationToken;
 (function (CancellationToken) {
     CancellationToken.None = Object.freeze({
@@ -1859,7 +1859,7 @@ exports.CancellationTokenSource = CancellationTokenSource;
 
 
 },
-"../../node_modules/.pnpm/vscode-jsonrpc@10.0.0/node_modules/vscode-jsonrpc/lib/common/connection.js"(__unused_rspack_module, exports, __webpack_require__) {
+"../../node_modules/.pnpm/vscode-jsonrpc@10.0.1/node_modules/vscode-jsonrpc/lib/common/connection.js"(__unused_rspack_module, exports, __webpack_require__) {
 
 /* --------------------------------------------------------------------------------------------
  * Copyright (c) Microsoft Corporation. All rights reserved.
@@ -1905,12 +1905,12 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
 Object.defineProperty(exports, "__esModule", ({ value: true }));
 exports.ConnectionOptions = exports.MessageStrategy = exports.CancellationStrategy = exports.CancellationSenderStrategy = exports.CancellationReceiverStrategy = exports.RequestCancellationReceiverStrategy = exports.IdCancellationReceiverStrategy = exports.ConnectionStrategy = exports.ConnectionError = exports.ConnectionErrors = exports.LogTraceNotification = exports.SetTraceNotification = exports.TraceFormat = exports.TraceValues = exports.TraceValue = exports.Trace = exports.NullLogger = exports.ProgressType = exports.ProgressToken = void 0;
 exports.createMessageConnection = createMessageConnection;
-const ral_1 = __importDefault(__webpack_require__("../../node_modules/.pnpm/vscode-jsonrpc@10.0.0/node_modules/vscode-jsonrpc/lib/common/ral.js"));
-const Is = __importStar(__webpack_require__("../../node_modules/.pnpm/vscode-jsonrpc@10.0.0/node_modules/vscode-jsonrpc/lib/common/is.js"));
-const messages_1 = __webpack_require__("../../node_modules/.pnpm/vscode-jsonrpc@10.0.0/node_modules/vscode-jsonrpc/lib/common/messages.js");
-const linkedMap_1 = __webpack_require__("../../node_modules/.pnpm/vscode-jsonrpc@10.0.0/node_modules/vscode-jsonrpc/lib/common/linkedMap.js");
-const events_1 = __webpack_require__("../../node_modules/.pnpm/vscode-jsonrpc@10.0.0/node_modules/vscode-jsonrpc/lib/common/events.js");
-const cancellation_1 = __webpack_require__("../../node_modules/.pnpm/vscode-jsonrpc@10.0.0/node_modules/vscode-jsonrpc/lib/common/cancellation.js");
+const ral_1 = __importDefault(__webpack_require__("../../node_modules/.pnpm/vscode-jsonrpc@10.0.1/node_modules/vscode-jsonrpc/lib/common/ral.js"));
+const Is = __importStar(__webpack_require__("../../node_modules/.pnpm/vscode-jsonrpc@10.0.1/node_modules/vscode-jsonrpc/lib/common/is.js"));
+const messages_1 = __webpack_require__("../../node_modules/.pnpm/vscode-jsonrpc@10.0.1/node_modules/vscode-jsonrpc/lib/common/messages.js");
+const linkedMap_1 = __webpack_require__("../../node_modules/.pnpm/vscode-jsonrpc@10.0.1/node_modules/vscode-jsonrpc/lib/common/linkedMap.js");
+const events_1 = __webpack_require__("../../node_modules/.pnpm/vscode-jsonrpc@10.0.1/node_modules/vscode-jsonrpc/lib/common/events.js");
+const cancellation_1 = __webpack_require__("../../node_modules/.pnpm/vscode-jsonrpc@10.0.1/node_modules/vscode-jsonrpc/lib/common/cancellation.js");
 var CancelNotification;
 (function (CancelNotification) {
     CancelNotification.type = new messages_1.NotificationType('$/cancelRequest');
@@ -3139,7 +3139,7 @@ function createMessageConnection(messageReader, messageWriter, _logger, options)
 
 
 },
-"../../node_modules/.pnpm/vscode-jsonrpc@10.0.0/node_modules/vscode-jsonrpc/lib/common/disposable.js"(__unused_rspack_module, exports) {
+"../../node_modules/.pnpm/vscode-jsonrpc@10.0.1/node_modules/vscode-jsonrpc/lib/common/disposable.js"(__unused_rspack_module, exports) {
 var __rspack_unused_export;
 
 /*---------------------------------------------------------------------------------------------
@@ -3160,7 +3160,7 @@ var Disposable;
 
 
 },
-"../../node_modules/.pnpm/vscode-jsonrpc@10.0.0/node_modules/vscode-jsonrpc/lib/common/events.js"(__unused_rspack_module, exports, __webpack_require__) {
+"../../node_modules/.pnpm/vscode-jsonrpc@10.0.1/node_modules/vscode-jsonrpc/lib/common/events.js"(__unused_rspack_module, exports, __webpack_require__) {
 
 /* --------------------------------------------------------------------------------------------
  * Copyright (c) Microsoft Corporation. All rights reserved.
@@ -3171,7 +3171,7 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
 };
 Object.defineProperty(exports, "__esModule", ({ value: true }));
 exports.Emitter = exports.Event = void 0;
-const ral_1 = __importDefault(__webpack_require__("../../node_modules/.pnpm/vscode-jsonrpc@10.0.0/node_modules/vscode-jsonrpc/lib/common/ral.js"));
+const ral_1 = __importDefault(__webpack_require__("../../node_modules/.pnpm/vscode-jsonrpc@10.0.1/node_modules/vscode-jsonrpc/lib/common/ral.js"));
 var Event;
 (function (Event) {
     const _disposable = { dispose() { } };
@@ -3299,7 +3299,7 @@ exports.Emitter = Emitter;
 
 
 },
-"../../node_modules/.pnpm/vscode-jsonrpc@10.0.0/node_modules/vscode-jsonrpc/lib/common/is.js"(__unused_rspack_module, exports) {
+"../../node_modules/.pnpm/vscode-jsonrpc@10.0.1/node_modules/vscode-jsonrpc/lib/common/is.js"(__unused_rspack_module, exports) {
 
 /* --------------------------------------------------------------------------------------------
  * Copyright (c) Microsoft Corporation. All rights reserved.
@@ -3337,7 +3337,7 @@ function stringArray(value) {
 
 
 },
-"../../node_modules/.pnpm/vscode-jsonrpc@10.0.0/node_modules/vscode-jsonrpc/lib/common/linkedMap.js"(__unused_rspack_module, exports) {
+"../../node_modules/.pnpm/vscode-jsonrpc@10.0.1/node_modules/vscode-jsonrpc/lib/common/linkedMap.js"(__unused_rspack_module, exports) {
 var __rspack_unused_export;
 
 /*---------------------------------------------------------------------------------------------
@@ -3438,7 +3438,9 @@ class LinkedMap {
         return this;
     }
     delete(key) {
-        return !!this.remove(key);
+        const existed = this._map.has(key);
+        this.remove(key);
+        return existed;
     }
     remove(key) {
         const item = this._map.get(key);
@@ -3754,7 +3756,7 @@ exports.LRUCache = LRUCache;
 
 
 },
-"../../node_modules/.pnpm/vscode-jsonrpc@10.0.0/node_modules/vscode-jsonrpc/lib/common/messageBuffer.js"(__unused_rspack_module, exports) {
+"../../node_modules/.pnpm/vscode-jsonrpc@10.0.1/node_modules/vscode-jsonrpc/lib/common/messageBuffer.js"(__unused_rspack_module, exports) {
 var __rspack_unused_export;
 
 /*---------------------------------------------------------------------------------------------
@@ -3914,7 +3916,7 @@ exports.AbstractMessageBuffer = AbstractMessageBuffer;
 
 
 },
-"../../node_modules/.pnpm/vscode-jsonrpc@10.0.0/node_modules/vscode-jsonrpc/lib/common/messageReader.js"(__unused_rspack_module, exports, __webpack_require__) {
+"../../node_modules/.pnpm/vscode-jsonrpc@10.0.1/node_modules/vscode-jsonrpc/lib/common/messageReader.js"(__unused_rspack_module, exports, __webpack_require__) {
 
 /* --------------------------------------------------------------------------------------------
  * Copyright (c) Microsoft Corporation. All rights reserved.
@@ -3958,10 +3960,10 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
 };
 Object.defineProperty(exports, "__esModule", ({ value: true }));
 exports.ReadableStreamMessageReader = exports.AbstractMessageReader = exports.MessageReader = void 0;
-const ral_1 = __importDefault(__webpack_require__("../../node_modules/.pnpm/vscode-jsonrpc@10.0.0/node_modules/vscode-jsonrpc/lib/common/ral.js"));
-const Is = __importStar(__webpack_require__("../../node_modules/.pnpm/vscode-jsonrpc@10.0.0/node_modules/vscode-jsonrpc/lib/common/is.js"));
-const events_1 = __webpack_require__("../../node_modules/.pnpm/vscode-jsonrpc@10.0.0/node_modules/vscode-jsonrpc/lib/common/events.js");
-const semaphore_1 = __webpack_require__("../../node_modules/.pnpm/vscode-jsonrpc@10.0.0/node_modules/vscode-jsonrpc/lib/common/semaphore.js");
+const ral_1 = __importDefault(__webpack_require__("../../node_modules/.pnpm/vscode-jsonrpc@10.0.1/node_modules/vscode-jsonrpc/lib/common/ral.js"));
+const Is = __importStar(__webpack_require__("../../node_modules/.pnpm/vscode-jsonrpc@10.0.1/node_modules/vscode-jsonrpc/lib/common/is.js"));
+const events_1 = __webpack_require__("../../node_modules/.pnpm/vscode-jsonrpc@10.0.1/node_modules/vscode-jsonrpc/lib/common/events.js");
+const semaphore_1 = __webpack_require__("../../node_modules/.pnpm/vscode-jsonrpc@10.0.1/node_modules/vscode-jsonrpc/lib/common/semaphore.js");
 var MessageReader;
 (function (MessageReader) {
     function is(value) {
@@ -4164,7 +4166,7 @@ exports.ReadableStreamMessageReader = ReadableStreamMessageReader;
 
 
 },
-"../../node_modules/.pnpm/vscode-jsonrpc@10.0.0/node_modules/vscode-jsonrpc/lib/common/messageWriter.js"(__unused_rspack_module, exports, __webpack_require__) {
+"../../node_modules/.pnpm/vscode-jsonrpc@10.0.1/node_modules/vscode-jsonrpc/lib/common/messageWriter.js"(__unused_rspack_module, exports, __webpack_require__) {
 
 /* --------------------------------------------------------------------------------------------
  * Copyright (c) Microsoft Corporation. All rights reserved.
@@ -4208,10 +4210,10 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
 };
 Object.defineProperty(exports, "__esModule", ({ value: true }));
 exports.WriteableStreamMessageWriter = exports.AbstractMessageWriter = exports.MessageWriter = void 0;
-const ral_1 = __importDefault(__webpack_require__("../../node_modules/.pnpm/vscode-jsonrpc@10.0.0/node_modules/vscode-jsonrpc/lib/common/ral.js"));
-const Is = __importStar(__webpack_require__("../../node_modules/.pnpm/vscode-jsonrpc@10.0.0/node_modules/vscode-jsonrpc/lib/common/is.js"));
-const semaphore_1 = __webpack_require__("../../node_modules/.pnpm/vscode-jsonrpc@10.0.0/node_modules/vscode-jsonrpc/lib/common/semaphore.js");
-const events_1 = __webpack_require__("../../node_modules/.pnpm/vscode-jsonrpc@10.0.0/node_modules/vscode-jsonrpc/lib/common/events.js");
+const ral_1 = __importDefault(__webpack_require__("../../node_modules/.pnpm/vscode-jsonrpc@10.0.1/node_modules/vscode-jsonrpc/lib/common/ral.js"));
+const Is = __importStar(__webpack_require__("../../node_modules/.pnpm/vscode-jsonrpc@10.0.1/node_modules/vscode-jsonrpc/lib/common/is.js"));
+const semaphore_1 = __webpack_require__("../../node_modules/.pnpm/vscode-jsonrpc@10.0.1/node_modules/vscode-jsonrpc/lib/common/semaphore.js");
+const events_1 = __webpack_require__("../../node_modules/.pnpm/vscode-jsonrpc@10.0.1/node_modules/vscode-jsonrpc/lib/common/events.js");
 const ContentLength = 'Content-Length: ';
 const CRLF = '\r\n';
 var MessageWriter;
@@ -4325,7 +4327,7 @@ exports.WriteableStreamMessageWriter = WriteableStreamMessageWriter;
 
 
 },
-"../../node_modules/.pnpm/vscode-jsonrpc@10.0.0/node_modules/vscode-jsonrpc/lib/common/messages.js"(__unused_rspack_module, exports, __webpack_require__) {
+"../../node_modules/.pnpm/vscode-jsonrpc@10.0.1/node_modules/vscode-jsonrpc/lib/common/messages.js"(__unused_rspack_module, exports, __webpack_require__) {
 
 /* --------------------------------------------------------------------------------------------
  * Copyright (c) Microsoft Corporation. All rights reserved.
@@ -4366,7 +4368,7 @@ var __importStar = (this && this.__importStar) || (function () {
 })();
 Object.defineProperty(exports, "__esModule", ({ value: true }));
 exports.Message = exports.NotificationType9 = exports.NotificationType8 = exports.NotificationType7 = exports.NotificationType6 = exports.NotificationType5 = exports.NotificationType4 = exports.NotificationType3 = exports.NotificationType2 = exports.NotificationType1 = exports.NotificationType0 = exports.NotificationType = exports.RequestType9 = exports.RequestType8 = exports.RequestType7 = exports.RequestType6 = exports.RequestType5 = exports.RequestType4 = exports.RequestType3 = exports.RequestType2 = exports.RequestType1 = exports.RequestType = exports.RequestType0 = exports.AbstractMessageSignature = exports.ParameterStructures = exports.ResponseError = exports.ErrorCodes = void 0;
-const is = __importStar(__webpack_require__("../../node_modules/.pnpm/vscode-jsonrpc@10.0.0/node_modules/vscode-jsonrpc/lib/common/is.js"));
+const is = __importStar(__webpack_require__("../../node_modules/.pnpm/vscode-jsonrpc@10.0.1/node_modules/vscode-jsonrpc/lib/common/is.js"));
 /**
  * Predefined error codes.
  */
@@ -4765,7 +4767,7 @@ var Message;
 
 
 },
-"../../node_modules/.pnpm/vscode-jsonrpc@10.0.0/node_modules/vscode-jsonrpc/lib/common/ral.js"(__unused_rspack_module, exports) {
+"../../node_modules/.pnpm/vscode-jsonrpc@10.0.1/node_modules/vscode-jsonrpc/lib/common/ral.js"(__unused_rspack_module, exports) {
 
 /* --------------------------------------------------------------------------------------------
  * Copyright (c) Microsoft Corporation. All rights reserved.
@@ -4792,7 +4794,7 @@ exports["default"] = RAL;
 
 
 },
-"../../node_modules/.pnpm/vscode-jsonrpc@10.0.0/node_modules/vscode-jsonrpc/lib/common/semaphore.js"(__unused_rspack_module, exports, __webpack_require__) {
+"../../node_modules/.pnpm/vscode-jsonrpc@10.0.1/node_modules/vscode-jsonrpc/lib/common/semaphore.js"(__unused_rspack_module, exports, __webpack_require__) {
 
 /* --------------------------------------------------------------------------------------------
  * Copyright (c) Microsoft Corporation. All rights reserved.
@@ -4803,7 +4805,7 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
 };
 Object.defineProperty(exports, "__esModule", ({ value: true }));
 exports.Semaphore = void 0;
-const ral_1 = __importDefault(__webpack_require__("../../node_modules/.pnpm/vscode-jsonrpc@10.0.0/node_modules/vscode-jsonrpc/lib/common/ral.js"));
+const ral_1 = __importDefault(__webpack_require__("../../node_modules/.pnpm/vscode-jsonrpc@10.0.1/node_modules/vscode-jsonrpc/lib/common/ral.js"));
 class Semaphore {
     _capacity;
     _active;
@@ -4870,7 +4872,7 @@ exports.Semaphore = Semaphore;
 
 
 },
-"../../node_modules/.pnpm/vscode-jsonrpc@10.0.0/node_modules/vscode-jsonrpc/lib/common/sharedArrayCancellation.js"(__unused_rspack_module, exports, __webpack_require__) {
+"../../node_modules/.pnpm/vscode-jsonrpc@10.0.1/node_modules/vscode-jsonrpc/lib/common/sharedArrayCancellation.js"(__unused_rspack_module, exports, __webpack_require__) {
 var __rspack_unused_export;
 
 /* --------------------------------------------------------------------------------------------
@@ -4879,7 +4881,7 @@ var __rspack_unused_export;
  * ------------------------------------------------------------------------------------------ */
 __rspack_unused_export = ({ value: true });
 exports.SharedArrayReceiverStrategy = exports.SharedArraySenderStrategy = void 0;
-const cancellation_1 = __webpack_require__("../../node_modules/.pnpm/vscode-jsonrpc@10.0.0/node_modules/vscode-jsonrpc/lib/common/cancellation.js");
+const cancellation_1 = __webpack_require__("../../node_modules/.pnpm/vscode-jsonrpc@10.0.1/node_modules/vscode-jsonrpc/lib/common/cancellation.js");
 var CancellationState;
 (function (CancellationState) {
     CancellationState.Continue = 0;
@@ -4952,7 +4954,7 @@ exports.SharedArrayReceiverStrategy = SharedArrayReceiverStrategy;
 
 
 },
-"../../node_modules/.pnpm/vscode-jsonrpc@10.0.0/node_modules/vscode-jsonrpc/lib/node/main.js"(__unused_rspack_module, exports, __webpack_require__) {
+"../../node_modules/.pnpm/vscode-jsonrpc@10.0.1/node_modules/vscode-jsonrpc/lib/node/main.js"(__unused_rspack_module, exports, __webpack_require__) {
 
 var __createBinding = (this && this.__createBinding) || (Object.create ? (function(o, m, k, k2) {
     if (k2 === undefined) k2 = k;
@@ -5005,7 +5007,7 @@ exports.createMessageConnection = createMessageConnection;
  * Copyright (c) Microsoft Corporation. All rights reserved.
  * Licensed under the MIT License. See License.txt in the project root for license information.
  * ----------------------------------------------------------------------------------------- */
-const ril_1 = __importDefault(__webpack_require__("../../node_modules/.pnpm/vscode-jsonrpc@10.0.0/node_modules/vscode-jsonrpc/lib/node/ril.js"));
+const ril_1 = __importDefault(__webpack_require__("../../node_modules/.pnpm/vscode-jsonrpc@10.0.1/node_modules/vscode-jsonrpc/lib/node/ril.js"));
 // Install the node runtime abstract.
 ril_1.default.install();
 const path = __importStar(__webpack_require__("path"));
@@ -5013,8 +5015,8 @@ const os = __importStar(__webpack_require__("os"));
 const fs = __importStar(__webpack_require__("fs"));
 const crypto_1 = __webpack_require__("crypto");
 const net_1 = __webpack_require__("net");
-const api_1 = __webpack_require__("../../node_modules/.pnpm/vscode-jsonrpc@10.0.0/node_modules/vscode-jsonrpc/lib/common/api.js");
-__exportStar(__webpack_require__("../../node_modules/.pnpm/vscode-jsonrpc@10.0.0/node_modules/vscode-jsonrpc/lib/common/api.js"), exports);
+const api_1 = __webpack_require__("../../node_modules/.pnpm/vscode-jsonrpc@10.0.1/node_modules/vscode-jsonrpc/lib/common/api.js");
+__exportStar(__webpack_require__("../../node_modules/.pnpm/vscode-jsonrpc@10.0.1/node_modules/vscode-jsonrpc/lib/common/api.js"), exports);
 class IPCMessageReader extends api_1.AbstractMessageReader {
     process;
     constructor(process) {
@@ -5254,7 +5256,7 @@ function createMessageConnection(input, output, logger, options) {
 
 
 },
-"../../node_modules/.pnpm/vscode-jsonrpc@10.0.0/node_modules/vscode-jsonrpc/lib/node/ril.js"(__unused_rspack_module, exports, __webpack_require__) {
+"../../node_modules/.pnpm/vscode-jsonrpc@10.0.1/node_modules/vscode-jsonrpc/lib/node/ril.js"(__unused_rspack_module, exports, __webpack_require__) {
 
 /* --------------------------------------------------------------------------------------------
  * Copyright (c) Microsoft Corporation. All rights reserved.
@@ -5263,7 +5265,7 @@ function createMessageConnection(input, output, logger, options) {
 Object.defineProperty(exports, "__esModule", ({ value: true }));
 const util_1 = __webpack_require__("util");
 const crypto_1 = __webpack_require__("crypto");
-const api_1 = __webpack_require__("../../node_modules/.pnpm/vscode-jsonrpc@10.0.0/node_modules/vscode-jsonrpc/lib/common/api.js");
+const api_1 = __webpack_require__("../../node_modules/.pnpm/vscode-jsonrpc@10.0.1/node_modules/vscode-jsonrpc/lib/common/api.js");
 class MessageBuffer extends api_1.AbstractMessageBuffer {
     static emptyBuffer = Buffer.allocUnsafe(0);
     constructor(encoding = 'utf-8') {
@@ -5425,7 +5427,7 @@ exports["default"] = RIL;
 
 
 },
-"../../node_modules/.pnpm/vscode-languageclient@11.0.0/node_modules/vscode-languageclient/lib/common/api.js"(__unused_rspack_module, exports, __webpack_require__) {
+"../../node_modules/.pnpm/vscode-languageclient@11.0.1/node_modules/vscode-languageclient/lib/common/api.js"(__unused_rspack_module, exports, __webpack_require__) {
 
 /* --------------------------------------------------------------------------------------------
  * Copyright (c) Microsoft Corporation. All rights reserved.
@@ -5447,16 +5449,16 @@ var __exportStar = (this && this.__exportStar) || function(m, exports) {
 };
 Object.defineProperty(exports, "__esModule", ({ value: true }));
 exports.DiagnosticPullMode = exports.vsdiag = void 0;
-__exportStar(__webpack_require__("../../node_modules/.pnpm/vscode-languageserver-protocol@3.18.5/node_modules/vscode-languageserver-protocol/lib/common/api.js"), exports);
-__exportStar(__webpack_require__("../../node_modules/.pnpm/vscode-languageclient@11.0.0/node_modules/vscode-languageclient/lib/common/features.js"), exports);
-var diagnostic_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageclient@11.0.0/node_modules/vscode-languageclient/lib/common/diagnostic.js");
+__exportStar(__webpack_require__("../../node_modules/.pnpm/vscode-languageserver-protocol@3.18.6/node_modules/vscode-languageserver-protocol/lib/common/api.js"), exports);
+__exportStar(__webpack_require__("../../node_modules/.pnpm/vscode-languageclient@11.0.1/node_modules/vscode-languageclient/lib/common/features.js"), exports);
+var diagnostic_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageclient@11.0.1/node_modules/vscode-languageclient/lib/common/diagnostic.js");
 Object.defineProperty(exports, "vsdiag", ({ enumerable: true, get: function () { return diagnostic_1.vsdiag; } }));
 Object.defineProperty(exports, "DiagnosticPullMode", ({ enumerable: true, get: function () { return diagnostic_1.DiagnosticPullMode; } }));
-__exportStar(__webpack_require__("../../node_modules/.pnpm/vscode-languageclient@11.0.0/node_modules/vscode-languageclient/lib/common/client.js"), exports);
+__exportStar(__webpack_require__("../../node_modules/.pnpm/vscode-languageclient@11.0.1/node_modules/vscode-languageclient/lib/common/client.js"), exports);
 
 
 },
-"../../node_modules/.pnpm/vscode-languageclient@11.0.0/node_modules/vscode-languageclient/lib/common/callHierarchy.js"(__unused_rspack_module, exports, __webpack_require__) {
+"../../node_modules/.pnpm/vscode-languageclient@11.0.1/node_modules/vscode-languageclient/lib/common/callHierarchy.js"(__unused_rspack_module, exports, __webpack_require__) {
 var __rspack_unused_export;
 
 /* --------------------------------------------------------------------------------------------
@@ -5466,8 +5468,8 @@ var __rspack_unused_export;
 __rspack_unused_export = ({ value: true });
 exports.CallHierarchyFeature = void 0;
 const vscode_1 = __webpack_require__("vscode");
-const vscode_languageserver_protocol_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageserver-protocol@3.18.5/node_modules/vscode-languageserver-protocol/lib/common/api.js");
-const features_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageclient@11.0.0/node_modules/vscode-languageclient/lib/common/features.js");
+const vscode_languageserver_protocol_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageserver-protocol@3.18.6/node_modules/vscode-languageserver-protocol/lib/common/api.js");
+const features_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageclient@11.0.1/node_modules/vscode-languageclient/lib/common/features.js");
 class CallHierarchyProvider {
     client;
     middleware;
@@ -5560,7 +5562,7 @@ exports.CallHierarchyFeature = CallHierarchyFeature;
 
 
 },
-"../../node_modules/.pnpm/vscode-languageclient@11.0.0/node_modules/vscode-languageclient/lib/common/client.js"(__unused_rspack_module, exports, __webpack_require__) {
+"../../node_modules/.pnpm/vscode-languageclient@11.0.1/node_modules/vscode-languageclient/lib/common/client.js"(__unused_rspack_module, exports, __webpack_require__) {
 
 var __createBinding = (this && this.__createBinding) || (Object.create ? (function(o, m, k, k2) {
     if (k2 === undefined) k2 = k;
@@ -5602,49 +5604,49 @@ exports.ProposedFeatures = exports.LanguageClient = exports.BaseLanguageClient =
  * Licensed under the MIT License. See License.txt in the project root for license information.
  * ------------------------------------------------------------------------------------------ */
 const vscode_1 = __webpack_require__("vscode");
-const vscode_languageserver_protocol_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageserver-protocol@3.18.5/node_modules/vscode-languageserver-protocol/lib/common/api.js");
-const c2p = __importStar(__webpack_require__("../../node_modules/.pnpm/vscode-languageclient@11.0.0/node_modules/vscode-languageclient/lib/common/codeConverter.js"));
-const p2c = __importStar(__webpack_require__("../../node_modules/.pnpm/vscode-languageclient@11.0.0/node_modules/vscode-languageclient/lib/common/protocolConverter.js"));
-const Is = __importStar(__webpack_require__("../../node_modules/.pnpm/vscode-languageclient@11.0.0/node_modules/vscode-languageclient/lib/common/utils/is.js"));
-const async_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageclient@11.0.0/node_modules/vscode-languageclient/lib/common/utils/async.js");
-const progressPart_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageclient@11.0.0/node_modules/vscode-languageclient/lib/common/progressPart.js");
-const features_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageclient@11.0.0/node_modules/vscode-languageclient/lib/common/features.js");
-const diagnostic_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageclient@11.0.0/node_modules/vscode-languageclient/lib/common/diagnostic.js");
-const notebook_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageclient@11.0.0/node_modules/vscode-languageclient/lib/common/notebook.js");
-const configuration_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageclient@11.0.0/node_modules/vscode-languageclient/lib/common/configuration.js");
-const textSynchronization_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageclient@11.0.0/node_modules/vscode-languageclient/lib/common/textSynchronization.js");
-const completion_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageclient@11.0.0/node_modules/vscode-languageclient/lib/common/completion.js");
-const hover_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageclient@11.0.0/node_modules/vscode-languageclient/lib/common/hover.js");
-const definition_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageclient@11.0.0/node_modules/vscode-languageclient/lib/common/definition.js");
-const signatureHelp_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageclient@11.0.0/node_modules/vscode-languageclient/lib/common/signatureHelp.js");
-const documentHighlight_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageclient@11.0.0/node_modules/vscode-languageclient/lib/common/documentHighlight.js");
-const documentSymbol_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageclient@11.0.0/node_modules/vscode-languageclient/lib/common/documentSymbol.js");
-const workspaceSymbol_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageclient@11.0.0/node_modules/vscode-languageclient/lib/common/workspaceSymbol.js");
-const reference_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageclient@11.0.0/node_modules/vscode-languageclient/lib/common/reference.js");
-const typeDefinition_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageclient@11.0.0/node_modules/vscode-languageclient/lib/common/typeDefinition.js");
-const implementation_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageclient@11.0.0/node_modules/vscode-languageclient/lib/common/implementation.js");
-const colorProvider_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageclient@11.0.0/node_modules/vscode-languageclient/lib/common/colorProvider.js");
-const codeAction_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageclient@11.0.0/node_modules/vscode-languageclient/lib/common/codeAction.js");
-const codeLens_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageclient@11.0.0/node_modules/vscode-languageclient/lib/common/codeLens.js");
-const formatting_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageclient@11.0.0/node_modules/vscode-languageclient/lib/common/formatting.js");
-const rename_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageclient@11.0.0/node_modules/vscode-languageclient/lib/common/rename.js");
-const documentLink_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageclient@11.0.0/node_modules/vscode-languageclient/lib/common/documentLink.js");
-const executeCommand_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageclient@11.0.0/node_modules/vscode-languageclient/lib/common/executeCommand.js");
-const foldingRange_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageclient@11.0.0/node_modules/vscode-languageclient/lib/common/foldingRange.js");
-const declaration_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageclient@11.0.0/node_modules/vscode-languageclient/lib/common/declaration.js");
-const selectionRange_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageclient@11.0.0/node_modules/vscode-languageclient/lib/common/selectionRange.js");
-const callHierarchy_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageclient@11.0.0/node_modules/vscode-languageclient/lib/common/callHierarchy.js");
-const semanticTokens_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageclient@11.0.0/node_modules/vscode-languageclient/lib/common/semanticTokens.js");
-const linkedEditingRange_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageclient@11.0.0/node_modules/vscode-languageclient/lib/common/linkedEditingRange.js");
-const typeHierarchy_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageclient@11.0.0/node_modules/vscode-languageclient/lib/common/typeHierarchy.js");
-const inlineValue_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageclient@11.0.0/node_modules/vscode-languageclient/lib/common/inlineValue.js");
-const inlayHint_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageclient@11.0.0/node_modules/vscode-languageclient/lib/common/inlayHint.js");
-const workspaceFolder_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageclient@11.0.0/node_modules/vscode-languageclient/lib/common/workspaceFolder.js");
-const fileOperations_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageclient@11.0.0/node_modules/vscode-languageclient/lib/common/fileOperations.js");
-const inlineCompletion_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageclient@11.0.0/node_modules/vscode-languageclient/lib/common/inlineCompletion.js");
-const textDocumentContent_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageclient@11.0.0/node_modules/vscode-languageclient/lib/common/textDocumentContent.js");
-const fileSystemWatcher_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageclient@11.0.0/node_modules/vscode-languageclient/lib/common/fileSystemWatcher.js");
-const progress_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageclient@11.0.0/node_modules/vscode-languageclient/lib/common/progress.js");
+const vscode_languageserver_protocol_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageserver-protocol@3.18.6/node_modules/vscode-languageserver-protocol/lib/common/api.js");
+const c2p = __importStar(__webpack_require__("../../node_modules/.pnpm/vscode-languageclient@11.0.1/node_modules/vscode-languageclient/lib/common/codeConverter.js"));
+const p2c = __importStar(__webpack_require__("../../node_modules/.pnpm/vscode-languageclient@11.0.1/node_modules/vscode-languageclient/lib/common/protocolConverter.js"));
+const Is = __importStar(__webpack_require__("../../node_modules/.pnpm/vscode-languageclient@11.0.1/node_modules/vscode-languageclient/lib/common/utils/is.js"));
+const async_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageclient@11.0.1/node_modules/vscode-languageclient/lib/common/utils/async.js");
+const progressPart_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageclient@11.0.1/node_modules/vscode-languageclient/lib/common/progressPart.js");
+const features_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageclient@11.0.1/node_modules/vscode-languageclient/lib/common/features.js");
+const diagnostic_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageclient@11.0.1/node_modules/vscode-languageclient/lib/common/diagnostic.js");
+const notebook_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageclient@11.0.1/node_modules/vscode-languageclient/lib/common/notebook.js");
+const configuration_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageclient@11.0.1/node_modules/vscode-languageclient/lib/common/configuration.js");
+const textSynchronization_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageclient@11.0.1/node_modules/vscode-languageclient/lib/common/textSynchronization.js");
+const completion_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageclient@11.0.1/node_modules/vscode-languageclient/lib/common/completion.js");
+const hover_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageclient@11.0.1/node_modules/vscode-languageclient/lib/common/hover.js");
+const definition_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageclient@11.0.1/node_modules/vscode-languageclient/lib/common/definition.js");
+const signatureHelp_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageclient@11.0.1/node_modules/vscode-languageclient/lib/common/signatureHelp.js");
+const documentHighlight_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageclient@11.0.1/node_modules/vscode-languageclient/lib/common/documentHighlight.js");
+const documentSymbol_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageclient@11.0.1/node_modules/vscode-languageclient/lib/common/documentSymbol.js");
+const workspaceSymbol_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageclient@11.0.1/node_modules/vscode-languageclient/lib/common/workspaceSymbol.js");
+const reference_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageclient@11.0.1/node_modules/vscode-languageclient/lib/common/reference.js");
+const typeDefinition_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageclient@11.0.1/node_modules/vscode-languageclient/lib/common/typeDefinition.js");
+const implementation_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageclient@11.0.1/node_modules/vscode-languageclient/lib/common/implementation.js");
+const colorProvider_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageclient@11.0.1/node_modules/vscode-languageclient/lib/common/colorProvider.js");
+const codeAction_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageclient@11.0.1/node_modules/vscode-languageclient/lib/common/codeAction.js");
+const codeLens_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageclient@11.0.1/node_modules/vscode-languageclient/lib/common/codeLens.js");
+const formatting_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageclient@11.0.1/node_modules/vscode-languageclient/lib/common/formatting.js");
+const rename_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageclient@11.0.1/node_modules/vscode-languageclient/lib/common/rename.js");
+const documentLink_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageclient@11.0.1/node_modules/vscode-languageclient/lib/common/documentLink.js");
+const executeCommand_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageclient@11.0.1/node_modules/vscode-languageclient/lib/common/executeCommand.js");
+const foldingRange_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageclient@11.0.1/node_modules/vscode-languageclient/lib/common/foldingRange.js");
+const declaration_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageclient@11.0.1/node_modules/vscode-languageclient/lib/common/declaration.js");
+const selectionRange_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageclient@11.0.1/node_modules/vscode-languageclient/lib/common/selectionRange.js");
+const callHierarchy_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageclient@11.0.1/node_modules/vscode-languageclient/lib/common/callHierarchy.js");
+const semanticTokens_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageclient@11.0.1/node_modules/vscode-languageclient/lib/common/semanticTokens.js");
+const linkedEditingRange_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageclient@11.0.1/node_modules/vscode-languageclient/lib/common/linkedEditingRange.js");
+const typeHierarchy_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageclient@11.0.1/node_modules/vscode-languageclient/lib/common/typeHierarchy.js");
+const inlineValue_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageclient@11.0.1/node_modules/vscode-languageclient/lib/common/inlineValue.js");
+const inlayHint_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageclient@11.0.1/node_modules/vscode-languageclient/lib/common/inlayHint.js");
+const workspaceFolder_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageclient@11.0.1/node_modules/vscode-languageclient/lib/common/workspaceFolder.js");
+const fileOperations_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageclient@11.0.1/node_modules/vscode-languageclient/lib/common/fileOperations.js");
+const inlineCompletion_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageclient@11.0.1/node_modules/vscode-languageclient/lib/common/inlineCompletion.js");
+const textDocumentContent_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageclient@11.0.1/node_modules/vscode-languageclient/lib/common/textDocumentContent.js");
+const fileSystemWatcher_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageclient@11.0.1/node_modules/vscode-languageclient/lib/common/fileSystemWatcher.js");
+const progress_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageclient@11.0.1/node_modules/vscode-languageclient/lib/common/progress.js");
 /**
  * Controls when the output channel is revealed.
  */
@@ -6614,7 +6616,11 @@ class BaseLanguageClient {
             resolve();
         }
         catch (error) {
-            this.$state = ClientState.StartFailed;
+            // If the connection closed during the start, the close handling may already have
+            // moved the client on, for example to a restart. Only a current start fails it.
+            if (this._onStart === promise) {
+                this.$state = ClientState.StartFailed;
+            }
             this.error(`${this._name} client: couldn't create connection to server.`, error, 'force');
             reject(error);
         }
@@ -6733,31 +6739,34 @@ class BaseLanguageClient {
             return result;
         }
         catch (error) {
+            // A retry settles the start of the client, so its outcome is returned rather
+            // than run in the background after start() has already rejected.
             if (this._clientOptions.initializationFailedHandler) {
                 if (this._clientOptions.initializationFailedHandler(error)) {
-                    void this.initialize(connection);
-                }
-                else {
-                    this.stopAfterFailedInitialize();
+                    return this.initialize(connection);
                 }
             }
             else if (error instanceof vscode_languageserver_protocol_1.ResponseError && error.data && error.data.retry) {
-                void vscode_1.window.showErrorMessage(error.message, { title: 'Retry', id: 'retry' }).then(item => {
-                    if (item && item.id === 'retry') {
-                        void this.initialize(connection);
-                    }
-                    else {
-                        this.stopAfterFailedInitialize();
-                    }
-                });
+                // The connection can close while the message is shown. The close handling then
+                // already cleaned up or restarted the client, so settle the start without
+                // waiting for the user and ignore the stale answer.
+                const item = await Promise.race([
+                    vscode_1.window.showErrorMessage(error.message, { title: 'Retry', id: 'retry' }),
+                    connection.closed.then(() => {
+                        throw new Error(`Connection to server got closed before initialization was retried.`);
+                    })
+                ]);
+                if (item && item.id === 'retry') {
+                    return this.initialize(connection);
+                }
             }
             else {
                 if (error && error.message) {
                     void vscode_1.window.showErrorMessage(error.message);
                 }
                 this.error('Server initialization failed.', error);
-                this.stopAfterFailedInitialize();
             }
+            this.stopAfterFailedInitialize();
             throw error;
         }
     }
@@ -6859,6 +6868,7 @@ class BaseLanguageClient {
         // purge outstanding file events.
         this._fileEvents = [];
         this._fileEventDelayer.cancel();
+        this._pendingChangeDelayer.cancel();
         const disposables = this._listeners.splice(0, this._listeners.length);
         for (const disposable of disposables) {
             disposable.dispose();
@@ -7497,7 +7507,9 @@ function createConnection(input, output, errorHandler, closeHandler, channelProv
     const connection = (0, vscode_languageserver_protocol_1.createProtocolConnection)(input, output, logger, options);
     connection.onError((data) => { errorHandler(data[0], data[1], data[2]); });
     connection.onClose(closeHandler);
+    const closed = new Promise(resolve => connection.onClose(() => resolve()));
     const result = {
+        closed,
         listen: () => connection.listen(),
         sendRequest: connection.sendRequest,
         onRequest: connection.onRequest,
@@ -7553,7 +7565,7 @@ var ProposedFeatures;
 
 
 },
-"../../node_modules/.pnpm/vscode-languageclient@11.0.0/node_modules/vscode-languageclient/lib/common/codeAction.js"(__unused_rspack_module, exports, __webpack_require__) {
+"../../node_modules/.pnpm/vscode-languageclient@11.0.1/node_modules/vscode-languageclient/lib/common/codeAction.js"(__unused_rspack_module, exports, __webpack_require__) {
 var __rspack_unused_export;
 
 /* --------------------------------------------------------------------------------------------
@@ -7563,8 +7575,8 @@ var __rspack_unused_export;
 __rspack_unused_export = ({ value: true });
 exports.CodeActionFeature = void 0;
 const vscode_1 = __webpack_require__("vscode");
-const vscode_languageserver_protocol_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageserver-protocol@3.18.5/node_modules/vscode-languageserver-protocol/lib/common/api.js");
-const features_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageclient@11.0.0/node_modules/vscode-languageclient/lib/common/features.js");
+const vscode_languageserver_protocol_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageserver-protocol@3.18.6/node_modules/vscode-languageserver-protocol/lib/common/api.js");
+const features_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageclient@11.0.1/node_modules/vscode-languageclient/lib/common/features.js");
 class CodeActionFeature extends features_1.TextDocumentLanguageFeature {
     constructor(client) {
         super(client, vscode_languageserver_protocol_1.CodeActionRequest.type);
@@ -7669,7 +7681,7 @@ exports.CodeActionFeature = CodeActionFeature;
 
 
 },
-"../../node_modules/.pnpm/vscode-languageclient@11.0.0/node_modules/vscode-languageclient/lib/common/codeConverter.js"(__unused_rspack_module, exports, __webpack_require__) {
+"../../node_modules/.pnpm/vscode-languageclient@11.0.1/node_modules/vscode-languageclient/lib/common/codeConverter.js"(__unused_rspack_module, exports, __webpack_require__) {
 
 /* --------------------------------------------------------------------------------------------
  * Copyright (c) Microsoft Corporation. All rights reserved.
@@ -7715,18 +7727,18 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
 Object.defineProperty(exports, "__esModule", ({ value: true }));
 exports.createConverter = createConverter;
 const code = __importStar(__webpack_require__("vscode"));
-const proto = __importStar(__webpack_require__("../../node_modules/.pnpm/vscode-languageserver-protocol@3.18.5/node_modules/vscode-languageserver-protocol/lib/common/api.js"));
-const Is = __importStar(__webpack_require__("../../node_modules/.pnpm/vscode-languageclient@11.0.0/node_modules/vscode-languageclient/lib/common/utils/is.js"));
-const async = __importStar(__webpack_require__("../../node_modules/.pnpm/vscode-languageclient@11.0.0/node_modules/vscode-languageclient/lib/common/utils/async.js"));
-const protocolCompletionItem_1 = __importDefault(__webpack_require__("../../node_modules/.pnpm/vscode-languageclient@11.0.0/node_modules/vscode-languageclient/lib/common/protocolCompletionItem.js"));
-const protocolCodeLens_1 = __importDefault(__webpack_require__("../../node_modules/.pnpm/vscode-languageclient@11.0.0/node_modules/vscode-languageclient/lib/common/protocolCodeLens.js"));
-const protocolDocumentLink_1 = __importDefault(__webpack_require__("../../node_modules/.pnpm/vscode-languageclient@11.0.0/node_modules/vscode-languageclient/lib/common/protocolDocumentLink.js"));
-const protocolCodeAction_1 = __importDefault(__webpack_require__("../../node_modules/.pnpm/vscode-languageclient@11.0.0/node_modules/vscode-languageclient/lib/common/protocolCodeAction.js"));
-const protocolDiagnostic_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageclient@11.0.0/node_modules/vscode-languageclient/lib/common/protocolDiagnostic.js");
-const protocolCallHierarchyItem_1 = __importDefault(__webpack_require__("../../node_modules/.pnpm/vscode-languageclient@11.0.0/node_modules/vscode-languageclient/lib/common/protocolCallHierarchyItem.js"));
-const protocolTypeHierarchyItem_1 = __importDefault(__webpack_require__("../../node_modules/.pnpm/vscode-languageclient@11.0.0/node_modules/vscode-languageclient/lib/common/protocolTypeHierarchyItem.js"));
-const protocolWorkspaceSymbol_1 = __importDefault(__webpack_require__("../../node_modules/.pnpm/vscode-languageclient@11.0.0/node_modules/vscode-languageclient/lib/common/protocolWorkspaceSymbol.js"));
-const protocolInlayHint_1 = __importDefault(__webpack_require__("../../node_modules/.pnpm/vscode-languageclient@11.0.0/node_modules/vscode-languageclient/lib/common/protocolInlayHint.js"));
+const proto = __importStar(__webpack_require__("../../node_modules/.pnpm/vscode-languageserver-protocol@3.18.6/node_modules/vscode-languageserver-protocol/lib/common/api.js"));
+const Is = __importStar(__webpack_require__("../../node_modules/.pnpm/vscode-languageclient@11.0.1/node_modules/vscode-languageclient/lib/common/utils/is.js"));
+const async = __importStar(__webpack_require__("../../node_modules/.pnpm/vscode-languageclient@11.0.1/node_modules/vscode-languageclient/lib/common/utils/async.js"));
+const protocolCompletionItem_1 = __importDefault(__webpack_require__("../../node_modules/.pnpm/vscode-languageclient@11.0.1/node_modules/vscode-languageclient/lib/common/protocolCompletionItem.js"));
+const protocolCodeLens_1 = __importDefault(__webpack_require__("../../node_modules/.pnpm/vscode-languageclient@11.0.1/node_modules/vscode-languageclient/lib/common/protocolCodeLens.js"));
+const protocolDocumentLink_1 = __importDefault(__webpack_require__("../../node_modules/.pnpm/vscode-languageclient@11.0.1/node_modules/vscode-languageclient/lib/common/protocolDocumentLink.js"));
+const protocolCodeAction_1 = __importDefault(__webpack_require__("../../node_modules/.pnpm/vscode-languageclient@11.0.1/node_modules/vscode-languageclient/lib/common/protocolCodeAction.js"));
+const protocolDiagnostic_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageclient@11.0.1/node_modules/vscode-languageclient/lib/common/protocolDiagnostic.js");
+const protocolCallHierarchyItem_1 = __importDefault(__webpack_require__("../../node_modules/.pnpm/vscode-languageclient@11.0.1/node_modules/vscode-languageclient/lib/common/protocolCallHierarchyItem.js"));
+const protocolTypeHierarchyItem_1 = __importDefault(__webpack_require__("../../node_modules/.pnpm/vscode-languageclient@11.0.1/node_modules/vscode-languageclient/lib/common/protocolTypeHierarchyItem.js"));
+const protocolWorkspaceSymbol_1 = __importDefault(__webpack_require__("../../node_modules/.pnpm/vscode-languageclient@11.0.1/node_modules/vscode-languageclient/lib/common/protocolWorkspaceSymbol.js"));
+const protocolInlayHint_1 = __importDefault(__webpack_require__("../../node_modules/.pnpm/vscode-languageclient@11.0.1/node_modules/vscode-languageclient/lib/common/protocolInlayHint.js"));
 var InsertReplaceRange;
 (function (InsertReplaceRange) {
     function is(value) {
@@ -8417,7 +8429,7 @@ function createConverter(uriConverter) {
         return result;
     }
     function asFormattingOptions(options, fileOptions) {
-        const result = { tabSize: options.tabSize, insertSpaces: options.insertSpaces };
+        const result = { ...options };
         if (fileOptions.trimTrailingWhitespace) {
             result.trimTrailingWhitespace = true;
         }
@@ -8616,7 +8628,7 @@ function createConverter(uriConverter) {
 
 
 },
-"../../node_modules/.pnpm/vscode-languageclient@11.0.0/node_modules/vscode-languageclient/lib/common/codeLens.js"(__unused_rspack_module, exports, __webpack_require__) {
+"../../node_modules/.pnpm/vscode-languageclient@11.0.1/node_modules/vscode-languageclient/lib/common/codeLens.js"(__unused_rspack_module, exports, __webpack_require__) {
 var __rspack_unused_export;
 
 /* --------------------------------------------------------------------------------------------
@@ -8626,8 +8638,8 @@ var __rspack_unused_export;
 __rspack_unused_export = ({ value: true });
 exports.CodeLensFeature = void 0;
 const vscode_1 = __webpack_require__("vscode");
-const vscode_languageserver_protocol_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageserver-protocol@3.18.5/node_modules/vscode-languageserver-protocol/lib/common/api.js");
-const features_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageclient@11.0.0/node_modules/vscode-languageclient/lib/common/features.js");
+const vscode_languageserver_protocol_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageserver-protocol@3.18.6/node_modules/vscode-languageserver-protocol/lib/common/api.js");
+const features_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageclient@11.0.1/node_modules/vscode-languageclient/lib/common/features.js");
 class CodeLensFeature extends features_1.TextDocumentLanguageFeature {
     constructor(client) {
         super(client, vscode_languageserver_protocol_1.CodeLensRequest.type);
@@ -8700,7 +8712,7 @@ exports.CodeLensFeature = CodeLensFeature;
 
 
 },
-"../../node_modules/.pnpm/vscode-languageclient@11.0.0/node_modules/vscode-languageclient/lib/common/colorProvider.js"(__unused_rspack_module, exports, __webpack_require__) {
+"../../node_modules/.pnpm/vscode-languageclient@11.0.1/node_modules/vscode-languageclient/lib/common/colorProvider.js"(__unused_rspack_module, exports, __webpack_require__) {
 var __rspack_unused_export;
 
 /* --------------------------------------------------------------------------------------------
@@ -8710,8 +8722,8 @@ var __rspack_unused_export;
 __rspack_unused_export = ({ value: true });
 exports.ColorProviderFeature = void 0;
 const vscode_1 = __webpack_require__("vscode");
-const vscode_languageserver_protocol_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageserver-protocol@3.18.5/node_modules/vscode-languageserver-protocol/lib/common/api.js");
-const features_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageclient@11.0.0/node_modules/vscode-languageclient/lib/common/features.js");
+const vscode_languageserver_protocol_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageserver-protocol@3.18.6/node_modules/vscode-languageserver-protocol/lib/common/api.js");
+const features_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageclient@11.0.1/node_modules/vscode-languageclient/lib/common/features.js");
 class ColorProviderFeature extends features_1.TextDocumentLanguageFeature {
     constructor(client) {
         super(client, vscode_languageserver_protocol_1.DocumentColorRequest.type);
@@ -8779,7 +8791,7 @@ exports.ColorProviderFeature = ColorProviderFeature;
 
 
 },
-"../../node_modules/.pnpm/vscode-languageclient@11.0.0/node_modules/vscode-languageclient/lib/common/completion.js"(__unused_rspack_module, exports, __webpack_require__) {
+"../../node_modules/.pnpm/vscode-languageclient@11.0.1/node_modules/vscode-languageclient/lib/common/completion.js"(__unused_rspack_module, exports, __webpack_require__) {
 var __rspack_unused_export;
 
 /* --------------------------------------------------------------------------------------------
@@ -8789,8 +8801,8 @@ var __rspack_unused_export;
 __rspack_unused_export = ({ value: true });
 exports.CompletionItemFeature = void 0;
 const vscode_1 = __webpack_require__("vscode");
-const vscode_languageserver_protocol_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageserver-protocol@3.18.5/node_modules/vscode-languageserver-protocol/lib/common/api.js");
-const features_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageclient@11.0.0/node_modules/vscode-languageclient/lib/common/features.js");
+const vscode_languageserver_protocol_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageserver-protocol@3.18.6/node_modules/vscode-languageserver-protocol/lib/common/api.js");
+const features_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageclient@11.0.1/node_modules/vscode-languageclient/lib/common/features.js");
 const SupportedCompletionItemKinds = [
     vscode_languageserver_protocol_1.CompletionItemKind.Text,
     vscode_languageserver_protocol_1.CompletionItemKind.Method,
@@ -8911,7 +8923,7 @@ exports.CompletionItemFeature = CompletionItemFeature;
 
 
 },
-"../../node_modules/.pnpm/vscode-languageclient@11.0.0/node_modules/vscode-languageclient/lib/common/configuration.js"(__unused_rspack_module, exports, __webpack_require__) {
+"../../node_modules/.pnpm/vscode-languageclient@11.0.1/node_modules/vscode-languageclient/lib/common/configuration.js"(__unused_rspack_module, exports, __webpack_require__) {
 
 /* --------------------------------------------------------------------------------------------
  * Copyright (c) Microsoft Corporation. All rights reserved.
@@ -8954,9 +8966,9 @@ Object.defineProperty(exports, "__esModule", ({ value: true }));
 exports.SyncConfigurationFeature = exports.ConfigurationFeature = void 0;
 exports.toJSONObject = toJSONObject;
 const vscode_1 = __webpack_require__("vscode");
-const vscode_languageserver_protocol_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageserver-protocol@3.18.5/node_modules/vscode-languageserver-protocol/lib/common/api.js");
-const Is = __importStar(__webpack_require__("../../node_modules/.pnpm/vscode-languageclient@11.0.0/node_modules/vscode-languageclient/lib/common/utils/is.js"));
-const features_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageclient@11.0.0/node_modules/vscode-languageclient/lib/common/features.js");
+const vscode_languageserver_protocol_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageserver-protocol@3.18.6/node_modules/vscode-languageserver-protocol/lib/common/api.js");
+const Is = __importStar(__webpack_require__("../../node_modules/.pnpm/vscode-languageclient@11.0.1/node_modules/vscode-languageclient/lib/common/utils/is.js"));
+const features_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageclient@11.0.1/node_modules/vscode-languageclient/lib/common/features.js");
 /**
  * Configuration pull model. From server to client.
  */
@@ -9160,7 +9172,7 @@ exports.SyncConfigurationFeature = SyncConfigurationFeature;
 
 
 },
-"../../node_modules/.pnpm/vscode-languageclient@11.0.0/node_modules/vscode-languageclient/lib/common/declaration.js"(__unused_rspack_module, exports, __webpack_require__) {
+"../../node_modules/.pnpm/vscode-languageclient@11.0.1/node_modules/vscode-languageclient/lib/common/declaration.js"(__unused_rspack_module, exports, __webpack_require__) {
 var __rspack_unused_export;
 
 /* --------------------------------------------------------------------------------------------
@@ -9170,8 +9182,8 @@ var __rspack_unused_export;
 __rspack_unused_export = ({ value: true });
 exports.DeclarationFeature = void 0;
 const vscode_1 = __webpack_require__("vscode");
-const vscode_languageserver_protocol_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageserver-protocol@3.18.5/node_modules/vscode-languageserver-protocol/lib/common/api.js");
-const features_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageclient@11.0.0/node_modules/vscode-languageclient/lib/common/features.js");
+const vscode_languageserver_protocol_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageserver-protocol@3.18.6/node_modules/vscode-languageserver-protocol/lib/common/api.js");
+const features_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageclient@11.0.1/node_modules/vscode-languageclient/lib/common/features.js");
 class DeclarationFeature extends features_1.TextDocumentLanguageFeature {
     constructor(client) {
         super(client, vscode_languageserver_protocol_1.DeclarationRequest.type);
@@ -9219,7 +9231,7 @@ exports.DeclarationFeature = DeclarationFeature;
 
 
 },
-"../../node_modules/.pnpm/vscode-languageclient@11.0.0/node_modules/vscode-languageclient/lib/common/definition.js"(__unused_rspack_module, exports, __webpack_require__) {
+"../../node_modules/.pnpm/vscode-languageclient@11.0.1/node_modules/vscode-languageclient/lib/common/definition.js"(__unused_rspack_module, exports, __webpack_require__) {
 var __rspack_unused_export;
 
 /* --------------------------------------------------------------------------------------------
@@ -9229,8 +9241,8 @@ var __rspack_unused_export;
 __rspack_unused_export = ({ value: true });
 exports.DefinitionFeature = void 0;
 const vscode_1 = __webpack_require__("vscode");
-const vscode_languageserver_protocol_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageserver-protocol@3.18.5/node_modules/vscode-languageserver-protocol/lib/common/api.js");
-const features_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageclient@11.0.0/node_modules/vscode-languageclient/lib/common/features.js");
+const vscode_languageserver_protocol_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageserver-protocol@3.18.6/node_modules/vscode-languageserver-protocol/lib/common/api.js");
+const features_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageclient@11.0.1/node_modules/vscode-languageclient/lib/common/features.js");
 class DefinitionFeature extends features_1.TextDocumentLanguageFeature {
     constructor(client) {
         super(client, vscode_languageserver_protocol_1.DefinitionRequest.type);
@@ -9278,7 +9290,7 @@ exports.DefinitionFeature = DefinitionFeature;
 
 
 },
-"../../node_modules/.pnpm/vscode-languageclient@11.0.0/node_modules/vscode-languageclient/lib/common/diagnostic.js"(__unused_rspack_module, exports, __webpack_require__) {
+"../../node_modules/.pnpm/vscode-languageclient@11.0.1/node_modules/vscode-languageclient/lib/common/diagnostic.js"(__unused_rspack_module, exports, __webpack_require__) {
 
 /* --------------------------------------------------------------------------------------------
  * Copyright (c) Microsoft Corporation. All rights reserved.
@@ -9287,9 +9299,9 @@ exports.DefinitionFeature = DefinitionFeature;
 Object.defineProperty(exports, "__esModule", ({ value: true }));
 exports.DiagnosticFeature = exports.DiagnosticPullMode = exports.vsdiag = void 0;
 const vscode_1 = __webpack_require__("vscode");
-const vscode_languageserver_protocol_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageserver-protocol@3.18.5/node_modules/vscode-languageserver-protocol/lib/common/api.js");
-const globPattern_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageclient@11.0.0/node_modules/vscode-languageclient/lib/common/utils/globPattern.js");
-const features_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageclient@11.0.0/node_modules/vscode-languageclient/lib/common/features.js");
+const vscode_languageserver_protocol_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageserver-protocol@3.18.6/node_modules/vscode-languageserver-protocol/lib/common/api.js");
+const globPattern_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageclient@11.0.1/node_modules/vscode-languageclient/lib/common/utils/globPattern.js");
+const features_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageclient@11.0.1/node_modules/vscode-languageclient/lib/common/features.js");
 function ensure(target, key) {
     if (target[key] === void 0) {
         target[key] = {};
@@ -9588,6 +9600,7 @@ class DiagnosticRequestor {
             return;
         }
         this.pullWorkspaceAsync().then(() => {
+            this.workspaceErrorCounter = 0;
             this.workspaceTimeout = (0, vscode_languageserver_protocol_1.RAL)().timer.setTimeout(() => {
                 this.pullWorkspace();
             }, 2000);
@@ -9702,6 +9715,10 @@ class DiagnosticRequestor {
                     return converted;
                 };
                 const provideDiagnostics = (resultIds, token, resultReporter) => {
+                    // Check before registering the progress handler so the early return can't leak it.
+                    if (this.isDisposed === true || !this.client.isRunning()) {
+                        return { items: [] };
+                    }
                     const partialResultToken = (0, vscode_languageserver_protocol_1.RAL)().crypto.randomUUID();
                     const disposable = this.client.onProgress(vscode_languageserver_protocol_1.WorkspaceDiagnosticRequest.partialResult, partialResultToken, async (partialResult) => {
                         if (partialResult === undefined || partialResult === null) {
@@ -9716,7 +9733,7 @@ class DiagnosticRequestor {
                                 converted.items.push(await convertReport(item));
                             }
                             catch (error) {
-                                this.client.error(`Converting workspace diagnostics failed.`, error);
+                                this.client.error(`Converting workspace diagnostics failed.`, error, false);
                             }
                         }
                         resultReporter(converted);
@@ -9726,9 +9743,6 @@ class DiagnosticRequestor {
                         previousResultIds: convertPreviousResultIds(resultIds),
                         partialResultToken: partialResultToken
                     };
-                    if (this.isDisposed === true || !this.client.isRunning()) {
-                        return { items: [] };
-                    }
                     return this.client.sendRequest(vscode_languageserver_protocol_1.WorkspaceDiagnosticRequest.type, params, token).then(async (result) => {
                         if (token.isCancellationRequested) {
                             return { items: [] };
@@ -9737,14 +9751,20 @@ class DiagnosticRequestor {
                             items: []
                         };
                         for (const item of result.items) {
-                            converted.items.push(await convertReport(item));
+                            try {
+                                converted.items.push(await convertReport(item));
+                            }
+                            catch (error) {
+                                this.client.error(`Converting workspace diagnostics failed.`, error, false);
+                            }
                         }
-                        disposable.dispose();
                         resultReporter(converted);
                         return { items: [] };
                     }, (error) => {
+                        return this.client.handleFailedRequest(vscode_languageserver_protocol_1.WorkspaceDiagnosticRequest.type, token, error, { items: [] });
+                    }).finally(() => {
+                        // Runs on success, cancellation, and request failure.
                         disposable.dispose();
-                        return this.client.handleFailedRequest(vscode_languageserver_protocol_1.DocumentDiagnosticRequest.type, token, error, { items: [] });
                     });
                 };
                 const middleware = this.client.middleware;
@@ -10079,10 +10099,10 @@ class DiagnosticFeatureProviderImpl {
                         this.diagnosticRequestor.pull(cell.document, () => { this.backgroundScheduler.trigger(); });
                     }
                 }
-                // Moving cells changes the order of the notebook without changing the text
-                // or the URIs of the cells. Cell order can change the diagnostics of other
-                // cells when the server reports inter file dependencies.
-                if (options.interFileDependencies && event.cells?.structure !== undefined) {
+                // Text edits and cell order changes can affect other cells when the server
+                // reports inter file dependencies. Refresh them together instead of waiting
+                // for the background scheduler's per-document delay.
+                if (options.interFileDependencies && (textEvents.length > 0 || event.cells?.structure !== undefined)) {
                     for (const cell of event.notebook.getCells()) {
                         // Cells pulled above for this event do not need a second pull.
                         if (matchesCell(cell) && !pulledUris.has(cell.document.uri.toString())) {
@@ -10205,7 +10225,7 @@ exports.DiagnosticFeature = DiagnosticFeature;
 
 
 },
-"../../node_modules/.pnpm/vscode-languageclient@11.0.0/node_modules/vscode-languageclient/lib/common/documentHighlight.js"(__unused_rspack_module, exports, __webpack_require__) {
+"../../node_modules/.pnpm/vscode-languageclient@11.0.1/node_modules/vscode-languageclient/lib/common/documentHighlight.js"(__unused_rspack_module, exports, __webpack_require__) {
 var __rspack_unused_export;
 
 /* --------------------------------------------------------------------------------------------
@@ -10215,8 +10235,8 @@ var __rspack_unused_export;
 __rspack_unused_export = ({ value: true });
 exports.DocumentHighlightFeature = void 0;
 const vscode_1 = __webpack_require__("vscode");
-const vscode_languageserver_protocol_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageserver-protocol@3.18.5/node_modules/vscode-languageserver-protocol/lib/common/api.js");
-const features_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageclient@11.0.0/node_modules/vscode-languageclient/lib/common/features.js");
+const vscode_languageserver_protocol_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageserver-protocol@3.18.6/node_modules/vscode-languageserver-protocol/lib/common/api.js");
+const features_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageclient@11.0.1/node_modules/vscode-languageclient/lib/common/features.js");
 class DocumentHighlightFeature extends features_1.TextDocumentLanguageFeature {
     constructor(client) {
         super(client, vscode_languageserver_protocol_1.DocumentHighlightRequest.type);
@@ -10259,7 +10279,7 @@ exports.DocumentHighlightFeature = DocumentHighlightFeature;
 
 
 },
-"../../node_modules/.pnpm/vscode-languageclient@11.0.0/node_modules/vscode-languageclient/lib/common/documentLink.js"(__unused_rspack_module, exports, __webpack_require__) {
+"../../node_modules/.pnpm/vscode-languageclient@11.0.1/node_modules/vscode-languageclient/lib/common/documentLink.js"(__unused_rspack_module, exports, __webpack_require__) {
 var __rspack_unused_export;
 
 /* --------------------------------------------------------------------------------------------
@@ -10269,8 +10289,8 @@ var __rspack_unused_export;
 __rspack_unused_export = ({ value: true });
 exports.DocumentLinkFeature = void 0;
 const vscode_1 = __webpack_require__("vscode");
-const vscode_languageserver_protocol_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageserver-protocol@3.18.5/node_modules/vscode-languageserver-protocol/lib/common/api.js");
-const features_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageclient@11.0.0/node_modules/vscode-languageclient/lib/common/features.js");
+const vscode_languageserver_protocol_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageserver-protocol@3.18.6/node_modules/vscode-languageserver-protocol/lib/common/api.js");
+const features_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageclient@11.0.1/node_modules/vscode-languageclient/lib/common/features.js");
 class DocumentLinkFeature extends features_1.TextDocumentLanguageFeature {
     constructor(client) {
         super(client, vscode_languageserver_protocol_1.DocumentLinkRequest.type);
@@ -10334,7 +10354,7 @@ exports.DocumentLinkFeature = DocumentLinkFeature;
 
 
 },
-"../../node_modules/.pnpm/vscode-languageclient@11.0.0/node_modules/vscode-languageclient/lib/common/documentSymbol.js"(__unused_rspack_module, exports, __webpack_require__) {
+"../../node_modules/.pnpm/vscode-languageclient@11.0.1/node_modules/vscode-languageclient/lib/common/documentSymbol.js"(__unused_rspack_module, exports, __webpack_require__) {
 var __rspack_unused_export;
 
 /* --------------------------------------------------------------------------------------------
@@ -10344,8 +10364,8 @@ var __rspack_unused_export;
 __rspack_unused_export = ({ value: true });
 exports.DocumentSymbolFeature = exports.SupportedSymbolTags = exports.SupportedSymbolKinds = void 0;
 const vscode_1 = __webpack_require__("vscode");
-const vscode_languageserver_protocol_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageserver-protocol@3.18.5/node_modules/vscode-languageserver-protocol/lib/common/api.js");
-const features_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageclient@11.0.0/node_modules/vscode-languageclient/lib/common/features.js");
+const vscode_languageserver_protocol_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageserver-protocol@3.18.6/node_modules/vscode-languageserver-protocol/lib/common/api.js");
+const features_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageclient@11.0.1/node_modules/vscode-languageclient/lib/common/features.js");
 exports.SupportedSymbolKinds = [
     vscode_languageserver_protocol_1.SymbolKind.File,
     vscode_languageserver_protocol_1.SymbolKind.Module,
@@ -10442,7 +10462,7 @@ exports.DocumentSymbolFeature = DocumentSymbolFeature;
 
 
 },
-"../../node_modules/.pnpm/vscode-languageclient@11.0.0/node_modules/vscode-languageclient/lib/common/executeCommand.js"(__unused_rspack_module, exports, __webpack_require__) {
+"../../node_modules/.pnpm/vscode-languageclient@11.0.1/node_modules/vscode-languageclient/lib/common/executeCommand.js"(__unused_rspack_module, exports, __webpack_require__) {
 var __rspack_unused_export;
 
 /* --------------------------------------------------------------------------------------------
@@ -10452,8 +10472,8 @@ var __rspack_unused_export;
 __rspack_unused_export = ({ value: true });
 exports.ExecuteCommandFeature = void 0;
 const vscode_1 = __webpack_require__("vscode");
-const vscode_languageserver_protocol_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageserver-protocol@3.18.5/node_modules/vscode-languageserver-protocol/lib/common/api.js");
-const features_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageclient@11.0.0/node_modules/vscode-languageclient/lib/common/features.js");
+const vscode_languageserver_protocol_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageserver-protocol@3.18.6/node_modules/vscode-languageserver-protocol/lib/common/api.js");
+const features_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageclient@11.0.1/node_modules/vscode-languageclient/lib/common/features.js");
 class ExecuteCommandFeature {
     _client;
     _commands;
@@ -10521,7 +10541,7 @@ exports.ExecuteCommandFeature = ExecuteCommandFeature;
 
 
 },
-"../../node_modules/.pnpm/vscode-languageclient@11.0.0/node_modules/vscode-languageclient/lib/common/features.js"(__unused_rspack_module, exports, __webpack_require__) {
+"../../node_modules/.pnpm/vscode-languageclient@11.0.1/node_modules/vscode-languageclient/lib/common/features.js"(__unused_rspack_module, exports, __webpack_require__) {
 
 /* --------------------------------------------------------------------------------------------
  * Copyright (c) Microsoft Corporation. All rights reserved.
@@ -10564,8 +10584,8 @@ Object.defineProperty(exports, "__esModule", ({ value: true }));
 exports.DefaultDiagnosticCollectionProvider = exports.DiagnosticCollectionSource = exports.WorkspaceFeature = exports.TextDocumentLanguageFeature = exports.TextDocumentEventFeature = exports.DynamicDocumentFeature = exports.DynamicFeature = exports.StaticFeature = exports.LSPCancellationError = void 0;
 exports.ensure = ensure;
 const vscode_1 = __webpack_require__("vscode");
-const vscode_languageserver_protocol_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageserver-protocol@3.18.5/node_modules/vscode-languageserver-protocol/lib/common/api.js");
-const Is = __importStar(__webpack_require__("../../node_modules/.pnpm/vscode-languageclient@11.0.0/node_modules/vscode-languageclient/lib/common/utils/is.js"));
+const vscode_languageserver_protocol_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageserver-protocol@3.18.6/node_modules/vscode-languageserver-protocol/lib/common/api.js");
+const Is = __importStar(__webpack_require__("../../node_modules/.pnpm/vscode-languageclient@11.0.1/node_modules/vscode-languageclient/lib/common/utils/is.js"));
 class LSPCancellationError extends vscode_1.CancellationError {
     data;
     constructor(data) {
@@ -10898,7 +10918,7 @@ exports.DefaultDiagnosticCollectionProvider = DefaultDiagnosticCollectionProvide
 
 
 },
-"../../node_modules/.pnpm/vscode-languageclient@11.0.0/node_modules/vscode-languageclient/lib/common/fileOperations.js"(__unused_rspack_module, exports, __webpack_require__) {
+"../../node_modules/.pnpm/vscode-languageclient@11.0.1/node_modules/vscode-languageclient/lib/common/fileOperations.js"(__unused_rspack_module, exports, __webpack_require__) {
 
 /* --------------------------------------------------------------------------------------------
  * Copyright (c) Microsoft Corporation. All rights reserved.
@@ -10941,7 +10961,7 @@ Object.defineProperty(exports, "__esModule", ({ value: true }));
 exports.WillDeleteFilesFeature = exports.WillRenameFilesFeature = exports.WillCreateFilesFeature = exports.DidDeleteFilesFeature = exports.DidRenameFilesFeature = exports.DidCreateFilesFeature = void 0;
 const code = __importStar(__webpack_require__("vscode"));
 const minimatch = __importStar(__webpack_require__("../../node_modules/.pnpm/minimatch@10.2.6/node_modules/minimatch/dist/commonjs/index.js"));
-const proto = __importStar(__webpack_require__("../../node_modules/.pnpm/vscode-languageserver-protocol@3.18.5/node_modules/vscode-languageserver-protocol/lib/common/api.js"));
+const proto = __importStar(__webpack_require__("../../node_modules/.pnpm/vscode-languageserver-protocol@3.18.6/node_modules/vscode-languageserver-protocol/lib/common/api.js"));
 function ensure(target, key) {
     if (target[key] === void 0) {
         target[key] = {};
@@ -11280,7 +11300,7 @@ exports.WillDeleteFilesFeature = WillDeleteFilesFeature;
 
 
 },
-"../../node_modules/.pnpm/vscode-languageclient@11.0.0/node_modules/vscode-languageclient/lib/common/fileSystemWatcher.js"(__unused_rspack_module, exports, __webpack_require__) {
+"../../node_modules/.pnpm/vscode-languageclient@11.0.1/node_modules/vscode-languageclient/lib/common/fileSystemWatcher.js"(__unused_rspack_module, exports, __webpack_require__) {
 var __rspack_unused_export;
 
 /* --------------------------------------------------------------------------------------------
@@ -11290,8 +11310,8 @@ var __rspack_unused_export;
 __rspack_unused_export = ({ value: true });
 exports.FileSystemWatcherFeature = void 0;
 const vscode_1 = __webpack_require__("vscode");
-const vscode_languageserver_protocol_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageserver-protocol@3.18.5/node_modules/vscode-languageserver-protocol/lib/common/api.js");
-const features_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageclient@11.0.0/node_modules/vscode-languageclient/lib/common/features.js");
+const vscode_languageserver_protocol_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageserver-protocol@3.18.6/node_modules/vscode-languageserver-protocol/lib/common/api.js");
+const features_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageclient@11.0.1/node_modules/vscode-languageclient/lib/common/features.js");
 class FileSystemWatcherFeature {
     _client;
     _notifyFileEvent;
@@ -11386,7 +11406,7 @@ exports.FileSystemWatcherFeature = FileSystemWatcherFeature;
 
 
 },
-"../../node_modules/.pnpm/vscode-languageclient@11.0.0/node_modules/vscode-languageclient/lib/common/foldingRange.js"(__unused_rspack_module, exports, __webpack_require__) {
+"../../node_modules/.pnpm/vscode-languageclient@11.0.1/node_modules/vscode-languageclient/lib/common/foldingRange.js"(__unused_rspack_module, exports, __webpack_require__) {
 var __rspack_unused_export;
 
 /* --------------------------------------------------------------------------------------------
@@ -11396,8 +11416,8 @@ var __rspack_unused_export;
 __rspack_unused_export = ({ value: true });
 exports.FoldingRangeFeature = void 0;
 const vscode_1 = __webpack_require__("vscode");
-const vscode_languageserver_protocol_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageserver-protocol@3.18.5/node_modules/vscode-languageserver-protocol/lib/common/api.js");
-const features_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageclient@11.0.0/node_modules/vscode-languageclient/lib/common/features.js");
+const vscode_languageserver_protocol_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageserver-protocol@3.18.6/node_modules/vscode-languageserver-protocol/lib/common/api.js");
+const features_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageclient@11.0.1/node_modules/vscode-languageclient/lib/common/features.js");
 class FoldingRangeFeature extends features_1.TextDocumentLanguageFeature {
     constructor(client) {
         super(client, vscode_languageserver_protocol_1.FoldingRangeRequest.type);
@@ -11456,7 +11476,7 @@ exports.FoldingRangeFeature = FoldingRangeFeature;
 
 
 },
-"../../node_modules/.pnpm/vscode-languageclient@11.0.0/node_modules/vscode-languageclient/lib/common/formatting.js"(__unused_rspack_module, exports, __webpack_require__) {
+"../../node_modules/.pnpm/vscode-languageclient@11.0.1/node_modules/vscode-languageclient/lib/common/formatting.js"(__unused_rspack_module, exports, __webpack_require__) {
 var __rspack_unused_export;
 
 /* --------------------------------------------------------------------------------------------
@@ -11466,8 +11486,8 @@ var __rspack_unused_export;
 __rspack_unused_export = ({ value: true });
 exports.DocumentOnTypeFormattingFeature = exports.DocumentRangeFormattingFeature = exports.DocumentFormattingFeature = void 0;
 const vscode_1 = __webpack_require__("vscode");
-const vscode_languageserver_protocol_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageserver-protocol@3.18.5/node_modules/vscode-languageserver-protocol/lib/common/api.js");
-const features_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageclient@11.0.0/node_modules/vscode-languageclient/lib/common/features.js");
+const vscode_languageserver_protocol_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageserver-protocol@3.18.6/node_modules/vscode-languageserver-protocol/lib/common/api.js");
+const features_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageclient@11.0.1/node_modules/vscode-languageclient/lib/common/features.js");
 var FileFormattingOptions;
 (function (FileFormattingOptions) {
     function fromConfiguration(document) {
@@ -11642,7 +11662,7 @@ exports.DocumentOnTypeFormattingFeature = DocumentOnTypeFormattingFeature;
 
 
 },
-"../../node_modules/.pnpm/vscode-languageclient@11.0.0/node_modules/vscode-languageclient/lib/common/hover.js"(__unused_rspack_module, exports, __webpack_require__) {
+"../../node_modules/.pnpm/vscode-languageclient@11.0.1/node_modules/vscode-languageclient/lib/common/hover.js"(__unused_rspack_module, exports, __webpack_require__) {
 var __rspack_unused_export;
 
 /* --------------------------------------------------------------------------------------------
@@ -11652,8 +11672,8 @@ var __rspack_unused_export;
 __rspack_unused_export = ({ value: true });
 exports.HoverFeature = void 0;
 const vscode_1 = __webpack_require__("vscode");
-const vscode_languageserver_protocol_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageserver-protocol@3.18.5/node_modules/vscode-languageserver-protocol/lib/common/api.js");
-const features_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageclient@11.0.0/node_modules/vscode-languageclient/lib/common/features.js");
+const vscode_languageserver_protocol_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageserver-protocol@3.18.6/node_modules/vscode-languageserver-protocol/lib/common/api.js");
+const features_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageclient@11.0.1/node_modules/vscode-languageclient/lib/common/features.js");
 class HoverFeature extends features_1.TextDocumentLanguageFeature {
     constructor(client) {
         super(client, vscode_languageserver_protocol_1.HoverRequest.type);
@@ -11704,7 +11724,7 @@ exports.HoverFeature = HoverFeature;
 
 
 },
-"../../node_modules/.pnpm/vscode-languageclient@11.0.0/node_modules/vscode-languageclient/lib/common/implementation.js"(__unused_rspack_module, exports, __webpack_require__) {
+"../../node_modules/.pnpm/vscode-languageclient@11.0.1/node_modules/vscode-languageclient/lib/common/implementation.js"(__unused_rspack_module, exports, __webpack_require__) {
 var __rspack_unused_export;
 
 /* --------------------------------------------------------------------------------------------
@@ -11714,8 +11734,8 @@ var __rspack_unused_export;
 __rspack_unused_export = ({ value: true });
 exports.ImplementationFeature = void 0;
 const vscode_1 = __webpack_require__("vscode");
-const vscode_languageserver_protocol_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageserver-protocol@3.18.5/node_modules/vscode-languageserver-protocol/lib/common/api.js");
-const features_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageclient@11.0.0/node_modules/vscode-languageclient/lib/common/features.js");
+const vscode_languageserver_protocol_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageserver-protocol@3.18.6/node_modules/vscode-languageserver-protocol/lib/common/api.js");
+const features_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageclient@11.0.1/node_modules/vscode-languageclient/lib/common/features.js");
 class ImplementationFeature extends features_1.TextDocumentLanguageFeature {
     constructor(client) {
         super(client, vscode_languageserver_protocol_1.ImplementationRequest.type);
@@ -11763,7 +11783,7 @@ exports.ImplementationFeature = ImplementationFeature;
 
 
 },
-"../../node_modules/.pnpm/vscode-languageclient@11.0.0/node_modules/vscode-languageclient/lib/common/inlayHint.js"(__unused_rspack_module, exports, __webpack_require__) {
+"../../node_modules/.pnpm/vscode-languageclient@11.0.1/node_modules/vscode-languageclient/lib/common/inlayHint.js"(__unused_rspack_module, exports, __webpack_require__) {
 var __rspack_unused_export;
 
 /* --------------------------------------------------------------------------------------------
@@ -11773,8 +11793,8 @@ var __rspack_unused_export;
 __rspack_unused_export = ({ value: true });
 exports.InlayHintsFeature = void 0;
 const vscode_1 = __webpack_require__("vscode");
-const vscode_languageserver_protocol_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageserver-protocol@3.18.5/node_modules/vscode-languageserver-protocol/lib/common/api.js");
-const features_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageclient@11.0.0/node_modules/vscode-languageclient/lib/common/features.js");
+const vscode_languageserver_protocol_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageserver-protocol@3.18.6/node_modules/vscode-languageserver-protocol/lib/common/api.js");
+const features_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageclient@11.0.1/node_modules/vscode-languageclient/lib/common/features.js");
 class InlayHintsFeature extends features_1.TextDocumentLanguageFeature {
     constructor(client) {
         super(client, vscode_languageserver_protocol_1.InlayHintRequest.type);
@@ -11860,7 +11880,7 @@ exports.InlayHintsFeature = InlayHintsFeature;
 
 
 },
-"../../node_modules/.pnpm/vscode-languageclient@11.0.0/node_modules/vscode-languageclient/lib/common/inlineCompletion.js"(__unused_rspack_module, exports, __webpack_require__) {
+"../../node_modules/.pnpm/vscode-languageclient@11.0.1/node_modules/vscode-languageclient/lib/common/inlineCompletion.js"(__unused_rspack_module, exports, __webpack_require__) {
 var __rspack_unused_export;
 
 /* --------------------------------------------------------------------------------------------
@@ -11870,8 +11890,8 @@ var __rspack_unused_export;
 __rspack_unused_export = ({ value: true });
 exports.InlineCompletionItemFeature = void 0;
 const vscode_1 = __webpack_require__("vscode");
-const vscode_languageserver_protocol_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageserver-protocol@3.18.5/node_modules/vscode-languageserver-protocol/lib/common/api.js");
-const features_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageclient@11.0.0/node_modules/vscode-languageclient/lib/common/features.js");
+const vscode_languageserver_protocol_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageserver-protocol@3.18.6/node_modules/vscode-languageserver-protocol/lib/common/api.js");
+const features_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageclient@11.0.1/node_modules/vscode-languageclient/lib/common/features.js");
 class InlineCompletionItemFeature extends features_1.TextDocumentLanguageFeature {
     constructor(client) {
         super(client, vscode_languageserver_protocol_1.InlineCompletionRequest.type);
@@ -11918,7 +11938,7 @@ exports.InlineCompletionItemFeature = InlineCompletionItemFeature;
 
 
 },
-"../../node_modules/.pnpm/vscode-languageclient@11.0.0/node_modules/vscode-languageclient/lib/common/inlineValue.js"(__unused_rspack_module, exports, __webpack_require__) {
+"../../node_modules/.pnpm/vscode-languageclient@11.0.1/node_modules/vscode-languageclient/lib/common/inlineValue.js"(__unused_rspack_module, exports, __webpack_require__) {
 var __rspack_unused_export;
 
 /* --------------------------------------------------------------------------------------------
@@ -11928,8 +11948,8 @@ var __rspack_unused_export;
 __rspack_unused_export = ({ value: true });
 exports.InlineValueFeature = void 0;
 const vscode_1 = __webpack_require__("vscode");
-const vscode_languageserver_protocol_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageserver-protocol@3.18.5/node_modules/vscode-languageserver-protocol/lib/common/api.js");
-const features_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageclient@11.0.0/node_modules/vscode-languageclient/lib/common/features.js");
+const vscode_languageserver_protocol_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageserver-protocol@3.18.6/node_modules/vscode-languageserver-protocol/lib/common/api.js");
+const features_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageclient@11.0.1/node_modules/vscode-languageclient/lib/common/features.js");
 class InlineValueFeature extends features_1.TextDocumentLanguageFeature {
     constructor(client) {
         super(client, vscode_languageserver_protocol_1.InlineValueRequest.type);
@@ -11988,7 +12008,7 @@ exports.InlineValueFeature = InlineValueFeature;
 
 
 },
-"../../node_modules/.pnpm/vscode-languageclient@11.0.0/node_modules/vscode-languageclient/lib/common/linkedEditingRange.js"(__unused_rspack_module, exports, __webpack_require__) {
+"../../node_modules/.pnpm/vscode-languageclient@11.0.1/node_modules/vscode-languageclient/lib/common/linkedEditingRange.js"(__unused_rspack_module, exports, __webpack_require__) {
 
 /* --------------------------------------------------------------------------------------------
  * Copyright (c) Microsoft Corporation. All rights reserved.
@@ -12030,8 +12050,8 @@ var __importStar = (this && this.__importStar) || (function () {
 Object.defineProperty(exports, "__esModule", ({ value: true }));
 exports.LinkedEditingFeature = void 0;
 const code = __importStar(__webpack_require__("vscode"));
-const proto = __importStar(__webpack_require__("../../node_modules/.pnpm/vscode-languageserver-protocol@3.18.5/node_modules/vscode-languageserver-protocol/lib/common/api.js"));
-const features_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageclient@11.0.0/node_modules/vscode-languageclient/lib/common/features.js");
+const proto = __importStar(__webpack_require__("../../node_modules/.pnpm/vscode-languageserver-protocol@3.18.6/node_modules/vscode-languageserver-protocol/lib/common/api.js"));
+const features_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageclient@11.0.1/node_modules/vscode-languageclient/lib/common/features.js");
 class LinkedEditingFeature extends features_1.TextDocumentLanguageFeature {
     constructor(client) {
         super(client, proto.LinkedEditingRangeRequest.type);
@@ -12078,7 +12098,7 @@ exports.LinkedEditingFeature = LinkedEditingFeature;
 
 
 },
-"../../node_modules/.pnpm/vscode-languageclient@11.0.0/node_modules/vscode-languageclient/lib/common/notebook.js"(__unused_rspack_module, exports, __webpack_require__) {
+"../../node_modules/.pnpm/vscode-languageclient@11.0.1/node_modules/vscode-languageclient/lib/common/notebook.js"(__unused_rspack_module, exports, __webpack_require__) {
 
 /* --------------------------------------------------------------------------------------------
  * Copyright (c) Microsoft Corporation. All rights reserved.
@@ -12120,10 +12140,10 @@ var __importStar = (this && this.__importStar) || (function () {
 Object.defineProperty(exports, "__esModule", ({ value: true }));
 exports.NotebookDocumentSyncFeature = void 0;
 const vscode = __importStar(__webpack_require__("vscode"));
-const proto = __importStar(__webpack_require__("../../node_modules/.pnpm/vscode-languageserver-protocol@3.18.5/node_modules/vscode-languageserver-protocol/lib/common/api.js"));
-const vscode_languageserver_protocol_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageserver-protocol@3.18.5/node_modules/vscode-languageserver-protocol/lib/common/api.js");
-const Is = __importStar(__webpack_require__("../../node_modules/.pnpm/vscode-languageclient@11.0.0/node_modules/vscode-languageclient/lib/common/utils/is.js"));
-const globPattern_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageclient@11.0.0/node_modules/vscode-languageclient/lib/common/utils/globPattern.js");
+const proto = __importStar(__webpack_require__("../../node_modules/.pnpm/vscode-languageserver-protocol@3.18.6/node_modules/vscode-languageserver-protocol/lib/common/api.js"));
+const vscode_languageserver_protocol_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageserver-protocol@3.18.6/node_modules/vscode-languageserver-protocol/lib/common/api.js");
+const Is = __importStar(__webpack_require__("../../node_modules/.pnpm/vscode-languageclient@11.0.1/node_modules/vscode-languageclient/lib/common/utils/is.js"));
+const globPattern_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageclient@11.0.1/node_modules/vscode-languageclient/lib/common/utils/globPattern.js");
 function ensure(target, key) {
     if (target[key] === void 0) {
         target[key] = {};
@@ -13133,7 +13153,7 @@ exports.NotebookDocumentSyncFeature = NotebookDocumentSyncFeature;
 
 
 },
-"../../node_modules/.pnpm/vscode-languageclient@11.0.0/node_modules/vscode-languageclient/lib/common/progress.js"(__unused_rspack_module, exports, __webpack_require__) {
+"../../node_modules/.pnpm/vscode-languageclient@11.0.1/node_modules/vscode-languageclient/lib/common/progress.js"(__unused_rspack_module, exports, __webpack_require__) {
 var __rspack_unused_export;
 
 /* --------------------------------------------------------------------------------------------
@@ -13142,8 +13162,8 @@ var __rspack_unused_export;
  * ------------------------------------------------------------------------------------------ */
 __rspack_unused_export = ({ value: true });
 exports.ProgressFeature = void 0;
-const vscode_languageserver_protocol_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageserver-protocol@3.18.5/node_modules/vscode-languageserver-protocol/lib/common/api.js");
-const progressPart_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageclient@11.0.0/node_modules/vscode-languageclient/lib/common/progressPart.js");
+const vscode_languageserver_protocol_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageserver-protocol@3.18.6/node_modules/vscode-languageserver-protocol/lib/common/api.js");
+const progressPart_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageclient@11.0.1/node_modules/vscode-languageclient/lib/common/progressPart.js");
 function ensure(target, key) {
     if (target[key] === void 0) {
         target[key] = Object.create(null);
@@ -13184,7 +13204,7 @@ exports.ProgressFeature = ProgressFeature;
 
 
 },
-"../../node_modules/.pnpm/vscode-languageclient@11.0.0/node_modules/vscode-languageclient/lib/common/progressPart.js"(__unused_rspack_module, exports, __webpack_require__) {
+"../../node_modules/.pnpm/vscode-languageclient@11.0.1/node_modules/vscode-languageclient/lib/common/progressPart.js"(__unused_rspack_module, exports, __webpack_require__) {
 
 var __createBinding = (this && this.__createBinding) || (Object.create ? (function(o, m, k, k2) {
     if (k2 === undefined) k2 = k;
@@ -13226,8 +13246,8 @@ exports.ProgressPart = void 0;
  * Licensed under the MIT License. See License.txt in the project root for license information.
  * ------------------------------------------------------------------------------------------ */
 const vscode_1 = __webpack_require__("vscode");
-const vscode_languageserver_protocol_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageserver-protocol@3.18.5/node_modules/vscode-languageserver-protocol/lib/common/api.js");
-const Is = __importStar(__webpack_require__("../../node_modules/.pnpm/vscode-languageclient@11.0.0/node_modules/vscode-languageclient/lib/common/utils/is.js"));
+const vscode_languageserver_protocol_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageserver-protocol@3.18.6/node_modules/vscode-languageserver-protocol/lib/common/api.js");
+const Is = __importStar(__webpack_require__("../../node_modules/.pnpm/vscode-languageclient@11.0.1/node_modules/vscode-languageclient/lib/common/utils/is.js"));
 class ProgressPart {
     _client;
     _token;
@@ -13329,7 +13349,7 @@ exports.ProgressPart = ProgressPart;
 
 
 },
-"../../node_modules/.pnpm/vscode-languageclient@11.0.0/node_modules/vscode-languageclient/lib/common/protocolCallHierarchyItem.js"(__unused_rspack_module, exports, __webpack_require__) {
+"../../node_modules/.pnpm/vscode-languageclient@11.0.1/node_modules/vscode-languageclient/lib/common/protocolCallHierarchyItem.js"(__unused_rspack_module, exports, __webpack_require__) {
 
 /* --------------------------------------------------------------------------------------------
  * Copyright (c) Microsoft Corporation. All rights reserved.
@@ -13383,7 +13403,7 @@ exports["default"] = ProtocolCallHierarchyItem;
 
 
 },
-"../../node_modules/.pnpm/vscode-languageclient@11.0.0/node_modules/vscode-languageclient/lib/common/protocolCodeAction.js"(__unused_rspack_module, exports, __webpack_require__) {
+"../../node_modules/.pnpm/vscode-languageclient@11.0.1/node_modules/vscode-languageclient/lib/common/protocolCodeAction.js"(__unused_rspack_module, exports, __webpack_require__) {
 
 /* --------------------------------------------------------------------------------------------
  * Copyright (c) Microsoft Corporation. All rights reserved.
@@ -13435,7 +13455,7 @@ exports["default"] = ProtocolCodeAction;
 
 
 },
-"../../node_modules/.pnpm/vscode-languageclient@11.0.0/node_modules/vscode-languageclient/lib/common/protocolCodeLens.js"(__unused_rspack_module, exports, __webpack_require__) {
+"../../node_modules/.pnpm/vscode-languageclient@11.0.1/node_modules/vscode-languageclient/lib/common/protocolCodeLens.js"(__unused_rspack_module, exports, __webpack_require__) {
 
 /* --------------------------------------------------------------------------------------------
  * Copyright (c) Microsoft Corporation. All rights reserved.
@@ -13486,7 +13506,7 @@ exports["default"] = ProtocolCodeLens;
 
 
 },
-"../../node_modules/.pnpm/vscode-languageclient@11.0.0/node_modules/vscode-languageclient/lib/common/protocolCompletionItem.js"(__unused_rspack_module, exports, __webpack_require__) {
+"../../node_modules/.pnpm/vscode-languageclient@11.0.1/node_modules/vscode-languageclient/lib/common/protocolCompletionItem.js"(__unused_rspack_module, exports, __webpack_require__) {
 
 /* --------------------------------------------------------------------------------------------
  * Copyright (c) Microsoft Corporation. All rights reserved.
@@ -13542,7 +13562,7 @@ exports["default"] = ProtocolCompletionItem;
 
 
 },
-"../../node_modules/.pnpm/vscode-languageclient@11.0.0/node_modules/vscode-languageclient/lib/common/protocolConverter.js"(__unused_rspack_module, exports, __webpack_require__) {
+"../../node_modules/.pnpm/vscode-languageclient@11.0.1/node_modules/vscode-languageclient/lib/common/protocolConverter.js"(__unused_rspack_module, exports, __webpack_require__) {
 
 /* --------------------------------------------------------------------------------------------
  * Copyright (c) Microsoft Corporation. All rights reserved.
@@ -13588,19 +13608,19 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
 Object.defineProperty(exports, "__esModule", ({ value: true }));
 exports.createConverter = createConverter;
 const code = __importStar(__webpack_require__("vscode"));
-const ls = __importStar(__webpack_require__("../../node_modules/.pnpm/vscode-languageserver-protocol@3.18.5/node_modules/vscode-languageserver-protocol/lib/common/api.js"));
-const Is = __importStar(__webpack_require__("../../node_modules/.pnpm/vscode-languageclient@11.0.0/node_modules/vscode-languageclient/lib/common/utils/is.js"));
-const async = __importStar(__webpack_require__("../../node_modules/.pnpm/vscode-languageclient@11.0.0/node_modules/vscode-languageclient/lib/common/utils/async.js"));
-const protocolCompletionItem_1 = __importDefault(__webpack_require__("../../node_modules/.pnpm/vscode-languageclient@11.0.0/node_modules/vscode-languageclient/lib/common/protocolCompletionItem.js"));
-const protocolCodeLens_1 = __importDefault(__webpack_require__("../../node_modules/.pnpm/vscode-languageclient@11.0.0/node_modules/vscode-languageclient/lib/common/protocolCodeLens.js"));
-const protocolDocumentLink_1 = __importDefault(__webpack_require__("../../node_modules/.pnpm/vscode-languageclient@11.0.0/node_modules/vscode-languageclient/lib/common/protocolDocumentLink.js"));
-const protocolCodeAction_1 = __importDefault(__webpack_require__("../../node_modules/.pnpm/vscode-languageclient@11.0.0/node_modules/vscode-languageclient/lib/common/protocolCodeAction.js"));
-const protocolDiagnostic_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageclient@11.0.0/node_modules/vscode-languageclient/lib/common/protocolDiagnostic.js");
-const protocolCallHierarchyItem_1 = __importDefault(__webpack_require__("../../node_modules/.pnpm/vscode-languageclient@11.0.0/node_modules/vscode-languageclient/lib/common/protocolCallHierarchyItem.js"));
-const protocolTypeHierarchyItem_1 = __importDefault(__webpack_require__("../../node_modules/.pnpm/vscode-languageclient@11.0.0/node_modules/vscode-languageclient/lib/common/protocolTypeHierarchyItem.js"));
-const protocolWorkspaceSymbol_1 = __importDefault(__webpack_require__("../../node_modules/.pnpm/vscode-languageclient@11.0.0/node_modules/vscode-languageclient/lib/common/protocolWorkspaceSymbol.js"));
-const protocolInlayHint_1 = __importDefault(__webpack_require__("../../node_modules/.pnpm/vscode-languageclient@11.0.0/node_modules/vscode-languageclient/lib/common/protocolInlayHint.js"));
-const vscode_languageserver_protocol_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageserver-protocol@3.18.5/node_modules/vscode-languageserver-protocol/lib/common/api.js");
+const ls = __importStar(__webpack_require__("../../node_modules/.pnpm/vscode-languageserver-protocol@3.18.6/node_modules/vscode-languageserver-protocol/lib/common/api.js"));
+const Is = __importStar(__webpack_require__("../../node_modules/.pnpm/vscode-languageclient@11.0.1/node_modules/vscode-languageclient/lib/common/utils/is.js"));
+const async = __importStar(__webpack_require__("../../node_modules/.pnpm/vscode-languageclient@11.0.1/node_modules/vscode-languageclient/lib/common/utils/async.js"));
+const protocolCompletionItem_1 = __importDefault(__webpack_require__("../../node_modules/.pnpm/vscode-languageclient@11.0.1/node_modules/vscode-languageclient/lib/common/protocolCompletionItem.js"));
+const protocolCodeLens_1 = __importDefault(__webpack_require__("../../node_modules/.pnpm/vscode-languageclient@11.0.1/node_modules/vscode-languageclient/lib/common/protocolCodeLens.js"));
+const protocolDocumentLink_1 = __importDefault(__webpack_require__("../../node_modules/.pnpm/vscode-languageclient@11.0.1/node_modules/vscode-languageclient/lib/common/protocolDocumentLink.js"));
+const protocolCodeAction_1 = __importDefault(__webpack_require__("../../node_modules/.pnpm/vscode-languageclient@11.0.1/node_modules/vscode-languageclient/lib/common/protocolCodeAction.js"));
+const protocolDiagnostic_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageclient@11.0.1/node_modules/vscode-languageclient/lib/common/protocolDiagnostic.js");
+const protocolCallHierarchyItem_1 = __importDefault(__webpack_require__("../../node_modules/.pnpm/vscode-languageclient@11.0.1/node_modules/vscode-languageclient/lib/common/protocolCallHierarchyItem.js"));
+const protocolTypeHierarchyItem_1 = __importDefault(__webpack_require__("../../node_modules/.pnpm/vscode-languageclient@11.0.1/node_modules/vscode-languageclient/lib/common/protocolTypeHierarchyItem.js"));
+const protocolWorkspaceSymbol_1 = __importDefault(__webpack_require__("../../node_modules/.pnpm/vscode-languageclient@11.0.1/node_modules/vscode-languageclient/lib/common/protocolWorkspaceSymbol.js"));
+const protocolInlayHint_1 = __importDefault(__webpack_require__("../../node_modules/.pnpm/vscode-languageclient@11.0.1/node_modules/vscode-languageclient/lib/common/protocolInlayHint.js"));
+const vscode_languageserver_protocol_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageserver-protocol@3.18.6/node_modules/vscode-languageserver-protocol/lib/common/api.js");
 var CodeBlock;
 (function (CodeBlock) {
     function is(value) {
@@ -14779,7 +14799,7 @@ function createConverter(uriConverter, trustMarkdown, supportHtml, supportThemeI
 
 
 },
-"../../node_modules/.pnpm/vscode-languageclient@11.0.0/node_modules/vscode-languageclient/lib/common/protocolDiagnostic.js"(__unused_rspack_module, exports, __webpack_require__) {
+"../../node_modules/.pnpm/vscode-languageclient@11.0.1/node_modules/vscode-languageclient/lib/common/protocolDiagnostic.js"(__unused_rspack_module, exports, __webpack_require__) {
 
 /* --------------------------------------------------------------------------------------------
  * Copyright (c) Microsoft Corporation. All rights reserved.
@@ -14821,7 +14841,7 @@ var __importStar = (this && this.__importStar) || (function () {
 Object.defineProperty(exports, "__esModule", ({ value: true }));
 exports.ProtocolDiagnostic = exports.DiagnosticCode = void 0;
 const vscode = __importStar(__webpack_require__("vscode"));
-const Is = __importStar(__webpack_require__("../../node_modules/.pnpm/vscode-languageclient@11.0.0/node_modules/vscode-languageclient/lib/common/utils/is.js"));
+const Is = __importStar(__webpack_require__("../../node_modules/.pnpm/vscode-languageclient@11.0.1/node_modules/vscode-languageclient/lib/common/utils/is.js"));
 var DiagnosticCode;
 (function (DiagnosticCode) {
     function is(value) {
@@ -14843,7 +14863,7 @@ exports.ProtocolDiagnostic = ProtocolDiagnostic;
 
 
 },
-"../../node_modules/.pnpm/vscode-languageclient@11.0.0/node_modules/vscode-languageclient/lib/common/protocolDocumentLink.js"(__unused_rspack_module, exports, __webpack_require__) {
+"../../node_modules/.pnpm/vscode-languageclient@11.0.1/node_modules/vscode-languageclient/lib/common/protocolDocumentLink.js"(__unused_rspack_module, exports, __webpack_require__) {
 
 /* --------------------------------------------------------------------------------------------
  * Copyright (c) Microsoft Corporation. All rights reserved.
@@ -14894,7 +14914,7 @@ exports["default"] = ProtocolDocumentLink;
 
 
 },
-"../../node_modules/.pnpm/vscode-languageclient@11.0.0/node_modules/vscode-languageclient/lib/common/protocolInlayHint.js"(__unused_rspack_module, exports, __webpack_require__) {
+"../../node_modules/.pnpm/vscode-languageclient@11.0.1/node_modules/vscode-languageclient/lib/common/protocolInlayHint.js"(__unused_rspack_module, exports, __webpack_require__) {
 
 /* --------------------------------------------------------------------------------------------
  * Copyright (c) Microsoft Corporation. All rights reserved.
@@ -14945,7 +14965,7 @@ exports["default"] = ProtocolInlayHint;
 
 
 },
-"../../node_modules/.pnpm/vscode-languageclient@11.0.0/node_modules/vscode-languageclient/lib/common/protocolTypeHierarchyItem.js"(__unused_rspack_module, exports, __webpack_require__) {
+"../../node_modules/.pnpm/vscode-languageclient@11.0.1/node_modules/vscode-languageclient/lib/common/protocolTypeHierarchyItem.js"(__unused_rspack_module, exports, __webpack_require__) {
 
 /* --------------------------------------------------------------------------------------------
  * Copyright (c) Microsoft Corporation. All rights reserved.
@@ -14999,7 +15019,7 @@ exports["default"] = ProtocolTypeHierarchyItem;
 
 
 },
-"../../node_modules/.pnpm/vscode-languageclient@11.0.0/node_modules/vscode-languageclient/lib/common/protocolWorkspaceSymbol.js"(__unused_rspack_module, exports, __webpack_require__) {
+"../../node_modules/.pnpm/vscode-languageclient@11.0.1/node_modules/vscode-languageclient/lib/common/protocolWorkspaceSymbol.js"(__unused_rspack_module, exports, __webpack_require__) {
 
 /* --------------------------------------------------------------------------------------------
  * Copyright (c) Microsoft Corporation. All rights reserved.
@@ -15056,7 +15076,7 @@ exports["default"] = WorkspaceSymbol;
 
 
 },
-"../../node_modules/.pnpm/vscode-languageclient@11.0.0/node_modules/vscode-languageclient/lib/common/reference.js"(__unused_rspack_module, exports, __webpack_require__) {
+"../../node_modules/.pnpm/vscode-languageclient@11.0.1/node_modules/vscode-languageclient/lib/common/reference.js"(__unused_rspack_module, exports, __webpack_require__) {
 var __rspack_unused_export;
 
 /* --------------------------------------------------------------------------------------------
@@ -15066,8 +15086,8 @@ var __rspack_unused_export;
 __rspack_unused_export = ({ value: true });
 exports.ReferencesFeature = void 0;
 const vscode_1 = __webpack_require__("vscode");
-const vscode_languageserver_protocol_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageserver-protocol@3.18.5/node_modules/vscode-languageserver-protocol/lib/common/api.js");
-const features_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageclient@11.0.0/node_modules/vscode-languageclient/lib/common/features.js");
+const vscode_languageserver_protocol_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageserver-protocol@3.18.6/node_modules/vscode-languageserver-protocol/lib/common/api.js");
+const features_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageclient@11.0.1/node_modules/vscode-languageclient/lib/common/features.js");
 class ReferencesFeature extends features_1.TextDocumentLanguageFeature {
     constructor(client) {
         super(client, vscode_languageserver_protocol_1.ReferencesRequest.type);
@@ -15113,7 +15133,7 @@ exports.ReferencesFeature = ReferencesFeature;
 
 
 },
-"../../node_modules/.pnpm/vscode-languageclient@11.0.0/node_modules/vscode-languageclient/lib/common/rename.js"(__unused_rspack_module, exports, __webpack_require__) {
+"../../node_modules/.pnpm/vscode-languageclient@11.0.1/node_modules/vscode-languageclient/lib/common/rename.js"(__unused_rspack_module, exports, __webpack_require__) {
 
 /* --------------------------------------------------------------------------------------------
  * Copyright (c) Microsoft Corporation. All rights reserved.
@@ -15155,9 +15175,9 @@ var __importStar = (this && this.__importStar) || (function () {
 Object.defineProperty(exports, "__esModule", ({ value: true }));
 exports.RenameFeature = void 0;
 const vscode_1 = __webpack_require__("vscode");
-const vscode_languageserver_protocol_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageserver-protocol@3.18.5/node_modules/vscode-languageserver-protocol/lib/common/api.js");
-const Is = __importStar(__webpack_require__("../../node_modules/.pnpm/vscode-languageclient@11.0.0/node_modules/vscode-languageclient/lib/common/utils/is.js"));
-const features_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageclient@11.0.0/node_modules/vscode-languageclient/lib/common/features.js");
+const vscode_languageserver_protocol_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageserver-protocol@3.18.6/node_modules/vscode-languageserver-protocol/lib/common/api.js");
+const Is = __importStar(__webpack_require__("../../node_modules/.pnpm/vscode-languageclient@11.0.1/node_modules/vscode-languageclient/lib/common/utils/is.js"));
+const features_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageclient@11.0.1/node_modules/vscode-languageclient/lib/common/features.js");
 class RenameFeature extends features_1.TextDocumentLanguageFeature {
     constructor(client) {
         super(client, vscode_languageserver_protocol_1.RenameRequest.type);
@@ -15272,7 +15292,7 @@ exports.RenameFeature = RenameFeature;
 
 
 },
-"../../node_modules/.pnpm/vscode-languageclient@11.0.0/node_modules/vscode-languageclient/lib/common/selectionRange.js"(__unused_rspack_module, exports, __webpack_require__) {
+"../../node_modules/.pnpm/vscode-languageclient@11.0.1/node_modules/vscode-languageclient/lib/common/selectionRange.js"(__unused_rspack_module, exports, __webpack_require__) {
 var __rspack_unused_export;
 
 /* --------------------------------------------------------------------------------------------
@@ -15282,8 +15302,8 @@ var __rspack_unused_export;
 __rspack_unused_export = ({ value: true });
 exports.SelectionRangeFeature = void 0;
 const vscode_1 = __webpack_require__("vscode");
-const vscode_languageserver_protocol_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageserver-protocol@3.18.5/node_modules/vscode-languageserver-protocol/lib/common/api.js");
-const features_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageclient@11.0.0/node_modules/vscode-languageclient/lib/common/features.js");
+const vscode_languageserver_protocol_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageserver-protocol@3.18.6/node_modules/vscode-languageserver-protocol/lib/common/api.js");
+const features_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageclient@11.0.1/node_modules/vscode-languageclient/lib/common/features.js");
 class SelectionRangeFeature extends features_1.TextDocumentLanguageFeature {
     constructor(client) {
         super(client, vscode_languageserver_protocol_1.SelectionRangeRequest.type);
@@ -15334,7 +15354,7 @@ exports.SelectionRangeFeature = SelectionRangeFeature;
 
 
 },
-"../../node_modules/.pnpm/vscode-languageclient@11.0.0/node_modules/vscode-languageclient/lib/common/semanticTokens.js"(__unused_rspack_module, exports, __webpack_require__) {
+"../../node_modules/.pnpm/vscode-languageclient@11.0.1/node_modules/vscode-languageclient/lib/common/semanticTokens.js"(__unused_rspack_module, exports, __webpack_require__) {
 
 /* --------------------------------------------------------------------------------------------
  * Copyright (c) Microsoft Corporation. All rights reserved.
@@ -15376,9 +15396,9 @@ var __importStar = (this && this.__importStar) || (function () {
 Object.defineProperty(exports, "__esModule", ({ value: true }));
 exports.SemanticTokensFeature = void 0;
 const vscode = __importStar(__webpack_require__("vscode"));
-const vscode_languageserver_protocol_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageserver-protocol@3.18.5/node_modules/vscode-languageserver-protocol/lib/common/api.js");
-const features_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageclient@11.0.0/node_modules/vscode-languageclient/lib/common/features.js");
-const Is = __importStar(__webpack_require__("../../node_modules/.pnpm/vscode-languageclient@11.0.0/node_modules/vscode-languageclient/lib/common/utils/is.js"));
+const vscode_languageserver_protocol_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageserver-protocol@3.18.6/node_modules/vscode-languageserver-protocol/lib/common/api.js");
+const features_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageclient@11.0.1/node_modules/vscode-languageclient/lib/common/features.js");
+const Is = __importStar(__webpack_require__("../../node_modules/.pnpm/vscode-languageclient@11.0.1/node_modules/vscode-languageclient/lib/common/utils/is.js"));
 class SemanticTokensFeature extends features_1.TextDocumentLanguageFeature {
     constructor(client) {
         super(client, vscode_languageserver_protocol_1.SemanticTokensRegistrationType.type);
@@ -15551,7 +15571,7 @@ exports.SemanticTokensFeature = SemanticTokensFeature;
 
 
 },
-"../../node_modules/.pnpm/vscode-languageclient@11.0.0/node_modules/vscode-languageclient/lib/common/signatureHelp.js"(__unused_rspack_module, exports, __webpack_require__) {
+"../../node_modules/.pnpm/vscode-languageclient@11.0.1/node_modules/vscode-languageclient/lib/common/signatureHelp.js"(__unused_rspack_module, exports, __webpack_require__) {
 var __rspack_unused_export;
 
 /* --------------------------------------------------------------------------------------------
@@ -15561,8 +15581,8 @@ var __rspack_unused_export;
 __rspack_unused_export = ({ value: true });
 exports.SignatureHelpFeature = void 0;
 const vscode_1 = __webpack_require__("vscode");
-const vscode_languageserver_protocol_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageserver-protocol@3.18.5/node_modules/vscode-languageserver-protocol/lib/common/api.js");
-const features_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageclient@11.0.0/node_modules/vscode-languageclient/lib/common/features.js");
+const vscode_languageserver_protocol_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageserver-protocol@3.18.6/node_modules/vscode-languageserver-protocol/lib/common/api.js");
+const features_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageclient@11.0.1/node_modules/vscode-languageclient/lib/common/features.js");
 class SignatureHelpFeature extends features_1.TextDocumentLanguageFeature {
     constructor(client) {
         super(client, vscode_languageserver_protocol_1.SignatureHelpRequest.type);
@@ -15627,7 +15647,7 @@ exports.SignatureHelpFeature = SignatureHelpFeature;
 
 
 },
-"../../node_modules/.pnpm/vscode-languageclient@11.0.0/node_modules/vscode-languageclient/lib/common/textDocumentContent.js"(__unused_rspack_module, exports, __webpack_require__) {
+"../../node_modules/.pnpm/vscode-languageclient@11.0.1/node_modules/vscode-languageclient/lib/common/textDocumentContent.js"(__unused_rspack_module, exports, __webpack_require__) {
 
 /* --------------------------------------------------------------------------------------------
  * Copyright (c) Microsoft Corporation. All rights reserved.
@@ -15669,8 +15689,8 @@ var __importStar = (this && this.__importStar) || (function () {
 Object.defineProperty(exports, "__esModule", ({ value: true }));
 exports.TextDocumentContentFeature = void 0;
 const vscode = __importStar(__webpack_require__("vscode"));
-const vscode_languageserver_protocol_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageserver-protocol@3.18.5/node_modules/vscode-languageserver-protocol/lib/common/api.js");
-const features_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageclient@11.0.0/node_modules/vscode-languageclient/lib/common/features.js");
+const vscode_languageserver_protocol_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageserver-protocol@3.18.6/node_modules/vscode-languageserver-protocol/lib/common/api.js");
+const features_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageclient@11.0.1/node_modules/vscode-languageclient/lib/common/features.js");
 class TextDocumentContentFeature {
     _client;
     _registrations = new Map();
@@ -15772,7 +15792,7 @@ exports.TextDocumentContentFeature = TextDocumentContentFeature;
 
 
 },
-"../../node_modules/.pnpm/vscode-languageclient@11.0.0/node_modules/vscode-languageclient/lib/common/textSynchronization.js"(__unused_rspack_module, exports, __webpack_require__) {
+"../../node_modules/.pnpm/vscode-languageclient@11.0.1/node_modules/vscode-languageclient/lib/common/textSynchronization.js"(__unused_rspack_module, exports, __webpack_require__) {
 var __rspack_unused_export;
 
 /* --------------------------------------------------------------------------------------------
@@ -15782,8 +15802,8 @@ var __rspack_unused_export;
 __rspack_unused_export = ({ value: true });
 exports.DidSaveTextDocumentFeature = exports.WillSaveWaitUntilFeature = exports.WillSaveFeature = exports.DidChangeTextDocumentFeature = exports.DidCloseTextDocumentFeature = exports.DidOpenTextDocumentFeature = void 0;
 const vscode_1 = __webpack_require__("vscode");
-const vscode_languageserver_protocol_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageserver-protocol@3.18.5/node_modules/vscode-languageserver-protocol/lib/common/api.js");
-const features_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageclient@11.0.0/node_modules/vscode-languageclient/lib/common/features.js");
+const vscode_languageserver_protocol_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageserver-protocol@3.18.6/node_modules/vscode-languageserver-protocol/lib/common/api.js");
+const features_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageclient@11.0.1/node_modules/vscode-languageclient/lib/common/features.js");
 const vscode_languageserver_textdocument_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageserver-textdocument@1.0.16/node_modules/vscode-languageserver-textdocument/lib/esm/main.js");
 class DidOpenTextDocumentFeature extends features_1.TextDocumentEventFeature {
     _syncedDocuments;
@@ -16443,7 +16463,7 @@ class TextDocumentSnapshot {
 
 
 },
-"../../node_modules/.pnpm/vscode-languageclient@11.0.0/node_modules/vscode-languageclient/lib/common/typeDefinition.js"(__unused_rspack_module, exports, __webpack_require__) {
+"../../node_modules/.pnpm/vscode-languageclient@11.0.1/node_modules/vscode-languageclient/lib/common/typeDefinition.js"(__unused_rspack_module, exports, __webpack_require__) {
 var __rspack_unused_export;
 
 /* --------------------------------------------------------------------------------------------
@@ -16453,8 +16473,8 @@ var __rspack_unused_export;
 __rspack_unused_export = ({ value: true });
 exports.TypeDefinitionFeature = void 0;
 const vscode_1 = __webpack_require__("vscode");
-const vscode_languageserver_protocol_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageserver-protocol@3.18.5/node_modules/vscode-languageserver-protocol/lib/common/api.js");
-const features_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageclient@11.0.0/node_modules/vscode-languageclient/lib/common/features.js");
+const vscode_languageserver_protocol_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageserver-protocol@3.18.6/node_modules/vscode-languageserver-protocol/lib/common/api.js");
+const features_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageclient@11.0.1/node_modules/vscode-languageclient/lib/common/features.js");
 class TypeDefinitionFeature extends features_1.TextDocumentLanguageFeature {
     constructor(client) {
         super(client, vscode_languageserver_protocol_1.TypeDefinitionRequest.type);
@@ -16503,7 +16523,7 @@ exports.TypeDefinitionFeature = TypeDefinitionFeature;
 
 
 },
-"../../node_modules/.pnpm/vscode-languageclient@11.0.0/node_modules/vscode-languageclient/lib/common/typeHierarchy.js"(__unused_rspack_module, exports, __webpack_require__) {
+"../../node_modules/.pnpm/vscode-languageclient@11.0.1/node_modules/vscode-languageclient/lib/common/typeHierarchy.js"(__unused_rspack_module, exports, __webpack_require__) {
 var __rspack_unused_export;
 
 /* --------------------------------------------------------------------------------------------
@@ -16513,8 +16533,8 @@ var __rspack_unused_export;
 __rspack_unused_export = ({ value: true });
 exports.TypeHierarchyFeature = void 0;
 const vscode_1 = __webpack_require__("vscode");
-const vscode_languageserver_protocol_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageserver-protocol@3.18.5/node_modules/vscode-languageserver-protocol/lib/common/api.js");
-const features_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageclient@11.0.0/node_modules/vscode-languageclient/lib/common/features.js");
+const vscode_languageserver_protocol_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageserver-protocol@3.18.6/node_modules/vscode-languageserver-protocol/lib/common/api.js");
+const features_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageclient@11.0.1/node_modules/vscode-languageclient/lib/common/features.js");
 class TypeHierarchyProvider {
     client;
     middleware;
@@ -16606,7 +16626,7 @@ exports.TypeHierarchyFeature = TypeHierarchyFeature;
 
 
 },
-"../../node_modules/.pnpm/vscode-languageclient@11.0.0/node_modules/vscode-languageclient/lib/common/utils/async.js"(__unused_rspack_module, exports, __webpack_require__) {
+"../../node_modules/.pnpm/vscode-languageclient@11.0.1/node_modules/vscode-languageclient/lib/common/utils/async.js"(__unused_rspack_module, exports, __webpack_require__) {
 
 /* --------------------------------------------------------------------------------------------
  * Copyright (c) Microsoft Corporation. All rights reserved.
@@ -16619,7 +16639,7 @@ exports.clearTestMode = clearTestMode;
 exports.map = map;
 exports.mapAsync = mapAsync;
 exports.forEach = forEach;
-const vscode_languageserver_protocol_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageserver-protocol@3.18.5/node_modules/vscode-languageserver-protocol/lib/common/api.js");
+const vscode_languageserver_protocol_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageserver-protocol@3.18.6/node_modules/vscode-languageserver-protocol/lib/common/api.js");
 class Delayer {
     defaultDelay;
     timeout;
@@ -16644,9 +16664,9 @@ class Delayer {
             }).then(() => {
                 this.completionPromise = undefined;
                 this.onSuccess = undefined;
-                const result = this.task();
+                const task = this.task;
                 this.task = undefined;
-                return result;
+                return task();
             });
         }
         if (delay >= 0 || this.timeout === void 0) {
@@ -16662,11 +16682,11 @@ class Delayer {
             return undefined;
         }
         this.cancelTimeout();
-        const result = this.task();
+        const task = this.task;
         this.completionPromise = undefined;
         this.onSuccess = undefined;
         this.task = undefined;
-        return result;
+        return task();
     }
     isTriggered() {
         return this.timeout !== undefined;
@@ -16914,7 +16934,7 @@ async function forEach(items, func, token, options) {
 
 
 },
-"../../node_modules/.pnpm/vscode-languageclient@11.0.0/node_modules/vscode-languageclient/lib/common/utils/globPattern.js"(__unused_rspack_module, exports, __webpack_require__) {
+"../../node_modules/.pnpm/vscode-languageclient@11.0.1/node_modules/vscode-languageclient/lib/common/utils/globPattern.js"(__unused_rspack_module, exports, __webpack_require__) {
 
 /* --------------------------------------------------------------------------------------------
  * Copyright (c) Microsoft Corporation. All rights reserved.
@@ -16980,7 +17000,7 @@ function matchGlobPattern(pattern, resource) {
 
 
 },
-"../../node_modules/.pnpm/vscode-languageclient@11.0.0/node_modules/vscode-languageclient/lib/common/utils/is.js"(__unused_rspack_module, exports) {
+"../../node_modules/.pnpm/vscode-languageclient@11.0.1/node_modules/vscode-languageclient/lib/common/utils/is.js"(__unused_rspack_module, exports) {
 
 /* --------------------------------------------------------------------------------------------
  * Copyright (c) Microsoft Corporation. All rights reserved.
@@ -17040,7 +17060,7 @@ function asPromise(value) {
 
 
 },
-"../../node_modules/.pnpm/vscode-languageclient@11.0.0/node_modules/vscode-languageclient/lib/common/workspaceFolder.js"(__unused_rspack_module, exports, __webpack_require__) {
+"../../node_modules/.pnpm/vscode-languageclient@11.0.1/node_modules/vscode-languageclient/lib/common/workspaceFolder.js"(__unused_rspack_module, exports, __webpack_require__) {
 var __rspack_unused_export;
 
 /* --------------------------------------------------------------------------------------------
@@ -17051,7 +17071,7 @@ __rspack_unused_export = ({ value: true });
 exports.WorkspaceFoldersFeature = void 0;
 __rspack_unused_export = arrayDiff;
 const vscode_1 = __webpack_require__("vscode");
-const vscode_languageserver_protocol_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageserver-protocol@3.18.5/node_modules/vscode-languageserver-protocol/lib/common/api.js");
+const vscode_languageserver_protocol_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageserver-protocol@3.18.6/node_modules/vscode-languageserver-protocol/lib/common/api.js");
 function access(target, key) {
     if (target === undefined || target === null) {
         return undefined;
@@ -17195,7 +17215,7 @@ exports.WorkspaceFoldersFeature = WorkspaceFoldersFeature;
 
 
 },
-"../../node_modules/.pnpm/vscode-languageclient@11.0.0/node_modules/vscode-languageclient/lib/common/workspaceSymbol.js"(__unused_rspack_module, exports, __webpack_require__) {
+"../../node_modules/.pnpm/vscode-languageclient@11.0.1/node_modules/vscode-languageclient/lib/common/workspaceSymbol.js"(__unused_rspack_module, exports, __webpack_require__) {
 var __rspack_unused_export;
 
 /* --------------------------------------------------------------------------------------------
@@ -17205,9 +17225,9 @@ var __rspack_unused_export;
 __rspack_unused_export = ({ value: true });
 exports.WorkspaceSymbolFeature = void 0;
 const vscode_1 = __webpack_require__("vscode");
-const vscode_languageserver_protocol_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageserver-protocol@3.18.5/node_modules/vscode-languageserver-protocol/lib/common/api.js");
-const features_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageclient@11.0.0/node_modules/vscode-languageclient/lib/common/features.js");
-const documentSymbol_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageclient@11.0.0/node_modules/vscode-languageclient/lib/common/documentSymbol.js");
+const vscode_languageserver_protocol_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageserver-protocol@3.18.6/node_modules/vscode-languageserver-protocol/lib/common/api.js");
+const features_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageclient@11.0.1/node_modules/vscode-languageclient/lib/common/features.js");
+const documentSymbol_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageclient@11.0.1/node_modules/vscode-languageclient/lib/common/documentSymbol.js");
 class WorkspaceSymbolFeature extends features_1.WorkspaceFeature {
     constructor(client) {
         super(client, vscode_languageserver_protocol_1.WorkspaceSymbolRequest.type);
@@ -17278,7 +17298,7 @@ exports.WorkspaceSymbolFeature = WorkspaceSymbolFeature;
 
 
 },
-"../../node_modules/.pnpm/vscode-languageclient@11.0.0/node_modules/vscode-languageclient/lib/node/main.js"(__unused_rspack_module, exports, __webpack_require__) {
+"../../node_modules/.pnpm/vscode-languageclient@11.0.1/node_modules/vscode-languageclient/lib/node/main.js"(__unused_rspack_module, exports, __webpack_require__) {
 
 /* --------------------------------------------------------------------------------------------
  * Copyright (c) Microsoft Corporation. All rights reserved.
@@ -17327,15 +17347,15 @@ const fs = __importStar(__webpack_require__("fs"));
 const path = __importStar(__webpack_require__("path"));
 const readline = __importStar(__webpack_require__("readline"));
 const vscode_1 = __webpack_require__("vscode");
-const Is = __importStar(__webpack_require__("../../node_modules/.pnpm/vscode-languageclient@11.0.0/node_modules/vscode-languageclient/lib/common/utils/is.js"));
-const client_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageclient@11.0.0/node_modules/vscode-languageclient/lib/common/client.js");
-const processes_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageclient@11.0.0/node_modules/vscode-languageclient/lib/node/processes.js");
-const node_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageserver-protocol@3.18.5/node_modules/vscode-languageserver-protocol/lib/node/main.js");
+const Is = __importStar(__webpack_require__("../../node_modules/.pnpm/vscode-languageclient@11.0.1/node_modules/vscode-languageclient/lib/common/utils/is.js"));
+const client_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageclient@11.0.1/node_modules/vscode-languageclient/lib/common/client.js");
+const processes_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageclient@11.0.1/node_modules/vscode-languageclient/lib/node/processes.js");
+const node_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageserver-protocol@3.18.6/node_modules/vscode-languageserver-protocol/lib/node/main.js");
 // Import SemVer functions individually to avoid circular dependencies in SemVer
 const semverParse = __webpack_require__("../../node_modules/.pnpm/semver@7.8.5/node_modules/semver/functions/parse.js");
 const semverSatisfies = __webpack_require__("../../node_modules/.pnpm/semver@7.8.5/node_modules/semver/functions/satisfies.js");
-__exportStar(__webpack_require__("../../node_modules/.pnpm/vscode-languageserver-protocol@3.18.5/node_modules/vscode-languageserver-protocol/lib/node/main.js"), exports);
-__exportStar(__webpack_require__("../../node_modules/.pnpm/vscode-languageclient@11.0.0/node_modules/vscode-languageclient/lib/common/api.js"), exports);
+__exportStar(__webpack_require__("../../node_modules/.pnpm/vscode-languageserver-protocol@3.18.6/node_modules/vscode-languageserver-protocol/lib/node/main.js"), exports);
+__exportStar(__webpack_require__("../../node_modules/.pnpm/vscode-languageclient@11.0.1/node_modules/vscode-languageclient/lib/common/api.js"), exports);
 const REQUIRED_VSCODE_VERSION = '^1.91.0'; // do not change format, updated by `updateVSCode` script
 var TransportKind;
 (function (TransportKind) {
@@ -17933,7 +17953,7 @@ function handleChildProcessStartError(process, message) {
 
 
 },
-"../../node_modules/.pnpm/vscode-languageclient@11.0.0/node_modules/vscode-languageclient/lib/node/processes.js"(__unused_rspack_module, exports, __webpack_require__) {
+"../../node_modules/.pnpm/vscode-languageclient@11.0.1/node_modules/vscode-languageclient/lib/node/processes.js"(__unused_rspack_module, exports, __webpack_require__) {
 
 /* --------------------------------------------------------------------------------------------
  * Copyright (c) Microsoft Corporation. All rights reserved.
@@ -18031,7 +18051,7 @@ terminateTree "${pid}"
 
 
 },
-"../../node_modules/.pnpm/vscode-languageserver-protocol@3.18.5/node_modules/vscode-languageserver-protocol/lib/common/api.js"(__unused_rspack_module, exports, __webpack_require__) {
+"../../node_modules/.pnpm/vscode-languageserver-protocol@3.18.6/node_modules/vscode-languageserver-protocol/lib/common/api.js"(__unused_rspack_module, exports, __webpack_require__) {
 
 /* --------------------------------------------------------------------------------------------
  * Copyright (c) Microsoft Corporation. All rights reserved.
@@ -18053,11 +18073,11 @@ var __exportStar = (this && this.__exportStar) || function(m, exports) {
 };
 Object.defineProperty(exports, "__esModule", ({ value: true }));
 exports.LSPErrorCodes = exports.createProtocolConnection = void 0;
-__exportStar(__webpack_require__("../../node_modules/.pnpm/vscode-jsonrpc@10.0.0/node_modules/vscode-jsonrpc/lib/common/api.js"), exports);
-__exportStar(__webpack_require__("../../node_modules/.pnpm/vscode-languageserver-types@3.18.5/node_modules/vscode-languageserver-types/lib/esm/main.js"), exports);
-__exportStar(__webpack_require__("../../node_modules/.pnpm/vscode-languageserver-protocol@3.18.5/node_modules/vscode-languageserver-protocol/lib/common/messages.js"), exports);
-__exportStar(__webpack_require__("../../node_modules/.pnpm/vscode-languageserver-protocol@3.18.5/node_modules/vscode-languageserver-protocol/lib/common/protocol.js"), exports);
-var connection_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageserver-protocol@3.18.5/node_modules/vscode-languageserver-protocol/lib/common/connection.js");
+__exportStar(__webpack_require__("../../node_modules/.pnpm/vscode-jsonrpc@10.0.1/node_modules/vscode-jsonrpc/lib/common/api.js"), exports);
+__exportStar(__webpack_require__("../../node_modules/.pnpm/vscode-languageserver-types@3.18.6/node_modules/vscode-languageserver-types/lib/esm/main.js"), exports);
+__exportStar(__webpack_require__("../../node_modules/.pnpm/vscode-languageserver-protocol@3.18.6/node_modules/vscode-languageserver-protocol/lib/common/messages.js"), exports);
+__exportStar(__webpack_require__("../../node_modules/.pnpm/vscode-languageserver-protocol@3.18.6/node_modules/vscode-languageserver-protocol/lib/common/protocol.js"), exports);
+var connection_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageserver-protocol@3.18.6/node_modules/vscode-languageserver-protocol/lib/common/connection.js");
 Object.defineProperty(exports, "createProtocolConnection", ({ enumerable: true, get: function () { return connection_1.createProtocolConnection; } }));
 var LSPErrorCodes;
 (function (LSPErrorCodes) {
@@ -18112,7 +18132,7 @@ var LSPErrorCodes;
 
 
 },
-"../../node_modules/.pnpm/vscode-languageserver-protocol@3.18.5/node_modules/vscode-languageserver-protocol/lib/common/connection.js"(__unused_rspack_module, exports, __webpack_require__) {
+"../../node_modules/.pnpm/vscode-languageserver-protocol@3.18.6/node_modules/vscode-languageserver-protocol/lib/common/connection.js"(__unused_rspack_module, exports, __webpack_require__) {
 
 /* --------------------------------------------------------------------------------------------
  * Copyright (c) Microsoft Corporation. All rights reserved.
@@ -18120,7 +18140,7 @@ var LSPErrorCodes;
  * ------------------------------------------------------------------------------------------ */
 Object.defineProperty(exports, "__esModule", ({ value: true }));
 exports.createProtocolConnection = createProtocolConnection;
-const vscode_jsonrpc_1 = __webpack_require__("../../node_modules/.pnpm/vscode-jsonrpc@10.0.0/node_modules/vscode-jsonrpc/lib/common/api.js");
+const vscode_jsonrpc_1 = __webpack_require__("../../node_modules/.pnpm/vscode-jsonrpc@10.0.1/node_modules/vscode-jsonrpc/lib/common/api.js");
 function createProtocolConnection(input, output, logger, options) {
     if (vscode_jsonrpc_1.ConnectionStrategy.is(options)) {
         options = { connectionStrategy: options };
@@ -18130,7 +18150,7 @@ function createProtocolConnection(input, output, logger, options) {
 
 
 },
-"../../node_modules/.pnpm/vscode-languageserver-protocol@3.18.5/node_modules/vscode-languageserver-protocol/lib/common/messages.js"(__unused_rspack_module, exports, __webpack_require__) {
+"../../node_modules/.pnpm/vscode-languageserver-protocol@3.18.6/node_modules/vscode-languageserver-protocol/lib/common/messages.js"(__unused_rspack_module, exports, __webpack_require__) {
 
 /* --------------------------------------------------------------------------------------------
  * Copyright (c) Microsoft Corporation. All rights reserved.
@@ -18138,7 +18158,7 @@ function createProtocolConnection(input, output, logger, options) {
  * ------------------------------------------------------------------------------------------ */
 Object.defineProperty(exports, "__esModule", ({ value: true }));
 exports.CM = exports.ProtocolNotificationType = exports.ProtocolNotificationType0 = exports.ProtocolRequestType = exports.ProtocolRequestType0 = exports.RegistrationType = exports.MessageDirection = void 0;
-const vscode_jsonrpc_1 = __webpack_require__("../../node_modules/.pnpm/vscode-jsonrpc@10.0.0/node_modules/vscode-jsonrpc/lib/common/api.js");
+const vscode_jsonrpc_1 = __webpack_require__("../../node_modules/.pnpm/vscode-jsonrpc@10.0.1/node_modules/vscode-jsonrpc/lib/common/api.js");
 var MessageDirection;
 (function (MessageDirection) {
     MessageDirection["clientToServer"] = "clientToServer";
@@ -18215,7 +18235,7 @@ var CM;
 
 
 },
-"../../node_modules/.pnpm/vscode-languageserver-protocol@3.18.5/node_modules/vscode-languageserver-protocol/lib/common/protocol.callHierarchy.js"(__unused_rspack_module, exports, __webpack_require__) {
+"../../node_modules/.pnpm/vscode-languageserver-protocol@3.18.6/node_modules/vscode-languageserver-protocol/lib/common/protocol.callHierarchy.js"(__unused_rspack_module, exports, __webpack_require__) {
 var __rspack_unused_export;
 
 /* --------------------------------------------------------------------------------------------
@@ -18224,7 +18244,7 @@ var __rspack_unused_export;
  * ------------------------------------------------------------------------------------------ */
 __rspack_unused_export = ({ value: true });
 exports.CallHierarchyOutgoingCallsRequest = exports.CallHierarchyIncomingCallsRequest = exports.CallHierarchyPrepareRequest = void 0;
-const messages_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageserver-protocol@3.18.5/node_modules/vscode-languageserver-protocol/lib/common/messages.js");
+const messages_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageserver-protocol@3.18.6/node_modules/vscode-languageserver-protocol/lib/common/messages.js");
 /**
  * A request to result a `CallHierarchyItem` in a document at a given position.
  * Can be used as an input to an incoming or outgoing call hierarchy.
@@ -18265,7 +18285,7 @@ var CallHierarchyOutgoingCallsRequest;
 
 
 },
-"../../node_modules/.pnpm/vscode-languageserver-protocol@3.18.5/node_modules/vscode-languageserver-protocol/lib/common/protocol.colorProvider.js"(__unused_rspack_module, exports, __webpack_require__) {
+"../../node_modules/.pnpm/vscode-languageserver-protocol@3.18.6/node_modules/vscode-languageserver-protocol/lib/common/protocol.colorProvider.js"(__unused_rspack_module, exports, __webpack_require__) {
 var __rspack_unused_export;
 
 /* --------------------------------------------------------------------------------------------
@@ -18274,7 +18294,7 @@ var __rspack_unused_export;
  * ------------------------------------------------------------------------------------------ */
 __rspack_unused_export = ({ value: true });
 exports.ColorPresentationRequest = exports.DocumentColorRequest = void 0;
-const messages_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageserver-protocol@3.18.5/node_modules/vscode-languageserver-protocol/lib/common/messages.js");
+const messages_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageserver-protocol@3.18.6/node_modules/vscode-languageserver-protocol/lib/common/messages.js");
 /**
  * A request to list all color symbols found in a given text document. The request's
  * parameter is of type {@link DocumentColorParams} the
@@ -18304,7 +18324,7 @@ var ColorPresentationRequest;
 
 
 },
-"../../node_modules/.pnpm/vscode-languageserver-protocol@3.18.5/node_modules/vscode-languageserver-protocol/lib/common/protocol.configuration.js"(__unused_rspack_module, exports, __webpack_require__) {
+"../../node_modules/.pnpm/vscode-languageserver-protocol@3.18.6/node_modules/vscode-languageserver-protocol/lib/common/protocol.configuration.js"(__unused_rspack_module, exports, __webpack_require__) {
 var __rspack_unused_export;
 
 /* --------------------------------------------------------------------------------------------
@@ -18313,7 +18333,7 @@ var __rspack_unused_export;
  * ------------------------------------------------------------------------------------------ */
 __rspack_unused_export = ({ value: true });
 exports.ConfigurationRequest = void 0;
-const messages_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageserver-protocol@3.18.5/node_modules/vscode-languageserver-protocol/lib/common/messages.js");
+const messages_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageserver-protocol@3.18.6/node_modules/vscode-languageserver-protocol/lib/common/messages.js");
 //---- Get Configuration request ----
 /**
  * The 'workspace/configuration' request is sent from the server to the client to fetch a certain
@@ -18334,7 +18354,7 @@ var ConfigurationRequest;
 
 
 },
-"../../node_modules/.pnpm/vscode-languageserver-protocol@3.18.5/node_modules/vscode-languageserver-protocol/lib/common/protocol.declaration.js"(__unused_rspack_module, exports, __webpack_require__) {
+"../../node_modules/.pnpm/vscode-languageserver-protocol@3.18.6/node_modules/vscode-languageserver-protocol/lib/common/protocol.declaration.js"(__unused_rspack_module, exports, __webpack_require__) {
 var __rspack_unused_export;
 
 /* --------------------------------------------------------------------------------------------
@@ -18343,7 +18363,7 @@ var __rspack_unused_export;
  * ------------------------------------------------------------------------------------------ */
 __rspack_unused_export = ({ value: true });
 exports.DeclarationRequest = void 0;
-const messages_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageserver-protocol@3.18.5/node_modules/vscode-languageserver-protocol/lib/common/messages.js");
+const messages_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageserver-protocol@3.18.6/node_modules/vscode-languageserver-protocol/lib/common/messages.js");
 // @ts-ignore: to avoid inlining LocationLink as dynamic import
 let __noDynamicImport;
 /**
@@ -18362,7 +18382,7 @@ var DeclarationRequest;
 
 
 },
-"../../node_modules/.pnpm/vscode-languageserver-protocol@3.18.5/node_modules/vscode-languageserver-protocol/lib/common/protocol.diagnostic.js"(__unused_rspack_module, exports, __webpack_require__) {
+"../../node_modules/.pnpm/vscode-languageserver-protocol@3.18.6/node_modules/vscode-languageserver-protocol/lib/common/protocol.diagnostic.js"(__unused_rspack_module, exports, __webpack_require__) {
 
 /* --------------------------------------------------------------------------------------------
  * Copyright (c) Microsoft Corporation. All rights reserved.
@@ -18403,9 +18423,9 @@ var __importStar = (this && this.__importStar) || (function () {
 })();
 Object.defineProperty(exports, "__esModule", ({ value: true }));
 exports.DiagnosticRefreshRequest = exports.WorkspaceDiagnosticRequest = exports.DocumentDiagnosticRequest = exports.DocumentDiagnosticReportKind = exports.DiagnosticServerCancellationData = void 0;
-const vscode_jsonrpc_1 = __webpack_require__("../../node_modules/.pnpm/vscode-jsonrpc@10.0.0/node_modules/vscode-jsonrpc/lib/common/api.js");
-const Is = __importStar(__webpack_require__("../../node_modules/.pnpm/vscode-languageserver-protocol@3.18.5/node_modules/vscode-languageserver-protocol/lib/common/utils/is.js"));
-const messages_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageserver-protocol@3.18.5/node_modules/vscode-languageserver-protocol/lib/common/messages.js");
+const vscode_jsonrpc_1 = __webpack_require__("../../node_modules/.pnpm/vscode-jsonrpc@10.0.1/node_modules/vscode-jsonrpc/lib/common/api.js");
+const Is = __importStar(__webpack_require__("../../node_modules/.pnpm/vscode-languageserver-protocol@3.18.6/node_modules/vscode-languageserver-protocol/lib/common/utils/is.js"));
+const messages_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageserver-protocol@3.18.6/node_modules/vscode-languageserver-protocol/lib/common/messages.js");
 /**
  * @since 3.17.0
  */
@@ -18477,7 +18497,7 @@ var DiagnosticRefreshRequest;
 
 
 },
-"../../node_modules/.pnpm/vscode-languageserver-protocol@3.18.5/node_modules/vscode-languageserver-protocol/lib/common/protocol.fileOperations.js"(__unused_rspack_module, exports, __webpack_require__) {
+"../../node_modules/.pnpm/vscode-languageserver-protocol@3.18.6/node_modules/vscode-languageserver-protocol/lib/common/protocol.fileOperations.js"(__unused_rspack_module, exports, __webpack_require__) {
 var __rspack_unused_export;
 
 /* --------------------------------------------------------------------------------------------
@@ -18486,7 +18506,7 @@ var __rspack_unused_export;
  * ------------------------------------------------------------------------------------------ */
 __rspack_unused_export = ({ value: true });
 exports.WillDeleteFilesRequest = exports.DidDeleteFilesNotification = exports.DidRenameFilesNotification = exports.WillRenameFilesRequest = exports.DidCreateFilesNotification = exports.WillCreateFilesRequest = exports.FileOperationPatternKind = void 0;
-const messages_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageserver-protocol@3.18.5/node_modules/vscode-languageserver-protocol/lib/common/messages.js");
+const messages_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageserver-protocol@3.18.6/node_modules/vscode-languageserver-protocol/lib/common/messages.js");
 /**
  * A pattern kind describing if a glob pattern matches a file a folder or
  * both.
@@ -18589,7 +18609,7 @@ var WillDeleteFilesRequest;
 
 
 },
-"../../node_modules/.pnpm/vscode-languageserver-protocol@3.18.5/node_modules/vscode-languageserver-protocol/lib/common/protocol.foldingRange.js"(__unused_rspack_module, exports, __webpack_require__) {
+"../../node_modules/.pnpm/vscode-languageserver-protocol@3.18.6/node_modules/vscode-languageserver-protocol/lib/common/protocol.foldingRange.js"(__unused_rspack_module, exports, __webpack_require__) {
 var __rspack_unused_export;
 
 /*---------------------------------------------------------------------------------------------
@@ -18598,7 +18618,7 @@ var __rspack_unused_export;
  *--------------------------------------------------------------------------------------------*/
 __rspack_unused_export = ({ value: true });
 exports.FoldingRangeRefreshRequest = exports.FoldingRangeRequest = void 0;
-const messages_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageserver-protocol@3.18.5/node_modules/vscode-languageserver-protocol/lib/common/messages.js");
+const messages_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageserver-protocol@3.18.6/node_modules/vscode-languageserver-protocol/lib/common/messages.js");
 /**
  * A request to provide folding ranges in a document. The request's
  * parameter is of type {@link FoldingRangeParams}, the
@@ -18627,7 +18647,7 @@ var FoldingRangeRefreshRequest;
 
 
 },
-"../../node_modules/.pnpm/vscode-languageserver-protocol@3.18.5/node_modules/vscode-languageserver-protocol/lib/common/protocol.implementation.js"(__unused_rspack_module, exports, __webpack_require__) {
+"../../node_modules/.pnpm/vscode-languageserver-protocol@3.18.6/node_modules/vscode-languageserver-protocol/lib/common/protocol.implementation.js"(__unused_rspack_module, exports, __webpack_require__) {
 var __rspack_unused_export;
 
 /* --------------------------------------------------------------------------------------------
@@ -18636,7 +18656,7 @@ var __rspack_unused_export;
  * ------------------------------------------------------------------------------------------ */
 __rspack_unused_export = ({ value: true });
 exports.ImplementationRequest = void 0;
-const messages_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageserver-protocol@3.18.5/node_modules/vscode-languageserver-protocol/lib/common/messages.js");
+const messages_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageserver-protocol@3.18.6/node_modules/vscode-languageserver-protocol/lib/common/messages.js");
 // @ts-ignore: to avoid inlining LocationLink as dynamic import
 let __noDynamicImport;
 /**
@@ -18654,7 +18674,7 @@ var ImplementationRequest;
 
 
 },
-"../../node_modules/.pnpm/vscode-languageserver-protocol@3.18.5/node_modules/vscode-languageserver-protocol/lib/common/protocol.inlayHint.js"(__unused_rspack_module, exports, __webpack_require__) {
+"../../node_modules/.pnpm/vscode-languageserver-protocol@3.18.6/node_modules/vscode-languageserver-protocol/lib/common/protocol.inlayHint.js"(__unused_rspack_module, exports, __webpack_require__) {
 var __rspack_unused_export;
 
 /*---------------------------------------------------------------------------------------------
@@ -18663,7 +18683,7 @@ var __rspack_unused_export;
  *--------------------------------------------------------------------------------------------*/
 __rspack_unused_export = ({ value: true });
 exports.InlayHintRefreshRequest = exports.InlayHintResolveRequest = exports.InlayHintRequest = void 0;
-const messages_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageserver-protocol@3.18.5/node_modules/vscode-languageserver-protocol/lib/common/messages.js");
+const messages_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageserver-protocol@3.18.6/node_modules/vscode-languageserver-protocol/lib/common/messages.js");
 /**
  * A request to provide inlay hints in a document. The request's parameter is of
  * type {@link InlayHintsParams}, the response is of type
@@ -18705,7 +18725,7 @@ var InlayHintRefreshRequest;
 
 
 },
-"../../node_modules/.pnpm/vscode-languageserver-protocol@3.18.5/node_modules/vscode-languageserver-protocol/lib/common/protocol.inlineCompletion.js"(__unused_rspack_module, exports, __webpack_require__) {
+"../../node_modules/.pnpm/vscode-languageserver-protocol@3.18.6/node_modules/vscode-languageserver-protocol/lib/common/protocol.inlineCompletion.js"(__unused_rspack_module, exports, __webpack_require__) {
 var __rspack_unused_export;
 
 /*---------------------------------------------------------------------------------------------
@@ -18714,7 +18734,7 @@ var __rspack_unused_export;
  *--------------------------------------------------------------------------------------------*/
 __rspack_unused_export = ({ value: true });
 exports.InlineCompletionRequest = void 0;
-const messages_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageserver-protocol@3.18.5/node_modules/vscode-languageserver-protocol/lib/common/messages.js");
+const messages_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageserver-protocol@3.18.6/node_modules/vscode-languageserver-protocol/lib/common/messages.js");
 /**
  * A request to provide inline completions in a document. The request's parameter is of
  * type {@link InlineCompletionParams}, the response is of type
@@ -18732,7 +18752,7 @@ var InlineCompletionRequest;
 
 
 },
-"../../node_modules/.pnpm/vscode-languageserver-protocol@3.18.5/node_modules/vscode-languageserver-protocol/lib/common/protocol.inlineValue.js"(__unused_rspack_module, exports, __webpack_require__) {
+"../../node_modules/.pnpm/vscode-languageserver-protocol@3.18.6/node_modules/vscode-languageserver-protocol/lib/common/protocol.inlineValue.js"(__unused_rspack_module, exports, __webpack_require__) {
 var __rspack_unused_export;
 
 /*---------------------------------------------------------------------------------------------
@@ -18741,7 +18761,7 @@ var __rspack_unused_export;
  *--------------------------------------------------------------------------------------------*/
 __rspack_unused_export = ({ value: true });
 exports.InlineValueRefreshRequest = exports.InlineValueRequest = void 0;
-const messages_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageserver-protocol@3.18.5/node_modules/vscode-languageserver-protocol/lib/common/messages.js");
+const messages_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageserver-protocol@3.18.6/node_modules/vscode-languageserver-protocol/lib/common/messages.js");
 /**
  * A request to provide inline values in a document. The request's parameter is of
  * type {@link InlineValueParams}, the response is of type
@@ -18769,7 +18789,7 @@ var InlineValueRefreshRequest;
 
 
 },
-"../../node_modules/.pnpm/vscode-languageserver-protocol@3.18.5/node_modules/vscode-languageserver-protocol/lib/common/protocol.js"(__unused_rspack_module, exports, __webpack_require__) {
+"../../node_modules/.pnpm/vscode-languageserver-protocol@3.18.6/node_modules/vscode-languageserver-protocol/lib/common/protocol.js"(__unused_rspack_module, exports, __webpack_require__) {
 
 /* --------------------------------------------------------------------------------------------
  * Copyright (c) Microsoft Corporation. All rights reserved.
@@ -18812,48 +18832,48 @@ Object.defineProperty(exports, "__esModule", ({ value: true }));
 exports.CodeActionRequest = exports.DocumentSymbolRequest = exports.DocumentHighlightRequest = exports.ReferencesRequest = exports.DefinitionRequest = exports.SignatureHelpRequest = exports.SignatureHelpTriggerKind = exports.HoverRequest = exports.CompletionResolveRequest = exports.CompletionRequest = exports.CompletionTriggerKind = exports.PublishDiagnosticsNotification = exports.WatchKind = exports.GlobPattern = exports.RelativePattern = exports.FileChangeType = exports.DidChangeWatchedFilesNotification = exports.WillSaveTextDocumentWaitUntilRequest = exports.WillSaveTextDocumentNotification = exports.TextDocumentSaveReason = exports.DidSaveTextDocumentNotification = exports.DidCloseTextDocumentNotification = exports.DidChangeTextDocumentNotification = exports.TextDocumentContentChangeEvent = exports.DidOpenTextDocumentNotification = exports.TextDocumentSyncKind = exports.TelemetryEventNotification = exports.LogMessageNotification = exports.ShowMessageRequest = exports.ShowMessageNotification = exports.MessageType = exports.DidChangeConfigurationNotification = exports.ExitNotification = exports.ShutdownRequest = exports.InitializedNotification = exports.InitializeErrorCodes = exports.InitializeRequest = exports.WorkDoneProgressOptions = exports.TextDocumentRegistrationOptions = exports.StaticRegistrationOptions = exports.PositionEncodingKind = exports.RegularExpressionEngineKind = exports.FailureHandlingKind = exports.ResourceOperationKind = exports.UnregistrationRequest = exports.RegistrationRequest = exports.DocumentSelector = exports.NotebookCellTextDocumentFilter = exports.NotebookDocumentFilter = exports.TextDocumentFilter = void 0;
 exports.UniquenessLevel = exports.WillDeleteFilesRequest = exports.DidDeleteFilesNotification = exports.WillRenameFilesRequest = exports.DidRenameFilesNotification = exports.WillCreateFilesRequest = exports.DidCreateFilesNotification = exports.FileOperationPatternKind = exports.LinkedEditingRangeRequest = exports.ShowDocumentRequest = exports.SemanticTokensRegistrationType = exports.SemanticTokensRefreshRequest = exports.SemanticTokensRangeRequest = exports.SemanticTokensDeltaRequest = exports.SemanticTokensRequest = exports.TokenFormat = exports.CallHierarchyPrepareRequest = exports.CallHierarchyOutgoingCallsRequest = exports.CallHierarchyIncomingCallsRequest = exports.WorkDoneProgressCancelNotification = exports.WorkDoneProgressCreateRequest = exports.WorkDoneProgress = exports.SelectionRangeRequest = exports.DeclarationRequest = exports.FoldingRangeRefreshRequest = exports.FoldingRangeRequest = exports.ColorPresentationRequest = exports.DocumentColorRequest = exports.ConfigurationRequest = exports.DidChangeWorkspaceFoldersNotification = exports.WorkspaceFoldersRequest = exports.TypeDefinitionRequest = exports.ImplementationRequest = exports.ApplyWorkspaceEditRequest = exports.ExecuteCommandRequest = exports.PrepareRenameRequest = exports.RenameRequest = exports.PrepareSupportDefaultBehavior = exports.DocumentOnTypeFormattingRequest = exports.DocumentRangesFormattingRequest = exports.DocumentRangeFormattingRequest = exports.DocumentFormattingRequest = exports.DocumentLinkResolveRequest = exports.DocumentLinkRequest = exports.CodeLensRefreshRequest = exports.CodeLensResolveRequest = exports.CodeLensRequest = exports.WorkspaceSymbolResolveRequest = exports.WorkspaceSymbolRequest = exports.CodeActionResolveRequest = void 0;
 exports.TextDocumentContentRefreshRequest = exports.TextDocumentContentRequest = exports.InlineCompletionRequest = exports.DidCloseNotebookDocumentNotification = exports.DidSaveNotebookDocumentNotification = exports.DidChangeNotebookDocumentNotification = exports.NotebookCellArrayChange = exports.DidOpenNotebookDocumentNotification = exports.NotebookDocumentSyncRegistrationType = exports.NotebookDocument = exports.NotebookCell = exports.ExecutionSummary = exports.NotebookCellKind = exports.DiagnosticRefreshRequest = exports.WorkspaceDiagnosticRequest = exports.DocumentDiagnosticRequest = exports.DocumentDiagnosticReportKind = exports.DiagnosticServerCancellationData = exports.InlayHintRefreshRequest = exports.InlayHintResolveRequest = exports.InlayHintRequest = exports.InlineValueRefreshRequest = exports.InlineValueRequest = exports.TypeHierarchySupertypesRequest = exports.TypeHierarchySubtypesRequest = exports.TypeHierarchyPrepareRequest = exports.MonikerRequest = exports.MonikerKind = void 0;
-const messages_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageserver-protocol@3.18.5/node_modules/vscode-languageserver-protocol/lib/common/messages.js");
-const vscode_languageserver_types_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageserver-types@3.18.5/node_modules/vscode-languageserver-types/lib/esm/main.js");
-const Is = __importStar(__webpack_require__("../../node_modules/.pnpm/vscode-languageserver-protocol@3.18.5/node_modules/vscode-languageserver-protocol/lib/common/utils/is.js"));
-const protocol_implementation_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageserver-protocol@3.18.5/node_modules/vscode-languageserver-protocol/lib/common/protocol.implementation.js");
+const messages_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageserver-protocol@3.18.6/node_modules/vscode-languageserver-protocol/lib/common/messages.js");
+const vscode_languageserver_types_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageserver-types@3.18.6/node_modules/vscode-languageserver-types/lib/esm/main.js");
+const Is = __importStar(__webpack_require__("../../node_modules/.pnpm/vscode-languageserver-protocol@3.18.6/node_modules/vscode-languageserver-protocol/lib/common/utils/is.js"));
+const protocol_implementation_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageserver-protocol@3.18.6/node_modules/vscode-languageserver-protocol/lib/common/protocol.implementation.js");
 Object.defineProperty(exports, "ImplementationRequest", ({ enumerable: true, get: function () { return protocol_implementation_1.ImplementationRequest; } }));
-const protocol_typeDefinition_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageserver-protocol@3.18.5/node_modules/vscode-languageserver-protocol/lib/common/protocol.typeDefinition.js");
+const protocol_typeDefinition_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageserver-protocol@3.18.6/node_modules/vscode-languageserver-protocol/lib/common/protocol.typeDefinition.js");
 Object.defineProperty(exports, "TypeDefinitionRequest", ({ enumerable: true, get: function () { return protocol_typeDefinition_1.TypeDefinitionRequest; } }));
-const protocol_workspaceFolder_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageserver-protocol@3.18.5/node_modules/vscode-languageserver-protocol/lib/common/protocol.workspaceFolder.js");
+const protocol_workspaceFolder_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageserver-protocol@3.18.6/node_modules/vscode-languageserver-protocol/lib/common/protocol.workspaceFolder.js");
 Object.defineProperty(exports, "WorkspaceFoldersRequest", ({ enumerable: true, get: function () { return protocol_workspaceFolder_1.WorkspaceFoldersRequest; } }));
 Object.defineProperty(exports, "DidChangeWorkspaceFoldersNotification", ({ enumerable: true, get: function () { return protocol_workspaceFolder_1.DidChangeWorkspaceFoldersNotification; } }));
-const protocol_configuration_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageserver-protocol@3.18.5/node_modules/vscode-languageserver-protocol/lib/common/protocol.configuration.js");
+const protocol_configuration_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageserver-protocol@3.18.6/node_modules/vscode-languageserver-protocol/lib/common/protocol.configuration.js");
 Object.defineProperty(exports, "ConfigurationRequest", ({ enumerable: true, get: function () { return protocol_configuration_1.ConfigurationRequest; } }));
-const protocol_colorProvider_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageserver-protocol@3.18.5/node_modules/vscode-languageserver-protocol/lib/common/protocol.colorProvider.js");
+const protocol_colorProvider_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageserver-protocol@3.18.6/node_modules/vscode-languageserver-protocol/lib/common/protocol.colorProvider.js");
 Object.defineProperty(exports, "DocumentColorRequest", ({ enumerable: true, get: function () { return protocol_colorProvider_1.DocumentColorRequest; } }));
 Object.defineProperty(exports, "ColorPresentationRequest", ({ enumerable: true, get: function () { return protocol_colorProvider_1.ColorPresentationRequest; } }));
-const protocol_foldingRange_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageserver-protocol@3.18.5/node_modules/vscode-languageserver-protocol/lib/common/protocol.foldingRange.js");
+const protocol_foldingRange_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageserver-protocol@3.18.6/node_modules/vscode-languageserver-protocol/lib/common/protocol.foldingRange.js");
 Object.defineProperty(exports, "FoldingRangeRequest", ({ enumerable: true, get: function () { return protocol_foldingRange_1.FoldingRangeRequest; } }));
 Object.defineProperty(exports, "FoldingRangeRefreshRequest", ({ enumerable: true, get: function () { return protocol_foldingRange_1.FoldingRangeRefreshRequest; } }));
-const protocol_declaration_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageserver-protocol@3.18.5/node_modules/vscode-languageserver-protocol/lib/common/protocol.declaration.js");
+const protocol_declaration_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageserver-protocol@3.18.6/node_modules/vscode-languageserver-protocol/lib/common/protocol.declaration.js");
 Object.defineProperty(exports, "DeclarationRequest", ({ enumerable: true, get: function () { return protocol_declaration_1.DeclarationRequest; } }));
-const protocol_selectionRange_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageserver-protocol@3.18.5/node_modules/vscode-languageserver-protocol/lib/common/protocol.selectionRange.js");
+const protocol_selectionRange_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageserver-protocol@3.18.6/node_modules/vscode-languageserver-protocol/lib/common/protocol.selectionRange.js");
 Object.defineProperty(exports, "SelectionRangeRequest", ({ enumerable: true, get: function () { return protocol_selectionRange_1.SelectionRangeRequest; } }));
-const protocol_progress_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageserver-protocol@3.18.5/node_modules/vscode-languageserver-protocol/lib/common/protocol.progress.js");
+const protocol_progress_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageserver-protocol@3.18.6/node_modules/vscode-languageserver-protocol/lib/common/protocol.progress.js");
 Object.defineProperty(exports, "WorkDoneProgress", ({ enumerable: true, get: function () { return protocol_progress_1.WorkDoneProgress; } }));
 Object.defineProperty(exports, "WorkDoneProgressCreateRequest", ({ enumerable: true, get: function () { return protocol_progress_1.WorkDoneProgressCreateRequest; } }));
 Object.defineProperty(exports, "WorkDoneProgressCancelNotification", ({ enumerable: true, get: function () { return protocol_progress_1.WorkDoneProgressCancelNotification; } }));
-const protocol_callHierarchy_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageserver-protocol@3.18.5/node_modules/vscode-languageserver-protocol/lib/common/protocol.callHierarchy.js");
+const protocol_callHierarchy_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageserver-protocol@3.18.6/node_modules/vscode-languageserver-protocol/lib/common/protocol.callHierarchy.js");
 Object.defineProperty(exports, "CallHierarchyIncomingCallsRequest", ({ enumerable: true, get: function () { return protocol_callHierarchy_1.CallHierarchyIncomingCallsRequest; } }));
 Object.defineProperty(exports, "CallHierarchyOutgoingCallsRequest", ({ enumerable: true, get: function () { return protocol_callHierarchy_1.CallHierarchyOutgoingCallsRequest; } }));
 Object.defineProperty(exports, "CallHierarchyPrepareRequest", ({ enumerable: true, get: function () { return protocol_callHierarchy_1.CallHierarchyPrepareRequest; } }));
-const protocol_semanticTokens_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageserver-protocol@3.18.5/node_modules/vscode-languageserver-protocol/lib/common/protocol.semanticTokens.js");
+const protocol_semanticTokens_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageserver-protocol@3.18.6/node_modules/vscode-languageserver-protocol/lib/common/protocol.semanticTokens.js");
 Object.defineProperty(exports, "TokenFormat", ({ enumerable: true, get: function () { return protocol_semanticTokens_1.TokenFormat; } }));
 Object.defineProperty(exports, "SemanticTokensRequest", ({ enumerable: true, get: function () { return protocol_semanticTokens_1.SemanticTokensRequest; } }));
 Object.defineProperty(exports, "SemanticTokensDeltaRequest", ({ enumerable: true, get: function () { return protocol_semanticTokens_1.SemanticTokensDeltaRequest; } }));
 Object.defineProperty(exports, "SemanticTokensRangeRequest", ({ enumerable: true, get: function () { return protocol_semanticTokens_1.SemanticTokensRangeRequest; } }));
 Object.defineProperty(exports, "SemanticTokensRefreshRequest", ({ enumerable: true, get: function () { return protocol_semanticTokens_1.SemanticTokensRefreshRequest; } }));
 Object.defineProperty(exports, "SemanticTokensRegistrationType", ({ enumerable: true, get: function () { return protocol_semanticTokens_1.SemanticTokensRegistrationType; } }));
-const protocol_showDocument_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageserver-protocol@3.18.5/node_modules/vscode-languageserver-protocol/lib/common/protocol.showDocument.js");
+const protocol_showDocument_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageserver-protocol@3.18.6/node_modules/vscode-languageserver-protocol/lib/common/protocol.showDocument.js");
 Object.defineProperty(exports, "ShowDocumentRequest", ({ enumerable: true, get: function () { return protocol_showDocument_1.ShowDocumentRequest; } }));
-const protocol_linkedEditingRange_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageserver-protocol@3.18.5/node_modules/vscode-languageserver-protocol/lib/common/protocol.linkedEditingRange.js");
+const protocol_linkedEditingRange_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageserver-protocol@3.18.6/node_modules/vscode-languageserver-protocol/lib/common/protocol.linkedEditingRange.js");
 Object.defineProperty(exports, "LinkedEditingRangeRequest", ({ enumerable: true, get: function () { return protocol_linkedEditingRange_1.LinkedEditingRangeRequest; } }));
-const protocol_fileOperations_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageserver-protocol@3.18.5/node_modules/vscode-languageserver-protocol/lib/common/protocol.fileOperations.js");
+const protocol_fileOperations_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageserver-protocol@3.18.6/node_modules/vscode-languageserver-protocol/lib/common/protocol.fileOperations.js");
 Object.defineProperty(exports, "FileOperationPatternKind", ({ enumerable: true, get: function () { return protocol_fileOperations_1.FileOperationPatternKind; } }));
 Object.defineProperty(exports, "DidCreateFilesNotification", ({ enumerable: true, get: function () { return protocol_fileOperations_1.DidCreateFilesNotification; } }));
 Object.defineProperty(exports, "WillCreateFilesRequest", ({ enumerable: true, get: function () { return protocol_fileOperations_1.WillCreateFilesRequest; } }));
@@ -18861,28 +18881,28 @@ Object.defineProperty(exports, "DidRenameFilesNotification", ({ enumerable: true
 Object.defineProperty(exports, "WillRenameFilesRequest", ({ enumerable: true, get: function () { return protocol_fileOperations_1.WillRenameFilesRequest; } }));
 Object.defineProperty(exports, "DidDeleteFilesNotification", ({ enumerable: true, get: function () { return protocol_fileOperations_1.DidDeleteFilesNotification; } }));
 Object.defineProperty(exports, "WillDeleteFilesRequest", ({ enumerable: true, get: function () { return protocol_fileOperations_1.WillDeleteFilesRequest; } }));
-const protocol_moniker_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageserver-protocol@3.18.5/node_modules/vscode-languageserver-protocol/lib/common/protocol.moniker.js");
+const protocol_moniker_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageserver-protocol@3.18.6/node_modules/vscode-languageserver-protocol/lib/common/protocol.moniker.js");
 Object.defineProperty(exports, "UniquenessLevel", ({ enumerable: true, get: function () { return protocol_moniker_1.UniquenessLevel; } }));
 Object.defineProperty(exports, "MonikerKind", ({ enumerable: true, get: function () { return protocol_moniker_1.MonikerKind; } }));
 Object.defineProperty(exports, "MonikerRequest", ({ enumerable: true, get: function () { return protocol_moniker_1.MonikerRequest; } }));
-const protocol_typeHierarchy_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageserver-protocol@3.18.5/node_modules/vscode-languageserver-protocol/lib/common/protocol.typeHierarchy.js");
+const protocol_typeHierarchy_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageserver-protocol@3.18.6/node_modules/vscode-languageserver-protocol/lib/common/protocol.typeHierarchy.js");
 Object.defineProperty(exports, "TypeHierarchyPrepareRequest", ({ enumerable: true, get: function () { return protocol_typeHierarchy_1.TypeHierarchyPrepareRequest; } }));
 Object.defineProperty(exports, "TypeHierarchySubtypesRequest", ({ enumerable: true, get: function () { return protocol_typeHierarchy_1.TypeHierarchySubtypesRequest; } }));
 Object.defineProperty(exports, "TypeHierarchySupertypesRequest", ({ enumerable: true, get: function () { return protocol_typeHierarchy_1.TypeHierarchySupertypesRequest; } }));
-const protocol_inlineValue_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageserver-protocol@3.18.5/node_modules/vscode-languageserver-protocol/lib/common/protocol.inlineValue.js");
+const protocol_inlineValue_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageserver-protocol@3.18.6/node_modules/vscode-languageserver-protocol/lib/common/protocol.inlineValue.js");
 Object.defineProperty(exports, "InlineValueRequest", ({ enumerable: true, get: function () { return protocol_inlineValue_1.InlineValueRequest; } }));
 Object.defineProperty(exports, "InlineValueRefreshRequest", ({ enumerable: true, get: function () { return protocol_inlineValue_1.InlineValueRefreshRequest; } }));
-const protocol_inlayHint_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageserver-protocol@3.18.5/node_modules/vscode-languageserver-protocol/lib/common/protocol.inlayHint.js");
+const protocol_inlayHint_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageserver-protocol@3.18.6/node_modules/vscode-languageserver-protocol/lib/common/protocol.inlayHint.js");
 Object.defineProperty(exports, "InlayHintRequest", ({ enumerable: true, get: function () { return protocol_inlayHint_1.InlayHintRequest; } }));
 Object.defineProperty(exports, "InlayHintResolveRequest", ({ enumerable: true, get: function () { return protocol_inlayHint_1.InlayHintResolveRequest; } }));
 Object.defineProperty(exports, "InlayHintRefreshRequest", ({ enumerable: true, get: function () { return protocol_inlayHint_1.InlayHintRefreshRequest; } }));
-const protocol_diagnostic_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageserver-protocol@3.18.5/node_modules/vscode-languageserver-protocol/lib/common/protocol.diagnostic.js");
+const protocol_diagnostic_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageserver-protocol@3.18.6/node_modules/vscode-languageserver-protocol/lib/common/protocol.diagnostic.js");
 Object.defineProperty(exports, "DiagnosticServerCancellationData", ({ enumerable: true, get: function () { return protocol_diagnostic_1.DiagnosticServerCancellationData; } }));
 Object.defineProperty(exports, "DocumentDiagnosticReportKind", ({ enumerable: true, get: function () { return protocol_diagnostic_1.DocumentDiagnosticReportKind; } }));
 Object.defineProperty(exports, "DocumentDiagnosticRequest", ({ enumerable: true, get: function () { return protocol_diagnostic_1.DocumentDiagnosticRequest; } }));
 Object.defineProperty(exports, "WorkspaceDiagnosticRequest", ({ enumerable: true, get: function () { return protocol_diagnostic_1.WorkspaceDiagnosticRequest; } }));
 Object.defineProperty(exports, "DiagnosticRefreshRequest", ({ enumerable: true, get: function () { return protocol_diagnostic_1.DiagnosticRefreshRequest; } }));
-const protocol_notebook_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageserver-protocol@3.18.5/node_modules/vscode-languageserver-protocol/lib/common/protocol.notebook.js");
+const protocol_notebook_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageserver-protocol@3.18.6/node_modules/vscode-languageserver-protocol/lib/common/protocol.notebook.js");
 Object.defineProperty(exports, "NotebookCellKind", ({ enumerable: true, get: function () { return protocol_notebook_1.NotebookCellKind; } }));
 Object.defineProperty(exports, "ExecutionSummary", ({ enumerable: true, get: function () { return protocol_notebook_1.ExecutionSummary; } }));
 Object.defineProperty(exports, "NotebookCell", ({ enumerable: true, get: function () { return protocol_notebook_1.NotebookCell; } }));
@@ -18893,9 +18913,9 @@ Object.defineProperty(exports, "NotebookCellArrayChange", ({ enumerable: true, g
 Object.defineProperty(exports, "DidChangeNotebookDocumentNotification", ({ enumerable: true, get: function () { return protocol_notebook_1.DidChangeNotebookDocumentNotification; } }));
 Object.defineProperty(exports, "DidSaveNotebookDocumentNotification", ({ enumerable: true, get: function () { return protocol_notebook_1.DidSaveNotebookDocumentNotification; } }));
 Object.defineProperty(exports, "DidCloseNotebookDocumentNotification", ({ enumerable: true, get: function () { return protocol_notebook_1.DidCloseNotebookDocumentNotification; } }));
-const protocol_inlineCompletion_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageserver-protocol@3.18.5/node_modules/vscode-languageserver-protocol/lib/common/protocol.inlineCompletion.js");
+const protocol_inlineCompletion_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageserver-protocol@3.18.6/node_modules/vscode-languageserver-protocol/lib/common/protocol.inlineCompletion.js");
 Object.defineProperty(exports, "InlineCompletionRequest", ({ enumerable: true, get: function () { return protocol_inlineCompletion_1.InlineCompletionRequest; } }));
-const protocol_textDocumentContent_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageserver-protocol@3.18.5/node_modules/vscode-languageserver-protocol/lib/common/protocol.textDocumentContent.js");
+const protocol_textDocumentContent_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageserver-protocol@3.18.6/node_modules/vscode-languageserver-protocol/lib/common/protocol.textDocumentContent.js");
 Object.defineProperty(exports, "TextDocumentContentRequest", ({ enumerable: true, get: function () { return protocol_textDocumentContent_1.TextDocumentContentRequest; } }));
 Object.defineProperty(exports, "TextDocumentContentRefreshRequest", ({ enumerable: true, get: function () { return protocol_textDocumentContent_1.TextDocumentContentRefreshRequest; } }));
 // @ts-ignore: to avoid inlining LocationLink as dynamic import
@@ -18910,7 +18930,7 @@ var TextDocumentFilter;
 (function (TextDocumentFilter) {
     function is(value) {
         const candidate = value;
-        return Is.string(candidate) || (Is.string(candidate.language) || Is.string(candidate.scheme) || GlobPattern.is(candidate.pattern));
+        return Is.string(candidate) || (Is.objectLiteral(candidate) && (Is.string(candidate.language) || Is.string(candidate.scheme) || GlobPattern.is(candidate.pattern)));
     }
     TextDocumentFilter.is = is;
 })(TextDocumentFilter || (exports.TextDocumentFilter = TextDocumentFilter = {}));
@@ -18924,7 +18944,7 @@ var NotebookDocumentFilter;
 (function (NotebookDocumentFilter) {
     function is(value) {
         const candidate = value;
-        return Is.objectLiteral(candidate) && (Is.string(candidate.notebookType) || Is.string(candidate.scheme) || Is.string(candidate.pattern));
+        return Is.objectLiteral(candidate) && (Is.string(candidate.notebookType) || Is.string(candidate.scheme) || GlobPattern.is(candidate.pattern));
     }
     NotebookDocumentFilter.is = is;
 })(NotebookDocumentFilter || (exports.NotebookDocumentFilter = NotebookDocumentFilter = {}));
@@ -19078,7 +19098,7 @@ var TextDocumentRegistrationOptions;
 (function (TextDocumentRegistrationOptions) {
     function is(value) {
         const candidate = value;
-        return candidate && (candidate.documentSelector === null || DocumentSelector.is(candidate.documentSelector));
+        return Is.objectLiteral(candidate) && (candidate.documentSelector === null || DocumentSelector.is(candidate.documentSelector));
     }
     TextDocumentRegistrationOptions.is = is;
 })(TextDocumentRegistrationOptions || (exports.TextDocumentRegistrationOptions = TextDocumentRegistrationOptions = {}));
@@ -19804,7 +19824,7 @@ var ApplyWorkspaceEditRequest;
 
 
 },
-"../../node_modules/.pnpm/vscode-languageserver-protocol@3.18.5/node_modules/vscode-languageserver-protocol/lib/common/protocol.linkedEditingRange.js"(__unused_rspack_module, exports, __webpack_require__) {
+"../../node_modules/.pnpm/vscode-languageserver-protocol@3.18.6/node_modules/vscode-languageserver-protocol/lib/common/protocol.linkedEditingRange.js"(__unused_rspack_module, exports, __webpack_require__) {
 var __rspack_unused_export;
 
 /*---------------------------------------------------------------------------------------------
@@ -19813,7 +19833,7 @@ var __rspack_unused_export;
  *--------------------------------------------------------------------------------------------*/
 __rspack_unused_export = ({ value: true });
 exports.LinkedEditingRangeRequest = void 0;
-const messages_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageserver-protocol@3.18.5/node_modules/vscode-languageserver-protocol/lib/common/messages.js");
+const messages_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageserver-protocol@3.18.6/node_modules/vscode-languageserver-protocol/lib/common/messages.js");
 /**
  * A request to provide ranges that can be edited together.
  *
@@ -19829,7 +19849,7 @@ var LinkedEditingRangeRequest;
 
 
 },
-"../../node_modules/.pnpm/vscode-languageserver-protocol@3.18.5/node_modules/vscode-languageserver-protocol/lib/common/protocol.moniker.js"(__unused_rspack_module, exports, __webpack_require__) {
+"../../node_modules/.pnpm/vscode-languageserver-protocol@3.18.6/node_modules/vscode-languageserver-protocol/lib/common/protocol.moniker.js"(__unused_rspack_module, exports, __webpack_require__) {
 var __rspack_unused_export;
 
 /* --------------------------------------------------------------------------------------------
@@ -19838,7 +19858,7 @@ var __rspack_unused_export;
  * ------------------------------------------------------------------------------------------ */
 __rspack_unused_export = ({ value: true });
 exports.MonikerRequest = exports.MonikerKind = exports.UniquenessLevel = void 0;
-const messages_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageserver-protocol@3.18.5/node_modules/vscode-languageserver-protocol/lib/common/messages.js");
+const messages_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageserver-protocol@3.18.6/node_modules/vscode-languageserver-protocol/lib/common/messages.js");
 /**
  * Moniker uniqueness level to define scope of the moniker.
  *
@@ -19903,7 +19923,7 @@ var MonikerRequest;
 
 
 },
-"../../node_modules/.pnpm/vscode-languageserver-protocol@3.18.5/node_modules/vscode-languageserver-protocol/lib/common/protocol.notebook.js"(__unused_rspack_module, exports, __webpack_require__) {
+"../../node_modules/.pnpm/vscode-languageserver-protocol@3.18.6/node_modules/vscode-languageserver-protocol/lib/common/protocol.notebook.js"(__unused_rspack_module, exports, __webpack_require__) {
 
 /* --------------------------------------------------------------------------------------------
  * Copyright (c) Microsoft Corporation. All rights reserved.
@@ -19944,9 +19964,9 @@ var __importStar = (this && this.__importStar) || (function () {
 })();
 Object.defineProperty(exports, "__esModule", ({ value: true }));
 exports.DidCloseNotebookDocumentNotification = exports.DidSaveNotebookDocumentNotification = exports.DidChangeNotebookDocumentNotification = exports.NotebookCellArrayChange = exports.DidOpenNotebookDocumentNotification = exports.NotebookDocumentSyncRegistrationType = exports.NotebookDocument = exports.NotebookCell = exports.ExecutionSummary = exports.NotebookCellKind = void 0;
-const vscode_languageserver_types_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageserver-types@3.18.5/node_modules/vscode-languageserver-types/lib/esm/main.js");
-const Is = __importStar(__webpack_require__("../../node_modules/.pnpm/vscode-languageserver-protocol@3.18.5/node_modules/vscode-languageserver-protocol/lib/common/utils/is.js"));
-const messages_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageserver-protocol@3.18.5/node_modules/vscode-languageserver-protocol/lib/common/messages.js");
+const vscode_languageserver_types_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageserver-types@3.18.6/node_modules/vscode-languageserver-types/lib/esm/main.js");
+const Is = __importStar(__webpack_require__("../../node_modules/.pnpm/vscode-languageserver-protocol@3.18.6/node_modules/vscode-languageserver-protocol/lib/common/utils/is.js"));
+const messages_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageserver-protocol@3.18.6/node_modules/vscode-languageserver-protocol/lib/common/messages.js");
 /**
  * A notebook cell kind.
  *
@@ -20154,7 +20174,7 @@ var DidCloseNotebookDocumentNotification;
 
 
 },
-"../../node_modules/.pnpm/vscode-languageserver-protocol@3.18.5/node_modules/vscode-languageserver-protocol/lib/common/protocol.progress.js"(__unused_rspack_module, exports, __webpack_require__) {
+"../../node_modules/.pnpm/vscode-languageserver-protocol@3.18.6/node_modules/vscode-languageserver-protocol/lib/common/protocol.progress.js"(__unused_rspack_module, exports, __webpack_require__) {
 var __rspack_unused_export;
 
 /* --------------------------------------------------------------------------------------------
@@ -20163,8 +20183,8 @@ var __rspack_unused_export;
  * ------------------------------------------------------------------------------------------ */
 __rspack_unused_export = ({ value: true });
 exports.WorkDoneProgressCancelNotification = exports.WorkDoneProgressCreateRequest = exports.WorkDoneProgress = void 0;
-const vscode_jsonrpc_1 = __webpack_require__("../../node_modules/.pnpm/vscode-jsonrpc@10.0.0/node_modules/vscode-jsonrpc/lib/common/api.js");
-const messages_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageserver-protocol@3.18.5/node_modules/vscode-languageserver-protocol/lib/common/messages.js");
+const vscode_jsonrpc_1 = __webpack_require__("../../node_modules/.pnpm/vscode-jsonrpc@10.0.1/node_modules/vscode-jsonrpc/lib/common/api.js");
+const messages_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageserver-protocol@3.18.6/node_modules/vscode-languageserver-protocol/lib/common/messages.js");
 var WorkDoneProgress;
 (function (WorkDoneProgress) {
     WorkDoneProgress.type = new vscode_jsonrpc_1.ProgressType();
@@ -20197,7 +20217,7 @@ var WorkDoneProgressCancelNotification;
 
 
 },
-"../../node_modules/.pnpm/vscode-languageserver-protocol@3.18.5/node_modules/vscode-languageserver-protocol/lib/common/protocol.selectionRange.js"(__unused_rspack_module, exports, __webpack_require__) {
+"../../node_modules/.pnpm/vscode-languageserver-protocol@3.18.6/node_modules/vscode-languageserver-protocol/lib/common/protocol.selectionRange.js"(__unused_rspack_module, exports, __webpack_require__) {
 var __rspack_unused_export;
 
 /*---------------------------------------------------------------------------------------------
@@ -20206,7 +20226,7 @@ var __rspack_unused_export;
  *--------------------------------------------------------------------------------------------*/
 __rspack_unused_export = ({ value: true });
 exports.SelectionRangeRequest = void 0;
-const messages_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageserver-protocol@3.18.5/node_modules/vscode-languageserver-protocol/lib/common/messages.js");
+const messages_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageserver-protocol@3.18.6/node_modules/vscode-languageserver-protocol/lib/common/messages.js");
 /**
  * A request to provide selection ranges in a document. The request's
  * parameter is of type {@link SelectionRangeParams}, the
@@ -20223,7 +20243,7 @@ var SelectionRangeRequest;
 
 
 },
-"../../node_modules/.pnpm/vscode-languageserver-protocol@3.18.5/node_modules/vscode-languageserver-protocol/lib/common/protocol.semanticTokens.js"(__unused_rspack_module, exports, __webpack_require__) {
+"../../node_modules/.pnpm/vscode-languageserver-protocol@3.18.6/node_modules/vscode-languageserver-protocol/lib/common/protocol.semanticTokens.js"(__unused_rspack_module, exports, __webpack_require__) {
 var __rspack_unused_export;
 
 /* --------------------------------------------------------------------------------------------
@@ -20232,7 +20252,7 @@ var __rspack_unused_export;
  * ------------------------------------------------------------------------------------------ */
 __rspack_unused_export = ({ value: true });
 exports.SemanticTokensRefreshRequest = exports.SemanticTokensRangeRequest = exports.SemanticTokensDeltaRequest = exports.SemanticTokensRequest = exports.SemanticTokensRegistrationType = exports.TokenFormat = void 0;
-const messages_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageserver-protocol@3.18.5/node_modules/vscode-languageserver-protocol/lib/common/messages.js");
+const messages_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageserver-protocol@3.18.6/node_modules/vscode-languageserver-protocol/lib/common/messages.js");
 //------- 'textDocument/semanticTokens' -----
 var TokenFormat;
 (function (TokenFormat) {
@@ -20289,7 +20309,7 @@ var SemanticTokensRefreshRequest;
 
 
 },
-"../../node_modules/.pnpm/vscode-languageserver-protocol@3.18.5/node_modules/vscode-languageserver-protocol/lib/common/protocol.showDocument.js"(__unused_rspack_module, exports, __webpack_require__) {
+"../../node_modules/.pnpm/vscode-languageserver-protocol@3.18.6/node_modules/vscode-languageserver-protocol/lib/common/protocol.showDocument.js"(__unused_rspack_module, exports, __webpack_require__) {
 var __rspack_unused_export;
 
 /* --------------------------------------------------------------------------------------------
@@ -20298,7 +20318,7 @@ var __rspack_unused_export;
  * ------------------------------------------------------------------------------------------ */
 __rspack_unused_export = ({ value: true });
 exports.ShowDocumentRequest = void 0;
-const messages_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageserver-protocol@3.18.5/node_modules/vscode-languageserver-protocol/lib/common/messages.js");
+const messages_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageserver-protocol@3.18.6/node_modules/vscode-languageserver-protocol/lib/common/messages.js");
 /**
  * A request to show a document. This request might open an
  * external program depending on the value of the URI to open.
@@ -20317,7 +20337,7 @@ var ShowDocumentRequest;
 
 
 },
-"../../node_modules/.pnpm/vscode-languageserver-protocol@3.18.5/node_modules/vscode-languageserver-protocol/lib/common/protocol.textDocumentContent.js"(__unused_rspack_module, exports, __webpack_require__) {
+"../../node_modules/.pnpm/vscode-languageserver-protocol@3.18.6/node_modules/vscode-languageserver-protocol/lib/common/protocol.textDocumentContent.js"(__unused_rspack_module, exports, __webpack_require__) {
 var __rspack_unused_export;
 
 /* --------------------------------------------------------------------------------------------
@@ -20326,7 +20346,7 @@ var __rspack_unused_export;
  * ------------------------------------------------------------------------------------------ */
 __rspack_unused_export = ({ value: true });
 exports.TextDocumentContentRefreshRequest = exports.TextDocumentContentRequest = void 0;
-const messages_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageserver-protocol@3.18.5/node_modules/vscode-languageserver-protocol/lib/common/messages.js");
+const messages_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageserver-protocol@3.18.6/node_modules/vscode-languageserver-protocol/lib/common/messages.js");
 /**
  * The `workspace/textDocumentContent` request is sent from the client to the
  * server to request the content of a text document.
@@ -20355,7 +20375,7 @@ var TextDocumentContentRefreshRequest;
 
 
 },
-"../../node_modules/.pnpm/vscode-languageserver-protocol@3.18.5/node_modules/vscode-languageserver-protocol/lib/common/protocol.typeDefinition.js"(__unused_rspack_module, exports, __webpack_require__) {
+"../../node_modules/.pnpm/vscode-languageserver-protocol@3.18.6/node_modules/vscode-languageserver-protocol/lib/common/protocol.typeDefinition.js"(__unused_rspack_module, exports, __webpack_require__) {
 var __rspack_unused_export;
 
 /* --------------------------------------------------------------------------------------------
@@ -20364,7 +20384,7 @@ var __rspack_unused_export;
  * ------------------------------------------------------------------------------------------ */
 __rspack_unused_export = ({ value: true });
 exports.TypeDefinitionRequest = void 0;
-const messages_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageserver-protocol@3.18.5/node_modules/vscode-languageserver-protocol/lib/common/messages.js");
+const messages_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageserver-protocol@3.18.6/node_modules/vscode-languageserver-protocol/lib/common/messages.js");
 // @ts-ignore: to avoid inlining LocationLink as dynamic import
 let __noDynamicImport;
 /**
@@ -20382,7 +20402,7 @@ var TypeDefinitionRequest;
 
 
 },
-"../../node_modules/.pnpm/vscode-languageserver-protocol@3.18.5/node_modules/vscode-languageserver-protocol/lib/common/protocol.typeHierarchy.js"(__unused_rspack_module, exports, __webpack_require__) {
+"../../node_modules/.pnpm/vscode-languageserver-protocol@3.18.6/node_modules/vscode-languageserver-protocol/lib/common/protocol.typeHierarchy.js"(__unused_rspack_module, exports, __webpack_require__) {
 var __rspack_unused_export;
 
 /* --------------------------------------------------------------------------------------------
@@ -20391,7 +20411,7 @@ var __rspack_unused_export;
  * ------------------------------------------------------------------------------------------ */
 __rspack_unused_export = ({ value: true });
 exports.TypeHierarchySubtypesRequest = exports.TypeHierarchySupertypesRequest = exports.TypeHierarchyPrepareRequest = void 0;
-const messages_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageserver-protocol@3.18.5/node_modules/vscode-languageserver-protocol/lib/common/messages.js");
+const messages_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageserver-protocol@3.18.6/node_modules/vscode-languageserver-protocol/lib/common/messages.js");
 /**
  * A request to result a `TypeHierarchyItem` in a document at a given position.
  * Can be used as an input to a subtypes or supertypes type hierarchy.
@@ -20430,7 +20450,7 @@ var TypeHierarchySubtypesRequest;
 
 
 },
-"../../node_modules/.pnpm/vscode-languageserver-protocol@3.18.5/node_modules/vscode-languageserver-protocol/lib/common/protocol.workspaceFolder.js"(__unused_rspack_module, exports, __webpack_require__) {
+"../../node_modules/.pnpm/vscode-languageserver-protocol@3.18.6/node_modules/vscode-languageserver-protocol/lib/common/protocol.workspaceFolder.js"(__unused_rspack_module, exports, __webpack_require__) {
 var __rspack_unused_export;
 
 /* --------------------------------------------------------------------------------------------
@@ -20439,7 +20459,7 @@ var __rspack_unused_export;
  * ------------------------------------------------------------------------------------------ */
 __rspack_unused_export = ({ value: true });
 exports.DidChangeWorkspaceFoldersNotification = exports.WorkspaceFoldersRequest = void 0;
-const messages_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageserver-protocol@3.18.5/node_modules/vscode-languageserver-protocol/lib/common/messages.js");
+const messages_1 = __webpack_require__("../../node_modules/.pnpm/vscode-languageserver-protocol@3.18.6/node_modules/vscode-languageserver-protocol/lib/common/messages.js");
 /**
  * The `workspace/workspaceFolders` is sent from the server to the client to fetch the open workspace folders.
  */
@@ -20464,7 +20484,7 @@ var DidChangeWorkspaceFoldersNotification;
 
 
 },
-"../../node_modules/.pnpm/vscode-languageserver-protocol@3.18.5/node_modules/vscode-languageserver-protocol/lib/common/utils/is.js"(__unused_rspack_module, exports) {
+"../../node_modules/.pnpm/vscode-languageserver-protocol@3.18.6/node_modules/vscode-languageserver-protocol/lib/common/utils/is.js"(__unused_rspack_module, exports) {
 /* --------------------------------------------------------------------------------------------
  * Copyright (c) Microsoft Corporation. All rights reserved.
  * Licensed under the MIT License. See License.txt in the project root for license information.
@@ -20513,7 +20533,7 @@ function objectLiteral(value) {
 
 
 },
-"../../node_modules/.pnpm/vscode-languageserver-protocol@3.18.5/node_modules/vscode-languageserver-protocol/lib/node/main.js"(__unused_rspack_module, exports, __webpack_require__) {
+"../../node_modules/.pnpm/vscode-languageserver-protocol@3.18.6/node_modules/vscode-languageserver-protocol/lib/node/main.js"(__unused_rspack_module, exports, __webpack_require__) {
 
 /* --------------------------------------------------------------------------------------------
  * Copyright (c) Microsoft Corporation. All rights reserved.
@@ -20535,9 +20555,9 @@ var __exportStar = (this && this.__exportStar) || function(m, exports) {
 };
 Object.defineProperty(exports, "__esModule", ({ value: true }));
 exports.createProtocolConnection = createProtocolConnection;
-const node_1 = __webpack_require__("../../node_modules/.pnpm/vscode-jsonrpc@10.0.0/node_modules/vscode-jsonrpc/lib/node/main.js");
-__exportStar(__webpack_require__("../../node_modules/.pnpm/vscode-jsonrpc@10.0.0/node_modules/vscode-jsonrpc/lib/node/main.js"), exports);
-__exportStar(__webpack_require__("../../node_modules/.pnpm/vscode-languageserver-protocol@3.18.5/node_modules/vscode-languageserver-protocol/lib/common/api.js"), exports);
+const node_1 = __webpack_require__("../../node_modules/.pnpm/vscode-jsonrpc@10.0.1/node_modules/vscode-jsonrpc/lib/node/main.js");
+__exportStar(__webpack_require__("../../node_modules/.pnpm/vscode-jsonrpc@10.0.1/node_modules/vscode-jsonrpc/lib/node/main.js"), exports);
+__exportStar(__webpack_require__("../../node_modules/.pnpm/vscode-languageserver-protocol@3.18.6/node_modules/vscode-languageserver-protocol/lib/common/api.js"), exports);
 function createProtocolConnection(input, output, logger, options) {
     return (0, node_1.createMessageConnection)(input, output, logger, options);
 }
@@ -23510,7 +23530,7 @@ __webpack_require__.d(__webpack_exports__, {
 
 
 },
-"../../node_modules/.pnpm/vscode-languageserver-types@3.18.5/node_modules/vscode-languageserver-types/lib/esm/main.js"(__unused_rspack___webpack_module__, __webpack_exports__, __webpack_require__) {
+"../../node_modules/.pnpm/vscode-languageserver-types@3.18.6/node_modules/vscode-languageserver-types/lib/esm/main.js"(__unused_rspack___webpack_module__, __webpack_exports__, __webpack_require__) {
 __webpack_require__.r(__webpack_exports__);
 /* --------------------------------------------------------------------------------------------
  * Copyright (c) Microsoft Corporation. All rights reserved.
@@ -23821,7 +23841,7 @@ var DiagnosticRelatedInformation;
      */
     function is(value) {
         const candidate = value;
-        return Is.defined(candidate) && Location.is(candidate.location) && Is.string(candidate.message);
+        return Is.objectLiteral(candidate) && Location.is(candidate.location) && Is.string(candidate.message);
     }
     DiagnosticRelatedInformation.is = is;
 })(DiagnosticRelatedInformation || (DiagnosticRelatedInformation = {}));
@@ -23913,7 +23933,7 @@ var Diagnostic;
     function is(value) {
         var _a;
         const candidate = value;
-        return Is.defined(candidate)
+        return Is.objectLiteral(candidate)
             && Range.is(candidate.range)
             && (Is.string(candidate.message) || MarkupContent.is(candidate.message))
             && (Is.number(candidate.severity) || Is.undefined(candidate.severity))
@@ -23977,7 +23997,7 @@ var Command;
      */
     function is(value) {
         const candidate = value;
-        return Is.defined(candidate) && Is.string(candidate.title) && (candidate.tooltip === undefined || Is.string(candidate.tooltip)) && Is.string(candidate.command);
+        return Is.objectLiteral(candidate) && Is.string(candidate.title) && (candidate.tooltip === undefined || Is.string(candidate.tooltip)) && Is.string(candidate.command);
     }
     Command.is = is;
 })(Command || (Command = {}));
@@ -24105,7 +24125,7 @@ var TextDocumentEdit;
     TextDocumentEdit.create = create;
     function is(value) {
         const candidate = value;
-        return Is.defined(candidate)
+        return Is.objectLiteral(candidate)
             && OptionalVersionedTextDocumentIdentifier.is(candidate.textDocument)
             && Array.isArray(candidate.edits);
     }
@@ -24297,7 +24317,7 @@ class ChangeAnnotations {
     constructor(annotations) {
         this._annotations = annotations === undefined ? Object.create(null) : annotations;
         this._counter = 0;
-        this._size = 0;
+        this._size = Object.keys(this._annotations).length;
     }
     all() {
         return this._annotations;
@@ -24325,8 +24345,12 @@ class ChangeAnnotations {
         return id;
     }
     nextId() {
-        this._counter++;
-        return this._counter.toString();
+        let id;
+        do {
+            this._counter++;
+            id = this._counter.toString();
+        } while (this._annotations[id] !== undefined);
+        return id;
     }
 }
 /**
@@ -24519,7 +24543,7 @@ var TextDocumentIdentifier;
      */
     function is(value) {
         const candidate = value;
-        return Is.defined(candidate) && Is.string(candidate.uri);
+        return Is.objectLiteral(candidate) && Is.string(candidate.uri);
     }
     TextDocumentIdentifier.is = is;
 })(TextDocumentIdentifier || (TextDocumentIdentifier = {}));
@@ -24543,7 +24567,7 @@ var VersionedTextDocumentIdentifier;
      */
     function is(value) {
         const candidate = value;
-        return Is.defined(candidate) && Is.string(candidate.uri) && Is.integer(candidate.version);
+        return Is.objectLiteral(candidate) && Is.string(candidate.uri) && Is.integer(candidate.version);
     }
     VersionedTextDocumentIdentifier.is = is;
 })(VersionedTextDocumentIdentifier || (VersionedTextDocumentIdentifier = {}));
@@ -24567,7 +24591,7 @@ var OptionalVersionedTextDocumentIdentifier;
      */
     function is(value) {
         const candidate = value;
-        return Is.defined(candidate) && Is.string(candidate.uri) && (candidate.version === null || Is.integer(candidate.version));
+        return Is.objectLiteral(candidate) && Is.string(candidate.uri) && (candidate.version === null || Is.integer(candidate.version));
     }
     OptionalVersionedTextDocumentIdentifier.is = is;
 })(OptionalVersionedTextDocumentIdentifier || (OptionalVersionedTextDocumentIdentifier = {}));
@@ -24671,7 +24695,7 @@ var TextDocumentItem;
      */
     function is(value) {
         const candidate = value;
-        return Is.defined(candidate) && Is.string(candidate.uri) && Is.string(candidate.languageId) && Is.integer(candidate.version) && Is.string(candidate.text);
+        return Is.objectLiteral(candidate) && Is.string(candidate.uri) && Is.string(candidate.languageId) && Is.integer(candidate.version) && Is.string(candidate.text);
     }
     TextDocumentItem.is = is;
 })(TextDocumentItem || (TextDocumentItem = {}));
@@ -25263,7 +25287,7 @@ var CodeActionContext;
      */
     function is(value) {
         const candidate = value;
-        return Is.defined(candidate) && Is.typedArray(candidate.diagnostics, Diagnostic.is)
+        return Is.objectLiteral(candidate) && Is.typedArray(candidate.diagnostics, Diagnostic.is)
             && (candidate.only === undefined || Is.typedArray(candidate.only, Is.string))
             && (candidate.triggerKind === undefined || candidate.triggerKind === CodeActionTriggerKind.Invoked || candidate.triggerKind === CodeActionTriggerKind.Automatic);
     }
@@ -25344,7 +25368,7 @@ var CodeLens;
      */
     function is(value) {
         const candidate = value;
-        return Is.defined(candidate) && Range.is(candidate.range) && (Is.undefined(candidate.command) || Command.is(candidate.command));
+        return Is.objectLiteral(candidate) && Range.is(candidate.range) && (Is.undefined(candidate.command) || Command.is(candidate.command));
     }
     CodeLens.is = is;
 })(CodeLens || (CodeLens = {}));
@@ -25366,7 +25390,7 @@ var FormattingOptions;
      */
     function is(value) {
         const candidate = value;
-        return Is.defined(candidate) && Is.uinteger(candidate.tabSize) && Is.boolean(candidate.insertSpaces);
+        return Is.objectLiteral(candidate) && Is.uinteger(candidate.tabSize) && Is.boolean(candidate.insertSpaces);
     }
     FormattingOptions.is = is;
 })(FormattingOptions || (FormattingOptions = {}));
@@ -25388,7 +25412,7 @@ var DocumentLink;
      */
     function is(value) {
         const candidate = value;
-        return Is.defined(candidate) && Range.is(candidate.range) && (Is.undefined(candidate.target) || Is.string(candidate.target));
+        return Is.objectLiteral(candidate) && Range.is(candidate.range) && (Is.undefined(candidate.target) || Is.string(candidate.target));
     }
     DocumentLink.is = is;
 })(DocumentLink || (DocumentLink = {}));
@@ -25572,7 +25596,7 @@ var InlineValueContext;
      */
     function is(value) {
         const candidate = value;
-        return Is.defined(candidate) && Range.is(value.stoppedLocation);
+        return Is.objectLiteral(candidate) && Range.is(value.stoppedLocation);
     }
     InlineValueContext.is = is;
 })(InlineValueContext || (InlineValueContext = {}));
@@ -25721,7 +25745,7 @@ var TextDocument;
      */
     function is(value) {
         const candidate = value;
-        return Is.defined(candidate) && Is.string(candidate.uri) && (Is.undefined(candidate.languageId) || Is.string(candidate.languageId)) && Is.uinteger(candidate.lineCount)
+        return Is.objectLiteral(candidate) && Is.string(candidate.uri) && (Is.undefined(candidate.languageId) || Is.string(candidate.languageId)) && Is.uinteger(candidate.lineCount)
             && Is.func(candidate.getText) && Is.func(candidate.positionAt) && Is.func(candidate.offsetAt) ? true : false;
     }
     TextDocument.is = is;
@@ -26085,8 +26109,8 @@ __webpack_require__.d(__webpack_exports__, {
 
 // EXTERNAL MODULE: external "vscode"
 var external_vscode_ = __webpack_require__("vscode");
-// EXTERNAL MODULE: ../../node_modules/.pnpm/vscode-languageclient@11.0.0/node_modules/vscode-languageclient/lib/node/main.js
-var main = __webpack_require__("../../node_modules/.pnpm/vscode-languageclient@11.0.0/node_modules/vscode-languageclient/lib/node/main.js");
+// EXTERNAL MODULE: ../../node_modules/.pnpm/vscode-languageclient@11.0.1/node_modules/vscode-languageclient/lib/node/main.js
+var main = __webpack_require__("../../node_modules/.pnpm/vscode-languageclient@11.0.1/node_modules/vscode-languageclient/lib/node/main.js");
 ;// CONCATENATED MODULE: ./src/nativeDiagnostics.ts
 const MAX_NATIVE_DIAGNOSTICS_PER_DOCUMENT = 100;
 const MAX_NATIVE_DIAGNOSTIC_MESSAGE_BYTES = 512;
