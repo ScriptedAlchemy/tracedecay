@@ -282,54 +282,64 @@ fn intent_outcomes(log: &Path, session: &str) -> Vec<String> {
 fn wait_for_tool_intent_settlement(log: &Path, session: &str, before: usize) -> usize {
     let mut tool_event_id = None;
     let mut settled_attempt_count = None;
-    wait_for("the tool boundary's mounted and durably completed intent", log, || {
-        let records = hook_work_records(log, session, "context_scout_intent_work", "outcome=");
-        let attempts = &records[before..];
-        let Some(first) = attempts.first() else {
-            return false;
-        };
-        let event_id = tool_event_id.get_or_insert_with(|| first.event_id.clone());
-        assert!(
-            attempts.iter().all(|attempt| attempt.event_id == *event_id),
-            "automatic replay must retain the tool boundary's exact event: {attempts:?}"
-        );
-        // Unavailable leaves this envelope's producer work owed. Observe its
-        // automatic replay without resubmitting a hook or extending WAIT.
-        // Any policy refusal or suppression still fails this journey.
-        assert!(
-            attempts
-                .iter()
-                .all(|attempt| matches!(attempt.outcome.as_str(), "unavailable" | "mounted")),
-            "the enabled tool boundary must mount rather than refuse its intent: {attempts:?}"
-        );
-        let mounted = attempts
-            .iter()
-            .filter(|attempt| attempt.outcome == "mounted")
-            .count();
-        assert!(mounted <= 1, "the tool intent mounts exactly once: {attempts:?}");
-        if mounted == 1 {
-            assert_eq!(
-                attempts.last().map(|attempt| attempt.outcome.as_str()),
-                Some("mounted"),
-                "only unavailable attempts may precede the mounted terminal: {attempts:?}"
+    wait_for(
+        "the tool boundary's mounted and durably completed intent",
+        log,
+        || {
+            let records = hook_work_records(log, session, "context_scout_intent_work", "outcome=");
+            let attempts = &records[before..];
+            let Some(first) = attempts.first() else {
+                return false;
+            };
+            let event_id = tool_event_id.get_or_insert_with(|| first.event_id.clone());
+            assert!(
+                attempts.iter().all(|attempt| attempt.event_id == *event_id),
+                "automatic replay must retain the tool boundary's exact event: {attempts:?}"
             );
-        }
-        let settlements = hook_work_records(log, session, "hook_v2_work_settled", "settlement=")
-            .into_iter()
-            .filter(|record| record.event_id == *event_id)
-            .collect::<Vec<_>>();
-        assert!(
-            settlements.len() <= 1
-                && settlements.iter().all(|record| record.outcome == "completed"),
-            "the mounted tool intent has one completed durable terminal: {settlements:?}"
-        );
-        if mounted == 1 && settlements.len() == 1 {
-            settled_attempt_count = Some(records.len());
-            true
-        } else {
-            false
-        }
-    });
+            // Unavailable leaves this envelope's producer work owed. Observe its
+            // automatic replay without resubmitting a hook or extending WAIT.
+            // Any policy refusal or suppression still fails this journey.
+            assert!(
+                attempts
+                    .iter()
+                    .all(|attempt| matches!(attempt.outcome.as_str(), "unavailable" | "mounted")),
+                "the enabled tool boundary must mount rather than refuse its intent: {attempts:?}"
+            );
+            let mounted = attempts
+                .iter()
+                .filter(|attempt| attempt.outcome == "mounted")
+                .count();
+            assert!(
+                mounted <= 1,
+                "the tool intent mounts exactly once: {attempts:?}"
+            );
+            if mounted == 1 {
+                assert_eq!(
+                    attempts.last().map(|attempt| attempt.outcome.as_str()),
+                    Some("mounted"),
+                    "only unavailable attempts may precede the mounted terminal: {attempts:?}"
+                );
+            }
+            let settlements =
+                hook_work_records(log, session, "hook_v2_work_settled", "settlement=")
+                    .into_iter()
+                    .filter(|record| record.event_id == *event_id)
+                    .collect::<Vec<_>>();
+            assert!(
+                settlements.len() <= 1
+                    && settlements
+                        .iter()
+                        .all(|record| record.outcome == "completed"),
+                "the mounted tool intent has one completed durable terminal: {settlements:?}"
+            );
+            if mounted == 1 && settlements.len() == 1 {
+                settled_attempt_count = Some(records.len());
+                true
+            } else {
+                false
+            }
+        },
+    );
     settled_attempt_count.expect("the completed wait validated the tool attempt count")
 }
 
