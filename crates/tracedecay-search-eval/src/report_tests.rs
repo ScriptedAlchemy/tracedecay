@@ -84,8 +84,6 @@ fn assert_baseline_report_retains_raw_fallback_current_and_exact_ten_x_samples(
             "train-026",
             "validation-015",
             "validation-023",
-            "validation-024",
-            "validation-025",
             "validation-027",
         ]
     );

@@ -4,11 +4,13 @@ use std::collections::BTreeMap;
 use std::collections::btree_map::Entry;
 use std::path::Path;
 use std::sync::{Arc, Mutex as StdMutex};
+use tracedecay_domain::canonical_text::encode_lowercase_hex;
 use tracedecay_domain::errors::Result;
 use tracedecay_domain::{ProviderId, SessionId, UtcMicros};
 use tracedecay_global_db::RegisteredGlobalDb;
 use tracedecay_project::project::TraceDecay;
 use tracedecay_runtime_core::background_cpu::ProcessBackgroundCpuV1;
+use tracedecay_runtime_core::logging::log_daemon_event;
 
 use super::context_scout::{
     NativeLifecycleAdmissionV1, admit_native_context_scout_lifecycle,
@@ -110,7 +112,40 @@ fn settle_hook_v2_pending_work(
     match with_hook_v2_admission_ledger(ledger_root, envelope.producer, hook_now(), |ledger| {
         ledger.stage_work_settlement(envelope, settlement)
     }) {
-        Ok(Ok(Some(commit))) => commit.wait().is_ok(),
+        Ok(Ok(Some(commit))) => {
+            if commit.wait().is_err() {
+                return false;
+            }
+            // An attempt log is not a durable terminal. Publish the exact
+            // identity only after its new settlement has committed; an
+            // already-settled callback cannot replace the first reason.
+            log_daemon_event(
+                "hook_v2_work_settled",
+                &[
+                    ("host", envelope.producer.hook_key().to_owned()),
+                    ("project_id", encode_lowercase_hex(&envelope.project_id)),
+                    ("worktree_id", encode_lowercase_hex(&envelope.worktree_id)),
+                    (
+                        "protected_session_id",
+                        encode_lowercase_hex(&envelope.protected_session_id),
+                    ),
+                    ("event_id", encode_lowercase_hex(&envelope.event_id)),
+                    (
+                        "settlement",
+                        match settlement {
+                            tracedecay_hooks::HookAdmissionWorkSettlementV1::Completed => {
+                                "completed"
+                            }
+                            tracedecay_hooks::HookAdmissionWorkSettlementV1::Superseded => {
+                                "superseded"
+                            }
+                        }
+                        .to_owned(),
+                    ),
+                ],
+            );
+            true
+        }
         Ok(Ok(None)) => true,
         Err(_) | Ok(Err(_)) => false,
     }

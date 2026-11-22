@@ -232,21 +232,105 @@ fn enabled_settings() -> ContextScoutSettingsV1 {
     }
 }
 
-/// Intent outcomes for exactly one protected native session, in order.
-fn intent_outcomes(log: &Path, session: &str) -> Vec<String> {
+#[derive(Debug)]
+struct HookWorkRecord {
+    event_id: String,
+    outcome: String,
+}
+
+/// Complete operator records for exactly one protected native session.
+fn hook_work_records(
+    log: &Path,
+    session: &str,
+    event: &str,
+    outcome_field: &str,
+) -> Vec<HookWorkRecord> {
     let protected = tracedecay_domain::canonical_text::encode_lowercase_hex(
         &tracedecay_agent_hosts::hooks::protected_native_session_id(session),
     );
     let session_field = format!(" protected_session_id={protected}");
+    let event_field = format!("event={event} ");
     std::fs::read_to_string(log)
         .unwrap_or_default()
-        .lines()
+        .split_inclusive('\n')
         .filter(|line| {
-            line.contains("event=context_scout_intent_work ") && line.contains(&session_field)
+            line.ends_with('\n') && line.contains(&event_field) && line.contains(&session_field)
         })
-        .filter_map(|line| line.split(" outcome=").nth(1))
-        .map(|outcome| outcome.split_whitespace().next().unwrap_or("").to_owned())
+        .map(|line| HookWorkRecord {
+            event_id: line
+                .split_whitespace()
+                .find_map(|field| field.strip_prefix("event_id="))
+                .expect("work record carries its event identity")
+                .to_owned(),
+            outcome: line
+                .split_whitespace()
+                .find_map(|field| field.strip_prefix(outcome_field))
+                .expect("work record carries its outcome")
+                .to_owned(),
+        })
         .collect()
+}
+
+/// Intent attempts for exactly one protected native session, in order.
+fn intent_outcomes(log: &Path, session: &str) -> Vec<String> {
+    hook_work_records(log, session, "context_scout_intent_work", "outcome=")
+        .into_iter()
+        .map(|record| record.outcome)
+        .collect()
+}
+
+fn wait_for_tool_intent_settlement(log: &Path, session: &str, before: usize) -> usize {
+    let mut tool_event_id = None;
+    let mut settled_attempt_count = None;
+    wait_for("the tool boundary's mounted and durably completed intent", log, || {
+        let records = hook_work_records(log, session, "context_scout_intent_work", "outcome=");
+        let attempts = &records[before..];
+        let Some(first) = attempts.first() else {
+            return false;
+        };
+        let event_id = tool_event_id.get_or_insert_with(|| first.event_id.clone());
+        assert!(
+            attempts.iter().all(|attempt| attempt.event_id == *event_id),
+            "automatic replay must retain the tool boundary's exact event: {attempts:?}"
+        );
+        // Unavailable leaves this envelope's producer work owed. Observe its
+        // automatic replay without resubmitting a hook or extending WAIT.
+        // Any policy refusal or suppression still fails this journey.
+        assert!(
+            attempts
+                .iter()
+                .all(|attempt| matches!(attempt.outcome.as_str(), "unavailable" | "mounted")),
+            "the enabled tool boundary must mount rather than refuse its intent: {attempts:?}"
+        );
+        let mounted = attempts
+            .iter()
+            .filter(|attempt| attempt.outcome == "mounted")
+            .count();
+        assert!(mounted <= 1, "the tool intent mounts exactly once: {attempts:?}");
+        if mounted == 1 {
+            assert_eq!(
+                attempts.last().map(|attempt| attempt.outcome.as_str()),
+                Some("mounted"),
+                "only unavailable attempts may precede the mounted terminal: {attempts:?}"
+            );
+        }
+        let settlements = hook_work_records(log, session, "hook_v2_work_settled", "settlement=")
+            .into_iter()
+            .filter(|record| record.event_id == *event_id)
+            .collect::<Vec<_>>();
+        assert!(
+            settlements.len() <= 1
+                && settlements.iter().all(|record| record.outcome == "completed"),
+            "the mounted tool intent has one completed durable terminal: {settlements:?}"
+        );
+        if mounted == 1 && settlements.len() == 1 {
+            settled_attempt_count = Some(records.len());
+            true
+        } else {
+            false
+        }
+    });
+    settled_attempt_count.expect("the completed wait validated the tool attempt count")
 }
 
 fn wait_for(what: &str, log: &Path, ready: impl FnMut() -> bool) {
@@ -459,23 +543,13 @@ fn claude_stop_delivers_the_deterministic_intent_from_the_tool_boundary() {
     );
 
     let before = intent_outcomes(&log, ENABLED_SESSION).len();
-    let enabled_tool = run_hook(
+    run_hook(
         home,
         &project,
         "hook-claude-post-tool-use",
         &post_tool_use(&project, ENABLED_SESSION, &enabled_transcript),
     );
-    wait_for(
-        &format!("the enabled tool boundary's intent pass after {enabled_tool:?}"),
-        &log,
-        || intent_outcomes(&log, ENABLED_SESSION).len() > before,
-    );
-    assert_eq!(
-        intent_outcomes(&log, ENABLED_SESSION)[before..],
-        ["mounted"],
-        "the tool boundary's intent pass enqueues one suggestion and mounts its claim: {}",
-        std::fs::read_to_string(&log).unwrap_or_default()
-    );
+    let after_tool = wait_for_tool_intent_settlement(&log, ENABLED_SESSION, before);
 
     let stop_event = stop(&project, ENABLED_SESSION, &enabled_transcript);
     let delivers = |context: &String| context.contains(&suggestion_text(INTENT));
@@ -520,7 +594,7 @@ fn claude_stop_delivers_the_deterministic_intent_from_the_tool_boundary() {
                     serde_json::from_value(status["hook_replay"].clone())
                         .unwrap_or_else(|error| panic!("hook replay status ({error}): {status}"));
                 replay == StatusHookReplayV1::Drained
-                    && intent_outcomes(&log, ENABLED_SESSION).len() > before + 1
+                    && intent_outcomes(&log, ENABLED_SESSION).len() > after_tool
             },
         );
         assert!(
@@ -561,7 +635,7 @@ fn claude_stop_delivers_the_deterministic_intent_from_the_tool_boundary() {
         &stop_contexts,
         |(emitted, suppressed)| emitted == 1 && suppressed >= 1,
     );
-    let after_mount = intent_outcomes(&log, ENABLED_SESSION)[before + 1..].to_vec();
+    let after_mount = intent_outcomes(&log, ENABLED_SESSION)[after_tool..].to_vec();
     // Retained stop attempts may truthfully finish unavailable before their
     // replay succeeds. The retry loop above already requires an explicit
     // retryable receipt for every repeated stop; the settled pass must still

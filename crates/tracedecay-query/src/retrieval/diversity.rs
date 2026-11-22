@@ -10,9 +10,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use thiserror::Error;
 use tracedecay_domain::{
     CandidateContribution, DiversityPolicy, EvidenceRole, ExactClass, FileOccurrenceId,
-    FixedPointScore, FusedCandidate, LogicalCopyClusterId, OccurrenceProvenance,
-    RankedCandidate, RankingDecision, RankingDecisionKind, RepositoryId, RetrievalAnchorId,
-    RetrieverKind, ScoreDomainId, SessionOrThreadId, SourceInstanceKey, SourceNamespace,
+    FixedPointScore, FusedCandidate, LogicalCopyClusterId, OccurrenceProvenance, RankedCandidate,
+    RankingDecision, RankingDecisionKind, RepositoryId, RetrievalAnchorId, RetrieverKind,
+    ScoreDomainId, SessionOrThreadId, SourceInstanceKey, SourceNamespace,
 };
 
 use super::ordering::{ordered_contribution_scores, source_validity_rank};
@@ -93,8 +93,7 @@ fn cap_candidates(
         let keys = candidates
             .iter()
             .map(|candidate| {
-                (!is_protected(candidate))
-                    .then(|| CandidateCapKeys::derive(policy, candidate))
+                (!is_protected(candidate)).then(|| CandidateCapKeys::derive(policy, candidate))
             })
             .collect::<Vec<_>>();
         let witnesses = direct_file_witnesses(policy, &candidates, anchor_tiers);
@@ -103,7 +102,14 @@ fn cap_candidates(
             active[witness.index] = true;
         }
         loop {
-            match cap_pass(policy, &candidates, &keys, &witnesses, &active, anchor_tiers) {
+            match cap_pass(
+                policy,
+                &candidates,
+                &keys,
+                &witnesses,
+                &active,
+                anchor_tiers,
+            ) {
                 Ok(dimensions) => break dimensions,
                 Err(index) => {
                     // Replaying from the original order also restores the
@@ -247,8 +253,7 @@ fn cap_pass(
                     active[witness.index]
                         && witness.index > index
                         && leading_priority(candidate, anchor_tiers) >= witness.priority
-                        && counters.files.get(*file).copied().unwrap_or(0)
-                            >= cap.saturating_sub(1)
+                        && counters.files.get(*file).copied().unwrap_or(0) >= cap.saturating_sub(1)
                 })
             })
         });

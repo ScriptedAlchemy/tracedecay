@@ -1,9 +1,8 @@
 use std::cmp::{Ordering, Reverse};
 
 use tracedecay_domain::{
-    CandidateContribution, ExactClass, FixedPointScore, FreshnessCompatibilityV1,
-    FusedCandidate, RankingDecision, RetrievalAnchorId, RetrieverKind, ScoreDomainId,
-    SourceOccurrenceId,
+    CandidateContribution, ExactClass, FixedPointScore, FreshnessCompatibilityV1, FusedCandidate,
+    RankingDecision, RetrievalAnchorId, RetrieverKind, ScoreDomainId, SourceOccurrenceId,
 };
 
 use super::fusion::FusionComparatorRecordV1;

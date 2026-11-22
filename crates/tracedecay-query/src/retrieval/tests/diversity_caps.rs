@@ -206,7 +206,10 @@ fn compose_file_candidates(
             for (ordinal, candidate) in candidates.iter_mut().enumerate() {
                 candidate.ordinal_rank = ordinal as u32;
             }
-            (lane, RetrieverOutcome::Complete(batch(candidates, "file evidence")))
+            (
+                lane,
+                RetrieverOutcome::Complete(batch(candidates, "file evidence")),
+            )
         })
         .collect();
     CompositionKernel::new(id("ranking.fixture.v1"))
@@ -229,12 +232,8 @@ fn a_file_retains_direct_text_and_fills_its_other_slot_in_fused_order() {
         file_candidate(RetrieverKind::Graph, "context", 1_000_000, "file.shared"),
         file_candidate(RetrieverKind::Graph, "graph-only", 900_000, "file.shared"),
     ];
-    let uncapped = compose_file_candidates(
-        profile(),
-        &no_caps(),
-        candidates.clone(),
-        &BTreeMap::new(),
-    );
+    let uncapped =
+        compose_file_candidates(profile(), &no_caps(), candidates.clone(), &BTreeMap::new());
     assert_eq!(
         ranked_anchors(&uncapped),
         ["anchor.context", "anchor.graph-only", "anchor.direct"]
@@ -247,8 +246,14 @@ fn a_file_retains_direct_text_and_fills_its_other_slot_in_fused_order() {
     let output = compose_file_candidates(profile(), &policy, candidates, &BTreeMap::new());
     assert_eq!(ranked_anchors(&output), ["anchor.context", "anchor.direct"]);
     assert_eq!(output.diversity_decisions.len(), 1);
-    assert_eq!(output.diversity_decisions[0].capped, vec![id("anchor.graph-only")]);
-    assert_eq!(output.diversity_decisions[0].decision.detail, "capped by file");
+    assert_eq!(
+        output.diversity_decisions[0].capped,
+        vec![id("anchor.graph-only")]
+    );
+    assert_eq!(
+        output.diversity_decisions[0].decision.detail,
+        "capped by file"
+    );
 }
 
 #[test]
@@ -262,11 +267,14 @@ fn text_retention_uses_saturation_ties_and_freshness_independently_of_lane_ordin
         (1_500_000, 2_000_000, FreshnessCompatibilityV1::Stale),
     ] {
         let direct = file_candidate(RetrieverKind::Lexical, "direct", direct_raw, "file.shared");
-        let mut context =
-            file_candidate(RetrieverKind::Lexical, "context", context_raw, "file.shared");
+        let mut context = file_candidate(
+            RetrieverKind::Lexical,
+            "context",
+            context_raw,
+            "file.shared",
+        );
         context.freshness.compatibility = context_freshness;
-        let mut graph =
-            file_candidate(RetrieverKind::Graph, "context", 1_000_000, "file.shared");
+        let mut graph = file_candidate(RetrieverKind::Graph, "context", 1_000_000, "file.shared");
         graph.freshness.compatibility = context_freshness;
         let candidates = vec![direct, context, graph];
         for reversed in [false, true] {
@@ -275,8 +283,7 @@ fn text_retention_uses_saturation_ties_and_freshness_independently_of_lane_ordin
                 candidates.reverse();
             }
             // The helper renumbers each valid batch after this permutation.
-            let output =
-                compose_file_candidates(profile(), &policy, candidates, &BTreeMap::new());
+            let output = compose_file_candidates(profile(), &policy, candidates, &BTreeMap::new());
             assert_eq!(
                 ranked_anchors(&output),
                 ["anchor.direct"],
@@ -315,8 +322,7 @@ fn an_infeasible_text_reservation_replays_original_priority_at_other_caps() {
     first.session_or_thread_id = Some(id("session.blocked"));
     let mut context = file_candidate(RetrieverKind::Graph, "context", 900_000, "file.shared");
     context.session_or_thread_id = Some(id("session.competing"));
-    let mut competitor =
-        file_candidate(RetrieverKind::Graph, "competitor", 800_000, "file.other");
+    let mut competitor = file_candidate(RetrieverKind::Graph, "competitor", 800_000, "file.other");
     competitor.session_or_thread_id = Some(id("session.competing"));
     let mut direct = file_candidate(RetrieverKind::Lexical, "direct", 100_000, "file.shared");
     direct.session_or_thread_id = Some(id("session.blocked"));
@@ -389,8 +395,12 @@ fn multi_file_reservations_follow_text_provenance_and_release_failed_witnesses()
 fn zero_file_capacity_preserves_exact_contradictions_and_unfiled_evidence() {
     let mut exact = exact_candidate("exact", 1_000_000);
     exact.file_occurrence_id = Some(id("file.shared"));
-    let mut contradiction =
-        file_candidate(RetrieverKind::Graph, "contradiction", 900_000, "file.shared");
+    let mut contradiction = file_candidate(
+        RetrieverKind::Graph,
+        "contradiction",
+        900_000,
+        "file.shared",
+    );
     contradiction.evidence_role = EvidenceRole::Contradiction;
     let unfiled = candidate(RetrieverKind::Lexical, "unfiled", 300_000, 0);
     let policy = DiversityPolicy {
@@ -431,7 +441,9 @@ fn disabled_or_zero_utility_text_does_not_reserve_a_file_slot() {
         .expect("lexical calibration exists")
         .raw_min_micros = 500_000;
     let mut rounded_to_zero = profile();
-    rounded_to_zero.weights_micros.insert(RetrieverKind::Lexical, 1);
+    rounded_to_zero
+        .weights_micros
+        .insert(RetrieverKind::Lexical, 1);
     for (name, fusion_profile, direct_raw) in [
         ("disabled weight", disabled, 1_000_000),
         ("zero calibrated feature", zero_feature, 400_000),
