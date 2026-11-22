@@ -1418,7 +1418,10 @@ mod tests {
                 control,
             )
             .unwrap();
-            assert!(status.stdout.is_empty(), "{flag} must hide the fixture edit");
+            assert!(
+                status.stdout.is_empty(),
+                "{flag} must hide the fixture edit"
+            );
             let index_flags = || {
                 successful_git_with_control(
                     &artifacts.worktree,

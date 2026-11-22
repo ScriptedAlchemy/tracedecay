@@ -11,7 +11,8 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use tracedecay_application::pr_tracking::{
     ManualBranchActivationError, PrCommandControlV1, refs_are_unattached_outside_worktree,
-    require_worktree_index_checks, successful_git_with_control, try_acquire_manual_branch_lifecycle,
+    require_worktree_index_checks, successful_git_with_control,
+    try_acquire_manual_branch_lifecycle,
 };
 use tracedecay_code_index_runtime::code_index_scheduler::CodeIndexSchedulerRegistryV1;
 use tracedecay_runtime_core::cancellation::CancellationToken;

@@ -16,6 +16,7 @@ pub(crate) use workflow_artifact_ceiling_upgrade::{
     reclaim_freed_artifact_pages, recover_published_artifact_ceiling,
 };
 
+use super::configuration::contracts::ConfigurationError;
 use super::schema_contract::{
     authority_invariant_triggers_intact, ensure_authority_audit_checkpoint_schema,
     ensure_authority_invariant_schema, ensure_authority_invariants,
@@ -1361,10 +1362,10 @@ pub async fn converge_attached_registered_schema(
 /// initialization. The returned convergence plan carries the LCM status-index
 /// work and any published workflow upgrade for lifecycle-owned daemon
 /// maintenance; short-lived callers run that same work synchronously.
-/// A store whose LCM, workflow, or git correlation shape this binary refuses
-/// is admitted untouched for its other authorities; one whose observation
-/// rows it refuses is installed without them. Either returns the refused
-/// authority instead of a plan.
+/// A store whose profile configuration, LCM, workflow, or git correlation shape
+/// this binary refuses is admitted untouched for its other authorities; one
+/// whose observation rows it refuses is installed without them. Either returns
+/// the refused authority instead of a plan.
 ///
 /// `cancellation` is observed before classification and before every
 /// statement of the admission transaction: a cancelled attach rolls that
@@ -1393,6 +1394,14 @@ pub(crate) async fn ensure_attached_registered_schema(
             return Ok(RegisteredSchemaAttachmentV1::SessionsRefused(refused));
         }
     };
+    if let Some(refused) = Box::pin(profile_configuration_refusal(
+        database,
+        configuration_fresh.is_some(),
+    ))
+    .await?
+    {
+        return Ok(RegisteredSchemaAttachmentV1::SessionsRefused(refused));
+    }
     validate_existing_observation_for_admission(&read_connection, configuration_fresh.is_some())
         .await?;
     let triggers_intact: Pin<
@@ -1508,6 +1517,14 @@ pub(crate) async fn attached_registered_schema_reset_refusal(
         }
         Err(error) => return reset_or_error(error),
     };
+    if let Some(refused) = Box::pin(profile_configuration_refusal(
+        database,
+        configuration_fresh.is_some(),
+    ))
+    .await?
+    {
+        return Ok(Some(refused.error()));
+    }
     if let Err(error) =
         validate_existing_observation_for_admission(&read_connection, configuration_fresh.is_some())
             .await
@@ -1546,6 +1563,38 @@ pub(crate) async fn attached_registered_schema_reset_refusal(
     match admission {
         Ok(refused) => Ok(refused.map(RefusedAuthorityV1::error)),
         Err(error) => reset_or_error(error),
+    }
+}
+
+/// Profile policy is part of the admitted profile-session authority. Refuse
+/// an incompatible initialized snapshot before schema writes or background
+/// convergence, so every lease and the reset census share the same verdict.
+async fn profile_configuration_refusal(
+    database: &Database,
+    is_fresh: bool,
+) -> tracedecay_domain::errors::Result<Option<RefusedAuthorityV1>> {
+    let binding = database.registered_binding();
+    if is_fresh || binding.shard_id.scope != StoreShardScopeV1::ProfileSessions {
+        return Ok(None);
+    }
+    let read = database
+        .begin_engine_read_snapshot("admit profile configuration")
+        .await?;
+    match configuration::ProfileConfigurationStore::admit_existing(
+        &read,
+        &binding.shard_id.profile_id,
+    )
+    .await
+    {
+        Ok(()) => Ok(None),
+        Err(ConfigurationError::ResetRequired { reason }) => Ok(Some(RefusedAuthorityV1::Shape {
+            authority: "configuration",
+            reason: Cow::Owned(reason),
+        })),
+        Err(error) => Err(global_db_operation_error(
+            "admit profile configuration",
+            error,
+        )),
     }
 }
 

@@ -20,7 +20,8 @@ use tracedecay_domain::configuration::{
     LCM_SUMMARIZER_EXECUTABLES_SETTING_KEY, ProtectedChange, ProtectedChangePlan,
     ProtectedChangeSnapshotError, RedactedConfigurationChangeV1, RollbackModeV1,
     SOURCE_BINDINGS_SETTING_KEY, SYNC_WATCH_LINKED_WORKTREES_SETTING_KEY, ScopeControlOperationV1,
-    SettingKey, USER_CODE_INDEX_WORKERS_SETTING_KEY, UserProfileId, WORK_TOPOLOGY_POLICY_SETTING_KEY,
+    SettingKey, USER_CODE_INDEX_WORKERS_SETTING_KEY, UserProfileId,
+    WORK_TOPOLOGY_POLICY_SETTING_KEY,
 };
 use tracedecay_domain::feedback::PROXIMITY_RELATIONSHIP_HINTS_SETTING_KEY_V1;
 use tracedecay_domain::{AccessPolicyDigest, ActorId, ManifestDigest, UtcMicros, canonical_sha256};
@@ -99,65 +100,71 @@ impl<'db> GlobalDbConfigurationControlStore<'db> {
                 .read_snapshot()
                 .await
                 .map_err(|_| ConfigurationError::Unavailable)?;
-            let mut table_rows = read
-                .query(
-                    "SELECT COUNT(*) FROM sqlite_master
-                     WHERE type = 'table'
-                       AND name = 'configuration_revisions'",
-                    (),
-                )
-                .await
-                .map_err(|_| ConfigurationError::Unavailable)?;
-            let table_count = table_rows
-                .next()
-                .await
-                .map_err(|_| ConfigurationError::Unavailable)?
-                .ok_or_else(|| {
-                    ConfigurationError::validation_message(
-                        "configuration table presence query returned no row",
-                    )
-                })?
-                .get::<i64>(0)
-                .map_err(|_| {
-                    ConfigurationError::validation_message(
-                        "configuration table count is not an integer",
-                    )
-                })?;
-            if table_count != 1 {
-                return Err(ConfigurationError::validation_message(
-                    "configuration final-shape table is unavailable",
-                ));
-            }
-            let mut rows = read
-                .query("SELECT COUNT(*) FROM configuration_revisions", ())
-                .await
-                .map_err(|_| ConfigurationError::Unavailable)?;
-            let row = rows
-                .next()
-                .await
-                .map_err(|_| ConfigurationError::Unavailable)?
-                .ok_or_else(|| {
-                    ConfigurationError::validation_message(
-                        "configuration initialization query returned no row",
-                    )
-                })?;
-            let revision_count = row.get::<i64>(0).map_err(|_| {
+            Self::is_uninitialized_from_executor(&read).await
+        })
+    }
+
+    async fn is_uninitialized_from_executor(
+        read: &impl QueryExecutor,
+    ) -> Result<bool, ConfigurationError> {
+        let mut table_rows = read
+            .query(
+                "SELECT COUNT(*) FROM sqlite_master
+                 WHERE type = 'table'
+                   AND name = 'configuration_revisions'",
+                (),
+            )
+            .await
+            .map_err(|_| ConfigurationError::Unavailable)?;
+        let table_count = table_rows
+            .next()
+            .await
+            .map_err(|_| ConfigurationError::Unavailable)?
+            .ok_or_else(|| {
                 ConfigurationError::validation_message(
-                    "configuration revision count is not an integer",
+                    "configuration table presence query returned no row",
+                )
+            })?
+            .get::<i64>(0)
+            .map_err(|_| {
+                ConfigurationError::validation_message(
+                    "configuration table count is not an integer",
                 )
             })?;
-            if rows
-                .next()
-                .await
-                .map_err(|_| ConfigurationError::Unavailable)?
-                .is_some()
-            {
-                return Err(ConfigurationError::validation_message(
-                    "configuration initialization query returned multiple rows",
-                ));
-            }
-            Ok(revision_count == 0)
-        })
+        if table_count != 1 {
+            return Err(ConfigurationError::validation_message(
+                "configuration final-shape table is unavailable",
+            ));
+        }
+        let mut rows = read
+            .query("SELECT COUNT(*) FROM configuration_revisions", ())
+            .await
+            .map_err(|_| ConfigurationError::Unavailable)?;
+        let row = rows
+            .next()
+            .await
+            .map_err(|_| ConfigurationError::Unavailable)?
+            .ok_or_else(|| {
+                ConfigurationError::validation_message(
+                    "configuration initialization query returned no row",
+                )
+            })?;
+        let revision_count = row.get::<i64>(0).map_err(|_| {
+            ConfigurationError::validation_message(
+                "configuration revision count is not an integer",
+            )
+        })?;
+        if rows
+            .next()
+            .await
+            .map_err(|_| ConfigurationError::Unavailable)?
+            .is_some()
+        {
+            return Err(ConfigurationError::validation_message(
+                "configuration initialization query returned multiple rows",
+            ));
+        }
+        Ok(revision_count == 0)
     }
 
     /// Publishes the sole canonical first revision into an empty final-shape
@@ -692,6 +699,25 @@ impl<'db> ProfileConfigurationStore<'db> {
             store: GlobalDbConfigurationControlStore::new_registered(db),
             profile_id: profile_id.clone(),
         })
+    }
+
+    /// Classify initialized profile policy before a registered store publishes
+    /// serving authority or starts schema convergence. Fresh configuration has
+    /// no persisted policy to refuse and remains uninitialized here.
+    pub(crate) async fn admit_existing(
+        read: &impl QueryExecutor,
+        profile_id: &UserProfileId,
+    ) -> Result<(), ConfigurationError> {
+        if GlobalDbConfigurationControlStore::is_uninitialized_from_executor(read).await? {
+            return Ok(());
+        }
+        let registry = ConfigurationRegistry::profile().map_err(ConfigurationError::validation)?;
+        Self::project(
+            profile_id,
+            current_state_from_transaction(read).await?,
+            &registry,
+        )?;
+        Ok(())
     }
 
     /// Read the exact current profile settings without initializing or changing

@@ -586,9 +586,7 @@ impl SessionTemporalRefreshWakeState {
             // A completed explicit import establishes the same source frontier
             // as an automatic pass. Pausing future discovery is convergence
             // policy, not evidence that this imported projection is stale.
-            SessionHistoricalIngestOutcome::Complete => {
-                SessionHistoricalServingState::Current
-            }
+            SessionHistoricalIngestOutcome::Complete => SessionHistoricalServingState::Current,
             SessionHistoricalIngestOutcome::Pending { .. } => {
                 SessionHistoricalServingState::Pending
             }

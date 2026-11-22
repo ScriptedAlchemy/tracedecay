@@ -1,4 +1,4 @@
-//! A registered store whose persisted shape this binary does not open is
+//! A registered store whose persisted shape or settings this binary does not open is
 //! served as a typed reset-required state instead of a daemon that refuses to
 //! start.
 //!
@@ -9,14 +9,22 @@
 //! `reset_required` problem, and a code-index read on the same project must
 //! still answer. After the named reset the same read serves.
 
+use std::collections::BTreeMap;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 
+use tracedecay_domain::configuration::{
+    ConfigurationCandidateV1, ConfigurationSnapshotV1, ConfigurationValueV1, SettingKey,
+    USER_SESSION_COMPACTION_DAYS_SETTING_KEY, USER_SESSION_HISTORY_IMPORT_ENABLED_SETTING_KEY,
+    USER_SESSION_RETENTION_DAYS_SETTING_KEY, USER_SESSION_RETENTION_ENABLED_SETTING_KEY,
+};
+use tracedecay_global_db::configuration::{registry::ConfigurationRegistry, resolver};
 use tracedecay_session_temporal_store::SESSION_TEMPORAL_SCHEMA_VERSION;
 use tracedecay_sessions::runtime::git_correlation::GIT_CORRELATION_SCHEMA_VERSION;
 
+use super::stale_sessions_store_reset::file_digests;
 use crate::common::{canonical_existing_path, spawn_tracedecay_daemon_with};
 
 /// Bound on waiting for the first sealed code generation of a two-line fixture.
@@ -195,6 +203,254 @@ fn reset_required_profile_session_store_is_served_typed_until_its_named_reset() 
         "the reset store serves again"
     );
 
+    let _ = daemon.kill_and_wait();
+}
+
+fn profile_configuration_snapshot(db_path: &Path) -> (String, ConfigurationSnapshotV1) {
+    let connection = rusqlite::Connection::open_with_flags(
+        db_path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .expect("read the existing profile settings");
+    let (revision, snapshot_id, behavior_digest, provenance_digest) = connection
+        .query_row(
+            "SELECT revision_id, snapshot_id, effective_behavior_digest,
+                    resolution_provenance_digest
+             FROM configuration_revisions AS candidate
+             WHERE NOT EXISTS (
+                 SELECT 1 FROM configuration_revisions AS child
+                 WHERE child.parent_revision_id = candidate.revision_id
+             )",
+            [],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                ))
+            },
+        )
+        .expect("read the current profile revision");
+    let mut statement = connection
+        .prepare("SELECT key, typed_value FROM configuration_entries WHERE revision_id = ?1")
+        .expect("read the current profile entries");
+    let entries = statement
+        .query_map([&revision], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })
+        .expect("query profile entries");
+    let mut values = BTreeMap::new();
+    let mut provenance = BTreeMap::new();
+    for entry in entries {
+        let (key, encoded) = entry.expect("read a profile setting");
+        let key = SettingKey::new(key).expect("registered setting key");
+        let entry: Value = serde_json::from_str(&encoded).expect("stored setting payload");
+        values.insert(
+            key.clone(),
+            serde_json::from_value::<ConfigurationValueV1>(entry["value"].clone())
+                .expect("typed profile value"),
+        );
+        provenance.insert(
+            key,
+            serde_json::from_value::<Vec<ConfigurationCandidateV1>>(entry["provenance"].clone())
+                .expect("typed profile provenance"),
+        );
+    }
+    let snapshot =
+        ConfigurationSnapshotV1::new(values, provenance).expect("sealed profile snapshot");
+    assert_eq!(snapshot.snapshot_id.as_str(), snapshot_id);
+    assert_eq!(snapshot.effective_behavior_digest.as_str(), behavior_digest);
+    assert_eq!(
+        snapshot.resolution_provenance_digest.as_str(),
+        provenance_digest
+    );
+    (revision, snapshot)
+}
+
+/// Publishes the settings set an older daemon knew, with valid identity and
+/// unchanged physical schema. Appending a revision retains the production
+/// immutability triggers; only registry completeness can refuse this store.
+fn publish_previous_profile_settings(db_path: &Path) -> (String, ConfigurationSnapshotV1) {
+    let (previous_revision, mut snapshot) = profile_configuration_snapshot(db_path);
+    let new_keys = [
+        USER_SESSION_HISTORY_IMPORT_ENABLED_SETTING_KEY,
+        USER_SESSION_RETENTION_ENABLED_SETTING_KEY,
+        USER_SESSION_RETENTION_DAYS_SETTING_KEY,
+        USER_SESSION_COMPACTION_DAYS_SETTING_KEY,
+    ];
+    for key in new_keys {
+        let key = SettingKey::new(key).unwrap();
+        assert!(snapshot.effective_values.remove(&key).is_some());
+        assert!(snapshot.provenance.remove(&key).is_some());
+    }
+    let snapshot = ConfigurationSnapshotV1::new(snapshot.effective_values, snapshot.provenance)
+        .expect("the older settings retain a valid snapshot identity");
+    let revision = "configuration.profile.previous-settings.v1";
+    let mut connection =
+        rusqlite::Connection::open(db_path).expect("open the stopped profile store");
+    let transaction = connection
+        .transaction()
+        .expect("publish older profile settings");
+    assert_eq!(
+        transaction
+            .execute(
+                "INSERT INTO configuration_revisions (
+                     revision_id, parent_revision_id, snapshot_id, effective_behavior_digest,
+                     resolution_provenance_digest, actor_id, operation_kind, created_at
+                 ) SELECT ?1, revision_id, ?2, ?3, ?4, actor_id, operation_kind, created_at + 1
+                   FROM configuration_revisions WHERE revision_id = ?5",
+                rusqlite::params![
+                    revision,
+                    snapshot.snapshot_id.as_str(),
+                    snapshot.effective_behavior_digest.as_str(),
+                    snapshot.resolution_provenance_digest.as_str(),
+                    previous_revision,
+                ],
+            )
+            .expect("append the older settings revision"),
+        1
+    );
+    assert_eq!(
+        transaction
+            .execute(
+                "INSERT INTO configuration_entries (
+                     revision_id, key, layer_kind, layer_id, schema_revision, typed_value
+                 ) SELECT ?1, key, layer_kind, layer_id, schema_revision, typed_value
+                   FROM configuration_entries
+                   WHERE revision_id = ?2 AND key NOT IN (?3, ?4, ?5, ?6)",
+                rusqlite::params![
+                    revision,
+                    previous_revision,
+                    new_keys[0],
+                    new_keys[1],
+                    new_keys[2],
+                    new_keys[3],
+                ],
+            )
+            .expect("retain the older settings entries"),
+        snapshot.effective_values.len()
+    );
+    transaction.commit().expect("commit the older settings");
+    connection
+        .execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")
+        .expect("settle the stopped store before byte comparisons");
+    profile_configuration_snapshot(db_path)
+}
+
+#[test]
+fn older_profile_settings_are_resettable_without_blocking_daemon_startup() {
+    let home = tempfile::TempDir::new().expect("isolated home");
+    let home_path = canonical_existing_path(home.path());
+    let project = tempfile::TempDir::new().expect("project");
+    let project_path = canonical_existing_path(project.path());
+    let profile_root = home_path.join(".tracedecay");
+    let profile_sessions = profile_root.join("user-sessions.db");
+
+    let mut daemon = spawn_tracedecay_daemon_with(&home_path, |_| {});
+    super::initialize_project(&home_path, &project_path, "older-profile-settings");
+    wait_for_code_index_hit(&home_path, &project_path, "probe");
+    daemon.kill_and_wait().expect("stop the initialized daemon");
+    crate::common::wait_for_stopped_daemon(&home_path);
+    let previous = publish_previous_profile_settings(&profile_sessions);
+    assert_eq!(
+        session_temporal_version(&profile_sessions),
+        SESSION_TEMPORAL_SCHEMA_VERSION,
+        "the refused settings live in a physically current session store"
+    );
+    let refused_bytes = std::fs::read(&profile_sessions).expect("read refused store bytes");
+
+    let mut daemon = spawn_tracedecay_daemon_with(&home_path, |_| {});
+    let stores = status_reset_required_stores(&home_path, &project_path);
+    let stores = stores.as_array().expect("reset census");
+    assert_eq!(
+        stores.len(),
+        1,
+        "only profile settings require reset: {stores:?}"
+    );
+    assert_eq!(stores[0]["store"], json!("profile sessions"));
+    assert_eq!(stores[0]["authority"], json!("configuration"));
+    assert_eq!(stores[0]["remedy"], json!("tracedecay wipe --stale --yes"));
+    assert!(
+        stores[0]["reason"]
+            .as_str()
+            .expect("configuration refusal reason")
+            .contains("configuration snapshot does not contain the complete registry"),
+        "the refusal must come from the older settings, not a physical schema mismatch: {stores:?}"
+    );
+    let refused = super::cli_problem_envelope(
+        &profile_session_read(&home_path, &project_path),
+        "profile read over older settings",
+    );
+    super::assert_reset_required(&refused, "profile read over older settings");
+    assert_eq!(
+        refused["problem"]["detail"]["authority"],
+        json!("configuration")
+    );
+    assert_eq!(
+        refused["problem"]["detail"]["remedy"],
+        json!("tracedecay wipe --stale --yes")
+    );
+    wait_for_code_index_hit(&home_path, &project_path, "probe");
+    assert_eq!(profile_configuration_snapshot(&profile_sessions), previous);
+
+    let mut before_reset = BTreeMap::new();
+    let (reset_status, reset_output) =
+        super::run_scoped_reset(&home_path, &project_path, &mut daemon, || {
+            assert_eq!(profile_configuration_snapshot(&profile_sessions), previous);
+            assert_eq!(
+                std::fs::read(&profile_sessions).expect("read the refused store before reset"),
+                refused_bytes,
+                "serving the reset state must leave the refused store byte-identical"
+            );
+            before_reset = file_digests(&profile_root);
+        });
+    assert!(
+        reset_status.success(),
+        "the scoped reset failed:\n{reset_output}"
+    );
+    assert!(
+        reset_output.contains("reset profile sessions"),
+        "{reset_output}"
+    );
+    let after_reset = file_digests(&profile_root);
+    assert!(before_reset.contains_key(Path::new("user-sessions.db")));
+    for (relative, digest) in &before_reset {
+        let name = relative.to_string_lossy();
+        if name.starts_with("user-sessions.")
+            || name.starts_with(".user-sessions.db.host-admission")
+        {
+            assert!(
+                !after_reset.contains_key(relative),
+                "the scoped reset left refused store member {}: {reset_output}",
+                relative.display()
+            );
+        } else if relative.as_path() != Path::new("lifecycle.lock") {
+            assert_eq!(
+                after_reset.get(relative),
+                Some(digest),
+                "the profile reset changed an unrelated file {}: {reset_output}",
+                relative.display()
+            );
+        }
+    }
+
+    let mut daemon = spawn_tracedecay_daemon_with(&home_path, |_| {});
+    let served = profile_session_read(&home_path, &project_path);
+    assert!(
+        find_key(&served, "problem").is_none_or(|problem| problem.is_null()),
+        "the fresh profile must serve after its scoped reset: {served}"
+    );
+    assert_eq!(
+        status_reset_required_stores(&home_path, &project_path),
+        json!([])
+    );
+    let (_, fresh) = profile_configuration_snapshot(&profile_sessions);
+    let defaults = resolver::resolve_configuration(&ConfigurationRegistry::profile().unwrap(), &[])
+        .expect("current profile defaults")
+        .snapshot;
+    assert_eq!(fresh.effective_values, defaults.effective_values);
+    wait_for_code_index_hit(&home_path, &project_path, "probe");
     let _ = daemon.kill_and_wait();
 }
 
