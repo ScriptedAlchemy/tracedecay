@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.0-beta.110](https://github.com/ScriptedAlchemy/tracedecay/compare/v1.0.0-beta.109...v1.0.0-beta.110) (2026-11-22)
+
+
+### Bug Fixes
+
+* **retention:** release store wait locks and update lucide ([#4927](https://github.com/ScriptedAlchemy/tracedecay/issues/4927)) ([cb97372](https://github.com/ScriptedAlchemy/tracedecay/commit/cb9737203f15e5f1725f174ccdec91949ec61d1a))
+* **sessions:** resume acknowledged discovery pages ([3defb82](https://github.com/ScriptedAlchemy/tracedecay/commit/3defb821f32d0068ff6a53546da17df639bc8453))
+* **sessions:** stop rescheduling idle provider sweeps ([f17cccf](https://github.com/ScriptedAlchemy/tracedecay/commit/f17cccf537316dea50da69cea4b60823d47c4cfc))
+* **sessions:** stop rescheduling idle provider sweeps ([5a180a2](https://github.com/ScriptedAlchemy/tracedecay/commit/5a180a20ab37ddcdd1c11d3d12cd1bc3ebfb4198))
+
 ## [1.0.0-beta.109](https://github.com/ScriptedAlchemy/tracedecay/compare/v1.0.0-beta.108...v1.0.0-beta.109) (2026-11-18)
 
 
