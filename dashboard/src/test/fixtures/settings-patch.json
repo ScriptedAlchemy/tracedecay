@@ -38,21 +38,21 @@
         "outcome": "effect",
         "value": {
           "authority": {
-            "authorized_scope_digest": "sha256:d6fb6d0938d4aef42e4eff3c0f113d607ce1baa34893752eae1361de955150ac",
+            "authorized_scope_digest": "sha256:51de8eada219915bd2a7cf668244ff29b7faaac09f35202d4649a2118cb1f81c",
             "disclosure": "sensitive",
-            "grant_digest": "sha256:8c3dcc220cccaec81a373e117f12fd49517706ffc3a72c677b782ad0edcf423d",
-            "grant_id": "grant.daemon.configuration.ed4af84f307849aaff517d4b47c8e72002febe7cec0fcac38b788596cc343815",
+            "grant_digest": "sha256:259877913a5dcdc5b728d9c133d7c13df558cf241cf0756c1da4a642151a1881",
+            "grant_id": "grant.daemon.configuration.da6e9dc51075644b01b241c664432f56bdbb0fad8065b8577b9f2083e3bd0823",
             "grant_revision": 1,
             "policy": {
               "decision_id": "policy.daemon.configuration.v1",
-              "digest": "sha256:2dde51a3729d9b5fb9cb94b4eb70b6238971cf65bdf5a2ff5ba7d30cca42a36d",
+              "digest": "sha256:5e753adf6c41c9e84a93a8af4ef3522aedb24394a72db6ec55961fe11c2547ed",
               "evaluator_revision": "tracedecay.daemon.configuration-policy.v1",
               "revision": 1
             },
-            "revalidated_at": 1792363717104188
+            "revalidated_at": 1795318616521531
           },
           "effect_class": "configuration_write",
-          "effect_id": "effect.configuration.ed4af84f307849aaff517d4b47c8e72002febe7cec0fcac38b788596cc343815",
+          "effect_id": "effect.configuration.da6e9dc51075644b01b241c664432f56bdbb0fad8065b8577b9f2083e3bd0823",
           "execution": {
             "budget": {
               "bytes_consumed": 0,
@@ -61,49 +61,49 @@
             },
             "cancellation": null,
             "effective_deadline": {
-              "expires_at": 1792363732101451
+              "expires_at": 1795318631521362
             },
-            "ended_at": 1792363717104188,
-            "started_at": 1792363717104188,
+            "ended_at": 1795318616521531,
+            "started_at": 1795318616521531,
             "termination": "completed"
           },
           "expected_state": "sha256:bae10ae7b2f476357fecbfc39d06eb7a43a89eb4b25d078422c77880d2199ef5",
           "idempotency_key": "configuration.idempotency.dashboard-project-commit",
           "payload": {
             "base_revision_id": "configuration.initial.canonical.v1",
-            "created_at": 1792363717104188,
-            "effective_deadline_at": 1792363732101451,
-            "operation_digest": "sha256:95e5a654d365e7fafec21bd84bf68a159d13468d16e6cb38c26ac8493593727f",
-            "receipt_id": "configuration.receipt.v1.eaf7df3361e7130c1b2344d5537c8fdd09d4fb1288fdd4481bf6a0b0bfd9bbc8",
-            "result_revision_id": "configuration.revision.v1.f1dda57fc1603bacc602ad4cdbb08de9bfb8aa867eaabaef844d45f8c779d5b4",
+            "created_at": 1795318616521531,
+            "effective_deadline_at": 1795318631521362,
+            "operation_digest": "sha256:7643b4cc708a15102a3343e1c8d269ce578d54ce43f73ea684fdcdd32a758188",
+            "receipt_id": "configuration.receipt.v1.e8c24798d99bd079587f99fa20eb9797d8c559dc2ad8a879a9f35e642595be62",
+            "result_revision_id": "configuration.revision.v1.7617b27fbf141926fe3b83312a5d10756d046a214c4dd8ce2ac1b10d40263110",
             "settlement_authority": {
-              "policy_digest": "sha256:2dde51a3729d9b5fb9cb94b4eb70b6238971cf65bdf5a2ff5ba7d30cca42a36d",
+              "policy_digest": "sha256:5e753adf6c41c9e84a93a8af4ef3522aedb24394a72db6ec55961fe11c2547ed",
               "policy_epoch": 1,
-              "revalidated_at": 1792363717104188
+              "revalidated_at": 1795318616521531
             },
-            "snapshot_id": "tracedecay.configuration.snapshot.v1.061944e9d3ea29c90e551a2ce8af6d42a385839a986c5fd045ed0add7dee042f"
+            "snapshot_id": "tracedecay.configuration.snapshot.v1.1a8d003e6c56e7dbcc4997d4b5d84f5ea59d6141ff0b2ed48fe88c0316303886"
           },
           "receipt": {
             "actor": "actor.tracedecay-daemon.project-open",
             "catalog_digest": "sha256:57a70599bf2413cffb73f936d4b664b08f8b17533c2dcb0a2fd2bb078e528916",
-            "committed_state": "sha256:e3bd41f67533fc6a4941295fc75c48af569dfcf158b0d1cb209b9fe05fbac74e",
-            "configuration_digest": "sha256:e3bd41f67533fc6a4941295fc75c48af569dfcf158b0d1cb209b9fe05fbac74e",
+            "committed_state": "sha256:b256e75ec35c930cd5b44f07386ed7f334ed2cf3335c3f6887e154bb168b2fbd",
+            "configuration_digest": "sha256:b256e75ec35c930cd5b44f07386ed7f334ed2cf3335c3f6887e154bb168b2fbd",
             "effect_class": "configuration_write",
             "expected_state": "sha256:bae10ae7b2f476357fecbfc39d06eb7a43a89eb4b25d078422c77880d2199ef5",
             "external_proof": null,
             "idempotency_key": "configuration.idempotency.dashboard-project-commit",
-            "input_digest": "sha256:95e5a654d365e7fafec21bd84bf68a159d13468d16e6cb38c26ac8493593727f",
+            "input_digest": "sha256:7643b4cc708a15102a3343e1c8d269ce578d54ce43f73ea684fdcdd32a758188",
             "operation": "use-case.application.configuration.batch",
             "outcome": "completed",
-            "policy_digest": "sha256:2dde51a3729d9b5fb9cb94b4eb70b6238971cf65bdf5a2ff5ba7d30cca42a36d",
+            "policy_digest": "sha256:5e753adf6c41c9e84a93a8af4ef3522aedb24394a72db6ec55961fe11c2547ed",
             "privacy_digest": "sha256:a7f16bc386eeafbe59c14451bd32da5458ced67a14d7ee7e2c641743da818eb6",
-            "request_id": "request.configuration.ed4af84f307849aaff517d4b47c8e72002febe7cec0fcac38b788596cc343815",
+            "request_id": "request.configuration.da6e9dc51075644b01b241c664432f56bdbb0fad8065b8577b9f2083e3bd0823",
             "scope": {
-              "project_id": "proj_69173dcc8b282d79",
+              "project_id": "proj_926e2e7f55c02780",
               "reference": "refs/heads/master",
-              "repository_id": "repository.daemon.e684e4fa551644cdbc59164b7a49c80cee102ea4b2d784c374df6f1cc473e629",
-              "scope_digest": "sha256:d6fb6d0938d4aef42e4eff3c0f113d607ce1baa34893752eae1361de955150ac",
-              "worktree_id": "worktree.daemon.69173dcc8b282d79a6608867f4799d9d8a97885470a7019d268a97b38a01d0a3"
+              "repository_id": "repository.daemon.812e66fd8e2467418683a894ec087a6e7b338fd41757b38fc70ee93222a9b55b",
+              "scope_digest": "sha256:51de8eada219915bd2a7cf668244ff29b7faaac09f35202d4649a2118cb1f81c",
+              "worktree_id": "worktree.daemon.926e2e7f55c02780905c7d9e10d3ab11bbcffce00a4530c38dcb1e54efd1d26e"
             }
           },
           "reconciliation": "pending"
@@ -127,7 +127,7 @@
         },
         "domain_state": "ready",
         "freshness": {
-          "observed_at_micros": 1792363717173083,
+          "observed_at_micros": 1795318616529841,
           "state": "fresh",
           "watermark": null
         },
@@ -152,7 +152,7 @@
             },
             "backend": "codex_app_server",
             "config_endpoint": "/api/plugins/holographic/curation/config",
-            "configuration_revision_id": "configuration.revision.v1.f1dda57fc1603bacc602ad4cdbb08de9bfb8aa867eaabaef844d45f8c779d5b4",
+            "configuration_revision_id": "configuration.revision.v1.7617b27fbf141926fe3b83312a5d10756d046a214c4dd8ce2ac1b10d40263110",
             "enabled": true,
             "host_mode": "standalone"
           },
@@ -171,13 +171,13 @@
                 "active": true,
                 "description": "Pins the global accounting database to an explicit path.",
                 "name": "TRACEDECAY_GLOBAL_DB",
-                "value": "/run/nl/w/4ba25a53-d0f6-4590-8e56-7dffb5d83e12/tmp/.tmpxOcJR3/home/.tracedecay/global.db"
+                "value": "/tmp/.tmpXf49v0/home/.tracedecay/global.db"
               },
               {
                 "active": true,
                 "description": "Pins the user-level TraceDecay data directory (default ~/.tracedecay).",
                 "name": "TRACEDECAY_DATA_DIR",
-                "value": "/run/nl/w/4ba25a53-d0f6-4590-8e56-7dffb5d83e12/tmp/.tmpxOcJR3/home/.tracedecay"
+                "value": "/tmp/.tmpXf49v0/home/.tracedecay"
               }
             ]
           },
@@ -193,72 +193,64 @@
                 ".github/**"
               ],
               "max_file_size": 2097152,
-              "sync": {
-                "auto_track_pr_branches": false,
-                "auto_track_pr_poll_secs": 300
-              },
               "telemetry": {
                 "timings": true
               },
               "track_call_sites": true
             },
-            "configuration_revision_id": "configuration.revision.v1.f1dda57fc1603bacc602ad4cdbb08de9bfb8aa867eaabaef844d45f8c779d5b4",
-            "configuration_snapshot_id": "tracedecay.configuration.snapshot.v1.061944e9d3ea29c90e551a2ce8af6d42a385839a986c5fd045ed0add7dee042f",
-            "pr_autotrack": {
-              "tracked": []
-            }
+            "configuration_revision_id": "configuration.revision.v1.7617b27fbf141926fe3b83312a5d10756d046a214c4dd8ce2ac1b10d40263110",
+            "configuration_snapshot_id": "tracedecay.configuration.snapshot.v1.1a8d003e6c56e7dbcc4997d4b5d84f5ea59d6141ff0b2ed48fe88c0316303886"
           },
           "resync_recommended": true,
           "storage": {
-            "dashboard_root": "/run/nl/w/4ba25a53-d0f6-4590-8e56-7dffb5d83e12/tmp/.tmpxOcJR3/home/.tracedecay/projects/proj_69173dcc8b282d79/dashboard",
-            "graph_db": "/run/nl/w/4ba25a53-d0f6-4590-8e56-7dffb5d83e12/tmp/.tmpxOcJR3/home/.tracedecay/projects/proj_69173dcc8b282d79/tracedecay.db",
-            "lcm_db": "/run/nl/w/4ba25a53-d0f6-4590-8e56-7dffb5d83e12/tmp/.tmpxOcJR3/home/.tracedecay/projects/proj_69173dcc8b282d79/sessions.db",
+            "dashboard_root": "/tmp/.tmpXf49v0/home/.tracedecay/projects/proj_926e2e7f55c02780/dashboard",
+            "graph_db": "/tmp/.tmpXf49v0/home/.tracedecay/projects/proj_926e2e7f55c02780/tracedecay.db",
+            "lcm_db": "/tmp/.tmpXf49v0/home/.tracedecay/projects/proj_926e2e7f55c02780/sessions.db",
             "lcm_scope": "profile_sharded",
-            "memory_db": "/run/nl/w/4ba25a53-d0f6-4590-8e56-7dffb5d83e12/tmp/.tmpxOcJR3/home/.tracedecay/projects/proj_69173dcc8b282d79/tracedecay.db",
-            "project_id": "proj_69173dcc8b282d79",
-            "project_root": "/run/nl/w/4ba25a53-d0f6-4590-8e56-7dffb5d83e12/tmp/.tmpxOcJR3/project",
-            "savings_db": "/run/nl/w/4ba25a53-d0f6-4590-8e56-7dffb5d83e12/tmp/.tmpxOcJR3/home/.tracedecay/global.db",
+            "memory_db": "/tmp/.tmpXf49v0/home/.tracedecay/projects/proj_926e2e7f55c02780/tracedecay.db",
+            "project_id": "proj_926e2e7f55c02780",
+            "project_root": "/tmp/.tmpXf49v0/project",
+            "savings_db": "/tmp/.tmpXf49v0/home/.tracedecay/global.db",
             "storage_mode": "profile_sharded",
-            "store_root": "/run/nl/w/4ba25a53-d0f6-4590-8e56-7dffb5d83e12/tmp/.tmpxOcJR3/home/.tracedecay/projects/proj_69173dcc8b282d79"
+            "store_root": "/tmp/.tmpXf49v0/home/.tracedecay/projects/proj_926e2e7f55c02780"
           },
           "user": {
             "code_index_worker_configuration_revision_id": "configuration.profile.initial.v1",
-            "code_index_worker_configuration_snapshot_id": "tracedecay.configuration.snapshot.v1.3862ddb1c67746133efde2466f16da128b79ae5879a195e7075d1d0c9fe7525c",
+            "code_index_worker_configuration_snapshot_id": "tracedecay.configuration.snapshot.v1.a38410cece38610d0af38babc5772f2ff5780495f9f78d7e87b021e284bbf726",
             "code_index_worker_status": {
-              "available_logical_cpus": 96,
+              "available_logical_cpus": 4,
               "configured": {
                 "mode": "automatic"
               },
-              "effective_workers": 48,
+              "effective_workers": 4,
               "environment_override_workers": null,
-              "limiting_reason": "automatic_half_cores",
-              "memory_safe_workers": 384
+              "limiting_reason": "automatic_all_cores",
+              "memory_safe_workers": 70
             },
             "code_index_workers": {
               "mode": "automatic"
             },
             "configuration_revision_id": "configuration.profile.initial.v1",
-            "configuration_snapshot_id": "tracedecay.configuration.snapshot.v1.3862ddb1c67746133efde2466f16da128b79ae5879a195e7075d1d0c9fe7525c",
+            "configuration_snapshot_id": "tracedecay.configuration.snapshot.v1.a38410cece38610d0af38babc5772f2ff5780495f9f78d7e87b021e284bbf726",
             "extraction_timeout_secs": 60,
             "installed_agents": [],
-            "upload_enabled": false,
             "watcher_debounce": "2s"
           },
           "version": {
             "cached_latest_version": null,
             "channel": "beta",
-            "version": "1.0.0-beta.88+451721797b8ae53bc539072fc19994df9cb66d34.dirty"
+            "version": "1.0.0-beta.109+9277ec2c47a2d91294dd92e41843c9ef7fe60fe7"
           }
         },
         "schema_revision": 1,
         "scope": {
-          "project_id": "proj_69173dcc8b282d79",
+          "project_id": "proj_926e2e7f55c02780",
           "storage_mode": "profile_sharded",
-          "store_root": "/run/nl/w/4ba25a53-d0f6-4590-8e56-7dffb5d83e12/tmp/.tmpxOcJR3/home/.tracedecay/projects/proj_69173dcc8b282d79"
+          "store_root": "/tmp/.tmpXf49v0/home/.tracedecay/projects/proj_926e2e7f55c02780"
         },
         "source_watermark": null,
         "time": {
-          "observation_time_micros": 1792363717173087,
+          "observation_time_micros": 1795318616529842,
           "valid_time_micros": null
         },
         "version": {
@@ -293,17 +285,17 @@
         ],
         "message": "The configuration request conflicts with current state",
         "owning_layer": "application",
-        "request_id": "request.dashboard.settings.7558e99727f379cfb4e9b326d15cd304.4",
+        "request_id": "request.dashboard.settings.3573680039fb690f49b86591db3d1f09.4",
         "retry": "after_revalidate",
         "retry_after_millis": null,
         "retry_scope": "fresh_request",
         "retryable": true,
         "revision": 1,
         "terminality": "pre_admission",
-        "trace_id": "request.dashboard.settings.7558e99727f379cfb4e9b326d15cd304.4",
+        "trace_id": "request.dashboard.settings.3573680039fb690f49b86591db3d1f09.4",
         "unavailable_classification": null
       },
-      "request_id": "request.dashboard.settings.7558e99727f379cfb4e9b326d15cd304.4"
+      "request_id": "request.dashboard.settings.3573680039fb690f49b86591db3d1f09.4"
     },
     "status": 409
   },
@@ -326,7 +318,7 @@
       },
       "domain_state": "ready",
       "freshness": {
-        "observed_at_micros": 1792363717093059,
+        "observed_at_micros": 1795318616520047,
         "state": "fresh",
         "watermark": null
       },
@@ -370,13 +362,13 @@
               "active": true,
               "description": "Pins the global accounting database to an explicit path.",
               "name": "TRACEDECAY_GLOBAL_DB",
-              "value": "/run/nl/w/4ba25a53-d0f6-4590-8e56-7dffb5d83e12/tmp/.tmpxOcJR3/home/.tracedecay/global.db"
+              "value": "/tmp/.tmpXf49v0/home/.tracedecay/global.db"
             },
             {
               "active": true,
               "description": "Pins the user-level TraceDecay data directory (default ~/.tracedecay).",
               "name": "TRACEDECAY_DATA_DIR",
-              "value": "/run/nl/w/4ba25a53-d0f6-4590-8e56-7dffb5d83e12/tmp/.tmpxOcJR3/home/.tracedecay"
+              "value": "/tmp/.tmpXf49v0/home/.tracedecay"
             }
           ]
         },
@@ -421,71 +413,63 @@
             "extract_docstrings": true,
             "include": [],
             "max_file_size": 1048576,
-            "sync": {
-              "auto_track_pr_branches": false,
-              "auto_track_pr_poll_secs": 300
-            },
             "telemetry": {
               "timings": true
             },
             "track_call_sites": true
           },
           "configuration_revision_id": "configuration.initial.canonical.v1",
-          "configuration_snapshot_id": "tracedecay.configuration.snapshot.v1.e027d2b7709ea9e063d5bbce4809ee1d4e72187298a22bd16df6720b2e329741",
-          "pr_autotrack": {
-            "tracked": []
-          }
+          "configuration_snapshot_id": "tracedecay.configuration.snapshot.v1.7ebc764a6970362987eba297ac7cfd118bc11ef695e694bc747ea77b297dc113"
         },
         "storage": {
-          "dashboard_root": "/run/nl/w/4ba25a53-d0f6-4590-8e56-7dffb5d83e12/tmp/.tmpxOcJR3/home/.tracedecay/projects/proj_69173dcc8b282d79/dashboard",
-          "graph_db": "/run/nl/w/4ba25a53-d0f6-4590-8e56-7dffb5d83e12/tmp/.tmpxOcJR3/home/.tracedecay/projects/proj_69173dcc8b282d79/tracedecay.db",
-          "lcm_db": "/run/nl/w/4ba25a53-d0f6-4590-8e56-7dffb5d83e12/tmp/.tmpxOcJR3/home/.tracedecay/projects/proj_69173dcc8b282d79/sessions.db",
+          "dashboard_root": "/tmp/.tmpXf49v0/home/.tracedecay/projects/proj_926e2e7f55c02780/dashboard",
+          "graph_db": "/tmp/.tmpXf49v0/home/.tracedecay/projects/proj_926e2e7f55c02780/tracedecay.db",
+          "lcm_db": "/tmp/.tmpXf49v0/home/.tracedecay/projects/proj_926e2e7f55c02780/sessions.db",
           "lcm_scope": "profile_sharded",
-          "memory_db": "/run/nl/w/4ba25a53-d0f6-4590-8e56-7dffb5d83e12/tmp/.tmpxOcJR3/home/.tracedecay/projects/proj_69173dcc8b282d79/tracedecay.db",
-          "project_id": "proj_69173dcc8b282d79",
-          "project_root": "/run/nl/w/4ba25a53-d0f6-4590-8e56-7dffb5d83e12/tmp/.tmpxOcJR3/project",
-          "savings_db": "/run/nl/w/4ba25a53-d0f6-4590-8e56-7dffb5d83e12/tmp/.tmpxOcJR3/home/.tracedecay/global.db",
+          "memory_db": "/tmp/.tmpXf49v0/home/.tracedecay/projects/proj_926e2e7f55c02780/tracedecay.db",
+          "project_id": "proj_926e2e7f55c02780",
+          "project_root": "/tmp/.tmpXf49v0/project",
+          "savings_db": "/tmp/.tmpXf49v0/home/.tracedecay/global.db",
           "storage_mode": "profile_sharded",
-          "store_root": "/run/nl/w/4ba25a53-d0f6-4590-8e56-7dffb5d83e12/tmp/.tmpxOcJR3/home/.tracedecay/projects/proj_69173dcc8b282d79"
+          "store_root": "/tmp/.tmpXf49v0/home/.tracedecay/projects/proj_926e2e7f55c02780"
         },
         "user": {
           "code_index_worker_configuration_revision_id": "configuration.profile.initial.v1",
-          "code_index_worker_configuration_snapshot_id": "tracedecay.configuration.snapshot.v1.3862ddb1c67746133efde2466f16da128b79ae5879a195e7075d1d0c9fe7525c",
+          "code_index_worker_configuration_snapshot_id": "tracedecay.configuration.snapshot.v1.a38410cece38610d0af38babc5772f2ff5780495f9f78d7e87b021e284bbf726",
           "code_index_worker_status": {
-            "available_logical_cpus": 96,
+            "available_logical_cpus": 4,
             "configured": {
               "mode": "automatic"
             },
-            "effective_workers": 48,
+            "effective_workers": 4,
             "environment_override_workers": null,
-            "limiting_reason": "automatic_half_cores",
-            "memory_safe_workers": 384
+            "limiting_reason": "automatic_all_cores",
+            "memory_safe_workers": 70
           },
           "code_index_workers": {
             "mode": "automatic"
           },
           "configuration_revision_id": "configuration.profile.initial.v1",
-          "configuration_snapshot_id": "tracedecay.configuration.snapshot.v1.3862ddb1c67746133efde2466f16da128b79ae5879a195e7075d1d0c9fe7525c",
+          "configuration_snapshot_id": "tracedecay.configuration.snapshot.v1.a38410cece38610d0af38babc5772f2ff5780495f9f78d7e87b021e284bbf726",
           "extraction_timeout_secs": 60,
           "installed_agents": [],
-          "upload_enabled": false,
           "watcher_debounce": "2s"
         },
         "version": {
           "cached_latest_version": null,
           "channel": "beta",
-          "version": "1.0.0-beta.88+451721797b8ae53bc539072fc19994df9cb66d34.dirty"
+          "version": "1.0.0-beta.109+9277ec2c47a2d91294dd92e41843c9ef7fe60fe7"
         }
       },
       "schema_revision": 1,
       "scope": {
-        "project_id": "proj_69173dcc8b282d79",
+        "project_id": "proj_926e2e7f55c02780",
         "storage_mode": "profile_sharded",
-        "store_root": "/run/nl/w/4ba25a53-d0f6-4590-8e56-7dffb5d83e12/tmp/.tmpxOcJR3/home/.tracedecay/projects/proj_69173dcc8b282d79"
+        "store_root": "/tmp/.tmpXf49v0/home/.tracedecay/projects/proj_926e2e7f55c02780"
       },
       "source_watermark": null,
       "time": {
-        "observation_time_micros": 1792363717093062,
+        "observation_time_micros": 1795318616520048,
         "valid_time_micros": null
       },
       "version": {
@@ -497,7 +481,7 @@
   },
   "revision_conflict": {
     "body": {
-      "actual_revision_id": "configuration.revision.v1.f1dda57fc1603bacc602ad4cdbb08de9bfb8aa867eaabaef844d45f8c779d5b4",
+      "actual_revision_id": "configuration.revision.v1.7617b27fbf141926fe3b83312a5d10756d046a214c4dd8ce2ac1b10d40263110",
       "code": "configuration_revision_conflict",
       "detail": "settings changed after this edit began; refresh and retry",
       "expected_revision_id": "configuration.initial.canonical.v1"
@@ -532,7 +516,7 @@
         },
         "domain_state": "ready",
         "freshness": {
-          "observed_at_micros": 1792363717205602,
+          "observed_at_micros": 1795318616535299,
           "state": "fresh",
           "watermark": null
         },
@@ -557,7 +541,7 @@
             },
             "backend": "codex_app_server",
             "config_endpoint": "/api/plugins/holographic/curation/config",
-            "configuration_revision_id": "configuration.revision.v1.f1dda57fc1603bacc602ad4cdbb08de9bfb8aa867eaabaef844d45f8c779d5b4",
+            "configuration_revision_id": "configuration.revision.v1.7617b27fbf141926fe3b83312a5d10756d046a214c4dd8ce2ac1b10d40263110",
             "enabled": true,
             "host_mode": "standalone"
           },
@@ -576,13 +560,13 @@
                 "active": true,
                 "description": "Pins the global accounting database to an explicit path.",
                 "name": "TRACEDECAY_GLOBAL_DB",
-                "value": "/run/nl/w/4ba25a53-d0f6-4590-8e56-7dffb5d83e12/tmp/.tmpxOcJR3/home/.tracedecay/global.db"
+                "value": "/tmp/.tmpXf49v0/home/.tracedecay/global.db"
               },
               {
                 "active": true,
                 "description": "Pins the user-level TraceDecay data directory (default ~/.tracedecay).",
                 "name": "TRACEDECAY_DATA_DIR",
-                "value": "/run/nl/w/4ba25a53-d0f6-4590-8e56-7dffb5d83e12/tmp/.tmpxOcJR3/home/.tracedecay"
+                "value": "/tmp/.tmpXf49v0/home/.tracedecay"
               }
             ]
           },
@@ -598,72 +582,64 @@
                 ".github/**"
               ],
               "max_file_size": 2097152,
-              "sync": {
-                "auto_track_pr_branches": false,
-                "auto_track_pr_poll_secs": 300
-              },
               "telemetry": {
                 "timings": true
               },
               "track_call_sites": true
             },
-            "configuration_revision_id": "configuration.revision.v1.f1dda57fc1603bacc602ad4cdbb08de9bfb8aa867eaabaef844d45f8c779d5b4",
-            "configuration_snapshot_id": "tracedecay.configuration.snapshot.v1.061944e9d3ea29c90e551a2ce8af6d42a385839a986c5fd045ed0add7dee042f",
-            "pr_autotrack": {
-              "tracked": []
-            }
+            "configuration_revision_id": "configuration.revision.v1.7617b27fbf141926fe3b83312a5d10756d046a214c4dd8ce2ac1b10d40263110",
+            "configuration_snapshot_id": "tracedecay.configuration.snapshot.v1.1a8d003e6c56e7dbcc4997d4b5d84f5ea59d6141ff0b2ed48fe88c0316303886"
           },
           "resync_recommended": false,
           "storage": {
-            "dashboard_root": "/run/nl/w/4ba25a53-d0f6-4590-8e56-7dffb5d83e12/tmp/.tmpxOcJR3/home/.tracedecay/projects/proj_69173dcc8b282d79/dashboard",
-            "graph_db": "/run/nl/w/4ba25a53-d0f6-4590-8e56-7dffb5d83e12/tmp/.tmpxOcJR3/home/.tracedecay/projects/proj_69173dcc8b282d79/tracedecay.db",
-            "lcm_db": "/run/nl/w/4ba25a53-d0f6-4590-8e56-7dffb5d83e12/tmp/.tmpxOcJR3/home/.tracedecay/projects/proj_69173dcc8b282d79/sessions.db",
+            "dashboard_root": "/tmp/.tmpXf49v0/home/.tracedecay/projects/proj_926e2e7f55c02780/dashboard",
+            "graph_db": "/tmp/.tmpXf49v0/home/.tracedecay/projects/proj_926e2e7f55c02780/tracedecay.db",
+            "lcm_db": "/tmp/.tmpXf49v0/home/.tracedecay/projects/proj_926e2e7f55c02780/sessions.db",
             "lcm_scope": "profile_sharded",
-            "memory_db": "/run/nl/w/4ba25a53-d0f6-4590-8e56-7dffb5d83e12/tmp/.tmpxOcJR3/home/.tracedecay/projects/proj_69173dcc8b282d79/tracedecay.db",
-            "project_id": "proj_69173dcc8b282d79",
-            "project_root": "/run/nl/w/4ba25a53-d0f6-4590-8e56-7dffb5d83e12/tmp/.tmpxOcJR3/project",
-            "savings_db": "/run/nl/w/4ba25a53-d0f6-4590-8e56-7dffb5d83e12/tmp/.tmpxOcJR3/home/.tracedecay/global.db",
+            "memory_db": "/tmp/.tmpXf49v0/home/.tracedecay/projects/proj_926e2e7f55c02780/tracedecay.db",
+            "project_id": "proj_926e2e7f55c02780",
+            "project_root": "/tmp/.tmpXf49v0/project",
+            "savings_db": "/tmp/.tmpXf49v0/home/.tracedecay/global.db",
             "storage_mode": "profile_sharded",
-            "store_root": "/run/nl/w/4ba25a53-d0f6-4590-8e56-7dffb5d83e12/tmp/.tmpxOcJR3/home/.tracedecay/projects/proj_69173dcc8b282d79"
+            "store_root": "/tmp/.tmpXf49v0/home/.tracedecay/projects/proj_926e2e7f55c02780"
           },
           "user": {
             "code_index_worker_configuration_revision_id": "configuration.profile.initial.v1",
-            "code_index_worker_configuration_snapshot_id": "tracedecay.configuration.snapshot.v1.3862ddb1c67746133efde2466f16da128b79ae5879a195e7075d1d0c9fe7525c",
+            "code_index_worker_configuration_snapshot_id": "tracedecay.configuration.snapshot.v1.a38410cece38610d0af38babc5772f2ff5780495f9f78d7e87b021e284bbf726",
             "code_index_worker_status": {
-              "available_logical_cpus": 96,
+              "available_logical_cpus": 4,
               "configured": {
                 "mode": "automatic"
               },
-              "effective_workers": 48,
+              "effective_workers": 4,
               "environment_override_workers": null,
-              "limiting_reason": "automatic_half_cores",
-              "memory_safe_workers": 384
+              "limiting_reason": "automatic_all_cores",
+              "memory_safe_workers": 70
             },
             "code_index_workers": {
               "mode": "automatic"
             },
             "configuration_revision_id": "configuration.profile.initial.v1",
-            "configuration_snapshot_id": "tracedecay.configuration.snapshot.v1.3862ddb1c67746133efde2466f16da128b79ae5879a195e7075d1d0c9fe7525c",
+            "configuration_snapshot_id": "tracedecay.configuration.snapshot.v1.a38410cece38610d0af38babc5772f2ff5780495f9f78d7e87b021e284bbf726",
             "extraction_timeout_secs": 60,
             "installed_agents": [],
-            "upload_enabled": false,
             "watcher_debounce": "2s"
           },
           "version": {
             "cached_latest_version": null,
             "channel": "beta",
-            "version": "1.0.0-beta.88+451721797b8ae53bc539072fc19994df9cb66d34.dirty"
+            "version": "1.0.0-beta.109+9277ec2c47a2d91294dd92e41843c9ef7fe60fe7"
           }
         },
         "schema_revision": 1,
         "scope": {
-          "project_id": "proj_69173dcc8b282d79",
+          "project_id": "proj_926e2e7f55c02780",
           "storage_mode": "profile_sharded",
-          "store_root": "/run/nl/w/4ba25a53-d0f6-4590-8e56-7dffb5d83e12/tmp/.tmpxOcJR3/home/.tracedecay/projects/proj_69173dcc8b282d79"
+          "store_root": "/tmp/.tmpXf49v0/home/.tracedecay/projects/proj_926e2e7f55c02780"
         },
         "source_watermark": null,
         "time": {
-          "observation_time_micros": 1792363717205605,
+          "observation_time_micros": 1795318616535300,
           "valid_time_micros": null
         },
         "version": {
@@ -676,11 +652,11 @@
   },
   "validation": {
     "body": {
-      "detail": "invalid project settings patch: unknown field `unknown_setting`, expected one of `expected_revision_id`, `idempotency_key`, `include`, `exclude`, `max_file_size`, `extract_docstrings`, `track_call_sites`, `telemetry`, `sync`, `context_scout`, `context_scout_intent`",
+      "detail": "invalid project settings patch: unknown field `unknown_setting`, expected one of `expected_revision_id`, `idempotency_key`, `include`, `exclude`, `max_file_size`, `extract_docstrings`, `track_call_sites`, `telemetry`, `context_scout`, `context_scout_intent`",
       "validation_errors": [
         {
           "field": "unknown_setting",
-          "message": "invalid project settings patch: unknown field `unknown_setting`, expected one of `expected_revision_id`, `idempotency_key`, `include`, `exclude`, `max_file_size`, `extract_docstrings`, `track_call_sites`, `telemetry`, `sync`, `context_scout`, `context_scout_intent`"
+          "message": "invalid project settings patch: unknown field `unknown_setting`, expected one of `expected_revision_id`, `idempotency_key`, `include`, `exclude`, `max_file_size`, `extract_docstrings`, `track_call_sites`, `telemetry`, `context_scout`, `context_scout_intent`"
         }
       ]
     },

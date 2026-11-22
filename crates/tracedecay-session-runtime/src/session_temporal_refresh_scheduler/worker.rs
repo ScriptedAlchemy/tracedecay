@@ -27,8 +27,9 @@ use super::projector::{
 };
 use super::registry::{SessionTemporalRefreshPassReport, session_refresh_retry_delay};
 use super::wake::{
-    PendingBeginRequestGuard, RecoverySelectionGuard, SessionProjectionJoin,
-    SessionTemporalRefreshRetryClass, SessionTemporalRefreshWakeState, TerminalAttemptGuard,
+    HISTORY_INGESTOR_MISSING_REASON, PendingBeginRequestGuard, RecoverySelectionGuard,
+    SessionProjectionJoin, SessionTemporalRefreshRetryClass, SessionTemporalRefreshWakeState,
+    TerminalAttemptGuard,
 };
 use tracedecay_global_db::{RegisteredGlobalDb, RegisteredGlobalDbLeaseV1};
 use tracedecay_runtime_core::db::engine::Error as EngineError;
@@ -370,6 +371,17 @@ pub(super) async fn run_session_temporal_refresh_scheduler(
                     tracing::debug!(
                         reason_code,
                         "retained historical session ingest pass will retry"
+                    );
+                }
+                Some(SessionHistoricalIngestOutcome::Blocked { reason_code, .. })
+                    if reason_code == HISTORY_INGESTOR_MISSING_REASON =>
+                {
+                    // No provider pass ran. Mounting its owner supplies the
+                    // missing authority and wakes the already accepted work;
+                    // terminal source backoff must not suppress that wake.
+                    tracing::debug!(
+                        reason_code,
+                        "historical session ingest awaits a mounted ingestor"
                     );
                 }
                 Some(SessionHistoricalIngestOutcome::Blocked { reason_code, .. }) => {
@@ -778,7 +790,7 @@ pub(super) async fn run_session_temporal_refresh_scheduler(
                 // While history owns a queued admission turn, discover only
                 // projection work: a redundant history retry would surrender
                 // that queue position. Terminal blockers retain their backoff.
-                fired = tracing::Instrument::instrument(native_runtime::sleep_until(history_idle_deadline), tracing::trace_span!("daemon.scheduler.session_temporal.history_idle_wait")) => {
+                fired = tracing::Instrument::instrument(native_runtime::sleep_until(history_idle_deadline), tracing::trace_span!("daemon.scheduler.session_temporal.history_idle_wait")), if state.history_recheck_enabled() => {
                     if stop_without_timer(fired) {
                         return;
                     }
@@ -890,7 +902,7 @@ async fn session_history_refresh(
         }
         None => (
             SessionHistoricalIngestOutcome::Blocked {
-                reason_code: "history_ingestor_missing".to_owned(),
+                reason_code: HISTORY_INGESTOR_MISSING_REASON.to_owned(),
                 made_progress: false,
             },
             None,

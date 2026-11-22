@@ -598,32 +598,6 @@ jobs:
             echo "prebuild=$prebuild"
           } >> "$GITHUB_OUTPUT"
 
-      # Contract fixtures are real daemon responses. Publish the bounded
-      # capture separately so a developer can refresh them even when the
-      # local host cannot run the daemon's Unix transport.
-      - name: Capture runtime configuration contract fixtures
-        id: runtime-contract-fixtures
-        if: matrix.shard == 'root-b' || matrix.shard == 'fleet'
-        run: >-
-          bazel test --config=ci --test_output=all
-          //crates/tracedecay:runtime_acceptance_suite
-          --test_arg=runtime_surface_acceptance::dashboard_project_settings_commit_through_the_daemon_control_plane
-          --test_arg=--exact
-
-      - name: Upload captured runtime contract fixtures
-        if: >-
-          always() && !cancelled()
-          && steps.runtime-contract-fixtures.outcome == 'success'
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
-          name: runtime-contract-fixtures-${{ runner.os }}-${{ matrix.shard }}
-          path: |
-            bazel-testlogs/crates/tracedecay/runtime_acceptance_suite/test.log
-            bazel-testlogs/crates/tracedecay/runtime_acceptance_suite/test.xml
-            bazel-testlogs/crates/tracedecay/runtime_acceptance_suite/test.outputs/**
-          if-no-files-found: error
-          retention-days: 7
-
       # Finish compilation before latency-sensitive daemon journeys run.
       - name: Build test binaries before latency-sensitive tests
         if: steps.targets.outputs.prebuild == 'true'
@@ -631,6 +605,24 @@ jobs:
 
       - name: Build and test the selected targets
         run: bazel test --config=ci ${{ steps.targets.outputs.patterns }}
+
+      # Preserve real daemon responses from the normal suite without binding
+      # CI to individual test names. A test can emit a file before a later
+      # assertion fails: verify its nonzero passing result before importing
+      # any captured response into the checked-in frontend fixtures.
+      - name: Upload runtime contract fixture diagnostics
+        if: >-
+          always() && !cancelled()
+          && (matrix.shard == 'root-b' || matrix.shard == 'fleet')
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: runtime-contract-fixtures-${{ runner.os }}-${{ matrix.shard }}
+          path: |
+            bazel-testlogs/crates/tracedecay/runtime_acceptance_suite/test.log
+            bazel-testlogs/crates/tracedecay/runtime_acceptance_suite/test.xml
+            bazel-testlogs/crates/tracedecay/runtime_acceptance_suite/test.outputs/**
+          if-no-files-found: ignore
+          retention-days: 7
 
       - name: Upload failed test diagnostics
         if: failure()

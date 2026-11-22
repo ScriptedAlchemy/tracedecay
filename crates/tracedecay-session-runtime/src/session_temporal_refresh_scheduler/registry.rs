@@ -130,13 +130,16 @@ impl SessionTemporalRefreshSchedulerEntry {
         };
         let mut retained = self.history.write().unwrap_or_else(PoisonError::into_inner);
         let installed = retained.is_none();
+        let resume_history = installed && self.state.history_needs_continuation();
         if installed {
             *retained = Some(history);
-            self.state.mark_history_pending();
+            if self.state.automatic_history_import_enabled || resume_history {
+                self.state.mark_history_pending();
+            }
         }
         let blocked = !installed && self.state.history_is_blocked();
         drop(retained);
-        if !blocked {
+        if !blocked && (self.state.automatic_history_import_enabled || resume_history) {
             // Publish both kinds of work before notifying the worker.
             self.state.requeue_projection();
             self.state.wake_history();
@@ -277,6 +280,9 @@ pub struct SessionTemporalRefreshSchedulerRegistry {
     /// ingest compositions built through this registry inject the same
     /// authority Codex page preparation meters against.
     background_cpu: std::sync::OnceLock<Arc<ProcessBackgroundCpuV1>>,
+    /// Profile configuration is pinned by daemon bootstrap before mounting
+    /// any session owner. A settings commit takes effect on the next daemon.
+    automatic_history_import: std::sync::OnceLock<bool>,
     historical_ingest_admission: Arc<tokio::sync::Semaphore>,
 }
 
@@ -298,6 +304,7 @@ impl Default for SessionTemporalRefreshSchedulerRegistry {
                 tracedecay_sessions::runtime::hosts::codex::CodexDiscoveryHub::default(),
             ),
             background_cpu: std::sync::OnceLock::new(),
+            automatic_history_import: std::sync::OnceLock::new(),
             historical_ingest_admission: Arc::new(tokio::sync::Semaphore::new(
                 bounded_historical_ingest_permits(),
             )),
@@ -313,6 +320,17 @@ impl Drop for SessionTemporalRefreshSchedulerRegistry {
 }
 
 impl SessionTemporalRefreshSchedulerRegistry {
+    /// Pin the profile's restart-applied import policy once for this daemon.
+    pub fn pin_automatic_history_import(&self, enabled: bool) -> bool {
+        *self.automatic_history_import.get_or_init(|| enabled)
+    }
+
+    /// An unconfigured registry uses the canonical enabled default. Daemon
+    /// bootstrap resolves the persisted profile before any owner is mounted.
+    pub fn automatic_history_import_enabled(&self) -> bool {
+        self.automatic_history_import.get().copied().unwrap_or(true)
+    }
+
     #[cfg(any(test, feature = "test-helpers"))]
     pub(crate) fn configure_for_test(
         &mut self,
@@ -363,9 +381,14 @@ impl SessionTemporalRefreshSchedulerRegistry {
         database: RegisteredGlobalDbLeaseV1,
         route: Option<SessionTemporalRefreshWake>,
         history: Option<SharedSessionHistoricalIngestor>,
+        resume_history: bool,
     ) -> SessionTemporalRefreshSchedulerEntry {
-        let state = Arc::new(SessionTemporalRefreshWakeState::default());
-        if history.is_some() {
+        let state = Arc::new(
+            SessionTemporalRefreshWakeState::with_automatic_history_import(
+                self.automatic_history_import_enabled(),
+            ),
+        );
+        if resume_history || (history.is_some() && state.automatic_history_import_enabled) {
             state.mark_history_pending();
             state.wake_history();
         }
@@ -574,7 +597,11 @@ impl SessionTemporalRefreshSchedulerRegistry {
                     }
                 }
             }
-            let staging = Arc::new(SessionTemporalRefreshWakeState::default());
+            let staging = Arc::new(
+                SessionTemporalRefreshWakeState::with_automatic_history_import(
+                    self.automatic_history_import_enabled(),
+                ),
+            );
             for route in &stored.routes {
                 route.bind(&staging);
             }
@@ -583,7 +610,11 @@ impl SessionTemporalRefreshSchedulerRegistry {
             return Some(stored.clone());
         }
         let (_, entry) = entries.last()?;
-        let staging = Arc::new(SessionTemporalRefreshWakeState::default());
+        let staging = Arc::new(
+            SessionTemporalRefreshWakeState::with_automatic_history_import(
+                self.automatic_history_import_enabled(),
+            ),
+        );
         let handoff = SessionTemporalRefreshRekeyHandoff {
             routes: entry.routes().cloned().collect(),
             staging: Arc::clone(&staging),
@@ -648,12 +679,15 @@ impl SessionTemporalRefreshSchedulerRegistry {
         if let Some(finished) = finished {
             let route = finished.wake.clone();
             let extra_routes = finished.extra_routes.clone();
-            let history = finished
+            let resume_history = finished.state.history_needs_continuation();
+            // Taking the retained ingestor before retirement avoids cancelling
+            // the same instance the replacement worker is about to retain.
+            let retained_history = finished
                 .history
-                .read()
+                .write()
                 .unwrap_or_else(PoisonError::into_inner)
-                .clone()
-                .or(history);
+                .take();
+            let history = retained_history.or(history);
             self.retire(vec![(retired_owner.clone(), finished)])
                 .join()
                 .await;
@@ -661,7 +695,7 @@ impl SessionTemporalRefreshSchedulerRegistry {
                 return inert_session_temporal_refresh_wake();
             }
             self.settle_retired(&retired_owner).await;
-            let mut entry = self.spawn_entry(database, Some(route), history);
+            let mut entry = self.spawn_entry(database, Some(route), history, resume_history);
             entry.extra_routes = extra_routes;
             for extra in &entry.extra_routes {
                 extra.bind(&entry.state);
@@ -676,7 +710,7 @@ impl SessionTemporalRefreshSchedulerRegistry {
             return entry.wake.clone();
         }
         self.settle_retired(&retired_owner).await;
-        let entry = self.spawn_entry(database, None, history);
+        let entry = self.spawn_entry(database, None, history, false);
         let wake = entry.wake.clone();
         project.insert(owner, entry);
         wake
@@ -712,12 +746,13 @@ impl SessionTemporalRefreshSchedulerRegistry {
             .flatten();
         if let Some(finished) = finished {
             let route = finished.wake.clone();
-            let history = finished
+            let resume_history = finished.state.history_needs_continuation();
+            let retained_history = finished
                 .history
-                .read()
+                .write()
                 .unwrap_or_else(PoisonError::into_inner)
-                .clone()
-                .or(history);
+                .take();
+            let history = retained_history.or(history);
             self.retire(vec![(retired_owner.clone(), finished)])
                 .join()
                 .await;
@@ -725,7 +760,7 @@ impl SessionTemporalRefreshSchedulerRegistry {
                 return inert_session_temporal_refresh_wake();
             }
             self.settle_retired(&retired_owner).await;
-            let entry = self.spawn_entry(database, Some(route), history);
+            let entry = self.spawn_entry(database, Some(route), history, resume_history);
             let wake = entry.wake.clone();
             profile.insert(database_path, entry);
             return wake;
@@ -735,7 +770,7 @@ impl SessionTemporalRefreshSchedulerRegistry {
             return entry.wake.clone();
         }
         self.settle_retired(&retired_owner).await;
-        let entry = self.spawn_entry(database, None, history);
+        let entry = self.spawn_entry(database, None, history, false);
         let wake = entry.wake.clone();
         profile.insert(database_path, entry);
         wake
@@ -840,6 +875,7 @@ impl SessionTemporalRefreshSchedulerRegistry {
                 .as_ref()
                 .and_then(|handoff| handoff.routes.last().cloned()),
             None,
+            false,
         );
         if let Some(handoff) = &handoff {
             for route in &handoff.routes {

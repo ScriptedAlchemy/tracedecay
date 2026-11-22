@@ -31,8 +31,8 @@ use tracedecay_domain::configuration::{
     SYNC_SESSION_START_SYNC_SETTING_KEY, SYNC_WATCH_DEBOUNCE_MS_SETTING_KEY,
     SYNC_WATCH_LINKED_WORKTREES_SETTING_KEY, SYNC_WATCH_MAX_DELAY_MS_SETTING_KEY,
     SYNC_WATCH_MAX_PROJECTS_SETTING_KEY, SettingKey, TELEMETRY_TIMINGS_SETTING_KEY,
-    USER_SESSION_COMPACTION_DAYS_SETTING_KEY, USER_SESSION_RETENTION_DAYS_SETTING_KEY,
-    USER_SESSION_RETENTION_ENABLED_SETTING_KEY,
+    USER_SESSION_COMPACTION_DAYS_SETTING_KEY, USER_SESSION_HISTORY_IMPORT_ENABLED_SETTING_KEY,
+    USER_SESSION_RETENTION_DAYS_SETTING_KEY, USER_SESSION_RETENTION_ENABLED_SETTING_KEY,
 };
 use tracedecay_domain::errors::{AutomationErrorMessage, Result, TraceDecayError};
 use tracedecay_domain::{IndexPathPolicyV1, ProjectId};
@@ -323,6 +323,17 @@ fn runtime_config_from_snapshot(
     })
 }
 
+/// Automatic history import is pinned once at daemon startup. Explicit imports
+/// and live transcript projection retain their existing admission authorities.
+pub fn session_history_import_enabled_from_profile_snapshot(
+    snapshot: &ConfigurationSnapshotV1,
+) -> Result<bool> {
+    snapshot.validate().map_err(|error| {
+        config_error(format!("invalid resolved configuration snapshot: {error}"))
+    })?;
+    required_bool(snapshot, USER_SESSION_HISTORY_IMPORT_ENABLED_SETTING_KEY)
+}
+
 /// Session retention is profile-owned: every project and the profile session
 /// store consume the same explicit policy. Zero days disables that phase;
 /// deletion still requires durable summary lineage in the retention kernel.
@@ -435,6 +446,7 @@ mod tests {
         ConfigurationSnapshotV1, ConfigurationValueV1, INDEX_MAX_FILE_SIZE_SETTING_KEY,
         SYNC_READ_COOLDOWN_SECS_SETTING_KEY, SYNC_WATCH_DEBOUNCE_MS_SETTING_KEY,
         SYNC_WATCH_LINKED_WORKTREES_SETTING_KEY, SYNC_WATCH_MAX_PROJECTS_SETTING_KEY, SettingKey,
+        UserProfileId,
     };
     use tracedecay_domain::errors::TraceDecayError;
 
@@ -474,6 +486,46 @@ mod tests {
             TraceDecayError::Config { message } => message,
             other => panic!("expected a typed configuration error, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn profile_history_import_policy_requires_an_explicit_boolean() {
+        let registry = registry::ConfigurationRegistry::profile().unwrap();
+        let snapshot = resolver::resolve_configuration(&registry, &[])
+            .unwrap()
+            .snapshot;
+        let key = SettingKey::new(super::USER_SESSION_HISTORY_IMPORT_ENABLED_SETTING_KEY).unwrap();
+        assert!(super::session_history_import_enabled_from_profile_snapshot(&snapshot).unwrap());
+        let mut snapshot = resolver::resolve_configuration(
+            &registry,
+            &[resolver::ConfigurationLayerV1 {
+                layer: ConfigurationLayerIdV1::UserProfile {
+                    profile_id: UserProfileId::new("profile.history-import-policy").unwrap(),
+                },
+                revision_id: revision(),
+                entries: BTreeMap::from([(key.clone(), ConfigurationValueV1::Boolean(false))]),
+            }],
+        )
+        .unwrap()
+        .snapshot;
+        assert!(!super::session_history_import_enabled_from_profile_snapshot(&snapshot).unwrap());
+        snapshot
+            .effective_values
+            .insert(key.clone(), ConfigurationValueV1::Unsigned(0));
+        // Unrepinned content changes must fail the snapshot identity check.
+        assert!(super::session_history_import_enabled_from_profile_snapshot(&snapshot).is_err());
+        let mut snapshot =
+            ConfigurationSnapshotV1::new(snapshot.effective_values, snapshot.provenance).unwrap();
+        let wrong_type = super::session_history_import_enabled_from_profile_snapshot(&snapshot)
+            .expect_err("the decoder must refuse an unsigned value even with a valid identity");
+        assert!(config_message(wrong_type).contains("wrong type: expected boolean"));
+        snapshot.effective_values.remove(&key);
+        snapshot.provenance.remove(&key);
+        let snapshot =
+            ConfigurationSnapshotV1::new(snapshot.effective_values, snapshot.provenance).unwrap();
+        let missing = super::session_history_import_enabled_from_profile_snapshot(&snapshot)
+            .expect_err("a missing key cannot invent an enabled default");
+        assert!(config_message(missing).contains("missing"));
     }
 
     #[test]

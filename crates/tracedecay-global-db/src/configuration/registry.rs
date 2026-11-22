@@ -22,10 +22,10 @@ use tracedecay_domain::configuration::{
     SettingKey, SettingScopeV1, SettingSensitivityV1, TELEMETRY_TIMINGS_SETTING_KEY,
     USER_CODE_INDEX_WORKERS_SETTING_KEY, USER_EXTRACTION_TIMEOUT_SECS_SETTING_KEY,
     USER_REPEATED_QUERY_HINTS_SETTING_KEY, USER_SESSION_COMPACTION_DAYS_SETTING_KEY,
-    USER_SESSION_RETENTION_DAYS_SETTING_KEY, USER_SESSION_RETENTION_ENABLED_SETTING_KEY,
-    USER_WATCHER_DEBOUNCE_MS_SETTING_KEY, USER_WORK_EXPERTISE_CONSENT_SETTING_KEY,
-    WORK_EXECUTABLE_BINDINGS_SETTING_KEY, WORK_TOPOLOGY_POLICY_SETTING_KEY, WorkExpertiseConsentV1,
-    safe_work_topology_policy_v1,
+    USER_SESSION_HISTORY_IMPORT_ENABLED_SETTING_KEY, USER_SESSION_RETENTION_DAYS_SETTING_KEY,
+    USER_SESSION_RETENTION_ENABLED_SETTING_KEY, USER_WATCHER_DEBOUNCE_MS_SETTING_KEY,
+    USER_WORK_EXPERTISE_CONSENT_SETTING_KEY, WORK_EXECUTABLE_BINDINGS_SETTING_KEY,
+    WORK_TOPOLOGY_POLICY_SETTING_KEY, WorkExpertiseConsentV1, safe_work_topology_policy_v1,
 };
 use tracedecay_domain::feedback::PROXIMITY_RELATIONSHIP_HINTS_SETTING_KEY_V1;
 use tracedecay_domain::source_path_policy::GENERATED_DIR_SEGMENTS;
@@ -390,6 +390,11 @@ fn register_profile_scalar_settings(
             RestartRequirementV1::DaemonRestart,
         ),
         (
+            USER_SESSION_HISTORY_IMPORT_ENABLED_SETTING_KEY,
+            ConfigurationValueV1::Boolean(true),
+            RestartRequirementV1::DaemonRestart,
+        ),
+        (
             USER_SESSION_RETENTION_ENABLED_SETTING_KEY,
             ConfigurationValueV1::Boolean(true),
             RestartRequirementV1::DaemonRestart,
@@ -700,6 +705,11 @@ mod user_profile_settings_tests {
         let registry = ConfigurationRegistry::profile().expect("registry");
         for (raw_key, kind, restart) in [
             (
+                USER_SESSION_HISTORY_IMPORT_ENABLED_SETTING_KEY,
+                ConfigurationValueKindV1::Boolean,
+                RestartRequirementV1::DaemonRestart,
+            ),
+            (
                 USER_REPEATED_QUERY_HINTS_SETTING_KEY,
                 ConfigurationValueKindV1::Boolean,
                 RestartRequirementV1::None,
@@ -723,6 +733,22 @@ mod user_profile_settings_tests {
             assert_eq!(definition.sensitivity, SettingSensitivityV1::Public);
             assert_eq!(definition.restart_requirement, restart);
         }
+        let history_key = SettingKey::new(USER_SESSION_HISTORY_IMPORT_ENABLED_SETTING_KEY).unwrap();
+        assert_eq!(
+            registry.definition(&history_key).unwrap().default_value,
+            ConfigurationValueV1::Boolean(true)
+        );
+        assert!(
+            ConfigurationRegistry::core()
+                .unwrap()
+                .definition(&history_key)
+                .is_err()
+        );
+        assert!(
+            registry
+                .validate_value(&history_key, &ConfigurationValueV1::Unsigned(0))
+                .is_err()
+        );
         assert!(matches!(
             registry.validate_value(
                 &SettingKey::new(USER_EXTRACTION_TIMEOUT_SECS_SETTING_KEY).unwrap(),

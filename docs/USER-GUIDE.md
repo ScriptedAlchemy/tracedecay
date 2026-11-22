@@ -613,6 +613,32 @@ tracedecay tool configuration_set --args '{"layer":{"kind":"user_profile","profi
 Read the current value and revision with `tracedecay tool configuration_get
 --args '{"key":"user.repeated_query_hints.v1"}'`.
 
+### Pausing automatic history imports
+
+The profile setting `user.session_history_import_enabled.v1` controls automatic
+historical transcript imports across registered projects and the profile session
+store. It defaults to `true` and takes effect after a daemon restart. Read its
+current value and profile revision before changing it:
+
+```bash
+tracedecay tool configuration_get --args '{"key":"user.session_history_import_enabled.v1"}'
+tracedecay tool configuration_set --args '{"layer":{"kind":"user_profile","profile_id":"<id>"},"key":"user.session_history_import_enabled.v1","value":{"kind":"boolean","value":false},"expected_revision":"<revision>","idempotency_key":"<key>"}'
+tracedecay daemon restart
+```
+
+With automatic imports paused, startup, project mounts, and idle discovery do
+not start historical scans. Live host hooks and session projection continue.
+An explicit `tracedecay sessions import` still schedules a bounded import; its
+accepted continuations finish and then return to paused. Already accepted
+session-sync recovery remains available. Status reports
+`historical_blocked:session_history_import_paused_by_configuration` while paused
+instead of claiming historical convergence.
+
+To resume automatic imports, set the same key to `true` using the current
+profile revision and a new idempotency key, then restart the daemon. Existing
+history and import progress remain stored. The setting controls background
+imports; the retention settings below control cleanup of stored history.
+
 ### Session history retention
 
 Session retention belongs to the profile and applies to `user-sessions.db`

@@ -167,7 +167,7 @@ async fn dirty_foreign_and_leased_artifacts_are_preserved_and_reported() {
     )
     .await
     .unwrap();
-    assert_eq!(report.retired, Vec::new());
+    assert_eq!(report.retired, Vec::<String>::new());
     assert_eq!(
         report.preserved,
         [
@@ -236,7 +236,7 @@ async fn clean_worktrees_with_unpublished_commits_are_preserved_byte_for_byte() 
     )
     .await
     .unwrap();
-    assert_eq!(report.retired, Vec::new());
+    assert_eq!(report.retired, Vec::<String>::new());
     assert_eq!(
         report.preserved,
         [
@@ -371,7 +371,7 @@ async fn stale_refs_and_missing_registered_worktrees_keep_their_ownership_record
     )
     .await
     .unwrap();
-    assert_eq!(report.retired, Vec::new());
+    assert_eq!(report.retired, Vec::<String>::new());
     assert_eq!(
         report.preserved,
         [
@@ -555,7 +555,7 @@ async fn symbolic_and_non_commit_refs_preserve_every_owned_artifact() {
     )
     .await
     .unwrap();
-    assert_eq!(report.retired, Vec::new());
+    assert_eq!(report.retired, Vec::<String>::new());
     assert_eq!(
         report.preserved,
         entries.map(|(label, _)| (label.clone(), PreservedReason::Foreign))
@@ -663,7 +663,7 @@ async fn a_remote_alias_to_the_retiring_branch_is_not_a_retained_commit_anchor()
     )
     .await
     .unwrap();
-    assert_eq!(report.retired, Vec::new());
+    assert_eq!(report.retired, Vec::<String>::new());
     assert_eq!(
         report.preserved,
         [(label.clone(), PreservedReason::Unpublished)]

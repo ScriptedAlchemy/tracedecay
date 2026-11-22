@@ -1495,7 +1495,8 @@ impl ProjectOpenInputs<'_> {
                 user_sessions: user_session_db.clone(),
                 registry: core.registered_profile_db.clone(),
                 background_cpu: Arc::clone(&background_cpu),
-                startup_import: cg.get_config().sync.session_start_sync,
+                startup_import: refresh_schedulers.automatic_history_import_enabled()
+                    && cg.get_config().sync.session_start_sync,
                 project_refresh: project_session_refresh_wake.clone(),
                 user_refresh: user_session_refresh_wake.clone(),
             })

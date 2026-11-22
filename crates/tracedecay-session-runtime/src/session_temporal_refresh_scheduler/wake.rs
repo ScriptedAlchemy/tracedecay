@@ -19,6 +19,10 @@ use tracedecay_sessions::serving::{
     SessionProjectionWorkerRetryClass,
 };
 
+pub const SESSION_HISTORY_IMPORT_PAUSED_REASON: &str =
+    "session_history_import_paused_by_configuration";
+pub(super) const HISTORY_INGESTOR_MISSING_REASON: &str = "history_ingestor_missing";
+
 /// One caller's publication obligation. Named sessions capture their source
 /// frontier before the worker starts the pass; unnamed sweeps retain the
 /// aggregate drain contract.
@@ -109,6 +113,7 @@ struct SessionTemporalRefreshWorkerTelemetry {
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum SessionHistoricalServingState {
     Current,
+    Paused,
     Pending,
     Retryable(String),
     Blocked(String),
@@ -136,6 +141,7 @@ impl Default for SessionTemporalRefreshWorkerTelemetry {
 macro_rules! define_wake_state {
     ($visibility:vis) => {
         $visibility struct SessionTemporalRefreshWakeState {
+            pub(super) automatic_history_import_enabled: bool,
             pub(super) dirty: AtomicBool,
             pub(super) historical_dirty: AtomicBool,
             pub(super) requests: std::sync::Mutex<VecDeque<SessionRefreshBeginOrJoinRequestV1>>,
@@ -168,7 +174,14 @@ define_wake_state!(pub(crate));
 
 impl Default for SessionTemporalRefreshWakeState {
     fn default() -> Self {
+        Self::with_automatic_history_import(true)
+    }
+}
+
+impl SessionTemporalRefreshWakeState {
+    pub(super) fn with_automatic_history_import(enabled: bool) -> Self {
         Self {
+            automatic_history_import_enabled: enabled,
             dirty: AtomicBool::new(false),
             historical_dirty: AtomicBool::new(false),
             requests: std::sync::Mutex::new(VecDeque::new()),
@@ -189,7 +202,14 @@ impl Default for SessionTemporalRefreshWakeState {
             cancelled: AtomicBool::new(false),
             cancellation: tokio::sync::Notify::new(),
             completion_control: ExecutionControl::new(None),
-            telemetry: std::sync::Mutex::new(SessionTemporalRefreshWorkerTelemetry::default()),
+            telemetry: std::sync::Mutex::new(SessionTemporalRefreshWorkerTelemetry {
+                historical_state: if enabled {
+                    SessionHistoricalServingState::Current
+                } else {
+                    SessionHistoricalServingState::Paused
+                },
+                ..SessionTemporalRefreshWorkerTelemetry::default()
+            }),
         }
     }
 }
@@ -297,7 +317,13 @@ impl SessionTemporalRefreshWakeState {
         if projection_dirty || target.has_requests() {
             target.wake();
         }
-        if historical_dirty {
+        // A running or capacity-blocked pass may already have consumed its
+        // dirty flag. Its accepted continuation must survive a rekey even
+        // when the target does not automatically start historical imports.
+        if historical_dirty || self.history_needs_continuation() {
+            if !target.history_is_blocked() {
+                target.mark_history_pending();
+            }
             target.wake_history();
         }
     }
@@ -522,9 +548,43 @@ impl SessionTemporalRefreshWakeState {
         )
     }
 
+    pub(super) fn history_needs_continuation(&self) -> bool {
+        match &self
+            .telemetry
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .historical_state
+        {
+            SessionHistoricalServingState::Pending
+            | SessionHistoricalServingState::Retryable(_) => true,
+            SessionHistoricalServingState::Blocked(reason) => {
+                reason == HISTORY_INGESTOR_MISSING_REASON
+            }
+            SessionHistoricalServingState::Current | SessionHistoricalServingState::Paused => false,
+        }
+    }
+
+    /// A configured pause stops idle source probes, while an explicitly
+    /// admitted import keeps the release/retry cadence it already owns.
+    pub(super) fn history_recheck_enabled(&self) -> bool {
+        self.automatic_history_import_enabled
+            || matches!(
+                &self
+                    .telemetry
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .historical_state,
+                SessionHistoricalServingState::Pending
+                    | SessionHistoricalServingState::Retryable(_)
+            )
+    }
+
     pub fn record_history_outcome(&self, outcome: SessionHistoricalIngestOutcome) {
         let state = match outcome {
-            SessionHistoricalIngestOutcome::Complete => SessionHistoricalServingState::Current,
+            SessionHistoricalIngestOutcome::Complete if self.automatic_history_import_enabled => {
+                SessionHistoricalServingState::Current
+            }
+            SessionHistoricalIngestOutcome::Complete => SessionHistoricalServingState::Paused,
             SessionHistoricalIngestOutcome::Pending { .. } => {
                 SessionHistoricalServingState::Pending
             }
@@ -695,6 +755,11 @@ impl SessionTemporalRefreshWakeState {
                     SessionHistoricalServingState::Current => {
                         SessionProjectionServingState::Current
                     }
+                    SessionHistoricalServingState::Paused => SessionProjectionServingState::Stale {
+                        reason: SessionProjectionStaleReason::HistoricalBlocked {
+                            reason_code: SESSION_HISTORY_IMPORT_PAUSED_REASON.to_owned(),
+                        },
+                    },
                     SessionHistoricalServingState::Pending => {
                         SessionProjectionServingState::Stale {
                             reason: SessionProjectionStaleReason::HistoricalConvergence,
@@ -806,6 +871,9 @@ fn convergence_status(
             if telemetry.quiescent {
                 match &telemetry.historical_state {
                     SessionHistoricalServingState::Current => SessionConvergenceState::Converged,
+                    SessionHistoricalServingState::Paused => SessionConvergenceState::Blocked {
+                        reason_code: SESSION_HISTORY_IMPORT_PAUSED_REASON.to_owned(),
+                    },
                     SessionHistoricalServingState::Blocked(reason_code) => {
                         SessionConvergenceState::Blocked {
                             reason_code: reason_code.clone(),
@@ -978,6 +1046,7 @@ fn historical_admission_view(
                 }
             }
             SessionHistoricalServingState::Current
+            | SessionHistoricalServingState::Paused
             | SessionHistoricalServingState::Pending
             | SessionHistoricalServingState::Retryable(_) => HistoricalAdmissionView::Scheduled,
         },

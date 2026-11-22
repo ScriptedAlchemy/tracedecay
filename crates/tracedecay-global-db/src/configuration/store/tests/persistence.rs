@@ -19,7 +19,8 @@ use crate::configuration::resolver::resolve_configuration;
 use tracedecay_domain::configuration::{
     CodeIndexWorkerSelectionV1, ConfigurationIdempotencyKey, ConfigurationLayerIdV1,
     ConfigurationMutationOperationV1, SettingKey, USER_CODE_INDEX_WORKERS_SETTING_KEY,
-    USER_REPEATED_QUERY_HINTS_SETTING_KEY, USER_SESSION_RETENTION_DAYS_SETTING_KEY,
+    USER_REPEATED_QUERY_HINTS_SETTING_KEY, USER_SESSION_HISTORY_IMPORT_ENABLED_SETTING_KEY,
+    USER_SESSION_RETENTION_DAYS_SETTING_KEY,
 };
 
 #[tokio::test]
@@ -249,6 +250,12 @@ async fn worker_only_profile_store_converges_onto_the_profile_registry() {
             .value(USER_SESSION_RETENTION_DAYS_SETTING_KEY)
             .unwrap(),
         &ConfigurationValueV1::Unsigned(180)
+    );
+    assert_eq!(
+        converged
+            .value(USER_SESSION_HISTORY_IMPORT_ENABLED_SETTING_KEY)
+            .unwrap(),
+        &ConfigurationValueV1::Boolean(true)
     );
 }
 
