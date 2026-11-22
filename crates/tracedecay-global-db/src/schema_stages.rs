@@ -1588,7 +1588,7 @@ async fn profile_configuration_refusal(
     {
         Ok(()) => Ok(None),
         Err(ConfigurationError::ResetRequired { reason }) => Ok(Some(RefusedAuthorityV1::Shape {
-            authority: "configuration",
+            authority: "profile configuration",
             reason: Cow::Owned(reason),
         })),
         Err(error) => Err(global_db_operation_error(

@@ -1061,6 +1061,7 @@ async fn named_projection_join_survives_an_unrelated_session_failure() {
     tokio::pin!(successful_join, refused_join, aggregate_join);
     // Put all three obligations in the same pass before starting the worker.
     // The unnamed caller still owns the aggregate failure contract.
+    let started = Instant::now();
     let pending = std::future::poll_fn(|cx| {
         std::task::Poll::Ready((
             successful_join.as_mut().poll(cx).is_pending(),
@@ -1083,11 +1084,27 @@ async fn named_projection_join_survives_an_unrelated_session_failure() {
 
     let (successful_result, refused_result, aggregate_result) =
         tokio::join!(successful_join, refused_join, aggregate_join);
+    let elapsed = started.elapsed();
+    let worker_status = handle.status();
+    let passes = state.pass_count.load(Ordering::Acquire);
+    let idle = state.is_idle();
     state.cancel();
     worker.await.expect("worker exits on cancellation");
+    let mut receipts = Vec::with_capacity(recoveries.len());
+    for recovery in recoveries {
+        let receipt = store
+            .session_refresh_receipt(SessionRefreshReceiptRequestV1::new(
+                recovery.operation_id().clone(),
+                recovery.session_id().clone(),
+            ))
+            .await;
+        receipts.push((recovery.session_id().clone(), receipt));
+    }
     assert!(
         successful_result,
-        "another session cannot veto a committed publication"
+        "another session cannot veto a committed publication; elapsed={elapsed:?}, \
+         refused={refused_result}, aggregate={aggregate_result}, worker={worker_status:?}, \
+         passes={passes}, idle={idle}, receipts={receipts:?}"
     );
     assert!(
         !refused_result,
@@ -1097,16 +1114,11 @@ async fn named_projection_join_survives_an_unrelated_session_failure() {
         !aggregate_result,
         "unnamed sweeps must retain aggregate failure"
     );
-    for recovery in recoveries {
-        let receipt = store
-            .session_refresh_receipt(SessionRefreshReceiptRequestV1::new(
-                recovery.operation_id().clone(),
-                recovery.session_id().clone(),
-            ))
-            .await
+    for (session_id, receipt) in receipts {
+        let receipt = receipt
             .expect("read durable receipt")
             .expect("both sessions must settle durably");
-        let expected = if recovery.session_id() == &successful {
+        let expected = if session_id == successful {
             SessionRefreshTerminalStateV1::Complete
         } else {
             SessionRefreshTerminalStateV1::Failed

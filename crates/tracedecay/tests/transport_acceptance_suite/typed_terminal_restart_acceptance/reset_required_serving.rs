@@ -207,11 +207,9 @@ fn reset_required_profile_session_store_is_served_typed_until_its_named_reset() 
 }
 
 fn profile_configuration_snapshot(db_path: &Path) -> (String, ConfigurationSnapshotV1) {
-    let connection = rusqlite::Connection::open_with_flags(
-        db_path,
-        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
-    )
-    .expect("read the existing profile settings");
+    let connection =
+        rusqlite::Connection::open_with_flags(db_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .expect("read the existing profile settings");
     let (revision, snapshot_id, behavior_digest, provenance_digest) = connection
         .query_row(
             "SELECT revision_id, snapshot_id, effective_behavior_digest,
@@ -369,7 +367,7 @@ fn older_profile_settings_are_resettable_without_blocking_daemon_startup() {
         "only profile settings require reset: {stores:?}"
     );
     assert_eq!(stores[0]["store"], json!("profile sessions"));
-    assert_eq!(stores[0]["authority"], json!("configuration"));
+    assert_eq!(stores[0]["authority"], json!("profile configuration"));
     assert_eq!(stores[0]["remedy"], json!("tracedecay wipe --stale --yes"));
     assert!(
         stores[0]["reason"]
@@ -385,7 +383,7 @@ fn older_profile_settings_are_resettable_without_blocking_daemon_startup() {
     super::assert_reset_required(&refused, "profile read over older settings");
     assert_eq!(
         refused["problem"]["detail"]["authority"],
-        json!("configuration")
+        json!("profile configuration")
     );
     assert_eq!(
         refused["problem"]["detail"]["remedy"],

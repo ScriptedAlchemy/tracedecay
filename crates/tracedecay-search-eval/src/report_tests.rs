@@ -26,6 +26,10 @@ fn assert_baseline_report_retains_raw_fallback_current_and_exact_ten_x_samples(
     generated: &GenerateCandidateOutputsResultV1,
     report: &DirectEvaluationReportV1,
 ) {
+    // Keep every already-generated partition in the failure evidence. The
+    // first mismatched receipt must not hide the other partition's receipt or
+    // the ordered candidate rows needed to explain the ranking change.
+    let ranking_evidence = &generated.outputs;
     // A ranking change must move the receipt. A generation reseal must not:
     // the receipt hashes ordered rows and lane coverage, not the sealed
     // generation those rows were bound under.
@@ -52,7 +56,8 @@ fn assert_baseline_report_retains_raw_fallback_current_and_exact_ten_x_samples(
              tests/fixtures/search_quality/query-lexical-graph-workload-v1.json \
              ({observed}). The receipt binds ordered ranking rows and lane coverage, \
              not generation or extractor-revision identity. Re-pin only that receipt \
-             when the ranking itself changed; do not touch the workload identity pin.",
+             when the ranking itself changed; do not touch the workload identity pin.\n\
+             Canonical output for all partitions:\n{ranking_evidence:#?}",
             profile.profile_id, profile.partition, profile.partition
         );
     }

@@ -240,8 +240,9 @@ fn is_project_store_authority(authority: &str) -> bool {
 /// authority or a session store. The daemon holds that store in its typed
 /// reset-required state, so the scoped reset deletes exactly the refused
 /// stores.
-const REGISTERED_STORE_AUTHORITIES: [&str; 10] = [
+const REGISTERED_STORE_AUTHORITIES: [&str; 11] = [
     "project registry",
+    "profile configuration",
     "observations",
     "session temporal",
     "session temporal profile schema",

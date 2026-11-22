@@ -150,9 +150,7 @@ impl<'db> GlobalDbConfigurationControlStore<'db> {
                 )
             })?;
         let revision_count = row.get::<i64>(0).map_err(|_| {
-            ConfigurationError::validation_message(
-                "configuration revision count is not an integer",
-            )
+            ConfigurationError::validation_message("configuration revision count is not an integer")
         })?;
         if rows
             .next()
