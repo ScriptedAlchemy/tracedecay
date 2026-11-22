@@ -231,8 +231,11 @@ impl<'a> ProjectProviderRun<'a> {
                 .await
             {
                 Ok(codex::CodexDiscoveryDelivery::Ready(pass)) => Ok(pass),
-                Ok(codex::CodexDiscoveryDelivery::Waiting) => {
-                    return ProviderRunOutcome::bounded(TranscriptIngestStats::default(), 0, true);
+                Ok(codex::CodexDiscoveryDelivery::Pending(scan)) => {
+                    let mut outcome =
+                        ProviderRunOutcome::bounded(TranscriptIngestStats::default(), 0, true);
+                    outcome.coverage_advanced = scan == codex::CodexScanProgress::Advanced;
+                    return outcome;
                 }
                 Err(error) => Err(error),
             },
@@ -389,6 +392,7 @@ impl<'a> ProjectProviderRun<'a> {
                     if progress.frames_persisted > 0 && !progress.resumed {
                         persisted_day = path.parent();
                     }
+                    outcome.coverage_advanced |= progress.advanced_coverage();
                     deferred |= progress.source_deferred || progress.bytes_consumed > remaining;
                     frontier_committable &=
                         !progress.source_deferred && progress.bytes_consumed <= remaining;
@@ -451,6 +455,7 @@ impl<'a> ProjectProviderRun<'a> {
                 "project Codex history frontier persistence failed",
             ));
         }
+        outcome.coverage_advanced |= deferred && frontier_persisted && next_frontier != stored;
         let coverage = if deferred || !frontier_persisted {
             HostProviderCoverage::Partial
         } else {

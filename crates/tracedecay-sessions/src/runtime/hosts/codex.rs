@@ -389,7 +389,15 @@ const MAX_CONSUMER_DISCOVERY_BACKLOG: usize = 1;
 
 pub(crate) enum CodexDiscoveryDelivery {
     Ready(std::sync::Arc<CodexDiscoveryPass>),
+    Pending(CodexScanProgress),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum CodexScanProgress {
+    /// A different consumer owns the scanner.
     Waiting,
+    /// This consumer finished a bounded step of the shared replay scan.
+    Advanced,
 }
 
 impl CodexDiscoveryHub {
@@ -679,7 +687,7 @@ impl CodexDiscoveryHub {
                     let index = inner.replay_indexes.entry(source_key.clone()).or_default();
                     if index.scanning {
                         inner.scan_waited = true;
-                        return Ok(CodexDiscoveryDelivery::Waiting);
+                        return Ok(CodexDiscoveryDelivery::Pending(CodexScanProgress::Waiting));
                     }
                     if index._scanner_memory.is_none() {
                         index._scanner_memory = reserve_shared_jsonl_bytes(
@@ -691,7 +699,7 @@ impl CodexDiscoveryHub {
                         )?;
                     }
                     let Some(state) = index.discovery.take() else {
-                        return Ok(CodexDiscoveryDelivery::Waiting);
+                        return Ok(CodexDiscoveryDelivery::Pending(CodexScanProgress::Waiting));
                     };
                     index.scanning = true;
                     CodexDiscoveryWork::Replay {
@@ -748,7 +756,7 @@ impl CodexDiscoveryHub {
                     }
                     if inner.discovery_scanning {
                         inner.scan_waited = true;
-                        return Ok(CodexDiscoveryDelivery::Waiting);
+                        return Ok(CodexDiscoveryDelivery::Pending(CodexScanProgress::Waiting));
                     }
                     inner.discovery_scanning = true;
                     inner.shared_scans += 1;
@@ -932,15 +940,19 @@ impl CodexDiscoveryHub {
                             detail: "Codex replay enumeration count exhausted",
                         })?;
                     index.files_considered = pass.report.files_considered;
-                } else if completed_probe_cycle {
-                    index.probe_revision = index.probe_revision.checked_add(1).ok_or(
-                        TranscriptIngestError::InvalidCodexDiscoveryFrontier {
-                            detail: "Codex replay probe revision exhausted",
-                        },
-                    )?;
+                } else if !completed_probe_cycle {
+                    return Ok(CodexDiscoveryDelivery::Pending(CodexScanProgress::Advanced));
                 }
+                index.probe_revision = index.probe_revision.checked_add(1).ok_or(
+                    TranscriptIngestError::InvalidCodexDiscoveryFrontier {
+                        detail: "Codex replay probe revision exhausted",
+                    },
+                )?;
+                // Deliver the completed index in this poll. Only an unfinished
+                // scan needs another provider sweep.
+                continue;
             }
-            return Ok(CodexDiscoveryDelivery::Waiting);
+            return Ok(CodexDiscoveryDelivery::Pending(CodexScanProgress::Advanced));
         }
     }
 

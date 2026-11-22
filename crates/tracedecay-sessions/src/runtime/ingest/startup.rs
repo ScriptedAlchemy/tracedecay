@@ -27,7 +27,7 @@ pub struct TranscriptIngestOutcome {
     pub failures: Vec<TranscriptCatchUpFailure>,
     pub coverage: IngestPassCoverage,
     pub scheduling_state_written: bool,
-    /// The pass durably advanced source coverage beyond its upserts.
+    /// The pass advanced discovery or source coverage beyond its upserts.
     pub coverage_advanced: bool,
     /// Each admitted provider's unit dispositions in this pass.
     pub provider_units: BTreeMap<&'static str, ProviderPassUnits>,

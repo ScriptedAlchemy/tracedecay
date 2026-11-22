@@ -260,6 +260,14 @@ pub struct CodexJsonlAdmissionProgress {
     pub prior_context_bytes: u64,
 }
 
+impl CodexJsonlAdmissionProgress {
+    /// An unterminated frame can consume the read budget on every pass without
+    /// covering any more of the rollout.
+    pub(in crate::runtime) fn advanced_coverage(&self) -> bool {
+        self.frames_persisted > 0 || self.frames_skipped > 0 || self.frames_refused > 0
+    }
+}
+
 /// Project admission with authority prepared by the caller.
 ///
 /// The project scheduler constructs this facade from its authoritative project

@@ -1230,8 +1230,8 @@ mod recent_first_discovery_tests {
     use crate::runtime::hosts::codex::{
         CodexCorpusEpoch, CodexDiscoveryDelivery, CodexDiscoveryFrontier, CodexDiscoveryHub,
         CodexDiscoverySourceKey, CodexDiscoveryState, CodexExactSessionPathAuthority,
-        CodexIndexedPath, CodexReplayIndex, CodexScanPhase, DirectoryStatWitness,
-        EXACT_HOOK_DISCOVERY_UNITS_PER_CALL, IDLE_FULL_VALIDATION_CYCLES,
+        CodexIndexedPath, CodexReplayIndex, CodexScanPhase, CodexScanProgress,
+        DirectoryStatWitness, EXACT_HOOK_DISCOVERY_UNITS_PER_CALL, IDLE_FULL_VALIDATION_CYCLES,
         MAX_EXACT_HOOK_SESSION_REQUESTS, MAX_EXACT_HOOK_SOURCE_AUTHORITIES, MAX_SCAN_DEPTH,
         codex_corpus_identity, codex_directory_changed, codex_directory_changed_since,
         codex_directory_stat_identity, codex_directory_witness, directory_entry_fingerprint,
@@ -1291,7 +1291,7 @@ mod recent_first_discovery_tests {
                 .await
                 .expect("bounded hub discovery")
             {
-                CodexDiscoveryDelivery::Waiting => continue,
+                CodexDiscoveryDelivery::Pending(_) => continue,
                 CodexDiscoveryDelivery::Ready(pass) => {
                     paths.extend(pass.report.paths.iter().cloned());
                     frontier = pass.next_frontier;
@@ -1488,7 +1488,7 @@ mod recent_first_discovery_tests {
             hub.discover("project", &source, bounds, frontier)
                 .await
                 .unwrap(),
-            CodexDiscoveryDelivery::Waiting
+            CodexDiscoveryDelivery::Pending(CodexScanProgress::Waiting)
         ));
         set_index_scanning(false);
         hub.discover("profile", &source, bounds, first.next_frontier)
@@ -1559,7 +1559,7 @@ mod recent_first_discovery_tests {
             .unwrap()
         {
             CodexDiscoveryDelivery::Ready(pass) => pass,
-            CodexDiscoveryDelivery::Waiting => panic!("initial delivery unexpectedly waited"),
+            CodexDiscoveryDelivery::Pending(_) => panic!("initial delivery unexpectedly waited"),
         };
         assert_eq!(first.report.paths, vec![expected]);
         let retry = match hub
@@ -1568,7 +1568,7 @@ mod recent_first_discovery_tests {
             .unwrap()
         {
             CodexDiscoveryDelivery::Ready(pass) => pass,
-            CodexDiscoveryDelivery::Waiting => panic!("budget retry unexpectedly waited"),
+            CodexDiscoveryDelivery::Pending(_) => panic!("budget retry unexpectedly waited"),
         };
 
         assert!(
@@ -1640,7 +1640,7 @@ mod recent_first_discovery_tests {
                 .unwrap()
             {
                 CodexDiscoveryDelivery::Ready(pass) => pass,
-                CodexDiscoveryDelivery::Waiting => continue,
+                CodexDiscoveryDelivery::Pending(_) => continue,
             };
             delivered = delivered.saturating_add(pass.report.paths.len());
             frontier = pass.next_frontier;
@@ -2091,7 +2091,7 @@ mod recent_first_discovery_tests {
 
         let replayer = hub.clone();
         assert_ledger_read_never_waits_on_pinning(&hub, &rollout, move || {
-            while let CodexDiscoveryDelivery::Waiting = replayer
+            while let CodexDiscoveryDelivery::Pending(_) = replayer
                 .discover_blocking("replayer", &source, bounds, initial)
                 .unwrap()
             {}
@@ -2333,7 +2333,7 @@ mod recent_first_discovery_tests {
                 .unwrap()
             {
                 CodexDiscoveryDelivery::Ready(pass) => pass,
-                CodexDiscoveryDelivery::Waiting => {
+                CodexDiscoveryDelivery::Pending(_) => {
                     panic!("a single catch-up consumer must not wait on its own scan")
                 }
             };
@@ -2358,7 +2358,7 @@ mod recent_first_discovery_tests {
                 .unwrap()
             {
                 CodexDiscoveryDelivery::Ready(pass) => pass,
-                CodexDiscoveryDelivery::Waiting => continue,
+                CodexDiscoveryDelivery::Pending(_) => continue,
             };
             frontier = pass.next_frontier;
             hub.acknowledge("project");
@@ -3821,7 +3821,7 @@ mod recent_first_discovery_tests {
                 .await
                 .expect("codex discovery")
             {
-                CodexDiscoveryDelivery::Waiting => continue,
+                CodexDiscoveryDelivery::Pending(_) => continue,
                 CodexDiscoveryDelivery::Ready(pass) => pass,
             };
             ready_passes = ready_passes.saturating_add(1);
@@ -3906,7 +3906,7 @@ mod recent_first_discovery_tests {
             .unwrap()
         {
             CodexDiscoveryDelivery::Ready(pass) => pass,
-            CodexDiscoveryDelivery::Waiting => panic!("an idle hub must deliver a pass"),
+            CodexDiscoveryDelivery::Pending(_) => panic!("an idle hub must deliver a pass"),
         };
         assert!(delivered.report.paths.contains(&rollout));
         std::fs::remove_file(&rollout).unwrap();

@@ -256,9 +256,8 @@ impl<'a, S: TranscriptIngestStore + 'a> UserProviderUnit<'a, S> {
                     run.add_failure(failure);
                 }
                 let mut frontier_persisted = result.committable_frontier.is_some();
-                if let Some(next_frontier) = result
-                    .committable_frontier
-                    .filter(|next_frontier| *next_frontier != stored)
+                let changed_frontier = result.committable_frontier.filter(|next| *next != stored);
+                if let Some(next_frontier) = changed_frontier
                     && let persisted = erase_send!(
                         write_codex_discovery_frontier(self.store, stored, next_frontier),
                         crate::runtime::source::TranscriptIngestResult<()>
@@ -274,6 +273,10 @@ impl<'a, S: TranscriptIngestStore + 'a> UserProviderUnit<'a, S> {
                         "user Codex discovery frontier persistence failed",
                     ));
                 }
+                run.coverage_advanced = result.coverage_advanced
+                    || (outcome.deferred_by_byte_cap
+                        && frontier_persisted
+                        && changed_frontier.is_some());
                 if let Some(coverage) = codex_profile_coverage_update(
                     discovery_waiting,
                     outcome.deferred_by_byte_cap,
