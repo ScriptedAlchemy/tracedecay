@@ -1,8 +1,9 @@
 use std::cmp::{Ordering, Reverse};
 
 use tracedecay_domain::{
-    ExactClass, FixedPointScore, FreshnessCompatibilityV1, FusedCandidate, RankingDecision,
-    RetrievalAnchorId, RetrieverKind, ScoreDomainId, SourceOccurrenceId,
+    CandidateContribution, ExactClass, FixedPointScore, FreshnessCompatibilityV1,
+    FusedCandidate, RankingDecision, RetrievalAnchorId, RetrieverKind, ScoreDomainId,
+    SourceOccurrenceId,
 };
 
 use super::fusion::FusionComparatorRecordV1;
@@ -162,9 +163,14 @@ pub(super) fn ordered_domain_scores(
     candidate: &FusedCandidate,
 ) -> Vec<(RetrieverKind, &ScoreDomainId, Reverse<FixedPointScore>)> {
     stage_counters::record_ranking_evidence_normalization();
-    let mut scores = candidate
-        .contributions
-        .iter()
+    ordered_contribution_scores(candidate.contributions.iter())
+}
+
+pub(super) fn ordered_contribution_scores<'a>(
+    contributions: impl IntoIterator<Item = &'a CandidateContribution>,
+) -> Vec<(RetrieverKind, &'a ScoreDomainId, Reverse<FixedPointScore>)> {
+    let mut scores = contributions
+        .into_iter()
         .filter(|contribution| contribution.weight_micros > 0)
         .map(|contribution| {
             (

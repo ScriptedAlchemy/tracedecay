@@ -4,15 +4,18 @@
 //! fusion; a cap must carry its locked evaluation anchor, absent evidence
 //! leaves the cap disabled except resource-safety ceilings).
 
+use std::cmp::Reverse;
 use std::collections::{BTreeMap, BTreeSet};
 
 use thiserror::Error;
 use tracedecay_domain::{
-    DiversityPolicy, EvidenceRole, ExactClass, FileOccurrenceId, FusedCandidate,
-    LogicalCopyClusterId, OccurrenceProvenance, RankedCandidate, RankingDecision,
-    RankingDecisionKind, RepositoryId, SessionOrThreadId, SourceInstanceKey, SourceNamespace,
+    CandidateContribution, DiversityPolicy, EvidenceRole, ExactClass, FileOccurrenceId,
+    FixedPointScore, FusedCandidate, LogicalCopyClusterId, OccurrenceProvenance,
+    RankedCandidate, RankingDecision, RankingDecisionKind, RepositoryId, RetrievalAnchorId,
+    RetrieverKind, ScoreDomainId, SessionOrThreadId, SourceInstanceKey, SourceNamespace,
 };
 
+use super::ordering::{ordered_contribution_scores, source_validity_rank};
 use super::stage_counters;
 
 #[derive(Clone, Debug, Error, PartialEq, Eq)]
@@ -40,6 +43,7 @@ impl DeterministicDiversity {
         &self,
         policy: &DiversityPolicy,
         candidates: Vec<FusedCandidate>,
+        anchor_tiers: &BTreeMap<RetrievalAnchorId, u32>,
     ) -> Result<(Vec<RankedCandidate>, Vec<DiversityDecisionV1>), DiversityStageError> {
         let enabled = [
             policy.per_source_namespace,
@@ -58,7 +62,7 @@ impl DeterministicDiversity {
         // Absent caps are a no-op over candidate data: the fused order is the
         // final order, and no key or counter is ever derived.
         let (admitted, decisions) = if enabled {
-            cap_candidates(policy, candidates)
+            cap_candidates(policy, candidates, anchor_tiers)
         } else {
             (candidates, Vec::new())
         };
@@ -80,22 +84,41 @@ impl DeterministicDiversity {
 fn cap_candidates(
     policy: &DiversityPolicy,
     candidates: Vec<FusedCandidate>,
+    anchor_tiers: &BTreeMap<RetrievalAnchorId, u32>,
 ) -> (Vec<FusedCandidate>, Vec<DiversityDecisionV1>) {
-    let mut counters = CapCounters::default();
+    let dimensions = {
+        // Exact and contradiction evidence remains cap-exempt. Every other
+        // candidate derives its keys once, including when an infeasible
+        // direct-evidence reservation requires another admission pass.
+        let keys = candidates
+            .iter()
+            .map(|candidate| {
+                (!is_protected(candidate))
+                    .then(|| CandidateCapKeys::derive(policy, candidate))
+            })
+            .collect::<Vec<_>>();
+        let witnesses = direct_file_witnesses(policy, &candidates, anchor_tiers);
+        let mut active = vec![false; candidates.len()];
+        for witness in witnesses.values() {
+            active[witness.index] = true;
+        }
+        loop {
+            match cap_pass(policy, &candidates, &keys, &witnesses, &active, anchor_tiers) {
+                Ok(dimensions) => break dimensions,
+                Err(index) => {
+                    // Replaying from the original order also restores the
+                    // earlier candidates' priority at every non-file cap.
+                    // Each retry releases all reservations for one active
+                    // witness, so at most one pass per witness can fail.
+                    active[index] = false;
+                }
+            }
+        }
+    };
     let mut admitted = Vec::with_capacity(candidates.len());
     let mut decisions = Vec::new();
-    for candidate in candidates {
-        // Exact and contradiction evidence is protected: diversity may
-        // neither demote exact technical lookup nor erase an admitted
-        // contradiction, and protected evidence never counts against a cap.
-        if is_protected(&candidate) {
-            admitted.push(candidate);
-            continue;
-        }
-        let keys = CandidateCapKeys::derive(policy, &candidate);
-        let dimensions = counters.reached_caps(policy, &keys);
+    for (candidate, dimensions) in candidates.into_iter().zip(dimensions) {
         if dimensions.is_empty() {
-            counters.admit(&keys);
             admitted.push(candidate);
             continue;
         }
@@ -116,6 +139,128 @@ fn cap_candidates(
         });
     }
     (admitted, decisions)
+}
+
+/// A file keeps one direct lexical witness before contextual lane boosts can
+/// consume its last slot. Source/anchor priority remains authoritative; the
+/// lexical strength is the strongest contribution, never a sum over chunks.
+/// Raw-score tags retain the ordinary comparator's saturated-score tie-break,
+/// and a complete tie keeps the existing fused order rather than lane ranks.
+struct DirectFileWitness<'a> {
+    index: usize,
+    priority: (Reverse<u32>, u8),
+    lexical_utility: u64,
+    source_validity: u8,
+    domain_scores: Vec<(RetrieverKind, &'a ScoreDomainId, Reverse<FixedPointScore>)>,
+}
+
+impl DirectFileWitness<'_> {
+    fn precedes(&self, other: &Self) -> bool {
+        self.priority
+            .cmp(&other.priority)
+            .then_with(|| other.lexical_utility.cmp(&self.lexical_utility))
+            .then_with(|| other.source_validity.cmp(&self.source_validity))
+            .then_with(|| self.domain_scores.cmp(&other.domain_scores))
+            .then_with(|| self.index.cmp(&other.index))
+            .is_lt()
+    }
+}
+
+fn leading_priority(
+    candidate: &FusedCandidate,
+    anchor_tiers: &BTreeMap<RetrievalAnchorId, u32>,
+) -> (Reverse<u32>, u8) {
+    (
+        Reverse(anchor_tiers.get(&candidate.anchor_id).copied().unwrap_or(0)),
+        candidate.source_role.admission_rank(),
+    )
+}
+
+fn direct_file_witnesses<'a>(
+    policy: &DiversityPolicy,
+    candidates: &'a [FusedCandidate],
+    anchor_tiers: &BTreeMap<RetrievalAnchorId, u32>,
+) -> BTreeMap<&'a FileOccurrenceId, DirectFileWitness<'a>> {
+    let mut witnesses = BTreeMap::new();
+    if !policy.per_file.is_some_and(|cap| cap > 0) {
+        return witnesses;
+    }
+    for (index, candidate) in candidates.iter().enumerate() {
+        if is_protected(candidate) {
+            continue;
+        }
+        let mut evidence = BTreeMap::<&FileOccurrenceId, Vec<&CandidateContribution>>::new();
+        for contribution in candidate.contributions.iter().filter(|contribution| {
+            contribution.retriever == RetrieverKind::Lexical
+                && contribution.weight_micros > 0
+                && contribution.weighted_contribution_micros > 0
+        }) {
+            for occurrence in candidate.occurrences.iter().filter(|occurrence| {
+                occurrence.source_occurrence_id == contribution.source_occurrence_id
+            }) {
+                if let Some(file) = &occurrence.file_occurrence_id {
+                    evidence.entry(file).or_default().push(contribution);
+                }
+            }
+        }
+        for (file, contributions) in evidence {
+            let witness = DirectFileWitness {
+                index,
+                priority: leading_priority(candidate, anchor_tiers),
+                lexical_utility: contributions
+                    .iter()
+                    .map(|contribution| contribution.weighted_contribution_micros)
+                    .max()
+                    .unwrap_or(0),
+                source_validity: source_validity_rank(candidate),
+                domain_scores: ordered_contribution_scores(contributions),
+            };
+            if witnesses
+                .get(file)
+                .is_none_or(|current| witness.precedes(current))
+            {
+                witnesses.insert(file, witness);
+            }
+        }
+    }
+    witnesses
+}
+
+fn cap_pass(
+    policy: &DiversityPolicy,
+    candidates: &[FusedCandidate],
+    keys: &[Option<CandidateCapKeys<'_>>],
+    witnesses: &BTreeMap<&FileOccurrenceId, DirectFileWitness<'_>>,
+    active: &[bool],
+    anchor_tiers: &BTreeMap<RetrievalAnchorId, u32>,
+) -> Result<Vec<Vec<&'static str>>, usize> {
+    let mut counters = CapCounters::default();
+    let mut decisions = Vec::with_capacity(candidates.len());
+    for (index, (candidate, keys)) in candidates.iter().zip(keys).enumerate() {
+        let Some(keys) = keys else {
+            decisions.push(Vec::new());
+            continue;
+        };
+        let file_reserved = policy.per_file.is_some_and(|cap| {
+            keys.files.iter().any(|file| {
+                witnesses.get(*file).is_some_and(|witness| {
+                    active[witness.index]
+                        && witness.index > index
+                        && leading_priority(candidate, anchor_tiers) >= witness.priority
+                        && counters.files.get(*file).copied().unwrap_or(0)
+                            >= cap.saturating_sub(1)
+                })
+            })
+        });
+        let dimensions = counters.reached_caps(policy, keys, file_reserved);
+        if dimensions.is_empty() {
+            counters.admit(keys);
+        } else if active[index] {
+            return Err(index);
+        }
+        decisions.push(dimensions);
+    }
+    Ok(decisions)
 }
 
 fn is_protected(candidate: &FusedCandidate) -> bool {
@@ -142,6 +287,7 @@ impl CapCounters {
         &self,
         policy: &DiversityPolicy,
         keys: &CandidateCapKeys<'_>,
+        file_reserved: bool,
     ) -> Vec<&'static str> {
         let mut dimensions = Vec::new();
         if any_reached(
@@ -161,7 +307,7 @@ impl CapCounters {
         ) {
             dimensions.push("repository");
         }
-        if any_reached(&self.files, &keys.files, policy.per_file) {
+        if file_reserved || any_reached(&self.files, &keys.files, policy.per_file) {
             dimensions.push("file");
         }
         if any_reached(&self.sessions, &keys.sessions, policy.per_session_or_thread) {
@@ -377,7 +523,7 @@ mod cap_key_tests {
         policy.evaluation_result_anchor = None;
         stage_counters::reset();
         let error = DeterministicDiversity
-            .apply_caps(&policy, vec![candidate()])
+            .apply_caps(&policy, vec![candidate()], &BTreeMap::new())
             .expect_err("an enabled cap needs its evaluation anchor");
         assert_eq!(error, DiversityStageError::CapWithoutEvidenceAnchor);
         assert_eq!(stage_counters::snapshot().cap_key_derivations, 0);

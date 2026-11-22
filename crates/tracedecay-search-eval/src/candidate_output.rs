@@ -1820,7 +1820,13 @@ pub(crate) mod tests {
     fn documented_answers_survive_full_graph_composition() {
         let fixture = packaged_fixture();
         let mut workload = fixture.workload().clone();
-        let queries = ["train-025", "validation-006", "validation-017"].map(|query_id| {
+        let queries = [
+            "train-025",
+            "validation-006",
+            "validation-017",
+            "validation-019",
+        ]
+        .map(|query_id| {
             workload
                 .queries
                 .iter()
@@ -1871,11 +1877,10 @@ pub(crate) mod tests {
             let mut without_graph = input.clone();
             for lane in &mut without_graph.lanes {
                 if lane.lane == RetrieverKind::Graph {
-                    lane.outcome = RetrieverOutcome::Unavailable(
-                        RetrievalFailure::AuthorityUnavailable {
+                    lane.outcome =
+                        RetrieverOutcome::Unavailable(RetrievalFailure::AuthorityUnavailable {
                             detail: "graph excluded by the lexical comparison".to_owned(),
-                        },
-                    );
+                        });
                 }
             }
             let lexical_only = kernel
