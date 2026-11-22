@@ -783,6 +783,7 @@ fn production_lanes(
                 query_view: &query_view,
                 generation: generation_id.clone(),
                 whole_terms: std::borrow::Cow::Borrowed(route.parts.whole_terms.as_slice()),
+                explicit_terms: std::borrow::Cow::Borrowed(route.parts.explicit_terms.as_slice()),
                 subtokens: std::borrow::Cow::Borrowed(route.parts.subtokens.as_slice()),
                 phrases: std::borrow::Cow::Borrowed(route.parts.phrases.as_slice()),
                 proximities: std::borrow::Cow::Borrowed(route.proximities.as_slice()),

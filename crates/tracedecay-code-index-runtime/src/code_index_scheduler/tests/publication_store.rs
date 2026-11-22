@@ -4147,6 +4147,7 @@ fn serve_scope_text_with_hits(
             query_view: &query_view,
             generation,
             whole_terms: std::borrow::Cow::Owned(vec![term.to_owned()]),
+            explicit_terms: std::borrow::Cow::Owned(Vec::new()),
             subtokens: std::borrow::Cow::Owned(vec![term.to_owned()]),
             phrases: std::borrow::Cow::Owned(Vec::new()),
             proximities: std::borrow::Cow::Owned(Vec::new()),

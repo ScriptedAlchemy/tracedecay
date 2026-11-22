@@ -347,6 +347,7 @@ fn lexical_request(max_candidates: u32) -> LexicalLaneRequest<'static> {
         query_view,
         generation: id("generation.1"),
         whole_terms: Cow::Owned(vec!["reserve".to_owned(), "stock".to_owned()]),
+        explicit_terms: Cow::Owned(Vec::new()),
         subtokens: Cow::Owned(vec!["res".to_owned()]),
         phrases: Cow::Owned(Vec::new()),
         proximities: Cow::Owned(Vec::new()),

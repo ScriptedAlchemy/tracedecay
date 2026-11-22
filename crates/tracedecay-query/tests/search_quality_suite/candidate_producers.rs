@@ -5973,6 +5973,11 @@ pub(crate) fn lexical_request(
         query_view,
         generation: id("generation.1"),
         whole_terms: Cow::Owned(whole_terms.iter().map(|term| (*term).to_owned()).collect()),
+        explicit_terms: Cow::Owned(
+            tracedecay_query::retrieval::lexical::lexical_query_parts(query)
+                .expect("lexical query parts")
+                .explicit_terms,
+        ),
         subtokens: Cow::Owned(subtokens.iter().map(|term| (*term).to_owned()).collect()),
         phrases: Cow::Owned(phrases.iter().map(|term| (*term).to_owned()).collect()),
         proximities: Cow::Owned(Vec::new()),
@@ -6312,7 +6317,7 @@ fn lexical_phrase_and_bounded_fuzzy_recovery_are_deterministic() {
     assert!(over_budget.validate().is_err());
 
     let oversized_term = "x".repeat(MAX_LEXICAL_QUERY_TERM_BYTES_V1 + 1);
-    let oversized = lexical_request(&oversized_term, &[oversized_term.as_str()], &[], &[], 1, 8);
+    let oversized = lexical_request("x", &[oversized_term.as_str()], &[], &[], 1, 8);
     assert!(oversized.validate().is_err());
 }
 

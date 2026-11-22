@@ -18,7 +18,7 @@ use super::{
     LexicalFieldFilterV1, LexicalFieldV1, LexicalLaneRequest, LexicalProximityV1,
     LexicalSpellingVariantV1, names_identifier, normalize_lexical, preferred_symbol_tokens,
 };
-use crate::retrieval::exact::{ExactAdmissionAuthority, ExactLaneRequest, explicit_query_terms};
+use crate::retrieval::exact::{ExactAdmissionAuthority, ExactLaneRequest};
 use crate::retrieval::ports::{
     CodeCandidateBindingV1, CodeOccurrenceRefV1, RetrievalPortError, contract_error,
 };
@@ -652,7 +652,6 @@ struct PreparedLexicalProximityV1<'request> {
 impl<'request> PreparedLexicalQueryV1<'request> {
     fn new(request: &'request LexicalLaneRequest<'_>) -> Self {
         let single_whole_term = request.whole_terms.len() == 1;
-        let explicit_terms = explicit_query_terms(request.query_view.as_str());
         let name_fields_requested = request
             .field_filters
             .iter()
@@ -665,8 +664,12 @@ impl<'request> PreparedLexicalQueryV1<'request> {
                 .filter(|term| {
                     single_whole_term
                         || name_fields_requested
+                        || names_identifier(term)
                         || !is_query_stopword(term)
-                        || explicit_terms.contains(&normalize_lexical(term))
+                        || request
+                            .explicit_terms
+                            .iter()
+                            .any(|explicit| explicit.eq_ignore_ascii_case(term))
                 })
                 .map(|term| (term.as_str(), normalize_lexical(term)))
                 .collect(),

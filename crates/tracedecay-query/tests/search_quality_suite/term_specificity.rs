@@ -14,8 +14,8 @@ use tracedecay_query::retrieval::fusion::{
 };
 use tracedecay_query::retrieval::graph::GraphLaneEvidence;
 use tracedecay_query::retrieval::lexical::{
-    LexicalLane, LexicalLaneRequest, LexicalRouteOutcomeV1, LexicalRoutePlanV1, LexicalRoutingV1,
-    merge_lexical_routes,
+    LexicalAliasV1, LexicalLane, LexicalLaneRequest, LexicalRouteOutcomeV1, LexicalRoutePlanV1,
+    LexicalRoutingV1, merge_lexical_routes,
 };
 use tracedecay_query::retrieval::{
     QUERY_EXACT_RULE_REVISION_V1, QUERY_EXACT_SCORE_DOMAIN_V1, QUERY_GRAPH_SCORE_DOMAIN_V1,
@@ -145,6 +145,14 @@ fn search(sources: &[String], query: &str) -> Vec<RankedCandidate> {
 }
 
 fn search_artifact(artifact: &SealedArtifactFixture, query: &str) -> Vec<RankedCandidate> {
+    search_artifact_with_routing(artifact, query, &LexicalRoutingV1::default())
+}
+
+fn search_artifact_with_routing(
+    artifact: &SealedArtifactFixture,
+    query: &str,
+    routing: &LexicalRoutingV1,
+) -> Vec<RankedCandidate> {
     let generation = artifact.metadata.generation.clone();
     let request = base_request(query, 32);
     let view = query_view(query);
@@ -167,8 +175,7 @@ fn search_artifact(artifact: &SealedArtifactFixture, query: &str) -> Vec<RankedC
     .expect("exact lane completes");
 
     let lexical_lane = LexicalLane::new(artifact.reader.clone());
-    let plan =
-        LexicalRoutePlanV1::plan(view.as_str(), &LexicalRoutingV1::default()).expect("route plan");
+    let plan = LexicalRoutePlanV1::plan(view.as_str(), routing).expect("route plan");
     let routes = plan
         .routes()
         .iter()
@@ -180,6 +187,7 @@ fn search_artifact(artifact: &SealedArtifactFixture, query: &str) -> Vec<RankedC
                     query_view: &view,
                     generation: generation.clone(),
                     whole_terms: Cow::Borrowed(route.parts.whole_terms.as_slice()),
+                    explicit_terms: Cow::Borrowed(route.parts.explicit_terms.as_slice()),
                     subtokens: Cow::Borrowed(route.parts.subtokens.as_slice()),
                     phrases: Cow::Borrowed(route.parts.phrases.as_slice()),
                     proximities: Cow::Borrowed(route.proximities.as_slice()),
@@ -428,14 +436,17 @@ fn prose_articles_do_not_spend_file_slots_on_rust_lifetimes() {
          \x20   type IntoIter = std::slice::IterMut<'a, T>;\n\
          \x20   fn into_iter(self) -> Self::IntoIter { self.0.iter_mut() }\n\
          }\n"
-            .to_owned(),
+        .to_owned(),
         "pub fn a() -> bool { true }\n".to_owned(),
     ]);
     let artifact = rust_artifact(&sources.iter().map(String::as_str).collect::<Vec<_>>());
     let named = search_artifact(&artifact, "allow_next");
     let answer = &named.first().expect("the named gate is indexed").candidate;
     assert_eq!(file(&named[0]), "file.fixture.0");
-    assert_eq!(answer.source_role, RetrievalSourceRoleV1::ProductionDefinition);
+    assert_eq!(
+        answer.source_role,
+        RetrievalSourceRoleV1::ProductionDefinition
+    );
     assert_ne!(answer.exact_class, ExactClass::Approximate);
 
     let lifetime_aliases = ["Item", "IntoIter"]
@@ -473,11 +484,17 @@ fn prose_articles_do_not_spend_file_slots_on_rust_lifetimes() {
     );
 
     let direct = search_artifact(&artifact, "a");
-    let explicit = &direct.first().expect("the ordinary name is indexed").candidate;
+    let explicit = &direct
+        .first()
+        .expect("the ordinary name is indexed")
+        .candidate;
     assert_eq!(file(&direct[0]), "file.fixture.1");
     for query in ["a", "find id:a"] {
         let ranked = search_artifact(&artifact, query);
-        let first = &ranked.first().expect("explicit intent remains searchable").candidate;
+        let first = &ranked
+            .first()
+            .expect("explicit intent remains searchable")
+            .candidate;
         assert_eq!(first.anchor_id, explicit.anchor_id, "{query}: {ranked:?}");
         assert_ne!(first.exact_class, ExactClass::Approximate, "{query}");
         assert!(
@@ -494,8 +511,7 @@ fn prose_articles_do_not_spend_file_slots_on_rust_lifetimes() {
         quoted.iter().any(|ranked| {
             file(ranked) == "file.fixture.0"
                 && ranked.candidate.contributions.iter().any(|contribution| {
-                    contribution.retriever == RetrieverKind::Lexical
-                        && contribution.raw_score.0 > 0
+                    contribution.retriever == RetrieverKind::Lexical && contribution.raw_score.0 > 0
                 })
         }),
         "a quoted article must remain lexical evidence in its source file: {quoted:?}"
@@ -528,5 +544,69 @@ fn a_one_content_word_question_keeps_prose_definition_priority() {
                 && ranked.candidate.source_role != RetrievalSourceRoleV1::ProductionDefinition
         }),
         "removing prose connectives cannot manufacture explicit name intent: {prose:?}"
+    );
+}
+
+#[test]
+fn uppercase_names_remain_lexical_evidence_inside_prose() {
+    let artifact = rust_artifact(&[
+        "pub const ALL: bool = true;\n",
+        "pub fn selected() -> bool { ALL }\n",
+    ]);
+    let ranked = search_artifact(&artifact, "where is ALL used");
+    assert!(
+        ranked.iter().any(|ranked| {
+            file(ranked) == "file.fixture.1"
+                && ranked.candidate.contributions.iter().any(|contribution| {
+                    contribution.retriever == RetrieverKind::Lexical && contribution.raw_score.0 > 0
+                })
+        }),
+        "a body-only uppercase name must retain lexical evidence even when its lowercase spelling is a prose connective: {ranked:?}"
+    );
+}
+
+#[test]
+fn alias_routes_preserve_their_own_explicit_literal_intent() {
+    let artifact = rust_artifact(&["pub fn token() -> &'static str { \"all\" }\n"]);
+    let query = "default scope";
+    let strict = search_artifact(&artifact, query);
+    assert!(
+        strict.is_empty(),
+        "the strict query must not supply the alias's literal evidence: {strict:?}"
+    );
+
+    let routing = LexicalRoutingV1::default()
+        .with_aliases(vec![LexicalAliasV1 {
+            strict_query: query.to_owned(),
+            alternative: "where is \"all\" defined".to_owned(),
+        }])
+        .expect("the explicit literal alias is valid");
+    let ranked = search_artifact_with_routing(&artifact, query, &routing);
+    assert!(
+        ranked.iter().any(|ranked| {
+            file(ranked) == "file.fixture.0"
+                && ranked.candidate.contributions.iter().any(|contribution| {
+                    contribution.retriever == RetrieverKind::Lexical && contribution.raw_score.0 > 0
+                })
+        }),
+        "an alias's quoted term must survive independently of the original query's syntax: {ranked:?}"
+    );
+    assert!(
+        ranked
+            .iter()
+            .all(|ranked| ranked.candidate.exact_class == ExactClass::Approximate),
+        "a lexical alias must not mint exact admission: {ranked:?}"
+    );
+
+    let prose_routing = LexicalRoutingV1::default()
+        .with_aliases(vec![LexicalAliasV1 {
+            strict_query: query.to_owned(),
+            alternative: "where is all defined".to_owned(),
+        }])
+        .expect("the prose alias is valid");
+    let prose = search_artifact_with_routing(&artifact, query, &prose_routing);
+    assert!(
+        prose.is_empty(),
+        "a generated prose phrase must not grant explicit literal intent: {prose:?}"
     );
 }

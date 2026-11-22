@@ -255,6 +255,9 @@ fn validate_alias_text(
 }
 
 fn normalized_query_parts(mut parts: LexicalQueryPartsV1) -> LexicalQueryPartsV1 {
+    // Alias matching depends on lexical content, not the syntax metadata used
+    // when executing each route. Keep its existing normalization semantics.
+    parts.explicit_terms.clear();
     for term in parts
         .whole_terms
         .iter_mut()
@@ -533,6 +536,7 @@ fn identifier_split_route(
         },
         parts: LexicalQueryPartsV1 {
             whole_terms,
+            explicit_terms: Vec::new(),
             subtokens: Vec::new(),
             phrases: Vec::new(),
         },
@@ -594,6 +598,7 @@ impl LexicalRoutePlanV1 {
                     kind: LexicalRouteKindV1::PreferredSymbol { tokens },
                     parts: LexicalQueryPartsV1 {
                         whole_terms,
+                        explicit_terms: Vec::new(),
                         subtokens: Vec::new(),
                         phrases: Vec::new(),
                     },
