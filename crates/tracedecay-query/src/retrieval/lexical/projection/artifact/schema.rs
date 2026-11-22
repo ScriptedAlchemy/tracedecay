@@ -7,7 +7,7 @@ use super::{CodeLexicalArtifactErrorV1, checkpoint};
 use tracedecay_code_index::production::CodeIndexExecutionControlV1;
 use tracedecay_domain::{ExactFieldV1, nonnegative_sha256_prefix};
 
-/// Revision 32 is the only layout this build serves: interned exact terms,
+/// Revision 33 is the only layout this build serves: interned exact terms,
 /// integer field codes, rows stored as deflated blocks of consecutive
 /// documents with an uncompressed scoring preface (chunk id, field lengths,
 /// and trimmed normalized-text length) ahead of the deflated payload
@@ -42,11 +42,12 @@ use tracedecay_domain::{ExactFieldV1, nonnegative_sha256_prefix};
 /// whose rows name each entry so a carried dictionary retires exactly the
 /// entries no page names. Every other revision is refused as incompatible
 /// and rebuilt from the sealed generation. There is no reader for an older
-/// layout. The digest domain is `tracedecay.code-lexical-artifact.v32`.
+/// layout. Path postings retain each component and the filename stem as
+/// whole terms. The digest domain is `tracedecay.code-lexical-artifact.v33`.
 /// Callers take the revision from this constant.
-pub const CODE_LEXICAL_ARTIFACT_FORMAT_REVISION_V1: u32 = 32;
+pub const CODE_LEXICAL_ARTIFACT_FORMAT_REVISION_V1: u32 = 33;
 
-const DIGEST_DOMAIN: &[u8] = b"tracedecay.code-lexical-artifact.v32\0";
+const DIGEST_DOMAIN: &[u8] = b"tracedecay.code-lexical-artifact.v33\0";
 
 const FIELD_SYMBOL_NAME: i64 = 1;
 const FIELD_QUALIFIED_NAME: i64 = 2;

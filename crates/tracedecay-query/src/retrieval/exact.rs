@@ -20,6 +20,7 @@ use tracedecay_domain::{
     is_runtime_error_code_token, is_tool_name_token,
 };
 
+use super::lexical::{names_identifier, preferred_symbol_tokens};
 use super::ports::{
     CodeCandidateBindingV1, ExactTermPostingReadPort, LaneBoundEvidence, LaneEvidenceRejections,
     RETRIEVAL_CANDIDATE_BATCH_SIZE, RetrievalExecutionControl, RetrievalPortError,
@@ -294,24 +295,42 @@ impl ExactAdmissionAuthority for CentralExactAdmissionAuthorityV1 {
             }
         };
         let atoms = exact_query_atoms(query);
+        // Ordinary prose words still take part in lexical ranking. Giving
+        // each of them non-demotable exact admission lets methods such as
+        // `get` displace the documented implementation a question describes.
+        // Single names, explicit fields, quoted text, and names with code
+        // spelling keep their exact semantics.
+        let multiple_atoms = atoms.len() > 1;
         for atom in &atoms {
             if let Some(field) = atom
                 .field
                 .or_else(|| classify_unprefixed_exact(atom.text.as_str(), atom.quoted))
             {
+                if multiple_atoms
+                    && field == ExactFieldV1::Identifier
+                    && atom.field.is_none()
+                    && !names_identifier(&atom.text)
+                {
+                    continue;
+                }
                 push(field, &atom.text);
             }
         }
         // A query of bare words may spell one identifier (`store response
-        // handle`). Each word alone is an exact literal, so without the
-        // joined spelling every symbol named `store` would outrank the
-        // definition the words name. Only the whole query is joined: joining
+        // handle`). Preserve that spelling without granting every ordinary
+        // word an exact tier. Only the whole query is joined: joining
         // its sub-runs turns natural-language pairs such as `dirty state`
         // into exact hits that bury the answer.
         if atoms.len() > 1
-            && atoms
-                .iter()
-                .all(|atom| atom.field.is_none() && !atom.quoted && is_identifier(&atom.text))
+            && atoms.iter().all(|atom| {
+                atom.field.is_none()
+                    && !atom.quoted
+                    && is_identifier(&atom.text)
+                    && !names_identifier(&atom.text)
+                    && preferred_symbol_tokens(&atom.text)
+                        .first()
+                        .is_some_and(|word| word == &atom.text)
+            })
         {
             for spelled in spelled_identifiers(&atoms) {
                 push(ExactFieldV1::Identifier, &spelled);

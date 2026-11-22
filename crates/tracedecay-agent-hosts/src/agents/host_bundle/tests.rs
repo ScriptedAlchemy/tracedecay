@@ -90,6 +90,97 @@ fn verifier(manifest: &HostBundleManifestV1) -> FirstPartyVerifier {
     FirstPartyVerifier(manifest.canonical_digest().unwrap())
 }
 
+#[cfg(unix)]
+#[test]
+fn pi_bundle_lifecycle_resolves_the_user_configuration_root() {
+    use std::os::unix::fs::symlink;
+
+    let home = tempfile::tempdir().unwrap();
+    let dotfiles = tempfile::tempdir().unwrap();
+    let lifecycle = tempfile::tempdir().unwrap();
+    let relative = ".pi/agent/extensions/tracedecay/index.ts";
+    let deployed = dotfiles.path().join("agent/extensions/tracedecay/index.ts");
+    symlink(dotfiles.path(), home.path().join(".pi")).unwrap();
+    fs::write(dotfiles.path().join("settings.json"), b"user settings").unwrap();
+
+    let mut writer =
+        HostBundleWriterV1::open_with_lifecycle_root(home.path(), lifecycle.path()).unwrap();
+    for (operation, nonce, bytes) in [
+        (HostBundleLifecycleOpV1::Install, 1, b"first".as_slice()),
+        (HostBundleLifecycleOpV1::Update, 2, b"updated".as_slice()),
+        (HostBundleLifecycleOpV1::Uninstall, 3, b"updated".as_slice()),
+    ] {
+        let mut bundle = manifest(HostKindV1::Pi, bytes);
+        bundle.artifacts[0].relative_path = relative.to_owned();
+        let request = execution(HostKindV1::Pi, operation, nonce, true);
+        let preview = dry_run_host_bundle_lifecycle_with_lifecycle_root_at(
+            home.path(),
+            lifecycle.path(),
+            &bundle,
+            &request,
+            &verifier(&bundle),
+            &[],
+        )
+        .unwrap();
+        assert_eq!(preview.plan.mutations.len(), 1);
+        writer
+            .execute(
+                &bundle,
+                &request,
+                &[HostBundleArtifactContentV1 {
+                    relative_path: relative.to_owned(),
+                    bytes: bytes.to_vec(),
+                }],
+                &verifier(&bundle),
+            )
+            .unwrap();
+        if operation == HostBundleLifecycleOpV1::Uninstall {
+            assert!(!deployed.exists());
+        } else {
+            assert_eq!(fs::read(&deployed).unwrap(), bytes);
+        }
+    }
+    assert!(home.path().join(".pi").is_symlink());
+    assert!(!dotfiles.path().join("agent").exists());
+    assert_eq!(
+        fs::read(dotfiles.path().join("settings.json")).unwrap(),
+        b"user settings"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn pi_bundle_rejects_descendant_links_and_root_retargeting() {
+    use std::os::unix::fs::symlink;
+
+    let home = tempfile::tempdir().unwrap();
+    let first = tempfile::tempdir().unwrap();
+    let second = tempfile::tempdir().unwrap();
+    let relative = Path::new(".pi/agent/extensions/tracedecay/index.ts");
+    let pi_home = home.path().join(".pi");
+    symlink(first.path(), &pi_home).unwrap();
+    fs::create_dir(first.path().join("agent")).unwrap();
+    symlink(second.path(), first.path().join("agent/extensions")).unwrap();
+    assert!(matches!(
+        inspect_install_target(home.path(), relative),
+        Err(HostBundleError::UnsafeInstallPath)
+    ));
+    let writer = HostBundleWriterV1::open(home.path()).unwrap();
+    assert!(matches!(
+        writer.open_parent_nofollow(relative),
+        Err(HostBundleError::UnsafeInstallPath)
+    ));
+    fs::remove_file(first.path().join("agent/extensions")).unwrap();
+    writer.open_parent_nofollow(relative).unwrap();
+    fs::remove_file(&pi_home).unwrap();
+    symlink(second.path(), &pi_home).unwrap();
+    assert!(matches!(
+        writer.open_parent_nofollow(relative),
+        Err(HostBundleError::StalePreview(_))
+    ));
+    assert!(!second.path().join("agent").exists());
+}
+
 fn execution(
     host: HostKindV1,
     operation: HostBundleLifecycleOpV1,

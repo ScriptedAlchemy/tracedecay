@@ -77,7 +77,7 @@ fn task_identifiers_follow_caller_anchors_and_plain_words_stay_prose() {
         .expect("caller anchor")
         .with_task_identifiers(
             "Plan how run_update_command refreshes plugins via VectorWatermark::merge_max, \
-             reloadBinary and MAX_RETRIES. Keep run_update_command; skip _private and Hono.",
+             reloadBinary and MAX_RETRIES through HTTPServer. Keep run_update_command; skip _private and Hono.",
         );
     let names: Vec<&str> = routing
         .anchors
@@ -91,7 +91,8 @@ fn task_identifiers_follow_caller_anchors_and_plain_words_stay_prose() {
             "run_update_command",
             "VectorWatermark::merge_max",
             "reloadBinary",
-            "MAX_RETRIES"
+            "MAX_RETRIES",
+            "HTTPServer"
         ]
     );
 
@@ -101,6 +102,23 @@ fn task_identifiers_follow_caller_anchors_and_plain_words_stay_prose() {
     let capped = LexicalRoutingV1::default().with_task_identifiers(&crowded);
     assert_eq!(capped.anchors.len(), MAX_LEXICAL_ANCHORS_V1);
     assert_eq!(capped.anchors[0].as_str(), "anchor_0");
+}
+
+#[test]
+fn task_filenames_and_paths_keep_whole_anchors_inside_prose() {
+    let routing = LexicalRoutingV1::new(anchors(&["limit-cap"]), false)
+        .expect("caller anchor")
+        .with_task_identifiers(
+            "Explain per-request limit enforcement in limit-cap.ts and pkg/src/check.ts.",
+        );
+    assert_eq!(
+        routing
+            .anchors
+            .iter()
+            .map(LexicalAnchorV1::as_str)
+            .collect::<Vec<_>>(),
+        ["limit-cap", "limit-cap.ts", "pkg/src/check.ts"]
+    );
 }
 
 #[test]
@@ -308,6 +326,9 @@ fn route_plan_runs_matching_aliases_after_the_strict_query_in_byte_order() {
         plan.descriptors(),
         [
             LexicalRouteKindV1::Query,
+            LexicalRouteKindV1::PreferredSymbol {
+                tokens: vec!["MEMOIZATION".to_owned()],
+            },
             LexicalRouteKindV1::Alias {
                 strict_query: "MEMOIZATION".to_owned(),
                 alternative: "cache".to_owned(),
@@ -320,9 +341,10 @@ fn route_plan_runs_matching_aliases_after_the_strict_query_in_byte_order() {
             },
         ]
     );
-    assert_eq!(plan.routes()[1].parts.whole_terms, ["cache"]);
+    assert_eq!(plan.routes()[1].parts.whole_terms, ["MEMOIZATION"]);
+    assert_eq!(plan.routes()[2].parts.whole_terms, ["cache"]);
     assert_eq!(
-        plan.routes()[2].parts.phrases,
+        plan.routes()[3].parts.phrases,
         ["stored value"],
         "multi-term alternatives retain phrase search"
     );

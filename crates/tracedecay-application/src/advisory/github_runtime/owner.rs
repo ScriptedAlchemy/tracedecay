@@ -127,6 +127,7 @@ pub struct GitHubReviewRuntimeOwnerV1<R, A> {
     stack_scope: ResolvedScope,
     stack_provider: tracedecay_domain::ProviderId,
     stack_coordinator: Arc<DaemonGitHubStackCoordinatorV1>,
+    _stack_scope: crate::stack_coordinator::GitHubStackScopeV1,
     stack_anchors: super::ProjectGitHubStackAnchorAuthorityV1,
     stack_observability: Option<GitHubStackObservabilityV1>,
 }
@@ -377,6 +378,9 @@ where
     let stack_scope = config.resolved_scope.clone();
     let stack_provider = config.identity.provider.clone();
     let stack_coordinator = Arc::clone(&config.stack_coordinator);
+    let stack_scope_owner = stack_coordinator
+        .retain_scope(&stack_scope)
+        .map_err(|_| GitHubReviewRuntimeOwnerBuildErrorV1::InvalidScope)?;
     let stack_observability = config.stack_observability.clone();
     let stack_anchors = super::ProjectGitHubStackAnchorAuthorityV1::new(
         config.stack_anchor_db.clone(),
@@ -404,6 +408,7 @@ where
         stack_scope,
         stack_provider,
         stack_coordinator,
+        _stack_scope: stack_scope_owner,
         stack_anchors,
         stack_observability,
     })
@@ -531,7 +536,7 @@ mod tests {
         .await
         .unwrap();
         let coordinator = Arc::new(DaemonGitHubStackCoordinatorV1::default());
-        coordinator
+        let _scope_registration_1 = coordinator
             .register_scope(context.scope(), GitHubStackedPullRequestPolicyV1::Disabled)
             .unwrap();
         let (_credential_authority, resolution) =
@@ -611,6 +616,7 @@ mod tests {
             stack_scope: context.scope().clone(),
             stack_provider: ProviderId::new("provider.github").unwrap(),
             stack_coordinator: Arc::clone(&coordinator),
+            _stack_scope: coordinator.retain_scope(context.scope()).unwrap(),
             stack_anchors: anchors,
             stack_observability: None,
         });
@@ -719,7 +725,7 @@ mod tests {
         .await
         .unwrap();
         let coordinator = Arc::new(DaemonGitHubStackCoordinatorV1::default());
-        coordinator
+        let _scope_registration_2 = coordinator
             .register_scope(
                 context.scope(),
                 GitHubStackedPullRequestPolicyV1::ProbePrivatePreview,
@@ -835,6 +841,7 @@ mod tests {
             stack_scope: context.scope().clone(),
             stack_provider: ProviderId::new("provider.github").unwrap(),
             stack_coordinator: Arc::clone(&coordinator),
+            _stack_scope: coordinator.retain_scope(context.scope()).unwrap(),
             stack_anchors: anchors.clone(),
             stack_observability: None,
         });
@@ -868,13 +875,13 @@ mod tests {
             let (owner, context, request) = (Arc::clone(&owner), context.clone(), request.clone());
             let refresh = tokio::spawn(async move { owner.refresh(&context, &request).await });
             request_arrived.await.unwrap();
-            coordinator
+            let _scope_registration_3 = coordinator
                 .register_scope(&open.scope, GitHubStackedPullRequestPolicyV1::Disabled)
                 .unwrap();
             release.send(()).unwrap();
             assert!(refresh.await.unwrap().has_usable_observation());
         } else {
-            coordinator
+            let _scope_registration_4 = coordinator
                 .register_scope(context.scope(), GitHubStackedPullRequestPolicyV1::Disabled)
                 .unwrap();
             let outcome = owner.refresh(&context, &request).await;

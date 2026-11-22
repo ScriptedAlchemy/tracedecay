@@ -1204,7 +1204,6 @@ pub(crate) async fn dashboard_state_fixture(
         project_root,
         code_index_freshness_reader: None,
         feedback_status_reader: None,
-        pr_autotrack_reader: None,
         storage_mode: "profile_sharded".to_owned(),
         profile_root,
         store_root,

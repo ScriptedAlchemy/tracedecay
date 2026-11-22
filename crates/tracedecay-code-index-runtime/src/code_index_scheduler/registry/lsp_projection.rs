@@ -38,8 +38,8 @@ impl tracedecay_application::lsp_runtime::LspCodeIndexProjectionIdentityPort
                     .map_err(|_| LspRuntimeFailure::new("lsp-code-index-identity-task-failed"))?
                     .map_err(|_| LspRuntimeFailure::new("lsp-code-index-identity-unavailable"))?;
             // Bracket the current-generation fence with the cheap Git identity
-            // read. A concurrent checkout, commit, or publication then refuses
-            // instead of pairing one generation with another HEAD.
+            // read. Structural changes refuse reuse; revision changes withdraw
+            // currency while leaving immutable graph attribution intact.
             // Identity, not serving: every field this port reads comes from
             // the retained generation's manifest and snapshot, so a text
             // owner still building its lexical artifact answers it exactly.
@@ -66,11 +66,15 @@ impl tracedecay_application::lsp_runtime::LspCodeIndexProjectionIdentityPort
                     "lsp-code-index-generation-unavailable",
                 ));
             }
-            if retained.metadata().manifest().generation_id
-                != current.metadata().manifest().generation_id
-            {
-                return Err(LspRuntimeFailure::new("lsp-code-index-identity-changed"));
-            }
+            // `current` pins one immutable owner. A publication between the
+            // root lookup and the freshness read may replace `retained`, but
+            // every field below still comes from the same `current` snapshot.
+            #[cfg(test)]
+            Self::pass_worker_step_gate(super::take_worker_step_gate(
+                identity_confirmation_gate(),
+                &super::test_gate_root(&root),
+            ))
+            .await;
             let confirmation_root = root.clone();
             let confirmed_identity = native_runtime::spawn_blocking(move || {
                 IndexingIdentityV1::resolve(&confirmation_root)
@@ -78,20 +82,30 @@ impl tracedecay_application::lsp_runtime::LspCodeIndexProjectionIdentityPort
             .await
             .map_err(|_| LspRuntimeFailure::new("lsp-code-index-identity-task-failed"))?
             .map_err(|_| LspRuntimeFailure::new("lsp-code-index-identity-unavailable"))?;
-            if confirmed_identity != live_identity {
+            if !confirmed_identity.authorizes_reuse_of(&live_identity) {
                 return Err(LspRuntimeFailure::new("lsp-code-index-identity-changed"));
             }
             let generation = current.metadata();
             let snapshot = generation.snapshot();
             if live_identity.repository_id() != &snapshot.repository
                 || snapshot.worktree.as_ref() != Some(live_identity.worktree_id())
-                || snapshot.reference.as_ref() != live_identity.head_ref()
-                || snapshot
-                    .source_revision
-                    .as_ref()
-                    .is_some_and(|revision| Some(revision) != live_identity.head_commit())
             {
                 return Err(LspRuntimeFailure::new("lsp-code-index-identity-changed"));
+            }
+            // A branch switch or commit does not revoke the checkout's sealed
+            // graph. Keep its revision attribution and withdraw currency until
+            // the successor is published, just as search and impact do.
+            let fresh = fresh
+                && confirmed_identity == live_identity
+                && snapshot.reference.as_ref() == confirmed_identity.head_ref()
+                && snapshot
+                    .source_revision
+                    .as_ref()
+                    .is_none_or(|revision| Some(revision) == confirmed_identity.head_commit());
+            if !fresh && document_relative_path.is_some() {
+                return Err(LspRuntimeFailure::new(
+                    "lsp-code-index-generation-unavailable",
+                ));
             }
             let document_identity = document_relative_path
                 .map(|path| path.replace('\\', "/"))
@@ -130,5 +144,32 @@ impl tracedecay_application::lsp_runtime::LspCodeIndexProjectionIdentityPort
                 },
             )
         })
+    }
+}
+
+#[cfg(test)]
+fn identity_confirmation_gate()
+-> &'static std::sync::Mutex<std::collections::BTreeMap<PathBuf, super::WorkerStepGateV1>> {
+    static GATES: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::BTreeMap<PathBuf, super::WorkerStepGateV1>>,
+    > = std::sync::OnceLock::new();
+    GATES.get_or_init(Default::default)
+}
+
+#[cfg(test)]
+impl CodeIndexSchedulerRegistryV1 {
+    /// Pause after choosing an immutable owner but before re-reading HEAD.
+    pub fn pause_next_lsp_identity_confirmation(
+        &self,
+        project_root: PathBuf,
+    ) -> (
+        tokio::sync::oneshot::Receiver<()>,
+        tokio::sync::oneshot::Sender<()>,
+    ) {
+        super::arm_worker_step_gate(
+            identity_confirmation_gate(),
+            super::test_gate_root(&project_root),
+            format_args!("one LSP identity confirmation per worktree"),
+        )
     }
 }

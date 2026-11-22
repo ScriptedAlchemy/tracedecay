@@ -1834,9 +1834,11 @@ fn lexical_admission_rank(
 }
 
 // A signature's parameter and return types reference other symbols. Definition
-// priority requires the query or its admitted spelling variant to name this
-// row. A short alias still names the row when every term is a subtoken of the
-// declared identifier (`cache grant` → `VerifiedCacheGrantSnapshotV1`).
+// priority requires a named query term or its admitted spelling variant to
+// name this row. An incidental prose word (`get`) cannot outrank stronger
+// evidence just because a method has that name. A short alias still names
+// the row when every term is a subtoken of the declared identifier
+// (`cache grant` → `VerifiedCacheGrantSnapshotV1`).
 fn lexical_definition_match(
     row: &ArtifactRowV1,
     prepared: &PreparedLexicalQueryV1<'_>,
@@ -1852,9 +1854,17 @@ fn lexical_definition_match(
         prepared
             .whole_terms
             .iter()
+            .filter(|(original, _)| prepared.definition_whole_terms.contains(*original))
             .chain(&prepared.phrases)
             .map(|(_, normalized)| normalized.as_str())
-            .chain(fuzzy.by_query.values().flatten().map(String::as_str)),
+            .chain(
+                fuzzy
+                    .by_query
+                    .iter()
+                    .filter(|(query, _)| prepared.definition_whole_terms.contains(query.as_str()))
+                    .flat_map(|(_, variants)| variants)
+                    .map(String::as_str),
+            ),
     ) {
         return true;
     }

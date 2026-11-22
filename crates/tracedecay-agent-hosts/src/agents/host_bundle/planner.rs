@@ -53,9 +53,28 @@ pub fn plan_verified_complete_lifecycle_mutation(
     )
 }
 
-/// Resolve a validated target while rejecting a symlink at the install root or
-/// any already-existing path component. Missing descendants are permitted;
-/// the writer must create them without following links and recheck at commit.
+/// Pi's user-selected configuration directory may live in a dotfiles checkout.
+/// Only this host root is resolved; bundle descendants still reject symlinks.
+pub(super) fn resolved_pi_home(root: &Path) -> Result<Option<PathBuf>, HostBundleError> {
+    let pi_home = root.join(".pi");
+    match fs::symlink_metadata(&pi_home) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            let resolved =
+                fs::canonicalize(&pi_home).map_err(|_| HostBundleError::UnsafeInstallPath)?;
+            if !resolved.is_dir() {
+                return Err(HostBundleError::UnsafeInstallPath);
+            }
+            Ok(Some(resolved))
+        }
+        Ok(_) => Ok(None),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(_) => Err(host_bundle_storage_failure!()),
+    }
+}
+
+/// Resolve a validated target while rejecting links within a bundle. Pi's
+/// configuration root is an explicit anchor; missing descendants are permitted
+/// and the writer creates them through its pinned directory capability.
 pub fn inspect_install_target(root: &Path, relative: &Path) -> Result<PathBuf, HostBundleError> {
     validate_relative_install_path(relative)?;
     if std::fs::symlink_metadata(root)
@@ -65,7 +84,20 @@ pub fn inspect_install_target(root: &Path, relative: &Path) -> Result<PathBuf, H
     {
         return Err(HostBundleError::UnsafeInstallPath);
     }
-    let mut target = root.to_path_buf();
+    let pi_home = if relative.starts_with(".pi/agent") {
+        resolved_pi_home(root)?
+    } else {
+        None
+    };
+    let (mut target, relative) = match pi_home {
+        Some(pi_home) => (
+            pi_home,
+            relative
+                .strip_prefix(".pi")
+                .map_err(|_| HostBundleError::UnsafeInstallPath)?,
+        ),
+        None => (root.to_path_buf(), relative),
+    };
     for component in relative.components() {
         target.push(component.as_os_str());
         match std::fs::symlink_metadata(&target) {
@@ -457,6 +489,7 @@ struct HostComponentSetPlanDigestPayloadV1 {
 struct HostComponentSetArtifactStatePayloadV1 {
     domain: &'static str,
     schema_version: u16,
+    pi_home: Option<PathBuf>,
     components: Vec<HostComponentArtifactStateV1>,
 }
 
@@ -533,6 +566,11 @@ fn component_set_artifact_state_revision(
     canonical_json_bytes(&HostComponentSetArtifactStatePayloadV1 {
         domain: "tracedecay.host-component-set.artifact-state.v1",
         schema_version: 1,
+        pi_home: if component_set.host == HostKindV1::Pi {
+            resolved_pi_home(artifact_root)?
+        } else {
+            None
+        },
         components: states,
     })
     .map(|bytes| Sha256::digest(bytes).into())

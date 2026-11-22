@@ -865,6 +865,14 @@ fn validate_host_bundle_options(
     family: CommandFamily,
     host_bundle: &HostBundleCliOptions,
 ) -> tracedecay_domain::errors::Result<()> {
+    if matches!(command, Commands::Update { .. } | Commands::Upgrade { .. }) {
+        if host_bundle.component.is_some() || host_bundle.yes || host_bundle.adopt {
+            return Err(tracedecay_domain::errors::TraceDecayError::Config {
+                message: "update and upgrade accept --dry-run to preview; --component, --yes, and --adopt belong to host installation commands".to_string(),
+            });
+        }
+        return Ok(());
+    }
     // `wipe` is the one non-lifecycle command that destroys deployed state, so
     // it takes the same `--yes` confirmation as the lifecycle mutations instead
     // of an interactive-only `go!` prompt. It owns no host component and has no
@@ -989,7 +997,7 @@ async fn dispatch_command(
             .await
             .map(lifecycle_command_outcome),
         CommandFamily::Hook => dispatch_hook_command(profile, command).await,
-        CommandFamily::Update => dispatch_update_command(profile, command)
+        CommandFamily::Update => dispatch_update_command(profile, command, host_bundle.dry_run)
             .await
             .map(lifecycle_command_outcome),
         CommandFamily::Configuration => {
@@ -1563,12 +1571,19 @@ async fn dispatch_hook_command(
 async fn dispatch_update_command(
     profile: &ProfileRoot,
     command: Commands,
+    dry_run: bool,
 ) -> tracedecay_domain::errors::Result<agent_cmd::HostLifecycleCompletion> {
     match command {
         Commands::Upgrade { no_reinstall } => {
+            if dry_run {
+                return update_cmd::preview_update_command(profile, no_reinstall, true);
+            }
             update_cmd::run_upgrade_command(profile, no_reinstall).await?;
         }
         Commands::Update { no_reinstall } => {
+            if dry_run {
+                return update_cmd::preview_update_command(profile, no_reinstall, false);
+            }
             return update_cmd::run_update_command(profile, no_reinstall).await;
         }
         Commands::PostUpdate {
@@ -1820,11 +1835,7 @@ impl CommandStartupPolicy {
                     },
             }
             | Commands::Branch {
-                action:
-                    BranchAction::List { .. }
-                    | BranchAction::Autotrack {
-                        action: BranchAutotrackAction::Status { .. },
-                    },
+                action: BranchAction::List { .. },
             }
             | Commands::Channel { channel: None }
             | Commands::Automation {

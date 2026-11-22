@@ -355,7 +355,7 @@ async fn settling_a_recipient_promotes_only_its_oldest_deferred_row() {
     );
 }
 
-async fn stored_signal_payload_bytes(harness: &RegisteredGlobalDbHarness, signal_id: &str) -> i64 {
+async fn stored_signal_payload(harness: &RegisteredGlobalDbHarness, signal_id: &str) -> String {
     let snapshot = harness
         .registered
         .read_snapshot()
@@ -363,18 +363,23 @@ async fn stored_signal_payload_bytes(harness: &RegisteredGlobalDbHarness, signal
         .expect("read stored signal");
     let mut rows = snapshot
         .query(
-            "SELECT length(signal_json) FROM github_stack_delivery_signals
+            "SELECT signal_json FROM github_stack_delivery_signals
              WHERE project_id = ?1 AND signal_id = ?2",
             params![PROJECT_ID, signal_id],
         )
         .await
-        .expect("query stored payload size");
+        .expect("query stored payload");
     rows.next()
         .await
-        .expect("read stored payload size")
+        .expect("read stored payload")
         .expect("signal identity remains after retirement")
-        .get::<i64>(0)
-        .expect("decode stored payload bytes")
+        .get::<String>(0)
+        .expect("decode stored payload")
+}
+
+async fn stored_signal_payload_bytes(harness: &RegisteredGlobalDbHarness, signal_id: &str) -> i64 {
+    i64::try_from(stored_signal_payload(harness, signal_id).await.len())
+        .expect("bounded stored payload byte count")
 }
 
 #[tokio::test]
@@ -623,9 +628,55 @@ async fn terminal_compaction_preserves_pending_peers_and_refuses_replay_collisio
             .retired,
         1
     );
+    let compact_size = stored_signal_payload_bytes(&harness, &record.signal_id).await;
     assert!(
-        stored_signal_payload_bytes(&harness, &record.signal_id).await < original_size / 100,
+        compact_size < original_size / 100,
         "retire the large transport payload rather than moving it to another log"
+    );
+    let footprint = {
+        let snapshot = harness
+            .registered
+            .read_snapshot()
+            .await
+            .expect("retired delivery footprint snapshot");
+        let mut rows = snapshot
+            .query(
+                "SELECT
+                   (SELECT COUNT(*) FROM github_stack_delivery_signals
+                    WHERE json_type(signal_json,
+                        '$.__tracedecay_retired_stack_sha256_v1') IS NOT NULL),
+                   (SELECT COUNT(*) FROM github_stack_delivery_signals
+                    WHERE json_type(signal_json,
+                        '$.__tracedecay_retired_stack_sha256_v1') IS NULL),
+                   (SELECT COUNT(*) FROM github_stack_delivery_recipients),
+                   (SELECT COUNT(*) FROM github_stack_delivery_recipients
+                    WHERE state = 'pending'),
+                   (SELECT COUNT(*) FROM github_stack_delivery_recipients
+                    WHERE state = 'deferred'),
+                   (SELECT COUNT(*) FROM github_stack_delivery_signals
+                    WHERE json_type(signal_json,
+                        '$.__tracedecay_retired_stack_sha256_v1') IS NULL)",
+                (),
+            )
+            .await
+            .expect("measure stored rows and partial-index membership");
+        let row = rows
+            .next()
+            .await
+            .expect("read delivery footprint")
+            .expect("delivery footprint counts");
+        std::array::from_fn::<_, 6, _>(|index| {
+            row.get::<i64>(i32::try_from(index).expect("footprint column"))
+                .expect("decode delivery footprint count")
+        })
+    };
+    assert_eq!(footprint, [1, 0, 0, 0, 0, 0]);
+    println!(
+        "stack_terminal_footprint payload_bytes_before={original_size} \
+         payload_bytes_after={compact_size} retired_signals={} remaining_signals={} \
+         recipient_rows={} pending_recipient_index_rows={} deferred_recipient_index_rows={} \
+         unretired_cursor_index_rows={}",
+        footprint[0], footprint[1], footprint[2], footprint[3], footprint[4], footprint[5]
     );
     assert!(
         harness
@@ -640,6 +691,20 @@ async fn terminal_compaction_preserves_pending_peers_and_refuses_replay_collisio
         state(&harness, &record.signal_id, RECIPIENT).await,
         None,
         "retired recipient bookkeeping is no longer part of the active index"
+    );
+    let retired_payload = stored_signal_payload(&harness, &record.signal_id).await;
+    for recipient in [RECIPIENT, "actor.other", "actor.foreign"] {
+        harness
+            .registered
+            .record_github_stack_authorization_loss(PROJECT_ID, &record.signal_id, recipient)
+            .await
+            .expect_err("retired or unknown recipient bindings remain unavailable");
+        assert_eq!(state(&harness, &record.signal_id, recipient).await, None);
+    }
+    assert_eq!(
+        stored_signal_payload(&harness, &record.signal_id).await,
+        retired_payload,
+        "late authorization loss cannot rewrite the retained fingerprint"
     );
     assert!(matches!(
         harness

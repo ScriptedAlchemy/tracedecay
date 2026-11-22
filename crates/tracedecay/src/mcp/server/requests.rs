@@ -3,8 +3,11 @@
 
 use std::collections::BTreeMap;
 
+use super::ledger::TokenAccountingCredit;
 use super::*;
+use tracedecay_application::tracedecay::TokenSavingsAttribution;
 use tracedecay_contracts::ProfileIdentityReadPort;
+use tracedecay_contracts::request_identity::{GlobalRequestSurface, mint_global_request_id};
 use tracedecay_daemon_protocol::PROJECT_SERVER_RESPONSE_REVOKED_REASON_CODE;
 use tracedecay_global_db::RegisteredGlobalDb;
 use tracedecay_mcp::server::{
@@ -22,6 +25,8 @@ use tracedecay_mcp::{
 use tracedecay_runtime_core::db::migrations::render_expected_final_schema_markdown;
 use tracedecay_tool_catalog::ApplicationSurfaceOperation;
 
+#[cfg(test)]
+mod accounting_tests;
 mod tool_dispatch;
 
 struct PreparedToolCall {
@@ -36,6 +41,7 @@ struct PreparedToolCall {
 
 struct DispatchedToolCall {
     cg: Arc<TraceDecay>,
+    accounting_attribution: Option<TokenSavingsAttribution>,
     selected_owner: Option<tracedecay_global_db::ProjectRegistryContext>,
     selected_scope: Option<tracedecay_contracts::ResolvedScope>,
     outcome: Result<ToolResult>,
@@ -1056,10 +1062,11 @@ impl McpServer {
         self: &Arc<Self>,
         cg: &Arc<TraceDecay>,
         tool_name: &str,
+        accounting_attribution: Option<&TokenSavingsAttribution>,
         result: &mut ToolResult,
     ) -> (
         ToolTokenAccounting,
-        Option<tokio::sync::oneshot::Receiver<bool>>,
+        Option<tokio::sync::oneshot::Receiver<TokenAccountingCredit>>,
     ) {
         // A result the shared renderer already accounted carries its figures
         // and footer; only persist them.
@@ -1067,13 +1074,23 @@ impl McpServer {
             Some(accounting) => accounting,
             None => self.account_unrendered_result(cg, result).await,
         };
-        let commitment = self.spawn_token_accounting_persist(
+        if accounting_attribution.is_none() {
+            // Admission could not establish this completion's identity and
+            // reset interval. Never invent either in a background retry.
+            // Preserve activity without claiming an unattributed credit.
+            tracing::warn!(
+                tool_name,
+                "token accounting refused a response without admitted attribution"
+            );
+        }
+        let commitment = Some(self.spawn_token_accounting_persist(
             Arc::clone(cg),
             cg.project_root(),
             tool_name,
+            accounting_attribution,
             accounting.net_saved_tokens(),
             accounting.raw_file_tokens,
-        );
+        ));
         (accounting, commitment)
     }
 
@@ -1112,7 +1129,7 @@ impl McpServer {
         result: &ToolResult,
         connection_client_name: Option<&str>,
         connection_instance_id: Option<&str>,
-        commit_confirmation: Option<tokio::sync::oneshot::Receiver<bool>>,
+        commit_confirmation: Option<tokio::sync::oneshot::Receiver<TokenAccountingCredit>>,
     ) {
         let analytics_outcome = if tool_result_has_semantic_error(result) {
             "error"
@@ -1162,11 +1179,11 @@ impl McpServer {
                 // Two independently scheduled writes may run in either order.
                 // Only the receipt for this response (not a project total
                 // sampled after another response) proves its durable credit.
-                let committed = match commit_confirmation {
-                    Some(receiver) => receiver.await.unwrap_or(false),
-                    None => net_saved_tokens == 0,
+                let credit = match commit_confirmation {
+                    Some(receiver) => receiver.await.unwrap_or(TokenAccountingCredit::Refused),
+                    None => TokenAccountingCredit::Refused,
                 };
-                if !committed {
+                if credit != TokenAccountingCredit::Committed {
                     // Keep the observed before/after activity and actual cost,
                     // but never claim a positive saving in analytics or history.
                     let Some(metadata_json) = analytics_event.metadata_json.as_mut() else {
@@ -1182,11 +1199,19 @@ impl McpServer {
                         return;
                     }
                     metadata["tokens_saved"] = json!(0);
-                    metadata["savings_commit"] = json!("refused");
+                    metadata["savings_commit"] =
+                        json!(if credit == TokenAccountingCredit::Replayed {
+                            "replayed"
+                        } else {
+                            "refused"
+                        });
                     *metadata_json = metadata.to_string();
                 }
+                // History remains best-effort. An exact replay cannot append
+                // again: the profile history has no durable response identity
+                // proving whether an earlier append committed before failure.
                 if let Some(registered) = savings_db
-                    && committed
+                    && credit == TokenAccountingCredit::Committed
                     && let Err(e) = registered
                         .try_record_savings(
                             &project_path_str,
@@ -1220,6 +1245,7 @@ impl McpServer {
         accounting_project_root: &Path,
         tool_name: &str,
         request_id: &Value,
+        accounting_attribution: Option<&TokenSavingsAttribution>,
         analytics_arguments: &Value,
         analytics_session_id: &Option<String>,
         records_tool_analytics: bool,
@@ -1228,8 +1254,9 @@ impl McpServer {
         connection_client_name: Option<&str>,
         connection_instance_id: Option<&str>,
     ) {
-        let (accounting, commit_confirmation) =
-            self.apply_token_accounting(cg, tool_name, result).await;
+        let (accounting, commit_confirmation) = self
+            .apply_token_accounting(cg, tool_name, accounting_attribution, result)
+            .await;
         self.spawn_success_analytics(
             accounting_project_root,
             tool_name,
@@ -1291,6 +1318,7 @@ impl McpServer {
         let connection_instance_id = connection_server.connection_identity.instance_id();
         let DispatchedToolCall {
             cg,
+            accounting_attribution,
             selected_owner,
             selected_scope,
             outcome,
@@ -1352,6 +1380,7 @@ impl McpServer {
                         accounting_project_root,
                         &tool_name,
                         &request_id,
+                        accounting_attribution.as_ref(),
                         &analytics_arguments,
                         &analytics_session_id,
                         records_tool_analytics,

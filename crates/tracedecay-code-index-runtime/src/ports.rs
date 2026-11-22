@@ -10,7 +10,6 @@ use tracedecay_runtime_core::native_runtime;
 /// Watcher knobs the git-metadata watcher needs from resolved sync config.
 ///
 /// Root maps `tracedecay_configuration::SyncConfig` into this type at construction.
-/// The usecases `SyncConfig` is a different, smaller PR-autotrack type.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct GitWatchSyncConfigV1 {
     pub auto_watch: bool,

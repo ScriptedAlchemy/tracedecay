@@ -1181,6 +1181,54 @@ pub fn run_upgrade(profile: &ProfileRoot) -> Result<UpgradeOutcome> {
     }
 }
 
+/// Read release metadata and describe the existing upgrade authority without
+/// downloading a binary, invoking a package manager, or touching daemon state.
+pub(crate) fn preview_upgrade() -> Result<bool> {
+    let current = env!("CARGO_PKG_VERSION");
+    let is_beta = cloud::is_beta();
+    preview_upgrade_for(&cloud::detect_install_method(), current, is_beta, || {
+        cloud::fetch_latest_channel_version(
+            cloud::GITHUB_API_URL,
+            is_beta,
+            cloud::github_authorization().as_deref(),
+        )
+        .map_err(release_lookup_failed)
+    })
+}
+
+fn preview_upgrade_for(
+    method: &InstallMethod,
+    current: &str,
+    is_beta: bool,
+    latest_version: impl FnOnce() -> Result<String>,
+) -> Result<bool> {
+    let channel = if is_beta { "beta" } else { "stable" };
+    eprintln!("Current version: v{current} ({channel} channel)");
+    match upgrade_source_for(method) {
+        UpgradeSource::PackageManager(manager) => {
+            eprintln!(
+                "Would run `{}` then `{}`; the package manager selects the available version.",
+                manager.refresh_command(),
+                manager.upgrade_command(is_beta),
+            );
+            Ok(true)
+        }
+        UpgradeSource::GitHubRelease => {
+            let latest = latest_version()?;
+            match classify_upgrade(current, &latest) {
+                UpgradeStatus::AlreadyCurrent => {
+                    eprintln!("Already up to date (v{current}); no binary replacement planned.");
+                    Ok(false)
+                }
+                UpgradeStatus::UpgradeAvailable(latest) => {
+                    eprintln!("Would verify and install {}.", asset_name(latest, is_beta));
+                    Ok(true)
+                }
+            }
+        }
+    }
+}
+
 /// Print the current channel.
 pub fn show_channel() {
     let current = env!("CARGO_PKG_VERSION");
@@ -1265,6 +1313,44 @@ mod tests {
     // All remaining unwrap/expect usage in this module is test-only fixture or
     // assertion setup; production upgrade code above is kept panic-free.
     use super::*;
+
+    #[test]
+    fn managed_upgrade_preview_never_queries_or_runs_the_manager() {
+        for method in [InstallMethod::Brew, InstallMethod::Scoop] {
+            assert!(
+                preview_upgrade_for(&method, "1.0.0", false, || {
+                    panic!("package-manager preview must not query GitHub releases")
+                })
+                .unwrap()
+            );
+        }
+    }
+
+    #[test]
+    fn direct_upgrade_preview_classifies_release_metadata_and_propagates_failure() {
+        assert!(
+            preview_upgrade_for(&InstallMethod::Unknown, "1.0.0", false, || {
+                Ok("1.1.0".to_owned())
+            })
+            .unwrap()
+        );
+        assert!(
+            !preview_upgrade_for(&InstallMethod::Unknown, "1.1.0", false, || {
+                Ok("1.1.0".to_owned())
+            })
+            .unwrap()
+        );
+        assert!(
+            preview_upgrade_for(&InstallMethod::Unknown, "1.0.0", false, || {
+                Err(TraceDecayError::Config {
+                    message: "release metadata unavailable".to_owned(),
+                })
+            })
+            .unwrap_err()
+            .to_string()
+            .contains("release metadata unavailable")
+        );
+    }
 
     #[test]
     fn checksum_manifest_selects_the_exact_release_asset() {

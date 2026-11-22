@@ -753,7 +753,13 @@ fn entry_statement(entry: &ProfileFootprintEntryV1, evidence_key: &str) -> Strin
                 format_bytes(kinds.graph_replay_pool)
             )
         });
-    let reclaim = registered_project_reclaim_hint(entry).unwrap_or_default();
+    let reclaim = if entry.family == ProfileFamilyV1::UserSessions
+        && entry.bytes > entry.bound_bytes
+    {
+        "; configure `user.session_retention_days.v1` and restart the daemon; only history covered by durable summaries is pruned".to_owned()
+    } else {
+        registered_project_reclaim_hint(entry).unwrap_or_default()
+    };
     let render = |root: &str, reclaim: &str| {
         format!("{label} {evidence_key}{reclaim}{root}{breakdown}{floor}")
     };
@@ -1199,6 +1205,28 @@ mod tests {
                 .statement()
                 .contains("graph container 5.9 KB, replay pool 400 B")
         );
+    }
+
+    #[test]
+    fn overbound_user_sessions_name_the_profile_retention_policy() {
+        let fixture = profile_fixture();
+        std::fs::write(fixture.profile.join("user-sessions.db"), b"session history").unwrap();
+        let footprint = census_profile_footprint(
+            &fixture.profile,
+            &fixture.registered,
+            &BTreeMap::from([("user-sessions.db".to_owned(), 1)]),
+        );
+        let findings = findings(&footprint);
+        let finding = &findings["user-sessions.db"];
+        assert_eq!(finding.finding().state(), DoctorEvidenceStateV1::Degraded);
+        let statement = finding.finding().coverage().statement();
+        assert!(
+            statement.contains("user.session_retention_days.v1"),
+            "{statement}"
+        );
+        assert!(statement.contains("durable summaries"), "{statement}");
+        assert!(statement.contains("of 1 B bound"), "{statement}");
+        assert!(!statement.contains("projects forget"), "{statement}");
     }
 
     #[test]

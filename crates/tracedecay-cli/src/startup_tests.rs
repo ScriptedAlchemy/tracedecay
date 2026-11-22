@@ -32,8 +32,8 @@ fn command_identity_uses_the_exact_clap_subcommand_path() {
         "daemon.install-service"
     );
     assert_eq!(
-        parsed_command_profile_label(&["branch", "autotrack", "status"]),
-        "branch.autotrack.status"
+        parsed_command_profile_label(&["branch", "list"]),
+        "branch.list"
     );
     assert_eq!(
         parsed_command_profile_label(&[
@@ -60,6 +60,26 @@ fn validate_parsed_host_bundle_options(args: &[&str]) -> Result<(), String> {
     };
     validate_host_bundle_options(&command, CommandFamily::for_command(&command), &options)
         .map_err(|error| error.to_string())
+}
+
+#[test]
+fn update_previews_accept_dry_run_without_host_mutation_flags() {
+    for command in ["update", "upgrade"] {
+        assert_eq!(
+            validate_parsed_host_bundle_options(&[command, "--dry-run"]),
+            Ok(())
+        );
+        assert_eq!(
+            validate_parsed_host_bundle_options(&[command, "--dry-run", "--no-reinstall"]),
+            Ok(())
+        );
+        assert!(validate_parsed_host_bundle_options(&[command, "--yes"]).is_err());
+        assert!(
+            validate_parsed_host_bundle_options(&[command, "--dry-run", "--component", "core"])
+                .is_err()
+        );
+        assert!(should_skip_startup_maintenance(&parse_command(&[command])));
+    }
 }
 
 #[test]
@@ -466,7 +486,6 @@ fn nested_inspection_commands_skip_agent_install_check() {
             "refresh-123",
         ][..],
         &["branch", "list"][..],
-        &["branch", "autotrack", "status"][..],
         &["channel"][..],
         &["automation", "config", "get", "--json"][..],
     ];

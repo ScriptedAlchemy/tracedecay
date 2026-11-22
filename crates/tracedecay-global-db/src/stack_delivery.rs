@@ -4,6 +4,21 @@
 //! an immutable provider/coordinator commitment; recipient rows are the
 //! delivery state machine.  A row stays `pending` until the authenticated host
 //! read that expands it records the receipt, so listing never settles.
+//!
+//! Full signal payloads are retained for at least fourteen days after issuance.
+//! After that window, bounded registered-store maintenance may compact a signal
+//! only when every recipient is settled or has permanently lost authorization.
+//! Pending and deferred recipients retain their payload regardless of age. Each
+//! maintenance transaction scans a bounded identity page and persists its
+//! frontier, including when no scanned signal is eligible.
+//!
+//! Retirement retains the immutable signal identity and a SHA-256 payload
+//! fingerprint for exact replay and collision refusal, removes terminal
+//! recipient rows, and excludes the signal from active delivery indexes.
+//! An expired host expansion returns `Concealed`, the same result as an absent
+//! or unauthorized handle; replay cannot recreate its recipients. Native
+//! previews and integration receipts remain in their authoritative native store
+//! and are not changed by notification retention.
 
 use std::collections::BTreeSet;
 

@@ -644,19 +644,21 @@ pub(crate) fn sealed_artifact(
 
 /// Rust files `src/fixture_{ordinal}.rs` with file ids `file.fixture.{ordinal}`.
 pub(crate) fn rust_source_fixture(sources: &[&str]) -> RealLexicalSourceFixture {
-    real_lexical_source_fixture_from_sources(
-        sources
-            .iter()
-            .enumerate()
-            .map(|(ordinal, source)| {
-                (
-                    format!("file.fixture.{ordinal}"),
-                    format!("src/fixture_{ordinal}.rs"),
-                    source.as_bytes().to_vec(),
-                )
-            })
-            .collect(),
-    )
+    let mut inputs = sources
+        .iter()
+        .enumerate()
+        .map(|(ordinal, source)| {
+            (
+                format!("file.fixture.{ordinal}"),
+                format!("src/fixture_{ordinal}.rs"),
+                source.as_bytes().to_vec(),
+            )
+        })
+        .collect::<Vec<_>>();
+    // Snapshot admission requires lexical path order, including when the
+    // fixture has enough files for multi-digit ordinals.
+    inputs.sort_by(|left, right| left.1.cmp(&right.1));
+    real_lexical_source_fixture_from_sources(inputs)
 }
 
 /// [`rust_source_fixture`] sealed into one reopened artifact.
@@ -2036,6 +2038,22 @@ fn vocabulary_fields_phrase_and_proximity_search_reopened_artifacts() {
             .map(|name| ((*name).to_owned(), vec![field]))
             .collect::<Vec<_>>()
     };
+    for component in ["http-cache", "client-store.rs", "client-store"] {
+        assert_eq!(
+            scored_fields(
+                &reader,
+                &run(
+                    component,
+                    &[component],
+                    &[],
+                    Some(LexicalFieldV1::Path),
+                    Vec::new()
+                ),
+            ),
+            scored(&both, LexicalFieldV1::Path),
+            "whole path components must find symbols after the artifact is reopened"
+        );
+    }
     // Each query scores in `field` only, and the same query under `other`
     // scores there instead, so ignoring the filter would widen both readings.
     for (query, field, drawn, other, drawn_elsewhere) in [

@@ -50,6 +50,9 @@ pub const USER_CODE_INDEX_WORKERS_SETTING_KEY: &str = "user.code_index_workers.v
 pub const USER_WATCHER_DEBOUNCE_MS_SETTING_KEY: &str = "user.watcher_debounce_ms.v1";
 pub const USER_EXTRACTION_TIMEOUT_SECS_SETTING_KEY: &str = "user.extraction_timeout_secs.v1";
 pub const USER_WORK_EXPERTISE_CONSENT_SETTING_KEY: &str = "user.work_expertise_consent.v1";
+pub const USER_SESSION_RETENTION_ENABLED_SETTING_KEY: &str = "user.session_retention_enabled.v1";
+pub const USER_SESSION_RETENTION_DAYS_SETTING_KEY: &str = "user.session_retention_days.v1";
+pub const USER_SESSION_COMPACTION_DAYS_SETTING_KEY: &str = "user.session_compaction_days.v1";
 
 /// User-profile settings persisted in the profile's own `ProfileSessions`
 /// store. They resolve from the profile alone, with or without a project.
@@ -60,6 +63,9 @@ pub const PROFILE_SETTING_KEYS_V1: &[&str] = &[
     USER_REPEATED_QUERY_HINTS_SETTING_KEY,
     USER_WATCHER_DEBOUNCE_MS_SETTING_KEY,
     USER_EXTRACTION_TIMEOUT_SECS_SETTING_KEY,
+    USER_SESSION_RETENTION_ENABLED_SETTING_KEY,
+    USER_SESSION_RETENTION_DAYS_SETTING_KEY,
+    USER_SESSION_COMPACTION_DAYS_SETTING_KEY,
 ];
 
 pub fn is_profile_setting_key(key: &SettingKey) -> bool {
@@ -87,8 +93,6 @@ pub const SYNC_SESSION_START_STALE_THRESHOLD_SECS_SETTING_KEY: &str =
 pub const SYNC_BACKSTOP_INTERVAL_MINS_SETTING_KEY: &str = "sync.backstop_interval_mins.v1";
 pub const SYNC_BRANCH_GC_DAYS_SETTING_KEY: &str = "sync.branch_gc_days.v1";
 pub const SYNC_AUTO_INIT_SETTING_KEY: &str = "sync.auto_init.v1";
-pub const SYNC_AUTO_TRACK_PR_BRANCHES_SETTING_KEY: &str = "sync.auto_track_pr_branches.v1";
-pub const SYNC_AUTO_TRACK_PR_POLL_SECS_SETTING_KEY: &str = "sync.auto_track_pr_poll_secs.v1";
 pub const TELEMETRY_TIMINGS_SETTING_KEY: &str = "telemetry.timings.v1";
 
 /// Exact registry inventory. Keeping this closed list in the domain
@@ -108,6 +112,9 @@ pub const CONFIGURATION_SETTING_KEYS_V1: &[&str] = &[
     USER_CODE_INDEX_WORKERS_SETTING_KEY,
     USER_WATCHER_DEBOUNCE_MS_SETTING_KEY,
     USER_EXTRACTION_TIMEOUT_SECS_SETTING_KEY,
+    USER_SESSION_RETENTION_ENABLED_SETTING_KEY,
+    USER_SESSION_RETENTION_DAYS_SETTING_KEY,
+    USER_SESSION_COMPACTION_DAYS_SETTING_KEY,
     USER_WORK_EXPERTISE_CONSENT_SETTING_KEY,
     INDEX_EXCLUDE_SETTING_KEY,
     INDEX_INCLUDE_SETTING_KEY,
@@ -128,8 +135,6 @@ pub const CONFIGURATION_SETTING_KEYS_V1: &[&str] = &[
     SYNC_BACKSTOP_INTERVAL_MINS_SETTING_KEY,
     SYNC_BRANCH_GC_DAYS_SETTING_KEY,
     SYNC_AUTO_INIT_SETTING_KEY,
-    SYNC_AUTO_TRACK_PR_BRANCHES_SETTING_KEY,
-    SYNC_AUTO_TRACK_PR_POLL_SECS_SETTING_KEY,
     TELEMETRY_TIMINGS_SETTING_KEY,
 ];
 

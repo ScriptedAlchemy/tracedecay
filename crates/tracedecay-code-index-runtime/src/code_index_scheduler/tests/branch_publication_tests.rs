@@ -2,9 +2,11 @@
 use std::os::unix::fs::symlink;
 
 use tempfile::TempDir;
+use tracedecay_application::lsp_runtime::LspCodeIndexProjectionIdentityPort;
 use tracedecay_contracts::code_index_freshness::{
     CodeGraphServingReadinessV1, CodeIndexWorktreeFreshnessV1,
 };
+use tracedecay_contracts::{FreshnessState, ResolvedScope};
 use tracedecay_runtime_core::cancellation::CancellationToken;
 
 use super::super::branch_publication::{
@@ -119,6 +121,131 @@ async fn exact_branch_source_uses_the_mounted_git_identity() {
         source.source_oid,
         super::git_stdout(fixture.path(), &["rev-parse", "HEAD"])
     );
+    registry.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn retained_symbol_graph_identity_survives_commit_and_branch_changes() {
+    let fixture = GitFixture::new(ALPHA_LIB_V1);
+    let store = TempDir::new().expect("store root");
+    let registry = mount_registry(
+        CodeIndexSchedulerRegistryV1::with_background_reconcile_permits(1, 1),
+        &fixture,
+        &store,
+    )
+    .await;
+    let sealed = registry
+        .current_identity(fixture.path().to_path_buf(), None)
+        .await
+        .expect("sealed graph identity");
+    let scope = ResolvedScope::new(
+        sealed.project.clone(),
+        sealed.repository.clone(),
+        sealed.worktree.clone().expect("worktree"),
+        sealed.reference.clone(),
+    )
+    .expect("sealed scope");
+    let admission = registry
+        .background_reconcile_admission()
+        .acquire_owned()
+        .await
+        .expect("hold successor publication");
+    std::fs::write(fixture.path().join("src/lib.rs"), "pub fn beta() {}\n").expect("edit source");
+    super::git(fixture.path(), &["add", "src/lib.rs"]);
+    super::git(fixture.path(), &["commit", "-qm", "advance source"]);
+
+    for switch_branch in [false, true] {
+        if switch_branch {
+            super::git(fixture.path(), &["switch", "-qc", "successor"]);
+        }
+        let retained = registry
+            .current_identity(fixture.path().to_path_buf(), None)
+            .await
+            .expect("read-only graph identity remains available during refresh");
+        assert_eq!(retained.code_generation_id, sealed.code_generation_id);
+        assert_eq!(retained.source_revision, sealed.source_revision);
+        assert_eq!(retained.reference, sealed.reference);
+        assert_ne!(retained.head_commit_id, sealed.head_commit_id);
+        assert_eq!(retained.source_freshness, FreshnessState::Unknown);
+        assert_eq!(
+            retained
+                .clone()
+                .admit_worktree_scope(&scope)
+                .expect("retained checkout scope")
+                .code_generation_id,
+            sealed.code_generation_id
+        );
+        assert!(retained.admit_commit_scope(&scope).is_err());
+        assert_eq!(
+            registry
+                .current_identity(fixture.path().to_path_buf(), Some("src/lib.rs".to_owned()))
+                .await
+                .expect_err("a current document cannot borrow a stale snapshot")
+                .class(),
+            "lsp-code-index-generation-unavailable"
+        );
+    }
+    drop(admission);
+    registry.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn graph_identity_survives_a_revision_change_inside_the_confirmation_bracket() {
+    let fixture = GitFixture::new(ALPHA_LIB_V1);
+    let store = TempDir::new().expect("store root");
+    let registry = mount_registry(
+        CodeIndexSchedulerRegistryV1::with_background_reconcile_permits(1, 1),
+        &fixture,
+        &store,
+    )
+    .await;
+    let sealed = registry
+        .current_identity(fixture.path().to_path_buf(), None)
+        .await
+        .expect("current graph");
+    let admission = registry
+        .background_reconcile_admission()
+        .acquire_owned()
+        .await
+        .expect("hold successor publication");
+    let (entered, release) =
+        registry.pause_next_lsp_identity_confirmation(fixture.path().to_path_buf());
+    let reading = tokio::spawn(registry.current_identity(fixture.path().to_path_buf(), None));
+    entered.await.expect("read pinned its immutable owner");
+    super::git(fixture.path(), &["switch", "-qc", "during-read"]);
+    std::fs::write(fixture.path().join("src/lib.rs"), "pub fn successor() {}\n")
+        .expect("edit source");
+    super::git(fixture.path(), &["add", "src/lib.rs"]);
+    super::git(
+        fixture.path(),
+        &["commit", "-qm", "move HEAD inside identity read"],
+    );
+    release.send(()).expect("confirm the new revision");
+    let retained = reading
+        .await
+        .expect("read joined")
+        .expect("immutable graph survives the revision race");
+    assert_eq!(retained.code_generation_id, sealed.code_generation_id);
+    assert_eq!(retained.reference, sealed.reference);
+    assert_eq!(retained.source_revision, sealed.source_revision);
+    assert_ne!(retained.head_commit_id, sealed.head_commit_id);
+    assert_eq!(retained.source_freshness, FreshnessState::Unknown);
+    let scope = ResolvedScope::new(
+        sealed.project,
+        sealed.repository,
+        sealed.worktree.expect("worktree"),
+        sealed.reference,
+    )
+    .expect("sealed scope");
+    assert!(retained.clone().admit_worktree_scope(&scope).is_ok());
+    assert!(retained.admit_commit_scope(&scope).is_err());
+    assert!(
+        registry
+            .current_identity(fixture.path().to_path_buf(), Some("src/lib.rs".to_owned()))
+            .await
+            .is_err()
+    );
+    drop(admission);
     registry.shutdown().await;
 }
 

@@ -2,9 +2,11 @@ use std::path::Path;
 
 use crate::project::TraceDecay;
 use tracedecay_application::tracedecay::{
-    get_local_counter, get_tokens_saved, record_token_savings, reset_local_counter,
+    TokenSavingsAttribution, TokenSavingsReceipt, get_local_counter, get_tokens_saved,
+    prepare_token_savings, record_token_savings, reset_local_counter,
 };
 use tracedecay_configuration::config::RuntimeTraceDecayConfig;
+use tracedecay_contracts::RequestId;
 use tracedecay_domain::errors::Result;
 
 impl TraceDecay {
@@ -13,10 +15,22 @@ impl TraceDecay {
         get_tokens_saved(&self.db).await
     }
 
-    /// Atomically credits lifetime and resettable savings for one response.
-    /// Returns the committed lifetime total.
-    pub async fn record_token_savings(&self, delta: u64) -> Result<u64> {
-        record_token_savings(&self.db, delta).await
+    /// Capture this admitted call's reset interval without taking the writer.
+    pub async fn prepare_token_savings(
+        &self,
+        request_id: &RequestId,
+    ) -> Result<TokenSavingsAttribution> {
+        prepare_token_savings(&self.db, request_id).await
+    }
+
+    /// Atomically credits lifetime and the admitted reset interval for a response.
+    /// Exact retries return the current lifetime total without another credit.
+    pub async fn record_token_savings(
+        &self,
+        attribution: &TokenSavingsAttribution,
+        delta: u64,
+    ) -> Result<TokenSavingsReceipt> {
+        record_token_savings(&self.db, attribution, delta).await
     }
 
     /// Returns the resettable project-local token counter.

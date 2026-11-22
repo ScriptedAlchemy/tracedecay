@@ -21,8 +21,9 @@ use tracedecay_domain::configuration::{
     ProtectedChangeSnapshotError, RedactedConfigurationChangeV1, RollbackModeV1,
     SOURCE_BINDINGS_SETTING_KEY, SYNC_WATCH_LINKED_WORKTREES_SETTING_KEY, ScopeControlOperationV1,
     SettingKey, USER_CODE_INDEX_WORKERS_SETTING_KEY, USER_EXTRACTION_TIMEOUT_SECS_SETTING_KEY,
-    USER_REPEATED_QUERY_HINTS_SETTING_KEY, USER_WATCHER_DEBOUNCE_MS_SETTING_KEY, UserProfileId,
-    WORK_TOPOLOGY_POLICY_SETTING_KEY,
+    USER_REPEATED_QUERY_HINTS_SETTING_KEY, USER_SESSION_COMPACTION_DAYS_SETTING_KEY,
+    USER_SESSION_RETENTION_DAYS_SETTING_KEY, USER_SESSION_RETENTION_ENABLED_SETTING_KEY,
+    USER_WATCHER_DEBOUNCE_MS_SETTING_KEY, UserProfileId, WORK_TOPOLOGY_POLICY_SETTING_KEY,
 };
 use tracedecay_domain::feedback::PROXIMITY_RELATIONSHIP_HINTS_SETTING_KEY_V1;
 use tracedecay_domain::{AccessPolicyDigest, ActorId, ManifestDigest, UtcMicros, canonical_sha256};
@@ -436,8 +437,19 @@ impl<'db> GlobalDbConfigurationControlStore<'db> {
                     .map_err(map_store_error)?;
                 return Ok(current);
             }
-            // A retired setting still at its registry default carries no user
-            // intent, so dropping it loses nothing. An override of it does.
+            if unregistered_keys.iter().any(|key| {
+                matches!(
+                    key.as_str(),
+                    "sync.auto_track_pr_branches.v1" | "sync.auto_track_pr_poll_secs.v1"
+                )
+            }) {
+                return Err(ConfigurationError::ResetRequired {
+                    reason: "automatic PR worktree tracking has been retired; this configuration still contains its removed settings and is preserved unchanged; follow the daemon's typed reset remediation, then use explicit branch activation"
+                        .to_owned(),
+                });
+            }
+            // A registered retired setting still at its registry default
+            // carries no user intent. An override of it does.
             if missing_keys.iter().any(|key| !additive_keys.contains(key))
                 || unregistered_keys.iter().any(|key| {
                     !retired_keys.contains(key)
@@ -666,6 +678,9 @@ const PROFILE_ADDITIVE_SETTING_KEYS: &[&str] = &[
     USER_REPEATED_QUERY_HINTS_SETTING_KEY,
     USER_WATCHER_DEBOUNCE_MS_SETTING_KEY,
     USER_EXTRACTION_TIMEOUT_SECS_SETTING_KEY,
+    USER_SESSION_RETENTION_ENABLED_SETTING_KEY,
+    USER_SESSION_RETENTION_DAYS_SETTING_KEY,
+    USER_SESSION_COMPACTION_DAYS_SETTING_KEY,
 ];
 
 /// Exact adapter over one registered `ProfileSessions` database.
@@ -691,6 +706,14 @@ impl<'db> ProfileConfigurationStore<'db> {
             store: GlobalDbConfigurationControlStore::new_registered(db),
             profile_id: profile_id.clone(),
         })
+    }
+
+    /// Read the exact current profile settings without initializing or changing
+    /// the store. Diagnostics use this so a missing policy is unknown evidence,
+    /// never an implicit mutation or a fabricated default.
+    pub async fn read(&self) -> Result<ProfileConfigurationV1, ConfigurationError> {
+        let registry = ConfigurationRegistry::profile().map_err(ConfigurationError::validation)?;
+        Self::project(&self.profile_id, self.current_state().await?, &registry)
     }
 
     /// The current profile configuration, initializing a fresh store from the

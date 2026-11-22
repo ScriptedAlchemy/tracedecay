@@ -167,7 +167,7 @@ function PathText({ value, query = '' }: { value: string; query?: string }) {
 /**
  * A dotted key reads from its leaf: dim the prefix, keep the last segment
  * bright. A `<wbr>` after each dot gives a long key a real break point at a
- * segment boundary, so a narrow column wraps `project.config.` / `sync.…`
+ * segment boundary, so a narrow column wraps `project.config.` / `telemetry.…`
  * rather than mid-identifier.
  */
 export function KeyText({ value, query = '' }: { value: string; query?: string }) {

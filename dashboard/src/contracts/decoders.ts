@@ -544,8 +544,6 @@ import type {
   PerformanceComparisonReadModelV1,
   PolicyDecisionRef,
   PolicyIdentifierV1,
-  PrAutoTrackEntryV1,
-  PrAutoTrackPayloadV1,
   PrepareWorkDuplicateAdjudicationRequestV1,
   PrepareWorkProductMutationRequestV1,
   PreviewResult,
@@ -720,8 +718,6 @@ import type {
   StructureReadV14,
   StructureReadV15,
   SymbolOccurrenceId,
-  SyncSettingsPatch,
-  SyncSettingsV1,
   TableGrowthDimensionV1,
   TableGrowthOmissionV1,
   TableGrowthThresholdV1,
@@ -7647,22 +7643,6 @@ It represents immutable references only; it is never a path, display
 label, provider account, branch name, or native object identifier. */
 export const PolicyIdentifierV1Schema: z.ZodType<string, unknown> = z.string();
 
-export const PrAutoTrackEntryV1Schema: z.ZodObject<{
-  branch: z.ZodType<string, unknown>;
-  head_branch: z.ZodType<string, unknown>;
-  pr: z.ZodType<number, unknown>;
-}> = z.object({
-  branch: z.string(),
-  head_branch: z.string(),
-  pr: z.number().int().min(0),
-});
-
-export const PrAutoTrackPayloadV1Schema: z.ZodObject<{
-  tracked: z.ZodType<Array<PrAutoTrackEntryV1>, unknown>;
-}> = z.object({
-  tracked: z.array(z.lazy(() => PrAutoTrackEntryV1Schema)),
-});
-
 /** Operator judgment before the owning Work authority binds exact current
 generations, relation revision, command identity, and observation time. */
 export const PrepareWorkDuplicateAdjudicationRequestV1Schema: z.ZodObject<{
@@ -7785,7 +7765,6 @@ export const ProjectEditableSettingsV1Schema: z.ZodObject<{
   extract_docstrings: z.ZodType<boolean, unknown>;
   include: z.ZodType<Array<string>, unknown>;
   max_file_size: z.ZodType<number, unknown>;
-  sync: z.ZodType<SyncSettingsV1, unknown>;
   telemetry: z.ZodType<TelemetrySettingsV1, unknown>;
   track_call_sites: z.ZodType<boolean, unknown>;
 }> = z.object({
@@ -7794,7 +7773,6 @@ export const ProjectEditableSettingsV1Schema: z.ZodObject<{
   extract_docstrings: z.boolean(),
   include: z.array(z.string()),
   max_file_size: z.number().int().min(0),
-  sync: z.lazy(() => SyncSettingsV1Schema),
   telemetry: z.lazy(() => TelemetrySettingsV1Schema),
   track_call_sites: z.boolean(),
 });
@@ -7900,7 +7878,6 @@ export const ProjectSettingsPatchSchema: z.ZodObject<{
   idempotency_key: z.ZodType<string, unknown>;
   include: z.ZodOptional<z.ZodType<Array<string> | null, unknown>>;
   max_file_size: z.ZodOptional<z.ZodType<number | null, unknown>>;
-  sync: z.ZodOptional<z.ZodType<SyncSettingsPatch | null, unknown>>;
   telemetry: z.ZodOptional<z.ZodType<TelemetrySettingsPatch | null, unknown>>;
   track_call_sites: z.ZodOptional<z.ZodType<boolean | null, unknown>>;
 }, z.core.$strict> = z.object({
@@ -7912,7 +7889,6 @@ export const ProjectSettingsPatchSchema: z.ZodObject<{
   idempotency_key: z.string(),
   include: z.array(z.string()).nullable().optional(),
   max_file_size: z.number().int().min(0).nullable().optional(),
-  sync: z.union([z.lazy(() => SyncSettingsPatchSchema), z.null()]).optional(),
   telemetry: z.union([z.lazy(() => TelemetrySettingsPatchSchema), z.null()]).optional(),
   track_call_sites: z.boolean().nullable().optional(),
 }).strict();
@@ -7929,12 +7905,10 @@ export const ProjectSettingsPayloadV1Schema: z.ZodObject<{
   config: z.ZodType<ProjectEditableSettingsV1, unknown>;
   configuration_revision_id: z.ZodType<string, unknown>;
   configuration_snapshot_id: z.ZodType<string, unknown>;
-  pr_autotrack: z.ZodType<PrAutoTrackPayloadV1, unknown>;
 }> = z.object({
   config: z.lazy(() => ProjectEditableSettingsV1Schema),
   configuration_revision_id: z.string(),
   configuration_snapshot_id: z.string(),
-  pr_autotrack: z.lazy(() => PrAutoTrackPayloadV1Schema),
 });
 
 export const ProjectsPayloadV1Schema: z.ZodObject<{
@@ -9642,23 +9616,6 @@ export const StructureReadV15Schema: z.ZodType<StructureReadV15, unknown> = z.di
 
 /** Strongly typed canonical identity: `SymbolOccurrenceId`. */
 export const SymbolOccurrenceIdSchema: z.ZodType<string, unknown> = z.string();
-
-/** Nested synchronization settings patch. */
-export const SyncSettingsPatchSchema: z.ZodObject<{
-  auto_track_pr_branches: z.ZodOptional<z.ZodType<boolean | null, unknown>>;
-  auto_track_pr_poll_secs: z.ZodOptional<z.ZodType<number | null, unknown>>;
-}, z.core.$strict> = z.object({
-  auto_track_pr_branches: z.boolean().nullable().optional(),
-  auto_track_pr_poll_secs: z.number().int().min(0).nullable().optional(),
-}).strict();
-
-export const SyncSettingsV1Schema: z.ZodObject<{
-  auto_track_pr_branches: z.ZodType<boolean, unknown>;
-  auto_track_pr_poll_secs: z.ZodType<number, unknown>;
-}> = z.object({
-  auto_track_pr_branches: z.boolean(),
-  auto_track_pr_poll_secs: z.number().int().min(0),
-});
 
 /** Per-store typed table-growth state. Unavailable reads carry no byte values;
 each state includes source coverage and explicit omissions. */

@@ -33,6 +33,51 @@ pub fn discover(path: &Path) -> gix::Result<gix::Repository> {
     gix::discover_opts(path, gix::discover::upwards::Options::default(), options())
 }
 
+/// Visit linked worktrees without retaining Git's complete proxy inventory.
+/// Git still owns parsing each worktree's metadata; only directory enumeration
+/// is streamed. A failed entry aborts the census instead of yielding partial
+/// liveness authority to callers that collect abandoned stores.
+pub fn visit_linked_worktrees(
+    repository: &gix::Repository,
+    mut visit: impl FnMut(&Path, &Path) -> std::io::Result<()>,
+) -> std::io::Result<()> {
+    let directory = repository
+        .current_dir()
+        .join(repository.common_dir())
+        .join("worktrees");
+    let entries = match std::fs::read_dir(directory) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    for entry in entries {
+        let entry = entry?;
+        let id = gix::path::into_bstr(std::path::PathBuf::from(entry.file_name()))
+            .map_err(std::io::Error::other)?;
+        let id: &gix::bstr::BStr = id.as_ref();
+        let Some(worktree) = repository
+            .worktree_proxy_by_id(id)
+            .map_err(|error| std::io::Error::other(error.to_string()))?
+        else {
+            // Gitoxide omits entries without a regular gitdir file, including
+            // inaccessible metadata. Destructive retention requires a complete
+            // census, so even a disappearing entry invalidates this attempt.
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!(
+                    "worktree metadata is unavailable at {}",
+                    entry.path().display()
+                ),
+            ));
+        };
+        let base = worktree
+            .base()
+            .map_err(|error| std::io::Error::other(error.to_string()))?;
+        visit(worktree.git_dir(), &base)?;
+    }
+    Ok(())
+}
+
 /// Preserve the repository's normal configuration and attribute semantics
 /// while rejecting `GIT_*` redirection from the ambient environment.
 fn options() -> gix::open::Options {

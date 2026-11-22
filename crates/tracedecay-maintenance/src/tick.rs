@@ -6,8 +6,8 @@ use std::time::{Duration, Instant};
 /// Resume bounded store maintenance over the normal store window.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MaintenanceContinuation {
-    /// Resume code-generation retention and canonical-body collection, without
-    /// repeating age policies or profile-wide maintenance on the short cadence.
+    /// Resume bounded session retention, code-generation retention and
+    /// canonical-body collection, without repeating profile-wide age policies.
     StoreRetention,
 }
 

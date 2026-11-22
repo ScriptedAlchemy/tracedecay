@@ -175,6 +175,137 @@ async fn program_membership(release: PinnedTypeScript) {
     );
 }
 
+/// Package and relative bases participate in the compiler's multiple-extends
+/// precedence. Their inherited JavaScript admission, include and exclude
+/// decisions remain authoritative as the source roster changes.
+#[tokio::test]
+async fn package_and_multiple_extends_preserve_javascript_membership_and_reuse() {
+    for release in RELEASES {
+        package_and_multiple_extends(release).await;
+    }
+}
+
+async fn package_and_multiple_extends(release: PinnedTypeScript) {
+    let project = InstalledCompilerProject::installing(
+        release,
+        &[
+            (
+                "node_modules/@fixture/tsconfig/package.json",
+                r#"{"name":"@fixture/tsconfig","version":"1.0.0","tsconfig":"base.json"}"#,
+            ),
+            (
+                "node_modules/@fixture/tsconfig/base.json",
+                r#"{"compilerOptions":{"allowJs":true,"checkJs":false}}"#,
+            ),
+            (
+                "tsconfig.shared.json",
+                r#"{"compilerOptions":{"checkJs":true,"outDir":"./src/generated"},"include":["src/**/*"],"exclude":["src/excluded","src/generated"]}"#,
+            ),
+            (
+                "tsconfig.json",
+                r#"{"extends":["@fixture/tsconfig","./tsconfig.shared.json"]}"#,
+            ),
+            ("src/index.ts", "export const value: number = 1;\n"),
+            (
+                "src/checked.js",
+                "/** @type {string} */\nexport const label = 7;\n",
+            ),
+            (
+                "src/excluded/hidden.js",
+                "/** @type {string} */\nexport const hidden = 8;\n",
+            ),
+            (
+                "src/generated/output.js",
+                "/** @type {string} */\nexport const generated = 9;\n",
+            ),
+        ],
+    );
+    project.log_compiler_runs();
+    let status = TypeScriptProducerStatusHandleV1::default();
+    let mut state = producer(&status);
+    let run = project
+        .run("generation.package-extends.1", &mut state)
+        .await;
+    assert!(
+        matches!(run, CompilerProducerRunV1::Published { checked: 1, .. }),
+        "{release:?}: {run:?}"
+    );
+    assert_eq!(project.checked(), ["tsconfig.json"]);
+    assert_eq!(
+        codes(&project.findings("generation.package-extends.1").await),
+        ["TS2322"],
+        "{release:?}: the later base enables checks of package-admitted JavaScript"
+    );
+    for file in ["src/index.ts", "src/checked.js"] {
+        assert_eq!(
+            owner(&project, &status, file),
+            Some((
+                "tsconfig.json".to_owned(),
+                Some(TypeScriptProjectCheckV1::Checked)
+            )),
+            "{release:?}: {file}"
+        );
+    }
+    for file in ["src/excluded/hidden.js", "src/generated/output.js"] {
+        assert_eq!(owner(&project, &status, file), None, "{release:?}: {file}");
+    }
+    assert_eq!(
+        project.runs(),
+        0,
+        "{release:?}: ordinary availability reads never invoke a compiler"
+    );
+
+    let run = project
+        .run("generation.package-extends.2", &mut state)
+        .await;
+    assert!(
+        matches!(
+            run,
+            CompilerProducerRunV1::Published {
+                checked: 0,
+                reused: 1,
+                ..
+            }
+        ),
+        "{release:?}: unchanged authoritative inputs reuse the prior check: {run:?}"
+    );
+    assert!(project.checked().is_empty());
+
+    std::fs::write(
+        project.root.join("src/added.js"),
+        "/** @type {string} */\nexport const added = 10;\n",
+    )
+    .unwrap();
+    project
+        .run("generation.package-extends.3", &mut state)
+        .await;
+    assert_eq!(project.checked(), ["tsconfig.json"]);
+    assert_eq!(
+        codes(&project.findings("generation.package-extends.3").await),
+        ["TS2322", "TS2322"],
+        "{release:?}: inherited includes admit the new JavaScript source"
+    );
+    std::fs::remove_file(project.root.join("src/checked.js")).unwrap();
+    project
+        .run("generation.package-extends.4", &mut state)
+        .await;
+    assert_eq!(project.checked(), ["tsconfig.json"]);
+    assert_eq!(
+        codes(&project.findings("generation.package-extends.4").await),
+        ["TS2322"],
+        "{release:?}: a removed member cannot retain its earlier diagnostic"
+    );
+    assert_eq!(owner(&project, &status, "src/checked.js"), None);
+    assert_eq!(
+        owner(&project, &status, "src/added.js"),
+        Some((
+            "tsconfig.json".to_owned(),
+            Some(TypeScriptProjectCheckV1::Checked)
+        ))
+    );
+    assert_eq!(project.runs(), 0);
+}
+
 const SOLUTION: &[(&str, &str)] = &[
     (
         "tsconfig.json",

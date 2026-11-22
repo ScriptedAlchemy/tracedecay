@@ -5,12 +5,14 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::{self, Read, Write};
 use std::path::{Component, Path, PathBuf};
+use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use cap_fs_ext::{DirExt, FollowSymlinks, OpenOptionsFollowExt};
 use cap_std::ambient_authority;
 use cap_std::fs::{Dir, OpenOptions as CapOpenOptions};
 use sha2::{Digest, Sha256};
+use tracedecay_host_integration::host_bundle_stale_preview;
 use tracedecay_host_integration::host_bundle_storage_failure;
 #[cfg(windows)]
 use tracedecay_private_fs::capability_dir::rename_noreplace;
@@ -25,7 +27,8 @@ use super::control::{
 use super::model::HostBundleExecutionRequestV1;
 use super::planner::{
     HostArtifactActionV1, HostArtifactMutationV1, ObservedArtifactKindV1, ObservedHostArtifactV1,
-    plan_verified_complete_lifecycle_mutation, validate_artifact_contents_for_operation,
+    plan_verified_complete_lifecycle_mutation, resolved_pi_home,
+    validate_artifact_contents_for_operation,
 };
 use super::{
     HOST_BUNDLE_RECEIPT_SCHEMA_VERSION, HostBundleArtifactContentV1, HostBundleError,
@@ -44,6 +47,11 @@ static HOST_BUNDLE_TEMP_NONCE: AtomicU64 = AtomicU64::new(1);
 struct HostWriterLock {
     host: HostKindV1,
     file: fs::File,
+}
+
+struct PiHome {
+    path: PathBuf,
+    directory: Dir,
 }
 
 impl Drop for HostWriterLock {
@@ -72,6 +80,7 @@ pub struct HostBundleWriterV1 {
     root: Dir,
     control: Dir,
     host_lock: Option<HostWriterLock>,
+    pi_home: OnceLock<Result<Option<PiHome>, HostBundleError>>,
 }
 
 impl HostBundleWriterV1 {
@@ -99,6 +108,7 @@ impl HostBundleWriterV1 {
             root,
             control,
             host_lock: None,
+            pi_home: OnceLock::new(),
         })
     }
 
@@ -379,13 +389,44 @@ impl HostBundleWriterV1 {
         })
     }
 
+    fn artifact_root<'a>(
+        &'a self,
+        relative: &'a Path,
+    ) -> Result<(&'a Dir, &'a Path), HostBundleError> {
+        if relative != Path::new(".pi") && !relative.starts_with(".pi/agent") {
+            return Ok((&self.root, relative));
+        }
+        let pi_home = self.pi_home.get_or_init(|| {
+            resolved_pi_home(&self.root_path)?
+                .map(|path| {
+                    let directory = Dir::open_ambient_dir(&path, ambient_authority())
+                        .map_err(|_| HostBundleError::UnsafeInstallPath)?;
+                    Ok(PiHome { path, directory })
+                })
+                .transpose()
+        });
+        let pi_home = pi_home.as_ref().map_err(Clone::clone)?;
+        if resolved_pi_home(&self.root_path)? != pi_home.as_ref().map(|home| home.path.clone()) {
+            return Err(host_bundle_stale_preview!());
+        }
+        match pi_home {
+            Some(home) => Ok((
+                &home.directory,
+                relative
+                    .strip_prefix(".pi")
+                    .map_err(|_| HostBundleError::UnsafeInstallPath)?,
+            )),
+            None => Ok((&self.root, relative)),
+        }
+    }
+
     pub(super) fn open_parent_nofollow(
         &self,
         relative: &Path,
     ) -> Result<(Dir, String), HostBundleError> {
         validate_relative_install_path(relative)?;
-        let mut parent = self
-            .root
+        let (root, relative) = self.artifact_root(relative)?;
+        let mut parent = root
             .open_dir_nofollow(".")
             .map_err(|_| HostBundleError::UnsafeInstallPath)?;
         let components = relative.components().collect::<Vec<_>>();
@@ -416,9 +457,11 @@ impl HostBundleWriterV1 {
         candidates
             .iter()
             .filter(|directory| {
-                self.root
-                    .symlink_metadata(directory.as_str())
-                    .is_err_and(|error| error.kind() == io::ErrorKind::NotFound)
+                self.artifact_root(Path::new(directory))
+                    .is_ok_and(|(root, relative)| {
+                        root.symlink_metadata(relative)
+                            .is_err_and(|error| error.kind() == io::ErrorKind::NotFound)
+                    })
             })
             .cloned()
             .collect()
@@ -433,9 +476,11 @@ impl HostBundleWriterV1 {
         missing_before
             .iter()
             .filter(|directory| {
-                self.root
-                    .symlink_metadata(directory.as_str())
-                    .is_ok_and(|metadata| metadata.is_dir())
+                self.artifact_root(Path::new(directory))
+                    .is_ok_and(|(root, relative)| {
+                        root.symlink_metadata(relative)
+                            .is_ok_and(|metadata| metadata.is_dir())
+                    })
             })
             .cloned()
             .collect()
@@ -485,8 +530,8 @@ impl HostBundleWriterV1 {
     /// at any component; `None` when a component is missing or is not a real
     /// directory.
     fn open_existing_dir_nofollow(&self, relative: &Path) -> Result<Option<Dir>, HostBundleError> {
-        let mut directory = self
-            .root
+        let (root, relative) = self.artifact_root(relative)?;
+        let mut directory = root
             .open_dir_nofollow(".")
             .map_err(|_| HostBundleError::UnsafeInstallPath)?;
         for component in relative.components() {

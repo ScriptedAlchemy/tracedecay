@@ -227,8 +227,8 @@ pub struct LcmRetentionReport {
     /// This counts representation changes, not filesystem bytes reclaimed.
     #[serde(default)]
     pub canonicalized_rows: u64,
-    /// A lossless pass reached its row/byte budget before draining its cursor.
-    /// The daemon may continue this work without rerunning age-based deletion.
+    /// A retention pass reached its row/byte budget before draining its cursor.
+    /// The daemon continues the configured policy under fresh writer admission.
     #[serde(default)]
     pub storage_has_more: bool,
     /// Database `PRAGMA freelist_count` before/after (freed pages are the
@@ -442,7 +442,7 @@ async fn run_session_retention_inner(
     };
     // Drop first (terminal, longest window) so the lossless passes never compact
     // a row that is about to be deleted.
-    let (dropped, drop_cursor) = run_drop_pass(
+    let (dropped, drop_cursor, drop_has_more) = run_drop_pass(
         store,
         scope,
         config,
@@ -478,7 +478,7 @@ async fn run_session_retention_inner(
     )
     .await?;
     report.offloaded = offloaded;
-    report.storage_has_more = inline_has_more || offload_has_more;
+    report.storage_has_more = drop_has_more || inline_has_more || offload_has_more;
     if mode.is_apply() {
         // Consume the staged GC/reporting meta cards: record the last run so a
         // scheduler and Doctor can report retention backlog without a rescan.
@@ -795,8 +795,9 @@ impl RetentionCursor {
 /// Reads up to `limit` durable rows past `cutoff` that became eligible since
 /// `cursor`: first the rows that aged, then the rows a new summary covers.
 /// `columns` start with `r.store_id, r.timestamp`; `eligible` narrows the
-/// rows a pass can act on. Returns the rows and the cursor past everything
-/// examined.
+/// rows a pass can act on. Returns the rows, the cursor past everything
+/// examined, and whether the bounded scan may have more work. A full page of
+/// new lineage must continue even when none of its raw rows is eligible.
 #[allow(clippy::too_many_arguments)]
 async fn select_retention_candidates<T>(
     read: &(impl QueryExecutor + ?Sized),
@@ -807,7 +808,7 @@ async fn select_retention_candidates<T>(
     columns: &str,
     eligible: &str,
     decode: impl Fn(&Row) -> Result<T, LcmError>,
-) -> Result<(Vec<T>, RetentionCursor), LcmError> {
+) -> Result<(Vec<T>, RetentionCursor, bool), LcmError> {
     let (aged_timestamp, aged_store_id) = cursor.aged_through;
     let mut rows = read
         .query(
@@ -852,7 +853,7 @@ async fn select_retention_candidates<T>(
     };
     let remaining = limit.saturating_sub(returned);
     if remaining == 0 {
-        return Ok((candidates, next));
+        return Ok((candidates, next, true));
     }
     let mut sources = read
         .query(
@@ -869,8 +870,9 @@ async fn select_retention_candidates<T>(
     }
     drop(sources);
     if covered.is_empty() {
-        return Ok((candidates, next));
+        return Ok((candidates, next, false));
     }
+    let has_more = i64::try_from(covered.len()).is_ok_and(|count| count == remaining);
     let covered_json = serde_json::to_string(&covered)
         .map_err(|error| LcmError::Db(format!("encode summary-covered rows: {error}")))?;
     let mut rows = read
@@ -899,7 +901,7 @@ async fn select_retention_candidates<T>(
             candidates.push(decode(&row)?);
         }
     }
-    Ok((candidates, next))
+    Ok((candidates, next, has_more))
 }
 
 struct DropRow {
@@ -917,20 +919,20 @@ async fn run_drop_pass(
     now: i64,
     errors: &mut Vec<String>,
     authorize: Option<&RetentionAuthorization<'_>>,
-) -> Result<(LcmRetentionPhaseReport, Option<RetentionCursor>), LcmError> {
+) -> Result<(LcmRetentionPhaseReport, Option<RetentionCursor>, bool), LcmError> {
     let mut report = LcmRetentionPhaseReport {
         window_days: config.drop_after_days,
         ..LcmRetentionPhaseReport::default()
     };
     let Some(window) = config.drop_after_days else {
-        return Ok((report, None));
+        return Ok((report, None, false));
     };
     let cutoff = cutoff_secs(window, now);
     // Candidates are read outside the write transaction; the delete below
     // re-checks each row, so the transaction holds only the bounded batch.
     let read = store.read_connection();
     let cursor = RetentionCursor::read(&read, "drop").await?;
-    let (targets, next) = select_retention_candidates(
+    let (targets, next, has_more) = select_retention_candidates(
         &read,
         scope,
         cursor,
@@ -951,10 +953,10 @@ async fn run_drop_pass(
     report.oldest_eligible_at = targets.iter().map(|target| target.timestamp).min();
     if !mode.is_apply() {
         report.bytes_reclaimed = targets.iter().map(|t| t.content_len).sum();
-        return Ok((report, None));
+        return Ok((report, None, has_more));
     }
     if targets.is_empty() {
-        return Ok((report, Some(next)));
+        return Ok((report, Some(next), has_more));
     }
 
     let txn = store
@@ -992,7 +994,8 @@ async fn run_drop_pass(
     }
     commit_authorized(txn, authorize, "commit session retention drop pass").await?;
     // A failed row stays behind the cursor so the next pass retries it.
-    Ok((report, (errors.len() == errors_before).then_some(next)))
+    let succeeded = errors.len() == errors_before;
+    Ok((report, succeeded.then_some(next), succeeded && has_more))
 }
 
 struct InlineOffloadedRow {
@@ -1049,7 +1052,7 @@ async fn run_inline_offloaded_pass(
     let mut remaining = MAX_STORAGE_PASS_BYTES;
     let mut has_more = true;
     for _ in 0..config.batch_limit().min(MAX_STORAGE_PASS_ROWS) {
-        let (mut targets, next) = select_retention_candidates(
+        let (mut targets, next, _) = select_retention_candidates(
             &read,
             scope,
             cursor,
@@ -1358,7 +1361,7 @@ async fn run_offload_pass(
     let mut remaining = MAX_STORAGE_PASS_BYTES;
     let mut has_more = true;
     for _ in 0..config.batch_limit().min(MAX_STORAGE_PASS_ROWS) {
-        let (mut targets, next) = select_retention_candidates(
+        let (mut targets, next, _) = select_retention_candidates(
             &read, scope, cursor, cutoff, 1,
             "r.store_id, r.timestamp, r.provider, r.session_id, r.message_id, r.content_hash,
              r.metadata_json, LENGTH(CAST(r.content AS BLOB))",

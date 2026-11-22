@@ -389,7 +389,7 @@ async fn half_open_circuit_rejects_stale_and_denied_but_success_closes() {
     }
     .seal()
     .unwrap();
-    coordinator
+    let _scope_registration_1 = coordinator
         .register_circuit_policy(&request.topology.destination, policy)
         .unwrap();
     let preflight = PreflightOutcomes {
@@ -469,7 +469,7 @@ async fn half_open_circuit_rejects_stale_and_denied_but_success_closes() {
 fn register_policy(
     coordinator: &DaemonGitHubStackCoordinatorV1,
     request: &NativeIntegrationPreflightRequestV1,
-) {
+) -> GitHubStackScopeV1 {
     coordinator
         .register_circuit_policy(
             &request.topology.destination,
@@ -482,15 +482,16 @@ fn register_policy(
             .seal()
             .unwrap(),
         )
-        .unwrap();
+        .unwrap()
 }
 
 #[test]
 fn preflight_admission_enforces_repository_and_daemon_bounds() {
+    let mut scope_owners = Vec::new();
     let coordinator = Arc::new(DaemonGitHubStackCoordinatorV1::default());
     let preflight = Arc::new(BlockingPreflight::default());
     let request = preflight_request(10);
-    register_policy(&coordinator, &request);
+    scope_owners.push(register_policy(&coordinator, &request));
     let mut handles = Vec::new();
     for index in 0..MAX_REPOSITORY_PREFLIGHTS {
         let mut admitted = request.clone();
@@ -533,7 +534,7 @@ fn preflight_admission_enforces_repository_and_daemon_bounds() {
     let mut handles = Vec::new();
     for index in 20..20 + MAX_DAEMON_PREFLIGHTS {
         let request = preflight_request(index);
-        register_policy(&coordinator, &request);
+        scope_owners.push(register_policy(&coordinator, &request));
         let coordinator = Arc::clone(&coordinator);
         let preflight = Arc::clone(&preflight);
         handles.push(std::thread::spawn(move || {
@@ -547,7 +548,7 @@ fn preflight_admission_enforces_repository_and_daemon_bounds() {
     }
     preflight.wait_for_active(MAX_DAEMON_PREFLIGHTS);
     let saturated = preflight_request(100);
-    register_policy(&coordinator, &saturated);
+    scope_owners.push(register_policy(&coordinator, &saturated));
     assert_eq!(
         run(coordinator.optional_preflight(
             preflight.as_ref(),
@@ -572,7 +573,7 @@ fn joined_preflight_observes_cancellation_without_waiting_for_owner() {
     let coordinator = Arc::new(DaemonGitHubStackCoordinatorV1::default());
     let preflight = Arc::new(BlockingPreflight::default());
     let request = preflight_request(200);
-    register_policy(&coordinator, &request);
+    let _scope_registration_11 = register_policy(&coordinator, &request);
     let owner_coordinator = Arc::clone(&coordinator);
     let owner_preflight = Arc::clone(&preflight);
     let owner_request = request.clone();
@@ -627,7 +628,7 @@ fn joined_preflights_share_the_full_result_in_either_consumption_order() {
                 outcome: expected.clone(),
             };
             let request = preflight_request(500 + case);
-            register_policy(&coordinator, &request);
+            let _scope_registration_12 = register_policy(&coordinator, &request);
             let cancellation = CancellationSignal::active("cancel.stack.shared").unwrap();
             run(async {
                 let mut owner = Box::pin(coordinator.optional_preflight(
@@ -705,8 +706,8 @@ fn different_request_identities_do_not_share_a_flight() {
         first.topology.destination.reference.clone(),
     )
     .unwrap();
-    register_policy(&coordinator, &first);
-    register_policy(&coordinator, &other_scope);
+    let _scope_registration_13 = register_policy(&coordinator, &first);
+    let _scope_registration_14 = register_policy(&coordinator, &other_scope);
     let spawn = |request: NativeIntegrationPreflightRequestV1, suffix: &'static str| {
         let coordinator = Arc::clone(&coordinator);
         let preflight = Arc::clone(&preflight);
@@ -741,7 +742,7 @@ fn different_request_identities_do_not_share_a_flight() {
 fn joined_timeout_leaves_the_owner_running_and_preserves_its_result() {
     let coordinator = DaemonGitHubStackCoordinatorV1::default();
     let request = preflight_request(650);
-    register_policy(&coordinator, &request);
+    let _scope_registration_15 = register_policy(&coordinator, &request);
     let cancellation = CancellationSignal::active("cancel.stack.timeout").unwrap();
     let release = tokio::sync::Notify::new();
     let preflight = EventPreflight {
@@ -792,7 +793,7 @@ fn joined_timeout_leaves_the_owner_running_and_preserves_its_result() {
 fn abandoned_owner_wakes_its_waiter_and_frees_admission() {
     let coordinator = DaemonGitHubStackCoordinatorV1::default();
     let request = preflight_request(700);
-    register_policy(&coordinator, &request);
+    let _scope_registration_16 = register_policy(&coordinator, &request);
     let cancellation = CancellationSignal::active("cancel.stack.abandoned").unwrap();
     run(async {
         let mut owner = Box::pin(coordinator.optional_preflight(
@@ -870,4 +871,94 @@ fn abandoned_owner_wakes_its_waiter_and_frees_admission() {
             "abandoned flights left no slot or registry entry behind"
         );
     });
+}
+
+#[tokio::test]
+async fn replaced_circuit_is_not_joined_or_reset_by_a_late_old_preflight() {
+    assert_remounted_circuit_isolation(false).await;
+}
+
+#[tokio::test]
+async fn same_policy_remount_does_not_join_or_reset_a_retired_circuit() {
+    assert_remounted_circuit_isolation(true).await;
+}
+
+async fn assert_remounted_circuit_isolation(same_policy: bool) {
+    let coordinator = DaemonGitHubStackCoordinatorV1::default();
+    let request = preflight_request(900);
+    let old_owner = coordinator
+        .register_circuit_policy(
+            &request.topology.destination,
+            StackCircuitPolicyV1 {
+                revision: 1,
+                policy_digest: digest('0'),
+                failure_threshold: 1,
+                open_micros: 100,
+            }
+            .seal()
+            .unwrap(),
+        )
+        .unwrap();
+    let release = tokio::sync::Notify::new();
+    let old = EventPreflight {
+        release: &release,
+        calls: Mutex::new(0),
+        outcome: Ok(NativeIntegrationPreflightOutcomeV1::Preview(Box::new(
+            complete_preview(),
+        ))),
+    };
+    let cancellation = CancellationSignal::active("cancel.stack.replaced").unwrap();
+    let mut old_flight =
+        Box::pin(coordinator.optional_preflight(&old, &request, &cancellation, UtcMicros(10)));
+    std::future::poll_fn(|cx| {
+        assert!(old_flight.as_mut().poll(cx).is_pending());
+        std::task::Poll::Ready(())
+    })
+    .await;
+    drop(old_owner);
+
+    let _replacement = coordinator
+        .register_circuit_policy(
+            &request.topology.destination,
+            StackCircuitPolicyV1 {
+                revision: if same_policy { 1 } else { 2 },
+                policy_digest: digest('0'),
+                failure_threshold: 1,
+                open_micros: 100,
+            }
+            .seal()
+            .unwrap(),
+        )
+        .unwrap();
+    let new = PreflightOutcomes {
+        outcomes: Mutex::new(VecDeque::from([Ok(
+            NativeIntegrationPreflightOutcomeV1::Unavailable,
+        )])),
+        calls: Mutex::new(0),
+    };
+    // An identical request under the new mount must run independently even
+    // when the policy bytes are unchanged.
+    assert_eq!(
+        coordinator
+            .optional_preflight(&new, &request, &cancellation, UtcMicros(20))
+            .await
+            .unwrap(),
+        OptionalPreflightV1::Completed(NativeIntegrationPreflightOutcomeV1::Unavailable),
+    );
+    release.notify_one();
+    assert!(matches!(
+        old_flight.await.unwrap(),
+        OptionalPreflightV1::Completed(NativeIntegrationPreflightOutcomeV1::Preview(_))
+    ));
+    // The old success closes only the old circuit. The replacement still
+    // owns its failure and open interval.
+    assert_eq!(
+        coordinator
+            .optional_preflight(&new, &request, &cancellation, UtcMicros(21))
+            .await
+            .unwrap(),
+        OptionalPreflightV1::SuppressedOpenCircuit,
+    );
+    assert_eq!(*old.calls.lock().unwrap(), 1);
+    assert_eq!(*new.calls.lock().unwrap(), 1);
 }

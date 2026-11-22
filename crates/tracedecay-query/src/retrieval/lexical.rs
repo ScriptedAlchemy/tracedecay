@@ -46,6 +46,7 @@ pub use self::projection::{
     PreparedCodeLexicalArtifactPageV1, VerifiedCodeLexicalArtifactV1,
     code_lexical_artifact_build_memory_budget_for, code_lexical_artifact_content_key,
 };
+pub(crate) use self::routes::names_identifier;
 pub use self::routes::{
     LEXICAL_ANCHOR_MATCH_SCORE_MICROS_V1, LexicalAliasV1, LexicalAlternativeReasonV1,
     LexicalAnchorOutcomeV1, LexicalAnchorReceiptV1, LexicalAnchorV1, LexicalQueryRouteV1,

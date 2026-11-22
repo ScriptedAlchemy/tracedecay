@@ -3,8 +3,8 @@ use std::collections::BTreeMap;
 
 use tracedecay_domain::{
     CalibrationProfileId, ComponentRevision, DiversityPolicy, ExactAdmissionRuleRevision,
-    ExactClass, FusionProfile, RankedCandidate, RetrieverBatch, RetrieverCoverage, RetrieverKind,
-    RetrieverOutcome, ScoreDomainCalibrationV1,
+    ExactClass, FusionProfile, RankedCandidate, RetrievalSourceRoleV1, RetrieverBatch,
+    RetrieverCoverage, RetrieverKind, RetrieverOutcome, ScoreDomainCalibrationV1,
 };
 use tracedecay_query::retrieval::exact::{
     CentralExactAdmissionAuthorityV1, ExactAdmissionAuthority, ExactLane, ExactLaneRequest,
@@ -24,7 +24,8 @@ use tracedecay_query::retrieval::{
 };
 
 use crate::candidate_producers::{
-    FixtureRetrievalExecutionControl, base_request, budget, id, query_view, rust_artifact,
+    FixtureRetrievalExecutionControl, SealedArtifactFixture, base_request, budget, id, query_view,
+    real_lexical_source_fixture_from_sources, rust_artifact, sealed_artifact,
 };
 
 /// The fixture files that each define an unrelated symbol named `callers`.
@@ -140,6 +141,10 @@ fn core_diversity() -> DiversityPolicy {
 /// composition, the way the daemon's search does.
 fn search(sources: &[String], query: &str) -> Vec<RankedCandidate> {
     let artifact = rust_artifact(&sources.iter().map(String::as_str).collect::<Vec<_>>());
+    search_artifact(&artifact, query)
+}
+
+fn search_artifact(artifact: &SealedArtifactFixture, query: &str) -> Vec<RankedCandidate> {
     let generation = artifact.metadata.generation.clone();
     let request = base_request(query, 32);
     let view = query_view(query);
@@ -226,8 +231,8 @@ fn file(ranked: &RankedCandidate) -> &str {
 }
 
 #[test]
-fn a_named_identifier_outranks_exact_matches_of_a_common_query_word() {
-    let ranked = search(&callers_sources(), "format_relative_time callers");
+fn a_named_identifier_outranks_an_explicit_exact_common_query_word() {
+    let ranked = search(&callers_sources(), "format_relative_time id:callers");
     let summary = ranked
         .iter()
         .map(|ranked| (file(ranked), ranked.candidate.utility_micros))
@@ -273,4 +278,141 @@ fn split_words_rank_the_identifier_they_spell_first() {
         .map(|ranked| (file(ranked), ranked.candidate.utility_micros))
         .collect::<Vec<_>>();
     assert_eq!(file(&ranked[0]), "file.fixture.0", "{summary:?}");
+}
+
+#[test]
+fn request_limit_question_outranks_unrelated_get_methods() {
+    let mut sources = vec![
+        "/// Enforces the per-request limit before admitting another operation.\n\
+         pub fn enforce_request_limit(remaining: usize) -> bool { remaining > 0 }\n"
+            .to_owned(),
+    ];
+    for index in 0..8 {
+        sources.push(format!(
+            "pub struct Unrelated{index};\nimpl Unrelated{index} {{\n\
+             pub fn get(&self) -> usize {{ {index} }}\n}}\n"
+        ));
+    }
+    let ranked = search(
+        &with_filler(sources),
+        "how does the per-request limit get enforced",
+    );
+    assert!(
+        !ranked.is_empty(),
+        "the documented implementation must be found"
+    );
+    let summary = ranked
+        .iter()
+        .map(|ranked| {
+            (
+                file(ranked),
+                ranked.candidate.source_role,
+                ranked.candidate.exact_class,
+                ranked.candidate.utility_micros,
+                ranked
+                    .candidate
+                    .contributions
+                    .iter()
+                    .map(|contribution| (contribution.retriever, contribution.raw_score))
+                    .collect::<Vec<_>>(),
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(file(&ranked[0]), "file.fixture.0", "{summary:?}");
+    assert_eq!(ranked[0].candidate.exact_class, ExactClass::Approximate);
+    assert!(
+        ranked
+            .iter()
+            .filter(|ranked| file(ranked) != "file.fixture.0")
+            .all(|ranked| ranked.candidate.source_role
+                != RetrievalSourceRoleV1::ProductionDefinition),
+        "incidental prose words cannot receive protected definition priority: {summary:?}"
+    );
+}
+
+#[test]
+fn request_limit_question_keeps_the_documented_typescript_caller_in_the_page() {
+    let mut sources = vec![
+        (
+            "file.limit".to_owned(),
+            "src/limit-cap.ts".to_owned(),
+            b"/** Enforces the per-request limit before admitting another operation. */\n\
+              export function enforceRequestLimit(remaining: number): boolean {\n\
+              \x20   return remaining > 0;\n\
+              }\n"
+            .to_vec(),
+        ),
+        (
+            "file.caller".to_owned(),
+            "src/check.ts".to_owned(),
+            b"import { enforceRequestLimit } from './limit-cap';\n\n\
+              /** Checks per-request limit enforcement before accepting a request. */\n\
+              export function checkRequest(remaining: number): boolean {\n\
+              \x20   return enforceRequestLimit(remaining);\n\
+              }\n"
+            .to_vec(),
+        ),
+        (
+            "file.plan".to_owned(),
+            "docs/plan.md".to_owned(),
+            b"# Scope\n\nCache storage and expiry.\n\n# Out of Scope\n\nNetwork transports.\n"
+                .to_vec(),
+        ),
+    ];
+    for index in 0..8 {
+        sources.push((
+            format!("file.cache.{index}"),
+            format!("scripts/cache_{index}.py"),
+            format!("class Cache{index}:\n    def get(self):\n        return {index}\n")
+                .into_bytes(),
+        ));
+        sources.push((
+            format!("file.unrelated.{index}"),
+            format!("src/unrelated_{index}.ts"),
+            format!("export const cap = {index};\n").into_bytes(),
+        ));
+    }
+    sources.sort_by(|left, right| left.1.cmp(&right.1));
+    let fixture = real_lexical_source_fixture_from_sources(sources);
+    let artifact = sealed_artifact(&fixture, fixture.metadata.clone());
+    let ranked = search_artifact(&artifact, "how does the per-request limit get enforced");
+    let summary = ranked
+        .iter()
+        .map(|ranked| {
+            (
+                file(ranked),
+                ranked.candidate.source_role,
+                ranked.candidate.exact_class,
+                ranked.candidate.utility_micros,
+                ranked
+                    .candidate
+                    .contributions
+                    .iter()
+                    .map(|contribution| (contribution.retriever, contribution.raw_score))
+                    .collect::<Vec<_>>(),
+            )
+        })
+        .collect::<Vec<_>>();
+    for required in ["file.limit", "file.caller"] {
+        assert!(
+            ranked.iter().take(6).any(|ranked| file(ranked) == required),
+            "the six-result question page must retain {required}: {summary:?}"
+        );
+    }
+    assert!(
+        matches!(ranked.first().map(file), Some("file.limit" | "file.caller")),
+        "the documented implementation must outrank unrelated get methods: {summary:?}"
+    );
+
+    let named = search_artifact(&artifact, "enforceRequestLimit");
+    assert_eq!(file(&named[0]), "file.limit");
+    assert_ne!(named[0].candidate.exact_class, ExactClass::Approximate);
+    let generic = search_artifact(&artifact, "get");
+    assert!(file(&generic[0]).starts_with("file.cache."));
+    assert_ne!(generic[0].candidate.exact_class, ExactClass::Approximate);
+    assert_eq!(
+        generic[0].candidate.source_role,
+        RetrievalSourceRoleV1::ProductionDefinition,
+        "a direct get query must retain definition admission"
+    );
 }

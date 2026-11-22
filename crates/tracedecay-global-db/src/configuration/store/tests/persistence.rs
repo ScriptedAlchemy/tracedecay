@@ -19,7 +19,7 @@ use crate::configuration::resolver::resolve_configuration;
 use tracedecay_domain::configuration::{
     CodeIndexWorkerSelectionV1, ConfigurationIdempotencyKey, ConfigurationLayerIdV1,
     ConfigurationMutationOperationV1, SettingKey, USER_CODE_INDEX_WORKERS_SETTING_KEY,
-    USER_REPEATED_QUERY_HINTS_SETTING_KEY,
+    USER_REPEATED_QUERY_HINTS_SETTING_KEY, USER_SESSION_RETENTION_DAYS_SETTING_KEY,
 };
 
 #[tokio::test]
@@ -104,6 +104,68 @@ async fn profile_worker_default_is_durable_and_project_registry_excludes_it() {
     );
 }
 
+#[tokio::test]
+async fn profile_retention_policy_survives_reopen_and_read_does_not_mutate() {
+    let directory = tempfile::tempdir().unwrap();
+    let profile_root = directory.path().join("profile");
+    let runtime = crate::tests::harness::RegisteredGlobalDbTestRuntime::profile(&profile_root)
+        .await
+        .unwrap();
+    let db = runtime.profile_database();
+    let profile_id = db.binding().shard_id.profile_id.clone();
+    let store = super::super::ProfileConfigurationStore::new_registered(db, &profile_id).unwrap();
+    assert!(
+        store.read().await.is_err(),
+        "read-only diagnostics never initialize a store"
+    );
+    let initial = store.read_or_initialize(UtcMicros(1)).await.unwrap();
+    assert_eq!(
+        initial
+            .value(USER_SESSION_RETENTION_DAYS_SETTING_KEY)
+            .unwrap(),
+        &ConfigurationValueV1::Unsigned(180)
+    );
+    let layer = ConfigurationLayerIdV1::UserProfile {
+        profile_id: profile_id.clone(),
+    };
+    let authority = control_authority_with_key_for_layer(
+        ConfigurationMutationOperationV1::DirectMutation,
+        &initial.revision_id,
+        Some(
+            ConfigurationIdempotencyKey::new("configuration.idempotency.session-retention")
+                .unwrap(),
+        ),
+        layer.clone(),
+    );
+    let committed = store
+        .commit_direct(
+            &authority,
+            &DirectConfigurationMutation::Set {
+                layer,
+                key: SettingKey::new(USER_SESSION_RETENTION_DAYS_SETTING_KEY).unwrap(),
+                value: Box::new(ConfigurationValueV1::Unsigned(30)),
+            },
+            &initial.revision_id,
+        )
+        .await
+        .unwrap();
+    assert_eq!(store.read().await.unwrap(), committed.current);
+    let runtime = runtime.reopen_profile_database_for_test().await.unwrap();
+    let db = runtime.profile_database();
+    let reopened = super::super::ProfileConfigurationStore::new_registered(db, &profile_id)
+        .unwrap()
+        .read()
+        .await
+        .unwrap();
+    assert_eq!(reopened, committed.current);
+    assert_eq!(
+        reopened
+            .value(USER_SESSION_RETENTION_DAYS_SETTING_KEY)
+            .unwrap(),
+        &ConfigurationValueV1::Unsigned(30)
+    );
+}
+
 /// A profile store written when it held only the worker selection converges
 /// onto the profile registry on first read: the operator's selection survives
 /// and the user settings resolve to their defaults.
@@ -181,6 +243,12 @@ async fn worker_only_profile_store_converges_onto_the_profile_registry() {
             .value(USER_REPEATED_QUERY_HINTS_SETTING_KEY)
             .unwrap(),
         &ConfigurationValueV1::Boolean(false)
+    );
+    assert_eq!(
+        converged
+            .value(USER_SESSION_RETENTION_DAYS_SETTING_KEY)
+            .unwrap(),
+        &ConfigurationValueV1::Unsigned(180)
     );
 }
 

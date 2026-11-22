@@ -149,7 +149,7 @@ async fn review_owner_observability_lane_records_capability_and_drift_receipts()
         observation_db: database.clone(),
     };
     let coordinator = DaemonGitHubStackCoordinatorV1::default();
-    coordinator
+    let _scope_registration_1 = coordinator
         .register_scope(&scope, GitHubStackedPullRequestPolicyV1::Disabled)
         .expect("register scope");
     let source_binding = source_binding(&scope);
@@ -229,7 +229,7 @@ async fn coordinator_drift_is_durable_closed_monotone_and_scope_denial_writes_no
     )
     .expect("stack probe owner");
     let coordinator = DaemonGitHubStackCoordinatorV1::default();
-    coordinator
+    let _scope_registration_2 = coordinator
         .register_scope(&scope, GitHubStackedPullRequestPolicyV1::Disabled)
         .expect("register scope");
     let source_binding = source_binding(&scope);

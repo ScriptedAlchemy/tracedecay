@@ -150,8 +150,9 @@ pub(super) struct DaemonEngine {
     /// but never owns its cadence or lifecycle.
     maintenance_coordinator: maintenance::MaintenanceCoordinator,
     /// PR reconciliation task, retained so shutdown never leaves it writing.
-    pr_autotrack_task:
-        Arc<tokio::sync::Mutex<Option<crate::daemon::pr_autotrack::PrAutotrackTask>>>,
+    legacy_pr_retirement_task: Arc<
+        tokio::sync::Mutex<Option<crate::daemon::legacy_pr_retirement::LegacyPrRetirementTask>>,
+    >,
 }
 
 #[tracing::instrument(
@@ -256,11 +257,11 @@ impl DaemonEngine {
         self
     }
 
-    pub(super) async fn with_pr_autotrack_task(
+    pub(super) async fn with_legacy_pr_retirement_task(
         self,
-        task: Option<crate::daemon::pr_autotrack::PrAutotrackTask>,
+        task: Option<crate::daemon::legacy_pr_retirement::LegacyPrRetirementTask>,
     ) -> Self {
-        *self.pr_autotrack_task.lock().await = task;
+        *self.legacy_pr_retirement_task.lock().await = task;
         self
     }
 

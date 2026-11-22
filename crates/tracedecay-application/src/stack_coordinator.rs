@@ -1,5 +1,5 @@
 use std::collections::BTreeMap;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Weak};
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
@@ -32,12 +32,6 @@ pub const MAX_GITHUB_STACK_LAYERS_V1: usize = 100;
 const PREFLIGHT_JOIN_WAIT_SLICE: Duration = Duration::from_millis(25);
 const PREFLIGHT_JOIN_TIMEOUT: Duration = Duration::from_secs(5);
 
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
-struct CircuitKey {
-    repository_id: RepositoryId,
-    scope_digest: ManifestDigest,
-}
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum CircuitState {
     Closed,
@@ -57,6 +51,9 @@ struct PreflightKey {
     scope_digest: ManifestDigest,
     revision_digest: ManifestDigest,
     request_digest: ManifestDigest,
+    // The flight retains this circuit allocation until settlement. A new
+    // registration, even with identical policy bytes, cannot join its result.
+    circuit_registration: usize,
 }
 
 struct InFlight {
@@ -236,10 +233,18 @@ struct ScopeRegistration {
 /// Publication is refused unless that same registration is still current, so
 /// a read spanning a policy change, including a change and its reversal,
 /// cannot publish. Dropping it abandons the read without touching state.
-#[derive(Debug)]
 pub struct GitHubStackProviderReadV1 {
-    scope: ResolvedScope,
+    scope: Arc<RetainedScope>,
     registration: ScopeRegistrationId,
+}
+
+impl std::fmt::Debug for GitHubStackProviderReadV1 {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("GitHubStackProviderReadV1")
+            .field("scope", &self.scope.scope)
+            .finish_non_exhaustive()
+    }
 }
 
 /// Who derived an observation and under which registration.
@@ -265,72 +270,161 @@ struct PublishedObservation {
     observation: GitHubStackObservationV1,
 }
 
-/// A scope's registration, latest observation and open drift intervals
-/// advance together under one lock.
+/// All retained state belongs to one mounted scope. The coordinator only
+/// keeps weak references; accepted provider reads and preflights retain the
+/// same scope until their work settles.
 #[derive(Default)]
 struct ScopeObservationState {
     registration: Option<ScopeRegistration>,
     current: Option<PublishedObservation>,
     drift_intervals: Vec<DriftInterval>,
+    circuit: Option<Arc<ScopeCircuit>>,
+}
+
+struct ScopeCircuit {
+    policy: StackCircuitPolicyV1,
+    status: Mutex<Circuit>,
+}
+
+type ScopeRegistry = Mutex<BTreeMap<ManifestDigest, Weak<MountedScope>>>;
+
+struct RetainedScope {
+    scope: ResolvedScope,
+    state: Mutex<ScopeObservationState>,
+    // Serialize a scope's debounced appends, not every project's store I/O.
+    dedupe: tokio::sync::Mutex<BTreeMap<(StackSignalKindV1, ManifestDigest), UtcMicros>>,
+}
+
+/// Mounted owners share this token. Accepted operations retain only its
+/// state, so a draining operation cannot extend the mounted registration or
+/// let a later mount inherit its policy, observations or circuit.
+struct MountedScope {
+    retained: Arc<RetainedScope>,
+    registry: Weak<ScopeRegistry>,
+}
+
+impl Drop for MountedScope {
+    fn drop(&mut self) {
+        let Some(registry) = self.registry.upgrade() else {
+            return;
+        };
+        let mut scopes = match registry.lock() {
+            Ok(scopes) => scopes,
+            Err(error) => {
+                tracing::warn!("GitHub stack scope retirement recovered a poisoned registry");
+                error.into_inner()
+            }
+        };
+        if scopes
+            .get(&self.retained.scope.scope_digest)
+            .is_some_and(|entry| std::ptr::eq(entry.as_ptr(), self))
+        {
+            scopes.remove(&self.retained.scope.scope_digest);
+        }
+    }
+}
+
+/// A mounted lifetime owns this handle; accepted work retains its state only.
+/// Retiring an old handle cannot remove a replacement scope registration.
+#[derive(Clone)]
+#[must_use = "retain the scope handle for the mounted runtime lifetime"]
+pub struct GitHubStackScopeV1(Arc<MountedScope>);
+
+impl std::fmt::Debug for GitHubStackScopeV1 {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_tuple("GitHubStackScopeV1")
+            .field(&self.0.retained.scope)
+            .finish()
+    }
 }
 
 #[derive(Default)]
 pub struct DaemonGitHubStackCoordinatorV1 {
-    observation_states: Mutex<BTreeMap<ManifestDigest, ScopeObservationState>>,
-    circuit_policies: Mutex<BTreeMap<ManifestDigest, StackCircuitPolicyV1>>,
-    /// Held across the append so a duplicate debounced signal racing the
-    /// first one cannot append twice.
-    dedupe: tokio::sync::Mutex<
-        BTreeMap<(ManifestDigest, StackSignalKindV1, ManifestDigest), UtcMicros>,
-    >,
-    circuits: Mutex<BTreeMap<CircuitKey, Circuit>>,
+    scopes: Arc<ScopeRegistry>,
     preflights: Mutex<PreflightState>,
 }
 
 impl DaemonGitHubStackCoordinatorV1 {
+    pub fn retain_scope(
+        &self,
+        scope: &ResolvedScope,
+    ) -> Result<GitHubStackScopeV1, GitHubStackCoordinatorErrorV1> {
+        scope
+            .validate()
+            .map_err(|_| GitHubStackCoordinatorErrorV1::InvalidScope)?;
+        let mut scopes = self
+            .scopes
+            .lock()
+            .map_err(|_| GitHubStackCoordinatorErrorV1::Poisoned)?;
+        if let Some(retained) = scopes.get(&scope.scope_digest).and_then(Weak::upgrade) {
+            if retained.retained.scope != *scope {
+                drop(scopes);
+                return Err(GitHubStackCoordinatorErrorV1::InvalidScope);
+            }
+            return Ok(GitHubStackScopeV1(retained));
+        }
+        let retained = Arc::new(MountedScope {
+            retained: Arc::new(RetainedScope {
+                scope: scope.clone(),
+                state: Mutex::new(ScopeObservationState::default()),
+                dedupe: tokio::sync::Mutex::new(BTreeMap::new()),
+            }),
+            registry: Arc::downgrade(&self.scopes),
+        });
+        scopes.insert(scope.scope_digest.clone(), Arc::downgrade(&retained));
+        Ok(GitHubStackScopeV1(retained))
+    }
+
     pub fn register_scope(
         &self,
         scope: &ResolvedScope,
         policy: GitHubStackedPullRequestPolicyV1,
-    ) -> Result<(), GitHubStackCoordinatorErrorV1> {
-        scope
-            .validate()
-            .map_err(|_| GitHubStackCoordinatorErrorV1::InvalidScope)?;
-        let mut states = self
-            .observation_states
-            .lock()
-            .map_err(|_| GitHubStackCoordinatorErrorV1::Poisoned)?;
-        let state = states.entry(scope.scope_digest.clone()).or_default();
-        // A changed policy is a new registration: reads it authorized can no
-        // longer publish, and its snapshot stops being a drift baseline while
-        // its timestamp still fences late samples. Re-registering an unchanged
-        // policy keeps the registration and its in-flight reads.
-        if state
-            .registration
-            .as_ref()
-            .is_none_or(|registration| registration.policy != policy)
+    ) -> Result<GitHubStackScopeV1, GitHubStackCoordinatorErrorV1> {
+        let retained = self.retain_scope(scope)?;
         {
-            state.registration = Some(ScopeRegistration {
-                id: ScopeRegistrationId::new(),
-                policy,
-            });
+            let mut state = retained
+                .0
+                .retained
+                .state
+                .lock()
+                .map_err(|_| GitHubStackCoordinatorErrorV1::Poisoned)?;
+            // A changed policy invalidates earlier reads, including a change
+            // followed by its reversal. An unchanged policy retains its epoch.
+            if state
+                .registration
+                .as_ref()
+                .is_none_or(|registration| registration.policy != policy)
+            {
+                state.registration = Some(ScopeRegistration {
+                    id: ScopeRegistrationId::new(),
+                    policy,
+                });
+            }
         }
-        Ok(())
+        Ok(retained)
     }
 
-    /// Authorizes one provider stack read when the scope's current
-    /// registration probes the private preview; `None` means no read may run.
+    /// Capture authorization and the scope lifetime before network I/O.
     pub fn authorize_provider_read(
         &self,
         scope: &ResolvedScope,
     ) -> Result<Option<GitHubStackProviderReadV1>, GitHubStackCoordinatorErrorV1> {
-        Ok(self
-            .registration(scope)?
+        let retained = self.retain_scope(scope)?;
+        let registration = retained
+            .0
+            .retained
+            .state
+            .lock()
+            .map_err(|_| GitHubStackCoordinatorErrorV1::Poisoned)?
+            .registration
+            .clone();
+        Ok(registration
             .filter(|registration| {
                 registration.policy == GitHubStackedPullRequestPolicyV1::ProbePrivatePreview
             })
             .map(|registration| GitHubStackProviderReadV1 {
-                scope: scope.clone(),
+                scope: Arc::clone(&retained.0.retained),
                 registration: registration.id,
             }))
     }
@@ -339,16 +433,16 @@ impl DaemonGitHubStackCoordinatorV1 {
         &self,
         scope: &ResolvedScope,
     ) -> Result<Option<ScopeRegistration>, GitHubStackCoordinatorErrorV1> {
-        scope
-            .validate()
-            .map_err(|_| GitHubStackCoordinatorErrorV1::InvalidScope)?;
-        let states = self
-            .observation_states
+        let retained = self.retain_scope(scope)?;
+        let registration = retained
+            .0
+            .retained
+            .state
             .lock()
-            .map_err(|_| GitHubStackCoordinatorErrorV1::Poisoned)?;
-        Ok(states
-            .get(&scope.scope_digest)
-            .and_then(|state| state.registration.clone()))
+            .map_err(|_| GitHubStackCoordinatorErrorV1::Poisoned)?
+            .registration
+            .clone();
+        Ok(registration)
     }
 
     pub fn observe_policy(
@@ -401,12 +495,13 @@ impl DaemonGitHubStackCoordinatorV1 {
             scope,
             registration,
         } = read;
+        let resolved_scope = scope.scope.clone();
         let state = outcome.capability_state();
         let response_digest = match outcome.response_digest() {
             Some(digest) => digest.clone(),
             None => canonical_sha256(&(
                 "tracedecay.github-stack.unavailable.v1",
-                &scope.scope_digest,
+                &resolved_scope.scope_digest,
                 observed_at,
             ))
             .map_err(|_| GitHubStackCoordinatorErrorV1::InvalidProviderObservation)?,
@@ -416,7 +511,7 @@ impl DaemonGitHubStackCoordinatorV1 {
             _ => None,
         };
         self.store_observation(
-            scope,
+            resolved_scope,
             provider,
             state,
             GitHubStackObservationMaterial {
@@ -433,39 +528,55 @@ impl DaemonGitHubStackCoordinatorV1 {
         &self,
         scope: &ResolvedScope,
         policy: StackCircuitPolicyV1,
-    ) -> Result<(), StackCoordinatorErrorV1> {
-        scope.validate().map_err(invalid)?;
+    ) -> Result<GitHubStackScopeV1, StackCoordinatorErrorV1> {
         policy.validate()?;
-        self.circuit_policies
-            .lock()
-            .map_err(lock_error)?
-            .insert(scope.scope_digest.clone(), policy);
-        Ok(())
+        let retained = self
+            .retain_scope(scope)
+            .map_err(|error| invalid(format!("{error:?}")))?;
+        {
+            let mut state = retained.0.retained.state.lock().map_err(lock_error)?;
+            if state
+                .circuit
+                .as_ref()
+                .is_none_or(|circuit| circuit.policy != policy)
+            {
+                state.circuit = Some(Arc::new(ScopeCircuit {
+                    policy,
+                    status: Mutex::new(Circuit {
+                        state: CircuitState::Closed,
+                        failures: 0,
+                    }),
+                }));
+            }
+        }
+        Ok(retained)
     }
 
     pub fn restore_open_drift_interval(
         &self,
         scope: &ResolvedScope,
         observation: &GitHubStackDriftObservationV1,
-    ) -> Result<(), GitHubStackCoordinatorErrorV1> {
+    ) -> Result<GitHubStackScopeV1, GitHubStackCoordinatorErrorV1> {
         let interval = transition::restored_open_interval(scope, observation)?;
-        let mut states = self
-            .observation_states
-            .lock()
-            .map_err(|_| GitHubStackCoordinatorErrorV1::Poisoned)?;
-        let active = &mut states
-            .entry(scope.scope_digest.clone())
-            .or_default()
-            .drift_intervals;
-        if let Some(existing) = active
-            .iter_mut()
-            .find(|existing| existing.kind == interval.kind)
+        let retained = self.retain_scope(scope)?;
         {
-            *existing = interval;
-        } else {
-            active.push(interval);
+            let mut state = retained
+                .0
+                .retained
+                .state
+                .lock()
+                .map_err(|_| GitHubStackCoordinatorErrorV1::Poisoned)?;
+            if let Some(existing) = state
+                .drift_intervals
+                .iter_mut()
+                .find(|existing| existing.kind == interval.kind)
+            {
+                *existing = interval;
+            } else {
+                state.drift_intervals.push(interval);
+            }
         }
-        Ok(())
+        Ok(retained)
     }
 
     #[tracing::instrument(name = "usecases.stack.enqueue", level = "trace", skip_all)]
@@ -477,6 +588,19 @@ impl DaemonGitHubStackCoordinatorV1 {
         signal: StackSignalV1,
     ) -> Result<(), StackCoordinatorErrorV1> {
         signal.validate(scope)?;
+        // Capture this invocation's state before authorization can suspend.
+        // A remount while it waits must not inherit this append's dedupe key.
+        let retained = if signal.kind.is_material() {
+            None
+        } else {
+            Some(Arc::clone(
+                &self
+                    .retain_scope(scope)
+                    .map_err(|error| invalid(format!("{error:?}")))?
+                    .0
+                    .retained,
+            ))
+        };
         let mut recipients = authorization.select_recipients(scope, &signal)?;
         let requested = recipients.len();
         recipients.sort();
@@ -503,15 +627,11 @@ impl DaemonGitHubStackCoordinatorV1 {
                 return Err(StackCoordinatorErrorV1::Denied);
             }
         }
-        if signal.kind.is_material() {
+        let Some(retained) = retained else {
             return store.append_signal(signal, authorized).await;
-        }
-        let key = (
-            signal.scope_digest.clone(),
-            signal.kind,
-            signal.state_digest.clone(),
-        );
-        let mut dedupe = self.dedupe.lock().await;
+        };
+        let key = (signal.kind, signal.state_digest.clone());
+        let mut dedupe = retained.dedupe.lock().await;
         dedupe.retain(|_, seen| signal.observed_at.0.saturating_sub(seen.0) <= DEDUPE_TTL_MICROS);
         if dedupe.contains_key(&key) {
             return Ok(());
@@ -572,24 +692,28 @@ impl DaemonGitHubStackCoordinatorV1 {
                 ));
             }
         };
+        let scope = Arc::clone(
+            &self
+                .retain_scope(&request.topology.destination)
+                .map_err(|error| invalid(format!("{error:?}")))?
+                .0
+                .retained,
+        );
+        let circuit = scope
+            .state
+            .lock()
+            .map_err(lock_error)?
+            .circuit
+            .clone()
+            .ok_or(StackCoordinatorErrorV1::Unavailable)?;
         let key = PreflightKey {
             repository_id: request.topology.destination.repository_id.clone(),
             scope_digest: request.topology.destination.scope_digest.clone(),
             revision_digest,
             request_digest: canonical_sha256(request).map_err(invalid)?,
+            circuit_registration: Arc::as_ptr(&circuit) as usize,
         };
-        let circuit_key = CircuitKey {
-            repository_id: key.repository_id.clone(),
-            scope_digest: key.scope_digest.clone(),
-        };
-        let policy = self
-            .circuit_policies
-            .lock()
-            .map_err(lock_error)?
-            .get(&key.scope_digest)
-            .cloned()
-            .ok_or(StackCoordinatorErrorV1::Unavailable)?;
-        if !self.admit_circuit(&circuit_key, now)? {
+        if !Self::admit_circuit(&circuit, now)? {
             return Ok(OptionalPreflightV1::SuppressedOpenCircuit);
         }
         let (flight, owner) = {
@@ -606,7 +730,7 @@ impl DaemonGitHubStackCoordinatorV1 {
                         >= MAX_REPOSITORY_PREFLIGHTS
                 {
                     drop(state);
-                    self.fail_circuit(&circuit_key, &policy, now)?;
+                    Self::fail_circuit(&circuit, now)?;
                     return Ok(OptionalPreflightV1::Saturated);
                 }
                 state.daemon_active += 1;
@@ -636,7 +760,7 @@ impl DaemonGitHubStackCoordinatorV1 {
                 }
                 let now_instant = Instant::now();
                 if now_instant >= deadline {
-                    self.fail_circuit(&circuit_key, &policy, now)?;
+                    Self::fail_circuit(&circuit, now)?;
                     return Err(StackCoordinatorErrorV1::Unavailable);
                 }
                 let _ = native_runtime::timeout(
@@ -650,8 +774,8 @@ impl DaemonGitHubStackCoordinatorV1 {
             coordinator: self,
             key,
             flight,
-            circuit_key,
-            policy,
+            _scope: scope,
+            circuit,
             now,
             finished: false,
         };
@@ -660,59 +784,41 @@ impl DaemonGitHubStackCoordinatorV1 {
     }
 
     fn admit_circuit(
-        &self,
-        key: &CircuitKey,
+        circuit: &ScopeCircuit,
         now: UtcMicros,
     ) -> Result<bool, StackCoordinatorErrorV1> {
-        let mut circuits = self.circuits.lock().map_err(lock_error)?;
-        let circuit = circuits.entry(key.clone()).or_insert(Circuit {
-            state: CircuitState::Closed,
-            failures: 0,
-        });
-        match circuit.state {
+        let mut status = circuit.status.lock().map_err(lock_error)?;
+        match status.state {
             CircuitState::Closed => Ok(true),
             CircuitState::Open { until } if now.0 >= until.0 => {
-                circuit.state = CircuitState::HalfOpenProbe;
+                status.state = CircuitState::HalfOpenProbe;
                 Ok(true)
             }
             CircuitState::Open { .. } | CircuitState::HalfOpenProbe => Ok(false),
         }
     }
 
-    fn fail_circuit(
-        &self,
-        key: &CircuitKey,
-        policy: &StackCircuitPolicyV1,
-        now: UtcMicros,
-    ) -> Result<(), StackCoordinatorErrorV1> {
-        let mut circuits = self.circuits.lock().map_err(lock_error)?;
-        let circuit = circuits.entry(key.clone()).or_insert(Circuit {
-            state: CircuitState::Closed,
-            failures: 0,
-        });
-        circuit.failures = circuit.failures.saturating_add(1);
-        if circuit.failures >= policy.failure_threshold
-            || circuit.state == CircuitState::HalfOpenProbe
+    fn fail_circuit(circuit: &ScopeCircuit, now: UtcMicros) -> Result<(), StackCoordinatorErrorV1> {
+        let mut status = circuit.status.lock().map_err(lock_error)?;
+        status.failures = status.failures.saturating_add(1);
+        if status.failures >= circuit.policy.failure_threshold
+            || status.state == CircuitState::HalfOpenProbe
         {
-            circuit.state = CircuitState::Open {
-                until: UtcMicros(now.0.saturating_add(policy.open_micros)),
+            status.state = CircuitState::Open {
+                until: UtcMicros(now.0.saturating_add(circuit.policy.open_micros)),
             };
         }
         Ok(())
     }
 
     fn reopen_half_open(
-        &self,
-        key: &CircuitKey,
-        policy: &StackCircuitPolicyV1,
+        circuit: &ScopeCircuit,
         now: UtcMicros,
     ) -> Result<(), StackCoordinatorErrorV1> {
-        let mut circuits = self.circuits.lock().map_err(lock_error)?;
-        if let Some(circuit) = circuits.get_mut(key)
-            && circuit.state == CircuitState::HalfOpenProbe
-        {
-            circuit.state = CircuitState::Open {
-                until: UtcMicros(now.0.saturating_add(policy.open_micros)),
+        let mut status = circuit.status.lock().map_err(lock_error)?;
+        if status.state == CircuitState::HalfOpenProbe {
+            status.state = CircuitState::Open {
+                until: UtcMicros(now.0.saturating_add(circuit.policy.open_micros)),
             };
         }
         Ok(())
@@ -809,11 +915,13 @@ impl DaemonGitHubStackCoordinatorV1 {
             .map_err(|_| GitHubStackCoordinatorErrorV1::InvalidProviderObservation)?;
         // Serialize comparison, interval update, and snapshot publication under
         // one scope-state transition. No network or storage I/O occurs while held.
-        let mut states = self
-            .observation_states
+        let retained = self.retain_scope(&scope)?;
+        let mut state = retained
+            .0
+            .retained
+            .state
             .lock()
             .map_err(|_| GitHubStackCoordinatorErrorV1::Poisoned)?;
-        let state = states.entry(scope.scope_digest.clone()).or_default();
         // The observation was derived under the registration it names. Policy
         // and provider authority both end when that registration is replaced.
         if !same_registration(
@@ -887,8 +995,8 @@ struct OwnedFlight<'a> {
     coordinator: &'a DaemonGitHubStackCoordinatorV1,
     key: PreflightKey,
     flight: Arc<InFlight>,
-    circuit_key: CircuitKey,
-    policy: StackCircuitPolicyV1,
+    _scope: Arc<RetainedScope>,
+    circuit: Arc<ScopeCircuit>,
     now: UtcMicros,
     finished: bool,
 }
@@ -920,20 +1028,21 @@ impl OwnedFlight<'_> {
             // Settle before a successor can acquire the freed admission slot.
             match effect {
                 CircuitEffect::Close => self
-                    .coordinator
-                    .circuits
+                    .circuit
+                    .status
                     .lock()
-                    .map(|mut circuits| {
-                        circuits.remove(&self.circuit_key);
+                    .map(|mut status| {
+                        *status = Circuit {
+                            state: CircuitState::Closed,
+                            failures: 0,
+                        };
                     })
                     .map_err(lock_error),
                 CircuitEffect::Fail => {
-                    self.coordinator
-                        .fail_circuit(&self.circuit_key, &self.policy, self.now)
+                    DaemonGitHubStackCoordinatorV1::fail_circuit(&self.circuit, self.now)
                 }
                 CircuitEffect::ReopenHalfOpen => {
-                    self.coordinator
-                        .reopen_half_open(&self.circuit_key, &self.policy, self.now)
+                    DaemonGitHubStackCoordinatorV1::reopen_half_open(&self.circuit, self.now)
                 }
             }
         })();

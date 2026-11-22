@@ -385,6 +385,38 @@ pub(crate) async fn run_update_command(
     update_completion(outcome.refresh, &outcome.reset_required)
 }
 
+pub(crate) fn preview_update_command(
+    profile: &ProfileRoot,
+    no_reinstall: bool,
+    upgrade_only: bool,
+) -> tracedecay_domain::errors::Result<HostLifecycleCompletion> {
+    let may_install = crate::upgrade::preview_upgrade()?;
+    if upgrade_only && !may_install {
+        return Ok(HostLifecycleCompletion::Complete);
+    }
+    eprintln!("Would refresh the installed daemon service and restore its prior lifecycle state.");
+    if no_reinstall {
+        eprintln!("Host integration refresh is disabled by --no-reinstall.");
+    } else {
+        let config = load_host_lifecycle_user_config(profile)?;
+        let home =
+            profile
+                .home()
+                .ok_or_else(|| tracedecay_domain::errors::TraceDecayError::Config {
+                    message: "could not determine home directory for the host refresh preview"
+                        .to_string(),
+                })?;
+        let agents =
+            crate::agent_cmd::maintenance_sweep_agents(profile, &config.installed_agents, home);
+        if agents.is_empty() {
+            eprintln!("No configured host integrations were found to refresh.");
+        } else {
+            eprintln!("Host integrations to refresh: {}", agents.join(", "));
+        }
+    }
+    Ok(HostLifecycleCompletion::Complete)
+}
+
 /// `update` keeps a successful binary upgrade while reporting the refresh as
 /// what it was: a failed refresh fails the command, a pending host step or a
 /// store the restored daemon serves reset-required exits with the

@@ -115,7 +115,6 @@ pub use settings_api::{
     DashboardCodeIndexWorkerConfigurationV1, DashboardCodeIndexWorkerSettingsCommitFuture,
     DashboardCodeIndexWorkerSettingsCommitV1, DashboardCodeIndexWorkerSettingsErrorV1,
     DashboardCodeIndexWorkerSettingsFuture, DashboardProfileCodeIndexWorkerSettingsPort,
-    PrAutoTrackManagedSummaryEntryV1, PrAutoTrackManagedSummaryReader,
 };
 mod storage_telemetry_api;
 mod token_count;

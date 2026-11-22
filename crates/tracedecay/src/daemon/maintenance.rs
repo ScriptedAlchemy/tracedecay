@@ -462,6 +462,36 @@ async fn join_cancelled_maintenance_task<Output: Clone + Send + Sync + 'static>(
     );
 }
 
+async fn configured_profile_retention(
+    administration: &StoreAdministration,
+    base: &tracedecay_configuration::RetentionConfig,
+    session_policy: &std::sync::OnceLock<tracedecay_lcm::LcmRetentionConfig>,
+) -> tracedecay_domain::errors::Result<tracedecay_configuration::RetentionConfig> {
+    let mut retention = base.clone();
+    retention.session_lcm = match session_policy.get() {
+        Some(policy) => *policy,
+        None => {
+            let identity = administration.profile_identity()?;
+            let database = administration.registered_profile_session_database().await?;
+            let configuration =
+                tracedecay_project::config::read_or_initialize_profile_configuration(
+                    database,
+                    identity.profile_id(),
+                )
+                .await?;
+            let policy = tracedecay_configuration::config::session_retention_from_profile_snapshot(
+                &configuration.snapshot,
+            )?;
+            // These settings require a daemon restart. Keep the admitted
+            // policy across bounded continuations and transient store outages.
+            *session_policy.get_or_init(|| policy)
+        }
+    };
+    // A coordinator whose owner disabled session maintenance remains disabled.
+    retention.session_lcm.enabled &= base.session_lcm.enabled;
+    Ok(retention)
+}
+
 #[tracing::instrument(
     name = "daemon.maintenance.registered_store_retention",
     level = "trace",
@@ -659,7 +689,7 @@ async fn run_registered_storage_continuation(
         }
     };
     let session_lcm =
-        tracedecay_maintenance::retention::registered_store::run_session_storage_compaction(
+        tracedecay_maintenance::retention::registered_store::run_session_retention_continuation(
             database,
             &config.session_lcm,
             now,
@@ -1284,12 +1314,14 @@ impl MaintenanceCoordinator {
         branch_gc: BranchStoreGcCadenceV1,
         interval: Duration,
     ) {
+        let session_policy = std::sync::OnceLock::new();
         run_maintenance_loop(&self.cancellation, &self.wake, interval, |continuation| {
-            let (profile_root, administration, code_index_schedulers, retention) = (
+            let (profile_root, administration, code_index_schedulers, retention, session_policy) = (
                 &profile_root,
                 &administration,
                 &code_index_schedulers,
                 &retention,
+                &session_policy,
             );
             async move {
                 // Resolved per tick: a reset-required profile authority keeps
@@ -1312,14 +1344,38 @@ impl MaintenanceCoordinator {
                         return MaintenanceTickOutcome::Retry;
                     }
                 };
+                let (configured_retention, policy_outcome) =
+                    match configured_profile_retention(administration, retention, session_policy)
+                        .await
+                    {
+                        Ok(retention) => (retention, MaintenanceTickOutcome::Complete),
+                        Err(error) => {
+                            log_daemon_event(
+                                "retention_degraded",
+                                &[
+                                    ("pass", "maintenance_tick".to_owned()),
+                                    ("failure", "profile_retention_policy_unavailable".to_owned()),
+                                    ("error", error.to_string()),
+                                ],
+                            );
+                            // Unknown session policy cannot authorize deletion,
+                            // but independent graph/footprint work must progress.
+                            // A failed read is never cached, so a later tick
+                            // retries the canonical profile authority.
+                            let mut disabled = retention.clone();
+                            disabled.session_lcm.enabled = false;
+                            (disabled, MaintenanceTickOutcome::Retry)
+                        }
+                    };
                 self.run_tick(
                     profile_root,
                     &profile_database,
                     administration,
                     code_index_schedulers,
-                    retention,
+                    &configured_retention,
                     branch_gc,
                     continuation,
+                    policy_outcome,
                 )
                 .await
             }
@@ -1345,6 +1401,7 @@ impl MaintenanceCoordinator {
         retention: &tracedecay_configuration::RetentionConfig,
         branch_gc: BranchStoreGcCadenceV1,
         continuation: Option<MaintenanceContinuation>,
+        policy_outcome: MaintenanceTickOutcome,
     ) -> MaintenanceTickOutcome {
         let Some(background_cpu) = self.background_cpu.as_ref() else {
             log_daemon_event(
@@ -1536,13 +1593,13 @@ impl MaintenanceCoordinator {
         // Bounded, round-robin slice of mounted stores. Writer admission is
         // per unit so one busy store defers only itself, and the cursor
         // advances past attempted units even on cancellation. A continuation
-        // advances bounded lossless storage work and code-generation retention
+        // advances bounded session retention and code-generation retention
         // over the same bounded store window rather than pinning one project.
         // CPU capacity belongs to actual work, never a queued acquisition.
         drop(tick_cpu);
         let mut attempted = 0usize;
         let mut deferred = 0u64;
-        let mut outcome = MaintenanceTickOutcome::Complete;
+        let mut outcome = policy_outcome;
         for &index in &window {
             if self.cancellation.is_cancelled() {
                 outcome = MaintenanceTickOutcome::Retry;
@@ -2037,6 +2094,100 @@ mod tests {
     use tracedecay_maintenance::tick::{MaintenanceContinuation, MaintenanceTickOutcome};
     use tracedecay_runtime_core::cancellation::CancellationToken;
     use tracedecay_runtime_core::native_runtime;
+
+    #[test]
+    fn profile_session_policy_changes_take_effect_after_owner_restart() {
+        native_runtime::block_on(async {
+            use tracedecay_domain::configuration::{
+                ConfigurationGrantId, ConfigurationGrantReceiptId, ConfigurationIdempotencyKey,
+                ConfigurationLayerIdV1, ConfigurationMutationEffectV1,
+                ConfigurationMutationGrantReceiptV1, ConfigurationMutationOperationV1,
+                ConfigurationMutationSinkV1, ConfigurationValueV1, SettingKey,
+                USER_SESSION_RETENTION_DAYS_SETTING_KEY,
+            };
+            use tracedecay_domain::{AccessPolicyDigest, ActorId, UtcMicros};
+            use tracedecay_global_db::configuration::ProfileConfigurationStore;
+            use tracedecay_global_db::configuration::contracts::{
+                ConfigurationMutationAuthority, DirectConfigurationMutation,
+            };
+
+            let temporary = tempfile::tempdir().expect("profile root");
+            let administration =
+                crate::daemon::tests::test_store_administration_for_profile(temporary.path());
+            let base = tracedecay_configuration::RetentionConfig::default();
+            let running = std::sync::OnceLock::new();
+            let initial = super::configured_profile_retention(&administration, &base, &running)
+                .await
+                .expect("canonical initial policy");
+            assert_eq!(initial.session_lcm.drop_after_days, Some(180));
+
+            let database = administration
+                .registered_profile_session_database()
+                .await
+                .expect("profile sessions");
+            let profile_id = administration
+                .profile_identity()
+                .unwrap()
+                .profile_id()
+                .clone();
+            let store = ProfileConfigurationStore::new_registered(&database, &profile_id).unwrap();
+            let before = store.read().await.unwrap();
+            let mutation = DirectConfigurationMutation::Set {
+                layer: ConfigurationLayerIdV1::UserProfile { profile_id },
+                key: SettingKey::new(USER_SESSION_RETENTION_DAYS_SETTING_KEY).unwrap(),
+                value: Box::new(ConfigurationValueV1::Unsigned(7)),
+            };
+            let authority = ConfigurationMutationAuthority {
+                receipt: ConfigurationMutationGrantReceiptV1::issue(
+                    ConfigurationGrantReceiptId::new("configuration.grant-receipt.retention")
+                        .unwrap(),
+                    ConfigurationGrantId::new("configuration.grant.retention").unwrap(),
+                    ActorId::new("actor.retention-test").unwrap(),
+                    ConfigurationMutationOperationV1::DirectMutation,
+                    mutation.target_scope_digest().unwrap(),
+                    before.revision_id.clone(),
+                    1,
+                    AccessPolicyDigest::new(format!("sha256:{}", "a".repeat(64))).unwrap(),
+                    ConfigurationMutationSinkV1::ConfigurationStore,
+                    ConfigurationMutationEffectV1::CommitConfigurationRevision,
+                    Some(
+                        ConfigurationIdempotencyKey::new("configuration.idempotency.retention")
+                            .unwrap(),
+                    ),
+                    UtcMicros(1),
+                    UtcMicros(100),
+                )
+                .unwrap(),
+            };
+            store
+                .commit_direct(&authority, &mutation, &before.revision_id)
+                .await
+                .expect("persist updated policy");
+            let continued = super::configured_profile_retention(&administration, &base, &running)
+                .await
+                .unwrap();
+            assert_eq!(continued.session_lcm, initial.session_lcm);
+            let restarted = super::configured_profile_retention(
+                &administration,
+                &base,
+                &std::sync::OnceLock::new(),
+            )
+            .await
+            .unwrap();
+            assert_eq!(restarted.session_lcm.drop_after_days, Some(7));
+            let mut disabled_owner = base;
+            disabled_owner.session_lcm.enabled = false;
+            assert!(
+                !super::configured_profile_retention(&administration, &disabled_owner, &running)
+                    .await
+                    .unwrap()
+                    .session_lcm
+                    .enabled,
+                "a cached profile policy cannot enable a disabled maintenance owner"
+            );
+        })
+        .expect("native runtime");
+    }
 
     #[test]
     fn terminal_storage_failure_is_retry_and_rolls_back_progress() {
@@ -3065,7 +3216,11 @@ mod tests {
             tracedecay_code_index_runtime::code_index_scheduler::CodeIndexSchedulerRegistryV1::new(
                 1,
             );
-        let retention = tracedecay_configuration::RetentionConfig::default();
+        let mut retention = tracedecay_configuration::RetentionConfig::default();
+        // A missing profile session policy disables only that phase. Both
+        // stores and profile housekeeping must still progress, while the tick
+        // remains visibly retryable until the policy becomes available.
+        retention.session_lcm.enabled = false;
         let branch_gc = super::BranchStoreGcCadenceV1 { branch_gc_days: 30 };
         assert_eq!(generation_files(), 6);
 
@@ -3079,6 +3234,7 @@ mod tests {
                 &retention,
                 branch_gc,
                 None,
+                MaintenanceTickOutcome::Retry,
             )
             .await;
         assert_eq!(deferred, MaintenanceTickOutcome::Retry);
@@ -3128,6 +3284,7 @@ mod tests {
                     &retention,
                     branch_gc,
                     None,
+                    MaintenanceTickOutcome::Retry,
                 ),
             )
             .await
@@ -3176,6 +3333,7 @@ mod tests {
                     &retention,
                     branch_gc,
                     None,
+                    MaintenanceTickOutcome::Retry,
                 ),
             )
             .await
@@ -3248,7 +3406,7 @@ mod tests {
         })
         .await
         .expect("A's supervised owner settles");
-        coordinator
+        let still_unavailable = coordinator
             .run_tick(
                 &profile_root,
                 &profile_database,
@@ -3257,8 +3415,14 @@ mod tests {
                 &retention,
                 branch_gc,
                 None,
+                MaintenanceTickOutcome::Retry,
             )
             .await;
+        assert_eq!(
+            still_unavailable,
+            MaintenanceTickOutcome::Retry,
+            "completed store maintenance cannot mask an unavailable session policy"
+        );
         assert!(coordinator.writer_jobs.pending.lock().unwrap().is_empty());
         assert_eq!(
             generation_files(),
@@ -3266,6 +3430,7 @@ mod tests {
             "queued retention reclaims five verified superseded generations after writer release"
         );
 
+        retention.session_lcm.enabled = true;
         let continuation = coordinator
             .run_tick(
                 &profile_root,
@@ -3275,6 +3440,7 @@ mod tests {
                 &retention,
                 branch_gc,
                 Some(MaintenanceContinuation::StoreRetention),
+                MaintenanceTickOutcome::Complete,
             )
             .await;
         assert_eq!(continuation, MaintenanceTickOutcome::Complete);
@@ -3335,6 +3501,7 @@ mod tests {
                     &tracedecay_configuration::RetentionConfig::default(),
                     super::BranchStoreGcCadenceV1 { branch_gc_days: 30 },
                     None,
+                    MaintenanceTickOutcome::Complete,
                 )
                 .await;
 

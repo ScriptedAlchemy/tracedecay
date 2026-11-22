@@ -1412,18 +1412,29 @@ async fn checked_out_stack_conflict_journey() {
 
 #[test]
 fn independent_pair_applies_supported_modes_and_survives_daemon_restart() {
-    run_native_journey(independent_pair_restart_journey());
+    run_native_journey(independent_pair_restart_journey(
+        &[
+            MechanicalIntegrationModeV1::FastForward,
+            MechanicalIntegrationModeV1::TwoParentMerge,
+            MechanicalIntegrationModeV1::CherryPickExactCommits,
+        ],
+        false,
+    ));
 }
 
-async fn independent_pair_restart_journey() {
-    for (index, mode) in [
-        MechanicalIntegrationModeV1::FastForward,
-        MechanicalIntegrationModeV1::TwoParentMerge,
-        MechanicalIntegrationModeV1::CherryPickExactCommits,
-    ]
-    .into_iter()
-    .enumerate()
-    {
+#[test]
+fn expired_stack_notice_expansion_is_concealed_and_never_redelivered() {
+    run_native_journey(independent_pair_restart_journey(
+        &[MechanicalIntegrationModeV1::FastForward],
+        true,
+    ));
+}
+
+async fn independent_pair_restart_journey(
+    modes: &[MechanicalIntegrationModeV1],
+    inspect_terminal_retention: bool,
+) {
+    for (index, mode) in modes.iter().copied().enumerate() {
         let directory = tempfile::tempdir().expect("temporary project directory");
         let repository_root = directory.path().join("repo");
         std::fs::create_dir_all(&repository_root).expect("repository root");
@@ -1647,6 +1658,7 @@ async fn independent_pair_restart_journey() {
             }
         }
 
+        let mut retired_notice = None;
         if index == 0 {
             let stack_signal = super::stack_signals::signal_from_receipt(
                 &destination_scope,
@@ -1718,7 +1730,7 @@ async fn independent_pair_restart_journey() {
                 owner.clone(),
                 database.clone(),
                 destination_scope.clone(),
-                access,
+                access.clone(),
             )
             .await;
             stack_runtime
@@ -1730,9 +1742,9 @@ async fn independent_pair_restart_journey() {
                 .expand(
                     GitHubStackSignalExpandSurfaceRequest {
                         signal_id: None,
-                        expected_watermark_id: Some(stack_signal.watermark_id),
+                        expected_watermark_id: Some(stack_signal.watermark_id.clone()),
                     }
-                    .into_application_request(live_context),
+                    .into_application_request(live_context.clone()),
                     &CancellationSignal::active("cancel.native.journey.terminal-consumer")
                         .expect("cancellation"),
                 )
@@ -1768,13 +1780,109 @@ async fn independent_pair_restart_journey() {
                     .expect("terminal recipient state"),
                 Some(GitHubStackDeliveryStateV1::Settled)
             );
+            if inspect_terminal_retention {
+                let pending_recipient =
+                    ActorId::new("actor.native.pending").expect("pending recipient");
+                let pending_context = RequestContext::new(
+                    pending_recipient.clone(),
+                    destination_scope.clone(),
+                    live_context.grant().clone(),
+                    RequestId::new("request.native.journey.pending-expand").expect("request id"),
+                    Deadline::new(expires_at).expect("deadline"),
+                    CancellationContext::active("cancel.native.journey.pending-expand")
+                        .expect("cancellation"),
+                )
+                .expect("pending recipient context");
+                let pending_signal = signal_from_preflight(&destination_scope, &preview_for_signal)
+                    .expect("pending stack signal")
+                    .expect("native preflight signal");
+                stack_runtime
+                    .enqueue_from_preflight(pending_signal.clone(), &pending_context)
+                    .await
+                    .expect("enqueue another recipient's pending native evidence");
+
+                // The native journey issues historical evidence. Advance the
+                // maintenance cutoff to a pass fifteen days after issuance;
+                // host authentication still uses its live request grant.
+                let maintenance_now = stack_signal.observed_at.0 + 15 * 86_400 * 1_000_000;
+                let cutoff = maintenance_now
+                    - tracedecay_global_db::GITHUB_STACK_TERMINAL_RETENTION_DAYS_V1
+                        * 86_400
+                        * 1_000_000;
+                let retired = database
+                    .retire_github_stack_terminal_payloads_before(cutoff)
+                    .await
+                    .expect("retire eligible terminal transport payloads");
+                assert_eq!(retired.retired, 1);
+                assert!(
+                    database
+                        .github_stack_signal(
+                            destination_scope.project_id.as_str(),
+                            stack_signal.signal_id.as_str(),
+                        )
+                        .await
+                        .expect("retired notice lookup")
+                        .is_none()
+                );
+                assert_eq!(
+                    database
+                        .github_stack_recipient_state(
+                            destination_scope.project_id.as_str(),
+                            stack_signal.signal_id.as_str(),
+                            requester.as_str(),
+                        )
+                        .await
+                        .expect("retired recipient lookup"),
+                    None
+                );
+                assert_eq!(
+                    stack_runtime
+                        .expand(
+                            GitHubStackSignalExpandSurfaceRequest {
+                                signal_id: Some(stack_signal.signal_id.clone()),
+                                expected_watermark_id: Some(stack_signal.watermark_id.clone()),
+                            }
+                            .into_application_request(live_context.clone()),
+                            &CancellationSignal::active("cancel.native.journey.expired-expand")
+                                .expect("cancellation"),
+                        )
+                        .await,
+                    Err(GitHubStackSignalExpandPortError::Concealed)
+                );
+                assert_eq!(
+                    owner
+                        .store()
+                        .read_receipt_by_digest(&receipt.receipt_digest)
+                        .await
+                        .expect("authoritative native receipt remains inspectable"),
+                    Some(receipt.clone())
+                );
+                assert_eq!(
+                    database
+                        .github_stack_recipient_state(
+                            destination_scope.project_id.as_str(),
+                            pending_signal.signal_id.as_str(),
+                            pending_recipient.as_str(),
+                        )
+                        .await
+                        .expect("pending peer state after cleanup"),
+                    Some(GitHubStackDeliveryStateV1::Pending)
+                );
+                retired_notice = Some((
+                    stack_signal,
+                    live_context,
+                    access,
+                    pending_signal,
+                    pending_context,
+                ));
+            }
             drop(stack_runtime);
         }
 
         registry.shutdown().await.expect("shutdown owner registry");
         code_index.shutdown().await;
         let (restarted_registry, restarted_owner, _analysis, restarted_code_index) =
-            mount(database, repository_root).await;
+            mount(database.clone(), repository_root).await;
         let durable = restarted_owner
             .service()
             .status(tracedecay_contracts::NativeIntegrationStatusRequestV1 {
@@ -1787,6 +1895,106 @@ async fn independent_pair_restart_journey() {
             durable.terminal_outcome,
             Some(NativeIntegrationTerminalOutcomeV1::Committed)
         );
+        if let Some((signal, context, access, pending_signal, pending_context)) = retired_notice {
+            let restarted_stack = mount_stack_runtime_off_tokio(
+                restarted_owner.clone(),
+                database.clone(),
+                destination_scope.clone(),
+                access,
+            )
+            .await;
+            restarted_stack
+                .enqueue_from_preflight(signal.clone(), &context)
+                .await
+                .expect("identical retired replay is recognized after restart");
+            let pending = database
+                .pending_github_stack_deliveries(
+                    destination_scope.project_id.as_str(),
+                    destination_scope.scope_digest.as_str(),
+                    None,
+                )
+                .await
+                .expect("pending delivery page after restart");
+            assert_eq!(
+                pending.len(),
+                1,
+                "replay must not recreate retired recipients"
+            );
+            assert_eq!(
+                pending[0].signal.signal_id,
+                pending_signal.signal_id.as_str()
+            );
+            assert_eq!(pending[0].recipient, pending_context.actor().as_str());
+            let cancellation = CancellationSignal::active("cancel.native.journey.restarted-expand")
+                .expect("cancellation");
+            assert_eq!(
+                restarted_stack
+                    .expand(
+                        GitHubStackSignalExpandSurfaceRequest {
+                            signal_id: Some(signal.signal_id.clone()),
+                            expected_watermark_id: Some(signal.watermark_id.clone()),
+                        }
+                        .into_application_request(context.clone()),
+                        &cancellation,
+                    )
+                    .await,
+                Err(GitHubStackSignalExpandPortError::Concealed)
+            );
+            let expanded = restarted_stack
+                .expand(
+                    GitHubStackSignalExpandSurfaceRequest {
+                        signal_id: Some(pending_signal.signal_id.clone()),
+                        expected_watermark_id: Some(pending_signal.watermark_id.clone()),
+                    }
+                    .into_application_request(pending_context.clone()),
+                    &cancellation,
+                )
+                .await
+                .expect("pending recipient still expands after retirement and restart");
+            let GitHubStackSignalExpandSurfaceResultV1::Expanded { evidence } = expanded else {
+                panic!("expected pending recipient's native evidence");
+            };
+            assert_eq!(evidence.signal_id, pending_signal.signal_id);
+            assert_eq!(evidence.kind, StackSignalKindV1::DependencyReady);
+            let tracedecay_contracts::git::GitHubStackSignalNativeSourceV1::Preflight { preview } =
+                evidence.native_source
+            else {
+                panic!("expected pending native preflight");
+            };
+            assert_eq!(preview.preview_digest, preview_for_signal.preview_digest);
+            assert_eq!(
+                database
+                    .github_stack_recipient_state(
+                        destination_scope.project_id.as_str(),
+                        signal.signal_id.as_str(),
+                        context.actor().as_str(),
+                    )
+                    .await
+                    .expect("retired recipient stays absent after replay and expansion"),
+                None
+            );
+            assert_eq!(
+                database
+                    .github_stack_recipient_state(
+                        destination_scope.project_id.as_str(),
+                        pending_signal.signal_id.as_str(),
+                        pending_context.actor().as_str(),
+                    )
+                    .await
+                    .expect("only the pending recipient was settled"),
+                Some(GitHubStackDeliveryStateV1::Settled)
+            );
+            assert_eq!(restarted_stack.has_due_pending_delivery().await, Ok(false));
+            assert_eq!(
+                restarted_owner
+                    .store()
+                    .read_receipt_by_digest(&receipt.receipt_digest)
+                    .await
+                    .expect("native receipt survives retirement and restart"),
+                Some(receipt)
+            );
+            drop(restarted_stack);
+        }
         restarted_registry
             .shutdown()
             .await

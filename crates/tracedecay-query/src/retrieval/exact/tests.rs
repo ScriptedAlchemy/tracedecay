@@ -226,7 +226,19 @@ fn central_authority_classification_matches_extraction_grammar() {
     )
     .expect("query sanitizes");
 
-    let literals = authority.parse_literals(&query_view, &base_request(16));
+    let literals: Vec<_> = query_view
+        .as_str()
+        .split_whitespace()
+        .flat_map(|token| {
+            let view = EphemeralSanitizedQueryViewV1::sanitize(
+                token,
+                id::<SanitizerRevision>("query-sanitizer.v1"),
+                id::<QueryNormalizationRevision>("query-normalization.v1"),
+            )
+            .expect("token sanitizes");
+            authority.parse_literals(&view, &base_request(16))
+        })
+        .collect();
     let literal_for = |original: &str| {
         literals
             .iter()
@@ -307,9 +319,6 @@ fn central_authority_admits_the_identifier_a_query_of_words_spells() {
     assert_eq!(
         identifier_literals("exact admission proof"),
         [
-            "exact",
-            "admission",
-            "proof",
             "exact_admission_proof",
             "exactAdmissionProof",
             "ExactAdmissionProof",
@@ -317,14 +326,40 @@ fn central_authority_admits_the_identifier_a_query_of_words_spells() {
     );
     assert_eq!(
         identifier_literals("admission proof path:src/lib.rs"),
-        ["admission", "proof"],
+        Vec::<String>::new(),
         "a typed atom is not a word of a spelled identifier"
     );
     assert_eq!(
         identifier_literals("admission \"proof\""),
-        ["admission"],
+        Vec::<String>::new(),
         "a quoted atom is not a word of a spelled identifier"
     );
+}
+
+#[test]
+fn prose_does_not_promote_generic_methods_over_lexical_evidence() {
+    assert!(
+        !identifier_literals("how does the per-request limit get enforced")
+            .iter()
+            .any(|name| matches!(name.as_str(), "get" | "limit" | "does"))
+    );
+    assert_eq!(identifier_literals("get"), ["get"]);
+    assert_eq!(identifier_literals("how does id:get work"), ["get"]);
+    assert_eq!(
+        identifier_literals("how does enforceRequestLimit get enforced"),
+        ["enforceRequestLimit"]
+    );
+    for mixed in [
+        "how does enforceRequestLimit work",
+        "get enforceRequestLimit",
+    ] {
+        assert_eq!(identifier_literals(mixed), ["enforceRequestLimit"]);
+    }
+    assert_eq!(
+        identifier_literals("How does HTTPServer get requests"),
+        ["HTTPServer"]
+    );
+    assert_eq!(identifier_literals("find URL handling"), ["URL"]);
 }
 
 /// One literal's specificity share when every request literal is equally
