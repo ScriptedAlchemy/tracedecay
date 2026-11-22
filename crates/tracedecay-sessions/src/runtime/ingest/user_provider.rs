@@ -303,7 +303,7 @@ impl<'a, S: TranscriptIngestStore + 'a> UserProviderUnit<'a, S> {
                     }
                 }
                 if frontier_persisted && let Some((hub, consumer)) = self.codex_discovery {
-                    hub.acknowledge(consumer);
+                    run.coverage_advanced |= hub.acknowledge(consumer);
                 }
                 run
             }

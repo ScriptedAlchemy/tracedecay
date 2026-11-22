@@ -482,7 +482,7 @@ impl<'a> ProjectProviderRun<'a> {
             && frontier_persisted
             && let Some((hub, consumer)) = self.codex_discovery
         {
-            hub.acknowledge(consumer);
+            outcome.coverage_advanced |= hub.acknowledge(consumer);
         }
         outcome
     }

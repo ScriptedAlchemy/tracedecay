@@ -2629,6 +2629,36 @@ mod recent_first_discovery_tests {
     }
 
     #[test]
+    fn idle_probe_finishes_the_current_cycle_before_starting_another() {
+        let home = TempDir::new().unwrap();
+        write_dated_rollout(home.path(), ("2026", "08", "29"), "current");
+        let source = CodexSource::with_home(home.path());
+        let bounds = TranscriptDiscoveryBounds::from_discovered_units(2);
+        let mut state = CodexDiscoveryState::default();
+        let mut frontier = CodexDiscoveryFrontier::initial();
+        for _ in 0..64 {
+            frontier = retained_pass(&source, &mut state, bounds, frontier).next_frontier;
+            if frontier.is_complete() {
+                break;
+            }
+        }
+        assert!(frontier.is_complete());
+        let idle = state.idle.as_mut().unwrap();
+        let authority_len = idle.directories.len() + idle.active_files.len();
+        assert!(authority_len > 2);
+        idle.next = authority_len - 1;
+        let cycles = idle.completed_probe_cycles;
+        assert!(
+            retained_pass(&source, &mut state, bounds, frontier)
+                .next_frontier
+                .is_complete()
+        );
+        let idle = state.idle.as_ref().unwrap();
+        assert_eq!(idle.completed_probe_cycles, cycles + 1);
+        assert_eq!(idle.next, 0);
+    }
+
+    #[test]
     fn hot_codex_directory_is_detected_even_when_rotation_starts_on_hot_prefix() {
         let temp = TempDir::new().unwrap();
         let home = temp.path();
@@ -2829,6 +2859,41 @@ mod recent_first_discovery_tests {
             codex_directory_changed(bucket, Some(witness)).unwrap(),
             "a new rollout must invalidate the cheap settled-directory witness"
         );
+    }
+
+    #[tokio::test]
+    async fn acknowledging_a_shared_validation_page_continues_its_retained_scan_once() {
+        crate::runtime::jsonl_observation_admission::install_test_shared_jsonl_preparation_authority();
+        let home = TempDir::new().unwrap();
+        for item in 0..64 {
+            write_dated_rollout(
+                home.path(),
+                ("2026", "08", "28"),
+                &format!("validation-{item}"),
+            );
+        }
+        let hub = CodexDiscoveryHub::default();
+        hub.register("project", Some(home.path()));
+        let source = CodexSource::with_home(home.path());
+        let bounds = TranscriptDiscoveryBounds::from_discovered_units(2);
+        let mut frontier = CodexDiscoveryFrontier::complete(CodexCorpusEpoch::initial());
+        for step in 0..2 {
+            let CodexDiscoveryDelivery::Ready(page) = hub
+                .discover("project", &source, bounds, frontier)
+                .await
+                .unwrap()
+            else {
+                panic!("a single shared consumer owns the scan");
+            };
+            assert!(page.report.paths.is_empty());
+            assert!(page.report.is_truncated());
+            if step == 1 {
+                assert_eq!(page.next_frontier, frontier);
+            }
+            frontier = page.next_frontier;
+            assert!(hub.acknowledge("project"));
+            assert!(!hub.acknowledge("project"));
+        }
     }
 
     #[test]

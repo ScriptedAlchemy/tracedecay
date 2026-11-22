@@ -177,7 +177,7 @@ pub struct IngestPassOutcome {
     /// False when an admitted provider API performs an internally unbounded
     /// sweep and therefore cannot honor the pass byte budget end-to-end.
     pub byte_bounds_enforced: bool,
-    /// The pass durably advanced source coverage beyond its upserts.
+    /// The pass advanced discovery or source coverage beyond its upserts.
     pub coverage_advanced: bool,
     pub provider_units: BTreeMap<&'static str, ProviderPassUnits>,
 }
