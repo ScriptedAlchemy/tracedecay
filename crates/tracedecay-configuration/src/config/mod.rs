@@ -340,6 +340,9 @@ pub fn session_history_import_enabled_from_profile_snapshot(
 pub fn session_retention_from_profile_snapshot(
     snapshot: &ConfigurationSnapshotV1,
 ) -> Result<tracedecay_lcm::LcmRetentionConfig> {
+    snapshot.validate().map_err(|error| {
+        config_error(format!("invalid resolved configuration snapshot: {error}"))
+    })?;
     let window = |key| -> Result<Option<u32>> {
         let days = u32::try_from(required_unsigned(snapshot, key)?)
             .map_err(|_| config_error(format!("retention setting '{key}' exceeds u32 days")))?;
@@ -544,6 +547,12 @@ mod tests {
             SettingKey::new(super::USER_SESSION_COMPACTION_DAYS_SETTING_KEY).unwrap(),
             ConfigurationValueV1::Unsigned(0),
         );
+        assert!(
+            super::session_retention_from_profile_snapshot(&snapshot).is_err(),
+            "changed policy values cannot retain the previous snapshot identity"
+        );
+        let mut snapshot =
+            ConfigurationSnapshotV1::new(snapshot.effective_values, snapshot.provenance).unwrap();
         let configured = super::session_retention_from_profile_snapshot(&snapshot).unwrap();
         assert_eq!(configured.drop_after_days, Some(7));
         assert_eq!(configured.offload_after_days, None);
@@ -552,6 +561,8 @@ mod tests {
             SettingKey::new(super::USER_SESSION_RETENTION_ENABLED_SETTING_KEY).unwrap(),
             ConfigurationValueV1::Boolean(false),
         );
+        let mut snapshot =
+            ConfigurationSnapshotV1::new(snapshot.effective_values, snapshot.provenance).unwrap();
         assert!(
             !super::session_retention_from_profile_snapshot(&snapshot)
                 .unwrap()
@@ -560,6 +571,11 @@ mod tests {
         snapshot
             .effective_values
             .remove(&SettingKey::new(super::USER_SESSION_RETENTION_DAYS_SETTING_KEY).unwrap());
+        snapshot
+            .provenance
+            .remove(&SettingKey::new(super::USER_SESSION_RETENTION_DAYS_SETTING_KEY).unwrap());
+        let snapshot =
+            ConfigurationSnapshotV1::new(snapshot.effective_values, snapshot.provenance).unwrap();
         assert!(super::session_retention_from_profile_snapshot(&snapshot).is_err());
     }
 
