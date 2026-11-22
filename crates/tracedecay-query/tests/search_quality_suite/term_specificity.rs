@@ -416,3 +416,117 @@ fn request_limit_question_keeps_the_documented_typescript_caller_in_the_page() {
         "a direct get query must retain definition admission"
     );
 }
+
+#[test]
+fn prose_articles_do_not_spend_file_slots_on_rust_lifetimes() {
+    let sources = with_filler(vec![
+        "/// Enforces capacity by rejecting an operation after all slots are occupied.\n\
+         pub fn allow_next(remaining: usize) -> bool { remaining > 0 }\n\n\
+         pub struct Borrowed<T>(Vec<T>);\n\
+         impl<'a, T> IntoIterator for &'a mut Borrowed<T> {\n\
+         \x20   type Item = &'a mut T;\n\
+         \x20   type IntoIter = std::slice::IterMut<'a, T>;\n\
+         \x20   fn into_iter(self) -> Self::IntoIter { self.0.iter_mut() }\n\
+         }\n"
+            .to_owned(),
+        "pub fn a() -> bool { true }\n".to_owned(),
+    ]);
+    let artifact = rust_artifact(&sources.iter().map(String::as_str).collect::<Vec<_>>());
+    let named = search_artifact(&artifact, "allow_next");
+    let answer = &named.first().expect("the named gate is indexed").candidate;
+    assert_eq!(file(&named[0]), "file.fixture.0");
+    assert_eq!(answer.source_role, RetrievalSourceRoleV1::ProductionDefinition);
+    assert_ne!(answer.exact_class, ExactClass::Approximate);
+
+    let lifetime_aliases = ["Item", "IntoIter"]
+        .into_iter()
+        .flat_map(|name| search_artifact(&artifact, name))
+        .map(|ranked| ranked.candidate.anchor_id)
+        .collect::<Vec<_>>();
+    assert!(
+        !lifetime_aliases.is_empty(),
+        "the lifetime declarations must be indexed for the isolation check"
+    );
+
+    let ranked = search_artifact(&artifact, "how is a request kept within the capacity limit");
+    let summary = ranked
+        .iter()
+        .map(|ranked| {
+            (
+                &ranked.candidate.anchor_id,
+                file(ranked),
+                ranked.candidate.source_role,
+                &ranked.candidate.contributions,
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        ranked.first().map(|ranked| &ranked.candidate.anchor_id),
+        Some(&answer.anchor_id),
+        "the documented gate must retain its file's result slot ahead of lifetime noise: {summary:?}"
+    );
+    assert!(
+        ranked
+            .iter()
+            .all(|ranked| !lifetime_aliases.contains(&ranked.candidate.anchor_id)),
+        "a prose article is not a request for the same-spelled Rust lifetime: {summary:?}"
+    );
+
+    let direct = search_artifact(&artifact, "a");
+    let explicit = &direct.first().expect("the ordinary name is indexed").candidate;
+    assert_eq!(file(&direct[0]), "file.fixture.1");
+    for query in ["a", "find id:a"] {
+        let ranked = search_artifact(&artifact, query);
+        let first = &ranked.first().expect("explicit intent remains searchable").candidate;
+        assert_eq!(first.anchor_id, explicit.anchor_id, "{query}: {ranked:?}");
+        assert_ne!(first.exact_class, ExactClass::Approximate, "{query}");
+        assert!(
+            first.contributions.iter().any(|contribution| {
+                contribution.retriever == RetrieverKind::Lexical && contribution.raw_score.0 > 0
+            }),
+            "explicit terms must remain lexical evidence as well as exact matches: {query}: {ranked:?}"
+        );
+    }
+
+    let literal_artifact = rust_artifact(&["pub fn token() -> &'static str { \"a\" }\n"]);
+    let quoted = search_artifact(&literal_artifact, "where is \"a\" defined");
+    assert!(
+        quoted.iter().any(|ranked| {
+            file(ranked) == "file.fixture.0"
+                && ranked.candidate.contributions.iter().any(|contribution| {
+                    contribution.retriever == RetrieverKind::Lexical
+                        && contribution.raw_score.0 > 0
+                })
+        }),
+        "a quoted article must remain lexical evidence in its source file: {quoted:?}"
+    );
+}
+
+#[test]
+fn a_one_content_word_question_keeps_prose_definition_priority() {
+    let artifact = rust_artifact(&[
+        "/// Tracks remaining capacity before accepting work.\n\
+         pub fn reserve_slot(remaining: usize) -> bool { remaining > 0 }\n",
+        "pub fn capacity() -> usize { 0 }\n",
+    ]);
+    let direct = search_artifact(&artifact, "capacity");
+    assert_eq!(file(&direct[0]), "file.fixture.1");
+    assert_eq!(
+        direct[0].candidate.source_role,
+        RetrievalSourceRoleV1::ProductionDefinition,
+        "a direct name owns definition priority"
+    );
+
+    let prose = search_artifact(&artifact, "what is capacity");
+    assert!(
+        prose.iter().any(|ranked| file(ranked) == "file.fixture.0"),
+        "the question must retain documented evidence: {prose:?}"
+    );
+    assert!(
+        prose.iter().all(|ranked| {
+            ranked.candidate.exact_class == ExactClass::Approximate
+                && ranked.candidate.source_role != RetrievalSourceRoleV1::ProductionDefinition
+        }),
+        "removing prose connectives cannot manufacture explicit name intent: {prose:?}"
+    );
+}

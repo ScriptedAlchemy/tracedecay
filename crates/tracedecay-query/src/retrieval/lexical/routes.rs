@@ -116,6 +116,14 @@ const PREFERRED_SYMBOL_STOPLIST_V1: &[&str] = &[
     "implementation",
 ];
 
+/// The shared query-word policy for symbol routing and ordinary prose
+/// evidence. Explicit names and literals decide separately whether to apply it.
+pub(super) fn is_query_stopword(term: &str) -> bool {
+    PREFERRED_SYMBOL_STOPLIST_V1
+        .iter()
+        .any(|stop| stop.eq_ignore_ascii_case(term))
+}
+
 /// Typed rejection for caller-supplied lexical routing.
 #[derive(Clone, Debug, Error, PartialEq, Eq)]
 pub enum LexicalRouteErrorV1 {
@@ -673,11 +681,7 @@ fn query_content_words(query: &str) -> Vec<QueryContentWordV1> {
         let Some(name) = trailing_symbol_name(&raw) else {
             return;
         };
-        if name.chars().count() < 2
-            || PREFERRED_SYMBOL_STOPLIST_V1
-                .iter()
-                .any(|stop| stop.eq_ignore_ascii_case(name))
-        {
+        if name.chars().count() < 2 || is_query_stopword(name) {
             return;
         }
         let name = name.to_owned();

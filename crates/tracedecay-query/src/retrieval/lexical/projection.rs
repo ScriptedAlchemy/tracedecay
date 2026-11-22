@@ -13,11 +13,12 @@ use tracedecay_domain::{
     exact_search_canonical, split_subtokens, technical_tokens, validate_code_logical_path,
 };
 
+use super::routes::is_query_stopword;
 use super::{
     LexicalFieldFilterV1, LexicalFieldV1, LexicalLaneRequest, LexicalProximityV1,
     LexicalSpellingVariantV1, names_identifier, normalize_lexical, preferred_symbol_tokens,
 };
-use crate::retrieval::exact::{ExactAdmissionAuthority, ExactLaneRequest};
+use crate::retrieval::exact::{ExactAdmissionAuthority, ExactLaneRequest, explicit_query_terms};
 use crate::retrieval::ports::{
     CodeCandidateBindingV1, CodeOccurrenceRefV1, RetrievalPortError, contract_error,
 };
@@ -623,7 +624,12 @@ impl LiteralProofCacheV1 {
 /// these instead of re-normalizing every query term, subtoken, phrase, and
 /// the whole echo query for every visited document.
 struct PreparedLexicalQueryV1<'request> {
-    /// `(original, normalized)` per request whole term.
+    /// Preserve the caller's original mode when prose filtering leaves only
+    /// one content term. That term must not acquire single-name priority.
+    single_whole_term: bool,
+    /// `(original, normalized)` per admitted whole term. Ordinary prose
+    /// stopwords are removed once before scoring, fuzzy expansion, and source
+    /// selection, so an article cannot retrieve a same-spelled lifetime.
     whole_terms: Vec<(&'request str, String)>,
     /// Whole terms that explicitly name a definition. Ordinary words in a
     /// multi-term question still score lexically, without a protected source
@@ -645,17 +651,30 @@ struct PreparedLexicalProximityV1<'request> {
 
 impl<'request> PreparedLexicalQueryV1<'request> {
     fn new(request: &'request LexicalLaneRequest<'_>) -> Self {
+        let single_whole_term = request.whole_terms.len() == 1;
+        let explicit_terms = explicit_query_terms(request.query_view.as_str());
+        let name_fields_requested = request
+            .field_filters
+            .iter()
+            .any(|filter| filter.include && is_identifier_name_field(filter.field));
         Self {
+            single_whole_term,
             whole_terms: request
                 .whole_terms
                 .iter()
+                .filter(|term| {
+                    single_whole_term
+                        || name_fields_requested
+                        || !is_query_stopword(term)
+                        || explicit_terms.contains(&normalize_lexical(term))
+                })
                 .map(|term| (term.as_str(), normalize_lexical(term)))
                 .collect(),
             definition_whole_terms: request
                 .whole_terms
                 .iter()
                 .filter(|term| {
-                    request.whole_terms.len() == 1
+                    single_whole_term
                         || names_identifier(term)
                         || (term.starts_with(char::is_uppercase)
                             && !preferred_symbol_tokens(term).is_empty())
@@ -1101,7 +1120,7 @@ fn score_lexical_row(
         .iter()
         .any(|filter| filter.include && is_identifier_name_field(filter.field));
     let score_name_fields = name_fields_requested
-        || prepared.whole_terms.len() == 1
+        || prepared.single_whole_term
         || (field_lengths.contains_key(&LexicalFieldV1::Documentation)
             && prepared.whole_terms.iter().any(|(_, normalized)| {
                 term_frequency(LexicalFieldV1::Documentation, normalized) > 0
@@ -1121,7 +1140,7 @@ fn score_lexical_row(
             if exact_tf > 0 {
                 let score = bm25(field, exact_tf, document_frequency(field, normalized));
                 let weighted_score =
-                    if field == LexicalFieldV1::Documentation && prepared.whole_terms.len() != 1 {
+                    if field == LexicalFieldV1::Documentation && !prepared.single_whole_term {
                         score.saturating_mul(DOCUMENTATION_NL_SCORE_MILLIS) / 1_000
                     } else {
                         score
@@ -1255,7 +1274,7 @@ fn score_lexical_row(
             matched_proximities.insert(proximity.original.clone());
         }
     }
-    if prepared.whole_terms.len() != 1
+    if !prepared.single_whole_term
         && let Some(score) = field_scores.get_mut(&LexicalFieldV1::Documentation)
     {
         *score = score.saturating_mul(DOCUMENTATION_NL_SCORE_MILLIS) / 1_000;

@@ -421,6 +421,21 @@ fn exact_query_atoms(query: &str) -> Vec<ExactQueryAtom> {
     atoms
 }
 
+/// Terms the caller explicitly quoted or field-qualified. Lexical scoring
+/// shares this syntax so prose filtering cannot erase an intentional literal;
+/// this does not grant exact admission.
+pub(super) fn explicit_query_terms(query: &str) -> BTreeSet<String> {
+    exact_query_atoms(query)
+        .into_iter()
+        .filter(|atom| atom.quoted || atom.field.is_some())
+        .flat_map(|atom| {
+            tracedecay_domain::technical_tokens(&atom.text)
+                .map(|(_, term)| term.to_ascii_lowercase())
+                .collect::<Vec<_>>()
+        })
+        .collect()
+}
+
 /// The snake_case, camelCase, and PascalCase identifiers `words` spell.
 fn spelled_identifiers(words: &[ExactQueryAtom]) -> [String; 3] {
     let capitalized = |word: &str| {

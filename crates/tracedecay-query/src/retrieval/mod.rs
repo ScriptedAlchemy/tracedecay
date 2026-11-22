@@ -56,12 +56,12 @@ pub use self::query_authority::{
 pub use self::request::{RawRetrievalRequestV1, SanitizedRetrievalRequestV1};
 
 pub const QUERY_EXACT_RETRIEVER_REVISION_V1: &str = "retriever.exact.daemon.v1";
-pub const QUERY_LEXICAL_RETRIEVER_REVISION_V1: &str = "retriever.lexical.daemon.query-intent.v3";
+pub const QUERY_LEXICAL_RETRIEVER_REVISION_V1: &str = "retriever.lexical.daemon.query-intent.v4";
 pub const QUERY_GRAPH_RETRIEVER_REVISION_V1: &str = "retriever.graph.daemon.v1";
 pub const QUERY_SANITIZER_REVISION_V1: &str = "query-sanitizer.daemon.v1";
 pub const QUERY_NORMALIZATION_REVISION_V1: &str = "query-normalization.daemon.v1";
 pub const QUERY_EXACT_RULE_REVISION_V1: &str = "exact-rules.daemon.v2";
-pub const QUERY_LEXICAL_PROFILE_REVISION_V1: &str = "lexical-profile.daemon.v3";
+pub const QUERY_LEXICAL_PROFILE_REVISION_V1: &str = "lexical-profile.daemon.v4";
 pub const QUERY_EXACT_SCORE_DOMAIN_V1: &str = "score.exact.daemon.v1";
 pub const QUERY_LEXICAL_SCORE_DOMAIN_V1: &str = "score.lexical.daemon.v1";
 pub const QUERY_GRAPH_SCORE_DOMAIN_V1: &str = "score.graph.daemon.v1";
