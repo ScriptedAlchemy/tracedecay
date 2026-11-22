@@ -1403,7 +1403,7 @@
       ],
       "label": {
         "anchors": [
-          "coverage::EvidenceRetentionWatermark::evaluated_at"
+          "coverage::RemoteCoverageV1::evaluated_at"
         ],
         "document_id": "coverage",
         "literal": "pub evaluated_at: UtcMicros"
