@@ -140,8 +140,10 @@ pub fn wait_for_code_generation_store_release(
     #[cfg(windows)]
     wait_for_generation_scope_fence_release(store_root)?;
     let store_root = canonical_store_root(store_root)?;
-    open_lock_file(&store_root.join(STORE_LOCK_FILE))?
-        .lock()
+    let lock = open_lock_file(&store_root.join(STORE_LOCK_FILE))?;
+    lock.lock().map_err(storage)?;
+    FileLease::held(lock, CODE_GENERATION_LEASE_LABEL)
+        .release()
         .map_err(storage)
 }
 
