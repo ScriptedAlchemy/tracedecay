@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.0-beta.111](https://github.com/ScriptedAlchemy/tracedecay/compare/v1.0.0-beta.110...v1.0.0-beta.111) (2026-11-22)
+
+
+### ⚠ BREAKING CHANGES
+
+* **runtime:** obsolete or incomplete persisted configuration requires the documented scoped reset; lexical artifacts regenerate at revision 33 and prior ranking cursors are refused.
+
+### Bug Fixes
+
+* **runtime:** consolidate retention, indexing, and lifecycle repairs ([#4939](https://github.com/ScriptedAlchemy/tracedecay/issues/4939)) ([66991d9](https://github.com/ScriptedAlchemy/tracedecay/commit/66991d99a8cbaab1b3a5da3549c35590a0176846))
+
 ## [1.0.0-beta.110](https://github.com/ScriptedAlchemy/tracedecay/compare/v1.0.0-beta.109...v1.0.0-beta.110) (2026-11-22)
 
 
