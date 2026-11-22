@@ -14,8 +14,8 @@ pub struct ProviderRunOutcome<F> {
     pub bytes_consumed: u64,
     pub deferred_units: u64,
     pub byte_bounds_enforced: bool,
-    /// The run durably advanced source coverage (a cursor, a skipped range,
-    /// or a projection), whether or not it upserted any message.
+    /// The next pass can resume after a discovery step, covered source range,
+    /// or projection even when this run upserted no messages.
     pub coverage_advanced: bool,
     admitted: bool,
 }
@@ -110,7 +110,7 @@ pub struct ProviderRunFold<F> {
     pub units_failed: u64,
     pub deferred_units: u64,
     pub byte_bounds_enforced: bool,
-    /// Some run without a failure durably advanced source coverage.
+    /// Some run without a failure advanced discovery or source coverage.
     pub coverage_advanced: bool,
     pub provider_units: BTreeMap<&'static str, ProviderPassUnits>,
 }

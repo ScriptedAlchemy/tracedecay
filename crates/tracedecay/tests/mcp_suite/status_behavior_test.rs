@@ -365,16 +365,16 @@ async fn tracedecay_status_reports_the_sealed_branch_and_keeps_diagnostics_opt_i
         json!({ "status": "current", "watermark": project.head })
     );
     assert_eq!(detailed["session_ingest"], empty_cursor_session_ingest());
-    let (history_passes, codex_parked, last_progress) =
+    let (history_passes, codex_parked) =
         empty_host_history_progress(&detailed["session_history_catch_up"])
-            .expect("historical progress reports pass counts and its frontier timestamp");
+            .expect("historical progress reports provider pass counts");
     assert!(
         history_passes > codex_parked,
         "the empty-host sweep has completed a Codex visit"
     );
     assert_eq!(
         detailed["session_history_catch_up"],
-        empty_host_session_history(history_passes, codex_parked, last_progress)
+        empty_host_session_history(history_passes, codex_parked)
     );
     assert_eq!(detailed["tracked_branch_count"], 1);
     assert_eq!(
@@ -643,10 +643,10 @@ async fn opted_in_status(project: &StatusProject) -> Value {
             parse_status(&stored_body(&project.harness, &project.project_root, text).await);
         let history_progress = empty_host_history_progress(&detailed["session_history_catch_up"]);
         if detailed["session_ingest"] == empty_cursor_session_ingest()
-            && history_progress.is_some_and(|(passes, codex_parked, last_progress)| {
+            && history_progress.is_some_and(|(passes, codex_parked)| {
                 passes > codex_parked
                     && detailed["session_history_catch_up"]
-                        == empty_host_session_history(passes, codex_parked, last_progress)
+                        == empty_host_session_history(passes, codex_parked)
             })
         {
             return detailed;
@@ -676,29 +676,14 @@ fn empty_cursor_session_ingest() -> Value {
 
 /// Timing-dependent counters from completed empty-home sweeps. The expected
 /// status below checks how every provider accounts for those passes.
-fn empty_host_history_progress(history: &Value) -> Option<(u64, u64, Option<i64>)> {
+fn empty_host_history_progress(history: &Value) -> Option<(u64, u64)> {
     let progress = &history["progress"];
     let codex = progress["providers"]
         .as_array()?
         .iter()
         .find(|provider| provider["provider"] == "codex")?;
     let codex_parked = codex["units_parked"].as_u64()?;
-    let last_progress = progress.get("last_progress_at_unix_micros")?;
-    let last_progress = if codex_parked == 0 {
-        if !last_progress.is_null() {
-            return None;
-        }
-        None
-    } else {
-        // A deferred Codex scan advances the persisted provider rotation
-        // frontier, so the worker must retain a real progress timestamp.
-        Some(
-            last_progress
-                .as_i64()
-                .filter(|time| *time > 1_000_000_000_000_000)?,
-        )
-    };
-    Some((progress["passes"].as_u64()?, codex_parked, last_progress))
+    Some((progress["passes"].as_u64()?, codex_parked))
 }
 
 /// Historical catch-up after every empty-home sweep has reported.
@@ -707,7 +692,7 @@ fn empty_host_history_progress(history: &Value) -> Option<(u64, u64, Option<i64>
 /// `~/.pi` are absent, so they are the only observed providers. OpenCode has
 /// no database, so its coverage stays unavailable. The other admitted hosts
 /// finish with nothing pending.
-fn empty_host_session_history(passes: u64, codex_parked: u64, last_progress: Option<i64>) -> Value {
+fn empty_host_session_history(passes: u64, codex_parked: u64) -> Value {
     // Each empty-home sweep visits every admitted provider once. Scheduling can
     // add a second sweep before status is read, so compare each cumulative
     // disposition to the worker's observed pass count. Codex can temporarily
@@ -749,7 +734,7 @@ fn empty_host_session_history(passes: u64, codex_parked: u64, last_progress: Opt
             "passes": passes,
             "passes_without_progress": 0,
             "stalled_after_passes": 3,
-            "last_progress_at_unix_micros": last_progress,
+            "last_progress_at_unix_micros": null,
             "providers": provider_units,
         },
         "message": "Historical session recall is partially available while the daemon continues bounded background catch-up.",

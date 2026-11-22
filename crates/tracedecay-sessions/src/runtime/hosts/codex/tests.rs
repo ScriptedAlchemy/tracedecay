@@ -1230,8 +1230,8 @@ mod recent_first_discovery_tests {
     use crate::runtime::hosts::codex::{
         CodexCorpusEpoch, CodexDiscoveryDelivery, CodexDiscoveryFrontier, CodexDiscoveryHub,
         CodexDiscoverySourceKey, CodexDiscoveryState, CodexExactSessionPathAuthority,
-        CodexIndexedPath, CodexReplayIndex, CodexScanPhase, DirectoryStatWitness,
-        EXACT_HOOK_DISCOVERY_UNITS_PER_CALL, IDLE_FULL_VALIDATION_CYCLES,
+        CodexIndexedPath, CodexReplayIndex, CodexScanPhase, CodexScanProgress,
+        DirectoryStatWitness, EXACT_HOOK_DISCOVERY_UNITS_PER_CALL, IDLE_FULL_VALIDATION_CYCLES,
         MAX_EXACT_HOOK_SESSION_REQUESTS, MAX_EXACT_HOOK_SOURCE_AUTHORITIES, MAX_SCAN_DEPTH,
         codex_corpus_identity, codex_directory_changed, codex_directory_changed_since,
         codex_directory_stat_identity, codex_directory_witness, directory_entry_fingerprint,
@@ -1291,7 +1291,7 @@ mod recent_first_discovery_tests {
                 .await
                 .expect("bounded hub discovery")
             {
-                CodexDiscoveryDelivery::Waiting => continue,
+                CodexDiscoveryDelivery::Pending(_) => continue,
                 CodexDiscoveryDelivery::Ready(pass) => {
                     paths.extend(pass.report.paths.iter().cloned());
                     frontier = pass.next_frontier;
@@ -1488,7 +1488,7 @@ mod recent_first_discovery_tests {
             hub.discover("project", &source, bounds, frontier)
                 .await
                 .unwrap(),
-            CodexDiscoveryDelivery::Waiting
+            CodexDiscoveryDelivery::Pending(CodexScanProgress::Waiting)
         ));
         set_index_scanning(false);
         hub.discover("profile", &source, bounds, first.next_frontier)
@@ -1559,7 +1559,7 @@ mod recent_first_discovery_tests {
             .unwrap()
         {
             CodexDiscoveryDelivery::Ready(pass) => pass,
-            CodexDiscoveryDelivery::Waiting => panic!("initial delivery unexpectedly waited"),
+            CodexDiscoveryDelivery::Pending(_) => panic!("initial delivery unexpectedly waited"),
         };
         assert_eq!(first.report.paths, vec![expected]);
         let retry = match hub
@@ -1568,7 +1568,7 @@ mod recent_first_discovery_tests {
             .unwrap()
         {
             CodexDiscoveryDelivery::Ready(pass) => pass,
-            CodexDiscoveryDelivery::Waiting => panic!("budget retry unexpectedly waited"),
+            CodexDiscoveryDelivery::Pending(_) => panic!("budget retry unexpectedly waited"),
         };
 
         assert!(
@@ -1640,7 +1640,7 @@ mod recent_first_discovery_tests {
                 .unwrap()
             {
                 CodexDiscoveryDelivery::Ready(pass) => pass,
-                CodexDiscoveryDelivery::Waiting => continue,
+                CodexDiscoveryDelivery::Pending(_) => continue,
             };
             delivered = delivered.saturating_add(pass.report.paths.len());
             frontier = pass.next_frontier;
@@ -2091,7 +2091,7 @@ mod recent_first_discovery_tests {
 
         let replayer = hub.clone();
         assert_ledger_read_never_waits_on_pinning(&hub, &rollout, move || {
-            while let CodexDiscoveryDelivery::Waiting = replayer
+            while let CodexDiscoveryDelivery::Pending(_) = replayer
                 .discover_blocking("replayer", &source, bounds, initial)
                 .unwrap()
             {}
@@ -2333,7 +2333,7 @@ mod recent_first_discovery_tests {
                 .unwrap()
             {
                 CodexDiscoveryDelivery::Ready(pass) => pass,
-                CodexDiscoveryDelivery::Waiting => {
+                CodexDiscoveryDelivery::Pending(_) => {
                     panic!("a single catch-up consumer must not wait on its own scan")
                 }
             };
@@ -2358,7 +2358,7 @@ mod recent_first_discovery_tests {
                 .unwrap()
             {
                 CodexDiscoveryDelivery::Ready(pass) => pass,
-                CodexDiscoveryDelivery::Waiting => continue,
+                CodexDiscoveryDelivery::Pending(_) => continue,
             };
             frontier = pass.next_frontier;
             hub.acknowledge("project");
@@ -2629,6 +2629,36 @@ mod recent_first_discovery_tests {
     }
 
     #[test]
+    fn idle_probe_finishes_the_current_cycle_before_starting_another() {
+        let home = TempDir::new().unwrap();
+        write_dated_rollout(home.path(), ("2026", "08", "29"), "current");
+        let source = CodexSource::with_home(home.path());
+        let bounds = TranscriptDiscoveryBounds::from_discovered_units(2);
+        let mut state = CodexDiscoveryState::default();
+        let mut frontier = CodexDiscoveryFrontier::initial();
+        for _ in 0..64 {
+            frontier = retained_pass(&source, &mut state, bounds, frontier).next_frontier;
+            if frontier.is_complete() {
+                break;
+            }
+        }
+        assert!(frontier.is_complete());
+        let idle = state.idle.as_mut().unwrap();
+        let authority_len = idle.directories.len() + idle.active_files.len();
+        assert!(authority_len > 2);
+        idle.next = authority_len - 1;
+        let cycles = idle.completed_probe_cycles;
+        assert!(
+            retained_pass(&source, &mut state, bounds, frontier)
+                .next_frontier
+                .is_complete()
+        );
+        let idle = state.idle.as_ref().unwrap();
+        assert_eq!(idle.completed_probe_cycles, cycles + 1);
+        assert_eq!(idle.next, 0);
+    }
+
+    #[test]
     fn hot_codex_directory_is_detected_even_when_rotation_starts_on_hot_prefix() {
         let temp = TempDir::new().unwrap();
         let home = temp.path();
@@ -2829,6 +2859,41 @@ mod recent_first_discovery_tests {
             codex_directory_changed(bucket, Some(witness)).unwrap(),
             "a new rollout must invalidate the cheap settled-directory witness"
         );
+    }
+
+    #[tokio::test]
+    async fn acknowledging_a_shared_validation_page_continues_its_retained_scan_once() {
+        crate::runtime::jsonl_observation_admission::install_test_shared_jsonl_preparation_authority();
+        let home = TempDir::new().unwrap();
+        for item in 0..64 {
+            write_dated_rollout(
+                home.path(),
+                ("2026", "08", "28"),
+                &format!("validation-{item}"),
+            );
+        }
+        let hub = CodexDiscoveryHub::default();
+        hub.register("project", Some(home.path()));
+        let source = CodexSource::with_home(home.path());
+        let bounds = TranscriptDiscoveryBounds::from_discovered_units(2);
+        let mut frontier = CodexDiscoveryFrontier::complete(CodexCorpusEpoch::initial());
+        for step in 0..2 {
+            let CodexDiscoveryDelivery::Ready(page) = hub
+                .discover("project", &source, bounds, frontier)
+                .await
+                .unwrap()
+            else {
+                panic!("a single shared consumer owns the scan");
+            };
+            assert!(page.report.paths.is_empty());
+            assert!(page.report.is_truncated());
+            if step == 1 {
+                assert_eq!(page.next_frontier, frontier);
+            }
+            frontier = page.next_frontier;
+            assert!(hub.acknowledge("project"));
+            assert!(!hub.acknowledge("project"));
+        }
     }
 
     #[test]
@@ -3821,7 +3886,7 @@ mod recent_first_discovery_tests {
                 .await
                 .expect("codex discovery")
             {
-                CodexDiscoveryDelivery::Waiting => continue,
+                CodexDiscoveryDelivery::Pending(_) => continue,
                 CodexDiscoveryDelivery::Ready(pass) => pass,
             };
             ready_passes = ready_passes.saturating_add(1);
@@ -3906,7 +3971,7 @@ mod recent_first_discovery_tests {
             .unwrap()
         {
             CodexDiscoveryDelivery::Ready(pass) => pass,
-            CodexDiscoveryDelivery::Waiting => panic!("an idle hub must deliver a pass"),
+            CodexDiscoveryDelivery::Pending(_) => panic!("an idle hub must deliver a pass"),
         };
         assert!(delivered.report.paths.contains(&rollout));
         std::fs::remove_file(&rollout).unwrap();

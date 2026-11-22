@@ -235,6 +235,7 @@ struct CodexQueuedDiscoveryPass {
     base: CodexDiscoveryFrontier,
     pass: std::sync::Arc<CodexDiscoveryPass>,
     indexed_ack: Option<(u128, Option<CodexIndexedPath>, u128)>,
+    continues_scan: bool,
 }
 
 enum CodexDiscoveryWork {
@@ -389,7 +390,15 @@ const MAX_CONSUMER_DISCOVERY_BACKLOG: usize = 1;
 
 pub(crate) enum CodexDiscoveryDelivery {
     Ready(std::sync::Arc<CodexDiscoveryPass>),
+    Pending(CodexScanProgress),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum CodexScanProgress {
+    /// A different consumer owns the scanner.
     Waiting,
+    /// This consumer finished a bounded step of the shared replay scan.
+    Advanced,
 }
 
 impl CodexDiscoveryHub {
@@ -667,6 +676,8 @@ impl CodexDiscoveryHub {
                             state.awaiting_ack = Some(CodexQueuedDiscoveryPass {
                                 base: frontier,
                                 pass: std::sync::Arc::clone(&pass),
+                                continues_scan: pass.report.is_truncated()
+                                    && next_position != effective_position,
                                 indexed_ack: Some((
                                     index_generation,
                                     next_position,
@@ -679,7 +690,7 @@ impl CodexDiscoveryHub {
                     let index = inner.replay_indexes.entry(source_key.clone()).or_default();
                     if index.scanning {
                         inner.scan_waited = true;
-                        return Ok(CodexDiscoveryDelivery::Waiting);
+                        return Ok(CodexDiscoveryDelivery::Pending(CodexScanProgress::Waiting));
                     }
                     if index._scanner_memory.is_none() {
                         index._scanner_memory = reserve_shared_jsonl_bytes(
@@ -691,7 +702,7 @@ impl CodexDiscoveryHub {
                         )?;
                     }
                     let Some(state) = index.discovery.take() else {
-                        return Ok(CodexDiscoveryDelivery::Waiting);
+                        return Ok(CodexDiscoveryDelivery::Pending(CodexScanProgress::Waiting));
                     };
                     index.scanning = true;
                     CodexDiscoveryWork::Replay {
@@ -748,7 +759,7 @@ impl CodexDiscoveryHub {
                     }
                     if inner.discovery_scanning {
                         inner.scan_waited = true;
-                        return Ok(CodexDiscoveryDelivery::Waiting);
+                        return Ok(CodexDiscoveryDelivery::Pending(CodexScanProgress::Waiting));
                     }
                     inner.discovery_scanning = true;
                     inner.shared_scans += 1;
@@ -798,6 +809,7 @@ impl CodexDiscoveryHub {
                     base,
                     pass: std::sync::Arc::clone(&pass),
                     indexed_ack: None,
+                    continues_scan: inner.discovery.scan.is_some(),
                 };
                 let shared_source_key = inner.source_key.clone();
                 let scan = inner.shared_scans;
@@ -932,15 +944,26 @@ impl CodexDiscoveryHub {
                             detail: "Codex replay enumeration count exhausted",
                         })?;
                     index.files_considered = pass.report.files_considered;
-                } else if completed_probe_cycle {
-                    index.probe_revision = index.probe_revision.checked_add(1).ok_or(
-                        TranscriptIngestError::InvalidCodexDiscoveryFrontier {
-                            detail: "Codex replay probe revision exhausted",
-                        },
-                    )?;
+                } else if !completed_probe_cycle {
+                    return Ok(CodexDiscoveryDelivery::Pending(CodexScanProgress::Advanced));
                 }
+                index.probe_revision = index.probe_revision.checked_add(1).ok_or(
+                    TranscriptIngestError::InvalidCodexDiscoveryFrontier {
+                        detail: "Codex replay probe revision exhausted",
+                    },
+                )?;
+                // Deliver the completed index in this poll. Only an unfinished
+                // scan needs another provider sweep.
+                continue;
             }
-            return Ok(CodexDiscoveryDelivery::Waiting);
+            let progress = if completed_sweep {
+                // The scan exhausted its candidates with incomplete coverage.
+                // Only a source change or a later idle probe can unblock it.
+                CodexScanProgress::Waiting
+            } else {
+                CodexScanProgress::Advanced
+            };
+            return Ok(CodexDiscoveryDelivery::Pending(progress));
         }
     }
 
@@ -976,15 +999,16 @@ impl CodexDiscoveryHub {
         Ok(needed)
     }
 
-    pub(crate) fn acknowledge(&self, consumer: &str) {
+    /// Whether consuming this page advances a bounded scan that still needs work.
+    pub(crate) fn acknowledge(&self, consumer: &str) -> bool {
         let mut inner = self.inner.lock().unwrap_or_else(PoisonError::into_inner);
         let shared_frontier = inner.frontier;
         let shared_source_key = inner.source_key.clone();
         let Some(state) = inner.consumers.get_mut(consumer) else {
-            return;
+            return false;
         };
         let Some(acknowledged) = state.awaiting_ack.take() else {
-            return;
+            return false;
         };
         if let Some((generation, position, probe_revision)) = acknowledged.indexed_ack
             && let CodexDiscoveryConsumerMode::Replay {
@@ -1005,6 +1029,7 @@ impl CodexDiscoveryHub {
                 };
             }
         }
+        acknowledged.continues_scan
     }
 }
 
@@ -1735,12 +1760,11 @@ impl CodexSource {
             let probes = if changed {
                 0
             } else {
-                work_limit.min(authority_len.max(1))
+                // Stop at the cycle boundary so a bounded replay probe can
+                // publish its completed revision before starting another lap.
+                work_limit.min(authority_len.saturating_sub(idle.next))
             };
             for _ in 0..probes {
-                if authority_len == 0 {
-                    break;
-                }
                 let index = idle.next % authority_len;
                 idle.next = if index + 1 == authority_len {
                     completed_cycle = true;

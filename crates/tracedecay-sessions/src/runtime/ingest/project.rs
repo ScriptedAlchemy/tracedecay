@@ -15,7 +15,7 @@ use tracedecay_store::StoreShardScopeV1;
 use super::failure::{
     IngestPassBounds, IngestPassOutcome, ProviderRunFold, RoundRobinAdmission,
     TranscriptCatchUpFailure, allocate_pass_byte_budgets, claude_catch_up_failure,
-    plan_round_robin_admission, scheduling_write_required, warn_transcript_catch_up_failure,
+    plan_round_robin_admission, provider_rotation_advances, warn_transcript_catch_up_failure,
 };
 use super::project_provider::{PROJECT_CATCH_UP_PROVIDERS, ProjectProviderRun};
 use super::scheduler::{
@@ -421,7 +421,7 @@ async fn ingest_project_sources_for_provider_bounded_inner<A: SessionIngestAutho
     // in this process or after a daemon restart, resumes at the provider
     // after the last one attempted instead of restarting the sweep.
     if let Some(frontier) = rotation_frontier
-        && scheduling_write_required(source_outcome.coverage, attempted, cancelled)
+        && provider_rotation_advances(selected.len(), attempted, cancelled)
     {
         source_outcome.scheduling_state_written = erase_send!(
             write_ingest_frontier(

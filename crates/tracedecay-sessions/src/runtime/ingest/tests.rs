@@ -22,7 +22,7 @@ use crate::runtime::{SessionProvider, hosts::claude_observation, hosts::codex, s
 use super::failure::{
     IngestPassBounds, IngestPassCoverage, allocate_pass_byte_budgets,
     classify_claude_observation_failure, classify_transcript_ingest_failure,
-    plan_round_robin_admission, scheduling_write_required,
+    plan_round_robin_admission, provider_rotation_advances,
 };
 use super::project::{home_dir, with_transcript_source_profile};
 use super::scheduler::{
@@ -523,30 +523,11 @@ fn zero_unit_budget_is_typed_backpressure() {
 }
 
 #[test]
-fn cancellation_and_empty_attempt_suppress_scheduling_writes() {
-    assert!(!scheduling_write_required(
-        IngestPassCoverage::Partial { deferred_units: 3 },
-        2,
-        true
-    ));
-    assert!(!scheduling_write_required(
-        IngestPassCoverage::Partial { deferred_units: 3 },
-        0,
-        false
-    ));
-    assert!(scheduling_write_required(
-        IngestPassCoverage::Partial { deferred_units: 3 },
-        2,
-        false
-    ));
-    assert!(scheduling_write_required(
-        IngestPassCoverage::Backpressured {
-            admitted_units: 2,
-            rejected_units: 1
-        },
-        2,
-        false
-    ));
+fn provider_rotation_advances_only_when_the_next_pass_starts_in_a_different_slot() {
+    assert!(provider_rotation_advances(3, 2, false));
+    assert!(!provider_rotation_advances(3, 2, true));
+    assert!(!provider_rotation_advances(3, 0, false));
+    assert!(!provider_rotation_advances(3, 3, false));
 }
 
 #[test]

@@ -1,4 +1,5 @@
-use std::path::Path;
+use std::io::Write;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use tracedecay_domain::{BrainId, ProjectId};
@@ -457,7 +458,7 @@ const FULL_SWEEP_TEST_BOUNDS: IngestPassBounds = IngestPassBounds {
 };
 
 /// Codex rollout whose `session_meta.cwd` binds it to `project`.
-fn write_codex_rollout_fixture(home: &Path, project: &Path, session: &str) {
+fn write_codex_rollout_fixture(home: &Path, project: &Path, session: &str) -> PathBuf {
     let dir = home.join(".codex/sessions/2026/01/01");
     std::fs::create_dir_all(&dir).unwrap();
     let contents = format!(
@@ -478,11 +479,9 @@ fn write_codex_rollout_fixture(home: &Path, project: &Path, session: &str) {
             "payload": {"type": "agent_message", "message": "The rotation backlog is covered."}
         }),
     );
-    std::fs::write(
-        dir.join(format!("rollout-2026-01-01T00-00-00-{session}.jsonl")),
-        contents,
-    )
-    .unwrap();
+    let path = dir.join(format!("rollout-2026-01-01T00-00-00-{session}.jsonl"));
+    std::fs::write(&path, contents).unwrap();
+    path
 }
 
 /// The codex scope matcher resolves rollout membership through the cwd's
@@ -620,6 +619,53 @@ async fn bounded_project_catch_up_pass_persists_the_rotation_frontier() {
         "the pass reports the dispositions of the one provider it admitted"
     );
     assert_eq!(project_rotation_frontier(&runtime).await, Some(1));
+    assert_eq!(runtime.database.session_message_count().await.unwrap(), 2);
+}
+
+#[tokio::test]
+async fn a_blocked_full_provider_sweep_does_not_schedule_itself_again() {
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path().join("home");
+    let project = temp.path().join("project");
+    std::fs::create_dir_all(&project).unwrap();
+    init_fixture_git_repo(&project);
+    let project_id = scheduler_test_project_id();
+    let path = write_codex_rollout_fixture(&home, &project, "codex-blocked-sweep");
+    let file = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
+    let len = file.metadata().unwrap().len();
+    file.set_len(len - 1).unwrap();
+    drop(file);
+    let runtime = project_test_runtime(&project, project_id.clone()).await;
+    let run = || {
+        run_bounded_project_pass(
+            &runtime,
+            &project,
+            &home,
+            &project_id,
+            None,
+            FULL_SWEEP_TEST_BOUNDS,
+        )
+    };
+    let first = run().await;
+    assert_eq!(first.stats.messages_upserted, 1);
+    assert!(first.made_progress());
+
+    for _ in 0..2 {
+        let pass = run().await;
+        assert!(pass.has_deferred_work(), "{:?}", pass.coverage);
+        assert!(!pass.scheduling_state_written);
+        assert!(!pass.made_progress(), "{:?}", pass.stats);
+        assert_eq!(project_rotation_frontier(&runtime).await, None);
+    }
+
+    let mut file = std::fs::OpenOptions::new()
+        .append(true)
+        .open(&path)
+        .unwrap();
+    file.write_all(b"\n").unwrap();
+    let resumed = run().await;
+    assert_eq!(resumed.stats.messages_upserted, 1);
+    assert!(resumed.made_progress());
     assert_eq!(runtime.database.session_message_count().await.unwrap(), 2);
 }
 

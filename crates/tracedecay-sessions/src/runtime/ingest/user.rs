@@ -16,7 +16,7 @@ use tracedecay_store::StoreShardScopeV1;
 use super::failure::{
     IngestPassBounds, IngestPassCoverage, IngestPassOutcome, ProviderRunFold,
     TranscriptCatchUpFailure, allocate_pass_byte_budgets, observation_catch_up_failure,
-    scheduling_write_required, warn_transcript_catch_up_failure,
+    provider_rotation_advances, warn_transcript_catch_up_failure,
 };
 use super::quarantine::SourceSweep;
 use super::scheduler::{
@@ -171,6 +171,7 @@ pub(super) async fn try_ingest_user_codex_sessions_rotated(
             },
             committable_frontier: None,
             discovery_waiting: false,
+            coverage_advanced: false,
             failures: Vec::new(),
         });
     };
@@ -185,7 +186,7 @@ pub(super) async fn try_ingest_user_codex_sessions_rotated(
             .await?
         {
             codex::CodexDiscoveryDelivery::Ready(pass) => pass,
-            codex::CodexDiscoveryDelivery::Waiting => {
+            codex::CodexDiscoveryDelivery::Pending(scan) => {
                 return Ok(CodexUserIngestOutcome {
                     outcome: BoundedProviderOutcome {
                         stats: TranscriptIngestStats::default(),
@@ -194,6 +195,7 @@ pub(super) async fn try_ingest_user_codex_sessions_rotated(
                     },
                     committable_frontier: None,
                     discovery_waiting: true,
+                    coverage_advanced: scan == codex::CodexScanProgress::Advanced,
                     failures: Vec::new(),
                 });
             }
@@ -217,6 +219,7 @@ pub(super) async fn try_ingest_user_codex_sessions_rotated(
     let mut bytes_consumed = 0u64;
     let mut deferred_by_byte_cap = discovery.is_truncated();
     let mut frontier_committable = true;
+    let mut coverage_advanced = false;
     let mut failures = Vec::new();
     for path in &discovery.paths {
         if remaining == Some(0) {
@@ -269,6 +272,7 @@ pub(super) async fn try_ingest_user_codex_sessions_rotated(
             }
         };
         pending.admitted(progress.source_deferred, progress.covered_through)?;
+        coverage_advanced |= progress.advanced_coverage();
         deferred_by_byte_cap |= progress.source_deferred;
         frontier_committable &= !progress.source_deferred;
         bytes_consumed = bytes_consumed.saturating_add(progress.bytes_consumed);
@@ -291,6 +295,7 @@ pub(super) async fn try_ingest_user_codex_sessions_rotated(
         },
         committable_frontier: frontier_committable.then_some(next_frontier),
         discovery_waiting: false,
+        coverage_advanced,
         failures,
     })
 }
@@ -300,6 +305,7 @@ pub(super) struct CodexUserIngestOutcome {
     pub(super) committable_frontier: Option<codex::CodexDiscoveryFrontier>,
     /// Shared discovery has not produced a page; preserve durable coverage.
     pub(super) discovery_waiting: bool,
+    pub(super) coverage_advanced: bool,
     pub(super) failures: Vec<TranscriptCatchUpFailure>,
 }
 
@@ -740,7 +746,7 @@ async fn ingest_user_global_sources_for_provider_with_roots_bounded_inner<
             .push(TranscriptCatchUpFailure::pass_backpressured());
     }
 
-    let write = scheduling_write_required(coverage, attempted, cancelled);
+    let write = provider_rotation_advances(selected.len(), attempted, cancelled);
     let scheduling_state_written = if write {
         write_ingest_frontier(
             &transcript_store,

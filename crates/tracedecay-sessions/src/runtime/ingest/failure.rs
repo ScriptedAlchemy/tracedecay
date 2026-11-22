@@ -177,7 +177,7 @@ pub struct IngestPassOutcome {
     /// False when an admitted provider API performs an internally unbounded
     /// sweep and therefore cannot honor the pass byte budget end-to-end.
     pub byte_bounds_enforced: bool,
-    /// The pass durably advanced source coverage beyond its upserts.
+    /// The pass advanced discovery or source coverage beyond its upserts.
     pub coverage_advanced: bool,
     pub provider_units: BTreeMap<&'static str, ProviderPassUnits>,
 }
@@ -261,22 +261,14 @@ pub(super) fn allocate_pass_byte_budgets(unit_count: usize, bounds: IngestPassBo
     budgets
 }
 
-/// Decide whether a completed pass should persist a scheduling frontier.
-///
-/// Cancellation and full coverage never write. Partial / backpressured passes
-/// write only when at least one unit was attempted so rotation can continue.
-pub(super) fn scheduling_write_required(
-    coverage: IngestPassCoverage,
-    attempted_units: usize,
+/// The next provider changes only if the pass stopped partway around the ring.
+/// A provider blocked inside a full sweep still starts in the same slot.
+pub(super) fn provider_rotation_advances(
+    selected: usize,
+    attempted: usize,
     cancelled: bool,
 ) -> bool {
-    if cancelled || attempted_units == 0 || coverage.is_complete() {
-        return false;
-    }
-    matches!(
-        coverage,
-        IngestPassCoverage::Partial { .. } | IngestPassCoverage::Backpressured { .. }
-    )
+    !cancelled && attempted > 0 && attempted < selected
 }
 
 /// Reason code, retryability, and admission status of one transcript ingest
