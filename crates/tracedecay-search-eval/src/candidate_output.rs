@@ -64,7 +64,8 @@ use tracedecay_query::retrieval::fusion::{
     FusionStageInput,
 };
 use tracedecay_query::retrieval::graph::{
-    GraphLane, GraphLaneEvidence, GraphLaneRequest, production_code_index_freshness,
+    GraphLane, GraphLaneEvidence, GraphLaneRequest, graph_seeds_from_outcomes,
+    production_code_index_freshness,
 };
 use tracedecay_query::retrieval::lexical::{
     CODE_LEXICAL_ARTIFACT_QUERY_CACHE_BUDGET_BYTES_V1, CodeLexicalArtifactBuilderV1,
@@ -74,7 +75,7 @@ use tracedecay_query::retrieval::lexical::{
     merge_lexical_routes,
 };
 use tracedecay_query::retrieval::ports::{
-    CodeCandidateBindingV1, TEXT_ARTIFACT_PAGE_BYTES_V1, TEXT_ARTIFACT_PAGE_CHUNKS_V1,
+    TEXT_ARTIFACT_PAGE_BYTES_V1, TEXT_ARTIFACT_PAGE_CHUNKS_V1,
 };
 use tracedecay_query::search_quality::candidate_output::{
     CandidateOutputError, CandidateWorkloadV1, CorpusDocumentV1, EVALUATION_CACHE_STATE,
@@ -1478,55 +1479,6 @@ fn display_qualified_anchor(document: &CorpusDocumentV1, qualified_name: &str) -
     }
 }
 
-fn graph_seeds_from_outcomes(
-    exact: &RetrieverOutcome<
-        tracedecay_domain::RetrieverBatch<tracedecay_query::retrieval::exact::ExactLaneEvidence>,
-    >,
-    lexical: &RetrieverOutcome<
-        tracedecay_domain::RetrieverBatch<
-            tracedecay_query::retrieval::lexical::LexicalLaneEvidence,
-        >,
-    >,
-) -> Vec<CodeCandidateBindingV1> {
-    let mut seeds = Vec::new();
-    let mut seen_occurrences = BTreeSet::new();
-    let mut seen_symbols = BTreeSet::new();
-    let mut push_seed = |binding: &CodeCandidateBindingV1,
-                         seeds: &mut Vec<CodeCandidateBindingV1>| {
-        let Some(symbol) = binding.occurrence.symbol.as_ref() else {
-            return;
-        };
-        if !seen_occurrences.insert(binding.source_occurrence.clone()) {
-            return;
-        }
-        if !seen_symbols.insert(symbol.clone()) {
-            return;
-        }
-        seeds.push(binding.clone());
-    };
-    if let RetrieverOutcome::Complete(batch) | RetrieverOutcome::Partial { value: batch, .. } =
-        exact
-    {
-        for evidence in batch.evidence_by_occurrence.values() {
-            push_seed(&evidence.binding, &mut seeds);
-            if seeds.len() >= 8 {
-                return seeds;
-            }
-        }
-    }
-    if let RetrieverOutcome::Complete(batch) | RetrieverOutcome::Partial { value: batch, .. } =
-        lexical
-    {
-        for evidence in batch.evidence_by_occurrence.values() {
-            push_seed(&evidence.binding, &mut seeds);
-            if seeds.len() >= 8 {
-                return seeds;
-            }
-        }
-    }
-    seeds
-}
-
 fn retrieval_request(
     profile_id: &str,
     generation: &CodeIndexPublishedGenerationV1,
@@ -1588,6 +1540,7 @@ pub(crate) mod tests {
     use super::*;
     use crate::packaged_assets::PackagedEvaluatorAssets;
     use std::sync::Mutex;
+    use tracedecay_domain::FixedPointScore;
     use tracedecay_query::search_quality::candidate_output::{
         ResourceMeasurementPendingReasonV1, ResourceMeasurementStatusV1,
     };
@@ -1751,6 +1704,216 @@ pub(crate) mod tests {
             production_digest(generation_a).as_str(),
             production_digest(generation_b).as_str(),
             "the production fallback digest still moves with the sealed generation"
+        );
+    }
+
+    fn lane_score_diagnostics(
+        published: &PublishedCorpus,
+        input: &FusionStageInput,
+    ) -> serde_json::Value {
+        let lanes = input
+            .lanes
+            .iter()
+            .map(|lane| {
+                let batch = match &lane.outcome {
+                    RetrieverOutcome::Complete(batch)
+                    | RetrieverOutcome::Partial { value: batch, .. } => batch,
+                    other => {
+                        return serde_json::json!({
+                            "lane": lane.lane,
+                            "outcome": format!("{other:?}"),
+                        });
+                    }
+                };
+                let candidates = batch
+                    .candidates
+                    .iter()
+                    .map(|candidate| {
+                        let entry = published
+                            .occurrence_map
+                            .get(candidate.anchor_id.as_str())
+                            .or_else(|| {
+                                published
+                                    .occurrence_map
+                                    .get(candidate.source_occurrence_id.as_str())
+                            });
+                        let calibrated = input
+                            .profile
+                            .score_domain_calibrations
+                            .get(&candidate.score_domain)
+                            .expect("candidate score domain is calibrated")
+                            .calibrate(candidate.raw_score)
+                            .expect("candidate score calibrates");
+                        let weight = input.profile.weights_micros[&candidate.retriever];
+                        serde_json::json!({
+                            "anchor": candidate.anchor_id,
+                            "display_anchors": entry.map(|entry| &entry.display_anchors),
+                            "file": candidate.file_occurrence_id,
+                            "rank": candidate.ordinal_rank,
+                            "exact_class": candidate.exact_class(),
+                            "source_role": candidate.source_role,
+                            "raw_score_micros": candidate.raw_score.0,
+                            "calibrated_feature_micros": calibrated,
+                            "weighted_contribution_micros": FixedPointScore(u64::from(calibrated))
+                                .checked_weight(weight)
+                                .expect("candidate contribution is bounded"),
+                        })
+                    })
+                    .collect::<Vec<_>>();
+                serde_json::json!({
+                    "lane": lane.lane,
+                    "coverage": batch.coverage,
+                    "candidates": candidates,
+                })
+            })
+            .collect::<Vec<_>>();
+        serde_json::json!(lanes)
+    }
+
+    fn composed_score_diagnostics(
+        published: &PublishedCorpus,
+        output: &CompositionOutputV1,
+    ) -> serde_json::Value {
+        let rows = map_ranked_candidates(published, output).expect("candidate corpus bindings");
+        let ranked = rows
+            .iter()
+            .zip(&output.ranked_candidates)
+            .map(|(row, candidate)| {
+                serde_json::json!({
+                    "row": row,
+                    "source_role": candidate.candidate.source_role,
+                    "utility_micros": candidate.candidate.utility_micros,
+                    "contributions": candidate.candidate.contributions,
+                })
+            })
+            .collect::<Vec<_>>();
+        let diversity = output
+            .diversity_decisions
+            .iter()
+            .map(|decision| {
+                serde_json::json!({
+                    "capped": decision.capped,
+                    "decision": decision.decision,
+                })
+            })
+            .collect::<Vec<_>>();
+        let dedupe = output
+            .dedupe_decisions
+            .iter()
+            .map(|decision| {
+                serde_json::json!({
+                    "kept_occurrence": decision.kept_occurrence,
+                    "collapsed_occurrences": decision.collapsed_occurrences,
+                    "decision": decision.decision,
+                })
+            })
+            .collect::<Vec<_>>();
+        serde_json::json!({
+            "lane_statuses": output.public_lane_statuses,
+            "ranked": ranked,
+            "diversity_decisions": diversity,
+            "dedupe_decisions": dedupe,
+        })
+    }
+
+    #[test]
+    fn documented_answers_survive_full_graph_composition() {
+        let fixture = packaged_fixture();
+        let mut workload = fixture.workload().clone();
+        let queries = ["train-025", "validation-006", "validation-017"].map(|query_id| {
+            workload
+                .queries
+                .iter()
+                .find(|query| query.query_id == query_id)
+                .cloned()
+                .expect("documented corpus need exists")
+        });
+        workload.queries = queries.to_vec();
+        let published = publish_corpus(fixture.root(), &workload, no_admitted_corpus_scope)
+            .expect("publish the actual allowed corpus scopes");
+        let spec = workload
+            .profile_matrix
+            .iter()
+            .find(|profile| profile.profile_id == "query-fallback")
+            .expect("production fallback profile");
+        let profile = fusion_profile(spec).expect("production fusion material");
+        let diversity = evaluated_diversity_policy().expect("production diversity policy");
+        let kernel = CompositionKernel::new(
+            id::<ComponentRevision>(tracedecay_query::retrieval::QUERY_RANKING_REVISION_V1)
+                .expect("production ranking revision"),
+        );
+        let mut failures = Vec::new();
+        let mut diagnostics = Vec::new();
+        for query in &queries {
+            let scoped = published
+                .scopes
+                .get(&canonical_scope_key(&query.allowed_scopes))
+                .and_then(Option::as_ref)
+                .expect("query scope has its real published generation");
+            let input = FusionStageInput {
+                profile: profile.clone(),
+                lanes: production_lanes(scoped, spec, query).expect("production retrieval lanes"),
+            };
+            let graph_has_candidates = input.lanes.iter().any(|lane| {
+                lane.lane == RetrieverKind::Graph
+                    && matches!(
+                        &lane.outcome,
+                        RetrieverOutcome::Complete(batch)
+                            | RetrieverOutcome::Partial { value: batch, .. }
+                            if !batch.candidates.is_empty()
+                    )
+            });
+            let full = kernel
+                .compose(&input, &diversity)
+                .expect("full production composition");
+            // Hold the actual exact/lexical evidence, calibration, and file
+            // cap fixed. Only this diagnostic comparison excludes graph.
+            let mut without_graph = input.clone();
+            for lane in &mut without_graph.lanes {
+                if lane.lane == RetrieverKind::Graph {
+                    lane.outcome = RetrieverOutcome::Unavailable(
+                        RetrievalFailure::AuthorityUnavailable {
+                            detail: "graph excluded by the lexical comparison".to_owned(),
+                        },
+                    );
+                }
+            }
+            let lexical_only = kernel
+                .compose(&without_graph, &diversity)
+                .expect("composition without graph contribution");
+            let rows = map_ranked_candidates(&published, &full).expect("final candidate bindings");
+            let label = query.label.as_ref().expect("reviewed relevance label");
+            let expected_document = label["document_id"].as_str().expect("label document");
+            let expected_anchors = label["anchors"].as_array().expect("label anchors");
+            let answer_found = rows.iter().any(|row| {
+                row.document_id == expected_document
+                    && expected_anchors.iter().any(|expected| {
+                        expected
+                            .as_str()
+                            .is_some_and(|anchor| row.anchors.iter().any(|actual| actual == anchor))
+                    })
+            });
+            if !answer_found || !graph_has_candidates {
+                failures.push((query.query_id.clone(), answer_found, graph_has_candidates));
+            }
+            diagnostics.push(serde_json::json!({
+                "query_id": query.query_id,
+                "query": query.query,
+                "label": label,
+                "answer_found": answer_found,
+                "graph_has_candidates": graph_has_candidates,
+                "lanes": lane_score_diagnostics(&published, &input),
+                "without_graph": composed_score_diagnostics(&published, &lexical_only),
+                "full_graph": composed_score_diagnostics(&published, &full),
+            }));
+        }
+        // Compute every case before asserting so one displacement cannot hide
+        // the other cases' actual lane scores and calibrated contributions.
+        let diagnostics = serde_json::json!(diagnostics);
+        assert!(
+            failures.is_empty(),
+            "documented answers must remain in the real graph result page; \
+             (query, answer found, graph exercised)={failures:?}\n{diagnostics:#}"
         );
     }
 
