@@ -674,6 +674,47 @@ pub fn manual_branch_artifact_ownership(
     }
 }
 
+/// Git's status and non-forced worktree removal both trust index flags that
+/// can hide edited tracked files. Cleanup preserves those checkouts instead
+/// of changing the user's index or treating its shortcuts as byte evidence.
+pub fn require_worktree_index_checks(
+    worktree: &Path,
+    command_control: &PrCommandControlV1,
+) -> std::result::Result<(), ManualBranchActivationError> {
+    let unavailable = |detail: String| {
+        ManualBranchActivationError::git_unavailable(format!(
+            "cannot verify worktree index content checks for '{}': {detail}",
+            worktree.display()
+        ))
+    };
+    if command_control.is_cancelled() {
+        return Err(unavailable("request cancelled".to_owned()));
+    }
+    let repository = tracedecay_runtime_core::git_open::open(worktree)
+        .map_err(|error| unavailable(error.to_string()))?;
+    // A missing index cannot authorize deletion; never substitute an empty one.
+    let index = repository
+        .index()
+        .map_err(|error| unavailable(error.to_string()))?;
+    let unchecked = gix::index::entry::Flags::UPTODATE
+        | gix::index::entry::Flags::SKIP_WORKTREE
+        | gix::index::entry::Flags::ASSUME_VALID
+        | gix::index::entry::Flags::FSMONITOR_VALID;
+    if index
+        .entries()
+        .iter()
+        .any(|entry| entry.flags.intersects(unchecked))
+    {
+        return Err(unavailable(
+            "index entries can bypass content checks; preserve the checkout".to_owned(),
+        ));
+    }
+    if command_control.is_cancelled() {
+        return Err(unavailable("request cancelled".to_owned()));
+    }
+    Ok(())
+}
+
 pub fn cleanup_owned_worktree(
     repo_root: &Path,
     worktree: &Path,
@@ -825,9 +866,10 @@ fn remove_owned_manual_worktree(
     if !checked_path_exists(worktree)? {
         return Ok(());
     }
+    require_worktree_index_checks(worktree, command_control)?;
     let worktree_arg = worktree.to_string_lossy();
-    // Git's own dirty/lock checks remain the last authority if a checkout
-    // changes after our ownership proof. Never force or recursively remove it.
+    // Keep Git's ordinary dirty/lock checks after rejecting hidden-content
+    // shortcuts. Never force or recursively remove the checkout.
     let output = run_git_with_control(
         repo_root,
         &["worktree", "remove", &worktree_arg],
@@ -1337,6 +1379,84 @@ mod tests {
         );
         assert!(cleanup().expect("clean exclusive artifacts can retire"));
         assert!(!artifacts.worktree.exists());
+    }
+
+    #[test]
+    fn manual_cleanup_preserves_tracked_edits_hidden_by_index_flags() {
+        for flag in ["--assume-unchanged", "--skip-worktree"] {
+            let repo = tempfile::tempdir().unwrap();
+            let branch = "feature/hidden-edits";
+            init_manual_branch_repo(repo.path(), branch);
+            let data = tempfile::tempdir().unwrap();
+            let control = default_pr_command_control();
+            let head = resolve_branch_head(repo.path(), branch, control).unwrap();
+            let artifacts = ManualBranchArtifactsV1::for_head(data.path(), branch, &head);
+            prepare_manual_branch_worktree(
+                repo.path(),
+                &artifacts.worktree,
+                &artifacts.tracking_ref,
+                &artifacts.label,
+                &head,
+                control,
+            )
+            .unwrap();
+            git(
+                &artifacts.worktree,
+                &["update-index", flag, "--", "src/feature.rs"],
+            );
+            let source = artifacts.worktree.join("src/feature.rs");
+            let edited = b"uncommitted hidden work must survive\n";
+            std::fs::write(&source, edited).unwrap();
+            let status = successful_git_with_control(
+                &artifacts.worktree,
+                &[
+                    "status",
+                    "--porcelain=v1",
+                    "--untracked-files=all",
+                    "--ignored",
+                ],
+                control,
+            )
+            .unwrap();
+            assert!(status.stdout.is_empty(), "{flag} must hide the fixture edit");
+            let index_flags = || {
+                successful_git_with_control(
+                    &artifacts.worktree,
+                    &["ls-files", "-v", "--", "src/feature.rs"],
+                    control,
+                )
+                .unwrap()
+                .stdout
+            };
+            let flags_before = index_flags();
+
+            let error = cleanup_owned_worktree(
+                repo.path(),
+                &artifacts.worktree,
+                &artifacts.tracking_ref,
+                &artifacts.label,
+                &head,
+                control,
+            )
+            .expect_err("an unchecked index cannot authorize checkout removal");
+
+            assert!(matches!(
+                error,
+                ManualBranchActivationError::GitAuthorityUnavailable { .. }
+            ));
+            assert!(artifacts.worktree.is_dir(), "{flag}");
+            assert_eq!(std::fs::read(&source).unwrap(), edited, "{flag}");
+            assert_eq!(index_flags(), flags_before, "{flag} must remain set");
+            for reference in [
+                artifacts.tracking_ref.clone(),
+                format!("refs/heads/{}", artifacts.label),
+            ] {
+                assert!(
+                    ref_points_to(repo.path(), &reference, &head, control).unwrap(),
+                    "{flag}: {reference}"
+                );
+            }
+        }
     }
 
     #[test]

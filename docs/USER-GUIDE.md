@@ -629,10 +629,12 @@ tracedecay daemon restart
 With automatic imports paused, startup, project mounts, and idle discovery do
 not start historical scans. Live host hooks and session projection continue.
 An explicit `tracedecay sessions import` still schedules a bounded import; its
-accepted continuations finish and then return to paused. Already accepted
-session-sync recovery remains available. Status reports
-`historical_blocked:session_history_import_paused_by_configuration` while paused
-instead of claiming historical convergence.
+accepted continuations finish while automatic discovery stays paused. After
+the imported messages are published, `require_fresh` reads can use them when
+their projection coverage is current. Already accepted session-sync recovery
+remains available. Status keeps historical convergence blocked with the reason
+`session_history_import_paused_by_configuration`; a completed explicit import
+does not resume automatic scans or claim historical convergence.
 
 To resume automatic imports, set the same key to `true` using the current
 profile revision and a new idempotency key, then restart the daemon. Existing
@@ -649,6 +651,11 @@ and registered project session stores. The daemon uses these settings:
 | `user.session_retention_enabled.v1` | `true` | Enable the session retention passes. |
 | `user.session_retention_days.v1` | `180` | Delete older raw messages after a durable summary covers them; `0` disables deletion. |
 | `user.session_compaction_days.v1` | `30` | Compact older summarized message bodies when the shared representation is smaller; `0` disables this phase. |
+
+Defaults initialize a fresh profile. An existing profile snapshot missing a
+current setting returns `ResetRequired` without changing its revision or stored
+values. Follow the explicit reset remediation and re-apply your custom settings;
+startup does not add history-import or retention defaults to an older snapshot.
 
 Read the current value and profile revision first:
 

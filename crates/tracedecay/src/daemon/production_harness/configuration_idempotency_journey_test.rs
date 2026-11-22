@@ -90,7 +90,7 @@ async fn wait_history_status(
     project: &Path,
     messages: u64,
     paused: bool,
-) {
+) -> Value {
     tokio::time::timeout(Duration::from_secs(30), async {
         loop {
             let response = harness
@@ -104,25 +104,49 @@ async fn wait_history_status(
             } else {
                 &payload
             };
-            let convergence = &status["projection"]["convergence"]["state"];
+            let convergence = &status["projection"]["convergence"];
             if status["lcm"]["store"]["messages"] == json!(messages)
-                && convergence == if paused { "blocked" } else { "converged" }
+                && convergence["state"] == if paused { "blocked" } else { "converged" }
             {
                 if paused {
                     assert_eq!(
-                        status["projection"]["reason"],
-                        json!(format!(
-                            "historical_blocked:{SESSION_HISTORY_IMPORT_PAUSED_REASON}"
-                        ))
+                        convergence["reason"],
+                        json!(SESSION_HISTORY_IMPORT_PAUSED_REASON)
                     );
+                    assert_eq!(convergence["epoch"], json!(0));
+                    assert_eq!(convergence["converged_at_unix_micros"], Value::Null);
                 }
-                break;
+                break status.clone();
             }
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
     })
     .await
-    .expect("native import reaches the expected serving state");
+    .expect("native import reaches the expected serving state")
+}
+
+async fn fresh_history_search(
+    harness: &ProductionProjectCompositionHarnessV1,
+    project: &Path,
+) -> (bool, Value) {
+    let response = harness
+        .call_tool(
+            project,
+            "tracedecay_message_search",
+            json!({
+                "query": "native historical message",
+                "provider": "codex",
+                "require_fresh": true,
+                "format": "json",
+            }),
+        )
+        .await
+        .expect("fresh message search transport");
+    let (refused, payload) = tool_answer(&response);
+    (
+        refused,
+        resolved(harness, project, "tracedecay_message_search", payload).await,
+    )
 }
 
 async fn explicit_history_import(harness: &ProductionProjectCompositionHarnessV1, project: &Path) {
@@ -200,9 +224,39 @@ async fn historical_import_pause_is_restart_applied_and_preserves_explicit_nativ
     .await
     .expect("paused production restart");
     assert!(!automatic_history_import(&harness));
-    wait_history_status(&harness, &project, 0, true).await;
+    let status = wait_history_status(&harness, &project, 0, true).await;
+    assert_eq!(status["projection"]["state"], json!("stale"));
+    assert_eq!(
+        status["projection"]["reason"],
+        json!(format!(
+            "historical_blocked:{SESSION_HISTORY_IMPORT_PAUSED_REASON}"
+        ))
+    );
+    let (refused, payload) = fresh_history_search(&harness, &project).await;
+    assert!(
+        refused,
+        "an unimported source cannot claim fresh message coverage: {payload}"
+    );
     explicit_history_import(&harness, &project).await;
-    wait_history_status(&harness, &project, 1, true).await;
+    let status = wait_history_status(&harness, &project, 1, true).await;
+    assert_eq!(status["projection"]["state"], json!("current"));
+    assert_eq!(status["projection"]["reason"], Value::Null);
+    let (refused, payload) = fresh_history_search(&harness, &project).await;
+    assert!(
+        !refused,
+        "the published explicit import must admit fresh retrieval while paused: {payload}"
+    );
+    let search = &payload["outcome"]["value"]["payload"];
+    assert_eq!(search["outcome"], json!("complete"), "{payload}");
+    assert_eq!(search["require_fresh"], json!(true));
+    assert_eq!(search["refresh_required"], json!(false));
+    assert_eq!(search["temporal"]["freshness"], json!({"state": "fresh"}));
+    assert_eq!(search["results"].as_array().map(Vec::len), Some(1));
+    assert_eq!(search["results"][0]["message"]["provider"], json!("codex"));
+    assert_eq!(
+        search["results"][0]["message"]["text"],
+        json!("native historical message for history-paused-first")
+    );
 
     set_history_import(&harness, &project, true).await;
     assert!(

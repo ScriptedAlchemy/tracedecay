@@ -460,7 +460,9 @@ impl SessionTemporalRefreshWakeState {
             return;
         }
         telemetry.quiescent = true;
-        if telemetry.historical_state == SessionHistoricalServingState::Current {
+        if self.automatic_history_import_enabled
+            && telemetry.historical_state == SessionHistoricalServingState::Current
+        {
             telemetry.convergence_epoch = telemetry.convergence_epoch.saturating_add(1);
             telemetry.converged_at_unix_micros =
                 Some(tracedecay_runtime_core::tracedecay::saturating_utc_now().0);
@@ -581,10 +583,12 @@ impl SessionTemporalRefreshWakeState {
 
     pub fn record_history_outcome(&self, outcome: SessionHistoricalIngestOutcome) {
         let state = match outcome {
-            SessionHistoricalIngestOutcome::Complete if self.automatic_history_import_enabled => {
+            // A completed explicit import establishes the same source frontier
+            // as an automatic pass. Pausing future discovery is convergence
+            // policy, not evidence that this imported projection is stale.
+            SessionHistoricalIngestOutcome::Complete => {
                 SessionHistoricalServingState::Current
             }
-            SessionHistoricalIngestOutcome::Complete => SessionHistoricalServingState::Paused,
             SessionHistoricalIngestOutcome::Pending { .. } => {
                 SessionHistoricalServingState::Pending
             }
@@ -729,7 +733,11 @@ impl SessionTemporalRefreshWakeState {
                 .unwrap_or_else(PoisonError::into_inner);
             (
                 telemetry.historical_state.clone(),
-                convergence_status(&telemetry, worker.unavailable_reason),
+                convergence_status(
+                    &telemetry,
+                    worker.unavailable_reason,
+                    self.automatic_history_import_enabled,
+                ),
                 telemetry.history_progress.clone(),
             )
         };
@@ -857,6 +865,7 @@ impl Drop for SessionTemporalRefreshWakeState {
 fn convergence_status(
     telemetry: &SessionTemporalRefreshWorkerTelemetry,
     unavailable_reason: Option<SessionTemporalRefreshUnavailableReason>,
+    automatic_history_import_enabled: bool,
 ) -> SessionConvergenceStatus {
     let state = match unavailable_reason {
         Some(
@@ -870,8 +879,11 @@ fn convergence_status(
         | None => {
             if telemetry.quiescent {
                 match &telemetry.historical_state {
-                    SessionHistoricalServingState::Current => SessionConvergenceState::Converged,
-                    SessionHistoricalServingState::Paused => SessionConvergenceState::Blocked {
+                    SessionHistoricalServingState::Current if automatic_history_import_enabled => {
+                        SessionConvergenceState::Converged
+                    }
+                    SessionHistoricalServingState::Current
+                    | SessionHistoricalServingState::Paused => SessionConvergenceState::Blocked {
                         reason_code: SESSION_HISTORY_IMPORT_PAUSED_REASON.to_owned(),
                     },
                     SessionHistoricalServingState::Blocked(reason_code) => {

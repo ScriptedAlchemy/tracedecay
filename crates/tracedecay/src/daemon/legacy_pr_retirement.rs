@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use tracedecay_application::pr_tracking::{
     ManualBranchActivationError, PrCommandControlV1, refs_are_unattached_outside_worktree,
-    successful_git_with_control, try_acquire_manual_branch_lifecycle,
+    require_worktree_index_checks, successful_git_with_control, try_acquire_manual_branch_lifecycle,
 };
 use tracedecay_code_index_runtime::code_index_scheduler::CodeIndexSchedulerRegistryV1;
 use tracedecay_runtime_core::cancellation::CancellationToken;
@@ -233,6 +233,13 @@ fn verify_clean_owned_worktree_head(
     {
         return Err(PreservedReason::Leased);
     }
+    require_worktree_index_checks(&managed.worktree, control).map_err(|_| {
+        if control.is_cancelled() {
+            PreservedReason::Cancelled
+        } else {
+            PreservedReason::Unavailable
+        }
+    })?;
     if !git_text(
         &managed.worktree,
         &[
@@ -371,8 +378,8 @@ fn remove_owned_published_artifacts(
     let (exists, branch_head, tracking_head) =
         verify_owned_published_artifacts(repo, data_root, label, managed, control)?;
     if exists {
-        // No --force and no recursive filesystem fallback: Git refuses a
-        // dirty or locked checkout even if it changed after our proof.
+        // Keep Git's ordinary dirty/lock checks after verifying that its index
+        // cannot hide edits. No --force and no recursive filesystem fallback.
         git_text(
             repo,
             &["worktree", "remove", &managed.worktree.to_string_lossy()],

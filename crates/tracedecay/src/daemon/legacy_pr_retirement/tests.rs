@@ -197,6 +197,74 @@ async fn dirty_foreign_and_leased_artifacts_are_preserved_and_reported() {
 }
 
 #[tokio::test]
+async fn tracked_edits_hidden_by_index_flags_preserve_every_recorded_artifact() {
+    for flag in ["--assume-unchanged", "--skip-worktree"] {
+        let fixture = Fixture::new();
+        let (label, managed) = fixture.add(1);
+        git(
+            &managed.worktree,
+            &["update-index", flag, "--", "source.txt"],
+        );
+        std::fs::write(
+            managed.worktree.join("source.txt"),
+            b"uncommitted hidden work must survive\n",
+        )
+        .unwrap();
+        assert!(
+            git(
+                &managed.worktree,
+                &[
+                    "status",
+                    "--porcelain=v1",
+                    "--untracked-files=all",
+                    "--ignored",
+                ],
+            )
+            .is_empty(),
+            "{flag} must hide the fixture edit"
+        );
+        let before = fixture.fingerprint(&label, &managed);
+        let flags_before = git(&managed.worktree, &["ls-files", "-v", "--", "source.txt"]);
+        let schedulers = CodeIndexSchedulerRegistryV1::new(1);
+
+        let report = retire_project(
+            &fixture.repo,
+            &fixture.data,
+            &schedulers,
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+
+        assert!(report.retired.is_empty(), "{flag}");
+        assert_eq!(
+            report.preserved,
+            [(label.clone(), PreservedReason::Unavailable)],
+            "{flag}"
+        );
+        assert!(managed.worktree.is_dir(), "{flag}");
+        assert_eq!(fixture.fingerprint(&label, &managed), before, "{flag}");
+        assert_eq!(
+            git(&managed.worktree, &["ls-files", "-v", "--", "source.txt"]),
+            flags_before,
+            "{flag} must remain set"
+        );
+        let state = load_state(&fixture.data).unwrap();
+        assert_eq!(state.managed.len(), 1, "{flag}");
+        let preserved = state.managed.get(&label).unwrap();
+        assert_eq!(preserved.worktree, managed.worktree, "{flag}");
+        assert_eq!(preserved.tracking_ref, managed.tracking_ref, "{flag}");
+        assert_eq!(preserved.head_sha, managed.head_sha, "{flag}");
+        assert_eq!(
+            preserved.retirement_reason,
+            Some(PreservedReason::Unavailable),
+            "{flag}"
+        );
+        schedulers.shutdown().await;
+    }
+}
+
+#[tokio::test]
 async fn clean_worktrees_with_unpublished_commits_are_preserved_byte_for_byte() {
     let fixture = Fixture::new();
     let advanced = fixture.add(1);

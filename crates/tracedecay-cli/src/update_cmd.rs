@@ -398,16 +398,7 @@ pub(crate) fn preview_update_command(
     if no_reinstall {
         eprintln!("Host integration refresh is disabled by --no-reinstall.");
     } else {
-        let config = load_host_lifecycle_user_config(profile)?;
-        let home =
-            profile
-                .home()
-                .ok_or_else(|| tracedecay_domain::errors::TraceDecayError::Config {
-                    message: "could not determine home directory for the host refresh preview"
-                        .to_string(),
-                })?;
-        let agents =
-            crate::agent_cmd::maintenance_sweep_agents(profile, &config.installed_agents, home);
+        let agents = preview_host_refresh_agents(profile)?;
         if agents.is_empty() {
             eprintln!("No configured host integrations were found to refresh.");
         } else {
@@ -415,6 +406,29 @@ pub(crate) fn preview_update_command(
         }
     }
     Ok(HostLifecycleCompletion::Complete)
+}
+
+fn retain_supported_tracked_agents(agents: &mut Vec<String>) {
+    agents.retain(|id| tracedecay_agent_hosts::agents::get_integration(id).is_ok());
+}
+
+fn preview_host_refresh_agents(
+    profile: &ProfileRoot,
+) -> tracedecay_domain::errors::Result<Vec<String>> {
+    let mut config = load_host_lifecycle_user_config(profile)?;
+    retain_supported_tracked_agents(&mut config.installed_agents);
+    let home =
+        profile
+            .home()
+            .ok_or_else(|| tracedecay_domain::errors::TraceDecayError::Config {
+                message: "could not determine home directory for the host refresh preview"
+                    .to_string(),
+            })?;
+    Ok(crate::agent_cmd::maintenance_sweep_agents(
+        profile,
+        &config.installed_agents,
+        home,
+    ))
 }
 
 /// `update` keeps a successful binary upgrade while reporting the refresh as
@@ -765,9 +779,7 @@ async fn run_post_update_mutations(
     // The reinstall pass skips such ids, but dropping them here stops the
     // pointless retry churn.
     let before = config.installed_agents.len();
-    config
-        .installed_agents
-        .retain(|id| tracedecay_agent_hosts::agents::get_integration(id).is_ok());
+    retain_supported_tracked_agents(&mut config.installed_agents);
     if config.installed_agents.len() != before
         && let Err(err) = config.save(profile.data_dir())
     {
@@ -864,7 +876,8 @@ mod tests {
         InstallThenRefresh, PluginRefreshOutcome, RefreshPolicy, codesign_failure_exit,
         current_tracedecay_exe_from, install_pass_covers_tracked_agents, pending_reset_line,
         post_update_binary, post_update_binary_from, prepare_post_update_lease,
-        restart_daemon_service_with, run_install_then_refresh, update_completion,
+        preview_host_refresh_agents, restart_daemon_service_with, run_install_then_refresh,
+        update_completion,
     };
     use crate::agent_cmd::HostLifecycleCompletion;
     use crate::upgrade::UpgradeOutcome;
@@ -1053,6 +1066,22 @@ mod tests {
         let current = Path::new("/repo/target/debug/deps/agent_suite-abc123");
 
         assert_eq!(current_tracedecay_exe_from(Some(current)), None);
+    }
+
+    #[test]
+    fn host_refresh_preview_skips_unavailable_tracked_agents_without_mutating_config() {
+        let home = TempDir::new().unwrap();
+        let profile = tracedecay_runtime_core::config::ProfileRoot::under_home(home.path());
+        let config = UserConfig {
+            installed_agents: vec!["claude".to_string(), "retired-host".to_string()],
+            ..UserConfig::default()
+        };
+        config.save(profile.data_dir()).unwrap();
+        let config_path = tracedecay_session_memory::user_config::config_path(profile.data_dir());
+        let before = std::fs::read(&config_path).unwrap();
+
+        assert_eq!(preview_host_refresh_agents(&profile).unwrap(), ["claude"]);
+        assert_eq!(std::fs::read(&config_path).unwrap(), before);
     }
 
     /// An unresolvable tracked id (renamed/removed by a later release, or a

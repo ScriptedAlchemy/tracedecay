@@ -15,8 +15,8 @@ pub use worktrees::{
     cleanup_owned_worktree, cleanup_owned_worktree_off_runtime, manual_branch_artifact_ownership,
     manual_branch_artifact_ownership_off_runtime, manual_branch_artifacts_match,
     manual_branch_artifacts_match_off_runtime, manual_branch_source_owns_artifacts,
-    prepare_manual_branch_worktree, refs_are_unattached_outside_worktree, resolve_branch_head,
-    try_acquire_manual_branch_lifecycle,
+    prepare_manual_branch_worktree, refs_are_unattached_outside_worktree,
+    require_worktree_index_checks, resolve_branch_head, try_acquire_manual_branch_lifecycle,
 };
 
 const PR_COMMAND_TIMEOUT: Duration = Duration::from_secs(30);

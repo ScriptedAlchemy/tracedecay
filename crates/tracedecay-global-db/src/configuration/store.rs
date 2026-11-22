@@ -20,11 +20,7 @@ use tracedecay_domain::configuration::{
     LCM_SUMMARIZER_EXECUTABLES_SETTING_KEY, ProtectedChange, ProtectedChangePlan,
     ProtectedChangeSnapshotError, RedactedConfigurationChangeV1, RollbackModeV1,
     SOURCE_BINDINGS_SETTING_KEY, SYNC_WATCH_LINKED_WORKTREES_SETTING_KEY, ScopeControlOperationV1,
-    SettingKey, USER_CODE_INDEX_WORKERS_SETTING_KEY, USER_EXTRACTION_TIMEOUT_SECS_SETTING_KEY,
-    USER_REPEATED_QUERY_HINTS_SETTING_KEY, USER_SESSION_COMPACTION_DAYS_SETTING_KEY,
-    USER_SESSION_HISTORY_IMPORT_ENABLED_SETTING_KEY, USER_SESSION_RETENTION_DAYS_SETTING_KEY,
-    USER_SESSION_RETENTION_ENABLED_SETTING_KEY, USER_WATCHER_DEBOUNCE_MS_SETTING_KEY,
-    UserProfileId, WORK_TOPOLOGY_POLICY_SETTING_KEY,
+    SettingKey, USER_CODE_INDEX_WORKERS_SETTING_KEY, UserProfileId, WORK_TOPOLOGY_POLICY_SETTING_KEY,
 };
 use tracedecay_domain::feedback::PROXIMITY_RELATIONSHIP_HINTS_SETTING_KEY_V1;
 use tracedecay_domain::{AccessPolicyDigest, ActorId, ManifestDigest, UtcMicros, canonical_sha256};
@@ -673,18 +669,6 @@ pub struct ProfileCodeIndexWorkerCommitV1 {
 /// at its registry default converges by dropping it.
 const PROJECT_RETIRED_SETTING_KEYS: &[&str] = &["feedback.proximity.risk_threshold"];
 
-/// Profile settings registered after a profile store was first initialized.
-/// A store written before one existed converges by adding its default.
-const PROFILE_ADDITIVE_SETTING_KEYS: &[&str] = &[
-    USER_REPEATED_QUERY_HINTS_SETTING_KEY,
-    USER_WATCHER_DEBOUNCE_MS_SETTING_KEY,
-    USER_EXTRACTION_TIMEOUT_SECS_SETTING_KEY,
-    USER_SESSION_HISTORY_IMPORT_ENABLED_SETTING_KEY,
-    USER_SESSION_RETENTION_ENABLED_SETTING_KEY,
-    USER_SESSION_RETENTION_DAYS_SETTING_KEY,
-    USER_SESSION_COMPACTION_DAYS_SETTING_KEY,
-];
-
 /// Exact adapter over one registered `ProfileSessions` database.
 pub struct ProfileConfigurationStore<'db> {
     store: GlobalDbConfigurationControlStore<'db>,
@@ -718,8 +702,9 @@ impl<'db> ProfileConfigurationStore<'db> {
         Self::project(&self.profile_id, self.current_state().await?, &registry)
     }
 
-    /// The current profile configuration, initializing a fresh store from the
-    /// registry defaults and converging one written by an earlier registry.
+    /// The current profile configuration, initializing only a fresh store from
+    /// registry defaults. Incompatible persisted snapshots require an explicit
+    /// reset and remain unchanged.
     pub async fn read_or_initialize(
         &self,
         occurred_at: UtcMicros,
@@ -746,30 +731,7 @@ impl<'db> ProfileConfigurationStore<'db> {
             }
         }
         let current = self.current_state().await?;
-        if registry.definitions().all(|definition| {
-            current
-                .snapshot
-                .effective_values
-                .contains_key(&definition.key)
-        }) {
-            return Self::project(&self.profile_id, current, &registry);
-        }
-        let converged = match self
-            .store
-            .converge_registry_shape(
-                &current.revision_id,
-                occurred_at,
-                &registry,
-                PROFILE_ADDITIVE_SETTING_KEYS,
-                &[],
-            )
-            .await
-        {
-            Ok(converged) => converged,
-            Err(ConfigurationError::RevisionConflict) => self.current_state().await?,
-            Err(error) => return Err(error),
-        };
-        Self::project(&self.profile_id, converged, &registry)
+        Self::project(&self.profile_id, current, &registry)
     }
 
     #[tracing::instrument(name = "global_db.configuration.query", level = "trace", skip_all)]

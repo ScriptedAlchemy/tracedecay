@@ -35,8 +35,8 @@ use super::worker::{
 use crate::lcm_effects::DaemonLcmEffectService;
 use tracedecay_sessions::ProviderPassUnits;
 use tracedecay_sessions::serving::{
-    SessionHistoryProgressState, SessionProjectionServingState, SessionProjectionServingStatusPort,
-    SessionProjectionStaleReason,
+    SessionConvergenceState, SessionHistoryProgressState, SessionProjectionServingState,
+    SessionProjectionServingStatusPort, SessionProjectionStaleReason,
 };
 
 #[test]
@@ -1218,20 +1218,25 @@ impl SessionHistoricalIngestor for TalliedHistory {
     fn cancel(&self) {}
 }
 
-fn assert_history_paused(wake: &SessionTemporalRefreshWake, expected_passes: u64) {
+fn assert_history_paused(
+    wake: &SessionTemporalRefreshWake,
+    expected_passes: u64,
+    expected_serving_state: SessionProjectionServingState,
+) {
     let status = wake.serving_status();
     assert_eq!(
         status.history.expect("mounted history status").passes,
         expected_passes
     );
     assert_eq!(
-        status.state,
-        SessionProjectionServingState::Stale {
-            reason: SessionProjectionStaleReason::HistoricalBlocked {
-                reason_code: SESSION_HISTORY_IMPORT_PAUSED_REASON.to_owned(),
-            },
+        status.convergence.state,
+        SessionConvergenceState::Blocked {
+            reason_code: SESSION_HISTORY_IMPORT_PAUSED_REASON.to_owned(),
         }
     );
+    assert_eq!(status.convergence.epoch, 0);
+    assert_eq!(status.convergence.converged_at_unix_micros, None);
+    assert_eq!(status.state, expected_serving_state);
     assert!(
         !wake
             .target()
@@ -1259,6 +1264,11 @@ async fn paused_history_preserves_live_projection_and_explicit_bounded_continuat
                 }
                 .into(),
                 SessionHistoricalIngestOutcome::Complete.into(),
+                SessionHistoricalIngestOutcome::Blocked {
+                    reason_code: "provider_history_unavailable".to_owned(),
+                    made_progress: false,
+                }
+                .into(),
             ]
             .into(),
         ),
@@ -1269,7 +1279,15 @@ async fn paused_history_preserves_live_projection_and_explicit_bounded_continuat
     tokio::time::timeout(Duration::from_secs(5), registry.wait_profile_idle(&path))
         .await
         .expect("paused mount settles");
-    assert_history_paused(&wake, 0);
+    assert_history_paused(
+        &wake,
+        0,
+        SessionProjectionServingState::Stale {
+            reason: SessionProjectionStaleReason::HistoricalBlocked {
+                reason_code: SESSION_HISTORY_IMPORT_PAUSED_REASON.to_owned(),
+            },
+        },
+    );
 
     let session_id = SessionId::new("live-while-history-paused").expect("session id");
     let store = SessionTemporalStore::new(harness.registered.as_ref());
@@ -1325,7 +1343,7 @@ async fn paused_history_preserves_live_projection_and_explicit_bounded_continuat
     })
     .await
     .expect("explicit import drains both bounded passes");
-    assert_history_paused(&wake, 2);
+    assert_history_paused(&wake, 2, SessionProjectionServingState::Current);
 
     for _ in 0..3 {
         registry
@@ -1334,8 +1352,41 @@ async fn paused_history_preserves_live_projection_and_explicit_bounded_continuat
         tokio::time::timeout(Duration::from_secs(5), registry.wait_profile_idle(&path))
             .await
             .expect("ordinary mount stays idle");
-        assert_history_paused(&wake, 2);
+        assert_history_paused(&wake, 2, SessionProjectionServingState::Current);
     }
+
+    assert_eq!(
+        wake.schedule_historical_admission(),
+        HistoricalAdmissionView::Scheduled
+    );
+    assert_eq!(
+        wake.serving_status().state,
+        SessionProjectionServingState::Stale {
+            reason: SessionProjectionStaleReason::HistoricalConvergence,
+        },
+        "another explicit import invalidates the previous completed frontier"
+    );
+    tokio::time::timeout(Duration::from_secs(5), registry.wait_profile_idle(&path))
+        .await
+        .expect("provider failure settles without resuming automatic history");
+    let status = wake.serving_status();
+    assert_eq!(status.history.unwrap().passes, 3);
+    assert_eq!(
+        status.state,
+        SessionProjectionServingState::Stale {
+            reason: SessionProjectionStaleReason::HistoricalBlocked {
+                reason_code: "provider_history_unavailable".to_owned(),
+            },
+        },
+        "a configured pause cannot hide a real failure of the admitted import"
+    );
+    assert_eq!(
+        status.convergence.state,
+        SessionConvergenceState::Blocked {
+            reason_code: "provider_history_unavailable".to_owned(),
+        }
+    );
+    assert!(!wake.target().unwrap().history_recheck_enabled());
     registry.shutdown().await;
 }
 
@@ -1369,7 +1420,7 @@ async fn paused_history_resumes_an_explicit_admission_when_its_ingestor_attaches
     tokio::time::timeout(Duration::from_secs(5), registry.wait_profile_idle(&path))
         .await
         .expect("retained explicit admission resumes");
-    assert_history_paused(&wake, 1);
+    assert_history_paused(&wake, 1, SessionProjectionServingState::Current);
     registry.shutdown().await;
 }
 
