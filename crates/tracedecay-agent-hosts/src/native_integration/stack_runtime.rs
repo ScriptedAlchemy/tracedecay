@@ -11,9 +11,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use tracedecay_application::source_authorization::ProjectSourceAccessSnapshot;
 use tracedecay_application::stack_coordinator::{
-    DaemonGitHubStackCoordinatorV1, OptionalPreflightV1, OptionalStackPreflightPort,
-    StackCircuitPolicyV1, StackCoordinatorErrorV1, StackCoordinatorStore,
-    StackDeliveryAuthorizationPort, StackDeliveryAuthorizationV1, StackSignalV1,
+    DaemonGitHubStackCoordinatorV1, GitHubStackScopeV1, OptionalPreflightV1,
+    OptionalStackPreflightPort, StackCircuitPolicyV1, StackCoordinatorErrorV1,
+    StackCoordinatorStore, StackDeliveryAuthorizationPort, StackDeliveryAuthorizationV1,
+    StackSignalV1,
 };
 use tracedecay_contracts::git::{
     GITHUB_STACK_SIGNAL_EXPAND_OPERATION, GitHubStackSignalEvidenceRefV1,
@@ -512,6 +513,7 @@ impl OptionalStackPreflightPort for StackRuntimePortsV1 {
 pub struct DaemonGitHubStackRuntimeV1 {
     scope: ResolvedScope,
     coordinator: Arc<DaemonGitHubStackCoordinatorV1>,
+    scope_registration: GitHubStackScopeV1,
     ports: StackRuntimePortsV1,
 }
 
@@ -525,10 +527,12 @@ const _: fn(&DaemonGitHubStackRuntimeV1) = |value| {
     let DaemonGitHubStackRuntimeV1 {
         scope,
         coordinator,
+        scope_registration,
         ports,
     } = value;
     assert_send_sync(scope);
     assert_send_sync(coordinator);
+    assert_send_sync(scope_registration);
     assert_send_sync(ports);
 };
 
@@ -559,7 +563,7 @@ impl DaemonGitHubStackRuntimeV1 {
             open_micros: STACK_CIRCUIT_OPEN_MICROS,
         }
         .seal()?;
-        coordinator.register_circuit_policy(&scope, policy)?;
+        let scope_registration = coordinator.register_circuit_policy(&scope, policy)?;
         let store = Arc::new(DaemonStackDeliveryStoreV1 {
             database,
             project_id: project_id.as_str().to_owned(),
@@ -575,6 +579,7 @@ impl DaemonGitHubStackRuntimeV1 {
         Ok(Arc::new(Self {
             scope,
             coordinator,
+            scope_registration,
             ports,
         }))
     }

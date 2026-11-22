@@ -38,8 +38,8 @@ use super::http_application_router::{
     install_http_application_cold_resolver, install_remote_http_application_router,
 };
 use super::invocation_state::DaemonInvocationState;
+use super::legacy_pr_retirement;
 use super::maintenance;
-use super::pr_autotrack;
 #[cfg(not(unix))]
 use super::project_open_admission::ProjectOpenGates;
 #[cfg(not(unix))]
@@ -948,16 +948,15 @@ async fn run_foreground_unix(
             &[("reason", "shutting_down".to_string())],
         );
     }
-    // PR-branch auto-tracking runs independently of the metadata watcher: it is
-    // gated per-project on `sync.auto_track_pr_branches` (default off), so this
-    // loop is inert unless a project opts in.
-    let pr_autotrack_task = pr_autotrack::spawn_with_administration(
+    // Retire only the exact artifacts recorded by the former automatic PR
+    // owner. This one-shot pass performs no discovery and creates no checkouts.
+    let legacy_pr_retirement_task = legacy_pr_retirement::spawn_with_administration(
         engine.store_administration.clone(),
         engine.invocation.code_index_schedulers.clone(),
     )
     .inspect_err(|error| {
         log_daemon_event(
-            "pr_autotrack",
+            "legacy_pr_retirement",
             &[
                 ("action", "start".to_string()),
                 ("outcome", "runtime_unavailable".to_string()),
@@ -969,7 +968,7 @@ async fn run_foreground_unix(
     let engine = engine
         .with_git_watcher(git_watcher)
         .with_maintenance_coordinator(maintenance)
-        .with_pr_autotrack_task(pr_autotrack_task)
+        .with_legacy_pr_retirement_task(legacy_pr_retirement_task)
         .await;
     let mut shutdown_signals = ShutdownSignals::listen()?;
     let mut run_end = DaemonRunEnd::Stopped;

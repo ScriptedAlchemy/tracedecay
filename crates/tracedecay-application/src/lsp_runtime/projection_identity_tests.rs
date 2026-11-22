@@ -37,7 +37,7 @@ fn identity() -> LspCodeIndexProjectionIdentity {
 }
 
 #[test]
-fn projection_scope_rejects_project_repository_worktree_and_reference_mismatch() {
+fn projection_scope_rejects_project_repository_and_worktree_mismatch() {
     let cases = [
         (
             {
@@ -63,14 +63,6 @@ fn projection_scope_rejects_project_repository_worktree_and_reference_mismatch()
             },
             "lsp-code-index-worktree-mismatch",
         ),
-        (
-            {
-                let mut value = identity();
-                value.reference = Some(id("ref.other"));
-                value
-            },
-            "lsp-code-index-reference-mismatch",
-        ),
     ];
 
     for (mut identity, expected) in cases {
@@ -85,6 +77,34 @@ fn projection_scope_rejects_project_repository_worktree_and_reference_mismatch()
             .expect_err("read-only admission must refuse a foreign generation too");
         assert_eq!(error.class(), expected);
     }
+}
+
+#[test]
+fn retained_graph_survives_a_branch_move_but_commit_feedback_does_not() {
+    let mut retained = identity();
+    retained.reference = Some(id("ref.previous"));
+    retained.source_freshness = FreshnessState::Unknown;
+    let admitted = retained
+        .clone()
+        .admit_worktree_scope(&scope())
+        .expect("a branch move preserves the checkout's retained graph");
+    assert_eq!(admitted.code_generation_id, identity().code_generation_id);
+    assert_eq!(admitted.source_revision, identity().source_revision);
+    assert_eq!(
+        retained.admit_commit_scope(&scope()).unwrap_err().class(),
+        "lsp-code-index-reference-mismatch"
+    );
+}
+
+#[test]
+fn commit_feedback_requires_the_sealed_revision_to_match_live_head() {
+    let mut retained = identity();
+    retained.head_commit_id = Some(id("commit.new-head"));
+    assert!(retained.clone().admit_worktree_scope(&scope()).is_ok());
+    assert_eq!(
+        retained.admit_commit_scope(&scope()).unwrap_err().class(),
+        "lsp-code-index-identity-changed"
+    );
 }
 
 /// A dirty worktree seals a generation with no commit. Read-only graph queries

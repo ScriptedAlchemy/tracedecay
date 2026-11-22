@@ -208,13 +208,14 @@ mod github_secret_reader;
 mod graph_resolution;
 mod http_application;
 pub use http_application::live_remote_operational_status;
+pub mod branch_worktrees;
 mod http_application_router;
 mod invocation_dispatch;
 mod invocation_executor;
 pub(crate) mod invocation_state;
+pub(crate) mod legacy_pr_retirement;
 mod lsp_sessions;
 mod maintenance;
-pub mod pr_autotrack;
 #[cfg(any(test, feature = "test-transport"))]
 #[allow(clippy::too_many_lines)]
 mod production_harness;

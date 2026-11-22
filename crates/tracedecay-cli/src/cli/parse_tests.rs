@@ -2,6 +2,23 @@ use super::{Cli, Commands, DaemonAction, ProfileStorageAction, RemoteAction};
 use clap::{Parser, error::ErrorKind};
 
 #[test]
+fn explicit_branches_remain_available_after_automatic_pr_tracking_retirement() {
+    let manual = Cli::try_parse_from(["tracedecay", "branch", "add", "feature/requested"])
+        .expect("explicit branch activation remains available");
+    assert!(matches!(
+        manual.command,
+        Some(Commands::Branch { action: super::BranchAction::Add { name, .. } })
+            if name.as_deref() == Some("feature/requested")
+    ));
+    for action in ["enable", "disable", "status"] {
+        let error = Cli::try_parse_from(["tracedecay", "branch", "autotrack", action])
+            .err()
+            .expect("retired automatic tracking is not an accepted command");
+        assert_eq!(error.kind(), ErrorKind::InvalidSubcommand);
+    }
+}
+
+#[test]
 fn tool_command_preserves_trailing_help_and_reserved_args() {
     let cli = Cli::try_parse_from([
         "tracedecay",

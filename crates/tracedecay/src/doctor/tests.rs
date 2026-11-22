@@ -21,16 +21,17 @@ fn domain_symbol_rules_warning_is_silent_without_the_file() {
 }
 
 #[test]
-fn pr_autotrack_state_failure_names_a_blocking_state_file() {
+fn legacy_pr_artifacts_finding_names_unreadable_ownership() {
     let data_root = tempfile::tempdir().expect("data root");
-    assert_eq!(pr_autotrack_state_failure(data_root.path()), None);
+    assert_eq!(legacy_pr_artifacts_finding(data_root.path()), None);
 
-    let state_path = tracedecay_application::pr_tracking::state_path(data_root.path());
+    let state_path = data_root.path().join("pr-autotrack.json");
     std::fs::write(&state_path, "{not json").expect("write malformed state");
     let failure =
-        pr_autotrack_state_failure(data_root.path()).expect("malformed state is blocking");
+        legacy_pr_artifacts_finding(data_root.path()).expect("malformed state is blocking");
     assert!(failure.contains(&state_path.display().to_string()));
-    assert!(failure.contains("until that file is removed"));
+    assert!(failure.contains("Automatic PR tracking is retired"));
+    assert!(failure.contains("Preserve the worktrees and refs"));
 }
 
 fn storage_runtime_finding(

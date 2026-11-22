@@ -13,7 +13,7 @@ const WORKLOAD_PATH: &str = "tests/fixtures/search_quality/query-lexical-graph-w
 /// receipt edit, including a generation-only reseal, rewrite the workload
 /// identity as well.
 pub const WORKLOAD_SHA256: &str =
-    "sha256:b40c4c470dc2afae55debd2930d39f9f5d56494afd8a010672fb53bceb0295ec";
+    "sha256:03bb656bbc8e6e13441cb2a0300a3adb94a4493d578bcdf10ed00ca698e5beac";
 
 const FILES: &[(&str, &[u8])] = &[
     (

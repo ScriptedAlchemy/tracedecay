@@ -180,6 +180,7 @@ async fn terminal_tick(
             &disabled_retention(),
             BranchStoreGcCadenceV1 { branch_gc_days: 30 },
             continuation,
+            MaintenanceTickOutcome::Complete,
         )
         .await
 }

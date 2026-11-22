@@ -21602,41 +21602,6 @@
       "description": "A bounded, canonical identifier owned by the policy input schema.\n\nIt represents immutable references only; it is never a path, display\nlabel, provider account, branch name, or native object identifier.",
       "type": "string"
     },
-    "PrAutoTrackEntryV1": {
-      "properties": {
-        "branch": {
-          "type": "string"
-        },
-        "head_branch": {
-          "type": "string"
-        },
-        "pr": {
-          "format": "uint64",
-          "minimum": 0,
-          "type": "integer"
-        }
-      },
-      "required": [
-        "branch",
-        "pr",
-        "head_branch"
-      ],
-      "type": "object"
-    },
-    "PrAutoTrackPayloadV1": {
-      "properties": {
-        "tracked": {
-          "items": {
-            "$ref": "#/$defs/PrAutoTrackEntryV1"
-          },
-          "type": "array"
-        }
-      },
-      "required": [
-        "tracked"
-      ],
-      "type": "object"
-    },
     "PrepareWorkDuplicateAdjudicationRequestV1": {
       "additionalProperties": false,
       "description": "Operator judgment before the owning Work authority binds exact current\ngenerations, relation revision, command identity, and observation time.",
@@ -21932,9 +21897,6 @@
           "minimum": 0,
           "type": "integer"
         },
-        "sync": {
-          "$ref": "#/$defs/SyncSettingsV1"
-        },
         "telemetry": {
           "$ref": "#/$defs/TelemetrySettingsV1"
         },
@@ -21949,7 +21911,6 @@
         "extract_docstrings",
         "track_call_sites",
         "telemetry",
-        "sync",
         "context_scout"
       ],
       "type": "object"
@@ -22225,16 +22186,6 @@
             "null"
           ]
         },
-        "sync": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/SyncSettingsPatch"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
         "telemetry": {
           "anyOf": [
             {
@@ -22291,16 +22242,12 @@
         },
         "configuration_snapshot_id": {
           "type": "string"
-        },
-        "pr_autotrack": {
-          "$ref": "#/$defs/PrAutoTrackPayloadV1"
         }
       },
       "required": [
         "configuration_snapshot_id",
         "configuration_revision_id",
-        "config",
-        "pr_autotrack"
+        "config"
       ],
       "type": "object"
     },
@@ -27012,44 +26959,6 @@
     "SymbolOccurrenceId": {
       "description": "Strongly typed canonical identity: `SymbolOccurrenceId`.",
       "type": "string"
-    },
-    "SyncSettingsPatch": {
-      "additionalProperties": false,
-      "description": "Nested synchronization settings patch.",
-      "properties": {
-        "auto_track_pr_branches": {
-          "type": [
-            "boolean",
-            "null"
-          ]
-        },
-        "auto_track_pr_poll_secs": {
-          "format": "uint64",
-          "minimum": 0,
-          "type": [
-            "integer",
-            "null"
-          ]
-        }
-      },
-      "type": "object"
-    },
-    "SyncSettingsV1": {
-      "properties": {
-        "auto_track_pr_branches": {
-          "type": "boolean"
-        },
-        "auto_track_pr_poll_secs": {
-          "format": "uint64",
-          "minimum": 0,
-          "type": "integer"
-        }
-      },
-      "required": [
-        "auto_track_pr_branches",
-        "auto_track_pr_poll_secs"
-      ],
-      "type": "object"
     },
     "TableGrowthDimensionV1": {
       "description": "Per-store typed table-growth state. Unavailable reads carry no byte values;\neach state includes source coverage and explicit omissions.",

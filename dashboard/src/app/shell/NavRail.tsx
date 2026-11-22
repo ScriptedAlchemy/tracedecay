@@ -15,16 +15,16 @@ import {
   Waypoints,
   Workflow,
 } from 'lucide-react';
-import { NavLink } from 'react-router';
+import { NavLink, useLocation } from 'react-router';
 import type { StorageFindingKindStatusV1 } from '../../contracts/generated.ts';
 import { useStorageFindings } from '../../data/query/storageFindings.ts';
 import {
-  scopedWorkspacePath,
   useScope,
   type DashboardScope,
 } from '../../data/scope/store.ts';
 import { cn } from '../../ui/cn';
 import { CHANNELS, channelNumber } from '../channels.ts';
+import { workspaceNavigationTarget } from '../workspaceNavigation.ts';
 
 /** 14-16px monoline glyphs (DESIGN-SYSTEM.md "Brand"). An anatomical Brain
  * icon identifies channel 01; it is never the product logo. */
@@ -128,9 +128,13 @@ function RailLink({
   scope: DashboardScope;
 }) {
   const Icon = ICONS[path] ?? Boxes;
+  const location = useLocation();
+  const target = workspaceNavigationTarget(scope, path, location);
   return (
     <NavLink
-      to={scopedWorkspacePath(scope, path)}
+      to={target.to}
+      replace={target.replace}
+      preventScrollReset={target.replace}
       aria-label={label}
       className={({ isActive }) =>
         cn(

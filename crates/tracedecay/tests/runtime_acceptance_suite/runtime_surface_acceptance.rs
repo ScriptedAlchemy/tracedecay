@@ -156,11 +156,11 @@ impl RuntimeFixture {
 
 async fn runtime_fixture() -> RuntimeFixture {
     let (environment, project) = common::IsolatedHome::new();
-    let daemon_log = std::fs::File::create(environment.scratch().join("runtime-daemon.log"))
-        .expect("create isolated runtime daemon log");
-    let daemon = common::spawn_tracedecay_daemon_with(environment.home(), |command| {
-        command.env("RUST_LOG", "info").stderr(daemon_log);
-    });
+    let daemon_log = environment.scratch().join("runtime-daemon.log");
+    let daemon =
+        common::spawn_tracedecay_daemon_logged(environment.home(), &daemon_log, |command| {
+            command.env("RUST_LOG", "info");
+        });
     initialize_project(environment.home(), &project);
     await_published_code_index(environment.home(), &project);
     let handshake = crate::common::handshake_for_current_client(
@@ -1284,6 +1284,8 @@ async fn dashboard_project_settings_commit_through_the_daemon_control_plane() {
         .unwrap();
     }
 
+    assert_settings_mutations_ignore_retired_pr_metadata(&agent, &settings_url);
+
     let _ = call_default_tool(
         fixture.profile(),
         &fixture.handshake,
@@ -1291,6 +1293,85 @@ async fn dashboard_project_settings_commit_through_the_daemon_control_plane() {
         serde_json::json!({ "action": "stop", "format": "json" }),
     )
     .await;
+}
+
+/// Project, profile, and worker writes need their complete daemon authority;
+/// none may consult or rewrite the retired automatic-PR ownership ledger.
+fn assert_settings_mutations_ignore_retired_pr_metadata(agent: &ureq::Agent, url: &str) {
+    let (status, before) = get_dashboard_json(agent, url);
+    assert_eq!(status, 200, "{before}");
+    let pr_state = Path::new(before["payload"]["storage"]["store_root"].as_str().unwrap())
+        .join("pr-autotrack.json");
+    let retired_bytes = b"{broken";
+    std::fs::write(&pr_state, retired_bytes).unwrap();
+    for (route, scope, revision_field, mut patch) in [
+        (
+            "project",
+            "project",
+            "configuration_revision_id",
+            serde_json::json!({
+                "idempotency_key": "configuration.idempotency.retired-pr-project",
+                "max_file_size": 4096,
+            }),
+        ),
+        (
+            "user",
+            "user",
+            "configuration_revision_id",
+            serde_json::json!({
+                "idempotency_key": "configuration.idempotency.retired-pr-user",
+                "watcher_debounce": "3s",
+            }),
+        ),
+        (
+            "user/code-index-workers",
+            "user",
+            "code_index_worker_configuration_revision_id",
+            serde_json::json!({
+                "idempotency_key": "configuration.idempotency.retired-pr-workers",
+                "code_index_workers": { "mode": "exact", "workers": 1 },
+            }),
+        ),
+    ] {
+        let (status, current) = get_dashboard_json(agent, url);
+        assert_eq!(status, 200, "{route}: {current}");
+        let revision = current["payload"][scope][revision_field].clone();
+        patch["expected_revision_id"] = revision.clone();
+        let (status, result) = patch_dashboard_json(agent, &format!("{url}/{route}"), &patch);
+        assert_eq!(
+            status, 200,
+            "the mounted daemon must commit {route}: {result}"
+        );
+        let (status, refreshed) = get_dashboard_json(agent, url);
+        assert_eq!(status, 200, "{route}: {refreshed}");
+        assert_ne!(
+            refreshed["payload"][scope][revision_field], revision,
+            "supported {route} mutation must commit"
+        );
+        assert_eq!(std::fs::read(&pr_state).unwrap(), retired_bytes);
+    }
+    let (status, after) = get_dashboard_json(agent, url);
+    assert_eq!(status, 200, "{after}");
+    assert_eq!(after["payload"]["project"]["config"]["max_file_size"], 4096);
+    assert_eq!(after["payload"]["user"]["watcher_debounce"], "3s");
+    assert_eq!(
+        after["payload"]["user"]["code_index_workers"],
+        serde_json::json!({ "mode": "exact", "workers": 1 })
+    );
+    assert!(after["payload"]["project"].get("pr_autotrack").is_none());
+    assert!(after["payload"]["project"]["config"].get("sync").is_none());
+    let (status, retired) = patch_dashboard_json(
+        agent,
+        &format!("{url}/project"),
+        &serde_json::json!({
+            "expected_revision_id": after["payload"]["project"]["configuration_revision_id"],
+            "idempotency_key": "configuration.idempotency.retired-pr-refusal",
+            "sync": { "auto_track_pr_branches": true },
+        }),
+    );
+    assert_eq!(status, 400, "retired sync field must be refused: {retired}");
+    assert_eq!(retired["validation_errors"][0]["field"], "sync");
+    assert_eq!(std::fs::read(&pr_state).unwrap(), retired_bytes);
 }
 
 /// Profile settings use the same cataloged configuration effect as project

@@ -628,7 +628,7 @@ impl CompositionKernel {
             .map_err(|error| FusionStageError::Contract(error.to_string()))?;
         let (ranked_candidates, diversity_decisions) = self
             .diversity
-            .apply_caps(policy, deduped)
+            .apply_caps(policy, deduped, anchor_tiers)
             .map_err(map_diversity_error)?;
         let comparator_records = ranked_comparator_records(&ranked_candidates, comparator_records)?;
 

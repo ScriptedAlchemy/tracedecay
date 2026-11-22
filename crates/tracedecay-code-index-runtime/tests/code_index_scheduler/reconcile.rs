@@ -1607,6 +1607,7 @@ pub(super) fn assert_exact_and_lexical_retrieval(
             query_view: &query_view,
             generation: metadata.manifest().generation_id.clone(),
             whole_terms: std::borrow::Cow::Owned(vec![needle.to_owned()]),
+            explicit_terms: std::borrow::Cow::Owned(Vec::new()),
             subtokens: std::borrow::Cow::Owned(vec![needle.to_owned()]),
             phrases: std::borrow::Cow::Owned(Vec::new()),
             proximities: std::borrow::Cow::Owned(Vec::new()),

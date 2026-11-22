@@ -399,8 +399,7 @@ pub use session_temporal_refresh::{
     UnavailableSessionTemporalRefreshWake,
 };
 pub use settings_preview::{
-    MIN_AUTO_TRACK_PR_POLL_SECS_V1, ProjectSettingsPatchInputV1, SettingsValidationIssueV1,
-    validate_project_settings_patch,
+    ProjectSettingsPatchInputV1, SettingsValidationIssueV1, validate_project_settings_patch,
 };
 pub use source_edit::{
     RenameDispositionCountsV1, RenameFileEditV1, RenameHazardKindV1, RenameHazardV1,

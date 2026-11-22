@@ -22,7 +22,7 @@ use crate::{
     DashboardProfileCodeIndexWorkerSettingsPort, DashboardProjectContext,
     DashboardSessionAuthoritiesV1, DashboardSessionAuthorityStateV1, DashboardSessionMountV1,
     DashboardSessionResolutionV1, code_read_api, events_api, events_delivery, feedback_api, scope,
-    settings_api, snapshot_cache, token_count,
+    snapshot_cache, token_count,
 };
 
 pub type AutomationSchedulerReconcileFuture = Pin<
@@ -125,10 +125,6 @@ pub struct DashboardStateCompositionV1 {
     pub remote_operational_status_reader: Option<RemoteOperationalStatusReader>,
     pub code_index_freshness_reader: Option<CodeIndexFreshnessReader>,
     pub feedback_status_reader: Option<feedback_api::FeedbackStatusReader>,
-    /// Root-addressed read over the daemon-owned PR-autotrack state sidecar.
-    /// Selected projects reuse the resolver but resolve their own exact store
-    /// root on every call.
-    pub pr_autotrack_reader: Option<settings_api::PrAutoTrackManagedSummaryReader>,
     pub code_diagnostics_broker:
         Option<Arc<tokio::sync::Mutex<tracedecay_lsp::analyzer::broker::DiagnosticBroker>>>,
     pub application_invocation_executor: Option<Arc<dyn DashboardApplicationRuntime>>,
@@ -260,8 +256,6 @@ pub struct DashboardState {
     /// observation owner. Selected projects reuse the resolver but resolve
     /// their own exact project root on every call.
     pub feedback_status_reader: Option<feedback_api::FeedbackStatusReader>,
-    /// Daemon-owned read over PR-autotrack managed branches for settings.
-    pub pr_autotrack_reader: Option<settings_api::PrAutoTrackManagedSummaryReader>,
     /// Storage mode resolved for the active project store.
     pub storage_mode: String,
     /// Resolved active project store root.
@@ -439,7 +433,6 @@ pub(super) async fn build_state_inner(
         remote_operational_status_reader,
         code_index_freshness_reader,
         feedback_status_reader,
-        pr_autotrack_reader,
         code_diagnostics_broker,
         application_invocation_executor,
         delivery_settlement_authority,
@@ -542,7 +535,6 @@ pub(super) async fn build_state_inner(
         project_root: cg.store_layout.project_root.clone(),
         code_index_freshness_reader,
         feedback_status_reader,
-        pr_autotrack_reader,
         storage_mode,
         store_root,
         profile_root: cg.profile.data_dir().to_path_buf(),
@@ -624,7 +616,6 @@ pub async fn build_selected_project_state(
             remote_operational_status_reader: active.remote_operational_status_reader.clone(),
             code_index_freshness_reader: active.code_index_freshness_reader.clone(),
             feedback_status_reader: active.feedback_status_reader.clone(),
-            pr_autotrack_reader: active.pr_autotrack_reader.clone(),
             code_diagnostics_broker: None,
             // Rebinding an application transport is required only for the
             // selected project's application routes. Ordinary read routes

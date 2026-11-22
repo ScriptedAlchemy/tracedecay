@@ -24,6 +24,7 @@ describe('channelForPathname', () => {
   it('resolves a workspace route by its first segment', () => {
     expect(channelForPathname('/code')?.path).toBe('code');
     expect(channelForPathname('/settings/')?.path).toBe('settings');
+    expect(channelForPathname('/Loom/')?.path).toBe('loom');
     expect(channelForPathname('/loom/thread/abc')?.path).toBe('loom');
   });
 

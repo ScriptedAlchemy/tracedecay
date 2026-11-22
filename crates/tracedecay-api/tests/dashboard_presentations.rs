@@ -29,7 +29,7 @@ fn configuration_patch_and_cas_errors_are_api_owned() {
         "expected_revision_id": "revision.project.1",
         "idempotency_key": "configuration.idempotency.project.1",
         "include": ["src/**"],
-        "sync": {"auto_track_pr_branches": true}
+        "telemetry": {"timings": true}
     }))
     .expect("valid project patch");
     assert_eq!(project.expected_revision_id, "revision.project.1");
@@ -39,9 +39,20 @@ fn configuration_patch_and_cas_errors_are_api_owned() {
     );
     assert_eq!(project.include, Some(vec!["src/**".to_owned()]));
     assert_eq!(
-        project.sync.expect("sync patch").auto_track_pr_branches,
+        project.telemetry.expect("telemetry patch").timings,
         Some(true)
     );
+
+    let retired = parse_project_settings_patch(json!({
+        "expected_revision_id": "revision.project.1",
+        "idempotency_key": "configuration.idempotency.project.1",
+        "sync": {"auto_track_pr_branches": true}
+    }))
+    .expect_err("retired settings must be refused, not silently ignored");
+    assert_eq!(retired.0, StatusCode::BAD_REQUEST);
+    let retired_body =
+        serde_json::to_value(retired.1.0).expect("serialize retired setting refusal");
+    assert_eq!(retired_body["validation_errors"][0]["field"], "sync");
 
     let shape_error = parse_user_settings_patch(
         json!({"expected_revision_id": "revision.user.1", "unknown": true}),

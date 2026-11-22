@@ -186,6 +186,29 @@ impl McpServer {
                 dispatch_server.reopen_if_branch_drifted_memoized().await.0
             }
         };
+        // A wire ID may be reused after its response. Mint this completion's
+        // identity once, and capture the exact selected store's reset interval
+        // before execution. This read does not acquire its writer lane and is
+        // inside the retained worker's cancellation/deadline boundary.
+        let accounting_attribution =
+            match mint_global_request_id(GlobalRequestSurface::McpTokenAccounting) {
+                Ok(identity) => match cg.prepare_token_savings(&identity).await {
+                    Ok(attribution) => Some(attribution),
+                    Err(error) => {
+                        tracing::warn!(
+                            tool_name,
+                            project_root = %cg.project_root().display(),
+                            %error,
+                            "token accounting reset interval unavailable"
+                        );
+                        None
+                    }
+                },
+                Err(error) => {
+                    tracing::warn!(%error, "token accounting completion identity unavailable");
+                    None
+                }
+            };
         let application_invocation_target =
             invocation_target_for_route(routed.selected_project.as_ref());
 
@@ -213,6 +236,7 @@ impl McpServer {
             .await;
         DispatchedToolCall {
             cg,
+            accounting_attribution,
             selected_owner,
             selected_scope,
             outcome,

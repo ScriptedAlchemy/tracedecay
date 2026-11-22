@@ -489,7 +489,7 @@ impl Harness {
             });
         }
         let stack_coordinator = Arc::new(DaemonGitHubStackCoordinatorV1::default());
-        stack_coordinator
+        let _stack_registration = stack_coordinator
             .register_scope(&resolved, GitHubStackedPullRequestPolicyV1::Disabled)
             .unwrap();
         let pull_request_id = pull_request_id();

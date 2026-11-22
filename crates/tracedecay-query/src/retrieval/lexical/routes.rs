@@ -29,8 +29,8 @@ use tracedecay_contracts::retrieval::{LexicalAnchorDropReasonV1, LexicalAnchorDr
 use tracedecay_domain::{
     CodeGenerationId, CompactCandidate, FixedPointScore, RetrievalAnchorId, RetrievalBudget,
     RetrievalFailure, RetrieverBatch, RetrieverContinuation, RetrieverCoverage, RetrieverKind,
-    RetrieverOutcome, SourceOccurrenceId, is_identifier_token, is_qualified_name_token,
-    split_subtokens, technical_tokens,
+    RetrieverOutcome, SourceOccurrenceId, is_identifier_token, is_path_shape,
+    is_qualified_name_token, split_subtokens, technical_tokens,
 };
 
 use super::{
@@ -116,6 +116,14 @@ const PREFERRED_SYMBOL_STOPLIST_V1: &[&str] = &[
     "implementation",
 ];
 
+/// The shared query-word policy for symbol routing and ordinary prose
+/// evidence. Explicit names and literals decide separately whether to apply it.
+pub(super) fn is_query_stopword(term: &str) -> bool {
+    PREFERRED_SYMBOL_STOPLIST_V1
+        .iter()
+        .any(|stop| stop.eq_ignore_ascii_case(term))
+}
+
 /// Typed rejection for caller-supplied lexical routing.
 #[derive(Clone, Debug, Error, PartialEq, Eq)]
 pub enum LexicalRouteErrorV1 {
@@ -195,16 +203,24 @@ pub fn task_is_name_shaped(task: &str) -> bool {
         || (task.contains('.') && task.split('.').all(is_identifier_token))
 }
 
-/// A token only code would spell: a `::` path, an inner underscore, or a
-/// lowercase-to-uppercase hump. Plain words such as `update` stay prose.
-fn names_identifier(token: &str) -> bool {
+/// A token with code spelling: a `::` path, an inner underscore, a camel-case
+/// hump, or an uppercase acronym. Plain words such as `update` stay prose.
+pub(crate) fn names_identifier(token: &str) -> bool {
     is_qualified_name_token(token)
         || (is_identifier_token(token)
             && (token.trim_matches('_').contains('_')
                 || token
                     .as_bytes()
                     .windows(2)
-                    .any(|pair| pair[0].is_ascii_lowercase() && pair[1].is_ascii_uppercase())))
+                    .any(|pair| pair[0].is_ascii_alphabetic() && pair[1].is_ascii_uppercase())))
+}
+
+fn names_path(token: &str) -> bool {
+    is_path_shape(token)
+        && (token.contains('/')
+            || token
+                .rsplit_once('.')
+                .is_some_and(|(stem, extension)| !stem.is_empty() && !extension.is_empty()))
 }
 
 impl LexicalAliasV1 {
@@ -239,6 +255,9 @@ fn validate_alias_text(
 }
 
 fn normalized_query_parts(mut parts: LexicalQueryPartsV1) -> LexicalQueryPartsV1 {
+    // Alias matching depends on lexical content, not the syntax metadata used
+    // when executing each route. Keep its existing normalization semantics.
+    parts.explicit_terms.clear();
     for term in parts
         .whole_terms
         .iter_mut()
@@ -383,8 +402,9 @@ impl LexicalRoutingV1 {
         })
     }
 
-    /// Anchors each identifier `task` names (`run_update_command`,
-    /// `camelCase`, `a::b`) after the caller's anchors, up to the anchor cap.
+    /// Anchors each identifier or file `task` names (`run_update_command`,
+    /// `camelCase`, `a::b`, `limit-cap.ts`) after the caller's anchors, up to
+    /// the anchor cap.
     /// An exact symbol-name hit on an ordinary task word would otherwise
     /// outrank the one symbol the task actually names.
     #[must_use]
@@ -394,7 +414,7 @@ impl LexicalRoutingV1 {
                 break;
             }
             let token = token.trim_matches(['.', ':']);
-            if names_identifier(token)
+            if (names_identifier(token) || names_path(token))
                 && !self.anchors.iter().any(|anchor| anchor.as_str() == token)
                 && LexicalAnchorV1::validate(token, self.anchors.len()).is_ok()
             {
@@ -516,6 +536,7 @@ fn identifier_split_route(
         },
         parts: LexicalQueryPartsV1 {
             whole_terms,
+            explicit_terms: Vec::new(),
             subtokens: Vec::new(),
             phrases: Vec::new(),
         },
@@ -577,6 +598,7 @@ impl LexicalRoutePlanV1 {
                     kind: LexicalRouteKindV1::PreferredSymbol { tokens },
                     parts: LexicalQueryPartsV1 {
                         whole_terms,
+                        explicit_terms: Vec::new(),
                         subtokens: Vec::new(),
                         phrases: Vec::new(),
                     },
@@ -664,11 +686,7 @@ fn query_content_words(query: &str) -> Vec<QueryContentWordV1> {
         let Some(name) = trailing_symbol_name(&raw) else {
             return;
         };
-        if name.chars().count() < 2
-            || PREFERRED_SYMBOL_STOPLIST_V1
-                .iter()
-                .any(|stop| stop.eq_ignore_ascii_case(name))
-        {
+        if name.chars().count() < 2 || is_query_stopword(name) {
             return;
         }
         let name = name.to_owned();

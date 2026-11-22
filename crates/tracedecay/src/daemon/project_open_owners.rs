@@ -561,7 +561,7 @@ pub(super) async fn register_project_open_production_owners(
         .is_some()
     {
         let stack_coordinator = invocation.github_stack_coordinator();
-        stack_coordinator
+        let _stack_registration = stack_coordinator
             .register_scope(
                 &scope,
                 work_topology_policy.review_topology.github_stacked_prs,

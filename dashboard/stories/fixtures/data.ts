@@ -3233,9 +3233,7 @@ const settingsPayload: Record<string, unknown> = {
       track_call_sites: true,
       context_scout: false,
       telemetry: { timings: false },
-      sync: { auto_track_pr_branches: true, auto_track_pr_poll_secs: 120 },
     },
-    pr_autotrack: { tracked: [] },
   },
   user: {
     configuration_snapshot_id: 'user-snap-7',

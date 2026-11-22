@@ -161,8 +161,6 @@ pub(crate) struct McpServerConstructionContext {
         Option<tracedecay_contracts::code_index_freshness::CodeIndexReadinessWaiter>,
     pub(crate) dashboard_feedback_status_reader:
         Option<tracedecay_dashboard_api::feedback_api::FeedbackStatusReader>,
-    pub(crate) dashboard_pr_autotrack_reader:
-        Option<tracedecay_dashboard_api::PrAutoTrackManagedSummaryReader>,
     pub(crate) diagnostics_lsp:
         Option<Arc<tokio::sync::Mutex<tracedecay_lsp::analyzer::broker::DiagnosticBroker>>>,
     pub(crate) code_index_hook_sink: Option<super::CodeIndexHookSink>,
@@ -278,7 +276,6 @@ impl McpServerConstructionContext {
             dashboard_code_index_freshness_reader: None,
             code_index_readiness_waiter: None,
             dashboard_feedback_status_reader: None,
-            dashboard_pr_autotrack_reader: None,
             diagnostics_lsp: None,
             code_index_hook_sink: None,
             code_index_reconcile_sink: None,
@@ -424,7 +421,6 @@ impl McpServerConstructionContext {
             dashboard_code_index_freshness_reader: None,
             code_index_readiness_waiter: None,
             dashboard_feedback_status_reader: None,
-            dashboard_pr_autotrack_reader: None,
             diagnostics_lsp: None,
             code_index_hook_sink: None,
             code_index_reconcile_sink: None,
@@ -637,14 +633,6 @@ impl McpServerConstructionContext {
         reader: tracedecay_dashboard_api::feedback_api::FeedbackStatusReader,
     ) -> Self {
         self.dashboard_feedback_status_reader = Some(reader);
-        self
-    }
-
-    pub(crate) fn with_dashboard_pr_autotrack_reader(
-        mut self,
-        reader: tracedecay_dashboard_api::PrAutoTrackManagedSummaryReader,
-    ) -> Self {
-        self.dashboard_pr_autotrack_reader = Some(reader);
         self
     }
 

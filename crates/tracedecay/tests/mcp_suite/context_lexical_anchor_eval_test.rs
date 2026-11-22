@@ -532,3 +532,105 @@ async fn an_identifier_named_in_the_task_leads_plan_and_explore_context() {
     drop(server);
     production.harness.shutdown().await;
 }
+
+/// The #4907 shape: documented TypeScript enforcement and its caller compete
+/// with unrelated Python `get` methods and short symbols named `cap`. Neither
+/// the English question nor the filename requires the caller to know a symbol.
+fn write_request_limit_project(dest: &Path) {
+    fs::create_dir_all(dest.join("src")).expect("request limit sources");
+    fs::create_dir_all(dest.join("scripts")).expect("unrelated scripts");
+    fs::create_dir_all(dest.join("docs")).expect("unrelated documents");
+    fs::write(
+        dest.join("src/limit-cap.ts"),
+        "/** Enforces the per-request limit before admitting another operation. */\n\
+         export function enforceRequestLimit(remaining: number): boolean {\n\
+         \x20   return remaining > 0;\n\
+         }\n",
+    )
+    .expect("request limit implementation");
+    fs::write(
+        dest.join("src/check.ts"),
+        "import { enforceRequestLimit } from './limit-cap';\n\n\
+         /** Checks per-request limit enforcement before accepting a request. */\n\
+         export function checkRequest(remaining: number): boolean {\n\
+         \x20   return enforceRequestLimit(remaining);\n\
+         }\n",
+    )
+    .expect("request limit caller");
+    for index in 0..8 {
+        fs::write(
+            dest.join(format!("scripts/cache_{index}.py")),
+            format!(
+                "class Cache{index}:\n\
+                 \x20   def get(self):\n\
+                 \x20       return {index}\n"
+            ),
+        )
+        .expect("unrelated get method");
+        fs::write(
+            dest.join(format!("src/unrelated_{index}.ts")),
+            format!("export const cap = {index};\n"),
+        )
+        .expect("unrelated short symbol");
+    }
+    fs::write(
+        dest.join("docs/plan.md"),
+        "# Scope\n\nCache storage and expiry.\n\n# Out of Scope\n\nNetwork transports.\n",
+    )
+    .expect("unrelated headings");
+}
+
+#[tokio::test]
+async fn context_finds_request_limit_by_question_stem_and_filename() {
+    let production = production_composition_fixture_with_sources(write_request_limit_project).await;
+    let server = production
+        .harness
+        .server(&production.project_root)
+        .expect("request limit server");
+    warm_code_index_search(&server, "enforceRequestLimit").await;
+
+    let question = "how does the per-request limit get enforced";
+    let plain = context_json(
+        &server,
+        json!({"task": question, "max_nodes": 6, "format": "json"}),
+    )
+    .await;
+    let files = matched_files(&plain);
+    assert!(
+        files.contains(&"src/limit-cap.ts") && files.contains(&"src/check.ts"),
+        "the question must return the enforcement and its caller in the requested page: {plain}"
+    );
+    assert!(
+        matches!(files.first(), Some(&"src/limit-cap.ts" | &"src/check.ts")),
+        "generic get methods must not outrank the documented implementation: {plain}"
+    );
+
+    for (task, anchor, explicit) in [
+        (question, "limit-cap", true),
+        (
+            "per-request limit enforcement in limit-cap.ts",
+            "limit-cap.ts",
+            false,
+        ),
+    ] {
+        let mut arguments = json!({"task": task, "max_nodes": 6, "format": "json"});
+        if explicit {
+            arguments["lexical_anchors"] = json!([anchor]);
+        }
+        let payload = context_json(&server, arguments).await;
+        assert!(
+            matched_files(&payload).contains(&"src/limit-cap.ts"),
+            "the named file must survive the context page for {anchor}: {payload}"
+        );
+        let receipt = anchor_receipt(&payload);
+        assert!(
+            receipt.iter().any(|(name, outcome, matched, admitted)| {
+                *name == anchor && *outcome == "matched" && *matched > 0 && *admitted > 0
+            }),
+            "the receipt must acknowledge matching whole filename evidence: {payload}"
+        );
+    }
+
+    drop(server);
+    production.harness.shutdown().await;
+}

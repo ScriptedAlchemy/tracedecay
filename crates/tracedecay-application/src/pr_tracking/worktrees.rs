@@ -14,8 +14,7 @@ use tracedecay_runtime_core::branch::BranchAddOutcome;
 use tracedecay_runtime_core::native_runtime;
 
 use super::{
-    PrCommandControlV1, PrGitCommandError, pr_label, pr_tracking_ref, run_git_with_control,
-    successful_git_with_control,
+    PrCommandControlV1, PrGitCommandError, run_git_with_control, successful_git_with_control,
 };
 
 const CODE_INDEX_SCHEDULER_UNAVAILABLE: &str = "code_index_scheduler_unavailable";
@@ -31,17 +30,6 @@ pub struct ManualBranchActivation {
     pub head_sha: String,
     pub worktree: PathBuf,
     pub outcome: BranchAddOutcome,
-}
-
-/// A summary of what one reconcile pass changed, for logging and tests.
-#[derive(Debug, Default, Clone, PartialEq, Eq)]
-pub struct ReconcileReport {
-    pub tracked: Vec<String>,
-    pub untracked: Vec<String>,
-    pub skipped_forks: Vec<u64>,
-    pub capped: bool,
-    pub removals_suppressed: bool,
-    pub failures: Vec<(String, String)>,
 }
 
 /// Hex digits of a digest that name a branch or head in a worktree path or
@@ -155,6 +143,15 @@ pub async fn acquire_manual_branch_lifecycle(
         Instant::now() + MANUAL_BRANCH_LIFECYCLE_ADMISSION_DEADLINE,
     )
     .await
+}
+
+/// Try the same exact lifecycle lease without waiting behind an active user.
+/// One-shot retirement must preserve a leased artifact for an operator retry.
+pub async fn try_acquire_manual_branch_lifecycle(
+    data_root: &Path,
+    branch: &str,
+) -> std::result::Result<ManualBranchLifecycleLeaseV1, ManualBranchActivationError> {
+    acquire_manual_branch_lifecycle_until(data_root, branch, Instant::now()).await
 }
 
 async fn acquire_manual_branch_lifecycle_until(
@@ -527,6 +524,26 @@ fn exact_ref_ownership(
     expected_head: &str,
     command_control: &PrCommandControlV1,
 ) -> std::result::Result<ManualBranchArtifactOwnershipV1, ManualBranchActivationError> {
+    let symbolic = run_git_with_control(
+        repo_root,
+        &["symbolic-ref", "--quiet", reference],
+        command_control,
+    )
+    .map_err(|error| {
+        ManualBranchActivationError::git_unavailable(format!(
+            "cannot inspect exact Git ref '{reference}': {error}"
+        ))
+    })?;
+    match symbolic.status.code() {
+        Some(0) => return Ok(ManualBranchArtifactOwnershipV1::Foreign),
+        Some(1) => {}
+        _ => {
+            return Err(ManualBranchActivationError::git_unavailable(format!(
+                "cannot inspect exact Git ref '{reference}': Git exited with {}",
+                symbolic.status
+            )));
+        }
+    }
     match read_exact_ref(repo_root, reference, command_control)? {
         ExactRefReadV1::Absent => Ok(ManualBranchArtifactOwnershipV1::Absent),
         ExactRefReadV1::Present(head) if head == expected_head => {
@@ -534,6 +551,86 @@ fn exact_ref_ownership(
         }
         ExactRefReadV1::Present(_) => Ok(ManualBranchArtifactOwnershipV1::Foreign),
     }
+}
+
+/// Prove that deleting these exact refs cannot strand another worktree's HEAD.
+/// The main HEAD and every linked worktree's Git metadata must be readable;
+/// an incomplete census never authorizes cleanup. `owned_worktree` is allowed
+/// only before removing that exact checkout, and must be `None` before refs
+/// themselves are deleted.
+pub fn refs_are_unattached_outside_worktree(
+    repo_root: &Path,
+    references: &[&str],
+    owned_worktree: Option<&Path>,
+    command_control: &PrCommandControlV1,
+) -> std::result::Result<bool, ManualBranchActivationError> {
+    let unavailable = |error: String| {
+        ManualBranchActivationError::git_unavailable(format!(
+            "cannot prove exclusive worktree ref ownership: {error}"
+        ))
+    };
+    if command_control.is_cancelled() {
+        return Err(unavailable("request cancelled".to_owned()));
+    }
+    let repository = tracedecay_runtime_core::git_open::open(repo_root)
+        .map_err(|error| unavailable(error.to_string()))?;
+    let main = repository
+        .main_repo()
+        .map_err(|error| unavailable(error.to_string()))?;
+    let owns_name = |name: &gix::refs::FullNameRef| {
+        references
+            .iter()
+            .any(|reference| name.as_bstr() == reference.as_bytes())
+    };
+    let head_owns_ref = |repository: &gix::Repository| -> std::io::Result<bool> {
+        let Some(name) = repository
+            .head_name()
+            .map_err(|error| std::io::Error::other(error.to_string()))?
+        else {
+            return Ok(false);
+        };
+        if owns_name(name.as_ref()) {
+            return Ok(true);
+        }
+        let Some(mut referent) = repository
+            .try_find_reference(name.as_bstr())
+            .map_err(|error| std::io::Error::other(error.to_string()))?
+        else {
+            // An unrelated unborn HEAD cannot depend on an owned direct ref.
+            return Ok(false);
+        };
+        // The first HEAD referent may itself be a user alias. Gitoxide owns
+        // cycle/depth checks and resolution to the final direct ref; matching
+        // only head_name() would strand that alias when its target retires.
+        referent
+            .follow_to_object()
+            .map_err(|error| std::io::Error::other(error.to_string()))?;
+        Ok(owns_name(referent.name()))
+    };
+    // A bare repository can still have an attached main HEAD. Never leave it
+    // dangling merely because there is no primary checkout directory.
+    let mut attached_elsewhere =
+        head_owns_ref(&main).map_err(|error| unavailable(error.to_string()))?;
+    tracedecay_runtime_core::git_open::visit_linked_worktrees(&repository, |git_dir, base| {
+        if command_control.is_cancelled() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::Interrupted,
+                "request cancelled",
+            ));
+        }
+        let linked = tracedecay_runtime_core::git_open::open(git_dir)
+            .map_err(|error| std::io::Error::other(error.to_string()))?;
+        let attached = head_owns_ref(&linked)?;
+        if owned_worktree != Some(base) && attached {
+            attached_elsewhere = true;
+        }
+        Ok(())
+    })
+    .map_err(|error| unavailable(error.to_string()))?;
+    if command_control.is_cancelled() {
+        return Err(unavailable("request cancelled".to_owned()));
+    }
+    Ok(!attached_elsewhere)
 }
 
 pub fn manual_branch_artifact_ownership(
@@ -577,6 +674,47 @@ pub fn manual_branch_artifact_ownership(
     }
 }
 
+/// Git's status and non-forced worktree removal both trust index flags that
+/// can hide edited tracked files. Cleanup preserves those checkouts instead
+/// of changing the user's index or treating its shortcuts as byte evidence.
+pub fn require_worktree_index_checks(
+    worktree: &Path,
+    command_control: &PrCommandControlV1,
+) -> std::result::Result<(), ManualBranchActivationError> {
+    let unavailable = |detail: String| {
+        ManualBranchActivationError::git_unavailable(format!(
+            "cannot verify worktree index content checks for '{}': {detail}",
+            worktree.display()
+        ))
+    };
+    if command_control.is_cancelled() {
+        return Err(unavailable("request cancelled".to_owned()));
+    }
+    let repository = tracedecay_runtime_core::git_open::open(worktree)
+        .map_err(|error| unavailable(error.to_string()))?;
+    // A missing index cannot authorize deletion; never substitute an empty one.
+    let index = repository
+        .index()
+        .map_err(|error| unavailable(error.to_string()))?;
+    let unchecked = gix::index::entry::Flags::UPTODATE
+        | gix::index::entry::Flags::SKIP_WORKTREE
+        | gix::index::entry::Flags::ASSUME_VALID
+        | gix::index::entry::Flags::FSMONITOR_VALID;
+    if index
+        .entries()
+        .iter()
+        .any(|entry| entry.flags.intersects(unchecked))
+    {
+        return Err(unavailable(
+            "index entries can bypass content checks; preserve the checkout".to_owned(),
+        ));
+    }
+    if command_control.is_cancelled() {
+        return Err(unavailable("request cancelled".to_owned()));
+    }
+    Ok(())
+}
+
 pub fn cleanup_owned_worktree(
     repo_root: &Path,
     worktree: &Path,
@@ -598,6 +736,14 @@ pub fn cleanup_owned_worktree(
         ManualBranchArtifactOwnershipV1::Foreign => return Ok(false),
         ManualBranchArtifactOwnershipV1::Exact => {}
     }
+    if !refs_are_unattached_outside_worktree(
+        repo_root,
+        &[&branch_ref, tracking_ref],
+        Some(worktree),
+        command_control,
+    )? {
+        return Ok(false);
+    }
     if checked_path_exists(worktree)? {
         if !worktree_matches_branch_head(
             repo_root,
@@ -609,6 +755,14 @@ pub fn cleanup_owned_worktree(
             return Ok(false);
         }
         remove_owned_manual_worktree(repo_root, worktree, command_control)?;
+    }
+    if !refs_are_unattached_outside_worktree(
+        repo_root,
+        &[&branch_ref, tracking_ref],
+        None,
+        command_control,
+    )? {
+        return Ok(false);
     }
     match exact_ref_ownership(repo_root, &branch_ref, expected_head, command_control)? {
         ManualBranchArtifactOwnershipV1::Exact => {
@@ -687,7 +841,7 @@ fn delete_exact_ref(
 ) -> std::result::Result<(), ManualBranchActivationError> {
     let output = run_git_with_control(
         repo_root,
-        &["update-ref", "-d", reference, expected_head],
+        &["update-ref", "--no-deref", "-d", reference, expected_head],
         command_control,
     )
     .map_err(|error| {
@@ -712,33 +866,27 @@ fn remove_owned_manual_worktree(
     if !checked_path_exists(worktree)? {
         return Ok(());
     }
+    require_worktree_index_checks(worktree, command_control)?;
     let worktree_arg = worktree.to_string_lossy();
-    for arguments in [
-        vec!["worktree", "remove", "--force", &worktree_arg],
-        vec!["worktree", "prune"],
-    ] {
-        let output =
-            run_git_with_control(repo_root, &arguments, command_control).map_err(|error| {
-                ManualBranchActivationError::git_unavailable(format!(
-                    "cannot remove manual worktree '{}': {error}",
-                    worktree.display()
-                ))
-            })?;
-        if !output.status.success() {
-            return Err(ManualBranchActivationError::activation_failed(format!(
-                "cannot remove manual worktree '{}': Git exited with {}",
-                worktree.display(),
-                output.status
-            )));
-        }
-    }
-    if checked_path_exists(worktree)? {
-        std::fs::remove_dir_all(worktree).map_err(|error| {
-            ManualBranchActivationError::git_unavailable(format!(
-                "cannot remove manual worktree directory '{}': {error}",
-                worktree.display()
-            ))
-        })?;
+    // Keep Git's ordinary dirty/lock checks after rejecting hidden-content
+    // shortcuts. Never force or recursively remove the checkout.
+    let output = run_git_with_control(
+        repo_root,
+        &["worktree", "remove", &worktree_arg],
+        command_control,
+    )
+    .map_err(|error| {
+        ManualBranchActivationError::git_unavailable(format!(
+            "cannot remove manual worktree '{}': {error}",
+            worktree.display()
+        ))
+    })?;
+    if !output.status.success() {
+        return Err(ManualBranchActivationError::activation_failed(format!(
+            "cannot remove manual worktree '{}': Git exited with {}",
+            worktree.display(),
+            output.status
+        )));
     }
     if checked_path_exists(worktree)? {
         return Err(ManualBranchActivationError::activation_failed(format!(
@@ -747,34 +895,6 @@ fn remove_owned_manual_worktree(
         )));
     }
     Ok(())
-}
-
-pub fn prepare_pr_worktree(
-    repo_root: &Path,
-    worktree: &Path,
-    pr_number: u64,
-    tracking_ref: &str,
-    label: &str,
-    expected_head: &str,
-    command_control: &PrCommandControlV1,
-) -> std::result::Result<(), String> {
-    let pr_ref_spec = format!("+refs/pull/{pr_number}/head:{tracking_ref}");
-    successful_git_with_control(
-        repo_root,
-        &["fetch", "--no-tags", "origin", &pr_ref_spec],
-        command_control,
-    )
-    .map_err(|error| format!("fetch of PR head failed: {error}"))?;
-    let fetched_head =
-        successful_git_with_control(repo_root, &["rev-parse", tracking_ref], command_control)
-            .ok()
-            .and_then(|output| String::from_utf8(output.stdout).ok())
-            .map(|sha| sha.trim().to_string());
-    if fetched_head.as_deref() != Some(expected_head) {
-        return Err("PR head changed during reconciliation".to_string());
-    }
-
-    checkout_linked_worktree(repo_root, worktree, tracking_ref, label, command_control)
 }
 
 fn checkout_linked_worktree(
@@ -806,205 +926,6 @@ fn checkout_linked_worktree(
     )
     .map_err(|error| format!("worktree add failed: {error}"))?;
     Ok(())
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum PrCleanupArtifact {
-    Worktree(PathBuf),
-    Branch(String),
-    TrackingRef(String),
-}
-
-impl std::fmt::Display for PrCleanupArtifact {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Worktree(path) => write!(formatter, "worktree '{}'", path.display()),
-            Self::Branch(reference) => write!(formatter, "branch '{reference}'"),
-            Self::TrackingRef(reference) => write!(formatter, "tracking ref '{reference}'"),
-        }
-    }
-}
-
-#[derive(Debug)]
-pub struct PrCleanupReceipt(());
-
-#[derive(Debug, thiserror::Error)]
-pub enum PrCleanupError {
-    #[error("PR cleanup task failed to join: {0}")]
-    Join(String),
-    #[error("PR cleanup command failed for {artifact}: {source}")]
-    Command {
-        artifact: PrCleanupArtifact,
-        #[source]
-        source: PrGitCommandError,
-    },
-    #[error(
-        "PR cleanup did not remove owned artifacts: {}",
-        .0.iter().map(ToString::to_string).collect::<Vec<_>>().join(", ")
-    )]
-    Remaining(Vec<PrCleanupArtifact>),
-}
-
-#[tracing::instrument(
-    name = "application.pr_tracking.cleanup_worktree",
-    level = "trace",
-    skip_all
-)]
-pub fn cleanup_pr_worktree(
-    repo_root: &Path,
-    data_root: &Path,
-    pr: u64,
-    expected_head: &str,
-    command_control: &PrCommandControlV1,
-) -> std::result::Result<PrCleanupReceipt, PrCleanupError> {
-    let worktree = data_root.join("pr-worktrees").join(format!("pr-{pr}"));
-    let tracking_ref = pr_tracking_ref(pr);
-    let label = pr_label(pr);
-    let branch_ref = format!("refs/heads/{label}");
-    let artifacts = || {
-        vec![
-            PrCleanupArtifact::Worktree(worktree.clone()),
-            PrCleanupArtifact::TrackingRef(tracking_ref.clone()),
-            PrCleanupArtifact::Branch(branch_ref.clone()),
-        ]
-    };
-    if command_control.is_cancelled() {
-        return Err(PrCleanupError::Remaining(artifacts()));
-    }
-    let owned_head = if expected_head.is_empty() {
-        let ref_head = ref_sha(repo_root, &tracking_ref, command_control)?;
-        let worktree_head = ref_sha(&worktree, "HEAD", command_control)?;
-        match (ref_head, worktree_head) {
-            (Some(ref_head), Some(worktree_head)) if ref_head == worktree_head => Some(ref_head),
-            _ => None,
-        }
-    } else {
-        Some(expected_head.to_string())
-    };
-    remove_worktree(repo_root, &worktree, command_control).map_err(|source| {
-        PrCleanupError::Command {
-            artifact: PrCleanupArtifact::Worktree(worktree.clone()),
-            source,
-        }
-    })?;
-    if let Some(owned_head) = owned_head {
-        if ref_points_to(repo_root, &branch_ref, &owned_head, command_control)? {
-            successful_git_with_control(repo_root, &["branch", "-D", &label], command_control)
-                .map_err(|source| PrCleanupError::Command {
-                    artifact: PrCleanupArtifact::Branch(branch_ref.clone()),
-                    source,
-                })?;
-        }
-        if ref_points_to(repo_root, &tracking_ref, &owned_head, command_control)? {
-            successful_git_with_control(
-                repo_root,
-                &["update-ref", "-d", &tracking_ref],
-                command_control,
-            )
-            .map_err(|source| PrCleanupError::Command {
-                artifact: PrCleanupArtifact::TrackingRef(tracking_ref.clone()),
-                source,
-            })?;
-        }
-    }
-    let verification_control = PrCommandControlV1::default();
-    let remaining = remaining_pr_artifacts(
-        repo_root,
-        &worktree,
-        &branch_ref,
-        &tracking_ref,
-        &verification_control,
-    )?;
-    if !remaining.is_empty() {
-        return Err(PrCleanupError::Remaining(remaining));
-    }
-    Ok(PrCleanupReceipt(()))
-}
-
-fn ref_points_to(
-    repo_root: &Path,
-    reference: &str,
-    expected_head: &str,
-    command_control: &PrCommandControlV1,
-) -> std::result::Result<bool, PrCleanupError> {
-    Ok(ref_sha(repo_root, reference, command_control)?.is_some_and(|sha| sha == expected_head))
-}
-
-fn ref_sha(
-    repo_root: &Path,
-    reference: &str,
-    command_control: &PrCommandControlV1,
-) -> std::result::Result<Option<String>, PrCleanupError> {
-    let output = run_git_with_control(
-        repo_root,
-        &["rev-parse", "--verify", "--end-of-options", reference],
-        command_control,
-    )
-    .map_err(|source| PrCleanupError::Command {
-        artifact: cleanup_artifact_for_ref(reference),
-        source: PrGitCommandError::Command(source),
-    })?;
-    if !output.status.success() {
-        return Ok(None);
-    }
-    String::from_utf8(output.stdout)
-        .map(|sha| Some(sha.trim().to_owned()))
-        .map_err(|source| PrCleanupError::Command {
-            artifact: cleanup_artifact_for_ref(reference),
-            source: PrGitCommandError::InvalidOutput {
-                arguments: format!("rev-parse --verify --end-of-options {reference}"),
-                detail: source.to_string(),
-            },
-        })
-}
-
-fn cleanup_artifact_for_ref(reference: &str) -> PrCleanupArtifact {
-    if reference.starts_with("refs/heads/") {
-        PrCleanupArtifact::Branch(reference.to_owned())
-    } else {
-        PrCleanupArtifact::TrackingRef(reference.to_owned())
-    }
-}
-
-fn remaining_pr_artifacts(
-    repo_root: &Path,
-    worktree: &Path,
-    branch_ref: &str,
-    tracking_ref: &str,
-    command_control: &PrCommandControlV1,
-) -> std::result::Result<Vec<PrCleanupArtifact>, PrCleanupError> {
-    let worktrees = successful_git_with_control(
-        repo_root,
-        &["worktree", "list", "--porcelain"],
-        command_control,
-    )
-    .map_err(|source| PrCleanupError::Command {
-        artifact: PrCleanupArtifact::Worktree(worktree.to_owned()),
-        source,
-    })?;
-    let listed = String::from_utf8(worktrees.stdout).map_err(|source| PrCleanupError::Command {
-        artifact: PrCleanupArtifact::Worktree(worktree.to_owned()),
-        source: PrGitCommandError::InvalidOutput {
-            arguments: "worktree list --porcelain".to_owned(),
-            detail: source.to_string(),
-        },
-    })?;
-    let mut remaining = Vec::new();
-    if worktree.exists()
-        || listed
-            .lines()
-            .filter_map(|line| line.strip_prefix("worktree "))
-            .any(|listed| Path::new(listed) == worktree)
-    {
-        remaining.push(PrCleanupArtifact::Worktree(worktree.to_owned()));
-    }
-    if ref_sha(repo_root, branch_ref, command_control)?.is_some() {
-        remaining.push(PrCleanupArtifact::Branch(branch_ref.to_owned()));
-    }
-    if ref_sha(repo_root, tracking_ref, command_control)?.is_some() {
-        remaining.push(PrCleanupArtifact::TrackingRef(tracking_ref.to_owned()));
-    }
-    Ok(remaining)
 }
 
 fn remove_worktree(
@@ -1118,35 +1039,29 @@ pub async fn manual_branch_artifacts_match_off_runtime(
     })?
 }
 
-pub async fn cleanup_pr_worktree_off_runtime(
-    repo_root: &Path,
-    data_root: &Path,
-    pr: u64,
-    expected_head: &str,
-    command_control: PrCommandControlV1,
-) -> std::result::Result<PrCleanupReceipt, PrCleanupError> {
-    let repo_root = repo_root.to_path_buf();
-    let data_root = data_root.to_path_buf();
-    let expected_head = expected_head.to_owned();
-    native_runtime::spawn_blocking(move || {
-        cleanup_pr_worktree(&repo_root, &data_root, pr, &expected_head, &command_control)
-    })
-    .await
-    .map_err(PrCleanupError::Join)?
-}
-
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::{
-        ManualBranchActivationError, ManualBranchArtifactsV1, PrCommandControlV1,
+        ExactRefReadV1, ManualBranchActivationError, ManualBranchArtifactsV1, PrCommandControlV1,
         acquire_manual_branch_lifecycle, acquire_manual_branch_lifecycle_until,
-        cleanup_owned_worktree, prepare_manual_branch_worktree, ref_points_to, remove_worktree,
+        cleanup_owned_worktree, prepare_manual_branch_worktree, read_exact_ref, remove_worktree,
         resolve_branch_head, successful_git_with_control,
     };
     use crate::pr_tracking::default_pr_command_control;
     use std::path::Path;
     use std::time::{Duration, Instant};
+
+    fn ref_points_to(
+        root: &Path,
+        reference: &str,
+        expected: &str,
+        control: &PrCommandControlV1,
+    ) -> Result<bool, ManualBranchActivationError> {
+        Ok(
+            matches!(read_exact_ref(root, reference, control)?, ExactRefReadV1::Present(head) if head == expected),
+        )
+    }
 
     /// A same-branch caller still queued when the admission deadline passes
     /// fails with the typed, retryable contention error instead of waiting
@@ -1338,6 +1253,213 @@ mod tests {
             artifacts.worktree.exists(),
             "a foreign provenance mismatch must not delete the linked worktree"
         );
+    }
+
+    #[test]
+    fn manual_artifact_cleanup_preserves_symbolic_ref_substitution() {
+        let repo = tempfile::tempdir().unwrap();
+        let branch = "feature/user-owned";
+        init_manual_branch_repo(repo.path(), branch);
+        let data = tempfile::tempdir().unwrap();
+        let head = resolve_branch_head(repo.path(), branch, default_pr_command_control())
+            .expect("feature branch head");
+        let artifacts = ManualBranchArtifactsV1::for_head(data.path(), branch, &head);
+        prepare_manual_branch_worktree(
+            repo.path(),
+            &artifacts.worktree,
+            &artifacts.tracking_ref,
+            &artifacts.label,
+            &head,
+            default_pr_command_control(),
+        )
+        .expect("prepare exact worktree");
+        let user_ref = format!("refs/heads/{branch}");
+        git(
+            repo.path(),
+            &["symbolic-ref", &artifacts.tracking_ref, &user_ref],
+        );
+        let source = artifacts.worktree.join("src/feature.rs");
+        let bytes = std::fs::read(&source).unwrap();
+        assert!(
+            !cleanup_owned_worktree(
+                repo.path(),
+                &artifacts.worktree,
+                &artifacts.tracking_ref,
+                &artifacts.label,
+                &head,
+                default_pr_command_control(),
+            )
+            .expect("symbolic provenance is foreign")
+        );
+        assert!(
+            ref_points_to(repo.path(), &user_ref, &head, default_pr_command_control()).unwrap()
+        );
+        assert!(git_succeeds(
+            repo.path(),
+            &["symbolic-ref", "--quiet", &artifacts.tracking_ref]
+        ));
+        assert_eq!(std::fs::read(source).unwrap(), bytes);
+        assert!(git_ref_exists(
+            repo.path(),
+            &format!("refs/heads/{}", artifacts.label)
+        ));
+    }
+
+    #[test]
+    fn manual_cleanup_preserves_other_checkouts_and_dirty_or_locked_worktrees() {
+        let repo = tempfile::tempdir().unwrap();
+        let branch = "feature/attached-elsewhere";
+        init_manual_branch_repo(repo.path(), branch);
+        let data = tempfile::tempdir().unwrap();
+        let head = resolve_branch_head(repo.path(), branch, default_pr_command_control())
+            .expect("feature branch head");
+        let artifacts = ManualBranchArtifactsV1::for_head(data.path(), branch, &head);
+        prepare_manual_branch_worktree(
+            repo.path(),
+            &artifacts.worktree,
+            &artifacts.tracking_ref,
+            &artifacts.label,
+            &head,
+            default_pr_command_control(),
+        )
+        .expect("prepare exact worktree");
+        let other = data.path().join("user-checkout");
+        git(
+            repo.path(),
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "--force",
+                &other.to_string_lossy(),
+                &artifacts.label,
+            ],
+        );
+        let cleanup = || {
+            cleanup_owned_worktree(
+                repo.path(),
+                &artifacts.worktree,
+                &artifacts.tracking_ref,
+                &artifacts.label,
+                &head,
+                default_pr_command_control(),
+            )
+        };
+        assert!(!cleanup().expect("another attachment is foreign ownership"));
+        assert!(artifacts.worktree.exists() && other.exists());
+        git(
+            repo.path(),
+            &["worktree", "remove", &other.to_string_lossy()],
+        );
+        let source = artifacts.worktree.join("src/feature.rs");
+        std::fs::write(&source, "user edits must survive\n").unwrap();
+        assert!(cleanup().is_err(), "dirty worktrees cannot be forced away");
+        assert_eq!(
+            std::fs::read(&source).unwrap(),
+            b"user edits must survive\n"
+        );
+        git(&artifacts.worktree, &["checkout", "--", "src/feature.rs"]);
+        git(
+            repo.path(),
+            &["worktree", "lock", &artifacts.worktree.to_string_lossy()],
+        );
+        assert!(cleanup().is_err(), "Git's worktree lock must be respected");
+        for reference in [
+            artifacts.tracking_ref.clone(),
+            format!("refs/heads/{}", artifacts.label),
+        ] {
+            assert!(
+                ref_points_to(repo.path(), &reference, &head, default_pr_command_control())
+                    .unwrap()
+            );
+        }
+        git(
+            repo.path(),
+            &["worktree", "unlock", &artifacts.worktree.to_string_lossy()],
+        );
+        assert!(cleanup().expect("clean exclusive artifacts can retire"));
+        assert!(!artifacts.worktree.exists());
+    }
+
+    #[test]
+    fn manual_cleanup_preserves_tracked_edits_hidden_by_index_flags() {
+        for flag in ["--assume-unchanged", "--skip-worktree"] {
+            let repo = tempfile::tempdir().unwrap();
+            let branch = "feature/hidden-edits";
+            init_manual_branch_repo(repo.path(), branch);
+            let data = tempfile::tempdir().unwrap();
+            let control = default_pr_command_control();
+            let head = resolve_branch_head(repo.path(), branch, control).unwrap();
+            let artifacts = ManualBranchArtifactsV1::for_head(data.path(), branch, &head);
+            prepare_manual_branch_worktree(
+                repo.path(),
+                &artifacts.worktree,
+                &artifacts.tracking_ref,
+                &artifacts.label,
+                &head,
+                control,
+            )
+            .unwrap();
+            git(
+                &artifacts.worktree,
+                &["update-index", flag, "--", "src/feature.rs"],
+            );
+            let source = artifacts.worktree.join("src/feature.rs");
+            let edited = b"uncommitted hidden work must survive\n";
+            std::fs::write(&source, edited).unwrap();
+            let status = successful_git_with_control(
+                &artifacts.worktree,
+                &[
+                    "status",
+                    "--porcelain=v1",
+                    "--untracked-files=all",
+                    "--ignored",
+                ],
+                control,
+            )
+            .unwrap();
+            assert!(
+                status.stdout.is_empty(),
+                "{flag} must hide the fixture edit"
+            );
+            let index_flags = || {
+                successful_git_with_control(
+                    &artifacts.worktree,
+                    &["ls-files", "-v", "--", "src/feature.rs"],
+                    control,
+                )
+                .unwrap()
+                .stdout
+            };
+            let flags_before = index_flags();
+
+            let error = cleanup_owned_worktree(
+                repo.path(),
+                &artifacts.worktree,
+                &artifacts.tracking_ref,
+                &artifacts.label,
+                &head,
+                control,
+            )
+            .expect_err("an unchecked index cannot authorize checkout removal");
+
+            assert!(matches!(
+                error,
+                ManualBranchActivationError::GitAuthorityUnavailable { .. }
+            ));
+            assert!(artifacts.worktree.is_dir(), "{flag}");
+            assert_eq!(std::fs::read(&source).unwrap(), edited, "{flag}");
+            assert_eq!(index_flags(), flags_before, "{flag} must remain set");
+            for reference in [
+                artifacts.tracking_ref.clone(),
+                format!("refs/heads/{}", artifacts.label),
+            ] {
+                assert!(
+                    ref_points_to(repo.path(), &reference, &head, control).unwrap(),
+                    "{flag}: {reference}"
+                );
+            }
+        }
     }
 
     #[test]

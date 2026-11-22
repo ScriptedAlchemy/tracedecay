@@ -3,8 +3,8 @@ use std::collections::BTreeMap;
 
 use tracedecay_domain::{
     CalibrationProfileId, ComponentRevision, DiversityPolicy, ExactAdmissionRuleRevision,
-    ExactClass, FusionProfile, RankedCandidate, RetrieverBatch, RetrieverCoverage, RetrieverKind,
-    RetrieverOutcome, ScoreDomainCalibrationV1,
+    ExactClass, FusionProfile, RankedCandidate, RetrievalSourceRoleV1, RetrieverBatch,
+    RetrieverCoverage, RetrieverKind, RetrieverOutcome, ScoreDomainCalibrationV1,
 };
 use tracedecay_query::retrieval::exact::{
     CentralExactAdmissionAuthorityV1, ExactAdmissionAuthority, ExactLane, ExactLaneRequest,
@@ -14,8 +14,8 @@ use tracedecay_query::retrieval::fusion::{
 };
 use tracedecay_query::retrieval::graph::GraphLaneEvidence;
 use tracedecay_query::retrieval::lexical::{
-    LexicalLane, LexicalLaneRequest, LexicalRouteOutcomeV1, LexicalRoutePlanV1, LexicalRoutingV1,
-    merge_lexical_routes,
+    LexicalAliasV1, LexicalLane, LexicalLaneRequest, LexicalRouteOutcomeV1, LexicalRoutePlanV1,
+    LexicalRoutingV1, merge_lexical_routes,
 };
 use tracedecay_query::retrieval::{
     QUERY_EXACT_RULE_REVISION_V1, QUERY_EXACT_SCORE_DOMAIN_V1, QUERY_GRAPH_SCORE_DOMAIN_V1,
@@ -24,7 +24,8 @@ use tracedecay_query::retrieval::{
 };
 
 use crate::candidate_producers::{
-    FixtureRetrievalExecutionControl, base_request, budget, id, query_view, rust_artifact,
+    FixtureRetrievalExecutionControl, SealedArtifactFixture, base_request, budget, id, query_view,
+    real_lexical_source_fixture_from_sources, rust_artifact, sealed_artifact,
 };
 
 /// The fixture files that each define an unrelated symbol named `callers`.
@@ -140,6 +141,18 @@ fn core_diversity() -> DiversityPolicy {
 /// composition, the way the daemon's search does.
 fn search(sources: &[String], query: &str) -> Vec<RankedCandidate> {
     let artifact = rust_artifact(&sources.iter().map(String::as_str).collect::<Vec<_>>());
+    search_artifact(&artifact, query)
+}
+
+fn search_artifact(artifact: &SealedArtifactFixture, query: &str) -> Vec<RankedCandidate> {
+    search_artifact_with_routing(artifact, query, &LexicalRoutingV1::default())
+}
+
+fn search_artifact_with_routing(
+    artifact: &SealedArtifactFixture,
+    query: &str,
+    routing: &LexicalRoutingV1,
+) -> Vec<RankedCandidate> {
     let generation = artifact.metadata.generation.clone();
     let request = base_request(query, 32);
     let view = query_view(query);
@@ -162,8 +175,7 @@ fn search(sources: &[String], query: &str) -> Vec<RankedCandidate> {
     .expect("exact lane completes");
 
     let lexical_lane = LexicalLane::new(artifact.reader.clone());
-    let plan =
-        LexicalRoutePlanV1::plan(view.as_str(), &LexicalRoutingV1::default()).expect("route plan");
+    let plan = LexicalRoutePlanV1::plan(view.as_str(), routing).expect("route plan");
     let routes = plan
         .routes()
         .iter()
@@ -175,6 +187,7 @@ fn search(sources: &[String], query: &str) -> Vec<RankedCandidate> {
                     query_view: &view,
                     generation: generation.clone(),
                     whole_terms: Cow::Borrowed(route.parts.whole_terms.as_slice()),
+                    explicit_terms: Cow::Borrowed(route.parts.explicit_terms.as_slice()),
                     subtokens: Cow::Borrowed(route.parts.subtokens.as_slice()),
                     phrases: Cow::Borrowed(route.parts.phrases.as_slice()),
                     proximities: Cow::Borrowed(route.proximities.as_slice()),
@@ -226,8 +239,8 @@ fn file(ranked: &RankedCandidate) -> &str {
 }
 
 #[test]
-fn a_named_identifier_outranks_exact_matches_of_a_common_query_word() {
-    let ranked = search(&callers_sources(), "format_relative_time callers");
+fn a_named_identifier_outranks_an_explicit_exact_common_query_word() {
+    let ranked = search(&callers_sources(), "format_relative_time id:callers");
     let summary = ranked
         .iter()
         .map(|ranked| (file(ranked), ranked.candidate.utility_micros))
@@ -273,4 +286,327 @@ fn split_words_rank_the_identifier_they_spell_first() {
         .map(|ranked| (file(ranked), ranked.candidate.utility_micros))
         .collect::<Vec<_>>();
     assert_eq!(file(&ranked[0]), "file.fixture.0", "{summary:?}");
+}
+
+#[test]
+fn request_limit_question_outranks_unrelated_get_methods() {
+    let mut sources = vec![
+        "/// Enforces the per-request limit before admitting another operation.\n\
+         pub fn enforce_request_limit(remaining: usize) -> bool { remaining > 0 }\n"
+            .to_owned(),
+    ];
+    for index in 0..8 {
+        sources.push(format!(
+            "pub struct Unrelated{index};\nimpl Unrelated{index} {{\n\
+             pub fn get(&self) -> usize {{ {index} }}\n}}\n"
+        ));
+    }
+    let ranked = search(
+        &with_filler(sources),
+        "how does the per-request limit get enforced",
+    );
+    assert!(
+        !ranked.is_empty(),
+        "the documented implementation must be found"
+    );
+    let summary = ranked
+        .iter()
+        .map(|ranked| {
+            (
+                file(ranked),
+                ranked.candidate.source_role,
+                ranked.candidate.exact_class,
+                ranked.candidate.utility_micros,
+                ranked
+                    .candidate
+                    .contributions
+                    .iter()
+                    .map(|contribution| (contribution.retriever, contribution.raw_score))
+                    .collect::<Vec<_>>(),
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(file(&ranked[0]), "file.fixture.0", "{summary:?}");
+    assert_eq!(ranked[0].candidate.exact_class, ExactClass::Approximate);
+    assert!(
+        ranked
+            .iter()
+            .filter(|ranked| file(ranked) != "file.fixture.0")
+            .all(|ranked| ranked.candidate.source_role
+                != RetrievalSourceRoleV1::ProductionDefinition),
+        "incidental prose words cannot receive protected definition priority: {summary:?}"
+    );
+}
+
+#[test]
+fn request_limit_question_keeps_the_documented_typescript_caller_in_the_page() {
+    let mut sources = vec![
+        (
+            "file.limit".to_owned(),
+            "src/limit-cap.ts".to_owned(),
+            b"/** Enforces the per-request limit before admitting another operation. */\n\
+              export function enforceRequestLimit(remaining: number): boolean {\n\
+              \x20   return remaining > 0;\n\
+              }\n"
+            .to_vec(),
+        ),
+        (
+            "file.caller".to_owned(),
+            "src/check.ts".to_owned(),
+            b"import { enforceRequestLimit } from './limit-cap';\n\n\
+              /** Checks per-request limit enforcement before accepting a request. */\n\
+              export function checkRequest(remaining: number): boolean {\n\
+              \x20   return enforceRequestLimit(remaining);\n\
+              }\n"
+            .to_vec(),
+        ),
+        (
+            "file.plan".to_owned(),
+            "docs/plan.md".to_owned(),
+            b"# Scope\n\nCache storage and expiry.\n\n# Out of Scope\n\nNetwork transports.\n"
+                .to_vec(),
+        ),
+    ];
+    for index in 0..8 {
+        sources.push((
+            format!("file.cache.{index}"),
+            format!("scripts/cache_{index}.py"),
+            format!("class Cache{index}:\n    def get(self):\n        return {index}\n")
+                .into_bytes(),
+        ));
+        sources.push((
+            format!("file.unrelated.{index}"),
+            format!("src/unrelated_{index}.ts"),
+            format!("export const cap = {index};\n").into_bytes(),
+        ));
+    }
+    sources.sort_by(|left, right| left.1.cmp(&right.1));
+    let fixture = real_lexical_source_fixture_from_sources(sources);
+    let artifact = sealed_artifact(&fixture, fixture.metadata.clone());
+    let ranked = search_artifact(&artifact, "how does the per-request limit get enforced");
+    let summary = ranked
+        .iter()
+        .map(|ranked| {
+            (
+                file(ranked),
+                ranked.candidate.source_role,
+                ranked.candidate.exact_class,
+                ranked.candidate.utility_micros,
+                ranked
+                    .candidate
+                    .contributions
+                    .iter()
+                    .map(|contribution| (contribution.retriever, contribution.raw_score))
+                    .collect::<Vec<_>>(),
+            )
+        })
+        .collect::<Vec<_>>();
+    for required in ["file.limit", "file.caller"] {
+        assert!(
+            ranked.iter().take(6).any(|ranked| file(ranked) == required),
+            "the six-result question page must retain {required}: {summary:?}"
+        );
+    }
+    assert!(
+        matches!(ranked.first().map(file), Some("file.limit" | "file.caller")),
+        "the documented implementation must outrank unrelated get methods: {summary:?}"
+    );
+
+    let named = search_artifact(&artifact, "enforceRequestLimit");
+    assert_eq!(file(&named[0]), "file.limit");
+    assert_ne!(named[0].candidate.exact_class, ExactClass::Approximate);
+    let generic = search_artifact(&artifact, "get");
+    assert!(file(&generic[0]).starts_with("file.cache."));
+    assert_ne!(generic[0].candidate.exact_class, ExactClass::Approximate);
+    assert_eq!(
+        generic[0].candidate.source_role,
+        RetrievalSourceRoleV1::ProductionDefinition,
+        "a direct get query must retain definition admission"
+    );
+}
+
+#[test]
+fn prose_articles_do_not_spend_file_slots_on_rust_lifetimes() {
+    let sources = with_filler(vec![
+        "/// Enforces capacity by rejecting an operation after all slots are occupied.\n\
+         pub fn allow_next(remaining: usize) -> bool { remaining > 0 }\n\n\
+         pub struct Borrowed<T>(Vec<T>);\n\
+         impl<'a, T> IntoIterator for &'a mut Borrowed<T> {\n\
+         \x20   type Item = &'a mut T;\n\
+         \x20   type IntoIter = std::slice::IterMut<'a, T>;\n\
+         \x20   fn into_iter(self) -> Self::IntoIter { self.0.iter_mut() }\n\
+         }\n"
+        .to_owned(),
+        "pub fn a() -> bool { true }\n".to_owned(),
+    ]);
+    let artifact = rust_artifact(&sources.iter().map(String::as_str).collect::<Vec<_>>());
+    let named = search_artifact(&artifact, "allow_next");
+    let answer = &named.first().expect("the named gate is indexed").candidate;
+    assert_eq!(file(&named[0]), "file.fixture.0");
+    assert_eq!(
+        answer.source_role,
+        RetrievalSourceRoleV1::ProductionDefinition
+    );
+    assert_ne!(answer.exact_class, ExactClass::Approximate);
+
+    let lifetime_aliases = ["Item", "IntoIter"]
+        .into_iter()
+        .flat_map(|name| search_artifact(&artifact, name))
+        .map(|ranked| ranked.candidate.anchor_id)
+        .collect::<Vec<_>>();
+    assert!(
+        !lifetime_aliases.is_empty(),
+        "the lifetime declarations must be indexed for the isolation check"
+    );
+
+    let ranked = search_artifact(&artifact, "how is a request kept within the capacity limit");
+    let summary = ranked
+        .iter()
+        .map(|ranked| {
+            (
+                &ranked.candidate.anchor_id,
+                file(ranked),
+                ranked.candidate.source_role,
+                &ranked.candidate.contributions,
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        ranked.first().map(|ranked| &ranked.candidate.anchor_id),
+        Some(&answer.anchor_id),
+        "the documented gate must retain its file's result slot ahead of lifetime noise: {summary:?}"
+    );
+    assert!(
+        ranked
+            .iter()
+            .all(|ranked| !lifetime_aliases.contains(&ranked.candidate.anchor_id)),
+        "a prose article is not a request for the same-spelled Rust lifetime: {summary:?}"
+    );
+
+    let direct = search_artifact(&artifact, "a");
+    let explicit = &direct
+        .first()
+        .expect("the ordinary name is indexed")
+        .candidate;
+    assert_eq!(file(&direct[0]), "file.fixture.1");
+    for query in ["a", "find id:a"] {
+        let ranked = search_artifact(&artifact, query);
+        let first = &ranked
+            .first()
+            .expect("explicit intent remains searchable")
+            .candidate;
+        assert_eq!(first.anchor_id, explicit.anchor_id, "{query}: {ranked:?}");
+        assert_ne!(first.exact_class, ExactClass::Approximate, "{query}");
+        assert!(
+            first.contributions.iter().any(|contribution| {
+                contribution.retriever == RetrieverKind::Lexical && contribution.raw_score.0 > 0
+            }),
+            "explicit terms must remain lexical evidence as well as exact matches: {query}: {ranked:?}"
+        );
+    }
+
+    let literal_artifact = rust_artifact(&["pub fn token() -> &'static str { \"a\" }\n"]);
+    let quoted = search_artifact(&literal_artifact, "where is \"a\" defined");
+    assert!(
+        quoted.iter().any(|ranked| {
+            file(ranked) == "file.fixture.0"
+                && ranked.candidate.contributions.iter().any(|contribution| {
+                    contribution.retriever == RetrieverKind::Lexical && contribution.raw_score.0 > 0
+                })
+        }),
+        "a quoted article must remain lexical evidence in its source file: {quoted:?}"
+    );
+}
+
+#[test]
+fn a_one_content_word_question_keeps_prose_definition_priority() {
+    let artifact = rust_artifact(&[
+        "/// Tracks remaining capacity before accepting work.\n\
+         pub fn reserve_slot(remaining: usize) -> bool { remaining > 0 }\n",
+        "pub fn capacity() -> usize { 0 }\n",
+    ]);
+    let direct = search_artifact(&artifact, "capacity");
+    assert_eq!(file(&direct[0]), "file.fixture.1");
+    assert_eq!(
+        direct[0].candidate.source_role,
+        RetrievalSourceRoleV1::ProductionDefinition,
+        "a direct name owns definition priority"
+    );
+
+    let prose = search_artifact(&artifact, "what is capacity");
+    assert!(
+        prose.iter().any(|ranked| file(ranked) == "file.fixture.0"),
+        "the question must retain documented evidence: {prose:?}"
+    );
+    assert!(
+        prose.iter().all(|ranked| {
+            ranked.candidate.exact_class == ExactClass::Approximate
+                && ranked.candidate.source_role != RetrievalSourceRoleV1::ProductionDefinition
+        }),
+        "removing prose connectives cannot manufacture explicit name intent: {prose:?}"
+    );
+}
+
+#[test]
+fn uppercase_names_remain_lexical_evidence_inside_prose() {
+    let artifact = rust_artifact(&[
+        "pub const ALL: bool = true;\n",
+        "pub fn selected() -> bool { ALL }\n",
+    ]);
+    let ranked = search_artifact(&artifact, "where is ALL used");
+    assert!(
+        ranked.iter().any(|ranked| {
+            file(ranked) == "file.fixture.1"
+                && ranked.candidate.contributions.iter().any(|contribution| {
+                    contribution.retriever == RetrieverKind::Lexical && contribution.raw_score.0 > 0
+                })
+        }),
+        "a body-only uppercase name must retain lexical evidence even when its lowercase spelling is a prose connective: {ranked:?}"
+    );
+}
+
+#[test]
+fn alias_routes_preserve_their_own_explicit_literal_intent() {
+    let artifact = rust_artifact(&["pub fn token() -> &'static str { \"all\" }\n"]);
+    let query = "default scope";
+    let strict = search_artifact(&artifact, query);
+    assert!(
+        strict.is_empty(),
+        "the strict query must not supply the alias's literal evidence: {strict:?}"
+    );
+
+    let routing = LexicalRoutingV1::default()
+        .with_aliases(vec![LexicalAliasV1 {
+            strict_query: query.to_owned(),
+            alternative: "where is \"all\" defined".to_owned(),
+        }])
+        .expect("the explicit literal alias is valid");
+    let ranked = search_artifact_with_routing(&artifact, query, &routing);
+    assert!(
+        ranked.iter().any(|ranked| {
+            file(ranked) == "file.fixture.0"
+                && ranked.candidate.contributions.iter().any(|contribution| {
+                    contribution.retriever == RetrieverKind::Lexical && contribution.raw_score.0 > 0
+                })
+        }),
+        "an alias's quoted term must survive independently of the original query's syntax: {ranked:?}"
+    );
+    assert!(
+        ranked
+            .iter()
+            .all(|ranked| ranked.candidate.exact_class == ExactClass::Approximate),
+        "a lexical alias must not mint exact admission: {ranked:?}"
+    );
+
+    let prose_routing = LexicalRoutingV1::default()
+        .with_aliases(vec![LexicalAliasV1 {
+            strict_query: query.to_owned(),
+            alternative: "where is all defined".to_owned(),
+        }])
+        .expect("the prose alias is valid");
+    let prose = search_artifact_with_routing(&artifact, query, &prose_routing);
+    assert!(
+        prose.is_empty(),
+        "a generated prose phrase must not grant explicit literal intent: {prose:?}"
+    );
 }

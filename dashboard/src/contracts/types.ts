@@ -4254,16 +4254,6 @@ export type PolicyDecisionRef = {
 
 export type PolicyIdentifierV1 = string;
 
-export type PrAutoTrackEntryV1 = {
-  branch: string;
-  head_branch: string;
-  pr: number;
-};
-
-export type PrAutoTrackPayloadV1 = {
-  tracked: Array<PrAutoTrackEntryV1>;
-};
-
 export type PrepareWorkDuplicateAdjudicationRequestV1 = {
   first_attempt: WorkAttemptIdentityV1;
   quantities: WorkDuplicateAdjudicationQuantitiesV1;
@@ -4331,7 +4321,6 @@ export type ProjectEditableSettingsV1 = {
   extract_docstrings: boolean;
   include: Array<string>;
   max_file_size: number;
-  sync: SyncSettingsV1;
   telemetry: TelemetrySettingsV1;
   track_call_sites: boolean;
 };
@@ -4393,7 +4382,6 @@ export type ProjectSettingsPatch = {
   idempotency_key: string;
   include?: Array<string> | null | undefined;
   max_file_size?: number | null | undefined;
-  sync?: SyncSettingsPatch | null | undefined;
   telemetry?: TelemetrySettingsPatch | null | undefined;
   track_call_sites?: boolean | null | undefined;
 };
@@ -4407,7 +4395,6 @@ export type ProjectSettingsPayloadV1 = {
   config: ProjectEditableSettingsV1;
   configuration_revision_id: string;
   configuration_snapshot_id: string;
-  pr_autotrack: PrAutoTrackPayloadV1;
 };
 
 export type ProjectsPayloadV1 = {
@@ -5495,16 +5482,6 @@ export type StructureReadV15 =
   };
 
 export type SymbolOccurrenceId = string;
-
-export type SyncSettingsPatch = {
-  auto_track_pr_branches?: boolean | null | undefined;
-  auto_track_pr_poll_secs?: number | null | undefined;
-};
-
-export type SyncSettingsV1 = {
-  auto_track_pr_branches: boolean;
-  auto_track_pr_poll_secs: number;
-};
 
 export type TableGrowthDimensionV1 =
   | {

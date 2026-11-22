@@ -552,30 +552,68 @@ fn settings_dashboard_api_round_trips_profile_worker_selection_after_reviewed_pa
 }
 
 #[test]
-fn settings_patch_rejects_unreadable_pr_state_before_mutation() {
+fn settings_patch_is_independent_of_retired_pr_ownership_metadata() {
     create_runtime().block_on(async {
         let fixture = start_dashboard_configuration_fixture().await;
         let agent = http_agent();
         let url = format!("{}/api/settings", fixture.base_url);
         let (status, before) = get_json(&agent, &url);
         assert_eq!(status, 200, "{before}");
-        let payload = &before["payload"];
-        let pr_state = std::path::Path::new(payload["storage"]["store_root"].as_str().unwrap()).join("pr-autotrack.json");
-        std::fs::write(&pr_state, "{broken").unwrap();
-        for (route, patch) in [
-            ("project", json!({"expected_revision_id": payload["project"]["configuration_revision_id"], "idempotency_key": "configuration.idempotency.corrupt-pr-project", "max_file_size": 4096})),
-            ("user", json!({"expected_revision_id": payload["user"]["configuration_revision_id"], "idempotency_key": "configuration.idempotency.corrupt-pr-user", "watcher_debounce": "3s"})),
-            ("user/code-index-workers", json!({"expected_revision_id": payload["user"]["code_index_worker_configuration_revision_id"], "idempotency_key": "configuration.idempotency.corrupt-pr-workers", "code_index_workers": {"mode": "exact", "workers": 1}})),
+        let pr_state = std::path::Path::new(before["payload"]["storage"]["store_root"].as_str().unwrap()).join("pr-autotrack.json");
+        let retired_bytes = b"{broken";
+        std::fs::write(&pr_state, retired_bytes).unwrap();
+        for (route, scope, revision_field, mut patch) in [
+            ("project", "project", "configuration_revision_id", json!({"idempotency_key": "configuration.idempotency.retired-pr-project", "max_file_size": 4096})),
+            ("user/code-index-workers", "user", "code_index_worker_configuration_revision_id", json!({"idempotency_key": "configuration.idempotency.retired-pr-workers", "code_index_workers": {"mode": "exact", "workers": 1}})),
         ] {
-            let (status, error) = patch_json_body(&agent, &format!("{url}/{route}"), &patch);
-            assert_eq!(status, 503, "{route}: {error}");
-            assert_eq!(error["code"], "configuration_authority_unavailable");
+            let (status, current) = get_json(&agent, &url);
+            assert_eq!(status, 200, "{route}: {current}");
+            let revision = current["payload"][scope][revision_field].clone();
+            patch["expected_revision_id"] = revision.clone();
+            let (status, result) = patch_json_body(&agent, &format!("{url}/{route}"), &patch);
+            assert_eq!(status, 200, "{route}: {result}");
+            let (status, refreshed) = get_json(&agent, &url);
+            assert_eq!(status, 200, "{route}: {refreshed}");
+            assert_ne!(refreshed["payload"][scope][revision_field], revision, "supported {route} mutation must commit");
+            assert_eq!(std::fs::read(&pr_state).unwrap(), retired_bytes);
         }
-        std::fs::remove_file(pr_state).unwrap();
+        // This fixture mounts project configuration and the worker adapter,
+        // but not the daemon's profile invocation owner. The real-daemon
+        // settings journey proves all three mutations succeed with that owner.
+        let (status, before_user) = get_json(&agent, &url);
+        assert_eq!(status, 200, "{before_user}");
+        let user_revision = before_user["payload"]["user"]["configuration_revision_id"].clone();
+        let (status, unavailable) = patch_json_body(
+            &agent,
+            &format!("{url}/user"),
+            &json!({
+                "expected_revision_id": user_revision,
+                "idempotency_key": "configuration.idempotency.retired-pr-user",
+                "watcher_debounce": "3s",
+            }),
+        );
+        assert_eq!(status, 503, "the absent profile owner must refuse: {unavailable}");
+        assert_eq!(unavailable["problem"]["diagnostic"]["code"], "application.surface.unavailable");
+        assert_eq!(std::fs::read(&pr_state).unwrap(), retired_bytes);
         let (status, after) = get_json(&agent, &url);
         assert_eq!(status, 200, "{after}");
-        for (scope, field) in [("project", "configuration_revision_id"), ("user", "configuration_revision_id"), ("user", "code_index_worker_configuration_revision_id")] {
-            assert_eq!(after["payload"][scope][field], payload[scope][field], "failed PATCH must not commit {scope}/{field}");
-        }
+        assert_eq!(after["payload"]["project"]["config"]["max_file_size"], 4096);
+        assert_eq!(after["payload"]["user"]["configuration_revision_id"], user_revision);
+        assert_eq!(after["payload"]["user"]["watcher_debounce"], before["payload"]["user"]["watcher_debounce"]);
+        assert_eq!(after["payload"]["user"]["code_index_workers"], json!({"mode": "exact", "workers": 1}));
+        assert!(after["payload"]["project"].get("pr_autotrack").is_none());
+        assert!(after["payload"]["project"]["config"].get("sync").is_none());
+        let (status, retired) = patch_json_body(
+            &agent,
+            &format!("{url}/project"),
+            &json!({
+                "expected_revision_id": after["payload"]["project"]["configuration_revision_id"],
+                "idempotency_key": "configuration.idempotency.retired-pr-refusal",
+                "sync": {"auto_track_pr_branches": true},
+            }),
+        );
+        assert_eq!(status, 400, "retired sync field must be refused: {retired}");
+        assert_eq!(retired["validation_errors"][0]["field"], "sync");
+        assert_eq!(std::fs::read(&pr_state).unwrap(), retired_bytes);
     });
 }

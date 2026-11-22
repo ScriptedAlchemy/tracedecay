@@ -458,6 +458,7 @@ fn production_text_serving_builds_publishes_and_reopens_the_artifact_head() {
             query_view: &query_view,
             generation,
             whole_terms: std::borrow::Cow::Owned(vec!["callee".to_owned()]),
+            explicit_terms: std::borrow::Cow::Owned(Vec::new()),
             subtokens: std::borrow::Cow::Owned(vec!["callee".to_owned()]),
             phrases: std::borrow::Cow::Owned(Vec::new()),
             proximities: std::borrow::Cow::Owned(Vec::new()),

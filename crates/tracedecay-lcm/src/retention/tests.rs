@@ -198,6 +198,87 @@ async fn run_apply(
     .map_err(|error| error.to_string())
 }
 
+async fn run_unscoped_page(
+    store: &TestStore,
+    config: &LcmRetentionConfig,
+) -> Result<LcmRetentionReport, String> {
+    run_session_retention_authorized(
+        &store.conn,
+        &store.storage_root,
+        "all",
+        None,
+        config,
+        RetentionMode::Apply,
+        NOW,
+        &|_| Ok(()),
+    )
+    .await
+    .map_err(|error| error.to_string())
+}
+
+#[tokio::test]
+async fn bounded_drop_continuations_drain_age_and_new_lineage_without_dropping_live_rows()
+-> Result<(), String> {
+    let store = test_store().await?;
+    let config = LcmRetentionConfig {
+        offload_after_days: None,
+        drop_after_days: Some(30),
+        max_batch_size: 2,
+        ..LcmRetentionConfig::default()
+    };
+    for ordinal in 1..=5 {
+        let raw = insert_message(&store.conn, ordinal, 90, "old summarized history").await?;
+        make_projection_durable(&store.conn, raw).await?;
+    }
+    let unsummarized = insert_message(&store.conn, 6, 90, "live evidence").await?;
+    let recent = insert_message(&store.conn, 7, 1, "recent summarized history").await?;
+    make_projection_durable(&store.conn, recent).await?;
+
+    for (acted, has_more) in [(2, true), (2, true), (1, false)] {
+        let report = run_unscoped_page(&store, &config).await?;
+        assert!(report.errors.is_empty(), "{:?}", report.errors);
+        assert_eq!(report.dropped.acted, acted);
+        assert_eq!(report.storage_has_more, has_more);
+        if has_more {
+            let before = count(&store.conn, "lcm_raw_messages").await?;
+            let disabled = LcmRetentionConfig {
+                enabled: false,
+                ..config
+            };
+            let paused = run_unscoped_page(&store, &disabled).await?;
+            assert_eq!(paused.dropped.acted, 0);
+            assert!(!paused.storage_has_more);
+            assert_eq!(count(&store.conn, "lcm_raw_messages").await?, before);
+        }
+    }
+    assert_eq!(count(&store.conn, "lcm_raw_messages").await?, 2);
+    assert_eq!(count(&store.conn, "session_summary_sources").await?, 6);
+
+    // New lineage may contain a full page that cannot be dropped. Its scan
+    // frontier must still request another page to reach newly summarized old
+    // evidence behind it, already below the durable aging frontier.
+    for ordinal in 8..=9 {
+        let raw = insert_message(&store.conn, ordinal, 1, "recent evidence").await?;
+        make_projection_durable(&store.conn, raw).await?;
+    }
+    make_projection_durable(&store.conn, unsummarized).await?;
+    let empty_page = run_unscoped_page(&store, &config).await?;
+    assert_eq!(empty_page.dropped.acted, 0);
+    assert!(empty_page.storage_has_more);
+    let final_page = run_unscoped_page(&store, &config).await?;
+    assert!(final_page.errors.is_empty(), "{:?}", final_page.errors);
+    assert_eq!(final_page.dropped.acted, 1);
+    assert!(!final_page.storage_has_more);
+    assert_eq!(count(&store.conn, "lcm_raw_messages").await?, 3);
+    let drained = run_unscoped_page(&store, &config).await?;
+    assert_eq!(drained.dropped.acted, 0);
+    assert!(
+        !drained.storage_has_more,
+        "a drained policy must not hot-loop"
+    );
+    Ok(())
+}
+
 #[tokio::test]
 async fn authority_loss_before_commit_rolls_back_retention_mutations() -> Result<(), String> {
     let store = test_store().await?;

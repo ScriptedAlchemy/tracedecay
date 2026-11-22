@@ -19,6 +19,7 @@ use tracedecay_domain::{
     RetrieverOutcome, ScoreDomainId, split_subtokens, technical_tokens,
 };
 
+use super::exact::explicit_query_terms;
 use super::ports::{
     CodeCandidateBindingV1, LaneBoundEvidence, LaneEvidenceRejections, LexicalPostingReadPort,
     RETRIEVAL_CANDIDATE_BATCH_SIZE, RetrievalExecutionControl, RetrievalPortError,
@@ -46,6 +47,7 @@ pub use self::projection::{
     PreparedCodeLexicalArtifactPageV1, VerifiedCodeLexicalArtifactV1,
     code_lexical_artifact_build_memory_budget_for, code_lexical_artifact_content_key,
 };
+pub(crate) use self::routes::names_identifier;
 pub use self::routes::{
     LEXICAL_ANCHOR_MATCH_SCORE_MICROS_V1, LexicalAliasV1, LexicalAlternativeReasonV1,
     LexicalAnchorOutcomeV1, LexicalAnchorReceiptV1, LexicalAnchorV1, LexicalQueryRouteV1,
@@ -153,6 +155,9 @@ fn candidate_admission_outcome<E>(
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct LexicalQueryPartsV1 {
     pub whole_terms: Vec<String>,
+    /// Normalized terms explicitly quoted or field-qualified in this route's
+    /// source text. This intent does not grant exact-tier admission.
+    pub explicit_terms: Vec<String>,
     pub subtokens: Vec<String>,
     pub phrases: Vec<String>,
 }
@@ -222,6 +227,7 @@ pub fn lexical_query_parts(query: &str) -> Result<LexicalQueryPartsV1, Retrieval
     }
     Ok(LexicalQueryPartsV1 {
         whole_terms,
+        explicit_terms: explicit_query_terms(query).into_iter().collect(),
         subtokens,
         phrases,
     })
@@ -297,13 +303,16 @@ pub struct LexicalSpellingVariantV1 {
 /// and bounded fuzzy retrieval.
 ///
 /// Term / proximity / filter collections are [`Cow`] so multi-route callers can
-/// borrow the route plan's parts once per sanitize instead of cloning five
+/// borrow the route plan's parts once per sanitize instead of cloning
 /// owned vectors on every lane call.
 pub struct LexicalLaneRequest<'a> {
     pub base: RetrievalRequest,
     pub query_view: &'a EphemeralSanitizedQueryViewV1,
     pub generation: CodeGenerationId,
     pub whole_terms: Cow<'a, [String]>,
+    /// Explicit lexical intent from the route's own text. The original
+    /// `query_view` remains the request's authority and echo-penalty input.
+    pub explicit_terms: Cow<'a, [String]>,
     pub subtokens: Cow<'a, [String]>,
     pub phrases: Cow<'a, [String]>,
     pub proximities: Cow<'a, [LexicalProximityV1]>,
@@ -396,6 +405,7 @@ impl LexicalLaneRequest<'_> {
         for term in self
             .whole_terms
             .iter()
+            .chain(self.explicit_terms.iter())
             .chain(self.subtokens.iter())
             .chain(self.phrases.iter())
         {

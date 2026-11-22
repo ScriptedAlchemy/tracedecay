@@ -239,8 +239,6 @@ pub struct ScopeRootAuthorityReceiptV1 {
     pub digest: String,
 }
 
-const MAX_GIT_WORKTREES_PER_SCOPE_INVENTORY: usize = 256;
-
 /// The shared `code-index-v1/` parent that holds every scope root for one
 /// repository.
 #[must_use]
@@ -259,43 +257,35 @@ pub fn code_index_store_root(data_root: &Path, project_root: &Path) -> PathBuf {
     super::scoped_code_index_store_root(&code_index_scope_store_root(data_root), project_root)
 }
 
-/// Bounded, fail-closed inventory of every worktree root registered by Git.
+/// Complete, fail-closed inventory of every worktree root registered by Git.
+/// Worktree metadata is visited one entry at a time. Retain only the roots
+/// needed by the caller and fixed-size entry digests, so a busy repository
+/// cannot permanently disable retention by crossing a worktree-count limit.
 pub fn git_worktree_scope_root_inventory(
     project_root: &Path,
 ) -> Result<(BTreeSet<PathBuf>, ScopeRootAuthorityReceiptV1), &'static str> {
     let repository = tracedecay_runtime_core::git_open::open(project_root)
         .map_err(|_| "git_repository_unavailable")?;
-    let linked = repository
-        .worktrees()
-        .map_err(|_| "git_worktree_inventory_unavailable")?;
-    if linked.len() >= MAX_GIT_WORKTREES_PER_SCOPE_INVENTORY {
-        return Err("git_worktree_inventory_exceeds_bound");
-    }
-
     let mut exact_roots = BTreeSet::from([project_root.to_path_buf()]);
-    if let Ok(main) = repository.main_repo()
-        && let Some(worktree) = main.worktree()
-    {
+    let main = repository
+        .main_repo()
+        .map_err(|_| "git_repository_unavailable")?;
+    if let Some(worktree) = main.worktree() {
         exact_roots.insert(worktree.base().to_path_buf());
     }
-    let mut linked_material = Vec::with_capacity(linked.len());
-    for worktree in linked {
-        let base = worktree
-            .base()
-            .map_err(|_| "git_worktree_root_unavailable")?;
-        linked_material.push((
-            worktree.git_dir().to_string_lossy().into_owned(),
-            base.to_string_lossy().into_owned(),
-        ));
-        exact_roots.insert(base);
-    }
-    if exact_roots.is_empty() || exact_roots.len() > MAX_GIT_WORKTREES_PER_SCOPE_INVENTORY {
-        return Err("git_worktree_inventory_invalid");
-    }
+    let mut linked_material = BTreeSet::new();
+    tracedecay_runtime_core::git_open::visit_linked_worktrees(&repository, |git_dir, base| {
+        let entry = canonical_sha256(&(git_dir.to_string_lossy(), base.to_string_lossy()))
+            .map_err(|error| std::io::Error::other(error.to_string()))?;
+        linked_material.insert(entry.as_str().to_owned());
+        exact_roots.insert(base.to_path_buf());
+        Ok(())
+    })
+    .map_err(|_| "git_worktree_inventory_unavailable")?;
     let terminal_count =
         u64::try_from(exact_roots.len()).map_err(|_| "git_worktree_count_overflow")?;
     let material = (
-        "tracedecay.git-worktree-root-inventory.v1",
+        "tracedecay.git-worktree-root-inventory.v2",
         repository.common_dir().to_string_lossy().into_owned(),
         linked_material,
         exact_roots
@@ -1116,9 +1106,9 @@ mod worktree_inventory_tests {
     }
 
     #[test]
-    fn oversized_worktree_inventory_refuses_partial_authority_then_recovers() {
+    fn large_worktree_inventory_retains_complete_liveness_and_tracks_removal() {
         const ADMITTED_ROOTS: usize = 256;
-        const OVERSIZED_ROOTS: usize = 331;
+        const EXPANDED_ROOTS: usize = 331;
 
         let temporary = tempfile::TempDir::new().expect("repository root");
         let base = std::fs::canonicalize(temporary.path()).expect("canonical root");
@@ -1146,18 +1136,59 @@ mod worktree_inventory_tests {
             git_worktree_scope_root_inventory(&primary).expect("the complete bound is admissible");
         assert_eq!(receipt.terminal_count, ADMITTED_ROOTS as u64);
 
-        let excess = (ADMITTED_ROOTS - 1..OVERSIZED_ROOTS - 1)
+        let excess = (ADMITTED_ROOTS - 1..EXPANDED_ROOTS - 1)
             .map(add_worktree)
             .collect::<Vec<_>>();
+        let (expanded_roots, expanded_receipt) =
+            git_worktree_scope_root_inventory(&primary).expect("large complete inventory");
+        assert_eq!(expanded_receipt.terminal_count, EXPANDED_ROOTS as u64);
+        assert!(admitted_roots.is_subset(&expanded_roots));
+        let proof = scope_root_liveness_proof(&primary, &BTreeSet::new())
+            .expect("large inventories still authorize retention");
+        for root in &excess {
+            assert!(expanded_roots.contains(root));
+            assert!(
+                proof
+                    .live_scope_hashes
+                    .contains(&code_index_scope_hash(root))
+            );
+        }
         assert_eq!(
-            git_worktree_scope_root_inventory(&primary).expect_err("331 roots exceed the bound"),
-            "git_worktree_inventory_exceeds_bound"
+            expanded_receipt,
+            git_worktree_scope_root_inventory(&primary)
+                .expect("stable inventory")
+                .1,
+            "filesystem enumeration order cannot change the proof"
         );
-        assert_eq!(
-            scope_root_liveness_proof(&primary, &BTreeSet::new())
-                .expect_err("a partial inventory must never authorize scope collection"),
-            "git_worktree_inventory_exceeds_bound"
-        );
+        assert_ne!(receipt, expanded_receipt);
+
+        let store_root = base.join("code-index-v1");
+        let live_scope = store_root.join(code_index_scope_hash(&primary));
+        let missing_root = base.join("removed-worktree");
+        let stranded_hash = code_index_scope_hash(&missing_root);
+        let stranded_scope = store_root.join(&stranded_hash);
+        for scope in [&live_scope, &stranded_scope] {
+            std::fs::create_dir_all(scope).expect("scope directory");
+            std::fs::write(scope.join("payload"), b"retained code").expect("scope payload");
+        }
+        record_scope_root(&stranded_scope, &missing_root).expect("record missing root");
+        let plan = plan_scope_root_retention_with_liveness_proof(&store_root, proof, i64::MAX, 0)
+            .expect("missing roots are collectible despite the age gate");
+        let revalidated =
+            scope_root_liveness_proof(&primary, &BTreeSet::new()).expect("revalidated proof");
+        let report = execute_scope_root_retention(
+            &store_root,
+            plan,
+            &revalidated,
+            CodeGenerationRetentionModeV1::Apply,
+            0,
+            UtcMicros(1),
+        )
+        .expect("large repository reclaims a stranded scope");
+        assert_eq!(report.collected_scopes.len(), 1);
+        assert_eq!(report.collected_scopes[0].scope_hash, stranded_hash);
+        assert!(!stranded_scope.exists());
+        assert!(live_scope.join("payload").is_file());
 
         for linked in excess {
             run_git(
@@ -1171,9 +1202,29 @@ mod worktree_inventory_tests {
             );
         }
         let (recovered_roots, receipt) = git_worktree_scope_root_inventory(&primary)
-            .expect("a later bounded inventory recovers");
+            .expect("removal refreshes the complete inventory");
         assert_eq!(receipt.terminal_count, ADMITTED_ROOTS as u64);
         assert_eq!(recovered_roots, admitted_roots);
+    }
+
+    #[test]
+    fn invalid_worktree_metadata_refuses_the_entire_inventory() {
+        let temporary = tempfile::TempDir::new().expect("repository root");
+        let (primary, linked) = repository_with_linked_worktree(temporary.path());
+        let repository = tracedecay_runtime_core::git_open::open(&linked).expect("linked repo");
+        let gitdir = repository.git_dir().join("gitdir");
+        let valid = std::fs::read(&gitdir).expect("worktree metadata");
+        std::fs::write(&gitdir, b"").expect("damage worktree metadata");
+        assert!(git_worktree_scope_root_inventory(&primary).is_err());
+        std::fs::remove_file(&gitdir).expect("remove worktree metadata");
+        assert!(
+            git_worktree_scope_root_inventory(&primary).is_err(),
+            "a live metadata directory cannot be silently omitted"
+        );
+        std::fs::write(gitdir, valid).expect("restore worktree metadata");
+        let (roots, receipt) = git_worktree_scope_root_inventory(&primary).expect("recovered");
+        assert!(roots.contains(&linked));
+        assert_eq!(receipt.terminal_count, 2);
     }
 
     #[test]

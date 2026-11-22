@@ -347,7 +347,7 @@ fn cursor_rotation_retains_old_keys_until_policy_revokes_them() {
 }
 
 #[test]
-fn cursor_rejects_cross_domain_and_snapshot_replay_after_authentication() {
+fn cursor_rejects_cross_domain_snapshot_and_ranking_replay_after_authentication() {
     let (kernel, output) =
         composed_with_graph_outcome(RetrieverOutcome::Complete(batch(Vec::new(), "empty")));
     let request = request();
@@ -387,6 +387,21 @@ fn cursor_rejects_cross_domain_and_snapshot_replay_after_authentication() {
             NOW,
         ),
         Err(RetrievalError::CursorSetMismatch)
+    );
+
+    let changed_ranking = CompositionKernel::new(id("ranking.changed-definition-admission"));
+    assert_eq!(
+        resume(
+            &changed_ranking,
+            &request,
+            &query_view,
+            &keys,
+            &output,
+            &cursor,
+            NOW,
+        ),
+        Err(RetrievalError::CursorSetMismatch),
+        "an authenticated old cursor cannot reuse a changed definition-priority policy"
     );
 }
 

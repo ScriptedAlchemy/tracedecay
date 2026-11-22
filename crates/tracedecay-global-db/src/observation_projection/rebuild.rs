@@ -2085,78 +2085,42 @@ async fn clear_active_projection(
     conn: &impl Executor,
     generation: &str,
 ) -> ProjectionStoreResult<()> {
-    conn.execute_batch(
-        "CREATE TEMP TABLE IF NOT EXISTS observation_projection_rebuild_retained_outputs (
-            output_provider TEXT NOT NULL,
-            output_message_id TEXT NOT NULL,
-            PRIMARY KEY(output_provider, output_message_id)
-         ) WITHOUT ROWID;
-         CREATE TEMP TABLE IF NOT EXISTS observation_projection_rebuild_cleared_outputs (
-            output_provider TEXT NOT NULL,
-            output_message_id TEXT NOT NULL,
-            PRIMARY KEY(output_provider, output_message_id)
-         ) WITHOUT ROWID;
-         DELETE FROM temp.observation_projection_rebuild_retained_outputs;
-         DELETE FROM temp.observation_projection_rebuild_cleared_outputs;",
-    )
-    .await
-    .map_err(|error| storage("prepare projection rebuild activation", error))?;
-    conn.execute(
-        "INSERT INTO temp.observation_projection_rebuild_retained_outputs (
-            output_provider, output_message_id
-         )
-         SELECT DISTINCT current.output_provider, current.output_message_id
-         FROM observation_projection_provenance AS current
-         WHERE current.projector_version = ?1
-           AND EXISTS (
-             SELECT 1 FROM observation_projection_provenance AS retained
-             WHERE retained.output_provider = current.output_provider
-               AND retained.output_message_id = current.output_message_id
-               AND retained.projector_version <> current.projector_version
-           )",
-        params![SESSION_MESSAGE_PROJECTOR_VERSION],
-    )
-    .await
-    .map_err(|error| storage("materialize retained projection outputs", error))?;
-    conn.execute(
-        "INSERT INTO temp.observation_projection_rebuild_cleared_outputs (
-            output_provider, output_message_id
-         )
-         SELECT DISTINCT provenance.output_provider, provenance.output_message_id
-         FROM observation_projection_provenance AS provenance
-         WHERE provenance.projector_version = ?1 AND provenance.message_created = 1
-           AND NOT EXISTS (
-             SELECT 1 FROM temp.observation_projection_rebuild_retained_outputs AS retained
-             WHERE retained.output_provider = provenance.output_provider
-               AND retained.output_message_id = provenance.output_message_id
-           )
-           AND NOT EXISTS (
-             SELECT 1 FROM observation_projection_rebuild_messages AS staged
-             WHERE staged.projector_version = ?1 AND staged.generation = ?2
-               AND staged.output_provider = provenance.output_provider
-               AND staged.output_message_id = provenance.output_message_id
-           )",
-        params![SESSION_MESSAGE_PROJECTOR_VERSION, generation],
-    )
-    .await
-    .map_err(|error| storage("materialize cleared projection outputs", error))?;
+    // The writer transaction pins both ownership and staged replacements.
+    // Their existing indexes answer exact output probes without copying the
+    // entire rebuild into connection-local TEMP b-trees. Other projectors'
+    // provenance survives both deletes, so their retention evidence remains
+    // stable while this projector's provenance is cleared.
     conn.execute(
         "DELETE FROM lcm_raw_messages
          WHERE EXISTS (
-           SELECT 1 FROM temp.observation_projection_rebuild_cleared_outputs AS cleared
-           WHERE cleared.output_provider = lcm_raw_messages.provider
-             AND cleared.output_message_id = lcm_raw_messages.message_id
+           SELECT 1 FROM observation_projection_provenance AS provenance
+           WHERE provenance.projector_version = ?1 AND provenance.message_created = 1
+             AND provenance.output_provider = lcm_raw_messages.provider
+             AND provenance.output_message_id = lcm_raw_messages.message_id
+         )
+         AND NOT EXISTS (
+           SELECT 1 FROM observation_projection_provenance AS retained
+           WHERE retained.output_provider = lcm_raw_messages.provider
+             AND retained.output_message_id = lcm_raw_messages.message_id
+             AND retained.projector_version <> ?1
+         )
+         AND NOT EXISTS (
+           SELECT 1 FROM observation_projection_rebuild_messages AS staged
+           WHERE staged.projector_version = ?1 AND staged.generation = ?2
+             AND staged.output_provider = lcm_raw_messages.provider
+             AND staged.output_message_id = lcm_raw_messages.message_id
          )",
-        (),
+        params![SESSION_MESSAGE_PROJECTOR_VERSION, generation],
     )
     .await
     .map_err(|error| storage("clear projected message rows for rebuild", error))?;
     conn.execute(
         "DELETE FROM observation_projection_provenance
          WHERE projector_version = ?1 AND NOT EXISTS (
-           SELECT 1 FROM temp.observation_projection_rebuild_retained_outputs AS retained
+           SELECT 1 FROM observation_projection_provenance AS retained
            WHERE retained.output_provider = observation_projection_provenance.output_provider
              AND retained.output_message_id = observation_projection_provenance.output_message_id
+             AND retained.projector_version <> ?1
          )",
         params![SESSION_MESSAGE_PROJECTOR_VERSION],
     )
@@ -2680,6 +2644,10 @@ async fn activate_rebuild_dispositions(
     .map(|_| ())
     .map_err(|error| storage("activate rebuilt projection dispositions", error))
 }
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod clear_tests;
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]

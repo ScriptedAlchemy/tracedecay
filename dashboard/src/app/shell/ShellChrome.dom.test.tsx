@@ -10,9 +10,9 @@
  * the Playwright audits, not here.
  */
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { cleanup, render, screen } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen } from '@testing-library/react';
 import type { ReactNode } from 'react';
-import { MemoryRouter } from 'react-router';
+import { MemoryRouter, useLocation } from 'react-router';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   DashboardEnvelopeV1Schema,
@@ -46,18 +46,55 @@ function queryWrapper(children: ReactNode) {
   return <QueryClientProvider client={client}>{children}</QueryClientProvider>;
 }
 
+function CurrentLocation() {
+  const location = useLocation();
+  return <output aria-label="Current location">{location.pathname}{location.search}{location.hash}</output>;
+}
+
 function renderRail(route = '/brain') {
   vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error('offline')));
   return render(
     queryWrapper(
       <MemoryRouter initialEntries={[route]}>
         <NavRail />
+        <CurrentLocation />
       </MemoryRouter>,
     ),
   );
 }
 
 describe('the navigation rail', () => {
+  it.each([
+    ['/loom?loomRenderer=rails&session=run-7&window=recent#replay', 'Loom'],
+    ['/Loom/?loomRenderer=strata&session=run-7#replay', 'Loom'],
+    ['/?field=sigma&node=node-3#selection', 'Brain'],
+    ['/brain?field=atlas&node=node-3', 'Brain'],
+    ['/code?render=relief&symbol=symbol-2', 'Code'],
+    ['/work?view=timeline&task=task-3', 'Work'],
+  ])('preserves the current view when the rail reopens %s', (route, label) => {
+    renderRail(route);
+    fireEvent.click(screen.getByRole('link', { name: label }));
+    expect(screen.getByLabelText('Current location').textContent).toBe(route);
+  });
+
+  it('refreshes a project label without clearing the selected renderer or session', () => {
+    useScope.getState().selectProject('project-1', 'Alpha', 'active');
+    renderRail('/loom?scope=project-1&scopeLabel=OldName&loomRenderer=rails&session=run-7#replay');
+    fireEvent.click(screen.getByRole('link', { name: 'Loom' }));
+    expect(screen.getByLabelText('Current location').textContent).toBe(
+      '/loom?scope=project-1&scopeLabel=Alpha&loomRenderer=rails&session=run-7#replay',
+    );
+  });
+
+  it('does not carry a foreign project selection across a scope transition', () => {
+    useScope.getState().selectProject('project-2', 'Beta', 'active');
+    renderRail('/loom?scope=project-1&loomRenderer=rails&session=foreign-run');
+    fireEvent.click(screen.getByRole('link', { name: 'Loom' }));
+    expect(screen.getByLabelText('Current location').textContent).toBe(
+      '/loom?scope=project-2&scopeLabel=Beta',
+    );
+  });
+
   it('draws all fourteen channels once, in canonical order, with no grouping', () => {
     renderRail();
     const nav = screen.getByRole('navigation', { name: 'Workspaces' });

@@ -2960,6 +2960,7 @@ impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
                 query_view: &request.query,
                 generation: served_generation.clone(),
                 whole_terms: std::borrow::Cow::Owned(parts.whole_terms),
+                explicit_terms: std::borrow::Cow::Owned(parts.explicit_terms),
                 subtokens: std::borrow::Cow::Owned(parts.subtokens),
                 phrases: std::borrow::Cow::Owned(parts.phrases),
                 proximities: std::borrow::Cow::Owned(Vec::new()),

@@ -1069,19 +1069,12 @@ fn check_inert_project_config(dc: &mut DoctorCounters, project_path: &Path) {
     }
 }
 
-/// The error names a PR auto-tracking state file that blocks reconciliation.
-fn pr_autotrack_state_failure(data_root: &Path) -> Option<String> {
-    tracedecay_application::pr_tracking::load_state(data_root)
-        .err()
-        .map(|error| {
-            format!(
-                "PR auto-tracking state {} is unreadable ({error}); reconciliation stays blocked until that file is removed, after which open PRs are re-tracked",
-                tracedecay_application::pr_tracking::state_path(data_root).display()
-            )
-        })
+/// Explain every legacy artifact the one-shot retirement could not remove.
+fn legacy_pr_artifacts_finding(data_root: &Path) -> Option<String> {
+    crate::daemon::legacy_pr_retirement::legacy_pr_artifacts_finding(data_root)
 }
 
-/// Reports PR auto-tracking state for the project's persisted layout, when it
+/// Reports preserved legacy PR artifacts for the project's layout, when it
 /// has one.
 fn check_persisted_state_resets(dc: &mut DoctorCounters, profile_root: &Path, project_path: &Path) {
     let Ok(Some(layout)) =
@@ -1089,7 +1082,7 @@ fn check_persisted_state_resets(dc: &mut DoctorCounters, profile_root: &Path, pr
     else {
         return;
     };
-    if let Some(failure) = pr_autotrack_state_failure(&layout.data_root) {
+    if let Some(failure) = legacy_pr_artifacts_finding(&layout.data_root) {
         dc.fail(&failure);
     }
 }

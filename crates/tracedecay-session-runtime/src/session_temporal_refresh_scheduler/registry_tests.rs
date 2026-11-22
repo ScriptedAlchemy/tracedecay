@@ -21,8 +21,8 @@ use super::super::history::{
     SessionHistoricalIngestor, SharedSessionHistoricalIngestor,
 };
 use super::super::wake::{
-    SessionTemporalRefreshBlocker, SessionTemporalRefreshWake, SessionTemporalRefreshWakeState,
-    enabled_idle_notification,
+    HistoricalAdmissionView, SessionTemporalRefreshBlocker, SessionTemporalRefreshWake,
+    SessionTemporalRefreshWakeState, enabled_idle_notification,
 };
 use super::SessionTemporalRefreshSchedulerRegistry;
 use crate::StoreOwnerKey;
@@ -40,7 +40,12 @@ async fn retained_history_precedes_summary_admission_on_worker_start() {
         .unwrap();
     let history = Arc::new(HeldHistory::default());
     let path = harness.registered.db_path().to_path_buf();
-    let entry = registry.spawn_entry(harness.registered.clone(), None, Some(history.clone()));
+    let entry = registry.spawn_entry(
+        harness.registered.clone(),
+        None,
+        Some(history.clone()),
+        false,
+    );
     let wake = entry.wake.clone();
     registry.profile.lock().await.insert(path.clone(), entry);
 
@@ -215,6 +220,121 @@ fn project_owner(name: &str) -> StoreOwnerKey {
         store_root: root.join("store"),
         graph_db_path: root.join("graph.db"),
     }
+}
+
+#[tokio::test]
+async fn a_finished_paused_worker_retains_its_admitted_ingestor_on_replacement() {
+    let harness = RegisteredGlobalDbHarness::open("paused-history-finished-owner").await;
+    let registry = SessionTemporalRefreshSchedulerRegistry::default();
+    registry.pin_automatic_history_import(false);
+    let owner = project_owner("paused-finished-owner");
+    let retained = Arc::new(HeldHistory::default());
+    let supplied = Arc::new(HeldHistory::default());
+    let wake = registry
+        .ensure_project_with_history(owner.clone(), harness.registered.clone(), retained.clone())
+        .await;
+    assert_eq!(
+        wake.schedule_historical_admission(),
+        HistoricalAdmissionView::Scheduled
+    );
+    tokio::time::timeout(Duration::from_secs(5), retained.entered.notified())
+        .await
+        .expect("explicit history starts");
+    let state = registry.project_state(&owner).await.unwrap();
+    assert!(
+        !state.historical_dirty.load(Ordering::Acquire),
+        "running pass consumed its wake"
+    );
+    state.cancel();
+    retained.release.notify_one();
+    {
+        let project = registry.project.lock().await;
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            project[&owner].supervisor.as_ref().unwrap().wait(),
+        )
+        .await
+        .expect("old worker releases its lease");
+    }
+    registry
+        .ensure_project_with_history(owner.clone(), harness.registered.clone(), supplied.clone())
+        .await;
+    tokio::time::timeout(Duration::from_secs(5), retained.entered.notified())
+        .await
+        .expect("replacement resumes the retained ingestor");
+    assert_eq!(retained.passes.load(Ordering::Acquire), 2);
+    assert_eq!(supplied.passes.load(Ordering::Acquire), 0);
+    assert!(
+        !retained.cancelled.load(Ordering::Acquire),
+        "retiring a finished worker cannot cancel its retained successor"
+    );
+    assert!(
+        !Arc::ptr_eq(&state, &wake.target().unwrap()),
+        "old routes bind to the replacement"
+    );
+    retained.release.notify_one();
+    registry.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_paused_rekey_preserves_a_consumed_explicit_history_admission() {
+    let harness = RegisteredGlobalDbHarness::open("paused-history-rekey").await;
+    let registry = SessionTemporalRefreshSchedulerRegistry::default();
+    registry.pin_automatic_history_import(false);
+    let old_owner = project_owner("paused-rekey-old");
+    let new_owner = project_owner("paused-rekey-new");
+    let old_history = Arc::new(HeldHistory::default());
+    let wake = registry
+        .ensure_project_with_history(
+            old_owner.clone(),
+            harness.registered.clone(),
+            old_history.clone(),
+        )
+        .await;
+    assert_eq!(
+        wake.schedule_historical_admission(),
+        HistoricalAdmissionView::Scheduled
+    );
+    tokio::time::timeout(Duration::from_secs(5), old_history.entered.notified())
+        .await
+        .expect("explicit history starts before rekey");
+    let mut rekey = std::pin::pin!(registry.rekey_project(
+        &old_owner,
+        new_owner.clone(),
+        harness.registered.clone()
+    ));
+    assert!(
+        rekey.as_mut().now_or_never().is_none(),
+        "rekey joins the accepted pass"
+    );
+    old_history.release.notify_one();
+    rekey.await;
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        registry.wait_project_idle(&new_owner),
+    )
+    .await
+    .expect("rekey waits for its new ingestor");
+    assert!(
+        matches!(wake.serving_status().state, SessionProjectionServingState::Stale {
+        reason: SessionProjectionStaleReason::HistoricalBlocked { reason_code },
+    } if reason_code == "history_ingestor_missing")
+    );
+    let new_history = Arc::new(HeldHistory::default());
+    registry
+        .ensure_project_with_history(
+            new_owner.clone(),
+            harness.registered.clone(),
+            new_history.clone(),
+        )
+        .await;
+    tokio::time::timeout(Duration::from_secs(5), new_history.entered.notified())
+        .await
+        .expect("the admitted continuation resumes without another explicit import");
+    assert_eq!(new_history.passes.load(Ordering::Acquire), 1);
+    assert!(old_history.cancelled.load(Ordering::Acquire));
+    new_history.release.notify_one();
+    registry.shutdown().await;
 }
 
 async fn mount_held_project(

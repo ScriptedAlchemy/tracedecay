@@ -565,8 +565,8 @@ impl<'a> ArtifactQueryV1<'a> {
         request: &LexicalLaneRequest<'_>,
     ) -> Result<RetrieverOutcome<RetrieverBatch<LexicalLaneEvidence>>, RetrievalPortError> {
         let control = request.control;
-        let fuzzy = self.fuzzy_expansions(request)?;
         let prepared = PreparedLexicalQueryV1::new(request);
+        let fuzzy = self.fuzzy_expansions(request, &prepared)?;
         let terms = lexical_terms(&prepared, &fuzzy);
         let stats = self.lexical_stats(&terms)?;
         retrieval_checkpoint(control)?;
@@ -612,8 +612,14 @@ impl<'a> ArtifactQueryV1<'a> {
             },
         )?;
         let mut pruned = Vec::new();
-        let documents =
-            self.lexical_documents(request, &fuzzy, &stats, &phrase_queries, &mut pruned)?;
+        let documents = self.lexical_documents(
+            request,
+            &prepared,
+            &fuzzy,
+            &stats,
+            &phrase_queries,
+            &mut pruned,
+        )?;
         let mut text_documents = phrase_documents;
         if !prepared.proximities.is_empty() {
             text_documents |= self.proximity_documents(&prepared, &stats)?;
@@ -1209,29 +1215,30 @@ impl<'a> ArtifactQueryV1<'a> {
     fn lexical_documents(
         &self,
         request: &LexicalLaneRequest<'_>,
+        prepared: &PreparedLexicalQueryV1<'_>,
         fuzzy: &FuzzyExpansionsV1,
         stats: &LexicalStatsCacheV1,
         phrase_queries: &BTreeMap<String, RoaringBitmap>,
         pruned: &mut Vec<(String, u64)>,
     ) -> Result<RoaringBitmap, RetrievalPortError> {
         let mut whole_terms = Vec::new();
-        for term in request.whole_terms.iter() {
-            whole_terms.push(normalize_lexical(term));
-            if let Some(expansions) = fuzzy.by_query.get(term) {
+        for (term, normalized) in &prepared.whole_terms {
+            whole_terms.push(normalized.clone());
+            if let Some(expansions) = fuzzy.by_query.get(*term) {
                 whole_terms.extend(expansions.iter().cloned());
             }
         }
         whole_terms.extend(
-            request
+            prepared
                 .proximities
                 .iter()
                 .flat_map(|proximity| &proximity.terms)
-                .map(|term| normalize_lexical(term)),
+                .cloned(),
         );
-        let subtokens = request
+        let subtokens = prepared
             .subtokens
             .iter()
-            .map(|subtoken| normalize_lexical(subtoken))
+            .map(|(_, normalized)| normalized.clone())
             .collect::<Vec<_>>();
         let sources = stats.candidate_sources(whole_terms, subtokens);
         let term_documents = admit_candidate_sources(
@@ -1320,6 +1327,7 @@ impl<'a> ArtifactQueryV1<'a> {
     fn fuzzy_expansions(
         &self,
         request: &LexicalLaneRequest<'_>,
+        prepared: &PreparedLexicalQueryV1<'_>,
     ) -> Result<FuzzyExpansionsV1, RetrievalPortError> {
         if request.fuzzy_budget == 0 {
             return Ok(FuzzyExpansionsV1::default());
@@ -1327,21 +1335,20 @@ impl<'a> ArtifactQueryV1<'a> {
         let limit = request.fuzzy_budget.min(MAX_FUZZY_TERM_EXPANSIONS_V1) as usize;
         let mut group_by_query = BTreeMap::<String, usize>::new();
         let mut groups = Vec::<FuzzyQueryGroupV1>::new();
-        for (query_ordinal, query) in request.whole_terms.iter().enumerate() {
-            let normalized_query = normalize_lexical(query);
-            let bound = fuzzy_distance_bound(&normalized_query);
+        for (query_ordinal, (query, normalized_query)) in prepared.whole_terms.iter().enumerate() {
+            let bound = fuzzy_distance_bound(normalized_query);
             if bound == 0 {
                 continue;
             }
-            if let Some(group) = group_by_query.get(&normalized_query).copied() {
-                groups[group].queries.insert(query.clone());
+            if let Some(group) = group_by_query.get(normalized_query).copied() {
+                groups[group].queries.insert((*query).to_owned());
             } else {
                 let group = groups.len();
                 group_by_query.insert(normalized_query.clone(), group);
                 groups.push(FuzzyQueryGroupV1 {
                     first_ordinal: query_ordinal,
-                    normalized_query,
-                    queries: BTreeSet::from([query.clone()]),
+                    normalized_query: normalized_query.clone(),
+                    queries: BTreeSet::from([(*query).to_owned()]),
                     bound,
                     seen: BTreeSet::new(),
                 });
@@ -1834,9 +1841,11 @@ fn lexical_admission_rank(
 }
 
 // A signature's parameter and return types reference other symbols. Definition
-// priority requires the query or its admitted spelling variant to name this
-// row. A short alias still names the row when every term is a subtoken of the
-// declared identifier (`cache grant` → `VerifiedCacheGrantSnapshotV1`).
+// priority requires a named query term or its admitted spelling variant to
+// name this row. An incidental prose word (`get`) cannot outrank stronger
+// evidence just because a method has that name. A short alias still names
+// the row when every term is a subtoken of the declared identifier
+// (`cache grant` → `VerifiedCacheGrantSnapshotV1`).
 fn lexical_definition_match(
     row: &ArtifactRowV1,
     prepared: &PreparedLexicalQueryV1<'_>,
@@ -1852,9 +1861,17 @@ fn lexical_definition_match(
         prepared
             .whole_terms
             .iter()
+            .filter(|(original, _)| prepared.definition_whole_terms.contains(*original))
             .chain(&prepared.phrases)
             .map(|(_, normalized)| normalized.as_str())
-            .chain(fuzzy.by_query.values().flatten().map(String::as_str)),
+            .chain(
+                fuzzy
+                    .by_query
+                    .iter()
+                    .filter(|(query, _)| prepared.definition_whole_terms.contains(query.as_str()))
+                    .flat_map(|(_, variants)| variants)
+                    .map(String::as_str),
+            ),
     ) {
         return true;
     }

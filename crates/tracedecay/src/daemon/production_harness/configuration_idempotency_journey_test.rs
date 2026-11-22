@@ -3,25 +3,278 @@ use super::super::invocation_executor::InProcessDaemonInvocationExecutor;
 use super::super::production_harness::ProductionProjectCompositionHarnessV1;
 use std::path::Path;
 use std::sync::Arc;
+use std::time::Duration;
 
-use serde_json::Value;
+use serde_json::{Value, json};
 use tempfile::TempDir;
+use tracedecay_contracts::session_sync::{
+    SessionSyncCommandV1, SessionSyncControlV1, SessionSyncOutcomeV1, SessionSyncRequestV1,
+    SessionSyncScopeV1, SessionSyncServicePort, SessionTranscriptImportV1,
+};
 use tracedecay_contracts::{
     ApplicationResult, CancellationSignal, ConfigurationBatchRequestV1,
-    ConfigurationDirectMutationRequestV1, ConfigurationSetRequestV1, Deadline, PageRequest,
+    ConfigurationDirectMutationRequestV1, ConfigurationSetRequestV1, Deadline, IdempotencyKey,
+    PageRequest, RequestId, now_micros,
 };
+use tracedecay_domain::UtcMicros;
 use tracedecay_domain::configuration::{
     ConfigurationIdempotencyKey, ConfigurationLayerIdV1, ConfigurationRevisionId,
     ConfigurationValueV1, SettingKey, TELEMETRY_TIMINGS_SETTING_KEY,
-    USER_REPEATED_QUERY_HINTS_SETTING_KEY, UserProfileId,
+    USER_REPEATED_QUERY_HINTS_SETTING_KEY, USER_SESSION_HISTORY_IMPORT_ENABLED_SETTING_KEY,
+    UserProfileId,
 };
 use tracedecay_sdk::client::{Client, ClientError, ConnectionMode};
 use tracedecay_sdk::operations::{ApplicationConfigurationSet, TypedOperation};
+use tracedecay_session_runtime::session_temporal_refresh_scheduler::wake::SESSION_HISTORY_IMPORT_PAUSED_REASON;
 use tracedecay_tool_catalog::ApplicationSurfaceOperation;
 
-use super::journey_test_support::{initialize_project, tool_payload};
+use super::journey_test_support::{initialize_project, resolved, tool_answer, tool_payload};
 
 const HTTP_AUTH_TOKEN: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
+fn automatic_history_import(harness: &ProductionProjectCompositionHarnessV1) -> bool {
+    harness
+        .resources
+        .as_ref()
+        .expect("production resources")
+        .store_administration
+        .session_temporal_refresh_schedulers()
+        .automatic_history_import_enabled()
+}
+
+async fn set_history_import(
+    harness: &ProductionProjectCompositionHarnessV1,
+    project: &Path,
+    enabled: bool,
+) {
+    let request = ConfigurationSetRequestV1 {
+        layer: ConfigurationLayerIdV1::UserProfile {
+            profile_id: current_profile_id(harness, project).await,
+        },
+        key: SettingKey::new(USER_SESSION_HISTORY_IMPORT_ENABLED_SETTING_KEY)
+            .expect("history setting"),
+        value: ConfigurationValueV1::Boolean(enabled),
+        expected_revision: profile_revision(harness).await,
+        idempotency_key: ConfigurationIdempotencyKey::new(format!("history-import.{enabled}"))
+            .expect("idempotency"),
+    };
+    cli_configuration_set(harness, project, request)
+        .await
+        .expect("canonical CLI profile commit");
+}
+
+fn seed_native_history(isolation: &Path, project: &Path, session: &str) {
+    let home = ProductionProjectCompositionHarnessV1::transcript_source_home(isolation).unwrap();
+    let directory = home.join(".codex/sessions/2026/09/30");
+    std::fs::create_dir_all(&directory).unwrap();
+    let mut meta: Value = serde_json::from_str(include_str!(
+        "../../../../../tests/fixtures/provider_normalization/codex/session_meta.input.json"
+    ))
+    .unwrap();
+    meta["payload"]["id"] = json!(session);
+    meta["payload"]["cwd"] = json!(project);
+    let mut message: Value = serde_json::from_str(include_str!(
+        "../../../../../tests/fixtures/provider_normalization/codex/agent_message.input.json"
+    ))
+    .unwrap();
+    message["payload"]["message"] = json!(format!("native historical message for {session}"));
+    std::fs::write(
+        directory.join(format!("rollout-2026-09-30T10-00-00-{session}.jsonl")),
+        format!("{meta}\n{message}\n"),
+    )
+    .unwrap();
+}
+
+async fn wait_history_status(
+    harness: &ProductionProjectCompositionHarnessV1,
+    project: &Path,
+    messages: u64,
+    paused: bool,
+) -> Value {
+    tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            let response = harness
+                .call_tool(project, "tracedecay_lcm_status", json!({"format":"json"}))
+                .await
+                .unwrap();
+            let (_, payload) = tool_answer(&response);
+            let payload = resolved(harness, project, "tracedecay_lcm_status", payload).await;
+            let status = if payload["outcome"]["outcome"] == json!("evidence") {
+                &payload["outcome"]["value"]["payload"]
+            } else {
+                &payload
+            };
+            let convergence = &status["projection"]["convergence"];
+            if status["lcm"]["store"]["messages"] == json!(messages)
+                && convergence["state"] == if paused { "blocked" } else { "converged" }
+            {
+                if paused {
+                    assert_eq!(
+                        convergence["reason"],
+                        json!(SESSION_HISTORY_IMPORT_PAUSED_REASON)
+                    );
+                    assert_eq!(convergence["epoch"], json!(0));
+                    assert_eq!(convergence["converged_at_unix_micros"], Value::Null);
+                }
+                break status.clone();
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("native import reaches the expected serving state")
+}
+
+async fn fresh_history_search(
+    harness: &ProductionProjectCompositionHarnessV1,
+    project: &Path,
+) -> (bool, Value) {
+    let response = harness
+        .call_tool(
+            project,
+            "tracedecay_message_search",
+            json!({
+                "query": "native historical message",
+                "provider": "codex",
+                "require_fresh": true,
+                "format": "json",
+            }),
+        )
+        .await
+        .expect("fresh message search transport");
+    let (refused, payload) = tool_answer(&response);
+    (
+        refused,
+        resolved(harness, project, "tracedecay_message_search", payload).await,
+    )
+}
+
+async fn explicit_history_import(harness: &ProductionProjectCompositionHarnessV1, project: &Path) {
+    let project_id = harness
+        .server(project)
+        .unwrap()
+        .cg_snapshot()
+        .await
+        .configuration_runtime()
+        .configuration_target()
+        .project_id
+        .clone();
+    let scope = SessionSyncScopeV1::new(project_id, current_profile_id(harness, project).await);
+    let service = harness
+        .resources
+        .as_ref()
+        .unwrap()
+        .store_administration
+        .session_sync_service();
+    let request = SessionSyncRequestV1::new(
+        RequestId::new("history-paused.explicit").unwrap(),
+        IdempotencyKey::new("history-paused.explicit").unwrap(),
+        scope.clone(),
+        Deadline::new(UtcMicros(now_micros().0 + 60_000_000)).unwrap(),
+        CancellationSignal::active("history-paused.explicit").unwrap(),
+        SessionSyncCommandV1::ImportTranscripts(SessionTranscriptImportV1::all_hosts()),
+    );
+    let accepted = SessionSyncServicePort::execute(service.as_ref(), request).await;
+    let SessionSyncOutcomeV1::Accepted(admission) = accepted else {
+        panic!("explicit import must remain admitted while paused: {accepted:?}");
+    };
+    let control = SessionSyncControlV1::new(scope, admission.idempotency_key);
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            match SessionSyncServicePort::status(service.as_ref(), control.clone()).await {
+                SessionSyncOutcomeV1::Complete { .. } => break,
+                SessionSyncOutcomeV1::Accepted(_) | SessionSyncOutcomeV1::Joined(_) => {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+                other => panic!("explicit import failed: {other:?}"),
+            }
+        }
+    })
+    .await
+    .expect("explicit import hands bounded work to the retained workers");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn historical_import_pause_is_restart_applied_and_preserves_explicit_native_import() {
+    let isolation = TempDir::new().expect("journey isolation");
+    let project = isolation.path().join("project");
+    initialize_project(&project);
+    let harness = ProductionProjectCompositionHarnessV1::open_for_session_retrieval(
+        isolation.path(),
+        [project.clone()],
+    )
+    .await
+    .expect("production composition");
+    assert!(
+        automatic_history_import(&harness),
+        "canonical default is enabled"
+    );
+    set_history_import(&harness, &project, false).await;
+    assert!(
+        automatic_history_import(&harness),
+        "the mounted daemon keeps its pinned policy"
+    );
+    harness.shutdown().await;
+
+    seed_native_history(isolation.path(), &project, "history-paused-first");
+    let harness = ProductionProjectCompositionHarnessV1::open_for_session_retrieval(
+        isolation.path(),
+        [project.clone()],
+    )
+    .await
+    .expect("paused production restart");
+    assert!(!automatic_history_import(&harness));
+    let status = wait_history_status(&harness, &project, 0, true).await;
+    assert_eq!(status["projection"]["state"], json!("stale"));
+    assert_eq!(
+        status["projection"]["reason"],
+        json!(format!(
+            "historical_blocked:{SESSION_HISTORY_IMPORT_PAUSED_REASON}"
+        ))
+    );
+    let (refused, payload) = fresh_history_search(&harness, &project).await;
+    assert!(
+        refused,
+        "an unimported source cannot claim fresh message coverage: {payload}"
+    );
+    explicit_history_import(&harness, &project).await;
+    let status = wait_history_status(&harness, &project, 1, true).await;
+    assert_eq!(status["projection"]["state"], json!("current"));
+    assert_eq!(status["projection"]["reason"], Value::Null);
+    let (refused, payload) = fresh_history_search(&harness, &project).await;
+    assert!(
+        !refused,
+        "the published explicit import must admit fresh retrieval while paused: {payload}"
+    );
+    let search = &payload["outcome"]["value"]["payload"];
+    assert_eq!(search["outcome"], json!("complete"), "{payload}");
+    assert_eq!(search["require_fresh"], json!(true));
+    assert_eq!(search["refresh_required"], json!(false));
+    assert_eq!(search["temporal"]["freshness"], json!({"state": "fresh"}));
+    assert_eq!(search["results"].as_array().map(Vec::len), Some(1));
+    assert_eq!(search["results"][0]["message"]["provider"], json!("codex"));
+    assert_eq!(
+        search["results"][0]["message"]["text"],
+        json!("native historical message for history-paused-first")
+    );
+
+    set_history_import(&harness, &project, true).await;
+    assert!(
+        !automatic_history_import(&harness),
+        "resuming also requires restart"
+    );
+    harness.shutdown().await;
+    seed_native_history(isolation.path(), &project, "history-resumed-second");
+    let harness = ProductionProjectCompositionHarnessV1::open_for_session_retrieval(
+        isolation.path(),
+        [project.clone()],
+    )
+    .await
+    .expect("resumed production restart");
+    assert!(automatic_history_import(&harness));
+    wait_history_status(&harness, &project, 2, false).await;
+    harness.shutdown().await;
+}
 
 async fn current_revision(
     harness: &ProductionProjectCompositionHarnessV1,

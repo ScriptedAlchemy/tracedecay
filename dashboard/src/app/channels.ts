@@ -128,5 +128,5 @@ export function channelNumber(path: string): string {
 export function channelForPathname(pathname: string): Channel | null {
   const [first = ''] = pathname.split('/').filter((segment) => segment.length > 0);
   if (first === '') return CHANNELS[0] ?? null;
-  return CHANNELS.find((channel) => channel.path === first) ?? null;
+  return CHANNELS.find((channel) => channel.path === first.toLowerCase()) ?? null;
 }

@@ -13,8 +13,7 @@ use tracedecay_domain::configuration::{
     INDEX_TRACK_CALL_SITES_SETTING_KEY, LCM_SUMMARIZER_EXECUTABLES_SETTING_KEY,
     LcmSummarizerExecutablesV1, PROFILE_SETTING_KEYS_V1,
     PROJECT_WORK_EXPERTISE_CONSENT_SETTING_KEY, RestartRequirementV1, SOURCE_BINDINGS_SETTING_KEY,
-    SYNC_AUTO_INIT_SETTING_KEY, SYNC_AUTO_TRACK_PR_BRANCHES_SETTING_KEY,
-    SYNC_AUTO_TRACK_PR_POLL_SECS_SETTING_KEY, SYNC_AUTO_WATCH_SETTING_KEY,
+    SYNC_AUTO_INIT_SETTING_KEY, SYNC_AUTO_WATCH_SETTING_KEY,
     SYNC_BACKSTOP_INTERVAL_MINS_SETTING_KEY, SYNC_BRANCH_GC_DAYS_SETTING_KEY,
     SYNC_READ_COOLDOWN_SECS_SETTING_KEY, SYNC_READ_REFRESH_SETTING_KEY,
     SYNC_SESSION_START_STALE_THRESHOLD_SECS_SETTING_KEY, SYNC_SESSION_START_SYNC_SETTING_KEY,
@@ -22,7 +21,9 @@ use tracedecay_domain::configuration::{
     SYNC_WATCH_MAX_DELAY_MS_SETTING_KEY, SYNC_WATCH_MAX_PROJECTS_SETTING_KEY, SettingDefinitionV1,
     SettingKey, SettingScopeV1, SettingSensitivityV1, TELEMETRY_TIMINGS_SETTING_KEY,
     USER_CODE_INDEX_WORKERS_SETTING_KEY, USER_EXTRACTION_TIMEOUT_SECS_SETTING_KEY,
-    USER_REPEATED_QUERY_HINTS_SETTING_KEY, USER_WATCHER_DEBOUNCE_MS_SETTING_KEY,
+    USER_REPEATED_QUERY_HINTS_SETTING_KEY, USER_SESSION_COMPACTION_DAYS_SETTING_KEY,
+    USER_SESSION_HISTORY_IMPORT_ENABLED_SETTING_KEY, USER_SESSION_RETENTION_DAYS_SETTING_KEY,
+    USER_SESSION_RETENTION_ENABLED_SETTING_KEY, USER_WATCHER_DEBOUNCE_MS_SETTING_KEY,
     USER_WORK_EXPERTISE_CONSENT_SETTING_KEY, WORK_EXECUTABLE_BINDINGS_SETTING_KEY,
     WORK_TOPOLOGY_POLICY_SETTING_KEY, WorkExpertiseConsentV1, safe_work_topology_policy_v1,
 };
@@ -32,7 +33,7 @@ use tracedecay_domain::{DomainError, validate_index_path_patterns};
 
 /// Registry schema revision. Increment only when setting-definition semantics
 /// change, not when a setting value changes.
-pub const CONFIGURATION_REGISTRY_SCHEMA_REVISION: u16 = 10;
+pub const CONFIGURATION_REGISTRY_SCHEMA_REVISION: u16 = 11;
 
 #[derive(Debug, Error)]
 pub enum ConfigurationRegistryError {
@@ -292,6 +293,20 @@ impl ConfigurationRegistry {
                 });
             }
         }
+        if let ConfigurationValueV1::Unsigned(actual) = value
+            && matches!(
+                key.as_str(),
+                USER_SESSION_RETENTION_DAYS_SETTING_KEY | USER_SESSION_COMPACTION_DAYS_SETTING_KEY
+            )
+            && *actual > u64::from(u32::MAX)
+        {
+            return Err(ConfigurationRegistryError::UnsignedValueOutOfRange {
+                key: key.clone(),
+                minimum: 0,
+                maximum: u64::from(u32::MAX),
+                actual: *actual,
+            });
+        }
         if let ConfigurationValueV1::StringList(patterns) = value
             && matches!(
                 key.as_str(),
@@ -339,11 +354,6 @@ impl ConfigurationRegistry {
     }
 }
 
-/// Lower bound the daemon clamps PR-branch auto-tracking polling up to.
-///
-/// Mirrors root `config::MIN_AUTO_TRACK_PR_POLL_SECS`.
-pub const MIN_AUTO_TRACK_PR_POLL_SECS: u64 = 60;
-
 fn register_project_stored_user_profile_settings(
     registry: &mut ConfigurationRegistry,
 ) -> Result<(), ConfigurationRegistryError> {
@@ -377,6 +387,26 @@ fn register_profile_scalar_settings(
         (
             USER_EXTRACTION_TIMEOUT_SECS_SETTING_KEY,
             ConfigurationValueV1::Unsigned(60),
+            RestartRequirementV1::DaemonRestart,
+        ),
+        (
+            USER_SESSION_HISTORY_IMPORT_ENABLED_SETTING_KEY,
+            ConfigurationValueV1::Boolean(true),
+            RestartRequirementV1::DaemonRestart,
+        ),
+        (
+            USER_SESSION_RETENTION_ENABLED_SETTING_KEY,
+            ConfigurationValueV1::Boolean(true),
+            RestartRequirementV1::DaemonRestart,
+        ),
+        (
+            USER_SESSION_RETENTION_DAYS_SETTING_KEY,
+            ConfigurationValueV1::Unsigned(180),
+            RestartRequirementV1::DaemonRestart,
+        ),
+        (
+            USER_SESSION_COMPACTION_DAYS_SETTING_KEY,
+            ConfigurationValueV1::Unsigned(30),
             RestartRequirementV1::DaemonRestart,
         ),
     ] {
@@ -433,8 +463,6 @@ struct SyncDefaults {
     backstop_interval_mins: u64,
     branch_gc_days: u64,
     auto_init: bool,
-    auto_track_pr_branches: bool,
-    auto_track_pr_poll_secs: u64,
 }
 
 impl Default for SyncDefaults {
@@ -452,8 +480,6 @@ impl Default for SyncDefaults {
             backstop_interval_mins: 15,
             branch_gc_days: 14,
             auto_init: true,
-            auto_track_pr_branches: false,
-            auto_track_pr_poll_secs: 300,
         }
     }
 }
@@ -604,21 +630,6 @@ fn register_project_settings(
             RestartRequirementV1::DaemonRestart,
         ),
         (
-            SYNC_AUTO_TRACK_PR_BRANCHES_SETTING_KEY,
-            ConfigurationValueV1::Boolean(sync.auto_track_pr_branches),
-            SettingSensitivityV1::Public,
-            RestartRequirementV1::DaemonRestart,
-        ),
-        (
-            SYNC_AUTO_TRACK_PR_POLL_SECS_SETTING_KEY,
-            ConfigurationValueV1::Unsigned(
-                sync.auto_track_pr_poll_secs
-                    .max(MIN_AUTO_TRACK_PR_POLL_SECS),
-            ),
-            SettingSensitivityV1::Public,
-            RestartRequirementV1::DaemonRestart,
-        ),
-        (
             TELEMETRY_TIMINGS_SETTING_KEY,
             ConfigurationValueV1::Boolean(defaults.telemetry_timings),
             SettingSensitivityV1::Public,
@@ -650,7 +661,7 @@ mod proximity_relationship_hints_tests {
 
     #[test]
     fn proximity_relationship_hints_is_one_boolean_project_default() {
-        assert_eq!(CONFIGURATION_REGISTRY_SCHEMA_REVISION, 10);
+        assert_eq!(CONFIGURATION_REGISTRY_SCHEMA_REVISION, 11);
         let registry = ConfigurationRegistry::core().expect("registry");
         let key = SettingKey::new(PROXIMITY_RELATIONSHIP_HINTS_SETTING_KEY_V1).expect("key");
         let definition = registry.definition(&key).expect("definition");
@@ -694,6 +705,11 @@ mod user_profile_settings_tests {
         let registry = ConfigurationRegistry::profile().expect("registry");
         for (raw_key, kind, restart) in [
             (
+                USER_SESSION_HISTORY_IMPORT_ENABLED_SETTING_KEY,
+                ConfigurationValueKindV1::Boolean,
+                RestartRequirementV1::DaemonRestart,
+            ),
+            (
                 USER_REPEATED_QUERY_HINTS_SETTING_KEY,
                 ConfigurationValueKindV1::Boolean,
                 RestartRequirementV1::None,
@@ -717,6 +733,22 @@ mod user_profile_settings_tests {
             assert_eq!(definition.sensitivity, SettingSensitivityV1::Public);
             assert_eq!(definition.restart_requirement, restart);
         }
+        let history_key = SettingKey::new(USER_SESSION_HISTORY_IMPORT_ENABLED_SETTING_KEY).unwrap();
+        assert_eq!(
+            registry.definition(&history_key).unwrap().default_value,
+            ConfigurationValueV1::Boolean(true)
+        );
+        assert!(
+            ConfigurationRegistry::core()
+                .unwrap()
+                .definition(&history_key)
+                .is_err()
+        );
+        assert!(
+            registry
+                .validate_value(&history_key, &ConfigurationValueV1::Unsigned(0))
+                .is_err()
+        );
         assert!(matches!(
             registry.validate_value(
                 &SettingKey::new(USER_EXTRACTION_TIMEOUT_SECS_SETTING_KEY).unwrap(),
@@ -724,6 +756,34 @@ mod user_profile_settings_tests {
             ),
             Err(ConfigurationRegistryError::UnsignedValueOutOfRange { minimum: 1, .. })
         ));
+    }
+
+    #[test]
+    fn session_retention_windows_are_profile_owned_and_bounded() {
+        let profile = ConfigurationRegistry::profile().expect("profile registry");
+        let project = ConfigurationRegistry::core().expect("project registry");
+        for raw_key in [
+            USER_SESSION_RETENTION_DAYS_SETTING_KEY,
+            USER_SESSION_COMPACTION_DAYS_SETTING_KEY,
+        ] {
+            let key = SettingKey::new(raw_key).expect("key");
+            assert!(project.definition(&key).is_err());
+            let definition = profile.definition(&key).expect("retention definition");
+            assert_eq!(definition.scope, SettingScopeV1::UserProfile);
+            profile
+                .validate_value(&key, &ConfigurationValueV1::Unsigned(0))
+                .expect("disabled phase");
+            profile
+                .validate_value(&key, &ConfigurationValueV1::Unsigned(30))
+                .expect("configured window");
+            assert!(matches!(
+                profile.validate_value(
+                    &key,
+                    &ConfigurationValueV1::Unsigned(u64::from(u32::MAX) + 1)
+                ),
+                Err(ConfigurationRegistryError::UnsignedValueOutOfRange { .. })
+            ));
+        }
     }
 
     #[test]

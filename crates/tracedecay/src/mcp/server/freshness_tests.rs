@@ -4,6 +4,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tempfile::TempDir;
+use tracedecay_contracts::RequestId;
 use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
 use tracedecay_project::project::TraceDecay;
 use tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1;
@@ -84,8 +85,17 @@ async fn savings_without_a_display_baseline_still_commit_to_the_project_store() 
     let (cg, _dir, _authority) = init_indexed_repo().await;
     assert_eq!(cg.get_tokens_saved().await.unwrap(), 0);
 
-    super::ledger::commit_token_savings(&cg, None, super::ledger::LedgerSink::NotMounted, 13, None)
-        .await;
+    super::ledger::commit_token_savings(
+        &cg,
+        None,
+        super::ledger::LedgerSink::NotMounted,
+        &cg.prepare_token_savings(&RequestId::new("request.savings.first").unwrap())
+            .await
+            .unwrap(),
+        13,
+        None,
+    )
+    .await;
     assert_eq!(cg.get_tokens_saved().await.unwrap(), 13);
     assert_eq!(cg.get_local_counter().await.unwrap(), 13);
 
@@ -96,6 +106,9 @@ async fn savings_without_a_display_baseline_still_commit_to_the_project_store() 
         &cg,
         Some(&display),
         super::ledger::LedgerSink::NotMounted,
+        &cg.prepare_token_savings(&RequestId::new("request.savings.second").unwrap())
+            .await
+            .unwrap(),
         7,
         None,
     )

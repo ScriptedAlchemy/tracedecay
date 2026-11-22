@@ -102,7 +102,8 @@ pub struct Cli {
     #[arg(long, global = true, value_enum)]
     pub component: Option<HostBundleComponentArg>,
     /// Preview without mutating: the exact signed lifecycle plan for the
-    /// agent-lifecycle commands, the rows `projects forget` would remove, or
+    /// agent-lifecycle commands, the release and hosts `update`/`upgrade` would
+    /// refresh, the rows `projects forget` would remove, or
     /// the counts `sessions git-sync` would write. Dispatch enforces that
     /// scope so this global flag never leaks onto unrelated subcommands
     /// (e.g. `branch gc`, `storage report`).
@@ -1226,36 +1227,6 @@ pub enum BranchAction {
     },
     /// Stop tracking branches that no longer exist in git
     Gc {
-        /// Project path (default: current directory)
-        #[arg(short, long)]
-        path: Option<String>,
-    },
-    /// Configure daemon auto-tracking of open PR branches
-    Autotrack {
-        #[command(subcommand)]
-        action: BranchAutotrackAction,
-    },
-}
-
-#[derive(Subcommand)]
-pub enum BranchAutotrackAction {
-    /// Show whether PR auto-tracking is enabled and list tracked PR branches
-    Status {
-        /// Project path (default: current directory)
-        #[arg(short, long)]
-        path: Option<String>,
-    },
-    /// Enable PR auto-tracking for this project (daemon restart picks it up)
-    Enable {
-        /// Poll interval in seconds (minimum 60; default keeps the current value)
-        #[arg(long)]
-        poll_secs: Option<u64>,
-        /// Project path (default: current directory)
-        #[arg(short, long)]
-        path: Option<String>,
-    },
-    /// Disable PR auto-tracking for this project
-    Disable {
         /// Project path (default: current directory)
         #[arg(short, long)]
         path: Option<String>,

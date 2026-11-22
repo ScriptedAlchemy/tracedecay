@@ -25,13 +25,13 @@ use super::{
     serving::CodeTextQueryOwnerReadinessV1,
 };
 use tracedecay_query::retrieval::exact::{
-    CentralExactAdmissionAuthorityV1, ExactAdmissionAuthority, ExactLaneEvidence, ExactLaneRequest,
+    CentralExactAdmissionAuthorityV1, ExactAdmissionAuthority, ExactLaneRequest,
 };
 use tracedecay_query::retrieval::fusion::CompositionLaneInput;
-use tracedecay_query::retrieval::graph::GraphLaneRequest;
+use tracedecay_query::retrieval::graph::{GraphLaneRequest, graph_seeds_from_outcomes};
 use tracedecay_query::retrieval::lexical::{
-    LexicalLaneEvidence, LexicalLaneRequest, LexicalRouteOutcomeV1, LexicalRoutePlanV1,
-    LexicalRouteReceiptV1, LexicalRoutingV1, merge_lexical_routes,
+    LexicalLaneRequest, LexicalRouteOutcomeV1, LexicalRoutePlanV1, LexicalRouteReceiptV1,
+    LexicalRoutingV1, merge_lexical_routes,
 };
 use tracedecay_query::retrieval::ports::RetrievalExecutionControl;
 use tracedecay_query::retrieval::{
@@ -727,6 +727,9 @@ where
                     query_view,
                     generation: generation.clone(),
                     whole_terms: std::borrow::Cow::Borrowed(route.parts.whole_terms.as_slice()),
+                    explicit_terms: std::borrow::Cow::Borrowed(
+                        route.parts.explicit_terms.as_slice(),
+                    ),
                     subtokens: std::borrow::Cow::Borrowed(route.parts.subtokens.as_slice()),
                     phrases: std::borrow::Cow::Borrowed(route.parts.phrases.as_slice()),
                     proximities: std::borrow::Cow::Borrowed(route.proximities.as_slice()),
@@ -914,53 +917,6 @@ fn validate_search_policy(
         ));
     }
     Ok(())
-}
-
-fn graph_seeds_from_outcomes(
-    exact: &RetrieverOutcome<tracedecay_domain::RetrieverBatch<ExactLaneEvidence>>,
-    lexical: &RetrieverOutcome<tracedecay_domain::RetrieverBatch<LexicalLaneEvidence>>,
-) -> Vec<tracedecay_query::retrieval::ports::CodeCandidateBindingV1> {
-    let mut seeds = Vec::new();
-    let mut seen_occurrences = BTreeSet::new();
-    let mut seen_symbols = BTreeSet::new();
-    let mut add_batch =
-        |bindings: Vec<&tracedecay_query::retrieval::ports::CodeCandidateBindingV1>| {
-            for binding in bindings {
-                let Some(symbol) = binding.occurrence.symbol.as_ref() else {
-                    continue;
-                };
-                if seen_occurrences.insert(binding.source_occurrence.clone())
-                    && seen_symbols.insert(symbol.clone())
-                {
-                    seeds.push(binding.clone());
-                }
-            }
-        };
-    match exact {
-        RetrieverOutcome::Complete(batch) | RetrieverOutcome::Partial { value: batch, .. } => {
-            add_batch(
-                batch
-                    .evidence_by_occurrence
-                    .values()
-                    .map(|evidence| &evidence.binding)
-                    .collect(),
-            );
-        }
-        _ => {}
-    }
-    match lexical {
-        RetrieverOutcome::Complete(batch) | RetrieverOutcome::Partial { value: batch, .. } => {
-            add_batch(
-                batch
-                    .evidence_by_occurrence
-                    .values()
-                    .map(|evidence| &evidence.binding)
-                    .collect(),
-            );
-        }
-        _ => {}
-    }
-    seeds
 }
 
 #[cfg(test)]

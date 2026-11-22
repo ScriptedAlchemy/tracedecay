@@ -622,7 +622,6 @@ struct ProjectRoutePorts {
     code_index_readiness_waiter:
         tracedecay_contracts::code_index_freshness::CodeIndexReadinessWaiter,
     dashboard_feedback_status_reader: tracedecay_dashboard_api::feedback_api::FeedbackStatusReader,
-    dashboard_pr_autotrack_reader: tracedecay_dashboard_api::PrAutoTrackManagedSummaryReader,
     diagnostic_broker: Arc<tokio::sync::Mutex<tracedecay_lsp::analyzer::broker::DiagnosticBroker>>,
     code_index_hook_sink: crate::mcp::server::CodeIndexHookSink,
     code_index_reconcile_sink: crate::mcp::server::CodeIndexReconcileSink,
@@ -672,7 +671,6 @@ impl ComposedCoreServer {
             .with_dashboard_feedback_status_reader(Arc::clone(
                 &ports.dashboard_feedback_status_reader,
             ))
-            .with_dashboard_pr_autotrack_reader(Arc::clone(&ports.dashboard_pr_autotrack_reader))
             .with_diagnostics_lsp(Arc::clone(&ports.diagnostic_broker))
             .with_code_index_hook_sink(Arc::clone(&ports.code_index_hook_sink))
             .with_code_index_reconcile_sink(Arc::clone(&ports.code_index_reconcile_sink))
@@ -1096,7 +1094,6 @@ impl ProjectOpenInputs<'_> {
                     tracedecay_dashboard_api::feedback_api::feedback_status_reader(
                         self.invocation.feedback_runtime_registrar(),
                     ),
-                dashboard_pr_autotrack_reader: project_dashboard_pr_autotrack_reader(),
                 diagnostic_broker,
                 code_index_hook_sink,
                 code_index_reconcile_sink,
@@ -1498,7 +1495,8 @@ impl ProjectOpenInputs<'_> {
                 user_sessions: user_session_db.clone(),
                 registry: core.registered_profile_db.clone(),
                 background_cpu: Arc::clone(&background_cpu),
-                startup_import: cg.get_config().sync.session_start_sync,
+                startup_import: refresh_schedulers.automatic_history_import_enabled()
+                    && cg.get_config().sync.session_start_sync,
                 project_refresh: project_session_refresh_wake.clone(),
                 user_refresh: user_session_refresh_wake.clone(),
             })
@@ -2288,24 +2286,6 @@ fn project_readiness_waiter(
                     }
                 }
             }
-        })
-    })
-}
-
-fn project_dashboard_pr_autotrack_reader()
--> tracedecay_dashboard_api::PrAutoTrackManagedSummaryReader {
-    Arc::new(|store_root| {
-        tracedecay_application::pr_tracking::managed_summary(&store_root).map(|entries| {
-            entries
-                .into_iter()
-                .map(
-                    |entry| tracedecay_dashboard_api::PrAutoTrackManagedSummaryEntryV1 {
-                        branch: entry.branch,
-                        pr: entry.pr,
-                        head_branch: entry.head_branch,
-                    },
-                )
-                .collect()
         })
     })
 }

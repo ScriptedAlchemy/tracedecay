@@ -181,22 +181,21 @@ pub async fn run_github_stack_terminal_retention(
     Ok(page)
 }
 
-/// Resume bounded, lossless storage work without repeating the raw-drop policy.
-pub async fn run_session_storage_compaction(
+/// Resume one bounded page of the configured session policy. The caller
+/// releases writer admission between pages so historical retention can drain
+/// without monopolizing foreground writers or waiting for another daily tick.
+pub async fn run_session_retention_continuation(
     database: &RegisteredGlobalDb,
     config: &LcmRetentionConfig,
     now: i64,
 ) -> Option<tracedecay_domain::errors::Result<LcmRetentionReport>> {
-    if !config.enabled || config.offload_after_days.is_none() {
+    if !config.enabled || (config.offload_after_days.is_none() && config.drop_after_days.is_none())
+    {
         return None;
     }
-    let config = LcmRetentionConfig {
-        drop_after_days: None,
-        ..*config
-    };
     Some(
         database
-            .run_session_lcm_retention("all", None, &config, LcmRetentionMode::Apply, now)
+            .run_session_lcm_retention("all", None, config, LcmRetentionMode::Apply, now)
             .await,
     )
 }
@@ -292,10 +291,11 @@ mod tests {
             ..ObservationRetentionConfig::default()
         };
 
-        let storage = run_session_storage_compaction(
+        let storage = run_session_retention_continuation(
             &harness.registered,
             &LcmRetentionConfig {
                 drop_after_days: Some(0),
+                offload_after_days: None,
                 ..LcmRetentionConfig::default()
             },
             31 * 86_400,
@@ -303,10 +303,10 @@ mod tests {
         .await
         .unwrap()
         .unwrap();
-        assert_eq!(storage.dropped.window_days, None);
+        assert_eq!(storage.dropped.window_days, Some(0));
         assert_eq!(storage.dropped.acted, 0);
         assert!(
-            run_session_storage_compaction(&harness.registered, &session_lcm, 31 * 86_400)
+            run_session_retention_continuation(&harness.registered, &session_lcm, 31 * 86_400)
                 .await
                 .is_none(),
             "disabling session retention also stops its storage continuation"

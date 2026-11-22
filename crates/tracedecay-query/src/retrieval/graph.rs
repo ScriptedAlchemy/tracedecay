@@ -19,6 +19,8 @@ use tracedecay_domain::{
     RetrieverKind, RetrieverOutcome, SourceOccurrenceId, SourceSpan, SymbolOccurrenceId,
 };
 
+use super::exact::ExactLaneEvidence;
+use super::lexical::LexicalLaneEvidence;
 use super::ports::{
     CodeCandidateBindingV1, GraphEvidenceReadPort, LaneBoundEvidence, LaneEvidenceRejections,
     RetrievalExecutionControl, RetrievalPortError, checkpoint_digest, contract_error,
@@ -36,6 +38,45 @@ const GRAPH_REJECTIONS: LaneEvidenceRejections = LaneEvidenceRejections {
     missing_evidence: "graph lane evidence is missing for a returned occurrence",
     unaddressed_binding: "graph lane binding does not address its candidate",
 };
+
+/// Select graph seeds from admitted text-lane outcomes for both serving and
+/// direct evaluation. Exact evidence precedes lexical evidence, retaining
+/// each lane's stable occurrence order and every distinct admitted symbol.
+/// `GraphLaneRequest` validates the combined bound; callers must not apply
+/// a separate seed cutoff that changes the graph being evaluated.
+pub fn graph_seeds_from_outcomes(
+    exact: &RetrieverOutcome<RetrieverBatch<ExactLaneEvidence>>,
+    lexical: &RetrieverOutcome<RetrieverBatch<LexicalLaneEvidence>>,
+) -> Vec<CodeCandidateBindingV1> {
+    let mut seeds = Vec::new();
+    let mut seen_occurrences = BTreeSet::new();
+    let mut seen_symbols = BTreeSet::new();
+    let mut add_binding = |binding: &CodeCandidateBindingV1| {
+        let Some(symbol) = binding.occurrence.symbol.as_ref() else {
+            return;
+        };
+        if seen_occurrences.insert(binding.source_occurrence.clone())
+            && seen_symbols.insert(symbol.clone())
+        {
+            seeds.push(binding.clone());
+        }
+    };
+    if let RetrieverOutcome::Complete(batch) | RetrieverOutcome::Partial { value: batch, .. } =
+        exact
+    {
+        for evidence in batch.evidence_by_occurrence.values() {
+            add_binding(&evidence.binding);
+        }
+    }
+    if let RetrieverOutcome::Complete(batch) | RetrieverOutcome::Partial { value: batch, .. } =
+        lexical
+    {
+        for evidence in batch.evidence_by_occurrence.values() {
+            add_binding(&evidence.binding);
+        }
+    }
+    seeds
+}
 
 /// Relation and path requests preserve edge authority and weakest coverage
 /// state.

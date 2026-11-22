@@ -177,7 +177,7 @@ fn assert_converged_without_threshold(
 }
 
 #[tokio::test]
-async fn released_snapshot_drops_the_default_threshold_and_gains_relationship_hints() {
+async fn released_pr_tracking_snapshot_requires_reset_without_rewriting_settings() {
     let (_directory, runtime, root) = global_setup().await;
     let db = runtime
         .registered_database(HostAdmissionScope::Project)
@@ -193,23 +193,54 @@ async fn released_snapshot_drops_the_default_threshold_and_gains_relationship_hi
     );
     let store = GlobalDbConfigurationControlStore::new_registered(db);
 
+    let before = store.current().await.unwrap();
+    let registry = crate::configuration::registry::ConfigurationRegistry::core().unwrap();
+    for name in [
+        "sync.auto_track_pr_branches.v1",
+        "sync.auto_track_pr_poll_secs.v1",
+    ] {
+        let key = SettingKey::new(name).unwrap();
+        assert!(before.snapshot.effective_values.contains_key(&key));
+        assert!(registry.definition(&key).is_err());
+        assert!(
+            registry
+                .validate_value(&key, &before.snapshot.effective_values[&key])
+                .is_err()
+        );
+    }
+    let error = store
+        .converge_registered_registry_shape(&root.revision_id, UtcMicros(2))
+        .await
+        .expect_err("removed PR tracking settings require the supported reset path");
+    assert!(matches!(
+        error,
+        ConfigurationError::ResetRequired { reason }
+            if reason.contains("automatic PR worktree tracking has been retired")
+                && reason.contains("preserved unchanged")
+                && reason.contains("explicit branch activation")
+    ));
+    assert_eq!(store.current().await.unwrap(), before);
+    assert_eq!(
+        revision_count(db).await,
+        1,
+        "refusal does not rewrite retained configuration"
+    );
+}
+
+#[tokio::test]
+async fn default_threshold_beside_relationship_hints_is_dropped() {
+    let (_directory, runtime, root) = global_setup().await;
+    let db = runtime
+        .registered_database(HostAdmissionScope::Project)
+        .expect("registered project database");
+    seed_both_proximity_keys(db, &root, root.snapshot.provenance[&hints_key()].clone()).await;
+    let store = GlobalDbConfigurationControlStore::new_registered(db);
+
     let converged = store
         .converge_registered_registry_shape(&root.revision_id, UtcMicros(2))
         .await
-        .expect("a store every earlier release wrote converges without a reset");
+        .expect("a default-held retired threshold converges");
     assert_converged_without_threshold(&converged, &root.revision_id, &root.snapshot);
-
-    let again = store
-        .converge_registered_registry_shape(&converged.revision_id, UtcMicros(3))
-        .await
-        .expect("a converged store opens as is");
-    assert_eq!(again.revision_id, converged.revision_id);
-    assert_eq!(
-        revision_count(db).await,
-        2,
-        "convergence writes one revision"
-    );
-
     let layer = ConfigurationLayerIdV1::Project {
         project_id: ProjectId::new(PROJECT_ID).expect("project"),
     };
@@ -238,22 +269,6 @@ async fn released_snapshot_drops_the_default_threshold_and_gains_relationship_hi
         ),
         other => panic!("unexpected setter refusal: {other:?}"),
     }
-}
-
-#[tokio::test]
-async fn default_threshold_beside_relationship_hints_is_dropped() {
-    let (_directory, runtime, root) = global_setup().await;
-    let db = runtime
-        .registered_database(HostAdmissionScope::Project)
-        .expect("registered project database");
-    seed_both_proximity_keys(db, &root, root.snapshot.provenance[&hints_key()].clone()).await;
-    let store = GlobalDbConfigurationControlStore::new_registered(db);
-
-    let converged = store
-        .converge_registered_registry_shape(&root.revision_id, UtcMicros(2))
-        .await
-        .expect("a default-held retired threshold converges");
-    assert_converged_without_threshold(&converged, &root.revision_id, &root.snapshot);
 }
 
 #[tokio::test]

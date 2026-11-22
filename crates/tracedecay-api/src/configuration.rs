@@ -42,21 +42,9 @@ pub struct ProjectSettingsPatch {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub telemetry: Option<TelemetrySettingsPatch>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub sync: Option<SyncSettingsPatch>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context_scout: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context_scout_intent: Option<ContextScoutIntentSettingsV1>,
-}
-
-/// Nested synchronization settings patch.
-#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, Default)]
-#[serde(deny_unknown_fields)]
-pub struct SyncSettingsPatch {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub auto_track_pr_branches: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub auto_track_pr_poll_secs: Option<u64>,
 }
 
 /// Nested telemetry settings patch.

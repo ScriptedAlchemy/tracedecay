@@ -295,7 +295,7 @@ fn production_coordinator_materializes_all_four_states_and_exact_stack_anchors()
     let coordinator = DaemonGitHubStackCoordinatorV1::default();
     let provider = ProviderId::new("provider.github").unwrap();
     let disabled = scope(0);
-    coordinator
+    let _scope_registration_1 = coordinator
         .register_scope(&disabled, GitHubStackedPullRequestPolicyV1::Disabled)
         .unwrap();
     let disabled = coordinator
@@ -313,7 +313,7 @@ fn production_coordinator_materializes_all_four_states_and_exact_stack_anchors()
     assert!(disabled.snapshot.is_none());
 
     let probed = scope(1);
-    coordinator
+    let _scope_registration_2 = coordinator
         .register_scope(
             &probed,
             GitHubStackedPullRequestPolicyV1::ProbePrivatePreview,
@@ -392,10 +392,10 @@ fn production_coordinator_materializes_all_four_states_and_exact_stack_anchors()
             .unwrap(),
         enabled
     );
-    coordinator
+    let _scope_registration_3 = coordinator
         .register_scope(&probed, GitHubStackedPullRequestPolicyV1::Disabled)
         .unwrap();
-    coordinator
+    let _scope_registration_4 = coordinator
         .register_scope(
             &probed,
             GitHubStackedPullRequestPolicyV1::ProbePrivatePreview,
@@ -415,7 +415,7 @@ fn production_coordinator_materializes_all_four_states_and_exact_stack_anchors()
         "reenabling the provider requires a fresh observation"
     );
     assert!(reenabled.snapshot.is_none());
-    coordinator
+    let _scope_registration_5 = coordinator
         .register_scope(&probed, GitHubStackedPullRequestPolicyV1::Disabled)
         .unwrap();
     let disabled = coordinator
@@ -438,7 +438,7 @@ fn mounted_provider_observation_reports_pr_tip_merge_base_and_ci_drift() {
     let coordinator = DaemonGitHubStackCoordinatorV1::default();
     let exact_scope = scope(90);
     let provider = ProviderId::new("provider.github").unwrap();
-    coordinator
+    let _scope_registration_6 = coordinator
         .register_scope(
             &exact_scope,
             GitHubStackedPullRequestPolicyV1::ProbePrivatePreview,
@@ -519,7 +519,7 @@ fn mounted_provider_observation_reports_pr_tip_merge_base_and_ci_drift() {
         Err(GitHubStackCoordinatorErrorV1::InvalidProviderObservation)
     );
     let restored = DaemonGitHubStackCoordinatorV1::default();
-    restored
+    let _restored_registration = restored
         .restore_open_drift_interval(&exact_scope, &persisted)
         .unwrap();
     assert_eq!(
@@ -580,8 +580,9 @@ fn mounted_provider_observation_reports_pr_tip_merge_base_and_ci_drift() {
 fn concurrent_identical_provider_publications_have_one_drift_transition() {
     let coordinator = Arc::new(DaemonGitHubStackCoordinatorV1::default());
     let exact_scope = scope(94);
+    let _scope_registration = coordinator.retain_scope(&exact_scope).unwrap();
     let provider = ProviderId::new("provider.github").unwrap();
-    coordinator
+    let _scope_registration_7 = coordinator
         .register_scope(
             &exact_scope,
             GitHubStackedPullRequestPolicyV1::ProbePrivatePreview,
@@ -668,13 +669,13 @@ fn provider_read_spanning_disable_and_reenable_cannot_publish() {
     let exact_scope = scope(96);
     let provider = ProviderId::new("provider.github").unwrap();
     let probe = GitHubStackedPullRequestPolicyV1::ProbePrivatePreview;
-    coordinator.register_scope(&exact_scope, probe).unwrap();
+    let _scope_registration_8 = coordinator.register_scope(&exact_scope, probe).unwrap();
     let open = open_base_advance(&coordinator, &exact_scope);
 
     // Disabling and re-enabling while the read runs leaves the policy equal
     // again; the completion still belongs to the retired registration.
     let held = authorized(&coordinator, &exact_scope);
-    coordinator
+    let _scope_registration_9 = coordinator
         .register_scope(&exact_scope, GitHubStackedPullRequestPolicyV1::Disabled)
         .unwrap();
     assert!(
@@ -684,7 +685,7 @@ fn provider_read_spanning_disable_and_reenable_cannot_publish() {
             .is_none(),
         "a disabled registration authorizes no provider read"
     );
-    coordinator.register_scope(&exact_scope, probe).unwrap();
+    let _scope_registration_10 = coordinator.register_scope(&exact_scope, probe).unwrap();
     assert_eq!(
         coordinator.observe_provider(
             held,
@@ -733,7 +734,7 @@ fn abandoned_unchanged_and_disabled_registrations_keep_scope_state_exact() {
             .is_none(),
         "an unregistered scope authorizes no provider read"
     );
-    coordinator.register_scope(&exact_scope, probe).unwrap();
+    let _scope_registration_11 = coordinator.register_scope(&exact_scope, probe).unwrap();
     coordinator
         .observe_provider(
             authorized(&coordinator, &exact_scope),
@@ -749,7 +750,7 @@ fn abandoned_unchanged_and_disabled_registrations_keep_scope_state_exact() {
     // Re-registering the unchanged policy, as each project open does, keeps
     // the registration, its in-flight read and its drift baseline.
     let in_flight = authorized(&coordinator, &exact_scope);
-    coordinator.register_scope(&exact_scope, probe).unwrap();
+    let _scope_registration_12 = coordinator.register_scope(&exact_scope, probe).unwrap();
     let drifted = coordinator
         .observe_provider(
             in_flight,
@@ -767,7 +768,7 @@ fn abandoned_unchanged_and_disabled_registrations_keep_scope_state_exact() {
     // A read spanning a plain disable is refused, not republished as the
     // disabled policy. The policy observation then closes the open interval.
     let spanning = authorized(&coordinator, &exact_scope);
-    coordinator
+    let _scope_registration_13 = coordinator
         .register_scope(&exact_scope, GitHubStackedPullRequestPolicyV1::Disabled)
         .unwrap();
     assert_eq!(
@@ -801,7 +802,7 @@ fn restarted_owner_refuses_pre_restart_reads_and_settles_restored_drift() {
     let provider = ProviderId::new("provider.github").unwrap();
     let probe = GitHubStackedPullRequestPolicyV1::ProbePrivatePreview;
     let before = DaemonGitHubStackCoordinatorV1::default();
-    before.register_scope(&exact_scope, probe).unwrap();
+    let _scope_registration_14 = before.register_scope(&exact_scope, probe).unwrap();
     let open = open_base_advance(&before, &exact_scope);
     let persisted = GitHubStackDriftObservationV1::from_persisted(
         &exact_scope.scope_digest,
@@ -814,10 +815,10 @@ fn restarted_owner_refuses_pre_restart_reads_and_settles_restored_drift() {
     // The same scope and policy registered again by a restarted owner is a
     // different registration.
     let restarted = DaemonGitHubStackCoordinatorV1::default();
-    restarted
+    let _scope_registration_15 = restarted
         .restore_open_drift_interval(&exact_scope, &persisted)
         .unwrap();
-    restarted.register_scope(&exact_scope, probe).unwrap();
+    let _scope_registration_16 = restarted.register_scope(&exact_scope, probe).unwrap();
     assert_eq!(
         restarted.observe_provider(
             pre_restart,
@@ -844,6 +845,7 @@ fn restarted_owner_refuses_pre_restart_reads_and_settles_restored_drift() {
 async fn mounted_owner_dedupes_debounced_signals_and_appends_all_material_overflow() {
     let coordinator = DaemonGitHubStackCoordinatorV1::default();
     let exact_scope = scope(91);
+    let _scope_registration = coordinator.retain_scope(&exact_scope).unwrap();
     let store = MemoryStore::default();
     let authorization = Authorization::default();
     let recipients = (0..65).map(actor).collect::<Vec<_>>();
@@ -987,7 +989,7 @@ async fn transition_signal_and_circuit_policy_reject_stale_or_tampered_identity(
             .register_circuit_policy(&exact_scope, tampered)
             .is_err()
     );
-    coordinator
+    let _scope_registration_17 = coordinator
         .register_circuit_policy(&exact_scope, policy)
         .unwrap();
 }
@@ -1024,6 +1026,7 @@ async fn durable_saturation_retains_material_work_for_a_later_read() {
 async fn debounce_classes_and_five_minute_dedupe_ttl_advance_independently() {
     let coordinator = DaemonGitHubStackCoordinatorV1::default();
     let exact_scope = scope(94);
+    let _scope_registration = coordinator.retain_scope(&exact_scope).unwrap();
     let store = MemoryStore::default();
     let authorization = Authorization::default();
     *authorization.recipients.lock().unwrap() = vec![actor(1)];
@@ -1093,7 +1096,7 @@ fn daemon_restart_returns_unavailable_until_a_delayed_exact_probe_upgrades_state
     let exact_scope = scope(80);
     let provider = ProviderId::new("provider.github").unwrap();
     let restarted = DaemonGitHubStackCoordinatorV1::default();
-    restarted
+    let _scope_registration_18 = restarted
         .register_scope(
             &exact_scope,
             GitHubStackedPullRequestPolicyV1::ProbePrivatePreview,
@@ -1182,6 +1185,7 @@ impl StackCoordinatorStore for YieldingAppendStore {
 async fn concurrent_duplicate_debounced_signals_append_once() {
     let coordinator = DaemonGitHubStackCoordinatorV1::default();
     let exact_scope = scope(95);
+    let _scope_registration = coordinator.retain_scope(&exact_scope).unwrap();
     let store = YieldingAppendStore::default();
     let authorization = Authorization::default();
     *authorization.recipients.lock().unwrap() = vec![actor(1)];
@@ -1209,5 +1213,214 @@ async fn concurrent_duplicate_debounced_signals_append_once() {
         store.appends.load(std::sync::atomic::Ordering::SeqCst),
         1,
         "the dedupe check and the append it guards are one critical section"
+    );
+}
+
+#[test]
+fn scope_state_retires_after_the_last_mounted_owner_and_provider_read() {
+    let coordinator = DaemonGitHubStackCoordinatorV1::default();
+    for index in 200..232 {
+        let exact_scope = scope(index);
+        let owner = coordinator
+            .register_scope(
+                &exact_scope,
+                GitHubStackedPullRequestPolicyV1::ProbePrivatePreview,
+            )
+            .unwrap();
+        let read = authorized(&coordinator, &exact_scope);
+        drop(owner);
+        // Accepted I/O retains only the old state, not a mounted registration.
+        assert!(
+            coordinator
+                .authorize_provider_read(&exact_scope)
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            coordinator.observe_provider(
+                read,
+                ProviderId::new("provider.github").unwrap(),
+                GitHubStackProviderOutcomeV1::Unavailable,
+                provider_source_binding(&exact_scope, false),
+                UtcMicros(1),
+            ),
+            Err(GitHubStackCoordinatorErrorV1::Superseded)
+        );
+        // Publication is not a new runtime owner. Once it settles, a remount
+        // has neither the old policy nor the old observation and drift state.
+        assert!(
+            coordinator
+                .authorize_provider_read(&exact_scope)
+                .unwrap()
+                .is_none()
+        );
+    }
+}
+
+#[tokio::test]
+async fn authorization_spanning_a_remount_keeps_its_original_dedupe_state() {
+    struct GatedAuthorization(tokio::sync::Notify);
+    impl StackDeliveryAuthorizationPort for GatedAuthorization {
+        fn select_recipients(
+            &self,
+            _scope: &ResolvedScope,
+            _signal: &StackSignalV1,
+        ) -> Result<Vec<tracedecay_domain::ActorId>, StackCoordinatorErrorV1> {
+            Ok(vec![actor(1)])
+        }
+
+        async fn authorize(
+            &self,
+            _recipient: &tracedecay_domain::ActorId,
+            _signal: &StackSignalV1,
+        ) -> StackDeliveryAuthorizationV1 {
+            self.0.notified().await;
+            StackDeliveryAuthorizationV1::Authorized
+        }
+    }
+
+    let coordinator = DaemonGitHubStackCoordinatorV1::default();
+    let exact_scope = scope(235);
+    let owner = coordinator.retain_scope(&exact_scope).unwrap();
+    let store = MemoryStore::default();
+    let authorization = GatedAuthorization(tokio::sync::Notify::new());
+    let first = signal_at(
+        &exact_scope,
+        StackSignalKindV1::DependencyReady,
+        digest('e'),
+        UtcMicros(1),
+    );
+    let mut pending =
+        Box::pin(coordinator.enqueue_transition(&store, &authorization, &exact_scope, first));
+    std::future::poll_fn(|cx| {
+        assert!(pending.as_mut().poll(cx).is_pending());
+        std::task::Poll::Ready(())
+    })
+    .await;
+    drop(owner);
+    let _replacement = coordinator.retain_scope(&exact_scope).unwrap();
+    authorization.0.notify_one();
+    pending.await.unwrap();
+
+    let current_authorization = Authorization::default();
+    *current_authorization.recipients.lock().unwrap() = vec![actor(1)];
+    let successor_signal = signal_at(
+        &exact_scope,
+        StackSignalKindV1::DependencyReady,
+        digest('e'),
+        UtcMicros(2),
+    );
+    coordinator
+        .enqueue_transition(
+            &store,
+            &current_authorization,
+            &exact_scope,
+            successor_signal,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        store.appended.lock().unwrap().len(),
+        2,
+        "the retired invocation cannot suppress the successor's first signal",
+    );
+}
+
+#[test]
+fn same_policy_remount_refuses_a_late_provider_read_from_the_retired_mount() {
+    let coordinator = DaemonGitHubStackCoordinatorV1::default();
+    let exact_scope = scope(234);
+    let provider = ProviderId::new("provider.github").unwrap();
+    let policy = GitHubStackedPullRequestPolicyV1::ProbePrivatePreview;
+    let owner = coordinator.register_scope(&exact_scope, policy).unwrap();
+    coordinator
+        .observe_provider(
+            authorized(&coordinator, &exact_scope),
+            provider.clone(),
+            GitHubStackProviderOutcomeV1::Enabled(enabled_snapshot(&exact_scope)),
+            provider_source_binding(&exact_scope, true),
+            UtcMicros(1),
+        )
+        .unwrap();
+    let old_read = authorized(&coordinator, &exact_scope);
+    drop(owner);
+
+    let replacement = coordinator.register_scope(&exact_scope, policy).unwrap();
+    let current = coordinator
+        .observe_provider(
+            authorized(&coordinator, &exact_scope),
+            provider.clone(),
+            GitHubStackProviderOutcomeV1::Enabled(advanced_snapshot(&exact_scope)),
+            provider_source_binding(&exact_scope, true),
+            UtcMicros(2),
+        )
+        .unwrap();
+    assert!(
+        current.transitions.is_empty(),
+        "the old mount is not a drift baseline"
+    );
+    assert_eq!(
+        coordinator.observe_provider(
+            old_read,
+            provider.clone(),
+            GitHubStackProviderOutcomeV1::Unavailable,
+            provider_source_binding(&exact_scope, false),
+            UtcMicros(3),
+        ),
+        Err(GitHubStackCoordinatorErrorV1::Superseded),
+    );
+    assert_eq!(
+        coordinator
+            .observe_policy(
+                exact_scope.clone(),
+                provider,
+                provider_source_binding(&exact_scope, false),
+                UtcMicros(4),
+            )
+            .unwrap(),
+        current,
+        "old completion leaves the successor's provider observation intact",
+    );
+    assert!(
+        coordinator
+            .authorize_provider_read(&exact_scope)
+            .unwrap()
+            .is_some()
+    );
+    drop(replacement);
+    assert!(
+        coordinator
+            .authorize_provider_read(&exact_scope)
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[test]
+fn old_scope_owner_cannot_retire_a_replacement_policy_registration() {
+    let coordinator = DaemonGitHubStackCoordinatorV1::default();
+    let exact_scope = scope(233);
+    let previous = coordinator
+        .register_scope(&exact_scope, GitHubStackedPullRequestPolicyV1::Disabled)
+        .unwrap();
+    let replacement = coordinator
+        .register_scope(
+            &exact_scope,
+            GitHubStackedPullRequestPolicyV1::ProbePrivatePreview,
+        )
+        .unwrap();
+    drop(previous);
+    assert!(
+        coordinator
+            .authorize_provider_read(&exact_scope)
+            .unwrap()
+            .is_some()
+    );
+    drop(replacement);
+    assert!(
+        coordinator
+            .authorize_provider_read(&exact_scope)
+            .unwrap()
+            .is_none()
     );
 }

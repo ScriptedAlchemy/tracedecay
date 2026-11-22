@@ -1341,6 +1341,8 @@ pub fn production_doctor_report_reader(
                 .and_then(|days| days.checked_mul(24 * 60 * 60))
                 .unwrap_or(i64::MAX);
             let now = now_secs();
+            let session_retention =
+                profile_session_retention_policy(profile_sessions.as_deref()).await;
             let profile_storage_reads = async {
                 let mut owner_roots =
                     tracedecay_maintenance::store_maintenance::scheduler_owner_roots(&schedulers)
@@ -1443,8 +1445,16 @@ pub fn production_doctor_report_reader(
                         profile_storage_reads,
                         collect_over_budget_store_findings(&context, &telemetry_ports),
                         profile_footprint_read(registry.as_ref(), &profile_root, &retention),
-                        session_retention_read(profile_sessions.as_deref(), &retention, now),
-                        session_retention_read(project_sessions.as_deref(), &retention, now),
+                        session_retention_read(
+                            profile_sessions.as_deref(),
+                            session_retention.as_ref(),
+                            now
+                        ),
+                        session_retention_read(
+                            project_sessions.as_deref(),
+                            session_retention.as_ref(),
+                            now
+                        ),
                         collect_code_generation_retention_findings(
                             &schedulers,
                             registry.as_ref(),
@@ -1606,15 +1616,37 @@ async fn session_temporal_ok(
     }
 }
 
+/// Observe the configured profile policy without initializing configuration
+/// during a read-only Doctor request. Changed settings require a daemon
+/// restart before the maintenance owner adopts them.
+async fn profile_session_retention_policy(
+    database: Option<&tracedecay_global_db::RegisteredGlobalDb>,
+) -> Option<tracedecay_configuration::RetentionConfig> {
+    let database = database?;
+    let store = tracedecay_global_db::configuration::ProfileConfigurationStore::new_registered(
+        database,
+        &database.binding().shard_id.profile_id,
+    )
+    .ok()?;
+    let configuration = store.read().await.ok()?;
+    Some(tracedecay_configuration::RetentionConfig {
+        session_lcm: tracedecay_configuration::config::session_retention_from_profile_snapshot(
+            &configuration.snapshot,
+        )
+        .ok()?,
+        ..tracedecay_configuration::RetentionConfig::default()
+    })
+}
+
 /// Retention backlog of a session store; unknown while the store is held
 /// reset-required.
 async fn session_retention_read(
     database: Option<&tracedecay_global_db::RegisteredGlobalDb>,
-    retention: &tracedecay_configuration::RetentionConfig,
+    retention: Option<&tracedecay_configuration::RetentionConfig>,
     now: i64,
 ) -> DoctorStorageFamilyReadV1 {
-    match database {
-        Some(database) => {
+    match (database, retention) {
+        (Some(database), Some(retention)) => {
             tracedecay_maintenance::retention::diagnostics::collect_session_retention_findings(
                 database,
                 &retention.session_lcm,
@@ -1622,7 +1654,7 @@ async fn session_retention_read(
             )
             .await
         }
-        None => DoctorStorageFamilyReadV1::Unknown,
+        _ => DoctorStorageFamilyReadV1::Unknown,
     }
 }
 

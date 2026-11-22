@@ -174,31 +174,16 @@ impl AgentIntegration for CodexIntegration {
         dc.section("Codex CLI integration");
         let local_plugin_dir = codex_repo_plugin_install_dir(&ctx.project_path);
         if local_plugin_dir.join(".codex-plugin/plugin.json").exists() {
-            doctor_check_plugin_dir(
-                dc,
-                &local_plugin_dir,
-                CodexBundlePolicy::for_scope(InstallScope::ProjectLocal),
-                &ctx.home,
-            );
-            doctor_check_marketplace_entry(
-                dc,
-                &codex_repo_marketplace_path(&ctx.project_path),
-                "repo marketplace",
-                "./plugins/tracedecay",
-                "tracedecay install --local --agent codex",
-            );
-            // Repo-local bundles ship no lifecycle hooks by design; hooks come
-            // from the personal plugin. Without one, no session/tool hooks run.
-            if !codex_plugin_manifest_path(&ctx.home).exists()
-                && codex_plugin_cached_install_dirs(&ctx.home).is_empty()
-            {
-                dc.warn(
-                    "repo-local Codex bundles ship no lifecycle hooks, run `tracedecay install --agent codex` to add the personal plugin (session hooks, transcript ingest)",
-                );
-            }
-        } else {
-            doctor_check_plugin(dc, ctx.profile.data_dir(), &ctx.home);
+            dc.warn(&format!(
+                "obsolete repo-local Codex plugin at {}; remove this TraceDecay bundle and its \
+                 tracedecay entry from {}. Project-local Codex installation is no longer supported; \
+                 `tracedecay update-plugin` refreshes the personal integration only. \
+                 Run `tracedecay install --agent codex` to install the personal integration",
+                local_plugin_dir.display(),
+                codex_repo_marketplace_path(&ctx.project_path).display(),
+            ));
         }
+        doctor_check_plugin(dc, ctx.profile.data_dir(), &ctx.home);
         doctor_suggest_native_memories_off(dc, ctx.profile.data_dir(), &ctx.home);
     }
 

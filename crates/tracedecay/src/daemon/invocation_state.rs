@@ -128,12 +128,23 @@ impl DaemonInvocationState {
         database: tracedecay_global_db::RegisteredGlobalDbLeaseV1,
         profile_id: &tracedecay_domain::configuration::UserProfileId,
     ) -> Result<tracedecay_code_index::parallelism::InstalledCodeIndexWorkerPlanV1> {
-        let configured =
-            tracedecay_project::config::read_or_initialize_profile_code_index_worker_selection(
-                database, profile_id,
-            )
-            .await?;
-        self.install_worker_selection(store_administration, configured)
+        let configuration = tracedecay_project::config::read_or_initialize_profile_configuration(
+            database, profile_id,
+        )
+        .await?;
+        let configured = configuration
+            .code_index_workers()
+            .map_err(tracedecay_configuration::map_profile_worker_configuration_error)?;
+        let history_import_enabled =
+            tracedecay_configuration::config::session_history_import_enabled_from_profile_snapshot(
+                &configuration.snapshot,
+            )?;
+        let installed =
+            self.install_worker_selection(store_administration, configured.selection)?;
+        store_administration
+            .session_temporal_refresh_schedulers()
+            .pin_automatic_history_import(history_import_enabled);
+        Ok(installed)
     }
 
     /// Fixture composition for tests that drive a bare invocation state:

@@ -4,8 +4,45 @@ use crate::agents::{
     observed_bundle_discovery_matches, safe_write_json_file, unexpected_bundle_entrypoints,
 };
 use sha2::{Digest, Sha256};
+use std::fs;
 #[cfg(unix)]
 use tracedecay_runtime_core::test_executable::write_executable_script;
+
+#[test]
+fn doctor_reports_obsolete_local_plugins_without_hiding_the_personal_integration() {
+    let home = tempfile::tempdir().unwrap();
+    let project = tempfile::tempdir().unwrap();
+    let local = codex_repo_plugin_install_dir(project.path());
+    fs::create_dir_all(local.join(".codex-plugin")).unwrap();
+    fs::write(
+        local.join(".codex-plugin/plugin.json"),
+        br#"{"name":"tracedecay","version":"0.0.1"}"#,
+    )
+    .unwrap();
+    let context = HealthcheckContext {
+        home: home.path().to_path_buf(),
+        profile: ProfileRoot::under_home(home.path()),
+        project_path: project.path().to_path_buf(),
+        catalog_profiles: super::super::serve_args::HostCatalogProfiles::default(),
+    };
+    let mut counters = DoctorCounters::quiet();
+    CodexIntegration.healthcheck(&mut counters, &context);
+    assert!(counters.checks.iter().any(|check| {
+        check.message.contains("obsolete repo-local Codex plugin")
+            && check.message.contains(&local.display().to_string())
+    }));
+    assert!(counters.checks.iter().any(|check| {
+        check.message.contains("not found")
+            && check.message.contains(&home.path().display().to_string())
+    }));
+    assert!(
+        counters
+            .checks
+            .iter()
+            .all(|check| !check.message.contains("install --local"))
+    );
+    assert!(local.join(".codex-plugin/plugin.json").is_file());
+}
 
 /// The repo-local `hooks-codex.json` ships only an empty `hooks` object.
 /// Rendering the global bundle must fill the object from `CODEX_MANAGED_HOOKS`

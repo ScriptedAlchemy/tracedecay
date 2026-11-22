@@ -22,9 +22,11 @@ use super::projector::{
     SessionTemporalRefreshProjectionFuture, SessionTemporalRefreshProjector,
     SessionTemporalRefreshProjectorError, zero_refresh_coverage,
 };
-use super::registry::SessionTemporalRefreshPassReport;
+use super::registry::{SessionTemporalRefreshPassReport, SessionTemporalRefreshSchedulerRegistry};
 use super::wake::{
-    SessionTemporalRefreshRetryClass, SessionTemporalRefreshWakeState, enabled_idle_notification,
+    HistoricalAdmissionView, SESSION_HISTORY_IMPORT_PAUSED_REASON,
+    SessionTemporalRefreshRetryClass, SessionTemporalRefreshWake, SessionTemporalRefreshWakeState,
+    enabled_idle_notification,
 };
 use super::worker::{
     apply_refresh_effect, history_idle_recheck_at, run_session_temporal_refresh_pass,
@@ -33,7 +35,8 @@ use super::worker::{
 use crate::lcm_effects::DaemonLcmEffectService;
 use tracedecay_sessions::ProviderPassUnits;
 use tracedecay_sessions::serving::{
-    SessionHistoryProgressState, SessionProjectionServingStatusPort,
+    SessionConvergenceState, SessionHistoryProgressState, SessionProjectionServingState,
+    SessionProjectionServingStatusPort, SessionProjectionStaleReason,
 };
 
 #[test]
@@ -1058,6 +1061,7 @@ async fn named_projection_join_survives_an_unrelated_session_failure() {
     tokio::pin!(successful_join, refused_join, aggregate_join);
     // Put all three obligations in the same pass before starting the worker.
     // The unnamed caller still owns the aggregate failure contract.
+    let started = Instant::now();
     let pending = std::future::poll_fn(|cx| {
         std::task::Poll::Ready((
             successful_join.as_mut().poll(cx).is_pending(),
@@ -1080,11 +1084,27 @@ async fn named_projection_join_survives_an_unrelated_session_failure() {
 
     let (successful_result, refused_result, aggregate_result) =
         tokio::join!(successful_join, refused_join, aggregate_join);
+    let elapsed = started.elapsed();
+    let worker_status = handle.status();
+    let passes = state.pass_count.load(Ordering::Acquire);
+    let idle = state.is_idle();
     state.cancel();
     worker.await.expect("worker exits on cancellation");
+    let mut receipts = Vec::with_capacity(recoveries.len());
+    for recovery in recoveries {
+        let receipt = store
+            .session_refresh_receipt(SessionRefreshReceiptRequestV1::new(
+                recovery.operation_id().clone(),
+                recovery.session_id().clone(),
+            ))
+            .await;
+        receipts.push((recovery.session_id().clone(), receipt));
+    }
     assert!(
         successful_result,
-        "another session cannot veto a committed publication"
+        "another session cannot veto a committed publication; elapsed={elapsed:?}, \
+         refused={refused_result}, aggregate={aggregate_result}, worker={worker_status:?}, \
+         passes={passes}, idle={idle}, receipts={receipts:?}"
     );
     assert!(
         !refused_result,
@@ -1094,16 +1114,11 @@ async fn named_projection_join_survives_an_unrelated_session_failure() {
         !aggregate_result,
         "unnamed sweeps must retain aggregate failure"
     );
-    for recovery in recoveries {
-        let receipt = store
-            .session_refresh_receipt(SessionRefreshReceiptRequestV1::new(
-                recovery.operation_id().clone(),
-                recovery.session_id().clone(),
-            ))
-            .await
+    for (session_id, receipt) in receipts {
+        let receipt = receipt
             .expect("read durable receipt")
             .expect("both sessions must settle durably");
-        let expected = if recovery.session_id() == &successful {
+        let expected = if session_id == successful {
             SessionRefreshTerminalStateV1::Complete
         } else {
             SessionRefreshTerminalStateV1::Failed
@@ -1213,6 +1228,212 @@ impl SessionHistoricalIngestor for TalliedHistory {
     }
 
     fn cancel(&self) {}
+}
+
+fn assert_history_paused(
+    wake: &SessionTemporalRefreshWake,
+    expected_passes: u64,
+    expected_serving_state: SessionProjectionServingState,
+) {
+    let status = wake.serving_status();
+    assert_eq!(
+        status.history.expect("mounted history status").passes,
+        expected_passes
+    );
+    assert_eq!(
+        status.convergence.state,
+        SessionConvergenceState::Blocked {
+            reason_code: SESSION_HISTORY_IMPORT_PAUSED_REASON.to_owned(),
+        }
+    );
+    assert_eq!(status.convergence.epoch, 0);
+    assert_eq!(status.convergence.converged_at_unix_micros, None);
+    assert_eq!(status.state, expected_serving_state);
+    assert!(
+        !wake
+            .target()
+            .expect("retained worker")
+            .history_recheck_enabled()
+    );
+}
+
+#[tokio::test]
+async fn paused_history_preserves_live_projection_and_explicit_bounded_continuations() {
+    let harness = RegisteredGlobalDbHarness::open("paused-history-live-and-explicit").await;
+    let registry = SessionTemporalRefreshSchedulerRegistry::default();
+    assert!(registry.automatic_history_import_enabled());
+    assert!(!registry.pin_automatic_history_import(false));
+    assert!(
+        !registry.pin_automatic_history_import(true),
+        "restart policy is pinned"
+    );
+    let path = harness.registered.db_path().to_path_buf();
+    let history = Arc::new(TalliedHistory {
+        passes: std::sync::Mutex::new(
+            [
+                SessionHistoricalIngestOutcome::Pending {
+                    made_progress: true,
+                }
+                .into(),
+                SessionHistoricalIngestOutcome::Complete.into(),
+                SessionHistoricalIngestOutcome::Blocked {
+                    reason_code: "provider_history_unavailable".to_owned(),
+                    made_progress: false,
+                }
+                .into(),
+            ]
+            .into(),
+        ),
+    });
+    let wake = registry
+        .ensure_profile_with_history(path.clone(), harness.registered.clone(), history.clone())
+        .await;
+    tokio::time::timeout(Duration::from_secs(5), registry.wait_profile_idle(&path))
+        .await
+        .expect("paused mount settles");
+    assert_history_paused(
+        &wake,
+        0,
+        SessionProjectionServingState::Stale {
+            reason: SessionProjectionStaleReason::HistoricalBlocked {
+                reason_code: SESSION_HISTORY_IMPORT_PAUSED_REASON.to_owned(),
+            },
+        },
+    );
+
+    let session_id = SessionId::new("live-while-history-paused").expect("session id");
+    let store = SessionTemporalStore::new(harness.registered.as_ref());
+    let begun = store
+        .begin_or_join_session_refresh(SessionRefreshBeginOrJoinRequestV1::new(
+            session_id.clone(),
+            SessionRefreshFrontierV1::new(0, 0).expect("empty frontier"),
+        ))
+        .await
+        .expect("live refresh admission");
+    assert!(
+        wake.wake_and_wait_for_session_projection(&session_id, Duration::from_secs(5))
+            .await
+    );
+    let receipt = store
+        .session_refresh_receipt(SessionRefreshReceiptRequestV1::new(
+            begun.operation_id().clone(),
+            begun.session_id().clone(),
+        ))
+        .await
+        .expect("durable live receipt")
+        .expect("published live generation");
+    assert_eq!(receipt.state(), SessionRefreshTerminalStateV1::Complete);
+
+    // Publication returns before the worker's derived summary pass settles.
+    // Occupy capacity only after that existing fair turn has finished, so
+    // the next refusal belongs to the explicit history admission below.
+    tokio::time::timeout(Duration::from_secs(5), registry.wait_profile_idle(&path))
+        .await
+        .expect("the live projection and its derived work settle before capacity is held");
+    let admission = registry.historical_ingest_admission();
+    let held = admission
+        .try_acquire_many(u32::try_from(admission.available_permits()).unwrap())
+        .expect("occupy history capacity");
+    assert_eq!(
+        wake.schedule_historical_admission(),
+        HistoricalAdmissionView::Scheduled
+    );
+    tokio::time::timeout(Duration::from_secs(5), registry.wait_profile_idle(&path))
+        .await
+        .expect("explicit admission defers without blocking projection");
+    assert!(wake.target().unwrap().history_recheck_enabled());
+    assert_eq!(wake.serving_status().history.unwrap().passes, 0);
+    drop(held);
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            registry.wait_profile_idle(&path).await;
+            if wake.serving_status().history.unwrap().passes == 2 {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("explicit import drains both bounded passes");
+    assert_history_paused(&wake, 2, SessionProjectionServingState::Current);
+
+    for _ in 0..3 {
+        registry
+            .ensure_profile_with_history(path.clone(), harness.registered.clone(), history.clone())
+            .await;
+        tokio::time::timeout(Duration::from_secs(5), registry.wait_profile_idle(&path))
+            .await
+            .expect("ordinary mount stays idle");
+        assert_history_paused(&wake, 2, SessionProjectionServingState::Current);
+    }
+
+    assert_eq!(
+        wake.schedule_historical_admission(),
+        HistoricalAdmissionView::Scheduled
+    );
+    assert_eq!(
+        wake.serving_status().state,
+        SessionProjectionServingState::Stale {
+            reason: SessionProjectionStaleReason::HistoricalConvergence,
+        },
+        "another explicit import invalidates the previous completed frontier"
+    );
+    tokio::time::timeout(Duration::from_secs(5), registry.wait_profile_idle(&path))
+        .await
+        .expect("provider failure settles without resuming automatic history");
+    let status = wake.serving_status();
+    assert_eq!(status.history.unwrap().passes, 3);
+    assert_eq!(
+        status.state,
+        SessionProjectionServingState::Stale {
+            reason: SessionProjectionStaleReason::HistoricalBlocked {
+                reason_code: "provider_history_unavailable".to_owned(),
+            },
+        },
+        "a configured pause cannot hide a real failure of the admitted import"
+    );
+    assert_eq!(
+        status.convergence.state,
+        SessionConvergenceState::Blocked {
+            reason_code: "provider_history_unavailable".to_owned(),
+        }
+    );
+    assert!(!wake.target().unwrap().history_recheck_enabled());
+    registry.shutdown().await;
+}
+
+#[tokio::test]
+async fn paused_history_resumes_an_explicit_admission_when_its_ingestor_attaches() {
+    let harness = RegisteredGlobalDbHarness::open("paused-history-late-ingestor").await;
+    let registry = SessionTemporalRefreshSchedulerRegistry::default();
+    registry.pin_automatic_history_import(false);
+    let path = harness.registered.db_path().to_path_buf();
+    let wake = registry
+        .ensure_profile(path.clone(), harness.registered.clone())
+        .await;
+    assert_eq!(
+        wake.schedule_historical_admission(),
+        HistoricalAdmissionView::Scheduled
+    );
+    tokio::time::timeout(Duration::from_secs(5), registry.wait_profile_idle(&path))
+        .await
+        .expect("missing ingestor settles truthfully");
+    assert!(
+        matches!(wake.serving_status().state, SessionProjectionServingState::Stale {
+        reason: SessionProjectionStaleReason::HistoricalBlocked { reason_code },
+    } if reason_code == "history_ingestor_missing")
+    );
+    let history = Arc::new(TalliedHistory {
+        passes: std::sync::Mutex::new([SessionHistoricalIngestOutcome::Complete.into()].into()),
+    });
+    registry
+        .ensure_profile_with_history(path.clone(), harness.registered.clone(), history)
+        .await;
+    tokio::time::timeout(Duration::from_secs(5), registry.wait_profile_idle(&path))
+        .await
+        .expect("retained explicit admission resumes");
+    assert_history_paused(&wake, 1, SessionProjectionServingState::Current);
+    registry.shutdown().await;
 }
 
 /// Status reads catch-up progress from the worker that ran the passes: each

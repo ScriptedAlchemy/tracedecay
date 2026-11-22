@@ -23,16 +23,17 @@ deployment.
 2. [Your First Index](#your-first-index)
 3. [Connecting to Your Agent](#connecting-to-your-agent)
 4. [Exploring Your Codebase from the CLI](#exploring-your-codebase-from-the-cli)
-5. [Keeping the Index Fresh](#keeping-the-index-fresh)
-6. [Running Parallel Work with Synthesis](#running-parallel-work-with-synthesis)
-7. [Checking Your Setup with Doctor](#checking-your-setup-with-doctor)
-8. [Finding Affected Tests](#finding-affected-tests)
-9. [MCP Tools for AI Agents](#mcp-tools-for-ai-agents)
-10. [Supported Languages](#supported-languages)
-11. [Privacy and Network](#privacy-and-network)
-12. [Updating TraceDecay](#updating-tracedecay)
-13. [Configuration Files](#configuration-files)
-14. [Troubleshooting](#troubleshooting)
+5. [Choosing a Dashboard Workspace](#choosing-a-dashboard-workspace)
+6. [Keeping the Index Fresh](#keeping-the-index-fresh)
+7. [Running Parallel Work with Synthesis](#running-parallel-work-with-synthesis)
+8. [Checking Your Setup with Doctor](#checking-your-setup-with-doctor)
+9. [Finding Affected Tests](#finding-affected-tests)
+10. [MCP Tools for AI Agents](#mcp-tools-for-ai-agents)
+11. [Supported Languages](#supported-languages)
+12. [Privacy and Network](#privacy-and-network)
+13. [Updating TraceDecay](#updating-tracedecay)
+14. [Configuration Files](#configuration-files)
+15. [Troubleshooting](#troubleshooting)
 
 ---
 
@@ -161,6 +162,31 @@ that project authority; branch and worktree labels are provenance only.
 An explicit `tracedecay sync` remains an administrative refresh request for a
 diagnostic or offline workflow; it is not the normal post-edit product path and
 never opens a store outside the daemon.
+
+### Requesting another branch
+
+Use `tracedecay branch add <branch>` to request the exact head of a local or
+origin branch. The daemon stages a linked worktree under its branch lifecycle
+lease and reports deferred, unavailable, or ready state while that head is
+indexed. Existing linked worktrees, PR context and review reads, and Work-managed
+execution keep their ordinary routes.
+
+Automatic tracking of every remote PR has been retired. The daemon no longer
+runs the all-PR discovery and checkout loop. The `branch autotrack`
+command, automatic-tracking settings, and dashboard controls have been removed.
+A persisted project configuration containing `sync.auto_track_pr_branches.v1`
+or `sync.auto_track_pr_poll_secs.v1` returns configuration `ResetRequired`;
+follow that store's explicit reset procedure and re-apply your custom settings.
+The retired keys are refused rather than accepted as inactive configuration.
+
+At startup, a single pass considers only worktrees recorded in the old
+`pr-autotrack.json` ownership ledger. It retires a checkout only after proving
+the exact path, refs, lifecycle lease, clean contents, and that every referenced
+commit is retained by a remote-tracking ref. Dirty, foreign, leased, unpublished,
+or unverifiable artifacts remain intact. `tracedecay doctor` lists each remaining
+worktree and ref with its preservation reason; resolve that reason and restart
+the daemon to retry. This cleanup never deletes shared project facts or session
+history.
 
 ### Incremental convergence
 
@@ -587,6 +613,71 @@ tracedecay tool configuration_set --args '{"layer":{"kind":"user_profile","profi
 Read the current value and revision with `tracedecay tool configuration_get
 --args '{"key":"user.repeated_query_hints.v1"}'`.
 
+### Pausing automatic history imports
+
+The profile setting `user.session_history_import_enabled.v1` controls automatic
+historical transcript imports across registered projects and the profile session
+store. It defaults to `true` and takes effect after a daemon restart. Read its
+current value and profile revision before changing it:
+
+```bash
+tracedecay tool configuration_get --args '{"key":"user.session_history_import_enabled.v1"}'
+tracedecay tool configuration_set --args '{"layer":{"kind":"user_profile","profile_id":"<id>"},"key":"user.session_history_import_enabled.v1","value":{"kind":"boolean","value":false},"expected_revision":"<revision>","idempotency_key":"<key>"}'
+tracedecay daemon restart
+```
+
+With automatic imports paused, startup, project mounts, and idle discovery do
+not start historical scans. Live host hooks and session projection continue.
+An explicit `tracedecay sessions import` still schedules a bounded import; its
+accepted continuations finish while automatic discovery stays paused. After
+the imported messages are published, `require_fresh` reads can use them when
+their projection coverage is current. Already accepted session-sync recovery
+remains available. Status keeps historical convergence blocked with the reason
+`session_history_import_paused_by_configuration`; a completed explicit import
+does not resume automatic scans or claim historical convergence.
+
+To resume automatic imports, set the same key to `true` using the current
+profile revision and a new idempotency key, then restart the daemon. Existing
+history and import progress remain stored. The setting controls background
+imports; the retention settings below control cleanup of stored history.
+
+### Session history retention
+
+Session retention belongs to the profile and applies to `user-sessions.db`
+and registered project session stores. The daemon uses these settings:
+
+| Setting | Default | Meaning |
+| --- | --- | --- |
+| `user.session_retention_enabled.v1` | `true` | Enable the session retention passes. |
+| `user.session_retention_days.v1` | `180` | Delete older raw messages after a durable summary covers them; `0` disables deletion. |
+| `user.session_compaction_days.v1` | `30` | Compact older summarized message bodies when the shared representation is smaller; `0` disables this phase. |
+
+Defaults initialize a fresh profile. An existing profile snapshot missing a
+current setting returns `ResetRequired` without changing its revision or stored
+values. Follow the explicit reset remediation and re-apply your custom settings;
+startup does not add history-import or retention defaults to an older snapshot.
+
+Read the current value and profile revision first:
+
+```bash
+tracedecay tool configuration_get --args '{"key":"user.session_retention_days.v1"}'
+```
+
+For example, set a 30-day window using the returned profile identity and revision,
+with a new idempotency key for this change:
+
+```bash
+tracedecay tool configuration_set --args '{"layer":{"kind":"user_profile","profile_id":"<id>"},"key":"user.session_retention_days.v1","value":{"kind":"unsigned","value":30},"expected_revision":"<revision>","idempotency_key":"<key>"}'
+tracedecay daemon restart
+```
+
+Cleanup runs through the daemon's bounded maintenance passes. Unsummarized
+messages remain retained, and the policy does not impose a hard disk-size cap.
+Deleting eligible rows frees database pages; physical disk reclamation follows
+the daemon's compaction and payload-GC checks. Doctor reports the configured
+retention backlog and names the setting when the user session store exceeds its
+size bound. Deleting database files manually would also discard import progress.
+
 ### Working from a subdirectory
 
 You can open your AI agent from any subdirectory of an enrolled project.
@@ -602,6 +693,34 @@ where you want to focus on one area.
 Graph traversal tools (`tracedecay_callers`, `tracedecay_callees`, `tracedecay_impact`, etc.) remain unscoped so you can still follow connections across directory boundaries.
 
 You can always override the automatic scope by passing an explicit `path` parameter to any tool. `tracedecay_status` shows the active scope prefix when one is in effect.
+
+---
+
+## Choosing a Dashboard Workspace
+
+The navigation rail and command palette show the same workspace names. The
+palette also searches the task hints beside those names, so searching for
+"source files", "agent timelines", or "task board" finds the relevant surface.
+
+| What you want to do | Workspace | What it shows |
+|---|---|---|
+| Explore source files, symbols, and dependencies | **Code** (`/code`) | The Cortex code surface and its source and relationship inspectors. |
+| Follow agent sessions through time | **Loom** (`/loom`) | Recorded session threads, temporal windows, and replay. |
+| Inspect project health and memory relationships | **Brain** (`/brain`) | The project relationship field within the selected scope. |
+| Track tasks, plans, and execution progress | **Work** (`/work`) | The existing task board, task details, and execution projections. |
+| Read a transcript or find an older session | **Sessions** (`/sessions`) | Session history and transcript details. |
+| Inspect individual memory facts and citations | **Knowledge** (`/knowledge`) | Stored knowledge and its supporting evidence. |
+
+Each visual surface retains its renderer choices: Loom offers **Weave**
+(default), **Strata**, and **Rails**; Brain offers **Neural** (default),
+**Luminous**, **Points**, and **Atlas**; Cortex offers **Luminous** (default),
+**Plate**, and **Relief**. These are views of the same workspace evidence.
+
+Selecting the workspace you are already viewing from the rail or palette
+preserves its renderer, selected entity, time window, and URL fragment.
+Changing workspace or project scope opens the destination under the selected
+scope and clears the previous workspace's entity and view parameters, so a
+session, file, or task from the old project is not carried into the new one.
 
 ---
 
@@ -1442,6 +1561,23 @@ The `upgrade` command downloads the latest release from GitHub and replaces the 
 ```bash
 tracedecay upgrade
 ```
+
+Use a dry run to inspect the planned update and follow-up maintenance:
+
+```bash
+tracedecay update --dry-run
+tracedecay upgrade --dry-run
+tracedecay update --dry-run --no-reinstall
+```
+
+For a direct installation, the preview reads release metadata and identifies
+the available binary. For a package-manager installation, it lists the
+manager commands that would select and install the version. It also lists the
+daemon service refresh and configured host integrations that would be
+refreshed; `--no-reinstall` excludes host integration refresh. The preview does
+not replace the binary, run a package manager, or change the daemon or host
+installation. `update` previews maintenance even when the binary is current;
+`upgrade` previews follow-up maintenance only when an installation may occur.
 
 Beta and stable are separate update channels, a beta build only sees beta releases and vice versa. Any attached MCP servers will continue running with the previous binary until you restart your agent.
 

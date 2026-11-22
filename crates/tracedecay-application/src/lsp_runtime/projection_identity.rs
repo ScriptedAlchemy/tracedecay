@@ -56,8 +56,9 @@ pub struct LspCodeIndexWorktreeGraphScope {
 
 impl LspCodeIndexProjectionIdentity {
     /// Admit the sealed generation for read-only worktree graph queries: it
-    /// must belong to exactly this project, repository, worktree, and
-    /// reference and carry a valid generation sequence. No commit is required.
+    /// must belong to exactly this project, repository, and worktree and carry
+    /// a valid generation sequence. The sealed branch and commit are source
+    /// attribution: a retained graph survives a checkout moving to a new HEAD.
     pub fn admit_worktree_scope(
         self,
         scope: &ResolvedScope,
@@ -73,9 +74,6 @@ impl LspCodeIndexProjectionIdentity {
         }
         if self.worktree.as_ref() != Some(&scope.worktree_id) {
             return Err(LspRuntimeFailure::new("lsp-code-index-worktree-mismatch"));
-        }
-        if self.reference != scope.reference {
-            return Err(LspRuntimeFailure::new("lsp-code-index-reference-mismatch"));
         }
         let generation = generation_sequence(&self.code_generation_id)
             .ok_or_else(|| LspRuntimeFailure::new("current-generation-invalid"))?;
@@ -101,7 +99,11 @@ impl LspCodeIndexProjectionIdentity {
         self,
         scope: &ResolvedScope,
     ) -> Result<LspFeedbackProjectionScope, LspRuntimeFailure> {
+        if self.reference != scope.reference {
+            return Err(LspRuntimeFailure::new("lsp-code-index-reference-mismatch"));
+        }
         let source_freshness = self.source_freshness;
+        let live_head = self.head_commit_id.clone();
         let worktree = self.admit_worktree_scope(scope)?;
         if source_freshness != FreshnessState::Current {
             return Err(LspRuntimeFailure::new(
@@ -111,6 +113,9 @@ impl LspCodeIndexProjectionIdentity {
         let head_commit_id = worktree
             .source_revision
             .ok_or_else(|| LspRuntimeFailure::new("lsp-code-index-source-revision-unavailable"))?;
+        if live_head.as_ref() != Some(&head_commit_id) {
+            return Err(LspRuntimeFailure::new("lsp-code-index-identity-changed"));
+        }
         Ok(LspFeedbackProjectionScope {
             head_commit_id,
             code_generation_id: worktree.code_generation_id,

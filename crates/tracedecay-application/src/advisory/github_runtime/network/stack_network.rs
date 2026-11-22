@@ -420,7 +420,7 @@ mod tests {
         });
         let client = local_stack_client(address, "stack-anchor-http", &request, credential);
         let coordinator = DaemonGitHubStackCoordinatorV1::default();
-        coordinator
+        let _scope_registration_1 = coordinator
             .register_scope(
                 context.scope(),
                 GitHubStackedPullRequestPolicyV1::ProbePrivatePreview,
@@ -611,7 +611,7 @@ mod tests {
             resume: GitHubReadResumeV1::empty(),
         };
         let coordinator = DaemonGitHubStackCoordinatorV1::default();
-        coordinator
+        let _scope_registration_2 = coordinator
             .register_scope(
                 context.scope(),
                 GitHubStackedPullRequestPolicyV1::ProbePrivatePreview,
@@ -636,10 +636,10 @@ mod tests {
             })
         };
         request_arrived.recv().unwrap();
-        coordinator
+        let _scope_registration_3 = coordinator
             .register_scope(context.scope(), GitHubStackedPullRequestPolicyV1::Disabled)
             .unwrap();
-        coordinator
+        let _scope_registration_4 = coordinator
             .register_scope(
                 context.scope(),
                 GitHubStackedPullRequestPolicyV1::ProbePrivatePreview,

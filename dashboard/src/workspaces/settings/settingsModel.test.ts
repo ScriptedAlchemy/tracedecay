@@ -191,7 +191,6 @@ describe('Settings authorized changes', () => {
         include: ['src/**', 'tests/**'],
         max_file_size: '2097152',
         telemetry_timings: true,
-        auto_track_pr_poll_secs: '180',
       }),
     ).toEqual({
       outcome: 'ready',
@@ -200,7 +199,6 @@ describe('Settings authorized changes', () => {
         include: ['src/**', 'tests/**'],
         max_file_size: 2_097_152,
         telemetry: { timings: true },
-        sync: { auto_track_pr_poll_secs: 180 },
       },
     });
   });
@@ -211,7 +209,6 @@ describe('Settings authorized changes', () => {
       include: [''],
       exclude: ['src/['],
       max_file_size: '0',
-      auto_track_pr_poll_secs: '59',
     });
 
     expect(result).toMatchObject({
@@ -220,10 +217,6 @@ describe('Settings authorized changes', () => {
         { field: 'include', message: 'include patterns must not be empty' },
         { field: 'exclude', message: "invalid glob pattern 'src/['" },
         { field: 'max_file_size', message: 'max_file_size must be at least 1 byte' },
-        {
-          field: 'auto_track_pr_poll_secs',
-          message: 'auto_track_pr_poll_secs must be at least 60 seconds',
-        },
       ],
     });
   });
