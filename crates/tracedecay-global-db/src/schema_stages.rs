@@ -28,7 +28,7 @@ use super::schema_contract::{
 use super::{
     configuration, git_index_transactions, global_db_operation_error, global_db_operation_message,
     managed_test_runs, observability_rollup, observation, observation_projection, project_registry,
-    session_temporal_schema, stack_delivery,
+    response_handles, session_temporal_schema, stack_delivery,
 };
 use crate::registered::RefusedAuthorityV1;
 use tracedecay_runtime_core::{
@@ -1114,6 +1114,7 @@ async fn install_registered_schema_stage_sequence(
 
     git_index_transactions::ensure_git_index_transaction_schema(transaction).await?;
     crate::native_integration::ensure_native_integration_schema(transaction).await?;
+    response_handles::ensure_response_handle_schema(transaction).await?;
 
     transaction
         .execute_batch(TRANSCRIPT_SCHEMA)
