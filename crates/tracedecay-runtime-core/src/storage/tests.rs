@@ -3,6 +3,7 @@
 mod tests {
     use super::*;
     use serde_json::Value;
+    use std::fs;
     use std::sync::{Arc, Barrier};
 
     #[test]
