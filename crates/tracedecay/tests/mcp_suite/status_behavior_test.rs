@@ -161,7 +161,7 @@ async fn converged_json_status(
     }
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn tracedecay_status_reports_the_sealed_branch_and_keeps_diagnostics_opt_in() {
     let project = open_status_project().await;
     let root = project.project_root.display().to_string();
@@ -430,7 +430,7 @@ async fn tracedecay_status_reports_the_sealed_branch_and_keeps_diagnostics_opt_i
 
 /// One daemon serving two projects: each project's status lists only its own
 /// resident owners, and the doctor's daemon-wide memory inventory lists both.
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn project_status_lists_only_its_own_memory_owners_and_the_doctor_lists_every_project() {
     let isolation = test_temp_dir();
     let roots = ["alpha", "beta"].map(|name| {
@@ -511,7 +511,7 @@ async fn project_status_lists_only_its_own_memory_owners_and_the_doctor_lists_ev
 /// A non-Git project has no graph scope and so no project session retrieval
 /// identity, but the daemon still mounts its session refresh worker. Status
 /// reports that worker's projection, which converges, not a missing worker.
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn status_reports_the_mounted_refresh_worker_without_a_session_retrieval_identity() {
     let isolation = test_temp_dir();
     let project_root = isolation.path().join("project");

@@ -58,38 +58,29 @@ async fn call_production_tool(
 #[cfg(feature = "test-transport")]
 async fn fixture_response_handle_root(
     fixture: &ProductionCompositionFixture,
-) -> std::path::PathBuf {
+) -> tracedecay_mcp::response_handles::ResponseHandleStore {
     fixture
         .harness
         .server(&fixture.project_root)
         .expect("production retrieve server")
-        .cg_snapshot()
-        .await
-        .store_layout()
-        .response_handle_root
-        .clone()
+        .project_session_db_for_test()
+        .map(tracedecay_mcp::response_handles::ResponseHandleStore::registered)
+        .expect("registered project session store")
 }
 
 #[cfg(feature = "test-transport")]
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn retrieve_tool_returns_full_stored_response() {
     let fixture = production_composition_fixture().await;
     let response_handle_root = fixture_response_handle_root(&fixture).await;
     let original = "{\"items\":[{\"id\":1,\"name\":\"alpha\"}]}";
-    let stored = tracedecay_mcp::response_handles::store_response_handle(
-        &response_handle_root,
-        original,
-        tracedecay_runtime_core::tracedecay::current_timestamp(),
-    )
-    .unwrap();
-
-    let stored_payload: Value = serde_json::from_str(
-        &fs::read_to_string(response_handle_root.join(format!("{}.json", stored.handle))).unwrap(),
-    )
-    .unwrap();
-    assert!(stored_payload.get("handle").is_none());
-    assert!(stored_payload.get("original_chars").is_none());
-    assert_eq!(stored_payload["content"], original);
+    let stored = response_handle_root
+        .publish(
+            original,
+            tracedecay_runtime_core::tracedecay::current_timestamp(),
+        )
+        .await
+        .unwrap();
 
     let result = call_production_tool(
         &fixture,
@@ -148,7 +139,7 @@ async fn retrieve_tool_returns_full_stored_response() {
 }
 
 #[cfg(feature = "test-transport")]
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn retrieve_pages_reconstruct_large_and_multibyte_handles_with_bounded_frames() {
     let fixture = production_composition_fixture().await;
     let response_handle_root = fixture_response_handle_root(&fixture).await;
@@ -160,12 +151,13 @@ async fn retrieve_pages_reconstruct_large_and_multibyte_handles_with_bounded_fra
     ];
 
     for original in cases {
-        let stored = tracedecay_mcp::response_handles::store_response_handle(
-            &response_handle_root,
-            &original,
-            tracedecay_runtime_core::tracedecay::current_timestamp(),
-        )
-        .unwrap();
+        let stored = response_handle_root
+            .publish(
+                &original,
+                tracedecay_runtime_core::tracedecay::current_timestamp(),
+            )
+            .await
+            .unwrap();
         let mut offset = 0usize;
         let mut reconstructed = String::new();
         loop {
@@ -213,7 +205,7 @@ async fn retrieve_pages_reconstruct_large_and_multibyte_handles_with_bounded_fra
 }
 
 #[cfg(feature = "test-transport")]
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn fact_store_large_json_list_response_uses_retrieve_handle() {
     const FACT_COUNT: usize = 8;
 
@@ -325,7 +317,7 @@ async fn fact_store_large_json_list_response_uses_retrieve_handle() {
 }
 
 #[cfg(feature = "test-transport")]
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn grep_large_response_uses_retrievable_truncation_handle() {
     // Grep caps at 200 results and 20 hits/file, so spread markers across files.
     const EXPECTED_MATCH_COUNT: usize = 200;
@@ -420,7 +412,7 @@ async fn grep_large_response_uses_retrievable_truncation_handle() {
 }
 
 #[cfg(feature = "test-transport")]
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn context_memory_large_markdown_uses_reversible_lane_preview() {
     let fixture = production_composition_fixture().await;
     let tail = "MEMORY_TAIL_MARKER";
@@ -458,7 +450,7 @@ async fn context_memory_large_markdown_uses_reversible_lane_preview() {
 }
 
 #[cfg(feature = "test-transport")]
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn diff_context_large_response_uses_retrievable_truncation_handle() {
     const LARGE_RESPONSE_MARKER_COUNT: usize = 260;
     const LAST_LARGE_RESPONSE_MARKER: usize = LARGE_RESPONSE_MARKER_COUNT - 1;

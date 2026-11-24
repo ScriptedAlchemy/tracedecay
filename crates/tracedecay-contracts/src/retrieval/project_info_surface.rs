@@ -424,7 +424,6 @@ pub struct ActiveProjectStorageV1 {
     pub graph_db_exists: bool,
     pub graph_db_size_bytes: u64,
     pub sessions_db_path: String,
-    pub response_handle_root: String,
     pub lcm_payload_root: String,
 }
 

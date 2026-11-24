@@ -131,11 +131,6 @@ fn assert_identity(opened: &OpenedCheckout, payload: &Value) {
         "{payload}"
     );
     assert_eq!(
-        payload["storage"]["response_handle_root"],
-        json!(data_root.join("response-handles").display().to_string()),
-        "{payload}"
-    );
-    assert_eq!(
         payload["storage"]["lcm_payload_root"],
         json!(data_root.join("lcm-payloads").display().to_string()),
         "{payload}"

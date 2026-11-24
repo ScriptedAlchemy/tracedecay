@@ -203,7 +203,6 @@ fn ensure_mcp_dispatch_available(tool_name: &str) -> Result<()> {
 #[cfg(any(test, feature = "test-transport"))]
 pub async fn handle_tool_call(cg: &TraceDecay, tool_name: &str, args: Value) -> Result<ToolResult> {
     Box::pin(handle_tool_call_with_registry_options(
-        cg,
         tool_name,
         args,
         ToolCallRegistryOptions::default().admit_opened_project(cg)?,
@@ -426,7 +425,6 @@ impl ToolCallRegistryOptions<'_> {
 }
 
 pub fn handle_tool_call_with_registry_options<'a>(
-    cg: &'a TraceDecay,
     tool_name: &'a str,
     args: Value,
     options: ToolCallRegistryOptions<'a>,
@@ -444,10 +442,8 @@ pub fn handle_tool_call_with_registry_options<'a>(
             // selector routing and goes straight to the profile owner.
             if retained_tool_target(retained, &args)? == InvocationTarget::Profile {
                 ensure_mcp_dispatch_available(tool_name)?;
-                return boxed_send(dispatch_application_surface_tools(
-                    tool_name, cg, args, options,
-                ))
-                .await;
+                return boxed_send(dispatch_application_surface_tools(tool_name, args, options))
+                    .await;
             }
         } else if let Some(storage_scope) = args.get("storage_scope") {
             return Err(ApplicationSurfaceAdapterError::invalid_request(
@@ -488,10 +484,7 @@ pub fn handle_tool_call_with_registry_options<'a>(
             // Reject unavailable effects before parsing, routing, or invoking
             // the canonical application handler.
             ensure_mcp_dispatch_available(tool_name)?;
-            return boxed_send(dispatch_application_surface_tools(
-                tool_name, cg, args, options,
-            ))
-            .await;
+            return boxed_send(dispatch_application_surface_tools(tool_name, args, options)).await;
         }
         if dispatch_group == Some(McpToolDispatchGroup::MultiRoot) {
             // Multi-root tools are daemon-owned: they carry no application

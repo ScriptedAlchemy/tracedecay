@@ -11,7 +11,7 @@ use tracedecay_project::test_support::host_admission::HostAdmissionTestRuntimeV1
 use tracedecay_runtime_core::path_safety::canonical_root_identity;
 
 #[cfg(feature = "test-transport")]
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn project_registry_tools_are_bounded_read_only_and_contextual() {
     let (cg, _env, _dir) = setup_empty_project().await;
     let registry_dir = test_temp_dir();
@@ -219,7 +219,7 @@ async fn project_registry_tools_are_bounded_read_only_and_contextual() {
 }
 
 #[cfg(feature = "test-transport")]
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn project_context_surfaces_registry_read_failure_as_tool_error() {
     let (cg, _env, _dir) = setup_empty_project().await;
     let registry_dir = test_temp_dir();
@@ -277,7 +277,7 @@ async fn project_context_surfaces_registry_read_failure_as_tool_error() {
 }
 
 #[cfg(feature = "test-transport")]
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn project_search_surfaces_registry_read_failure_as_tool_error() {
     let (cg, _env, _dir) = setup_empty_project().await;
     let registry_dir = test_temp_dir();
@@ -339,7 +339,7 @@ async fn project_search_surfaces_registry_read_failure_as_tool_error() {
 }
 
 #[cfg(feature = "test-transport")]
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn project_registry_tools_prefer_injected_registry_over_process_default() {
     let (cg, _env, _dir) = setup_empty_project().await;
     let process_registry_dir = test_temp_dir();
@@ -485,7 +485,7 @@ fn active_project_and_storage_status_tools_are_advertised_readonly() {
 }
 
 #[cfg(feature = "test-transport")]
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn storage_status_tool_summarizes_active_project_store_health() {
     let fixture = production_composition_fixture().await;
     let server = fixture
@@ -603,7 +603,7 @@ fn assert_storage_status_matches_store(
 }
 
 #[cfg(feature = "test-transport")]
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn storage_status_reports_admitted_page_math_and_rejects_unknown_fields() {
     let fixture = production_composition_fixture().await;
     let server = fixture

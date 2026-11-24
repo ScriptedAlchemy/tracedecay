@@ -14,7 +14,7 @@ use tracedecay_mcp::response_handles::{
 use tracedecay_runtime_core::path_safety::{canonical_existing_identity, canonical_root_identity};
 use tracedecay_runtime_core::tracedecay::current_timestamp;
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_initialize_negotiates_legacy_and_unknown_client_versions() {
     for (requested, expected) in [
         ("2024-11-05", "2024-11-05"),
@@ -39,7 +39,7 @@ async fn test_initialize_negotiates_legacy_and_unknown_client_versions() {
 /// Logging is deprecated by MCP SEP-2577 and the server emits no log
 /// notifications, so the advertised capabilities are exactly tools and
 /// resources: `initialize` must not invite `logging/setLevel`.
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_initialize() {
     let (server, _dir) = setup_server().await;
     let responses = run_server_with_messages(server, vec![spec_initialize_request(json!(1))]).await;
@@ -69,12 +69,12 @@ async fn test_initialize() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn legacy_project_selectors_are_rejected_instead_of_rerouting() {
     assert_legacy_selectors_cannot_reroute_the_active_project().await;
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_any_notification_without_id_produces_no_response() {
     let (server, _dir) = setup_server().await;
     let responses = run_server_with_messages(
@@ -115,7 +115,7 @@ fn assert_null_id_refused(responses: &[String], label: &str) {
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_explicit_null_id_is_refused_as_invalid_request() {
     let (server, _dir) = setup_server().await;
     let responses = run_server_with_messages(
@@ -126,7 +126,7 @@ async fn test_explicit_null_id_is_refused_as_invalid_request() {
     assert_null_id_refused(&responses, "ping with id=null");
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_tools_call_explicit_null_id_is_refused_before_dispatch() {
     let (server, _dir) = setup_server().await;
     let stats_view = Arc::clone(&server);
@@ -154,7 +154,7 @@ async fn test_tools_call_explicit_null_id_is_refused_before_dispatch() {
 /// so the listed `tracedecay_retrieve` schema is pinned whole and then called
 /// with arguments it admits, against a handle stored in the fixture project.
 #[cfg(feature = "test-transport")]
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_tools_list() {
     let fixture = crate::support::production_composition_fixture().await;
     let server = fixture
@@ -162,15 +162,13 @@ async fn test_tools_list() {
         .server(&fixture.project_root)
         .expect("production tools/list server");
     let now = current_timestamp();
-    let stored = store_response_handle(
-        &server
-            .cg_snapshot()
-            .await
-            .store_layout()
-            .response_handle_root,
-        "{\"items\":[1,2,3]}",
-        now,
+    let stored = tracedecay_mcp::response_handles::ResponseHandleStore::registered(
+        server
+            .project_session_db_for_test()
+            .expect("registered project session store"),
     )
+    .publish("{\"items\":[1,2,3]}", now)
+    .await
     .unwrap();
     let responses = run_client_connection_with_messages(
         Arc::clone(&server),
@@ -269,7 +267,7 @@ async fn test_tools_list() {
 }
 
 #[cfg(feature = "test-transport")]
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_tools_call_search() {
     // Search lanes are served by the daemon-owned code-index authority; a
     // server outside the production composition has no executor and answers
@@ -312,7 +310,7 @@ async fn test_tools_call_search() {
     fixture.harness.shutdown().await;
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_tools_call_semantic_failure_sets_is_error() {
     let fixture = crate::support::production_composition_fixture().await;
     let server = fixture
@@ -356,7 +354,7 @@ async fn test_tools_call_semantic_failure_sets_is_error() {
     fixture.harness.shutdown().await;
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_tools_call_plain_text_failure_sets_is_error() {
     let fixture = crate::support::production_composition_fixture().await;
     let server = fixture
@@ -399,7 +397,7 @@ async fn test_tools_call_plain_text_failure_sets_is_error() {
     fixture.harness.shutdown().await;
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_tools_call_timings_enabled_by_default() {
     let fixture = setup_accounted_server().await;
     let server = Arc::clone(&fixture.server);
@@ -427,7 +425,7 @@ async fn test_tools_call_timings_enabled_by_default() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_tools_call_timings_can_be_disabled() {
     let fixture = setup_accounted_server().await;
     let server = Arc::clone(&fixture.server);
@@ -464,7 +462,7 @@ async fn test_tools_call_timings_can_be_disabled() {
 /// request is on the wire, so a live-cancellable tool must still be answered
 /// after end-of-input rather than being cancelled with no response.
 #[cfg(feature = "test-transport")]
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn cancellable_tool_call_is_answered_after_client_half_close() {
     struct HalfClosedTransport {
         request: Option<String>,
@@ -525,7 +523,7 @@ async fn cancellable_tool_call_is_answered_after_client_half_close() {
 /// A full peer close is distinct from the write-half close above. Once the
 /// transport reports HUP, an in-flight handler is dropped without a response
 /// so its daemon admission permit cannot remain pinned.
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn cancellable_tool_call_is_dropped_on_full_peer_close() {
     struct FullClosedTransport {
         requests: std::collections::VecDeque<String>,
@@ -588,7 +586,7 @@ async fn cancellable_tool_call_is_dropped_on_full_peer_close() {
 /// The same full-close path must release a handler that is not in the live
 /// cancellation allow-list; this branch used to await it without observing
 /// the transport at all.
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn non_cancellable_tool_call_is_dropped_on_full_peer_close() {
     struct FullClosedTransport {
         requests: std::collections::VecDeque<String>,
@@ -641,7 +639,7 @@ async fn non_cancellable_tool_call_is_dropped_on_full_peer_close() {
 
 /// A hard peer-loss read error during an in-flight cancellable `tools/call`
 /// must cancel the request and fail the connection without writing a response.
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn cancellable_tool_call_is_cancelled_on_peer_read_failure() {
     struct PeerLossTransport {
         request: Option<String>,
@@ -703,7 +701,7 @@ async fn cancellable_tool_call_is_cancelled_on_peer_read_failure() {
 
 /// A write-side peer loss after the request has been accepted must fail the
 /// connection rather than pretending the response was delivered.
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn cancellable_tool_call_fails_connection_on_peer_write_failure() {
     struct WriteFailTransport {
         request: Option<String>,
@@ -752,7 +750,7 @@ async fn cancellable_tool_call_fails_connection_on_peer_write_failure() {
     fixture.harness.shutdown().await;
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_tools_call_status() {
     let fixture = setup_accounted_server().await;
     let server = Arc::clone(&fixture.server);
@@ -783,7 +781,7 @@ async fn test_tools_call_status() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_tools_call_missing_params() {
     let (server, _dir) = setup_server().await;
     // Send tools/call with no params at all.
@@ -811,7 +809,7 @@ async fn test_tools_call_missing_params() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_tools_call_missing_name() {
     let (server, _dir) = setup_server().await;
     // Send tools/call with params but no "name" key.
@@ -833,7 +831,7 @@ async fn test_tools_call_missing_name() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_unknown_method() {
     let (server, _dir) = setup_server().await;
     let responses = run_server_with_messages(
@@ -853,7 +851,7 @@ async fn test_unknown_method() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_malformed_json() {
     let (server, _dir) = setup_server().await;
     // Send invalid JSON, then a valid ping to verify server continues.
@@ -889,7 +887,7 @@ async fn test_malformed_json() {
 /// carrying its id and never reaches the handler, so it cannot execute a tool
 /// or enter request accounting. Malformed JSON stays `ParseError`
 /// (`test_malformed_json`).
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_foreign_protocol_version_is_rejected_before_dispatch() {
     let (server, _dir) = setup_server().await;
     let stats_view = std::sync::Arc::clone(&server);
@@ -955,7 +953,7 @@ async fn test_foreign_protocol_version_is_rejected_before_dispatch() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_blank_lines_skipped() {
     let (server, _dir) = setup_server().await;
     // Send blank/whitespace lines, then a ping.
@@ -982,7 +980,7 @@ async fn test_blank_lines_skipped() {
 }
 
 #[cfg(feature = "test-transport")]
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_server_stats_include_response_handle_metrics() {
     let fixture = crate::support::production_composition_fixture().await;
     let server = fixture
@@ -1064,12 +1062,18 @@ async fn test_server_stats_include_response_handle_metrics() {
         serde_json::from_str(crate::support::extract_real_server_text(&missing)).unwrap();
     assert_eq!(missing_payload["reason_code"], "handle_not_found");
 
-    let expired = store_response_handle(
-        &cg.store_layout().response_handle_root,
-        "{\"expired\":true}",
-        current_timestamp() - RESPONSE_HANDLE_TTL_SECS - 5,
-    )
-    .unwrap();
+    let database = server
+        .project_session_db_for_test()
+        .expect("registered project session store");
+    let handle_store =
+        tracedecay_mcp::response_handles::ResponseHandleStore::registered(database.clone());
+    let expired = handle_store
+        .publish(
+            "{\"expired\":true}",
+            current_timestamp() - RESPONSE_HANDLE_TTL_SECS - 5,
+        )
+        .await
+        .unwrap();
     let expired_result = crate::support::handle_real_server_tool_call(
         &server,
         "tracedecay_retrieve",
@@ -1080,15 +1084,20 @@ async fn test_server_stats_include_response_handle_metrics() {
         serde_json::from_str(crate::support::extract_real_server_text(&expired_result)).unwrap();
     assert_eq!(expired_payload["reason_code"], "handle_expired");
 
-    let broken = store_response_handle(
-        &cg.store_layout().response_handle_root,
-        "{\"broken\":true}",
-        current_timestamp(),
-    )
-    .unwrap();
-    let broken_path = response_handle_dir(&cg).join(format!("{}.json", broken.handle));
-    fs::remove_file(&broken_path).unwrap();
-    fs::create_dir(&broken_path).unwrap();
+    let broken = handle_store
+        .publish("{\"broken\":true}", current_timestamp())
+        .await
+        .unwrap();
+    let tampered = database
+        .writer_connection()
+        .expect("store writer")
+        .execute(
+            "UPDATE response_handles SET content = '{\"broken\":false}' WHERE handle = ?1",
+            tracedecay_runtime_core::db::engine::params![broken.handle.as_str()],
+        )
+        .await
+        .expect("tamper with the stored row");
+    assert_eq!(tampered, 1);
     let broken_result = crate::support::handle_real_server_tool_call_raw(
         &server,
         "tracedecay_retrieve",
@@ -1098,33 +1107,29 @@ async fn test_server_stats_include_response_handle_metrics() {
     let problem = crate::support::refusal_problem(&broken_result["result"]);
     assert_eq!(
         problem["kind"], "unavailable",
-        "broken handle fixture should increment retrieve failure telemetry"
+        "corrupt handle fixture should increment retrieve failure telemetry"
     );
-    assert_eq!(problem["code"], "handle_read_failed");
-    assert_eq!(problem["message"], "response-handle cache is unavailable");
-    fs::remove_dir(&broken_path).unwrap();
+    assert_eq!(problem["code"], "corrupt_handle_record");
 
-    store_response_handle(
-        &cg.store_layout().response_handle_root,
-        "{\"expires\":true}",
-        current_timestamp(),
-    )
-    .expect("direct store should succeed so cleanup has something to expire");
+    handle_store
+        .publish("{\"expires\":true}", current_timestamp())
+        .await
+        .expect("direct store should succeed so cleanup has something to expire");
     let expired_removed = cleanup_expired_response_handles(
-        &cg.store_layout().response_handle_root,
+        &database,
         current_timestamp() + RESPONSE_HANDLE_TTL_SECS + 1,
     )
+    .await
     .unwrap();
     assert!(
         expired_removed >= 1,
         "cleanup should remove at least one expired handle"
     );
 
-    let failure_root = TempDir::new().unwrap();
-    let failure_handle_root = failure_root.path().join("response-handles");
-    fs::write(&failure_handle_root, "not-a-directory").unwrap();
     store_response_handle(
-        &failure_handle_root,
+        &tracedecay_mcp::response_handles::ResponseHandlePublisher::from_port(std::sync::Arc::new(
+            RefusingPublisher,
+        )),
         "store failure telemetry",
         current_timestamp(),
     )
@@ -1155,12 +1160,12 @@ async fn test_server_stats_include_response_handle_metrics() {
             >= baseline_counter("cleanup_removed_expired_total") + expired_removed as u64
     );
     // The cleanup ran past every stored handle's expiry, so the project's
-    // on-disk cache is empty.
+    // registered store holds none.
     assert_eq!(
-        handles["on_disk"],
+        handles["stored"],
         json!({
             "available": true,
-            "file_count": 0,
+            "record_count": 0,
             "total_bytes": 0,
             "oldest_expires_at": null,
             "newest_expires_at": null
@@ -1190,7 +1195,31 @@ async fn test_server_stats_include_response_handle_metrics() {
     drop(server);
     fixture.harness.shutdown().await;
 }
-#[tokio::test]
+/// An owner that refuses every publication.
+struct RefusingPublisher;
+
+impl tracedecay_mcp::response_handles::ResponseHandlePublishPort for RefusingPublisher {
+    fn publish<'a>(
+        &'a self,
+        _content: &'a str,
+        _now: i64,
+    ) -> tracedecay_mcp::response_handles::ResponseHandleFuture<
+        'a,
+        tracedecay_mcp::response_handles::ResponseHandleRecord,
+    > {
+        Box::pin(async {
+            Err(
+                tracedecay_mcp::response_handles::ResponseHandleError::Store(
+                    tracedecay_domain::errors::TraceDecayError::Config {
+                        message: "refused".to_owned(),
+                    },
+                ),
+            )
+        })
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn test_server_stats_after_run() {
     let fixture = setup_accounted_server().await;
     let server = Arc::clone(&fixture.server);
@@ -1246,7 +1275,7 @@ async fn test_server_stats_after_run() {
     assert_eq!(stats["ratios"]["tool_calls_per_jsonrpc_message"], 0.25);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_error_tracking() {
     let fixture = setup_accounted_server().await;
     let server = Arc::clone(&fixture.server);
@@ -1279,7 +1308,7 @@ async fn test_error_tracking() {
     assert_eq!(stats["errors"], 1, "only the unknown method errs: {stats}");
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_resources_list() {
     let (server, _dir) = setup_server().await;
     let responses = run_server_with_messages(
@@ -1332,7 +1361,7 @@ async fn test_resources_list() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_resources_read_status() {
     let (server, _dir) = setup_server().await;
     let responses = run_server_with_messages(
@@ -1364,7 +1393,7 @@ async fn test_resources_read_status() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_resources_read_files() {
     let (server, _dir) = setup_server().await;
     let responses = run_server_with_messages(
@@ -1391,7 +1420,7 @@ async fn test_resources_read_files() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_resources_read_overview() {
     let (server, dir) = setup_server().await;
     let responses = run_server_with_messages(
@@ -1423,7 +1452,7 @@ async fn test_resources_read_overview() {
 
 /// The branches resource reports each tracked branch as a provenance scope of
 /// the project store.
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_resources_read_branches_reports_provenance_scopes() {
     let dir = TempDir::new().unwrap();
     let project = canonical_root_identity(dir.path());
@@ -1487,7 +1516,7 @@ fn branch_named<'a>(branches: &'a [Value], name: &str) -> &'a Value {
         .unwrap_or_else(|| panic!("{name} missing: {branches:?}"))
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_resources_read_unknown_uri() {
     let (server, _dir) = setup_server().await;
     let responses = run_server_with_messages(
@@ -1508,7 +1537,7 @@ async fn test_resources_read_unknown_uri() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_resources_read_missing_uri() {
     let (server, _dir) = setup_server().await;
     let responses = run_server_with_messages(
@@ -1523,7 +1552,7 @@ async fn test_resources_read_missing_uri() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_run_returns_transport_read_errors() {
     let (server, _dir) = setup_server().await;
     let mut transport = ReadErrorTransport;
@@ -1548,7 +1577,7 @@ async fn test_run_returns_transport_read_errors() {
 // Pure-read tools (lcm_status) no longer create the store, so each session
 // issues a write-path call (`lcm_session_boundary`, whose storage open is
 // the migration-running path) before the status reads.
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn repeated_serve_lcm_calls_do_not_rerun_migrations() {
     let profile = crate::common::fixture::TestProfile::isolated();
     let repository =

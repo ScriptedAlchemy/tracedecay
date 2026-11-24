@@ -530,7 +530,7 @@ impl DaemonFeedbackRuntimeRegistrar {
         &self,
         database: Database,
         project_root: PathBuf,
-        response_handle_root: PathBuf,
+        response_handles: tracedecay_session_memory::response_handles::ResponseHandleStore,
         scope: ResolvedScope,
         access: ProjectSourceAccessSnapshot,
         authorization: Arc<dyn CallableCodeAuthorizationSourcePort>,
@@ -550,7 +550,7 @@ impl DaemonFeedbackRuntimeRegistrar {
                     open_feedback_runtime(
                         database,
                         runtime_root.clone(),
-                        response_handle_root,
+                        response_handles,
                         scope.clone(),
                         access,
                     )

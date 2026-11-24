@@ -43,6 +43,7 @@ use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tracedecay_runtime_core::config::ProfileRoot;
 
@@ -76,6 +77,10 @@ use tracedecay_mcp::tools::response_trailers::{account_tool_result, is_beside_re
 use tracedecay_mcp::{
     ALWAYS_LOAD_META, RESERVED_FLAGS_FOOTER, ToolCategory, ToolDefinition, ToolResult,
     cli_tool_definition, get_tool_definitions_ref, render_tool_cli_help, short_tool_name,
+};
+use tracedecay_session_memory::response_handles::{
+    ResponseHandleError, ResponseHandleFuture, ResponseHandlePublishPort, ResponseHandlePublisher,
+    ResponseHandleRecord, response_handle_for,
 };
 use tracedecay_tool_catalog::{ApplicationSurfaceOperation, BindingSurface};
 
@@ -528,7 +533,7 @@ fn dispatch_cli_application_surface_inner(
             }
             sleep_before_retry(delay).await?;
         };
-        print_cli_application_surface(profile, project.as_deref(), result, output)
+        print_cli_application_surface(profile, project.as_deref(), deadline, result, output)
     })
 }
 
@@ -591,17 +596,18 @@ fn print_cli_tool_result(
 fn render_graph_tool_outcome(
     profile: &ProfileRoot,
     project: Option<&Path>,
+    deadline: Instant,
     tool_args: &Value,
     outcome: tracedecay::mcp::tools::GraphToolOutcome,
 ) -> Result<ToolResult> {
-    let response_handle_root = cli_response_handle_root(profile, project)?;
+    let response_handles = cli_response_handle_publisher(profile, project, deadline)?;
     match outcome {
         Ok(completion) => tracedecay_mcp::handlers::graph_tool::render_graph_tool(
-            response_handle_root.as_deref(),
+            response_handles.as_ref(),
             tool_args,
             completion,
         ),
-        Err(refusal) => refusal.render(response_handle_root.as_deref(), tool_args),
+        Err(refusal) => refusal.render(response_handles.as_ref(), tool_args),
     }
 }
 
@@ -644,11 +650,10 @@ async fn dispatch_cli_retained(
         }
         sleep_before_retry(delay).await?;
     };
-    let response_handle_root = cli_response_handle_root(profile, dispatch.project_path.as_deref())?;
-    let result = tracedecay::mcp::tools::render_retained_execution(
-        response_handle_root.as_deref(),
-        &execution,
-    )?;
+    let response_handles =
+        cli_response_handle_publisher(profile, dispatch.project_path.as_deref(), deadline)?;
+    let result =
+        tracedecay::mcp::tools::render_retained_execution(response_handles.as_ref(), &execution)?;
     print_cli_tool_result(
         dispatch.project_path.as_deref(),
         result,
@@ -702,9 +707,9 @@ async fn dispatch_cli_source_edit(
         }
         sleep_before_retry(delay).await?;
     };
-    let response_handle_root = cli_response_handle_root(profile, project.as_deref())?;
+    let response_handles = cli_response_handle_publisher(profile, project.as_deref(), deadline)?;
     let result = tracedecay_mcp::handlers::edit::render_source_edit_outcome(
-        response_handle_root.as_deref(),
+        response_handles.as_ref(),
         operation,
         &tool_args,
         outcome,
@@ -732,7 +737,8 @@ async fn dispatch_cli_graph_tool(
     let handshake = crate::commands::client_handshake(profile, project.as_deref())?;
     let outcome =
         invoke_cli_graph_tool(profile, handshake, operation, &tool_args, deadline).await?;
-    let result = render_graph_tool_outcome(profile, project.as_deref(), &tool_args, outcome)?;
+    let result =
+        render_graph_tool_outcome(profile, project.as_deref(), deadline, &tool_args, outcome)?;
     print_cli_tool_result(
         project.as_deref(),
         result,
@@ -867,7 +873,7 @@ async fn dispatch_cli_profile_registry(
     )
     .await?;
     let project = dispatch.project_path.as_deref();
-    let result = render_graph_tool_outcome(profile, project, &tool_args, outcome)?;
+    let result = render_graph_tool_outcome(profile, project, deadline, &tool_args, outcome)?;
     print_cli_tool_result(
         project,
         result,
@@ -877,18 +883,92 @@ async fn dispatch_cli_profile_registry(
     )
 }
 
-/// Enrolled project's handle root, or none when that path has no store.
-fn cli_response_handle_root(
+/// Publish access to an enrolled project's daemon-owned handle store, or none
+/// when the CLI call names no enrolled project. The CLI never opens the
+/// registered store itself; each truncated render is published through the
+/// daemon that owns it.
+fn cli_response_handle_publisher(
     profile: &ProfileRoot,
     project: Option<&Path>,
-) -> Result<Option<PathBuf>> {
+    deadline: Instant,
+) -> Result<Option<ResponseHandlePublisher>> {
     let Some(project) = project else {
         return Ok(None);
     };
-    Ok(
-        tracedecay_runtime_core::storage::resolve_persisted_layout(project, profile.data_dir())?
-            .map(|layout| layout.response_handle_root),
-    )
+    if tracedecay_runtime_core::storage::resolve_persisted_layout(project, profile.data_dir())?
+        .is_none()
+    {
+        return Ok(None);
+    }
+    let handshake = crate::commands::client_handshake(profile, Some(project))?;
+    let client = invocation_client_for_current_client(profile, handshake)?;
+    Ok(Some(ResponseHandlePublisher::from_port(Arc::new(
+        DaemonResponseHandlePublisher { client, deadline },
+    ))))
+}
+
+/// Publishes through the daemon invocation the routed project's owner answers.
+/// Bounded by the admitted CLI call's own deadline, so publication can never
+/// outlive the request whose output it completes.
+struct DaemonResponseHandlePublisher {
+    client: tracedecay_daemon_protocol::DaemonInvocationClient,
+    deadline: Instant,
+}
+
+impl ResponseHandlePublishPort for DaemonResponseHandlePublisher {
+    fn publish<'a>(
+        &'a self,
+        content: &'a str,
+        now: i64,
+    ) -> ResponseHandleFuture<'a, ResponseHandleRecord> {
+        Box::pin(async move {
+            let unavailable =
+                |message: String| ResponseHandleError::Store(TraceDecayError::Config { message });
+            let request_id = cli_request_id()?;
+            let (deadline, cancellation) = cli_request_controls(&request_id, self.deadline)?;
+            let remaining = self.deadline.saturating_duration_since(Instant::now());
+            let invoked = tracedecay_runtime_core::native_runtime::timeout(
+                remaining,
+                self.client.invoke(
+                    tracedecay_daemon_protocol::DaemonInvocationRequest::response_handle_publish(
+                        request_id.as_str(),
+                        content.to_owned(),
+                        UtcMicros(now.saturating_mul(1_000_000)),
+                        deadline,
+                        cancellation.context(),
+                    ),
+                ),
+            )
+            .await
+            .map_err(|_| {
+                unavailable("response-handle publication outlived the tool deadline".to_owned())
+            })?;
+            let response = invoked?;
+            let tracedecay_daemon_protocol::DaemonInvocationOutcome::ResponseHandlePublished {
+                handle,
+                created_at,
+                expires_at,
+            } = response.outcome
+            else {
+                return Err(unavailable(
+                    "daemon did not publish the response handle".to_owned(),
+                ));
+            };
+            // The daemon's handle must name exactly the content this
+            // process rendered; anything else is refused, never printed.
+            if handle != response_handle_for(content) {
+                return Err(unavailable(
+                    "daemon returned a response handle for different content".to_owned(),
+                ));
+            }
+            Ok(ResponseHandleRecord {
+                handle,
+                created_at,
+                expires_at,
+                content: content.to_owned(),
+            })
+        })
+    }
 }
 
 const OWNER_MOUNT_RESEND_DELAY: Duration = Duration::from_millis(250);
@@ -898,6 +978,7 @@ const OWNER_MOUNT_RESEND_DELAY: Duration = Duration::from_millis(250);
 fn print_cli_application_surface(
     profile: &ProfileRoot,
     project: Option<&Path>,
+    deadline: Instant,
     result: ApplicationSurfaceInvocationResult,
     output: CliToolOutput,
 ) -> Result<()> {
@@ -908,9 +989,9 @@ fn print_cli_application_surface(
             Some(problem.problem.message.clone()),
         )
     });
-    let response_handle_root = cli_response_handle_root(profile, project)?;
+    let response_handles = cli_response_handle_publisher(profile, project, deadline)?;
     let mut rendered = tracedecay::mcp::tools::render_application_surface_result(
-        response_handle_root.as_deref(),
+        response_handles.as_ref(),
         &result,
     )?;
     account_tool_result(project, &mut rendered);

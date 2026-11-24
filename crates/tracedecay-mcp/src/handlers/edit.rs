@@ -5,7 +5,7 @@
 //! renders its whole problem record, and a completed edit reports its touched
 //! files and failure message.
 
-use std::path::Path;
+use crate::response_handles::ResponseHandlePublisher;
 
 use serde_json::Value;
 use tracedecay_contracts::source_edit::SourceEditSurfaceResultV1;
@@ -71,14 +71,14 @@ pub type SourceEditOutcome = std::result::Result<SourceEditSurfaceResultV1, Appl
 /// Run one source-edit tool on `surface` and render its tool result.
 #[tracing::instrument(name = "mcp.edit.total", level = "trace", skip_all)]
 pub async fn source_edit_tool(
-    response_handle_root: Option<&Path>,
+    response_handles: Option<&ResponseHandlePublisher>,
     surface: BindingSurface,
     operation: ApplicationSurfaceOperation,
     args: Value,
     invocation: SourceEditInvocationContext<'_>,
 ) -> Result<ToolResult> {
     let outcome = run_source_edit(surface, operation, &args, invocation).await?;
-    render_source_edit_outcome(response_handle_root, operation, &args, outcome)
+    render_source_edit_outcome(response_handles, operation, &args, outcome)
 }
 
 /// Decode, dispatch, and settle one source-edit tool call. `Err` is an
@@ -146,14 +146,14 @@ pub async fn run_source_edit(
 /// Render a settled source edit: its result, or the daemon's whole problem
 /// record.
 pub fn render_source_edit_outcome(
-    response_handle_root: Option<&Path>,
+    response_handles: Option<&ResponseHandlePublisher>,
     operation: ApplicationSurfaceOperation,
     args: &Value,
     outcome: SourceEditOutcome,
 ) -> Result<ToolResult> {
     match outcome {
-        Ok(result) => render_source_edit_result(response_handle_root, operation, args, &result),
-        Err(refusal) => refusal.render(response_handle_root, args),
+        Ok(result) => render_source_edit_result(response_handles, operation, args, &result),
+        Err(refusal) => refusal.render(response_handles, args),
     }
 }
 
@@ -164,7 +164,7 @@ fn unexpected_outcome() -> TraceDecayError {
 }
 
 fn render_source_edit_result(
-    response_handle_root: Option<&Path>,
+    response_handles: Option<&ResponseHandlePublisher>,
     operation: ApplicationSurfaceOperation,
     args: &Value,
     result: &SourceEditSurfaceResultV1,
@@ -173,10 +173,10 @@ fn render_source_edit_result(
     let success = result.outcome.success();
     let tool_result = match operation {
         ApplicationSurfaceOperation::SourceEditReconcile => {
-            generic_tool_result(response_handle_root, args, &value, Vec::new())
+            generic_tool_result(response_handles, args, &value, Vec::new())
         }
         _ => rendered_tool_result(
-            response_handle_root,
+            response_handles,
             args,
             &value,
             if result.replayed {
@@ -243,9 +243,9 @@ fn move_result_md(result: &tracedecay_contracts::source_edit::MoveResult) -> Str
 
 #[cfg(test)]
 mod tests {
+    use crate::response_handles::test_support::open_registered_handle_store;
     use std::sync::Mutex;
 
-    use tempfile::tempdir;
     use tracedecay_domain::{ManifestDigest, UtcMicros};
 
     use super::*;
@@ -483,10 +483,10 @@ mod tests {
     /// The problem record a refused `str_replace` renders beside its text,
     /// with `isError` set.
     async fn source_edit_refusal(outcome: DaemonInvocationOutcome) -> Value {
-        let project = tempdir().unwrap();
+        let (_handles_harness, handles) = open_registered_handle_store().await;
         let executor = RefusingSourceEditExecutor { outcome };
         let result = source_edit_tool(
-            Some(project.path()),
+            Some(&handles.publisher()),
             BindingSurface::Mcp,
             ApplicationSurfaceOperation::StrReplace,
             json!({"path":"src/lib.rs","old_str":"old","new_str":"new","dry_run":true}),
@@ -637,13 +637,13 @@ mod tests {
         assert!(!problem.to_string().contains("NotFoundOrNotAuthorized"));
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn source_edit_handlers_forward_exact_variants_defaults_and_controls() {
-        let project = tempdir().unwrap();
+        let (_handles_harness, handles) = open_registered_handle_store().await;
         let executor = RecordingSourceEditExecutor::new();
 
         source_edit_tool(
-            Some(project.path()),
+            Some(&handles.publisher()),
             BindingSurface::Mcp,
             ApplicationSurfaceOperation::StrReplace,
             json!({"path":"src/lib.rs","old_str":"old","new_str":"new","dry_run":true}),
@@ -652,7 +652,7 @@ mod tests {
         .await
         .unwrap();
         source_edit_tool(
-            Some(project.path()),
+            Some(&handles.publisher()),
             BindingSurface::Mcp,
             ApplicationSurfaceOperation::MultiStrReplace,
             json!({"path":"src/lib.rs","replacements":[["old","new"]],"dry_run":true}),
@@ -661,7 +661,7 @@ mod tests {
         .await
         .unwrap();
         source_edit_tool(
-            Some(project.path()),
+            Some(&handles.publisher()),
             BindingSurface::Mcp,
             ApplicationSurfaceOperation::InsertAt,
             json!({"path":"src/lib.rs","anchor":"1","content":"new","dry_run":true}),
@@ -670,7 +670,7 @@ mod tests {
         .await
         .unwrap();
         source_edit_tool(
-            Some(project.path()),
+            Some(&handles.publisher()),
             BindingSurface::Mcp,
             ApplicationSurfaceOperation::AstGrepRewrite,
             json!({"path":"src/lib.rs","pattern":"old","rewrite":"new","dry_run":true}),
@@ -679,7 +679,7 @@ mod tests {
         .await
         .unwrap();
         source_edit_tool(
-            Some(project.path()),
+            Some(&handles.publisher()),
             BindingSurface::Mcp,
             ApplicationSurfaceOperation::ReplaceSymbol,
             json!({"symbol":"old","new_source":"fn new() {}","dry_run":true}),
@@ -688,7 +688,7 @@ mod tests {
         .await
         .unwrap();
         source_edit_tool(
-            Some(project.path()),
+            Some(&handles.publisher()),
             BindingSurface::Mcp,
             ApplicationSurfaceOperation::InsertAtSymbol,
             json!({"symbol":"old","content":"fn new() {}","dry_run":true}),
@@ -697,7 +697,7 @@ mod tests {
         .await
         .unwrap();
         source_edit_tool(
-            Some(project.path()),
+            Some(&handles.publisher()),
             BindingSurface::Mcp,
             ApplicationSurfaceOperation::MoveSymbol,
             json!({"symbol":"old","dest_file":"src/new.rs"}),
@@ -706,7 +706,7 @@ mod tests {
         .await
         .unwrap();
         source_edit_tool(
-            Some(project.path()),
+            Some(&handles.publisher()),
             BindingSurface::Mcp,
             ApplicationSurfaceOperation::RenameSymbol,
             json!({
@@ -787,12 +787,12 @@ mod tests {
         }
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn preview_accepts_no_effect_identity_and_returns_expected_state() {
-        let project = tempdir().unwrap();
+        let (_handles_harness, handles) = open_registered_handle_store().await;
         let executor = RecordingSourceEditExecutor::new();
         let result = source_edit_tool(
-            Some(project.path()),
+            Some(&handles.publisher()),
             BindingSurface::Mcp,
             ApplicationSurfaceOperation::StrReplace,
             json!({
@@ -818,11 +818,11 @@ mod tests {
         assert!(result.value.to_string().contains(EXPECTED_STATE));
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn preview_remains_unavailable_until_source_edit_owner_is_installed() {
-        let project = tempdir().unwrap();
+        let (_handles_harness, handles) = open_registered_handle_store().await;
         let error = source_edit_tool(
-            Some(project.path()),
+            Some(&handles.publisher()),
             BindingSurface::Mcp,
             ApplicationSurfaceOperation::StrReplace,
             json!({
@@ -843,9 +843,9 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn apply_requires_preview_idempotency_and_expected_state() {
-        let project = tempdir().unwrap();
+        let (_handles_harness, handles) = open_registered_handle_store().await;
         for args in [
             json!({
                 "path": "src/lib.rs",
@@ -861,7 +861,7 @@ mod tests {
             }),
         ] {
             let error = source_edit_tool(
-                Some(project.path()),
+                Some(&handles.publisher()),
                 BindingSurface::Mcp,
                 ApplicationSurfaceOperation::StrReplace,
                 args,
@@ -875,12 +875,12 @@ mod tests {
         }
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn apply_forwards_exact_idempotency_key_and_expected_state() {
-        let project = tempdir().unwrap();
+        let (_handles_harness, handles) = open_registered_handle_store().await;
         let executor = RecordingSourceEditExecutor::new();
         source_edit_tool(
-            Some(project.path()),
+            Some(&handles.publisher()),
             BindingSurface::Mcp,
             ApplicationSurfaceOperation::StrReplace,
             json!({

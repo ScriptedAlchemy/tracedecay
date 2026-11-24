@@ -4,8 +4,8 @@
 //! The graph-tool owner decodes the typed request and computes the typed
 //! result; every surface renders that result through [`render_search`].
 
+use crate::response_handles::ResponseHandlePublisher;
 use std::future::Future;
-use std::path::Path;
 
 use serde_json::Value;
 use tracedecay_contracts::ApplicationProblemDetailV1;
@@ -391,7 +391,7 @@ where
 /// ahead of the markdown body, or the typed JSON. An unavailable search names
 /// its failure, parked indexing by its cause and remedy.
 pub(crate) fn render_search(
-    response_handle_root: Option<&Path>,
+    response_handles: Option<&ResponseHandlePublisher>,
     args: &Value,
     result: &SearchResultV1,
 ) -> Result<ToolResult> {
@@ -400,12 +400,12 @@ pub(crate) fn render_search(
         SearchResultV1::Complete(complete) => &complete.freshness,
         SearchResultV1::Unavailable(unavailable) => &unavailable.freshness,
     };
-    let rendered = rendered_tool_result(response_handle_root, args, &value, Vec::new(), || {
+    let rendered = rendered_tool_result(response_handles, args, &value, Vec::new(), || {
         format!(
             "{}{}",
             freshness_lines(freshness),
             render_search_md(
-                response_handle_root,
+                response_handles,
                 args.get("query")
                     .and_then(Value::as_str)
                     .unwrap_or_default(),
@@ -521,13 +521,17 @@ fn ranked_search_row(it: &Value) -> RankedRow {
     }
 }
 
-fn render_search_md(response_handle_root: Option<&Path>, query: &str, value: &Value) -> String {
+fn render_search_md(
+    response_handles: Option<&ResponseHandlePublisher>,
+    query: &str,
+    value: &Value,
+) -> String {
     let mut md = Md::new();
     md.heading(2, "Search Results");
     match value.get("results").and_then(Value::as_array) {
         Some(items) if !items.is_empty() => {
             let rows = items.iter().map(ranked_search_row).collect::<Vec<_>>();
-            md.raw(&ranked_rows_md(response_handle_root, query, &rows).0);
+            md.raw(&ranked_rows_md(response_handles, query, &rows).0);
         }
         _ => {
             md.empty_note("No matching symbols.");
@@ -560,6 +564,7 @@ fn render_search_md(response_handle_root: Option<&Path>, query: &str, value: &Va
 
 #[cfg(test)]
 mod tests {
+    use crate::response_handles::test_support::registered_handle_store;
     use serde_json::json;
     use tracedecay_contracts::retrieval::{PrimitiveFreshnessStateV1, SearchRouteMatchV1};
     use tracedecay_domain::errors::TraceDecayError;
@@ -742,6 +747,7 @@ mod tests {
 
     #[test]
     fn markdown_search_trims_the_weak_tail_but_json_returns_every_row() {
+        let (_handles_harness, handles) = registered_handle_store();
         let results = (0..10)
             .map(|ordinal| {
                 let utility = if ordinal < 3 { 2_000_000 } else { 1_000_000 };
@@ -768,9 +774,8 @@ mod tests {
             verified_graph_evidence: None,
             external_import_hint: None,
         });
-        let root = tempfile::tempdir().expect("handle root");
         let text = |args: Value| {
-            render_search(Some(root.path()), &args, &result)
+            render_search(Some(&handles.publisher()), &args, &result)
                 .expect("rendered search")
                 .value["content"][0]["text"]
                 .as_str()

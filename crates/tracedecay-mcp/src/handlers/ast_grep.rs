@@ -5,6 +5,7 @@
 //! repo's bundled tree-sitter grammars into the `ast-grep-core` pattern
 //! engine, no external `ast-grep` binary required).
 
+use crate::response_handles::ResponseHandlePublisher;
 use std::path::Path;
 
 use serde_json::Value;
@@ -112,12 +113,12 @@ fn non_blank(value: Option<String>) -> Option<String> {
 /// Renders a structural-search result as its tool text, with `value` as its
 /// JSON body.
 pub fn render_ast_grep_search(
-    response_handle_root: Option<&Path>,
+    response_handles: Option<&ResponseHandlePublisher>,
     args: &Value,
     value: &Value,
     result: &AstGrepSearchResultV1,
 ) -> Result<ToolResult> {
-    let text = render::finalize(response_handle_root, args, value, || render_md(result));
+    let text = render::finalize(response_handles, args, value, || render_md(result));
     Ok(text_tool_result(&text, Vec::new()))
 }
 

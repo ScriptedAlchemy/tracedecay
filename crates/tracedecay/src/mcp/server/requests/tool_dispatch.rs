@@ -279,7 +279,6 @@ impl McpServer {
         let dispatch: std::pin::Pin<
             Box<dyn std::future::Future<Output = Result<ToolResult>> + Send + '_>,
         > = handle_tool_call_with_registry_options(
-            cg,
             tool_name,
             handler_arguments,
             ToolCallRegistryOptions {

@@ -110,7 +110,7 @@ fn rust_hit(line: u64, matched: &str, line_text: &str) -> Value {
     })
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn ast_grep_search_returns_the_call_and_rejects_text_lookalikes() {
     let fixture = open_fixture(write_checkout_sources).await;
     let literal_zero = call_ast_grep(
@@ -201,7 +201,7 @@ _1 matches; 1 files scanned._
     fixture.harness.shutdown().await;
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn ast_grep_search_path_glob_and_language_select_one_file() {
     let fixture = open_fixture(write_checkout_sources).await;
     let rust_only = call_ast_grep(
@@ -255,7 +255,7 @@ async fn ast_grep_search_path_glob_and_language_select_one_file() {
     fixture.harness.shutdown().await;
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn ast_grep_search_caps_results_and_refuses_invalid_arguments() {
     let fixture = open_fixture(write_capped_calls).await;
 

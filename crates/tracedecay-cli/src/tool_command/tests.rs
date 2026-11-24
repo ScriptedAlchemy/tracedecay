@@ -1507,8 +1507,14 @@ fn application_problem_makes_the_tool_command_fail() {
         requested_format: RequestedOutputFormat::Json,
     };
 
-    let error = print_cli_application_surface(profile, None, result, CliToolOutput::Document)
-        .expect_err("a canonical application problem must fail the CLI process");
+    let error = print_cli_application_surface(
+        profile,
+        None,
+        Instant::now() + Duration::from_secs(5),
+        result,
+        CliToolOutput::Document,
+    )
+    .expect_err("a canonical application problem must fail the CLI process");
     assert_eq!(
         error.to_string(),
         "tracedecay_configuration_set refused the request (configuration_revision_conflict): \

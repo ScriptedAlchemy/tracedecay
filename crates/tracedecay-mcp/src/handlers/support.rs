@@ -1,7 +1,7 @@
 //! Portable handler result and argument helpers used by graph-backed tools.
 
+use crate::response_handles::ResponseHandlePublisher;
 use std::collections::HashSet;
-use std::path::Path;
 use std::time::Duration;
 
 use serde::de::DeserializeOwned;
@@ -68,13 +68,13 @@ pub fn encode_retrieval_cursor(
 /// `touched_files`. The `format:"json"` path is unaffected,
 /// [`render::finalize`] serializes `value` compactly there.
 pub fn rendered_tool_result<F: FnOnce() -> String>(
-    response_handle_root: Option<&Path>,
+    response_handles: Option<&ResponseHandlePublisher>,
     args: &Value,
     value: &Value,
     touched_files: Vec<String>,
     md: F,
 ) -> ToolResult {
-    let text = render::finalize(response_handle_root, args, value, md);
+    let text = render::finalize(response_handles, args, value, md);
     text_tool_result(&text, touched_files).with_structured_result(value.clone())
 }
 
@@ -152,19 +152,23 @@ pub fn text_tool_result(text: &str, touched_files: Vec<String>) -> ToolResult {
 /// [`rendered_tool_result`] for handlers that don't need a custom markdown
 /// renderer, the default body is [`render::generic_md`] over the same value.
 pub fn generic_tool_result(
-    response_handle_root: Option<&Path>,
+    response_handles: Option<&ResponseHandlePublisher>,
     args: &Value,
     value: &Value,
     touched_files: Vec<String>,
 ) -> ToolResult {
-    rendered_tool_result(response_handle_root, args, value, touched_files, || {
+    rendered_tool_result(response_handles, args, value, touched_files, || {
         render::generic_md(value)
     })
 }
 
 /// [`generic_tool_result`] for handlers that touch no files.
-pub fn tool_json(response_handle_root: Option<&Path>, args: &Value, value: &Value) -> ToolResult {
-    generic_tool_result(response_handle_root, args, value, Vec::new())
+pub fn tool_json(
+    response_handles: Option<&ResponseHandlePublisher>,
+    args: &Value,
+    value: &Value,
+) -> ToolResult {
+    generic_tool_result(response_handles, args, value, Vec::new())
 }
 
 /// The single rejection every dispatch family returns for a name it does not own.

@@ -1156,7 +1156,6 @@ pub async fn compute_active_project(
                 .metadata()
                 .map_or(0, |metadata| metadata.len()),
             sessions_db_path: display_path(&layout.sessions_db_path),
-            response_handle_root: display_path(&layout.response_handle_root),
             lcm_payload_root: display_path(&layout.lcm_payload_root),
         },
         branch: ActiveProjectBranchV1 {

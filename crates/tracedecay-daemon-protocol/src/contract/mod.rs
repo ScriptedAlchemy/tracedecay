@@ -400,6 +400,7 @@ pub enum DaemonInvocationOperation {
     FeedbackImpact,
     AffectedTests,
     FeedbackObserve,
+    ResponseHandlePublish,
     PrimitiveImpact,
     PrimitiveAffectedTests,
     PrimitiveTestResults,
@@ -467,6 +468,7 @@ impl DaemonInvocationOperation {
             Self::FeedbackImpact => "feedback_impact",
             Self::AffectedTests => "affected_tests",
             Self::FeedbackObserve => "feedback_observe",
+            Self::ResponseHandlePublish => "response_handle_publish",
             Self::PrimitiveImpact => "primitive_impact",
             Self::PrimitiveAffectedTests => "primitive_affected_tests",
             Self::PrimitiveTestResults => "test_results",
@@ -606,6 +608,15 @@ pub enum DaemonInvocationPayload {
         subject_digest: ManifestDigest,
         observed_at: UtcMicros,
         event: FeedbackSourceEventV1,
+    },
+    /// Publishes a truncated response a client rendered into the routed
+    /// project's registered response-handle store, which only the daemon
+    /// owns.
+    ResponseHandlePublish {
+        content: String,
+        observed_at: UtcMicros,
+        deadline: Deadline,
+        cancellation: CancellationContext,
     },
     PrimitiveImpact {
         request: tracedecay_contracts::retrieval::GraphImpactPrimitiveRequest,
@@ -1191,6 +1202,27 @@ impl DaemonInvocationRequest {
                 subject_digest,
                 observed_at,
                 event,
+            },
+        }
+    }
+
+    pub fn response_handle_publish(
+        request_id: impl Into<String>,
+        content: String,
+        observed_at: UtcMicros,
+        deadline: Deadline,
+        cancellation: CancellationContext,
+    ) -> Self {
+        Self {
+            protocol: DAEMON_INVOCATION_PROTOCOL.to_owned(),
+            revision: DAEMON_INVOCATION_REVISION,
+            request_id: request_id.into(),
+            delivery_route: None,
+            payload: DaemonInvocationPayload::ResponseHandlePublish {
+                content,
+                observed_at,
+                deadline,
+                cancellation,
             },
         }
     }
@@ -1841,6 +1873,9 @@ impl DaemonInvocationRequest {
             DaemonInvocationPayload::FeedbackObserve { .. } => {
                 DaemonInvocationOperation::FeedbackObserve
             }
+            DaemonInvocationPayload::ResponseHandlePublish { .. } => {
+                DaemonInvocationOperation::ResponseHandlePublish
+            }
             DaemonInvocationPayload::PrimitiveImpact { .. } => {
                 DaemonInvocationOperation::PrimitiveImpact
             }
@@ -1972,6 +2007,7 @@ impl DaemonInvocationRequest {
                 | DaemonInvocationOperation::FeedbackImpact
                 | DaemonInvocationOperation::AffectedTests
                 | DaemonInvocationOperation::FeedbackObserve
+                | DaemonInvocationOperation::ResponseHandlePublish
                 | DaemonInvocationOperation::PrimitiveImpact
                 | DaemonInvocationOperation::PrimitiveAffectedTests
                 | DaemonInvocationOperation::PrimitiveTestResults
@@ -2479,6 +2515,18 @@ impl DaemonInvocationRequest {
                 cancellation,
             } => {
                 if !valid_observation_window(&request.observed_at, deadline, cancellation) {
+                    return Err(DaemonInvocationProblem::InvalidRequest);
+                }
+            }
+            DaemonInvocationPayload::ResponseHandlePublish {
+                content,
+                observed_at,
+                deadline,
+                cancellation,
+            } => {
+                if content.is_empty()
+                    || !valid_observation_window(observed_at, deadline, cancellation)
+                {
                     return Err(DaemonInvocationProblem::InvalidRequest);
                 }
             }
@@ -3235,6 +3283,12 @@ pub struct DaemonInvocationResponse {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "status", rename_all = "snake_case")]
 pub enum DaemonInvocationOutcome {
+    /// The routed project's store committed the published response.
+    ResponseHandlePublished {
+        handle: String,
+        created_at: i64,
+        expires_at: i64,
+    },
     GitRead {
         scope: ResolvedScope,
         result: DaemonFeedbackResult,

@@ -315,6 +315,7 @@ type LocalCycleRuntime = AdvisoryRuntime<
 
 struct Harness {
     _root: tempfile::TempDir,
+    _response_handles: tracedecay_global_db::tests::harness::RegisteredGlobalDbHarness,
     _global_owner: RegisteredGlobalDbOwnerV1,
     runtime: LocalCycleRuntime,
     feedback: Arc<FeedbackRuntime>,
@@ -384,11 +385,18 @@ impl Harness {
         let now = now_micros();
         let operation = diagnostics_operation();
         let list = surface_operation("feedback_list");
+        let response_handles_1 =
+            tracedecay_global_db::tests::harness::RegisteredGlobalDbHarness::open(
+                "local-cycle-tests-1",
+            )
+            .await;
         let feedback = Arc::new(
             open_feedback_runtime(
                 database.clone(),
                 root.path(),
-                root.path().join("response-handles"),
+                tracedecay_session_memory::response_handles::ResponseHandleStore::registered(
+                    response_handles_1.registered.clone(),
+                ),
                 resolved.clone(),
                 ProjectSourceAccessSnapshot {
                     scope: resolved.clone(),
@@ -548,6 +556,7 @@ impl Harness {
         .unwrap_or_else(|error| panic!("production advisory owner must open: {error:?}"));
         Self {
             _root: root,
+            _response_handles: response_handles_1,
             _global_owner: global_owner,
             runtime,
             feedback,

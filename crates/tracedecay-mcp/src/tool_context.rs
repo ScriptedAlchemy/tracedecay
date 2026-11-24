@@ -1003,7 +1003,6 @@ pub(crate) mod tests {
             graph_db_path: root.join("graph.db"),
             branch_meta_path: root.join("branch-meta.json"),
             sessions_db_path: root.join("sessions.db"),
-            response_handle_root: root.join("handles"),
             lcm_payload_root: root.join("lcm"),
             dashboard_root: root.join("dashboard"),
             manifest_path: None,

@@ -34,7 +34,6 @@ use tracedecay_contracts::{
     ApplicationContractError, ApplicationOperation, CoverageCompleteness, FreshnessState,
     RequestAdmission, RequestContext,
 };
-use tracedecay_domain::errors::TraceDecayError;
 use tracedecay_domain::feedback::{
     FeedbackDurabilityV1, FeedbackFindingId, FeedbackFindingV1, FeedbackImpactStateV1,
     FeedbackImpactV1, FeedbackTriggerV1,
@@ -234,9 +233,6 @@ impl FeedbackCycleRuntimeError {
     pub fn lsp_failure_class(&self) -> &'static str {
         match self {
             Self::Contract(_) => "feedback-cycle-contract",
-            Self::Runtime(FeedbackRuntimeError::HandleStore(TraceDecayError::LockDeadline {
-                ..
-            })) => "feedback-cycle-handle-store-busy",
             Self::Runtime(_) => "feedback-cycle-runtime",
             Self::NoManagedDiagnosticProviders => "feedback-cycle-provider-missing",
             Self::ProviderSetMismatch => "feedback-cycle-provider-mismatch",

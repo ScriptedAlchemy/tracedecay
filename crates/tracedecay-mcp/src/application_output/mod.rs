@@ -13,6 +13,7 @@ pub fn without_per_call_fields(text: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use crate::response_handles::test_support::registered_handle_store;
     use crate::tools::response_trailers::account_tool_result;
     use serde_json::{Value, json};
     use tracedecay_contracts::retrieval::{CodeGraphReadFreshnessV1, ServedCodeGraphGenerationV1};
@@ -153,6 +154,7 @@ mod tests {
     /// the envelope alone, so any typed tool gains them in either format.
     #[test]
     fn envelope_freshness_and_files_render_the_trailer_and_footer_in_both_formats() {
+        let (_handles_harness, handles) = registered_handle_store();
         let root = tempfile::tempdir().expect("project");
         std::fs::create_dir_all(root.path().join("src")).expect("src");
         std::fs::write(root.path().join("src/lib.rs"), "a".repeat(800)).expect("source");
@@ -183,7 +185,7 @@ mod tests {
         let binding = BindingId::new("binding.mcp.code-callers.v1").unwrap();
         for format in [RequestedOutputFormat::Markdown, RequestedOutputFormat::Json] {
             let mut rendered = render_application_result(
-                Some(root.path()),
+                Some(&handles.publisher()),
                 "code_callers",
                 &binding,
                 &Ok(envelope.clone()),

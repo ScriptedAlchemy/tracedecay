@@ -103,7 +103,7 @@ fn invalid(tool_name: &str, detail: &str) -> Value {
     })
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn info_and_runtime_reads_refuse_arguments_outside_their_typed_request() {
     let fixture = production_composition_fixture().await;
     let root = canonical_existing_identity(&fixture.project_root)
@@ -318,7 +318,7 @@ async fn info_and_runtime_reads_refuse_arguments_outside_their_typed_request() {
 /// `sync` request by name: it answers the code-index scheduler's typed
 /// admission and refuses any argument, since it always reconciles the served
 /// project.
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn admin_sync_answers_the_scheduler_admission_and_refuses_arguments() {
     let fixture = production_composition_fixture().await;
     let root = canonical_existing_identity(&fixture.project_root)
@@ -355,7 +355,7 @@ async fn admin_sync_answers_the_scheduler_admission_and_refuses_arguments() {
 /// a profile reconcile reaches the daemon's profile owner from a project
 /// connection, and an argument outside the action's request is refused
 /// instead of being ignored or normalized.
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn admin_project_answers_through_its_owners_and_refuses_arguments_outside_its_action() {
     let fixture = production_composition_fixture().await;
     let project_id = fixture
@@ -453,7 +453,7 @@ async fn admin_project_answers_through_its_owners_and_refuses_arguments_outside_
 /// registry, storage, cost, and session commands request by name. Each action
 /// answers its established body through the owner, and an argument outside
 /// the named action is refused instead of being silently ignored.
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn admin_cli_actions_answer_through_the_owner_and_refuse_arguments_outside_the_action() {
     let fixture = production_composition_fixture().await;
     let root = canonical_existing_identity(&fixture.project_root)

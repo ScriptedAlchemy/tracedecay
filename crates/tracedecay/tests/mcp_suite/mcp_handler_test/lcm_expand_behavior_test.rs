@@ -39,7 +39,7 @@ fn assert_problem(payload: &Value, kind: &str, code: &str, message: &str) {
     assert!(payload.get("expansion").is_none(), "{payload}");
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn lcm_expand_returns_the_seeded_message_and_refuses_the_wrong_target() {
     let (cg, _env, _dir) = setup_empty_project().await;
     let projection = seed_temporal_lcm_session_message(&cg, SESSION, MESSAGE, BODY, 1).await;
@@ -279,7 +279,7 @@ async fn lcm_expand_returns_the_seeded_message_and_refuses_the_wrong_target() {
     server.shutdown().await;
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn lcm_expand_returns_summary_text_and_the_source_body() {
     let (cg, _env, _dir) = setup_empty_project().await;
     let projection = seed_temporal_lcm_session_message(&cg, SESSION, MESSAGE, BODY, 1).await;

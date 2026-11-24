@@ -24,7 +24,6 @@ use crate::daemon::invocation_executor::InProcessDaemonInvocationExecutor;
 use crate::mcp::tools::{ToolCallRegistryOptions, handle_tool_call_with_registry_options};
 use tracedecay_daemon_protocol::DaemonInvocationExecutor;
 use tracedecay_daemon_service::{DaemonInvocationOutcome, DaemonInvocationRequest};
-use tracedecay_project::project::TraceDecay;
 
 const SCOPE_SET_ID: &str = "scope-set.mcp-execute-proof";
 const ALPHA_NAME: &str = "alpha_marker";
@@ -179,7 +178,6 @@ fn symbol_names(page: &Value) -> Vec<String> {
 }
 
 async fn call_execute(
-    graph: &TraceDecay,
     executor: Option<&InProcessDaemonInvocationExecutor>,
     request_id: &str,
     arguments: Value,
@@ -191,14 +189,9 @@ async fn call_execute(
         application_request_id: Some(request_id),
         ..ToolCallRegistryOptions::default()
     };
-    handle_tool_call_with_registry_options(
-        graph,
-        "tracedecay_multi_root_execute",
-        arguments,
-        options,
-    )
-    .await
-    .expect("multi-root execute dispatch")
+    handle_tool_call_with_registry_options("tracedecay_multi_root_execute", arguments, options)
+        .await
+        .expect("multi-root execute dispatch")
 }
 
 #[test]
@@ -350,7 +343,6 @@ async fn run_multi_root_execute() {
     );
 
     let unavailable = call_execute(
-        &graph,
         None,
         "request.mcp.multi-root-execute.unavailable",
         execute_arguments(SCOPE_SET_ID, 1, &digest, 0),
@@ -379,7 +371,6 @@ async fn run_multi_root_execute() {
     );
 
     let malformed = call_execute(
-        &graph,
         Some(&executor),
         "request.mcp.multi-root-execute.malformed",
         json!({
@@ -399,7 +390,6 @@ async fn run_multi_root_execute() {
     );
 
     let page_zero = call_execute(
-        &graph,
         Some(&executor),
         "request.mcp.multi-root-execute.page-zero",
         execute_arguments(SCOPE_SET_ID, 1, &digest, 0),
@@ -441,7 +431,6 @@ async fn run_multi_root_execute() {
     );
 
     let stale = call_execute(
-        &graph,
         Some(&executor),
         "request.mcp.multi-root-execute.stale",
         execute_arguments(SCOPE_SET_ID, 1, &format!("sha256:{}", "a".repeat(64)), 0),
@@ -458,7 +447,6 @@ async fn run_multi_root_execute() {
     );
 
     let missing = call_execute(
-        &graph,
         Some(&executor),
         "request.mcp.multi-root-execute.missing",
         execute_arguments("scope-set.mcp-execute-proof.missing", 1, &digest, 0),
@@ -475,7 +463,6 @@ async fn run_multi_root_execute() {
     );
 
     let next_page = call_execute(
-        &graph,
         Some(&executor),
         "request.mcp.multi-root-execute.next-page",
         execute_arguments(SCOPE_SET_ID, 1, &digest, 1),

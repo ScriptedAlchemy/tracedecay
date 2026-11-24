@@ -61,6 +61,7 @@ pub(super) fn feedback_observation_operation(
         | DaemonInvocationOperation::LspReconnect
         | DaemonInvocationOperation::LspDetach => FeedbackOperationV1::LspSession,
         DaemonInvocationOperation::FeedbackObserve
+        | DaemonInvocationOperation::ResponseHandlePublish
         | DaemonInvocationOperation::PrimitiveRead
         | DaemonInvocationOperation::CodeExactOccurrence
         | DaemonInvocationOperation::CodePhraseSearch
@@ -138,6 +139,7 @@ pub(super) fn invocation_response_outcome(
         | DaemonInvocationOutcome::WorkflowApplication { .. }
         | DaemonInvocationOutcome::HandoffApplication { .. }
         | DaemonInvocationOutcome::ObservationAccepted
+        | DaemonInvocationOutcome::ResponseHandlePublished { .. }
         | DaemonInvocationOutcome::LspOpened { .. }
         | DaemonInvocationOutcome::LspAcknowledged { .. }
         | DaemonInvocationOutcome::LspReconnected { .. }

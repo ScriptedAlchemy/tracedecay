@@ -331,7 +331,6 @@ async fn fact_store_curate_forwards_only_bounds_and_preserves_canonical_success(
     let request_id = RequestId::new("request.retained.mcp.fact-store-curate").expect("request id");
 
     let result = handle_tool_call_with_registry_options(
-        &cg,
         "tracedecay_fact_store_curate",
         json!({
             "fact_review_limit": 17,
@@ -384,7 +383,6 @@ async fn fact_store_curate_expired_deadline_does_not_mutate() {
     };
 
     let error = handle_tool_call_with_registry_options(
-        &cg,
         "tracedecay_fact_store_curate",
         json!({"fact_review_limit": 5, "min_confidence_millionths": 700_000}),
         ToolCallRegistryOptions {
@@ -573,7 +571,6 @@ async fn fact_store_curate_rejects_a_partial_receipt_from_another_scope() {
     );
 
     let result = handle_tool_call_with_registry_options(
-        &cg,
         "tracedecay_fact_store_curate",
         json!({"fact_review_limit": 8, "min_confidence_millionths": 730_000}),
         ToolCallRegistryOptions {
@@ -616,7 +613,6 @@ async fn fact_store_curate_pre_commit_cancellation_does_not_mutate() {
     assert!(cancellation.cancel(UtcMicros(1)));
 
     let result = handle_tool_call_with_registry_options(
-        &cg,
         "tracedecay_fact_store_curate",
         json!({"fact_review_limit": 5, "min_confidence_millionths": 700_000}),
         ToolCallRegistryOptions {
@@ -713,7 +709,6 @@ async fn a_stale_refresh_frontier_reaches_mcp_as_typed_detail() {
 
     for format in ["json", "markdown"] {
         let result = handle_tool_call_with_registry_options(
-            &cg,
             "tracedecay_session_refresh_begin",
             json!({
                 "scope": { "kind": "project" },

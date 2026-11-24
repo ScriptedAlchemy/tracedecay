@@ -113,7 +113,6 @@ async fn available_configuration_effect_reaches_canonical_executor() {
             .unwrap();
 
     let result = handle_tool_call_with_registry_options(
-        &cg,
         "tracedecay_configuration_set",
         request,
         ToolCallRegistryOptions {
@@ -217,7 +216,6 @@ async fn every_other_configuration_effect_reaches_the_authoritative_daemon_execu
         ))
         .unwrap();
         let result = handle_tool_call_with_registry_options(
-            &cg,
             tool_name,
             request.clone(),
             ToolCallRegistryOptions {
@@ -322,7 +320,6 @@ async fn every_configuration_read_and_preview_reaches_its_canonical_daemon_handl
 
     for (tool_name, _, request) in &reads {
         let result = handle_tool_call_with_registry_options(
-            &cg,
             tool_name,
             request.clone(),
             ToolCallRegistryOptions {

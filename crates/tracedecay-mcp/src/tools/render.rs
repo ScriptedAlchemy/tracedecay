@@ -1,19 +1,17 @@
 //! Output-format rendering for MCP tool responses.
 
 use std::fmt::Write as _;
-use std::path::Path;
 
 use serde_json::Value;
 
 use crate::context_headings::CONTEXT_PRIORITY_HEADINGS;
 use crate::path_tree::format_compact_path_list;
 use crate::response_handles::{
-    RESPONSE_HANDLE_TTL_SECS, RESPONSE_RETRIEVE_TOOL, ResponseHandleRecord,
-    note_response_handle_store_skipped_no_project_root, observe_response_truncation,
-    store_response_handle,
+    RESPONSE_HANDLE_TTL_SECS, RESPONSE_RETRIEVE_TOOL, ResponseHandlePublisher,
+    ResponseHandleRecord, note_response_handle_store_skipped_no_project_root,
+    observe_response_truncation, store_response_handle,
 };
 use tracedecay_daemon_protocol::{RequestedOutputFormat, requested_output_format};
-use tracedecay_domain::errors::TraceDecayError;
 use tracedecay_mcp_catalog::MAX_RESPONSE_CHARS;
 use tracedecay_runtime_core::text::utf8_prefix_at_or_before;
 use tracedecay_runtime_core::tracedecay::current_timestamp;
@@ -58,7 +56,7 @@ pub fn wants_json(args: &Value) -> bool {
 }
 
 pub fn finalize<F>(
-    response_handle_root: Option<&Path>,
+    response_handles: Option<&ResponseHandlePublisher>,
     args: &Value,
     value: &Value,
     md: F,
@@ -66,12 +64,12 @@ pub fn finalize<F>(
 where
     F: FnOnce() -> String,
 {
-    finalize_with_format(response_handle_root, parse_format(args), value, md)
+    finalize_with_format(response_handles, parse_format(args), value, md)
 }
 
 #[tracing::instrument(name = "mcp.server.response.render", level = "trace", skip_all)]
 pub fn finalize_with_format<F>(
-    response_handle_root: Option<&Path>,
+    response_handles: Option<&ResponseHandlePublisher>,
     format: RequestedOutputFormat,
     value: &Value,
     md: F,
@@ -82,14 +80,14 @@ where
     match format {
         RequestedOutputFormat::Json => {
             let json = value.to_string();
-            truncated_json_envelope_with_handle(response_handle_root, &json)
+            truncated_json_envelope_with_handle(response_handles, &json)
         }
         RequestedOutputFormat::Markdown => {
             let text = md();
             if text.is_empty() {
                 return text;
             }
-            truncated_markdown_with_handle(response_handle_root, &text)
+            truncated_markdown_with_handle(response_handles, &text)
         }
     }
 }
@@ -101,7 +99,7 @@ where
 /// a preview but also includes explicit recovery metadata so clients can tell
 /// why no handle was emitted and what to retry.
 pub fn truncated_json_envelope_with_handle(
-    response_handle_root: Option<&Path>,
+    response_handles: Option<&ResponseHandlePublisher>,
     formatted: &str,
 ) -> String {
     if formatted.len() <= MAX_RESPONSE_CHARS {
@@ -109,7 +107,7 @@ pub fn truncated_json_envelope_with_handle(
     }
     let started = std::time::Instant::now();
     let now = current_timestamp();
-    let handle = prepare_truncated_response_handle(response_handle_root, formatted);
+    let handle = prepare_truncated_response_handle(response_handles, formatted);
     let original_chars = formatted.chars().count();
     let mut end = formatted.len().min(MAX_RESPONSE_CHARS.saturating_sub(1024));
     loop {
@@ -159,7 +157,7 @@ pub fn truncated_json_envelope_with_handle(
                 // failed/absent handle means the preview is all that survives.
                 handle.record.is_some(),
                 now,
-                truncation_handle_status(response_handle_root, &handle),
+                truncation_handle_status(response_handles, &handle),
                 started.elapsed(),
             );
             return text;
@@ -169,7 +167,7 @@ pub fn truncated_json_envelope_with_handle(
 }
 
 pub fn markdown_preview_with_handle(
-    response_handle_root: Option<&Path>,
+    response_handles: Option<&ResponseHandlePublisher>,
     full_text: &str,
     preview: &str,
 ) -> String {
@@ -177,17 +175,20 @@ pub fn markdown_preview_with_handle(
         return full_text.to_string();
     }
     if full_text == preview {
-        return truncated_markdown_with_handle(response_handle_root, full_text);
+        return truncated_markdown_with_handle(response_handles, full_text);
     }
-    markdown_preview_truncation_with_handle(response_handle_root, full_text, preview)
+    markdown_preview_truncation_with_handle(response_handles, full_text, preview)
 }
 
-fn truncated_markdown_with_handle(response_handle_root: Option<&Path>, text: &str) -> String {
+fn truncated_markdown_with_handle(
+    response_handles: Option<&ResponseHandlePublisher>,
+    text: &str,
+) -> String {
     if text.len() <= MAX_RESPONSE_CHARS {
         return text.to_string();
     }
     render_markdown_truncation_with_handle(
-        response_handle_root,
+        response_handles,
         text,
         text.len(),
         |end| markdown_truncation_preview(text, end),
@@ -202,12 +203,12 @@ fn truncated_markdown_with_handle(response_handle_root: Option<&Path>, text: &st
 }
 
 fn markdown_preview_truncation_with_handle(
-    response_handle_root: Option<&Path>,
+    response_handles: Option<&ResponseHandlePublisher>,
     full_text: &str,
     preview: &str,
 ) -> String {
     render_markdown_truncation_with_handle(
-        response_handle_root,
+        response_handles,
         full_text,
         preview.len(),
         |end| {
@@ -228,7 +229,7 @@ fn markdown_preview_truncation_with_handle(
 }
 
 fn render_markdown_truncation_with_handle(
-    response_handle_root: Option<&Path>,
+    response_handles: Option<&ResponseHandlePublisher>,
     full_text: &str,
     mut end: usize,
     mut preview_for_end: impl FnMut(usize) -> String,
@@ -236,7 +237,7 @@ fn render_markdown_truncation_with_handle(
 ) -> String {
     let started = std::time::Instant::now();
     let now = current_timestamp();
-    let handle = prepare_truncated_response_handle(response_handle_root, full_text);
+    let handle = prepare_truncated_response_handle(response_handles, full_text);
     end = end.min(MAX_RESPONSE_CHARS.saturating_sub(MARKDOWN_TRUNCATION_RESERVED_CHARS));
     loop {
         let preview = preview_for_end(end);
@@ -247,7 +248,7 @@ fn render_markdown_truncation_with_handle(
                 rendered.len(),
                 handle.record.is_some(),
                 now,
-                truncation_handle_status(response_handle_root, &handle),
+                truncation_handle_status(response_handles, &handle),
                 started.elapsed(),
             );
             return rendered;
@@ -402,59 +403,49 @@ struct TruncatedResponseHandle {
 }
 
 fn truncation_handle_status(
-    response_handle_root: Option<&Path>,
+    response_handles: Option<&ResponseHandlePublisher>,
     handle: &TruncatedResponseHandle,
 ) -> &'static str {
     if handle.record.is_some() {
         "stored"
-    } else if response_handle_root.is_none() {
-        "no_project_root"
+    } else if response_handles.is_none() {
+        "no_handle_store"
     } else {
         "store_failed"
     }
 }
 
 /// The adapter records the full typed error in internal telemetry. Public
-/// output must not disclose project-local filesystem paths.
-fn handle_store_failure_status(error: &TraceDecayError) -> Value {
-    if matches!(error, TraceDecayError::LockDeadline { .. }) {
-        return serde_json::json!({
-            "reason_code": "handle_store_busy",
-            "message": "The local response-handle cache stayed busy with other writers past its admission deadline, so no retrieval handle is available.",
-            "retryable": true,
-            "retry_instruction": "Re-run the original MCP tool to regenerate the full response and a fresh handle."
-        });
-    }
+/// output must not disclose local paths or store internals.
+fn handle_store_failure_status() -> Value {
     serde_json::json!({
         "reason_code": "handle_store_failed",
-        "message": "The full response could not be cached locally, so no retrieval handle is available.",
+        "message": "The full response could not be published to the project's response-handle store, so no retrieval handle is available.",
         "retryable": true,
-        "retry_instruction": "Fix the local project cache path or filesystem error, then re-run the original MCP tool to regenerate the full response and a fresh handle."
+        "retry_instruction": "Check `tracedecay_status` for the project store state, then re-run the original MCP tool to regenerate the full response and a fresh handle."
     })
 }
 
 fn prepare_truncated_response_handle(
-    response_handle_root: Option<&Path>,
+    response_handles: Option<&ResponseHandlePublisher>,
     text: &str,
 ) -> TruncatedResponseHandle {
-    if let Some(root) = response_handle_root {
+    if let Some(store) = response_handles {
         let match_result = {
             let _span = tracing::trace_span!("mcp.server.response.handle_store").entered();
-            // ponytail: the truncating render path is synchronous (it sits
-            // under dozens of sync handler helpers), so this small bounded
-            // write blocks the executor worker rendering the response. Move
-            // it to `native_runtime::spawn_blocking` if the render path goes
-            // async or the write shows up in worker stall timings.
-            store_response_handle(root, text, current_timestamp())
+            // The truncating render path is synchronous (it sits under dozens
+            // of sync handler helpers), so publication parks this worker
+            // through the shared native runtime until the store commits.
+            store_response_handle(store, text, current_timestamp())
         };
         match match_result {
             Ok(record) => TruncatedResponseHandle {
                 record: Some(record),
                 unavailable: None,
             },
-            Err(error) => TruncatedResponseHandle {
+            Err(_) => TruncatedResponseHandle {
                 record: None,
-                unavailable: Some(handle_store_failure_status(&error)),
+                unavailable: Some(handle_store_failure_status()),
             },
         }
     } else {
@@ -463,7 +454,7 @@ fn prepare_truncated_response_handle(
             record: None,
             unavailable: Some(serde_json::json!({
                 "reason_code": "handle_storage_unavailable",
-                "message": "This response was truncated in a context without a project-local cache path, so no retrieval handle could be created.",
+                "message": "This response was truncated on a surface with no admitted response-handle store, so no retrieval handle could be created.",
                 "retryable": true,
                 "retry_instruction": "Re-run the original MCP tool from a project-scoped tracedecay session if you need a retrievable full response."
             })),

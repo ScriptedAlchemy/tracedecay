@@ -9,7 +9,7 @@ use std::sync::Arc;
 use tempfile::TempDir;
 use tracedecay::mcp::McpServer;
 use tracedecay_mcp::transport::{ChannelTransport, McpTransport};
-use tracedecay_project::project::{TraceDecay, TraceDecayOpenOptions};
+use tracedecay_project::project::TraceDecayOpenOptions;
 use tracedecay_project::test_support::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay_runtime_core::path_safety::canonical_root_identity;
 
@@ -119,10 +119,6 @@ pub(crate) fn spec_initialize_request(id: Value) -> String {
             "clientInfo": {"name": "tracedecay-protocol-test", "version": "0"}
         }),
     )
-}
-
-pub(crate) fn response_handle_dir(cg: &TraceDecay) -> PathBuf {
-    cg.store_layout().response_handle_root.clone()
 }
 
 pub(crate) fn jsonrpc_notification(method: &str) -> String {
