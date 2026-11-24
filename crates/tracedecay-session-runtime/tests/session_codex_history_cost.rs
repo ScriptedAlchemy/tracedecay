@@ -3,6 +3,9 @@
 //! against the same store. This probe owns its process so writer telemetry
 //! includes only its own work.
 
+// The shared support module reads WAL frames through Unix file APIs.
+#![cfg(unix)]
+
 #[path = "support/session_store_read_cost.rs"]
 pub mod support;
 
