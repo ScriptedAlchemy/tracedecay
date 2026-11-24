@@ -678,14 +678,27 @@ impl StoreTelemetrySamplingRegistry {
             .store(false, Ordering::Release);
     }
 
-    /// Retain scan cursors for every registered project, including those with
-    /// no mounted graph. Mounted-only pruning would restart a registered
-    /// scope at the same preserved directory prefix on every tick.
+    /// Retain scan cursors and busy-store deferral counts for every
+    /// registered project, including those with no mounted graph.
+    /// Mounted-only pruning would restart a registered scope at the same
+    /// preserved directory prefix, or at zero deferrals, on every tick.
     pub fn retain_text_artifact_scan_projects(&self, active_data_roots: &BTreeSet<PathBuf>) {
         self.text_artifact_scans
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .retain(|_, entry| active_data_roots.contains(&entry.data_root));
+        // Busy deferrals are keyed by code-index store root, which lives under
+        // a project data root, never at a checkout path: pruning them by
+        // mounted checkout would reset every count each tick and the bounded
+        // wait would never be reached.
+        self.generation_store_busy
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .retain(|store_root, _| {
+                active_data_roots
+                    .iter()
+                    .any(|data_root| store_root.starts_with(data_root))
+            });
     }
 
     pub fn retain_project_maintenance_state(&self, active_projects: &BTreeSet<PathBuf>) {
@@ -694,10 +707,6 @@ impl StoreTelemetrySamplingRegistry {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .retain(|project, _| active_projects.contains(project));
         self.graph_staging_release
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .retain(|project, _| active_projects.contains(project));
-        self.generation_store_busy
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .retain(|project, _| active_projects.contains(project));
@@ -1856,6 +1865,38 @@ mod store_file_identity_tests {
 #[cfg(test)]
 mod registry_tests {
     use super::StoreTelemetrySamplingRegistry;
+
+    /// The daemon prunes per-project state by mounted checkout every tick.
+    /// Busy deferrals are keyed by the code-index store root under the data
+    /// root, so that pruning must not reset them, or the bounded wait after
+    /// repeated `GenerationStoreBusy` outcomes is never reached.
+    #[test]
+    fn busy_store_deferrals_survive_checkout_pruning_and_follow_data_roots() {
+        let registry = StoreTelemetrySamplingRegistry::default();
+        let checkout = std::path::PathBuf::from("/work/alpha");
+        let data_root = std::path::PathBuf::from("/profile/projects/alpha");
+        let store_root = data_root.join("code-index-v1").join("scope-hash");
+        for _ in 0..3 {
+            registry.record_generation_store_busy(&store_root);
+        }
+
+        registry.retain_project_maintenance_state(&std::collections::BTreeSet::from([
+            checkout.clone()
+        ]));
+        assert_eq!(registry.generation_store_busy_deferrals(&store_root), 3);
+
+        registry.retain_text_artifact_scan_projects(&std::collections::BTreeSet::from([data_root]));
+        assert_eq!(registry.generation_store_busy_deferrals(&store_root), 3);
+
+        registry.retain_text_artifact_scan_projects(&std::collections::BTreeSet::from([
+            std::path::PathBuf::from("/profile/projects/beta"),
+        ]));
+        assert_eq!(
+            registry.generation_store_busy_deferrals(&store_root),
+            0,
+            "an unregistered project's deferrals are dropped"
+        );
+    }
 
     #[test]
     fn graph_replay_release_backoff_widens_and_recovers() {
