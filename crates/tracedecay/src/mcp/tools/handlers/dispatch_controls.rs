@@ -3,6 +3,7 @@
 //! admitted.
 
 use serde_json::Value;
+use tracedecay_automation_runtime::automation::registered_run_store::RegisteredAutomationRunStore;
 use tracedecay_contracts::graph_tool::GraphToolCompletionV1;
 use tracedecay_contracts::{CancellationSignal, Deadline};
 use tracedecay_domain::errors::{Result, TraceDecayError};
@@ -56,6 +57,26 @@ fn admitted_control(
     Ok((deadline, cancellation))
 }
 
+/// The serving project's admitted session store as its automation run-state
+/// authority; run reads never fall back to another project's history.
+fn automation_run_store(
+    cg: &TraceDecay,
+    options: &ToolCallRegistryOptions<'_>,
+) -> Result<RegisteredAutomationRunStore> {
+    let database = options
+        .session_authorities
+        .project
+        .cloned()
+        .ok_or_else(|| {
+            TraceDecayError::project_route(
+                "automation_run_store_unavailable",
+                true,
+                "the project session store holding automation run history is not admitted",
+            )
+        })?;
+    RegisteredAutomationRunStore::admit(database, cg.store_layout().dashboard_root.clone())
+}
+
 #[tracing::instrument(name = "mcp.dispatch.automation_read", level = "trace", skip_all)]
 pub(super) async fn compute_automation_read(
     cg: &TraceDecay,
@@ -63,7 +84,6 @@ pub(super) async fn compute_automation_read(
     args: &Value,
     options: &ToolCallRegistryOptions<'_>,
 ) -> Result<GraphToolCompletionV1> {
-    let dashboard_root = cg.store_layout().dashboard_root.as_path();
     let profile_root = options.profile.map(ProfileRoot::data_dir);
     let skills = SkillReadAuthority {
         profile_root,
@@ -72,13 +92,13 @@ pub(super) async fn compute_automation_read(
     };
     match operation {
         ApplicationSurfaceOperation::AutomationRunList => {
-            compute_run_list(dashboard_root, args).await
+            compute_run_list(&automation_run_store(cg, options)?, args).await
         }
         ApplicationSurfaceOperation::AutomationRunView => {
-            compute_run_view(dashboard_root, args).await
+            compute_run_view(&automation_run_store(cg, options)?, args).await
         }
         ApplicationSurfaceOperation::AutomationRunArtifactView => {
-            compute_run_artifact_view(dashboard_root, args).await
+            compute_run_artifact_view(&automation_run_store(cg, options)?, args).await
         }
         ApplicationSurfaceOperation::SkillList => compute_skill_list(&skills, args).await,
         ApplicationSurfaceOperation::SkillView => compute_skill_view(&skills, args).await,
@@ -91,7 +111,6 @@ pub(super) async fn compute_automation_read(
                 cg,
                 args,
                 AnalyticsAuthority {
-                    profile_root,
                     analytics_db: options.global_db.map(RegisteredGlobalDbLeaseV1::as_ref),
                     project_sessions: options
                         .session_authorities

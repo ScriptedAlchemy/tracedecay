@@ -14,6 +14,7 @@ use tracedecay_automation_runtime::automation::effect_runtime::contract_error;
 use tracedecay_automation_runtime::automation::effect_runtime::settlement::{
     AdmittedAutomationEffectRequest, AutomationEffectAdmission, AutomationEffectAuthority,
 };
+use tracedecay_automation_runtime::automation::registered_run_store::RegisteredAutomationRunStore;
 use tracedecay_contracts::retained_surfaces::{
     AutomationRunRequestV1, RetainedSurfaceOperation, retained_surface_application_operation,
 };
@@ -38,7 +39,7 @@ pub async fn prepare(
     invocation: &DaemonInvocationService,
     memory: &TraceDecay,
     project_root: &Path,
-    dashboard_root: &Path,
+    runs: &RegisteredAutomationRunStore,
     request_id: RequestId,
     deadline: Deadline,
     cancellation: &CancellationSignal,
@@ -98,7 +99,7 @@ pub async fn prepare(
                     observed_at,
                     configuration_digest,
                     request,
-                    dashboard_root: dashboard_root.to_path_buf(),
+                    runs: runs.clone(),
                 },
                 || memory.project_memory_owner(),
                 |run_id, read_control| async move {

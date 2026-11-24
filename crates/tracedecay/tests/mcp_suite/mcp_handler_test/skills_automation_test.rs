@@ -13,7 +13,7 @@ use tracedecay_automation_runtime::automation::managed_skills::{
 };
 use tracedecay_automation_runtime::automation::run_ledger::{
     AutomationRunArtifactKind, AutomationRunLedgerRecord, AutomationRunStatus, AutomationTrigger,
-    append_run_record, write_run_artifact,
+    write_run_artifact,
 };
 #[cfg(feature = "test-transport")]
 use tracedecay_automation_runtime::automation::skill_usage::{
@@ -44,9 +44,9 @@ async fn automation_run_artifact_mcp_tool_reads_verified_payload() {
     )
     .await
     .unwrap();
-    append_run_record(
-        &dashboard_root,
-        &AutomationRunLedgerRecord {
+    cg.automation_run_store()
+        .unwrap()
+        .append_run_record(&AutomationRunLedgerRecord {
             schema_version: 2,
             run_id: run_id.to_string(),
             trigger: AutomationTrigger::Dashboard,
@@ -83,10 +83,9 @@ async fn automation_run_artifact_mcp_tool_reads_verified_payload() {
             started_at: "1782283199".to_string(),
             completed_at: "1782283200".to_string(),
             completed_at_micros: Some(1_782_283_200_000_000),
-        },
-    )
-    .await
-    .unwrap();
+        })
+        .await
+        .unwrap();
 
     let server = real_mcp_server(cg).await;
     let markdown_result = server

@@ -14,6 +14,7 @@ use crate::automation::lifecycle::{
     AgentTaskRunContext, AutomationRunLedgerPublication, AutomationRunPublication,
     AutomationRunSettlementGuard, RetainedAutomationRun,
 };
+use crate::automation::registered_run_store::RegisteredAutomationRunStore;
 use crate::automation::run_ledger::{
     AutomationRunLedgerRecord, AutomationRunLedgerTaskSummary, AutomationTrigger,
 };
@@ -167,7 +168,7 @@ async fn run_skill_writer_with_backend_and_retrieval_publication(
         SkillWriterStoreRuntime {
             host_io: cg.host_io,
             host_home: cg.host_home.clone(),
-            dashboard_root: cg.dashboard_root.clone(),
+            runs: cg.automation_run_store()?,
             sessions_db,
             analytics_project_root: Some(&cg.project_root),
             analytics_db: Some(cg.profile_database.as_ref()),
@@ -186,7 +187,7 @@ async fn run_skill_writer_with_backend_and_retrieval_publication(
 pub(super) struct SkillWriterStoreRuntime<'a> {
     pub(super) host_io: HostIo,
     pub(super) host_home: Option<PathBuf>,
-    pub(super) dashboard_root: PathBuf,
+    pub(super) runs: RegisteredAutomationRunStore,
     pub(super) sessions_db: RegisteredGlobalDbLeaseV1,
     pub(super) analytics_project_root: Option<&'a Path>,
     pub(super) analytics_db: Option<&'a RegisteredGlobalDb>,
@@ -241,14 +242,14 @@ fn run_skill_writer_for_store_with_publication_inner<'a>(
         let SkillWriterStoreRuntime {
             host_io,
             host_home,
-            dashboard_root,
+            runs,
             sessions_db,
             analytics_project_root,
             analytics_db,
             authority,
         } = runtime;
         let mut run = AgentTaskRunContext::new(
-            dashboard_root,
+            runs,
             sessions_db,
             options.run_id.clone(),
             "skill_writer",
@@ -319,7 +320,7 @@ fn run_skill_writer_for_store_with_publication_inner<'a>(
         // stale snapshot must not block skill writing.
         if let Err(err) = crate::automation::outcomes::refresh_skill_outcomes(
             &profile_root,
-            &run.dashboard_root,
+            run.runs.dashboard_root(),
             current_timestamp(),
         )
         .await

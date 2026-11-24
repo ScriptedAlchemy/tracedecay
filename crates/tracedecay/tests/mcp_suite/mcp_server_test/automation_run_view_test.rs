@@ -13,7 +13,6 @@ use tempfile::TempDir;
 use tracedecay_automation_runtime::automation::backend::{AgentTaskFailureClass, AgentTaskKind};
 use tracedecay_automation_runtime::automation::run_ledger::{
     AutomationRunArtifact, AutomationRunLedgerRecord, AutomationRunStatus, AutomationTrigger,
-    append_run_record, run_ledger_path,
 };
 
 const EXACT_RUN_ID: &str = "run-view-exact";
@@ -136,7 +135,7 @@ async fn automation_run_view_returns_the_exact_active_project_record() {
     fs::create_dir_all(project.join("src")).unwrap();
     fs::write(project.join("src/lib.rs"), "pub fn fixture() {}\n").unwrap();
     let (cg, _env) = init_test_project(project).await;
-    let dashboard_root = cg.store_layout().dashboard_root.clone();
+    let run_store = cg.automation_run_store().unwrap();
 
     let mut queued = base_record(
         EXACT_RUN_ID,
@@ -148,7 +147,7 @@ async fn automation_run_view_returns_the_exact_active_project_record() {
     );
     queued.model = Some(QUEUED_MODEL.to_owned());
     queued.reviewed_count = 1;
-    append_run_record(&dashboard_root, &queued).await.unwrap();
+    run_store.append_run_record(&queued).await.unwrap();
 
     let mut succeeded = base_record(
         EXACT_RUN_ID,
@@ -172,9 +171,7 @@ async fn automation_run_view_returns_the_exact_active_project_record() {
         summary: Some("handoff ready".to_owned()),
         created_at: "1782283200".to_owned(),
     }];
-    append_run_record(&dashboard_root, &succeeded)
-        .await
-        .unwrap();
+    run_store.append_run_record(&succeeded).await.unwrap();
 
     let mut failed = base_record(
         FAILED_RUN_ID,
@@ -192,10 +189,8 @@ async fn automation_run_view_returns_the_exact_active_project_record() {
     failed.error = Some("backend_disabled".to_owned());
     failed.error_classification = Some(AgentTaskFailureClass::Permanent);
     failed.error_retryable = Some(false);
-    append_run_record(&dashboard_root, &failed).await.unwrap();
+    run_store.append_run_record(&failed).await.unwrap();
 
-    let ledger_path = run_ledger_path(&dashboard_root);
-    let ledger_before = fs::read(&ledger_path).unwrap();
     let server = real_mcp_server(cg).await;
     let responses = run_server_with_messages(
         server,
@@ -228,11 +223,5 @@ async fn automation_run_view_returns_the_exact_active_project_record() {
         &response_with_id(&responses, json!(6)),
         6,
         "invalid arguments for tracedecay_automation_run_view: missing field `run_id`",
-    );
-
-    assert_eq!(
-        fs::read(&ledger_path).unwrap(),
-        ledger_before,
-        "view must not rewrite the automation ledger"
     );
 }

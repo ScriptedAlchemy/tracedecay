@@ -90,9 +90,7 @@ async fn memory_curator_resumes_from_the_durable_next_page_cursor() {
     let mut expected = vec![facts.winner_id, facts.loser_id];
     expected.sort();
     assert_eq!(seen_sorted, expected);
-    let records = load_run_records(&cg.store_layout().dashboard_root, 10)
-        .await
-        .unwrap();
+    let records = run_store(&cg).load_run_records(10).await.unwrap();
     assert_eq!(
         records[0].validation_report.as_ref().unwrap()["pagination"]["resume_after_fact_id"],
         Value::Null,

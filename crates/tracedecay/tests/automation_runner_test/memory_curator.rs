@@ -603,9 +603,7 @@ async fn memory_curator_repairs_then_applies_validated_ops_and_records_ledger() 
         json!(1)
     );
 
-    let records = load_run_records(&cg.store_layout().dashboard_root, 10)
-        .await
-        .unwrap();
+    let records = run_store(&cg).load_run_records(10).await.unwrap();
     assert_eq!(records.len(), 1);
     assert_eq!(records[0].run_id, run.run_id);
     assert_eq!(records[0].accepted_count, 1);
@@ -852,9 +850,7 @@ async fn memory_curator_quarantines_legacy_output_after_bounded_repair_exhaustio
         fact_exists(&cg, &facts.loser_id, run_control.read_control()).await,
         "quarantined validation failures must not mutate memory"
     );
-    let records = load_run_records(&cg.store_layout().dashboard_root, 10)
-        .await
-        .unwrap();
+    let records = run_store(&cg).load_run_records(10).await.unwrap();
     assert_eq!(records.len(), 1);
     assert_eq!(records[0].status, AutomationRunStatus::Failed);
     assert!(
@@ -1027,7 +1023,8 @@ async fn memory_curator_stops_before_backend_or_apply_when_caller_is_interrupted
         .expect("interrupted run must retain the seeded winner");
     assert_eq!(winner_tags_after, winner_tags_before);
     assert!(
-        load_run_records(&cg.store_layout().dashboard_root, 10)
+        run_store(&cg)
+            .load_run_records(10)
             .await
             .unwrap()
             .is_empty(),

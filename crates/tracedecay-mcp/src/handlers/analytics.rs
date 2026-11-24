@@ -7,11 +7,11 @@
 //! ([`tracedecay_global_db::RegisteredGlobalDb::query_analytics_tool_counts`],
 //! [`tracedecay_global_db::RegisteredGlobalDb::query_analytics_hint_counts`],
 //! [`tracedecay_dashboard_api::analytics_api::hint_summary_from_counts`],
-//! [`tracedecay_automation_runtime::automation::run_ledger::load_run_records_page`]) rather than
+//! [`tracedecay_automation_runtime::automation::registered_run_store::RegisteredAutomationRunStore::load_run_records_page`]) rather than
 //! re-implementing queries against those tables.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use serde_json::Value;
@@ -35,7 +35,7 @@ use tracedecay_store::{FactReadControl, StoreShardScopeV1};
 
 use tracedecay_automation_runtime::automation::backend::task_key;
 use tracedecay_automation_runtime::automation::run_ledger::{
-    AutomationRunStatus, canonical_record_started_at_seconds, load_run_records_page,
+    AutomationRunStatus, canonical_record_started_at_seconds,
 };
 use tracedecay_daemon_service::retained_owner::open_project_retained_memory_target;
 use tracedecay_domain::errors::{Result, TraceDecayError};
@@ -245,7 +245,6 @@ async fn observatory_and_costs_sections(
 
 /// The authorities an analytics report reads beside the project itself.
 pub struct AnalyticsAuthority<'a> {
-    pub profile_root: Option<&'a Path>,
     pub analytics_db: Option<&'a RegisteredGlobalDb>,
     pub project_sessions: Option<&'a RegisteredGlobalDb>,
     pub deadline: Deadline,
@@ -270,7 +269,6 @@ pub async fn compute_analytics(
     let all_projects = scope_kind == AnalyticsScopeV1::All;
     let section = request.section;
     let AnalyticsAuthority {
-        profile_root,
         analytics_db,
         project_sessions,
         deadline,
@@ -354,7 +352,7 @@ pub async fn compute_analytics(
     if wants_section(section, AnalyticsSectionV1::Automation) {
         report.automation = Some(
             tracing::Instrument::instrument(
-                automation_section(profile_root, &scope.root, since),
+                automation_section(cg, since),
                 tracing::trace_span!("mcp.analytics.report.automation"),
             )
             .await,
@@ -554,38 +552,18 @@ async fn facts_section(
     })
 }
 
-async fn automation_section(
-    profile_root: Option<&Path>,
-    project_root: &Path,
-    since: i64,
-) -> AnalyticsAutomationSectionV1 {
-    let unavailable = |reason: String| {
-        AnalyticsAutomationSectionV1::Unavailable(AnalyticsSectionUnavailableV1::new(reason))
+async fn automation_section(cg: &TraceDecay, since: i64) -> AnalyticsAutomationSectionV1 {
+    let dashboard_root = cg.store_layout().dashboard_root.clone();
+    let page = match cg.automation_run_store() {
+        Ok(runs) => runs.load_run_records_page(AUTOMATION_RECORD_LIMIT).await,
+        Err(err) => Err(err),
     };
-    let Some(profile_root) = profile_root else {
-        return unavailable("profile root unavailable".to_owned());
-    };
-    // Only an enrolled project has an automation ledger; resolving through the
-    // path-derived default layout would name a shard this directory never
-    // owned and the read below would mint it.
-    let dashboard_root = match tracedecay_runtime_core::storage::resolve_persisted_layout(
-        project_root,
-        profile_root,
-    ) {
-        Ok(Some(layout)) => layout.dashboard_root,
-        Ok(None) => return unavailable("project is not enrolled in this profile".to_owned()),
-        Err(err) => {
-            return unavailable(format!(
-                "could not resolve automation dashboard root: {err}"
-            ));
-        }
-    };
-    let page = match load_run_records_page(&dashboard_root, AUTOMATION_RECORD_LIMIT).await {
+    let page = match page {
         Ok(page) => page,
         Err(err) => {
             return AnalyticsAutomationSectionV1::LedgerUnavailable(AnalyticsLedgerUnavailableV1 {
                 available: false,
-                reason: format!("could not read automation run ledger: {err}"),
+                reason: format!("could not read automation run history: {err}"),
                 dashboard_root: dashboard_root.display().to_string(),
             });
         }
@@ -627,11 +605,8 @@ async fn automation_section(
         dashboard_root: dashboard_root.display().to_string(),
         records_considered: records.len(),
         records_in_window: in_window,
-        // A page that read exactly the limit is complete when the ledger holds
-        // nothing older; `records.len() >= limit` claimed the newest 200 rows
-        // were a truncated window even when the ledger held exactly 200. The
-        // page's own completeness is the authority: it knows whether a row was
-        // left behind and whether any row could not be read.
+        // A page that read exactly the limit is complete when the store holds
+        // nothing older; the page's own completeness is the authority.
         records_truncated,
         by_job: by_job.into_values().collect(),
     })

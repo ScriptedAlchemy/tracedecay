@@ -254,7 +254,7 @@ for line in sys.stdin:
         install_fake_codex_launcher(&fake_codex_script, &fake_codex_bin);
 
         let (cg, host_runtime) = setup_project(&profile, &project_root).await;
-        let dashboard_root = cg.store_layout().dashboard_root.clone();
+        let run_store = cg.automation_run_store().unwrap();
         let project_id = cg
             .configuration_runtime()
             .configuration_target()
@@ -331,10 +331,7 @@ for line in sys.stdin:
         }
         let started = backend_started.exists();
         let unsettled =
-            tracedecay_automation_runtime::automation::run_ledger::find_run_record_exact_bounded(
-                &dashboard_root,
-                run_id,
-            )
+            run_store.find_run_record(run_id)
             .await;
         // Always release the child before asserting so a failed falsifier
         // cannot leave the dashboard server waiting on the fixture backend.
@@ -353,10 +350,7 @@ for line in sys.stdin:
         let mut settled = None;
         for _ in 0..250 {
             settled =
-                tracedecay_automation_runtime::automation::run_ledger::find_run_record_exact_bounded(
-                    &dashboard_root,
-                    run_id,
-                )
+                run_store.find_run_record(run_id)
                 .await
                 .unwrap_or_else(|error| panic!("read settled user-job history: {error}"));
             if settled.is_some() {
@@ -382,7 +376,7 @@ for line in sys.stdin:
             tracedecay_automation_runtime::automation::run_ledger::AutomationRunStatus::Succeeded
         );
         let records =
-            tracedecay_automation_runtime::automation::run_ledger::load_run_records(&dashboard_root, 16)
+            run_store.load_run_records(16)
                 .await
                 .unwrap_or_else(|error| panic!("read settled dashboard user-job ledger: {error}"));
         assert_eq!(
@@ -459,7 +453,7 @@ for line in sys.stdin:
         install_fake_codex_launcher(&fake_codex_script, &fake_codex_bin);
 
         let (cg, host_runtime) = setup_project(&profile, &project_root).await;
-        let dashboard_root = cg.store_layout().dashboard_root.clone();
+        let run_store = cg.automation_run_store().unwrap();
         let project_id = cg
             .configuration_runtime()
             .configuration_target()
@@ -525,10 +519,7 @@ for line in sys.stdin:
         let mut settled = None;
         for _ in 0..1500 {
             settled =
-                tracedecay_automation_runtime::automation::run_ledger::find_run_record_exact_bounded(
-                    &dashboard_root,
-                    &run_id,
-                )
+                run_store.find_run_record(&run_id)
                 .await
                 .unwrap_or_else(|error| panic!("read settled user-job history: {error}"));
             if settled.is_some() {

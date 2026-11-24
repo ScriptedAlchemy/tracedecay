@@ -14,7 +14,7 @@ use tempfile::TempDir;
 use tracedecay_automation_runtime::automation::backend::AgentTaskKind;
 use tracedecay_automation_runtime::automation::run_ledger::{
     AutomationRunArtifactKind, AutomationRunLedgerRecord, AutomationRunStatus, AutomationTrigger,
-    append_run_record, run_artifact_path, run_ledger_path, write_run_artifact,
+    run_artifact_path, write_run_artifact,
 };
 
 const EXACT_RUN_ID: &str = "run-artifact-exact";
@@ -154,10 +154,11 @@ async fn automation_run_artifact_view_returns_the_exact_hash_checked_payload() {
     fs::create_dir_all(project.join("src")).unwrap();
     fs::write(project.join("src/lib.rs"), "pub fn fixture() {}\n").unwrap();
     let (cg, _env) = init_test_project(&project).await;
-    let dashboard_root = cg.store_layout().dashboard_root.clone();
+    let run_store = cg.automation_run_store().unwrap();
+    let dashboard_root = run_store.dashboard_root();
 
     let queued_artifact = write_run_artifact(
-        &dashboard_root,
+        dashboard_root,
         EXACT_RUN_ID,
         AutomationRunArtifactKind::CodexHandoff,
         &json!({
@@ -171,10 +172,10 @@ async fn automation_run_artifact_view_returns_the_exact_hash_checked_payload() {
     .unwrap();
     let mut queued = base_record(EXACT_RUN_ID, AutomationRunStatus::Queued, "1782283100");
     queued.artifacts = vec![queued_artifact];
-    append_run_record(&dashboard_root, &queued).await.unwrap();
+    run_store.append_run_record(&queued).await.unwrap();
 
     let handoff = write_run_artifact(
-        &dashboard_root,
+        dashboard_root,
         EXACT_RUN_ID,
         AutomationRunArtifactKind::CodexHandoff,
         &json!({
@@ -188,7 +189,7 @@ async fn automation_run_artifact_view_returns_the_exact_hash_checked_payload() {
     .await
     .unwrap();
     let traces = write_run_artifact(
-        &dashboard_root,
+        dashboard_root,
         EXACT_RUN_ID,
         AutomationRunArtifactKind::Traces,
         &json!({
@@ -204,12 +205,10 @@ async fn automation_run_artifact_view_returns_the_exact_hash_checked_payload() {
     succeeded.reviewed_count = 3;
     succeeded.accepted_count = 2;
     succeeded.artifacts = vec![handoff, traces];
-    append_run_record(&dashboard_root, &succeeded)
-        .await
-        .unwrap();
+    run_store.append_run_record(&succeeded).await.unwrap();
 
     let other = write_run_artifact(
-        &dashboard_root,
+        dashboard_root,
         OTHER_RUN_ID,
         AutomationRunArtifactKind::CodexHandoff,
         &json!({
@@ -223,12 +222,10 @@ async fn automation_run_artifact_view_returns_the_exact_hash_checked_payload() {
     .unwrap();
     let mut other_record = base_record(OTHER_RUN_ID, AutomationRunStatus::Succeeded, "1782283300");
     other_record.artifacts = vec![other];
-    append_run_record(&dashboard_root, &other_record)
-        .await
-        .unwrap();
+    run_store.append_run_record(&other_record).await.unwrap();
 
     let tampered = write_run_artifact(
-        &dashboard_root,
+        dashboard_root,
         TAMPERED_RUN_ID,
         AutomationRunArtifactKind::CodexHandoff,
         &json!({ "status": "original" }),
@@ -243,33 +240,29 @@ async fn automation_run_artifact_view_returns_the_exact_hash_checked_payload() {
         "1782283400",
     );
     tampered_record.artifacts = vec![tampered];
-    append_run_record(&dashboard_root, &tampered_record)
-        .await
-        .unwrap();
+    run_store.append_run_record(&tampered_record).await.unwrap();
     let tampered_path = run_artifact_path(
-        &dashboard_root,
+        dashboard_root,
         TAMPERED_RUN_ID,
         AutomationRunArtifactKind::CodexHandoff,
     )
     .unwrap();
     fs::write(&tampered_path, TAMPERED_BYTES).unwrap();
 
-    let ledger_path = run_ledger_path(&dashboard_root);
-    let ledger_before = fs::read(&ledger_path).unwrap();
     let handoff_path = run_artifact_path(
-        &dashboard_root,
+        dashboard_root,
         EXACT_RUN_ID,
         AutomationRunArtifactKind::CodexHandoff,
     )
     .unwrap();
     let traces_path = run_artifact_path(
-        &dashboard_root,
+        dashboard_root,
         EXACT_RUN_ID,
         AutomationRunArtifactKind::Traces,
     )
     .unwrap();
     let other_path = run_artifact_path(
-        &dashboard_root,
+        dashboard_root,
         OTHER_RUN_ID,
         AutomationRunArtifactKind::CodexHandoff,
     )
@@ -358,11 +351,6 @@ async fn automation_run_artifact_view_returns_the_exact_hash_checked_payload() {
         "automation run artifact 'automation_artifacts/run-artifact-tampered/codex_handoff.json' hash mismatch",
     );
 
-    assert_eq!(
-        fs::read(&ledger_path).unwrap(),
-        ledger_before,
-        "artifact view must not rewrite the automation ledger"
-    );
     assert_eq!(fs::read(&handoff_path).unwrap(), HANDOFF_PRETTY.as_bytes());
     assert_eq!(fs::read(&traces_path).unwrap(), TRACES_PRETTY.as_bytes());
     assert_eq!(fs::read(&other_path).unwrap(), OTHER_PRETTY.as_bytes());

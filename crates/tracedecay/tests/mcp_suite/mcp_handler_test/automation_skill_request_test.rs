@@ -112,21 +112,20 @@ fn assert_invalid_request(problem: &Value, message: &str) {
 struct CuratedProject {
     fixture: ProductionCompositionFixture,
     run_id: String,
-    /// The run's terminal row, read from the ledger file the run wrote.
+    /// The run's terminal row, read from the registered run store.
     terminal_row: Value,
 }
 
 async fn curated_project() -> CuratedProject {
     let fixture = production_composition_fixture().await;
-    let dashboard_root = fixture
+    let runs = fixture
         .harness
         .server(&fixture.project_root)
         .expect("production automation server")
         .cg_snapshot()
         .await
-        .store_layout()
-        .dashboard_root
-        .clone();
+        .automation_run_store()
+        .unwrap();
     for _attempt in 0..20 {
         let envelope = call_json(
             &fixture,
@@ -150,13 +149,13 @@ async fn curated_project() -> CuratedProject {
             continue;
         }
         assert_eq!(settled["error"], "nothing_to_review", "{settled}");
-        let terminal_row = fs::read_to_string(dashboard_root.join("automation_runs.jsonl"))
-            .expect("automation run ledger")
-            .lines()
-            .filter(|line| !line.trim().is_empty())
-            .map(|line| serde_json::from_str::<Value>(line).expect("ledger row JSON"))
-            .rfind(|row| row["run_id"] == run_id)
-            .unwrap_or_else(|| panic!("ledger must record run {run_id}"));
+        let terminal_row = serde_json::to_value(
+            runs.find_run_record(&run_id)
+                .await
+                .unwrap()
+                .expect("settled history"),
+        )
+        .unwrap();
         return CuratedProject {
             fixture,
             run_id,

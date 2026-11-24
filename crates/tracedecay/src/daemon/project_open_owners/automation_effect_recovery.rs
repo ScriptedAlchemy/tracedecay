@@ -31,10 +31,8 @@ pub(crate) async fn reconcile_project_open_automation_effects(project: Arc<Trace
             return;
         }
     };
-    let dashboard_root = project.hook_store_layout().dashboard_root.clone();
     match tracedecay_daemon_service::automation_effect::recovery_composition::reconcile_reserved_automation_effects_for_project(
         project.as_ref(),
-        &dashboard_root,
         &cancellation,
     )
     .await

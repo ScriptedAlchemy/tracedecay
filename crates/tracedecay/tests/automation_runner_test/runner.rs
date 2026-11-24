@@ -7,16 +7,14 @@ async fn scheduler_memory_curator_respects_failure_cooldown() {
     let cg = init_project(temp.path()).await;
     seed_duplicate_facts(&cg).await;
     let config = scheduler_config(Some(3600), Some(3600));
-    append_run_record(
-        &cg.store_layout().dashboard_root,
-        &scheduler_record(
+    run_store(&cg)
+        .append_run_record(&scheduler_record(
             "previous_failed_run",
             AutomationRunStatus::Failed,
             current_timestamp() - 60,
-        ),
-    )
-    .await
-    .unwrap();
+        ))
+        .await
+        .unwrap();
     let backend = JsonBackend::new(json!({"ops": []}));
 
     let run = run_memory_curator(
@@ -48,16 +46,14 @@ async fn scheduler_memory_curator_respects_interval_gate() {
     let cg = init_project(temp.path()).await;
     seed_duplicate_facts(&cg).await;
     let config = scheduler_config(Some(3600), None);
-    append_run_record(
-        &cg.store_layout().dashboard_root,
-        &scheduler_record(
+    run_store(&cg)
+        .append_run_record(&scheduler_record(
             "previous_successful_run",
             AutomationRunStatus::Succeeded,
             current_timestamp() - 60,
-        ),
-    )
-    .await
-    .unwrap();
+        ))
+        .await
+        .unwrap();
     let backend = JsonBackend::new(json!({"ops": []}));
 
     let run = run_memory_curator(
@@ -94,17 +90,15 @@ async fn scheduler_session_reflector_respects_interval_gate() {
     let temp = tempdir().unwrap();
     let cg = init_project(temp.path()).await;
     let config = scheduler_config(Some(3600), None);
-    append_run_record(
-        &cg.store_layout().dashboard_root,
-        &scheduler_record_for(
+    run_store(&cg)
+        .append_run_record(&scheduler_record_for(
             "previous_session_reflector_run",
             AgentTaskKind::SessionReflector,
             AutomationRunStatus::Succeeded,
             current_timestamp() - 60,
-        ),
-    )
-    .await
-    .unwrap();
+        ))
+        .await
+        .unwrap();
     let backend = SessionJsonBackend::new(json!({"facts": []}));
 
     let run = run_session_reflector(
@@ -172,17 +166,15 @@ async fn scheduler_skill_writer_skips_without_new_session_activity_since_last_su
     let now = current_timestamp();
     // Activity landed, then a successful run consumed it.
     seed_session_activity(&cg, now - 120).await;
-    append_run_record(
-        &cg.store_layout().dashboard_root,
-        &scheduler_record_for(
+    run_store(&cg)
+        .append_run_record(&scheduler_record_for(
             "previous_skill_writer_run",
             AgentTaskKind::SkillWriter,
             AutomationRunStatus::Succeeded,
             now - 60,
-        ),
-    )
-    .await
-    .unwrap();
+        ))
+        .await
+        .unwrap();
     let backend = SkillJsonBackend::new(no_skill_needed_output(
         "No repeated evidence warrants a managed skill mutation.",
         "insufficient_repeated_evidence",
@@ -266,9 +258,7 @@ async fn scheduler_memory_curator_ledgers_active_lock_skip() {
         run.ledger_record.error.as_deref(),
         Some("scheduler_lock_active")
     );
-    let records = load_run_records(&cg.store_layout().dashboard_root, 10)
-        .await
-        .unwrap();
+    let records = run_store(&cg).load_run_records(10).await.unwrap();
     assert_eq!(records.len(), 1);
     assert_eq!(records[0].error.as_deref(), Some("scheduler_lock_active"));
 }

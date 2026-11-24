@@ -7,6 +7,7 @@ use tracedecay_automation_runtime::automation::combined_effect::{
 };
 
 use tracedecay_automation_runtime::automation::AutomationRunControl;
+use tracedecay_automation_runtime::automation::registered_run_store::RegisteredAutomationRunStore;
 use tracedecay_automation_runtime::automation::runner::CombinedReviewAutomationOptions;
 use tracedecay_automation_runtime::automation::runner::{
     RetainedAutomationRun, RetainedAutomationSettlementDisposition, SessionReflectorAutomationRun,
@@ -601,7 +602,7 @@ pub(super) async fn prepare_combined_effects(
     memory: &TraceDecay,
     parent_control: &AutomationRunControl,
     project_path: &Path,
-    dashboard_root: &Path,
+    runs: &RegisteredAutomationRunStore,
     requested_run_id: Option<&str>,
     configuration_digest: tracedecay_domain::ManifestDigest,
     options: &CombinedReviewAutomationOptions,
@@ -611,7 +612,7 @@ pub(super) async fn prepare_combined_effects(
         memory,
         parent_control,
         project_path,
-        dashboard_root,
+        runs,
         requested_run_id,
         configuration_digest,
         options,
@@ -631,7 +632,7 @@ fn prepare_combined_effects_inner<'a>(
     memory: &'a TraceDecay,
     parent_control: &'a AutomationRunControl,
     project_path: &'a Path,
-    dashboard_root: &'a Path,
+    runs: &'a RegisteredAutomationRunStore,
     requested_run_id: Option<&'a str>,
     configuration_digest: tracedecay_domain::ManifestDigest,
     options: &'a CombinedReviewAutomationOptions,
@@ -642,7 +643,7 @@ fn prepare_combined_effects_inner<'a>(
             memory,
             parent_control,
             project_path,
-            dashboard_root,
+            runs,
             requested_run_id,
             configuration_digest.clone(),
             |run_id| {
@@ -659,7 +660,7 @@ fn prepare_combined_effects_inner<'a>(
             memory,
             parent_control,
             project_path,
-            dashboard_root,
+            runs,
             Some(&skill_run_id),
             configuration_digest,
             |run_id| {
@@ -799,9 +800,9 @@ mod tests {
         AgentTaskBackend, AgentTaskKind, AgentTaskRequest, AgentTaskResponse,
     };
     use tracedecay_automation_runtime::automation::config::AutomationSettingsV1;
+    use tracedecay_automation_runtime::automation::registered_run_store::RegisteredAutomationRunStore;
     use tracedecay_automation_runtime::automation::run_ledger::{
-        AutomationRunStatus, AutomationTrigger, find_run_record_exact_bounded_blocking,
-        run_ledger_path,
+        AutomationRunStatus, AutomationTrigger,
     };
     use tracedecay_automation_runtime::automation::runner::{
         AutomationSessionRetrieval, AutomationSessionRetrievalFuture, AutomationTemporalRetrieval,
@@ -831,6 +832,7 @@ mod tests {
         memory: Arc<TraceDecay>,
         project_root: PathBuf,
         dashboard_root: PathBuf,
+        runs: RegisteredAutomationRunStore,
         project_id: ProjectId,
         configuration_revision_id: tracedecay_domain::configuration::ConfigurationRevisionId,
         configuration_digest: ManifestDigest,
@@ -861,7 +863,8 @@ mod tests {
                 .project_root()
                 .canonicalize()
                 .expect("canonical combined admission project");
-            let dashboard_root = memory.store_layout().dashboard_root.clone();
+            let runs = memory.automation_run_store().expect("registered run store");
+            let dashboard_root = runs.dashboard_root().to_path_buf();
             let project_id = memory
                 .configuration_runtime()
                 .configuration_target()
@@ -930,6 +933,7 @@ mod tests {
                 memory,
                 project_root,
                 dashboard_root,
+                runs,
                 project_id,
                 configuration_revision_id,
                 configuration_digest: access.configuration_digest,
@@ -1007,20 +1011,6 @@ mod tests {
         journal_path.with_file_name(format!("{filename}.terminal"))
     }
 
-    fn exact_spool_files(dashboard_root: &Path) -> Vec<PathBuf> {
-        let mut paths = match std::fs::read_dir(dashboard_root.join("automation_run_spool")) {
-            Ok(entries) => entries
-                .filter_map(std::result::Result::ok)
-                .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_file()))
-                .map(|entry| entry.path())
-                .collect::<Vec<_>>(),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
-            Err(error) => panic!("read exact automation spool: {error}"),
-        };
-        paths.sort();
-        paths
-    }
-
     struct RecordingEarlyGateBackend {
         calls: AtomicUsize,
     }
@@ -1093,7 +1083,7 @@ mod tests {
             fixture.memory.as_ref(),
             &parent_control,
             &fixture.project_root,
-            &fixture.dashboard_root,
+            &fixture.runs,
             Some(&skill_run_id),
             fixture.configuration_digest.clone(),
             |run_id| {
@@ -1121,7 +1111,7 @@ mod tests {
             fixture.memory.as_ref(),
             &parent_control,
             &fixture.project_root,
-            &fixture.dashboard_root,
+            &fixture.runs,
             Some(run_id),
             fixture.configuration_digest.clone(),
             &options,
@@ -1155,7 +1145,6 @@ mod tests {
         let report =
             tracedecay_daemon_service::automation_effect::recovery_composition::reconcile_reserved_automation_effects_for_project(
                 fixture.memory.as_ref(),
-                &fixture.dashboard_root,
                 &cancellation,
             )
             .await
@@ -1176,7 +1165,6 @@ mod tests {
         let report =
             tracedecay_daemon_service::automation_effect::recovery_composition::reconcile_reserved_automation_effects_for_project(
                 fixture.memory.as_ref(),
-                &fixture.dashboard_root,
                 &cancellation,
             )
             .await
@@ -1216,7 +1204,7 @@ mod tests {
                 fixture.memory.as_ref(),
                 &parent_control,
                 &fixture.project_root,
-                &fixture.dashboard_root,
+                &fixture.runs,
                 Some(prior_skill_run_id),
                 fixture.configuration_digest.clone(),
                 |run_id| {
@@ -1273,7 +1261,7 @@ mod tests {
             fixture.memory.as_ref(),
             &parent_control,
             &fixture.project_root,
-            &fixture.dashboard_root,
+            &fixture.runs,
             Some(combined_run_id),
             fixture.configuration_digest.clone(),
             |run_id| {
@@ -1323,9 +1311,11 @@ mod tests {
             .0;
         assert!(!replayed_reflector.is_completed());
 
-        let ledger_path = run_ledger_path(&fixture.dashboard_root);
-        let ledger_before = std::fs::read(&ledger_path).expect("partial replay ledger before run");
-        let spool_before = exact_spool_files(&fixture.dashboard_root);
+        let history_before = fixture
+            .runs
+            .load_run_records(10)
+            .await
+            .expect("run history before replay");
         let current_skill_run_id = format!("{combined_run_id}_skills");
         let current_skill_journal =
             automation_journal_path(&fixture.dashboard_root, &current_skill_run_id);
@@ -1335,7 +1325,7 @@ mod tests {
             fixture.memory.as_ref(),
             &parent_control,
             &fixture.project_root,
-            &fixture.dashboard_root,
+            &fixture.runs,
             Some(combined_run_id),
             fixture.configuration_digest.clone(),
             &options,
@@ -1404,15 +1394,21 @@ mod tests {
         assert!(current_skill_journal.is_file());
         assert!(!current_skill_sidecar.exists());
         assert_eq!(
-            std::fs::read(&ledger_path).expect("ledger while abandonment blocked"),
-            ledger_before
+            fixture
+                .runs
+                .load_run_records(10)
+                .await
+                .expect("history while abandonment blocked"),
+            history_before
         );
         assert!(
-            find_run_record_exact_bounded_blocking(&fixture.dashboard_root, &current_skill_run_id,)
+            fixture
+                .runs
+                .find_run_record(&current_skill_run_id)
+                .await
                 .expect("current exact ledger lookup while blocked")
                 .is_none()
         );
-        assert_eq!(exact_spool_files(&fixture.dashboard_root), spool_before);
         assert_eq!(pending_journal_files(&fixture.dashboard_root).len(), 1);
 
         journal_lock
@@ -1424,23 +1420,32 @@ mod tests {
         assert_eq!(backend.calls.load(Ordering::SeqCst), 0);
         assert_eq!(retrieval.calls.load(Ordering::SeqCst), 0);
         assert_eq!(
-            std::fs::read(&ledger_path).expect("ledger after reused abandonment"),
-            ledger_before
+            fixture
+                .runs
+                .load_run_records(10)
+                .await
+                .expect("history after reused abandonment"),
+            history_before
         );
         assert_eq!(
-            find_run_record_exact_bounded_blocking(&fixture.dashboard_root, prior_skill_run_id)
+            fixture
+                .runs
+                .find_run_record(prior_skill_run_id)
+                .await
                 .expect("prior exact ledger lookup after reuse"),
             Some(prior_skill.ledger_record.clone())
         );
         assert!(
-            find_run_record_exact_bounded_blocking(&fixture.dashboard_root, &current_skill_run_id,)
+            fixture
+                .runs
+                .find_run_record(&current_skill_run_id)
+                .await
                 .expect("current exact ledger absence after reuse")
                 .is_none()
         );
         assert!(!current_skill_journal.exists());
         assert!(!current_skill_sidecar.exists());
         assert_eq!(pending_journal_files(&fixture.dashboard_root).len(), 0);
-        assert_eq!(exact_spool_files(&fixture.dashboard_root), spool_before);
         assert!(
             tracedecay_automation_runtime::automation::scheduler::AutomationTaskLock::try_acquire(
                 &fixture.dashboard_root,

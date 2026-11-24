@@ -2,13 +2,15 @@ use std::path::Path;
 
 use tracedecay_contracts::retained_surfaces::AutomationSkipReasonV1;
 
+use crate::automation::registered_run_store::RegisteredAutomationRunStore;
+
 #[cfg(test)]
 use super::admit_job;
 use super::{
     AdmittedAutomationJob, AgentTaskKind, AutomationJob, AutomationRunLedgerPublication,
     AutomationSettingsV1, AutomationTrigger, JobRunContext, Result, TraceDecayError,
     UserJobAutomationRun, config_skip_reason, configured_job_schedule_decision, current_timestamp,
-    job_task_key, load_run_ledger_task_summary, try_acquire_job_task_lock,
+    job_task_key, try_acquire_job_task_lock,
 };
 /// Applies the configuration, canonical job-lock, and schedule gates before
 /// the daemon reserves an external effect. Every skip is recorded under a
@@ -36,7 +38,7 @@ use super::{
 /// scan anchor is pinned to the occurrence snapshot.
 #[tracing::instrument(name = "automation.scheduler.job_gate", level = "trace", skip_all)]
 pub async fn evaluate_and_record_scheduler_skip(
-    dashboard_root: &Path,
+    runs: &RegisteredAutomationRunStore,
     config: &AutomationSettingsV1,
     executable: Option<&Path>,
     job: &AdmittedAutomationJob,
@@ -45,7 +47,7 @@ pub async fn evaluate_and_record_scheduler_skip(
 ) -> Result<Option<UserJobAutomationRun>> {
     if let Some(reason) = job_backend_skip_reason(config, executable) {
         return record_scheduler_diagnostic(
-            dashboard_root,
+            runs,
             config,
             executable,
             job,
@@ -58,12 +60,12 @@ pub async fn evaluate_and_record_scheduler_skip(
         .map(Some);
     }
 
-    let Some(_task_lock) = try_acquire_job_task_lock(dashboard_root, &job.id).await? else {
+    let Some(_task_lock) = try_acquire_job_task_lock(runs.dashboard_root(), &job.id).await? else {
         crate::automation::scheduler_trace::observe_skip_reason(
             AutomationSkipReasonV1::SchedulerLockActive,
         );
         return record_scheduler_lock_skip(
-            dashboard_root,
+            runs,
             config,
             executable,
             job,
@@ -75,7 +77,7 @@ pub async fn evaluate_and_record_scheduler_skip(
         .map(Some);
     };
 
-    let summary = load_scheduler_summary(dashboard_root, job).await?;
+    let summary = load_scheduler_summary(runs, job).await?;
     let decision_time = current_timestamp();
     let Some(reason) = configured_job_schedule_decision(
         config,
@@ -90,7 +92,7 @@ pub async fn evaluate_and_record_scheduler_skip(
     };
     crate::automation::scheduler_trace::observe_skip_reason(reason);
     record_scheduler_diagnostic(
-        dashboard_root,
+        runs,
         config,
         executable,
         job,
@@ -105,7 +107,7 @@ pub async fn evaluate_and_record_scheduler_skip(
 
 #[cfg(test)]
 pub(super) async fn evaluate_and_record_scheduler_skip_at(
-    dashboard_root: &Path,
+    runs: &RegisteredAutomationRunStore,
     config: &AutomationSettingsV1,
     executable: Option<&Path>,
     job: &AutomationJob,
@@ -116,7 +118,7 @@ pub(super) async fn evaluate_and_record_scheduler_skip_at(
     let admitted_job = admit_job(job)?;
     if let Some(reason) = job_backend_skip_reason(config, executable) {
         return record_scheduler_diagnostic(
-            dashboard_root,
+            runs,
             config,
             executable,
             job,
@@ -129,9 +131,9 @@ pub(super) async fn evaluate_and_record_scheduler_skip_at(
         .map(Some);
     }
 
-    let Some(_task_lock) = try_acquire_job_task_lock(dashboard_root, &job.id).await? else {
+    let Some(_task_lock) = try_acquire_job_task_lock(runs.dashboard_root(), &job.id).await? else {
         return record_scheduler_lock_skip(
-            dashboard_root,
+            runs,
             config,
             executable,
             job,
@@ -143,7 +145,7 @@ pub(super) async fn evaluate_and_record_scheduler_skip_at(
         .map(Some);
     };
 
-    let summary = load_scheduler_summary(dashboard_root, job).await?;
+    let summary = load_scheduler_summary(runs, job).await?;
     let Some(reason) = configured_job_schedule_decision(
         config,
         executable,
@@ -155,7 +157,7 @@ pub(super) async fn evaluate_and_record_scheduler_skip_at(
         return Ok(None);
     };
     record_scheduler_diagnostic(
-        dashboard_root,
+        runs,
         config,
         executable,
         job,
@@ -183,15 +185,11 @@ fn job_backend_skip_reason(
 }
 
 async fn load_scheduler_summary(
-    dashboard_root: &Path,
+    runs: &RegisteredAutomationRunStore,
     job: &AutomationJob,
 ) -> Result<super::AutomationRunLedgerTaskSummary> {
-    load_run_ledger_task_summary(
-        dashboard_root,
-        AgentTaskKind::UserJob,
-        &job_task_key(&job.id),
-    )
-    .await
+    runs.load_run_ledger_task_summary(AgentTaskKind::UserJob, &job_task_key(&job.id))
+        .await
 }
 
 /// Appends (or reuses) one scheduler diagnostic under an identity derived from
@@ -199,7 +197,7 @@ async fn load_scheduler_summary(
 /// snapshot `occurrence_run_id` was minted from; see
 /// [`evaluate_and_record_scheduler_skip`] for the invariant this preserves.
 async fn record_scheduler_diagnostic(
-    dashboard_root: &Path,
+    runs: &RegisteredAutomationRunStore,
     config: &AutomationSettingsV1,
     executable: Option<&Path>,
     job: &AutomationJob,
@@ -210,7 +208,7 @@ async fn record_scheduler_diagnostic(
 ) -> Result<UserJobAutomationRun> {
     let diagnostic_run_id = scheduler_skip_run_id(occurrence_run_id, reason.as_str())?;
     JobRunContext {
-        dashboard_root,
+        runs,
         config,
         executable,
         job,
@@ -227,7 +225,7 @@ async fn record_scheduler_diagnostic(
 /// [`record_scheduler_diagnostic`]: it is the anchor of the ledger snapshot
 /// `occurrence_run_id` was minted from, not one re-derived here.
 pub(super) async fn record_scheduler_lock_skip(
-    dashboard_root: &Path,
+    runs: &RegisteredAutomationRunStore,
     config: &AutomationSettingsV1,
     executable: Option<&Path>,
     job: &AutomationJob,
@@ -236,7 +234,7 @@ pub(super) async fn record_scheduler_lock_skip(
     effectful_anchor_run_id: Option<&str>,
 ) -> Result<UserJobAutomationRun> {
     record_scheduler_diagnostic(
-        dashboard_root,
+        runs,
         config,
         executable,
         job,

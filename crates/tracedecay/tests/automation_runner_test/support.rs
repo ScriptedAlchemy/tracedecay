@@ -9,9 +9,9 @@ pub(crate) use settlement::{
 };
 
 pub(crate) use fixtures::{
-    SeedSessionMessage, SeededDuplicateFacts, fact_exists, fixture_host_home, fixture_open_options,
-    init_project, read_artifact, seed_duplicate_facts, seed_project_session_activity,
-    seed_project_session_activity_at, seed_session_message_in_db,
+    RunStoreFixture, SeedSessionMessage, SeededDuplicateFacts, fact_exists, fixture_host_home,
+    fixture_open_options, init_project, read_artifact, run_store, seed_duplicate_facts,
+    seed_project_session_activity, seed_project_session_activity_at, seed_session_message_in_db,
 };
 #[cfg(feature = "test-transport")]
 pub(crate) use fixtures::{
@@ -44,9 +44,9 @@ pub(crate) use tracedecay_automation_runtime::automation::managed_skills::{
     ManagedSkillDraft, ManagedSkillProvenance, ManagedSkillSource, ManagedSkillState,
     ManagedSupportFile, ManagedSupportFileExt, create_managed_skill, load_managed_skill,
 };
+pub(crate) use tracedecay_automation_runtime::automation::registered_run_store::RegisteredAutomationRunStore;
 pub(crate) use tracedecay_automation_runtime::automation::run_ledger::{
-    AutomationRunLedgerRecord, AutomationRunStatus, AutomationTrigger, append_run_record,
-    load_run_records, read_run_artifact_payload,
+    AutomationRunLedgerRecord, AutomationRunStatus, AutomationTrigger, read_run_artifact_payload,
 };
 pub(crate) use tracedecay_automation_runtime::automation::runner::{
     AutomationSessionRetrieval, AutomationSessionRetrievalFuture, AutomationTemporalEvidence,

@@ -216,12 +216,13 @@ async fn run_one_host_receipt_review(
         trigger: AutomationTrigger::HostReceipt,
         ..CombinedReviewAutomationOptions::default()
     };
+    let runs = automation_context.automation_run_store()?;
     let admission = Box::pin(super::combined_effect::prepare_combined_effects(
         engine,
         cg,
         run_control,
         automation_context.project_root(),
-        &automation_context.dashboard_root,
+        &runs,
         Some(&host_run_id),
         configuration.configuration_digest.clone(),
         &combined_options,

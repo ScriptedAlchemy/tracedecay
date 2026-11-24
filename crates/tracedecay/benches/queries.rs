@@ -192,6 +192,8 @@ pub struct Seeds {
     pub refresh_operation_id: Option<String>,
     pub refresh_selectors: Option<Value>,
     pub automation_run_id: Option<String>,
+    pub automation_run_record:
+        Option<tracedecay_automation_runtime::automation::run_ledger::AutomationRunLedgerRecord>,
     /// git_hunks producer output for `git_preview`/`git_apply`.
     pub preview_input_id: Option<String>,
     pub hunk_digests: Vec<String>,

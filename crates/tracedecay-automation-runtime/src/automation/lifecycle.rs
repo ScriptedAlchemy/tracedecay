@@ -23,9 +23,10 @@ use super::config::{
 };
 use super::config_error;
 use super::jobs::effect_receipt::ExternalAutomationEffectReceipt;
+use super::registered_run_store::RegisteredAutomationRunStore;
 use super::run_ledger::{
     AutomationRunLedgerRecord, AutomationRunLedgerTaskSummary, AutomationRunStatus,
-    AutomationTrigger, append_run_record, load_run_ledger_task_summary,
+    AutomationTrigger,
 };
 use super::scheduler::{
     AutomationTaskLock, load_session_activity, schedule_decision, task_disabled_skip,
@@ -222,13 +223,11 @@ pub(crate) enum AutomationRunLedgerPublication {
 
 pub(crate) async fn publish_ledger_record(
     publication: AutomationRunLedgerPublication,
-    dashboard_root: &Path,
+    runs: &RegisteredAutomationRunStore,
     record: &AutomationRunLedgerRecord,
 ) -> Result<()> {
     match publication {
-        AutomationRunLedgerPublication::Immediate => {
-            append_run_record(dashboard_root, record).await
-        }
+        AutomationRunLedgerPublication::Immediate => runs.append_run_record(record).await,
         AutomationRunLedgerPublication::DeferredUntilApplicationSettlement => Ok(()),
     }
 }
@@ -321,7 +320,7 @@ pub(crate) enum BackendTaskRun {
 pub(crate) struct AgentTaskRunContext<'a> {
     pub(crate) run_id: String,
     pub(crate) trigger: AutomationTrigger,
-    pub(crate) dashboard_root: PathBuf,
+    pub(crate) runs: RegisteredAutomationRunStore,
     /// Exact registered LCM session shard whose newest message timestamp is
     /// the scheduler activity signal.
     sessions_db: RegisteredGlobalDbLeaseV1,
@@ -341,7 +340,7 @@ pub(crate) struct AgentTaskRunContext<'a> {
 
 impl<'a> AgentTaskRunContext<'a> {
     pub(crate) fn new(
-        dashboard_root: PathBuf,
+        runs: RegisteredAutomationRunStore,
         sessions_db: RegisteredGlobalDbLeaseV1,
         run_id: Option<String>,
         run_id_prefix: &'static str,
@@ -353,7 +352,7 @@ impl<'a> AgentTaskRunContext<'a> {
         Self {
             run_id: run_id.unwrap_or_else(|| generated_run_id(run_id_prefix)),
             trigger,
-            dashboard_root,
+            runs,
             sessions_db,
             config,
             executable: executable.map(Path::to_path_buf),
@@ -395,7 +394,7 @@ impl<'a> AgentTaskRunContext<'a> {
         let (gate, summary) = task_run_gate_with_lock_retention(
             self.config,
             self.executable(),
-            &self.dashboard_root,
+            &self.runs,
             self.sessions_db.as_ref(),
             self.task,
             self.trigger,
@@ -412,7 +411,8 @@ impl<'a> AgentTaskRunContext<'a> {
         match &self.ledger_summary {
             Some(summary) => Ok(summary.clone()),
             None => {
-                load_run_ledger_task_summary(&self.dashboard_root, self.task, task_key(self.task))
+                self.runs
+                    .load_run_ledger_task_summary(self.task, task_key(self.task))
                     .await
             }
         }
@@ -481,7 +481,7 @@ impl<'a> AgentTaskRunContext<'a> {
 
     pub(crate) fn finalizer(&self, input_hash: Option<String>) -> Result<AgentRunFinalizer<'_>> {
         AgentRunFinalizer::new(
-            &self.dashboard_root,
+            &self.runs,
             &self.run_id,
             self.trigger,
             self.config,
@@ -494,7 +494,7 @@ impl<'a> AgentTaskRunContext<'a> {
     }
 
     async fn publish_terminal_record(&self, record: &AutomationRunLedgerRecord) -> Result<()> {
-        publish_ledger_record(self.ledger_publication, &self.dashboard_root, record).await
+        publish_ledger_record(self.ledger_publication, &self.runs, record).await
     }
 }
 
@@ -517,7 +517,7 @@ type GatedTask = (SchedulerGate, Option<AutomationRunLedgerTaskSummary>);
 fn scheduler_gate_with_lock_retention<'a>(
     config: &'a AutomationSettingsV1,
     executable: Option<&'a Path>,
-    dashboard_root: &'a Path,
+    runs: &'a RegisteredAutomationRunStore,
     sessions_db: &'a RegisteredGlobalDb,
     task: AgentTaskKind,
     trigger: AutomationTrigger,
@@ -530,12 +530,16 @@ fn scheduler_gate_with_lock_retention<'a>(
                 trigger,
                 AutomationTrigger::Scheduler | AutomationTrigger::HostReceipt
             );
-            let Some(lock) = AutomationTaskLock::try_acquire(dashboard_root, task).await? else {
+            let Some(lock) = AutomationTaskLock::try_acquire(runs.dashboard_root(), task).await?
+            else {
                 super::scheduler_trace::observe_skip_reason(
                     AutomationSkipReasonV1::SchedulerLockActive,
                 );
                 let summary = if scheduled {
-                    Some(load_run_ledger_task_summary(dashboard_root, task, task_key(task)).await?)
+                    Some(
+                        runs.load_run_ledger_task_summary(task, task_key(task))
+                            .await?,
+                    )
                 } else {
                     None
                 };
@@ -550,8 +554,9 @@ fn scheduler_gate_with_lock_retention<'a>(
             }
 
             let config = admit_config(config)?;
-            let summary =
-                load_run_ledger_task_summary(dashboard_root, task, task_key(task)).await?;
+            let summary = runs
+                .load_run_ledger_task_summary(task, task_key(task))
+                .await?;
             let activity = load_session_activity(sessions_db).await;
             let decision_now_secs = current_timestamp();
             let decision = if trigger == AutomationTrigger::HostReceipt {
@@ -588,27 +593,19 @@ fn scheduler_gate_with_lock_retention<'a>(
 pub(crate) async fn task_run_gate(
     config: &AutomationSettingsV1,
     executable: Option<&Path>,
-    dashboard_root: &Path,
+    runs: &RegisteredAutomationRunStore,
     sessions_db: &RegisteredGlobalDb,
     task: AgentTaskKind,
     trigger: AutomationTrigger,
 ) -> Result<GatedTask> {
-    task_run_gate_with_lock_retention(
-        config,
-        executable,
-        dashboard_root,
-        sessions_db,
-        task,
-        trigger,
-        None,
-    )
-    .await
+    task_run_gate_with_lock_retention(config, executable, runs, sessions_db, task, trigger, None)
+        .await
 }
 
 pub(crate) async fn task_run_gate_for_retained_settlement(
     config: &AutomationSettingsV1,
     executable: Option<&Path>,
-    dashboard_root: &Path,
+    runs: &RegisteredAutomationRunStore,
     sessions_db: &RegisteredGlobalDb,
     task: AgentTaskKind,
     trigger: AutomationTrigger,
@@ -618,7 +615,7 @@ pub(crate) async fn task_run_gate_for_retained_settlement(
     task_run_gate_with_lock_retention(
         config,
         executable,
-        dashboard_root,
+        runs,
         sessions_db,
         task,
         trigger,
@@ -630,7 +627,7 @@ pub(crate) async fn task_run_gate_for_retained_settlement(
 async fn task_run_gate_with_lock_retention(
     config: &AutomationSettingsV1,
     executable: Option<&Path>,
-    dashboard_root: &Path,
+    runs: &RegisteredAutomationRunStore,
     sessions_db: &RegisteredGlobalDb,
     task: AgentTaskKind,
     trigger: AutomationTrigger,
@@ -639,7 +636,7 @@ async fn task_run_gate_with_lock_retention(
     let (gate, records) = scheduler_gate_with_lock_retention(
         config,
         executable,
-        dashboard_root,
+        runs,
         sessions_db,
         task,
         trigger,
@@ -840,7 +837,7 @@ struct RunRecordOutcome {
 }
 
 pub(crate) struct AgentRunFinalizer<'a> {
-    dashboard_root: &'a Path,
+    runs: &'a RegisteredAutomationRunStore,
     run_id: &'a str,
     trigger: AutomationTrigger,
     config: &'a AutomationSettingsV1,
@@ -859,7 +856,7 @@ pub(crate) struct AgentRunFinalizer<'a> {
 
 impl<'a> AgentRunFinalizer<'a> {
     pub(crate) fn new(
-        dashboard_root: &'a Path,
+        runs: &'a RegisteredAutomationRunStore,
         run_id: &'a str,
         trigger: AutomationTrigger,
         config: &'a AutomationSettingsV1,
@@ -869,7 +866,7 @@ impl<'a> AgentRunFinalizer<'a> {
         input_hash: Option<String>,
     ) -> Result<Self> {
         Self::new_at(
-            dashboard_root,
+            runs,
             run_id,
             trigger,
             config,
@@ -883,7 +880,7 @@ impl<'a> AgentRunFinalizer<'a> {
 
     #[allow(clippy::too_many_arguments)]
     fn new_at(
-        dashboard_root: &'a Path,
+        runs: &'a RegisteredAutomationRunStore,
         run_id: &'a str,
         trigger: AutomationTrigger,
         config: &'a AutomationSettingsV1,
@@ -895,7 +892,7 @@ impl<'a> AgentRunFinalizer<'a> {
     ) -> Result<Self> {
         super::run_ledger::timestamp_micros_at(completion_time)?;
         Ok(Self {
-            dashboard_root,
+            runs,
             run_id,
             trigger,
             config,
@@ -918,7 +915,7 @@ impl<'a> AgentRunFinalizer<'a> {
     }
 
     async fn publish_terminal_record(&self, record: &AutomationRunLedgerRecord) -> Result<()> {
-        publish_ledger_record(self.ledger_publication, self.dashboard_root, record).await
+        publish_ledger_record(self.ledger_publication, self.runs, record).await
     }
 
     #[must_use]
@@ -1128,7 +1125,7 @@ impl<'a> AgentRunFinalizer<'a> {
         apply_retry_report(&mut record, retry_report);
         self.finish_record(&mut record)?;
         record.artifacts = write_improvement_artifacts(
-            self.dashboard_root,
+            self.runs.dashboard_root(),
             self.run_id,
             self.task,
             request,
@@ -1371,11 +1368,17 @@ fn noop_output_for_task(task: AgentTaskKind) -> Value {
 mod recorded_failure_tests {
     use super::*;
 
-    #[test]
-    fn retained_settlement_disposition_carries_exact_reused_scheduler_skip() {
+    #[tokio::test]
+    async fn retained_settlement_disposition_carries_exact_reused_scheduler_skip() {
+        let temp = tempfile::tempdir().unwrap();
+        let fixture = crate::automation::registered_run_store::tests::project_run_store(
+            temp.path(),
+            &temp.path().join("dashboard"),
+        )
+        .await;
         let config = AutomationSettingsV1::default();
         let prior_record = AgentRunFinalizer::new_at(
-            Path::new("/unused"),
+            &fixture.runs,
             "prior_scheduler_skip",
             AutomationTrigger::Scheduler,
             &config,

@@ -111,8 +111,7 @@ pub const AUTOMATION_RUN_STATE_SCHEMA_V1: &str = "
         ON automation_runs(
             namespace, task_key,
             completed_at_seconds DESC, completed_at_micros DESC
-        )
-        WHERE task_key IS NOT NULL;
+        );
 
     CREATE TRIGGER IF NOT EXISTS automation_run_transitions_immutable
     BEFORE UPDATE ON automation_run_transitions BEGIN
@@ -465,7 +464,7 @@ impl RegisteredGlobalDb {
                         )
                    FROM automation_runs
                   WHERE namespace = ?1 AND task_key = ?2
-                    AND json_extract(
+                    AND json_type(
                             record_json,
                             '$.validation_report.pagination.resume_after_fact_id'
                         ) IS NOT NULL
@@ -536,6 +535,20 @@ impl RegisteredGlobalDb {
             let record = &record;
             let run_id = record.run_id.as_str();
             let staged_digest = staged_for_tx.digest.as_str();
+            match read_terminal_digest(&transaction, namespace, run_id).await? {
+                Some(published) if published == staged_digest => {
+                    return Ok(staged_for_tx.clone());
+                }
+                Some(_) => {
+                    return Err(TraceDecayError::Config {
+                        message: format!(
+                            "automation run '{}' has conflicting durable history",
+                            record.run_id
+                        ),
+                    });
+                }
+                None => {}
+            }
             let existing = read_staging_digest(&transaction, namespace, run_id).await?;
             let record_json = canonical_record_json(record)?;
             if let Some((existing_digest, existing_json)) = existing {
@@ -595,7 +608,19 @@ impl RegisteredGlobalDb {
             let Some((digest, record_json)) =
                 read_staging_digest(&transaction, namespace, run_id).await?
             else {
-                return Ok(AutomationRunStagePublishOutcomeV1::MissingPayload);
+                // A publication that already committed retired its staging
+                // row in the same transaction; replaying it is success.
+                return match read_terminal_digest(&transaction, namespace, run_id).await? {
+                    Some(published) if published == publication_digest => {
+                        Ok(AutomationRunStagePublishOutcomeV1::Published)
+                    }
+                    Some(_) => Err(TraceDecayError::Config {
+                        message: format!(
+                            "automation run '{run_id}' has conflicting durable history"
+                        ),
+                    }),
+                    None => Ok(AutomationRunStagePublishOutcomeV1::MissingPayload),
+                };
             };
             if digest != publication_digest {
                 return Err(TraceDecayError::Config {
@@ -663,6 +688,44 @@ impl RegisteredGlobalDb {
             Ok(())
         })
         .await
+    }
+
+    /// Discards every staged terminal of `run_id`, whatever digest it bound.
+    ///
+    /// Only an owner that has proven the run's external-effect reservation is
+    /// abandoned and unbound may call this; a bound terminal is retired with
+    /// [`Self::discard_staged_automation_run_terminal`] instead.
+    pub async fn discard_unbound_staged_automation_run(&self, run_id: &str) -> Result<()> {
+        validate_run_id(run_id)?;
+        let namespace = self.automation_run_namespace()?.to_owned();
+        let run_id = run_id.to_owned();
+        self.transact_or(std::convert::identity, async move |transaction| {
+            transaction
+                .execute(
+                    "DELETE FROM automation_run_staging WHERE namespace = ?1 AND run_id = ?2",
+                    params![namespace.as_str(), run_id.as_str()],
+                )
+                .await
+                .map_err(|error| TraceDecayError::Database {
+                    operation: "discard unbound staged automation run".to_owned(),
+                    message: error.to_string(),
+                })?;
+            Ok(())
+        })
+        .await
+    }
+
+    /// The digest of the run's published terminal, when one committed.
+    pub async fn automation_run_terminal_digest(&self, run_id: &str) -> Result<Option<String>> {
+        let namespace = self.automation_run_namespace()?;
+        let snapshot = self
+            .read_snapshot()
+            .await
+            .map_err(|error| TraceDecayError::Database {
+                operation: "read automation run terminal".to_owned(),
+                message: error.to_string(),
+            })?;
+        read_terminal_digest(&snapshot, namespace, run_id).await
     }
 
     /// Appends a scheduler diagnostic run or reuses the exact durable one.
@@ -1013,6 +1076,38 @@ async fn read_transition_digest<Q: QueryExecutor>(
         .await
         .map_err(|error| TraceDecayError::Database {
             operation: "read automation run transition".to_owned(),
+            message: error.to_string(),
+        })?
+    else {
+        return Ok(None);
+    };
+    decode_column(&row, 0).map(Some)
+}
+
+/// A run has at most one terminal transition: terminal states never advance.
+async fn read_terminal_digest<Q: QueryExecutor>(
+    connection: &Q,
+    namespace: &str,
+    run_id: &str,
+) -> Result<Option<String>> {
+    let mut rows = connection
+        .query(
+            "SELECT record_digest
+               FROM automation_run_transitions
+              WHERE namespace = ?1 AND run_id = ?2
+                AND status IN ('succeeded', 'failed', 'skipped')",
+            params![namespace, run_id],
+        )
+        .await
+        .map_err(|error| TraceDecayError::Database {
+            operation: "read automation run terminal".to_owned(),
+            message: error.to_string(),
+        })?;
+    let Some(row) = rows
+        .next()
+        .await
+        .map_err(|error| TraceDecayError::Database {
+            operation: "read automation run terminal".to_owned(),
             message: error.to_string(),
         })?
     else {

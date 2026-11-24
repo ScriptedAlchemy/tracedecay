@@ -7,10 +7,12 @@ use serde_json::{Value, json};
 use tracedecay_automation_runtime::automation::automatic_facts::{
     AdmittedAutomaticFact, record_session_automatic_facts,
 };
+use tracedecay_automation_runtime::automation::registered_run_store::RegisteredAutomationRunStore;
 use tracedecay_automation_runtime::automation::run_ledger::{
     AutomationRunLedgerRecord, read_run_artifact_payload,
 };
-use tracedecay_domain::{Confidence, FactCategoryV1, FactOwnerV1};
+use tracedecay_domain::{Confidence, FactCategoryV1, FactOwnerV1, ProjectId};
+use tracedecay_global_db::tests::harness::RegisteredGlobalDbTestRuntime;
 use tracedecay_project::project::{TraceDecay, TraceDecayOpenOptions};
 use tracedecay_project::test_support::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay_runtime_core::tracedecay::current_timestamp;
@@ -394,4 +396,68 @@ pub(crate) async fn read_artifact(
     read_run_artifact_payload(&cg.store_layout().dashboard_root, run_id, artifact)
         .await
         .unwrap()
+}
+
+/// The project's admitted registered run-state authority, the same one the
+/// production runners publish through.
+pub(crate) fn run_store(cg: &TraceDecay) -> RegisteredAutomationRunStore {
+    cg.automation_run_store()
+        .expect("project must admit its registered automation run store")
+}
+
+/// A project-scoped registered run store over a temporary dashboard root, for
+/// tests that exercise the store or the job runner without a full project.
+///
+/// The registered database is the project's sessions shard, so the namespace
+/// comes from `project_id` exactly as it does in production.
+pub(crate) struct RunStoreFixture {
+    pub(crate) runs: RegisteredAutomationRunStore,
+    runtime: RegisteredGlobalDbTestRuntime,
+}
+
+impl RunStoreFixture {
+    pub(crate) const DEFAULT_PROJECT_ID: &'static str = "project.automation.run-store";
+
+    /// Opens the default project's store with its dashboard root at
+    /// `<root>/dashboard`. The registered database lives under
+    /// `<root>/registered-profile` so it never collides with fixture paths.
+    pub(crate) async fn open(root: &Path) -> Self {
+        Self::open_project(root, Self::DEFAULT_PROJECT_ID).await
+    }
+
+    pub(crate) async fn open_project(root: &Path, project_id: &str) -> Self {
+        crate::common::register_process_runtime_ports();
+        let runtime = RegisteredGlobalDbTestRuntime::project(
+            root.join("registered-profile"),
+            root.join("registered-project"),
+            ProjectId::new(project_id).expect("project id"),
+        )
+        .await
+        .expect("registered project test runtime");
+        let runs = RegisteredAutomationRunStore::admit(
+            runtime
+                .project_database_arc()
+                .expect("project-scoped registered database"),
+            root.join("dashboard"),
+        )
+        .expect("registered run store admission");
+        Self { runs, runtime }
+    }
+
+    /// Admits a second store over the same registered database and dashboard
+    /// root, the way a restarted runner re-admits its project.
+    pub(crate) fn readmit(
+        &self,
+    ) -> tracedecay_domain::errors::Result<RegisteredAutomationRunStore> {
+        RegisteredAutomationRunStore::admit(
+            self.runtime
+                .issue_project_database_lease_for_test()
+                .expect("fresh project database lease"),
+            self.runs.dashboard_root().to_path_buf(),
+        )
+    }
+
+    pub(crate) fn dashboard_root(&self) -> &Path {
+        self.runs.dashboard_root()
+    }
 }

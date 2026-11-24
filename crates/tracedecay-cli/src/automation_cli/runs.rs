@@ -1,55 +1,66 @@
-use super::daemon_project_dashboard_root;
 use crate::cli::AutomationRunsAction;
 use crate::resolve_cli_project_root;
+use tracedecay_automation_runtime::automation::run_ledger::{
+    AutomationRunArtifact, AutomationRunLedgerRecord,
+};
+use tracedecay_contracts::retrieval::{AUTOMATION_RUN_LIST_MAX_LIMIT, AutomationRunListEntryV1};
+use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_runtime_core::config::ProfileRoot;
 
+/// Run history lives in the daemon-owned registered store, so every read goes
+/// through the daemon's run tools rather than a local file.
 pub(super) async fn handle_automation_runs_command(
     profile: &ProfileRoot,
     action: AutomationRunsAction,
-) -> tracedecay_domain::errors::Result<()> {
-    use tracedecay_automation_runtime::automation::run_ledger::{
-        find_run_record, load_run_records, read_run_artifact_payload,
-    };
-
+) -> Result<()> {
     let path = match &action {
         AutomationRunsAction::List { path, .. }
         | AutomationRunsAction::View { path, .. }
         | AutomationRunsAction::Artifact { path, .. } => path.clone(),
     };
     let project_path = resolve_cli_project_root(profile, path, None, None).await?;
-    let dashboard_root = daemon_project_dashboard_root(profile, &project_path).await?;
 
     match action {
         AutomationRunsAction::List { limit, json, .. } => {
-            let limit = limit.min(200);
-            let records = load_run_records(&dashboard_root, limit).await?;
+            let limit = u32::try_from(limit)
+                .unwrap_or(AUTOMATION_RUN_LIST_MAX_LIMIT)
+                .clamp(1, AUTOMATION_RUN_LIST_MAX_LIMIT);
+            let listed = crate::commands::daemon_tool_json(
+                profile,
+                Some(&project_path),
+                "tracedecay_automation_run_list",
+                serde_json::json!({ "limit": limit, "format": "json" }),
+            )
+            .await?;
+            let runs: Vec<AutomationRunListEntryV1> = decode_field(&listed, "runs")?;
+            let has_more: bool = decode_field(&listed, "has_more")?;
             if json {
                 println!(
                     "{}",
                     serde_json::to_string_pretty(&serde_json::json!({
-                        "dashboard_root": dashboard_root,
-                        "count": records.len(),
+                        "count": runs.len(),
                         "limit": limit,
-                        "records": records,
+                        "has_more": has_more,
+                        "runs": runs,
                     }))?
                 );
             } else {
-                print_automation_run_list(&records);
+                print_automation_run_list(&runs);
             }
         }
         AutomationRunsAction::View { run_id, json, .. } => {
-            let record = find_run_record(&dashboard_root, &run_id)
-                .await?
-                .ok_or_else(|| tracedecay_domain::errors::TraceDecayError::Config {
-                    message: format!("automation run not found: {run_id}"),
-                })?;
+            let viewed = crate::commands::daemon_tool_json(
+                profile,
+                Some(&project_path),
+                "tracedecay_automation_run_view",
+                serde_json::json!({ "run_id": run_id, "format": "json" }),
+            )
+            .await?;
+            let record: AutomationRunLedgerRecord = decode_field(&viewed, "run")?;
             if json {
                 println!(
                     "{}",
-                    serde_json::to_string_pretty(&serde_json::json!({
-                        "dashboard_root": dashboard_root,
-                        "record": record,
-                    }))?
+                    serde_json::to_string_pretty(&serde_json::json!({ "record": record }))?
                 );
             } else {
                 print_automation_run_record(&record);
@@ -58,41 +69,48 @@ pub(super) async fn handle_automation_runs_command(
         AutomationRunsAction::Artifact {
             run_id, kind, json, ..
         } => {
-            let record = find_run_record(&dashboard_root, &run_id)
-                .await?
-                .ok_or_else(|| tracedecay_domain::errors::TraceDecayError::Config {
-                    message: format!("automation run not found: {run_id}"),
-                })?;
-            let artifact = record
-                .artifacts
-                .iter()
-                .find(|artifact| artifact.kind == kind)
-                .ok_or_else(|| tracedecay_domain::errors::TraceDecayError::Config {
-                    message: format!("automation run artifact not found: {run_id}/{kind}"),
-                })?;
-            let payload =
-                read_run_artifact_payload(&dashboard_root, &record.run_id, artifact).await?;
+            let viewed = crate::commands::daemon_tool_json(
+                profile,
+                Some(&project_path),
+                "tracedecay_automation_run_artifact_view",
+                serde_json::json!({ "run_id": run_id, "kind": kind, "format": "json" }),
+            )
+            .await?;
+            let artifact: AutomationRunArtifact = decode_field(&viewed, "artifact")?;
+            let payload: serde_json::Value = decode_field(&viewed, "payload")?;
             if json {
                 println!(
                     "{}",
                     serde_json::to_string_pretty(&serde_json::json!({
-                        "dashboard_root": dashboard_root,
-                        "run_id": record.run_id,
+                        "run_id": run_id,
                         "artifact": artifact,
                         "payload": payload,
                     }))?
                 );
             } else {
-                print_automation_run_artifact(&record.run_id, artifact, &payload)?;
+                print_automation_run_artifact(&run_id, &artifact, &payload)?;
             }
         }
     }
     Ok(())
 }
 
-fn print_automation_run_list(
-    records: &[tracedecay_automation_runtime::automation::run_ledger::AutomationRunLedgerRecord],
-) {
+fn decode_field<T: serde::de::DeserializeOwned>(
+    document: &serde_json::Value,
+    field: &str,
+) -> Result<T> {
+    let value = document
+        .get(field)
+        .cloned()
+        .ok_or_else(|| TraceDecayError::Config {
+            message: format!("managed daemon automation run reply omitted '{field}'"),
+        })?;
+    serde_json::from_value(value).map_err(|error| TraceDecayError::Config {
+        message: format!("managed daemon automation run reply has an invalid '{field}': {error}"),
+    })
+}
+
+fn print_automation_run_list(records: &[AutomationRunListEntryV1]) {
     if records.is_empty() {
         println!("No automation runs.");
         return;
@@ -113,9 +131,7 @@ fn print_automation_run_list(
     }
 }
 
-fn print_automation_run_record(
-    record: &tracedecay_automation_runtime::automation::run_ledger::AutomationRunLedgerRecord,
-) {
+fn print_automation_run_record(record: &AutomationRunLedgerRecord) {
     println!("run_id: {}", record.run_id);
     println!("status: {}", record.status.as_str());
     println!("task: {}", record.task_key);
@@ -145,9 +161,9 @@ fn print_automation_run_record(
 
 fn print_automation_run_artifact(
     run_id: &str,
-    artifact: &tracedecay_automation_runtime::automation::run_ledger::AutomationRunArtifact,
+    artifact: &AutomationRunArtifact,
     payload: &serde_json::Value,
-) -> tracedecay_domain::errors::Result<()> {
+) -> Result<()> {
     println!("run_id: {run_id}");
     println!("artifact: {}", artifact.kind);
     println!("path: {}", artifact.path);

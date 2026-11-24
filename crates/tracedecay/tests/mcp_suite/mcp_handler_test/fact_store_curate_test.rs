@@ -7,12 +7,14 @@
 #![cfg(feature = "test-transport")]
 
 use std::collections::BTreeSet;
-use std::fs;
-use std::path::Path;
 use std::time::Duration;
 
 use serde_json::{Value, json};
 use tracedecay::mcp::McpServer;
+use tracedecay_automation_runtime::automation::registered_run_store::RegisteredAutomationRunStore;
+use tracedecay_automation_runtime::automation::run_ledger::{
+    AutomationRunStatus, AutomationTrigger,
+};
 
 use crate::support::{
     application_invalid_request_error, extract_real_server_text, handle_real_server_tool_call_raw,
@@ -28,12 +30,7 @@ async fn empty_store_curate_skips_and_refuses_caller_authority() {
         .harness
         .server(&fixture.project_root)
         .expect("production fact-store MCP server");
-    let dashboard_root = server
-        .cg_snapshot()
-        .await
-        .store_layout()
-        .dashboard_root
-        .clone();
+    let runs = server.cg_snapshot().await.automation_run_store().unwrap();
 
     // The project's scheduler takes the same curator lock. A held lock is the
     // legal transient skip; wait it out so the assertion is the empty-store
@@ -114,9 +111,16 @@ async fn empty_store_curate_skips_and_refuses_caller_authority() {
     assert_eq!(record["accepted_count"], 0);
     assert_eq!(record["rejected_count"], 0);
     assert_eq!(record["skipped_count"], 1);
-    assert_eq!(ledger_record(&dashboard_root, &run_id)["status"], "skipped");
+    assert_eq!(
+        runs.find_run_record(&run_id)
+            .await
+            .unwrap()
+            .expect("settled run")
+            .status,
+        AutomationRunStatus::Skipped
+    );
 
-    let admitted = application_run_ids(&dashboard_root);
+    let admitted = application_run_ids(&runs).await;
 
     for bounds in [
         json!({"fact_review_limit": 0, "min_confidence_millionths": 500_000}),
@@ -179,7 +183,7 @@ async fn empty_store_curate_skips_and_refuses_caller_authority() {
     );
 
     assert_eq!(
-        application_run_ids(&dashboard_root),
+        application_run_ids(&runs).await,
         admitted,
         "rejected curate calls must not append an application run"
     );
@@ -215,28 +219,12 @@ fn tool_document(response: &Value) -> Value {
         .expect("fact_store_curate content must be JSON")
 }
 
-fn ledger_record(dashboard_root: &Path, run_id: &str) -> Value {
-    ledger_records(dashboard_root)
+async fn application_run_ids(runs: &RegisteredAutomationRunStore) -> BTreeSet<String> {
+    let page = runs.load_run_records_page(50).await.unwrap();
+    assert!(!page.has_more, "all fixture runs must fit on one page");
+    page.records
         .into_iter()
-        .find(|record| record["run_id"] == run_id)
-        .unwrap_or_else(|| panic!("ledger must record run {run_id}"))
-}
-
-fn application_run_ids(dashboard_root: &Path) -> BTreeSet<String> {
-    ledger_records(dashboard_root)
-        .into_iter()
-        .filter(|record| record["trigger"] == "application")
-        .map(|record| record["run_id"].as_str().expect("ledger run_id").to_owned())
-        .collect()
-}
-
-fn ledger_records(dashboard_root: &Path) -> Vec<Value> {
-    let path = dashboard_root.join("automation_runs.jsonl");
-    let ledger = fs::read_to_string(&path)
-        .unwrap_or_else(|error| panic!("automation run ledger {path:?} must be readable: {error}"));
-    ledger
-        .lines()
-        .filter(|line| !line.trim().is_empty())
-        .map(|line| serde_json::from_str(line).expect("ledger line must be JSON"))
+        .filter(|record| record.trigger == AutomationTrigger::Application)
+        .map(|record| record.run_id)
         .collect()
 }

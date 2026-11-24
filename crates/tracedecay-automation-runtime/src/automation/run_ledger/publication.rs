@@ -395,7 +395,7 @@ fn sync_directory(path: &Path) -> Result<()> {
 #[cfg(test)]
 #[allow(clippy::expect_used, clippy::unwrap_used)]
 mod tests {
-    use super::super::{prepare_run_artifact, run_ledger_path};
+    use super::super::prepare_run_artifact;
     use super::*;
 
     fn test_artifact_chain(run_id: &str) -> Vec<(AutomationRunArtifact, Vec<u8>)> {
@@ -525,7 +525,6 @@ mod tests {
             .unwrap_err();
             assert!(error.to_string().contains("injected"));
             assert!(!temp.path().join(RUN_ARTIFACTS_DIR).join(&run_id).exists());
-            assert!(!run_ledger_path(temp.path()).exists());
         }
     }
 
@@ -557,7 +556,6 @@ mod tests {
             std::fs::read_dir(&final_directory).unwrap().count(),
             artifacts.len() + 1
         );
-        assert!(!run_ledger_path(temp.path()).exists());
         publish_run_artifact_chain_blocking(temp.path(), run_id, &artifacts, &publication).unwrap();
     }
 

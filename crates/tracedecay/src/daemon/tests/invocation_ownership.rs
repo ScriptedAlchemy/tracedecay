@@ -401,7 +401,7 @@ async fn aborted_automation_preparation_keeps_its_writer_owned_through_shutdown(
     let service = engine.invocation.service.clone();
     let (release, release_rx) = mpsc::channel();
     *pause.release.lock().unwrap() = Some(release_rx);
-    let prepare_dashboard_root = dashboard_root.clone();
+    let prepare_runs = cg.automation_run_store().expect("registered run store");
     let preparation = tracedecay_runtime_core::native_runtime::NativeTask::spawn(async move {
         // Scheduler and dashboard callers use this shared production boundary,
         // without the socket caller's accepted-run lease or task-local scope.
@@ -409,7 +409,7 @@ async fn aborted_automation_preparation_keeps_its_writer_owned_through_shutdown(
             &service,
             &cg,
             &project_root,
-            &prepare_dashboard_root,
+            &prepare_runs,
             request_id,
             deadline,
             &cancellation,

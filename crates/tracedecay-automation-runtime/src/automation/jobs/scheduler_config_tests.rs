@@ -8,9 +8,9 @@ use super::{
 };
 use crate::automation::backend::{AgentTaskFailureClass, AgentTaskKind};
 use crate::automation::config::AutomationSettingsV1;
+use crate::automation::registered_run_store::tests::project_run_store;
 use crate::automation::run_ledger::{
-    AutomationRunLedgerRecord, AutomationRunStatus, AutomationTrigger, append_run_record,
-    find_run_record_exact_bounded, load_run_records_for_task_key,
+    AutomationRunLedgerRecord, AutomationRunStatus, AutomationTrigger,
 };
 
 async fn jobs_configured_for_scheduler(
@@ -300,6 +300,7 @@ fn job_scheduler_fails_closed_on_invalid_completion_history() {
 #[tokio::test]
 async fn unconfigured_backend_jobs_are_blocked_without_failure_cooldown_and_recover() {
     let temp = tempfile::TempDir::new().unwrap();
+    let temp_runs = project_run_store(temp.path(), temp.path()).await;
     let mut job = interval_job();
     let config = AutomationSettingsV1 {
         enabled: true,
@@ -311,7 +312,7 @@ async fn unconfigured_backend_jobs_are_blocked_without_failure_cooldown_and_reco
     job.pre_run_command = Some("printf context".to_owned());
     let read = |executable, run_id| {
         super::scheduler_gate::evaluate_and_record_scheduler_skip_at(
-            temp.path(),
+            &temp_runs.runs,
             &config,
             executable,
             &job,
@@ -334,7 +335,9 @@ async fn unconfigured_backend_jobs_are_blocked_without_failure_cooldown_and_reco
         .unwrap()
         .unwrap();
     assert_eq!(repeated.ledger_record, blocked.ledger_record);
-    let records = load_run_records_for_task_key(temp.path(), &super::job_task_key(&job.id), 100)
+    let records = temp_runs
+        .runs
+        .load_run_records_for_task_key(&super::job_task_key(&job.id), 100)
         .await
         .unwrap();
     assert!(
@@ -359,7 +362,7 @@ async fn unconfigured_backend_jobs_are_blocked_without_failure_cooldown_and_reco
         Some(crate::automation::backend_identity::backend_identity(&config, None).unwrap());
     historical.error_classification = Some(AgentTaskFailureClass::Unavailable);
     historical.error_retryable = Some(true);
-    append_run_record(temp.path(), &historical).await.unwrap();
+    temp_runs.runs.append_run_record(&historical).await.unwrap();
     assert!(
         read(Some(executable.path()), "recovered-occurrence")
             .await
@@ -384,8 +387,11 @@ async fn unconfigured_backend_jobs_are_blocked_without_failure_cooldown_and_reco
         "a failure under the current backend must keep its cooldown"
     );
     let isolated = tempfile::TempDir::new().unwrap();
+    let isolated_runs = project_run_store(isolated.path(), isolated.path()).await;
     assert_eq!(
-        load_run_records_for_task_key(isolated.path(), &super::job_task_key(&job.id), 100)
+        isolated_runs
+            .runs
+            .load_run_records_for_task_key(&super::job_task_key(&job.id), 100)
             .await
             .unwrap(),
         Vec::new()
@@ -395,17 +401,22 @@ async fn unconfigured_backend_jobs_are_blocked_without_failure_cooldown_and_reco
 #[tokio::test]
 async fn persisted_and_deduplicated_skips_do_not_block_later_due_execution() {
     let temp = tempfile::TempDir::new().unwrap();
+    let temp_runs = project_run_store(temp.path(), temp.path()).await;
     let job = interval_job();
-    append_run_record(
-        temp.path(),
-        &ledger_record("success-a", AutomationRunStatus::Succeeded, None, 100),
-    )
-    .await
-    .unwrap();
+    temp_runs
+        .runs
+        .append_run_record(&ledger_record(
+            "success-a",
+            AutomationRunStatus::Succeeded,
+            None,
+            100,
+        ))
+        .await
+        .unwrap();
     let config = AutomationSettingsV1::default();
     let executable = tempfile::NamedTempFile::new().unwrap();
     let first = super::scheduler_gate::evaluate_and_record_scheduler_skip_at(
-        temp.path(),
+        &temp_runs.runs,
         &config,
         Some(executable.path()),
         &job,
@@ -422,7 +433,7 @@ async fn persisted_and_deduplicated_skips_do_not_block_later_due_execution() {
     let first = first.unwrap();
     assert_ne!(first.run_id, "next-occurrence");
     let repeated = super::scheduler_gate::evaluate_and_record_scheduler_skip_at(
-        temp.path(),
+        &temp_runs.runs,
         &config,
         Some(executable.path()),
         &job,
@@ -437,12 +448,16 @@ async fn persisted_and_deduplicated_skips_do_not_block_later_due_execution() {
     assert_ne!(repeated.run_id, "next-occurrence");
     assert_eq!(repeated.run_id, first.run_id);
     assert_eq!(repeated.ledger_record, first.ledger_record);
-    let exact_skip = find_run_record_exact_bounded(temp.path(), &repeated.run_id)
+    let exact_skip = temp_runs
+        .runs
+        .find_run_record(&repeated.run_id)
         .await
         .unwrap()
         .expect("repeated skip returns the exact persisted diagnostic");
     assert_eq!(exact_skip, first.ledger_record);
-    let records = load_run_records_for_task_key(temp.path(), "user_job:nightly", 10)
+    let records = temp_runs
+        .runs
+        .load_run_records_for_task_key("user_job:nightly", 10)
         .await
         .unwrap();
     assert_eq!(
@@ -451,7 +466,7 @@ async fn persisted_and_deduplicated_skips_do_not_block_later_due_execution() {
         "the repeated skip must be ledger-deduplicated"
     );
     let due = super::scheduler_gate::evaluate_and_record_scheduler_skip_at(
-        temp.path(),
+        &temp_runs.runs,
         &config,
         Some(executable.path()),
         &job,
@@ -465,20 +480,26 @@ async fn persisted_and_deduplicated_skips_do_not_block_later_due_execution() {
         due.is_none(),
         "the same next occurrence must become executable"
     );
-    append_run_record(
-        temp.path(),
-        &ledger_record("next-occurrence", AutomationRunStatus::Succeeded, None, 160),
-    )
-    .await
-    .unwrap();
-    let exact = find_run_record_exact_bounded(temp.path(), "next-occurrence")
+    temp_runs
+        .runs
+        .append_run_record(&ledger_record(
+            "next-occurrence",
+            AutomationRunStatus::Succeeded,
+            None,
+            160,
+        ))
+        .await
+        .unwrap();
+    let exact = temp_runs
+        .runs
+        .find_run_record("next-occurrence")
         .await
         .unwrap()
         .expect("due success remains exact after diagnostic skips");
     assert_eq!(exact.status, AutomationRunStatus::Succeeded);
 
     let next_skip = super::scheduler_gate::evaluate_and_record_scheduler_skip_at(
-        temp.path(),
+        &temp_runs.runs,
         &config,
         Some(executable.path()),
         &job,
@@ -491,7 +512,7 @@ async fn persisted_and_deduplicated_skips_do_not_block_later_due_execution() {
     .expect("the following occurrence is not due");
     assert_ne!(next_skip.run_id, first.run_id);
     let repeated_next = super::scheduler_gate::evaluate_and_record_scheduler_skip_at(
-        temp.path(),
+        &temp_runs.runs,
         &config,
         Some(executable.path()),
         &job,
@@ -504,7 +525,9 @@ async fn persisted_and_deduplicated_skips_do_not_block_later_due_execution() {
     .expect("the following occurrence remains not due");
     assert_eq!(repeated_next.run_id, next_skip.run_id);
     assert_eq!(repeated_next.ledger_record, next_skip.ledger_record);
-    let exact_next = find_run_record_exact_bounded(temp.path(), &repeated_next.run_id)
+    let exact_next = temp_runs
+        .runs
+        .find_run_record(&repeated_next.run_id)
         .await
         .unwrap()
         .expect("the following occurrence returns its own exact diagnostic");
@@ -518,10 +541,10 @@ async fn persisted_and_deduplicated_skips_do_not_block_later_due_execution() {
             200 + index,
         );
         unrelated.trigger = AutomationTrigger::Dashboard;
-        append_run_record(temp.path(), &unrelated).await.unwrap();
+        temp_runs.runs.append_run_record(&unrelated).await.unwrap();
     }
     let after_noise = super::scheduler_gate::evaluate_and_record_scheduler_skip_at(
-        temp.path(),
+        &temp_runs.runs,
         &config,
         Some(executable.path()),
         &job,
@@ -535,7 +558,9 @@ async fn persisted_and_deduplicated_skips_do_not_block_later_due_execution() {
     assert_eq!(after_noise.run_id, next_skip.run_id);
     assert_eq!(after_noise.ledger_record, next_skip.ledger_record);
     assert_eq!(
-        find_run_record_exact_bounded(temp.path(), &after_noise.run_id)
+        temp_runs
+            .runs
+            .find_run_record(&after_noise.run_id)
             .await
             .unwrap()
             .expect("no duplicate diagnostic terminal is appended"),
@@ -546,12 +571,13 @@ async fn persisted_and_deduplicated_skips_do_not_block_later_due_execution() {
 #[tokio::test]
 async fn scheduler_lock_skip_uses_a_diagnostic_identity_outside_the_effect_occurrence() {
     let temp = tempfile::TempDir::new().unwrap();
+    let temp_runs = project_run_store(temp.path(), temp.path()).await;
     let job = interval_job();
     let config = AutomationSettingsV1::default();
     let occurrence = "locked-occurrence";
     let started_at = "200".to_owned();
     let skip = super::scheduler_gate::record_scheduler_lock_skip(
-        temp.path(),
+        &temp_runs.runs,
         &config,
         None,
         &job,
@@ -564,14 +590,20 @@ async fn scheduler_lock_skip_uses_a_diagnostic_identity_outside_the_effect_occur
     .await
     .unwrap();
     assert_ne!(skip.run_id, occurrence);
-    append_run_record(
-        temp.path(),
-        &ledger_record(occurrence, AutomationRunStatus::Succeeded, None, 201),
-    )
-    .await
-    .unwrap();
+    temp_runs
+        .runs
+        .append_run_record(&ledger_record(
+            occurrence,
+            AutomationRunStatus::Succeeded,
+            None,
+            201,
+        ))
+        .await
+        .unwrap();
     assert_eq!(
-        find_run_record_exact_bounded(temp.path(), &skip.run_id)
+        temp_runs
+            .runs
+            .find_run_record(&skip.run_id)
             .await
             .unwrap()
             .expect("lock diagnostic is exact")
@@ -579,7 +611,9 @@ async fn scheduler_lock_skip_uses_a_diagnostic_identity_outside_the_effect_occur
         AutomationRunStatus::Skipped
     );
     assert_eq!(
-        find_run_record_exact_bounded(temp.path(), occurrence)
+        temp_runs
+            .runs
+            .find_run_record(occurrence)
             .await
             .unwrap()
             .expect("effect occurrence remains exact")

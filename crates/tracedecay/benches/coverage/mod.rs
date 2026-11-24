@@ -44,7 +44,7 @@ use tracedecay_automation_runtime::automation::managed_skills::{
 };
 use tracedecay_automation_runtime::automation::run_ledger::{
     AutomationRunArtifactKind, AutomationRunLedgerRecord, AutomationRunStatus, AutomationTrigger,
-    append_run_record, write_run_artifact,
+    write_run_artifact,
 };
 use tracedecay_contracts::git::{
     GitHubStackSignalEvidenceRefV1, GitHubStackSignalExpandSurfaceResultV1,
@@ -2722,14 +2722,15 @@ async fn seed_automation_run(
             return;
         }
     };
-    let dashboard_root = server
-        .cg_snapshot()
-        .await
-        .store_layout()
-        .dashboard_root
-        .clone();
+    let runs = match server.cg_snapshot().await.automation_run_store() {
+        Ok(runs) => runs,
+        Err(error) => {
+            seeds.skipped.push(format!("automation_run_*: {error}"));
+            return;
+        }
+    };
     let artifact = match write_run_artifact(
-        &dashboard_root,
+        runs.dashboard_root(),
         RUN_ID,
         AutomationRunArtifactKind::Traces,
         &json!({"marker": MARKER, "status": "captured"}),
@@ -2784,8 +2785,11 @@ async fn seed_automation_run(
         completed_at: "1782283200".to_owned(),
         completed_at_micros: Some(1_782_283_200_000_000),
     };
-    match append_run_record(&dashboard_root, &record).await {
-        Ok(()) => seeds.automation_run_id = Some(RUN_ID.to_owned()),
+    match runs.append_run_record(&record).await {
+        Ok(()) => {
+            seeds.automation_run_id = Some(RUN_ID.to_owned());
+            seeds.automation_run_record = Some(record);
+        }
         Err(error) => seeds.skipped.push(format!("automation_run_*: {error}")),
     }
 }

@@ -5,6 +5,7 @@ use tracedecay_daemon_protocol::DaemonHandshake;
 
 use tracedecay_automation_runtime::automation::AutomationRunControl;
 use tracedecay_automation_runtime::automation::backend::AgentTaskKind;
+use tracedecay_automation_runtime::automation::registered_run_store::RegisteredAutomationRunStore;
 
 use super::{
     automation_scheduler_has_work, effective_automation_config_for_project,
@@ -125,16 +126,15 @@ fn log_scheduler_schedule_skip(
     skip_all
 )]
 async fn fixed_task_schedule_decision(
-    dashboard_root: &Path,
+    runs: &RegisteredAutomationRunStore,
     config: &tracedecay_automation_runtime::automation::config::AdmittedAutomationConfig,
     codex: &tracedecay_domain::configuration::LcmSummarizerExecutableV1,
     task: AgentTaskKind,
     activity: tracedecay_automation_runtime::automation::scheduler::SessionActivity,
     now_secs: i64,
 ) -> Result<tracedecay_automation_runtime::automation::scheduler::AutomationScheduleDecision> {
-    let summary =
-        tracedecay_automation_runtime::automation::run_ledger::load_run_ledger_task_summary(
-            dashboard_root,
+    let summary = runs
+        .load_run_ledger_task_summary(
             task,
             tracedecay_automation_runtime::automation::backend::task_key(task),
         )
@@ -161,7 +161,7 @@ pub(super) async fn scheduler_automation_effect(
     memory: &tracedecay_project::project::TraceDecay,
     run_control: &AutomationRunControl,
     project_path: &Path,
-    dashboard_root: &Path,
+    runs: &RegisteredAutomationRunStore,
     requested_run_id: Option<&str>,
     configuration_digest: tracedecay_domain::ManifestDigest,
     request: impl FnOnce(
@@ -188,7 +188,7 @@ pub(super) async fn scheduler_automation_effect(
         &engine.invocation.invocation_service(),
         memory,
         project_path,
-        dashboard_root,
+        runs,
         request_id,
         deadline,
         &cancellation,
@@ -436,8 +436,9 @@ fn run_automation_scheduler_tick_inner<'a>(
             )
             .await;
         let schedule_now_secs = tracedecay_contracts::now_micros().0.div_euclid(1_000_000);
+        let runs = automation_context.automation_run_store()?;
         let memory_curator_decision = fixed_task_schedule_decision(
-            &cg.store_layout().dashboard_root,
+            &runs,
             config,
             &configuration.codex_executable,
             AgentTaskKind::MemoryCurator,
@@ -446,7 +447,7 @@ fn run_automation_scheduler_tick_inner<'a>(
         )
         .await?;
         let session_reflector_decision = fixed_task_schedule_decision(
-            &cg.store_layout().dashboard_root,
+            &runs,
             config,
             &configuration.codex_executable,
             AgentTaskKind::SessionReflector,
@@ -455,7 +456,7 @@ fn run_automation_scheduler_tick_inner<'a>(
         )
         .await?;
         let skill_writer_decision = fixed_task_schedule_decision(
-            &cg.store_layout().dashboard_root,
+            &runs,
             config,
             &configuration.codex_executable,
             AgentTaskKind::SkillWriter,
@@ -489,7 +490,7 @@ fn run_automation_scheduler_tick_inner<'a>(
                 cg,
                 run_control,
                 automation_context.project_root(),
-                &automation_context.dashboard_root,
+                &runs,
                 None,
                 configuration.configuration_digest.clone(),
                 |run_id| {
@@ -576,7 +577,7 @@ fn run_automation_scheduler_tick_inner<'a>(
                 cg,
                 run_control,
                 automation_context.project_root(),
-                &automation_context.dashboard_root,
+                &runs,
                 None,
                 configuration.configuration_digest.clone(),
                 &combined_options,
@@ -622,7 +623,7 @@ fn run_automation_scheduler_tick_inner<'a>(
                     cg,
                     run_control,
                     automation_context.project_root(),
-                    &automation_context.dashboard_root,
+                    &runs,
                     None,
                     configuration.configuration_digest.clone(),
                     |run_id| {
@@ -716,7 +717,7 @@ fn run_automation_scheduler_tick_inner<'a>(
                     cg,
                     run_control,
                     automation_context.project_root(),
-                    &automation_context.dashboard_root,
+                    &runs,
                     None,
                     configuration.configuration_digest.clone(),
                     |run_id| {
@@ -807,8 +808,10 @@ mod tests {
     use std::time::Duration;
 
     use tracedecay_automation_runtime::automation::AutomationRunControl;
+    use tracedecay_automation_runtime::automation::registered_run_store::RegisteredAutomationRunStore;
     use tracedecay_contracts::{CancellationSignal, Deadline};
-    use tracedecay_domain::UtcMicros;
+    use tracedecay_domain::{ProjectId, UtcMicros};
+    use tracedecay_global_db::tests::harness::RegisteredGlobalDbTestRuntime;
     use tracedecay_runtime_core::native_runtime;
 
     use super::{
@@ -972,14 +975,26 @@ mod tests {
 
     #[tokio::test]
     async fn disabled_fixed_task_preflight_creates_no_effect_journal() {
-        let dashboard = tempfile::tempdir().expect("dashboard root");
+        let temp = tempfile::tempdir().expect("automation preflight fixture");
+        let runtime = RegisteredGlobalDbTestRuntime::project(
+            temp.path().join("profile"),
+            temp.path().join("project"),
+            ProjectId::new("project.disabled-preflight").unwrap(),
+        )
+        .await
+        .unwrap();
+        let runs = RegisteredAutomationRunStore::admit(
+            runtime.project_database_arc().unwrap(),
+            temp.path().join("dashboard"),
+        )
+        .unwrap();
         let config = tracedecay_automation_runtime::automation::config::AutomationSettingsV1 {
             enabled: false,
             ..Default::default()
         };
 
         let decision = fixed_task_schedule_decision(
-            dashboard.path(),
+            &runs,
             &tracedecay_automation::config::admit_config(&config).unwrap(),
             &tracedecay_domain::configuration::LcmSummarizerExecutableV1::Unconfigured,
             tracedecay_automation_runtime::automation::backend::AgentTaskKind::MemoryCurator,
@@ -996,7 +1011,7 @@ mod tests {
             )
         );
         assert!(
-            !dashboard.path().join("automation_effects").exists(),
+            !runs.dashboard_root().join("automation_effects").exists(),
             "a skipped fixed task must not reserve or fsync an outer effect"
         );
     }
