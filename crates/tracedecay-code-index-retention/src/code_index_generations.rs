@@ -55,11 +55,13 @@ pub use graph_replay_release::{
     CodeGenerationGraphReplayReleasePageV1, CodeGenerationGraphReplayReleaseV1,
     code_generation_graph_replay_release_page, complete_code_generation_graph_replay_release,
 };
-use locking::acquire_generation_segments_lock_checked;
 pub use locking::{
     CodeGenerationStoreLockV1, acquire_code_generation_store_lock,
     acquire_generation_segments_publication_lock, try_acquire_code_generation_store_lock,
     try_acquire_code_generation_store_read_lock, wait_for_code_generation_store_release,
+};
+use locking::{
+    acquire_code_generation_store_lock_checked, acquire_generation_segments_lock_checked,
 };
 pub use scope_roots::{
     CodeIndexScopeV1, RefusedCodeIndexScopeV1, SCOPE_ROOT_RECORD_FILE, ScopeRootAuthorityReceiptV1,
@@ -100,7 +102,8 @@ use scope_roots::{
     scope_transaction_path, validate_scope_transaction,
 };
 use text_artifacts::{
-    TEXT_ARTIFACT_RECEIPT_STORE, execute_text_artifact_retention_under_store_lock,
+    CommittedTextArtifactCleanupV1, TEXT_ARTIFACT_RECEIPT_STORE,
+    execute_text_artifact_retention_under_store_lock,
     plan_collectable_text_artifacts_budgeted_page_cancellable,
     recover_pending_text_artifact_transaction_unlocked, text_artifact_transaction_path,
     total_text_artifact_bytes,
@@ -441,6 +444,37 @@ pub enum CodeGenerationRetentionModeV1 {
     Apply,
 }
 
+/// How a retention attempt admits itself to an exclusive generation-store
+/// lock.
+///
+/// `TryOnce` is the cheap census shape: a store somebody else holds is
+/// reported as busy at once. `WaitUntil` is the maintenance shape: a busy
+/// store is waited for until the caller's bounded deadline, so steady
+/// publication pressure cannot starve collection forever. Both observe
+/// cancellation between probes and never block in the kernel past the
+/// deadline.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StoreLockAdmissionV1 {
+    TryOnce,
+    WaitUntil(Instant),
+}
+
+impl StoreLockAdmissionV1 {
+    fn acquire(
+        self,
+        store_root: &Path,
+        is_cancelled: &dyn Fn() -> bool,
+    ) -> Result<CodeGenerationStoreLockV1, CodeGenerationRetentionErrorV1> {
+        match self {
+            Self::TryOnce => try_acquire_code_generation_store_lock(store_root)?
+                .ok_or(CodeGenerationRetentionErrorV1::GenerationStoreBusy),
+            Self::WaitUntil(deadline) => {
+                acquire_code_generation_store_lock_checked(store_root, deadline, is_cancelled)
+            }
+        }
+    }
+}
+
 /// How hard a census proves that a sealed generation file still matches the
 /// content digest encoded in its name.
 ///
@@ -754,6 +788,9 @@ pub struct CodeGenerationRetentionReportV1 {
     pub deleted_generations: Vec<CodeGenerationRetentionGenerationV1>,
     pub receipt: Option<CodeGenerationRetentionReceiptV1>,
     pub deleted_text_artifacts: Vec<CodeTextArtifactRetentionCandidateV1>,
+    /// Completed artifacts a concurrent publish relivened after the mark
+    /// phase. They were quarantined and restored, never unlinked.
+    pub restored_live_text_artifacts: Vec<String>,
     pub text_artifact_receipt: Option<CodeTextArtifactRetentionReceiptV1>,
     pub generation_segment_batch_exhausted: bool,
 }
@@ -908,6 +945,7 @@ pub fn prepare_next_code_generation_retention_cancellable(
         is_cancelled,
         graph_replay_pool_root,
         None,
+        StoreLockAdmissionV1::TryOnce,
     )
 }
 
@@ -917,6 +955,7 @@ fn prepare_next_code_generation_retention_page_cancellable(
     is_cancelled: &dyn Fn() -> bool,
     graph_replay_pool_root: Option<&Path>,
     text_page: Option<&Arc<TextArtifactPageV1>>,
+    admission: StoreLockAdmissionV1,
 ) -> Result<CodeGenerationRetentionPlanV1, CodeGenerationRetentionErrorV1> {
     if is_cancelled() {
         return Err(CodeGenerationRetentionErrorV1::Cancelled);
@@ -949,6 +988,7 @@ fn prepare_next_code_generation_retention_page_cancellable(
         store_root,
         vector_readable_sources,
         graph_replay_pool_root,
+        admission,
         is_cancelled,
     )?;
     // Most maintenance ticks have no collectable work. Inventory those ticks
@@ -1794,6 +1834,31 @@ pub fn execute_code_generation_retention_cancellable(
     graph_replay_pool_root: Option<&Path>,
     is_cancelled: &dyn Fn() -> bool,
 ) -> Result<CodeGenerationRetentionReportV1, CodeGenerationRetentionErrorV1> {
+    execute_code_generation_retention_with_admission(
+        store_root,
+        plan,
+        mode,
+        completed_at,
+        graph_replay_pool_root,
+        StoreLockAdmissionV1::TryOnce,
+        is_cancelled,
+    )
+}
+
+/// Apply a fully verified retention plan with the caller's lock admission.
+///
+/// Daemon maintenance passes [`StoreLockAdmissionV1::WaitUntil`] so a busy
+/// publisher delays collection instead of failing every tick; one-off callers
+/// keep the single-attempt shape above.
+pub fn execute_code_generation_retention_with_admission(
+    store_root: &Path,
+    plan: CodeGenerationRetentionPlanV1,
+    mode: CodeGenerationRetentionModeV1,
+    completed_at: UtcMicros,
+    graph_replay_pool_root: Option<&Path>,
+    admission: StoreLockAdmissionV1,
+    is_cancelled: &dyn Fn() -> bool,
+) -> Result<CodeGenerationRetentionReportV1, CodeGenerationRetentionErrorV1> {
     if is_cancelled() {
         return Err(CodeGenerationRetentionErrorV1::Cancelled);
     }
@@ -1803,6 +1868,7 @@ pub fn execute_code_generation_retention_cancellable(
             deleted_generations: Vec::new(),
             receipt: None,
             deleted_text_artifacts: Vec::new(),
+            restored_live_text_artifacts: Vec::new(),
             text_artifact_receipt: None,
             generation_segment_batch_exhausted: false,
         });
@@ -1816,8 +1882,7 @@ pub fn execute_code_generation_retention_cancellable(
     }
 
     let vector_readable_sources = plan.vector_readable_sources.clone();
-    let _store_lock = try_acquire_code_generation_store_lock(store_root)?
-        .ok_or(CodeGenerationRetentionErrorV1::GenerationStoreBusy)?;
+    let _store_lock = admission.acquire(store_root, is_cancelled)?;
     // Retiring manifests and sweeping segments both change which segments
     // are named; neither may interleave with another scope's publication,
     // retention, or scope collection over the shared segment directory.
@@ -1965,21 +2030,34 @@ pub fn execute_code_generation_retention_cancellable(
         (deleted_generations, Some(receipt))
     };
 
-    let (deleted_text_artifacts, text_artifact_receipt) =
+    let (deleted_text_artifacts, text_artifact_receipt, restored_live_text_artifacts) =
         if plan.collectable_text_artifacts.is_empty() {
-            (Vec::new(), None)
+            (Vec::new(), None, Vec::new())
         } else {
             // The generation phase above may have rewritten the durable index
             // out from under `plan.active_pointer`; the artifact phase's own
             // compare-and-swap has to bind the pointer the store carries now.
             let active_pointer = read_optional_active_pointer(store_root)?;
-            execute_text_artifact_retention_under_store_lock(
+            let (_, receipt, cleanup) = execute_text_artifact_retention_under_store_lock(
                 store_root,
                 &plan,
                 active_pointer.as_ref(),
                 completed_at,
                 is_cancelled,
-            )?
+            )?;
+            let removed = plan
+                .collectable_text_artifacts
+                .iter()
+                .filter(|candidate| {
+                    cleanup
+                        .removed
+                        .iter()
+                        .any(|removed| removed == &candidate.artifact_file)
+                })
+                .cloned()
+                .collect();
+            log_restored_live_text_artifacts(&cleanup);
+            (removed, receipt, cleanup.restored_live)
         };
 
     Ok(CodeGenerationRetentionReportV1 {
@@ -1987,6 +2065,7 @@ pub fn execute_code_generation_retention_cancellable(
         deleted_generations,
         receipt,
         deleted_text_artifacts,
+        restored_live_text_artifacts,
         text_artifact_receipt,
         generation_segment_batch_exhausted,
     })
@@ -2002,6 +2081,7 @@ fn recover_code_generation_retention(
         store_root,
         vector_readable_sources,
         graph_replay_pool_root,
+        StoreLockAdmissionV1::TryOnce,
         &|| false,
     )
 }
@@ -2015,13 +2095,13 @@ fn recover_code_generation_retention_cancellable(
     store_root: &Path,
     vector_readable_sources: &BTreeSet<CodeGenerationId>,
     graph_replay_pool_root: Option<&Path>,
+    admission: StoreLockAdmissionV1,
     is_cancelled: &dyn Fn() -> bool,
 ) -> Result<(), CodeGenerationRetentionErrorV1> {
     if is_cancelled() {
         return Err(CodeGenerationRetentionErrorV1::Cancelled);
     }
-    let _store_lock = try_acquire_code_generation_store_lock(store_root)?
-        .ok_or(CodeGenerationRetentionErrorV1::GenerationStoreBusy)?;
+    let _store_lock = admission.acquire(store_root, is_cancelled)?;
     // Recovery may restore quarantined manifests into the generations
     // directory, which a concurrent sweep over shared segments must not miss.
     let _segments_lock = acquire_generation_segments_lock_checked(store_root, is_cancelled)?;
@@ -2037,7 +2117,8 @@ fn recover_code_generation_retention_cancellable(
     if is_cancelled() {
         return Err(CodeGenerationRetentionErrorV1::Cancelled);
     }
-    recover_pending_text_artifact_transaction_unlocked(store_root)?;
+    let text_artifact_cleanup = recover_pending_text_artifact_transaction_unlocked(store_root)?;
+    log_restored_live_text_artifacts(&text_artifact_cleanup);
     // Receipts are recovery evidence: a pending journal reads its own, and a
     // queued graph-replay release is validated against the generation receipt
     // it names. With every journal settled above, a receipt the release queue
@@ -2050,6 +2131,20 @@ fn recover_code_generation_retention_cancellable(
     )?;
     receipt_store::prune_receipts(store_root, &TEXT_ARTIFACT_RECEIPT_STORE, &BTreeSet::new())?;
     Ok(())
+}
+
+/// One relivened completed artifact no longer stalls its transaction: every
+/// other candidate finishes and the restored name is operator-visible.
+fn log_restored_live_text_artifacts(cleanup: &CommittedTextArtifactCleanupV1) {
+    if cleanup.restored_live.is_empty() {
+        return;
+    }
+    tracing::warn!(
+        event = "code_text_artifact_retention_restored_live",
+        artifacts = cleanup.restored_live.len(),
+        names = ?cleanup.restored_live,
+        "completed text artifacts relivened during retention were restored instead of collected"
+    );
 }
 
 pub fn run_code_generation_retention(
@@ -2065,13 +2160,36 @@ pub fn run_code_generation_retention(
         mode,
         completed_at,
         graph_replay_pool_root,
+        StoreLockAdmissionV1::TryOnce,
         &|| false,
     )
 }
 
-/// Plan, recover, and apply with one cancellation authority. The old wrapper
-/// preserves current callers while daemon maintenance is integrated with this
-/// control boundary.
+/// [`run_code_generation_retention`] with the caller's lock admission. Daemon
+/// maintenance uses it to wait out a busy publisher within its own deadline.
+pub fn run_code_generation_retention_with_admission(
+    store_root: &Path,
+    vector_readable_sources: &BTreeSet<CodeGenerationId>,
+    mode: CodeGenerationRetentionModeV1,
+    completed_at: UtcMicros,
+    graph_replay_pool_root: Option<&Path>,
+    admission: StoreLockAdmissionV1,
+    is_cancelled: &dyn Fn() -> bool,
+) -> Result<CodeGenerationRetentionReportV1, CodeGenerationRetentionErrorV1> {
+    run_code_generation_retention_cancellable(
+        store_root,
+        vector_readable_sources,
+        mode,
+        completed_at,
+        graph_replay_pool_root,
+        admission,
+        is_cancelled,
+    )
+}
+
+/// Plan, recover, and apply with one cancellation authority and lock
+/// admission. `TryOnce` callers see a busy store immediately; maintenance
+/// passes a bounded `WaitUntil`.
 #[tracing::instrument(name = "usecases.retention.run", level = "trace", skip_all)]
 fn run_code_generation_retention_cancellable(
     store_root: &Path,
@@ -2079,6 +2197,7 @@ fn run_code_generation_retention_cancellable(
     mode: CodeGenerationRetentionModeV1,
     completed_at: UtcMicros,
     graph_replay_pool_root: Option<&Path>,
+    admission: StoreLockAdmissionV1,
     is_cancelled: &dyn Fn() -> bool,
 ) -> Result<CodeGenerationRetentionReportV1, CodeGenerationRetentionErrorV1> {
     // Apply sweeps the same census dry-run reports, bounded by the batch cap.
@@ -2088,6 +2207,7 @@ fn run_code_generation_retention_cancellable(
                 store_root,
                 vector_readable_sources,
                 graph_replay_pool_root,
+                admission,
                 is_cancelled,
             )?;
             plan_code_generation_retention_with_verification_cancellable(
@@ -2108,12 +2228,13 @@ fn run_code_generation_retention_cancellable(
             )?
         }
     };
-    execute_code_generation_retention_cancellable(
+    execute_code_generation_retention_with_admission(
         store_root,
         plan,
         mode,
         completed_at,
         graph_replay_pool_root,
+        admission,
         is_cancelled,
     )
 }

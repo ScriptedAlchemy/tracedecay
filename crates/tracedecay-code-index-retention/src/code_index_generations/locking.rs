@@ -80,8 +80,10 @@ pub fn acquire_code_generation_store_lock(
 /// caller that only needs one uncontended critical section is not refused.
 /// A held lock returns [`CodeGenerationRetentionErrorV1::GenerationStoreBusy`]
 /// or [`CodeGenerationRetentionErrorV1::Cancelled`] instead of blocking in
-/// `File::lock`, which cannot observe either signal.
-pub(super) fn acquire_code_generation_store_lock_checked(
+/// `File::lock`, which cannot observe either signal. The caller owns the
+/// deadline: a probe passes the short acquire budget, while a maintenance pass
+/// that may wait out a publisher passes its own bounded wait.
+pub fn acquire_code_generation_store_lock_checked(
     store_root: &Path,
     deadline: Instant,
     is_cancelled: &dyn Fn() -> bool,
@@ -271,7 +273,6 @@ fn lock_file(
     deadline: Instant,
     is_cancelled: &dyn Fn() -> bool,
 ) -> Result<CodeGenerationStoreLockV1, CodeGenerationRetentionErrorV1> {
-    let deadline = deadline.min(Instant::now() + GRAPH_REPLAY_POOL_ACQUIRE_BUDGET);
     loop {
         if is_cancelled() {
             return Err(CodeGenerationRetentionErrorV1::Cancelled);

@@ -1,6 +1,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use tracedecay_code_index_retention::code_index_generations::code_text_artifacts_root;
+use tracedecay_code_index_retention::code_index_generations::{
+    StoreLockAdmissionV1, code_text_artifacts_root,
+};
 use tracedecay_domain::canonical_text::sha256_hex;
 use tracedecay_runtime_core::cancellation::CancellationToken;
 
@@ -45,6 +47,7 @@ async fn maintenance_owner_advances_noop_pages_and_applies_a_later_orphan() {
             store.path(),
             &observations.clone(),
             &cancellation,
+            StoreLockAdmissionV1::TryOnce,
         )
         .await
         .unwrap();
@@ -58,6 +61,7 @@ async fn maintenance_owner_advances_noop_pages_and_applies_a_later_orphan() {
                 store.path(),
                 &observations,
                 &cancellation,
+                StoreLockAdmissionV1::TryOnce,
             )
             .await
             .unwrap();

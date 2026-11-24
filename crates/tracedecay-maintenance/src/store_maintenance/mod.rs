@@ -9,24 +9,54 @@
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
+use std::time::Instant;
 
 use crate::lease::ProjectStoreMaintenanceLeaseV1;
 use crate::telemetry::StoreTelemetrySamplingRegistry;
 use tracedecay_code_index_retention::code_index_generations::{
     CodeGenerationRetentionErrorV1, CodeGenerationRetentionModeV1, CodeGenerationRetentionPlanV1,
-    CodeGenerationRetentionReportV1, CodeIndexScopeV1, code_index_scopes, code_index_store_root,
-    execute_code_generation_retention_cancellable,
+    CodeGenerationRetentionReportV1, CodeIndexScopeV1, StoreLockAdmissionV1, code_index_scopes,
+    code_index_store_root, execute_code_generation_retention_with_admission,
 };
 use tracedecay_code_index_runtime::code_index_scheduler::CodeIndexSchedulerRegistryV1;
 use tracedecay_domain::CodeGenerationId;
 use tracedecay_global_db::RegisteredGlobalDb;
+use tracedecay_runtime_core::DAEMON_TASK_ABORT_DEADLINE;
 use tracedecay_runtime_core::cancellation::CancellationToken;
 use tracedecay_runtime_core::logging::log_daemon_event;
 use tracedecay_runtime_core::native_runtime;
 
+/// How many consecutive `GenerationStoreBusy` deferrals a scope may take
+/// before a maintenance attempt waits for the publisher instead of failing.
+///
+/// Publication holds the store lock for its seal; a handful of deferrals is
+/// cheap, while retrying forever is the starvation #4616 reported. The wait
+/// itself is bounded by the daemon's existing task abort deadline, so this
+/// constant decides only when to stop probing and start waiting. Measured by
+/// `busy_store_progress_tests`, which is the bound's review evidence: three
+/// single-attempt passes defer while a publisher holds the store, the fourth
+/// waits and collects the superseded generations, and a lock held
+/// indefinitely still returns cancellation in under a second.
+const GENERATION_STORE_BUSY_DEFERRALS_BEFORE_WAIT: u32 = 3;
+
+fn generation_store_admission(
+    observations: &StoreTelemetrySamplingRegistry,
+    store_root: &Path,
+) -> StoreLockAdmissionV1 {
+    if observations.generation_store_busy_deferrals(store_root)
+        >= GENERATION_STORE_BUSY_DEFERRALS_BEFORE_WAIT
+    {
+        StoreLockAdmissionV1::WaitUntil(Instant::now() + DAEMON_TASK_ABORT_DEADLINE)
+    } else {
+        StoreLockAdmissionV1::TryOnce
+    }
+}
+
 mod graph_replay;
 mod scope_reconciliation;
 use graph_replay::{defer_graph_replay_pool_busy, log_code_generation_retention_degraded};
+#[cfg(test)]
+mod busy_store_progress_tests;
 #[cfg(test)]
 pub(crate) mod registered_tests;
 #[cfg(test)]
@@ -64,7 +94,9 @@ impl CodeGenerationRetentionOutcomeV1 {
 
 fn defer_generation_store_busy(
     observations: &crate::telemetry::StoreTelemetrySamplingRegistry,
+    store_root: &Path,
 ) -> CodeGenerationRetentionOutcomeV1 {
+    observations.record_generation_store_busy(store_root);
     log_code_generation_retention_degraded(observations, "generation_store_busy");
     CodeGenerationRetentionOutcomeV1::Failed
 }
@@ -154,6 +186,7 @@ async fn plan_collection(
     scan_owner_root: &Path,
     observations: &StoreTelemetrySamplingRegistry,
     cancellation: &CancellationToken,
+    admission: StoreLockAdmissionV1,
 ) -> Result<CodeGenerationRetentionPlanV1, CodeGenerationRetentionOutcomeV1> {
     let plan_root = store_root.to_path_buf();
     let plan_sources = protected_sources.clone();
@@ -164,11 +197,12 @@ async fn plan_collection(
         let mut scan = scan
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let plan = scan.prepare(
+        let plan = scan.prepare_with_admission(
             &plan_root,
             &plan_sources,
             &|| plan_cancellation.is_cancelled(),
             Some(&plan_pool_root),
+            admission,
         )?;
         if !plan.has_collectable_work() {
             scan.complete(&plan);
@@ -186,7 +220,7 @@ async fn plan_collection(
             Err(defer_graph_replay_pool_busy(observations, backoff_root))
         }
         Ok(Err(CodeGenerationRetentionErrorV1::GenerationStoreBusy)) => {
-            Err(defer_generation_store_busy(observations))
+            Err(defer_generation_store_busy(observations, store_root))
         }
         Ok(Err(error)) => {
             // The bare label proved undiagnosable on a live profile: without
@@ -220,6 +254,7 @@ async fn execute_collection(
     scan_owner_root: &Path,
     observations: &StoreTelemetrySamplingRegistry,
     cancellation: &CancellationToken,
+    admission: StoreLockAdmissionV1,
 ) -> Result<CodeGenerationRetentionReportV1, CodeGenerationRetentionOutcomeV1> {
     // `current_timestamp()` counts seconds; wrapping it in `UtcMicros` stamped
     // every deletion receipt with a seconds value in a micros-typed field
@@ -231,12 +266,13 @@ async fn execute_collection(
     let execution_cancellation = cancellation.clone();
     let scan = observations.text_artifact_scan(scan_owner_root, store_root);
     let report = native_runtime::spawn_blocking(move || {
-        let report = execute_code_generation_retention_cancellable(
+        let report = execute_code_generation_retention_with_admission(
             &execution_root,
             plan,
             CodeGenerationRetentionModeV1::Apply,
             completed_at,
             Some(&execution_pool_root),
+            admission,
             &|| execution_cancellation.is_cancelled(),
         )?;
         scan.lock()
@@ -247,6 +283,7 @@ async fn execute_collection(
     .await;
     match report {
         Ok(Ok(report)) => {
+            observations.clear_generation_store_busy(store_root);
             let generation_reclaimed = report.receipt.as_ref().map_or_else(
                 || {
                     report
@@ -257,16 +294,14 @@ async fn execute_collection(
                 },
                 |receipt| receipt.reclaimed_bytes,
             );
-            let text_artifact_reclaimed = report.text_artifact_receipt.as_ref().map_or_else(
-                || {
-                    report
-                        .deleted_text_artifacts
-                        .iter()
-                        .map(|artifact| artifact.size_bytes)
-                        .sum()
-                },
-                |receipt| receipt.reclaimed_bytes,
-            );
+            // Reclaim is what actually left the store. A relivened artifact
+            // was quarantined and restored, so neither its planned bytes nor
+            // its planned candidate count is a collection.
+            let text_artifact_reclaimed: u64 = report
+                .deleted_text_artifacts
+                .iter()
+                .map(|artifact| artifact.size_bytes)
+                .sum();
             let reclaimed = generation_reclaimed.saturating_add(text_artifact_reclaimed);
             if reclaimed > 0 {
                 log_daemon_event(
@@ -282,6 +317,23 @@ async fn execute_collection(
                             "text_artifacts_collected",
                             report.deleted_text_artifacts.len().to_string(),
                         ),
+                        (
+                            "text_artifacts_restored_live",
+                            report.restored_live_text_artifacts.len().to_string(),
+                        ),
+                    ],
+                );
+            }
+            if !report.restored_live_text_artifacts.is_empty() {
+                log_daemon_event(
+                    "retention_text_artifact_restored_live",
+                    &[
+                        ("store", "code-index-v1".to_string()),
+                        (
+                            "artifacts",
+                            report.restored_live_text_artifacts.len().to_string(),
+                        ),
+                        ("names", report.restored_live_text_artifacts.join(",")),
                     ],
                 );
             }
@@ -295,9 +347,10 @@ async fn execute_collection(
             Err(defer_graph_replay_pool_busy(observations, backoff_root))
         }
         Ok(Err(CodeGenerationRetentionErrorV1::GenerationStoreBusy)) => {
-            Err(defer_generation_store_busy(observations))
+            Err(defer_generation_store_busy(observations, store_root))
         }
         Ok(Err(error)) => {
+            observations.clear_generation_store_busy(store_root);
             // Same diagnosability contract as the plan failure: the apply
             // step's typed error names the exact refusal (CAS loss, unsafe
             // state, storage) instead of a bare retry label.
@@ -407,6 +460,7 @@ pub async fn run_code_generation_retention(
         &layout.data_root,
         observations,
         cancellation,
+        generation_store_admission(observations, &store_root),
     )
     .await
     {
@@ -475,6 +529,7 @@ pub async fn run_code_generation_retention(
         &layout.data_root,
         observations,
         cancellation,
+        generation_store_admission(observations, &store_root),
     )
     .await
     {
@@ -630,6 +685,7 @@ pub async fn run_registered_code_generation_retention(
             &store.data_root,
             observations,
             cancellation,
+            generation_store_admission(observations, &scope.store_root),
         )
         .await
         {
@@ -653,6 +709,7 @@ pub async fn run_registered_code_generation_retention(
             &store.data_root,
             observations,
             cancellation,
+            generation_store_admission(observations, &scope.store_root),
         )
         .await
         {

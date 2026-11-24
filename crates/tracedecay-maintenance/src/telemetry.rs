@@ -497,6 +497,10 @@ pub struct StoreTelemetrySamplingRegistry {
     text_artifact_scans: TextArtifactScansV1,
     graph_staging_release:
         Arc<std::sync::Mutex<HashMap<PathBuf, tracedecay_store::GraphProjectionIdentityV1>>>,
+    /// Consecutive `GenerationStoreBusy` deferrals per scope root. The
+    /// maintenance pass defers a few times, then waits within its own bounded
+    /// deadline so steady publication pressure cannot starve collection.
+    generation_store_busy: Arc<std::sync::Mutex<HashMap<PathBuf, u32>>>,
     /// Whether the by-design quiet `retry` tick line has already been written.
     /// A persistent quiet retry logs once, then counts on
     /// [`daemon.git.maintenance.retention_quiet_total`]; a loud anomaly or an
@@ -693,6 +697,40 @@ impl StoreTelemetrySamplingRegistry {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .retain(|project, _| active_projects.contains(project));
+        self.generation_store_busy
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .retain(|project, _| active_projects.contains(project));
+    }
+
+    /// Count one `GenerationStoreBusy` deferral for `store_root` and return
+    /// the new consecutive count.
+    pub fn record_generation_store_busy(&self, store_root: &Path) -> u32 {
+        let mut counts = self
+            .generation_store_busy
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let count = counts.entry(store_root.to_path_buf()).or_insert(0);
+        *count = count.saturating_add(1);
+        *count
+    }
+
+    /// Clear a store's consecutive busy deferrals after a non-busy outcome.
+    pub fn clear_generation_store_busy(&self, store_root: &Path) {
+        self.generation_store_busy
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(store_root);
+    }
+
+    /// Consecutive busy deferrals recorded for `store_root`.
+    pub fn generation_store_busy_deferrals(&self, store_root: &Path) -> u32 {
+        self.generation_store_busy
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(store_root)
+            .copied()
+            .unwrap_or(0)
     }
 
     /// Whether this tick may attempt the graph-replay release reconcile.
