@@ -17,8 +17,13 @@ pub mod co_change;
 
 use std::ffi::{OsStr, OsString};
 use std::io::{Read, Write};
+#[cfg(target_os = "macos")]
+use std::mem::{MaybeUninit, size_of};
+use std::num::NonZeroU64;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
+#[cfg(unix)]
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -26,8 +31,11 @@ use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
+use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System};
+
 use crate::cancellation::CancellationToken;
 use crate::path_safety::{plain_git_args, plain_host_path};
+use crate::resident_memory::{ProcessResidentMemoryV1, ResidentMemoryComponentIdV1};
 
 const GIT_LITERAL: &str = "git";
 const GIT_CAPTURE_AT_TIMEOUT: Duration = Duration::from_secs(2);
@@ -283,9 +291,133 @@ pub fn bounded_git_output(
 /// and termination. [`bounded_git_output`] is the read-only Git wrapper that
 /// applies `TraceDecay`'s ambient-environment sanitization.
 pub fn bounded_command_output(
+    command: Command,
+    stdin: Option<&[u8]>,
+    bounds: &GitCommandBounds,
+) -> Result<Output, GitCommandError> {
+    supervised_command_output(command, stdin, bounds, false, |_| Ok(()))
+}
+
+/// Charge a bounded command's output and sampled process-tree RSS to the
+/// daemon ledger until supervision finishes. Refused growth aborts the command.
+pub fn bounded_command_output_with_resident_memory(
+    command: Command,
+    bounds: &GitCommandBounds,
+    memory: &Arc<ProcessResidentMemoryV1>,
+    component: ResidentMemoryComponentIdV1,
+) -> Result<Output, GitCommandError> {
+    let output_bytes =
+        (bounds.max_stdout_bytes as u64).saturating_add(bounds.max_stderr_bytes as u64);
+    let initial = NonZeroU64::new(output_bytes).unwrap_or(NonZeroU64::MIN);
+    let mut reservation = memory
+        .begin_operation()
+        .reserve_process_shared(component, initial)
+        .map_err(|error| GitCommandError::Wait(std::io::Error::other(error)))?;
+    let mut system = System::new();
+    let sample_interval = Duration::from_millis(200);
+    let max_observation_gap = Duration::from_secs(1);
+    let mut next_sample = None;
+    let mut unavailable_since = None;
+    supervised_command_output(command, None, bounds, true, |child| {
+        let now = Instant::now();
+        if now < *next_sample.get_or_insert(now + sample_interval) {
+            return Ok(());
+        }
+        let Some(bytes) = sample_child_tree_rss(&mut system, Pid::from_u32(child.id())) else {
+            if child.try_wait()?.is_some() {
+                return Ok(());
+            }
+            let since = *unavailable_since.get_or_insert(now);
+            if now.duration_since(since) >= max_observation_gap {
+                return Err(std::io::Error::other(
+                    "child resident memory is unavailable",
+                ));
+            }
+            next_sample = Some(now + CHILD_WAIT_POLL_INTERVAL);
+            return Ok(());
+        };
+        unavailable_since = None;
+        next_sample = Some(now + sample_interval);
+        let required = output_bytes.saturating_add(bytes);
+        if let Some(growth) = NonZeroU64::new(required.saturating_sub(reservation.reserved_bytes()))
+        {
+            reservation
+                .try_grow(growth)
+                .map_err(std::io::Error::other)?;
+        }
+        Ok(())
+    })
+}
+
+fn sample_child_tree_rss(system: &mut System, root: Pid) -> Option<u64> {
+    let tree = child_tree(system, root);
+    #[cfg(not(target_os = "macos"))]
+    system.refresh_processes_specifics(
+        ProcessesToUpdate::Some(&tree),
+        true,
+        ProcessRefreshKind::nothing().with_memory().without_tasks(),
+    );
+    let root_bytes = process_rss(system, root)?;
+    Some(
+        tree.into_iter()
+            .skip(1)
+            .filter_map(|pid| process_rss(system, pid))
+            .fold(root_bytes, u64::saturating_add),
+    )
+}
+
+#[cfg(target_os = "macos")]
+fn process_rss(_: &System, pid: Pid) -> Option<u64> {
+    let mut task = MaybeUninit::<libc::proc_taskinfo>::uninit();
+    let pid = libc::pid_t::try_from(pid.as_u32()).ok()?;
+    let length = i32::try_from(size_of::<libc::proc_taskinfo>()).ok()?;
+    let written = unsafe {
+        libc::proc_pidinfo(
+            pid,
+            libc::PROC_PIDTASKINFO,
+            0,
+            task.as_mut_ptr().cast(),
+            length,
+        )
+    };
+    if written != length {
+        return None;
+    }
+    let resident = unsafe { task.assume_init() }.pti_resident_size;
+    (resident != 0).then_some(resident)
+}
+
+#[cfg(not(target_os = "macos"))]
+fn process_rss(system: &System, pid: Pid) -> Option<u64> {
+    let resident = system.process(pid)?.memory();
+    (resident != 0).then_some(resident)
+}
+
+fn child_tree(system: &mut System, root: Pid) -> Vec<Pid> {
+    system.refresh_processes_specifics(
+        ProcessesToUpdate::All,
+        true,
+        ProcessRefreshKind::nothing().without_tasks(),
+    );
+    let mut tree = vec![root];
+    let mut next = 0;
+    while let Some(parent) = tree.get(next).copied() {
+        for (pid, process) in system.processes() {
+            if process.parent() == Some(parent) && !tree.contains(pid) {
+                tree.push(*pid);
+            }
+        }
+        next += 1;
+    }
+    tree
+}
+
+fn supervised_command_output(
     mut command: Command,
     stdin: Option<&[u8]>,
     bounds: &GitCommandBounds,
+    isolated: bool,
+    observe: impl FnMut(&mut Child) -> std::io::Result<()>,
 ) -> Result<Output, GitCommandError> {
     if is_cancelled(bounds) {
         return Err(GitCommandError::Cancelled);
@@ -294,6 +426,10 @@ pub fn bounded_command_output(
         return Err(GitCommandError::DeadlineExceeded);
     }
 
+    #[cfg(unix)]
+    if isolated {
+        command.process_group(0);
+    }
     let mut child = command
         .stdin(if stdin.is_some() {
             Stdio::piped()
@@ -304,12 +440,35 @@ pub fn bounded_command_output(
         .stderr(Stdio::piped())
         .spawn()
         .map_err(GitCommandError::Unavailable)?;
-    let output = supervise_child(&mut child, stdin, bounds);
+    let output = supervise_child(&mut child, stdin, bounds, observe);
     if output.is_err() {
+        terminate_command_tree(&mut child, isolated);
         let _ = child.kill();
         let _ = child.wait();
     }
     output
+}
+
+#[cfg(unix)]
+fn terminate_command_tree(child: &mut Child, isolated: bool) {
+    if isolated && let Ok(group) = libc::pid_t::try_from(child.id()) {
+        unsafe { libc::kill(-group, libc::SIGKILL) };
+    }
+}
+
+#[cfg(not(unix))]
+fn terminate_command_tree(child: &mut Child, isolated: bool) {
+    if isolated {
+        let mut system = System::new();
+        for pid in child_tree(&mut system, Pid::from_u32(child.id()))
+            .into_iter()
+            .rev()
+        {
+            if let Some(process) = system.process(pid) {
+                process.kill();
+            }
+        }
+    }
 }
 
 /// Runs in-process Git work under the bounds that govern Git subprocesses.
@@ -449,6 +608,7 @@ fn supervise_child(
     child: &mut Child,
     input: Option<&[u8]>,
     bounds: &GitCommandBounds,
+    mut observe: impl FnMut(&mut Child) -> std::io::Result<()>,
 ) -> Result<Output, GitCommandError> {
     let missing = |pipe| GitCommandError::Unavailable(std::io::Error::other(pipe));
     let abandoned = AbandonOnReturn(Arc::new(AtomicBool::new(false)));
@@ -505,6 +665,7 @@ fn supervise_child(
         if let Some(status) = child.try_wait().map_err(GitCommandError::Wait)? {
             break status;
         }
+        observe(child).map_err(GitCommandError::Wait)?;
         events.pump(bounds)?;
         if let Some((stream, bound)) = events.exceeded {
             return Err(GitCommandError::OutputLimitExceeded { stream, bound });

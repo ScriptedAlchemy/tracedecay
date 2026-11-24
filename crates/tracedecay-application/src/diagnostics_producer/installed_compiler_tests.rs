@@ -11,7 +11,7 @@ use sha2::{Digest, Sha256};
 
 use tracedecay_domain::UtcMicros;
 use tracedecay_domain::test_fixtures::id;
-use tracedecay_lsp::{TypeScriptCompilerAdmission, typescript_projects};
+use tracedecay_lsp::typescript_projects;
 use tracedecay_runtime_core::background_cpu::ProcessBackgroundCpuV1;
 use tracedecay_runtime_core::db::engine::TestConnection;
 use tracedecay_runtime_core::test_executable::write_executable_script;
@@ -19,6 +19,7 @@ use tracedecay_runtime_core::test_executable::write_executable_script;
 use super::{
     CompilerProducerRunV1, CompilerReadBudget, TypeScriptProducerStateV1,
     TypeScriptProducerStatusHandleV1, hash_package_tree, run_typescript_producer_v1,
+    test_compiler_admission,
 };
 use crate::diagnostics_publication::CodeIndexPublicationIdentityV1;
 use crate::diagnostics_store::DiagnosticsStore;
@@ -182,12 +183,6 @@ impl InstalledCompilerProject {
 
     /// A project of `files` (relative path, contents) beside `release`.
     pub(super) fn installing(release: PinnedTypeScript, files: &[(&str, &str)]) -> Self {
-        let pinned = PinnedCompiler::resolve(release);
-        assert!(
-            version(&pinned.typescript).starts_with(release.major()),
-            "{release:?} resolved typescript@{}",
-            version(&pinned.typescript)
-        );
         let temp = tempfile::tempdir().expect("isolated compiler project");
         let root = temp.path().join("project");
         std::fs::create_dir_all(&root).unwrap();
@@ -197,7 +192,23 @@ impl InstalledCompilerProject {
             std::fs::create_dir_all(path.parent().unwrap()).unwrap();
             std::fs::write(path, contents).unwrap();
         }
+        let typescript = Self::install_release(&root, release);
+        Self {
+            build_info_dir: temp.path().join("store/typescript-build-info"),
+            connection: TestConnection::open(&temp.path().join("diagnostics.db")),
+            _temp: temp,
+            root,
+            typescript,
+        }
+    }
 
+    fn install_release(root: &Path, release: PinnedTypeScript) -> PathBuf {
+        let pinned = PinnedCompiler::resolve(release);
+        assert!(
+            version(&pinned.typescript).starts_with(release.major()),
+            "{release:?} resolved typescript@{}",
+            version(&pinned.typescript)
+        );
         let store = root.join("node_modules/.pnpm");
         let linked = store.join(format!(
             "typescript@{}/node_modules",
@@ -220,13 +231,7 @@ impl InstalledCompilerProject {
         std::fs::create_dir_all(&bin).unwrap();
         std::os::unix::fs::symlink(&pinned.node, bin.join("node")).unwrap();
         write_executable_script(&bin.join("tsc"), PNPM_SHIM).unwrap();
-        Self {
-            build_info_dir: temp.path().join("store/typescript-build-info"),
-            connection: TestConnection::open(&temp.path().join("diagnostics.db")),
-            _temp: temp,
-            root,
-            typescript,
-        }
+        typescript
     }
 
     /// Where the installed compiler reads one of its default libraries from,
@@ -409,7 +414,7 @@ impl InstalledCompilerProject {
 pub(super) fn producer_state() -> TypeScriptProducerStateV1 {
     TypeScriptProducerStateV1::new(
         TypeScriptProducerStatusHandleV1::default(),
-        TypeScriptCompilerAdmission::new(Arc::new(ProcessBackgroundCpuV1::new(
+        test_compiler_admission(Arc::new(ProcessBackgroundCpuV1::new(
             NonZeroUsize::new(2).unwrap(),
         ))),
     )
@@ -427,6 +432,37 @@ fn published(generation: &str, inserted: u64, checked: usize) -> CompilerProduce
 
 fn missing_property() -> Vec<(String, String)> {
     vec![("TS2339".to_owned(), MISSING_PROPERTY.to_owned())]
+}
+
+#[tokio::test]
+async fn a_compiler_major_upgrade_rechecks_an_unchanged_source_generation() {
+    let mut project = InstalledCompilerProject::installing(
+        PinnedTypeScript::Five,
+        &[
+            ("tsconfig.json", r#"{"include":["src"]}"#),
+            ("src/index.ts", SOURCE),
+        ],
+    );
+    let mut state = producer_state();
+    assert_eq!(
+        project.run("generation.tsc5", &mut state).await,
+        published("generation.tsc5", 1, 1)
+    );
+    assert_eq!(
+        project.run("generation.tsc5-reused", &mut state).await,
+        published("generation.tsc5-reused", 1, 0)
+    );
+    std::fs::remove_dir_all(project.root.join("node_modules")).unwrap();
+    project.typescript =
+        InstalledCompilerProject::install_release(&project.root, PinnedTypeScript::Seven);
+    assert_eq!(
+        project.run("generation.tsc7", &mut state).await,
+        published("generation.tsc7", 1, 1)
+    );
+    assert_eq!(
+        project.findings("generation.tsc7").await,
+        missing_property()
+    );
 }
 
 /// The installed compiler lies outside the indexed sources. A same-version

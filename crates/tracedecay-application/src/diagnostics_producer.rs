@@ -58,6 +58,21 @@ mod installed_compiler_tests;
 #[cfg(all(test, unix))]
 mod overlap_tests;
 
+#[cfg(test)]
+pub(crate) fn test_compiler_admission(
+    cpu: std::sync::Arc<tracedecay_runtime_core::background_cpu::ProcessBackgroundCpuV1>,
+) -> TypeScriptCompilerAdmission {
+    use tracedecay_runtime_core::resident_memory::{
+        DEFAULT_PROCESS_RESIDENT_MEMORY_LIMIT_V1, ProcessResidentMemoryV1,
+    };
+    TypeScriptCompilerAdmission::new(
+        cpu,
+        std::sync::Arc::new(ProcessResidentMemoryV1::new(
+            DEFAULT_PROCESS_RESIDENT_MEMORY_LIMIT_V1,
+        )),
+    )
+}
+
 pub use availability::{
     SearchedTsconfigV1, TypeScriptDiagnosticsAvailabilityV1, typescript_diagnostics_availability,
 };
@@ -412,7 +427,7 @@ pub async fn run_typescript_producer_v1(
         .checked_files
         .as_ref()
         .map(|previous| GenerationChanges::between(previous, &files));
-    let resolved = resolve_projects(project_root, projects, state, changes.as_ref()).await;
+    let resolved = resolve_projects(project_root, projects, &state.admission).await;
 
     let mut results = BTreeMap::new();
     let mut stale = Vec::new();
@@ -634,14 +649,18 @@ struct CheckableProject {
 }
 
 /// Asks each project's compiler how it resolves its tsconfig, following the
-/// references it reports to projects under the root. A configuration is
-/// reused only when its compiler is unchanged and the generation changed
-/// nothing at all, since any file may be one it reads.
+/// references it reports to projects under the root. Refresh this evidence
+/// even for identical indexed files: an inherited configuration can live
+/// in an installed package outside the indexed file set.
+#[tracing::instrument(
+    name = "usecases.diagnostics.typescript_prepare",
+    level = "trace",
+    skip_all
+)]
 async fn resolve_projects(
     project_root: &Path,
     discovered: &[TypeScriptProject],
-    state: &TypeScriptProducerStateV1,
-    changes: Option<&GenerationChanges>,
+    admission: &TypeScriptCompilerAdmission,
 ) -> ResolvedProjects {
     let mut resolved = ResolvedProjects {
         checkable: BTreeMap::new(),
@@ -671,28 +690,14 @@ async fn resolve_projects(
                 continue;
             };
             let revision = revisions.get(&compiler).copied().flatten();
-            let unchanged = state.projects.get(&tsconfig).and_then(|previous| {
-                (revision.is_some()
-                    && previous.compiler_revision == revision
-                    && changes.is_some_and(GenerationChanges::is_empty))
-                .then(|| previous.configuration.clone())
-                .flatten()
-            });
-            queries.push((tsconfig, compiler, revision, unchanged));
+            queries.push((tsconfig, compiler, revision));
         }
         let configured = futures_util::stream::iter(queries)
-            .map(|(tsconfig, compiler, revision, unchanged)| async move {
-                let configuration = match unchanged {
-                    Some(configuration) => Ok(configuration),
-                    None => resolve_typescript_configuration(
-                        &state.admission,
-                        &compiler,
-                        project_root,
-                        &tsconfig,
-                    )
-                    .await
-                    .map_err(|error| error.to_string()),
-                };
+            .map(|(tsconfig, compiler, revision)| async move {
+                let configuration =
+                    resolve_typescript_configuration(admission, &compiler, project_root, &tsconfig)
+                        .await
+                        .map_err(|error| error.to_string());
                 (
                     tsconfig,
                     CheckableProject {
@@ -702,7 +707,7 @@ async fn resolve_projects(
                     },
                 )
             })
-            .buffer_unordered(state.admission.concurrency())
+            .buffer_unordered(admission.concurrency())
             .collect::<Vec<_>>()
             .await;
         resolved.checkable.extend(configured);
@@ -782,10 +787,6 @@ impl GenerationChanges {
         }
     }
 
-    fn is_empty(&self) -> bool {
-        self.changed.is_empty()
-    }
-
     /// Whether these changes can alter what tsc reports for a project whose
     /// compiler and resolved configuration are those of `previous`: an added
     /// module candidate, a file its program or a referenced project's
@@ -802,9 +803,6 @@ impl GenerationChanges {
         configuration: &TypeScriptConfiguration,
         projects: &BTreeMap<PathBuf, ProjectResult>,
     ) -> bool {
-        if self.changed.is_empty() {
-            return false;
-        }
         if self.added_module_candidate {
             return true;
         }
@@ -1097,7 +1095,6 @@ mod tests {
     use std::sync::Arc;
 
     use tracedecay_domain::test_fixtures::id;
-    use tracedecay_lsp::TypeScriptCompilerAdmission;
     #[cfg(unix)]
     use tracedecay_runtime_core::background_cpu::ProcessBackgroundCpuV1;
     #[cfg(unix)]
@@ -1116,8 +1113,8 @@ mod tests {
     use crate::diagnose::Severity;
 
     #[cfg(unix)]
-    fn admission() -> TypeScriptCompilerAdmission {
-        TypeScriptCompilerAdmission::new(Arc::new(ProcessBackgroundCpuV1::new(
+    fn admission() -> tracedecay_lsp::TypeScriptCompilerAdmission {
+        super::test_compiler_admission(Arc::new(ProcessBackgroundCpuV1::new(
             std::num::NonZeroUsize::new(4).unwrap(),
         )))
     }
@@ -1349,7 +1346,7 @@ mod tests {
     /// only a project the generation changed an input of: the edited package
     /// after a one-file edit, nothing that checked cleanly after an edit no
     /// program read. The failed package is retried on any change until it
-    /// checks, and an unchanged generation runs no compiler at all.
+    /// checks, and an unchanged generation only rechecks incomplete evidence.
     #[cfg(unix)]
     #[tokio::test]
     async fn only_projects_a_generation_changed_are_rechecked() {
@@ -1408,9 +1405,9 @@ mod tests {
 
         assert_eq!(
             project.run("generation.producer.4", &mut state).await,
-            published_run("generation.producer.4", 0, 3)
+            published_run("generation.producer.4", 1, 2)
         );
-        assert_eq!(project.runs(), 0, "nothing changed, so no compiler ran");
+        assert_eq!(project.checked(), ["packages/broken/tsconfig.json"]);
 
         std::fs::write(
             project.root.join("packages/broken/tsconfig.json"),
@@ -1665,11 +1662,7 @@ mod tests {
             counts.len() >= CHECKED_ALL.len() * projects.len(),
             "{counts:?}"
         );
-        assert!(
-            counts.iter().all(|count| *count <= admission.concurrency()),
-            "{counts:?}"
-        );
-        assert!(counts.iter().any(|count| *count > 1), "{counts:?}");
+        assert!(counts.iter().all(|count| *count == 1), "{counts:?}");
         assert_eq!(
             std::fs::read_dir(counter.path()).unwrap().count(),
             1,
@@ -1695,7 +1688,7 @@ mod tests {
         let status = TypeScriptProducerStatusHandleV1::default();
         let mut state = super::TypeScriptProducerStateV1::new(
             status.clone(),
-            TypeScriptCompilerAdmission::new(std::sync::Arc::new(
+            super::test_compiler_admission(std::sync::Arc::new(
                 tracedecay_runtime_core::background_cpu::ProcessBackgroundCpuV1::new(
                     std::num::NonZeroUsize::new(1).unwrap(),
                 ),
