@@ -345,17 +345,19 @@ describe('CostsPage provider spend attribution', () => {
     expect(screen.queryByText(/saved · all time/i)).toBeNull();
   });
 
-  it('keeps the canonical cost and topology reads independent of the attribution', async () => {
+  it('reads execution accounting only when opened, without blocking canonical costs', async () => {
     const { fetch: fetchMock } = renderCosts();
+    const topologyRequests = () => fetchMock.mock.calls.filter(
+      ([input]) => new URL(String(input), 'http://localhost').pathname === '/api/work/topology-metrics',
+    );
     expect(await screen.findByText('provider tokens')).toBeTruthy();
+    expect(topologyRequests()).toHaveLength(0);
+
+    await userEvent.click(screen.getByText('Work execution accounting'));
     expect(await screen.findByText('Execution topology accounting')).toBeTruthy();
     expect(await screen.findByText('work execution concurrency width')).toBeTruthy();
     expect(screen.getByText('support_floor_unmet')).toBeTruthy();
-    expect(
-      fetchMock.mock.calls.some(
-        ([input]) => new URL(String(input), 'http://localhost').pathname === '/api/work/topology-metrics',
-      ),
-    ).toBe(true);
+    expect(topologyRequests()).toHaveLength(1);
   });
 
   it('reads the canonical cost projection once per refresh, from /api/costs alone', async () => {
