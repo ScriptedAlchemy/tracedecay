@@ -218,6 +218,10 @@ pub enum ConfigurationError {
     Validation(String),
     #[error("configuration reset required: {reason}")]
     ResetRequired { reason: String },
+    #[error(
+        "automatic PR worktree tracking has been retired; explicit overrides remain unchanged until reset. Use explicit branch activation instead"
+    )]
+    RetiredPrTrackingResetRequired,
     #[error("configuration authority is unavailable")]
     Unavailable,
 }

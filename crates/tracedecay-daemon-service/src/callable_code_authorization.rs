@@ -380,6 +380,7 @@ fn configuration_current_problem(error: ConfigurationError) -> ApplicationProble
         | ConfigurationError::IdempotencyConflict
         | ConfigurationError::MutationAuthorityRejected
         | ConfigurationError::Validation(_)
+        | ConfigurationError::RetiredPrTrackingResetRequired
         | ConfigurationError::ResetRequired { .. } => concealed(),
     }
 }

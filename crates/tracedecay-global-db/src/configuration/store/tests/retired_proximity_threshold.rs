@@ -9,10 +9,11 @@ use crate::tests::harness::HostAdmissionScope;
 use tracedecay_domain::configuration::{
     CandidateDispositionV1, ConfigurationCandidateV1, ConfigurationIdempotencyKey,
     ConfigurationLayerIdV1, ConfigurationMutationOperationV1, ConfigurationSnapshotV1,
-    ConfigurationValueV1, SettingKey,
+    ConfigurationValueV1, SettingKey, TELEMETRY_TIMINGS_SETTING_KEY,
 };
 use tracedecay_domain::feedback::PROXIMITY_RELATIONSHIP_HINTS_SETTING_KEY_V1;
 use tracedecay_domain::{ProjectId, UtcMicros};
+use tracedecay_runtime_core::db::engine::params;
 
 const REGISTRY_REVISION_9_STORE_FIXTURE: &str =
     include_str!("fixtures/configuration-registry-revision9.sql");
@@ -176,55 +177,217 @@ fn assert_converged_without_threshold(
     );
 }
 
-#[tokio::test]
-async fn released_pr_tracking_snapshot_requires_reset_without_rewriting_settings() {
-    let (_directory, runtime, root) = global_setup().await;
-    let db = runtime
-        .registered_database(HostAdmissionScope::Project)
-        .expect("registered project database");
+const PR_TRACKING_KEYS: [&str; 2] = [
+    "sync.auto_track_pr_branches.v1",
+    "sync.auto_track_pr_poll_secs.v1",
+];
+
+async fn install_released_pr_tracking_snapshot(db: &crate::registered::RegisteredGlobalDb) {
     let triggers_before = trigger_names(db).await.unwrap();
     let transaction = db.begin_write_transaction().await.unwrap();
     seed_released_registry_key_set(&transaction).await.unwrap();
     transaction.commit().await.unwrap();
-    assert_eq!(
-        trigger_names(db).await.unwrap(),
-        triggers_before,
-        "seeding restores every immutability trigger it stepped around"
-    );
-    let store = GlobalDbConfigurationControlStore::new_registered(db);
+    assert_eq!(trigger_names(db).await.unwrap(), triggers_before);
+}
 
+#[tokio::test]
+async fn released_pr_tracking_defaults_converge_without_a_reset() {
+    let (_directory, runtime, _) = global_setup().await;
+    let db = runtime
+        .registered_database(HostAdmissionScope::Project)
+        .unwrap();
+    install_released_pr_tracking_snapshot(db).await;
+    let store = GlobalDbConfigurationControlStore::new_registered(db);
     let before = store.current().await.unwrap();
-    let registry = crate::configuration::registry::ConfigurationRegistry::core().unwrap();
-    for name in [
-        "sync.auto_track_pr_branches.v1",
-        "sync.auto_track_pr_poll_secs.v1",
-    ] {
+    for (name, value) in PR_TRACKING_KEYS.into_iter().zip([
+        ConfigurationValueV1::Boolean(false),
+        ConfigurationValueV1::Unsigned(300),
+    ]) {
         let key = SettingKey::new(name).unwrap();
-        assert!(before.snapshot.effective_values.contains_key(&key));
-        assert!(registry.definition(&key).is_err());
-        assert!(
-            registry
-                .validate_value(&key, &before.snapshot.effective_values[&key])
-                .is_err()
-        );
+        assert_eq!(before.snapshot.effective_values[&key], value);
+        let registry = crate::configuration::registry::ConfigurationRegistry::core().unwrap();
+        assert!(registry.validate_value(&key, &value).is_err());
     }
-    let error = store
-        .converge_registered_registry_shape(&root.revision_id, UtcMicros(2))
+    assert!(
+        store
+            .reset_retired_pr_tracking_configuration(&before.revision_id, UtcMicros(2))
+            .await
+            .is_err()
+    );
+    assert_eq!(store.current().await.unwrap(), before);
+
+    let converged = store
+        .converge_registered_registry_shape(&before.revision_id, UtcMicros(3))
         .await
-        .expect_err("removed PR tracking settings require the supported reset path");
+        .expect("never-overridden released settings must upgrade without a reset");
+    assert_ne!(converged.revision_id, before.revision_id);
+    assert_pr_tracking_absent(&converged);
+    assert_eq!(
+        store
+            .converge_registered_registry_shape(&converged.revision_id, UtcMicros(4))
+            .await
+            .unwrap(),
+        converged
+    );
+    assert_eq!(revision_count(db).await, 2);
+}
+
+fn assert_pr_tracking_absent(current: &ConfigurationCurrentStateV1) {
+    for name in PR_TRACKING_KEYS {
+        let key = SettingKey::new(name).unwrap();
+        assert!(!current.snapshot.effective_values.contains_key(&key));
+        assert!(!current.snapshot.provenance.contains_key(&key));
+    }
+}
+
+async fn seed_released_override(
+    db: &crate::registered::RegisteredGlobalDb,
+    before: &ConfigurationCurrentStateV1,
+    key: &SettingKey,
+    value: ConfigurationValueV1,
+) {
+    let transaction = db.begin_write_transaction().await.unwrap();
+    let triggers = replaced_table_triggers(&transaction).await.unwrap();
+    for (name, _) in &triggers {
+        transaction
+            .execute_batch(&format!("DROP TRIGGER \"{}\";", name.replace('"', "\"\"")))
+            .await
+            .unwrap();
+    }
+    let mut effective_values = before.snapshot.effective_values.clone();
+    effective_values.insert(key.clone(), value.clone());
+    let mut provenance = before.snapshot.provenance.clone();
+    let candidate = ConfigurationCandidateV1 {
+        layer: ConfigurationLayerIdV1::Project {
+            project_id: ProjectId::new(PROJECT_ID).unwrap(),
+        },
+        revision_id: before.revision_id.clone(),
+        disposition: CandidateDispositionV1::Winning,
+        safe_reason: None,
+    };
+    provenance.insert(key.clone(), vec![candidate]);
+    let snapshot = ConfigurationSnapshotV1::new(effective_values, provenance).unwrap();
+    transaction
+        .execute(
+            "UPDATE configuration_entries SET typed_value = ?3
+         WHERE revision_id = ?1 AND key = ?2",
+            params![
+                before.revision_id.as_str(),
+                key.as_str(),
+                serde_json::json!({
+                    "schema_version": 1,
+                    "value": value,
+                    "provenance": snapshot.provenance[key],
+                })
+                .to_string()
+            ],
+        )
+        .await
+        .unwrap();
+    point_revision_at_snapshot(&transaction, &before.revision_id, &snapshot).await;
+    for (_, definition) in triggers {
+        transaction.execute_batch(&definition).await.unwrap();
+    }
+    transaction.commit().await.unwrap();
+}
+
+#[tokio::test]
+async fn explicit_pr_tracking_override_requires_scoped_reset_even_at_old_default_value() {
+    let (_directory, runtime, _) = global_setup().await;
+    let db = runtime
+        .registered_database(HostAdmissionScope::Project)
+        .unwrap();
+    install_released_pr_tracking_snapshot(db).await;
+    let store = GlobalDbConfigurationControlStore::new_registered(db);
+    let key = SettingKey::new(PR_TRACKING_KEYS[0]).unwrap();
+    seed_released_override(
+        db,
+        &store.current().await.unwrap(),
+        &key,
+        ConfigurationValueV1::Boolean(false),
+    )
+    .await;
+    let unrelated = SettingKey::new(TELEMETRY_TIMINGS_SETTING_KEY).unwrap();
+    seed_released_override(
+        db,
+        &store.current().await.unwrap(),
+        &unrelated,
+        ConfigurationValueV1::Boolean(false),
+    )
+    .await;
+    let before = store.current().await.unwrap();
+
+    assert_eq!(
+        store
+            .converge_registered_registry_shape(&before.revision_id, UtcMicros(2))
+            .await,
+        Err(ConfigurationError::RetiredPrTrackingResetRequired)
+    );
+    let wrong_revision = ConfigurationRevisionId::new("configuration.revision.stale").unwrap();
+    assert_eq!(
+        store
+            .reset_retired_pr_tracking_configuration(&wrong_revision, UtcMicros(3))
+            .await,
+        Err(ConfigurationError::RevisionConflict)
+    );
+    assert_eq!(store.current().await.unwrap(), before);
+    assert_eq!(revision_count(db).await, 1);
+
+    let reset = store
+        .reset_retired_pr_tracking_configuration(&before.revision_id, UtcMicros(4))
+        .await
+        .unwrap();
+    assert_pr_tracking_absent(&reset);
+    assert_eq!(
+        reset.snapshot.effective_values[&unrelated],
+        ConfigurationValueV1::Boolean(false)
+    );
+    assert_eq!(
+        reset.snapshot.provenance[&unrelated],
+        before.snapshot.provenance[&unrelated]
+    );
+    assert_eq!(
+        store
+            .converge_registered_registry_shape(&reset.revision_id, UtcMicros(5))
+            .await
+            .unwrap(),
+        reset
+    );
+    assert_eq!(revision_count(db).await, 2);
+}
+
+#[tokio::test]
+async fn pr_tracking_reset_refuses_unrelated_retired_overrides() {
+    let (_directory, runtime, _) = global_setup().await;
+    let db = runtime
+        .registered_database(HostAdmissionScope::Project)
+        .unwrap();
+    install_released_pr_tracking_snapshot(db).await;
+    let store = GlobalDbConfigurationControlStore::new_registered(db);
+    let key = SettingKey::new(PR_TRACKING_KEYS[1]).unwrap();
+    seed_released_override(
+        db,
+        &store.current().await.unwrap(),
+        &key,
+        ConfigurationValueV1::Unsigned(301),
+    )
+    .await;
+    seed_released_override(
+        db,
+        &store.current().await.unwrap(),
+        &retired_key(),
+        ConfigurationValueV1::Unsigned(7000),
+    )
+    .await;
+    let before = store.current().await.unwrap();
     assert!(matches!(
-        error,
-        ConfigurationError::ResetRequired { reason }
-            if reason.contains("automatic PR worktree tracking has been retired")
-                && reason.contains("preserved unchanged")
-                && reason.contains("explicit branch activation")
+        store
+            .reset_retired_pr_tracking_configuration(&before.revision_id, UtcMicros(2))
+            .await,
+        Err(ConfigurationError::ResetRequired { .. })
     ));
     assert_eq!(store.current().await.unwrap(), before);
-    assert_eq!(
-        revision_count(db).await,
-        1,
-        "refusal does not rewrite retained configuration"
-    );
+    assert_eq!(revision_count(db).await, 1);
 }
 
 #[tokio::test]

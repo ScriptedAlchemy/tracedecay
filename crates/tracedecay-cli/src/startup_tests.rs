@@ -96,6 +96,13 @@ fn destructive_non_lifecycle_commands_accept_only_their_own_confirmation_flags()
             "/tmp/p",
             "--yes",
         ][..],
+        &[
+            "storage",
+            "reset-retired-pr-tracking",
+            "--project-root",
+            "/tmp/p",
+            "--yes",
+        ][..],
         &["projects", "list"][..],
     ] {
         assert_eq!(

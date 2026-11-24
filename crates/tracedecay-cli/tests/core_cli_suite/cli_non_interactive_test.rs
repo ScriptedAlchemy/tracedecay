@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::io::ErrorKind;
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
@@ -21,6 +22,10 @@ use tracedecay_automation_runtime::automation::run_ledger::{
     AutomationRunArtifactKind, AutomationRunLedgerRecord, append_run_record, write_run_artifact,
 };
 use tracedecay_domain::ProjectId;
+use tracedecay_domain::configuration::{
+    CandidateDispositionV1, ConfigurationCandidateV1, ConfigurationLayerIdV1,
+    ConfigurationRevisionId, ConfigurationSnapshotV1, ConfigurationValueV1, SettingKey,
+};
 use tracedecay_global_db::StoreInstanceUpsert;
 use tracedecay_project::test_support::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay_runtime_core::branch_meta::BranchMeta;
@@ -201,6 +206,183 @@ fn init_project_fixture(home: &Path, project: &Path) {
         String::from_utf8_lossy(&output.stderr)
     );
     drop(daemon);
+}
+
+/// Seed the released entry payload in an otherwise canonically enrolled store.
+/// The immutable snapshot digests are recomputed by the canonical domain API.
+fn seed_released_pr_tracking_settings(path: &Path, project_id: &str, overridden: bool) {
+    let mut connection = rusqlite::Connection::open(path).unwrap();
+    let transaction = connection.transaction().unwrap();
+    let revision: String = transaction.query_row(
+        "SELECT revision_id FROM configuration_revisions AS head
+         WHERE NOT EXISTS (SELECT 1 FROM configuration_revisions WHERE parent_revision_id = head.revision_id)",
+        [], |row| row.get(0),
+    ).unwrap();
+    let mut values = BTreeMap::new();
+    let mut provenance = BTreeMap::new();
+    {
+        let mut entries = transaction
+            .prepare("SELECT key, typed_value FROM configuration_entries WHERE revision_id = ?1")
+            .unwrap();
+        let mut rows = entries.query([&revision]).unwrap();
+        while let Some(row) = rows.next().unwrap() {
+            let key = SettingKey::new(row.get::<_, String>(0).unwrap()).unwrap();
+            let payload: serde_json::Value =
+                serde_json::from_str(&row.get::<_, String>(1).unwrap()).unwrap();
+            values.insert(
+                key.clone(),
+                serde_json::from_value(payload["value"].clone()).unwrap(),
+            );
+            provenance.insert(
+                key,
+                serde_json::from_value(payload["provenance"].clone()).unwrap(),
+            );
+        }
+    }
+    for (name, value, explicit) in [
+        (
+            "sync.auto_track_pr_branches.v1",
+            ConfigurationValueV1::Boolean(false),
+            overridden,
+        ),
+        (
+            "sync.auto_track_pr_poll_secs.v1",
+            ConfigurationValueV1::Unsigned(300),
+            false,
+        ),
+    ] {
+        let key = SettingKey::new(name).unwrap();
+        let candidate = if explicit {
+            ConfigurationCandidateV1 {
+                layer: ConfigurationLayerIdV1::Project {
+                    project_id: ProjectId::new(project_id).unwrap(),
+                },
+                revision_id: ConfigurationRevisionId::new(&revision).unwrap(),
+                disposition: CandidateDispositionV1::Winning,
+                safe_reason: None,
+            }
+        } else {
+            ConfigurationCandidateV1 {
+                layer: ConfigurationLayerIdV1::Default,
+                revision_id: ConfigurationRevisionId::new("configuration.registry.default.v1")
+                    .unwrap(),
+                disposition: CandidateDispositionV1::Defaulted,
+                safe_reason: Some("registry_default".to_owned()),
+            }
+        };
+        transaction.execute(
+            "INSERT INTO configuration_entries (revision_id, key, layer_kind, layer_id, schema_revision, typed_value)
+             VALUES (?1, ?2, 'default', '', 1, ?3)",
+            rusqlite::params![revision, key.as_str(), json!({"schema_version": 1, "value": value, "provenance": [candidate]}).to_string()],
+        ).unwrap();
+        values.insert(key.clone(), value);
+        provenance.insert(key, vec![candidate]);
+    }
+    let snapshot = ConfigurationSnapshotV1::new(values, provenance).unwrap();
+    let trigger: String = transaction
+        .query_row(
+            "SELECT sql FROM sqlite_schema WHERE name = 'configuration_revisions_immutable_update'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    transaction
+        .execute_batch("DROP TRIGGER configuration_revisions_immutable_update;")
+        .unwrap();
+    transaction
+        .execute(
+            "UPDATE configuration_revisions SET snapshot_id = ?2, effective_behavior_digest = ?3,
+         resolution_provenance_digest = ?4 WHERE revision_id = ?1",
+            rusqlite::params![
+                revision,
+                snapshot.snapshot_id.as_str(),
+                snapshot.effective_behavior_digest.as_str(),
+                snapshot.resolution_provenance_digest.as_str()
+            ],
+        )
+        .unwrap();
+    transaction.execute_batch(&trigger).unwrap();
+    transaction.commit().unwrap();
+}
+
+#[test]
+fn retired_pr_tracking_upgrade_and_scoped_reset_reopen_two_registered_projects() {
+    let home = TempDir::new().unwrap();
+    let default_dir = TempDir::new().unwrap();
+    let explicit_dir = TempDir::new().unwrap();
+    let default = canonical_temp_path(default_dir.path());
+    let explicit = canonical_temp_path(explicit_dir.path());
+    let profile = profile_root(home.path());
+    for (root, overridden) in [(&default, false), (&explicit, true)] {
+        git(root, &["init", "-b", "main"]);
+        std::fs::write(root.join("lib.rs"), "pub fn indexed() {}\n").unwrap();
+        commit_all(root, "initial commit");
+        init_project_fixture(home.path(), root);
+        let layout = tracedecay_runtime_core::storage::resolve_persisted_layout(root, &profile)
+            .unwrap()
+            .unwrap();
+        seed_released_pr_tracking_settings(
+            &layout.sessions_db_path,
+            layout.identity.project_id.as_deref().unwrap(),
+            overridden,
+        );
+    }
+    let tool_status = |root: &Path| {
+        let mut command = tracedecay_command_without_daemon(home.path(), root);
+        command.args(["tool", "tracedecay_status", "--args", "{}", "--json"]);
+        run_with_timeout(command, cli_timeout())
+    };
+    let reset = |confirm| {
+        let mut command = tracedecay_command_without_daemon(home.path(), &explicit);
+        command
+            .args(["storage", "reset-retired-pr-tracking", "--project-root"])
+            .arg(&explicit);
+        if confirm {
+            command.arg("--yes");
+        }
+        run_with_timeout(command, cli_timeout())
+    };
+    let daemon = crate::common::spawn_tracedecay_daemon(home.path());
+    let upgraded = tool_status(&default);
+    assert!(
+        upgraded.status.success(),
+        "default project did not upgrade: {upgraded:?}"
+    );
+    let refused = tool_status(&explicit);
+    let diagnostic = format!(
+        "{}{}",
+        String::from_utf8_lossy(&refused.stderr),
+        String::from_utf8_lossy(&refused.stdout)
+    );
+    assert!(
+        diagnostic.contains("reset-retired-pr-tracking"),
+        "{diagnostic}"
+    );
+    assert!(!diagnostic.contains("wipe --all"), "{diagnostic}");
+    assert!(
+        !reset(true).status.success(),
+        "live daemon owns the profile"
+    );
+    drop(daemon);
+    assert!(
+        !reset(false).status.success(),
+        "reset requires explicit confirmation"
+    );
+    let repaired = reset(true);
+    assert!(repaired.status.success(), "{repaired:?}");
+    assert!(
+        !reset(true).status.success(),
+        "healthy project has nothing to reset"
+    );
+    let _daemon = crate::common::spawn_tracedecay_daemon(home.path());
+    for root in [&default, &explicit] {
+        let output = tool_status(root);
+        assert!(
+            output.status.success(),
+            "project '{}' did not reopen: {output:?}",
+            root.display()
+        );
+    }
 }
 
 fn git(project: &Path, args: &[&str]) {

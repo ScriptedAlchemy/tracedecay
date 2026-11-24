@@ -634,7 +634,7 @@ install --agent codex --automation (enable at install), tracedecay dashboard
 
 pub(crate) const STORAGE_LONG_ABOUT: &str = "\
 Profile-storage maintenance: read-only per-store size and retention reporting, \
-and scoped reset of a project graph store refused for an incompatible schema. \
+and scoped resets of refused project graph stores or retired PR-tracking settings. \
 TraceDecay V2 stores are created at their final shape, so there is no \
 cross-version migration workflow.";
 
@@ -642,6 +642,9 @@ pub(crate) const STORAGE_AFTER_HELP: &str = "\
 Examples:
   tracedecay storage report                      Per-store size / free-page ratio (read-only)
   tracedecay storage reset-project-store --project-root <dir> --yes
+  tracedecay storage reset-retired-pr-tracking --project-root <dir> --yes
+      With the daemon stopped, remove retired PR-tracking overrides only.
+      Preserves other settings, project data, and configuration history.
 
 Related: tracedecay projects (registry view), tracedecay wipe.";
 
