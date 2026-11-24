@@ -209,6 +209,10 @@ pub enum GitHubStackCoordinatorErrorV1 {
     InvalidScope,
     InvalidProviderObservation,
     InvalidCircuitPolicy,
+    /// Restart restoration was offered after this registration had already
+    /// published an observation, so its live drift state is newer than any
+    /// durable receipt the caller could have read.
+    ScopeAlreadyObserved,
     /// The scope registration that authorized the observation was replaced
     /// before it could publish.
     Superseded,
@@ -363,6 +367,21 @@ impl GitHubStackScopeV1 {
     pub fn scope(&self) -> &ResolvedScope {
         &self.0.retained.scope
     }
+
+    /// Whether this registration has published no observation yet, which is
+    /// the only state in which restart restoration may still supply durable
+    /// drift intervals. Once an observation exists, the scope's live drift
+    /// state is newer than any receipt a restarted read can see.
+    pub fn is_mount_fresh(&self) -> Result<bool, GitHubStackCoordinatorErrorV1> {
+        Ok(self
+            .0
+            .retained
+            .state
+            .lock()
+            .map_err(|_| GitHubStackCoordinatorErrorV1::Poisoned)?
+            .current
+            .is_none())
+    }
 }
 
 impl std::fmt::Debug for GitHubStackScopeV1 {
@@ -462,11 +481,13 @@ impl DaemonGitHubStackCoordinatorV1 {
 
     /// Durable restart restoration of one persisted open drift interval.
     ///
-    /// It must be applied through a live registration so a restored interval
-    /// cannot outlive its owner or land in a retired slot. When this scope
-    /// already tracks that drift kind, the earlier opening time wins: a
-    /// restarted daemon may not rewrite evidence that was already observed
-    /// longer ago than the durable receipt it re-read.
+    /// Restoration is a mount transition. It must be applied through a live
+    /// registration so a restored interval cannot outlive its owner or land in
+    /// a retired slot, and it is refused once this registration has published
+    /// an observation: a rebuilt owner re-reading older durable receipts may
+    /// not overwrite drift state this process already observed. Within the
+    /// fresh mount, the earlier opening time wins so repeated reads of the
+    /// same receipts are idempotent.
     pub fn restore_open_drift_interval(
         &self,
         registration: &GitHubStackScopeV1,
@@ -480,6 +501,9 @@ impl DaemonGitHubStackCoordinatorV1 {
             .state
             .lock()
             .map_err(|_| GitHubStackCoordinatorErrorV1::Poisoned)?;
+        if state.current.is_some() {
+            return Err(GitHubStackCoordinatorErrorV1::ScopeAlreadyObserved);
+        }
         match state
             .drift_intervals
             .iter_mut()

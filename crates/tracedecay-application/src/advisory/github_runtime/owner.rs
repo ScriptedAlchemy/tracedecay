@@ -293,7 +293,12 @@ where
                     Ok(report) => {
                         tracing::info!(
                             event = "github_stack_drift_restore",
-                            outcome = "restored",
+                            outcome = if report.scope_already_live {
+                                "already_live"
+                            } else {
+                                "restored"
+                            },
+                            scope_already_live = report.scope_already_live,
                             restored = report.restored,
                             closed_before_restart = report.closed_before_restart,
                             skipped_unbound = report.skipped_unbound,

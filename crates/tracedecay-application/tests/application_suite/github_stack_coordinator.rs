@@ -1549,9 +1549,12 @@ fn a_late_restore_cannot_rewrite_a_live_open_interval() {
         },
     )
     .unwrap();
-    coordinator
-        .restore_open_drift_interval(&owner, &later)
-        .unwrap();
+    // A rebuilt owner re-reading older durable receipts may not replace the
+    // live interval this registration already observed.
+    assert_eq!(
+        coordinator.restore_open_drift_interval(&owner, &later),
+        Err(GitHubStackCoordinatorErrorV1::ScopeAlreadyObserved)
+    );
     let settled = coordinator
         .observe_provider(
             authorized(&coordinator, &exact_scope),

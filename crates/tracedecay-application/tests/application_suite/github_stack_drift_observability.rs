@@ -545,3 +545,115 @@ async fn restart_restores_only_this_scope_open_drift_and_closes_its_original_tra
         "another worktree's open interval is not this scope's evidence"
     );
 }
+
+/// The storage port pages by insertion id and sorts each page by event time,
+/// so a late-persisted close can arrive on an earlier page than a newer open
+/// interval. Restoration must reduce each drift kind by its greatest event
+/// time; stopping at the first receipt for a kind would hide the open interval.
+#[tokio::test]
+async fn restore_reduces_drift_kinds_by_event_time_across_unsorted_pages() {
+    use std::collections::VecDeque;
+    use std::sync::Mutex;
+
+    use tracedecay_application::observability::stack_drift_observation_envelope;
+    use tracedecay_contracts::{ObservabilityFuture, ObservabilityPageV1};
+
+    struct PagedPort {
+        pages: Mutex<VecDeque<ObservabilityPageV1>>,
+    }
+
+    impl ObservabilityQueryPort for PagedPort {
+        fn query<'a>(
+            &'a self,
+            _query: ObservabilityQueryV1,
+        ) -> ObservabilityFuture<'a, ObservabilityPageV1> {
+            Box::pin(async move {
+                Ok(self
+                    .pages
+                    .lock()
+                    .unwrap()
+                    .pop_front()
+                    .unwrap_or(ObservabilityPageV1 {
+                        events: Vec::new(),
+                        event_cursors: Vec::new(),
+                        watermark: "analytics:empty".to_owned(),
+                        coverage: CoverageStateV1::Known,
+                        next_watermark: None,
+                    }))
+            })
+        }
+    }
+    let scope = resolved_scope("pages");
+    let identity = producer_identity(&scope.project_id);
+    let open = drift(&scope, 2_000, 2_000, IntervalStateV1::Open);
+    let older_close = drift_kind(
+        &scope,
+        StackDriftKindV1::BaseAdvanced,
+        1_000,
+        1_500,
+        IntervalStateV1::Closed,
+    );
+    let envelope = |observation: &GitHubStackDriftObservationV1| {
+        stack_drift_observation_envelope(
+            &identity,
+            scope.project_id.as_str(),
+            &scope.scope_digest,
+            observation,
+        )
+        .expect("canonical drift envelope")
+    };
+    let port = PagedPort {
+        pages: Mutex::new(VecDeque::from([
+            // Insertion-newest page: the late-persisted close of the old
+            // interval, whose event time is older than the open below.
+            ObservabilityPageV1 {
+                events: vec![envelope(&older_close)],
+                event_cursors: vec!["analytics:2".to_owned()],
+                watermark: "analytics:2".to_owned(),
+                coverage: CoverageStateV1::Known,
+                next_watermark: Some("analytics:2".to_owned()),
+            },
+            ObservabilityPageV1 {
+                events: vec![envelope(&open)],
+                event_cursors: vec!["analytics:1".to_owned()],
+                watermark: "analytics:1".to_owned(),
+                coverage: CoverageStateV1::Known,
+                next_watermark: None,
+            },
+        ])),
+    };
+    let coordinator = DaemonGitHubStackCoordinatorV1::default();
+    let registration = coordinator
+        .register_scope(
+            &scope,
+            GitHubStackedPullRequestPolicyV1::ProbePrivatePreview,
+            github_stack_circuit_policy().expect("circuit policy"),
+        )
+        .expect("register scope");
+    let report =
+        restore_github_stack_drift_intervals(&port, &coordinator, &registration, UtcMicros(5_000))
+            .await
+            .expect("drift restoration");
+    assert_eq!(
+        report.restored, 1,
+        "the newer open interval must survive an older close on an earlier page"
+    );
+    assert_eq!(report.closed_before_restart, 0);
+    assert!(!report.scope_already_live);
+    assert_eq!(report.coverage, CoverageStateV1::Known);
+
+    let settled = coordinator
+        .observe_policy(
+            scope.clone(),
+            ProviderId::new("provider.github").expect("provider"),
+            source_binding(&scope),
+            UtcMicros(3_000),
+        )
+        .expect("policy observation after restoration");
+    let [restored] = settled.drift_observations.as_slice() else {
+        panic!("the restored interval must close exactly once: {settled:?}");
+    };
+    assert_eq!(restored.trace_id, open.trace_id);
+    assert_eq!(restored.drift.first_observed_micros, 2_000);
+    assert_eq!(restored.drift.terminal_micros, Some(3_000));
+}
