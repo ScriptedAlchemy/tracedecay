@@ -1126,6 +1126,12 @@ async fn install_registered_schema_stage_sequence(
         .map_err(|error| {
             global_db_operation_error("initialize delivery settlement schema", error)
         })?;
+    transaction
+        .execute_batch(crate::automation_run_state::AUTOMATION_RUN_STATE_SCHEMA_V1)
+        .await
+        .map_err(|error| {
+            global_db_operation_error("initialize automation run-state schema", error)
+        })?;
     stack_delivery::ensure_github_stack_delivery_schema(transaction).await?;
     transaction
         .execute_batch(observability_rollup::OBSERVABILITY_ROLLUP_SCHEMA_V1)

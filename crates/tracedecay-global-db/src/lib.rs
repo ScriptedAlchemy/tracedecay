@@ -21,6 +21,7 @@
 pub use tracedecay_store::ParseOffset;
 
 mod api_types;
+pub mod automation_run_state;
 pub mod configuration;
 #[cfg(test)]
 mod delivery_settlement_tests;
@@ -115,6 +116,11 @@ mod session_temporal_schema;
 mod sqlite_persist;
 mod transcript;
 
+pub use automation_run_state::{
+    AUTOMATION_RUN_STATE_SCHEMA_V1, AutomationRunPageV1, AutomationRunPublishOutcomeV1,
+    AutomationRunStagePublishOutcomeV1, AutomationRunStagedPublicationV1,
+    AutomationRunTaskSummaryV1,
+};
 pub use git_index_transactions::{
     GitIndexPreviewInputGcResult, GitIndexReadExecutor, GlobalDbGitIndexTransactionStore,
     ensure_git_index_transaction_schema,
