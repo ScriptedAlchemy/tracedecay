@@ -758,6 +758,7 @@ mod doctor_runtime_route_tests {
     use tracedecay_mcp::McpTransport;
     use tracedecay_project::project::{TraceDecay, TraceDecayOpenOptions};
     use tracedecay_runtime_core::cancellation::CancellationToken;
+    use tracedecay_rusqlite_runtime::has_sqlite_database_header;
 
     static REGISTERED_RUNTIME_NONCE: AtomicU64 = AtomicU64::new(1);
 
@@ -1847,8 +1848,7 @@ mod doctor_runtime_route_tests {
             "fixture must provide an uninitialized sessions placeholder"
         );
         assert!(
-            !tracedecay_runtime_core::storage::has_sqlite_database_header(&session_path)
-                .unwrap_or(true),
+            !has_sqlite_database_header(&session_path).unwrap_or(true),
             "sessions placeholder must not be a SQLite database yet"
         );
         let handshake = handshake(project, profile.clone(), registry_path);
