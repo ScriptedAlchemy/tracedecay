@@ -1058,9 +1058,15 @@ pub(super) fn cleanup_committed_text_artifact_transaction(
         {
             quarantine.restore(sources.of(candidate.kind), &candidate.artifact_file)?;
             cleanup.restored_live.push(candidate.artifact_file.clone());
-        } else {
-            quarantine.remove_committed(sources.of(candidate.kind), &candidate.artifact_file)?;
+        } else if quarantine
+            .settle_committed_restorable(sources.of(candidate.kind), &candidate.artifact_file)?
+        {
             cleanup.removed.push(candidate.artifact_file.clone());
+        } else {
+            // An earlier, interrupted run of this cleanup already restored
+            // it and its descriptor has since gone: it stays in its source
+            // as an ordinary artifact the next retention pass re-plans.
+            cleanup.restored_live.push(candidate.artifact_file.clone());
         }
     }
     quarantine.remove_empty_stage()?;
