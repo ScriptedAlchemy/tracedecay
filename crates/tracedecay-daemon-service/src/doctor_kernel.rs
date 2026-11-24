@@ -48,7 +48,7 @@ use tracedecay_graph_db::{
 
 use crate::DaemonFeedbackRuntimeRegistrar;
 use tracedecay_maintenance::retention::footprint::{
-    ProfileFootprintV1, ProjectRootStateV1, census_profile_footprint, census_sqlite_temp_spill,
+    ProfileFootprintV1, ProjectRootStateV1, census_profile_footprint,
 };
 use tracedecay_maintenance::telemetry::GuardedStoreTelemetryPort;
 use tracedecay_session_temporal_store::SessionTemporalAccess;
@@ -665,12 +665,14 @@ async fn profile_footprint_read(
     let overrides = retention.store_soft_budgets_bytes.clone();
     let profile_root = profile_root.to_path_buf();
     tracedecay_runtime_core::native_runtime::spawn_blocking(move || {
-        let mut footprint =
+        let footprint =
             profile_footprint_from_registered_roots(&profile_root, registered.as_ref(), &overrides);
-        footprint.entries.extend(census_sqlite_temp_spill(
-            Path::new("/proc/self/fd"),
-            &overrides,
-        ));
+        #[cfg(target_os = "linux")]
+        let footprint = {
+            let mut footprint = footprint;
+            footprint.account_for_sqlite_temp_spill(Path::new("/proc/self/fd"), &overrides);
+            footprint
+        };
         footprint
     })
     .await
