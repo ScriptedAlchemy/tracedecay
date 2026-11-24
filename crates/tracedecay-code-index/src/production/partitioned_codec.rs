@@ -681,6 +681,25 @@ fn verify_payload_digest(
         &mut Vec<u8>,
     ) -> Result<(), CodeIndexProductionErrorV1>,
 ) -> Result<(), CodeIndexProductionErrorV1> {
+    verify_payload_extent(digest, size_bytes, into, |offset, length, buffer| {
+        read_pack(
+            SealedGenerationSegmentReadV1::Range {
+                digest,
+                size_bytes,
+                offset,
+                length,
+            },
+            buffer,
+        )
+    })
+}
+
+fn verify_payload_extent(
+    digest: &ManifestDigest,
+    size_bytes: u64,
+    into: &mut Vec<u8>,
+    mut read_range: impl FnMut(u64, u64, &mut Vec<u8>) -> Result<(), CodeIndexProductionErrorV1>,
+) -> Result<(), CodeIndexProductionErrorV1> {
     let _span = tracing::trace_span!("code_index.sealed_verify.pack", bytes = size_bytes).entered();
     let mut hasher = Sha256::new();
     let mut offset = 0_u64;
@@ -689,15 +708,7 @@ fn verify_payload_digest(
         into.clear();
         // An empty stream's digest alone cannot prove a physical file exists.
         // Its zero-length read still asks the owner to authenticate the file.
-        if let Err(error) = read_pack(
-            SealedGenerationSegmentReadV1::Range {
-                digest,
-                size_bytes,
-                offset,
-                length,
-            },
-            into,
-        ) {
+        if let Err(error) = read_range(offset, length, into) {
             into.clear();
             return Err(error);
         }
@@ -713,9 +724,16 @@ fn verify_payload_digest(
             break;
         }
     }
+    into.clear();
+    require_payload_digest(digest, hasher)
+}
+
+fn require_payload_digest(
+    digest: &ManifestDigest,
+    hasher: Sha256,
+) -> Result<(), CodeIndexProductionErrorV1> {
     let actual = ManifestDigest::from_sha256_bytes(&hasher.finalize())
         .map_err(|error| CodeIndexProductionErrorV1::Contract(error.to_string()))?;
-    into.clear();
     if actual != *digest {
         return Err(CodeIndexProductionErrorV1::Contract(
             "sealed physical pack does not match its content address".to_owned(),
@@ -4342,55 +4360,34 @@ fn verify_partitioned_generation(
         evidence_digest: &generation.generation_evidence.segment_digest,
         evidence_size_bytes: generation.generation_evidence.segment_size_bytes,
     };
-    for (index, (digest, size_bytes)) in [
-        (&layout.content.digest, layout.content.size_bytes),
-        (layout.evidence_digest, layout.evidence_size_bytes),
-    ]
-    .into_iter()
-    .enumerate()
-    {
-        if index == 1 && digest == &layout.content.digest {
-            continue;
-        }
-        if !already_verified(digest, size_bytes) {
-            verify_payload_digest(digest, size_bytes, &mut segment, &mut read_pack)?;
-        }
+    verify_content_pack(&layout, &mut already_verified, &mut segment, &mut read_pack)?;
+    let evidence_descriptor = &generation.generation_evidence;
+    let mut evidence_hasher = (layout.evidence_digest != &layout.content.digest
+        && !already_verified(layout.evidence_digest, layout.evidence_size_bytes))
+    .then(Sha256::new);
+    if evidence_descriptor.pages.is_empty() && evidence_hasher.take().is_some() {
+        verify_payload_digest(
+            layout.evidence_digest,
+            layout.evidence_size_bytes,
+            &mut segment,
+            &mut read_pack,
+        )?;
     }
     let mut read_segment = |request: SealedGenerationSegmentReadV1<'_>, into: &mut Vec<u8>| {
-        layout.read(request, into, &mut read_pack)
-    };
-    for (digest, size_bytes) in generation
-        .file_segments
-        .iter()
-        .map(|descriptor| (&descriptor.segment_digest, descriptor.segment_size_bytes))
-        .chain(
-            generation
-                .file_evidence
-                .iter()
-                .map(|descriptor| (&descriptor.segment_digest, descriptor.segment_size_bytes)),
-        )
-        .chain(
-            generation
-                .resolution_index
-                .segments()
-                .map(|descriptor| (&descriptor.segment_digest, descriptor.segment_size_bytes)),
-        )
-    {
-        if !already_verified(digest, size_bytes) {
-            verify_payload_digest(digest, size_bytes, &mut segment, &mut read_segment)?;
+        layout.read(request, into, &mut read_pack)?;
+        if let Some(hasher) = &mut evidence_hasher {
+            hasher.update(into.as_slice());
         }
-    }
+        Ok(())
+    };
     // Only one payload buffer lives at a time. Evidence keeps its existing
     // page validator and preallocates the largest declared page once, so its
     // possibly larger page buffer never overlaps the hash window or grows.
     drop(segment);
     {
-        let mut evidence = PartitionedEvidencePageReaderV1::new(
-            &generation.generation_evidence,
-            &mut read_segment,
-        );
-        let page_bytes = generation
-            .generation_evidence
+        let mut evidence =
+            PartitionedEvidencePageReaderV1::new(evidence_descriptor, &mut read_segment);
+        let page_bytes = evidence_descriptor
             .pages
             .iter()
             .map(|page| page.page_size_bytes as usize)
@@ -4406,16 +4403,56 @@ fn verify_partitioned_generation(
         })?;
         evidence.finish()?;
     }
-    let mut segment = Vec::with_capacity(PAYLOAD_VERIFY_WINDOW_BYTES_V1 as usize);
-    for descriptor in &generation.code_graph_pages {
-        if !already_verified(&descriptor.page_digest, descriptor.size_bytes) {
-            verify_payload_digest(
-                &descriptor.page_digest,
-                descriptor.size_bytes,
-                &mut segment,
-                &mut read_segment,
-            )?;
+    if let Some(hasher) = evidence_hasher {
+        require_payload_digest(layout.evidence_digest, hasher)?;
+    }
+    Ok(())
+}
+
+fn verify_content_pack(
+    layout: &SealedGenerationPackLayoutRefV1<'_>,
+    already_verified: &mut impl FnMut(&ManifestDigest, u64) -> bool,
+    buffer: &mut Vec<u8>,
+    read_pack: &mut impl FnMut(
+        SealedGenerationSegmentReadV1<'_>,
+        &mut Vec<u8>,
+    ) -> Result<(), CodeIndexProductionErrorV1>,
+) -> Result<(), CodeIndexProductionErrorV1> {
+    let pack = layout.content;
+    let mut pack_hasher = (!already_verified(&pack.digest, pack.size_bytes)).then(Sha256::new);
+    if pack.extents.is_empty() && pack_hasher.is_some() {
+        return verify_payload_digest(&pack.digest, pack.size_bytes, buffer, read_pack);
+    }
+
+    for extent in &pack.extents {
+        let extent_verified = extent.digest != *layout.evidence_digest
+            && already_verified(&extent.digest, extent.size_bytes);
+        if extent_verified && pack_hasher.is_none() {
+            continue;
         }
+        verify_payload_extent(
+            &extent.digest,
+            extent.size_bytes,
+            buffer,
+            |offset, length, into| {
+                read_pack(
+                    SealedGenerationSegmentReadV1::Range {
+                        digest: &pack.digest,
+                        size_bytes: pack.size_bytes,
+                        offset: extent.offset + offset,
+                        length,
+                    },
+                    into,
+                )?;
+                if let Some(hasher) = &mut pack_hasher {
+                    hasher.update(into.as_slice());
+                }
+                Ok(())
+            },
+        )?;
+    }
+    if let Some(hasher) = pack_hasher {
+        require_payload_digest(&pack.digest, hasher)?;
     }
     Ok(())
 }
@@ -4468,6 +4505,40 @@ mod tests {
             },
             bytes,
         )
+    }
+
+    #[test]
+    fn a_content_pack_proves_both_physical_and_logical_digests() {
+        let (layout, bytes) = content_pack_fixture();
+        let verify = |layout: &SealedGenerationPackLayoutV1, bytes: &[u8]| {
+            verify_content_pack(
+                &layout.view(),
+                &mut |_, _| false,
+                &mut Vec::new(),
+                &mut |request, into| {
+                    let SealedGenerationSegmentReadV1::Range { offset, length, .. } = request
+                    else {
+                        panic!("proof must request bounded ranges");
+                    };
+                    let start = usize::try_from(offset).unwrap();
+                    let end = start + usize::try_from(length).unwrap();
+                    into.extend_from_slice(&bytes[start..end]);
+                    Ok(())
+                },
+            )
+        };
+        verify(&layout, &bytes).unwrap();
+
+        let mut wrong_address = layout.clone();
+        wrong_address.content.digest =
+            ManifestDigest::from_sha256_bytes(&Sha256::digest(b"a different pack")).unwrap();
+        assert!(verify(&wrong_address, &bytes).is_err());
+
+        let mut wrong_content = bytes;
+        wrong_content[0] ^= 1;
+        wrong_address.content.digest =
+            ManifestDigest::from_sha256_bytes(&Sha256::digest(&wrong_content)).unwrap();
+        assert!(verify(&wrong_address, &wrong_content).is_err());
     }
 
     #[test]
