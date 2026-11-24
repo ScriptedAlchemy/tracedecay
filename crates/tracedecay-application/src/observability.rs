@@ -44,8 +44,10 @@ pub use export::RegisteredAggregateShareExporterV1;
 pub use github_stack_emit::{
     GitHubStackCapabilityObservationResultV1, GitHubStackCapabilityObservationUnavailableV1,
     GitHubStackDriftObservationResultV1, GitHubStackDriftObservationUnavailableV1,
-    GitHubStackProbeOwnerMountErrorV1, GitHubStackProbeOwnerV1, record_github_stack_capability,
-    record_github_stack_drifts,
+    GitHubStackDriftRestoreErrorV1, GitHubStackDriftRestoreReportV1,
+    GitHubStackProbeOwnerMountErrorV1, GitHubStackProbeOwnerV1, MAX_STACK_DRIFT_RESTORE_PAGES,
+    STACK_DRIFT_RESTORE_PAGE_LIMIT, record_github_stack_capability, record_github_stack_drifts,
+    restore_github_stack_drift_intervals, stack_drift_receipt_trace_id,
 };
 pub use no_progress_emit::{WorkNoProgressObservationV1, record_no_progress_observation};
 pub use producer::{

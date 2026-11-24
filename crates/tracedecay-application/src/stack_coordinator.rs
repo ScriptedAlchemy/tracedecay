@@ -14,8 +14,8 @@ use tracedecay_domain::{
     GitHubStackCapabilityStateV1, GitHubStackLayerSnapshotV1, GitHubStackSnapshotV1,
     GitTopologyAnchorTargetV1, ManifestDigest, ObservationScopeV1, PrivacyDomainBoundLocatorDigest,
     ProjectionGenerationId, ProviderId, PullRequestSnapshotAnchorRefV1, RefId, RepositoryId,
-    RetrievalAnchorId, StackSignalId, StackSignalKindV1, UtcMicros, WorkStackDriftObservedV1,
-    canonical_sha256, derive_git_topology_anchor_id,
+    RetrievalAnchorId, StackDriftKindV1, StackSignalId, StackSignalKindV1, UtcMicros,
+    WorkStackDriftObservedV1, canonical_sha256, derive_git_topology_anchor_id,
 };
 use tracedecay_runtime_core::native_runtime;
 
@@ -31,6 +31,22 @@ use transition::{DriftInterval, stack_drift};
 pub const MAX_GITHUB_STACK_LAYERS_V1: usize = 100;
 const PREFLIGHT_JOIN_WAIT_SLICE: Duration = Duration::from_millis(25);
 const PREFLIGHT_JOIN_TIMEOUT: Duration = Duration::from_secs(5);
+const STACK_CIRCUIT_FAILURE_THRESHOLD: u32 = 3;
+const STACK_CIRCUIT_OPEN_MICROS: i64 = 30_000_000;
+
+/// The preflight circuit policy every mounted stack scope registers. The
+/// daemon registers it together with the scope's stacked-PR policy, so one
+/// registration owns both and a runtime mount only joins that registration.
+pub fn github_stack_circuit_policy() -> Result<StackCircuitPolicyV1, StackCoordinatorErrorV1> {
+    StackCircuitPolicyV1 {
+        revision: 1,
+        policy_digest: ManifestDigest::new(format!("sha256:{}", "0".repeat(64)))
+            .map_err(|error| StackCoordinatorErrorV1::Invalid(error.to_string()))?,
+        failure_threshold: STACK_CIRCUIT_FAILURE_THRESHOLD,
+        open_micros: STACK_CIRCUIT_OPEN_MICROS,
+    }
+    .seal()
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum CircuitState {
@@ -151,6 +167,17 @@ pub struct GitHubStackDriftObservationV1 {
 }
 
 impl GitHubStackDriftObservationV1 {
+    /// The canonical trace identity a durable drift receipt carries for one
+    /// exact scope. Persisted evidence is bound to the scope digest through
+    /// this digest, not through the project-wide receipt scope reference.
+    pub fn trace_id_for(
+        scope_digest: &ManifestDigest,
+        kind: StackDriftKindV1,
+        first_observed_at: UtcMicros,
+    ) -> Result<ManifestDigest, GitHubStackCoordinatorErrorV1> {
+        transition::drift_trace_id(scope_digest, kind, first_observed_at)
+    }
+
     pub fn from_persisted(
         scope_digest: &ManifestDigest,
         observed_at: UtcMicros,
@@ -181,6 +208,7 @@ impl GitHubStackDriftObservationV1 {
 pub enum GitHubStackCoordinatorErrorV1 {
     InvalidScope,
     InvalidProviderObservation,
+    InvalidCircuitPolicy,
     /// The scope registration that authorized the observation was replaced
     /// before it could publish.
     Superseded,
@@ -330,6 +358,13 @@ impl Drop for MountedScope {
 #[must_use = "retain the scope handle for the mounted runtime lifetime"]
 pub struct GitHubStackScopeV1(Arc<MountedScope>);
 
+impl GitHubStackScopeV1 {
+    /// The exact scope this registration was mounted for.
+    pub fn scope(&self) -> &ResolvedScope {
+        &self.0.retained.scope
+    }
+}
+
 impl std::fmt::Debug for GitHubStackScopeV1 {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
@@ -376,11 +411,18 @@ impl DaemonGitHubStackCoordinatorV1 {
         Ok(GitHubStackScopeV1(retained))
     }
 
+    /// Mounts the one registration a real owner holds for its lifetime. The
+    /// same registration owns the stacked-PR policy, the preflight circuit
+    /// policy and their state, so callers never join several independently
+    /// keyed maps. Re-registering the same policy keeps its epoch and any
+    /// in-flight read that already captured it.
     pub fn register_scope(
         &self,
         scope: &ResolvedScope,
         policy: GitHubStackedPullRequestPolicyV1,
+        circuit_policy: StackCircuitPolicyV1,
     ) -> Result<GitHubStackScopeV1, GitHubStackCoordinatorErrorV1> {
+        circuit_policy.validate().map_err(invalid_circuit)?;
         let retained = self.retain_scope(scope)?;
         {
             let mut state = retained
@@ -401,8 +443,55 @@ impl DaemonGitHubStackCoordinatorV1 {
                     policy,
                 });
             }
+            if state
+                .circuit
+                .as_ref()
+                .is_none_or(|circuit| circuit.policy != circuit_policy)
+            {
+                state.circuit = Some(Arc::new(ScopeCircuit {
+                    policy: circuit_policy,
+                    status: Mutex::new(Circuit {
+                        state: CircuitState::Closed,
+                        failures: 0,
+                    }),
+                }));
+            }
         }
         Ok(retained)
+    }
+
+    /// Durable restart restoration of one persisted open drift interval.
+    ///
+    /// It must be applied through a live registration so a restored interval
+    /// cannot outlive its owner or land in a retired slot. When this scope
+    /// already tracks that drift kind, the earlier opening time wins: a
+    /// restarted daemon may not rewrite evidence that was already observed
+    /// longer ago than the durable receipt it re-read.
+    pub fn restore_open_drift_interval(
+        &self,
+        registration: &GitHubStackScopeV1,
+        observation: &GitHubStackDriftObservationV1,
+    ) -> Result<(), GitHubStackCoordinatorErrorV1> {
+        let scope = registration.scope();
+        let interval = transition::restored_open_interval(scope, observation)?;
+        let mut state = registration
+            .0
+            .retained
+            .state
+            .lock()
+            .map_err(|_| GitHubStackCoordinatorErrorV1::Poisoned)?;
+        match state
+            .drift_intervals
+            .iter_mut()
+            .find(|existing| existing.kind == interval.kind)
+        {
+            Some(existing) if existing.first_observed_at > interval.first_observed_at => {
+                *existing = interval;
+            }
+            Some(_) => {}
+            None => state.drift_intervals.push(interval),
+        }
+        Ok(())
     }
 
     /// Capture authorization and the scope lifetime before network I/O.
@@ -524,59 +613,20 @@ impl DaemonGitHubStackCoordinatorV1 {
         )
     }
 
-    pub fn register_circuit_policy(
-        &self,
-        scope: &ResolvedScope,
-        policy: StackCircuitPolicyV1,
-    ) -> Result<GitHubStackScopeV1, StackCoordinatorErrorV1> {
-        policy.validate()?;
-        let retained = self
-            .retain_scope(scope)
-            .map_err(|error| invalid(format!("{error:?}")))?;
-        {
-            let mut state = retained.0.retained.state.lock().map_err(lock_error)?;
-            if state
-                .circuit
-                .as_ref()
-                .is_none_or(|circuit| circuit.policy != policy)
-            {
-                state.circuit = Some(Arc::new(ScopeCircuit {
-                    policy,
-                    status: Mutex::new(Circuit {
-                        state: CircuitState::Closed,
-                        failures: 0,
-                    }),
-                }));
-            }
-        }
-        Ok(retained)
-    }
-
-    pub fn restore_open_drift_interval(
-        &self,
-        scope: &ResolvedScope,
-        observation: &GitHubStackDriftObservationV1,
-    ) -> Result<GitHubStackScopeV1, GitHubStackCoordinatorErrorV1> {
-        let interval = transition::restored_open_interval(scope, observation)?;
-        let retained = self.retain_scope(scope)?;
-        {
-            let mut state = retained
-                .0
-                .retained
-                .state
-                .lock()
-                .map_err(|_| GitHubStackCoordinatorErrorV1::Poisoned)?;
-            if let Some(existing) = state
-                .drift_intervals
-                .iter_mut()
-                .find(|existing| existing.kind == interval.kind)
-            {
-                *existing = interval;
-            } else {
-                state.drift_intervals.push(interval);
-            }
-        }
-        Ok(retained)
+    /// Live registrations only. Accepted provider reads and preflights retain
+    /// the same state without a registry entry, so this proves retirement of
+    /// the mounted owners rather than of settled work.
+    #[cfg(any(test, feature = "test-helpers"))]
+    pub fn retained_scope_count(&self) -> usize {
+        self.scopes
+            .lock()
+            .map(|scopes| {
+                scopes
+                    .values()
+                    .filter(|entry| entry.strong_count() > 0)
+                    .count()
+            })
+            .unwrap_or(0)
     }
 
     #[tracing::instrument(name = "usecases.stack.enqueue", level = "trace", skip_all)]
@@ -1167,6 +1217,9 @@ fn generation_id(
 
 fn invalid(error: impl std::fmt::Display) -> StackCoordinatorErrorV1 {
     StackCoordinatorErrorV1::Invalid(error.to_string())
+}
+fn invalid_circuit(_error: StackCoordinatorErrorV1) -> GitHubStackCoordinatorErrorV1 {
+    GitHubStackCoordinatorErrorV1::InvalidCircuitPolicy
 }
 fn lock_error<T>(error: std::sync::PoisonError<T>) -> StackCoordinatorErrorV1 {
     invalid(error)

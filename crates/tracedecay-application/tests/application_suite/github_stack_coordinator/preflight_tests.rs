@@ -21,6 +21,7 @@ use tracedecay_domain::{
     NativeIntegrationRepositorySnapshotV1, NativeIntegrationSelectionV1, ProjectId, RefId,
     RepositoryId, ScopeSetId, ScopeSetRevision, StackNodeId, UtcMicros, WorktreeId,
     WorktreeInventoryEpoch, WorktreeInventorySnapshotId,
+    configuration::GitHubStackedPullRequestPolicyV1,
 };
 use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
 
@@ -390,7 +391,11 @@ async fn half_open_circuit_rejects_stale_and_denied_but_success_closes() {
     .seal()
     .unwrap();
     let _scope_registration_1 = coordinator
-        .register_circuit_policy(&request.topology.destination, policy)
+        .register_scope(
+            &request.topology.destination,
+            GitHubStackedPullRequestPolicyV1::ProbePrivatePreview,
+            policy,
+        )
         .unwrap();
     let preflight = PreflightOutcomes {
         outcomes: Mutex::new(VecDeque::from([
@@ -471,8 +476,9 @@ fn register_policy(
     request: &NativeIntegrationPreflightRequestV1,
 ) -> GitHubStackScopeV1 {
     coordinator
-        .register_circuit_policy(
+        .register_scope(
             &request.topology.destination,
+            GitHubStackedPullRequestPolicyV1::ProbePrivatePreview,
             StackCircuitPolicyV1 {
                 revision: 1,
                 policy_digest: digest('0'),
@@ -887,8 +893,9 @@ async fn assert_remounted_circuit_isolation(same_policy: bool) {
     let coordinator = DaemonGitHubStackCoordinatorV1::default();
     let request = preflight_request(900);
     let old_owner = coordinator
-        .register_circuit_policy(
+        .register_scope(
             &request.topology.destination,
+            GitHubStackedPullRequestPolicyV1::ProbePrivatePreview,
             StackCircuitPolicyV1 {
                 revision: 1,
                 policy_digest: digest('0'),
@@ -918,8 +925,9 @@ async fn assert_remounted_circuit_isolation(same_policy: bool) {
     drop(old_owner);
 
     let _replacement = coordinator
-        .register_circuit_policy(
+        .register_scope(
             &request.topology.destination,
+            GitHubStackedPullRequestPolicyV1::ProbePrivatePreview,
             StackCircuitPolicyV1 {
                 revision: if same_policy { 1 } else { 2 },
                 policy_digest: digest('0'),

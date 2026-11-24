@@ -6,11 +6,12 @@
 //! immutable evidence into the bounded Observatory outbox.
 
 use tracedecay_contracts::context::ResolvedScope;
+use tracedecay_contracts::{ObservabilityHorizonV1, ObservabilityQueryPort, ObservabilityQueryV1};
 use tracedecay_domain::{
     CoverageStateV1, GitHubStackCapabilityObservedV1, GitHubStackCapabilityStateV1,
-    GitHubStackCapabilityV1, GitTopologyAnchorTargetV1, ManifestDigest, ObservabilityEnvelopeV1,
-    ObservabilityPayloadV1, ObservabilityTerminalResultV1, ObservationScopeV1, UtcMicros,
-    canonical_sha256,
+    GitHubStackCapabilityV1, GitTopologyAnchorTargetV1, IntervalStateV1, ManifestDigest,
+    ObservabilityEnvelopeV1, ObservabilityPayloadV1, ObservabilityTerminalResultV1,
+    ObservationScopeV1, StackDriftKindV1, UtcMicros, canonical_sha256,
     configuration::{ReviewTopologyKindV1, WorkTopologyPolicyV1},
     derive_git_topology_anchor_id,
 };
@@ -18,7 +19,8 @@ use tracedecay_global_db::RegisteredGlobalDb;
 
 use crate::advisory::github_runtime::GitHubCiRepositoryTargetV1;
 use crate::stack_coordinator::{
-    GitHubStackDriftObservationV1, GitHubStackObservationV1, GitHubStackProviderSourceBindingV1,
+    DaemonGitHubStackCoordinatorV1, GitHubStackCoordinatorErrorV1, GitHubStackDriftObservationV1,
+    GitHubStackObservationV1, GitHubStackProviderSourceBindingV1, GitHubStackScopeV1,
 };
 
 use super::{
@@ -441,8 +443,8 @@ fn stack_drift_envelope(
     observation
         .validate(scope_digest)
         .map_err(|_| "github_stack_drift_observation")?;
-    let owner_transition_ref = format!("github-stack-drift:{}", observation.trace_id.as_str());
-    execution_owner_fact_envelope(
+    let owner_transition_ref = stack_drift_owner_transition_ref(&observation.trace_id);
+    let envelope = execution_owner_fact_envelope(
         identity,
         scope_ref,
         ExecutionOwnerFactInputV1 {
@@ -455,7 +457,170 @@ fn stack_drift_envelope(
             coverage: observation.drift.coverage,
             payload: ObservabilityPayloadV1::WorkStackDrift(observation.drift.clone()),
         },
-    )
+    )?;
+    if envelope.trace_id != stack_drift_receipt_trace_id(scope_ref, &observation.trace_id)? {
+        return Err("github_stack_drift_receipt_identity");
+    }
+    Ok(envelope)
+}
+
+fn stack_drift_owner_transition_ref(drift_trace_id: &ManifestDigest) -> String {
+    format!("github-stack-drift:{}", drift_trace_id.as_str())
+}
+
+/// Envelope trace identity of the durable drift receipt for one exact scope.
+/// The receipt's project-wide scope reference is shared by every worktree of
+/// the project, so this identity is what proves a re-read interval belongs to
+/// the exact scope digest that derived it.
+pub fn stack_drift_receipt_trace_id(
+    scope_ref: &str,
+    drift_trace_id: &ManifestDigest,
+) -> Result<String, &'static str> {
+    let trace = canonical_sha256(&(
+        "tracedecay.execution-topology.owner-trace.v1",
+        scope_ref,
+        stack_drift_owner_transition_ref(drift_trace_id),
+    ))
+    .map_err(|_| "github_stack_drift_receipt_identity")?;
+    Ok(format!("execution-trace:{}", trace.as_str()))
+}
+
+/// Every stack drift kind the coordinator can persist an interval for.
+const STACK_DRIFT_KINDS_V1: [StackDriftKindV1; 5] = [
+    StackDriftKindV1::HeadAdvanced,
+    StackDriftKindV1::BaseAdvanced,
+    StackDriftKindV1::MergeBaseChanged,
+    StackDriftKindV1::Retargeted,
+    StackDriftKindV1::Superseded,
+];
+
+/// Durable drift events read per restore page.
+pub const STACK_DRIFT_RESTORE_PAGE_LIMIT: u32 = 64;
+/// Restore pages read before the scan reports partial coverage.
+pub const MAX_STACK_DRIFT_RESTORE_PAGES: u32 = 8;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum GitHubStackDriftRestoreErrorV1 {
+    StoreUnavailable,
+    Coordinator(GitHubStackCoordinatorErrorV1),
+}
+
+/// What a restart recovered from durable drift receipts.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct GitHubStackDriftRestoreReportV1 {
+    /// Open intervals rebuilt into the live registration.
+    pub restored: usize,
+    /// Drift kinds whose newest durable receipt was already closed.
+    pub closed_before_restart: usize,
+    /// Receipts that did not bind this exact scope, kind and interval shape.
+    /// Another worktree of the project is a legitimate source of these.
+    pub skipped_unbound: usize,
+    pub pages_scanned: u32,
+    pub coverage: CoverageStateV1,
+}
+
+/// Rebuilds a restarted scope's open drift intervals from the canonical
+/// observability receipts, before that scope publishes its next observation.
+///
+/// The read is bounded and newest-first per scope: for every drift kind the
+/// newest durable receipt decides whether an interval is still open. A kind
+/// whose newest receipt is closed needs no restored state, and an interval is
+/// restored only when its envelope trace binds the exact scope digest, kind
+/// and opening time. No network or coordinator state changes happen while a
+/// page is unread, and the caller keeps the registration that owns the
+/// restored state.
+#[tracing::instrument(name = "usecases.stack.restore_drift", level = "trace", skip_all)]
+pub async fn restore_github_stack_drift_intervals<Q: ObservabilityQueryPort + ?Sized>(
+    query: &Q,
+    coordinator: &DaemonGitHubStackCoordinatorV1,
+    registration: &GitHubStackScopeV1,
+    now: UtcMicros,
+) -> Result<GitHubStackDriftRestoreReportV1, GitHubStackDriftRestoreErrorV1> {
+    let scope = registration.scope();
+    let mut unresolved = STACK_DRIFT_KINDS_V1.to_vec();
+    let mut report = GitHubStackDriftRestoreReportV1 {
+        restored: 0,
+        closed_before_restart: 0,
+        skipped_unbound: 0,
+        pages_scanned: 0,
+        coverage: CoverageStateV1::Known,
+    };
+    let mut after_watermark = None;
+    let mut scan_complete = false;
+    while !unresolved.is_empty() && report.pages_scanned < MAX_STACK_DRIFT_RESTORE_PAGES {
+        let page = query
+            .query(ObservabilityQueryV1 {
+                authorized_scope_ref: scope.project_id.as_str().to_owned(),
+                event_kinds: vec![DRIFT_EVENT_KIND.to_owned()],
+                horizon: ObservabilityHorizonV1 {
+                    since_micros: 0,
+                    until_micros: now.0.saturating_add(1),
+                },
+                after_watermark: after_watermark.clone(),
+                limit: STACK_DRIFT_RESTORE_PAGE_LIMIT,
+            })
+            .await
+            .map_err(|_| GitHubStackDriftRestoreErrorV1::StoreUnavailable)?;
+        report.pages_scanned = report.pages_scanned.saturating_add(1);
+        // Pages are chronological; the newest receipt for each kind wins.
+        for envelope in page.events.iter().rev() {
+            let ObservabilityPayloadV1::WorkStackDrift(drift) = &envelope.payload else {
+                continue;
+            };
+            if !unresolved.contains(&drift.kind) {
+                continue;
+            }
+            let Ok(trace_id) = GitHubStackDriftObservationV1::trace_id_for(
+                &scope.scope_digest,
+                drift.kind,
+                UtcMicros(drift.first_observed_micros),
+            ) else {
+                report.skipped_unbound = report.skipped_unbound.saturating_add(1);
+                continue;
+            };
+            let expected_trace = stack_drift_receipt_trace_id(scope.project_id.as_str(), &trace_id)
+                .map_err(|_| GitHubStackDriftRestoreErrorV1::StoreUnavailable)?;
+            if envelope.scope_ref != scope.project_id.as_str()
+                || envelope.event_kind != DRIFT_EVENT_KIND
+                || envelope.trace_id != expected_trace
+                || envelope.valid_from_micros != Some(drift.first_observed_micros)
+                || envelope.valid_until_micros != drift.terminal_micros
+            {
+                report.skipped_unbound = report.skipped_unbound.saturating_add(1);
+                continue;
+            }
+            match drift.state {
+                IntervalStateV1::Open => {
+                    let observation = GitHubStackDriftObservationV1::from_persisted(
+                        &scope.scope_digest,
+                        UtcMicros(envelope.event_time_micros),
+                        drift.clone(),
+                    )
+                    .map_err(GitHubStackDriftRestoreErrorV1::Coordinator)?;
+                    coordinator
+                        .restore_open_drift_interval(registration, &observation)
+                        .map_err(GitHubStackDriftRestoreErrorV1::Coordinator)?;
+                    report.restored = report.restored.saturating_add(1);
+                }
+                IntervalStateV1::Closed => {
+                    report.closed_before_restart = report.closed_before_restart.saturating_add(1);
+                }
+            }
+            unresolved.retain(|kind| *kind != drift.kind);
+        }
+        match page.next_watermark {
+            Some(next) => after_watermark = Some(next),
+            None => {
+                scan_complete = true;
+                break;
+            }
+        }
+    }
+    // A kind with no receipt at all is known-absent, not missing evidence.
+    if !scan_complete {
+        report.coverage = CoverageStateV1::Partial;
+    }
+    Ok(report)
 }
 
 const fn drift_unavailable(
