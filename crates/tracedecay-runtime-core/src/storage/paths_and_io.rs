@@ -17,8 +17,8 @@ use tracedecay_domain::errors::{Result, TraceDecayError};
 use super::DURABLE_REMOVAL_TOMBSTONE_PREFIX;
 use super::{
     BRANCH_META_FILENAME, DurableAtomicWritePhase, PrivateStoreIo, ProjectIdentity, ProjectPath,
-    RESPONSE_HANDLES_DIRECTORY, SESSIONS_DB_FILENAME, STORE_MANIFEST_SCHEMA_VERSION, StorageMode,
-    StoreArtifactPath, StoreKind, StoreLayout, StoreManifest, inject_durable_atomic_write_fault,
+    SESSIONS_DB_FILENAME, STORE_MANIFEST_SCHEMA_VERSION, StorageMode, StoreArtifactPath, StoreKind,
+    StoreLayout, StoreManifest, inject_durable_atomic_write_fault,
     inject_durable_namespace_sync_fault,
 };
 
@@ -931,7 +931,6 @@ impl StoreLayout {
         let graph_db_path = data_root.join(config::DB_FILENAME);
         let branch_meta_path = data_root.join(BRANCH_META_FILENAME);
         let sessions_db_path = data_root.join(SESSIONS_DB_FILENAME);
-        let response_handle_root = data_root.join(RESPONSE_HANDLES_DIRECTORY);
         let lcm_payload_root = data_root.join("lcm-payloads");
         let dashboard_root = data_root.join("dashboard");
         let manifest_path = manifest_filename.map(|filename| data_root.join(filename));
@@ -946,7 +945,6 @@ impl StoreLayout {
             graph_db_path,
             branch_meta_path,
             sessions_db_path,
-            response_handle_root,
             lcm_payload_root,
             dashboard_root,
             manifest_path,

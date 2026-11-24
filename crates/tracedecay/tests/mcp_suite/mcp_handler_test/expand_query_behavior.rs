@@ -28,7 +28,7 @@ const PAPAYA_BODY: &str = "papaya export stays in the north shed";
 const PAPAYA_PROMPT: &str = "What did we decide about papaya export?";
 const PAPAYA_QUERY: &str = "papaya export";
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn lcm_expand_query_returns_the_asked_session_or_the_literal_miss() {
     let (cg, _env, _dir) = setup_empty_project().await;
     let citron =
@@ -290,7 +290,7 @@ const TIGHT_BUDGET: u64 = 1024;
 
 /// A context budget smaller than the matched message admits only a prefix of
 /// it and says so, rather than overrunning the budget or dropping the match.
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn lcm_expand_query_reports_a_truncated_block_inside_the_context_budget() {
     let (cg, _env, _dir) = setup_empty_project().await;
     let body = format!("raw lemon details {}", "L".repeat(6000));
@@ -362,7 +362,7 @@ const KIWI_LISTING: &str =
 /// A base64 thinking-signature blob is machine noise and never reaches the
 /// assembled context or the synthesis prompt; readable text, including a
 /// directory listing, still does.
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn lcm_expand_query_filters_signature_blobs_from_the_context() {
     let (cg, _env, _dir) = setup_empty_project().await;
     let signature = "EqQBCkYIBxgCKkBQ7mZ3vT9xR2aLk8sN0pYw4uJ1cHfD6gE5bM".repeat(4);

@@ -1665,7 +1665,7 @@ fn recorded_peer_observation(session: &SessionId, ordinal: u64) -> CanonicalObse
 /// thread is `isOutdated`, so it contributes a `Superseded` finding without
 /// degrading its own provider state.
 #[cfg(feature = "test-transport")]
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn one_saved_edit_cycle_returns_all_four_advisory_pillars_together() {
     let (environment, project) = common::IsolatedHome::new();
     std::fs::create_dir_all(project.join("src")).unwrap();
@@ -2068,10 +2068,16 @@ async fn one_saved_edit_cycle_returns_all_four_advisory_pillars_together() {
         effective_capabilities: BTreeSet::from([operation.capability_id().clone()]),
         grant_expires_at: UtcMicros(now.0.saturating_add(600_000_000)),
     };
+    let response_handles_1 = tracedecay_global_db::tests::harness::RegisteredGlobalDbHarness::open(
+        "advisory-runtime-acceptance-1",
+    )
+    .await;
     let feedback = open_feedback_runtime(
         database,
         &project,
-        project.join("response-handles"),
+        tracedecay_session_memory::response_handles::ResponseHandleStore::registered(
+            response_handles_1.registered.clone(),
+        ),
         resolved.clone(),
         access,
     )

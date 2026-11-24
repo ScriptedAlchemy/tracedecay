@@ -14301,7 +14301,7 @@ mod diagnostic_authority {
         }
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn diagnostic_authority_changes_when_an_unchanged_documents_dependency_is_published() {
         let source = "pub fn alpha() -> u32 { 1 }\n";
         let fixture = GitFixture::new(&[
@@ -14352,11 +14352,18 @@ mod diagnostic_authority {
             effective_capabilities: BTreeSet::new(),
             grant_expires_at: UtcMicros(i64::MAX),
         };
+        let response_handles =
+            tracedecay_global_db::tests::harness::RegisteredGlobalDbHarness::open(
+                "reconcile-feedback-handles",
+            )
+            .await;
         let runtime = Arc::new(
             open_feedback_runtime(
                 database.clone(),
                 fixture.path(),
-                storage.path().join("handles"),
+                tracedecay_application::feedback::concrete::ResponseHandleStore::registered(
+                    response_handles.registered.clone(),
+                ),
                 scope.clone(),
                 access,
             )

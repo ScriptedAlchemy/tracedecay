@@ -26,9 +26,7 @@ use tracedecay_lsp::{
     MAX_CONTEXT_RETRIEVAL_HANDLE_BYTES, ManagedDiagnosticSnapshot, ManagedDiagnosticSnapshotPort,
     TRACEDECAY_CONTEXT_REVISION,
 };
-use tracedecay_session_memory::response_handles::{
-    ResponseHandleLookup, micros_to_seconds, retrieve_response_handle, store_response_handle,
-};
+use tracedecay_session_memory::response_handles::{ResponseHandleLookup, micros_to_seconds};
 
 use super::context_projection::{
     advisory_finding_matches, advisory_projection_producer, advisory_projection_status,
@@ -365,12 +363,11 @@ impl ConcreteFeedbackLspSource {
         };
         let content = serde_json::to_string(&record)
             .map_err(|_| LspRuntimeFailure::new("context-expansion-handle-invalid"))?;
-        let stored = store_response_handle(
-            self.runtime.response_handle_root(),
-            &content,
-            micros_to_seconds(observed_at),
-        )
-        .map_err(|_| LspRuntimeFailure::new("context-expansion-handle-store-failed"))?;
+        let stored = self
+            .runtime
+            .response_handles()
+            .publish_blocking(&content, micros_to_seconds(observed_at))
+            .map_err(|_| LspRuntimeFailure::new("context-expansion-handle-store-failed"))?;
         item.retrieval_handle = Some(stored.handle);
         Ok(item)
     }
@@ -381,11 +378,12 @@ impl ConcreteFeedbackLspSource {
         request: ContextExpansionRequest,
     ) -> ContextExpansionOutcome {
         let observed_at = now_micros();
-        let content = match retrieve_response_handle(
-            self.runtime.response_handle_root(),
-            &request.retrieval_handle,
-            micros_to_seconds(observed_at),
-        ) {
+        let content = match self
+            .runtime
+            .response_handles()
+            .lookup(&request.retrieval_handle, micros_to_seconds(observed_at))
+            .await
+        {
             Ok(ResponseHandleLookup::Found(record)) => record.content,
             Ok(ResponseHandleLookup::Missing | ResponseHandleLookup::Expired { .. }) => {
                 return ContextExpansionOutcome::Denied;

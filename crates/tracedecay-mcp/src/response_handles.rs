@@ -1,10 +1,9 @@
-//! Local response-handle cache for reversible MCP truncation.
+//! Response-handle telemetry and caller-facing problems for reversible MCP
+//! truncation.
 //!
-//! Handles are stored in the owning store's `response-handles` root.
-//! They are only references to local files, never external URLs or remote
-//! identifiers.
+//! Handles name records in the admitted project's registered store; they are
+//! never external URLs or remote identifiers.
 
-use std::path::Path;
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
@@ -17,9 +16,12 @@ use tracedecay_domain::errors::{Result, TraceDecayError};
 // `tracedecay_session_memory::response_handles`. This module wraps it with the
 // MCP telemetry counters and re-exports the record types so MCP callers import
 // the authority and its telemetry-wrapped operations from one path.
+use tracedecay_global_db::RegisteredGlobalDb;
 pub use tracedecay_mcp_catalog::RESPONSE_RETRIEVE_TOOL;
 pub use tracedecay_session_memory::response_handles::{
-    RESPONSE_HANDLE_TTL_SECS, ResponseHandleError, ResponseHandleLookup, ResponseHandleRecord,
+    RESPONSE_HANDLE_TTL_SECS, ResponseHandleError, ResponseHandleFuture, ResponseHandleInventory,
+    ResponseHandleLookup, ResponseHandlePublishPort, ResponseHandlePublisher, ResponseHandleRecord,
+    ResponseHandleStore,
 };
 
 #[derive(Default)]
@@ -42,8 +44,6 @@ struct ResponseHandleTelemetry {
     retrieve_time_us_total: AtomicU64,
     cleanup_runs: AtomicU64,
     cleanup_removed_expired_total: AtomicU64,
-    cleanup_removed_staging_total: AtomicU64,
-    cleanup_removed_tombstones_total: AtomicU64,
     cleanup_failures: AtomicU64,
     cleanup_time_us_total: AtomicU64,
     last_truncation_at: AtomicI64,
@@ -60,13 +60,13 @@ fn telemetry() -> &'static ResponseHandleTelemetry {
 
 fn public_inventory_problem(error: &ResponseHandleError) -> (&'static str, &'static str) {
     match error {
-        ResponseHandleError::CorruptRecord { .. } => (
+        ResponseHandleError::CorruptRecord { .. } | ResponseHandleError::Collision { .. } => (
             "corrupt_handle_record",
-            "The local response-handle inventory contains a corrupt record.",
+            "The response-handle inventory contains a corrupt record.",
         ),
         ResponseHandleError::InvalidHandle | ResponseHandleError::Store(_) => (
             "handle_inventory_unavailable",
-            "The local response-handle inventory is unavailable.",
+            "The response-handle inventory is unavailable.",
         ),
     }
 }
@@ -83,11 +83,13 @@ pub const RETRIEVE_READ_FAILED_REASON: &str = "handle_read_failed";
 pub fn public_retrieve_error(error: ResponseHandleError) -> TraceDecayError {
     match error {
         ResponseHandleError::InvalidHandle => error.into(),
-        ResponseHandleError::CorruptRecord { .. } => TraceDecayError::project_route(
-            RETRIEVE_CORRUPT_RECORD_REASON,
-            true,
-            "corrupt response-handle record: cached payload failed integrity validation",
-        ),
+        ResponseHandleError::CorruptRecord { .. } | ResponseHandleError::Collision { .. } => {
+            TraceDecayError::project_route(
+                RETRIEVE_CORRUPT_RECORD_REASON,
+                true,
+                "corrupt response-handle record: cached payload failed integrity validation",
+            )
+        }
         ResponseHandleError::Store(_) => TraceDecayError::project_route(
             RETRIEVE_READ_FAILED_REASON,
             true,
@@ -96,7 +98,10 @@ pub fn public_retrieve_error(error: ResponseHandleError) -> TraceDecayError {
     }
 }
 
-pub fn response_handle_stats_json(response_handle_root: Option<&Path>) -> Value {
+/// Process telemetry plus, when the store answered, its metadata inventory.
+pub fn response_handle_stats_json(
+    inventory: Option<std::result::Result<ResponseHandleInventory, ResponseHandleError>>,
+) -> Value {
     let telemetry = telemetry();
     let counter = |value: &AtomicU64| value.load(Ordering::Relaxed);
     let timestamp = |value: &AtomicI64| value.load(Ordering::Relaxed);
@@ -119,8 +124,6 @@ pub fn response_handle_stats_json(response_handle_root: Option<&Path>) -> Value 
         "retrieve_time_us_total": counter(&telemetry.retrieve_time_us_total),
         "cleanup_runs": counter(&telemetry.cleanup_runs),
         "cleanup_removed_expired_total": counter(&telemetry.cleanup_removed_expired_total),
-        "cleanup_removed_staging_total": counter(&telemetry.cleanup_removed_staging_total),
-        "cleanup_removed_tombstones_total": counter(&telemetry.cleanup_removed_tombstones_total),
         "cleanup_failures": counter(&telemetry.cleanup_failures),
         "cleanup_time_us_total": counter(&telemetry.cleanup_time_us_total),
         "last_truncation_at": timestamp_json(timestamp(&telemetry.last_truncation_at)),
@@ -129,38 +132,40 @@ pub fn response_handle_stats_json(response_handle_root: Option<&Path>) -> Value 
         "last_expired_at": timestamp_json(timestamp(&telemetry.last_expired_at)),
         "last_cleanup_at": timestamp_json(timestamp(&telemetry.last_cleanup_at)),
     });
-    if let (Some(root), Some(object)) = (response_handle_root, stats.as_object_mut()) {
-        let on_disk =
-            match tracedecay_session_memory::response_handles::inventory_response_handles(root) {
-                Ok(inventory) => json!({
-                    "available": true,
-                    "file_count": inventory.file_count,
-                    "total_bytes": inventory.total_bytes,
-                    "oldest_expires_at": inventory.oldest_expires_at,
-                    "newest_expires_at": inventory.newest_expires_at,
-                }),
-                Err(error) => {
-                    let (reason_code, detail) = public_inventory_problem(&error);
-                    json!({
-                        "available": false,
-                        "reason_code": reason_code,
-                        "detail": detail,
-                    })
-                }
-            };
-        object.insert("on_disk".to_string(), on_disk);
+    if let (Some(inventory), Some(object)) = (inventory, stats.as_object_mut()) {
+        let stored = match inventory {
+            Ok(inventory) => json!({
+                "available": true,
+                "record_count": inventory.record_count,
+                "total_bytes": inventory.total_bytes,
+                "oldest_expires_at": inventory.oldest_expires_at,
+                "newest_expires_at": inventory.newest_expires_at,
+            }),
+            Err(error) => {
+                let (reason_code, detail) = public_inventory_problem(&error);
+                json!({
+                    "available": false,
+                    "reason_code": reason_code,
+                    "detail": detail,
+                })
+            }
+        };
+        object.insert("stored".to_string(), stored);
     }
     stats
 }
 
 #[track_caller]
-pub fn store_response_handle(root: &Path, content: &str, now: i64) -> Result<ResponseHandleRecord> {
+pub fn store_response_handle(
+    store: &ResponseHandlePublisher,
+    content: &str,
+    now: i64,
+) -> Result<ResponseHandleRecord> {
     let started = Instant::now();
     let caller = std::panic::Location::caller();
     let telemetry = telemetry();
     telemetry.store_attempts.fetch_add(1, Ordering::Relaxed);
-    let result =
-        tracedecay_session_memory::response_handles::store_response_handle(root, content, now);
+    let result = store.publish_blocking(content, now);
     telemetry
         .store_time_us_total
         .fetch_add(duration_micros_u64(started.elapsed()), Ordering::Relaxed);
@@ -186,51 +191,37 @@ pub fn store_response_handle(root: &Path, content: &str, now: i64) -> Result<Res
     result.map_err(TraceDecayError::from)
 }
 
-#[track_caller]
 #[tracing::instrument(
     name = "mcp.server.response.handle_retrieve",
     level = "trace",
     skip_all
 )]
-pub fn retrieve_response_handle(
-    root: &Path,
+pub async fn retrieve_response_handle(
+    store: &ResponseHandleStore,
     handle: &str,
     now: i64,
 ) -> std::result::Result<ResponseHandleLookup, ResponseHandleError> {
     let started = Instant::now();
-    let caller = std::panic::Location::caller();
     let telemetry = telemetry();
-    let result =
-        tracedecay_session_memory::response_handles::retrieve_response_handle(root, handle, now);
+    let result = store.lookup(handle, now).await;
     telemetry
         .retrieve_time_us_total
         .fetch_add(duration_micros_u64(started.elapsed()), Ordering::Relaxed);
-    match result {
-        Ok(ResponseHandleLookup::Found(record)) => {
+    match &result {
+        Ok(ResponseHandleLookup::Found(_)) => {
             telemetry.retrieve_hits.fetch_add(1, Ordering::Relaxed);
-            Ok(ResponseHandleLookup::Found(record))
         }
         Ok(ResponseHandleLookup::Missing) => {
             telemetry.retrieve_misses.fetch_add(1, Ordering::Relaxed);
-            Ok(ResponseHandleLookup::Missing)
         }
-        Ok(ResponseHandleLookup::Expired {
-            created_at,
-            expires_at,
-        }) => {
+        Ok(ResponseHandleLookup::Expired { expires_at, .. }) => {
             telemetry.retrieve_expired.fetch_add(1, Ordering::Relaxed);
             telemetry.last_expired_at.store(now, Ordering::Relaxed);
             tracing::debug!(
                 handle = %clipped_handle_for_log(handle),
                 expires_at,
-                caller_file = caller.file(),
-                caller_line = caller.line(),
                 "response handle expired"
             );
-            Ok(ResponseHandleLookup::Expired {
-                created_at,
-                expires_at,
-            })
         }
         Err(error) => {
             telemetry.retrieve_failures.fetch_add(1, Ordering::Relaxed);
@@ -239,70 +230,48 @@ pub fn retrieve_response_handle(
                 .store(now, Ordering::Relaxed);
             tracing::warn!(
                 handle = %clipped_handle_for_log(handle),
-                error_class = error_class(&error),
-                caller_file = caller.file(),
-                caller_line = caller.line(),
+                error_class = error_class(error),
                 %error,
                 "response handle retrieval failed"
             );
-            Err(error)
         }
     }
+    result
 }
 
-#[track_caller]
+/// Removes one registered store's expired handles and records the sweep.
 #[tracing::instrument(name = "mcp.server.response.handle_cleanup", level = "trace", skip_all)]
-pub fn cleanup_expired_response_handles(root: &Path, now: i64) -> Result<usize> {
+pub async fn cleanup_expired_response_handles(
+    database: &RegisteredGlobalDb,
+    now: i64,
+) -> Result<u64> {
     let started = Instant::now();
-    let caller = std::panic::Location::caller();
     let telemetry = telemetry();
     telemetry.cleanup_runs.fetch_add(1, Ordering::Relaxed);
-    let result =
-        tracedecay_session_memory::response_handles::cleanup_expired_response_handles(root, now);
+    let result = database.cleanup_expired_response_handles(now).await;
     telemetry
         .cleanup_time_us_total
         .fetch_add(duration_micros_u64(started.elapsed()), Ordering::Relaxed);
+    telemetry.last_cleanup_at.store(now, Ordering::Relaxed);
     match &result {
-        Ok(cleanup) => {
+        Ok(removed) => {
             telemetry
                 .cleanup_removed_expired_total
-                .fetch_add(cleanup.removed_expired as u64, Ordering::Relaxed);
-            telemetry
-                .cleanup_removed_staging_total
-                .fetch_add(cleanup.removed_staging as u64, Ordering::Relaxed);
-            telemetry
-                .cleanup_removed_tombstones_total
-                .fetch_add(cleanup.removed_tombstones as u64, Ordering::Relaxed);
-            telemetry.last_cleanup_at.store(now, Ordering::Relaxed);
-            if cleanup.removed_expired > 0
-                || cleanup.removed_staging > 0
-                || cleanup.removed_tombstones > 0
-            {
-                tracing::debug!(
-                    removed = cleanup.removed_expired,
-                    removed_staging = cleanup.removed_staging,
-                    removed_tombstones = cleanup.removed_tombstones,
-                    caller_file = caller.file(),
-                    caller_line = caller.line(),
-                    "expired response handles removed"
-                );
+                .fetch_add(*removed, Ordering::Relaxed);
+            if *removed > 0 {
+                tracing::debug!(removed, "expired response handles removed");
             }
         }
         Err(error) => {
             telemetry.cleanup_failures.fetch_add(1, Ordering::Relaxed);
-            telemetry.last_cleanup_at.store(now, Ordering::Relaxed);
             tracing::warn!(
                 error_class = error_class(error),
-                caller_file = caller.file(),
-                caller_line = caller.line(),
                 %error,
                 "response handle cleanup failed"
             );
         }
     }
-    result
-        .map(|cleanup| cleanup.removed_expired)
-        .map_err(TraceDecayError::from)
+    result.map_err(TraceDecayError::from)
 }
 
 #[track_caller]
@@ -367,6 +336,7 @@ fn error_class(error: &ResponseHandleError) -> &'static str {
     let error = match error {
         ResponseHandleError::InvalidHandle => return "invalid_handle",
         ResponseHandleError::CorruptRecord { .. } => return "corrupt_record",
+        ResponseHandleError::Collision { .. } => return "collision",
         ResponseHandleError::Store(error) => error,
     };
     match error {
@@ -402,6 +372,64 @@ fn clipped_handle_for_log(handle: &str) -> String {
     }
 }
 
+/// Real registered-store fixtures for this crate's handle tests.
+#[cfg(test)]
+pub(crate) mod test_support {
+    use std::sync::Arc;
+
+    use tracedecay_global_db::tests::harness::RegisteredGlobalDbHarness;
+    use tracedecay_session_memory::response_handles::{
+        ResponseHandleFuture, ResponseHandlePublishPort,
+    };
+
+    use super::*;
+
+    /// A registered store for one async test; the harness owns its files.
+    pub(crate) async fn open_registered_handle_store()
+    -> (RegisteredGlobalDbHarness, ResponseHandleStore) {
+        let harness = RegisteredGlobalDbHarness::open("mcp-response-handles").await;
+        let store = ResponseHandleStore::registered(harness.registered.clone());
+        (harness, store)
+    }
+
+    /// [`open_registered_handle_store`] for synchronous tests.
+    pub(crate) fn registered_handle_store() -> (RegisteredGlobalDbHarness, ResponseHandleStore) {
+        tracedecay_runtime_core::native_runtime::block_on(open_registered_handle_store())
+            .expect("native runtime")
+    }
+
+    /// Rows the harness's store holds, from its metadata inventory.
+    pub(crate) fn stored_handles(harness: &RegisteredGlobalDbHarness) -> u64 {
+        tracedecay_runtime_core::native_runtime::block_on(
+            harness.registered.inventory_response_handles(),
+        )
+        .expect("native runtime")
+        .expect("inventory")
+        .record_count
+    }
+
+    /// An owner that refuses every publication with an internal detail the
+    /// caller must not see.
+    pub(crate) fn refusing_publisher() -> ResponseHandlePublisher {
+        struct Refusing;
+        impl ResponseHandlePublishPort for Refusing {
+            fn publish<'a>(
+                &'a self,
+                _content: &'a str,
+                _now: i64,
+            ) -> ResponseHandleFuture<'a, ResponseHandleRecord> {
+                Box::pin(async {
+                    Err(ResponseHandleError::Store(TraceDecayError::Database {
+                        operation: "publish response handle".to_owned(),
+                        message: "/private/operator/sessions.db: disk I/O error".to_owned(),
+                    }))
+                })
+            }
+        }
+        ResponseHandlePublisher::from_port(Arc::new(Refusing))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use tracedecay_domain::errors::InvalidRequestReason;
@@ -411,8 +439,7 @@ mod tests {
     #[test]
     fn public_inventory_problem_never_exposes_the_local_path() {
         let error = ResponseHandleError::CorruptRecord {
-            path: "/private/operator/cache/secret.json".into(),
-            reason: "invalid JSON".to_string(),
+            reason: "record digest does not match its handle".to_string(),
         };
 
         let (reason_code, detail) = public_inventory_problem(&error);

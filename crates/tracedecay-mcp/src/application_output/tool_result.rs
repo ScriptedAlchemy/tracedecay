@@ -1,7 +1,7 @@
 //! The one tool-result rendering of a settled application call, shared by
 //! every MCP tool family and the `tracedecay tool` CLI.
 
-use std::path::Path;
+use crate::response_handles::ResponseHandlePublisher;
 
 use serde_json::Value;
 use tracedecay_contracts::{
@@ -31,9 +31,13 @@ pub struct ApplicationRefusal {
 
 impl ApplicationRefusal {
     /// Renders the refusal in the output format `args` requested.
-    pub fn render(self, response_handle_root: Option<&Path>, args: &Value) -> Result<ToolResult> {
+    pub fn render(
+        self,
+        response_handles: Option<&ResponseHandlePublisher>,
+        args: &Value,
+    ) -> Result<ToolResult> {
         render_application_result(
-            response_handle_root,
+            response_handles,
             self.operation.as_str(),
             &self.binding_id,
             &Err(self.problem),
@@ -96,7 +100,7 @@ pub fn error_problem_record(error: &TraceDecayError) -> Option<ApplicationProble
 /// whose whole record rides beside the text as MCP
 /// `structuredContent.problem`, which `--json` prints with the result.
 pub fn render_application_result(
-    response_handle_root: Option<&Path>,
+    response_handles: Option<&ResponseHandlePublisher>,
     operation: &str,
     binding_id: &BindingId,
     result: &ApplicationResult<Value>,
@@ -113,7 +117,7 @@ pub fn render_application_result(
             Some(markdown::render(view).as_str().to_owned())
         }
     };
-    let text = finalize_with_format(response_handle_root, requested_format, &value, || {
+    let text = finalize_with_format(response_handles, requested_format, &value, || {
         markdown.unwrap_or_default()
     });
     match result {

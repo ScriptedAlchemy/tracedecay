@@ -12,7 +12,7 @@ use tracedecay_lsp::{
     LspRuntimeFailure, LspRuntimeFuture, MAX_CONTEXT_PROJECTION_ITEMS, TRACEDECAY_CONTEXT_REVISION,
 };
 use tracedecay_runtime_core::native_runtime::NativeTask;
-use tracedecay_session_memory::response_handles::{micros_to_seconds, store_response_handle};
+use tracedecay_session_memory::response_handles::micros_to_seconds;
 
 use super::context_projection::test_run_projection;
 use super::feedback_source::context_expansion_envelope_for_test_run;
@@ -157,13 +157,12 @@ impl ManagedTestRunProjection {
         };
         let content = serde_json::to_string(&record)
             .map_err(|_| LspRuntimeFailure::new("test-run-expansion-handle-invalid"))?;
-        store_response_handle(
-            self.project.feedback.response_handle_root(),
-            &content,
-            micros_to_seconds(issued_at),
-        )
-        .map(|stored| stored.handle)
-        .map_err(|_| LspRuntimeFailure::new("test-run-expansion-handle-store-failed"))
+        self.project
+            .feedback
+            .response_handles()
+            .publish_blocking(&content, micros_to_seconds(issued_at))
+            .map(|stored| stored.handle)
+            .map_err(|_| LspRuntimeFailure::new("test-run-expansion-handle-store-failed"))
     }
 }
 

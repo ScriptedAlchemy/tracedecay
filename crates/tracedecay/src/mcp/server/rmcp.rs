@@ -395,7 +395,7 @@ mod tests {
         drop(repo);
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn rmcp_wire_matrix_matches_raw_dispatch_initialize_tools_and_resources() {
         let fixture = RmcpWireFixture::start(ClientConfig::default()).await;
         let requested = fixture

@@ -22,7 +22,7 @@ pub fn committed_anchor() -> usize { 1 }
 pub fn dirty_anchor() -> usize { 2 }
 ";
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn branch_search_reads_committed_symbols_and_reports_a_missing_branch() {
     let isolation = TempDir::new().expect("branch-search isolation");
     let project = isolation.path().join("project");

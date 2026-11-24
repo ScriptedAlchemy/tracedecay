@@ -104,10 +104,6 @@ fn profile_sharded_layout_maps_marker_to_profile_store_paths() {
         profile.join("projects/proj_123/sessions.db")
     );
     assert_eq!(
-        layout.response_handle_root,
-        profile.join("projects/proj_123/response-handles")
-    );
-    assert_eq!(
         layout.lcm_payload_root,
         profile.join("projects/proj_123/lcm-payloads")
     );

@@ -19,8 +19,8 @@ use tracedecay_contracts::retrieval::{FilesLayoutV1, FilesResultV1, IndexedFileV
 use tracedecay_daemon_identity::authority::DaemonAuthority;
 use tracedecay_daemon_protocol::{
     DAEMON_INVOCATION_PROTOCOL, DAEMON_INVOCATION_REVISION, DaemonAuthPreface, DaemonEndpoint,
-    DaemonHandshake, DaemonInvocationOutcome, DaemonInvocationPayload, DaemonInvocationRequest,
-    DaemonInvocationResponse,
+    DaemonHandshake, DaemonInvocationOutcome, DaemonInvocationPayload, DaemonInvocationProblem,
+    DaemonInvocationRequest, DaemonInvocationResponse,
 };
 use tracedecay_domain::ProjectId;
 use tracedecay_tool_catalog::ApplicationSurfaceOperation;
@@ -337,7 +337,7 @@ where
                         DaemonInvocationPayload::GraphTool {
                             surface_operation: ApplicationSurfaceOperation::Files,
                             ..
-                        }
+                        } | DaemonInvocationPayload::ResponseHandlePublish { .. }
                     ));
                     request_tx
                         .send(Instant::now())
@@ -457,29 +457,33 @@ fn oversized_files() -> FilesResultV1 {
     files
 }
 
+/// The CLI renders the oversized result locally and asks the daemon to
+/// publish it; a daemon that refuses publication leaves a typed, retryable
+/// handle status and no handle.
 #[test]
-fn generic_tool_reports_unavailable_truncation_storage() {
+fn generic_tool_reports_refused_truncation_publication() {
     let (_home, _project, _socket_dir, home, project, socket) = fixture();
-    let layout = tracedecay_runtime_core::storage::resolve_persisted_layout(
-        &project,
-        &home.join(".tracedecay"),
-    )
-    .expect("resolve fixture layout")
-    .expect("initialized layout");
-    if layout.response_handle_root.exists() {
-        std::fs::remove_dir(&layout.response_handle_root).expect("unused fixture handle cache");
-    }
-    std::fs::write(&layout.response_handle_root, b"cache path is a file")
-        .expect("block handle cache storage");
     let (_requests, server) = spawn_scripted_daemon(
         socket.clone(),
         &home,
         &project,
-        1,
+        2,
         |mut stream, request, scope| {
+            let response = match &request.payload {
+                DaemonInvocationPayload::ResponseHandlePublish { .. } => {
+                    let mut bytes = serde_json::to_vec(&DaemonInvocationResponse::problem(
+                        request.request_id.clone(),
+                        DaemonInvocationProblem::Unavailable,
+                    ))
+                    .expect("encode publication refusal");
+                    bytes.push(b'\n');
+                    bytes
+                }
+                _ => files_response(&request, scope, oversized_files()),
+            };
             stream
-                .write_all(&files_response(&request, scope, oversized_files()))
-                .expect("write oversized result");
+                .write_all(&response)
+                .expect("write scripted response");
         },
     );
     let result = run_command_with_timeout(
@@ -498,7 +502,7 @@ fn generic_tool_reports_unavailable_truncation_storage() {
     assert_eq!(payload["handle_available"], false, "{payload}");
     assert!(
         payload.get("handle").is_none(),
-        "unwritten content must not receive a handle"
+        "unpublished content must not receive a handle"
     );
     assert_eq!(
         payload["handle_status"]["reason_code"],
@@ -506,93 +510,150 @@ fn generic_tool_reports_unavailable_truncation_storage() {
     );
     assert_eq!(payload["handle_status"]["retryable"], true);
     assert!(
-        payload["handle_status"]["retry_instruction"]
-            .as_str()
-            .is_some_and(|value| !value.is_empty())
-    );
-    assert!(
         payload["preview_chars"].as_u64().unwrap() < payload["original_chars"].as_u64().unwrap()
     );
 }
 
+/// A real daemon serves an oversized listing, publishes the CLI's rendered
+/// text into the project's registered store, and pages it back exactly.
 #[test]
-fn generic_tool_retrieves_oversized_typed_result() {
-    let (_home, _project, _socket_dir, home, project, socket) = fixture();
-    let files = oversized_files();
-    let expected = serde_json::to_value(&files).expect("expected file listing");
-    let (requests, server) = spawn_scripted_daemon(
-        socket.clone(),
-        &home,
-        &project,
-        1,
-        move |mut stream, request, scope| {
-            stream
-                .write_all(&files_response(&request, scope, files.clone()))
-                .expect("write oversized result");
-        },
-    );
-    let output = run_tool_after_admission(
-        tool_command(&home, &project, &socket, "large"),
-        requests,
-        Instant::now() + CHILD_TIMEOUT,
-    );
-    server.join().expect("join scripted daemon");
-    let preview = output_payload(&output);
-    assert_eq!(preview["truncated"], true, "{preview}");
-    let handle = preview["handle"].as_str().expect("stored response handle");
-    assert_eq!(preview["retrieve_tool"], "tracedecay_retrieve");
-
-    // The CLI renderer wrote the real enrolled project's cache. Recover its
-    // pages through the shipped daemon's retrieve owner, not scripted pages.
+fn generic_tool_retrieves_oversized_result_published_through_the_daemon() {
+    let home = TempDir::new().expect("home");
+    let project = TempDir::new().expect("project");
+    let home = canonical_existing_path(home.path());
+    let project_path = canonical_existing_path(project.path());
+    let profile_root = home.join(".tracedecay");
+    std::fs::create_dir(&profile_root).expect("create private profile root");
+    std::fs::set_permissions(&profile_root, std::fs::Permissions::from_mode(0o700))
+        .expect("secure profile root");
+    std::fs::create_dir_all(project_path.join("src")).expect("create project source");
+    let expected: Vec<String> = (0..1024)
+        .map(|index| format!("src/transport_large_result_{index:04}.rs"))
+        .collect();
+    for path in &expected {
+        std::fs::write(project_path.join(path), "pub fn marker() {}\n").expect("source file");
+    }
+    let git = Command::new(common::git_program())
+        .current_dir(&project_path)
+        .args(["init", "--quiet"])
+        .status()
+        .expect("initialize fixture repository");
+    assert!(git.success(), "initialize fixture repository");
+    crate::common::initialize_tracedecay_cli_project(&home, &project_path);
     let _daemon = common::spawn_tracedecay_daemon(&home);
-    let mut content = String::new();
-    let mut offset = 0;
-    let mut pages = 0;
-    loop {
-        let arguments = json!({ "handle": handle, "offset": offset, "format": "json" });
+
+    let run_tool = |name: &str, arguments: Value| {
         let mut command = tracedecay_command_with_home(&home);
-        command.current_dir(&project).args([
+        command.current_dir(&project_path).args([
             "tool",
             "--project",
-            project.to_str().expect("project path"),
-            "retrieve",
+            project_path.to_str().expect("project path"),
+            name,
             "--args",
             &arguments.to_string(),
             "--json",
         ]);
-        let retrieved = run_command_with_timeout(command, CHILD_TIMEOUT);
-        assert!(!retrieved.killed_by_harness, "retrieval hung");
+        let result = run_command_with_timeout(command, CHILD_TIMEOUT);
+        assert!(!result.killed_by_harness, "{name} hung");
         assert!(
-            retrieved.output.status.success(),
-            "{}",
-            String::from_utf8_lossy(&retrieved.output.stderr)
+            result.output.status.success(),
+            "{name}: {}",
+            String::from_utf8_lossy(&result.output.stderr)
         );
-        let page = output_payload(&retrieved.output);
+        output_payload(&result.output)
+    };
+    // The listing is served from the verified code graph; wait until the
+    // daemon reports it ready rather than racing its first index.
+    let mut ready = tracedecay_command_with_home(&home);
+    ready.current_dir(&project_path).args([
+        "tool",
+        "--project",
+        project_path.to_str().expect("project path"),
+        "status",
+        "--args",
+        r#"{"format":"json","wait_for":{"state":"ready","timeout_ms":110000}}"#,
+        "--json",
+    ]);
+    let ready = run_command_with_timeout(ready, Duration::from_secs(120));
+    assert!(
+        !ready.killed_by_harness && ready.output.status.success(),
+        "code graph never became ready: {}",
+        String::from_utf8_lossy(&ready.output.stderr)
+    );
+    let preview = run_tool("files", json!({ "format": "json" }));
+    assert_eq!(preview["truncated"], true, "{preview}");
+    let handle = preview["handle"]
+        .as_str()
+        .expect("published response handle")
+        .to_owned();
+
+    let mut content = String::new();
+    let mut offset = 0;
+    let mut pages = 0;
+    loop {
+        let page = run_tool(
+            "retrieve",
+            json!({ "handle": handle, "offset": offset, "format": "json" }),
+        );
         pages += 1;
-        assert_eq!(page["handle"], handle);
+        assert_eq!(page["handle"], handle.as_str());
         assert_eq!(page["offset"], offset);
-        content.push_str(page["content"].as_str().expect("retained page content"));
+        content.push_str(page["content"].as_str().expect("page content"));
         if page["has_more"] == false {
-            assert!(page["next_offset"].is_null());
             assert_eq!(
                 page["total_chars"].as_u64(),
                 Some(content.chars().count() as u64)
             );
             break;
         }
-        assert_eq!(page["has_more"], true);
-        let next = page["next_offset"].as_u64().expect("next retained offset");
+        let next = page["next_offset"].as_u64().expect("next offset");
         assert!(next > offset, "retrieval must advance");
         offset = next;
     }
     assert!(
         pages > 1,
-        "the oversized result must require multiple bounded pages"
+        "the oversized result must require multiple pages"
     );
-    assert_eq!(
-        serde_json::from_str::<Value>(&content).expect("complete retained JSON"),
-        expected
-    );
+    let listing: Value = serde_json::from_str(&content).expect("complete published JSON");
+    let listed: Vec<&str> = listing["files"]
+        .as_array()
+        .expect("published file listing")
+        .iter()
+        .map(|file| file["path"].as_str().expect("listed path"))
+        .collect();
+    for path in &expected {
+        assert!(
+            listed.contains(&path.as_str()),
+            "{path} missing from the published listing"
+        );
+    }
+}
+
+/// Answers a publish invocation as the registered owner does: with the
+/// content-derived handle the CLI verifies against what it rendered.
+fn answer_publication(mut stream: UnixStream, request: &DaemonInvocationRequest) {
+    let DaemonInvocationPayload::ResponseHandlePublish {
+        content,
+        observed_at,
+        ..
+    } = &request.payload
+    else {
+        panic!("expected a publish invocation");
+    };
+    let created_at = observed_at.0.div_euclid(1_000_000);
+    let response = DaemonInvocationResponse {
+        protocol: DAEMON_INVOCATION_PROTOCOL.to_owned(),
+        revision: DAEMON_INVOCATION_REVISION,
+        request_id: request.request_id.clone(),
+        outcome: DaemonInvocationOutcome::ResponseHandlePublished {
+            handle: tracedecay_global_db::response_handle_for(content),
+            created_at,
+            expires_at: created_at + tracedecay_global_db::RESPONSE_HANDLE_TTL_SECS,
+        },
+    };
+    let mut bytes = serde_json::to_vec(&response).expect("encode publication");
+    bytes.push(b'\n');
+    stream.write_all(&bytes).expect("write publication");
 }
 
 fn hold_stream_after_files(
@@ -620,9 +681,12 @@ fn generic_tool_json_preserves_large_result_while_daemon_waits() {
         socket.clone(),
         &home,
         &project,
-        1,
-        move |stream, request, scope| {
-            hold_stream_after_files(stream, request, scope, files.clone());
+        2,
+        move |stream, request, scope| match &request.payload {
+            DaemonInvocationPayload::ResponseHandlePublish { .. } => {
+                answer_publication(stream, &request);
+            }
+            _ => hold_stream_after_files(stream, request, scope, files.clone()),
         },
     );
     let output = run_tool_after_admission(

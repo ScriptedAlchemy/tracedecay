@@ -76,7 +76,6 @@ use tracedecay_lsp::TRACEDECAY_CONTEXT_REVISION;
 use tracedecay_mcp::application_output::json::json_line as canonical_json_line;
 use tracedecay_mcp::application_output::markdown::render as render_markdown;
 use tracedecay_mcp::application_output::view::CanonicalHumanView;
-use tracedecay_mcp::response_handles::{ResponseHandleLookup, retrieve_response_handle};
 use tracedecay_mcp::tools::dispatch::resolve_mcp_application_surface;
 use tracedecay_runtime_core::config::ProfileRoot;
 use tracedecay_tool_catalog::ApplicationSurfaceOperation;
@@ -102,14 +101,24 @@ impl RuntimeFixture {
         self._environment.profile()
     }
 
-    fn response_handle_root(&self) -> PathBuf {
-        tracedecay_runtime_core::storage::resolve_persisted_layout(
+    /// The content a response handle names, read back through the daemon's
+    /// own `tracedecay_retrieve`, the only owner of the project's store.
+    fn retrieve_handle_content(&self, handle: &str) -> String {
+        let output = run_application_tool(
+            self.home(),
             &self.project,
-            self._environment.profile_root(),
-        )
-        .expect("resolve admitted project store")
-        .expect("admitted project is enrolled")
-        .response_handle_root
+            ApplicationSurfaceOperation::Retrieve,
+            &serde_json::json!({ "handle": handle, "format": "json" }),
+        );
+        assert_command_success("CLI tracedecay_retrieve", &output);
+        let envelope: Value = serde_json::from_slice(&output.stdout).expect("retrieve JSON");
+        let page = tracedecay::daemon::tool_json_payload(&envelope, "retrieve handle")
+            .expect("retrieve page");
+        assert_eq!(page["has_more"], false, "LSP handle records fit one page");
+        page["content"]
+            .as_str()
+            .expect("retrieved content")
+            .to_owned()
     }
 
     /// The path an LSP client addresses the admitted project through.
@@ -3027,18 +3036,9 @@ async fn production_lsp_negotiates_and_projects_canonical_context() {
             2,
             "cycle-backed related projections must expose retrieval handles"
         );
-        let handle_record = match retrieve_response_handle(
-            &fixture.response_handle_root(),
-            lsp_handle,
-            wall_clock_micros().0.div_euclid(1_000_000),
-        )
-        .expect("read LSP response handle through its authority")
-        {
-            ResponseHandleLookup::Found(record) => record,
-            other => panic!("LSP response handle unavailable: {other:?}"),
-        };
         let handle_record: Value =
-            serde_json::from_str(&handle_record.content).expect("LSP response handle record");
+            serde_json::from_str(&fixture.retrieve_handle_content(lsp_handle))
+                .expect("LSP response handle record");
         let canonical_handle = handle_record["canonical_handle"]
             .as_str()
             .expect("canonical feedback handle");
@@ -3069,18 +3069,8 @@ async fn production_lsp_negotiates_and_projects_canonical_context() {
         );
 
         for lsp_handle in related_lsp_handles {
-            let record = match retrieve_response_handle(
-                &fixture.response_handle_root(),
-                &lsp_handle,
-                wall_clock_micros().0.div_euclid(1_000_000),
-            )
-            .expect("read related LSP response handle")
-            {
-                ResponseHandleLookup::Found(record) => record,
-                other => panic!("related LSP response handle unavailable: {other:?}"),
-            };
-            let record: Value =
-                serde_json::from_str(&record.content).expect("related LSP handle record");
+            let record: Value = serde_json::from_str(&fixture.retrieve_handle_content(&lsp_handle))
+                .expect("related LSP handle record");
             assert_eq!(record["canonical_handle"], canonical_handle);
         }
 
@@ -3481,9 +3471,12 @@ async fn production_lsp_negotiates_and_projects_canonical_context() {
     shutdown_lsp(&fixture, &mut session, 702).await;
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn feedback_handle_bootstrap_reads() {
     let project = TempDir::new().expect("temporary feedback project");
+    let handles =
+        tracedecay_global_db::tests::harness::RegisteredGlobalDbHarness::open("feedback-bootstrap")
+            .await;
     let (database, _) = common::initialize_test_database(&project.path().join("graph.db"))
         .await
         .expect("feedback database");
@@ -3493,7 +3486,9 @@ async fn feedback_handle_bootstrap_reads() {
     let runtime = open_feedback_runtime(
         database,
         project.path(),
-        project.path().join("response-handles"),
+        tracedecay_session_memory::response_handles::ResponseHandleStore::registered(
+            handles.registered.clone(),
+        ),
         scope,
         access,
     )

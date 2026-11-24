@@ -28,7 +28,7 @@ use tracedecay_sessions::admission::HostAdmissionScope;
 #[cfg(feature = "test-transport")]
 use tracedecay_sessions::runtime::{SessionMessageRecord, SessionRecord};
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn lcm_tools_reject_invalid_storage_routing_arguments() {
     let dir = test_temp_dir();
     let (cg, _env) = init_test_project(dir.path()).await;
@@ -58,7 +58,7 @@ async fn lcm_tools_reject_invalid_storage_routing_arguments() {
 }
 
 #[cfg(feature = "test-transport")]
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn lcm_session_handlers_expose_bounded_read_apis_and_placeholders() {
     let dir = test_temp_dir();
     let (cg, _env) = init_test_project(dir.path()).await;
@@ -381,7 +381,7 @@ async fn lcm_session_handlers_expose_bounded_read_apis_and_placeholders() {
 }
 
 #[cfg(feature = "test-transport")]
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn lcm_load_session_cursor_walk_reads_every_message_exactly_once() {
     // More records than the internal candidate cohort window, so the walk has
     // to advance the storage keyset rather than re-rank the first window.
@@ -468,7 +468,7 @@ async fn lcm_load_session_cursor_walk_reads_every_message_exactly_once() {
 }
 
 #[cfg(feature = "test-transport")]
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn lcm_status_response_is_valid_json_and_omits_payload_secrets() {
     let (cg, _env, _dir) = setup_empty_project().await;
     let db = open_active_project_session_db(&cg).await;
@@ -541,7 +541,7 @@ async fn lcm_status_response_is_valid_json_and_omits_payload_secrets() {
 }
 
 #[cfg(feature = "test-transport")]
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn lcm_status_reports_lifecycle_fields_from_active_project() {
     let dir = test_temp_dir();
     let (cg, _env) = init_test_project(dir.path()).await;
@@ -624,7 +624,7 @@ async fn lcm_status_reports_lifecycle_fields_from_active_project() {
 }
 
 #[cfg(feature = "test-transport")]
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn lcm_describe_supports_summary_node_and_external_payload_targets() {
     let (cg, _env, _dir) = setup_empty_project().await;
     let source_projection = seed_temporal_lcm_session_message(
@@ -772,7 +772,7 @@ async fn lcm_describe_supports_summary_node_and_external_payload_targets() {
 }
 
 #[cfg(feature = "test-transport")]
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn lcm_grep_raw_hit_store_id_expands_byte_exactly() {
     let (cg, _env, _dir) = setup_empty_project().await;
     let content = "grep-to-expand byte identity: café\nsecond line";
@@ -824,7 +824,7 @@ async fn lcm_grep_raw_hit_store_id_expands_byte_exactly() {
 }
 
 #[cfg(feature = "test-transport")]
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn lcm_grep_and_load_session_honor_native_filters_and_content_clamp() {
     let (cg, _env, _dir) = setup_empty_project().await;
     let old = seed_temporal_lcm_session_message_at_micros(
@@ -931,7 +931,7 @@ async fn lcm_grep_and_load_session_honor_native_filters_and_content_clamp() {
 }
 
 #[cfg(feature = "test-transport")]
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn lcm_grep_accepts_string_timestamp_filters() {
     let dir = test_temp_dir();
     let (cg, _env) = init_test_project(dir.path()).await;
@@ -995,7 +995,7 @@ async fn lcm_grep_accepts_string_timestamp_filters() {
 }
 
 #[cfg(feature = "test-transport")]
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn lcm_grep_accepts_relative_time_filters() {
     let dir = test_temp_dir();
     let (cg, _env) = init_test_project(dir.path()).await;
@@ -1052,7 +1052,7 @@ async fn lcm_grep_accepts_relative_time_filters() {
 }
 
 #[cfg(feature = "test-transport")]
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn lcm_load_session_rejects_fractional_negative_and_wrong_type_numeric_args() {
     let (cg, _env, _dir) = setup_empty_project().await;
     seed_lcm_session_message(
@@ -1089,7 +1089,7 @@ async fn lcm_load_session_rejects_fractional_negative_and_wrong_type_numeric_arg
 }
 
 #[cfg(feature = "test-transport")]
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn lcm_large_json_response_stays_parseable_after_truncation() {
     let (cg, _env, _dir) = setup_empty_project().await;
     let mut projections = Vec::new();
@@ -1135,7 +1135,7 @@ async fn lcm_large_json_response_stays_parseable_after_truncation() {
 }
 
 #[cfg(feature = "test-transport")]
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn lcm_expand_query_large_response_preserves_synthesis_contract() {
     let (cg, _env, _dir) = setup_empty_project().await;
     let projection = seed_temporal_lcm_session_message(
@@ -1202,7 +1202,7 @@ async fn lcm_expand_query_large_response_preserves_synthesis_contract() {
 }
 
 #[cfg(feature = "test-transport")]
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn lcm_expand_query_oversized_prompt_preserves_synthesis_contract() {
     let (cg, _env, _dir) = setup_empty_project().await;
     let projection = seed_temporal_lcm_session_message(
@@ -1292,7 +1292,7 @@ async fn lcm_expand_query_oversized_prompt_preserves_synthesis_contract() {
 }
 
 #[cfg(unix)]
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn lcm_status_cli_bridge_accepts_json_args() {
     use std::time::Duration;
 
@@ -1389,7 +1389,7 @@ fn cursor_parameter_changed(parameter: &str) -> String {
 /// or page size, other session operations refuse it as foreign, and only the
 /// unchanged request reads the next page.
 #[cfg(feature = "test-transport")]
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn lcm_session_cursor_pages_only_the_operation_and_request_that_minted_it() {
     let (cg, _env, _dir) = setup_empty_project().await;
     let mut projections = Vec::new();
@@ -1532,7 +1532,7 @@ async fn lcm_session_cursor_pages_only_the_operation_and_request_that_minted_it(
 }
 
 #[cfg(feature = "test-transport")]
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn lcm_expand_paginates_summary_sources_over_mcp() {
     let (cg, _env, _dir) = setup_empty_project().await;
     let mut store_ids = Vec::new();
@@ -1847,7 +1847,7 @@ async fn lcm_expand_paginates_summary_sources_over_mcp() {
 }
 
 #[cfg(feature = "test-transport")]
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn lcm_expand_resolves_cross_session_store_ids_over_mcp() {
     let (cg, _env, _dir) = setup_empty_project().await;
     let origin_projection = seed_temporal_lcm_session_message(
@@ -1919,7 +1919,7 @@ async fn lcm_expand_resolves_cross_session_store_ids_over_mcp() {
 }
 
 #[cfg(feature = "test-transport")]
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn lcm_expand_real_service_rechecks_terminal_anchor_states() {
     let (cg, _env, _dir) = setup_empty_project().await;
     let available_projection = seed_temporal_lcm_session_message(
@@ -2040,7 +2040,7 @@ async fn lcm_expand_real_service_rechecks_terminal_anchor_states() {
 }
 
 #[cfg(feature = "test-transport")]
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn lcm_expand_cross_session_external_payload_supports_two_step_hydration() {
     let (cg, _env, _dir) = setup_empty_project().await;
     let body = format!("data:image/png;base64,{}", "A".repeat(220_000));
@@ -2461,7 +2461,7 @@ async fn lcm_expand_cross_session_external_payload_supports_two_step_hydration()
 }
 
 #[cfg(feature = "test-transport")]
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn lcm_status_reports_dag_store_and_config_diagnostics_over_mcp() {
     let (cg, _env, _dir) = setup_empty_project().await;
     seed_lcm_session_message(
@@ -2528,7 +2528,7 @@ async fn lcm_status_reports_dag_store_and_config_diagnostics_over_mcp() {
 }
 
 #[cfg(feature = "test-transport")]
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn lcm_status_all_provider_aggregates_provider_counts() {
     let (cg, _env, _dir) = setup_empty_project().await;
     seed_lcm_session_message_for_provider(
@@ -2569,7 +2569,7 @@ async fn lcm_status_all_provider_aggregates_provider_counts() {
 }
 
 #[cfg(feature = "test-transport")]
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn lcm_status_all_provider_counts_payload_health_once() {
     let (cg, _env, _dir) = setup_empty_project().await;
     seed_lcm_tool_result_message_for_provider(
@@ -2611,7 +2611,7 @@ async fn lcm_status_all_provider_counts_payload_health_once() {
 /// count only the session it was given, leave message bodies out of the
 /// answer, and refuse a parameter the schema does not accept.
 #[cfg(feature = "test-transport")]
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn lcm_status_over_mcp_counts_the_requested_session() {
     let (cg, _env, _dir) = setup_empty_project().await;
     seed_lcm_session_message(
@@ -2978,7 +2978,7 @@ fn lcm_status_scope(payload: &Value) -> Value {
 // downgraded version marker stays downgraded across calls on the same server.
 // Reconstructing the server would correctly admit and migrate it again.
 #[cfg(feature = "test-transport")]
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn repeated_lcm_calls_skip_schema_reensure_per_process() {
     let dir = test_temp_dir();
     let (cg, _env) = init_test_project(dir.path()).await;
@@ -3033,7 +3033,7 @@ async fn repeated_lcm_calls_skip_schema_reensure_per_process() {
 
 /// An invalid `scope` must be a hard error naming the valid values, never
 /// silently broadened to `all`.
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn lcm_grep_rejects_invalid_scope() {
     let dir = test_temp_dir();
     let (cg, _env) = init_test_project(dir.path()).await;
@@ -3070,7 +3070,7 @@ async fn lcm_grep_rejects_invalid_scope() {
 /// authority already opened sessions.db, but no transcript ingest) must stay
 /// typed and non-mutating: return an empty/read status rather than inventing
 /// ingest success, and must not create a second store path.
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn lcm_read_only_tools_return_not_ingested_without_creating_sessions_db() {
     let dir = test_temp_dir();
     let project = dir.path();
@@ -3153,7 +3153,7 @@ async fn lcm_read_only_tools_return_not_ingested_without_creating_sessions_db() 
     }
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn lcm_load_session_missing_store_uses_typed_empty_messages_without_creating_sessions_db() {
     let dir = test_temp_dir();
     let project = dir.path();

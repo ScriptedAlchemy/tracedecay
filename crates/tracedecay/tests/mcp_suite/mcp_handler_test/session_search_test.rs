@@ -234,7 +234,7 @@ pub(super) async fn call_production_tool(
 
 /// Same contract for `tracedecay_message_search`: invalid scope values fail
 /// closed instead of broadening the search to every session.
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn message_search_rejects_invalid_scope() {
     let dir = test_temp_dir();
     let (cg, _env) = init_test_project(dir.path()).await;
@@ -289,7 +289,7 @@ async fn message_search_rejects_invalid_scope() {
 /// `require_fresh` for the freshness precondition, and `project_selector` for
 /// cross-project reads. Removed spellings fail decode instead of being
 /// silently ignored or reinterpreted.
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn message_search_rejects_removed_request_spellings() {
     let dir = test_temp_dir();
     let (cg, _env) = init_test_project(dir.path()).await;
@@ -329,7 +329,7 @@ async fn message_search_rejects_removed_request_spellings() {
 /// typed invalid-selector route error, a foreign registered id fails closed
 /// as not-found-or-not-authorized, and a malformed selector is a decode error
 /// naming the argument.
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn message_search_rejects_foreign_project_selectors() {
     let dir = test_temp_dir();
     let (cg, _env) = init_test_project(dir.path()).await;
@@ -386,7 +386,7 @@ async fn message_search_rejects_foreign_project_selectors() {
 }
 
 #[cfg(feature = "test-transport")]
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn message_search_limit_one_hydrates_a_bounded_multi_session_corpus() {
     const SESSION_COUNT: usize = 4;
     const MESSAGES_PER_SESSION: usize = 4;
@@ -1108,7 +1108,7 @@ async fn cursor_record_with_a_dispatch_is_one_searchable_message() {
 /// with no goals are empty complete answers. Omitting `query` outside goals
 /// mode, and naming an unknown provider, are typed invalid-request refusals.
 #[cfg(feature = "test-transport")]
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn message_search_returns_literal_seeded_messages() {
     let dir = test_temp_dir();
     let (cg, _env) = init_test_project(dir.path()).await;

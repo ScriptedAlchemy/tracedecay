@@ -123,20 +123,31 @@ async fn admitted_graph_query_for_operation(
     Ok(query)
 }
 
+/// Publish access to the admitted project's registered response-handle store, or none on a
+/// route that mounted no project session store.
+pub(super) fn response_handle_store(
+    options: &ToolCallRegistryOptions<'_>,
+) -> Option<tracedecay_mcp::response_handles::ResponseHandlePublisher> {
+    options
+        .registered_project_session_db
+        .clone()
+        .map(|database| {
+            tracedecay_mcp::response_handles::ResponseHandleStore::registered(database).publisher()
+        })
+}
+
 /// Dispatch catalog-owned application surfaces.
 #[tracing::instrument(name = "mcp.dispatch.application", level = "trace", skip_all)]
 pub(super) async fn dispatch_application_surface_tools(
     tool_name: &str,
-    cg: &TraceDecay,
     args: Value,
     options: ToolCallRegistryOptions<'_>,
 ) -> Result<ToolResult> {
-    dispatch_application_surface_tools_inner(tool_name, cg, args, options).await
+    dispatch_application_surface_tools_inner(tool_name, args, options).await
 }
 
 fn dispatch_application_surface_tools_inner<'a>(
     tool_name: &'a str,
-    cg: &'a TraceDecay,
     mut args: Value,
     options: ToolCallRegistryOptions<'a>,
 ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<ToolResult>> + Send + 'a>> {
@@ -149,6 +160,8 @@ fn dispatch_application_surface_tools_inner<'a>(
         let retained = RetainedSurfaceOperation::from_application(operation).is_some();
         let source_edit = tracedecay_daemon_protocol::is_source_edit_operation(operation);
         let graph_tool = operation.is_graph_tool() || operation.is_profile_registry_read();
+        let handle_store = response_handle_store(&options);
+        let response_handles = handle_store.as_ref();
         // An already-elapsed carried deadline is refused before these tools
         // dispatch, exactly as their retained handlers always refused it.
         if (retained || source_edit || graph_tool)
@@ -161,7 +174,7 @@ fn dispatch_application_surface_tools_inner<'a>(
         }
         if retained {
             return application_surface::run_retained_surface_tool(
-                Some(&cg.store_layout().response_handle_root),
+                response_handles,
                 BindingSurface::Mcp,
                 operation,
                 args,
@@ -183,19 +196,18 @@ fn dispatch_application_surface_tools_inner<'a>(
                 options.application_cancellation.clone(),
             )
             .await?;
-            let response_handle_root = Some(cg.store_layout().response_handle_root.as_path());
             return match execution {
                 Ok(completion) => tracedecay_mcp::handlers::graph_tool::render_graph_tool(
-                    response_handle_root,
+                    response_handles,
                     &args,
                     completion,
                 ),
-                Err(refusal) => refusal.render(response_handle_root, &args),
+                Err(refusal) => refusal.render(response_handles, &args),
             };
         }
         if source_edit {
             return edit::source_edit_tool(
-                Some(&cg.store_layout().response_handle_root),
+                response_handles,
                 BindingSurface::Mcp,
                 operation,
                 args,
@@ -220,7 +232,7 @@ fn dispatch_application_surface_tools_inner<'a>(
             tracedecay_daemon_protocol::adapt_application_tool_request(tool_name, args)
                 .map_err(ApplicationSurfaceAdapterError::into_trace_decay_error)?;
         application_surface::handle_application_surface(
-            Some(&cg.store_layout().response_handle_root),
+            response_handles,
             operation,
             normalized_args,
             options.application_invocation_executor,

@@ -51,7 +51,7 @@ error[E0425]: cannot find value `missing` in this scope
    |
 ";
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn diagnose_reports_literal_mapping_filters_and_refusals() {
     let fixture = open_indexed_project().await;
     let target_id = exact_symbol_id(&fixture, "target").await;

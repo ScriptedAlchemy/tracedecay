@@ -97,7 +97,7 @@ fn ledger_row(run_id: &str, task: &str, status: &str, started_at: i64) -> String
 }
 
 #[cfg(feature = "test-transport")]
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn analytics_automation_reports_a_ledger_that_exactly_fills_the_page_as_complete() {
     // The newest-rows page is bounded. A ledger holding exactly that many rows
     // is the whole ledger, not a truncated window: nothing was left behind.
@@ -227,7 +227,7 @@ async fn analytics_automation_reports_a_ledger_that_exactly_fills_the_page_as_co
 }
 
 #[cfg(feature = "test-transport")]
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn analytics_reports_tool_tiers_top_tools_and_zero_call_tools() {
     let fixture = production_composition_fixture().await;
     let server = fixture
@@ -349,7 +349,7 @@ async fn analytics_reports_tool_tiers_top_tools_and_zero_call_tools() {
 }
 
 #[cfg(feature = "test-transport")]
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn analytics_section_filter_returns_only_the_requested_section() {
     let fixture = production_composition_fixture().await;
     let project_id = RegisteredGlobalDb::canonical_project_key(&fixture.project_root);
@@ -405,7 +405,7 @@ async fn analytics_section_filter_returns_only_the_requested_section() {
 }
 
 #[cfg(feature = "test-transport")]
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn analytics_rejects_unknown_scope_and_section() {
     let fixture = production_composition_fixture().await;
     let server = fixture
@@ -439,7 +439,7 @@ async fn analytics_rejects_unknown_scope_and_section() {
 }
 
 #[cfg(feature = "test-transport")]
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn analytics_degrades_gracefully_for_a_zero_data_project() {
     let fixture = production_composition_fixture().await;
     let server = fixture
@@ -688,7 +688,7 @@ async fn analytics_degrades_gracefully_for_a_zero_data_project() {
 }
 
 #[cfg(feature = "test-transport")]
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn analytics_reconciles_public_catalog_with_alias_internal_and_unknown_or_retired_events() {
     let fixture = production_composition_fixture().await;
     let project_id = RegisteredGlobalDb::canonical_project_key(&fixture.project_root);
@@ -858,7 +858,7 @@ async fn analytics_reconciles_public_catalog_with_alias_internal_and_unknown_or_
 }
 
 #[cfg(feature = "test-transport")]
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn analytics_counts_a_rewrite_call_as_an_available_tool() {
     let fixture = production_composition_fixture().await;
     let project_id = RegisteredGlobalDb::canonical_project_key(&fixture.project_root);
@@ -902,7 +902,7 @@ async fn analytics_counts_a_rewrite_call_as_an_available_tool() {
 }
 
 #[cfg(feature = "test-transport")]
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn analytics_aggregates_sections_before_any_event_sample_cap() {
     let fixture = production_composition_fixture().await;
     let project_id = RegisteredGlobalDb::canonical_project_key(&fixture.project_root);
@@ -1012,7 +1012,7 @@ fn active_window_events(project_id: &str, now: i64) -> Vec<AnalyticsEventInsert>
 }
 
 #[cfg(feature = "test-transport")]
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn analytics_keeps_foreign_and_stale_events_out_of_the_active_window() {
     let fixture = production_composition_fixture().await;
     let project_id = RegisteredGlobalDb::canonical_project_key(&fixture.project_root);
@@ -1057,7 +1057,7 @@ async fn analytics_keeps_foreign_and_stale_events_out_of_the_active_window() {
 }
 
 #[cfg(feature = "test-transport")]
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn analytics_scope_all_counts_foreign_project_events_and_keeps_project_facts() {
     let fixture = production_composition_fixture().await;
     let project_id = RegisteredGlobalDb::canonical_project_key(&fixture.project_root);
@@ -1117,7 +1117,7 @@ async fn analytics_scope_all_counts_foreign_project_events_and_keeps_project_fac
 }
 
 #[cfg(feature = "test-transport")]
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn analytics_applies_the_requested_window_and_refuses_one_out_of_range() {
     let fixture = production_composition_fixture().await;
     let project_id = RegisteredGlobalDb::canonical_project_key(&fixture.project_root);
@@ -1205,7 +1205,7 @@ async fn analytics_applies_the_requested_window_and_refuses_one_out_of_range() {
 }
 
 #[cfg(feature = "test-transport")]
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn analytics_limits_top_tools_to_the_ten_highest_call_counts() {
     let fixture = production_composition_fixture().await;
     let project_id = RegisteredGlobalDb::canonical_project_key(&fixture.project_root);

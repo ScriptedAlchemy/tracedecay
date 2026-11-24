@@ -66,9 +66,11 @@ use crate::source_authorization::ProjectSourceAccessSnapshot;
 use tracedecay_runtime_core::db::engine::params;
 use tracedecay_runtime_core::db::{Database, DatabaseWriteTransaction};
 use tracedecay_runtime_core::native_runtime::{NativeTask, NativeTaskOutcome};
+/// The registered handle store [`open_feedback_runtime`] mints request
+/// handles into.
+pub use tracedecay_session_memory::response_handles::ResponseHandleStore;
 use tracedecay_session_memory::response_handles::{
     RESPONSE_HANDLE_TTL_SECS, ResponseHandleLookup, is_valid_response_handle, micros_to_seconds,
-    retrieve_response_handle, store_response_handle,
 };
 
 const PUBLICATION_LEDGER_METADATA_KEY: &str = "feedback.publications.v1";
@@ -113,14 +115,14 @@ pub enum FeedbackRuntimeError {
 #[derive(Clone)]
 pub struct ProjectFeedbackStore {
     database: Database,
-    response_handle_root: PathBuf,
+    response_handles: ResponseHandleStore,
     source_observations: Option<Arc<dyn FeedbackObservationEmitterV1 + Send + Sync>>,
 }
 
 #[derive(Clone)]
 pub struct ProjectFeedbackRequestAuthority {
     project_root: PathBuf,
-    response_handle_root: PathBuf,
+    response_handles: ResponseHandleStore,
     scope: ResolvedScope,
     requester: ActorId,
 }
@@ -483,11 +485,11 @@ struct StoredFeedbackRequestV1 {
 pub async fn open_feedback_runtime(
     database: Database,
     project_root: impl Into<PathBuf>,
-    response_handle_root: impl Into<PathBuf>,
+    response_handles: ResponseHandleStore,
     scope: ResolvedScope,
     access: ProjectSourceAccessSnapshot,
 ) -> Result<FeedbackRuntime, FeedbackRuntimeError> {
-    FeedbackRuntime::open(database, project_root, response_handle_root, scope, access).await
+    FeedbackRuntime::open(database, project_root, response_handles, scope, access).await
 }
 
 impl FeedbackRuntime {
@@ -495,7 +497,7 @@ impl FeedbackRuntime {
     pub async fn open(
         database: Database,
         project_root: impl Into<PathBuf>,
-        response_handle_root: impl Into<PathBuf>,
+        response_handles: ResponseHandleStore,
         scope: ResolvedScope,
         access: ProjectSourceAccessSnapshot,
     ) -> Result<Self, FeedbackRuntimeError> {
@@ -504,17 +506,16 @@ impl FeedbackRuntime {
             return Err(FeedbackRuntimeError::AccessDenied);
         }
         let project_root = project_root.into();
-        let response_handle_root = response_handle_root.into();
         let requester = access.requester.clone();
         let requests = ProjectFeedbackRequestAuthority {
             project_root,
-            response_handle_root: response_handle_root.clone(),
+            response_handles: response_handles.clone(),
             scope,
             requester,
         };
         let mut publications = ProjectFeedbackStore {
             database,
-            response_handle_root,
+            response_handles,
             source_observations: None,
         };
         let route_authorization = ProjectFeedbackRouteAuthorization {
@@ -578,8 +579,8 @@ impl FeedbackRuntime {
         &self.requests.project_root
     }
 
-    pub fn response_handle_root(&self) -> &Path {
-        &self.requests.response_handle_root
+    pub fn response_handles(&self) -> &ResponseHandleStore {
+        &self.requests.response_handles
     }
 
     pub fn scope(&self) -> &ResolvedScope {
@@ -684,7 +685,7 @@ impl ProjectFeedbackRequestAuthority {
         RequestId::new(request_id.clone())?;
         let expires_at = self.expiry_at(observed_at)?;
         store_request_handle(
-            &self.response_handle_root,
+            &self.response_handles,
             StoredFeedbackRequestV1 {
                 schema_version: REQUEST_HANDLE_SCHEMA_VERSION,
                 operation: request.operation(),
@@ -706,7 +707,7 @@ impl ProjectFeedbackRequestAuthority {
         observed_at: UtcMicros,
     ) -> Result<AuthorizedFeedbackReadRequestV1, FeedbackReadRequestResolutionV1> {
         let mut record = load_handle_content::<StoredFeedbackRequestV1>(
-            &self.response_handle_root,
+            &self.response_handles,
             handle,
             observed_at,
         )?;
@@ -1503,7 +1504,7 @@ impl ProjectFeedbackStore {
         observed_at: UtcMicros,
     ) -> Result<FeedbackFindingReadV1, FeedbackRuntimeError> {
         let get_handle = store_request_handle(
-            &self.response_handle_root,
+            &self.response_handles,
             request_record(
                 context,
                 FeedbackReadRequestV1::Get(FeedbackGetRequestV1 {
@@ -1518,7 +1519,7 @@ impl ProjectFeedbackStore {
             .map(|anchor| {
                 let page = PageRequest::first(DEFAULT_EXPANSION_PAGE_SIZE)?;
                 store_request_handle(
-                    &self.response_handle_root,
+                    &self.response_handles,
                     request_record(
                         context,
                         FeedbackReadRequestV1::Expand(FeedbackExpandRequestV1 {
@@ -1560,7 +1561,7 @@ impl ProjectFeedbackStore {
             return Ok(0);
         };
         let stored = load_handle_content::<StoredFeedbackRequestV1>(
-            &self.response_handle_root,
+            &self.response_handles,
             cursor.as_str(),
             observed_at,
         )
@@ -1607,8 +1608,7 @@ impl ProjectFeedbackStore {
             }),
         );
         next_request.after_finding_id = Some(after_finding_id.clone());
-        let next_handle =
-            store_request_handle(&self.response_handle_root, next_request, observed_at)?;
+        let next_handle = store_request_handle(&self.response_handles, next_request, observed_at)?;
         Ok((OpaqueCursor::new(next_handle)?, expires_at))
     }
 }
@@ -1691,22 +1691,19 @@ fn request_record(
 }
 
 fn store_request_handle(
-    response_handle_root: &Path,
+    response_handles: &ResponseHandleStore,
     record: StoredFeedbackRequestV1,
     observed_at: UtcMicros,
 ) -> Result<String, FeedbackRuntimeError> {
     let content = serde_json::to_string(&record).map_err(|_| FeedbackRuntimeError::Corrupt)?;
-    let stored = store_response_handle(
-        response_handle_root,
-        &content,
-        micros_to_seconds(observed_at),
-    )
-    .map_err(|error| FeedbackRuntimeError::HandleStore(error.into()))?;
+    let stored = response_handles
+        .publish_blocking(&content, micros_to_seconds(observed_at))
+        .map_err(|error| FeedbackRuntimeError::HandleStore(error.into()))?;
     Ok(stored.handle)
 }
 
 fn load_handle_content<T>(
-    response_handle_root: &Path,
+    response_handles: &ResponseHandleStore,
     handle: &str,
     observed_at: UtcMicros,
 ) -> Result<T, FeedbackReadRequestResolutionV1>
@@ -1717,7 +1714,8 @@ where
         log_handle_refusal("invalid_handle", None);
         return Err(FeedbackReadRequestResolutionV1::NotFoundOrNotAuthorized);
     }
-    match retrieve_response_handle(response_handle_root, handle, micros_to_seconds(observed_at))
+    match response_handles
+        .lookup_blocking(handle, micros_to_seconds(observed_at))
         .map_err(|_| FeedbackReadRequestResolutionV1::Unavailable)?
     {
         ResponseHandleLookup::Found(record) => {
@@ -2314,7 +2312,21 @@ mod tests {
         .unwrap()
     }
 
-    #[tokio::test]
+    /// A registered store whose response-handle table backs a fixture; the
+    /// harness owns the store files for the test's lifetime.
+    async fn handle_store(
+        label: &str,
+    ) -> (
+        tracedecay_global_db::tests::harness::RegisteredGlobalDbHarness,
+        ResponseHandleStore,
+    ) {
+        let harness =
+            tracedecay_global_db::tests::harness::RegisteredGlobalDbHarness::open(label).await;
+        let store = ResponseHandleStore::registered(harness.registered.clone());
+        (harness, store)
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn repeated_incomplete_local_saves_do_not_fill_the_durable_ledger() {
         let root = tempfile::tempdir().unwrap();
         let path = root.path().join("feedback-incomplete-dedupe.db");
@@ -2325,9 +2337,10 @@ mod tests {
             Database::publish_test_runtime(&path, &authority, TestDatabaseRuntimeMode::Initialize)
                 .await
                 .unwrap();
+        let (_handles, response_handles) = handle_store("feedback-store-fixture").await;
         let store = ProjectFeedbackStore {
             database,
-            response_handle_root: root.path().join("response-handles"),
+            response_handles,
             source_observations: None,
         };
 
@@ -2465,7 +2478,7 @@ mod tests {
         }));
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn equal_timestamp_provider_verdicts_follow_durable_commit_order() {
         let root = tempfile::tempdir().unwrap();
         let path = root.path().join("feedback-equal-timestamp.db");
@@ -2475,9 +2488,10 @@ mod tests {
             Database::publish_test_runtime(&path, &authority, TestDatabaseRuntimeMode::Initialize)
                 .await
                 .unwrap();
+        let (_handles, response_handles) = handle_store("feedback-store-fixture").await;
         let store = ProjectFeedbackStore {
             database,
-            response_handle_root: root.path().join("response-handles"),
+            response_handles,
             source_observations: None,
         };
         let unavailable = incomplete_publication(
@@ -2572,7 +2586,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn conflicting_durable_result_identity_refuses_rebinding() {
         let root = tempfile::tempdir().unwrap();
         let path = root.path().join("feedback-incomplete-identity.db");
@@ -2583,9 +2597,10 @@ mod tests {
             Database::publish_test_runtime(&path, &authority, TestDatabaseRuntimeMode::Initialize)
                 .await
                 .unwrap();
+        let (_handles, response_handles) = handle_store("feedback-store-fixture").await;
         let store = ProjectFeedbackStore {
             database,
-            response_handle_root: root.path().join("response-handles"),
+            response_handles,
             source_observations: None,
         };
         let original = incomplete_publication(
@@ -2661,15 +2676,20 @@ mod tests {
 
     #[test]
     fn concurrent_request_authorities_keep_handles_in_their_own_store() {
-        let stores = [tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap()];
-        let authorities = stores
-            .each_ref()
-            .map(|store| ProjectFeedbackRequestAuthority {
-                project_root: store.path().to_path_buf(),
-                response_handle_root: store.path().join("response-handles"),
-                scope: scope(),
-                requester: id("actor.feedback-reader.requester"),
-            });
+        let roots = [tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap()];
+        let stores = tracedecay_runtime_core::native_runtime::block_on(async {
+            [
+                handle_store("feedback-authority-a").await,
+                handle_store("feedback-authority-b").await,
+            ]
+        })
+        .expect("native runtime");
+        let authorities = [0, 1].map(|index| ProjectFeedbackRequestAuthority {
+            project_root: roots[index].path().to_path_buf(),
+            response_handles: stores[index].1.clone(),
+            scope: scope(),
+            requester: id("actor.feedback-reader.requester"),
+        });
         let barrier = std::sync::Barrier::new(authorities.len());
         let handles = std::thread::scope(|threads| {
             let workers = authorities.each_ref().map(|authority| {
@@ -2720,7 +2740,7 @@ mod tests {
     /// A list continuation pages only the list that minted it: a changed head
     /// or page size, another read's handle, or an unknown handle is the one
     /// typed cursor refusal instead of an unavailable page.
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn list_refuses_a_continuation_minted_for_another_request() {
         let root = tempfile::tempdir().unwrap();
         let path = root.path().join("feedback-list-cursor.db");
@@ -2730,9 +2750,10 @@ mod tests {
             Database::publish_test_runtime(&path, &authority, TestDatabaseRuntimeMode::Initialize)
                 .await
                 .unwrap();
+        let (_handles, response_handles) = handle_store("feedback-store-fixture").await;
         let store = ProjectFeedbackStore {
             database,
-            response_handle_root: root.path().join("response-handles"),
+            response_handles,
             source_observations: None,
         };
         let operation = feedback_surface_operation("feedback_list")
@@ -2784,7 +2805,7 @@ mod tests {
             )
             .unwrap();
         let get_handle = store_request_handle(
-            &store.response_handle_root,
+            &store.response_handles,
             request_record(
                 &request,
                 FeedbackReadRequestV1::Get(FeedbackGetRequestV1 {
@@ -2978,7 +2999,7 @@ mod tests {
         ));
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn cancelled_close_retains_worker_and_terminal_drain_is_joinable() {
         let root = tempfile::tempdir().unwrap();
         let path = root.path().join("feedback-observation-shutdown.db");
@@ -3030,7 +3051,7 @@ mod tests {
         )));
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn failed_terminal_persistence_remains_sticky_across_close_retries() {
         let (sender, _receiver) = mpsc::channel(1);
         let (control_sender, mut control_receiver) = mpsc::channel(1);

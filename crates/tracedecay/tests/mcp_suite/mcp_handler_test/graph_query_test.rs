@@ -171,7 +171,7 @@ async fn graph_node_id(fixture: &GraphQueryFixture, name: &str) -> String {
         .to_owned()
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn rust_wrapper_callees_follow_declared_sibling_module_imports() {
     let fixture = graph_query_fixture_with_sources(|project| {
         fs::create_dir_all(project.join("src")).unwrap();
@@ -248,7 +248,7 @@ async fn rust_wrapper_callees_follow_declared_sibling_module_imports() {
 /// failed every high-limit search as a typed `search_failed` (Internal) once
 /// a generation was bound.
 #[cfg(feature = "test-transport")]
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn search_limit_above_retrieval_budget_serves_full_candidate_set() {
     let fixture = production_composition_fixture().await;
     let server = fixture
@@ -317,7 +317,7 @@ async fn search_limit_above_retrieval_budget_serves_full_candidate_set() {
     fixture.harness.shutdown().await;
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_grep_literal_hit_is_enriched_with_symbol() {
     let cg = production_graph_query_fixture().await;
     // `format!("Hello, {}!", name)` lives inside `format_greeting` in utils.rs.
@@ -356,7 +356,7 @@ async fn test_grep_literal_hit_is_enriched_with_symbol() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_grep_regex_hit() {
     let cg = production_graph_query_fixture().await;
     // Regex: a `pub fn` declaration returning `String`.
@@ -379,7 +379,7 @@ async fn test_grep_regex_hit() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_grep_no_match_reports_empty() {
     let cg = production_graph_query_fixture().await;
     let result = call_production_tool(
@@ -397,7 +397,7 @@ async fn test_grep_no_match_reports_empty() {
     assert!(payload["files_scanned"].as_u64().unwrap() > 0);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_grep_respects_gitignore() {
     let cg = production_graph_query_fixture().await;
     let root = cg.project_root().to_path_buf();
@@ -436,7 +436,7 @@ async fn test_grep_respects_gitignore() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_grep_skips_binary_files() {
     let cg = production_graph_query_fixture().await;
     let root = cg.project_root().to_path_buf();
@@ -467,7 +467,7 @@ async fn test_grep_skips_binary_files() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_grep_prunes_generated_trees_unless_path_glob_selects_one() {
     let cg = production_graph_query_fixture().await;
     let root = cg.project_root().to_path_buf();
@@ -526,7 +526,7 @@ async fn test_grep_prunes_generated_trees_unless_path_glob_selects_one() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_grep_basename_glob_reaches_nested_generated_file() {
     let cg = production_graph_query_fixture().await;
     let root = cg.project_root().to_path_buf();
@@ -558,7 +558,7 @@ async fn test_grep_basename_glob_reaches_nested_generated_file() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_ast_grep_search_respects_public_path_glob() {
     let cg = production_graph_query_fixture().await;
     let root = cg.project_root().to_path_buf();
@@ -599,7 +599,7 @@ async fn test_ast_grep_search_respects_public_path_glob() {
 
 /// The shared warm-up asserts a fresh search, so it must wait for `fresh`: a
 /// save no hook reported after warming is served before the warm-up returns.
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn code_index_warm_up_serves_an_unreported_save_before_returning() {
     let cg = production_graph_query_fixture().await;
     let root = cg.project_root().to_path_buf();
@@ -620,7 +620,7 @@ async fn code_index_warm_up_serves_an_unreported_save_before_returning() {
     assert_eq!(names, ["warm_probe_marker"], "{search}");
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_grep_enforces_max_results_cap() {
     let cg = production_graph_query_fixture().await;
     let root = cg.project_root().to_path_buf();
@@ -651,7 +651,7 @@ async fn test_grep_enforces_max_results_cap() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_grep_case_sensitivity() {
     let cg = production_graph_query_fixture().await;
     let root = cg.project_root().to_path_buf();
@@ -694,7 +694,7 @@ async fn test_grep_case_sensitivity() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_grep_context_lines() {
     let cg = production_graph_query_fixture().await;
     let root = cg.project_root().to_path_buf();
@@ -724,7 +724,7 @@ async fn test_grep_context_lines() {
     assert_eq!(hit["after"][0], "line_after");
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_grep_missing_pattern_errors() {
     let cg = production_graph_query_fixture().await;
     let missing_pattern = expect_tool_refusal(
@@ -745,7 +745,7 @@ async fn test_grep_missing_pattern_errors() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_node_existing() {
     let cg = production_graph_query_fixture().await;
     let node_id = graph_node_id(&cg, "helper").await;
@@ -777,7 +777,7 @@ async fn test_node_existing() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn signature_search_and_derives_use_extracted_metadata() {
     let fixture = production_signature_metadata_fixture().await;
     let async_node = graph_node_id(&fixture, "fetch_value").await;
@@ -876,7 +876,7 @@ async fn signature_search_and_derives_use_extracted_metadata() {
     shutdown_graph_fixture(fixture).await;
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_node_not_found() {
     let cg = production_empty_graph_query_fixture().await;
     let result = call_production_tool(
@@ -896,7 +896,7 @@ async fn test_node_not_found() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_files_json_format_with_grouped_layout() {
     let cg = production_graph_query_fixture().await;
     let json_result = call_production_tool(
@@ -917,7 +917,7 @@ async fn test_files_json_format_with_grouped_layout() {
 }
 
 #[cfg(feature = "test-transport")]
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn affected_central_daemon_fixture_preserves_set_and_ranks_near_tests_over_mcp() {
     let isolation = TempDir::new().unwrap();
     let project = isolation.path().join("project");
@@ -1068,7 +1068,7 @@ async fn affected_central_daemon_fixture_preserves_set_and_ranks_near_tests_over
 }
 
 #[cfg(feature = "test-transport")]
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn affected_follows_public_wrapper_to_nested_unit_test_file() {
     let isolation = TempDir::new().unwrap();
     let project = isolation.path().join("project");
@@ -1174,7 +1174,7 @@ async fn affected_follows_public_wrapper_to_nested_unit_test_file() {
 }
 
 #[cfg(feature = "test-transport")]
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_module_api() {
     let fixture = production_composition_fixture().await;
     let server = fixture
@@ -1202,7 +1202,7 @@ async fn test_module_api() {
     fixture.harness.shutdown().await;
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn name_first_lexical_search_discloses_preferred_symbol_route() {
     let cg = production_graph_query_fixture().await;
     let (search, search_names) = preferred_symbol_search(&cg, "helper").await;
@@ -1217,7 +1217,7 @@ async fn name_first_lexical_search_discloses_preferred_symbol_route() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn redundancy_reports_ranked_repository_exact_families_with_bounded_pages() {
     let large_body = "
         let one = parse(input);
@@ -1381,7 +1381,7 @@ async fn redundancy_reports_ranked_repository_exact_families_with_bounded_pages(
     shutdown_graph_fixture(fixture).await;
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn redundancy_pull_request_scope_shares_one_budget_and_resumes_changed_families() {
     let large_body = "
         let one = parse(input);
@@ -1626,7 +1626,7 @@ async fn redundancy_pull_request_scope_shares_one_budget_and_resumes_changed_fam
     shutdown_graph_fixture(fixture).await;
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn analytics_tools_return_their_canonical_envelope_keys() {
     let cg = production_graph_query_fixture().await;
     let cases: &[(&str, Value, &[&str])] = &[
@@ -1676,7 +1676,7 @@ async fn analytics_tools_return_their_canonical_envelope_keys() {
     shutdown_graph_fixture(cg).await;
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_rank_invalid_direction() {
     let cg = production_empty_graph_query_fixture().await;
     let result = call_production_tool(
@@ -1700,7 +1700,7 @@ async fn test_rank_invalid_direction() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_unknown_tool() {
     let cg = production_empty_graph_query_fixture().await;
     let problem = crate::support::expect_tool_refusal(
@@ -1727,7 +1727,7 @@ async fn test_unknown_tool() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_distribution_with_path_filter() {
     let cg = production_graph_query_fixture().await;
     let result = call_production_tool(
@@ -1748,7 +1748,7 @@ async fn test_distribution_with_path_filter() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_complexity_response_fields() {
     let cg = production_graph_query_fixture().await;
     let result = call_production_tool(&cg, "tracedecay_complexity", json!({}), None, None)
@@ -1784,7 +1784,7 @@ async fn test_complexity_response_fields() {
     }
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn doc_coverage_distinguishes_documented_and_undocumented_enum_variants() {
     let cg = graph_query_fixture_with_sources(|project| {
         fs::create_dir_all(project.join("src")).unwrap();
@@ -1875,7 +1875,7 @@ async fn doc_coverage_census(fixture: &GraphQueryFixture, args: Value) -> Value 
     })
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn doc_coverage_lists_undocumented_public_symbols_and_honors_path_and_limit() {
     let fixture = graph_query_fixture_with_sources(|project| {
         fs::create_dir_all(project.join("src")).unwrap();
@@ -2033,7 +2033,7 @@ async fn doc_coverage_lists_undocumented_public_symbols_and_honors_path_and_limi
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_files_public_path_filters() {
     let cg = production_graph_query_fixture().await;
     let result = call_production_tool(&cg, "tracedecay_files", json!({"path": "src"}), None, None)
@@ -2050,7 +2050,7 @@ async fn test_files_public_path_filters() {
 /// Name-to-body is an exact symbol lookup followed by `tracedecay_source_body`
 /// on the returned node ID.
 #[cfg(feature = "test-transport")]
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn source_body_returns_full_function_source_for_exact_lookup() {
     let fixture = production_composition_fixture().await;
     let server = fixture
@@ -2123,7 +2123,7 @@ async fn source_body_returns_full_function_source_for_exact_lookup() {
 /// Inputs that can never succeed answer a typed, non-retryable refusal: an
 /// agent that reads a retryable `unavailable` here would retry forever.
 #[cfg(feature = "test-transport")]
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn unknown_and_malformed_inputs_are_typed_refusals_not_outages() {
     let fixture = production_composition_fixture().await;
     let server = fixture
@@ -2263,7 +2263,7 @@ async fn qualified_name_rows(fixture: &GraphQueryFixture, qualified_name: &str) 
     })
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn tracedecay_by_qualified_name_returns_the_symbol_at_that_exact_name() {
     let fixture = production_graph_query_fixture().await;
 
@@ -2348,7 +2348,7 @@ async fn tracedecay_by_qualified_name_returns_the_symbol_at_that_exact_name() {
     shutdown_graph_fixture(fixture).await;
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn tracedecay_by_qualified_name_returns_every_symbol_sharing_that_name() {
     let fixture = graph_query_fixture_with_sources(|project| {
         fs::create_dir_all(project.join("src")).unwrap();

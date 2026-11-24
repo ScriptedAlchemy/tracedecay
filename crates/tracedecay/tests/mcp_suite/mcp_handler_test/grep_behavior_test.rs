@@ -200,7 +200,7 @@ _1 matches; {FILES_SCANNED} files scanned._
     )
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn tracedecay_grep_reports_literal_matches_and_typed_failures() {
     let fixture = production_composition_fixture_with_sources(write_grep_project).await;
     let server = fixture

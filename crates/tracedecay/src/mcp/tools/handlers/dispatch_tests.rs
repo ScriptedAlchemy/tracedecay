@@ -62,7 +62,7 @@ impl tracedecay_daemon_protocol::DaemonInvocationExecutor for RecordingMultiRoot
 #[tokio::test]
 async fn multi_root_tools_invoke_the_closed_daemon_routes() {
     let dir = TempDir::new().unwrap();
-    let (cg, _runtime) = registered_lib_fixture(
+    let (_cg, _runtime) = registered_lib_fixture(
         dir.path(),
         "multi-root-mcp",
         "pub fn mcp_multi_root() {}\n",
@@ -98,7 +98,6 @@ async fn multi_root_tools_invoke_the_closed_daemon_routes() {
 
     for (tool_name, args) in requests {
         let result = handle_tool_call_with_registry_options(
-            &cg,
             tool_name,
             args,
             ToolCallRegistryOptions {
@@ -140,7 +139,7 @@ fn bounded_tool_identity_preserves_catalog_names_and_bounds_unknown_values() {
 #[tokio::test]
 async fn advertised_tools_resolve_one_concrete_dispatch_entry() {
     let dir = TempDir::new().unwrap();
-    let (cg, _runtime) = registered_lib_fixture(
+    let (_cg, _runtime) = registered_lib_fixture(
         dir.path(),
         "dispatch-registry",
         "pub fn dispatch_probe() {}\n",
@@ -220,8 +219,7 @@ async fn advertised_tools_resolve_one_concrete_dispatch_entry() {
             "{tool_name} must fail closed"
         );
         let rejected =
-            handle_tool_call_with_registry_options(&cg, tool_name, json!({}), options.clone())
-                .await;
+            handle_tool_call_with_registry_options(tool_name, json!({}), options.clone()).await;
         assert!(
             rejected.is_err(),
             "{tool_name} must reject handler dispatch"
@@ -894,7 +892,7 @@ async fn query_search_rejects_cross_project_selector() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn selected_project_retrieve_finds_selected_project_response_handle() {
     const LARGE_RESPONSE_MARKER_COUNT: usize = 200;
     const LAST_RETURNED_RESPONSE_MARKER: usize = 19;
@@ -1578,7 +1576,6 @@ async fn unavailable_user_lcm_effect_is_rejected_before_profile_store_open() {
     let sessions_db = tracedecay_sessions::runtime::user_sessions_db_path(lcm_profile.data_dir());
 
     let error = handle_tool_call_with_registry_options(
-        &cg,
         "tracedecay_lcm_compress",
         json!({
             "storage_scope": "user",

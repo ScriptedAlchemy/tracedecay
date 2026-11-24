@@ -3,7 +3,7 @@
 //! Kept rows stay byte-exact, and the cut rows are stored verbatim, so one
 //! `tracedecay_retrieve` call restores exactly what the page left out.
 
-use std::path::Path;
+use crate::response_handles::ResponseHandlePublisher;
 use std::time::Instant;
 
 use tracedecay_runtime_core::tracedecay::current_timestamp;
@@ -83,7 +83,7 @@ fn low_value_tail_start(query: &str, rows: &[RankedRow]) -> Option<(usize, u64)>
 /// one marker line naming its retrieval handle, and how many leading rows
 /// the page kept. Fails open to every row when the handle cannot be stored.
 pub(crate) fn ranked_rows_md(
-    response_handle_root: Option<&Path>,
+    response_handles: Option<&ResponseHandlePublisher>,
     query: &str,
     rows: &[RankedRow],
 ) -> (String, usize) {
@@ -100,7 +100,7 @@ pub(crate) fn ranked_rows_md(
     if marker.len() >= cut_md.len() {
         return untrimmed();
     }
-    if prepare_truncated_response_handle(response_handle_root, &cut_md)
+    if prepare_truncated_response_handle(response_handles, &cut_md)
         .record
         .is_none()
     {
@@ -138,10 +138,10 @@ fn trimmed_tail_marker(cut: &[RankedRow], best: u64, handle: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::response_handles::{
-        RESPONSE_HANDLE_TTL_SECS, ResponseHandleLookup, retrieve_response_handle,
-        store_response_handle,
+    use crate::response_handles::test_support::{
+        refusing_publisher, registered_handle_store, stored_handles,
     };
+    use crate::response_handles::{RESPONSE_HANDLE_TTL_SECS, ResponseHandleLookup};
 
     fn row(rank: u64, utility_micros: Option<u64>, anchored: bool, name: &str) -> RankedRow {
         RankedRow {
@@ -259,16 +259,16 @@ mod tests {
 
     #[test]
     fn short_weak_tail_stays_untrimmed_without_storing_a_handle() {
-        let root = tempfile::tempdir().expect("handle root");
+        let (harness, store) = registered_handle_store();
         let rows = page(&[2_000_000, 2_000_000, 2_000_000, 1_000_000, 1_000_000]);
         let untrimmed = concat(&rows);
 
         assert_eq!(
-            ranked_rows_md(Some(root.path()), "store", &rows).0,
+            ranked_rows_md(Some(&store.publisher()), "store", &rows).0,
             untrimmed
         );
         assert_eq!(
-            std::fs::read_dir(root.path()).expect("handle root").count(),
+            stored_handles(&harness),
             0,
             "a marker larger than the omitted rows must not publish a handle"
         );
@@ -276,12 +276,13 @@ mod tests {
 
     #[test]
     fn trimmed_page_keeps_rows_exact_and_restores_the_cut_rows() {
-        let root = tempfile::tempdir().expect("handle root");
+        let (_harness, store) = registered_handle_store();
         let rows = weak_tail_page();
         let kept = concat(&rows[..3]);
         let cut = concat(&rows[3..]);
 
-        let (rendered, kept_rows) = ranked_rows_md(Some(root.path()), "store", &weak_tail_page());
+        let (rendered, kept_rows) =
+            ranked_rows_md(Some(&store.publisher()), "store", &weak_tail_page());
         assert_eq!(kept_rows, 3);
 
         let marker = rendered
@@ -298,9 +299,9 @@ mod tests {
                 cut.len()
             )
         );
-        let ResponseHandleLookup::Found(record) =
-            retrieve_response_handle(root.path(), handle, current_timestamp())
-                .expect("handle lookup")
+        let ResponseHandleLookup::Found(record) = store
+            .lookup_blocking(handle, current_timestamp())
+            .expect("handle lookup")
         else {
             panic!("the marker's handle restores the cut rows");
         };
@@ -311,33 +312,31 @@ mod tests {
     fn marker_bytes_survive_a_renewed_handle_record() {
         let now = current_timestamp();
         let cut = concat(&weak_tail_page()[3..]);
-        let fresh_root = tempfile::tempdir().expect("fresh root");
-        let renewed_root = tempfile::tempdir().expect("renewed root");
+        let (_fresh_harness, fresh_store) = registered_handle_store();
+        let (_renewed_harness, renewed_store) = registered_handle_store();
         // One record keeps most of its lifetime; the other is near expiry, so
         // rendering renews it with a later expiry.
-        let handle =
-            store_response_handle(fresh_root.path(), &cut, now - RESPONSE_HANDLE_TTL_SECS / 4)
-                .expect("seed fresh record")
-                .handle;
-        store_response_handle(
-            renewed_root.path(),
-            &cut,
-            now - RESPONSE_HANDLE_TTL_SECS + 60,
-        )
-        .expect("seed expiring record");
+        let handle = fresh_store
+            .publish_blocking(&cut, now - RESPONSE_HANDLE_TTL_SECS / 4)
+            .expect("seed fresh record")
+            .handle;
+        renewed_store
+            .publish_blocking(&cut, now - RESPONSE_HANDLE_TTL_SECS + 60)
+            .expect("seed expiring record");
 
-        let fresh = ranked_rows_md(Some(fresh_root.path()), "store", &weak_tail_page()).0;
-        let renewed = ranked_rows_md(Some(renewed_root.path()), "store", &weak_tail_page()).0;
+        let fresh = ranked_rows_md(Some(&fresh_store.publisher()), "store", &weak_tail_page()).0;
+        let renewed =
+            ranked_rows_md(Some(&renewed_store.publisher()), "store", &weak_tail_page()).0;
 
-        let expires_at =
-            |root: &Path| match retrieve_response_handle(root, &handle, current_timestamp())
-                .expect("handle lookup")
-            {
-                ResponseHandleLookup::Found(record) => record.expires_at,
-                _ => panic!("record is live"),
-            };
+        let expires_at = |store: &crate::response_handles::ResponseHandleStore| match store
+            .lookup_blocking(&handle, current_timestamp())
+            .expect("handle lookup")
+        {
+            ResponseHandleLookup::Found(record) => record.expires_at,
+            _ => panic!("record is live"),
+        };
         assert!(
-            expires_at(renewed_root.path()) > expires_at(fresh_root.path()),
+            expires_at(&renewed_store) > expires_at(&fresh_store),
             "the arrangement must actually renew one record"
         );
         assert_eq!(fresh, renewed);
@@ -345,13 +344,10 @@ mod tests {
 
     #[test]
     fn unavailable_handle_store_fails_open_to_every_row() {
-        let dir = tempfile::tempdir().expect("temp dir");
-        let file_root = dir.path().join("not-a-directory");
-        std::fs::write(&file_root, b"occupied").expect("regular file");
         let untrimmed = concat(&weak_tail_page());
 
         assert_eq!(
-            ranked_rows_md(Some(&file_root), "store", &weak_tail_page()).0,
+            ranked_rows_md(Some(&refusing_publisher()), "store", &weak_tail_page()).0,
             untrimmed
         );
         assert_eq!(

@@ -534,6 +534,41 @@ impl DaemonInvocationService {
                 )
                 .await
             }
+            DaemonInvocationPayload::ResponseHandlePublish {
+                content,
+                observed_at,
+                deadline: _,
+                cancellation: _,
+            } => match feedback_runtime.as_ref() {
+                Some(runtime) => match runtime
+                    .response_handles()
+                    .publish(
+                        &content,
+                        tracedecay_session_memory::response_handles::micros_to_seconds(observed_at),
+                    )
+                    .await
+                {
+                    Ok(record) => DaemonInvocationResponse::with_outcome(
+                        request_id,
+                        DaemonInvocationOutcome::ResponseHandlePublished {
+                            handle: record.handle,
+                            created_at: record.created_at,
+                            expires_at: record.expires_at,
+                        },
+                    ),
+                    Err(error) => {
+                        tracing::warn!(%error, "response handle publication failed");
+                        DaemonInvocationResponse::problem(
+                            request_id,
+                            DaemonInvocationProblem::Unavailable,
+                        )
+                    }
+                },
+                None => DaemonInvocationResponse::problem(
+                    request_id,
+                    DaemonInvocationProblem::Unavailable,
+                ),
+            },
             DaemonInvocationPayload::FeedbackObserve {
                 subject_digest,
                 observed_at,

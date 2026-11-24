@@ -10,11 +10,7 @@
 
 #![cfg(feature = "test-transport")]
 
-use std::fs;
-use std::path::PathBuf;
-
 use serde_json::{Value, json};
-use tracedecay_mcp::response_handles::store_response_handle;
 
 use crate::support::{ProductionCompositionFixture, production_composition_fixture};
 
@@ -34,16 +30,16 @@ fn tool_text(response: &Value) -> &str {
         .unwrap_or_else(|| panic!("retrieve text missing: {response}"))
 }
 
-async fn response_handle_root(fixture: &ProductionCompositionFixture) -> PathBuf {
+async fn response_handle_root(
+    fixture: &ProductionCompositionFixture,
+) -> tracedecay_mcp::response_handles::ResponseHandleStore {
     fixture
         .harness
         .server(&fixture.project_root)
         .expect("production retrieve server")
-        .cg_snapshot()
-        .await
-        .store_layout()
-        .response_handle_root
-        .clone()
+        .project_session_db_for_test()
+        .map(tracedecay_mcp::response_handles::ResponseHandleStore::registered)
+        .expect("registered project session store")
 }
 
 async fn retrieve(fixture: &ProductionCompositionFixture, arguments: Value) -> Value {
@@ -55,11 +51,11 @@ async fn retrieve(fixture: &ProductionCompositionFixture, arguments: Value) -> V
     serde_json::to_value(response).expect("JSON-RPC response")
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn retrieve_returns_stored_pages_as_literal_json() {
     let fixture = production_composition_fixture().await;
     let root = response_handle_root(&fixture).await;
-    store_response_handle(&root, HELLO, STORED_AT).unwrap();
+    root.publish(HELLO, STORED_AT).await.unwrap();
 
     let first = retrieve(&fixture, json!({"handle": HELLO_HANDLE, "format": "json"})).await;
     let window = retrieve(
@@ -97,12 +93,12 @@ async fn retrieve_returns_stored_pages_as_literal_json() {
     fixture.shutdown().await;
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn retrieve_default_and_markdown_slice_characters_not_bytes() {
     let fixture = production_composition_fixture().await;
     let root = response_handle_root(&fixture).await;
-    store_response_handle(&root, HELLO, STORED_AT).unwrap();
-    store_response_handle(&root, CRAB, STORED_AT).unwrap();
+    root.publish(HELLO, STORED_AT).await.unwrap();
+    root.publish(CRAB, STORED_AT).await.unwrap();
 
     let default_page = retrieve(&fixture, json!({"handle": HELLO_HANDLE})).await;
     let markdown_page = retrieve(
@@ -145,11 +141,11 @@ async fn retrieve_default_and_markdown_slice_characters_not_bytes() {
     fixture.shutdown().await;
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn retrieve_reports_missing_and_expired_handles() {
     let fixture = production_composition_fixture().await;
     let root = response_handle_root(&fixture).await;
-    store_response_handle(&root, SHORT, EXPIRED_AT).unwrap();
+    root.publish(SHORT, EXPIRED_AT).await.unwrap();
 
     let missing = retrieve(
         &fixture,
@@ -165,9 +161,9 @@ async fn retrieve_reports_missing_and_expired_handles() {
 
     assert_eq!(
         tool_text(&missing),
-        r#"{"content":null,"expired":null,"handle":"rh_0123456789abcdef01234567","message":"Response handle was not found in this project's local cache.","reason_code":"handle_not_found","retry_instruction":"Re-run the original MCP tool in this project to regenerate the full response and a fresh handle.","retryable":true}"#
+        r#"{"content":null,"expired":null,"handle":"rh_0123456789abcdef01234567","message":"Response handle was not found in this project's response-handle store.","reason_code":"handle_not_found","retry_instruction":"Re-run the original MCP tool in this project to regenerate the full response and a fresh handle.","retryable":true}"#
     );
-    let expired = r#"{"content":null,"created_at":1000000000,"expired":true,"expires_at":1000086400,"handle":"rh_f9b0078b5df596d2ea19010c","message":"Response handle expired at 1000086400 and was removed from this project's local cache.","reason_code":"handle_expired","retry_instruction":"Re-run the original MCP tool in this project to regenerate the full response and a fresh handle.","retryable":true}"#;
+    let expired = r#"{"content":null,"created_at":1000000000,"expired":true,"expires_at":1000086400,"handle":"rh_f9b0078b5df596d2ea19010c","message":"Response handle expired at 1000086400.","reason_code":"handle_expired","retry_instruction":"Re-run the original MCP tool in this project to regenerate the full response and a fresh handle.","retryable":true}"#;
     assert_eq!(tool_text(&first_expired), expired);
     assert_eq!(tool_text(&second_expired), expired);
     fixture.shutdown().await;
@@ -187,11 +183,11 @@ fn assert_unavailable(response: &Value, code: &str, message: &str) {
     assert_eq!(problem["message"], message);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn retrieve_rejects_arguments_outside_its_typed_request() {
     let fixture = production_composition_fixture().await;
     let root = response_handle_root(&fixture).await;
-    store_response_handle(&root, SHORT, STORED_AT).unwrap();
+    root.publish(SHORT, STORED_AT).await.unwrap();
 
     assert_invalid_request(
         &retrieve(&fixture, json!({})).await,
@@ -230,18 +226,14 @@ async fn retrieve_rejects_arguments_outside_its_typed_request() {
 /// The owner sizes each page against the response frame the client sends: a
 /// plain page fills the whole page budget, and a page whose JSON escapes
 /// double its bytes shrinks until its frame fits.
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn retrieve_pages_fill_the_response_budget_the_client_frame_measures() {
     let fixture = production_composition_fixture().await;
     let root = response_handle_root(&fixture).await;
     let plain = "p".repeat(40_000);
-    let plain_handle = store_response_handle(&root, &plain, STORED_AT)
-        .unwrap()
-        .handle;
+    let plain_handle = root.publish(&plain, STORED_AT).await.unwrap().handle;
     let quoted = "\"".repeat(40_000);
-    let quoted_handle = store_response_handle(&root, &quoted, STORED_AT)
-        .unwrap()
-        .handle;
+    let quoted_handle = root.publish(&quoted, STORED_AT).await.unwrap().handle;
 
     let page = retrieve(&fixture, json!({"handle": plain_handle, "format": "json"})).await;
     let page: Value = serde_json::from_str(tool_text(&page)).unwrap();
@@ -267,26 +259,33 @@ async fn retrieve_pages_fill_the_response_budget_the_client_frame_measures() {
     fixture.shutdown().await;
 }
 
-#[tokio::test]
-async fn retrieve_reports_unreadable_records_as_typed_route_problems() {
+#[tokio::test(flavor = "multi_thread")]
+async fn retrieve_reports_corrupt_records_as_typed_route_problems() {
     let fixture = production_composition_fixture().await;
     let root = response_handle_root(&fixture).await;
-    let corrupt = store_response_handle(&root, "{\"items\":[1]}", STORED_AT).unwrap();
-    fs::write(root.join(format!("{}.json", corrupt.handle)), "{not-json").unwrap();
-    let unreadable = store_response_handle(&root, "{\"items\":[2]}", STORED_AT).unwrap();
-    let unreadable_path = root.join(format!("{}.json", unreadable.handle));
-    fs::remove_file(&unreadable_path).unwrap();
-    fs::create_dir(&unreadable_path).unwrap();
+    let corrupt = root.publish("{\"items\":[1]}", STORED_AT).await.unwrap();
+    // Tamper with the committed row behind the store's back.
+    let database = fixture
+        .harness
+        .server(&fixture.project_root)
+        .expect("production retrieve server")
+        .project_session_db_for_test()
+        .expect("registered project session store");
+    let changed = database
+        .writer_connection()
+        .expect("store writer")
+        .execute(
+            "UPDATE response_handles SET content = '{\"items\":[9]}' WHERE handle = ?1",
+            tracedecay_runtime_core::db::engine::params![corrupt.handle.as_str()],
+        )
+        .await
+        .expect("tamper with the stored row");
+    assert_eq!(changed, 1);
 
     assert_unavailable(
         &retrieve(&fixture, json!({"handle": corrupt.handle})).await,
         "corrupt_handle_record",
         "corrupt response-handle record: cached payload failed integrity validation",
-    );
-    assert_unavailable(
-        &retrieve(&fixture, json!({"handle": unreadable.handle})).await,
-        "handle_read_failed",
-        "response-handle cache is unavailable",
     );
     fixture.shutdown().await;
 }
