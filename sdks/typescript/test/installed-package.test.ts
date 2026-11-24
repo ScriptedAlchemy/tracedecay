@@ -39,6 +39,28 @@ interface PackedArtifact {
   files: Array<{ path: string }>;
 }
 
+/** The release target triple this host's platform package is built for. */
+function hostReleaseTarget(): string {
+  const targets: Record<string, string> = {
+    "darwin-arm64": "aarch64-apple-darwin",
+    "linux-x64": "x86_64-unknown-linux-gnu",
+    "linux-arm64": "aarch64-unknown-linux-gnu",
+    "win32-x64": "x86_64-pc-windows-msvc",
+  };
+  const target = targets[`${process.platform}-${process.arch}`];
+  if (target === undefined) throw new Error(`no release target for ${process.platform}-${process.arch}`);
+  return target;
+}
+
+/** The binding built by `bazel build //crates/tracedecay-sdk-node:addon`. */
+function builtAddon(): string {
+  const addon = process.env.TRACEDECAY_SDK_ADDON;
+  if (addon === undefined || !existsSync(addon)) {
+    throw new Error("TRACEDECAY_SDK_ADDON must name the built tracedecay_sdk_node.node");
+  }
+  return resolve(addon);
+}
+
 function isolatedEnvironment(home: string): NodeJS.ProcessEnv {
   const profile = join(home, ".tracedecay");
   return {
@@ -212,6 +234,31 @@ it(
         );
       }
 
+      // The binding reaches consumers as the host's platform package, staged
+      // by the same script the release uses.
+      const platformDirectory = join(scratch, "platform-package");
+      run(
+        process.execPath,
+        [
+          join(PACKAGE_ROOT, "scripts/native-packages.mjs"),
+          "stage",
+          "--target",
+          hostReleaseTarget(),
+          "--addon",
+          builtAddon(),
+          "--out",
+          platformDirectory,
+        ],
+        { cwd: PACKAGE_ROOT, env: process.env },
+      );
+      const platformPacked = JSON.parse(
+        run(NPM, ["pack", "--json", "--ignore-scripts", "--pack-destination", scratch], {
+          cwd: platformDirectory,
+          env: process.env,
+        }),
+      ) as PackedArtifact[];
+      const platformTarball = join(scratch, platformPacked[0]!.filename);
+
       writeFileSync(
         join(consumer, "package.json"),
         '{"name":"tracedecay-sdk-installed-consumer","private":true,"type":"module"}\n',
@@ -224,6 +271,7 @@ it(
           "--no-audit",
           "--no-fund",
           tarball,
+          platformTarball,
         ],
         { cwd: consumer, env: process.env },
       );

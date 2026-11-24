@@ -54,7 +54,7 @@ rust_test(
     rustc_flags = perf_rustc_flags(1),
     crate_features = [],
     compile_data = glob(["assets/**", "data/**", "fixtures/**", "resources/**", "tests/**", "tests/fixtures/**", "vendor/**"], allow_empty = True) + ["//tests:fixtures_remote_tls"],
-    data = glob(["assets/**", "data/**", "fixtures/**", "resources/**", "tests/**", "tests/fixtures/**", "vendor/**"], allow_empty = True) + ["//tests:support"],
+    data = glob(["assets/**", "data/**", "fixtures/**", "resources/**", "tests/**", "tests/fixtures/**", "vendor/**"], allow_empty = True) + ["//tests:support"] + ["//tests:fixtures"],
     runfiles_env = {"TRACEDECAY_TEST_BIN": "//crates/tracedecay-cli:tracedecay__test"},
 )
 
@@ -70,7 +70,7 @@ rust_test(
     rustc_flags = perf_rustc_flags(1),
     crate_features = [],
     compile_data = glob(["assets/**", "data/**", "fixtures/**", "resources/**", "tests/fixtures/**", "tests/sdk_suite/**", "vendor/**"], allow_empty = True) + ["//tests:fixtures_remote_tls"],
-    data = glob(["assets/**", "data/**", "fixtures/**", "resources/**", "tests/fixtures/**", "tests/sdk_suite/**", "vendor/**"], allow_empty = True) + ["//tests:support"],
+    data = glob(["assets/**", "data/**", "fixtures/**", "resources/**", "tests/fixtures/**", "tests/sdk_suite/**", "vendor/**"], allow_empty = True) + ["//tests:support"] + ["//tests:fixtures"],
     runfiles_env = {"TRACEDECAY_TEST_BIN": "//crates/tracedecay-cli:tracedecay__test"},
 )
 
@@ -93,8 +93,8 @@ exports_files(["src/bin/generate.rs", "src/codegen.rs", "src/operations.rs"],
 )
 
 js_library(
-    name = "sse_framing_fixture",
-    srcs = ["tests/fixtures/sse-framing.json"],
+    name = "shared_client_fixtures",
+    srcs = glob(["tests/fixtures/*.json"]),
     visibility = ["//visibility:public"],
 )
 

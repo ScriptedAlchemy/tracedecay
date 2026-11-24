@@ -1,4 +1,5 @@
 import { once } from "node:events";
+import { readFileSync } from "node:fs";
 import {
   createServer,
   type IncomingMessage,
@@ -28,13 +29,56 @@ import {
   TraceDecayDisconnectedError,
   TraceDecayDeniedError,
   TraceDecayMalformedResponseError,
+  TraceDecayProtocolError,
   TraceDecayResetRequiredError,
   TraceDecayStaleError,
   TraceDecayUnavailableError,
   TraceDecayUnsupportedError,
-  createClient,
+  createClient as createSdkClient,
+  type ClientOptions,
   type OperationRequestOptions,
 } from "../src/client";
+import { addonPath } from "./support/daemon";
+
+/** Every client in this suite drives the built native binding. */
+function createClient(options: ClientOptions) {
+  return createSdkClient({ addon: addonPath(), ...options });
+}
+
+/**
+ * Canonical problems derived from typed details. The Rust SDK suite proves
+ * each entry is `ApplicationProblem::from_detail` of its detail.
+ */
+const CANONICAL_DETAILED_PROBLEMS = (JSON.parse(readFileSync(new URL(
+  "../../../crates/tracedecay-sdk/tests/fixtures/problem-details.json",
+  import.meta.url,
+), "utf8")) as {
+  problems: Array<{
+    detail: { kind: string } & Record<string, unknown>;
+    kind: string;
+    code: string;
+    message: string;
+    retry: string;
+    legal_actions: string[];
+  }>;
+}).problems;
+
+/** A wire problem envelope for a canonical detail, optionally with a substituted detail. */
+function detailedProblemEnvelope(detailKind: string, detail?: unknown) {
+  const canonical = CANONICAL_DETAILED_PROBLEMS.find((problem) => problem.detail.kind === detailKind);
+  if (canonical === undefined) throw new Error(`no canonical problem for detail ${detailKind}`);
+  return problemEnvelope(canonical.kind, canonical.code, {
+    bindingId: "binding.http.workflow.list_definitions",
+    retry: canonical.retry,
+    retryable: canonical.retry !== "never",
+    legalActions: canonical.legal_actions,
+    diagnostic: { code: canonical.code, message: canonical.message },
+    detail: detail ?? canonical.detail,
+    ...(canonical.detail.kind === "code_graph_rewarming"
+      ? { retryAfterMillis: canonical.detail.retry_after_millis as number }
+      : {}),
+  });
+}
 
 type RequestHandler = (
   request: IncomingMessage,
@@ -226,6 +270,20 @@ function problemEnvelope(
           kind === "timed_out"
         ? null
         : { code, message: code };
+  // Kinds without a diagnostic carry their own canonical code and safe message.
+  const safeMessages: Record<string, string> = {
+    not_found_or_not_authorized: "The requested resource was not found or is not authorized",
+    cancelled: cancellationStage === "before_admission"
+      ? "The request was cancelled before admission"
+      : "The admitted request was cancelled",
+    timed_out: cancellationStage === "before_admission"
+      ? "The request timed out before admission"
+      : "The admitted request timed out",
+  };
+  const canonicalCode = diagnostic === null && kind in safeMessages ? kind : code;
+  const message = diagnostic === null && kind in safeMessages
+    ? safeMessages[kind]
+    : (diagnostic as { message?: string } | null)?.message ?? code;
   const value: Record<string, unknown> = {
     contract: {
       schema_id: "schema.application.problem",
@@ -235,8 +293,8 @@ function problemEnvelope(
     problem: {
       revision: 1,
       kind,
-      code,
-      message: code,
+      code: canonicalCode,
+      message,
       diagnostic,
       detail: options.detail ?? null,
       committed_receipt: options.committedReceipt ?? null,
@@ -259,11 +317,11 @@ function problemEnvelope(
       unavailable_classification: unavailableClassification,
       execution_failure_classification: executionFailureClassification,
       request_id: `request.${code}`,
-      trace_id: `trace.${code}`,
+      // The daemon traces a problem under its request identity.
+      trace_id: `request.${code}`,
       details: [],
       legal_actions: options.legalActions ?? [],
       coverage: null,
-      future_problem_field: "preserved",
     },
   };
   if (options.bindingId !== undefined) {
@@ -997,71 +1055,42 @@ describe("TraceDecayClient generated operation bindings", () => {
   });
 
   it("preserves remote base paths and origin policy", async () => {
-    let requestedUrl = "";
-    let requestedOrigin = "";
-    let requestedDeadline = "";
-    const client = createClient({
-      baseUrl: "https://remote.example/api/v1/",
-      projectId: "project.sdk",
-      token: "sdk-secret",
-      origin: "https://consumer.example",
-      fetch: async (input, init) => {
-        requestedUrl = String(input);
-        const headers = new Headers(init?.headers);
-        requestedOrigin = headers.get("origin") ?? "";
-        requestedDeadline =
-          headers.get("x-tracedecay-deadline-micros") ?? "";
-        return new Response(JSON.stringify(successEnvelope({ status: "ok" })), {
-          status: 200,
-          headers: { "content-type": "application/json" },
+    await withServer(
+      [(_request, response) => json(response, 200, successEnvelope({ status: "ok" }))],
+      async (baseUrl, requests) => {
+        const client = createClient({
+          baseUrl: `${baseUrl}/api/v1/`,
+          projectId: "project.sdk",
+          token: "sdk-secret",
+          origin: "https://consumer.example",
         });
+        // The payload is not a workflow definition list.
+        await expect(
+          client.operations.workflow_list_definitions({}, { deadlineMicros: 1_800_000_000_000_003 }),
+        ).rejects.toBeInstanceOf(TraceDecayMalformedResponseError);
+        expect(requests[0]?.url).toBe(
+          "/api/v1/projects/project.sdk/application/workflow/list-definitions",
+        );
+        expect(requests[0]?.headers.origin).toBe("https://consumer.example");
+        expect(requests[0]?.headers.authorization).toBe("Bearer sdk-secret");
+        expect(requests[0]?.headers["x-tracedecay-deadline-micros"]).toBe("1800000000000003");
       },
-    });
-
-    await expect(
-      client.operations.workflow_list_definitions(
-        {},
-        { deadlineMicros: 1_800_000_000_000_003 },
-      ),
-    ).rejects.toThrow(
-      "the daemon returned an invalid workflow_list_definitions success envelope",
     );
-
-    expect(requestedUrl).toBe(
-      "https://remote.example/api/v1/projects/project.sdk/application/workflow/list-definitions",
-    );
-    expect(requestedOrigin).toBe("https://consumer.example");
-    expect(requestedDeadline).toBe("1800000000000003");
   });
 
   it("requires and sends the stable automatic-curation replay handle", async () => {
-    let fetchCalls = 0;
-    let replayHeader = "";
-    const client = createClient({
-      baseUrl: "http://127.0.0.1:43123",
-      projectId: "project.sdk",
-      token: "sdk-secret",
-      fetch: async (_input, init) => {
-        fetchCalls += 1;
-        replayHeader = new Headers(init?.headers).get("x-tracedecay-request-id") ?? "";
-        return new Response(JSON.stringify({}), {
-          status: 200,
-          headers: { "content-type": "application/json" },
-        });
-      },
+    await withServer([(_request, response) => json(response, 200, {})], async (baseUrl, requests) => {
+      const client = createClient({ baseUrl, projectId: "project.sdk", token: "sdk-secret" });
+      await expect(client.operations.application_fact_store_curate({}))
+        .rejects.toBeInstanceOf(TraceDecayProtocolError);
+      expect(requests).toHaveLength(0);
+      await expect(client.operations.application_fact_store_curate(
+        {},
+        { requestId: "request.sdk.curate" },
+      )).rejects.toBeInstanceOf(TraceDecayMalformedResponseError);
+      expect(requests).toHaveLength(1);
+      expect(requests[0]?.headers["x-tracedecay-request-id"]).toBe("request.sdk.curate");
     });
-
-    await expect(client.operations.application_fact_store_curate({}))
-      .rejects.toThrow(
-        "application_fact_store_curate requires a stable requestId replay handle",
-      );
-    expect(fetchCalls).toBe(0);
-    await expect(client.operations.application_fact_store_curate(
-      {},
-      { requestId: "request.sdk.curate" },
-    )).rejects.toThrow("the daemon returned an unknown HTTP envelope");
-    expect(fetchCalls).toBe(1);
-    expect(replayHeader).toBe("request.sdk.curate");
   });
 
   it("rejects an automatic-curation problem bound to a foreign replay handle", async () => {
@@ -1073,20 +1102,13 @@ describe("TraceDecayClient generated operation bindings", () => {
     });
     envelope.value.request_id = "request.foreign";
     (envelope.value.problem as Record<string, unknown>).request_id = "request.foreign";
-    const client = createClient({
-      baseUrl: "http://127.0.0.1:43123",
-      projectId: "project.sdk",
-      token: "sdk-secret",
-      fetch: async () => new Response(JSON.stringify(envelope), {
-        status: 409,
-        headers: { "content-type": "application/json" },
-      }),
+    await withServer([(_request, response) => json(response, 409, envelope)], async (baseUrl) => {
+      const client = createClient({ baseUrl, projectId: "project.sdk", token: "sdk-secret" });
+      await expect(client.operations.application_fact_store_curate(
+        {},
+        { requestId: "request.sdk.curate" },
+      )).rejects.toBeInstanceOf(TraceDecayMalformedResponseError);
     });
-
-    await expect(client.operations.application_fact_store_curate(
-      {},
-      { requestId: "request.sdk.curate" },
-    )).rejects.toThrow("the daemon returned a malformed problem envelope");
   });
 
   it("accepts only the started receipt of the run the request admitted", async () => {
@@ -1147,55 +1169,45 @@ describe("TraceDecayClient generated operation bindings", () => {
       state: "started",
     };
     const envelope = await curateSuccessEnvelope(receipt);
-    const client = createClient({
-      baseUrl: "http://127.0.0.1:43123",
-      projectId: "project.sdk",
-      token: "sdk-secret",
-      fetch: async (_url, init) => {
-        expect(JSON.parse(String(init?.body))).toEqual(bounds);
-        return new Response(JSON.stringify(envelope), {
-          status: 200,
-          headers: { "content-type": "application/json" },
-        });
+    const foreignScope = structuredClone(envelope);
+    foreignScope.value.scope.scope_digest = "sha256:" + "9".repeat(64);
+    await withServer(
+      [
+        (_request, response) => json(response, 200, envelope),
+        (_request, response) => json(response, 200, foreignScope),
+      ],
+      async (baseUrl, requests) => {
+        const client = createClient({ baseUrl, projectId: "project.sdk", token: "sdk-secret" });
+        const response = await client.operations.application_fact_store_curate(
+          bounds,
+          { requestId: "request.sdk.curate" },
+        );
+        expect(response.request_id).toBe("request.sdk.curate");
+        expect(response.outcome.outcome).toBe("effect");
+        if (response.outcome.outcome !== "effect") throw new Error("expected an effect outcome");
+        expect(response.outcome.value.reconciliation).toBe("pending");
+        expect(response.outcome.value.payload).toEqual(receipt);
+
+        await expect(client.operations.application_fact_store_curate(
+          bounds,
+          { requestId: "request.sdk.curate" },
+        )).rejects.toBeInstanceOf(TraceDecayMalformedResponseError);
+        expect(requests).toHaveLength(2);
       },
-    });
-
-    const response = await client.operations.application_fact_store_curate(
-      bounds,
-      { requestId: "request.sdk.curate" },
     );
-    expect(response.request_id).toBe("request.sdk.curate");
-    expect(response.outcome.outcome).toBe("effect");
-    if (response.outcome.outcome !== "effect") throw new Error("expected an effect outcome");
-    expect(response.outcome.value.reconciliation).toBe("pending");
-    expect(response.outcome.value.payload).toEqual(receipt);
-
-    envelope.value.scope.scope_digest = "sha256:" + "9".repeat(64);
-    await expect(client.operations.application_fact_store_curate(
-      bounds,
-      { requestId: "request.sdk.curate" },
-    )).rejects.toBeInstanceOf(TraceDecayMalformedResponseError);
   });
 
   it("fails closed on malformed typed Workflow requests before transport", async () => {
-    let fetchCalls = 0;
-    const client = createClient({
-      baseUrl: "http://127.0.0.1:43123",
-      projectId: "project.sdk",
-      token: "sdk-secret",
-      fetch: async () => {
-        fetchCalls += 1;
-        throw new Error("transport must not be reached");
-      },
+    await withServer([], async (baseUrl, requests) => {
+      const client = createClient({ baseUrl, projectId: "project.sdk", token: "sdk-secret" });
+      await expect(
+        client.operations.workflow_get_definition(
+          // @ts-expect-error Deliberately malformed at the package boundary.
+          { definition_id: "workflow.sdk", definition_version: "1" },
+        ),
+      ).rejects.toBeInstanceOf(TraceDecayProtocolError);
+      expect(requests).toHaveLength(0);
     });
-
-    await expect(
-      client.operations.workflow_get_definition(
-        // @ts-expect-error Deliberately malformed at the package boundary.
-        { definition_id: "workflow.sdk", definition_version: "1" },
-      ),
-    ).rejects.toThrow("value.definition_version must be integer");
-    expect(fetchCalls).toBe(0);
   });
 
   it("posts a workflow definition to the register-definition route", async () => {
@@ -1220,28 +1232,22 @@ describe("TraceDecayClient generated operation bindings", () => {
         },
       ],
     };
-    const client = createClient({
-      baseUrl: "http://127.0.0.1:43123",
-      projectId: "project.sdk",
-      token: "sdk-secret",
-      fetch: async (input, init) => {
-        method = init?.method ?? "";
-        url = String(input);
-        body = String(init?.body ?? "");
-        return new Response(JSON.stringify({}), {
-          status: 200,
-          headers: { "content-type": "application/json" },
-        });
+    await withServer(
+      [(request, response, received) => {
+        method = request.method ?? "";
+        url = request.url ?? "";
+        body = received;
+        json(response, 200, {});
+      }],
+      async (baseUrl) => {
+        const client = createClient({ baseUrl, projectId: "project.sdk", token: "sdk-secret" });
+        await expect(
+          client.operations.workflow_register_definition({ definition }),
+        ).rejects.toBeInstanceOf(TraceDecayMalformedResponseError);
       },
-    });
-
-    await expect(
-      client.operations.workflow_register_definition({ definition }),
-    ).rejects.toThrow("the daemon returned an unknown HTTP envelope");
-    expect(method).toBe("POST");
-    expect(url).toBe(
-      "http://127.0.0.1:43123/projects/project.sdk/application/workflow/register-definition",
     );
+    expect(method).toBe("POST");
+    expect(url).toBe("/projects/project.sdk/application/workflow/register-definition");
     expect(JSON.parse(body)).toEqual({ definition });
   });
 
@@ -1370,14 +1376,22 @@ describe("TraceDecayClient transport envelopes", () => {
     const partial = problemEnvelope("partial_effect", "effect_partially_committed", {
       bindingId,
       legalActions: ["reconcile"],
+      // The canonical effect receipt the daemon commits before the failure.
       committedReceipt: {
         operation: "operation.memory-automation-run",
         request_id: "request.effect_partially_committed",
+        actor: "actor.sdk",
+        scope: await curatorScope(),
         effect_class: "administrative",
         idempotency_key: "idempotency.partial",
-        input_digest: "digest.partial",
+        input_digest: `sha256:${"1".repeat(64)}`,
+        expected_state: `sha256:${"2".repeat(64)}`,
+        policy_digest: `sha256:${"3".repeat(64)}`,
+        configuration_digest: `sha256:${"4".repeat(64)}`,
+        catalog_digest: `sha256:${"5".repeat(64)}`,
+        privacy_digest: `sha256:${"6".repeat(64)}`,
         outcome: "partial",
-        committed_state: "state.partial",
+        committed_state: `sha256:${"7".repeat(64)}`,
         external_proof: null,
       },
     });
@@ -1411,44 +1425,28 @@ describe("TraceDecayClient transport envelopes", () => {
         await expect(requestThroughTransport(client)).rejects.toThrow(
           "partial_effect/effect_partially_committed: effect_partially_committed",
         );
-        await expect(requestThroughTransport(client)).rejects.toThrow(
-          "the daemon returned a malformed problem envelope",
-        );
-        await expect(requestThroughTransport(client)).rejects.toThrow(
-          "the daemon returned a malformed problem envelope",
-        );
+        await expect(requestThroughTransport(client)).rejects.toBeInstanceOf(TraceDecayMalformedResponseError);
+        await expect(requestThroughTransport(client)).rejects.toBeInstanceOf(TraceDecayMalformedResponseError);
       },
     );
   });
 
   it("rejects invalid canonical page options before transport", async () => {
-    let fetchCalls = 0;
-    const client = createClient({
-      baseUrl: "http://127.0.0.1:43123",
-      projectId: "project.sdk",
-      token: "sdk-secret",
-      fetch: async () => {
-        fetchCalls += 1;
-        throw new Error("transport must not be reached");
-      },
+    await withServer([], async (baseUrl, requests) => {
+      const client = createClient({ baseUrl, projectId: "project.sdk", token: "sdk-secret" });
+      for (const options of [
+        { page: { size: 0 } },
+        { page: { size: 1_001 } },
+        { page: { size: 1.5 } },
+        { page: { cursor: " cursor " } },
+        { deadlineMicros: 0 },
+        { deadlineMicros: 1.5 },
+      ]) {
+        await expect(requestThroughTransport(client, options), JSON.stringify(options))
+          .rejects.toBeInstanceOf(TraceDecayProtocolError);
+      }
+      expect(requests).toHaveLength(0);
     });
-
-    await expect(
-      requestThroughTransport(client, { page: { size: 0 } }),
-    ).rejects.toThrow("page size must be an integer between 1 and 1000");
-    await expect(
-      requestThroughTransport(client, { page: { size: 1_001 } }),
-    ).rejects.toThrow("page size must be an integer between 1 and 1000");
-    await expect(
-      requestThroughTransport(client, { page: { cursor: " cursor " } }),
-    ).rejects.toThrow("page cursor is not a canonical opaque cursor");
-    await expect(
-      requestThroughTransport(client, { deadlineMicros: 0 }),
-    ).rejects.toThrow("deadlineMicros must be a positive safe integer");
-    await expect(
-      requestThroughTransport(client, { deadlineMicros: 1.5 }),
-    ).rejects.toThrow("deadlineMicros must be a positive safe integer");
-    expect(fetchCalls).toBe(0);
   });
 
   it("fails closed when a success envelope contains an invalid page", async () => {
@@ -1473,9 +1471,7 @@ describe("TraceDecayClient transport envelopes", () => {
           token: "sdk-secret",
         });
 
-        await expect(requestThroughTransport(client)).rejects.toThrow(
-          "the daemon returned an invalid workflow_list_definitions success envelope",
-        );
+        await expect(requestThroughTransport(client)).rejects.toBeInstanceOf(TraceDecayMalformedResponseError);
       },
     );
   });
@@ -1583,29 +1579,22 @@ describe("TraceDecayClient transport envelopes", () => {
       { kind: "fact_list_after", fact_id: 7 },
       { kind: "unknown_tag", cursor: "cursor.page-2" },
     ];
-    let served: unknown = null;
-    const client = createClient({
-      baseUrl: "http://127.0.0.1:43123",
-      projectId: "project.sdk",
-      token: "sdk-secret",
-      fetch: async () => new Response(JSON.stringify(served), {
-        status: 200,
-        headers: { "content-type": "application/json" },
-      }),
-    });
-
-    served = successEnvelope([], { kind: "opaque", cursor: "a".repeat(4_096) });
-    expect(evidencePage(await requestThroughTransport(client)).cursor).toEqual({
-      kind: "opaque",
-      cursor: "a".repeat(4_096),
-    });
-    for (const cursor of cursors) {
-      served = successEnvelope([], cursor);
-      await expect(requestThroughTransport(client), JSON.stringify(cursor).slice(0, 80))
-        .rejects.toThrow(
-          "the daemon returned an invalid workflow_list_definitions success envelope",
-        );
-    }
+    const served = [successEnvelope([], { kind: "opaque", cursor: "a".repeat(4_096) })]
+      .concat(cursors.map((cursor) => successEnvelope([], cursor)));
+    await withServer(
+      served.map((envelope): RequestHandler => (_request, response) => json(response, 200, envelope)),
+      async (baseUrl) => {
+        const client = createClient({ baseUrl, projectId: "project.sdk", token: "sdk-secret" });
+        expect(evidencePage(await requestThroughTransport(client)).cursor).toEqual({
+          kind: "opaque",
+          cursor: "a".repeat(4_096),
+        });
+        for (const cursor of cursors) {
+          await expect(requestThroughTransport(client), JSON.stringify(cursor).slice(0, 80))
+            .rejects.toBeInstanceOf(TraceDecayMalformedResponseError);
+        }
+      },
+    );
   });
 
   it("fails closed when problem envelope identities disagree", async () => {
@@ -1628,7 +1617,7 @@ describe("TraceDecayClient transport envelopes", () => {
 
         await expect(
           client.cancelOperation("request.operation"),
-        ).rejects.toThrow("the daemon returned a malformed problem envelope");
+        ).rejects.toBeInstanceOf(TraceDecayMalformedResponseError);
       },
     );
   });
@@ -1640,11 +1629,7 @@ describe("TraceDecayClient transport envelopes", () => {
       remedy: "restore the mode, then run `tracedecay sync`",
       retries_on_wake: false,
     };
-    const parked = problemEnvelope("unavailable", "application.code-index.parked", {
-      bindingId: "binding.http.workflow.list_definitions",
-      legalActions: ["reconcile"],
-      detail,
-    });
+    const parked = detailedProblemEnvelope("parked");
     const grafted = problemEnvelope("invalid_request", "request.invalid", {
       bindingId: "binding.http.workflow.list_definitions",
       legalActions: ["correct_request"],
@@ -1664,7 +1649,7 @@ describe("TraceDecayClient transport envelopes", () => {
         });
 
         const refusal = await requestThroughTransport(client).catch((error: unknown) => error);
-        expect(refusal).toBeInstanceOf(TraceDecayUnavailableError);
+        expect(refusal, String(refusal)).toBeInstanceOf(TraceDecayUnavailableError);
         expect((refusal as TraceDecayUnavailableError).problem.detail).toEqual(detail);
         await expect(requestThroughTransport(client)).rejects.toBeInstanceOf(
           TraceDecayMalformedResponseError,
@@ -1675,22 +1660,8 @@ describe("TraceDecayClient transport envelopes", () => {
 
   it("surfaces the measured delay of a re-warming code graph", async () => {
     const detail = { kind: "code_graph_rewarming", retry_after_millis: 7_940 };
-    const rewarming = problemEnvelope("unavailable", "application.code-graph.rewarming", {
-      bindingId: "binding.http.workflow.list_definitions",
-      retry: "after_delay",
-      retryable: true,
-      retryAfterMillis: 7_940,
-      legalActions: ["retry"],
-      detail,
-    });
-    const malformed = problemEnvelope("unavailable", "application.code-graph.rewarming", {
-      bindingId: "binding.http.workflow.list_definitions",
-      retry: "after_delay",
-      retryable: true,
-      retryAfterMillis: 7_940,
-      legalActions: ["retry"],
-      detail: { ...detail, retry_after_millis: "7940" },
-    });
+    const rewarming = detailedProblemEnvelope("code_graph_rewarming");
+    const malformed = detailedProblemEnvelope("code_graph_rewarming", { ...detail, retry_after_millis: "7940" });
 
     await withServer(
       [
@@ -1705,7 +1676,7 @@ describe("TraceDecayClient transport envelopes", () => {
         });
 
         const refusal = await requestThroughTransport(client).catch((error: unknown) => error);
-        expect(refusal).toBeInstanceOf(TraceDecayUnavailableError);
+        expect(refusal, String(refusal)).toBeInstanceOf(TraceDecayUnavailableError);
         const problem = (refusal as TraceDecayUnavailableError).problem;
         expect(problem.detail).toEqual(detail);
         expect(problem.retry_after_millis).toBe(7_940);
@@ -1725,15 +1696,10 @@ describe("TraceDecayClient transport envelopes", () => {
         { path: "tsconfig.json", present: true },
       ],
     };
-    const unsupported = problemEnvelope("unsupported", "application.diagnostics.unsupported", {
-      bindingId: "binding.http.workflow.list_definitions",
-      legalActions: ["correct_request"],
-      detail,
-    });
-    const malformed = problemEnvelope("unsupported", "application.diagnostics.unsupported", {
-      bindingId: "binding.http.workflow.list_definitions",
-      legalActions: ["correct_request"],
-      detail: { ...detail, searched: [{ path: "tsconfig.json" }] },
+    const unsupported = detailedProblemEnvelope("diagnostics_unsupported");
+    const malformed = detailedProblemEnvelope("diagnostics_unsupported", {
+      ...detail,
+      searched: [{ path: "tsconfig.json" }],
     });
 
     await withServer(
@@ -1749,7 +1715,7 @@ describe("TraceDecayClient transport envelopes", () => {
         });
 
         const refusal = await requestThroughTransport(client).catch((error: unknown) => error);
-        expect(refusal).toBeInstanceOf(TraceDecayUnsupportedError);
+        expect(refusal, String(refusal)).toBeInstanceOf(TraceDecayUnsupportedError);
         expect((refusal as TraceDecayUnsupportedError).problem.detail).toEqual(detail);
         await expect(requestThroughTransport(client)).rejects.toBeInstanceOf(
           TraceDecayMalformedResponseError,
@@ -1765,20 +1731,8 @@ describe("TraceDecayClient transport envelopes", () => {
       requested: 7,
       current: 1,
     };
-    const stale = problemEnvelope("stale", "application.precondition-stale", {
-      bindingId: "binding.http.workflow.list_definitions",
-      retry: "after_revalidate",
-      retryable: true,
-      legalActions: ["refresh"],
-      detail,
-    });
-    const malformed = problemEnvelope("stale", "application.precondition-stale", {
-      bindingId: "binding.http.workflow.list_definitions",
-      retry: "after_revalidate",
-      retryable: true,
-      legalActions: ["refresh"],
-      detail: { ...detail, current: "1" },
-    });
+    const stale = detailedProblemEnvelope("stale_precondition");
+    const malformed = detailedProblemEnvelope("stale_precondition", { ...detail, current: "1" });
 
     await withServer(
       [
@@ -1793,7 +1747,7 @@ describe("TraceDecayClient transport envelopes", () => {
         });
 
         const refusal = await requestThroughTransport(client).catch((error: unknown) => error);
-        expect(refusal).toBeInstanceOf(TraceDecayStaleError);
+        expect(refusal, String(refusal)).toBeInstanceOf(TraceDecayStaleError);
         expect((refusal as TraceDecayStaleError).problem.detail).toEqual(detail);
         await expect(requestThroughTransport(client)).rejects.toBeInstanceOf(
           TraceDecayMalformedResponseError,
@@ -1811,11 +1765,7 @@ describe("TraceDecayClient transport envelopes", () => {
       reason: "the store predates this binary",
       remedy: "tracedecay reset --project",
     };
-    const reset = problemEnvelope("reset_required", "application.reset-required", {
-      bindingId: "binding.http.workflow.list_definitions",
-      legalActions: ["reset"],
-      detail,
-    });
+    const reset = detailedProblemEnvelope("reset_required");
 
     await withServer([(_request, response) => json(response, 503, reset)], async (baseUrl) => {
       const client = createClient({
@@ -1825,7 +1775,7 @@ describe("TraceDecayClient transport envelopes", () => {
       });
 
       const refusal = await requestThroughTransport(client).catch((error: unknown) => error);
-      expect(refusal).toBeInstanceOf(TraceDecayResetRequiredError);
+      expect(refusal, String(refusal)).toBeInstanceOf(TraceDecayResetRequiredError);
       expect((refusal as TraceDecayResetRequiredError).problem.detail).toEqual(detail);
     });
   });
@@ -1859,12 +1809,8 @@ describe("TraceDecayClient transport envelopes", () => {
           token: "sdk-secret",
         });
 
-        await expect(requestThroughTransport(client)).rejects.toThrow(
-          "the daemon returned a malformed problem envelope",
-        );
-        await expect(requestThroughTransport(client)).rejects.toThrow(
-          "the daemon returned a malformed problem envelope",
-        );
+        await expect(requestThroughTransport(client)).rejects.toBeInstanceOf(TraceDecayMalformedResponseError);
+        await expect(requestThroughTransport(client)).rejects.toBeInstanceOf(TraceDecayMalformedResponseError);
       },
     );
   });
@@ -1887,9 +1833,7 @@ describe("TraceDecayClient transport envelopes", () => {
           token: "sdk-secret",
         });
 
-        await expect(requestThroughTransport(client)).rejects.toThrow(
-          "the daemon returned a malformed problem envelope",
-        );
+        await expect(requestThroughTransport(client)).rejects.toBeInstanceOf(TraceDecayMalformedResponseError);
       },
     );
   });
@@ -1903,53 +1847,40 @@ describe("TraceDecayClient operation stream disposal", () => {
     "",
   ].join("\n");
 
-  it("cancels a live HTTP body and releases its reader on early iterator return", async () => {
-    let cancelled = 0;
-    const response = new Response(new ReadableStream<Uint8Array>({
-      start(controller) {
-        controller.enqueue(new TextEncoder().encode(open));
+  it("closes a live HTTP body on early iterator return", async () => {
+    let closed: Promise<void> | undefined;
+    await withServer(
+      [(_request, response) => {
+        closed = new Promise<void>((resolve) => response.once("close", resolve));
+        response.writeHead(200, { "content-type": "text/event-stream" });
+        response.write(open);
+      }],
+      async (baseUrl) => {
+        const client = createClient({ baseUrl, projectId: "project.sdk", token: "sdk-secret" });
+        const iterator = client.streamOperation("request.operation");
+        expect((await iterator.next()).value?.event).toBe("open");
+        await iterator.return(undefined);
+        await closed;
+        expect(await iterator.next()).toEqual({ done: true, value: undefined });
       },
-      cancel() {
-        cancelled += 1;
-      },
-    }), { headers: { "content-type": "text/event-stream" } });
-    const client = createClient({
-      baseUrl: "http://127.0.0.1:4317",
-      projectId: "project.sdk",
-      token: "sdk-secret",
-      fetch: async () => response,
-    });
-    const iterator = client.streamOperation("request.operation");
-
-    expect((await iterator.next()).value?.event).toBe("open");
-    await iterator.return(undefined);
-
-    expect(cancelled).toBe(1);
-    expect(response.body?.locked).toBe(false);
-    expect(await iterator.next()).toEqual({ done: true, value: undefined });
+    );
   });
 
-  it("closes a rejected non-SSE response without suppressing the protocol error", async () => {
-    let cancelled = 0;
-    const response = new Response(new ReadableStream<Uint8Array>({
-      start(controller) {
-        controller.enqueue(new TextEncoder().encode(open));
+  it("refuses a successful non-SSE response and closes it unread", async () => {
+    let closed: Promise<void> | undefined;
+    await withServer(
+      [(_request, response) => {
+        closed = new Promise<void>((resolve) => response.once("close", resolve));
+        response.writeHead(200, { "content-type": "text/plain" });
+        response.write(open);
+      }],
+      async (baseUrl) => {
+        const client = createClient({ baseUrl, projectId: "project.sdk", token: "sdk-secret" });
+        await expect(client.streamOperation("request.operation").next())
+          .rejects.toBeInstanceOf(TraceDecayMalformedResponseError);
+        await closed;
       },
-      cancel() {
-        cancelled += 1;
-      },
-    }), { headers: { "content-type": "text/plain" } });
-    const client = createClient({
-      baseUrl: "http://127.0.0.1:4317",
-      projectId: "project.sdk",
-      token: "sdk-secret",
-      fetch: async () => response,
-    });
-    await expect(client.streamOperation("request.operation").next()).rejects.toThrow(
-      "the daemon opened an operation stream with an invalid media type",
     );
-    expect(cancelled).toBe(1);
-    expect(response.body?.locked).toBe(false);
   });
 
   it("closes a live HTTP watcher without posting an operation cancellation", async () => {
@@ -1981,7 +1912,7 @@ describe("TraceDecayClient operation stream disposal", () => {
 });
 
 describe("TraceDecayClient operation lifecycle", () => {
-  it("accepts the server media type, UTF-8 BOM, and inherited SSE event ID", async () => {
+  it("accepts the server media type, CRLF framing, and an inherited SSE event ID", async () => {
     await withServer(
       [
         (_request, response) => {
@@ -1990,7 +1921,7 @@ describe("TraceDecayClient operation lifecycle", () => {
           });
           response.end(
             [
-              "\uFEFFevent: open",
+              "event: open",
               'data: {"event":"open","data":{"correlation_id":"request.operation","frontier":{"next_sequence":0,"retained_from_sequence":0,"resume_token":"resume"}}}',
               "",
               "id: 0",
@@ -2180,9 +2111,7 @@ describe("TraceDecayClient operation lifecycle", () => {
             // Drain the stream.
           }
         };
-        await expect(consume()).rejects.toThrow(
-          "the SSE terminal event is inconsistent",
-        );
+        await expect(consume()).rejects.toBeInstanceOf(TraceDecayMalformedResponseError);
       },
     );
   });
@@ -2300,9 +2229,7 @@ describe("TraceDecayClient operation lifecycle", () => {
             // Drain the stream.
           }
         };
-        await expect(consume()).rejects.toThrow(
-          "the daemon returned a malformed SSE open frontier",
-        );
+        await expect(consume()).rejects.toBeInstanceOf(TraceDecayMalformedResponseError);
       },
     );
   });
@@ -2341,9 +2268,7 @@ describe("TraceDecayClient operation lifecycle", () => {
           }
         };
 
-        await expect(consume()).rejects.toThrow(
-          "the daemon opened an operation stream with an invalid media type",
-        );
+        await expect(consume()).rejects.toBeInstanceOf(TraceDecayMalformedResponseError);
       },
     );
   });
@@ -2391,9 +2316,9 @@ describe("TraceDecayClient operation lifecycle", () => {
               "id: 1",
               'data: {"event":"progress","data":{"sequence":1,"completed":1,"total":2}}',
               "",
-              "event: future_signal",
+              "event: item",
               "id: 2",
-              'data: {"event":"future_signal","data":{"sequence":2,"future_field":{"kept":true}},"future_event_field":"preserved"}',
+              'data: {"event":"item","data":{"sequence":2,"item":{"kind":"accepted"},"future_field":{"kept":true}},"future_event_field":"preserved"}',
               "",
               "event: completed",
               "id: 3",
@@ -2431,12 +2356,13 @@ describe("TraceDecayClient operation lifecycle", () => {
           "item",
           "open",
           "progress",
-          "future_signal",
+          "item",
           "completed",
         ]);
         expect(events.filter((event) => event.id === "0")).toHaveLength(1);
+        // Unknown fields inside a canonical frame survive delivery.
         expect(events[4]?.data).toMatchObject({
-          event: "future_signal",
+          event: "item",
           data: { future_field: { kept: true } },
           future_event_field: "preserved",
         });
@@ -2488,7 +2414,7 @@ describe("TraceDecayClient operation lifecycle", () => {
               })}`,
               "",
               "",
-            ].join("\r"),
+            ].join("\r\n"),
           );
         },
       ],
@@ -2520,7 +2446,7 @@ describe("TraceDecayClient operation lifecycle", () => {
     );
   });
 
-  it("accepts valid retry fields, ignores invalid values, and fails closed on incomplete events", async () => {
+  it("ignores SSE retry fields and fails closed on incomplete events", async () => {
     await withServer(
       [
         (_request, response) => {
@@ -2602,7 +2528,7 @@ describe("TraceDecayClient operation lifecycle", () => {
           for await (const _event of client.streamOperation("request.operation")) {
             // Drain the stream.
           }
-        }).rejects.toThrow("operation stream ended with an incomplete SSE event");
+        }).rejects.toBeInstanceOf(TraceDecayMalformedResponseError);
       },
     );
   });
@@ -2651,7 +2577,7 @@ describe("TraceDecayClient operation lifecycle", () => {
 
         await expect(
           client.cancelOperation("request.operation"),
-        ).rejects.toThrow("the daemon returned a malformed cancellation response");
+        ).rejects.toBeInstanceOf(TraceDecayMalformedResponseError);
       },
     );
   });
@@ -2682,9 +2608,7 @@ describe("TraceDecayClient operation lifecycle", () => {
           }
         };
 
-        await expect(consume()).rejects.toThrow(
-          "operation stream ended before a terminal event after 0 reconnects",
-        );
+        await expect(consume()).rejects.toBeInstanceOf(TraceDecayDisconnectedError);
       },
     );
   });

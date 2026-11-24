@@ -10,9 +10,46 @@ registry determines whether an operation is available to the SDK.
 
 ## Requirements
 
-- Node.js 20 or newer
+- Node.js 20 or newer on a supported platform: macOS arm64, Linux x64 or
+  arm64 (glibc), or Windows x64
 - A reachable TraceDecay daemon application endpoint
 - An application token issued for that daemon
+
+## Architecture
+
+The HTTP lifecycle runs in Rust. The package is a generated TypeScript facade
+over a Node-API binding of the TraceDecay Rust SDK, so Node and Rust clients
+admit exactly the same envelopes, problems, stream frames, terminal states and
+reconnects. Network waits run on the binding's own threads and never block
+the Node event loop. The daemon remains the authority for storage, scheduling
+and admission.
+
+The binding ships as an optional platform package
+(`@tracedecay/sdk-darwin-arm64`, `-linux-x64-gnu`, `-linux-arm64-gnu`,
+`-win32-x64-msvc`) that npm installs for the host automatically. Hosts that
+deliver it some other way, such as an offline plugin install that places
+`tracedecay_sdk_node.node` beside the daemon binary, pass its absolute path as
+`addon`. MCP-backed operations never load the binding.
+
+### Migrating from 0.15
+
+- `ClientOptions.fetch` is removed. Requests no longer pass through a
+  replaceable `fetch`; test against a real loopback server instead of a fetch
+  stub, and route traffic through `baseUrl`. Ambient proxy variables are not
+  used, as before.
+- Error classes and their `instanceof` relationships are unchanged. Messages
+  are now the Rust client's messages; branch on the error class, `status`, or
+  `problem`, not on message text.
+- Event streams ignore the SSE `retry:` field (the daemon never sends it) and
+  reconnect immediately within `maxReconnects`. Lines end with LF or CRLF;
+  a lone CR, a leading byte-order mark, and malformed UTF-8 are protocol
+  failures rather than decoded leniently. A body that ends inside a frame is
+  a protocol failure, not a retried disconnect.
+- Responses are admitted only in their canonical shape: event names outside
+  the canonical set, and problem records with unknown fields or identities
+  inconsistent with their kind, are `TraceDecayMalformedResponseError`.
+  Unknown fields inside success payloads and canonical events still pass
+  through.
 
 ## Usage
 
@@ -50,13 +87,14 @@ Malformed or unavailable contracts fail closed.
 Pass an `AbortSignal` in the operation options or in
 `cancelOperation(operationId, { signal })`. Caller cancellation raises
 `TraceDecayAbortError` with the original signal reason as its `cause`, including
-when headers have arrived and the SDK is still reading the body. The SDK
-cancels unread response data and releases its reader.
+when headers have arrived and the SDK is still reading the body. Aborting
+drops the in-flight native request, which closes its connection.
 
 Body I/O failures raise `TraceDecayDisconnectedError`. Completely received but
 invalid JSON or application envelopes raise `TraceDecayMalformedResponseError`.
 Authentication and origin refusals retain their distinct 401/403 statuses on
-`TraceDecayAuthenticationError`; their bodies are cancelled without being read.
+`TraceDecayAuthenticationError`; they are refused from the response head
+without reading the body.
 
 Unary HTTP operations are not automatically retried. A disconnected or aborted
 response does not prove that an effect was rolled back or never committed.
@@ -107,17 +145,16 @@ of packing its own.
 
 ## Event-stream framing limits
 
-The TypeScript and Rust clients use the same 64 KiB allowance for each raw SSE
-line, including its CR/LF ending, and for the UTF-8 event, ID and data bytes
-retained for a frame. Data-line separators count toward the frame allowance;
-replacement fields use the Rust client's conservative one-byte allowance.
-An inherited last-event ID stays charged until replaced or cleared. Canonical
-accepted-operation metadata, test-result names (at most 1 KiB), progress,
-frontiers, gaps and terminal receipts fit within this policy.
+Node and Rust share one framing implementation with a 64 KiB allowance for
+each raw SSE line, including its line ending, and for the UTF-8 event, ID and
+data bytes retained for a frame. Data-line separators count toward the frame
+allowance. A frame ID carried across an empty frame stays charged to the next
+frame. Canonical accepted-operation metadata, test-result names (at most
+1 KiB), progress, frontiers, gaps and terminal receipts fit within this policy.
 
-The TypeScript client scans transport bytes once into a bounded line buffer,
-including when a transport supplies one large chunk. One byte of lookahead
-detects a line overflow. Oversized comments and unknown fields are refused too.
-Overflow throws `TraceDecayMalformedResponseError` with `payload.limitBytes`,
-cancels the response body and never reconnects or delivers the oversized frame.
-Transport-owned chunks are outside the parser's retained-state allowance.
+The binding reads the next body chunk only when the iterator asks for the next
+event, so a slow consumer applies TCP backpressure to the daemon instead of
+growing a buffer. Overflow throws `TraceDecayMalformedResponseError`, closes
+the connection, and never reconnects or delivers the oversized frame. Leaving
+a `for await` loop early, calling `return()`, or aborting its signal releases
+the connection without cancelling the operation.
