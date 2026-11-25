@@ -47,7 +47,7 @@ import {
   type WorkProductView,
   type WorkProductViewResult,
 } from './workProductView.ts';
-import { workDagReading } from './workViewsModel.ts';
+import { type WorkDagReading, workDagReading } from './workViewsModel.ts';
 
 /**
  * Work, channel thirteen.
@@ -119,6 +119,7 @@ function WorkProjectionView({
   proximity,
   selectedEncounterId,
   graph,
+  readDag,
   selected,
   onSelect,
   onSelectEncounter,
@@ -136,6 +137,7 @@ function WorkProjectionView({
   proximity: WorkResult<FeedbackProximityReadResultV1> | undefined;
   selectedEncounterId: string | null;
   graph: WorkGraphReading;
+  readDag: () => WorkDagReading;
   selected: string | null;
   onSelect: (taskId: string) => void;
   onSelectEncounter: (encounterId: string | null) => void;
@@ -145,11 +147,11 @@ function WorkProjectionView({
       return <WorkBoard snapshot={snapshot} graph={graph} selected={selected} onSelect={onSelect} />;
     case 'dag':
       return (
-        <WorkDagView snapshot={snapshot} graph={graph} selected={selected} onSelect={onSelect} />
+        <WorkDagView snapshot={snapshot} reading={readDag()} selected={selected} onSelect={onSelect} />
       );
     case 'matrix':
       return (
-        <WorkDagView snapshot={snapshot} graph={graph} selected={selected} onSelect={onSelect} view="matrix" />
+        <WorkDagView snapshot={snapshot} reading={readDag()} selected={selected} onSelect={onSelect} view="matrix" />
       );
     case 'timeline':
       return (
@@ -329,10 +331,10 @@ export function WorkPage() {
   );
   const result = useMemo(() => currentWorkProductView(graph.data), [graph.data]);
   const value = result?.outcome === 'value' ? result.value : undefined;
-  const dag = useMemo(
-    () => workDagReading(value?.projections ?? [], graphReading),
-    [value?.projections, graphReading],
-  );
+  const readDag = useMemo(() => {
+    let reading: WorkDagReading | undefined;
+    return () => (reading ??= workDagReading(value?.projections ?? [], graphReading));
+  }, [value?.projections, graphReading]);
 
   const selectedProjection = value?.projections.find(
     (projection) => projection.task_id === selected,
@@ -439,6 +441,7 @@ export function WorkPage() {
                     proximity={concurrent.proximity}
                     selectedEncounterId={concurrent.selectedEncounterId}
                     graph={graphReading}
+                    readDag={readDag}
                     selected={selected}
                     onSelect={setSelected}
                     onSelectEncounter={concurrent.selectEncounter}
@@ -470,7 +473,7 @@ export function WorkPage() {
                     snapshot={value}
                     graph={graph.data}
                     graphReading={graphReading}
-                    dag={dag}
+                    readDag={readDag}
                     topology={topology.data}
                     topologyMetrics={topologyMetrics.data}
                     onSelect={setSelected}
