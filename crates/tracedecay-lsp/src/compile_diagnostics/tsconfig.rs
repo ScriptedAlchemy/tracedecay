@@ -133,8 +133,10 @@ pub fn is_typescript_package_manifest(name: &str) -> bool {
 /// The program one check read, as its `--tsBuildInfoFile` records it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TypeScriptProgram {
-    /// Every file the program read, absolute.
+    /// Files named by path in the program record, absolute.
     pub files: Vec<PathBuf>,
+    /// Default libraries recorded by name, not by filesystem path.
+    pub bundled_libraries: Vec<String>,
     /// The files the configuration itself named, absolute; the rest were
     /// reached through imports, type references and default libraries.
     pub roots: Vec<PathBuf>,
@@ -148,6 +150,7 @@ pub struct TypeScriptProgram {
 /// one-based file ids or inclusive id ranges. typescript@7 leaves an empty
 /// program's file list out; typescript@5 writes the names it compares with,
 /// lower-cased where the filesystem ignores case.
+/// TypeScript 7 records unreplaced default libraries as bare names.
 #[must_use]
 pub fn typescript_build_info_program(build_info: &Path) -> Option<TypeScriptProgram> {
     #[derive(Deserialize)]
@@ -172,10 +175,24 @@ pub fn typescript_build_info_program(build_info: &Path) -> Option<TypeScriptProg
         return None;
     }
     let dir = build_info.parent()?;
+    let mut bundled_libraries = Vec::new();
     let files = info
         .file_names
         .iter()
-        .map(|name| normalize(&dir.join(name)))
+        .map(|name| {
+            if info.version.starts_with("7.")
+                && name.starts_with("lib.")
+                && name.ends_with(".d.ts")
+                && Path::new(name)
+                    .file_name()
+                    .is_some_and(|part| part == name.as_str())
+            {
+                bundled_libraries.push(name.clone());
+                None
+            } else {
+                Some(normalize(&dir.join(name)))
+            }
+        })
         .collect::<Vec<_>>();
     let mut roots = Vec::new();
     for entry in info.root {
@@ -186,9 +203,15 @@ pub fn typescript_build_info_program(build_info: &Path) -> Option<TypeScriptProg
         if first == 0 || first > last {
             return None;
         }
-        roots.extend_from_slice(files.get(first - 1..last)?);
+        for path in files.get(first - 1..last)? {
+            roots.push(path.as_ref()?.clone());
+        }
     }
-    Some(TypeScriptProgram { files, roots })
+    Some(TypeScriptProgram {
+        files: files.into_iter().flatten().collect(),
+        bundled_libraries,
+        roots,
+    })
 }
 
 fn is_skipped_dir(name: &str) -> bool {
@@ -338,6 +361,7 @@ mod tests {
                 ]
                 .map(|file| root.path().join(file))
                 .to_vec(),
+                bundled_libraries: Vec::new(),
                 roots: ["project/src/a.ts", "project/src/b.ts", "project/src/c.ts"]
                     .map(|file| root.path().join(file))
                     .to_vec(),
@@ -354,6 +378,7 @@ mod tests {
             typescript_build_info_program(&root.path().join("store/solution.tsbuildinfo")),
             Some(TypeScriptProgram {
                 files: Vec::new(),
+                bundled_libraries: Vec::new(),
                 roots: Vec::new()
             })
         );

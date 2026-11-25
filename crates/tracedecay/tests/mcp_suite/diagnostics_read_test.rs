@@ -190,6 +190,25 @@ async fn typescript_project_publishes_diagnostics_from_its_own_compiler() {
         checks > 0,
         "the producer ran the project's tsc: {invocations}"
     );
+    let repeated_read = await_published_diagnostics(
+        &server,
+        json!({"scope": "file", "path": "src/index.ts", "maximum_diagnostics": 10}),
+    )
+    .await;
+    assert_eq!(
+        published_records(&repeated_read),
+        published_records(&file_read)
+    );
+    assert_eq!(
+        std::fs::read_to_string(
+            fixture
+                .project_root
+                .join(TYPESCRIPT_FIXTURE_TSC_INVOCATIONS)
+        )
+        .unwrap(),
+        invocations,
+        "diagnostics reads must not launch the compiler"
+    );
 
     fixture.harness.shutdown().await;
 }
@@ -751,9 +770,6 @@ async fn typescript_producer_still_running_is_pending_with_typed_detail() {
     let project_root = isolation.path().join("project");
     write_typescript_diagnostics_fixture(&project_root, TypeScriptFixtureCompiler::Held);
     commit_worktree(&project_root, "held TypeScript producer fixture");
-    // This opener mounts the production owners without waiting for lexical
-    // readiness. The held compiler shares their CPU admission, so requiring
-    // the index to finish before releasing it can make the test wait on itself.
     let harness = Box::pin(seeded_composition::open_for_session_retrieval(
         isolation.path(),
         [project_root.clone()],
@@ -763,6 +779,7 @@ async fn typescript_producer_still_running_is_pending_with_typed_detail() {
     let server = harness
         .server(&project_root)
         .expect("production project server");
+    wait_for_current_graph(&server).await;
     let canonical_root = project_root.canonicalize().expect("canonical project root");
 
     let arguments = json!({"scope": "file", "path": "src/index.ts", "maximum_diagnostics": 10});

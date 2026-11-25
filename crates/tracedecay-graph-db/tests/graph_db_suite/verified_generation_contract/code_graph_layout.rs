@@ -682,6 +682,123 @@ fn cancelled_superseded_retirement_releases_unvisited_fences_for_a_live_retry() 
 /// The whole selected batch remains retryable when the staging engine fails
 /// to reopen before any retirement starts. Keep the same issued lease so an
 /// owner teardown cannot clear the leaked fences on behalf of the pass.
+/// A tombstone retired just before its projection lost the verified head is
+/// already linearized; the headless sweep must still finalize it and reclaim
+/// its sealed artifact (#4616). It must not treat "no head" as licence to
+/// retire any replay record that was never tombstoned.
+#[test]
+fn headless_projection_finishes_preexisting_tombstones_only() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+    let registered = RegisteredGraph::new_mounted(root).unwrap();
+    let mut authority = RelationalAuthority::default();
+    let identity = canonical_projection("worktree.headless-tombstone");
+    let mut head = None;
+    let mut keys = Vec::new();
+    for (index, input) in ['1', '2', '3', '4'].into_iter().enumerate() {
+        let (record, commit) = publish_generation(
+            &registered,
+            root,
+            &mut authority,
+            &identity,
+            &format!("headless-g{}", index + 1),
+            head.take(),
+            input,
+        );
+        head = Some(commit.head.clone());
+        keys.push(record.publication.key);
+    }
+    assert_eq!(sealed_generation_count(root), 4);
+    let projection = keys[3].projection.clone();
+    let sealed_root = support::graph_path(root).with_extension("sealed");
+    let foreign = sealed_root.join("foreign-operator-bytes");
+    std::fs::write(&foreign, b"not a generation").unwrap();
+
+    // Interrupt after the first durable tombstone, before native cleanup.
+    let cancellation = Arc::new(AtomicU8::new(0));
+    authority.cancel_after_retire = Some(Arc::clone(&cancellation));
+    let mut cancelled_registration = registration(registered.binding.clone(), root);
+    cancelled_registration.cancellation =
+        Arc::new(AtomicTestCancellation(Arc::clone(&cancellation)));
+    let (control, probe) = control_and_probe();
+    assert_eq!(
+        registered.registry.retire_superseded_projection_replays(
+            cancelled_registration,
+            &mut authority,
+            &fresh_context(&control, &probe),
+            &projection,
+        ),
+        Err(GraphDbError::Cancelled)
+    );
+    assert!(
+        authority.retired[&keys[0]]
+            .canonical_replay_source
+            .is_some()
+    );
+    assert_eq!(sealed_generation_count(root), 4);
+    cancellation.store(0, Ordering::SeqCst);
+    authority.cancel_after_retire = None;
+
+    // The projection then loses its verified head.
+    authority.heads.remove(&projection);
+
+    let (control, probe) = control_and_probe();
+    let receipt = registered
+        .registry
+        .retire_superseded_projection_replays(
+            registration(registered.binding.clone(), root),
+            &mut authority,
+            &fresh_context(&control, &probe),
+            &projection,
+        )
+        .unwrap();
+    assert_eq!(
+        receipt,
+        SupersededReplayRetirement {
+            retired: 1,
+            retained: 0,
+            pending: 0,
+        },
+        "only the preexisting tombstone is finished"
+    );
+    assert!(
+        authority.retired[&keys[0]]
+            .canonical_replay_source
+            .is_none(),
+        "the tombstone is finalized"
+    );
+    assert_eq!(
+        sealed_generation_count(root),
+        3,
+        "the tombstoned generation's sealed artifact is reclaimed"
+    );
+    for key in &keys[1..] {
+        assert!(
+            authority.records.contains_key(key),
+            "no untombstoned replay is retired without a head"
+        );
+        assert!(!authority.retired.contains_key(key));
+    }
+    assert!(foreign.is_file(), "foreign bytes are never reclaimed");
+    assert_eq!(authority.head_retirement_calls, 0);
+
+    // A second headless sweep has nothing left to finish.
+    let (control, probe) = control_and_probe();
+    assert_eq!(
+        registered
+            .registry
+            .retire_superseded_projection_replays(
+                registration(registered.binding.clone(), root),
+                &mut authority,
+                &fresh_context(&control, &probe),
+                &projection,
+            )
+            .unwrap(),
+        SupersededReplayRetirement::default()
+    );
+    assert_eq!(sealed_generation_count(root), 3);
+}
+
 #[test]
 fn failed_retirement_engine_open_releases_the_entire_selected_batch() {
     let temp = TempDir::new().unwrap();

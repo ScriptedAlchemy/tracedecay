@@ -14,8 +14,9 @@ use tracedecay_domain::CodeGenerationId;
 use super::text_artifacts::private_directory_exists;
 use super::{
     CodeGenerationRetentionErrorV1, CodeGenerationRetentionPlanV1,
-    MAX_CODE_TEXT_ARTIFACT_INVENTORY_ENTRIES_V1, code_text_artifact_staging_root,
-    code_text_artifacts_root, prepare_next_code_generation_retention_page_cancellable, storage,
+    MAX_CODE_TEXT_ARTIFACT_INVENTORY_ENTRIES_V1, StoreLockAdmissionV1,
+    code_text_artifact_staging_root, code_text_artifacts_root,
+    prepare_next_code_generation_retention_page_cancellable, storage,
 };
 
 #[derive(Debug, PartialEq, Eq)]
@@ -59,6 +60,27 @@ impl CodeGenerationRetentionScanV1 {
         is_cancelled: &dyn Fn() -> bool,
         graph_replay_pool_root: Option<&Path>,
     ) -> Result<CodeGenerationRetentionPlanV1, CodeGenerationRetentionErrorV1> {
+        self.prepare_with_admission(
+            store_root,
+            protected_sources,
+            is_cancelled,
+            graph_replay_pool_root,
+            StoreLockAdmissionV1::TryOnce,
+        )
+    }
+
+    /// [`Self::prepare`] with the caller's lock admission. Daemon maintenance
+    /// waits out a busy publisher within its own deadline; one-off callers keep
+    /// the single-attempt shape.
+    #[allow(clippy::too_many_arguments)]
+    pub fn prepare_with_admission(
+        &mut self,
+        store_root: &Path,
+        protected_sources: &BTreeSet<CodeGenerationId>,
+        is_cancelled: &dyn Fn() -> bool,
+        graph_replay_pool_root: Option<&Path>,
+        admission: StoreLockAdmissionV1,
+    ) -> Result<CodeGenerationRetentionPlanV1, CodeGenerationRetentionErrorV1> {
         let page = self.next_page(store_root, is_cancelled)?;
         let mut plan = prepare_next_code_generation_retention_page_cancellable(
             store_root,
@@ -66,6 +88,7 @@ impl CodeGenerationRetentionScanV1 {
             is_cancelled,
             graph_replay_pool_root,
             Some(&page),
+            admission,
         )?;
         // An absent, never-published store returns before the census. Its
         // empty page still needs acknowledging so a later mount is rescanned.

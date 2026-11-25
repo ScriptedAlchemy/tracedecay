@@ -20,8 +20,8 @@ use tracedecay_domain::configuration::{
     LCM_SUMMARIZER_EXECUTABLES_SETTING_KEY, ProtectedChange, ProtectedChangePlan,
     ProtectedChangeSnapshotError, RedactedConfigurationChangeV1, RollbackModeV1,
     SOURCE_BINDINGS_SETTING_KEY, SYNC_WATCH_LINKED_WORKTREES_SETTING_KEY, ScopeControlOperationV1,
-    SettingKey, USER_CODE_INDEX_WORKERS_SETTING_KEY, UserProfileId,
-    WORK_TOPOLOGY_POLICY_SETTING_KEY,
+    SettingKey, TYPESCRIPT_DIAGNOSTICS_ENABLED_SETTING_KEY, USER_CODE_INDEX_WORKERS_SETTING_KEY,
+    UserProfileId, WORK_TOPOLOGY_POLICY_SETTING_KEY,
 };
 use tracedecay_domain::feedback::PROXIMITY_RELATIONSHIP_HINTS_SETTING_KEY_V1;
 use tracedecay_domain::{AccessPolicyDigest, ActorId, ManifestDigest, UtcMicros, canonical_sha256};
@@ -373,6 +373,7 @@ impl<'db> GlobalDbConfigurationControlStore<'db> {
                 LCM_SUMMARIZER_EXECUTABLES_SETTING_KEY,
                 SYNC_WATCH_LINKED_WORKTREES_SETTING_KEY,
                 PROXIMITY_RELATIONSHIP_HINTS_SETTING_KEY_V1,
+                TYPESCRIPT_DIAGNOSTICS_ENABLED_SETTING_KEY,
             ],
             operation,
         )

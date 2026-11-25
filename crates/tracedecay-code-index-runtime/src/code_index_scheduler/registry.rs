@@ -4351,19 +4351,27 @@ fn feedback_document_identity_for_file(
 impl CodeIndexSchedulerRegistryV1 {
     async fn resolve_current_publication_identity(
         &self,
-        project_root: PathBuf,
+        project_root: &Path,
         scope: Option<tracedecay_contracts::ResolvedScope>,
+        known: Option<&CodeGenerationId>,
+        require_query_ready: bool,
     ) -> Option<tracedecay_application::diagnostics_publication::CodeIndexPublicationIdentityV1>
     {
-        let root = canonical_existing_identity(&project_root).ok()?;
-        // Identity, not serving: this reads only the retained generation's
-        // manifest and snapshot. The TypeScript producer publishes at the
-        // seal, so a warming lexical artifact must not hide that publication.
-        let root_generation = self.retained_text_owner_for_root(&root).await?;
+        // Explicit diagnostic publication can bind to a retained generation
+        // while its lexical artifact warms.
+        let root_generation = if require_query_ready {
+            self.latest_text_serving_for_root(project_root).await?
+        } else {
+            self.retained_text_owner_for_root(project_root).await?
+        };
+        let metadata = root_generation.metadata();
+        let generation = &metadata.manifest().generation_id;
+        if known == Some(generation) {
+            return None;
+        }
         let scope = match scope {
             Some(scope) => scope,
             None => {
-                let metadata = root_generation.metadata();
                 let snapshot = metadata.snapshot();
                 tracedecay_contracts::ResolvedScope::new(
                     metadata.manifest().project_id.clone(),
@@ -4374,77 +4382,37 @@ impl CodeIndexSchedulerRegistryV1 {
                 .ok()?
             }
         };
-        let (current, fresh) = self.retained_text_owner_freshness_for_scope(&scope).await?;
-        if !fresh
-            || root_generation.metadata().manifest().generation_id
-                != current.metadata().manifest().generation_id
-        {
-            return None;
-        }
-        Some(publication_identity(current.metadata()))
+        let (current, fresh) = if require_query_ready {
+            self.latest_text_serving_freshness_for_scope(&scope).await?
+        } else {
+            self.retained_text_owner_freshness_for_scope(&scope).await?
+        };
+        (fresh && generation == &current.metadata().manifest().generation_id)
+            .then(|| publication_identity(current.metadata()))
     }
 
-    /// The publication identity of the generation the latest seal named, for
-    /// a producer whose findings depend only on the sealed source. It answers
-    /// as soon as the seal moves the durable pointer, while the text
-    /// projection and serving swap that follow are still running, and only
-    /// while the fence's last source proof still describes that snapshot.
-    ///
-    /// A caller that already handled `known` gets `None` from one pointer
-    /// read while no newer seal exists; only a new seal pays for decoding
-    /// the generation's manifest.
+    /// Automatic diagnostics use the query-ready owner's already resident
+    /// metadata, never competing with the first projection of a sealed source.
     #[tracing::instrument(
-        name = "daemon.code_index.sealed_publication_identity",
+        name = "daemon.code_index.query_ready_diagnostics_identity",
         level = "trace",
         skip_all
     )]
-    pub async fn sealed_publication_identity(
+    pub async fn query_ready_diagnostics_identity(
         &self,
         project_root: &Path,
         known: Option<&CodeGenerationId>,
-    ) -> Result<
-        Option<tracedecay_application::diagnostics_publication::CodeIndexPublicationIdentityV1>,
-        CodeIndexSchedulerErrorV1,
-    > {
-        let Ok(root) = canonical_existing_identity(project_root) else {
-            return Ok(None);
-        };
-        let (owner, source_freshness, shutting_down) = {
-            let mounted = self.mounted.lock().await;
-            let Some(worktree) = mounted.get(&root) else {
-                return Ok(None);
-            };
-            (
-                worktree.historical_generation_owner.clone(),
-                worktree.source_freshness.clone(),
-                Arc::clone(&worktree.shutting_down),
-            )
-        };
-        let admission_pending = source_freshness.read_pending_source().map_err(|error| {
-            CodeIndexSchedulerErrorV1::Identity(format!("source admission read failed: {error:?}"))
-        })?;
-        if admission_pending {
-            return Ok(None);
+    ) -> Option<tracedecay_application::diagnostics_publication::CodeIndexPublicationIdentityV1>
+    {
+        if !self
+            .subscribe_owner_activity(project_root)
+            .await?
+            .pass_finished()
+        {
+            return None;
         }
-        let known = known.cloned();
-        let metadata = native_runtime::spawn_blocking(move || {
-            owner.active_publication_text_metadata(known.as_ref())
-        })
-        .await
-        .map_err(|error| {
-            CodeIndexSchedulerErrorV1::Identity(format!(
-                "sealed publication identity read task failed: {error}"
-            ))
-        })??;
-        Ok(metadata
-            .filter(|metadata| {
-                source_freshness.serves_verified_source(
-                    &metadata.snapshot().content_identity,
-                    &root,
-                    &shutting_down,
-                )
-            })
-            .map(|metadata| publication_identity(&metadata)))
+        self.resolve_current_publication_identity(project_root, None, known, true)
+            .await
     }
 }
 
@@ -4479,7 +4447,7 @@ impl tracedecay_application::diagnostics_publication::CodeIndexPublicationIdenti
         let registry = self.clone();
         Box::pin(async move {
             registry
-                .resolve_current_publication_identity(project_root, None)
+                .resolve_current_publication_identity(&project_root, None, None, false)
                 .await
         })
     }
@@ -4493,7 +4461,7 @@ impl tracedecay_application::diagnostics_publication::CodeIndexPublicationIdenti
         let registry = self.clone();
         Box::pin(async move {
             registry
-                .resolve_current_publication_identity(project_root, Some(scope))
+                .resolve_current_publication_identity(&project_root, Some(scope), None, false)
                 .await
         })
     }

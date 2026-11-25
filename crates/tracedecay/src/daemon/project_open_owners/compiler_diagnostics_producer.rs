@@ -1,5 +1,5 @@
 //! Project-open owner that runs the project's own TypeScript compiler when
-//! each code-index generation seals and publishes its findings for it.
+//! each code-index generation can serve queries and publishes its findings for it.
 //!
 //! `tracedecay_diagnostics` is a read over generation-bound publications, so a
 //! freshly initialized TypeScript project answered "no producer" until a caller
@@ -20,8 +20,11 @@ use tracedecay_application::diagnostics_producer::{
 };
 use tracedecay_application::diagnostics_store::DiagnosticsStore;
 use tracedecay_code_index_runtime::code_index_scheduler::CodeIndexOwnerSignalsV1;
-use tracedecay_contracts::now_micros;
+use tracedecay_contracts::{ResolvedScope, now_micros};
 use tracedecay_domain::CodeGenerationId;
+use tracedecay_domain::configuration::{
+    ConfigurationSnapshotV1, ConfigurationValueV1, TYPESCRIPT_DIAGNOSTICS_ENABLED_SETTING_KEY,
+};
 use tracedecay_lsp::{
     TypeScriptCompilerAdmission, TypeScriptProject, TypeScriptProjectDiscoveryError,
     typescript_projects,
@@ -39,8 +42,26 @@ const BUILD_INFO_DIR: &str = "typescript-build-info";
 pub(super) fn compiler_admission_for_project(
     invocation: &DaemonInvocationState,
     project_root: &Path,
-    scope: &tracedecay_contracts::ResolvedScope,
+    scope: &ResolvedScope,
+    configuration: &ConfigurationSnapshotV1,
 ) -> Option<TypeScriptCompilerAdmission> {
+    let configured = configuration
+        .effective_values
+        .iter()
+        .find_map(|(key, value)| {
+            (key.as_str() == TYPESCRIPT_DIAGNOSTICS_ENABLED_SETTING_KEY).then_some(value)
+        });
+    match configured {
+        Some(ConfigurationValueV1::Boolean(true)) => {}
+        Some(ConfigurationValueV1::Boolean(false)) => {
+            log_producer_event(project_root, "disabled_by_configuration");
+            return None;
+        }
+        _ => {
+            log_producer_event(project_root, "configuration_unavailable");
+            return None;
+        }
+    }
     if tracedecay_code_index_runtime::project_reads::code_index_disabled_for_scope(
         &invocation.code_index_schedulers,
         scope,
@@ -108,42 +129,27 @@ pub(super) fn spawn_typescript_diagnostics_producer(
             // whose compiler keeps failing must not re-run it on each of them.
             let mut attempted_for: Option<CodeGenerationId> = None;
             loop {
-                // The sealed generation, not the serving one: tsc reads only
-                // the source the seal proved, so the check starts at the seal
-                // rather than after the text projection and serving swap. A
-                // generation sealed mid-run is caught by the next wake.
-                match schedulers
-                    .sealed_publication_identity(&project_root, attempted_for.as_ref())
+                if let Some(identity) = schedulers
+                    .query_ready_diagnostics_identity(&project_root, attempted_for.as_ref())
                     .await
                 {
-                    Ok(Some(identity)) => {
-                        attempted_for = Some(identity.generation_id().clone());
-                        // A generation can add, drop, or retarget tsconfigs.
-                        if let Some(projects) = discover_projects(&project_root).await {
-                            let database = graph.dashboard_database_guard();
-                            let store = DiagnosticsStore::new(database.as_ref().clone());
-                            let run = run_typescript_producer_v1(
-                                &project_root,
-                                &projects,
-                                &identity,
-                                &store,
-                                &build_info_dir,
-                                &mut state,
-                                now_micros(),
-                            )
-                            .await;
-                            log_producer_run(&project_root, &run);
-                        }
+                    attempted_for = Some(identity.generation_id().clone());
+                    // A generation can add, drop, or retarget tsconfigs.
+                    if let Some(projects) = discover_projects(&project_root).await {
+                        let database = graph.dashboard_database_guard();
+                        let store = DiagnosticsStore::new(database.as_ref().clone());
+                        let run = run_typescript_producer_v1(
+                            &project_root,
+                            &projects,
+                            &identity,
+                            &store,
+                            &build_info_dir,
+                            &mut state,
+                            now_micros(),
+                        )
+                        .await;
+                        log_producer_run(&project_root, &run);
                     }
-                    Ok(_) => {}
-                    Err(error) => log_daemon_event(
-                        "typescript_diagnostics_producer",
-                        &[
-                            ("project", project_root.display().to_string()),
-                            ("outcome", "sealed_identity_unavailable".to_owned()),
-                            ("detail", error.to_string()),
-                        ],
-                    ),
                 }
                 if signals.changed().await.is_err() {
                     return;
