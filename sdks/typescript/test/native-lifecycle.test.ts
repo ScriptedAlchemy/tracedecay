@@ -98,17 +98,58 @@ describe("native lifecycle ownership", () => {
     });
   });
 
+  it("releases a watcher when return is requested during a pending read", async () => {
+    await withDaemon([heldEvents(OPEN)], async (daemon) => {
+      const iterator = daemon.client().streamOperation("request.operation");
+      expect((await iterator.next()).value?.event).toBe("open");
+      const pending = iterator.next().catch((error: unknown) => error);
+      expect(await iterator.return(undefined)).toEqual({ done: true, value: undefined });
+      expect(await pending).toBeInstanceOf(TraceDecayAbortError);
+      await daemon.closed(0);
+      expect(daemon.requests.map((request) => request.method)).toEqual(["GET"]);
+    });
+  });
+
+  it("closes a terminal response before the consumer asks for another event", async () => {
+    const terminal = "event: completed\nid: 0\ndata: " + JSON.stringify({
+      event: "completed",
+      data: { sequence: 0, terminal: { termination: "completed", receipt: {
+        started_at: 1, ended_at: 2, effective_deadline: { expires_at: 3 }, cancellation: null,
+        budget: { units_consumed: 0, bytes_consumed: 0, elapsed_micros: 1 },
+        termination: "completed",
+      } } },
+    }) + "\n\n";
+    await withDaemon([heldEvents(OPEN + terminal)], async (daemon) => {
+      const iterator = daemon.client().streamOperation("request.operation");
+      expect((await iterator.next()).value?.event).toBe("open");
+      expect((await iterator.next()).value?.event).toBe("completed");
+      await daemon.closed(0);
+      expect(await iterator.next()).toEqual({ done: true, value: undefined });
+      expect(daemon.requests.map((request) => request.method)).toEqual(["GET"]);
+    });
+  });
+
   it("applies backpressure to the daemon while the consumer is not reading", async () => {
-    let refusedAfter: number | undefined;
-    const flood: Handler = (_request, response) => {
+    let produced = 0;
+    let drains = 0;
+    const flood: Handler = async (_request, response) => {
       response.writeHead(200, { "content-type": "text/event-stream" });
       response.write(OPEN);
-      // Write until the socket refuses more; an eager reader would drain
-      // everything into memory and the write would never be refused.
-      for (let sequence = 0; sequence < 200_000; sequence += 1) {
-        if (!response.write(item(sequence))) {
-          refusedAfter = sequence;
-          return;
+      // Continue through local writable-buffer drains. Stopping at the first
+      // false write would prove only Node's output high-water mark, not that
+      // the paused native reader eventually stops the TCP sender.
+      while (!response.destroyed && produced < 200_000) {
+        if (!response.write(item(produced++))) {
+          await new Promise<void>((resolve) => {
+            const ready = () => {
+              response.off("drain", ready);
+              response.off("close", ready);
+              resolve();
+            };
+            response.once("drain", ready);
+            response.once("close", ready);
+          });
+          drains += 1;
         }
       }
     };
@@ -116,10 +157,10 @@ describe("native lifecycle ownership", () => {
       const iterator = daemon.client().streamOperation("request.operation");
       expect((await iterator.next()).value?.event).toBe("open");
       await new Promise((resolve) => setTimeout(resolve, 200));
-      expect(refusedAfter).toBeDefined();
+      expect(drains).toBeGreaterThan(0);
       // The kernel buffers on both sides bound what was produced, far below
       // the 200k events (~60 MB) an unbounded reader would accept.
-      expect(refusedAfter).toBeLessThan(50_000);
+      expect(produced).toBeLessThan(50_000);
       await iterator.return(undefined);
       await daemon.closed(0);
     });
@@ -186,6 +227,22 @@ describe("native lifecycle ownership", () => {
       expect(daemon.requests).toHaveLength(0);
     });
   });
+
+  it.each([NaN, Infinity, -Infinity, 1.5, Number.MAX_SAFE_INTEGER + 1])(
+    "refuses non-canonical numeric controls before transport (%s)",
+    async (value) => {
+      await withDaemon([], async (daemon) => {
+        const client = daemon.client();
+        await expect(client.operations.workflow_list_definitions({}, { deadlineMicros: value }))
+          .rejects.toBeInstanceOf(TraceDecayProtocolError);
+        await expect(client.operations.workflow_list_definitions({}, { page: { size: value } }))
+          .rejects.toBeInstanceOf(TraceDecayProtocolError);
+        await expect(client.streamOperation("request.operation", { maxReconnects: value }).next())
+          .rejects.toBeInstanceOf(TraceDecayProtocolError);
+        expect(daemon.requests).toHaveLength(0);
+      });
+    },
+  );
 });
 
 describe("native binding resolution", () => {

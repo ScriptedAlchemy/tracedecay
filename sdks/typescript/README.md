@@ -31,7 +31,7 @@ deliver it some other way, such as an offline plugin install that places
 `tracedecay_sdk_node.node` beside the daemon binary, pass its absolute path as
 `addon`. MCP-backed operations never load the binding.
 
-### Migrating from 0.15
+### Migrating from 0.15 to 0.16
 
 - `ClientOptions.fetch` is removed. Requests no longer pass through a
   replaceable `fetch`; test against a real loopback server instead of a fetch
@@ -130,18 +130,29 @@ directory; `npm publish <tarball>.tgz` (what the CI publish job does) skips
 package lifecycle scripts entirely, so CI's own build/conformance job is the
 authoritative gate, not this hook.
 
+Build the binding through `bazel build //crates/tracedecay-sdk-node:addon`
+and set `TRACEDECAY_SDK_ADDON` to the resulting
+`bazel-bin/crates/tracedecay-sdk-node/tracedecay_sdk_node.node` for local tests.
+
 Actual releases run through `.github/workflows/release.yml` on the same
-GitHub Release trigger that ships the binaries. An unprivileged
-`build-typescript` job packs the tarball exactly once, runs
+GitHub Release trigger that ships the binaries. The native build matrix uses
+the same release targets as the daemon, loads each addon on its target runner,
+and packs one platform package per target. An unprivileged
+`build-typescript` job verifies the complete platform set, links those exact
+versions as optional dependencies, packs the facade exactly once, and runs
 typecheck/unit/conformance against that same tarball, and stages both the
 artifact and digest-pinned npm tooling. A separate protected
 `publish-typescript` job, gated on the release verification job, re-verifies
-those exact bytes and publishes through tokenless npm trusted publishing
+those exact bytes and publishes the platform packages before the facade through
+tokenless npm trusted publishing
 (OIDC; provenance attached automatically; no `NPM_TOKEN` exists), without
 installing code. Prerelease package versions publish under the `beta`
 dist-tag; stable versions take `latest`. Setting `TRACEDECAY_SDK_TARBALL` to
 a prebuilt tarball path makes `test:installed` exercise that tarball instead
 of packing its own.
+`TRACEDECAY_SDK_NATIVE_TARBALL` selects the exact platform tarball for that
+installed-consumer test. Native archives also carry the same addon beside the
+daemon for offline plugin installations.
 
 ## Event-stream framing limits
 
@@ -156,5 +167,9 @@ The binding reads the next body chunk only when the iterator asks for the next
 event, so a slow consumer applies TCP backpressure to the daemon instead of
 growing a buffer. Overflow throws `TraceDecayMalformedResponseError`, closes
 the connection, and never reconnects or delivers the oversized frame. Leaving
-a `for await` loop early, calling `return()`, or aborting its signal releases
-the connection without cancelling the operation.
+a `for await` loop early, calling `return()` or `throw()`, or aborting its
+signal releases the connection without cancelling the operation. Explicit
+iterator disposal closes the transport even while `next()` is pending: that
+pending read rejects with `TraceDecayAbortError`, while `return()` resolves
+normally. Parsing a terminal event also closes the response immediately,
+before the consumer requests another event.

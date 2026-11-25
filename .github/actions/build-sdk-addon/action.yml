@@ -1,0 +1,39 @@
+name: Build the Node SDK addon
+description: Build and load the release Node-API binding through Bazel.
+
+inputs:
+  config:
+    description: Build profile (dist, release or ci).
+    default: dist
+  dest:
+    description: Directory for the staged native addon.
+    required: true
+
+outputs:
+  path:
+    description: Absolute path to the verified native addon.
+    value: ${{ steps.addon.outputs.path }}
+
+runs:
+  using: composite
+  steps:
+    - name: Build and load the native binding
+      id: addon
+      shell: bash
+      env:
+        ADDON_DEST: ${{ inputs.dest }}
+        BUILD_CONFIG: ${{ inputs.config }}
+      run: |
+        set -euo pipefail
+        args=(--config=ci)
+        case "$BUILD_CONFIG" in
+          dist|release) args=(--config="$BUILD_CONFIG" "${args[@]}") ;;
+          ci) ;;
+          *) echo "Unsupported addon build profile: $BUILD_CONFIG" >&2; exit 1 ;;
+        esac
+        bazel build "${args[@]}" //crates/tracedecay-sdk-node:addon
+        mkdir -p "$ADDON_DEST"
+        cp "$(bazel info "${args[@]}" bazel-bin)/crates/tracedecay-sdk-node/tracedecay_sdk_node.node" "$ADDON_DEST/tracedecay_sdk_node.node"
+        addon="$(cd "$ADDON_DEST" && pwd)/tracedecay_sdk_node.node"
+        node -e 'const binding = require(process.argv[1]); if (typeof binding.NativeClient !== "function") throw new Error("native SDK client export is missing")' "$addon"
+        echo "path=$addon" >> "$GITHUB_OUTPUT"

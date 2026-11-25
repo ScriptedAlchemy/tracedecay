@@ -247,7 +247,7 @@ impl Client {
                 },
             ))?;
             let payload = admitted.payload().cloned().unwrap_or(Value::Null);
-            let result = Operation::Result::deserialize(payload).map_err(|error| {
+            let result = Option::<Operation::Result>::deserialize(payload).map_err(|error| {
                 statusless_protocol(format!(
                     "daemon returned a malformed {} result: {error}",
                     Operation::OPERATION_ID
@@ -337,7 +337,9 @@ fn content_type(response: &Response) -> Option<String> {
 #[derive(Clone, Debug, PartialEq)]
 pub struct TypedResponse<Result> {
     pub request_id: String,
-    pub result: Result,
+    /// Some terminal outcomes carry only their receipt. Absence of a payload
+    /// never means that the operation completed; inspect the envelope receipt.
+    pub result: Option<Result>,
     /// The validated success envelope, including operation/effect receipts.
     pub envelope: Value,
 }

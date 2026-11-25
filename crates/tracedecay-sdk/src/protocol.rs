@@ -12,8 +12,8 @@ use reqwest::{Method, StatusCode, Url};
 use serde::Deserialize as _;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
-use tracedecay_contracts::RequestId;
 use tracedecay_contracts::retained_surfaces::{SdkRequestIdControlV1, SdkResultSemanticsV1};
+use tracedecay_contracts::{CancellationObservation, RequestId};
 use tracedecay_tool_catalog::{
     CancellationPoint, ReceiptContract, ReconciliationContract, SdkTransportBindingV1,
     TerminalState,
@@ -502,7 +502,9 @@ impl PreparedOperation {
         if let Some(cancellation) = execution.get("cancellation")
             && !cancellation.is_null()
         {
-            if !contract.cancellable {
+            // A deadline observation is valid even when callers cannot
+            // cancel the operation. Its terminal state was admitted above.
+            if !contract.cancellable && termination != TerminalState::TimedOut {
                 return Err(protocol(
                     status,
                     format!(
@@ -523,10 +525,11 @@ impl PreparedOperation {
                         ),
                     )
                 })?;
-            if !contract
-                .cancellation_points
-                .iter()
-                .any(|point| cancellation_point_name(*point) == stage)
+            if contract.cancellable
+                && !contract
+                    .cancellation_points
+                    .iter()
+                    .any(|point| cancellation_point_name(*point) == stage)
             {
                 return Err(protocol(
                     status,
@@ -555,10 +558,10 @@ impl PreparedOperation {
                 ),
             ));
         }
-        // A completed evidence read always carries its payload; only a
-        // non-completed receipt may stand without one.
-        let receipt_without_payload = outcome_kind == OutcomeKind::Evidence
-            && termination != TerminalState::Completed
+        // Canonical effect and preview results can contain only their receipt.
+        // A completed evidence read still requires its typed payload.
+        let receipt_without_payload = (outcome_kind != OutcomeKind::Evidence
+            || termination != TerminalState::Completed)
             && payload.is_null();
         if !receipt_without_payload {
             (contract.validate_result)(payload).map_err(|error| {
@@ -1243,7 +1246,11 @@ fn validate_receipt<'a>(
     }
     let cancellation = match receipt.get("cancellation") {
         Some(Value::Null) => None,
-        Some(Value::Object(cancellation)) => Some(cancellation),
+        Some(value @ Value::Object(_)) => Some(
+            CancellationObservation::deserialize(value).map_err(|error| {
+                protocol(status, format!("malformed cancellation evidence: {error}"))
+            })?,
+        ),
         _ => {
             return Err(protocol(
                 status,

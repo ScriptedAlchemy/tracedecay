@@ -424,6 +424,11 @@ impl NativeStream {
             Some(chunk) => {
                 let (events, error) = inner.state.push_bytes(&chunk);
                 inner.ready.extend(events);
+                // A terminal or malformed frame ends transport ownership now,
+                // even if JS pauses before asking for the buffered event.
+                if inner.state.is_finished() || error.is_some() {
+                    inner.body = None;
+                }
                 // Deliver what preceded the failure, then fail.
                 inner.failure = error;
                 Ok(())

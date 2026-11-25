@@ -1,10 +1,8 @@
-import { useMemo } from 'react';
 import { StateChip } from '../../../ui/StateChip.tsx';
 import { Panel } from '../../../ui/instrument.tsx';
 import { coverageReading } from '../workModel.ts';
-import type { WorkGraphReading } from '../workGraphModel.ts';
 import type { WorkProductView } from '../workProductView.ts';
-import { type WorkDagReading, workDagReading } from '../workViewsModel.ts';
+import type { WorkDagReading } from '../workViewsModel.ts';
 import { WorkDagBoard } from './WorkDagBoard.tsx';
 import type { WorkDagFieldView } from './dagField.ts';
 import { ChannelLedger, EmptyReading } from './WorkViewChannel.tsx';
@@ -29,21 +27,17 @@ import { ChannelLedger, EmptyReading } from './WorkViewChannel.tsx';
  */
 export function WorkDagView({
   snapshot,
-  graph,
+  reading,
   selected,
   onSelect,
   view = 'graph',
 }: {
   snapshot: WorkProductView;
-  graph: WorkGraphReading;
+  reading: WorkDagReading;
   selected: string | null;
   onSelect: (taskId: string) => void;
   view?: WorkDagFieldView;
 }) {
-  const reading = useMemo(
-    () => workDagReading(snapshot.projections, graph),
-    [snapshot.projections, graph],
-  );
   const coverage = coverageReading(snapshot.coverage);
 
   return (

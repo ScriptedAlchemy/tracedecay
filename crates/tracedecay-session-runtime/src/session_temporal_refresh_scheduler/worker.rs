@@ -357,7 +357,13 @@ pub(super) async fn run_session_temporal_refresh_scheduler(
                 state.pass_count.fetch_add(1, Ordering::AcqRel);
             }
             if let Some(outcome) = &history_outcome {
-                state.record_history_outcome(outcome.clone());
+                match (outcome, history_release.as_ref()) {
+                    (
+                        SessionHistoricalIngestOutcome::Retryable { reason_code, .. },
+                        Some(HistoryRelease::Admission(_)),
+                    ) => state.record_history_admission_refusal(reason_code),
+                    _ => state.record_history_outcome(outcome.clone()),
+                }
             }
             if matches!(
                 history_outcome,

@@ -19,7 +19,8 @@ EPOCH = 1_700_000_001
 PAYLOAD = b"tracedecay release binary\n"
 
 
-def package(binary: Path, output: Path, archive_format: str, entry_name: str) -> None:
+def package(binary: Path, output: Path, archive_format: str, entry_name: str,
+            addon: Path | None = None) -> None:
     subprocess.run(
         [
             "python3",
@@ -34,6 +35,7 @@ def package(binary: Path, output: Path, archive_format: str, entry_name: str) ->
             entry_name,
             "--epoch",
             str(EPOCH),
+            *(["--addon", str(addon)] if addon is not None else []),
         ],
         check=True,
     )
@@ -89,6 +91,24 @@ def main() -> None:
         binary.chmod(0o755)
         test_tar_gz(temp, binary)
         test_zip(temp, binary)
+        addon = temp / "tracedecay_sdk_node.node"
+        addon.write_bytes(b"native SDK binding\n")
+        for archive_format, entry_name in (("tar.gz", "tracedecay"), ("zip", "tracedecay.exe")):
+            archive = temp / f"with-addon.{archive_format}"
+            package(binary, archive, archive_format, entry_name, addon)
+            if archive_format == "tar.gz":
+                with tarfile.open(archive, "r:gz") as packaged:
+                    assert set(packaged.getnames()) == {entry_name, addon.name}
+                    assert packaged.extractfile(addon.name).read() == addon.read_bytes()
+                    assert packaged.getmember(addon.name).mode == 0o644
+            else:
+                with zipfile.ZipFile(archive) as packaged:
+                    assert set(packaged.namelist()) == {entry_name, addon.name}
+                    assert packaged.read(addon.name) == addon.read_bytes()
+            first_bytes = archive.read_bytes()
+            os.utime(addon, (EPOCH + 300, EPOCH + 300))
+            package(binary, archive, archive_format, entry_name, addon)
+            assert archive.read_bytes() == first_bytes
     print("release archive packaging tests passed")
 
 

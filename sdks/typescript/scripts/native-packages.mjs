@@ -7,13 +7,15 @@
 //
 //   native-packages.mjs stage --target <rust-triple> --addon <file> --out <dir>
 //   native-packages.mjs link
+//   native-packages.mjs verify --packages <artifact-directory>
 //
 // `stage` writes one platform package directory. `link` writes the main
 // package's optionalDependencies at its current version; the release job runs
 // it after the version bump and before `npm pack`, because unpublished
 // platform packages cannot sit in the workspace manifest. Both are
 // idempotent: rerunning converges on the same files.
-import { copyFileSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { copyFileSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -60,6 +62,34 @@ function optionalDependencies(version) {
   );
 }
 
+function verifyPackages(directory) {
+  const expected = new Map(releaseTargets().map((target) => {
+    const platform = platformOf(target);
+    return [`@tracedecay/sdk-${platform.suffix}`, platform];
+  }));
+  const version = mainPackage().version;
+  const filenames = readdirSync(directory, { recursive: true })
+    .filter((filename) => filename.endsWith(".tgz"));
+  for (const filename of filenames) {
+    const tarball = path.join(directory, filename);
+    const manifest = JSON.parse(execFileSync("tar", ["-xOf", tarball, "package/package.json"], { encoding: "utf8" }));
+    const platform = expected.get(manifest.name);
+    if (platform === undefined || manifest.version !== version || manifest.main !== ADDON
+        || JSON.stringify(manifest.os) !== JSON.stringify([platform.os])
+        || JSON.stringify(manifest.cpu) !== JSON.stringify([platform.cpu])
+        || JSON.stringify(manifest.libc) !== JSON.stringify(platform.libc === undefined ? undefined : [platform.libc])) {
+      throw new Error(`unexpected native SDK package: ${filename}`);
+    }
+    const addon = readFileSync(path.join(path.dirname(tarball), ADDON));
+    const packed = execFileSync("tar", ["-xOf", tarball, `package/${ADDON}`], { maxBuffer: addon.length + 1 });
+    if (packed.length === 0 || !packed.equals(addon)) {
+      throw new Error(`native SDK package differs from the tested addon: ${filename}`);
+    }
+    expected.delete(manifest.name);
+  }
+  if (expected.size !== 0) throw new Error(`missing native SDK packages: ${[...expected.keys()].join(", ")}`);
+}
+
 function argument(args, name) {
   const index = args.indexOf(name);
   const value = index === -1 ? undefined : args[index + 1];
@@ -74,8 +104,10 @@ if (command === "stage") {
   const platform = platformOf(target);
   const main = mainPackage();
   const out = path.resolve(argument(args, "--out"));
+  const addon = path.resolve(argument(args, "--addon"));
+  if (!statSync(addon).isFile() || statSync(addon).size === 0) throw new Error(`native SDK addon is missing or empty: ${addon}`);
   mkdirSync(out, { recursive: true });
-  copyFileSync(path.resolve(argument(args, "--addon")), path.join(out, ADDON));
+  copyFileSync(addon, path.join(out, ADDON));
   writeJson(path.join(out, "package.json"), {
     name: `@tracedecay/sdk-${platform.suffix}`,
     version: main.version,
@@ -94,6 +126,8 @@ if (command === "stage") {
   const file = path.join(packageRoot, "package.json");
   const main = mainPackage();
   writeJson(file, { ...main, optionalDependencies: optionalDependencies(main.version) });
+} else if (command === "verify") {
+  verifyPackages(path.resolve(argument(args, "--packages")));
 } else {
-  throw new Error("usage: native-packages.mjs stage --target <triple> --addon <file> --out <dir> | link");
+  throw new Error("usage: native-packages.mjs stage --target <triple> --addon <file> --out <dir> | link | verify --packages <dir>");
 }

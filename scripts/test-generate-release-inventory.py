@@ -26,11 +26,15 @@ def write_package(path: Path, name: str, version: str, license_value: str) -> No
     )
 
 
-def make_archive(path: Path, payload: bytes) -> None:
+def make_archive(path: Path, payload: bytes, addon: bytes | None = None) -> None:
     with tarfile.open(path, "w:gz") as archive:
         entry = tarfile.TarInfo("tracedecay")
         entry.size = len(payload)
         archive.addfile(entry, __import__("io").BytesIO(payload))
+        if addon is not None:
+            entry = tarfile.TarInfo("tracedecay_sdk_node.node")
+            entry.size = len(addon)
+            archive.addfile(entry, __import__("io").BytesIO(addon))
 
 
 def configured_graph_preserves_target_and_exec_dependency_boundaries() -> None:
@@ -64,6 +68,16 @@ def configured_graph_preserves_target_and_exec_dependency_boundaries() -> None:
         {"label": "@@c__runtime-only-1.0.0//:runtime_only", "kind": "rust_library"},
         {"label": "@@c__shared-1.0.0//:shared", "kind": "rust_library"},
     ]
+
+    sdk_root = "//crates/tracedecay-sdk-node:tracedecay-sdk-node (123abc)"
+    sdk_graph = graph.replace(root, sdk_root)
+    sdk_kinds = kinds.replace(f"rust_binary rule {root}", f"rust_shared_library rule {sdk_root}")
+    sdk_labels = INVENTORY.parse_graph(sdk_graph, sdk_kinds, INVENTORY.SDK_TARGET)
+    assert {item["label"] for item in sdk_labels} == {
+        INVENTORY.SDK_TARGET,
+        "@@c__runtime-only-1.0.0//:runtime_only",
+        "@@c__shared-1.0.0//:shared",
+    }
 
     # Bazel's default DOT output combines equivalent nodes. An externally
     # supplied factored graph must not silently lose all but the first crate.
@@ -389,6 +403,48 @@ rust_library rule @@c__build-tool-1.0.0//:build_tool
             output_base,
         )
         assert scope.read_bytes() != scope_bytes
+
+        write_package(source / "crates/tracedecay-sdk-node/Cargo.toml", "tracedecay-sdk-node", "0.1.0", "MIT")
+        scoped = json.loads(scope.read_bytes())
+        scoped["sdk_rust_components"] = [scoped["rust_components"][0], {
+            "name": "napi",
+            "version": "3.0.0",
+            "purl": "pkg:cargo/napi@3.0.0",
+            "license": "MIT",
+            "downloadLocation": "https://crates.io/crates/napi/3.0.0",
+        }]
+        scope.write_bytes(INVENTORY.canonical_json(scoped))
+        INVENTORY.npm_components = lambda _source_root, platform: INVENTORY.npm_components_from_lock(npm_lock, platform)
+        try:
+            INVENTORY.release_inventory(*arguments)
+        except KeyError:
+            pass
+        else:
+            raise AssertionError("inventory accepted a release missing its SDK addon")
+        make_archive(archive, binary, b"native-sdk-addon")
+        INVENTORY.release_inventory(*arguments)
+        native_document = json.loads(inventory.read_bytes())
+        native_packages = {package["name"]: package for package in native_document["packages"]}
+        napi_id = native_packages["napi"]["SPDXID"]
+        assert "tracedecay_sdk_node.node" in native_packages
+        native_relationships = native_document["relationships"]
+        assert len(native_relationships) == len({
+            (item["spdxElementId"], item["relationshipType"], item["relatedSpdxElement"])
+            for item in native_relationships
+        })
+        assert {"spdxElementId": "SPDXRef-SDK-Addon", "relationshipType": "DEPENDS_ON", "relatedSpdxElement": napi_id} in native_relationships
+        assert {"spdxElementId": "SPDXRef-CLI-Binary", "relationshipType": "DEPENDS_ON", "relatedSpdxElement": napi_id} not in native_relationships
+        assert {"spdxElementId": "SPDXRef-MCPB", "relationshipType": "CONTAINS", "relatedSpdxElement": napi_id} not in native_relationships
+        INVENTORY.verify_inventory(inventory, archive, mcpb)
+        native_packages["tracedecay_sdk_node.node"]["checksums"][0]["checksumValue"] = "0" * 64
+        inventory.write_bytes(INVENTORY.canonical_json(native_document))
+        try:
+            INVENTORY.verify_inventory(inventory, archive, mcpb)
+        except ValueError as error:
+            assert "native SDK addon" in str(error)
+        else:
+            raise AssertionError("inventory accepted a different native SDK addon digest")
+        INVENTORY.npm_components = npm_components
 
     print("release component inventory tests passed")
 

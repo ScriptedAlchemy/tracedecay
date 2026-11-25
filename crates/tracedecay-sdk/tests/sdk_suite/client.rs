@@ -11,7 +11,7 @@ use tracedecay_sdk::client::{
 };
 use tracedecay_sdk::operations::{
     ApplicationFactStoreCurate, MultiRootScopeSetRead, OperationTransport, TypedOperation,
-    WorkflowListDefinitions,
+    WorkflowActivateDefinition, WorkflowListDefinitions,
 };
 use tracedecay_tool_catalog::TerminalState;
 
@@ -603,6 +603,69 @@ fn typed_result_rejects_a_cancellation_stage_outside_the_operation_contract() {
 }
 
 #[test]
+fn a_timed_out_workflow_returns_its_receipt_without_a_payload() {
+    let mut body = list_definitions_success();
+    body["value"]["binding_id"] = json!(WorkflowActivateDefinition::BINDING_ID);
+    body["value"]["contract"] = json!({
+        "schema_id": WorkflowActivateDefinition::RESULT_SCHEMA_ID,
+        "schema_revision": WorkflowActivateDefinition::RESULT_SCHEMA_REVISION,
+    });
+    body["value"]["outcome"] = json!({
+        "outcome": "effect",
+        "value": {
+            "effect_id": "effect.workflow.sdk",
+            "effect_class": "administrative",
+            "idempotency_key": "workflow.idempotency.sdk",
+            "authority": {},
+            "expected_state": "workflow.revision.sdk",
+            "reconciliation": "required",
+            "receipt": {},
+            "payload": null,
+            "execution": {
+                "started_at": 1, "ended_at": 2,
+                "effective_deadline": {"expires_at": 2},
+                "cancellation": {"stage": "before_effect", "observed_at": 2},
+                "budget": {"units_consumed": 1, "bytes_consumed": 1, "elapsed_micros": 1},
+                "termination": "timed_out",
+            },
+        },
+    });
+    let mut failed = body.clone();
+    failed["value"]["outcome"]["value"]["execution"]["termination"] = json!("failed");
+    let mut malformed = body.clone();
+    malformed["value"]["outcome"]["value"]["execution"]["cancellation"]["stage"] =
+        json!("not_a_stage");
+    let (base_url, server) = serve(
+        [body, failed, malformed]
+            .into_iter()
+            .map(|body| json_response("200 OK", body))
+            .collect(),
+    );
+    let client = Client::builder(ConnectionMode::local(&base_url, "project.sdk", "sdk-token"))
+        .build()
+        .unwrap();
+    let request = serde_json::from_value(json!({
+        "definition_id": "workflow.sdk", "definition_version": 1, "expected_revision": 1,
+    }))
+    .unwrap();
+    let response = client
+        .execute::<WorkflowActivateDefinition>(&request)
+        .unwrap();
+    assert!(response.result.is_none());
+    assert_eq!(
+        response.envelope["outcome"]["value"]["execution"]["termination"],
+        "timed_out",
+    );
+    for _ in 0..2 {
+        assert!(matches!(
+            client.execute::<WorkflowActivateDefinition>(&request),
+            Err(ClientError::Protocol { .. }),
+        ));
+    }
+    assert_eq!(server.join().unwrap().len(), 3);
+}
+
+#[test]
 fn malformed_success_and_problem_fields_are_protocol_errors() {
     let mut missing_scope = list_definitions_success();
     missing_scope["value"]
@@ -917,7 +980,7 @@ fn terminal_frame_at(event: &str, receipt_termination: &str, sequence: u64) -> S
     // The canonical receipt carries a cancellation observation exactly when
     // the operation was cancelled or timed out.
     let cancellation = if matches!(receipt_termination, "cancelled" | "timed_out") {
-        r#"{"stage":"during_read"}"#
+        r#"{"stage":"during_read","observed_at":2}"#
     } else {
         "null"
     };

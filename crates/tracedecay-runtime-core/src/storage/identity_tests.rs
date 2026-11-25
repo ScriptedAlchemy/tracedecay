@@ -6,6 +6,7 @@
 #[cfg(test)]
 mod identity_root_canonicalization_tests {
     use super::*;
+    use std::fs;
 
     fn git(dir: &Path, args: &[&str]) {
         let status = std::process::Command::new("git")
@@ -177,6 +178,7 @@ mod enrolled_project_roots_tests {
 #[cfg(test)]
 mod identity_anchor_tests {
     use super::*;
+    use std::fs;
     use tracedecay_domain::git::GitOidV1;
 
     fn git(dir: &Path, args: &[&str]) -> String {

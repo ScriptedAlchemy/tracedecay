@@ -5,6 +5,10 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 INSTALLER="$ROOT/install.sh"
 
 bash -n "$INSTALLER"
+case "$(uname -s)" in
+  Darwin) mode_args=(-f '%Lp') ;;
+  *) mode_args=(-c '%a') ;;
+esac
 
 tmpdir="$(mktemp -d)"
 trap 'rm -rf "$tmpdir"' EXIT
@@ -29,7 +33,8 @@ stage_release_archive() {
 printf 'tracedecay ${version}\n'
 SH
   chmod +x "$tmpdir/archive/tracedecay"
-  tar -czf "$tmpdir/${asset}" -C "$tmpdir/archive" tracedecay
+  printf 'sdk binding %s\n' "$version" >"$tmpdir/archive/tracedecay_sdk_node.node"
+  tar -czf "$tmpdir/${asset}" -C "$tmpdir/archive" tracedecay tracedecay_sdk_node.node
   (
     cd "$tmpdir"
     sha256sum "$asset" >"$sums"
@@ -190,7 +195,7 @@ run_installer() {
 ${STABLE_SIGNER}@refs/tags/${STABLE_TAG}}" \
   TRACEDECAY_INSTALL_DIR="$tmpdir/install" \
   TEST_RELEASES_JSON="${INSTALLER_RELEASES_JSON:-$tmpdir/releases.json}" \
-  TEST_ARCHIVE="$tmpdir/${BETA_ASSET}" \
+  TEST_ARCHIVE="${INSTALLER_ARCHIVE:-$tmpdir/${BETA_ASSET}}" \
   TEST_CHECKSUMS="${INSTALLER_CHECKSUMS:-$tmpdir/SHA256SUMS}" \
   TEST_STABLE_ARCHIVE="$tmpdir/${STABLE_ASSET}" \
   TEST_STABLE_CHECKSUMS="$tmpdir/STABLE_SHA256SUMS" \
@@ -208,7 +213,10 @@ mkdir -p "$tmpdir/install"
 : >"$gh_log"
 run_installer "$INSTALLER" >"$tmpdir/beta-install.log"
 [[ "$("$tmpdir/install/tracedecay")" == "tracedecay 9.8.7-beta.1" ]]
-[[ "$(ls -A "$tmpdir/install")" == "tracedecay" ]]
+[[ -f "$tmpdir/install/tracedecay_sdk_node.node" ]]
+[[ "$(stat "${mode_args[@]}" "$tmpdir/install/tracedecay")" == 755 ]]
+[[ "$(stat "${mode_args[@]}" "$tmpdir/install/tracedecay_sdk_node.node")" == 644 ]]
+[[ "$(ls -A "$tmpdir/install")" == $'tracedecay\ntracedecay_sdk_node.node' ]]
 [[ $(wc -l <"$gh_log") -eq 1 ]]
 [[ $(cat "$gh_log") == "attestation verify "*"/${BETA_ASSET} $(verify_args "${BETA_SIGNER}@refs/heads/master")" ]]
 grep -Fqx "Verified build provenance: ${BETA_SIGNER}@refs/heads/master" \
@@ -220,10 +228,89 @@ mkdir -p "$tmpdir/install"
 : >"$gh_log"
 run_installer env TRACEDECAY_VERSION=stable "$INSTALLER" >"$tmpdir/stable-install.log"
 [[ "$("$tmpdir/install/tracedecay")" == "tracedecay 9.8.7" ]]
+[[ "$(cat "$tmpdir/install/tracedecay_sdk_node.node")" == "sdk binding 9.8.7" ]]
 [[ $(sed -n 1p "$gh_log") == "attestation verify "*"/${STABLE_ASSET} $(verify_args "${STABLE_SIGNER}@refs/heads/master")" ]]
 [[ $(sed -n 2p "$gh_log") == "attestation verify "*"/${STABLE_ASSET} $(verify_args "${STABLE_SIGNER}@refs/tags/${STABLE_TAG}")" ]]
 grep -Fqx "Verified build provenance: ${STABLE_SIGNER}@refs/tags/${STABLE_TAG}" \
   "$tmpdir/stable-install.log"
+
+# A verified archive without its binding must leave the installed pair alone.
+mkdir -p "$tmpdir/missing-addon"
+tar -czf "$tmpdir/missing-addon/${BETA_ASSET}" -C "$tmpdir/archive" tracedecay
+(
+  cd "$tmpdir/missing-addon"
+  sha256sum "$BETA_ASSET" >SHA256SUMS
+)
+if INSTALLER_ARCHIVE="$tmpdir/missing-addon/${BETA_ASSET}" \
+  INSTALLER_CHECKSUMS="$tmpdir/missing-addon/SHA256SUMS" \
+  run_installer "$INSTALLER" >"$tmpdir/missing-addon.log" 2>&1; then
+  echo "installer accepted a release without its native SDK binding" >&2
+  exit 1
+fi
+grep -Fq 'archive does not contain the native SDK binding' "$tmpdir/missing-addon.log"
+[[ "$("$tmpdir/install/tracedecay")" == "tracedecay 9.8.7" ]]
+[[ "$(cat "$tmpdir/install/tracedecay_sdk_node.node")" == "sdk binding 9.8.7" ]]
+
+# Failure to stage the addon must remove the already staged executable and
+# preserve both installed members.
+cat >"$tmpdir/bin/mktemp" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+case "${1:-}" in
+  */.tracedecay-sdk.install.XXXXXX)
+    printf 'addon staging unavailable\n' >&2
+    exit 1
+    ;;
+esac
+exec "${TEST_REAL_MKTEMP:?}" "$@"
+SH
+chmod +x "$tmpdir/bin/mktemp"
+if run_installer env TEST_REAL_MKTEMP="$tmpdir/tools/mktemp" "$INSTALLER" \
+  >"$tmpdir/staging-failure.log" 2>&1; then
+  echo "installer accepted failed addon staging" >&2
+  exit 1
+fi
+rm "$tmpdir/bin/mktemp"
+grep -Fq 'addon staging unavailable' "$tmpdir/staging-failure.log"
+[[ "$("$tmpdir/install/tracedecay")" == "tracedecay 9.8.7" ]]
+[[ "$(cat "$tmpdir/install/tracedecay_sdk_node.node")" == "sdk binding 9.8.7" ]]
+[[ "$(ls -A "$tmpdir/install")" == $'tracedecay\ntracedecay_sdk_node.node' ]]
+
+# mv treats a directory destination as a container, including a symlink to
+# one. Refuse either occupied member before replacing the other member.
+for member in tracedecay tracedecay_sdk_node.node; do
+  for kind in directory symlink; do
+    rm -rf "$tmpdir/install"
+    run_installer env TRACEDECAY_VERSION=stable "$INSTALLER" >/dev/null
+    destination="$tmpdir/install/$member"
+    rm "$destination"
+    if [[ $kind == directory ]]; then
+      mkdir "$destination"
+    else
+      occupied="$tmpdir/occupied-${member}"
+      mkdir "$occupied"
+      ln -s "$occupied" "$destination"
+    fi
+    printf 'keep\n' >"$destination/marker"
+    if run_installer "$INSTALLER" >"$tmpdir/directory-destination.log" 2>&1; then
+      echo "installer accepted $kind destination for $member" >&2
+      exit 1
+    fi
+    grep -Fq "cannot replace ${destination}: destination is a directory" \
+      "$tmpdir/directory-destination.log"
+    [[ "$(ls -A "$destination")" == marker ]]
+    [[ "$(cat "$destination/marker")" == keep ]]
+    if [[ $kind == symlink ]]; then
+      [[ -L $destination ]]
+    fi
+    if [[ $member == tracedecay ]]; then
+      [[ "$(cat "$tmpdir/install/tracedecay_sdk_node.node")" == "sdk binding 9.8.7" ]]
+    else
+      [[ "$("$tmpdir/install/tracedecay")" == "tracedecay 9.8.7" ]]
+    fi
+    [[ "$(ls -A "$tmpdir/install")" == $'tracedecay\ntracedecay_sdk_node.node' ]]
+  done
+done
 
 # An archive whose attestation names no accepted release identity (another
 # workflow or repository, or none at all) is refused with nothing installed,
@@ -251,6 +338,7 @@ grep -Fq "tracedecay installer: gh (GitHub CLI) is required to verify the build-
 INSTALLER_GH_DIR="$tmpdir/no-gh" run_installer env TRACEDECAY_INSTALL_UNATTESTED=1 "$INSTALLER" \
   >/dev/null 2>"$tmpdir/unattested-optin.log"
 [[ "$("$tmpdir/install/tracedecay")" == "tracedecay 9.8.7-beta.1" ]]
+[[ -f "$tmpdir/install/tracedecay_sdk_node.node" ]]
 grep -Fq "tracedecay installer: WARNING: gh is not installed, so the build-provenance attestation of ${BETA_ASSET} was NOT verified" \
   "$tmpdir/unattested-optin.log"
 
@@ -279,6 +367,7 @@ rm -rf "$tmpdir/install"
 mkdir -p "$tmpdir/install"
 INSTALLER_RELEASES_JSON="$tmpdir/large-releases.json" run_installer "$INSTALLER"
 [[ "$("$tmpdir/install/tracedecay")" == "tracedecay 9.8.7-beta.1" ]]
+[[ -f "$tmpdir/install/tracedecay_sdk_node.node" ]]
 
 write_large_releases "$tmpdir/large-releases-without-assets.json" ""
 rm -rf "$tmpdir/install"
@@ -332,7 +421,7 @@ expect_installer_failure \
 } >"$tmpdir/archive/tracedecay"
 chmod +x "$tmpdir/archive/tracedecay"
 new_size=$(wc -c <"$tmpdir/archive/tracedecay" | tr -d ' ')
-tar -czf "$tmpdir/${BETA_ASSET}" -C "$tmpdir/archive" tracedecay
+tar -czf "$tmpdir/${BETA_ASSET}" -C "$tmpdir/archive" tracedecay tracedecay_sdk_node.node
 (
   cd "$tmpdir"
   sha256sum "$BETA_ASSET" >SHA256SUMS
@@ -357,7 +446,8 @@ run_installer "$INSTALLER" >/dev/null
 touch "$tmpdir/stop-sampling"
 wait "$sampler"
 [[ "$("$tmpdir/install/tracedecay")" == "tracedecay 9.8.7-beta.1" ]]
-[[ "$(ls -A "$tmpdir/install")" == "tracedecay" ]]
+[[ -f "$tmpdir/install/tracedecay_sdk_node.node" ]]
+[[ "$(ls -A "$tmpdir/install")" == $'tracedecay\ntracedecay_sdk_node.node' ]]
 grep -qx "755 $old_size" "$tmpdir/replace-samples"
 grep -qx "755 $new_size" "$tmpdir/replace-samples"
 grep -vx -e "755 $old_size" -e "755 $new_size" "$tmpdir/replace-samples" \
@@ -391,7 +481,7 @@ PATH="$tmpdir/bin:$PATH" \
   CODESIGN_LOG="$codesign_log" \
   codesign --force --sign - --identifier "tracedecay-${deps_hash}" \
   "$tmpdir/archive/tracedecay"
-tar -czf "$tmpdir/${BETA_ASSET}" -C "$tmpdir/archive" tracedecay
+tar -czf "$tmpdir/${BETA_ASSET}" -C "$tmpdir/archive" tracedecay tracedecay_sdk_node.node
 (
   cd "$tmpdir"
   sha256sum "$BETA_ASSET" >SHA256SUMS
@@ -406,6 +496,6 @@ strip_line=$(head -n 1 "$codesign_log")
 stable_line=$(tail -n 1 "$codesign_log")
 [[ $strip_line == "--force --sign - --identifier tracedecay-${deps_hash} ${tmpdir}/archive/tracedecay" ]]
 [[ $stable_line == "--force --sign - --identifier dev.tracedecay.cli -r=designated => identifier \"dev.tracedecay.cli\" ${tmpdir}/install/.tracedecay.install."* ]]
-[[ "$(ls -A "$tmpdir/install")" == "tracedecay" ]]
+[[ "$(ls -A "$tmpdir/install")" == $'tracedecay\ntracedecay_sdk_node.node' ]]
 [[ $strip_line != "$stable_line" ]]
 grep -Fq "Installed tracedecay ${BETA_TAG#v}" "$tmpdir/macho-install.log"

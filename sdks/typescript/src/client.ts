@@ -250,6 +250,13 @@ function unsignedDecimal(value: number | bigint | string): string {
   return value;
 }
 
+/** Preserve supplied controls across JSON's non-finite-number coercion. */
+function optionalSafeInteger(value: number | undefined, name: string): void {
+  if (value !== undefined && !Number.isSafeInteger(value)) {
+    throw new TraceDecayProtocolError(`${name} must be a safe integer`);
+  }
+}
+
 export class TraceDecayClient {
   readonly operations: OperationMethods;
 
@@ -303,6 +310,8 @@ export class TraceDecayClient {
   ): Promise<unknown> {
     let call: NativeCall;
     try {
+      optionalSafeInteger(controls.deadlineMicros, "deadlineMicros");
+      optionalSafeInteger(controls.page?.size, "page size");
       call = this.#client().prepareOperation(
         operationId,
         JSON.stringify(request),
@@ -360,14 +369,37 @@ export class TraceDecayClient {
    * Watch an operation's canonical events. Leaving the loop early or aborting
    * releases the connection; neither cancels the operation.
    */
-  async *streamOperation(
+  streamOperation(
     operationId: string,
     options: OperationStreamOptions = {},
+  ): AsyncGenerator<OperationStreamEvent> {
+    let native: NativeStream | undefined;
+    const iterator = this.#streamOperation(operationId, options, (stream) => { native = stream; });
+    const returnFrom = iterator.return.bind(iterator);
+    const throwInto = iterator.throw.bind(iterator);
+    // Async generators queue return/throw behind an outstanding next(). Close
+    // its native read first so disposal cannot wait forever for another event.
+    iterator.return = (value) => {
+      native?.close();
+      return returnFrom(value);
+    };
+    iterator.throw = (error) => {
+      native?.close();
+      return throwInto(error);
+    };
+    return iterator;
+  }
+
+  async *#streamOperation(
+    operationId: string,
+    options: OperationStreamOptions,
+    own: (stream: NativeStream | undefined) => void,
   ): AsyncGenerator<OperationStreamEvent> {
     const { signal, resume, maxReconnects } = options;
     if (signal?.aborted) throw new TraceDecayAbortError(signal.reason);
     let stream: NativeStream;
     try {
+      optionalSafeInteger(maxReconnects, "maxReconnects");
       stream = this.#client().prepareStream(
         operationId,
         JSON.stringify({
@@ -379,6 +411,7 @@ export class TraceDecayClient {
     } catch (error) {
       rethrow(error, signal);
     }
+    own(stream);
     const close = () => stream.close();
     signal?.addEventListener("abort", close, { once: true });
     try {
@@ -395,6 +428,7 @@ export class TraceDecayClient {
     } finally {
       signal?.removeEventListener("abort", close);
       stream.close();
+      own(undefined);
     }
   }
 

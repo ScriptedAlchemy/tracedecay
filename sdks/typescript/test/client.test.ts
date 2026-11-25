@@ -1287,7 +1287,7 @@ describe("TraceDecayClient generated operation bindings", () => {
     );
   });
 
-  it("accepts the deadline observation of a non-cancellable effect that timed out", () => {
+  it("accepts the deadline observation of a non-cancellable effect over HTTP", async () => {
     const descriptor = OPERATIONS.find(
       (operation) => operation.operation === "workflow_activate_definition",
     );
@@ -1312,7 +1312,7 @@ describe("TraceDecayClient generated operation bindings", () => {
           payload: null,
           execution: {
             ...structuredClone(RECEIPT),
-            cancellation: { stage: "before_effect", observed_at: 2 },
+            cancellation: { stage: "before_effect", observed_at: 20 },
             termination,
           },
         },
@@ -1326,6 +1326,24 @@ describe("TraceDecayClient generated operation bindings", () => {
     response.value.outcome = effect("failed");
     expect(() => descriptor?.decodeSuccess(response.value)).toThrow(
       /non-cancellable operation returned cancellation evidence/,
+    );
+
+    await withServer(
+      ["timed_out", "failed"].map((termination): RequestHandler => (_request, reply) => {
+        response.value.outcome = effect(termination);
+        reply.writeHead(200, { "content-type": "application/json" });
+        reply.end(JSON.stringify(response));
+      }),
+      async (baseUrl, requests) => {
+        const client = createClient({ baseUrl, projectId: "project.sdk", token: "sdk-secret" });
+        const request = { definition_id: "workflow.sdk", definition_version: 1, expected_revision: 1 };
+        const result = await client.operations.workflow_activate_definition(request);
+        expect(result.outcome.value.execution.termination).toBe("timed_out");
+        expect(result.outcome.value.payload).toBeNull();
+        await expect(client.operations.workflow_activate_definition(request))
+          .rejects.toBeInstanceOf(TraceDecayMalformedResponseError);
+        expect(requests).toHaveLength(2);
+      },
     );
   });
 
@@ -2048,7 +2066,9 @@ describe("TraceDecayClient operation lifecycle", () => {
                       receipt: {
                         ...RECEIPT,
                         termination,
-                        cancellation: { observed: true },
+                        cancellation: termination === "cancelled" || termination === "timed_out"
+                          ? { stage: "during_read", observed_at: 20 }
+                          : null,
                       },
                     },
                   },
