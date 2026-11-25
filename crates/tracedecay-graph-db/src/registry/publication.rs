@@ -899,7 +899,13 @@ impl GraphDbRegistry {
             .verified_head(projection, context)
             .map_err(GraphDbError::from)?
         else {
-            return Ok(SupersededReplayRetirement::default());
+            // No head means nothing is superseded, so nothing new may be
+            // retired. A tombstone retired before the head went away is
+            // already linearized, though, and this sweep is its only
+            // finalizer: skipping it would strand its sealed artifact.
+            return self.finish_headless_retired_tombstones(
+                &database, operation, authority, context, projection,
+            );
         };
         let head_locator = locator_from_key(&head.key)?;
 
@@ -1108,6 +1114,84 @@ impl GraphDbRegistry {
             (Ok(_), Err(error)) => Err(error),
             (Ok(receipt), Ok(())) => Ok(receipt),
         }
+    }
+
+    /// Finalizes the durable retirement tombstones of a projection that has
+    /// no verified head (its head was itself retired, or never installed).
+    /// Only tombstones that already exist are finished; no replay record is
+    /// newly retired, so a headless projection never authorizes deleting a
+    /// generation the journal has not already decided to drop.
+    fn finish_headless_retired_tombstones(
+        &self,
+        database: &GraphDb,
+        operation: &RegisteredGraphDbOperationV1,
+        authority: &mut dyn GraphPublicationStoreV1,
+        context: &GraphPublicationOperationContextV1<'_>,
+        projection: &GraphProjectionIdentityV1,
+    ) -> Result<SupersededReplayRetirement, GraphDbError> {
+        let mut tombstones = Vec::new();
+        let mut cleanup_after = None;
+        loop {
+            let request = GraphPublicationRetiredCleanupPageRequestV1::new(
+                projection.clone(),
+                cleanup_after.clone(),
+                MAX_GRAPH_REPLAY_PAGE_RECORDS_V1,
+            )
+            .map_err(|error| GraphDbError::invalid(error.to_string()))?;
+            let page = authority
+                .retired_cleanup_page(&request, context)
+                .map_err(GraphDbError::from)?;
+            for tombstone in page.records {
+                if tombstone.key.projection != *projection {
+                    return Err(GraphDbError::Corrupt {
+                        message: "retired graph cleanup page escaped its projection".to_owned(),
+                    });
+                }
+                tombstones.push((locator_from_key(&tombstone.key)?, tombstone));
+            }
+            let Some(continuation) = page.continuation else {
+                break;
+            };
+            validate_replay_cursor(
+                projection,
+                cleanup_after.as_ref(),
+                &continuation,
+                "retired graph cleanup",
+            )?;
+            cleanup_after = Some(continuation);
+        }
+        let mut receipt = SupersededReplayRetirement::default();
+        if tombstones.is_empty() {
+            return Ok(receipt);
+        }
+        let opened_for_retirement = !database.native_engine_open()?;
+        if opened_for_retirement {
+            database.ensure_opened()?;
+        }
+        let mut finished = Ok(());
+        for (locator, tombstone) in tombstones {
+            finished = Self::finish_retired_replay(
+                database,
+                &|| operation.check(self, context),
+                authority,
+                context,
+                &locator,
+                &tombstone.retirement(),
+                &mut receipt,
+            );
+            if finished.is_err() {
+                break;
+            }
+        }
+        if opened_for_retirement && let Err(error) = database.hibernate_if_lazy() {
+            tracing::warn!(
+                %error,
+                namespace = projection.namespace.as_str(),
+                projection = projection.projection.as_str(),
+                "staging engine opened for headless tombstone cleanup could not hibernate again"
+            );
+        }
+        finished.map(|()| receipt)
     }
 
     /// Runs the retirements the census selected, with the engine already in
