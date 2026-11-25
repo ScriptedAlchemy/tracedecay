@@ -349,12 +349,12 @@ fn apply_page(url: &mut Url, page: Option<&PageOptions>) -> Result<(), ClientErr
             "page size must be an integer between 1 and {MAX_PAGE_SIZE}"
         )));
     }
-    if let Some(cursor) = &page.cursor {
-        if !is_bounded_opaque(cursor, MAX_OPAQUE_BYTES) {
-            return Err(ClientError::InvalidRequest(
-                "page cursor is not a canonical opaque cursor".into(),
-            ));
-        }
+    if let Some(cursor) = &page.cursor
+        && !is_bounded_opaque(cursor, MAX_OPAQUE_BYTES)
+    {
+        return Err(ClientError::InvalidRequest(
+            "page cursor is not a canonical opaque cursor".into(),
+        ));
     }
     if page.size.is_none() && page.cursor.is_none() {
         return Ok(());

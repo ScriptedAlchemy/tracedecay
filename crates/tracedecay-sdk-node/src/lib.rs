@@ -292,7 +292,7 @@ impl NativeClient {
             .map_err(Failure::from)?;
         Ok(NativeCall::new(
             self.http.clone(),
-            CallKind::Cancel(prepared),
+            CallKind::Cancel(Box::new(prepared)),
         ))
     }
 
@@ -323,7 +323,7 @@ impl NativeClient {
 
 enum CallKind {
     Operation(Box<PreparedOperation>),
-    Cancel(PreparedRequest),
+    Cancel(Box<PreparedRequest>),
 }
 
 /// One prepared request/response exchange.
@@ -346,7 +346,7 @@ impl NativeCall {
     async fn exchange(&self) -> std::result::Result<String, Failure> {
         let prepared = match &self.kind {
             CallKind::Operation(operation) => &operation.request,
-            CallKind::Cancel(request) => request,
+            CallKind::Cancel(request) => request.as_ref(),
         };
         let response = send(&self.http, prepared).await?;
         let status = response.status().as_u16();

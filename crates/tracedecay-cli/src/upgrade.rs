@@ -2132,7 +2132,7 @@ mod tests {
         let executable = install.path().join(EXECUTABLE_MEMBER.name);
         let addon = install.path().join(SDK_MEMBER.name);
         std::fs::write(&executable, b"old-executable").unwrap();
-        std::fs::copy(&source, &addon).unwrap();
+        publish_member(&source, &addon, SDK_MEMBER.mode).unwrap();
         let original_digest = Sha256::digest(std::fs::read(&addon).unwrap());
         let ready = install.path().join("host-ready");
         let mut host = NodeHost(
