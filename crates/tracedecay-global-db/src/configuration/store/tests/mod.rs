@@ -23,7 +23,7 @@ use tracedecay_domain::configuration::{
     ProtectedChange, ProtectedChangePlan, RedactedConfigurationChangeV1,
     SOURCE_BINDINGS_SETTING_KEY, SYNC_WATCH_LINKED_WORKTREES_SETTING_KEY, ScopeControlOperationV1,
     ScopeSourceBinding, SettingKey, SourceBindingId, SourceKindV1, TELEMETRY_TIMINGS_SETTING_KEY,
-    WORK_TOPOLOGY_POLICY_SETTING_KEY,
+    TYPESCRIPT_DIAGNOSTICS_ENABLED_SETTING_KEY, WORK_TOPOLOGY_POLICY_SETTING_KEY,
 };
 use tracedecay_domain::{
     AccessPolicyDigest, ActorId, LocatorDigest, ProjectId, UtcMicros, canonical_sha256,
@@ -50,11 +50,12 @@ fn incomplete_snapshot_requires_reset_instead_of_default_repair() {
 }
 
 #[tokio::test]
-async fn linked_worktree_and_submodule_defaults_converge_into_existing_snapshot() {
+async fn registered_additive_defaults_converge_into_existing_snapshot() {
     let (_directory, runtime, root) = Box::pin(global_setup()).await;
     let keys = [
         SYNC_WATCH_LINKED_WORKTREES_SETTING_KEY,
         tracedecay_domain::configuration::INDEX_INCLUDE_SUBMODULES_SETTING_KEY,
+        TYPESCRIPT_DIAGNOSTICS_ENABLED_SETTING_KEY,
     ]
     .map(|name| SettingKey::new(name).unwrap());
     let mut effective_values = root.snapshot.effective_values.clone();
@@ -97,13 +98,7 @@ async fn linked_worktree_and_submodule_defaults_converge_into_existing_snapshot(
         .unwrap();
 
     assert_ne!(converged.revision_id, root.revision_id);
-    for key in &keys {
-        assert_eq!(
-            converged.snapshot.effective_values.get(key),
-            Some(&ConfigurationValueV1::Boolean(false))
-        );
-        assert!(converged.snapshot.provenance.contains_key(key));
-    }
+    assert_eq!(converged.snapshot, root.snapshot);
     validate_snapshot_registry_completeness(&converged.snapshot).unwrap();
 }
 

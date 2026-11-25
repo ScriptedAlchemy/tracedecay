@@ -1190,6 +1190,14 @@ pub enum ProfileStorageAction {
         #[arg(long = "project-id")]
         project_id: Option<String>,
     },
+    /// Drop explicit overrides of retired PR-tracking settings from one project's
+    /// active configuration. Leaves other overrides and project data in place.
+    /// Requires --yes and a stopped daemon.
+    ResetRetiredPrTracking {
+        /// Root of the registered project to repair.
+        #[arg(long)]
+        project_root: PathBuf,
+    },
 }
 
 #[derive(Subcommand)]

@@ -243,6 +243,9 @@ fn refusal_suffix(code: Option<&str>, reason: Option<&str>) -> String {
 /// the next open creates the shape the running binary writes.
 pub const PROFILE_RESET_COMMAND: &str = "tracedecay wipe --all --yes";
 
+/// The project configuration refusal eligible for a reset of retired PR settings only.
+pub const RETIRED_PR_TRACKING_CONFIGURATION_AUTHORITY: &str = "retired PR-tracking configuration";
+
 /// Deletes exactly the stores the daemon reports in their typed
 /// reset-required state and nothing else; the next open recreates each one
 /// empty. Stores it cannot reset on their own name [`PROFILE_RESET_COMMAND`].
