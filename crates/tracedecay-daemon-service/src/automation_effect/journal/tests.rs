@@ -1,5 +1,6 @@
 use tracedecay_automation_runtime::automation::effect_runtime::contract_error;
 use tracedecay_automation_runtime::automation::effect_runtime::settlement::*;
+use tracedecay_automation_runtime::automation::run_ledger::ExactRunPublication;
 
 use tracedecay_contracts::retained_surfaces::{
     AutomationRunProblemV1, AutomationRunRequestV1, AutomationTaskRequestV1,
@@ -31,29 +32,81 @@ use crate::automation_effect::recovery_composition;
 
 #[test]
 fn legacy_run_publication_is_refused_without_repeating_its_external_effect() {
-    let directory = tempfile::tempdir().expect("legacy journal directory");
-    let journal_path = directory.path().join("legacy.json");
-    let retired = r#"{"state":"prepared","value":{"terminal":{"schema_version":1,"digest":"sha256:terminal","payload_len":1},"publication":{"schema_version":1,"ledger_digest":"sha256:legacy","payload_len":1}}}"#;
-    std::fs::write(&journal_path, retired).expect("write legacy journal");
-    let admission = external_admission_for_job(
-        "legacy-publication",
-        "request.legacy-publication",
-        "legacy-job",
-    );
-    let error = reserve_or_replay_blocking(&journal_path, admission)
-        .err()
-        .expect("the old publication must stop before another effect");
-    assert_eq!(
-        error
-            .project_route_context()
-            .map(|(code, retryable, _)| (code, retryable)),
-        Some(("automation_run_legacy_jsonl_refused", false))
-    );
-    assert!(error.reset_required_context().is_none());
-    assert_eq!(
-        std::fs::read(&journal_path).expect("retained journal"),
-        retired.as_bytes()
-    );
+    for promoted in [false, true] {
+        let directory = tempfile::tempdir().expect("legacy journal directory");
+        let admission = external_admission_for_job(
+            "legacy-publication",
+            "request.legacy-publication",
+            "legacy-job",
+        );
+        let journal_path = canonical_journal_path(directory.path(), &admission.request.run_id);
+        let reservation = reserve_or_replay_blocking(&journal_path, admission.clone())
+            .expect("reserve the original occurrence");
+        let terminal = AutomationSettledTerminal::Problem(admission.recovery_problem().clone());
+        let publication: ExactRunPublication = serde_json::from_value(serde_json::json!({
+            "schema_version": 2,
+            "digest": digest('d'),
+        }))
+        .expect("current publication");
+        persist_prepared_terminal_blocking(
+            &journal_path,
+            &admission,
+            &terminal,
+            publication.clone(),
+        )
+        .expect("write the real prepared journal and sidecar");
+        if promoted {
+            promote_prepared_terminal_blocking(
+                &journal_path,
+                &admission,
+                terminal,
+                &publication,
+            )
+            .expect("write the real terminal journal");
+        }
+        drop(reservation);
+        let mut document: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(&journal_path).expect("read the real journal shape"),
+        )
+        .expect("journal JSON");
+        *document
+            .pointer_mut("/state/value/publication")
+            .expect("publication inside the serialized journal state") = serde_json::json!({
+            "schema_version": 1,
+            "ledger_digest": digest('d'),
+            "payload_len": 1,
+        });
+        let retired = serde_json::to_vec(&document).expect("retired journal bytes");
+        std::fs::write(&journal_path, &retired).expect("write legacy publication");
+        let sidecar_path = journal_path.with_extension("json.terminal");
+        let sidecar = std::fs::read(&sidecar_path).expect("original terminal receipt");
+
+        for _ in 0..2 {
+            let error = reserve_or_replay_blocking(&journal_path, admission.clone())
+                .err()
+                .expect("the old publication must stop before another effect");
+            assert_eq!(
+                error
+                    .project_route_context()
+                    .map(|(code, retryable, _)| (code, retryable)),
+                Some(("automation_run_legacy_jsonl_refused", false))
+            );
+            assert!(error.reset_required_context().is_none());
+        }
+
+        let next = external_admission_for_job(
+            "new-occurrence",
+            "request.new-occurrence",
+            "legacy-job",
+        );
+        let next_path = canonical_journal_path(directory.path(), &next.request.run_id);
+        assert!(matches!(
+            reserve_or_replay_blocking(&next_path, next).expect("explicitly new occurrence"),
+            ReservationResult::Execute { .. }
+        ));
+        assert_eq!(std::fs::read(&journal_path).expect("retained journal"), retired);
+        assert_eq!(std::fs::read(&sidecar_path).expect("retained receipt"), sidecar);
+    }
 }
 use tracedecay_automation_runtime::automation::effect_runtime::AutomationSettledTerminal;
 use tracedecay_automation_runtime::automation::effect_runtime::journal::*;

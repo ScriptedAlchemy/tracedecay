@@ -458,10 +458,7 @@ impl RegisteredGlobalDb {
             })?;
         let mut rows = snapshot
             .query(
-                "SELECT json_extract(
-                            record_json,
-                            '$.validation_report.pagination.resume_after_fact_id'
-                        )
+                "SELECT record_json -> '$.validation_report.pagination.resume_after_fact_id'
                    FROM automation_runs
                   WHERE namespace = ?1 AND task_key = ?2
                     AND json_type(
@@ -490,24 +487,19 @@ impl RegisteredGlobalDb {
             return Ok(None);
         };
         let cursor = row
-            .get::<tracedecay_runtime_core::db::engine::Value>(0)
+            .get::<String>(0)
             .map_err(|error| TraceDecayError::Database {
                 operation: "decode automation validation cursor".to_owned(),
                 message: error.to_string(),
             })?;
-        use tracedecay_runtime_core::db::engine::Value as EngineValue;
-        match cursor {
-            EngineValue::Null => Ok(None),
-            EngineValue::Integer(value) => Ok(Some(serde_json::Value::from(value))),
-            EngineValue::Real(value) => {
-                Ok(serde_json::Number::from_f64(value).map(serde_json::Value::Number))
-            }
-            EngineValue::Text(value) => Ok(Some(serde_json::Value::String(value))),
-            EngineValue::Blob(_) => Err(TraceDecayError::Database {
+        // Keep the JSON type: json_extract would turn objects into strings,
+        // allowing an invalid cursor to masquerade as a fact identity.
+        serde_json::from_str(&cursor)
+            .map(Some)
+            .map_err(|error| TraceDecayError::Database {
                 operation: "decode automation validation cursor".to_owned(),
-                message: "validation cursor is not a JSON scalar".to_owned(),
-            }),
-        }
+                message: error.to_string(),
+            })
     }
 
     /// Stages a terminal record so its digest can be bound into the external
@@ -1858,6 +1850,50 @@ mod tests {
                 .await
                 .unwrap(),
             None
+        );
+    }
+
+    #[tokio::test]
+    async fn validation_cursor_preserves_json_types_and_explicit_null() {
+        let (runtime, _root) = project_fixture().await;
+        let database = runtime.project_database().unwrap();
+        let values = [
+            json!("fact-42"),
+            json!({"fact_id": "fact-42"}),
+            json!(["fact-42"]),
+            json!(true),
+            json!(42),
+            json!(null),
+        ];
+        for (index, cursor) in values.into_iter().enumerate() {
+            let mut run = record(
+                &format!("cursor-{index}"),
+                AgentTaskKind::MemoryCurator,
+                "memory_curator",
+                AutomationRunStatus::Succeeded,
+                30 + index as i64,
+                None,
+            );
+            run.validation_report = Some(json!({
+                "pagination": { "resume_after_fact_id": cursor.clone() }
+            }));
+            database.publish_automation_run(&run).await.unwrap();
+            assert_eq!(
+                database
+                    .automation_run_validation_cursor("memory_curator")
+                    .await
+                    .unwrap(),
+                Some(cursor),
+                "stored cursors must retain their JSON shape for consumer validation"
+            );
+        }
+        assert_eq!(
+            database
+                .automation_run_validation_cursor("missing-task")
+                .await
+                .unwrap(),
+            None,
+            "an absent cursor differs from the explicit null that resets pagination"
         );
     }
 

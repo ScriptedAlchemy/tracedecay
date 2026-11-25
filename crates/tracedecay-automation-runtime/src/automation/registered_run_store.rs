@@ -294,7 +294,7 @@ fn refuse_legacy_run_ledger(dashboard_root: &Path) -> Result<()> {
                     "automation_run_legacy_jsonl_refused",
                     false,
                     format!(
-                        "automation run history at '{}' predates the registered run store and is not carried forward; remove it to start registered run history",
+                        "automation run history at '{}' predates the registered run store and is not carried forward; stop automation before removing retired run-history files. Preserve automation_effects journals and terminal receipts, and explicitly update and save scheduled job definitions before resuming with registered run history",
                         path.display()
                     ),
                 ));

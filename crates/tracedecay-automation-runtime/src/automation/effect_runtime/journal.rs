@@ -1105,7 +1105,7 @@ fn read_record(path: &Path) -> Result<Option<DurableAutomationRecord>> {
     // replaying an external effect whose publication can no longer be proven.
     if let Ok(document) = serde_json::from_slice::<serde_json::Value>(&bytes)
         && document
-            .pointer("/value/publication/schema_version")
+            .pointer("/state/value/publication/schema_version")
             .and_then(serde_json::Value::as_u64)
             == Some(1)
     {
@@ -1113,7 +1113,7 @@ fn read_record(path: &Path) -> Result<Option<DurableAutomationRecord>> {
             "automation_run_legacy_jsonl_refused",
             false,
             format!(
-                "automation effect journal at '{}' uses a retired run-publication schema and is not carried forward; archive its receipt and remove this journal to allow a new occurrence",
+                "automation effect journal at '{}' uses a retired run-publication schema and this exact run cannot resume; retain this journal and its terminal receipt to prevent repeating an external effect. Explicitly update and save the scheduled job definition to start a new occurrence, or use a new run identity for a manual invocation",
                 path.display()
             ),
         ));

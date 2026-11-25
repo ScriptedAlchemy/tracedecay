@@ -277,7 +277,7 @@ async fn indexed_history_summary_cursor_and_scheduler_diagnostic() {
         )
         .await
         .unwrap(),
-        None
+        Some(serde_json::Value::Null)
     );
     assert_eq!(
         runs.load_run_records_for_task_key("skill_writer", 10)
