@@ -56,13 +56,8 @@ fn legacy_run_publication_is_refused_without_repeating_its_external_effect() {
         )
         .expect("write the real prepared journal and sidecar");
         if promoted {
-            promote_prepared_terminal_blocking(
-                &journal_path,
-                &admission,
-                terminal,
-                &publication,
-            )
-            .expect("write the real terminal journal");
+            promote_prepared_terminal_blocking(&journal_path, &admission, terminal, &publication)
+                .expect("write the real terminal journal");
         }
         drop(reservation);
         let mut document: serde_json::Value = serde_json::from_slice(
@@ -94,18 +89,21 @@ fn legacy_run_publication_is_refused_without_repeating_its_external_effect() {
             assert!(error.reset_required_context().is_none());
         }
 
-        let next = external_admission_for_job(
-            "new-occurrence",
-            "request.new-occurrence",
-            "legacy-job",
-        );
+        let next =
+            external_admission_for_job("new-occurrence", "request.new-occurrence", "legacy-job");
         let next_path = canonical_journal_path(directory.path(), &next.request.run_id);
         assert!(matches!(
             reserve_or_replay_blocking(&next_path, next).expect("explicitly new occurrence"),
             ReservationResult::Execute { .. }
         ));
-        assert_eq!(std::fs::read(&journal_path).expect("retained journal"), retired);
-        assert_eq!(std::fs::read(&sidecar_path).expect("retained receipt"), sidecar);
+        assert_eq!(
+            std::fs::read(&journal_path).expect("retained journal"),
+            retired
+        );
+        assert_eq!(
+            std::fs::read(&sidecar_path).expect("retained receipt"),
+            sidecar
+        );
     }
 }
 use tracedecay_automation_runtime::automation::effect_runtime::AutomationSettledTerminal;
