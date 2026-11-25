@@ -338,43 +338,34 @@ fn record_lost_store_files(
     }
 }
 
-/// Expired response handles are removed from every mounted registered
-/// session store, so a daemon that outlives the handle TTL still reclaims
-/// them; each store bounds its own deletion batches. The retired filesystem
-/// cache under the profile root and each registered project shard is removed
-/// with them. The sweep stops between stores once cancellation is requested.
-///
-/// `databases` are the owner leases of the stores swept, issued for this
-/// sweep alone and dropped when it returns: a lease pins its store against
-/// retirement, so none may outlive the sweep into the rest of the tick.
+/// The admitted store unit owns the lease and retirement fence for this
+/// sweep. Listing or waiting for another unit must not retain store clients.
 async fn sweep_response_handles(
-    databases: Vec<tracedecay_global_db::RegisteredGlobalDbLeaseV1>,
+    database: &tracedecay_global_db::RegisteredGlobalDb,
+    now: i64,
+) -> MaintenanceTickOutcome {
+    match tracedecay_mcp::response_handles::cleanup_expired_response_handles(database, now).await {
+        Ok(removed) => {
+            if removed > 0 {
+                log_daemon_event(
+                    "response_handle_cleanup",
+                    &[
+                        ("stores", "1".to_owned()),
+                        ("removed_expired", removed.to_string()),
+                        ("failed_stores", "0".to_owned()),
+                    ],
+                );
+            }
+            MaintenanceTickOutcome::Complete
+        }
+        Err(_) => MaintenanceTickOutcome::Retry,
+    }
+}
+
+async fn sweep_retired_response_handle_caches(
     retired_roots: Vec<PathBuf>,
     cancellation: tracedecay_runtime_core::cancellation::CancellationToken,
 ) {
-    let now = tracedecay_runtime_core::tracedecay::current_timestamp();
-    let (mut removed, mut failed) = (0u64, 0usize);
-    for database in &databases {
-        if cancellation.is_cancelled() {
-            break;
-        }
-        match tracedecay_mcp::response_handles::cleanup_expired_response_handles(database, now)
-            .await
-        {
-            Ok(count) => removed = removed.saturating_add(count),
-            Err(_) => failed = failed.saturating_add(1),
-        }
-    }
-    if removed > 0 || failed > 0 {
-        log_daemon_event(
-            "response_handle_cleanup",
-            &[
-                ("stores", databases.len().to_string()),
-                ("removed_expired", removed.to_string()),
-                ("failed_stores", failed.to_string()),
-            ],
-        );
-    }
     if cancellation.is_cancelled() {
         return;
     }
@@ -555,6 +546,7 @@ async fn run_registered_store_retention(
             return MaintenanceTickOutcome::Retry;
         }
     };
+    let response_handles_outcome = sweep_response_handles(database, now).await;
     let report =
         tracedecay_maintenance::retention::registered_store::run_registered_store_retention(
             database,
@@ -624,7 +616,7 @@ async fn run_registered_store_retention(
             return MaintenanceTickOutcome::Retry;
         }
     }
-    outcome
+    outcome.combine(response_handles_outcome)
 }
 
 async fn run_registered_terminal_housekeeping(
@@ -1515,12 +1507,7 @@ impl MaintenanceCoordinator {
                 )
                 .map(Path::to_path_buf)
                 .collect();
-            sweep_response_handles(
-                administration.mounted_registered_session_databases().await,
-                retired_roots,
-                self.cancellation.clone(),
-            )
-            .await;
+            sweep_retired_response_handle_caches(retired_roots, self.cancellation.clone()).await;
         }
         let mut active_telemetry_paths = BTreeSet::from([profile_database.db_path().to_path_buf()]);
         active_telemetry_paths.extend(session_databases.iter().cloned());
@@ -2316,6 +2303,77 @@ mod tests {
                 super::run_registered_terminal_housekeeping(&harness.registered).await,
                 MaintenanceTickOutcome::Complete
             );
+        })
+        .expect("native runtime");
+    }
+
+    #[test]
+    fn admitted_store_retention_reclaims_expired_handles_and_retries_failed_cleanup() {
+        native_runtime::block_on(async {
+            let harness = tracedecay_global_db::tests::harness::RegisteredGlobalDbHarness::open(
+                "response-handle-retention",
+            )
+            .await;
+            let database = &harness.registered;
+            let now = tracedecay_runtime_core::tracedecay::current_timestamp();
+            database
+                .publish_response_handle("expired", 1)
+                .await
+                .unwrap();
+            let fresh = database
+                .publish_response_handle("fresh", now)
+                .await
+                .unwrap();
+            database
+                .writer_connection()
+                .unwrap()
+                .execute_batch(
+                    "CREATE TRIGGER refuse_handle_cleanup BEFORE DELETE ON response_handles
+                     BEGIN SELECT RAISE(ABORT, 'handle cleanup blocked'); END;",
+                )
+                .await
+                .unwrap();
+            let config = tracedecay_configuration::RetentionConfig::default();
+            assert_eq!(
+                super::run_registered_store_retention(database, &config).await,
+                MaintenanceTickOutcome::Retry,
+                "failed handle cleanup must keep the store eligible for maintenance"
+            );
+            assert_eq!(
+                database
+                    .inventory_response_handles()
+                    .await
+                    .unwrap()
+                    .record_count,
+                2
+            );
+            database
+                .writer_connection()
+                .unwrap()
+                .execute_batch("DROP TRIGGER refuse_handle_cleanup")
+                .await
+                .unwrap();
+            assert!(
+                super::run_registered_store_retention(database, &config)
+                    .await
+                    .succeeded()
+            );
+            assert_eq!(
+                database
+                    .inventory_response_handles()
+                    .await
+                    .unwrap()
+                    .record_count,
+                1
+            );
+            assert!(matches!(
+                database
+                    .lookup_response_handle(&fresh.handle, now)
+                    .await
+                    .unwrap(),
+                tracedecay_global_db::ResponseHandleLookup::Found(record)
+                    if record.content == "fresh"
+            ));
         })
         .expect("native runtime");
     }

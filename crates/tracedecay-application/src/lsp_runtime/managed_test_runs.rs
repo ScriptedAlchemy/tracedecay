@@ -108,7 +108,7 @@ impl ManagedTestRunProjection {
         level = "trace",
         skip_all
     )]
-    pub(super) fn store_expansion(
+    pub(super) async fn store_expansion(
         &self,
         root: &AdmittedRoot,
         document_uri: Option<&str>,
@@ -160,7 +160,8 @@ impl ManagedTestRunProjection {
         self.project
             .feedback
             .response_handles()
-            .publish_blocking(&content, micros_to_seconds(issued_at))
+            .publish(&content, micros_to_seconds(issued_at))
+            .await
             .map(|stored| stored.handle)
             .map_err(|_| LspRuntimeFailure::new("test-run-expansion-handle-store-failed"))
     }
@@ -260,18 +261,21 @@ impl LspTestRunProjectionPort for ManagedTestRunProjection {
                         );
                         if let ContextProjectionOutcome::Ready(envelope) = &mut outcome {
                             for (index, item) in envelope.items.iter_mut().enumerate() {
-                                item.retrieval_handle = match projection.store_expansion(
-                                    &root,
-                                    document_uri.as_deref(),
-                                    &scope,
-                                    item.stable_id.clone(),
-                                    LspTestRunExpansionContext {
-                                        result_offset: expansion_context
-                                            .result_offset
-                                            .saturating_add(index),
-                                        ..expansion_context.clone()
-                                    },
-                                ) {
+                                item.retrieval_handle = match projection
+                                    .store_expansion(
+                                        &root,
+                                        document_uri.as_deref(),
+                                        &scope,
+                                        item.stable_id.clone(),
+                                        LspTestRunExpansionContext {
+                                            result_offset: expansion_context
+                                                .result_offset
+                                                .saturating_add(index),
+                                            ..expansion_context.clone()
+                                        },
+                                    )
+                                    .await
+                                {
                                     Ok(handle) => Some(handle),
                                     Err(error) => {
                                         return ContextProjectionOutcome::Deferred {
@@ -283,19 +287,22 @@ impl LspTestRunProjectionPort for ManagedTestRunProjection {
                             if expansion_context.available_results > envelope.items.len()
                                 && !envelope.items.is_empty()
                             {
-                                envelope.retrieval_handle = match projection.store_expansion(
-                                    &root,
-                                    document_uri.as_deref(),
-                                    &scope,
-                                    format!("{}.__remaining__", expansion_context.operation_id),
-                                    LspTestRunExpansionContext {
-                                        result_offset: expansion_context
-                                            .result_offset
-                                            .saturating_add(envelope.items.len()),
-                                        page_size: MAX_CONTEXT_PROJECTION_ITEMS as u32,
-                                        ..expansion_context
-                                    },
-                                ) {
+                                envelope.retrieval_handle = match projection
+                                    .store_expansion(
+                                        &root,
+                                        document_uri.as_deref(),
+                                        &scope,
+                                        format!("{}.__remaining__", expansion_context.operation_id),
+                                        LspTestRunExpansionContext {
+                                            result_offset: expansion_context
+                                                .result_offset
+                                                .saturating_add(envelope.items.len()),
+                                            page_size: MAX_CONTEXT_PROJECTION_ITEMS as u32,
+                                            ..expansion_context
+                                        },
+                                    )
+                                    .await
+                                {
                                     Ok(handle) => Some(handle),
                                     Err(error) => {
                                         return ContextProjectionOutcome::Deferred {
@@ -610,21 +617,24 @@ impl ManagedTestRunProjection {
                     .collect::<Vec<_>>();
                 let result_offset = record.result_offset;
                 let next_retrieval_handle = if end < snapshot.results.len() {
-                    match projection.store_expansion(
-                        &root,
-                        record.document_uri.as_deref(),
-                        &scope,
-                        record.stable_id.clone(),
-                        LspTestRunExpansionContext {
-                            operation_id: record.operation_id.clone(),
-                            operation_completed: record.operation_completed,
-                            operation_total: record.operation_total,
-                            operation_termination: record.operation_termination,
-                            available_results: record.available_results,
-                            result_offset: end,
-                            page_size: MAX_CONTEXT_PROJECTION_ITEMS as u32,
-                        },
-                    ) {
+                    match projection
+                        .store_expansion(
+                            &root,
+                            record.document_uri.as_deref(),
+                            &scope,
+                            record.stable_id.clone(),
+                            LspTestRunExpansionContext {
+                                operation_id: record.operation_id.clone(),
+                                operation_completed: record.operation_completed,
+                                operation_total: record.operation_total,
+                                operation_termination: record.operation_termination,
+                                available_results: record.available_results,
+                                result_offset: end,
+                                page_size: MAX_CONTEXT_PROJECTION_ITEMS as u32,
+                            },
+                        )
+                        .await
+                    {
                         Ok(handle) => Some(handle),
                         Err(_) => return ContextExpansionOutcome::Denied,
                     }

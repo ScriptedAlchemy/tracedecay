@@ -78,7 +78,11 @@ pub async fn source_edit_tool(
     invocation: SourceEditInvocationContext<'_>,
 ) -> Result<ToolResult> {
     let outcome = run_source_edit(surface, operation, &args, invocation).await?;
-    render_source_edit_outcome(response_handles, operation, &args, outcome)
+    let response_handles = response_handles.cloned();
+    crate::response_handles::render_with_handles(move || {
+        render_source_edit_outcome(response_handles.as_ref(), operation, &args, outcome)
+    })
+    .await
 }
 
 /// Decode, dispatch, and settle one source-edit tool call. `Err` is an

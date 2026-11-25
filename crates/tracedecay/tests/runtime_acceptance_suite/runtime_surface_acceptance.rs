@@ -3498,6 +3498,7 @@ async fn feedback_handle_bootstrap_reads() {
 
     let list_handle = runtime
         .mint_list("request.feedback-bootstrap.list", None, 1, observed_at)
+        .await
         .expect("list handle");
     assert!(list_handle.starts_with("rh_"));
     let listed = owner
@@ -3525,6 +3526,7 @@ async fn feedback_handle_bootstrap_reads() {
             },
             observed_at,
         )
+        .await
         .expect("diagnostics handle");
     let diagnostics = owner
         .invoke(

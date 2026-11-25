@@ -196,14 +196,17 @@ fn dispatch_application_surface_tools_inner<'a>(
                 options.application_cancellation.clone(),
             )
             .await?;
-            return match execution {
-                Ok(completion) => tracedecay_mcp::handlers::graph_tool::render_graph_tool(
-                    response_handles,
-                    &args,
-                    completion,
-                ),
-                Err(refusal) => refusal.render(response_handles, &args),
-            };
+            return tracedecay_mcp::response_handles::render_with_handles(
+                move || match execution {
+                    Ok(completion) => tracedecay_mcp::handlers::graph_tool::render_graph_tool(
+                        handle_store.as_ref(),
+                        &args,
+                        completion,
+                    ),
+                    Err(refusal) => refusal.render(handle_store.as_ref(), &args),
+                },
+            )
+            .await;
         }
         if source_edit {
             return edit::source_edit_tool(

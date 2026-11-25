@@ -356,7 +356,7 @@ fn assert_unknown_handle(response: &Value) {
     );
 }
 
-#[tokio::test(flavor = "multi_thread")]
+#[tokio::test]
 async fn feedback_diagnostics_refuses_bad_arguments_and_denies_unknown_handles() {
     let fixture = production_composition_fixture().await;
     let server = fixture
@@ -401,7 +401,7 @@ async fn feedback_diagnostics_refuses_bad_arguments_and_denies_unknown_handles()
     fixture.harness.shutdown().await;
 }
 
-#[tokio::test(flavor = "multi_thread")]
+#[tokio::test]
 async fn feedback_diagnostics_returns_the_published_cycle_for_its_minted_handle() {
     let fixture = production_composition_fixture_with_sources(write_warned_fixture_sources).await;
     let server = fixture

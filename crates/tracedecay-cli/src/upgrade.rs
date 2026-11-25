@@ -2197,6 +2197,7 @@ mod tests {
         use flate2::write::GzEncoder;
         use sha2::{Digest, Sha256};
         use tar::{Builder, EntryType, Header};
+        use tracedecay_runtime_core::test_executable::write_executable_script;
 
         use super::super::test_server::{FakeGitHub, attestations_path};
         use super::super::{
@@ -2251,6 +2252,21 @@ mod tests {
             let scratch = tempfile::tempdir().unwrap();
             extract_targz(Cursor::new(archive), scratch.path(), members)?;
             Ok(StagedRelease { scratch })
+        }
+
+        // A sibling test's fork can inherit an in-process extraction writer
+        // and keep its executable busy after that writer closes here. Probe
+        // fixtures use the canonical subprocess writer so only the intended
+        // version identity decides whether the binding is published.
+        fn staged_probe_release(version: &str, addon: &[u8]) -> StagedRelease {
+            let scratch = tempfile::tempdir().unwrap();
+            write_executable_script(
+                &scratch.path().join(EXECUTABLE_MEMBER.name),
+                format!("#!/bin/sh\nprintf 'tracedecay {version}\\n'\n"),
+            )
+            .unwrap();
+            fs::write(scratch.path().join(SDK_MEMBER.name), addon).unwrap();
+            StagedRelease { scratch }
         }
 
         fn mode_of(path: &std::path::Path) -> u32 {
@@ -2461,14 +2477,10 @@ mod tests {
 
         #[test]
         fn completing_a_matching_release_adds_only_its_missing_binding() {
-            let archive = targz(&[
-                file(
-                    "tracedecay",
-                    b"#!/bin/sh\nprintf 'tracedecay 1.0.0+0123456789abcdef0123456789abcdef01234567\\n'\n",
-                ),
-                file(SDK_MEMBER.name, b"matching-addon"),
-            ]);
-            let staged = stage(&archive, &members()).unwrap();
+            let staged = staged_probe_release(
+                "1.0.0+0123456789abcdef0123456789abcdef01234567",
+                b"matching-addon",
+            );
             let install = tempfile::tempdir().unwrap();
             let executable = install.path().join("tracedecay");
             fs::write(&executable, b"installed-executable").unwrap();
@@ -2488,14 +2500,7 @@ mod tests {
 
         #[test]
         fn a_binding_from_another_build_cannot_complete_the_install() {
-            let archive = targz(&[
-                file(
-                    "tracedecay",
-                    b"#!/bin/sh\nprintf 'tracedecay 1.0.0+another-build\\n'\n",
-                ),
-                file(SDK_MEMBER.name, b"foreign-addon"),
-            ]);
-            let staged = stage(&archive, &members()).unwrap();
+            let staged = staged_probe_release("1.0.0+another-build", b"foreign-addon");
             let install = tempfile::tempdir().unwrap();
             let executable = install.path().join("tracedecay");
             fs::write(&executable, b"installed-executable").unwrap();

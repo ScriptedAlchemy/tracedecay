@@ -31,6 +31,20 @@
     },
     {
       "detail": {
+        "kind": "project_open_backoff",
+        "retry_after_millis": 3210,
+        "cause": "Project open is waiting after a bounded store-open failure."
+      },
+      "kind": "unavailable",
+      "code": "project_route_open_backoff",
+      "message": "Project open is waiting after a bounded store-open failure.",
+      "retry": "after_delay",
+      "legal_actions": [
+        "retry"
+      ]
+    },
+    {
+      "detail": {
         "kind": "diagnostics_unsupported",
         "file": "src/main.rs",
         "searched": [

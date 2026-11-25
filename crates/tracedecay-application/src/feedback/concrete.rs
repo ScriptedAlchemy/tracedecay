@@ -594,16 +594,16 @@ impl FeedbackRuntime {
         self.requests.expiry_at(observed_at)
     }
 
-    pub fn mint_request(
+    pub async fn mint_request(
         &self,
         request_id: impl Into<String>,
         request: FeedbackReadRequestV1,
         observed_at: UtcMicros,
     ) -> Result<String, FeedbackRuntimeError> {
-        self.requests.mint(request_id, request, observed_at)
+        self.requests.mint(request_id, request, observed_at).await
     }
 
-    pub fn mint_diagnostics(
+    pub async fn mint_diagnostics(
         &self,
         request_id: impl Into<String>,
         request: FeedbackDiagnosticsReadRequestV1,
@@ -614,9 +614,10 @@ impl FeedbackRuntime {
             FeedbackReadRequestV1::Diagnostics(request),
             observed_at,
         )
+        .await
     }
 
-    pub fn mint_list(
+    pub async fn mint_list(
         &self,
         request_id: impl Into<String>,
         head_commit_id: Option<tracedecay_domain::CommitId>,
@@ -632,9 +633,10 @@ impl FeedbackRuntime {
             }),
             observed_at,
         )
+        .await
     }
 
-    pub fn mint_get(
+    pub async fn mint_get(
         &self,
         request_id: impl Into<String>,
         finding_id: FeedbackFindingId,
@@ -645,9 +647,10 @@ impl FeedbackRuntime {
             FeedbackReadRequestV1::Get(FeedbackGetRequestV1 { finding_id }),
             observed_at,
         )
+        .await
     }
 
-    pub fn mint_expand(
+    pub async fn mint_expand(
         &self,
         request_id: impl Into<String>,
         request: FeedbackExpandRequestV1,
@@ -658,6 +661,7 @@ impl FeedbackRuntime {
             FeedbackReadRequestV1::Expand(request),
             observed_at,
         )
+        .await
     }
 }
 
@@ -674,7 +678,7 @@ impl ProjectFeedbackRequestAuthority {
             .ok_or(FeedbackRuntimeError::AccessDenied)
     }
 
-    pub fn mint(
+    pub async fn mint(
         &self,
         request_id: impl Into<String>,
         request: FeedbackReadRequestV1,
@@ -698,9 +702,10 @@ impl ProjectFeedbackRequestAuthority {
             },
             observed_at,
         )
+        .await
     }
 
-    fn resolve_record(
+    async fn resolve_record(
         &self,
         operation: FeedbackReadOperationV1,
         handle: &str,
@@ -710,7 +715,8 @@ impl ProjectFeedbackRequestAuthority {
             &self.response_handles,
             handle,
             observed_at,
-        )?;
+        )
+        .await?;
         let refusal_reason = if record.schema_version != REQUEST_HANDLE_SCHEMA_VERSION {
             Some("schema_version_mismatch")
         } else if record.operation != operation {
@@ -802,7 +808,10 @@ impl FeedbackReadRequestAuthority for ProjectFeedbackRequestAuthority {
         request_handle: &'a str,
         observed_at: UtcMicros,
     ) -> FeedbackReadRequestAuthorityFuture<'a> {
-        Box::pin(async move { self.resolve_record(operation, request_handle, observed_at) })
+        Box::pin(async move {
+            self.resolve_record(operation, request_handle, observed_at)
+                .await
+        })
     }
 }
 
@@ -1041,11 +1050,18 @@ impl FeedbackReadPort for ProjectFeedbackStore {
                 let Some((publication, finding)) = selected else {
                     return unavailable(finished_at, domains);
                 };
-                let Ok(view) =
-                    self.finding_view(context.request, publication, finding, finished_at)
+                let Ok(view) = self
+                    .finding_view(context.request, publication, finding, finished_at)
+                    .await
                 else {
                     return unavailable(finished_at, domains);
                 };
+                let finished_at = now_micros();
+                if let Some(interrupted) =
+                    interruption(context.request, finished_at, domains.clone())
+                {
+                    return interrupted;
+                }
                 complete(
                     FeedbackGetResultV1 { finding: view },
                     vec![publication],
@@ -1157,8 +1173,9 @@ impl FeedbackReadPort for ProjectFeedbackStore {
                     );
                     return interrupted;
                 }
-                let Ok(view) =
-                    self.finding_view(context.request, publication, finding, finished_at)
+                let Ok(view) = self
+                    .finding_view(context.request, publication, finding, finished_at)
+                    .await
                 else {
                     self.observe_expansion(
                         context.request,
@@ -1169,6 +1186,19 @@ impl FeedbackReadPort for ProjectFeedbackStore {
                     );
                     return unavailable(finished_at, domains);
                 };
+                finished_at = now_micros();
+                if let Some(interrupted) =
+                    interruption(context.request, finished_at, domains.clone())
+                {
+                    self.observe_expansion(
+                        context.request,
+                        request,
+                        interruption_outcome(context.request, finished_at),
+                        0,
+                        finished_at,
+                    );
+                    return interrupted;
+                }
                 self.observe_expansion(
                     context.request,
                     request,
@@ -1235,7 +1265,10 @@ impl FeedbackReadPort for ProjectFeedbackStore {
                     }
                 }
                 let records: Vec<_> = latest.into_iter().collect();
-                let start = match self.list_start(context.request, request, &records, finished_at) {
+                let start = match self
+                    .list_start(context.request, request, &records, finished_at)
+                    .await
+                {
                     Ok(start) => start,
                     Err(mismatch) => return cursor_refused(finished_at, domains, &mismatch),
                 };
@@ -1247,8 +1280,9 @@ impl FeedbackReadPort for ProjectFeedbackStore {
                 let mut authorities = Vec::new();
                 for (_, (publication_index, finding)) in selected {
                     let publication = &publications[*publication_index];
-                    let Ok(view) =
-                        self.finding_view(context.request, publication, finding, finished_at)
+                    let Ok(view) = self
+                        .finding_view(context.request, publication, finding, finished_at)
+                        .await
                     else {
                         return unavailable(finished_at, domains);
                     };
@@ -1256,12 +1290,15 @@ impl FeedbackReadPort for ProjectFeedbackStore {
                     authorities.push(publication);
                 }
                 let (cursor, expires_at) = if end < records.len() {
-                    match self.next_list_handle(
-                        context.request,
-                        request,
-                        &records[end - 1].0,
-                        finished_at,
-                    ) {
+                    match self
+                        .next_list_handle(
+                            context.request,
+                            request,
+                            &records[end - 1].0,
+                            finished_at,
+                        )
+                        .await
+                    {
                         Ok(next) => (Some(next.0), Some(next.1)),
                         Err(_) => {
                             return unavailable(finished_at, domains);
@@ -1496,7 +1533,7 @@ impl ProjectFeedbackStore {
         Ok(FeedbackPublicationRecordState::Recorded)
     }
 
-    fn finding_view(
+    async fn finding_view(
         &self,
         context: &RequestContext,
         publication: &FeedbackPublicationV1,
@@ -1512,12 +1549,11 @@ impl ProjectFeedbackStore {
                 }),
             ),
             observed_at,
-        )?;
-        let expand_handle = finding
-            .retrieval_anchor_id
-            .as_ref()
-            .map(|anchor| {
-                let page = PageRequest::first(DEFAULT_EXPANSION_PAGE_SIZE)?;
+        )
+        .await?;
+        let expand_handle = if let Some(anchor) = finding.retrieval_anchor_id.as_ref() {
+            let page = PageRequest::first(DEFAULT_EXPANSION_PAGE_SIZE)?;
+            Some(
                 store_request_handle(
                     &self.response_handles,
                     request_record(
@@ -1536,8 +1572,11 @@ impl ProjectFeedbackStore {
                     ),
                     observed_at,
                 )
-            })
-            .transpose()?;
+                .await?,
+            )
+        } else {
+            None
+        };
         Ok(FeedbackFindingReadV1 {
             result_id: publication.result.result_id.clone(),
             cycle_id: publication.result.cycle_id.clone(),
@@ -1550,7 +1589,7 @@ impl ProjectFeedbackStore {
 
     /// Where a list page starts: the stored continuation's position when the
     /// presented cursor is a live list continuation minted for this request.
-    fn list_start(
+    async fn list_start(
         &self,
         context: &RequestContext,
         request: &FeedbackListRequestV1,
@@ -1565,6 +1604,7 @@ impl ProjectFeedbackStore {
             cursor.as_str(),
             observed_at,
         )
+        .await
         .map_err(|_| CursorBindingMismatchV1::Foreign)?;
         let FeedbackReadRequestV1::List(stored_request) = &stored.request else {
             return Err(CursorBindingMismatchV1::Foreign);
@@ -1592,7 +1632,7 @@ impl ProjectFeedbackStore {
         Ok(records.partition_point(|(finding_id, _)| finding_id <= after_finding_id))
     }
 
-    fn next_list_handle(
+    async fn next_list_handle(
         &self,
         context: &RequestContext,
         request: &FeedbackListRequestV1,
@@ -1608,7 +1648,8 @@ impl ProjectFeedbackStore {
             }),
         );
         next_request.after_finding_id = Some(after_finding_id.clone());
-        let next_handle = store_request_handle(&self.response_handles, next_request, observed_at)?;
+        let next_handle =
+            store_request_handle(&self.response_handles, next_request, observed_at).await?;
         Ok((OpaqueCursor::new(next_handle)?, expires_at))
     }
 }
@@ -1690,19 +1731,20 @@ fn request_record(
     }
 }
 
-fn store_request_handle(
+async fn store_request_handle(
     response_handles: &ResponseHandleStore,
     record: StoredFeedbackRequestV1,
     observed_at: UtcMicros,
 ) -> Result<String, FeedbackRuntimeError> {
     let content = serde_json::to_string(&record).map_err(|_| FeedbackRuntimeError::Corrupt)?;
     let stored = response_handles
-        .publish_blocking(&content, micros_to_seconds(observed_at))
+        .publish(&content, micros_to_seconds(observed_at))
+        .await
         .map_err(|error| FeedbackRuntimeError::HandleStore(error.into()))?;
     Ok(stored.handle)
 }
 
-fn load_handle_content<T>(
+async fn load_handle_content<T>(
     response_handles: &ResponseHandleStore,
     handle: &str,
     observed_at: UtcMicros,
@@ -1715,7 +1757,8 @@ where
         return Err(FeedbackReadRequestResolutionV1::NotFoundOrNotAuthorized);
     }
     match response_handles
-        .lookup_blocking(handle, micros_to_seconds(observed_at))
+        .lookup(handle, micros_to_seconds(observed_at))
+        .await
         .map_err(|_| FeedbackReadRequestResolutionV1::Unavailable)?
     {
         ResponseHandleLookup::Found(record) => {
@@ -2708,7 +2751,13 @@ mod tests {
                             .to_string_lossy()
                     );
                     barrier.wait();
-                    authority.mint(request_id, request, UtcMicros(10)).unwrap()
+                    tracedecay_runtime_core::native_runtime::block_on(authority.mint(
+                        request_id,
+                        request,
+                        UtcMicros(10),
+                    ))
+                    .expect("native runtime")
+                    .unwrap()
                 })
             });
             workers.map(|worker| worker.join().unwrap())
@@ -2717,21 +2766,26 @@ mod tests {
 
         for (owner, other) in [(0, 1), (1, 0)] {
             assert!(
-                authorities[owner]
-                    .resolve_record(
+                tracedecay_runtime_core::native_runtime::block_on(
+                    authorities[owner].resolve_record(
+                        FeedbackReadOperationV1::List,
+                        &handles[owner],
+                        UtcMicros(11)
+                    ),
+                )
+                .expect("native runtime")
+                .is_ok(),
+                "owner {owner} resolves its own handle"
+            );
+            assert!(matches!(
+                tracedecay_runtime_core::native_runtime::block_on(
+                    authorities[other].resolve_record(
                         FeedbackReadOperationV1::List,
                         &handles[owner],
                         UtcMicros(11)
                     )
-                    .is_ok(),
-                "owner {owner} resolves its own handle"
-            );
-            assert!(matches!(
-                authorities[other].resolve_record(
-                    FeedbackReadOperationV1::List,
-                    &handles[owner],
-                    UtcMicros(11)
-                ),
+                )
+                .expect("native runtime"),
                 Err(FeedbackReadRequestResolutionV1::NotFoundOrNotAuthorized)
             ));
         }
@@ -2740,7 +2794,7 @@ mod tests {
     /// A list continuation pages only the list that minted it: a changed head
     /// or page size, another read's handle, or an unknown handle is the one
     /// typed cursor refusal instead of an unavailable page.
-    #[tokio::test(flavor = "multi_thread")]
+    #[tokio::test]
     async fn list_refuses_a_continuation_minted_for_another_request() {
         let root = tempfile::tempdir().unwrap();
         let path = root.path().join("feedback-list-cursor.db");
@@ -2803,6 +2857,7 @@ mod tests {
                 &id::<FeedbackFindingId>("feedback.finding.fixture"),
                 now,
             )
+            .await
             .unwrap();
         let get_handle = store_request_handle(
             &store.response_handles,
@@ -2814,6 +2869,7 @@ mod tests {
             ),
             now,
         )
+        .await
         .unwrap();
         let refusal = |outcome: RetrievalPortOutcome<FeedbackListResultV1>| {
             let RetrievalPortOutcome::Refused(_, problem) = outcome else {

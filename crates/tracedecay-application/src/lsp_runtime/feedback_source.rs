@@ -213,6 +213,7 @@ impl ConcreteFeedbackLspSource {
                 },
                 observed_at,
             )
+            .await
             .map_err(|_| LspRuntimeFailure::new("feedback-request-mint-failed"))?;
         let result = self
             .owner
@@ -256,13 +257,13 @@ impl ConcreteFeedbackLspSource {
     }
 
     #[tracing::instrument(name = "usecases.lsp.context.findings", level = "trace", skip_all)]
-    pub(super) fn current_finding_items<'a>(
+    pub(super) async fn current_finding_items<'a>(
         &self,
         target: FindingContextTarget<'_>,
         scope: &LspFeedbackProjectionScope,
         impact_target_file: Option<&tracedecay_domain::FileOccurrenceId>,
         kind: ContextProjectionKind,
-        findings: impl Iterator<Item = &'a FeedbackFindingV1>,
+        findings: impl Iterator<Item = &'a FeedbackFindingV1> + Send,
         maximum_items: usize,
     ) -> Result<Vec<ContextProjectionItem>, LspRuntimeFailure> {
         let observed_at = now_micros();
@@ -270,14 +271,14 @@ impl ConcreteFeedbackLspSource {
             .runtime
             .request_expiry_at(observed_at)
             .map_err(|_| LspRuntimeFailure::new("feedback-finding-expiry-unavailable"))?;
-        findings
+        let mut items = Vec::new();
+        for (finding, item) in findings
             .filter(|finding| finding_matches_document(finding, scope, impact_target_file))
             .filter_map(|finding| finding_item(finding).map(|item| (finding, item)))
             .take(maximum_items)
-            .map(|(finding, item)| {
-                let (canonical_operation, canonical_handle) = if let Some(anchor) =
-                    finding.retrieval_anchor_id.as_ref()
-                {
+        {
+            let (canonical_operation, canonical_handle) =
+                if let Some(anchor) = finding.retrieval_anchor_id.as_ref() {
                     let page = PageRequest::first(MAX_CONTEXT_PROJECTION_ITEMS as u32)
                         .map_err(|_| LspRuntimeFailure::new("feedback-expand-page-invalid"))?;
                     let handle = self
@@ -301,6 +302,7 @@ impl ConcreteFeedbackLspSource {
                             },
                             observed_at,
                         )
+                        .await
                         .map_err(|_| LspRuntimeFailure::new("feedback-expand-mint-failed"))?;
                     (FeedbackReadOperationV1::Expand, handle)
                 } else {
@@ -315,9 +317,11 @@ impl ConcreteFeedbackLspSource {
                             finding.finding_id.clone(),
                             observed_at,
                         )
+                        .await
                         .map_err(|_| LspRuntimeFailure::new("feedback-get-mint-failed"))?;
                     (FeedbackReadOperationV1::Get, handle)
                 };
+            items.push(
                 self.attach_context_handle(
                     target.root,
                     target.document_uri,
@@ -329,13 +333,15 @@ impl ConcreteFeedbackLspSource {
                     &canonical_handle,
                     item,
                 )
-            })
-            .collect()
+                .await?,
+            );
+        }
+        Ok(items)
     }
 
     #[allow(clippy::too_many_arguments)]
     #[tracing::instrument(name = "usecases.lsp.context.store_handle", level = "trace", skip_all)]
-    pub(super) fn attach_context_handle(
+    pub(super) async fn attach_context_handle(
         &self,
         root: &AdmittedRoot,
         document_uri: Option<&str>,
@@ -366,7 +372,8 @@ impl ConcreteFeedbackLspSource {
         let stored = self
             .runtime
             .response_handles()
-            .publish_blocking(&content, micros_to_seconds(observed_at))
+            .publish(&content, micros_to_seconds(observed_at))
+            .await
             .map_err(|_| LspRuntimeFailure::new("context-expansion-handle-store-failed"))?;
         item.retrieval_handle = Some(stored.handle);
         Ok(item)
@@ -549,7 +556,8 @@ impl ManagedDiagnosticSnapshotPort for ConcreteFeedbackLspSource {
                         ContextProjectionKind::diagnostics(),
                         cycle.findings.iter(),
                         MAX_CONTEXT_PROJECTION_ITEMS,
-                    )?
+                    )
+                    .await?
                     .into_iter()
                     .filter_map(|item| item.retrieval_handle.map(|handle| (item.stable_id, handle)))
                     .collect();
@@ -665,17 +673,20 @@ impl CanonicalContextProjectionAuthority for ConcreteFeedbackLspSource {
                 let (coverage, mut items, omitted_count) = if request.kind
                     == ContextProjectionKind::diagnostics()
                 {
-                    let items = match source.current_finding_items(
-                        FindingContextTarget {
-                            root: &root,
-                            document_uri: request.document_uri.as_deref(),
-                        },
-                        &scope,
-                        cycle.impact.as_ref().map(|impact| &impact.target.file),
-                        ContextProjectionKind::diagnostics(),
-                        cycle.findings.iter(),
-                        MAX_CONTEXT_PROJECTION_ITEMS,
-                    ) {
+                    let items = match source
+                        .current_finding_items(
+                            FindingContextTarget {
+                                root: &root,
+                                document_uri: request.document_uri.as_deref(),
+                            },
+                            &scope,
+                            cycle.impact.as_ref().map(|impact| &impact.target.file),
+                            ContextProjectionKind::diagnostics(),
+                            cycle.findings.iter(),
+                            MAX_CONTEXT_PROJECTION_ITEMS,
+                        )
+                        .await
+                    {
                         Ok(items) => items,
                         Err(error) => {
                             return ContextProjectionOutcome::Deferred {
@@ -721,20 +732,23 @@ impl CanonicalContextProjectionAuthority for ConcreteFeedbackLspSource {
                         .filter(|finding| advisory_finding_matches(finding, producer))
                         .filter_map(finding_item)
                         .count();
-                    let items = match source.current_finding_items(
-                        FindingContextTarget {
-                            root: &root,
-                            document_uri: request.document_uri.as_deref(),
-                        },
-                        &scope,
-                        cycle.impact.as_ref().map(|impact| &impact.target.file),
-                        kind.clone(),
-                        cycle
-                            .findings
-                            .iter()
-                            .filter(|finding| advisory_finding_matches(finding, producer)),
-                        MAX_CONTEXT_PROJECTION_ITEMS,
-                    ) {
+                    let items = match source
+                        .current_finding_items(
+                            FindingContextTarget {
+                                root: &root,
+                                document_uri: request.document_uri.as_deref(),
+                            },
+                            &scope,
+                            cycle.impact.as_ref().map(|impact| &impact.target.file),
+                            kind.clone(),
+                            cycle
+                                .findings
+                                .iter()
+                                .filter(|finding| advisory_finding_matches(finding, producer)),
+                            MAX_CONTEXT_PROJECTION_ITEMS,
+                        )
+                        .await
+                    {
                         Ok(items) => items,
                         Err(error) => {
                             return ContextProjectionOutcome::Deferred {
@@ -767,10 +781,10 @@ impl CanonicalContextProjectionAuthority for ConcreteFeedbackLspSource {
                 if kind != ContextProjectionKind::diagnostics()
                     && advisory_projection_producer(&kind).is_none()
                 {
-                    items = match items
-                        .into_iter()
-                        .map(|item| {
-                            source.attach_context_handle(
+                    let mut attached_items = Vec::with_capacity(items.len());
+                    for item in items {
+                        let item = match source
+                            .attach_context_handle(
                                 &root,
                                 request.document_uri.as_deref(),
                                 kind.clone(),
@@ -781,32 +795,37 @@ impl CanonicalContextProjectionAuthority for ConcreteFeedbackLspSource {
                                 &canonical_handle,
                                 item,
                             )
-                        })
-                        .collect()
-                    {
-                        Ok(items) => items,
-                        Err(error) => {
-                            return ContextProjectionOutcome::Deferred {
-                                reason: error.class().to_owned(),
-                            };
-                        }
-                    };
+                            .await
+                        {
+                            Ok(item) => item,
+                            Err(error) => {
+                                return ContextProjectionOutcome::Deferred {
+                                    reason: error.class().to_owned(),
+                                };
+                            }
+                        };
+                        attached_items.push(item);
+                    }
+                    items = attached_items;
                 }
-                let retrieval_handle = match source.attach_context_handle(
-                    &root,
-                    request.document_uri.as_deref(),
-                    kind.clone(),
-                    &scope,
-                    observed_at,
-                    expires_at,
-                    FeedbackReadOperationV1::Diagnostics,
-                    &canonical_handle,
-                    ContextProjectionItem {
-                        stable_id: "__projection__".to_owned(),
-                        summary: String::new(),
-                        retrieval_handle: None,
-                    },
-                ) {
+                let retrieval_handle = match source
+                    .attach_context_handle(
+                        &root,
+                        request.document_uri.as_deref(),
+                        kind.clone(),
+                        &scope,
+                        observed_at,
+                        expires_at,
+                        FeedbackReadOperationV1::Diagnostics,
+                        &canonical_handle,
+                        ContextProjectionItem {
+                            stable_id: "__projection__".to_owned(),
+                            summary: String::new(),
+                            retrieval_handle: None,
+                        },
+                    )
+                    .await
+                {
                     Ok(item) => item.retrieval_handle,
                     Err(error) => {
                         return ContextProjectionOutcome::Deferred {

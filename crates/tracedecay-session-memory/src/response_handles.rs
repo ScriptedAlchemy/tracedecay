@@ -17,9 +17,11 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 
+use tracedecay_contracts::{CancellationSignal, Deadline};
 use tracedecay_domain::UtcMicros;
 use tracedecay_domain::errors::TraceDecayError;
 use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
+use tracedecay_runtime_core::cancellation::CancellationToken;
 
 pub use tracedecay_global_db::{
     RESPONSE_HANDLE_TTL_SECS, ResponseHandleError, ResponseHandleInventory, ResponseHandleLookup,
@@ -54,6 +56,18 @@ impl ResponseHandleStore {
 
     pub async fn publish(&self, content: &str, now: i64) -> Result<ResponseHandleRecord> {
         self.database.publish_response_handle(content, now).await
+    }
+
+    pub async fn publish_with_control(
+        &self,
+        content: &str,
+        deadline: Deadline,
+        cancellation: CancellationToken,
+        signal: Option<CancellationSignal>,
+    ) -> Result<ResponseHandleRecord> {
+        self.database
+            .publish_response_handle_with_control(content, deadline, cancellation, signal)
+            .await
     }
 
     pub async fn lookup(&self, handle: &str, now: i64) -> Result<ResponseHandleLookup> {

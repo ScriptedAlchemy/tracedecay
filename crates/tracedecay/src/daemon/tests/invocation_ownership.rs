@@ -14,12 +14,14 @@ use tracedecay_daemon_protocol::{
 
 use tempfile::TempDir;
 use tokio::io::AsyncWriteExt;
+use tracedecay_contracts::graph_tool::GraphToolResultV1;
 use tracedecay_contracts::retained_surfaces::{
     FactStoreCurateRequestV1, MemoryStatusRequestV1, RetainedSurfaceRequestV1,
 };
+use tracedecay_contracts::retrieval::RuntimeDoctorReportV1;
 use tracedecay_contracts::{
-    ApplicationProblemKind, CancellationContext, Deadline, ProblemTerminality, RetryDirective,
-    WorkGraphReadRequestV1, WorkProductSelectionScopeV1,
+    ApplicationProblem, ApplicationProblemKind, CancellationContext, Deadline, ProblemTerminality,
+    RetryDirective, WorkGraphReadRequestV1, WorkProductSelectionScopeV1,
 };
 use tracedecay_domain::{ActorId, ProjectId, RepositoryId, UtcMicros, WorktreeId};
 use tracedecay_tool_catalog::ApplicationSurfaceOperation;
@@ -101,7 +103,208 @@ async fn unopened_committed_fixture(
     (temp, database_scope, engine, handshake)
 }
 
+#[tokio::test]
+async fn doctor_probe_preserves_a_stalled_project_open_cause_and_retry_delay() {
+    use crate::daemon::project_open_admission::{ProjectOpenTaskClaim, ProjectOpenTasks};
+    use tracedecay_domain::errors::{ProjectOpenFailureKind, TraceDecayError};
+
+    let (_temp, _database_scope, engine, handshake) =
+        unopened_committed_fixture("doctor-stalled-project-open").await;
+    super::prewarm_test_profile_runtime(&engine.store_administration).await;
+    let (project_path, route) = engine
+        .project_route(&handshake)
+        .expect("Doctor project route");
+    let tasks =
+        crate::daemon::project_routing::project_open_tasks(&engine.project_open_gates).await;
+    const CAUSE: &str = "session authority rejected mutable committed receipt history";
+    let ProjectOpenTaskClaim::InFlight(state) = tasks.start(route.clone(), async {
+        Err(TraceDecayError::project_open(
+            ProjectOpenFailureKind::AuthorityVerdict {
+                migration_pending: false,
+            },
+            CAUSE,
+        ))
+    }) else {
+        panic!("fixture must own the first project open");
+    };
+    ProjectOpenTasks::wait_for_completion(state)
+        .await
+        .expect_err("record the rejected project open");
+    let recorded_status = tasks.status(&route).expect("recorded project status");
+    assert_eq!(
+        recorded_status.state,
+        tracedecay_contracts::project_open::ProjectOpenStatusStateV1::Stalled,
+    );
+    let delay_before_probe = recorded_status
+        .retry_after_ms
+        .expect("the stalled project records its retry delay");
+
+    let (listener, endpoint) = tracedecay_daemon_protocol::BrokerListener::bind(
+        &tracedecay_daemon_protocol::default_loopback_endpoint(),
+    )
+    .await
+    .expect("Doctor daemon endpoint");
+    let serving_engine = engine.clone();
+    let serving = tokio::spawn(async move {
+        let stream = listener.accept().await.expect("accept Doctor probe");
+        Box::pin(
+            crate::daemon::connection_serving::serve_authenticated_socket_client_with_class(
+                stream,
+                serving_engine,
+                super::TEST_AUTH_TOKEN.to_owned(),
+                crate::daemon::core_admission::DaemonClientAdmissionClass::General,
+            ),
+        )
+        .await
+    });
+    let client = tracedecay_daemon_protocol::DaemonInvocationClient::new(
+        tracedecay_daemon_protocol::DaemonConnection::new(
+            endpoint,
+            super::TEST_AUTH_TOKEN.to_owned(),
+        ),
+        handshake.clone(),
+    );
+    let reported_delay = crate::doctor::assert_stalled_doctor_probe(
+        &client,
+        &handshake.client_identity.profile_root,
+        &project_path,
+        CAUSE,
+    )
+    .await;
+    let delay_after_probe = tasks
+        .status(&route)
+        .expect("the Doctor probe does not restart the rejected open")
+        .retry_after_ms
+        .expect("the recorded retry delay remains active");
+    assert!(
+        (delay_after_probe..=delay_before_probe).contains(&reported_delay),
+        "Doctor's wire delay {reported_delay} must match the owner's remaining backoff \
+         ({delay_after_probe}..={delay_before_probe})"
+    );
+    drop(client);
+    tokio::time::timeout(Duration::from_secs(30), serving)
+        .await
+        .expect("Doctor connection must finish")
+        .expect("Doctor serving task")
+        .expect("Doctor daemon response");
+    let shutdown = engine.shutdown_all().await;
+    assert!(shutdown.project_servers.is_clean(), "{shutdown:?}");
+}
+
 const PREPARATION_RELEASE_DEADLINE: Duration = Duration::from_mins(1);
+
+/// Runtime telemetry can serve during project open, but a requested Doctor
+/// report must wait for the report reader's publication after dependent owners
+/// mount. The typed route must not settle that window as an unsupported report.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn doctor_report_mounts_before_the_typed_runtime_request_is_admitted() {
+    let (_temp, _database_scope, engine, handshake) =
+        unopened_committed_fixture("doctor-report-while-owners-mount").await;
+    let canonical_project = handshake
+        .project_path
+        .as_deref()
+        .expect("project alias")
+        .canonicalize()
+        .expect("canonical project root");
+    let registration = engine
+        .invocation
+        .service
+        .pause_configuration_runtime_registration(canonical_project.clone())
+        .await;
+    let opening_engine = engine.clone();
+    let opening_handshake = handshake.clone();
+    let opening =
+        tokio::spawn(async move { opening_engine.project_server(&opening_handshake).await });
+    tokio::time::timeout(Duration::from_mins(1), registration.before_registration)
+        .await
+        .expect("project open must reach the owner registration gate")
+        .expect("owner registration gate sender");
+    assert_eq!(
+        engine
+            .invocation
+            .service
+            .project_runtimes
+            .publication_state(&canonical_project),
+        Some(ProjectRuntimePublicationStateV1::Warming),
+    );
+    let runtime_request = |request_id: &str, doctor_report: bool| {
+        let observed_at = tracedecay_contracts::clock::now_micros();
+        DaemonInvocationRequest::graph_tool(
+            request_id,
+            ApplicationSurfaceOperation::Runtime,
+            serde_json::Map::from_iter([("doctor_report".to_owned(), doctor_report.into())]),
+            observed_at,
+            Deadline::new(UtcMicros(observed_at.0.saturating_add(30_000_000)))
+                .expect("daemon invocation deadline"),
+            CancellationContext::active(format!("cancel.{request_id}"))
+                .expect("daemon invocation cancellation"),
+        )
+    };
+
+    let mounting = execute_daemon_invocation(
+        &engine,
+        &handshake,
+        runtime_request("request.doctor.while-mounting", true),
+    )
+    .await;
+    let DaemonInvocationOutcome::ApplicationProblem { problem } = &mounting.outcome else {
+        panic!("an unpublished Doctor reader must answer a mounting refusal: {mounting:?}");
+    };
+    assert_eq!(problem, &ApplicationProblem::runtime_mounting());
+
+    let telemetry = execute_daemon_invocation(
+        &engine,
+        &handshake,
+        runtime_request("request.telemetry.while-doctor-mounts", false),
+    )
+    .await;
+    let DaemonInvocationOutcome::GraphTool { completion, .. } = &telemetry.outcome else {
+        panic!("ordinary runtime telemetry must remain available: {telemetry:?}");
+    };
+    let GraphToolResultV1::Runtime(runtime) = &completion.result else {
+        panic!("runtime request returned another result: {completion:?}");
+    };
+    assert!(runtime.doctor_report.is_none());
+
+    registration
+        .allow_registration
+        .send(())
+        .expect("release owner registration");
+    tokio::time::timeout(Duration::from_mins(1), registration.after_registration)
+        .await
+        .expect("owner registration must publish")
+        .expect("owner registration publication sender");
+    registration
+        .allow_return
+        .send(())
+        .expect("release project-open owner setup");
+    opening
+        .await
+        .expect("project-open task")
+        .expect("project opens once its owners are registered");
+
+    let served = execute_daemon_invocation(
+        &engine,
+        &handshake,
+        runtime_request("request.doctor.after-mounting", true),
+    )
+    .await;
+    let DaemonInvocationOutcome::GraphTool { completion, .. } = &served.outcome else {
+        panic!("the published Doctor reader must answer its report: {served:?}");
+    };
+    let GraphToolResultV1::Runtime(runtime) = &completion.result else {
+        panic!("Doctor request returned another result: {completion:?}");
+    };
+    assert!(
+        matches!(
+            runtime.doctor_report,
+            Some(RuntimeDoctorReportV1::Observed { .. })
+        ),
+        "Doctor must observe the canonical report after its reader publishes: {runtime:?}"
+    );
+    let shutdown = engine.shutdown_all().await;
+    assert!(shutdown.project_servers.is_clean(), "{shutdown:?}");
+}
 
 #[derive(Default)]
 struct CuratorPreparationPause {

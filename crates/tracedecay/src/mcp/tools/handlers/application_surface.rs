@@ -137,7 +137,11 @@ pub async fn handle_application_surface(
     )
     .await
     .map_err(ApplicationSurfaceAdapterError::into_trace_decay_error)?;
-    render_application_surface_result(response_handles, &result)
+    let response_handles = response_handles.cloned();
+    tracedecay_mcp::response_handles::render_with_handles(move || {
+        render_application_surface_result(response_handles.as_ref(), &result)
+    })
+    .await
 }
 
 /// Render one settled application-surface call as its tool result. MCP and
@@ -187,7 +191,11 @@ pub async fn run_retained_surface_tool(
         cancellation,
     )
     .await?;
-    render_retained_execution(response_handles, &execution)
+    let response_handles = response_handles.cloned();
+    tracedecay_mcp::response_handles::render_with_handles(move || {
+        render_retained_execution(response_handles.as_ref(), &execution)
+    })
+    .await
 }
 
 /// Render a settled retained tool call.
@@ -620,6 +628,15 @@ pub(crate) fn graph_tool_error_problem(
         return graph_tool_unavailable(reason_code, retryable, detail);
     }
     match error {
+        TraceDecayError::ProjectOpen {
+            kind: ProjectOpenFailureKind::BackedOff { retry_after_ms },
+            detail,
+        } => tracedecay_contracts::ApplicationProblem::from_detail(
+            tracedecay_contracts::ApplicationProblemDetailV1::ProjectOpenBackoff {
+                retry_after_millis: *retry_after_ms,
+                cause: safe_diagnostic_message(detail),
+            },
+        ),
         TraceDecayError::Config { message }
         | TraceDecayError::InvalidRequest { message, .. }
         | TraceDecayError::ProjectOpen {

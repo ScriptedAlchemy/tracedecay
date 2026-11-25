@@ -265,11 +265,14 @@ pub(crate) async fn dispatch_on_graph_authority(
             let completion =
                 super::compute_graph_tool_for_owner(cg, operation, args.clone(), None, options)
                     .await?;
-            tracedecay_mcp::handlers::graph_tool::render_graph_tool(
-                handle_store.as_ref(),
-                &args,
-                completion,
-            )
+            tracedecay_mcp::response_handles::render_with_handles(move || {
+                tracedecay_mcp::handlers::graph_tool::render_graph_tool(
+                    handle_store.as_ref(),
+                    &args,
+                    completion,
+                )
+            })
+            .await
         }
         None => handle_tool_call_with_registry_options(tool_name, args, options).await,
     }

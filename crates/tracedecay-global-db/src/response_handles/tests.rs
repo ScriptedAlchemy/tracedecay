@@ -174,7 +174,7 @@ async fn namespaces_isolate_lookup_cleanup_and_inventory() {
     let own = db.response_handle_namespace().unwrap();
     let foreign = "foreign-project".to_owned();
     let record = db
-        .publish_response_handle_in(foreign.clone(), "foreign payload".into(), NOW)
+        .publish_response_handle_in(foreign.clone(), "foreign payload".into(), NOW, None)
         .await
         .unwrap();
 
@@ -345,5 +345,182 @@ async fn revoked_write_authority_refuses_publication_without_a_record() {
     assert_eq!(
         rows.next().await.unwrap().unwrap().get::<i64>(0).unwrap(),
         0
+    );
+}
+
+#[tokio::test]
+async fn replay_repairs_length_metadata_and_future_dated_rows() {
+    let harness = RegisteredGlobalDbHarness::open("response-handle-metadata-repair").await;
+    let db = &harness.registered;
+    let content = "é🦀\0full content";
+    let record = db.publish_response_handle(content, NOW).await.unwrap();
+    db.writer_connection()
+        .unwrap()
+        .execute(
+            "UPDATE response_handles SET content_bytes = 1, content_chars = 1 WHERE handle = ?1",
+            params![record.handle.as_str()],
+        )
+        .await
+        .unwrap();
+    assert!(matches!(
+        db.lookup_response_handle(&record.handle, NOW).await,
+        Err(ResponseHandleError::CorruptRecord { .. }),
+    ));
+    db.publish_response_handle(content, NOW + 1).await.unwrap();
+    assert_eq!(found(db, &record.handle, NOW + 1).await.content, content);
+
+    let future = NOW + RESPONSE_HANDLE_TTL_SECS * 10;
+    db.writer_connection()
+        .unwrap()
+        .execute(
+            "UPDATE response_handles SET created_at = ?1, expires_at = ?2 WHERE handle = ?3",
+            params![
+                future,
+                future + RESPONSE_HANDLE_TTL_SECS,
+                record.handle.as_str()
+            ],
+        )
+        .await
+        .unwrap();
+    assert!(matches!(
+        db.lookup_response_handle(&record.handle, NOW + 2).await,
+        Err(ResponseHandleError::CorruptRecord { .. }),
+    ));
+    let repaired = db.publish_response_handle(content, NOW + 2).await.unwrap();
+    assert_eq!(repaired.created_at, NOW + 2);
+    assert_eq!(repaired.expires_at, NOW + 2 + RESPONSE_HANDLE_TTL_SECS);
+    assert_eq!(found(db, &record.handle, NOW + 2).await.content, content);
+}
+
+#[tokio::test]
+async fn request_deadline_refuses_publication_while_writer_is_held() {
+    let harness = RegisteredGlobalDbHarness::open("response-handle-writer-deadline").await;
+    let db = &harness.registered;
+    let writer = db.runtime_database().writer().await.unwrap();
+    let deadline = Deadline::new(tracedecay_domain::UtcMicros(now_micros().0 + 50_000)).unwrap();
+    let result = tokio::time::timeout(
+        Duration::from_secs(3),
+        db.publish_response_handle_with_control(
+            "must not persist",
+            deadline,
+            CancellationToken::new(),
+            None,
+        ),
+    )
+    .await
+    .expect("publication must stop without acquiring the held writer");
+    assert!(matches!(result, Err(ResponseHandleError::Store(error))
+        if error.project_route_context().is_some_and(|(code, _, _)| code == "response_handle_publication_timed_out")));
+    drop(writer);
+    db.publish_response_handle("writer is usable", NOW)
+        .await
+        .unwrap();
+    assert_eq!(
+        db.lookup_response_handle(&response_handle_for("must not persist"), NOW)
+            .await
+            .unwrap(),
+        ResponseHandleLookup::Missing,
+    );
+}
+
+#[tokio::test]
+async fn request_cancellation_refuses_queued_publication_and_uses_owner_clock() {
+    use std::future::{Future, poll_fn};
+    use std::task::Poll;
+
+    let harness = RegisteredGlobalDbHarness::open("response-handle-writer-cancel").await;
+    let db = &harness.registered;
+    let writer = db.runtime_database().writer().await.unwrap();
+    let cancellation = CancellationToken::new();
+    let deadline = Deadline::new(tracedecay_domain::UtcMicros(now_micros().0 + 3_000_000)).unwrap();
+    let publication = db.publish_response_handle_with_control(
+        "cancelled payload",
+        deadline.clone(),
+        cancellation.clone(),
+        None,
+    );
+    tokio::pin!(publication);
+    poll_fn(|cx| {
+        assert!(publication.as_mut().poll(cx).is_pending());
+        Poll::Ready(())
+    })
+    .await;
+    cancellation.cancel();
+    let result = tokio::time::timeout(Duration::from_secs(1), publication)
+        .await
+        .unwrap();
+    assert!(matches!(result, Err(ResponseHandleError::Store(error))
+        if error.project_route_context().is_some_and(|(code, _, _)| code == "response_handle_publication_cancelled")));
+    drop(writer);
+    let before = now_micros().0.div_euclid(1_000_000);
+    let published = db
+        .publish_response_handle_with_control(
+            "owner clock",
+            deadline,
+            CancellationToken::new(),
+            None,
+        )
+        .await
+        .unwrap();
+    let after = now_micros().0.div_euclid(1_000_000);
+    assert!((before..=after).contains(&published.created_at));
+    assert_eq!(
+        published.expires_at,
+        published.created_at + RESPONSE_HANDLE_TTL_SECS
+    );
+    assert_eq!(
+        db.lookup_response_handle(&response_handle_for("cancelled payload"), before)
+            .await
+            .unwrap(),
+        ResponseHandleLookup::Missing,
+    );
+}
+
+#[tokio::test]
+async fn live_request_signal_refuses_publication_without_a_token_relay() {
+    use std::future::{Future, poll_fn};
+    use std::task::Poll;
+
+    let harness = RegisteredGlobalDbHarness::open("response-handle-live-signal").await;
+    let db = &harness.registered;
+    let writer = db.runtime_database().writer().await.unwrap();
+    let cancellation = CancellationToken::new();
+    let signal = CancellationSignal::active("response-handle-live-signal").unwrap();
+    let deadline = Deadline::new(tracedecay_domain::UtcMicros(now_micros().0 + 3_000_000)).unwrap();
+    let publication = db.publish_response_handle_with_control(
+        "cancelled directly",
+        deadline,
+        cancellation.clone(),
+        Some(signal.clone()),
+    );
+    tokio::pin!(publication);
+    poll_fn(|cx| {
+        assert!(publication.as_mut().poll(cx).is_pending());
+        Poll::Ready(())
+    })
+    .await;
+    signal.cancel(now_micros());
+    assert!(
+        !cancellation.is_cancelled(),
+        "no asynchronous relay is needed"
+    );
+    let result = tokio::time::timeout(Duration::from_secs(1), publication)
+        .await
+        .unwrap();
+    assert!(matches!(result, Err(ResponseHandleError::Store(error))
+        if error.project_route_context().is_some_and(|(code, _, _)| code == "response_handle_publication_cancelled")));
+    drop(writer);
+    db.publish_response_handle("writer is usable", NOW)
+        .await
+        .unwrap();
+    assert_eq!(
+        db.inventory_response_handles().await.unwrap().record_count,
+        1
+    );
+    assert_eq!(
+        db.lookup_response_handle(&response_handle_for("cancelled directly"), NOW)
+            .await
+            .unwrap(),
+        ResponseHandleLookup::Missing,
     );
 }

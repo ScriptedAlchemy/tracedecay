@@ -316,3 +316,51 @@ fn cache_key_suffixes_fit_the_reserved_length() {
             .all(|suffix| suffix.len() <= crate::exact_sql::guard::MAX_CACHE_KEY_SUFFIX_BYTES)
     );
 }
+
+#[test]
+fn request_guard_preserves_registered_authority_and_fences_job_commit() {
+    struct RefuseCommit;
+    impl ExactSqlWriteAuthority for RefuseCommit {
+        fn verify(&self, intent: ExactSqlWriteIntent) -> Result<(), ExactSqlError> {
+            if intent == ExactSqlWriteIntent::Commit {
+                Err(ExactSqlError::AuthorityDenied(
+                    "request ended before commit".to_owned(),
+                ))
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    let fixture = fixture('a', 'a');
+    let base = ExactSqlHandle::attach(&fixture.writer, &fixture.readers).unwrap();
+    base.execute_batch("CREATE TABLE request_rows (value INTEGER)".to_owned())
+        .unwrap();
+    assert!(matches!(
+        base.with_write_guard(Arc::new(RefuseCommit)),
+        Err(ExactSqlError::AuthorityMismatch)
+    ));
+    let allowed = Arc::new(AtomicBool::new(true));
+    let registered = base
+        .clone()
+        .with_write_authority(Arc::new(AtomicWriteAuthority(Arc::clone(&allowed))))
+        .unwrap();
+    let guarded = registered.with_write_guard(Arc::new(RefuseCommit)).unwrap();
+    let result = crate::native_runtime::block_on(guarded.transact(|transaction| {
+        transaction.execute(statement("INSERT INTO request_rows VALUES (1)", vec![]))
+    }))
+    .unwrap();
+    assert!(matches!(result, Err(ExactSqlError::AuthorityDenied(_))));
+    let rows = base
+        .query(
+            statement("SELECT count(*) FROM request_rows", vec![]),
+            Duration::from_secs(1),
+        )
+        .unwrap();
+    assert_eq!(rows.rows[0].values, vec![ExactSqlValue::Integer(0)]);
+
+    allowed.store(false, Ordering::Release);
+    let result =
+        crate::native_runtime::block_on(guarded.transact(|_| Ok::<_, ExactSqlError>(()))).unwrap();
+    assert!(matches!(result, Err(ExactSqlError::AuthorityDenied(_))));
+}

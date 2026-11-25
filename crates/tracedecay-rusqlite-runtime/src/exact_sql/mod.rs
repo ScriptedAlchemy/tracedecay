@@ -380,6 +380,36 @@ impl ExactSqlHandle {
         Ok(self)
     }
 
+    /// Narrows this handle's write authority for one caller without replacing
+    /// the registered store authority. Both are rechecked by the writer at
+    /// admission, for each statement, and immediately before commit.
+    pub fn with_write_guard(
+        &self,
+        guard: Arc<dyn ExactSqlWriteAuthority>,
+    ) -> Result<Self, ExactSqlError> {
+        struct GuardedAuthority {
+            registered: Arc<dyn ExactSqlWriteAuthority>,
+            guard: Arc<dyn ExactSqlWriteAuthority>,
+        }
+
+        impl ExactSqlWriteAuthority for GuardedAuthority {
+            fn verify(&self, intent: ExactSqlWriteIntent) -> Result<(), ExactSqlError> {
+                self.registered.verify(intent)?;
+                self.guard.verify(intent)
+            }
+        }
+
+        let mut guarded = self.clone();
+        guarded.write_authority = Some(Arc::new(GuardedAuthority {
+            registered: self
+                .write_authority
+                .clone()
+                .ok_or(ExactSqlError::AuthorityMismatch)?,
+            guard,
+        }));
+        Ok(guarded)
+    }
+
     /// Live reader-pool occupancy, or `None` once the pool has been closed.
     ///
     /// This takes no lease and runs no query: saturation has to stay
