@@ -1232,7 +1232,7 @@ async fn scheduler_prefilter_config_skip_precedes_live_lock_and_is_exact() {
     let run = run.unwrap();
     assert_eq!(backend.calls(), 0);
     assert_eq!(run.report["reason"], json!(AUTOMATION_DISABLED));
-    assert!(store.load_run_records(10).await.unwrap().is_empty());
+    assert_eq!(store.load_run_records(10).await.unwrap(), Vec::new());
     drop(guard);
 
     let first = evaluate_and_record_scheduler_skip(store, &config, None, &job, occurrence, None)

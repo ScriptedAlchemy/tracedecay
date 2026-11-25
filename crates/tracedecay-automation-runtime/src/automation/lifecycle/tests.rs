@@ -65,13 +65,13 @@ async fn pre_epoch_completion_clock_fails_before_ledger_mutation() {
     };
 
     assert!(error.to_string().contains("predates the UNIX epoch"));
-    assert!(
+    assert_eq!(
         sessions
             .runs
             .load_run_records(1)
             .await
-            .expect("load records")
-            .is_empty()
+            .expect("load records"),
+        Vec::new()
     );
 }
 

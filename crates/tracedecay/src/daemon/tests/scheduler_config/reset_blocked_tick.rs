@@ -143,7 +143,7 @@ async fn scheduler_refuses_legacy_history_and_resumes_after_removal() {
         Some(("automation_run_legacy_jsonl_refused", false))
     );
     assert_eq!(std::fs::read(&retired).unwrap(), LEGACY_HISTORY);
-    assert!(runs.load_run_records(10).await.unwrap().is_empty());
+    assert_eq!(runs.load_run_records(10).await.unwrap(), Vec::new());
 
     std::fs::remove_file(retired).unwrap();
     Box::pin(crate::daemon::scheduler::run_automation_scheduler_tick(
@@ -155,7 +155,7 @@ async fn scheduler_refuses_legacy_history_and_resumes_after_removal() {
     ))
     .await
     .expect("ticks may resume once retired history is removed");
-    assert!(runs.load_run_records(10).await.unwrap().is_empty());
+    assert_eq!(runs.load_run_records(10).await.unwrap(), Vec::new());
     drop(runs);
     engine.shutdown_all().await;
 }

@@ -236,7 +236,7 @@ async fn wrong_project_and_legacy_jsonl_refuse_without_touching_bytes() {
             .is_none(),
         "a different project's store served another project's run"
     );
-    assert!(other.runs.load_run_records(10).await.unwrap().is_empty());
+    assert_eq!(other.runs.load_run_records(10).await.unwrap(), Vec::new());
     assert_eq!(
         owner.runs.find_run_record(&published.run_id).await.unwrap(),
         Some(published),
