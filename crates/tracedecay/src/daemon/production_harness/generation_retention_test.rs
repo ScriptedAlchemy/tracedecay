@@ -342,6 +342,9 @@ async fn mounted_retention_preserves_a_reader_then_reclaims_its_sealed_generatio
     let reader = store
         .interactive_reader_with_cancellation(&first, Arc::new(NeverCancelled))
         .expect("retain the first published graph");
+    // Only the reader may keep the old snapshot alive across publication.
+    drop(admission);
+    drop(store);
     drop(serving);
 
     let graph_generation = code_graph_generation_id(
@@ -375,21 +378,31 @@ async fn mounted_retention_preserves_a_reader_then_reclaims_its_sealed_generatio
     let lease = project_store_maintenance_lease(graph.as_ref());
     // Drive the same generation pass the daemon schedules while the reader
     // still holds generation one, after five distinct publications.
-    for _ in 0..2 {
-        tracedecay_maintenance::generation::run_project_generation_maintenance(
-            &lease,
-            schedulers,
-            &observations,
-            &cancellation,
-            None,
-            None,
-        )
-        .await;
-        assert!(
-            first_directory.is_dir(),
-            "retention deleted a reader-held sealed graph"
-        );
-    }
+    tokio::time::timeout(Duration::from_mins(1), async {
+        let mut completed = 0;
+        while completed < 2 {
+            let outcome = tracedecay_maintenance::generation::run_project_generation_maintenance(
+                &lease,
+                schedulers,
+                &observations,
+                &cancellation,
+                None,
+                None,
+            )
+            .await;
+            assert!(
+                first_directory.is_dir(),
+                "retention deleted a reader-held sealed graph: {outcome:?}"
+            );
+            if outcome.succeeded() {
+                completed += 1;
+            } else {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        }
+    })
+    .await
+    .expect("maintenance completes passes while preserving the held reader");
     assert_eq!(reader.generation(), &first);
     assert_eq!(
         reader
@@ -400,8 +413,6 @@ async fn mounted_retention_preserves_a_reader_then_reclaims_its_sealed_generatio
     );
 
     drop(reader);
-    drop(admission);
-    drop(store);
     tokio::time::timeout(Duration::from_mins(1), async {
         while first_directory.exists() {
             tracedecay_maintenance::generation::run_project_generation_maintenance(
