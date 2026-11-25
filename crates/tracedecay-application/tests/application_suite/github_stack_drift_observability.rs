@@ -7,10 +7,11 @@ use tracedecay_application::{
         BoundedObservabilityProducerV1, GitHubStackDriftObservationResultV1,
         GitHubStackDriftObservationUnavailableV1, GitHubStackProbeOwnerV1,
         ObservabilityProducerIdentityV1, RegisteredObservabilityPortV1, record_github_stack_drifts,
+        restore_github_stack_drift_intervals,
     },
     stack_coordinator::{
         DaemonGitHubStackCoordinatorV1, GitHubStackDriftObservationV1,
-        GitHubStackProviderSourceBindingV1,
+        GitHubStackProviderSourceBindingV1, github_stack_circuit_policy,
     },
 };
 use tracedecay_contracts::{
@@ -96,11 +97,27 @@ fn drift(
     observed_at: i64,
     state: IntervalStateV1,
 ) -> GitHubStackDriftObservationV1 {
+    drift_kind(
+        scope,
+        StackDriftKindV1::BaseAdvanced,
+        first_observed_micros,
+        observed_at,
+        state,
+    )
+}
+
+fn drift_kind(
+    scope: &ResolvedScope,
+    kind: StackDriftKindV1,
+    first_observed_micros: i64,
+    observed_at: i64,
+    state: IntervalStateV1,
+) -> GitHubStackDriftObservationV1 {
     GitHubStackDriftObservationV1::from_persisted(
         &scope.scope_digest,
         UtcMicros(observed_at),
         WorkStackDriftObservedV1 {
-            kind: StackDriftKindV1::BaseAdvanced,
+            kind,
             state,
             first_observed_micros,
             terminal_micros: (state == IntervalStateV1::Closed).then_some(observed_at),
@@ -150,7 +167,11 @@ async fn review_owner_observability_lane_records_capability_and_drift_receipts()
     };
     let coordinator = DaemonGitHubStackCoordinatorV1::default();
     let _scope_registration_1 = coordinator
-        .register_scope(&scope, GitHubStackedPullRequestPolicyV1::Disabled)
+        .register_scope(
+            &scope,
+            GitHubStackedPullRequestPolicyV1::Disabled,
+            github_stack_circuit_policy().unwrap(),
+        )
         .expect("register scope");
     let source_binding = source_binding(&scope);
     let mut observation = coordinator
@@ -230,7 +251,11 @@ async fn coordinator_drift_is_durable_closed_monotone_and_scope_denial_writes_no
     .expect("stack probe owner");
     let coordinator = DaemonGitHubStackCoordinatorV1::default();
     let _scope_registration_2 = coordinator
-        .register_scope(&scope, GitHubStackedPullRequestPolicyV1::Disabled)
+        .register_scope(
+            &scope,
+            GitHubStackedPullRequestPolicyV1::Disabled,
+            github_stack_circuit_policy().unwrap(),
+        )
         .expect("register scope");
     let source_binding = source_binding(&scope);
     let mut observation = coordinator
@@ -351,4 +376,284 @@ async fn coordinator_drift_is_durable_closed_monotone_and_scope_denial_writes_no
         .expect("durable closed stack-drift rollup cell");
     assert_eq!(cell.value.value, Some(5.0));
     assert_eq!(cell.value.denominator, "observed_stack_drifts");
+}
+
+/// A restarted daemon rebuilds this scope's open drift intervals from the
+/// durable receipts before its next observation, so the original trace closes
+/// instead of a duplicate interval opening. A receipt from another worktree of
+/// the same project is durable evidence for that scope, not this one.
+#[tokio::test]
+async fn restart_restores_only_this_scope_open_drift_and_closes_its_original_trace() {
+    let profile_dir = tempfile::tempdir().expect("profile");
+    let project = tempfile::tempdir().expect("project");
+    let scope = resolved_scope("restart");
+    let other = ResolvedScope::new(
+        scope.project_id.clone(),
+        scope.repository_id.clone(),
+        WorktreeId::new("worktree.github-stack-drift.restart-other").expect("other worktree"),
+        Some(RefId::new("refs/heads/other").expect("other ref")),
+    )
+    .expect("other scope");
+    let runtime = RegisteredGlobalDbTestRuntime::project(
+        profile_dir.path().to_path_buf(),
+        project.path(),
+        scope.project_id.clone(),
+    )
+    .await
+    .expect("registered runtime");
+    let database = runtime.project_database_arc().expect("project database");
+    let producer = BoundedObservabilityProducerV1::start(
+        database.clone(),
+        producer_identity(&scope.project_id),
+        64,
+    )
+    .expect("producer");
+    let probe_owner = GitHubStackProbeOwnerV1::mount(
+        scope.clone(),
+        safe_work_topology_policy_v1(),
+        "octo-org",
+        "stack-repository",
+        true,
+    )
+    .expect("stack probe owner");
+    let other_owner = GitHubStackProbeOwnerV1::mount(
+        other.clone(),
+        safe_work_topology_policy_v1(),
+        "octo-org",
+        "stack-repository",
+        true,
+    )
+    .expect("other stack probe owner");
+    let before = DaemonGitHubStackCoordinatorV1::default();
+    let _before_registration = before
+        .register_scope(
+            &scope,
+            GitHubStackedPullRequestPolicyV1::ProbePrivatePreview,
+            github_stack_circuit_policy().expect("circuit policy"),
+        )
+        .expect("register pre-restart scope");
+    let exact_binding = source_binding(&scope);
+    let open = drift(&scope, 2_000, 2_000, IntervalStateV1::Open);
+    let closed = drift_kind(
+        &scope,
+        StackDriftKindV1::HeadAdvanced,
+        1_500,
+        1_501,
+        IntervalStateV1::Closed,
+    );
+    let mut observation = before
+        .observe_policy(
+            scope.clone(),
+            ProviderId::new("provider.github").expect("provider"),
+            exact_binding.clone(),
+            UtcMicros(1_000),
+        )
+        .expect("policy observation");
+    observation.observed_at = open.observed_at;
+    observation.drift_observations = vec![open.clone(), closed];
+    assert_eq!(
+        record_github_stack_drifts(
+            database.as_ref(),
+            Some(&producer),
+            &probe_owner,
+            &exact_binding,
+            &observation,
+        ),
+        GitHubStackDriftObservationResultV1::Emitted {
+            enqueued: 2,
+            dropped: 0,
+        }
+    );
+
+    let other_source_binding = source_binding(&other);
+    let other_open = drift(&other, 2_100, 2_100, IntervalStateV1::Open);
+    let mut other_observation = before
+        .observe_policy(
+            other.clone(),
+            ProviderId::new("provider.github").expect("provider"),
+            other_source_binding.clone(),
+            UtcMicros(2_100),
+        )
+        .expect("other worktree policy observation");
+    other_observation.observed_at = other_open.observed_at;
+    other_observation.drift_observations = vec![other_open.clone()];
+    assert_eq!(
+        record_github_stack_drifts(
+            database.as_ref(),
+            Some(&producer),
+            &other_owner,
+            &other_source_binding,
+            &other_observation,
+        ),
+        GitHubStackDriftObservationResultV1::Emitted {
+            enqueued: 1,
+            dropped: 0,
+        }
+    );
+    producer.shutdown().await.expect("flush producer");
+    drop(producer);
+    drop(before);
+
+    // The daemon restarts: no scope state survives, only durable receipts.
+    let restarted = DaemonGitHubStackCoordinatorV1::default();
+    let registration = restarted
+        .register_scope(
+            &scope,
+            GitHubStackedPullRequestPolicyV1::ProbePrivatePreview,
+            github_stack_circuit_policy().expect("circuit policy"),
+        )
+        .expect("register restarted scope");
+    let port = RegisteredObservabilityPortV1::new(database.as_ref());
+    let report =
+        restore_github_stack_drift_intervals(&port, &restarted, &registration, UtcMicros(5_000))
+            .await
+            .expect("durable drift restoration");
+    assert_eq!(
+        report.restored, 1,
+        "only this scope's open interval restores"
+    );
+    assert_eq!(
+        report.closed_before_restart, 1,
+        "a kind whose newest receipt is closed needs no restored state"
+    );
+    assert_eq!(
+        report.skipped_unbound, 1,
+        "the other worktree's receipt does not bind this scope"
+    );
+    assert_eq!(report.coverage, CoverageStateV1::Known);
+
+    let settled = restarted
+        .observe_policy(
+            scope.clone(),
+            ProviderId::new("provider.github").expect("provider"),
+            exact_binding,
+            UtcMicros(3_000),
+        )
+        .expect("policy observation after restart");
+    let [restored] = settled.drift_observations.as_slice() else {
+        panic!(
+            "the restored interval must close exactly once: {:?}",
+            settled.drift_observations
+        );
+    };
+    assert_eq!(restored.trace_id, open.trace_id);
+    assert_eq!(restored.drift.state, IntervalStateV1::Closed);
+    assert_eq!(restored.drift.first_observed_micros, 2_000);
+    assert_eq!(restored.drift.terminal_micros, Some(3_000));
+    assert_ne!(
+        settled.drift_observations[0].trace_id, other_open.trace_id,
+        "another worktree's open interval is not this scope's evidence"
+    );
+}
+
+/// The storage port pages by insertion id and sorts each page by event time,
+/// so a late-persisted close can arrive on an earlier page than a newer open
+/// interval. Restoration must reduce each drift kind by its greatest event
+/// time; stopping at the first receipt for a kind would hide the open interval.
+#[tokio::test]
+async fn restore_reduces_drift_kinds_by_event_time_across_unsorted_pages() {
+    use std::collections::VecDeque;
+    use std::sync::Mutex;
+
+    use tracedecay_application::observability::stack_drift_observation_envelope;
+    use tracedecay_contracts::{ObservabilityFuture, ObservabilityPageV1};
+
+    struct PagedPort {
+        pages: Mutex<VecDeque<ObservabilityPageV1>>,
+    }
+
+    impl ObservabilityQueryPort for PagedPort {
+        fn query<'a>(
+            &'a self,
+            _query: ObservabilityQueryV1,
+        ) -> ObservabilityFuture<'a, ObservabilityPageV1> {
+            Box::pin(async move {
+                Ok(self
+                    .pages
+                    .lock()
+                    .unwrap()
+                    .pop_front()
+                    .unwrap_or(ObservabilityPageV1 {
+                        events: Vec::new(),
+                        event_cursors: Vec::new(),
+                        watermark: "analytics:empty".to_owned(),
+                        coverage: CoverageStateV1::Known,
+                        next_watermark: None,
+                    }))
+            })
+        }
+    }
+    let scope = resolved_scope("pages");
+    let identity = producer_identity(&scope.project_id);
+    let open = drift(&scope, 2_000, 2_000, IntervalStateV1::Open);
+    let older_close = drift_kind(
+        &scope,
+        StackDriftKindV1::BaseAdvanced,
+        1_000,
+        1_500,
+        IntervalStateV1::Closed,
+    );
+    let envelope = |observation: &GitHubStackDriftObservationV1| {
+        stack_drift_observation_envelope(
+            &identity,
+            scope.project_id.as_str(),
+            &scope.scope_digest,
+            observation,
+        )
+        .expect("canonical drift envelope")
+    };
+    let port = PagedPort {
+        pages: Mutex::new(VecDeque::from([
+            // Insertion-newest page: the late-persisted close of the old
+            // interval, whose event time is older than the open below.
+            ObservabilityPageV1 {
+                events: vec![envelope(&older_close)],
+                event_cursors: vec!["analytics:2".to_owned()],
+                watermark: "analytics:2".to_owned(),
+                coverage: CoverageStateV1::Known,
+                next_watermark: Some("analytics:2".to_owned()),
+            },
+            ObservabilityPageV1 {
+                events: vec![envelope(&open)],
+                event_cursors: vec!["analytics:1".to_owned()],
+                watermark: "analytics:1".to_owned(),
+                coverage: CoverageStateV1::Known,
+                next_watermark: None,
+            },
+        ])),
+    };
+    let coordinator = DaemonGitHubStackCoordinatorV1::default();
+    let registration = coordinator
+        .register_scope(
+            &scope,
+            GitHubStackedPullRequestPolicyV1::ProbePrivatePreview,
+            github_stack_circuit_policy().expect("circuit policy"),
+        )
+        .expect("register scope");
+    let report =
+        restore_github_stack_drift_intervals(&port, &coordinator, &registration, UtcMicros(5_000))
+            .await
+            .expect("drift restoration");
+    assert_eq!(
+        report.restored, 1,
+        "the newer open interval must survive an older close on an earlier page"
+    );
+    assert_eq!(report.closed_before_restart, 0);
+    assert!(!report.scope_already_live);
+    assert_eq!(report.coverage, CoverageStateV1::Known);
+
+    let settled = coordinator
+        .observe_policy(
+            scope.clone(),
+            ProviderId::new("provider.github").expect("provider"),
+            source_binding(&scope),
+            UtcMicros(3_000),
+        )
+        .expect("policy observation after restoration");
+    let [restored] = settled.drift_observations.as_slice() else {
+        panic!("the restored interval must close exactly once: {settled:?}");
+    };
+    assert_eq!(restored.trace_id, open.trace_id);
+    assert_eq!(restored.drift.first_observed_micros, 2_000);
+    assert_eq!(restored.drift.terminal_micros, Some(3_000));
 }
