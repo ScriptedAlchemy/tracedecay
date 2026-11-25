@@ -349,7 +349,8 @@ async fn mounted_retention_preserves_a_reader_then_reclaims_its_sealed_generatio
 
     let graph_generation = code_graph_generation_id(
         &first,
-        &GraphProjectorRevision::new(CODE_GRAPH_PROJECTOR_REVISION).expect("projector revision"),
+        &GraphProjectorRevision::try_from(CODE_GRAPH_PROJECTOR_REVISION.to_owned())
+            .expect("projector revision"),
     )
     .expect("canonical graph generation");
     let sealed_root = graph.db().database_path().with_extension("sealed");
