@@ -516,10 +516,39 @@ fn retired_pr_tracking_reset_refuses_a_selected_alias_owned_by_another_project()
     );
     std::fs::create_dir(&selected).unwrap();
     write_git_fixture(&selected);
+    // A fresh checkout has no marker, but its path-derived identity still
+    // cannot authorize changing the registered alias's former owner.
+    let unmarked_project_id = default_profile_project_id(&selected);
+    assert_ne!(unmarked_project_id, project_id);
+    let selected_marker = repository_identity_path(&selected).unwrap();
+    assert!(!selected_marker.exists());
+    let mut command = tracedecay_command_without_daemon(home.path(), &selected);
+    command
+        .args(["storage", "reset-retired-pr-tracking", "--project-root"])
+        .arg(&selected)
+        .arg("--yes");
+    let refused = run_with_timeout(command, cli_timeout());
+    assert!(!refused.status.success(), "{refused:?}");
+    let diagnostic = format!(
+        "{}{}",
+        String::from_utf8_lossy(&refused.stdout),
+        String::from_utf8_lossy(&refused.stderr),
+    );
+    assert!(
+        diagnostic.contains("project_identity_conflict"),
+        "{diagnostic}"
+    );
+    assert!(diagnostic.contains(&unmarked_project_id), "{diagnostic}");
+    assert_eq!(
+        revision_ids(),
+        revisions_before,
+        "an unmarked selection reset the former owner"
+    );
+    assert!(!selected_marker.exists());
+
     write_repository_identity_marker(&selected, "proj_foreign_selected").unwrap();
     let primary_marker = repository_identity_path(&primary).unwrap();
     let primary_before = std::fs::read(&primary_marker).unwrap();
-    let selected_marker = repository_identity_path(&selected).unwrap();
     let selected_before = std::fs::read(&selected_marker).unwrap();
     let mut command = tracedecay_command_without_daemon(home.path(), &selected);
     command
