@@ -530,6 +530,7 @@ async fn consume_fixture() -> ConsumeFixture {
             execution,
             FeedbackDurabilityV1::Durable,
         )
+        .await
         .expect("canonical feedback result"),
         contributions: AdvisoryContributionsV1::absent(),
         observation_input,

@@ -155,6 +155,19 @@ pub fn response_handle_stats_json(
     stats
 }
 
+/// Render paths can publish to the registered store. Keep that synchronous
+/// work off async executor threads so their writer replies continue making
+/// progress, including when the caller uses a current-thread runtime.
+pub async fn render_with_handles(
+    render: impl FnOnce() -> Result<crate::ToolResult> + Send + 'static,
+) -> Result<crate::ToolResult> {
+    tracedecay_runtime_core::native_runtime::spawn_blocking(render)
+        .await
+        .map_err(|message| TraceDecayError::Config {
+            message: format!("response rendering could not run: {message}"),
+        })?
+}
+
 #[track_caller]
 pub fn store_response_handle(
     store: &ResponseHandlePublisher,
@@ -435,6 +448,25 @@ mod tests {
     use tracedecay_domain::errors::InvalidRequestReason;
 
     use super::*;
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn asynchronous_render_publishes_on_a_current_thread_executor() {
+        let (_harness, store) = test_support::open_registered_handle_store().await;
+        let publisher = store.publisher();
+        let rendered = render_with_handles(move || {
+            let record = store_response_handle(&publisher, "exact response 🦀", 1_000_000)?;
+            Ok(crate::ToolResult::new(
+                json!({ "handle": record.handle }),
+                vec![],
+            ))
+        })
+        .await
+        .expect("render and publication");
+        let handle = rendered.value["handle"].as_str().unwrap();
+        let record = store.lookup(handle, 1_000_001).await.unwrap();
+        assert!(matches!(record, ResponseHandleLookup::Found(record)
+            if record.content == "exact response 🦀"));
+    }
 
     #[test]
     fn public_inventory_problem_never_exposes_the_local_path() {

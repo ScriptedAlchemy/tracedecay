@@ -8,13 +8,16 @@ use std::path::{Path, PathBuf};
 use tracedecay_contracts::project_open::{
     ProjectOpenStatusReasonV1, ProjectOpenStatusStateV1, ProjectOpenStatusV1,
 };
+use tracedecay_contracts::request_identity::{GlobalRequestSurface, mint_global_request_id};
 use tracedecay_contracts::storage::{SchemaConvergenceFindingV1, SchemaConvergenceStateV1};
+use tracedecay_contracts::{CancellationSignal, Deadline};
 use tracedecay_daemon_protocol::{
     DOCTOR_REPORT_OWNER_WARMING_REASON, PROJECT_SERVER_CAPACITY_REASON_CODE,
     error_is_project_not_enrolled, error_is_project_warming,
 };
 use tracedecay_daemon_service::reject_stalled_project_open_status;
-use tracedecay_domain::errors::ProjectOpenFailureKind;
+use tracedecay_domain::errors::{ProjectOpenFailureKind, TraceDecayError};
+use tracedecay_tool_catalog::{ApplicationSurfaceOperation, BindingSurface};
 
 use tracedecay_agent_hosts::agents::{self, DoctorCounters, HealthcheckContext};
 use tracedecay_application::advisory::github_runtime;
@@ -608,6 +611,7 @@ async fn daemon_project_status(
         false,
         false,
     )?;
+    let client = crate::daemon::invocation_client_for_current_client(profile, handshake)?;
     let warmup_deadline = std::time::Instant::now() + RUNTIME_TELEMETRY_WARMUP;
     loop {
         // Diagnostic probe, not a liveness gate. A multi-gigabyte store
@@ -616,24 +620,7 @@ async fn daemon_project_status(
         // under a second. Give it headroom so a contended read reports real
         // status instead of failing the post-update with a spurious timeout.
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(90);
-        let result = crate::daemon::call_default_tool_within(
-            profile,
-            &handshake,
-            "tracedecay_runtime",
-            daemon_doctor_runtime_args(),
-            deadline,
-        )
-        .await?;
-        // The runtime reply carrying the full report exceeds one response
-        // frame, so it arrives as a truncation envelope to reassemble.
-        let runtime = crate::daemon::recover_truncated_tool_payload(
-            profile,
-            &handshake,
-            "tracedecay_runtime",
-            result,
-            Some(deadline),
-        )
-        .await?;
+        let runtime = daemon_doctor_runtime(&client, deadline).await?;
         let warmed_up = std::time::Instant::now() >= warmup_deadline;
         match daemon_runtime_status(runtime)? {
             // The first Doctor call starts the project open, so a warming
@@ -651,6 +638,83 @@ async fn daemon_project_status(
             )
             .await
             .map_err(|message| tracedecay_domain::errors::TraceDecayError::Config { message })?,
+        }
+    }
+}
+
+/// Read the owner's full diagnostic result before any tool-output rendering.
+/// A refused session store cannot publish response handles, but Doctor must
+/// still read the canonical report that explains that store's reset state.
+async fn daemon_doctor_runtime(
+    executor: &dyn tracedecay_daemon_protocol::DaemonInvocationExecutor,
+    deadline: std::time::Instant,
+) -> tracedecay_domain::errors::Result<serde_json::Value> {
+    let request_id =
+        mint_global_request_id(GlobalRequestSurface::DaemonDoctor).map_err(|error| {
+            TraceDecayError::Config {
+                message: format!("could not allocate a Doctor request id: {error}"),
+            }
+        })?;
+    let remaining_micros = i64::try_from(
+        deadline
+            .saturating_duration_since(std::time::Instant::now())
+            .as_micros(),
+    )
+    .map_err(|error| TraceDecayError::Config {
+        message: format!("Doctor request deadline exceeds the domain clock: {error}"),
+    })?;
+    let request_deadline = Deadline::new(tracedecay_domain::UtcMicros(
+        tracedecay_contracts::clock::now_micros()
+            .0
+            .saturating_add(remaining_micros),
+    ))
+    .map_err(|error| TraceDecayError::Config {
+        message: error.to_string(),
+    })?;
+    let cancellation =
+        CancellationSignal::active(format!("cancellation.doctor.{}", request_id.as_str()))
+            .map_err(|error| TraceDecayError::Config {
+                message: error.to_string(),
+            })?;
+    loop {
+        let outcome = crate::mcp::tools::execute_graph_tool_surface(
+            BindingSurface::Cli,
+            ApplicationSurfaceOperation::Runtime,
+            daemon_doctor_runtime_args(),
+            Some(executor),
+            Some(request_id.clone()),
+            Some(request_deadline.clone()),
+            Some(cancellation.clone()),
+        )
+        .await?;
+        match outcome {
+            Ok(completion) => {
+                let tracedecay_contracts::graph_tool::GraphToolResultV1::Runtime(runtime) =
+                    completion.result
+                else {
+                    return Err(TraceDecayError::project_route(
+                        "application_surface_invalid_response",
+                        false,
+                        "Doctor's runtime request returned another operation's result",
+                    ));
+                };
+                return Ok(serde_json::to_value(runtime)?);
+            }
+            Err(refusal) => {
+                // Only a publication-window mounting refusal is re-sent.
+                // Every other owner refusal remains Doctor's typed finding.
+                if let Some(delay) = refusal.problem.problem.owner_mount_resend_delay()
+                    && deadline.saturating_duration_since(std::time::Instant::now()) > delay
+                {
+                    tracedecay_runtime_core::native_runtime::sleep_until(
+                        std::time::Instant::now() + delay,
+                    )
+                    .await
+                    .map_err(|message| TraceDecayError::Config { message })?;
+                    continue;
+                }
+                return Err(refusal.into_error());
+            }
         }
     }
 }
@@ -680,7 +744,6 @@ pub async fn daemon_language_server_read(
 
 fn daemon_doctor_runtime_args() -> serde_json::Value {
     serde_json::json!({
-        "format": "json",
         "startup_health": false,
         "authority_audit": true,
         "doctor_report": true,
@@ -728,7 +791,17 @@ fn classify_daemon_status_or_reset(
     pending_reset: &mut bool,
     error: &tracedecay_domain::errors::TraceDecayError,
 ) -> DoctorDaemonFindingsV1 {
-    if let Some((authority, reason)) = tracedecay_mcp::reset_required_context(error) {
+    let reset = tracedecay_mcp::reset_required_context(error).or_else(|| {
+        match error.project_route_typed_detail() {
+            Some(tracedecay_contracts::ApplicationProblemDetailV1::ResetRequired {
+                authority,
+                reason,
+                ..
+            }) => Some((authority.clone(), reason.clone())),
+            _ => None,
+        }
+    });
+    if let Some((authority, reason)) = reset {
         *pending_reset = true;
         dc.pending(&format!(
             "Current project is not served: {authority} requires reset ({reason}). \

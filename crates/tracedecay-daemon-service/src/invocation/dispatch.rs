@@ -536,15 +536,22 @@ impl DaemonInvocationService {
             }
             DaemonInvocationPayload::ResponseHandlePublish {
                 content,
-                observed_at,
-                deadline: _,
-                cancellation: _,
-            } => match feedback_runtime.as_ref() {
+                observed_at: _,
+                deadline,
+                cancellation,
+            } => {
+                if cancellation.is_cancelled() {
+                    request_cancellation.cancel();
+                }
+                let signal = self.request_cancellations.signal(&request_id, &request_cancellation);
+                match feedback_runtime.as_ref() {
                 Some(runtime) => match runtime
                     .response_handles()
-                    .publish(
+                    .publish_with_control(
                         &content,
-                        tracedecay_session_memory::response_handles::micros_to_seconds(observed_at),
+                        deadline,
+                        request_cancellation,
+                        signal,
                     )
                     .await
                 {
@@ -568,6 +575,7 @@ impl DaemonInvocationService {
                     request_id,
                     DaemonInvocationProblem::Unavailable,
                 ),
+                }
             },
             DaemonInvocationPayload::FeedbackObserve {
                 subject_digest,

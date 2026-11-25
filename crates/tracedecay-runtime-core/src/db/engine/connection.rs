@@ -3,7 +3,7 @@ use std::{sync::Arc, time::Duration};
 use tracedecay_store::{OperationPriorityV1, StoreRuntimeBindingV1};
 
 use tracedecay_rusqlite_runtime::exact_sql::{
-    ExactSqlHandle, ExactSqlStatement, JobPolicy, MemoryReleaseOutcome,
+    ExactSqlHandle, ExactSqlStatement, ExactSqlWriteAuthority, JobPolicy, MemoryReleaseOutcome,
 };
 pub use tracedecay_rusqlite_runtime::reader::{ReaderPoolSnapshot, ReaderPoolState};
 
@@ -295,6 +295,7 @@ impl Connection {
     pub(crate) async fn transact<R, E, F>(
         &self,
         policy: JobPolicy,
+        guard: Option<Arc<dyn ExactSqlWriteAuthority>>,
         body: F,
     ) -> Result<std::result::Result<R, E>>
     where
@@ -302,7 +303,11 @@ impl Connection {
         R: Send + 'static,
         E: Send + 'static,
     {
-        self.runtime
+        let guarded = guard
+            .map(|guard| self.runtime.with_write_guard(guard))
+            .transpose()?;
+        let runtime = guarded.as_ref().unwrap_or(self.runtime.as_ref());
+        runtime
             .transact_async(policy, async move |job| body(&WriteTx::new(job)).await)
             .await
             .map_err(Into::into)

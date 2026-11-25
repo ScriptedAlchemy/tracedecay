@@ -9,9 +9,17 @@
 //! content_bytes)`, so inventory and expiry selection never read payload
 //! pages. Content identity is verified where content is actually returned.
 
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+
 use sha2::{Digest, Sha256};
+use tracedecay_contracts::{CancellationSignal, Deadline, clock::now_micros};
 use tracedecay_domain::errors::{InvalidRequestReason, TraceDecayError};
+use tracedecay_runtime_core::cancellation::{CancellationToken, MonotonicDeadline};
 use tracedecay_runtime_core::db::engine::{Executor, QueryExecutor, Row, params};
+use tracedecay_rusqlite_runtime::exact_sql::{
+    ExactSqlError, ExactSqlWriteAuthority, ExactSqlWriteIntent,
+};
 
 use super::{RegisteredGlobalDb, global_db_operation_error};
 
@@ -174,10 +182,68 @@ enum ExistingRecord {
         digest: String,
         created_at: i64,
         expires_at: i64,
-        /// The stored text equals the text being published, compared inside
+        /// The stored text and lengths match the publication, compared inside
         /// SQLite so the payload is not copied out.
         same_content: bool,
     },
+}
+
+struct PublicationControl {
+    deadline: MonotonicDeadline,
+    cancellation: CancellationToken,
+    signal: Option<CancellationSignal>,
+}
+
+impl PublicationControl {
+    fn refusal(&self) -> Option<TraceDecayError> {
+        if self.cancellation.is_cancelled()
+            || self
+                .signal
+                .as_ref()
+                .is_some_and(CancellationSignal::is_cancelled)
+        {
+            Some(TraceDecayError::project_route(
+                "response_handle_publication_cancelled",
+                true,
+                "Response-handle publication was cancelled",
+            ))
+        } else if self.deadline.is_elapsed_at(Instant::now()) {
+            Some(TraceDecayError::project_route(
+                "response_handle_publication_timed_out",
+                true,
+                "Response-handle publication exceeded its request deadline",
+            ))
+        } else {
+            None
+        }
+    }
+    async fn cancelled(&self) {
+        if let Some(signal) = &self.signal {
+            tokio::select! {
+                _ = self.cancellation.cancelled() => {},
+                _ = signal.cancelled() => {},
+            }
+        } else {
+            self.cancellation.cancelled().await;
+        }
+    }
+}
+
+impl ExactSqlWriteAuthority for PublicationControl {
+    fn verify(&self, _intent: ExactSqlWriteIntent) -> Result<(), ExactSqlError> {
+        match self.refusal() {
+            Some(error) => Err(ExactSqlError::AuthorityDenied(error.to_string())),
+            None => Ok(()),
+        }
+    }
+}
+
+struct CancelPublicationOnDrop(CancellationToken);
+
+impl Drop for CancelPublicationOnDrop {
+    fn drop(&mut self) {
+        self.0.cancel();
+    }
 }
 
 impl RegisteredGlobalDb {
@@ -202,8 +268,65 @@ impl RegisteredGlobalDb {
         now: i64,
     ) -> Result<ResponseHandleRecord, ResponseHandleError> {
         let namespace = self.response_handle_namespace()?;
-        self.publish_response_handle_in(namespace, content.to_owned(), now)
+        self.publish_response_handle_in(namespace, content.to_owned(), now, None)
             .await
+    }
+
+    /// Publishes for a live request. Writer admission is bounded by its
+    /// deadline, and the same fence remains attached through SQL commit even
+    /// if the caller drops its wait after the writer accepted the job.
+    pub async fn publish_response_handle_with_control(
+        &self,
+        content: &str,
+        deadline: Deadline,
+        cancellation: CancellationToken,
+        signal: Option<CancellationSignal>,
+    ) -> Result<ResponseHandleRecord, ResponseHandleError> {
+        let observed_at = now_micros();
+        let now = observed_at.0.div_euclid(1_000_000);
+        let remaining = deadline.expires_at.0.saturating_sub(observed_at.0).max(0) as u64;
+        let expires_at = Instant::now()
+            .checked_add(Duration::from_micros(remaining))
+            .ok_or_else(|| {
+                TraceDecayError::project_route(
+                    "response_handle_publication_invalid_deadline",
+                    false,
+                    "Response-handle publication deadline exceeds the monotonic clock",
+                )
+            })?;
+        let control = Arc::new(PublicationControl {
+            deadline: MonotonicDeadline::at(expires_at),
+            cancellation: cancellation.child_token(),
+            signal,
+        });
+        let _cancel_on_drop = CancelPublicationOnDrop(control.cancellation.clone());
+        if let Some(error) = control.refusal() {
+            return Err(error.into());
+        }
+        let namespace = self.response_handle_namespace()?;
+        let guard: Arc<dyn ExactSqlWriteAuthority> = control.clone();
+        let publication =
+            self.publish_response_handle_in(namespace, content.to_owned(), now, Some(guard));
+        let deadline_wait = tokio::time::sleep_until(control.deadline.instant().into());
+        tokio::pin!(publication);
+        tokio::pin!(deadline_wait);
+        tokio::select! {
+            biased;
+            result = &mut publication => result.map_err(|error| match control.refusal() {
+                Some(refusal) => ResponseHandleError::Store(refusal),
+                None => error,
+            }),
+            _ = control.cancelled() => Err(TraceDecayError::project_route(
+                "response_handle_publication_cancelled",
+                true,
+                "Response-handle publication was cancelled",
+            ).into()),
+            _ = &mut deadline_wait => Err(TraceDecayError::project_route(
+                "response_handle_publication_timed_out",
+                true,
+                "Response-handle publication exceeded its request deadline",
+            ).into()),
+        }
     }
 
     async fn publish_response_handle_in(
@@ -211,15 +334,25 @@ impl RegisteredGlobalDb {
         namespace: String,
         content: String,
         now: i64,
+        guard: Option<Arc<dyn ExactSqlWriteAuthority>>,
     ) -> Result<ResponseHandleRecord, ResponseHandleError> {
         let digest = content_digest(&content);
         let handle = handle_for_digest(&digest);
         let content_bytes = count(content.len(), "content byte count")?;
         let content_chars = count(content.chars().count(), "content character count")?;
         let expires_at = now.saturating_add(RESPONSE_HANDLE_TTL_SECS);
-        let published = self
-            .transact(async move |transaction| {
-                let existing = existing_record(&transaction, &namespace, &handle, &content).await?;
+        self.require_active_write_scope("publish response handle")?;
+        self.runtime_database()
+            .transact_with_write_guard("publish response handle", guard, async move |transaction| {
+                let existing = existing_record(
+                    transaction,
+                    &namespace,
+                    &handle,
+                    &content,
+                    content_bytes,
+                    content_chars,
+                )
+                .await?;
                 let record = |created_at, expires_at, content: &str| ResponseHandleRecord {
                     handle: handle.clone(),
                     created_at,
@@ -233,6 +366,7 @@ impl RegisteredGlobalDb {
                         expires_at: stored_expiry,
                         same_content: true,
                     } if stored == digest
+                        && created_at <= now
                         && stored_expiry == created_at.saturating_add(RESPONSE_HANDLE_TTL_SECS)
                         && stored_expiry.saturating_sub(now) >= RESPONSE_HANDLE_TTL_SECS / 2 =>
                     {
@@ -294,8 +428,7 @@ impl RegisteredGlobalDb {
                 }
                 Ok(record(now, expires_at, &content))
             })
-            .await?;
-        published
+            .await?
     }
 
     /// Reads one handle of this namespace. The returned content is verified
@@ -346,7 +479,7 @@ impl RegisteredGlobalDb {
         let content_chars = integer(&row, 2, "content character count")?;
         let created_at = integer(&row, 3, "creation time")?;
         let expires_at = integer(&row, 4, "expiry")?;
-        if expires_at != created_at.saturating_add(RESPONSE_HANDLE_TTL_SECS) {
+        if created_at > now || expires_at != created_at.saturating_add(RESPONSE_HANDLE_TTL_SECS) {
             return Err(corrupt("record has a noncanonical expiry"));
         }
         if expires_at <= now {
@@ -477,12 +610,15 @@ async fn existing_record(
     namespace: &str,
     handle: &str,
     content: &str,
+    content_bytes: i64,
+    content_chars: i64,
 ) -> Result<ExistingRecord, ResponseHandleError> {
     let mut rows = transaction
         .query(
-            "SELECT content_sha256, created_at, expires_at, content = ?3
+            "SELECT content_sha256, created_at, expires_at,
+                    content = ?3 AND content_bytes = ?4 AND content_chars = ?5
              FROM response_handles WHERE namespace = ?1 AND handle = ?2",
-            params![namespace, handle, content],
+            params![namespace, handle, content, content_bytes, content_chars],
         )
         .await
         .map_err(store_error("read response handle for publication"))?;

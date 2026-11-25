@@ -238,6 +238,47 @@ fn daemon_runtime_parser_reports_missing_database_telemetry_as_pending() {
     assert!(malformed.to_string().contains("was not an object"));
 }
 
+#[test]
+fn an_owner_reset_refusal_remains_a_pending_operator_action() {
+    let project = Path::new("/tmp/doctor-reset-project");
+    let detail = tracedecay_contracts::ApplicationProblemDetailV1::ResetRequired {
+        authority: "project sessions".to_owned(),
+        found_version: Some(1),
+        required_version: Some(2),
+        reason: "session storage uses a retired schema".to_owned(),
+        remedy: "tracedecay reset sessions".to_owned(),
+    };
+    let error = TraceDecayError::project_route_with_detail(detail.code(), false, detail.clone());
+    let mut counters = DoctorCounters::quiet();
+    let mut pending_reset = false;
+    let findings = classify_daemon_status_or_reset(
+        &mut counters,
+        Path::new("/tmp/doctor-reset-profile"),
+        project,
+        &mut pending_reset,
+        &error,
+    );
+
+    assert!(matches!(
+        findings,
+        DoctorDaemonFindingsV1::Unread { reason } if reason == "reset_required"
+    ));
+    assert_eq!(counters.issues, 0);
+    assert_eq!(counters.pending_actions, 1);
+    assert!(pending_reset);
+    assert_eq!(
+        doctor_result(&counters, pending_reset),
+        DoctorCompletion::PendingOperatorAction,
+    );
+    assert!(counters.checks[0].message.contains("project sessions"));
+    assert!(
+        counters.checks[0]
+            .message
+            .contains("session storage uses a retired schema")
+    );
+    assert_eq!(error.project_route_typed_detail(), Some(&detail));
+}
+
 /// The sole daemon owner is the only authority that can observe storage
 /// health, so Doctor losing it is an issue, not a warning: nothing else in the
 /// run opened the store, and a zero exit reads as "checked and fine" to every

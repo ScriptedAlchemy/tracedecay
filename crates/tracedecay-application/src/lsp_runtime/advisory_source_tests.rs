@@ -23,7 +23,6 @@ use tracedecay_contracts::{
 use tracedecay_domain::configuration::{
     AuthorityRef, ConfigurationRevisionId, ScopeSourceBinding, SourceBindingId, SourceKindV1,
 };
-use tracedecay_domain::errors::TraceDecayError;
 use tracedecay_domain::feedback::{
     FeedbackActorContextV1, FeedbackAdvisoryProviderStateV1, FeedbackAuthoritativeRuntimeStateV1,
     FeedbackBaselineHorizonV1, FeedbackBaselineStateV1, FeedbackBudgetV1,
@@ -840,6 +839,7 @@ async fn incomplete_publication_remains_readable_without_consuming_completed_ded
         execution,
         tracedecay_domain::feedback::FeedbackDurabilityV1::Durable,
     )
+    .await
     .expect("published result handles");
     let read_handles = canonical.read_handles.as_ref().expect("cycle read handles");
     let finding_handles = canonical
@@ -1011,6 +1011,7 @@ async fn incomplete_publication_remains_readable_without_consuming_completed_ded
         repeated_execution,
         tracedecay_domain::feedback::FeedbackDurabilityV1::Durable,
     )
+    .await
     .expect("reused incomplete result handles");
     assert_eq!(replayed_canonical.finding_handles.len(), 1);
     let replayed_handles = replayed_canonical

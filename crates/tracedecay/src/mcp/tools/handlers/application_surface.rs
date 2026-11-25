@@ -137,7 +137,11 @@ pub async fn handle_application_surface(
     )
     .await
     .map_err(ApplicationSurfaceAdapterError::into_trace_decay_error)?;
-    render_application_surface_result(response_handles, &result)
+    let response_handles = response_handles.cloned();
+    tracedecay_mcp::response_handles::render_with_handles(move || {
+        render_application_surface_result(response_handles.as_ref(), &result)
+    })
+    .await
 }
 
 /// Render one settled application-surface call as its tool result. MCP and
@@ -187,7 +191,11 @@ pub async fn run_retained_surface_tool(
         cancellation,
     )
     .await?;
-    render_retained_execution(response_handles, &execution)
+    let response_handles = response_handles.cloned();
+    tracedecay_mcp::response_handles::render_with_handles(move || {
+        render_retained_execution(response_handles.as_ref(), &execution)
+    })
+    .await
 }
 
 /// Render a settled retained tool call.
