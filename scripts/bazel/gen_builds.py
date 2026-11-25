@@ -1256,6 +1256,9 @@ def main():
         )
         if shared_library:
             out.append('load("@rules_rust//rust:defs.bzl", "rust_shared_library")\n')
+            out.append(
+                'load("//scripts:bazel/rust_shared_library_output.bzl", "rust_shared_library_output")\n'
+            )
         if name == "tracedecay-sdk":
             out.append('load("@aspect_rules_js//js:defs.bzl", "js_library")\n')
 
@@ -1575,10 +1578,16 @@ def main():
 
         if shared_library:
             # Node resolves addons by the `.node` extension on every platform.
+            # Select the runtime library explicitly: a cdylib's default output
+            # set also contains import/debug artifacts on Windows.
             out += [
+                "rust_shared_library_output(",
+                '    name = "addon_library",',
+                f'    library = ":{name}",',
+                ")\n",
                 "genrule(",
                 '    name = "addon",',
-                f'    srcs = [":{name}"],',
+                '    srcs = [":addon_library"],',
                 f'    outs = ["{lib_t["name"].replace("-", "_")}.node"],',
                 '    cmd = "cp $< $@",',
                 "    cmd_ps = \"Copy-Item -Path '$<' -Destination '$@'\",",

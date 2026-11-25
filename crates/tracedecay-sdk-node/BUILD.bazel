@@ -10,6 +10,8 @@ load("//scripts:bazel/rust_test.bzl", "perf_rustc_flags", "rust_test")
 
 load("@rules_rust//rust:defs.bzl", "rust_shared_library")
 
+load("//scripts:bazel/rust_shared_library_output.bzl", "rust_shared_library_output")
+
 rust_shared_library(
     name = "tracedecay-sdk-node",
     srcs = glob(["src/**/*.rs"]),
@@ -38,9 +40,14 @@ cargo_build_script(
     crate_features = [],
 )
 
+rust_shared_library_output(
+    name = "addon_library",
+    library = ":tracedecay-sdk-node",
+)
+
 genrule(
     name = "addon",
-    srcs = [":tracedecay-sdk-node"],
+    srcs = [":addon_library"],
     outs = ["tracedecay_sdk_node.node"],
     cmd = "cp $< $@",
     cmd_ps = "Copy-Item -Path '$<' -Destination '$@'",
