@@ -1,7 +1,7 @@
 use tracedecay_automation_runtime::automation::effect_runtime::contract_error;
 use tracedecay_automation_runtime::automation::effect_runtime::settlement::*;
+use tracedecay_automation_runtime::automation::run_ledger::ExactRunPublication;
 
-use std::collections::BTreeMap;
 use tracedecay_contracts::retained_surfaces::{
     AutomationRunProblemV1, AutomationRunRequestV1, AutomationTaskRequestV1,
     MemoryCuratorRunInputV1, RetainedSurfaceExecutionErrorV1, RetainedSurfaceOperation,
@@ -29,9 +29,87 @@ use tracedecay_domain::{
 use tracedecay_tool_catalog::EffectClass;
 
 use crate::automation_effect::recovery_composition;
+
+#[test]
+fn legacy_run_publication_is_refused_without_repeating_its_external_effect() {
+    for promoted in [false, true] {
+        let directory = tempfile::tempdir().expect("legacy journal directory");
+        let admission = external_admission_for_job(
+            "legacy-publication",
+            "request.legacy-publication",
+            "legacy-job",
+        );
+        let journal_path = canonical_journal_path(directory.path(), &admission.request.run_id);
+        let reservation = reserve_or_replay_blocking(&journal_path, admission.clone())
+            .expect("reserve the original occurrence");
+        let terminal = AutomationSettledTerminal::Problem(admission.recovery_problem().clone());
+        let publication: ExactRunPublication = serde_json::from_value(serde_json::json!({
+            "schema_version": 2,
+            "digest": digest('d'),
+        }))
+        .expect("current publication");
+        persist_prepared_terminal_blocking(
+            &journal_path,
+            &admission,
+            &terminal,
+            publication.clone(),
+        )
+        .expect("write the real prepared journal and sidecar");
+        if promoted {
+            promote_prepared_terminal_blocking(&journal_path, &admission, terminal, &publication)
+                .expect("write the real terminal journal");
+        }
+        drop(reservation);
+        let mut document: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(&journal_path).expect("read the real journal shape"),
+        )
+        .expect("journal JSON");
+        *document
+            .pointer_mut("/state/value/publication")
+            .expect("publication inside the serialized journal state") = serde_json::json!({
+            "schema_version": 1,
+            "ledger_digest": digest('d'),
+            "payload_len": 1,
+        });
+        let retired = serde_json::to_vec(&document).expect("retired journal bytes");
+        std::fs::write(&journal_path, &retired).expect("write legacy publication");
+        let sidecar_path = journal_path.with_extension("json.terminal");
+        let sidecar = std::fs::read(&sidecar_path).expect("original terminal receipt");
+
+        for _ in 0..2 {
+            let error = reserve_or_replay_blocking(&journal_path, admission.clone())
+                .err()
+                .expect("the old publication must stop before another effect");
+            assert_eq!(
+                error
+                    .project_route_context()
+                    .map(|(code, retryable, _)| (code, retryable)),
+                Some(("automation_run_legacy_jsonl_refused", false))
+            );
+            assert!(error.reset_required_context().is_none());
+        }
+
+        let next =
+            external_admission_for_job("new-occurrence", "request.new-occurrence", "legacy-job");
+        let next_path = canonical_journal_path(directory.path(), &next.request.run_id);
+        assert!(matches!(
+            reserve_or_replay_blocking(&next_path, next).expect("explicitly new occurrence"),
+            ReservationResult::Execute { .. }
+        ));
+        assert_eq!(
+            std::fs::read(&journal_path).expect("retained journal"),
+            retired
+        );
+        assert_eq!(
+            std::fs::read(&sidecar_path).expect("retained receipt"),
+            sidecar
+        );
+    }
+}
 use tracedecay_automation_runtime::automation::effect_runtime::AutomationSettledTerminal;
 use tracedecay_automation_runtime::automation::effect_runtime::journal::*;
 use tracedecay_automation_runtime::automation::effect_runtime::recovery_index;
+use tracedecay_automation_runtime::automation::registered_run_store::RegisteredAutomationRunStore;
 
 struct NeverAutomationBackend;
 
@@ -220,24 +298,8 @@ fn admission_for_recovery_project(
     seal_effect_authority(admission)
 }
 
-fn write_private_test_file(path: &std::path::Path, bytes: &[u8]) {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).expect("create private test file parent");
-    }
-    std::fs::write(path, bytes).expect("write private test file");
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
-            .expect("private test file mode");
-    }
-    #[cfg(windows)]
-    drop(tracedecay_private_fs::windows::make_private_file(path).expect("private test file ACL"));
-}
-
 async fn retained_external_authority(
-    dashboard_root: &std::path::Path,
+    runs: &RegisteredAutomationRunStore,
     admission: DurableAutomationAdmission,
 ) -> (
     AutomationEffectAuthority,
@@ -285,7 +347,7 @@ async fn retained_external_authority(
                 observed_at: UtcMicros(2),
                 configuration_digest: admission.configuration_digest.clone(),
                 request: admission.request.clone(),
-                dashboard_root: dashboard_root.to_path_buf(),
+                runs: runs.clone(),
             },
             || {
                 Ok(FactOwnerV1::Project {
@@ -299,76 +361,13 @@ async fn retained_external_authority(
     else {
         panic!("fresh retained fixture must execute")
     };
-    let journal_path = canonical_journal_path(dashboard_root, &admission.request.run_id);
+    let journal_path = canonical_journal_path(runs.dashboard_root(), &admission.request.run_id);
     let expected_admission = read_indexed_record_blocking(&journal_path)
         .expect("admitted journal")
         .expect("journal")
         .admission()
         .clone();
     (*authority, journal_path, expected_admission)
-}
-
-async fn retained_disabled_user_job(
-    dashboard_root: &std::path::Path,
-    run_id: &str,
-    job_id: &str,
-) -> (
-    tracedecay_automation_runtime::automation::jobs::UserJobAutomationRun,
-    tracedecay_automation_runtime::automation::runner::AutomationRunSettlementGuard,
-) {
-    let retained = retained_disabled_user_job_run(dashboard_root, run_id, job_id).await;
-    let (result, guard) = retained.into_parts();
-    (result.expect("disabled retained job terminal"), guard)
-}
-
-async fn retained_disabled_user_job_run(
-    dashboard_root: &std::path::Path,
-    run_id: &str,
-    job_id: &str,
-) -> tracedecay_automation_runtime::automation::runner::RetainedAutomationRun<
-    tracedecay_automation_runtime::automation::jobs::UserJobAutomationRun,
-> {
-    use tracedecay_automation_runtime::automation::config::{
-        AutomationBackendV1, AutomationHostModeV1, AutomationSettingsV1,
-    };
-    use tracedecay_automation_runtime::automation::jobs::{
-        AutomationJob, JobDelivery, UserJobRunOptions,
-        run_user_job_with_backend_for_retained_settlement,
-    };
-
-    let config = AutomationSettingsV1 {
-        enabled: true,
-        backend: AutomationBackendV1::CodexAppServer,
-        host_mode: AutomationHostModeV1::Standalone,
-        ..AutomationSettingsV1::default()
-    };
-    let job = AutomationJob {
-        id: job_id.to_owned(),
-        name: format!("{job_id} retained test"),
-        prompt: "This disabled job must stop after acquiring its canonical lock.".to_owned(),
-        schedule: None,
-        enabled: false,
-        interval_secs: None,
-        cooldown_secs: None,
-        skill_ids: Vec::new(),
-        pre_run_command: None,
-        delivery: JobDelivery::default(),
-        created_at: 1,
-        updated_at: 1,
-        extra: BTreeMap::default(),
-    };
-    let job = tracedecay_automation_runtime::automation::jobs::admit_job(&job).unwrap();
-    run_user_job_with_backend_for_retained_settlement(
-        dashboard_root,
-        &config,
-        &NeverAutomationBackend,
-        &job,
-        UserJobRunOptions {
-            run_id: Some(run_id.to_owned()),
-            ..UserJobRunOptions::default()
-        },
-    )
-    .await
 }
 
 async fn retained_recovery_project(
@@ -460,22 +459,6 @@ async fn retained_repeated_memory_curator_run(
         &run_control,
     )
     .await
-}
-
-fn exact_spool_files(dashboard_root: &std::path::Path) -> Vec<std::path::PathBuf> {
-    match std::fs::read_dir(dashboard_root.join("automation_run_spool")) {
-        Ok(entries) => entries
-            .filter_map(std::result::Result::ok)
-            .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_file()))
-            .map(|entry| entry.path())
-            .collect(),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
-        Err(error) => panic!("read exact spool directory: {error}"),
-    }
-}
-
-fn exact_spool_file_count(dashboard_root: &std::path::Path) -> usize {
-    exact_spool_files(dashboard_root).len()
 }
 
 fn partial_receipt_template(request_id: &RequestId, scope: &ResolvedScope) -> EffectReceipt {
@@ -670,7 +653,6 @@ async fn post_write_reservation_error_retains_reserved_journal_and_pending_recov
 
     let report = recovery_composition::reconcile_reserved_automation_effects_for_project(
         &cg,
-        dashboard_root,
         &tracedecay_contracts::CancellationSignal::active("cancellation.post-write-reservation")
             .expect("recovery cancellation"),
     )
@@ -731,7 +713,6 @@ async fn prewrite_reservation_error_retains_index_until_missing_journal_recovery
 
     let report = recovery_composition::reconcile_reserved_automation_effects_for_project(
         &cg,
-        dashboard_root,
         &tracedecay_contracts::CancellationSignal::active("cancellation.prewrite-reservation")
             .expect("recovery cancellation"),
     )
@@ -752,61 +733,17 @@ async fn prewrite_reservation_error_retains_index_until_missing_journal_recovery
 }
 
 #[tokio::test]
-async fn project_open_repairs_corrupt_append_intent_at_clean_eof_without_pending_journals() {
-    let temp = tempfile::tempdir().expect("tempdir");
-    let cg = retained_recovery_project(&temp, "clean-eof-corrupt-intent").await;
-    let dashboard_root = &cg.store_layout().dashboard_root;
-    let intent_path = dashboard_root.join("automation_runs.jsonl.append-intent");
-    let corrupt = b"corrupt-clean-eof-intent";
-    write_private_test_file(&intent_path, corrupt);
-
-    let report = recovery_composition::reconcile_reserved_automation_effects_for_project(
-        &cg,
-        dashboard_root,
-        &tracedecay_contracts::CancellationSignal::active("cancellation.clean-eof-corrupt-intent")
-            .expect("recovery cancellation"),
-    )
-    .await
-    .expect("project-open corrupt-intent repair");
-    assert_eq!(report.inspected, 0);
-    assert!(!intent_path.exists());
-    assert_eq!(
-        std::fs::read_dir(dashboard_root.join("automation_run_append_intent_quarantine"))
-            .expect("corrupt-intent quarantine")
-            .filter_map(std::result::Result::ok)
-            .map(|entry| std::fs::read(entry.path()).expect("quarantined intent"))
-            .collect::<Vec<_>>(),
-        vec![corrupt.to_vec()]
-    );
-    assert!(
-        recovery_index::indexed_journals_blocking(
-            dashboard_root,
-            &tracedecay_code_index_runtime::resolved_scope_for_project(
-                cg.project_root(),
-                &match cg.project_memory_owner().expect("project owner") {
-                    FactOwnerV1::Project { project_id } => project_id,
-                    FactOwnerV1::Profile => panic!("recovery fixture requires a project owner"),
-                },
-            )
-            .expect("project scope"),
-        )
-        .expect("empty pending index")
-        .is_empty()
-    );
-}
-
-#[tokio::test]
 async fn recovery_defers_unavailable_memory_without_blocking_external_or_terminal_effects() {
     let temp = tempfile::tempdir().expect("tempdir");
-    let fixture_name = "corrupt-intent-before-memory-open";
+    let fixture_name = "unavailable-memory-recovery";
     let project_root = temp.path().join(format!("{fixture_name}-project"));
     let profile_root = temp.path().join(format!("{fixture_name}-profile"));
     let cg = retained_recovery_project(&temp, fixture_name).await;
     let dashboard_root = cg.store_layout().dashboard_root.clone();
     let admission = admission_for_recovery_project(
         &cg,
-        "run.corrupt-intent-before-memory-open",
-        "request.corrupt-intent-before-memory-open",
+        "run.unavailable-memory-recovery",
+        "request.unavailable-memory-recovery",
     );
     let journal_path = canonical_journal_path(&dashboard_root, &admission.request.run_id);
     recovery_index::add_pending_blocking(&dashboard_root, &journal_path, &admission)
@@ -839,9 +776,6 @@ async fn recovery_defers_unavailable_memory_without_blocking_external_or_termina
         None,
     )
     .expect("terminal journal");
-    let intent_path = dashboard_root.join("automation_runs.jsonl.append-intent");
-    let corrupt = b"corrupt-before-memory-open";
-    write_private_test_file(&intent_path, corrupt);
     cg.close();
 
     let read_only = tracedecay_project::project::TraceDecay::open_read_only_with_options_for_test(
@@ -855,9 +789,8 @@ async fn recovery_defers_unavailable_memory_without_blocking_external_or_termina
     .expect("open read-only recovery project");
     let report = recovery_composition::reconcile_reserved_automation_effects_for_project(
         &read_only,
-        &dashboard_root,
         &tracedecay_contracts::CancellationSignal::active(
-            "cancellation.corrupt-intent-before-memory-open",
+            "cancellation.unavailable-memory-recovery",
         )
         .expect("recovery cancellation"),
     )
@@ -880,15 +813,6 @@ async fn recovery_defers_unavailable_memory_without_blocking_external_or_termina
             .expect("reserved memory")
             .is_terminal()
     );
-    assert!(!intent_path.exists());
-    assert_eq!(
-        std::fs::read_dir(dashboard_root.join("automation_run_append_intent_quarantine"))
-            .expect("corrupt-intent quarantine")
-            .filter_map(std::result::Result::ok)
-            .map(|entry| std::fs::read(entry.path()).expect("quarantined intent"))
-            .collect::<Vec<_>>(),
-        vec![corrupt.to_vec()]
-    );
 }
 
 #[tokio::test]
@@ -898,7 +822,6 @@ async fn empty_pending_index_does_not_open_project_memory() {
     let project_root = temp.path().join(format!("{fixture_name}-project"));
     let profile_root = temp.path().join(format!("{fixture_name}-profile"));
     let cg = retained_recovery_project(&temp, fixture_name).await;
-    let dashboard_root = cg.store_layout().dashboard_root.clone();
     cg.close();
 
     let read_only = tracedecay_project::project::TraceDecay::open_read_only_with_options_for_test(
@@ -912,7 +835,6 @@ async fn empty_pending_index_does_not_open_project_memory() {
     .expect("open read-only recovery project");
     let report = recovery_composition::reconcile_reserved_automation_effects_for_project(
         &read_only,
-        &dashboard_root,
         &tracedecay_contracts::CancellationSignal::active(
             "cancellation.empty-index-with-unavailable-memory",
         )
@@ -924,70 +846,6 @@ async fn empty_pending_index_does_not_open_project_memory() {
     assert_eq!(
         report,
         recovery_index::AutomationEffectRecoveryReport::default()
-    );
-}
-
-#[tokio::test]
-async fn project_open_truncates_unique_spool_partial_with_empty_pending_index() {
-    let temp = tempfile::tempdir().expect("tempdir");
-    let cg = retained_recovery_project(&temp, "partial-corrupt-intent").await;
-    let dashboard_root = &cg.store_layout().dashboard_root;
-    let run_id = "run.project-open-corrupt-intent";
-    let (run, guard) =
-        retained_disabled_user_job(dashboard_root, run_id, "project-open-corrupt-intent").await;
-    drop(guard);
-    let expected_record = run.ledger_record;
-    let (publication, _) =
-        tracedecay_automation_runtime::automation::run_ledger::bind_staged_run_record_exact(
-            dashboard_root,
-            &expected_record,
-            |publication| Ok(publication.clone()),
-        )
-        .expect("stage exact recovery spool");
-    let spool_files = exact_spool_files(dashboard_root);
-    assert_eq!(spool_files.len(), 1);
-    let spool = std::fs::read(&spool_files[0]).expect("exact spool payload");
-    let ledger_path =
-        tracedecay_automation_runtime::automation::run_ledger::run_ledger_path(dashboard_root);
-    std::fs::write(&ledger_path, &spool[..spool.len() / 2]).expect("owned partial ledger tail");
-    let intent_path = dashboard_root.join("automation_runs.jsonl.append-intent");
-    std::fs::write(&intent_path, b"corrupt-partial-intent").expect("corrupt append intent");
-
-    let report = recovery_composition::reconcile_reserved_automation_effects_for_project(
-        &cg,
-        dashboard_root,
-        &tracedecay_contracts::CancellationSignal::active("cancellation.partial-corrupt-intent")
-            .expect("recovery cancellation"),
-    )
-    .await
-    .expect("project-open partial-intent repair");
-    assert_eq!(report.inspected, 0);
-    assert!(!intent_path.exists());
-    assert_eq!(
-        std::fs::metadata(&ledger_path)
-            .expect("repaired ledger")
-            .len(),
-        0
-    );
-    assert_eq!(exact_spool_file_count(dashboard_root), 1);
-
-    assert_eq!(
-        tracedecay_automation_runtime::automation::run_ledger::publish_staged_run_record_exact(
-            dashboard_root,
-            run_id,
-            &publication,
-        )
-        .await
-        .expect("publish repaired exact row"),
-        tracedecay_automation_runtime::automation::run_ledger::ExactRunPublishOutcome::Published
-    );
-    assert_eq!(
-        tracedecay_automation_runtime::automation::run_ledger::find_run_record_exact_bounded_blocking(
-            dashboard_root,
-            run_id,
-        )
-        .expect("exact repaired row"),
-        Some(expected_record)
     );
 }
 
@@ -1025,7 +883,8 @@ async fn reused_scheduler_skip_abandons_current_effect_before_observing_exact_pr
     let project_context = cg
         .automation_project_context(None)
         .expect("compose project automation context");
-    let dashboard_root = &cg.store_layout().dashboard_root;
+    let runs = cg.automation_run_store().expect("registered run store");
+    let dashboard_root = runs.dashboard_root();
     let config = AutomationSettingsV1 {
         enabled: true,
         backend: AutomationBackendV1::Disabled,
@@ -1070,7 +929,7 @@ async fn reused_scheduler_skip_abandons_current_effect_before_observing_exact_pr
     };
     let prior_record = prior_run.ledger_record.clone();
     let (prior_authority, prior_journal, prior_admission) = retained_external_authority(
-        dashboard_root,
+        &runs,
         admission(prior_run_id, "request.reused-scheduler-skip.prior"),
     )
     .await;
@@ -1087,15 +946,14 @@ async fn reused_scheduler_skip_abandons_current_effect_before_observing_exact_pr
         .await
         .expect("settle exact prior scheduler skip");
 
-    let ledger_path =
-        tracedecay_automation_runtime::automation::run_ledger::run_ledger_path(dashboard_root);
-    let prior_ledger_bytes = std::fs::read(&ledger_path).expect("prior exact ledger bytes");
+    let prior_history = runs
+        .load_run_records(10)
+        .await
+        .expect("prior exact history");
     assert_eq!(
-        tracedecay_automation_runtime::automation::run_ledger::find_run_record_exact_bounded_blocking(
-            dashboard_root,
-            prior_run_id,
-        )
-        .expect("prior exact lookup"),
+        runs.find_run_record(prior_run_id)
+            .await
+            .expect("prior exact lookup"),
         Some(prior_record.clone())
     );
     assert_eq!(prior_record.task, AgentTaskKind::MemoryCurator);
@@ -1104,7 +962,6 @@ async fn reused_scheduler_skip_abandons_current_effect_before_observing_exact_pr
         task_key(AgentTaskKind::MemoryCurator)
     );
     assert_eq!(prior_record.error.as_deref(), Some("backend_disabled"));
-    let prior_spool_files = exact_spool_files(dashboard_root);
 
     let wrong_task_run_id = "run.reused-scheduler-skip.wrong-task";
     let (mut wrong_task_reused, wrong_task_guard) =
@@ -1113,7 +970,7 @@ async fn reused_scheduler_skip_abandons_current_effect_before_observing_exact_pr
     wrong_task_reused.task_key = task_key(AgentTaskKind::SessionReflector).to_owned();
     let (wrong_task_authority, wrong_task_journal, wrong_task_admission) =
         retained_external_authority(
-            dashboard_root,
+            &runs,
             admission(
                 wrong_task_run_id,
                 "request.reused-scheduler-skip.wrong-task",
@@ -1143,8 +1000,10 @@ async fn reused_scheduler_skip_abandons_current_effect_before_observing_exact_pr
     assert!(wrong_task_journal.exists());
     assert!(fixed_task_lock_is_denied(dashboard_root, AgentTaskKind::MemoryCurator).await);
     assert_eq!(
-        std::fs::read(&ledger_path).expect("ledger after wrong-task rejection"),
-        prior_ledger_bytes
+        runs.load_run_records(10)
+            .await
+            .expect("history after wrong-task rejection"),
+        prior_history
     );
     drop(wrong_task_error);
     assert!(!fixed_task_lock_is_denied(dashboard_root, AgentTaskKind::MemoryCurator).await);
@@ -1164,7 +1023,7 @@ async fn reused_scheduler_skip_abandons_current_effect_before_observing_exact_pr
     wrong_reason_reused.reason = "different_skip_reason".to_owned();
     let (wrong_reason_authority, wrong_reason_journal, wrong_reason_admission) =
         retained_external_authority(
-            dashboard_root,
+            &runs,
             admission(
                 wrong_reason_run_id,
                 "request.reused-scheduler-skip.wrong-reason",
@@ -1189,8 +1048,10 @@ async fn reused_scheduler_skip_abandons_current_effect_before_observing_exact_pr
     assert!(wrong_reason_journal.exists());
     assert!(fixed_task_lock_is_denied(dashboard_root, AgentTaskKind::MemoryCurator).await);
     assert_eq!(
-        std::fs::read(&ledger_path).expect("ledger after wrong-reason rejection"),
-        prior_ledger_bytes
+        runs.load_run_records(10)
+            .await
+            .expect("history after wrong-reason rejection"),
+        prior_history
     );
     drop(wrong_reason_error);
     assert!(!fixed_task_lock_is_denied(dashboard_root, AgentTaskKind::MemoryCurator).await);
@@ -1203,7 +1064,7 @@ async fn reused_scheduler_skip_abandons_current_effect_before_observing_exact_pr
         retained_repeated_memory_curator_run(&cg, &config, &configuration_revision, current_run_id)
             .await;
     let (current_authority, current_journal, current_admission) = retained_external_authority(
-        dashboard_root,
+        &runs,
         admission(current_run_id, "request.reused-scheduler-skip.current"),
     )
     .await;
@@ -1243,12 +1104,10 @@ async fn reused_scheduler_skip_abandons_current_effect_before_observing_exact_pr
     );
     assert!(current_journal.exists());
     assert!(
-        tracedecay_automation_runtime::automation::run_ledger::find_run_record_exact_bounded_blocking(
-            dashboard_root,
-            current_run_id,
-        )
-        .expect("current exact absence")
-        .is_none()
+        runs.find_run_record(current_run_id)
+            .await
+            .expect("current exact absence")
+            .is_none()
     );
     assert!(fixed_task_lock_is_denied(dashboard_root, AgentTaskKind::MemoryCurator).await);
 
@@ -1276,19 +1135,18 @@ async fn reused_scheduler_skip_abandons_current_effect_before_observing_exact_pr
             .is_empty()
     );
     assert_eq!(
-        std::fs::read(&ledger_path).expect("ledger after abandonment"),
-        prior_ledger_bytes,
-        "reusing a scheduler skip must not append a current physical row"
+        runs.load_run_records(10)
+            .await
+            .expect("history after abandonment"),
+        prior_history,
+        "reusing a scheduler skip must not publish a current run"
     );
     assert!(
-        tracedecay_automation_runtime::automation::run_ledger::find_run_record_exact_bounded_blocking(
-            dashboard_root,
-            current_run_id,
-        )
-        .expect("current exact absence after abandonment")
-        .is_none()
+        runs.find_run_record(current_run_id)
+            .await
+            .expect("current exact absence after abandonment")
+            .is_none()
     );
-    assert_eq!(exact_spool_files(dashboard_root), prior_spool_files);
     assert!(
         tracedecay_automation_runtime::automation::scheduler::AutomationTaskLock::try_acquire(
             dashboard_root,

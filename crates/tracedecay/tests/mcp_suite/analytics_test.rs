@@ -13,8 +13,11 @@ use crate::support::{
 #[cfg(feature = "test-transport")]
 use serde_json::Value;
 #[cfg(feature = "test-transport")]
-use tracedecay_global_db::{AnalyticsEventInsert, RegisteredGlobalDb};
+use tracedecay_automation_runtime::automation::registered_run_store::RegisteredAutomationRunStore;
 #[cfg(feature = "test-transport")]
+use tracedecay_automation_runtime::automation::run_ledger::AutomationRunLedgerRecord;
+#[cfg(feature = "test-transport")]
+use tracedecay_global_db::{AnalyticsEventInsert, RegisteredGlobalDb};
 #[cfg(feature = "test-transport")]
 use tracedecay_runtime_core::tracedecay::current_timestamp;
 
@@ -85,15 +88,32 @@ fn metric<'a>(metrics: &'a Value, name: &str) -> &'a Value {
 }
 
 #[cfg(feature = "test-transport")]
-fn ledger_row(run_id: &str, task: &str, status: &str, started_at: i64) -> String {
-    format!(
-        "{{\"schema_version\":2,\"run_id\":\"{run_id}\",\"trigger\":\"scheduler\",\
-         \"task\":\"{task}\",\"task_key\":\"{task}\",\"backend\":\"codex_app_server\",\
-         \"status\":\"{status}\",\
-         \"accepted_count\":0,\"rejected_count\":0,\"started_at\":\"{started_at}\",\
-         \"completed_at\":\"{started_at}\",\"completed_at_micros\":{}}}",
-        started_at.saturating_mul(1_000_000)
-    )
+async fn seed_run(
+    runs: &RegisteredAutomationRunStore,
+    run_id: &str,
+    task: &str,
+    task_key: &str,
+    status: &str,
+    started_at: i64,
+) {
+    let record: AutomationRunLedgerRecord = serde_json::from_value(json!({
+        "schema_version": 2,
+        "run_id": run_id,
+        "trigger": "scheduler",
+        "task": task,
+        "task_key": task_key,
+        "backend": "codex_app_server",
+        "status": status,
+        "accepted_count": 0,
+        "rejected_count": 0,
+        "started_at": started_at.to_string(),
+        "completed_at": started_at.to_string(),
+        "completed_at_micros": started_at * 1_000_000,
+    }))
+    .expect("valid automation run fixture");
+    runs.append_run_record(&record)
+        .await
+        .expect("seed automation run");
 }
 
 #[cfg(feature = "test-transport")]
@@ -107,72 +127,20 @@ async fn analytics_automation_reports_a_ledger_that_exactly_fills_the_page_as_co
         .server(&fixture.project_root)
         .expect("production project server");
 
-    let empty = extract_json(
-        &handle_real_server_tool_call(
-            &server,
-            "tracedecay_analytics",
-            json!({"section": "automation", "format": "json"}),
-        )
-        .await,
-    );
-    let dashboard_root = empty["automation"]["dashboard_root"]
-        .as_str()
-        .expect("enrolled dashboard root")
-        .to_string();
-    let dashboard_path = std::path::PathBuf::from(&dashboard_root);
-    std::fs::create_dir_all(&dashboard_path).expect("dashboard root");
-
-    // Derive the page bound from the service instead of duplicating the
-    // handler's constant: write well past any plausible bound and let the
-    // report say how many rows it actually read.
+    let runs = server.cg_snapshot().await.automation_run_store().unwrap();
     let now = current_timestamp();
-    let probe_rows = 512usize;
-    let mut ledger = String::new();
-    for index in 0..probe_rows {
-        ledger.push_str(&ledger_row(
-            &format!("analytics-page-probe-{index}"),
-            "memory_curator",
-            "succeeded",
-            now - 60,
-        ));
-        ledger.push('\n');
-    }
-    std::fs::write(dashboard_path.join("automation_runs.jsonl"), ledger)
-        .expect("automation ledger");
-    let probe = extract_json(
-        &handle_real_server_tool_call(
-            &server,
-            "tracedecay_analytics",
-            json!({"section": "automation", "format": "json"}),
-        )
-        .await,
-    );
-    let page_bound = probe["automation"]["records_considered"]
-        .as_u64()
-        .expect("records considered") as usize;
-    assert!(
-        page_bound > 0 && page_bound < probe_rows,
-        "the probe must exceed the page bound for the boundary to be testable, got {page_bound}"
-    );
-    assert_eq!(
-        probe["automation"]["records_truncated"], true,
-        "a ledger larger than the page is a partial window"
-    );
-
-    // Exactly the page bound: the page is the whole ledger, nothing older was
-    // left behind, so the window is complete.
-    let mut ledger = String::new();
+    let page_bound = 200usize;
     for index in 0..page_bound {
-        ledger.push_str(&ledger_row(
+        seed_run(
+            &runs,
             &format!("analytics-full-page-{index}"),
             "memory_curator",
+            "memory_curator",
             "succeeded",
             now - 60,
-        ));
-        ledger.push('\n');
+        )
+        .await;
     }
-    std::fs::write(dashboard_path.join("automation_runs.jsonl"), ledger)
-        .expect("automation ledger");
 
     let automation = extract_json(
         &handle_real_server_tool_call(
@@ -197,17 +165,15 @@ async fn analytics_automation_reports_a_ledger_that_exactly_fills_the_page_as_co
 
     // One more row pushes the oldest out of the page, which is a real
     // truncation and must be reported.
-    let mut extended = std::fs::read_to_string(dashboard_path.join("automation_runs.jsonl"))
-        .expect("automation ledger");
-    extended.push_str(&ledger_row(
+    seed_run(
+        &runs,
         "analytics-overflow",
+        "memory_curator",
         "memory_curator",
         "succeeded",
         now - 120,
-    ));
-    extended.push('\n');
-    std::fs::write(dashboard_path.join("automation_runs.jsonl"), extended)
-        .expect("automation ledger");
+    )
+    .await;
 
     let truncated = extract_json(
         &handle_real_server_tool_call(
@@ -564,33 +530,40 @@ async fn analytics_degrades_gracefully_for_a_zero_data_project() {
     assert_eq!(added["result"]["disposition"], "added");
     assert_eq!(added["result"]["fact"]["fact"]["content"], fact_content);
 
-    let dashboard_path = std::path::PathBuf::from(&dashboard_root);
-    std::fs::create_dir_all(&dashboard_path).expect("dashboard root");
+    let runs = server.cg_snapshot().await.automation_run_store().unwrap();
     let now = current_timestamp();
-    let ledger = format!(
-        "{}\n{}\n{}\n{}\n",
-        ledger_row(
+    for (run_id, task, task_key, status, started_at) in [
+        (
             "analytics-recent-success",
             "memory_curator",
+            "memory_curator",
             "succeeded",
-            now - 60
+            now - 60,
         ),
-        ledger_row(
+        (
             "analytics-recent-failure",
             "skill_writer",
+            "skill_writer",
             "failed",
-            now - 120
+            now - 120,
         ),
-        ledger_row("analytics-recent-queued", "user_job", "queued", now - 180),
-        ledger_row(
+        (
+            "analytics-recent-queued",
+            "user_job",
+            "user_job:analytics",
+            "queued",
+            now - 180,
+        ),
+        (
             "analytics-stale-success",
             "session_reflector",
+            "session_reflector",
             "succeeded",
-            now - 20 * 86_400
+            now - 20 * 86_400,
         ),
-    );
-    std::fs::write(dashboard_path.join("automation_runs.jsonl"), ledger)
-        .expect("automation ledger");
+    ] {
+        seed_run(&runs, run_id, task, task_key, status, started_at).await;
+    }
 
     let facts = extract_json(
         &handle_real_server_tool_call(

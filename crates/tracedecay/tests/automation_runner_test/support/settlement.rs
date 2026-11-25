@@ -3,7 +3,6 @@
 //! scheduler does, so ledger rows appear only once settlement publishes them.
 
 use std::collections::BTreeSet;
-use std::path::Path;
 
 use tracedecay_automation_runtime::automation::backend::AgentTaskBackend;
 use tracedecay_automation_runtime::automation::combined_effect::{
@@ -22,6 +21,7 @@ use tracedecay_automation_runtime::automation::jobs::{
     AutomationJob, UserJobAutomationRun, UserJobRunOptions,
     run_user_job_with_backend_for_retained_settlement,
 };
+use tracedecay_automation_runtime::automation::registered_run_store::RegisteredAutomationRunStore;
 use tracedecay_automation_runtime::automation::run_ledger::{
     AutomationRunLedgerRecord, AutomationRunStatus,
 };
@@ -59,7 +59,7 @@ use tracedecay_domain::{
 /// root does, with a fixture grant standing in for the registered project
 /// runtime. Memory-owning runs are scoped to their project's memory owner.
 async fn admit(
-    dashboard_root: &Path,
+    runs: RegisteredAutomationRunStore,
     project_id: Option<&ProjectId>,
     request: AutomationRunRequestV1,
 ) -> AutomationEffectAuthority {
@@ -112,7 +112,7 @@ async fn admit(
             configuration_digest: canonical_sha256(&"automation-runner-test.configuration")
                 .expect("configuration digest"),
             request,
-            dashboard_root: dashboard_root.to_path_buf(),
+            runs,
         },
         move || owner.ok_or_else(|| contract_error("fixture run has no memory owner")),
         |_, _| async { Err(contract_error("fresh admission must not recover receipts")) },
@@ -127,6 +127,11 @@ async fn admit(
             panic!("automation admission was refused: {problem:?}")
         }
     }
+}
+
+fn project_runs(cx: &AutomationProjectContext) -> RegisteredAutomationRunStore {
+    cx.automation_run_store()
+        .expect("project context must admit its registered run store")
 }
 
 fn admitted_run_id(requested: Option<String>) -> String {
@@ -229,7 +234,7 @@ pub(crate) async fn settle_memory_curator(
     let request =
         memory_curator_run_request(&run_id, options.fact_review_limit, options.min_confidence)
             .expect("memory curator request");
-    let authority = admit(&cx.dashboard_root, Some(cx.project_id()), request).await;
+    let authority = admit(project_runs(cx), Some(cx.project_id()), request).await;
     options.run_id = Some(run_id);
     let retained = run_memory_curator_with_backend_for_retained_settlement(
         cx,
@@ -255,7 +260,7 @@ pub(crate) async fn settle_session_reflector(
     let run_id = admitted_run_id(options.run_id.take());
     let request =
         session_reflector_run_request(&run_id, &options).expect("session reflector request");
-    let authority = admit(&cx.dashboard_root, Some(cx.project_id()), request).await;
+    let authority = admit(project_runs(cx), Some(cx.project_id()), request).await;
     options.run_id = Some(run_id);
     let retained = run_session_reflector_with_backend_and_retrieval_for_retained_settlement(
         cx,
@@ -280,7 +285,7 @@ pub(crate) async fn settle_skill_writer(
 ) -> AutomationRunResult<SkillWriterAutomationRun> {
     let run_id = admitted_run_id(options.run_id.take());
     let request = skill_writer_run_request(&run_id, &options).expect("skill writer request");
-    let authority = admit(&cx.dashboard_root, Some(cx.project_id()), request).await;
+    let authority = admit(project_runs(cx), Some(cx.project_id()), request).await;
     options.run_id = Some(run_id);
     let retained = run_skill_writer_with_backend_and_retrieval_for_retained_settlement(
         cx,
@@ -298,7 +303,7 @@ pub(crate) async fn settle_skill_writer(
 /// scheduler-lock diagnostic was already published under its own identity,
 /// so the admitted reservation is abandoned instead of settled.
 pub(crate) async fn settle_user_job(
-    dashboard_root: &Path,
+    runs: &RegisteredAutomationRunStore,
     config: &AutomationSettingsV1,
     backend: &dyn AgentTaskBackend,
     job: &AutomationJob,
@@ -307,16 +312,11 @@ pub(crate) async fn settle_user_job(
     let job = tracedecay_automation_runtime::automation::jobs::admit_job(job)?;
     let run_id = admitted_run_id(options.run_id.take());
     let request = user_job_run_request(&run_id, &job.id).expect("user job request");
-    let authority = admit(dashboard_root, None, request).await;
+    let authority = admit(runs.clone(), None, request).await;
     options.run_id = Some(run_id);
-    let retained = run_user_job_with_backend_for_retained_settlement(
-        dashboard_root,
-        config,
-        backend,
-        &job,
-        options,
-    )
-    .await;
+    let retained =
+        run_user_job_with_backend_for_retained_settlement(runs, config, backend, &job, options)
+            .await;
     let RetainedAutomationSettlementDisposition::Current {
         result,
         settlement_guard,
@@ -463,8 +463,8 @@ pub(crate) async fn settle_combined_review(
     let skill_request =
         skill_writer_run_request(&format!("{run_id}_skills"), &options.skill_writer)
             .expect("skill writer request");
-    let reflector = admit(&cx.dashboard_root, Some(cx.project_id()), reflector_request).await;
-    let skill = admit(&cx.dashboard_root, Some(cx.project_id()), skill_request).await;
+    let reflector = admit(project_runs(cx), Some(cx.project_id()), reflector_request).await;
+    let skill = admit(project_runs(cx), Some(cx.project_id()), skill_request).await;
     options.run_id = Some(run_id);
     let retained = run_combined_review_with_backend_and_retrieval_for_retained_settlement(
         cx,

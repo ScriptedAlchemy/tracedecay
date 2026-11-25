@@ -20,6 +20,7 @@ mod combined_review;
 mod config;
 mod jobs;
 mod memory_curator;
+mod registered_run_store;
 mod run_ledger;
 mod runner;
 mod scheduler;

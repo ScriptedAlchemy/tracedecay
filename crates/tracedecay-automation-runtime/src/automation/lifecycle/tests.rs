@@ -1,25 +1,19 @@
 use std::{path::Path, sync::Arc, sync::atomic::Ordering};
 
-use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
-
 use super::{
-    AgentTaskRunContext, AutomationRunControl, RUN_ID_COUNTER, SchedulerGate,
-    append_skipped_record, failed_output_projection, task_run_gate,
+    AgentTaskRunContext, AutomationRunControl, SchedulerGate, append_skipped_record,
+    failed_output_projection, task_run_gate,
 };
 use crate::automation::backend::AgentTaskKind;
 use crate::automation::config::{
     AutomationBackendV1, AutomationHostModeV1, AutomationSettingsV1, AutomationTaskSetV1,
     AutomationTaskSettingsV1,
 };
-use crate::automation::run_ledger::{
-    AutomationRunLedgerRecord, AutomationTrigger, load_run_records,
+use crate::automation::registered_run_store::tests::{
+    ProjectRunStoreFixture as TestSessionsDb, project_run_store,
 };
+use crate::automation::run_ledger::{AutomationRunLedgerRecord, AutomationTrigger};
 use tracedecay_contracts::retained_surfaces::AutomationSkipReasonV1;
-
-struct TestSessionsDb {
-    db: RegisteredGlobalDbLeaseV1,
-    _runtime: tracedecay_global_db::tests::harness::RegisteredGlobalDbTestRuntime,
-}
 
 #[test]
 fn session_reflector_malformed_output_projection_is_payload_free() {
@@ -46,16 +40,17 @@ fn session_reflector_malformed_output_projection_is_payload_free() {
     assert!(!serialized.contains(secret));
 }
 
-#[test]
-fn pre_epoch_completion_clock_fails_before_ledger_mutation() {
+#[tokio::test]
+async fn pre_epoch_completion_clock_fails_before_ledger_mutation() {
     let temp = tempfile::TempDir::new().expect("temp dir");
+    let sessions = test_sessions_db(temp.path()).await;
     let config = AutomationSettingsV1::default();
     let completion_time = std::time::UNIX_EPOCH
         .checked_sub(std::time::Duration::from_micros(1))
         .expect("pre-epoch instant");
 
     let error = match super::AgentRunFinalizer::new_at(
-        temp.path(),
+        &sessions.runs,
         "run.pre-epoch",
         AutomationTrigger::ManualCli,
         &config,
@@ -70,16 +65,24 @@ fn pre_epoch_completion_clock_fails_before_ledger_mutation() {
     };
 
     assert!(error.to_string().contains("predates the UNIX epoch"));
-    assert!(!super::super::run_ledger::run_ledger_path(temp.path()).exists());
+    assert_eq!(
+        sessions
+            .runs
+            .load_run_records(1)
+            .await
+            .expect("load records"),
+        Vec::<AutomationRunLedgerRecord>::new()
+    );
 }
 
-#[test]
-fn terminal_clock_is_fresh_and_posteffect_failure_stays_typed() {
+#[tokio::test]
+async fn terminal_clock_is_fresh_and_posteffect_failure_stays_typed() {
     let temp = tempfile::TempDir::new().expect("temp dir");
+    let sessions = test_sessions_db(temp.path()).await;
     let config = AutomationSettingsV1::default();
     let preflight = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1);
     let finalizer = super::AgentRunFinalizer::new_at(
-        temp.path(),
+        &sessions.runs,
         "run.clock-progression",
         AutomationTrigger::ManualCli,
         &config,
@@ -132,17 +135,7 @@ fn terminal_clock_is_fresh_and_posteffect_failure_stays_typed() {
 }
 
 async fn test_sessions_db(root: &Path) -> TestSessionsDb {
-    let nonce = RUN_ID_COUNTER.fetch_add(1, Ordering::Relaxed) + 1;
-    let profile_root = root.join(format!("profile-{nonce}"));
-    let runtime =
-        tracedecay_global_db::tests::harness::RegisteredGlobalDbTestRuntime::profile(&profile_root)
-            .await
-            .expect("registered profile test runtime");
-    let db = runtime.profile_database_arc();
-    TestSessionsDb {
-        db,
-        _runtime: runtime,
-    }
+    project_run_store(root, &root.join("dashboard")).await
 }
 
 #[test]
@@ -203,16 +196,15 @@ fn run_control_commit_admission_stays_consumed_after_later_interrupt() {
 /// records for scheduler triggers) and then record the skip, exactly as a
 /// gate-level skip does in the task runners.
 async fn append_skip(
-    dashboard_root: &Path,
+    sessions: &TestSessionsDb,
     run_id: &str,
     trigger: AutomationTrigger,
     task: AgentTaskKind,
     reason: &str,
 ) -> AutomationRunLedgerRecord {
     let config = AutomationSettingsV1::default();
-    let sessions = test_sessions_db(dashboard_root).await;
     let mut run = AgentTaskRunContext::new(
-        dashboard_root.to_path_buf(),
+        sessions.runs.clone(),
         sessions.db.clone(),
         Some(run_id.to_string()),
         "test",
@@ -232,10 +224,10 @@ async fn append_skip(
 #[tokio::test]
 async fn scheduler_skips_with_new_reason_or_task_still_persist() {
     let temp = tempfile::TempDir::new().expect("temp dir");
-    let root = temp.path();
+    let sessions = test_sessions_db(temp.path()).await;
 
     append_skip(
-        root,
+        &sessions,
         "run-1",
         AutomationTrigger::Scheduler,
         AgentTaskKind::MemoryCurator,
@@ -243,7 +235,7 @@ async fn scheduler_skips_with_new_reason_or_task_still_persist() {
     )
     .await;
     append_skip(
-        root,
+        &sessions,
         "run-2",
         AutomationTrigger::Scheduler,
         AgentTaskKind::MemoryCurator,
@@ -251,7 +243,7 @@ async fn scheduler_skips_with_new_reason_or_task_still_persist() {
     )
     .await;
     append_skip(
-        root,
+        &sessions,
         "run-3",
         AutomationTrigger::Scheduler,
         AgentTaskKind::SessionReflector,
@@ -259,18 +251,22 @@ async fn scheduler_skips_with_new_reason_or_task_still_persist() {
     )
     .await;
 
-    let records = load_run_records(root, 50).await.expect("load records");
+    let records = sessions
+        .runs
+        .load_run_records(50)
+        .await
+        .expect("load records");
     assert_eq!(records.len(), 3, "distinct skip conditions must persist");
 }
 
 #[tokio::test]
 async fn manual_trigger_skips_always_persist() {
     let temp = tempfile::TempDir::new().expect("temp dir");
-    let root = temp.path();
+    let sessions = test_sessions_db(temp.path()).await;
     let task = AgentTaskKind::SkillWriter;
 
     append_skip(
-        root,
+        &sessions,
         "run-1",
         AutomationTrigger::ManualCli,
         task,
@@ -278,7 +274,7 @@ async fn manual_trigger_skips_always_persist() {
     )
     .await;
     append_skip(
-        root,
+        &sessions,
         "run-2",
         AutomationTrigger::ManualCli,
         task,
@@ -286,7 +282,11 @@ async fn manual_trigger_skips_always_persist() {
     )
     .await;
 
-    let records = load_run_records(root, 50).await.expect("load records");
+    let records = sessions
+        .runs
+        .load_run_records(50)
+        .await
+        .expect("load records");
     assert_eq!(records.len(), 2, "manual skips must always be recorded");
 }
 
@@ -334,7 +334,7 @@ async fn on_demand_triggers_bypass_only_scheduler_enablement() {
         let (gate, _) = task_run_gate(
             &disabled,
             None,
-            temp.path(),
+            &sessions.runs,
             sessions.db.as_ref(),
             AgentTaskKind::MemoryCurator,
             trigger,
@@ -353,7 +353,7 @@ async fn concurrent_on_demand_runs_share_the_canonical_task_lock() {
     let (first, _) = task_run_gate(
         &config,
         None,
-        temp.path(),
+        &sessions.runs,
         sessions.db.as_ref(),
         AgentTaskKind::MemoryCurator,
         AutomationTrigger::ManualCli,
@@ -367,7 +367,7 @@ async fn concurrent_on_demand_runs_share_the_canonical_task_lock() {
     let (concurrent, _) = task_run_gate(
         &config,
         None,
-        temp.path(),
+        &sessions.runs,
         sessions.db.as_ref(),
         AgentTaskKind::MemoryCurator,
         AutomationTrigger::Dashboard,
@@ -383,7 +383,7 @@ async fn concurrent_on_demand_runs_share_the_canonical_task_lock() {
     let (next, _) = task_run_gate(
         &config,
         None,
-        temp.path(),
+        &sessions.runs,
         sessions.db.as_ref(),
         AgentTaskKind::MemoryCurator,
         AutomationTrigger::ManualMcp,
@@ -407,7 +407,7 @@ async fn scheduler_trigger_still_obeys_global_enablement() {
     let (gate, _) = task_run_gate(
         &disabled,
         None,
-        temp.path(),
+        &sessions.runs,
         sessions.db.as_ref(),
         AgentTaskKind::MemoryCurator,
         AutomationTrigger::Scheduler,
@@ -434,7 +434,7 @@ async fn on_demand_trigger_does_not_bypass_backend_or_host_admission() {
     let (gate, _) = task_run_gate(
         &unavailable,
         None,
-        temp.path(),
+        &sessions.runs,
         sessions.db.as_ref(),
         AgentTaskKind::MemoryCurator,
         AutomationTrigger::ManualMcp,
@@ -454,7 +454,7 @@ async fn on_demand_trigger_does_not_bypass_backend_or_host_admission() {
     let (gate, _) = task_run_gate(
         &delegated,
         None,
-        temp.path(),
+        &sessions.runs,
         sessions.db.as_ref(),
         AgentTaskKind::MemoryCurator,
         AutomationTrigger::Dashboard,
@@ -484,11 +484,10 @@ async fn wait_out_scheduler_interval() {
 
 /// Runs the production post-gate skip path: the gate proceeds (caching
 /// ledger records), and the task body later decides to skip.
-async fn post_gate_scheduler_skip(dashboard_root: &Path, run_id: &str, reason: &str) {
+async fn post_gate_scheduler_skip(sessions: &TestSessionsDb, run_id: &str, reason: &str) {
     let config = every_second_config();
-    let sessions = test_sessions_db(dashboard_root).await;
     let mut run = AgentTaskRunContext::new(
-        dashboard_root.to_path_buf(),
+        sessions.runs.clone(),
         sessions.db.clone(),
         Some(run_id.to_string()),
         "test",
@@ -517,13 +516,17 @@ async fn post_gate_scheduler_skip(dashboard_root: &Path, run_id: &str, reason: &
 #[tokio::test]
 async fn consecutive_identical_post_gate_scheduler_skips_persist_once() {
     let temp = tempfile::TempDir::new().expect("temp dir");
-    let root = temp.path();
+    let sessions = test_sessions_db(temp.path()).await;
 
-    post_gate_scheduler_skip(root, "run-1", "nothing_to_review").await;
+    post_gate_scheduler_skip(&sessions, "run-1", "nothing_to_review").await;
     wait_out_scheduler_interval().await;
-    post_gate_scheduler_skip(root, "run-2", "nothing_to_review").await;
+    post_gate_scheduler_skip(&sessions, "run-2", "nothing_to_review").await;
 
-    let records = load_run_records(root, 50).await.expect("load records");
+    let records = sessions
+        .runs
+        .load_run_records(50)
+        .await
+        .expect("load records");
     assert_eq!(
         records.len(),
         1,
@@ -535,7 +538,7 @@ async fn consecutive_identical_post_gate_scheduler_skips_persist_once() {
 #[tokio::test]
 async fn page_cursor_transitions_bypass_reason_only_skip_deduplication() {
     let temp = tempfile::TempDir::new().expect("temp dir");
-    let root = temp.path();
+    let sessions = test_sessions_db(temp.path()).await;
     let reason = "nothing_to_review";
     for (run_id, cursor) in [
         ("run-cursor-1", serde_json::json!("fact.cursor")),
@@ -545,9 +548,8 @@ async fn page_cursor_transitions_bypass_reason_only_skip_deduplication() {
             wait_out_scheduler_interval().await;
         }
         let config = every_second_config();
-        let sessions = test_sessions_db(root).await;
         let mut run = AgentTaskRunContext::new(
-            root.to_path_buf(),
+            sessions.runs.clone(),
             sessions.db.clone(),
             Some(run_id.to_owned()),
             "test",
@@ -572,7 +574,11 @@ async fn page_cursor_transitions_bypass_reason_only_skip_deduplication() {
         drop(lock);
     }
 
-    let records = load_run_records(root, 50).await.expect("load records");
+    let records = sessions
+        .runs
+        .load_run_records(50)
+        .await
+        .expect("load records");
     assert_eq!(records.len(), 2);
     assert_eq!(records[0].run_id, "run-cursor-2");
     assert_eq!(
@@ -588,10 +594,9 @@ async fn page_cursor_transitions_bypass_reason_only_skip_deduplication() {
 #[tokio::test]
 async fn append_path_relies_solely_on_caller_computed_repeat_flag() {
     let temp = tempfile::TempDir::new().expect("temp dir");
-    let root = temp.path();
+    let sessions = test_sessions_db(temp.path()).await;
     let config = AutomationSettingsV1::default();
     let task = AgentTaskKind::MemoryCurator;
-    let sessions = test_sessions_db(root).await;
 
     // Both identical scheduler skips persist when the caller reports
     // is_repeat=false, even though the second is a repeat on disk: the
@@ -599,7 +604,7 @@ async fn append_path_relies_solely_on_caller_computed_repeat_flag() {
     // the flag computed from the gate's cached records.
     for run_id in ["run-1", "run-2"] {
         let run = AgentTaskRunContext::new(
-            root.to_path_buf(),
+            sessions.runs.clone(),
             sessions.db.clone(),
             Some(run_id.to_string()),
             "memory_curator",
@@ -612,7 +617,11 @@ async fn append_path_relies_solely_on_caller_computed_repeat_flag() {
             .await
             .expect("append skipped record");
     }
-    let records = load_run_records(root, 50).await.expect("load records");
+    let records = sessions
+        .runs
+        .load_run_records(50)
+        .await
+        .expect("load records");
     assert_eq!(
         records.len(),
         2,
@@ -620,7 +629,7 @@ async fn append_path_relies_solely_on_caller_computed_repeat_flag() {
     );
 
     let run = AgentTaskRunContext::new(
-        root.to_path_buf(),
+        sessions.runs.clone(),
         sessions.db.clone(),
         Some("run-3".to_string()),
         "memory_curator",
@@ -632,6 +641,10 @@ async fn append_path_relies_solely_on_caller_computed_repeat_flag() {
     append_skipped_record(&run, None, "scheduler_interval_not_elapsed", true)
         .await
         .expect("append skipped record");
-    let records = load_run_records(root, 50).await.expect("load records");
+    let records = sessions
+        .runs
+        .load_run_records(50)
+        .await
+        .expect("load records");
     assert_eq!(records.len(), 2, "is_repeat=true must suppress the append");
 }

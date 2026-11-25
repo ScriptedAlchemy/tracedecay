@@ -229,9 +229,7 @@ async fn combined_review_runner_records_both_tasks_from_one_backend_call() {
 
     // Per-task last-run bookkeeping sees the combined run: both tasks are
     // now inside their scheduler interval.
-    let records = load_run_records(&cg.store_layout().dashboard_root, 50)
-        .await
-        .unwrap();
+    let records = run_store(&cg).load_run_records(50).await.unwrap();
     assert_eq!(records.len(), 2);
     for task in [AgentTaskKind::SessionReflector, AgentTaskKind::SkillWriter] {
         let now = current_timestamp();
@@ -322,7 +320,8 @@ async fn retained_combined_review_defers_both_ledgers_and_holds_both_task_locks(
     let dispatch = result.unwrap();
     assert!(matches!(dispatch, CombinedReviewDispatch::Ran(_)));
     assert!(
-        load_run_records(&cg.store_layout().dashboard_root, 10)
+        run_store(&cg)
+            .load_run_records(10)
             .await
             .unwrap()
             .is_empty(),
@@ -382,7 +381,8 @@ async fn retained_combined_review_defers_recorded_failures_until_settlement() {
         CombinedReviewDispatch::RecordedFailure(_) | CombinedReviewDispatch::FailureTerminals(_)
     ));
     assert!(
-        load_run_records(&cg.store_layout().dashboard_root, 10)
+        run_store(&cg)
+            .load_run_records(10)
             .await
             .unwrap()
             .is_empty(),
@@ -444,9 +444,7 @@ async fn combined_review_commits_atomic_terminal_effects() {
             .join("agent_managed/skills/automation-run-review")
             .exists()
     );
-    let records = load_run_records(&cg.store_layout().dashboard_root, 10)
-        .await
-        .unwrap();
+    let records = run_store(&cg).load_run_records(10).await.unwrap();
     assert_eq!(records.len(), 2);
     assert!(
         records
@@ -623,17 +621,15 @@ async fn combined_review_not_dispatched_when_only_one_task_is_due() {
     let profile_root = temp.path().join("profile");
     let cg = init_project(temp.path()).await;
     let config = scheduler_config(Some(3600), None);
-    append_run_record(
-        &cg.store_layout().dashboard_root,
-        &scheduler_record_for(
+    run_store(&cg)
+        .append_run_record(&scheduler_record_for(
             "previous_session_reflector_run",
             AgentTaskKind::SessionReflector,
             AutomationRunStatus::Succeeded,
             current_timestamp() - 60,
-        ),
-    )
-    .await
-    .unwrap();
+        ))
+        .await
+        .unwrap();
     let backend = CombinedJsonBackend::new(combined_output_fixture());
     let retrieval = CountingAutomationSessionRetrieval::new(&cg);
 
@@ -655,9 +651,7 @@ async fn combined_review_not_dispatched_when_only_one_task_is_due() {
         panic!("expected combined dispatch to fall back, got {dispatch:?}");
     };
     assert_eq!(reason, "session_reflector_not_due");
-    let records = load_run_records(&cg.store_layout().dashboard_root, 50)
-        .await
-        .unwrap();
+    let records = run_store(&cg).load_run_records(50).await.unwrap();
     assert_eq!(records.len(), 1, "fallback must not append ledger records");
 }
 
@@ -831,7 +825,8 @@ async fn combined_review_terminal_evidence_matrix_has_zero_effects() {
         assert_eq!(actual_reason, reason);
         assert_eq!(backend.calls(), 0);
         assert!(
-            load_run_records(&cg.store_layout().dashboard_root, 10)
+            run_store(&cg)
+                .load_run_records(10)
                 .await
                 .unwrap()
                 .is_empty()
@@ -863,7 +858,8 @@ async fn combined_review_terminal_evidence_matrix_has_zero_effects() {
     assert_eq!(reason, "no_session_evidence");
     assert_eq!(backend.calls(), 0);
     assert!(
-        load_run_records(&cg.store_layout().dashboard_root, 10)
+        run_store(&cg)
+            .load_run_records(10)
             .await
             .unwrap()
             .is_empty()
@@ -906,7 +902,8 @@ async fn combined_review_preserves_reflector_budget_stage_for_fallback() {
     assert_eq!(retrieval.calls(), 1);
     assert_eq!(backend.calls(), 0);
     assert!(
-        load_run_records(&cg.store_layout().dashboard_root, 10)
+        run_store(&cg)
+            .load_run_records(10)
             .await
             .unwrap()
             .is_empty()
@@ -949,7 +946,8 @@ async fn combined_review_preserves_skill_budget_stage_for_fallback() {
     assert_eq!(retrieval.calls(), 2);
     assert_eq!(backend.calls(), 0);
     assert!(
-        load_run_records(&cg.store_layout().dashboard_root, 10)
+        run_store(&cg)
+            .load_run_records(10)
             .await
             .unwrap()
             .is_empty()
@@ -988,9 +986,7 @@ async fn combined_review_records_failures_for_both_tasks_when_an_array_is_missin
         err.contains("combined review output must include a skills array"),
         "unexpected error: {err}"
     );
-    let records = load_run_records(&cg.store_layout().dashboard_root, 50)
-        .await
-        .unwrap();
+    let records = run_store(&cg).load_run_records(50).await.unwrap();
     assert_eq!(records.len(), 2);
     for record in &records {
         assert_eq!(record.status, AutomationRunStatus::Failed);

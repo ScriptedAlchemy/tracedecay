@@ -400,11 +400,12 @@ async fn execute_dashboard_automation_run(
             })?;
             let job = tracedecay_automation_runtime::automation::jobs::admit_job(&job)
                 .map_err(automation_failed)?;
+            let runs = cg.automation_run_store().map_err(automation_failed)?;
             let admission = tracedecay_daemon_service::automation_effect::prepare(
                 invocation_service,
                 cg,
                 cg.project_root(),
-                &cg.store_layout().dashboard_root,
+                &runs,
                 request_control.request_id(),
                 request_control.deadline(),
                 request_control.cancellation(),
@@ -437,7 +438,7 @@ async fn execute_dashboard_automation_run(
                 );
             let retained_run = tracedecay_automation_runtime::automation::jobs::
                 run_user_job_with_backend_for_retained_settlement(
-                    &cg.store_layout().dashboard_root,
+                    &runs,
                     config,
                     backend,
                     &job,

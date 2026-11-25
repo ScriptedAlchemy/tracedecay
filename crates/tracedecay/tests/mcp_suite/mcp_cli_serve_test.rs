@@ -40,13 +40,9 @@ use tracedecay_automation_runtime::automation::managed_skills::{
 };
 use tracedecay_automation_runtime::automation::run_ledger::{
     AutomationRunArtifactKind, AutomationRunLedgerRecord, AutomationRunStatus, AutomationTrigger,
-    append_run_record, write_run_artifact,
+    write_run_artifact,
 };
-#[cfg(unix)]
-use tracedecay_project::project::TraceDecay;
-#[cfg(unix)]
-use tracedecay_project::project::TraceDecayOpenOptions;
-use tracedecay_runtime_core::storage::default_profile_sharded_layout;
+use tracedecay_project::project::{TraceDecay, TraceDecayOpenOptions};
 #[cfg(unix)]
 use tracedecay_runtime_core::storage::{PrivateStoreIo, pin_fixture_repository_identity};
 
@@ -340,12 +336,20 @@ async fn serve_stdio_smokes_managed_skill_list_and_view() {
 async fn serve_stdio_smokes_automation_run_artifact_view() {
     let home = TempDir::new().unwrap();
     let project = init_project_with_file(home.path(), "pub fn artifact_stdio_marker() {}\n").await;
-    let dashboard_root = default_profile_sharded_layout(project.path(), &profile_root(home.path()))
-        .unwrap()
-        .dashboard_root;
+    let profile = profile_root(home.path());
+    let graph = TraceDecay::open_with_options_for_test(
+        project.path(),
+        TraceDecayOpenOptions {
+            global_db_path: Some(profile.join("global.db")),
+            profile_root: Some(profile),
+        },
+    )
+    .await
+    .unwrap();
+    let runs = graph.automation_run_store().unwrap();
     let run_id = "run-stdio-artifact";
     let artifact = write_run_artifact(
-        &dashboard_root,
+        runs.dashboard_root(),
         run_id,
         AutomationRunArtifactKind::CodexHandoff,
         &json!({
@@ -357,49 +361,48 @@ async fn serve_stdio_smokes_automation_run_artifact_view() {
     )
     .await
     .unwrap();
-    append_run_record(
-        &dashboard_root,
-        &AutomationRunLedgerRecord {
-            schema_version: 2,
-            run_id: run_id.to_string(),
-            trigger: AutomationTrigger::Dashboard,
-            task: tracedecay_automation_runtime::automation::backend::AgentTaskKind::MemoryCurator,
-            task_key: "memory_curator".to_string(),
-            backend: "codex_app_server".to_string(),
-            backend_identity: None,
-            host_mode: Some("standalone".to_string()),
-            prompt_version: Some("memory_curator:v1".to_string()),
-            response_schema: None,
-            strict_json: Some(true),
-            model: Some("test-model".to_string()),
-            status: AutomationRunStatus::Succeeded,
-            evidence_hash: Some("sha256:evidence".to_string()),
-            input_hash: Some("sha256:input".to_string()),
-            output_hash: Some("sha256:output".to_string()),
-            proposed_ops: Some(json!({"ops": []})),
-            applied_ops: None,
-            rejected_ops: None,
-            validation_report: None,
-            reviewed_count: 0,
-            accepted_count: 0,
-            rejected_count: 0,
-            skipped_count: 0,
-            error: None,
-            error_classification: None,
-            error_retryable: None,
-            backend_attempt_count: 0,
-            backend_attempts: Vec::new(),
-            fallback_status: None,
-            session_evidence_budget_stage: None,
-            report_ref: None,
-            artifacts: vec![artifact],
-            started_at: "1782283199".to_string(),
-            completed_at: "1782283200".to_string(),
-            completed_at_micros: Some(1_782_283_200_000_000),
-        },
-    )
+    runs.append_run_record(&AutomationRunLedgerRecord {
+        schema_version: 2,
+        run_id: run_id.to_string(),
+        trigger: AutomationTrigger::Dashboard,
+        task: tracedecay_automation_runtime::automation::backend::AgentTaskKind::MemoryCurator,
+        task_key: "memory_curator".to_string(),
+        backend: "codex_app_server".to_string(),
+        backend_identity: None,
+        host_mode: Some("standalone".to_string()),
+        prompt_version: Some("memory_curator:v1".to_string()),
+        response_schema: None,
+        strict_json: Some(true),
+        model: Some("test-model".to_string()),
+        status: AutomationRunStatus::Succeeded,
+        evidence_hash: Some("sha256:evidence".to_string()),
+        input_hash: Some("sha256:input".to_string()),
+        output_hash: Some("sha256:output".to_string()),
+        proposed_ops: Some(json!({"ops": []})),
+        applied_ops: None,
+        rejected_ops: None,
+        validation_report: None,
+        reviewed_count: 0,
+        accepted_count: 0,
+        rejected_count: 0,
+        skipped_count: 0,
+        error: None,
+        error_classification: None,
+        error_retryable: None,
+        backend_attempt_count: 0,
+        backend_attempts: Vec::new(),
+        fallback_status: None,
+        session_evidence_budget_stage: None,
+        report_ref: None,
+        artifacts: vec![artifact],
+        started_at: "1782283199".to_string(),
+        completed_at: "1782283200".to_string(),
+        completed_at_micros: Some(1_782_283_200_000_000),
+    })
     .await
     .unwrap();
+    drop(runs);
+    graph.close();
     let _daemon = common::spawn_tracedecay_daemon(home.path());
 
     let mut command = serve_command(

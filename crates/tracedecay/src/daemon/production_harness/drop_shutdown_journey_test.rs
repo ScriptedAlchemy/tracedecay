@@ -7,13 +7,14 @@ use std::process::Command;
 use std::sync::{Arc, Mutex, mpsc};
 use std::time::{Duration, Instant};
 
-use serde_json::{Value, json};
+use serde_json::json;
 use tempfile::TempDir;
 use tracing_subscriber::layer::{Context, Layer, SubscriberExt};
 use tracing_subscriber::registry::LookupSpan;
 
 use super::journey_test_support::{initialize_project, tool_payload};
 use crate::daemon::production_harness::ProductionProjectCompositionHarnessV1;
+use tracedecay_automation_runtime::automation::run_ledger::AutomationRunStatus;
 use tracedecay_runtime_core::storage::default_profile_sharded_layout;
 
 /// True while another open file description holds the task lease exclusively.
@@ -55,12 +56,14 @@ where
     }
 }
 
-#[tokio::test]
+// The tracing gate parks the async settlement's worker while this test drives
+// shutdown and releases it. A current-thread executor cannot run that release.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn shutdown_waits_for_accepted_curator_settlement_and_lock_release() {
     const CHILD: &str = "TRACEDECAY_TEST_CURATOR_SHUTDOWN_CHILD";
     if std::env::var_os(CHILD).is_none() {
-        // The subscriber follows the real settlement onto a native blocking
-        // thread. Isolate it from every other test in the parent process.
+        // The subscriber pauses the real settlement on its async worker.
+        // Isolate it from every other test in the parent process.
         let test_name = format!(
             "{}::shutdown_waits_for_accepted_curator_settlement_and_lock_release",
             module_path!().split_once("::").unwrap().1
@@ -159,15 +162,23 @@ async fn shutdown_waits_for_accepted_curator_settlement_and_lock_release() {
         !task_lease_is_held(&task_lock),
         "shutdown must join exact task-lock release"
     );
-    let ledger = std::fs::read_to_string(dashboard_root.join("automation_runs.jsonl"))
-        .expect("settled automation ledger");
-    let record: Value = ledger
-        .lines()
-        .map(|line| serde_json::from_str::<Value>(line).unwrap())
-        .find(|record| record["run_id"] == run_id)
+    let reopened = ProductionProjectCompositionHarnessV1::open(isolation.path(), [project.clone()])
+        .await
+        .expect("reopen production project after shutdown");
+    let record = reopened
+        .server(&project)
+        .unwrap()
+        .cg_snapshot()
+        .await
+        .automation_run_store()
+        .unwrap()
+        .find_run_record(run_id)
+        .await
+        .unwrap()
         .expect("the admitted curator settled before shutdown returned");
-    assert_eq!(record["status"], "skipped");
-    assert_eq!(record["error"], "nothing_to_review");
+    assert_eq!(record.status, AutomationRunStatus::Skipped);
+    assert_eq!(record.error.as_deref(), Some("nothing_to_review"));
+    reopened.shutdown().await;
 }
 
 #[tokio::test]

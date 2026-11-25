@@ -22,10 +22,10 @@ use super::lifecycle::{
     generated_run_id, publish_ledger_record,
 };
 use super::managed_skills::{ManagedSkillState, load_managed_skill};
+use super::registered_run_store::RegisteredAutomationRunStore;
 use super::run_ledger::{
     AutomationRunLedgerRecord, AutomationRunLedgerTaskSummary, AutomationRunStatus,
-    AutomationTrigger, append_or_reuse_scheduler_diagnostic, latest_record_by_canonical_completion,
-    load_run_ledger_task_summary,
+    AutomationTrigger, latest_record_by_canonical_completion,
 };
 use super::scheduler::{
     AutomationSchedule, AutomationTaskLock, cron_is_due, elapsed_secs, resolve_schedule,
@@ -561,27 +561,20 @@ fn latest_terminal_job_record<'a>(
 /// output. Its `user_job:<job_id>` ledger terminal is published by the
 /// caller's application settlement.
 pub async fn run_user_job_with_backend_for_retained_settlement(
-    dashboard_root: &Path,
+    runs: &RegisteredAutomationRunStore,
     config: &AutomationSettingsV1,
     backend: &dyn AgentTaskBackend,
     job: &AdmittedAutomationJob,
     options: UserJobRunOptions,
 ) -> RetainedAutomationRun<UserJobAutomationRun> {
     let settlement_guard = AutomationRunSettlementGuard::new();
-    let result = run_retained_user_job(
-        dashboard_root,
-        config,
-        backend,
-        job,
-        options,
-        &settlement_guard,
-    )
-    .await;
+    let result =
+        run_retained_user_job(runs, config, backend, job, options, &settlement_guard).await;
     RetainedAutomationRun::new(result, settlement_guard)
 }
 
 async fn run_retained_user_job(
-    dashboard_root: &Path,
+    runs: &RegisteredAutomationRunStore,
     config: &AutomationSettingsV1,
     backend: &dyn AgentTaskBackend,
     job: &AdmittedAutomationJob,
@@ -595,11 +588,12 @@ async fn run_retained_user_job(
         project_root,
         occurrence_anchor_run_id,
     } = options;
+    let dashboard_root = runs.dashboard_root();
     let run_id = run_id.unwrap_or_else(|| generated_run_id("user_job"));
     let started_at = current_timestamp().to_string();
     super::run_ledger::current_timestamp_micros()?;
     let ctx = JobRunContext {
-        dashboard_root,
+        runs,
         config,
         executable: backend.executable(),
         job,
@@ -625,7 +619,7 @@ async fn run_retained_user_job(
             // a concurrently committed terminal and bound the anti-duplicate
             // scan below a row that already carries this identity.
             return scheduler_gate::record_scheduler_lock_skip(
-                dashboard_root,
+                runs,
                 config,
                 backend.executable(),
                 job,
@@ -642,12 +636,8 @@ async fn run_retained_user_job(
 
     let scheduler_summary = if trigger == AutomationTrigger::Scheduler {
         Some(
-            load_run_ledger_task_summary(
-                dashboard_root,
-                AgentTaskKind::UserJob,
-                &job_task_key(&job.id),
-            )
-            .await?,
+            runs.load_run_ledger_task_summary(AgentTaskKind::UserJob, &job_task_key(&job.id))
+                .await?,
         )
     } else {
         None
@@ -837,7 +827,7 @@ fn config_skip_reason(config: &AutomationSettingsV1) -> Option<AutomationSkipRea
 }
 
 struct JobRunContext<'a> {
-    dashboard_root: &'a Path,
+    runs: &'a RegisteredAutomationRunStore,
     config: &'a AutomationSettingsV1,
     /// The executable the job's backend spawns (`AgentTaskBackend::executable`).
     executable: Option<&'a Path>,
@@ -946,12 +936,10 @@ impl JobRunContext<'_> {
     ) -> Result<UserJobAutomationRun> {
         let token = reason.as_str();
         let candidate = self.base_record(AutomationRunStatus::Skipped, Some(token.to_owned()))?;
-        let record = append_or_reuse_scheduler_diagnostic(
-            self.dashboard_root,
-            &candidate,
-            effectful_anchor_run_id,
-        )
-        .await?;
+        let record = self
+            .runs
+            .append_or_reuse_scheduler_diagnostic(&candidate, effectful_anchor_run_id)
+            .await?;
         Ok(UserJobAutomationRun {
             run_id: record.run_id.clone(),
             report: json!({
@@ -990,7 +978,7 @@ impl JobRunContext<'_> {
     }
 
     async fn publish_terminal(&self, record: &AutomationRunLedgerRecord) -> Result<()> {
-        publish_ledger_record(self.ledger_publication, self.dashboard_root, record).await
+        publish_ledger_record(self.ledger_publication, self.runs, record).await
     }
 }
 

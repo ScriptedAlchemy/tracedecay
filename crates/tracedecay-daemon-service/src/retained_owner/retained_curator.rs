@@ -97,6 +97,11 @@ pub async fn execute_retained_memory_curator(
                 "the memory curator project runtime is retiring".to_owned(),
             )
         })?;
+    let automation_runs = automation_context.automation_run_store().map_err(|error| {
+        RetainedSurfaceExecutionErrorV1::unavailable(format!(
+            "the automation run store could not be admitted: {error}"
+        ))
+    })?;
     let prepared: Pin<
         Box<
             dyn Future<
@@ -110,7 +115,7 @@ pub async fn execute_retained_memory_curator(
         invocation_service,
         cg,
         automation_context.project_root(),
-        &automation_context.dashboard_root,
+        &automation_runs,
         context.request_context.request_id().clone(),
         context.request_context.deadline().clone(),
         context.cancellation_signal,

@@ -1,7 +1,6 @@
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-use std::path::PathBuf;
 use tracedecay_contracts::retrieval::SessionRetrievalBudgetStageV1;
 use tracedecay_store::ProjectMemoryFactStore;
 
@@ -20,6 +19,7 @@ use crate::automation::lifecycle::{
     AutomationRunSettlementGuard, BackendTaskRun, NonEmptyAutomaticFactReceipts,
     RetainedAutomationRun, SchedulerGate, failed_backend_fallback_report,
 };
+use crate::automation::registered_run_store::RegisteredAutomationRunStore;
 use crate::automation::run_ledger::{AutomationRunLedgerRecord, AutomationTrigger};
 use crate::automation::session_reflector::validate_fact_candidates;
 use crate::ports::project_runtime::AutomationProjectContext;
@@ -628,7 +628,7 @@ pub(super) async fn finalize_session_reflector_success<A: ProjectMemoryFactStore
 #[tracing::instrument(name = "automation.run.session_reflector", level = "trace", skip_all)]
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn run_session_reflector_for_store_with_publication<A: ProjectMemoryFactStore>(
-    dashboard_root: PathBuf,
+    runs: RegisteredAutomationRunStore,
     sessions_db: RegisteredGlobalDbLeaseV1,
     retrieval: &dyn AutomationSessionRetrieval,
     memory: &MemoryApplication<A>,
@@ -642,7 +642,7 @@ pub(super) async fn run_session_reflector_for_store_with_publication<A: ProjectM
     settlement_guard: Option<&AutomationRunSettlementGuard>,
 ) -> AutomationRunResult<SessionReflectorAutomationRun> {
     run_session_reflector_for_store_with_publication_inner(
-        dashboard_root,
+        runs,
         sessions_db,
         retrieval,
         memory,
@@ -662,7 +662,7 @@ pub(super) async fn run_session_reflector_for_store_with_publication<A: ProjectM
 /// definition; see the scheduler's boxing note.
 #[allow(clippy::too_many_arguments)]
 fn run_session_reflector_for_store_with_publication_inner<'a, A: ProjectMemoryFactStore + 'a>(
-    dashboard_root: PathBuf,
+    runs: RegisteredAutomationRunStore,
     sessions_db: RegisteredGlobalDbLeaseV1,
     retrieval: &'a dyn AutomationSessionRetrieval,
     memory: &'a MemoryApplication<A>,
@@ -683,7 +683,7 @@ fn run_session_reflector_for_store_with_publication_inner<'a, A: ProjectMemoryFa
 > {
     Box::pin(async move {
         let mut run = AgentTaskRunContext::new(
-            dashboard_root,
+            runs,
             sessions_db,
             options.run_id.clone(),
             "session_reflector",
@@ -726,7 +726,7 @@ fn run_session_reflector_for_store_with_publication_inner<'a, A: ProjectMemoryFa
             evidence_hash,
         } = evidence_bundle;
         crate::automation::outcomes::refresh_fact_outcomes(
-            &run.dashboard_root,
+            run.runs.dashboard_root(),
             memory,
             current_timestamp(),
             run_control.read_control(),
@@ -975,7 +975,7 @@ async fn run_session_reflector_with_backend_and_retrieval_publication(
         ),
     })?;
     run_session_reflector_for_store_with_publication(
-        cg.dashboard_root.clone(),
+        cg.automation_run_store()?,
         sessions_db,
         retrieval,
         &memory,

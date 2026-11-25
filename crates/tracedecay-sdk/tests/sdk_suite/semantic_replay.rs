@@ -58,7 +58,10 @@ fn public_curator_client_replays_one_durable_effect_and_rejects_foreign_identiti
     let request = tracedecay_contracts::retained_surfaces::FactStoreCurateRequestV1::default();
     let request_id = RequestId::new(VALID_REQUEST_ID).expect("canonical replay identity");
 
-    assert_eq!(application_run_record_count(&profile, VALID_REQUEST_ID), 0);
+    assert_eq!(
+        application_run_record_count(&binary, &home, &profile, &project, VALID_REQUEST_ID),
+        0
+    );
     let accepted = execute_curate(&client, &request, &request_id)
         .unwrap_or_else(|error| panic!("valid public curate request must succeed: {error}"));
     assert_eq!(accepted.request_id, VALID_REQUEST_ID);
@@ -73,11 +76,14 @@ fn public_curator_client_replays_one_durable_effect_and_rejects_foreign_identiti
     );
     // The receipt returns at admission; the run settles on the daemon.
     let settled = Instant::now() + Duration::from_secs(60);
-    while application_run_record_count(&profile, VALID_REQUEST_ID) == 0 {
+    while application_run_record_count(&binary, &home, &profile, &project, VALID_REQUEST_ID) == 0 {
         assert!(Instant::now() < settled, "the admitted run never settled");
         thread::sleep(Duration::from_millis(50));
     }
-    assert_eq!(application_run_record_count(&profile, VALID_REQUEST_ID), 1);
+    assert_eq!(
+        application_run_record_count(&binary, &home, &profile, &project, VALID_REQUEST_ID),
+        1
+    );
 
     let first_daemon_epoch = authority["epoch"].as_u64().expect("daemon authority epoch");
     drop(client);
@@ -102,7 +108,7 @@ fn public_curator_client_replays_one_durable_effect_and_rejects_foreign_identiti
         "durable replay must return the same run receipt"
     );
     assert_eq!(
-        application_run_record_count(&profile, VALID_REQUEST_ID),
+        application_run_record_count(&binary, &home, &profile, &project, VALID_REQUEST_ID),
         1,
         "replay must not execute the curator twice"
     );
@@ -122,7 +128,10 @@ fn public_curator_client_replays_one_durable_effect_and_rejects_foreign_identiti
         problem.envelope["problem"]["committed_receipt"],
         Value::Null
     );
-    assert_eq!(application_run_record_count(&profile, VALID_REQUEST_ID), 1);
+    assert_eq!(
+        application_run_record_count(&binary, &home, &profile, &project, VALID_REQUEST_ID),
+        1
+    );
 
     let raw = reqwest::blocking::Client::new();
     let curate_route = "/retained/fact_store_curate";
@@ -132,7 +141,10 @@ fn public_curator_client_replays_one_durable_effect_and_rejects_foreign_identiti
     let malformed =
         raw_application_request(&raw, &endpoint, &project_id, token, curate_route, malformed);
     assert_zero_effect_rejection(&malformed, &[""]);
-    assert_eq!(application_run_record_count(&profile, VALID_REQUEST_ID), 1);
+    assert_eq!(
+        application_run_record_count(&binary, &home, &profile, &project, VALID_REQUEST_ID),
+        1
+    );
 
     let mut duplicate = HeaderMap::new();
     duplicate.append(
@@ -149,7 +161,10 @@ fn public_curator_client_replays_one_durable_effect_and_rejects_foreign_identiti
         &duplicate,
         &[VALID_REQUEST_ID, "request.sdk.semantic-replay.other"],
     );
-    assert_eq!(application_run_record_count(&profile, VALID_REQUEST_ID), 1);
+    assert_eq!(
+        application_run_record_count(&binary, &home, &profile, &project, VALID_REQUEST_ID),
+        1
+    );
 
     let mut disallowed = HeaderMap::new();
     disallowed.insert(
@@ -166,7 +181,7 @@ fn public_curator_client_replays_one_durable_effect_and_rejects_foreign_identiti
     );
     assert_zero_effect_rejection(&disallowed, &[VALID_REQUEST_ID]);
     assert_eq!(
-        application_run_record_count(&profile, VALID_REQUEST_ID),
+        application_run_record_count(&binary, &home, &profile, &project, VALID_REQUEST_ID),
         1,
         "malformed, duplicate, and disallowed identities must have zero effect"
     );
@@ -174,7 +189,10 @@ fn public_curator_client_replays_one_durable_effect_and_rejects_foreign_identiti
     let final_replay = execute_curate(&client, &request, &request_id)
         .unwrap_or_else(|error| panic!("rejected traffic must not disturb replay: {error}"));
     assert_eq!(final_replay, replay);
-    assert_eq!(application_run_record_count(&profile, VALID_REQUEST_ID), 1);
+    assert_eq!(
+        application_run_record_count(&binary, &home, &profile, &project, VALID_REQUEST_ID),
+        1
+    );
 }
 
 fn spawn_daemon(
@@ -358,28 +376,24 @@ fn project_id(binary: &Path, home: &Path, profile: &Path, project: &Path) -> Str
         .to_owned()
 }
 
-fn application_run_record_count(profile: &Path, run_id: &str) -> usize {
-    let projects = profile.join("projects");
-    let Ok(entries) = fs::read_dir(projects) else {
-        return 0;
-    };
-    entries
-        .map(|entry| {
-            entry
-                .expect("project store directory")
-                .path()
-                .join("dashboard/automation_runs.jsonl")
-        })
-        .filter_map(|path| fs::read_to_string(path).ok())
-        .flat_map(|contents| {
-            contents
-                .lines()
-                .filter(|line| !line.trim().is_empty())
-                .map(|line| {
-                    serde_json::from_str::<Value>(line).expect("complete automation ledger record")
-                })
-                .collect::<Vec<_>>()
-        })
+fn application_run_record_count(
+    binary: &Path,
+    home: &Path,
+    profile: &Path,
+    project: &Path,
+    run_id: &str,
+) -> usize {
+    let mut list = Command::new(binary);
+    list.args(["automation", "runs", "list", "--limit", "200", "--json"])
+        .current_dir(project);
+    isolated(&mut list, home, profile);
+    let payload: Value =
+        serde_json::from_slice(&run(&mut list)).expect("registered automation run list JSON");
+    assert_eq!(payload["has_more"], false, "all fixture runs must fit");
+    payload["records"]
+        .as_array()
+        .expect("run list")
+        .iter()
         .filter(|record| {
             record["run_id"] == run_id
                 && record["trigger"] == "application"

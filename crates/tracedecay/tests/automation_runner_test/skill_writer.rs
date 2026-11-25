@@ -31,7 +31,8 @@ async fn retained_skill_writer_preserves_retrieval_and_defers_ledger_publication
 
     assert_eq!(run.run_id, "retained-skill-writer");
     assert!(
-        load_run_records(&cg.store_layout().dashboard_root, 10)
+        run_store(&cg)
+            .load_run_records(10)
             .await
             .unwrap()
             .is_empty(),
@@ -459,9 +460,7 @@ async fn skill_writer_runner_repairs_then_activates_validated_create() {
             .is_file()
     );
 
-    let records = load_run_records(&cg.store_layout().dashboard_root, 10)
-        .await
-        .unwrap();
+    let records = run_store(&cg).load_run_records(10).await.unwrap();
     assert_eq!(records.len(), 1);
     assert_eq!(records[0].run_id, run.run_id);
     assert_eq!(records[0].accepted_count, 1);
@@ -501,9 +500,7 @@ async fn skill_writer_quarantines_output_after_bounded_repair_exhaustion() {
         !profile_root.join("agent_managed/skills/bad/skill").exists(),
         "quarantined validation failures must not materialize"
     );
-    let records = load_run_records(&cg.store_layout().dashboard_root, 10)
-        .await
-        .unwrap();
+    let records = run_store(&cg).load_run_records(10).await.unwrap();
     assert_eq!(records.len(), 1);
     assert_eq!(records[0].status, AutomationRunStatus::Failed);
     assert!(
@@ -1337,9 +1334,7 @@ async fn skill_writer_runner_updates_existing_skills_with_checksum_precondition(
     assert_eq!(user_owned.metadata.state, ManagedSkillState::Active);
     assert_eq!(user_owned.metadata.summary, "User-authored workflow.");
 
-    let records = load_run_records(&cg.store_layout().dashboard_root, 10)
-        .await
-        .unwrap();
+    let records = run_store(&cg).load_run_records(10).await.unwrap();
     assert_eq!(records.len(), 1);
     assert_eq!(records[0].accepted_count, 1);
     assert_eq!(records[0].rejected_count, 0);
@@ -1376,9 +1371,7 @@ async fn skill_writer_runner_ledgers_malformed_backend_output() {
         err.to_string().contains("expected ident") || err.to_string().contains("expected value"),
         "unexpected error: {err}"
     );
-    let records = load_run_records(&cg.store_layout().dashboard_root, 10)
-        .await
-        .unwrap();
+    let records = run_store(&cg).load_run_records(10).await.unwrap();
     assert_eq!(records.len(), 1);
     assert_eq!(records[0].schema_version, 2);
     assert_eq!(records[0].task, AgentTaskKind::SkillWriter);
@@ -1427,9 +1420,7 @@ async fn skill_writer_runner_ledgers_missing_skills_array() {
         err.to_string()
             .contains("skill writer output must include a skills array")
     );
-    let records = load_run_records(&cg.store_layout().dashboard_root, 10)
-        .await
-        .unwrap();
+    let records = run_store(&cg).load_run_records(10).await.unwrap();
     assert_eq!(records.len(), 1);
     assert_eq!(records[0].schema_version, 2);
     assert_eq!(records[0].task, AgentTaskKind::SkillWriter);
@@ -1490,9 +1481,7 @@ async fn skill_writer_runner_records_noop_fallback_when_backend_run_task_fails()
             .as_deref()
             .is_some_and(|error| error.contains("executable"))
     );
-    let records = load_run_records(&cg.store_layout().dashboard_root, 10)
-        .await
-        .unwrap();
+    let records = run_store(&cg).load_run_records(10).await.unwrap();
     assert_eq!(records.len(), 1);
     assert_noop_fallback_record(
         &records[0],
@@ -1541,9 +1530,7 @@ async fn skill_writer_runner_retains_no_skill_needed_without_deployment() {
     assert!(run.report["deployment"].is_null());
     assert!(!profile_root.join("agent_managed/skills").exists());
 
-    let records = load_run_records(&cg.store_layout().dashboard_root, 10)
-        .await
-        .unwrap();
+    let records = run_store(&cg).load_run_records(10).await.unwrap();
     assert_eq!(records.len(), 1);
     assert_eq!(records[0].status, AutomationRunStatus::Succeeded);
     assert_eq!(records[0].accepted_count, 0);

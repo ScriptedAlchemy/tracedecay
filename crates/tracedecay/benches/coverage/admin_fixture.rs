@@ -4,9 +4,6 @@ use std::path::{Path, PathBuf};
 
 use serde_json::{Value, json};
 use tracedecay_automation_runtime::automation::managed_skills::managed_skill_dir;
-use tracedecay_automation_runtime::automation::run_ledger::{
-    AutomationRunLedgerRecord, run_ledger_path,
-};
 
 use crate::queries::QueryContext;
 
@@ -317,19 +314,12 @@ pub(crate) fn verify_admin_fixture(
                     .automation_run_id
                     .as_deref()
                     .ok_or("automation ledger fixture is absent")?;
-                let ledger = std::fs::read_to_string(run_ledger_path(&store.join("dashboard")))
-                    .map_err(|error| error.to_string())?;
-                let records = ledger
-                    .lines()
-                    .filter(|line| !line.trim().is_empty())
-                    .map(serde_json::from_str::<AutomationRunLedgerRecord>)
-                    .collect::<Result<Vec<_>, _>>()
-                    .map_err(|error| error.to_string())?;
-                let record = records
-                    .iter()
-                    .rev()
-                    .find(|record| record.run_id == id)
-                    .ok_or("durable automation fixture record is absent")?;
+                let record = ctx
+                    .seeds
+                    .automation_run_record
+                    .as_ref()
+                    .filter(|record| record.run_id == id)
+                    .ok_or("automation seed record is absent")?;
                 let expected = serde_json::to_value(record).map_err(|error| error.to_string())?;
                 let actual = payload["runs"]
                     .as_array()

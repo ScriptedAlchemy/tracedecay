@@ -144,9 +144,15 @@ fn persisted_invalid_schedule_remains_readable_and_repairable_over_http() {
         assert_eq!(problem.get("committed_receipt"), Some(&serde_json::Value::Null), "{curator_refused}");
         assert!(curator_refused.to_string().contains("memory_curator schedule is invalid"), "{curator_refused}");
         assert!(!effects_root.exists(), "refused curator must not reserve a durable effect");
-        assert!(tracedecay_automation_runtime::automation::run_ledger::load_run_records(
-            &reopened.store_layout().dashboard_root, 10,
-        ).await.unwrap().is_empty());
+        assert_eq!(
+            reopened
+                .automation_run_store()
+                .unwrap()
+                .load_run_records(10)
+                .await
+                .unwrap(),
+            Vec::new()
+        );
         let (status, rejected) = patch_json_body(
             &agent, &config_url,
             &serde_json::json!({

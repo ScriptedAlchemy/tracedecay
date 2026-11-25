@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 use std::future::Future;
-use std::path::Path;
+
 use std::pin::Pin;
 
 use serde_json::{Value, json};
@@ -15,7 +15,9 @@ use tracedecay_store::{
 use tracedecay_domain::errors::Result;
 
 use super::super::lifecycle::AutomationRunControl;
-use super::super::run_ledger::load_latest_task_validation_pointer;
+use super::super::registered_run_store::{
+    AutomationValidationCursorV1, RegisteredAutomationRunStore,
+};
 use super::{memory_application_error, memory_contract_error};
 use tracedecay_domain::errors::TraceDecayError;
 
@@ -27,13 +29,15 @@ pub(super) struct MemoryCuratorReviewPage {
     pub resume_after_fact_id: Option<FactId>,
 }
 
-pub(super) async fn memory_curator_resume_cursor(root: &Path) -> Result<Option<FactId>> {
-    match load_latest_task_validation_pointer(
-        root,
-        "memory_curator",
-        "/pagination/resume_after_fact_id",
-    )
-    .await?
+pub(super) async fn memory_curator_resume_cursor(
+    runs: &RegisteredAutomationRunStore,
+) -> Result<Option<FactId>> {
+    match runs
+        .load_latest_task_validation_cursor(
+            "memory_curator",
+            AutomationValidationCursorV1::ResumeAfterFactId,
+        )
+        .await?
     {
         None | Some(Value::Null) => Ok(None),
         Some(Value::String(value)) => {

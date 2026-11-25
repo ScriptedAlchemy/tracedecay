@@ -13,7 +13,7 @@ use tracedecay_automation_runtime::automation::config::{
     AdmittedAutomationConfig, AutomationSettingsV1,
 };
 use tracedecay_automation_runtime::automation::run_ledger::{
-    AutomationRunLedgerRecord, AutomationRunLedgerTaskSummary, load_run_ledger_task_summary,
+    AutomationRunLedgerRecord, AutomationRunLedgerTaskSummary,
 };
 use tracedecay_automation_runtime::automation::scheduler::{
     AutomationSchedulerControl, SessionActivity, backend_executable_unconfigured,
@@ -114,9 +114,11 @@ async fn scheduler_status_payload(state: &DashboardState) -> ApiResult {
         .as_ref()
         .map(|read| read())
         .unwrap_or_default();
+    let runs = state
+        .automation_run_store()
+        .map_err(|err| internal_error(&err))?;
     let memory_summary = scheduler_summary_or_refusal(
-        load_run_ledger_task_summary(
-            &state.dashboard_root,
+        runs.load_run_ledger_task_summary(
             AgentTaskKind::MemoryCurator,
             task_key(AgentTaskKind::MemoryCurator),
         )
@@ -124,8 +126,7 @@ async fn scheduler_status_payload(state: &DashboardState) -> ApiResult {
         &mut reset_required_stores,
     )?;
     let session_summary = scheduler_summary_or_refusal(
-        load_run_ledger_task_summary(
-            &state.dashboard_root,
+        runs.load_run_ledger_task_summary(
             AgentTaskKind::SessionReflector,
             task_key(AgentTaskKind::SessionReflector),
         )
@@ -133,8 +134,7 @@ async fn scheduler_status_payload(state: &DashboardState) -> ApiResult {
         &mut reset_required_stores,
     )?;
     let skill_summary = scheduler_summary_or_refusal(
-        load_run_ledger_task_summary(
-            &state.dashboard_root,
+        runs.load_run_ledger_task_summary(
             AgentTaskKind::SkillWriter,
             task_key(AgentTaskKind::SkillWriter),
         )
@@ -282,65 +282,11 @@ mod tests {
     use tracedecay_automation_runtime::automation::config::{
         AutomationBackendV1, AutomationTaskSettingsV1,
     };
+    use tracedecay_automation_runtime::automation::registered_run_store::RegisteredAutomationRunStore;
     use tracedecay_automation_runtime::automation::run_ledger::{
-        AutomationRunLedgerRecord, AutomationRunStatus, AutomationTrigger, run_ledger_path,
+        AutomationRunLedgerRecord, AutomationRunStatus, AutomationTrigger,
     };
-
-    #[tokio::test]
-    async fn refused_ledger_status_keeps_the_reset_census_and_recovers_without_fake_history() {
-        let temp = tempfile::TempDir::new().unwrap();
-        // A complete retired row: the ledger refuses it as a reset, which is a
-        // different state from a malformed row (a config error).
-        std::fs::write(
-            run_ledger_path(temp.path()),
-            "{\"schema_version\":1,\"run_id\":\"retired\",\"trigger\":\"scheduler\",\
-             \"task\":\"memory_curator\",\"task_key\":\"memory_curator\",\
-             \"backend\":\"codex_app_server\",\"status\":\"succeeded\",\
-             \"accepted_count\":0,\"rejected_count\":0,\"started_at\":\"1970-01-01T00:00:01Z\",\
-             \"completed_at\":\"1970-01-01T00:00:02Z\"}\n",
-        )
-        .unwrap();
-        let mut census = Vec::new();
-        for task in [
-            AgentTaskKind::MemoryCurator,
-            AgentTaskKind::SessionReflector,
-        ] {
-            scheduler_summary_or_refusal(
-                load_run_ledger_task_summary(temp.path(), task, task_key(task)).await,
-                &mut census,
-            )
-            .unwrap();
-        }
-        assert_eq!(census.len(), 1);
-        assert!(!census[0].reason.is_empty());
-        assert_eq!(census[0].store, "automation");
-        std::fs::remove_file(run_ledger_path(temp.path())).unwrap();
-        let mut recovered_census = Vec::new();
-        let summary = scheduler_summary_or_refusal(
-            load_run_ledger_task_summary(
-                temp.path(),
-                AgentTaskKind::MemoryCurator,
-                "memory_curator",
-            )
-            .await,
-            &mut recovered_census,
-        )
-        .unwrap();
-        assert!(recovered_census.is_empty());
-        assert!(summary.unwrap().records().is_empty());
-        let isolated = tempfile::TempDir::new().unwrap();
-        assert!(
-            load_run_ledger_task_summary(
-                isolated.path(),
-                AgentTaskKind::MemoryCurator,
-                "memory_curator"
-            )
-            .await
-            .unwrap()
-            .records()
-            .is_empty()
-        );
-    }
+    use tracedecay_global_db::tests::harness::RegisteredGlobalDbTestRuntime;
 
     fn record(
         run_id: &str,
@@ -422,6 +368,18 @@ mod tests {
     #[tokio::test]
     async fn status_uses_full_canonical_summary_for_decision_and_last_scheduler_run() {
         let temp = tempfile::TempDir::new().unwrap();
+        let runtime = RegisteredGlobalDbTestRuntime::project(
+            temp.path().join("profile"),
+            temp.path().join("project"),
+            tracedecay_domain::ProjectId::new("project.dashboard-scheduler-status").unwrap(),
+        )
+        .await
+        .unwrap();
+        let runs = RegisteredAutomationRunStore::admit(
+            runtime.project_database_arc().unwrap(),
+            temp.path().join("dashboard"),
+        )
+        .unwrap();
         let mut older_success = record(
             "a-success",
             AgentTaskKind::MemoryCurator,
@@ -450,22 +408,17 @@ mod tests {
                 (101 + index) * 1_000_000,
             )
         }));
-        let body = rows
-            .iter()
-            .map(serde_json::to_string)
-            .collect::<Result<Vec<_>, _>>()
-            .unwrap()
-            .join("\n")
-            + "\n";
-        std::fs::write(run_ledger_path(temp.path()), body).unwrap();
+        for row in &rows {
+            runs.append_run_record(row).await.unwrap();
+        }
 
-        let summary = load_run_ledger_task_summary(
-            temp.path(),
-            AgentTaskKind::MemoryCurator,
-            task_key(AgentTaskKind::MemoryCurator),
-        )
-        .await
-        .unwrap();
+        let summary = runs
+            .load_run_ledger_task_summary(
+                AgentTaskKind::MemoryCurator,
+                task_key(AgentTaskKind::MemoryCurator),
+            )
+            .await
+            .unwrap();
         let mut config = AutomationSettingsV1 {
             enabled: true,
             backend: AutomationBackendV1::CodexAppServer,

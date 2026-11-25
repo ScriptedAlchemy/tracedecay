@@ -24,6 +24,19 @@ pub struct AutomationProjectContext {
 }
 
 impl AutomationProjectContext {
+    /// Admits this project's registered sessions store as its automation
+    /// run-state authority, with artifacts under its dashboard root.
+    pub fn automation_run_store(
+        &self,
+    ) -> tracedecay_domain::errors::Result<
+        crate::automation::registered_run_store::RegisteredAutomationRunStore,
+    > {
+        crate::automation::registered_run_store::RegisteredAutomationRunStore::admit(
+            self.project_sessions.clone(),
+            self.dashboard_root.clone(),
+        )
+    }
+
     #[must_use]
     pub fn project_id(&self) -> &ProjectId {
         &self.project_id

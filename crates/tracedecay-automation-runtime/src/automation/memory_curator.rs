@@ -19,6 +19,7 @@ use super::lifecycle::{
     AutomationRunSettlementGuard, RetainedAutomationRun, SchedulerGate,
     failed_backend_fallback_report,
 };
+use super::registered_run_store::RegisteredAutomationRunStore;
 use super::run_ledger::{AutomationRunLedgerRecord, AutomationTrigger};
 use crate::ports::project_runtime::AutomationProjectContext;
 use tracedecay_domain::errors::{Result, TraceDecayError};
@@ -111,8 +112,8 @@ struct MemoryCuratorStore<'a> {
 }
 
 impl MemoryCuratorStore<'_> {
-    fn dashboard_root(&self) -> std::path::PathBuf {
-        self.cg.dashboard_root.clone()
+    fn automation_run_store(&self) -> Result<RegisteredAutomationRunStore> {
+        self.cg.automation_run_store()
     }
 
     fn sessions_db(&self) -> RegisteredGlobalDbLeaseV1 {
@@ -162,7 +163,7 @@ async fn run_memory_curator_for_store_with_publication(
     let curation_authority = store.curation_authority(configuration_revision_id)?;
     let sessions_db = store.sessions_db();
     let mut run = AgentTaskRunContext::new(
-        store.dashboard_root(),
+        store.automation_run_store()?,
         sessions_db,
         options.run_id.clone(),
         "memory_curator",
@@ -189,7 +190,7 @@ async fn run_memory_curator_for_store_with_publication(
                 .map_err(Into::into);
         }
     };
-    let after_fact_id = memory_curator_resume_cursor(&run.dashboard_root).await?;
+    let after_fact_id = memory_curator_resume_cursor(&run.runs).await?;
     if run_control.read_control().interrupted() {
         return Err(TraceDecayError::Database {
             operation: "run memory curator".to_owned(),

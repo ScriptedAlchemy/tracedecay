@@ -20,6 +20,7 @@ use super::lifecycle::{
     failed_backend_fallback_report, generated_run_id, task_run_gate,
     task_run_gate_for_retained_settlement,
 };
+use super::registered_run_store::RegisteredAutomationRunStore;
 use super::run_ledger::{
     AutomationRunLedgerRecord, AutomationRunLedgerTaskSummary, AutomationTrigger,
 };
@@ -322,7 +323,7 @@ pub async fn run_combined_review_with_backend_and_retrieval_for_retained_settlem
 async fn acquire_combined_task_lock(
     config: &AutomationSettingsV1,
     executable: Option<&Path>,
-    dashboard_root: &Path,
+    runs: &RegisteredAutomationRunStore,
     sessions_db: &RegisteredGlobalDb,
     task: AgentTaskKind,
     trigger: AutomationTrigger,
@@ -342,7 +343,7 @@ async fn acquire_combined_task_lock(
             task_run_gate_for_retained_settlement(
                 config,
                 executable,
-                dashboard_root,
+                runs,
                 sessions_db,
                 task,
                 trigger,
@@ -350,17 +351,7 @@ async fn acquire_combined_task_lock(
             )
             .await?
         }
-        None => {
-            task_run_gate(
-                config,
-                executable,
-                dashboard_root,
-                sessions_db,
-                task,
-                trigger,
-            )
-            .await?
-        }
+        None => task_run_gate(config, executable, runs, sessions_db, task, trigger).await?,
     };
     Ok(match gate {
         SchedulerGate::Proceed(lock) => Ok((lock, summary)),
@@ -451,12 +442,13 @@ fn run_combined_review_for_retrieval_inner<'a>(
                 reason: "combined_mode_disabled",
             });
         }
-        let dashboard_root = cg.dashboard_root.clone();
+        let runs = cg.automation_run_store()?;
+        let dashboard_root = runs.dashboard_root();
         let sessions_db = project_automation_sessions(cg);
         let _reflector_lock = match acquire_combined_task_lock(
             config,
             backend.executable(),
-            &dashboard_root,
+            &runs,
             sessions_db.as_ref(),
             AgentTaskKind::SessionReflector,
             options.trigger,
@@ -471,7 +463,7 @@ fn run_combined_review_for_retrieval_inner<'a>(
         let _skill_lock = match acquire_combined_task_lock(
             config,
             backend.executable(),
-            &dashboard_root,
+            &runs,
             sessions_db.as_ref(),
             AgentTaskKind::SkillWriter,
             options.trigger,
@@ -528,7 +520,7 @@ fn run_combined_review_for_retrieval_inner<'a>(
             skill: &skill_bundle,
         };
         if let Err(err) = super::outcomes::refresh_fact_outcomes(
-            &dashboard_root,
+            dashboard_root,
             &memory,
             current_timestamp(),
             run_control.read_control(),
@@ -542,7 +534,7 @@ fn run_combined_review_for_retrieval_inner<'a>(
         }
         if let Err(err) = super::outcomes::refresh_skill_outcomes(
             &skill_bundle.profile_root,
-            &dashboard_root,
+            dashboard_root,
             current_timestamp(),
         )
         .await
@@ -577,7 +569,7 @@ fn run_combined_review_for_retrieval_inner<'a>(
         );
         let input_hash = Some(request.input_hash.clone());
         let reflector_finalizer = AgentRunFinalizer::new(
-            &dashboard_root,
+            &runs,
             &reflector_run_id,
             options.trigger,
             config,
@@ -589,7 +581,7 @@ fn run_combined_review_for_retrieval_inner<'a>(
         .with_ledger_publication(ledger_publication)
         .for_combined_run(run_id.clone());
         let skill_finalizer = AgentRunFinalizer::new(
-            &dashboard_root,
+            &runs,
             &skill_run_id,
             options.trigger,
             config,

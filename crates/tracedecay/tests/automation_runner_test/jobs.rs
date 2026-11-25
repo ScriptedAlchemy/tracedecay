@@ -36,7 +36,7 @@ fn job_schedule_decision(
 }
 
 async fn evaluate_and_record_scheduler_skip(
-    dashboard_root: &Path,
+    runs: &RegisteredAutomationRunStore,
     config: &AutomationSettingsV1,
     executable: Option<&Path>,
     job: &AutomationJob,
@@ -46,7 +46,7 @@ async fn evaluate_and_record_scheduler_skip(
     Option<tracedecay_automation_runtime::automation::jobs::UserJobAutomationRun>,
 > {
     tracedecay_automation_runtime::automation::jobs::evaluate_and_record_scheduler_skip(
-        dashboard_root,
+        runs,
         config,
         executable,
         &tracedecay_automation_runtime::automation::jobs::admit_job(job)?,
@@ -437,7 +437,9 @@ fn job_schedule_decision_enforces_interval_cron_and_enabled() {
 #[tokio::test]
 async fn user_job_delivers_output_to_file_and_records_ledger() {
     let temp = tempdir().unwrap();
-    let dashboard_root = temp.path().join("dashboard");
+    let fixture = RunStoreFixture::open(temp.path()).await;
+    let store = &fixture.runs;
+    let dashboard_root = fixture.dashboard_root().to_path_buf();
     let profile_root = temp.path().join("profile");
     fs::create_dir_all(&profile_root).unwrap();
 
@@ -445,7 +447,7 @@ async fn user_job_delivers_output_to_file_and_records_ledger() {
     let config = enabled_job_config();
     let backend = ContentBackend::new("# Digest\n\nNothing changed today.");
     let run = settle_user_job(
-        &dashboard_root,
+        store,
         &config,
         &backend,
         &job,
@@ -507,7 +509,7 @@ async fn user_job_delivers_output_to_file_and_records_ledger() {
         ]
     );
 
-    let records = load_run_records(&dashboard_root, 10).await.unwrap();
+    let records = store.load_run_records(10).await.unwrap();
     assert_eq!(records.len(), 1);
     assert_eq!(records[0].run_id, "user-job-run-1");
     assert_eq!(records[0].task_key, "user_job:daily-digest");
@@ -516,7 +518,8 @@ async fn user_job_delivers_output_to_file_and_records_ledger() {
 #[tokio::test]
 async fn user_job_pre_run_command_is_refused_unless_allowed() {
     let temp = tempdir().unwrap();
-    let dashboard_root = temp.path().join("dashboard");
+    let fixture = RunStoreFixture::open(temp.path()).await;
+    let store = &fixture.runs;
     let profile_root = temp.path().join("profile");
     fs::create_dir_all(&profile_root).unwrap();
 
@@ -528,7 +531,7 @@ async fn user_job_pre_run_command_is_refused_unless_allowed() {
     assert!(!config.allow_job_commands);
     let backend = ContentBackend::new("unused");
     let run = settle_user_job(
-        &dashboard_root,
+        store,
         &config,
         &backend,
         &job,
@@ -582,7 +585,7 @@ async fn user_job_pre_run_command_is_refused_unless_allowed() {
         ..enabled_job_config()
     };
     let run = settle_user_job(
-        &dashboard_root,
+        store,
         &config,
         &AssertCommandOutputBackend,
         &job,
@@ -602,7 +605,8 @@ async fn user_job_pre_run_command_is_refused_unless_allowed() {
 #[tokio::test]
 async fn user_job_pre_run_command_runs_from_project_root() {
     let temp = tempdir().unwrap();
-    let dashboard_root = temp.path().join("dashboard");
+    let fixture = RunStoreFixture::open(temp.path()).await;
+    let store = &fixture.runs;
     let profile_root = temp.path().join("profile");
     let project_root = temp.path().join("project");
     fs::create_dir_all(&profile_root).unwrap();
@@ -650,7 +654,7 @@ async fn user_job_pre_run_command_runs_from_project_root() {
         ..enabled_job_config()
     };
     let run = settle_user_job(
-        &dashboard_root,
+        store,
         &config,
         &AssertProjectCommandOutputBackend,
         &job,
@@ -673,7 +677,8 @@ async fn run_scheduled_pre_run_failure(
     project_root: std::path::PathBuf,
 ) -> (AutomationJob, AutomationRunLedgerRecord) {
     let temp = tempdir().unwrap();
-    let dashboard_root = temp.path().join("dashboard");
+    let fixture = RunStoreFixture::open(temp.path()).await;
+    let store = &fixture.runs;
     let profile_root = temp.path().join("profile");
     fs::create_dir_all(&profile_root).unwrap();
 
@@ -685,7 +690,7 @@ async fn run_scheduled_pre_run_failure(
     };
     let backend = ContentBackend::new("unused");
     let run = settle_user_job(
-        &dashboard_root,
+        store,
         &config,
         &backend,
         &job,
@@ -780,7 +785,8 @@ async fn scheduled_pre_run_nonzero_exit_is_not_retried() {
 #[tokio::test]
 async fn scheduler_user_job_uses_explicit_profile_root_for_attached_skills() {
     let temp = tempdir().unwrap();
-    let dashboard_root = temp.path().join("dashboard");
+    let fixture = RunStoreFixture::open(temp.path()).await;
+    let store = &fixture.runs;
     let profile_root = temp.path().join("profile");
     let project_root = temp.path().join("project");
     fs::create_dir_all(&profile_root).unwrap();
@@ -838,7 +844,7 @@ async fn scheduler_user_job_uses_explicit_profile_root_for_attached_skills() {
     }
 
     let run = settle_user_job(
-        &dashboard_root,
+        store,
         &enabled_job_config(),
         &AssertAttachedSkillBackend,
         &job,
@@ -858,7 +864,8 @@ async fn scheduler_user_job_uses_explicit_profile_root_for_attached_skills() {
 #[tokio::test]
 async fn user_job_does_not_attach_archived_managed_skills() {
     let temp = tempdir().unwrap();
-    let dashboard_root = temp.path().join("dashboard");
+    let fixture = RunStoreFixture::open(temp.path()).await;
+    let store = &fixture.runs;
     let profile_root = temp.path().join("profile");
     let project_root = temp.path().join("project");
     fs::create_dir_all(&profile_root).unwrap();
@@ -925,7 +932,7 @@ async fn user_job_does_not_attach_archived_managed_skills() {
     }
 
     let run = settle_user_job(
-        &dashboard_root,
+        store,
         &enabled_job_config(),
         &AssertArchivedSkillExcludedBackend,
         &job,
@@ -945,7 +952,8 @@ async fn user_job_does_not_attach_archived_managed_skills() {
 #[tokio::test]
 async fn user_job_backend_failure_records_failed_ledger_entry() {
     let temp = tempdir().unwrap();
-    let dashboard_root = temp.path().join("dashboard");
+    let fixture = RunStoreFixture::open(temp.path()).await;
+    let store = &fixture.runs;
     let profile_root = temp.path().join("profile");
     fs::create_dir_all(&profile_root).unwrap();
 
@@ -956,7 +964,7 @@ async fn user_job_backend_failure_records_failed_ledger_entry() {
     };
     let backend = FailingBackend::new(AgentTaskKind::UserJob);
     let run = settle_user_job(
-        &dashboard_root,
+        store,
         &config,
         &backend,
         &job,
@@ -982,7 +990,7 @@ async fn user_job_backend_failure_records_failed_ledger_entry() {
         run.ledger_record.error_classification,
         Some(AgentTaskFailureClass::Unavailable)
     );
-    let records = load_run_records(&dashboard_root, 10).await.unwrap();
+    let records = store.load_run_records(10).await.unwrap();
     assert_eq!(records.len(), 1);
     assert_eq!(records[0].status, AutomationRunStatus::Failed);
 }
@@ -990,7 +998,8 @@ async fn user_job_backend_failure_records_failed_ledger_entry() {
 #[tokio::test]
 async fn scheduler_trigger_skips_repeat_and_respects_lock_discipline() {
     let temp = tempdir().unwrap();
-    let dashboard_root = temp.path().join("dashboard");
+    let fixture = RunStoreFixture::open(temp.path()).await;
+    let store = &fixture.runs;
 
     let mut job = sample_job("sched-job");
     job.schedule = Some("manual".to_string());
@@ -1005,7 +1014,7 @@ async fn scheduler_trigger_skips_repeat_and_respects_lock_discipline() {
     let mut first = None;
     for _ in 0..2 {
         let run = evaluate_and_record_scheduler_skip(
-            &dashboard_root,
+            store,
             &config,
             backend.executable(),
             &job,
@@ -1019,7 +1028,7 @@ async fn scheduler_trigger_skips_repeat_and_respects_lock_discipline() {
         first.get_or_insert(run);
     }
     let first = first.unwrap();
-    let records = load_run_records(&dashboard_root, 10).await.unwrap();
+    let records = store.load_run_records(10).await.unwrap();
     assert_eq!(
         records.len(),
         1,
@@ -1028,7 +1037,7 @@ async fn scheduler_trigger_skips_repeat_and_respects_lock_discipline() {
     assert_eq!(records[0].run_id, first.run_id);
 
     let repeated = evaluate_and_record_scheduler_skip(
-        &dashboard_root,
+        store,
         &config,
         backend.executable(),
         &job,
@@ -1048,14 +1057,15 @@ async fn scheduler_trigger_skips_repeat_and_respects_lock_discipline() {
 #[tokio::test]
 async fn scheduler_prefilter_rejects_unconfigured_backend_and_recovers_without_effect() {
     let temp = tempdir().unwrap();
-    let dashboard_root = temp.path().join("dashboard");
+    let fixture = RunStoreFixture::open(temp.path()).await;
+    let store = &fixture.runs;
     let job = sample_job("backend-recovery");
     let config = enabled_job_config();
     let occurrence = "backend-recovery-occurrence";
     let backend = ContentBackend::new("unused");
 
     let first = evaluate_and_record_scheduler_skip(
-        &dashboard_root,
+        store,
         &config,
         backend.executable(),
         &job,
@@ -1069,7 +1079,7 @@ async fn scheduler_prefilter_rejects_unconfigured_backend_and_recovers_without_e
     assert_eq!(first.ledger_record.status, AutomationRunStatus::Skipped);
     assert_ne!(first.run_id, occurrence);
     let repeated = evaluate_and_record_scheduler_skip(
-        &dashboard_root,
+        store,
         &config,
         backend.executable(),
         &job,
@@ -1085,7 +1095,7 @@ async fn scheduler_prefilter_rejects_unconfigured_backend_and_recovers_without_e
     let backend = backend.with_executable(executable.path());
     assert!(
         evaluate_and_record_scheduler_skip(
-            &dashboard_root,
+            store,
             &config,
             backend.executable(),
             &job,
@@ -1099,25 +1109,19 @@ async fn scheduler_prefilter_rejects_unconfigured_backend_and_recovers_without_e
     );
     assert_eq!(backend.calls(), 0);
     assert_eq!(
-        load_run_records(&dashboard_root, 10).await.unwrap(),
+        store.load_run_records(10).await.unwrap(),
         vec![first.ledger_record],
         "advisory admission must not append an effectful terminal"
     );
-    assert!(
-        tracedecay_automation_runtime::automation::run_ledger::find_run_record_exact_bounded(
-            &dashboard_root,
-            occurrence,
-        )
-        .await
-        .unwrap()
-        .is_none()
-    );
+    assert!(store.find_run_record(occurrence).await.unwrap().is_none());
 }
 
 #[tokio::test]
 async fn manual_job_trigger_respects_existing_per_job_lock() {
     let temp = tempdir().unwrap();
-    let dashboard_root = temp.path().join("dashboard");
+    let fixture = RunStoreFixture::open(temp.path()).await;
+    let store = &fixture.runs;
+    let dashboard_root = fixture.dashboard_root().to_path_buf();
     let profile_root = temp.path().join("profile");
     fs::create_dir_all(&profile_root).unwrap();
     let _held = AutomationTaskLock::try_acquire_keyed(&dashboard_root, "user_job_locked-job")
@@ -1129,7 +1133,7 @@ async fn manual_job_trigger_respects_existing_per_job_lock() {
     let config = enabled_job_config();
     let backend = ContentBackend::new("unused");
     let run = settle_user_job(
-        &dashboard_root,
+        store,
         &config,
         &backend,
         &job,
@@ -1153,7 +1157,9 @@ async fn manual_job_trigger_respects_existing_per_job_lock() {
 #[tokio::test]
 async fn disabled_automation_skip_precedes_existing_per_job_lock() {
     let temp = tempdir().unwrap();
-    let dashboard_root = temp.path().join("dashboard");
+    let fixture = RunStoreFixture::open(temp.path()).await;
+    let store = &fixture.runs;
+    let dashboard_root = fixture.dashboard_root().to_path_buf();
     let profile_root = temp.path().join("profile");
     fs::create_dir_all(&profile_root).unwrap();
     let _held = AutomationTaskLock::try_acquire_keyed(&dashboard_root, "user_job_disabled-job")
@@ -1166,7 +1172,7 @@ async fn disabled_automation_skip_precedes_existing_per_job_lock() {
     config.enabled = false;
     let backend = ContentBackend::new("unused");
     let run = settle_user_job(
-        &dashboard_root,
+        store,
         &config,
         &backend,
         &job,
@@ -1189,7 +1195,9 @@ async fn disabled_automation_skip_precedes_existing_per_job_lock() {
 #[tokio::test]
 async fn scheduler_prefilter_config_skip_precedes_live_lock_and_is_exact() {
     let temp = tempdir().unwrap();
-    let dashboard_root = temp.path().join("dashboard");
+    let fixture = RunStoreFixture::open(temp.path()).await;
+    let store = &fixture.runs;
+    let dashboard_root = fixture.dashboard_root().to_path_buf();
     let profile_root = temp.path().join("profile");
     fs::create_dir_all(&profile_root).unwrap();
     let _held_lock =
@@ -1207,7 +1215,7 @@ async fn scheduler_prefilter_config_skip_precedes_live_lock_and_is_exact() {
     let backend = ContentBackend::new("unused");
     let admitted_job = tracedecay_automation_runtime::automation::jobs::admit_job(&job).unwrap();
     let retained = run_user_job_with_backend_for_retained_settlement(
-        &dashboard_root,
+        store,
         &config,
         &backend,
         &admitted_job,
@@ -1224,40 +1232,27 @@ async fn scheduler_prefilter_config_skip_precedes_live_lock_and_is_exact() {
     let run = run.unwrap();
     assert_eq!(backend.calls(), 0);
     assert_eq!(run.report["reason"], json!(AUTOMATION_DISABLED));
-    assert!(
-        load_run_records(&dashboard_root, 10)
-            .await
-            .unwrap()
-            .is_empty()
-    );
+    assert_eq!(store.load_run_records(10).await.unwrap(), Vec::new());
     drop(guard);
 
-    let first =
-        evaluate_and_record_scheduler_skip(&dashboard_root, &config, None, &job, occurrence, None)
-            .await
-            .unwrap()
-            .expect("disabled automation must produce an out-of-band diagnostic");
-    let repeated =
-        evaluate_and_record_scheduler_skip(&dashboard_root, &config, None, &job, occurrence, None)
-            .await
-            .unwrap()
-            .expect("the same config skip must return its exact diagnostic");
+    let first = evaluate_and_record_scheduler_skip(store, &config, None, &job, occurrence, None)
+        .await
+        .unwrap()
+        .expect("disabled automation must produce an out-of-band diagnostic");
+    let repeated = evaluate_and_record_scheduler_skip(store, &config, None, &job, occurrence, None)
+        .await
+        .unwrap()
+        .expect("the same config skip must return its exact diagnostic");
 
     assert_eq!(first.report["reason"], json!(AUTOMATION_DISABLED));
     assert_ne!(first.run_id, occurrence);
     assert_eq!(repeated.run_id, first.run_id);
     assert_eq!(repeated.ledger_record, first.ledger_record);
 
-    let records = load_run_records(&dashboard_root, 10).await.unwrap();
+    let records = store.load_run_records(10).await.unwrap();
     assert_eq!(records, vec![first.ledger_record]);
     assert!(
-        tracedecay_automation_runtime::automation::run_ledger::find_run_record_exact_bounded(
-            &dashboard_root,
-            occurrence,
-        )
-        .await
-        .unwrap()
-        .is_none(),
+        store.find_run_record(occurrence).await.unwrap().is_none(),
         "the prefilter and deferred runner must not terminalize the outer occurrence"
     );
 }
@@ -1265,7 +1260,9 @@ async fn scheduler_prefilter_config_skip_precedes_live_lock_and_is_exact() {
 #[tokio::test]
 async fn scheduler_prefilter_live_lock_wins_over_not_due_summary() {
     let temp = tempdir().unwrap();
-    let dashboard_root = temp.path().join("dashboard");
+    let fixture = RunStoreFixture::open(temp.path()).await;
+    let store = &fixture.runs;
+    let dashboard_root = fixture.dashboard_root().to_path_buf();
     let profile_root = temp.path().join("profile");
     fs::create_dir_all(&profile_root).unwrap();
     let _held_lock =
@@ -1283,14 +1280,14 @@ async fn scheduler_prefilter_live_lock_wins_over_not_due_summary() {
     );
     recent.task = AgentTaskKind::UserJob;
     recent.task_key = job_task_key(&job.id);
-    append_run_record(&dashboard_root, &recent).await.unwrap();
+    store.append_run_record(&recent).await.unwrap();
 
     let config = enabled_job_config();
     let occurrence = "locked-prefilter-occurrence";
     let executable = tempfile::NamedTempFile::new().unwrap();
     let backend = ContentBackend::new("unused").with_executable(executable.path());
     let prefilter = evaluate_and_record_scheduler_skip(
-        &dashboard_root,
+        store,
         &config,
         backend.executable(),
         &job,
@@ -1305,7 +1302,7 @@ async fn scheduler_prefilter_live_lock_wins_over_not_due_summary() {
 
     let admitted_job = tracedecay_automation_runtime::automation::jobs::admit_job(&job).unwrap();
     let retained = run_user_job_with_backend_for_retained_settlement(
-        &dashboard_root,
+        store,
         &config,
         &backend,
         &admitted_job,
@@ -1324,18 +1321,9 @@ async fn scheduler_prefilter_live_lock_wins_over_not_due_summary() {
     assert_eq!(run.report["reason"], json!("scheduler_lock_active"));
     assert_eq!(run.ledger_record, prefilter.ledger_record);
     drop(guard);
-    assert_eq!(
-        load_run_records(&dashboard_root, 10).await.unwrap().len(),
-        2
-    );
+    assert_eq!(store.load_run_records(10).await.unwrap().len(), 2);
     assert!(
-        tracedecay_automation_runtime::automation::run_ledger::find_run_record_exact_bounded(
-            &dashboard_root,
-            occurrence,
-        )
-        .await
-        .unwrap()
-        .is_none(),
+        store.find_run_record(occurrence).await.unwrap().is_none(),
         "the lock diagnostic must remain outside the effect occurrence"
     );
 }
@@ -1343,7 +1331,9 @@ async fn scheduler_prefilter_live_lock_wins_over_not_due_summary() {
 #[tokio::test]
 async fn retained_scheduler_runner_reacquires_after_due_prefilter() {
     let temp = tempdir().unwrap();
-    let dashboard_root = temp.path().join("dashboard");
+    let fixture = RunStoreFixture::open(temp.path()).await;
+    let store = &fixture.runs;
+    let dashboard_root = fixture.dashboard_root().to_path_buf();
     let profile_root = temp.path().join("profile");
     fs::create_dir_all(&profile_root).unwrap();
     let mut job = sample_job("prefilter-gap");
@@ -1355,7 +1345,7 @@ async fn retained_scheduler_runner_reacquires_after_due_prefilter() {
 
     assert!(
         evaluate_and_record_scheduler_skip(
-            &dashboard_root,
+            store,
             &config,
             backend.executable(),
             &job,
@@ -1375,7 +1365,7 @@ async fn retained_scheduler_runner_reacquires_after_due_prefilter() {
 
     let admitted_job = tracedecay_automation_runtime::automation::jobs::admit_job(&job).unwrap();
     let retained = run_user_job_with_backend_for_retained_settlement(
-        &dashboard_root,
+        store,
         &config,
         &backend,
         &admitted_job,
@@ -1395,16 +1385,10 @@ async fn retained_scheduler_runner_reacquires_after_due_prefilter() {
     assert_ne!(run.run_id, occurrence);
     drop(guard);
 
-    let records = load_run_records(&dashboard_root, 10).await.unwrap();
+    let records = store.load_run_records(10).await.unwrap();
     assert_eq!(records, vec![run.ledger_record]);
     assert!(
-        tracedecay_automation_runtime::automation::run_ledger::find_run_record_exact_bounded(
-            &dashboard_root,
-            occurrence,
-        )
-        .await
-        .unwrap()
-        .is_none(),
+        store.find_run_record(occurrence).await.unwrap().is_none(),
         "a post-prefilter lock race must not create an outer occurrence terminal"
     );
 }
@@ -1440,7 +1424,9 @@ async fn concurrent_manual_job_triggers_do_not_double_execute() {
     }
 
     let temp = tempdir().unwrap();
-    let dashboard_root = temp.path().join("dashboard");
+    let fixture = RunStoreFixture::open(temp.path()).await;
+    let store = &fixture.runs;
+    let dashboard_root = fixture.dashboard_root().to_path_buf();
     let profile_root = temp.path().join("profile");
     let lock_dir = dashboard_root.join("automation_locks");
     PrivateStoreIo::create_dir_all_durable(&profile_root).unwrap();
@@ -1456,7 +1442,7 @@ async fn concurrent_manual_job_triggers_do_not_double_execute() {
         async {
             barrier.wait().await;
             settle_user_job(
-                &dashboard_root,
+                store,
                 &config,
                 &backend,
                 &job,
@@ -1473,7 +1459,7 @@ async fn concurrent_manual_job_triggers_do_not_double_execute() {
         async {
             barrier.wait().await;
             settle_user_job(
-                &dashboard_root,
+                store,
                 &config,
                 &backend,
                 &job,
@@ -1506,7 +1492,8 @@ async fn concurrent_manual_job_triggers_do_not_double_execute() {
 #[tokio::test]
 async fn retained_user_job_defers_ledger_and_keeps_exact_keyed_lock() {
     let temp = tempdir().unwrap();
-    let dashboard_root = temp.path().join("dashboard");
+    let fixture = RunStoreFixture::open(temp.path()).await;
+    let store = &fixture.runs;
     let profile_root = temp.path().join("profile");
     fs::create_dir_all(&profile_root).unwrap();
     let job = sample_job("retained-job");
@@ -1515,7 +1502,7 @@ async fn retained_user_job_defers_ledger_and_keeps_exact_keyed_lock() {
 
     let admitted_job = tracedecay_automation_runtime::automation::jobs::admit_job(&job).unwrap();
     let retained = run_user_job_with_backend_for_retained_settlement(
-        &dashboard_root,
+        store,
         &config,
         &backend,
         &admitted_job,
@@ -1532,15 +1519,12 @@ async fn retained_user_job_defers_ledger_and_keeps_exact_keyed_lock() {
     let run = result.unwrap();
     assert_eq!(run.run_id, "retained-job-run");
     assert!(
-        load_run_records(&dashboard_root, 10)
-            .await
-            .unwrap()
-            .is_empty(),
+        store.load_run_records(10).await.unwrap().is_empty(),
         "retained user-job history must await outer settlement"
     );
 
     let competing = settle_user_job(
-        &dashboard_root,
+        store,
         &config,
         &backend,
         &job,

@@ -10,7 +10,7 @@ use super::DashboardState;
 use super::util::{internal_error, json_error};
 use tracedecay_automation_runtime::automation::run_ledger::{
     AutomationRunArtifact, AutomationRunArtifactKind, AutomationRunLedgerRecord,
-    AutomationRunStatus, AutomationTrigger, find_run_record, read_published_artifact_chain,
+    AutomationRunStatus, AutomationTrigger, read_published_artifact_chain,
     read_run_artifact_payload,
 };
 
@@ -38,7 +38,7 @@ pub(crate) struct AutomationRunRowV1 {
     artifact_kinds: Vec<String>,
 }
 
-/// `known` only when the ledger page holds every row and none was malformed.
+/// `known` only when the page holds every published run.
 #[derive(Debug, Serialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum AutomationRunLedgerCompletenessV1 {
@@ -109,13 +109,17 @@ pub async fn run_list(
     axum::extract::Query(params): axum::extract::Query<RunListParams>,
 ) -> Response {
     let limit = super::util::coerce_limit(params.limit, 50, 200) as usize;
-    // The locked ledger tail read is this route's only I/O; row projection
-    // after it is linear in the (bounded) page.
+    let runs_store = match state.automation_run_store() {
+        Ok(runs_store) => runs_store,
+        Err(err) => {
+            return internal_error(format!("Failed to read automation run history: {err}"))
+                .into_response();
+        }
+    };
+    // The indexed page read is this route's only I/O; row projection after
+    // it is linear in the (bounded) page.
     match tracing::Instrument::instrument(
-        tracedecay_automation_runtime::automation::run_ledger::load_run_records_page(
-            &state.dashboard_root,
-            limit,
-        ),
+        runs_store.load_run_records_page(limit),
         tracing::trace_span!("dashboard_api.runs.ledger_read"),
     )
     .await
@@ -127,7 +131,8 @@ pub async fn run_list(
                 runs,
                 limit,
                 has_more: page.has_more,
-                malformed_row_count: page.malformed_row_count,
+                // Registered rows are schema-checked JSON; none is malformed.
+                malformed_row_count: 0,
                 completeness: if page.is_complete() {
                     AutomationRunLedgerCompletenessV1::Known
                 } else {
@@ -137,7 +142,7 @@ pub async fn run_list(
             .into_response()
         }
         Err(err) => {
-            internal_error(format!("Failed to read automation run ledger: {err}")).into_response()
+            internal_error(format!("Failed to read automation run history: {err}")).into_response()
         }
     }
 }
@@ -174,7 +179,7 @@ pub async fn artifact_list(
     State(state): State<DashboardState>,
     AxumPath(run_id): AxumPath<String>,
 ) -> Response {
-    match find_run_record(&state.dashboard_root, &run_id).await {
+    match find_run_record(&state, &run_id).await {
         Ok(Some(record)) => {
             let count = record.artifacts.len();
             // Integrity verification re-reads the publication chain from disk
@@ -215,7 +220,7 @@ pub async fn artifact_payload(
     State(state): State<DashboardState>,
     AxumPath((run_id, kind)): AxumPath<(String, String)>,
 ) -> Response {
-    let record = match find_run_record(&state.dashboard_root, &run_id).await {
+    let record = match find_run_record(&state, &run_id).await {
         Ok(Some(record)) => record,
         Ok(None) => {
             return json_error(
@@ -255,6 +260,13 @@ pub async fn artifact_payload(
             internal_error(format!("Failed to read automation run artifact: {err}")).into_response()
         }
     }
+}
+
+async fn find_run_record(
+    state: &DashboardState,
+    run_id: &str,
+) -> tracedecay_domain::errors::Result<Option<AutomationRunLedgerRecord>> {
+    state.automation_run_store()?.find_run_record(run_id).await
 }
 
 fn find_artifact<'a>(

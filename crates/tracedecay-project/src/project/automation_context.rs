@@ -1,3 +1,4 @@
+use tracedecay_automation_runtime::automation::registered_run_store::RegisteredAutomationRunStore;
 use tracedecay_automation_runtime::ports::project_runtime::AutomationProjectContext;
 use tracedecay_domain::FactOwnerV1;
 use tracedecay_domain::errors::{Result, TraceDecayError};
@@ -38,5 +39,14 @@ impl TraceDecay {
             project_sessions: self.configuration_runtime().registered_database(),
             project_memory_database: self.retained_project_store_db()?,
         })
+    }
+
+    /// Admits this project's registered sessions store as its automation
+    /// run-state authority; artifacts stay under the project dashboard root.
+    pub fn automation_run_store(&self) -> Result<RegisteredAutomationRunStore> {
+        RegisteredAutomationRunStore::admit(
+            self.configuration_runtime().registered_database(),
+            self.store_layout().dashboard_root.clone(),
+        )
     }
 }

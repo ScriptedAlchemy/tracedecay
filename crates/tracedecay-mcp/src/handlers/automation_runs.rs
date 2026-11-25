@@ -1,12 +1,10 @@
-//! Read-only inspection over the active project's durable automation ledger.
-
-use std::path::Path;
+//! Read-only inspection over the active project's registered automation run
+//! history.
 
 use serde_json::Value;
 use tracedecay_automation_runtime::automation::config_error;
-use tracedecay_automation_runtime::automation::run_ledger::{
-    find_run_record, load_run_records_page, read_run_artifact_payload,
-};
+use tracedecay_automation_runtime::automation::registered_run_store::RegisteredAutomationRunStore;
+use tracedecay_automation_runtime::automation::run_ledger::read_run_artifact_payload;
 use tracedecay_contracts::graph_tool::{GraphToolCompletionV1, GraphToolResultV1};
 use tracedecay_contracts::retrieval::{
     AUTOMATION_RUN_LIST_DEFAULT_LIMIT, AUTOMATION_RUN_LIST_MAX_LIMIT, AutomationReadStatusV1,
@@ -35,7 +33,7 @@ fn ledger_unavailable(operation: &str, error: TraceDecayError) -> TraceDecayErro
 
 #[tracing::instrument(name = "mcp.automation.run_list.total", level = "trace", skip_all)]
 pub async fn compute_run_list(
-    dashboard_root: &Path,
+    runs: &RegisteredAutomationRunStore,
     args: &Value,
 ) -> Result<GraphToolCompletionV1> {
     let request: AutomationRunListSurfaceRequestV1 =
@@ -47,7 +45,7 @@ pub async fn compute_run_list(
         )));
     }
     let page = tracing::Instrument::instrument(
-        load_run_records_page(dashboard_root, limit as usize),
+        runs.load_run_records_page(limit as usize),
         tracing::trace_span!("mcp.automation.run_list.load"),
     )
     .await
@@ -70,7 +68,8 @@ pub async fn compute_run_list(
             runs,
             limit,
             has_more: page.has_more,
-            malformed_row_count: page.malformed_row_count,
+            // Registered rows are schema-checked JSON; none is malformed.
+            malformed_row_count: 0,
             completeness,
         }),
         Vec::new(),
@@ -79,7 +78,7 @@ pub async fn compute_run_list(
 
 #[tracing::instrument(name = "mcp.automation.run_view.total", level = "trace", skip_all)]
 pub async fn compute_run_view(
-    dashboard_root: &Path,
+    runs: &RegisteredAutomationRunStore,
     args: &Value,
 ) -> Result<GraphToolCompletionV1> {
     let request: AutomationRunViewSurfaceRequestV1 =
@@ -90,7 +89,7 @@ pub async fn compute_run_view(
         ));
     }
     let run = tracing::Instrument::instrument(
-        find_run_record(dashboard_root, &request.run_id),
+        runs.find_run_record(&request.run_id),
         tracing::trace_span!("mcp.automation.run_view.load"),
     )
     .await
@@ -110,7 +109,7 @@ pub async fn compute_run_view(
 
 #[tracing::instrument(name = "mcp.automation.artifact_view.total", level = "trace", skip_all)]
 pub async fn compute_run_artifact_view(
-    dashboard_root: &Path,
+    runs: &RegisteredAutomationRunStore,
     args: &Value,
 ) -> Result<GraphToolCompletionV1> {
     let request: AutomationRunArtifactViewSurfaceRequestV1 =
@@ -118,7 +117,7 @@ pub async fn compute_run_artifact_view(
     let run_id = request.run_id.as_str();
     let kind = request.kind.as_str();
     let record = tracing::Instrument::instrument(
-        find_run_record(dashboard_root, run_id),
+        runs.find_run_record(run_id),
         tracing::trace_span!("mcp.automation.artifact_view.load"),
     )
     .await?
@@ -134,7 +133,7 @@ pub async fn compute_run_artifact_view(
             ))
         })?;
     let payload = tracing::Instrument::instrument(
-        read_run_artifact_payload(dashboard_root, &record.run_id, &artifact),
+        read_run_artifact_payload(runs.dashboard_root(), &record.run_id, &artifact),
         tracing::trace_span!("mcp.automation.artifact_view.read"),
     )
     .await?;

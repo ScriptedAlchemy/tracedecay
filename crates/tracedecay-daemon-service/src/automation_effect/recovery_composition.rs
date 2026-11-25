@@ -3,8 +3,6 @@
 //! The root orders runtime preparation before opening project memory, then
 //! supplies the admitted project identity, scope, and memory authority.
 
-use std::path::Path;
-
 use tracedecay_automation_runtime::automation::effect_runtime::{
     AutomationEffectRecoveryPreparation, AutomationEffectRecoveryReport,
     prepare_reserved_automation_effect_recovery, reconcile_prepared_automation_effects_for_project,
@@ -19,10 +17,10 @@ use tracedecay_project::project::TraceDecay;
 
 pub async fn reconcile_reserved_automation_effects_for_project(
     project: &TraceDecay,
-    dashboard_root: &Path,
     cancellation: &CancellationSignal,
 ) -> Result<AutomationEffectRecoveryReport> {
-    let preparation = prepare_reserved_automation_effect_recovery(dashboard_root).await?;
+    let runs = project.automation_run_store()?;
+    let preparation = prepare_reserved_automation_effect_recovery(&runs).await?;
     let preparation = match preparation {
         AutomationEffectRecoveryPreparation::Complete(report) => return Ok(report),
         AutomationEffectRecoveryPreparation::Pending(preparation) => preparation,

@@ -18,9 +18,6 @@ use serde_json::json;
 use std::os::unix::fs::PermissionsExt;
 use tempfile::TempDir;
 use tracedecay_agent_hosts::PRODUCT_VERSION;
-use tracedecay_automation_runtime::automation::run_ledger::{
-    AutomationRunArtifactKind, AutomationRunLedgerRecord, append_run_record, write_run_artifact,
-};
 use tracedecay_domain::ProjectId;
 use tracedecay_domain::configuration::{
     CandidateDispositionV1, ConfigurationCandidateV1, ConfigurationLayerIdV1,
@@ -2560,38 +2557,10 @@ fn fact_store_curate_records_backend_disabled_skip_and_preserves_read_only_inspe
     assert_eq!(settled["status"], "skipped");
     assert_eq!(settled["error"], "backend_disabled");
 
-    let ledger_paths = std::fs::read_dir(profile_root(home.path()).join("projects"))
-        .unwrap()
-        .map(|entry| {
-            entry
-                .unwrap()
-                .path()
-                .join("dashboard/automation_runs.jsonl")
-        })
-        .filter(|path| path.is_file())
-        .collect::<Vec<_>>();
-    assert_eq!(
-        ledger_paths.len(),
-        1,
-        "automation run should write one run ledger, got {ledger_paths:?}"
-    );
     let run_id = run["run_id"]
         .as_str()
         .expect("automation run payload should include a run_id");
-    // Inspect the exact run identity returned by the manual call.
-    let ledger = std::fs::read_to_string(&ledger_paths[0]).unwrap();
-    let record = ledger
-        .lines()
-        .filter(|line| !line.trim().is_empty())
-        .map(|line| {
-            serde_json::from_str::<serde_json::Value>(line)
-                .expect("every ledger line should be a JSON record")
-        })
-        .find(|record| record["run_id"] == run_id)
-        .unwrap_or_else(|| panic!("ledger should record run {run_id}:\n{ledger}"));
-    assert_eq!(record["status"], "skipped");
-    assert_eq!(record["error"], "backend_disabled");
-    assert_eq!(record["trigger"], "application");
+    assert_eq!(settled["trigger"], "application");
 
     let mut list = tracedecay_command(home.path(), project.path());
     list.args(["automation", "runs", "list", "--json", "--limit", "5"]);
@@ -2604,13 +2573,22 @@ fn fact_store_curate_records_backend_disabled_skip_and_preserves_read_only_inspe
     );
     let list_payload: serde_json::Value =
         serde_json::from_slice(&list_output.stdout).expect("runs list should print JSON");
+    assert_eq!(list_payload["limit"], 5);
+    assert_eq!(
+        list_payload["count"],
+        list_payload["records"].as_array().unwrap().len()
+    );
     let listed = list_payload["records"]
         .as_array()
         .expect("runs list should return records")
         .iter()
         .find(|entry| entry["run_id"] == run_id)
         .unwrap_or_else(|| panic!("runs list should surface {run_id}: {list_payload}"));
-    assert_eq!(listed["status"], "skipped");
+    assert_eq!(listed["run_id"], settled["run_id"]);
+    assert_eq!(listed["status"], settled["status"]);
+    assert_eq!(listed["error"], settled["error"]);
+    assert_eq!(listed["task"], settled["task"]);
+    assert_eq!(listed["trigger"], settled["trigger"]);
 
     let mut view = tracedecay_command(home.path(), project.path());
     view.args(["automation", "runs", "view", run_id, "--json"]);
@@ -2623,83 +2601,36 @@ fn fact_store_curate_records_backend_disabled_skip_and_preserves_read_only_inspe
     );
     let view_payload: serde_json::Value =
         serde_json::from_slice(&view_output.stdout).expect("runs view should print JSON");
-    assert_eq!(view_payload["record"]["run_id"], run_id);
-    assert_eq!(view_payload["record"]["error"], "backend_disabled");
+    assert_eq!(view_payload["record"], settled);
 
-    let dashboard_root = ledger_paths[0]
-        .parent()
-        .expect("ledger should live under dashboard root")
-        .to_path_buf();
-    let mut artifact_record: AutomationRunLedgerRecord =
-        serde_json::from_value(record).expect("ledger should deserialize as run record");
-    // The ledger is append-only with an enforced lifecycle: a run that already
-    // reached a terminal status cannot be re-appended, so attaching an artifact
-    // to the curate run's own `skipped` row is refused with "invalid lifecycle
-    // transition". Cover the artifact surface on a run of its own instead.
-    // one terminal row that already carries the artifact, which is the only
-    // shape the ledger accepts.
-    let artifact_run_id = format!("{run_id}-artifact");
-    artifact_record.run_id.clone_from(&artifact_run_id);
-    let artifact_payload = serde_json::json!({
-        "loop_stage": "codex_handoff",
-        "run_id": artifact_run_id,
-        "status": "ready_for_review",
-    });
-    let runtime = create_runtime();
-    let artifact = runtime
-        .block_on(write_run_artifact(
-            &dashboard_root,
-            &artifact_run_id,
-            AutomationRunArtifactKind::CodexHandoff,
-            &artifact_payload,
-            Some("CLI handoff artifact".to_string()),
-            "2026-06-24T05:00:02Z",
-        ))
-        .expect("artifact write should succeed");
-    artifact_record.artifacts = vec![artifact];
-    runtime
-        .block_on(append_run_record(&dashboard_root, &artifact_record))
-        .expect("artifact ledger append should succeed");
+    let artifact_args =
+        serde_json::json!({"run_id": run_id, "kind": "codex_handoff", "format": "json"});
+    let (found, problem) =
+        tool_document(&artifact_args.to_string(), "automation_run_artifact_view");
+    assert!(!found, "the backend-disabled run has no handoff: {problem}");
+    let expected = format!("automation run artifact not found: {run_id}/codex_handoff");
+    assert!(problem.to_string().contains(&expected), "{problem}");
 
     let mut artifact_view = tracedecay_command(home.path(), project.path());
     artifact_view.args([
         "automation",
         "runs",
         "artifact",
-        artifact_run_id.as_str(),
+        run_id,
         "codex_handoff",
         "--json",
     ]);
     let artifact_output = run_with_timeout(artifact_view, cli_timeout());
     assert!(
-        artifact_output.status.success(),
-        "automation runs artifact should succeed\nstdout:\n{}\nstderr:\n{}",
+        !artifact_output.status.success(),
+        "artifact inspection must refuse a missing handoff"
+    );
+    let diagnostic = format!(
+        "{}{}",
         String::from_utf8_lossy(&artifact_output.stdout),
         String::from_utf8_lossy(&artifact_output.stderr)
     );
-    let artifact_view_payload: serde_json::Value =
-        serde_json::from_slice(&artifact_output.stdout).expect("artifact view should print JSON");
-    assert_eq!(artifact_view_payload["run_id"], artifact_run_id);
-    assert_eq!(artifact_view_payload["artifact"]["kind"], "codex_handoff");
-    assert_eq!(
-        artifact_view_payload["payload"]["status"],
-        "ready_for_review"
-    );
-
-    let mut original_view = tracedecay_command(home.path(), project.path());
-    original_view.args(["automation", "runs", "view", run_id, "--json"]);
-    let original_output = run_with_timeout(original_view, cli_timeout());
-    assert!(
-        original_output.status.success(),
-        "original skipped run remains readable: {}",
-        String::from_utf8_lossy(&original_output.stderr)
-    );
-    let original_payload: serde_json::Value =
-        serde_json::from_slice(&original_output.stdout).expect("original run JSON");
-    assert_eq!(
-        original_payload["record"], view_payload["record"],
-        "artifact publication and inspection must preserve the skipped terminal"
-    );
+    assert!(diagnostic.contains(&expected), "{diagnostic}");
 }
 
 #[test]

@@ -3,7 +3,7 @@ use serde_json::json;
 use std::fs;
 use tempfile::TempDir;
 use tracedecay_automation_runtime::automation::run_ledger::{
-    AutomationRunLedgerRecord, AutomationRunStatus, AutomationTrigger, append_run_record,
+    AutomationRunLedgerRecord, AutomationRunStatus, AutomationTrigger,
 };
 
 fn run_record(run_id: &str, completed_at: &str) -> AutomationRunLedgerRecord {
@@ -73,11 +73,13 @@ async fn automation_run_list_and_view_use_the_active_project_ledger() {
     fs::create_dir_all(project.join("src")).unwrap();
     fs::write(project.join("src/lib.rs"), "pub fn fixture() {}\n").unwrap();
     let (cg, _env) = init_test_project(&project).await;
-    let dashboard_root = cg.store_layout().dashboard_root.clone();
-    append_run_record(&dashboard_root, &run_record("run-older", "1782283200"))
+    let run_store = cg.automation_run_store().unwrap();
+    run_store
+        .append_run_record(&run_record("run-older", "1782283200"))
         .await
         .unwrap();
-    append_run_record(&dashboard_root, &run_record("run-newer", "1782283300"))
+    run_store
+        .append_run_record(&run_record("run-newer", "1782283300"))
         .await
         .unwrap();
 

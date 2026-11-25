@@ -36,9 +36,7 @@ async fn manual_memory_curator_runs_when_scheduling_and_task_are_disabled() {
     assert_eq!(run.ledger_record.trigger, AutomationTrigger::ManualCli);
     assert_eq!(run.ledger_record.status, AutomationRunStatus::Succeeded);
     assert_eq!(run.ledger_record.error, None);
-    let records = load_run_records(&cg.store_layout().dashboard_root, 10)
-        .await
-        .unwrap();
+    let records = run_store(&cg).load_run_records(10).await.unwrap();
     assert_eq!(records.len(), 1);
     assert_eq!(records[0].run_id, run.run_id);
     assert_eq!(records[0].status, AutomationRunStatus::Succeeded);

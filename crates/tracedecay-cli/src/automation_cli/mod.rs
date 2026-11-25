@@ -6,27 +6,6 @@ mod skills;
 use crate::cli::AutomationAction;
 use tracedecay_runtime_core::config::ProfileRoot;
 
-async fn daemon_project_dashboard_root(
-    profile: &ProfileRoot,
-    project_path: &std::path::Path,
-) -> tracedecay_domain::errors::Result<std::path::PathBuf> {
-    let context = crate::commands::daemon_tool_json(
-        profile,
-        Some(project_path),
-        "tracedecay_active_project",
-        serde_json::json!({ "format": "json" }),
-    )
-    .await?;
-    let data_root = context
-        .get("storage")
-        .and_then(|storage| storage.get("data_root"))
-        .and_then(serde_json::Value::as_str)
-        .ok_or_else(|| tracedecay_domain::errors::TraceDecayError::Config {
-            message: "managed daemon returned no active project data_root".to_string(),
-        })?;
-    Ok(std::path::PathBuf::from(data_root).join("dashboard"))
-}
-
 pub(crate) async fn handle_automation_command(
     profile: &ProfileRoot,
     action: AutomationAction,

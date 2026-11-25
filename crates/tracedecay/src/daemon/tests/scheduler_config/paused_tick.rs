@@ -5,7 +5,6 @@ use tempfile::TempDir;
 use tracedecay_automation_runtime::automation::config::{
     AutomationBackendV1, AutomationConfigPatch, AutomationTaskPatch,
 };
-use tracedecay_automation_runtime::automation::run_ledger::load_run_records;
 use tracedecay_automation_runtime::automation::scheduler::{
     AutomationSchedulerControl, save_scheduler_control,
 };
@@ -99,7 +98,10 @@ async fn paused_tick_scenario() {
     .await
     .expect("paused scheduler tick should exit cleanly");
 
-    let records = load_run_records(&dashboard_root, 10)
+    let records = cg
+        .automation_run_store()
+        .unwrap()
+        .load_run_records(10)
         .await
         .expect("load run ledger");
     assert!(

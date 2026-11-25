@@ -55,13 +55,47 @@ async fn pause_before_next_poll() {
     tokio::time::sleep(std::time::Duration::from_millis(10)).await;
 }
 
-fn exact_publication(seed: char, payload_len: u64) -> ExactRunPublication {
+fn exact_publication(seed: char) -> ExactRunPublication {
     serde_json::from_value(json!({
-        "schema_version": 1,
-        "ledger_digest": format!("sha256:{}", seed.to_string().repeat(64)),
-        "payload_len": payload_len,
+        "schema_version": 2,
+        "digest": format!("sha256:{}", seed.to_string().repeat(64)),
     }))
     .expect("exact publication")
+}
+
+type RunStoreRegistry = std::sync::Mutex<
+    std::collections::HashMap<
+        std::path::PathBuf,
+        Arc<(
+            tempfile::TempDir,
+            crate::automation::registered_run_store::tests::ProjectRunStoreFixture,
+        )>,
+    >,
+>;
+
+static RUN_STORES: std::sync::LazyLock<RunStoreRegistry> =
+    std::sync::LazyLock::new(RunStoreRegistry::default);
+
+/// The one registered run store a test's dashboard root settles into, so
+/// every helper that touches that root shares its run history.
+async fn runs_for(dashboard_root: &std::path::Path) -> RegisteredAutomationRunStore {
+    if let Some(existing) = RUN_STORES.lock().unwrap().get(dashboard_root) {
+        return existing.1.runs.clone();
+    }
+    let shard_root = tempfile::tempdir().expect("run store shard root");
+    let fixture = crate::automation::registered_run_store::tests::project_run_store(
+        shard_root.path(),
+        dashboard_root,
+    )
+    .await;
+    RUN_STORES
+        .lock()
+        .unwrap()
+        .entry(dashboard_root.to_path_buf())
+        .or_insert_with(|| Arc::new((shard_root, fixture)))
+        .1
+        .runs
+        .clone()
 }
 
 fn scope() -> ResolvedScope {
@@ -235,7 +269,7 @@ fn write_private_test_file(path: &std::path::Path, bytes: &[u8]) {
     drop(tracedecay_private_fs::windows::make_private_file(path).expect("private test file ACL"));
 }
 
-fn retained_external_authority(
+async fn retained_external_authority(
     dashboard_root: &std::path::Path,
     admission: DurableAutomationAdmission,
 ) -> (
@@ -327,7 +361,7 @@ fn retained_external_authority(
             prepared,
             admission,
             journal_path: journal_path.clone(),
-            dashboard_root: dashboard_root.to_path_buf(),
+            runs: runs_for(dashboard_root).await,
             _reservation_claim: Some(claim),
         },
         journal_path,
@@ -385,7 +419,7 @@ async fn retained_disabled_user_job_run(
     };
     let job = crate::automation::jobs::admit_job(&job).unwrap();
     run_user_job_with_backend_for_retained_settlement(
-        dashboard_root,
+        &runs_for(dashboard_root).await,
         &config,
         &NeverAutomationBackend,
         &job,
@@ -405,22 +439,6 @@ async fn task_lock_is_denied(dashboard_root: &std::path::Path, job_id: &str) -> 
     .await
     .expect("competing task lock")
     .is_none()
-}
-
-fn exact_spool_files(dashboard_root: &std::path::Path) -> Vec<std::path::PathBuf> {
-    match std::fs::read_dir(dashboard_root.join("automation_run_spool")) {
-        Ok(entries) => entries
-            .filter_map(std::result::Result::ok)
-            .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_file()))
-            .map(|entry| entry.path())
-            .collect(),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
-        Err(error) => panic!("read exact spool directory: {error}"),
-    }
-}
-
-fn exact_spool_file_count(dashboard_root: &std::path::Path) -> usize {
-    exact_spool_files(dashboard_root).len()
 }
 
 fn assert_admission_conflict(result: tracedecay_domain::errors::Result<ReservationResult>) {
@@ -665,12 +683,12 @@ fn durable_journal_reopens_the_byte_identical_terminal() {
     assert_eq!(replay, terminal);
 }
 
-#[test]
-fn session_evidence_timeout_ledger_projects_a_typed_terminal() {
+#[tokio::test]
+async fn session_evidence_timeout_ledger_projects_a_typed_terminal() {
     let temp = tempfile::tempdir().expect("tempdir");
     let run_id = "run.session-evidence-timeout";
     let admission = session_reflector_admission(run_id, "request.session-evidence-timeout");
-    let (authority, _, _) = retained_external_authority(temp.path(), admission);
+    let (authority, _, _) = retained_external_authority(temp.path(), admission).await;
     let ledger: AutomationRunLedgerRecord = serde_json::from_value(json!({
         "schema_version": 2,
         "run_id": run_id,
@@ -877,7 +895,7 @@ fn prepared_terminal_recovers_in_the_same_process_and_promotes_exactly() {
     let admission = admission("run.prepared-journal", "request.prepared-journal");
     reserve_or_replay_blocking(&path, admission.clone()).expect("reserve");
     let terminal = success_terminal(&admission, "run.prepared-journal");
-    let publication = exact_publication('e', 8_192);
+    let publication = exact_publication('e');
 
     persist_prepared_terminal_blocking(&path, &admission, &terminal, publication.clone())
         .expect("persist prepared terminal");
@@ -1129,29 +1147,30 @@ async fn visible_terminal_replace_error_after_exact_publish_retains_cleanup_auth
         _ => panic!("fresh settlement must execute"),
     };
     let terminal = AutomationSettledTerminal::Problem(admission.recovery_problem().clone());
-    let (publication, ()) = crate::automation::run_ledger::bind_staged_run_record_exact(
-        dashboard_root,
-        &expected_record,
-        |publication| {
+    let runs = runs_for(dashboard_root).await;
+    let (bind_path, bind_admission, bind_terminal) =
+        (journal_path.clone(), admission.clone(), terminal.clone());
+    let (publication, ()) = runs
+        .bind_staged_run_record_exact(&expected_record, move |publication| {
             persist_prepared_terminal_blocking(
-                &journal_path,
-                &admission,
-                &terminal,
+                &bind_path,
+                &bind_admission,
+                &bind_terminal,
                 publication.clone(),
             )
-        },
-    )
-    .expect("stage and prepare exact terminal");
+        })
+        .await
+        .expect("stage and prepare exact terminal");
     assert_eq!(
-        crate::automation::run_ledger::publish_staged_run_record_exact_blocking(
-            dashboard_root,
-            run_id,
-            &publication,
-        )
-        .expect("publish exact row"),
-        crate::automation::run_ledger::ExactRunPublishOutcome::Published
+        runs.publish_staged_run_record_exact(run_id, &publication)
+            .await
+            .expect("publish exact row"),
+        ExactRunPublishOutcome::Published
     );
-    assert_eq!(exact_spool_file_count(dashboard_root), 1);
+    assert_eq!(
+        runs.find_run_record(run_id).await.expect("exact row"),
+        Some(expected_record.clone())
+    );
 
     let error = promote_prepared_terminal_with_writer(
         &journal_path,
@@ -1176,7 +1195,6 @@ async fn visible_terminal_replace_error_after_exact_publish_retains_cleanup_auth
             .expect("visible terminal journal")
             .is_terminal()
     );
-    assert_eq!(exact_spool_file_count(dashboard_root), 1);
     assert_eq!(
         recovery_index::indexed_journals_blocking(dashboard_root, &admission.scope)
             .expect("retained pending authority")
@@ -1233,7 +1251,6 @@ async fn visible_terminal_replace_error_after_exact_publish_retains_cleanup_auth
             .to_string()
             .contains("hardened promotion republication")
     );
-    assert_eq!(exact_spool_file_count(dashboard_root), 1);
     assert_eq!(
         recovery_index::indexed_journals_blocking(dashboard_root, &admission.scope)
             .expect("pending authority after failed republication")
@@ -1261,15 +1278,19 @@ async fn visible_terminal_replace_error_after_exact_publish_retains_cleanup_auth
         .expect("exact terminal retry"),
         terminal
     );
-    crate::automation::run_ledger::discard_staged_run_record_exact_blocking(
-        dashboard_root,
-        run_id,
-        &publication,
-    )
-    .expect("cleanup only after exact terminal retry");
+    // The committed exact publication replays without another transition.
+    assert_eq!(
+        runs.publish_staged_run_record_exact(run_id, &publication)
+            .await
+            .expect("replay committed exact row"),
+        ExactRunPublishOutcome::Published
+    );
     recovery_index::remove_pending_blocking(dashboard_root, &journal_path)
         .expect("retire pending authority after exact retry");
-    assert_eq!(exact_spool_file_count(dashboard_root), 0);
+    assert_eq!(
+        runs.load_run_records(10).await.expect("run history"),
+        vec![expected_record]
+    );
     assert!(
         recovery_index::indexed_journals_blocking(dashboard_root, &admission.scope)
             .expect("retired pending authority")
@@ -1286,7 +1307,7 @@ fn uncertain_bind_replay_distinguishes_reserved_from_durable_prepared() {
     let admission = admission("run.uncertain-bind", "request.uncertain-bind");
     let claim = reserve_or_replay_blocking(&path, admission.clone()).expect("reserve");
     let terminal = success_terminal(&admission, "run.uncertain-bind");
-    let publication = exact_publication('c', 16_384);
+    let publication = exact_publication('c');
 
     assert_eq!(
         replay_exact_binding_after_error_blocking(&path, &admission, &terminal, &publication,)
@@ -1310,7 +1331,7 @@ fn every_durable_state_is_exactly_republished_before_classification() {
     let admission = admission("run.republish-every-state", "request.republish-every-state");
     let claim = reserve_or_replay_blocking(&path, admission.clone()).expect("reserve");
     let terminal = success_terminal(&admission, "run.republish-every-state");
-    let publication = exact_publication('b', 32_768);
+    let publication = exact_publication('b');
     let republishes = std::cell::Cell::new(0_usize);
 
     let reserved = classify_durable_settlement_with_stabilizer(
@@ -1371,7 +1392,7 @@ fn failed_exact_republication_never_proves_visible_prepared_state() {
     );
     reserve_or_replay_blocking(&path, admission.clone()).expect("reserve");
     let terminal = success_terminal(&admission, "run.visible-but-undurable-prepared");
-    persist_prepared_terminal_blocking(&path, &admission, &terminal, exact_publication('d', 4_096))
+    persist_prepared_terminal_blocking(&path, &admission, &terminal, exact_publication('d'))
         .expect("prepared");
     let visible = read_record(&path).expect("read").expect("visible record");
 
@@ -1398,7 +1419,7 @@ fn bound_state_stabilization_rereads_after_parent_sync() {
     );
     reserve_or_replay_blocking(&path, admission.clone()).expect("reserve");
     let terminal = success_terminal(&admission, "run.changed-during-stabilization");
-    persist_prepared_terminal_blocking(&path, &admission, &terminal, exact_publication('e', 8_192))
+    persist_prepared_terminal_blocking(&path, &admission, &terminal, exact_publication('e'))
         .expect("prepared");
     let visible = read_record(&path).expect("read").expect("visible record");
     let replacement = DurableAutomationRecord {
@@ -1688,7 +1709,7 @@ fn abandoned_same_process_reservation_enters_recovery_without_reexecution() {
 }
 
 #[tokio::test]
-async fn direct_recover_retires_spool_staged_before_prepared_binding() {
+async fn direct_recover_retires_terminal_staged_before_prepared_binding() {
     let temp = tempfile::tempdir().expect("tempdir");
     let path = temp.path().join("direct-recover-orphan.json");
     let original = admission("run.direct-recover-orphan", "request.direct-recover-orphan");
@@ -1708,34 +1729,27 @@ async fn direct_recover_retires_spool_staged_before_prepared_binding() {
         "completed_at": "2"
     }))
     .expect("ledger record");
-    crate::automation::run_ledger::bind_staged_run_record_exact(temp.path(), &ledger, |_| Ok(()))
+    let runs = runs_for(temp.path()).await;
+    let (staged, ()) = runs
+        .bind_staged_run_record_exact(&ledger, |_| Ok(()))
+        .await
         .expect("stage without journal binding");
-    let spool_dir = temp.path().join("automation_run_spool");
-    assert_eq!(
-        std::fs::read_dir(&spool_dir)
-            .expect("spool directory")
-            .filter_map(std::result::Result::ok)
-            .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_file()))
-            .count(),
-        1
-    );
     drop(claim);
     assert!(matches!(
         reserve_or_replay_blocking(&path, original.clone()).expect("direct recover"),
         ReservationResult::Recover
     ));
 
-    super::discard_direct_recovery_unbound_spools(temp.path(), &path, &original)
+    super::discard_direct_recovery_unbound_staging(&runs, &path, &original)
         .await
-        .expect("discard abandoned spool");
+        .expect("discard abandoned staged terminal");
 
     assert_eq!(
-        std::fs::read_dir(&spool_dir)
-            .expect("spool directory")
-            .filter_map(std::result::Result::ok)
-            .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_file()))
-            .count(),
-        0
+        runs.publish_staged_run_record_exact(original.request.run_id.as_str(), &staged)
+            .await
+            .expect("probe retired staging"),
+        ExactRunPublishOutcome::MissingPayload,
+        "the unbound staged terminal is retired"
     );
     let terminal = success_terminal(&original, "run.direct-recover-orphan");
     assert_eq!(
@@ -1749,12 +1763,11 @@ async fn direct_recover_retires_spool_staged_before_prepared_binding() {
     assert!(record.is_terminal());
     assert!(record.publication().is_none());
     assert_eq!(
-        std::fs::read_dir(&spool_dir)
-            .expect("spool directory")
-            .filter_map(std::result::Result::ok)
-            .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_file()))
-            .count(),
-        0
+        runs.find_run_record(original.request.run_id.as_str())
+            .await
+            .expect("run history"),
+        None,
+        "direct recovery publishes no fabricated run row"
     );
 }
 
@@ -1775,7 +1788,7 @@ fn unbound_cleanup_requires_abandoned_reserved_state_at_revalidation() {
     );
 
     let terminal = success_terminal(&original, "run.cleanup-claim");
-    persist_prepared_terminal_blocking(&path, &original, &terminal, exact_publication('d', 4_096))
+    persist_prepared_terminal_blocking(&path, &original, &terminal, exact_publication('d'))
         .expect("prepared");
     assert!(
         !unbound_reserved_cleanup_is_safe_blocking(&path, &original)
@@ -1984,11 +1997,6 @@ fn reserved_admission_conflict_preserves_recovery_index() {
         panic!("stable mismatch must be a conflict")
     };
     assert!(!terminal);
-    let admission = super::reservation_conflict_admission(dashboard_root, &path, terminal);
-    assert!(matches!(
-        admission,
-        super::AutomationEffectAdmission::Conflict
-    ));
     assert_eq!(
         recovery_index::indexed_journals_blocking(dashboard_root, &scope())
             .expect("pending index")
@@ -2024,11 +2032,6 @@ fn terminal_admission_conflict_preserves_existing_cleanup_authority() {
         panic!("terminal mismatch must be a conflict")
     };
     assert!(terminal);
-    let admission = super::reservation_conflict_admission(dashboard_root, &path, terminal);
-    assert!(matches!(
-        admission,
-        super::AutomationEffectAdmission::Conflict
-    ));
     assert_eq!(
         recovery_index::indexed_journals_blocking(dashboard_root, &scope())
             .expect("pending index")
@@ -2137,10 +2140,14 @@ async fn dropping_retained_waiter_does_not_abort_blocking_owner() {
     let (started_tx, started_rx) = std::sync::mpsc::sync_channel(0);
     let (release_tx, release_rx) = std::sync::mpsc::sync_channel(0);
     let (finished_tx, finished_rx) = std::sync::mpsc::sync_channel(0);
-    let waiter = super::RetainedSettlementWaiter::start(move || {
-        started_tx.send(()).expect("signal blocking owner");
-        release_rx.recv().expect("release blocking owner");
-        finished_tx.send(()).expect("signal owner completion");
+    let waiter = super::RetainedSettlementWaiter::start_future(async move {
+        native_runtime::spawn_owned_blocking(move || {
+            started_tx.send(()).expect("signal settlement owner");
+            release_rx.recv().expect("release settlement owner");
+            finished_tx.send(()).expect("signal owner completion");
+        })
+        .await
+        .expect("settlement owner work");
         tracedecay_domain::errors::Result::Ok(())
     });
 
@@ -2165,7 +2172,7 @@ async fn retained_projector_panic_finishes_recovery_before_releasing_task_lock()
     let retained = retained_disabled_user_job_run(dashboard_root, run_id, job_id).await;
     let admission = external_admission_for_job(run_id, "request.retained-projector-panic", job_id);
     let (authority, journal_path, expected_admission) =
-        retained_external_authority(dashboard_root, admission);
+        retained_external_authority(dashboard_root, admission).await;
     recovery_index::add_pending_blocking(dashboard_root, &journal_path, &expected_admission)
         .expect("retain projector-panic authority");
     let reserved = read_indexed_record_blocking(&journal_path)
@@ -2223,12 +2230,12 @@ async fn retained_projector_panic_finishes_recovery_before_releasing_task_lock()
         pause_before_next_poll().await;
     }
     assert!(
-        crate::automation::run_ledger::find_run_record_exact_bounded_blocking(
-            dashboard_root,
-            run_id,
-        )
-        .expect("projector-panic exact lookup")
-        .is_none(),
+        runs_for(dashboard_root)
+            .await
+            .find_run_record(run_id)
+            .await
+            .expect("projector-panic exact lookup")
+            .is_none(),
         "projector panic must not fabricate a successful ledger row"
     );
 
@@ -2273,11 +2280,13 @@ async fn request_waiting_pair_fixture(
     let (first_authority, first_journal, first_admission) = retained_external_authority(
         dashboard_root,
         external_admission_for_job(&run_ids[0], &format!("request.{label}.first"), &job_ids[0]),
-    );
+    )
+    .await;
     let (second_authority, second_journal, second_admission) = retained_external_authority(
         dashboard_root,
         external_admission_for_job(&run_ids[1], &format!("request.{label}.second"), &job_ids[1]),
-    );
+    )
+    .await;
     recovery_index::add_pending_blocking(dashboard_root, &first_journal, &first_admission)
         .expect("retain first request-waiting pair authority");
     recovery_index::add_pending_blocking(dashboard_root, &second_journal, &second_admission)
@@ -2335,18 +2344,14 @@ async fn assert_request_waiting_pair_abandoned_cleanly(
             "abandoned pair left recovery-index debris"
         );
     }
-    assert!(
-        exact_spool_files(dashboard_root).is_empty(),
-        "abandoned pair left exact-publication spool debris"
-    );
     for run_id in &fixture.run_ids {
         assert!(
-            crate::automation::run_ledger::find_run_record_exact_bounded_blocking(
-                dashboard_root,
-                run_id,
-            )
-            .expect("abandoned pair exact ledger lookup")
-            .is_none(),
+            runs_for(dashboard_root)
+                .await
+                .find_run_record(run_id)
+                .await
+                .expect("abandoned pair exact ledger lookup")
+                .is_none(),
             "abandoned pair fabricated an exact ledger row"
         );
     }
@@ -2457,11 +2462,13 @@ async fn retained_pair_attempts_second_leg_and_keeps_both_guards_until_both_fini
     let (first_authority, first_journal, first_admission) = retained_external_authority(
         dashboard_root,
         external_admission_for_job(first_run_id, "request.retained-pair-first", first_job_id),
-    );
+    )
+    .await;
     let (second_authority, second_journal, second_admission) = retained_external_authority(
         dashboard_root,
         external_admission_for_job(second_run_id, "request.retained-pair-second", second_job_id),
-    );
+    )
+    .await;
 
     first_run.ledger_record.run_id = "run.invalid-pair-projection".to_owned();
     let (phase_tx, mut phase_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -2528,12 +2535,12 @@ async fn retained_pair_attempts_second_leg_and_keeps_both_guards_until_both_fini
     assert!(task_lock_is_denied(dashboard_root, first_job_id).await);
     assert!(task_lock_is_denied(dashboard_root, second_job_id).await);
     assert!(
-        crate::automation::run_ledger::find_run_record_exact_bounded_blocking(
-            dashboard_root,
-            first_run_id,
-        )
-        .expect("first recovery exact lookup")
-        .is_none()
+        runs_for(dashboard_root)
+            .await
+            .find_run_record(first_run_id)
+            .await
+            .expect("first recovery exact lookup")
+            .is_none()
     );
 
     release_tx.send(()).expect("release second pair leg");
@@ -2561,11 +2568,11 @@ async fn retained_pair_attempts_second_leg_and_keeps_both_guards_until_both_fini
         second_expected_record.clone()
     );
     assert_eq!(
-        crate::automation::run_ledger::find_run_record_exact_bounded_blocking(
-            dashboard_root,
-            second_run_id,
-        )
-        .expect("second pair exact lookup"),
+        runs_for(dashboard_root)
+            .await
+            .find_run_record(second_run_id)
+            .await
+            .expect("second pair exact lookup"),
         Some(second_expected_record)
     );
     let second_terminal = read_indexed_record_blocking(&second_journal)
@@ -2622,7 +2629,7 @@ fn durable_settlement_classifier_requires_terminal_before_release() {
     let path = temp.path().join("classified-settlement.json");
     let admission = admission("run.classified-settlement", "request.classified-settlement");
     let terminal = success_terminal(&admission, "run.classified-settlement");
-    let publication = exact_publication('f', 8_192);
+    let publication = exact_publication('f');
     let claim = reserve_or_replay_blocking(&path, admission.clone()).expect("reserve");
 
     assert_eq!(
@@ -2713,7 +2720,7 @@ async fn retained_settlement_exceeds_retry_budget_instead_of_hanging_forever() {
     };
     let cleanup_admission = seal_effect_authority(cleanup_admission);
     let (authority, journal_path, expected_admission) =
-        retained_external_authority(dashboard_root, cleanup_admission);
+        retained_external_authority(dashboard_root, cleanup_admission).await;
     recovery_index::add_pending_blocking(dashboard_root, &journal_path, &expected_admission)
         .expect("retain retry-budget cleanup authority");
 
@@ -2736,8 +2743,9 @@ async fn retained_settlement_exceeds_retry_budget_instead_of_hanging_forever() {
         prepared_write_hook: Some(always_fails_write_hook),
     };
 
-    let waiter = super::RetainedSettlementWaiter::start(move || {
+    let waiter = super::RetainedSettlementWaiter::start_future(async move {
         super::settle_bound_owner_with_budget(state, Duration::from_millis(200))
+            .await
             .map(|owned| owned.value)
     });
     let error = waiter.wait().await.expect_err(
@@ -2760,7 +2768,7 @@ async fn retained_settlement_exceeds_retry_budget_instead_of_hanging_forever() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn retained_user_job_rebinds_and_recovery_retires_only_terminal_corrupt_spool() {
+async fn external_effect_crash_and_cancellation_boundaries_settle_once() {
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
@@ -2787,7 +2795,7 @@ async fn retained_user_job_rebinds_and_recovery_retires_only_terminal_corrupt_sp
     };
     cleanup_admission = seal_effect_authority(cleanup_admission);
     let (authority, journal_path, expected_admission) =
-        retained_external_authority(dashboard_root, cleanup_admission);
+        retained_external_authority(dashboard_root, cleanup_admission).await;
     recovery_index::add_pending_blocking(dashboard_root, &journal_path, &expected_admission)
         .expect("retain settlement cleanup authority");
 
@@ -2857,14 +2865,13 @@ async fn retained_user_job_rebinds_and_recovery_retires_only_terminal_corrupt_sp
     assert!(reserved.prepared().is_none());
     assert_eq!(reserved.admission(), &expected_admission);
     assert!(
-        crate::automation::run_ledger::find_run_record_exact_bounded_blocking(
-            dashboard_root,
-            run_id,
-        )
-        .expect("exact lookup after failed Prepared write")
-        .is_none()
+        runs_for(dashboard_root)
+            .await
+            .find_run_record(run_id)
+            .await
+            .expect("exact lookup after failed Prepared write")
+            .is_none()
     );
-    assert_eq!(exact_spool_file_count(dashboard_root), 1);
     assert!(task_lock_is_denied(dashboard_root, job_id).await);
 
     release_tx.send(()).expect("release failed Prepared phase");
@@ -2883,12 +2890,12 @@ async fn retained_user_job_rebinds_and_recovery_retires_only_terminal_corrupt_sp
             .is_some()
     );
     assert!(
-        crate::automation::run_ledger::find_run_record_exact_bounded_blocking(
-            dashboard_root,
-            run_id,
-        )
-        .expect("exact lookup before publication")
-        .is_none()
+        runs_for(dashboard_root)
+            .await
+            .find_run_record(run_id)
+            .await
+            .expect("exact lookup before publication")
+            .is_none()
     );
     let publication = {
         let attempted_publications = publications.lock().expect("publication attempts");
@@ -2896,7 +2903,6 @@ async fn retained_user_job_rebinds_and_recovery_retires_only_terminal_corrupt_sp
         assert_eq!(attempted_publications[0], attempted_publications[1]);
         attempted_publications[1].clone()
     };
-    assert_eq!(exact_spool_file_count(dashboard_root), 1);
     assert!(task_lock_is_denied(dashboard_root, job_id).await);
 
     release_tx.send(()).expect("release prepared phase");
@@ -2908,11 +2914,11 @@ async fn retained_user_job_rebinds_and_recovery_retires_only_terminal_corrupt_sp
         super::RetainedSettlementPhase::Published
     );
     assert_eq!(
-        crate::automation::run_ledger::find_run_record_exact_bounded_blocking(
-            dashboard_root,
-            run_id,
-        )
-        .expect("exact lookup after publication"),
+        runs_for(dashboard_root)
+            .await
+            .find_run_record(run_id)
+            .await
+            .expect("exact lookup after publication"),
         Some(expected_record.clone())
     );
     let prepared = read_indexed_record_blocking(&journal_path)
@@ -2922,41 +2928,13 @@ async fn retained_user_job_rebinds_and_recovery_retires_only_terminal_corrupt_sp
     assert!(!prepared.is_terminal());
     assert_eq!(prepared.admission(), &expected_admission);
     assert!(task_lock_is_denied(dashboard_root, job_id).await);
-    let spool_files = exact_spool_files(dashboard_root);
-    assert_eq!(spool_files.len(), 1);
-    let spool_path = spool_files[0].clone();
-    std::fs::write(&spool_path, b"corrupt-after-exact-publication")
-        .expect("corrupt exact stable spool");
-    let prepared_terminal = read_indexed_terminal_blocking(&journal_path)
-        .expect("prepared terminal sidecar")
-        .expect("prepared terminal");
-    let cleanup_path = journal_path.clone();
-    let cleanup_admission = expected_admission.clone();
-    let cleanup_terminal = prepared_terminal.clone();
-    let cleanup_publication = publication.clone();
-    let cleanup_error =
-        crate::automation::run_ledger::discard_stale_staged_run_record_exact_after_terminal(
-            dashboard_root,
-            run_id,
-            &publication,
-            move || {
-                Ok(classify_durable_settlement_blocking(
-                    &cleanup_path,
-                    &cleanup_admission,
-                    &cleanup_terminal,
-                    Some(&cleanup_publication),
-                )?
-                .is_terminal())
-            },
-        )
-        .await
-        .expect_err("Prepared journal must not authorize stale spool retirement");
+    let runs = runs_for(dashboard_root).await;
     assert!(
-        cleanup_error
-            .to_string()
-            .contains("lacks matching terminal authority")
+        runs.is_exact_terminal_published(run_id, &publication)
+            .await
+            .expect("exact publication probe"),
+        "the Prepared binding names the committed exact terminal"
     );
-    assert_eq!(exact_spool_file_count(dashboard_root), 1);
     assert_eq!(
         recovery_index::indexed_journals_blocking(dashboard_root, &expected_admission.scope)
             .expect("pre-Terminal pending authority")
@@ -2965,6 +2943,20 @@ async fn retained_user_job_rebinds_and_recovery_retires_only_terminal_corrupt_sp
     );
 
     release_tx.send(()).expect("release published phase");
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(5), phase_rx.recv())
+            .await
+            .expect("journal terminal phase")
+            .expect("journal terminal phase: channel unexpectedly closed"),
+        super::RetainedSettlementPhase::JournalTerminal
+    );
+    let pending =
+        recovery_index::indexed_journals_blocking(dashboard_root, &expected_admission.scope)
+            .expect("pending cleanup authority");
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].path, journal_path);
+
+    release_tx.send(()).expect("release terminal housekeeping");
     assert_eq!(
         tokio::time::timeout(Duration::from_secs(5), observed_rx.recv())
             .await
@@ -2982,33 +2974,25 @@ async fn retained_user_job_rebinds_and_recovery_retires_only_terminal_corrupt_sp
     assert!(terminal_journal.is_terminal());
     assert_eq!(terminal_journal.admission(), &expected_admission);
     assert_eq!(
-        crate::automation::run_ledger::find_run_record_exact_bounded_blocking(
-            dashboard_root,
-            run_id,
-        )
-        .expect("exact lookup after terminal"),
+        runs_for(dashboard_root)
+            .await
+            .find_run_record(run_id)
+            .await
+            .expect("exact lookup after terminal"),
         Some(expected_record.clone())
     );
-    let exact_rows = std::fs::read_to_string(crate::automation::run_ledger::run_ledger_path(
-        dashboard_root,
-    ))
-    .expect("physical exact run ledger")
-    .lines()
-    .filter(|line| !line.is_empty())
-    .map(|line| serde_json::from_str::<AutomationRunLedgerRecord>(line).expect("exact ledger row"))
-    .filter(|record| record.run_id == run_id)
-    .collect::<Vec<_>>();
+    let exact_rows = runs
+        .load_run_records(50)
+        .await
+        .expect("registered run history")
+        .into_iter()
+        .filter(|record| record.run_id == run_id)
+        .collect::<Vec<_>>();
     assert_eq!(
         exact_rows,
         vec![expected_record.clone()],
-        "physical ledger must contain the exact run row once"
+        "registered history must contain the exact run row once"
     );
-    assert_eq!(exact_spool_file_count(dashboard_root), 1);
-    let pending =
-        recovery_index::indexed_journals_blocking(dashboard_root, &expected_admission.scope)
-            .expect("pending cleanup authority");
-    assert_eq!(pending.len(), 1);
-    assert_eq!(pending[0].path, journal_path);
     assert!(
         crate::automation::scheduler::AutomationTaskLock::try_acquire_keyed(
             dashboard_root,
@@ -3022,12 +3006,13 @@ async fn retained_user_job_rebinds_and_recovery_retires_only_terminal_corrupt_sp
     let journal_before_recovery = std::fs::read(&journal_path).expect("terminal journal bytes");
     let terminal_path = terminal_sidecar_path(&journal_path).expect("terminal sidecar path");
     let terminal_before_recovery = std::fs::read(&terminal_path).expect("terminal sidecar bytes");
-    let ledger_path = crate::automation::run_ledger::run_ledger_path(dashboard_root);
-    let ledger_before_recovery = std::fs::read(&ledger_path).expect("exact ledger bytes");
-    let cancellation = CancellationSignal::active("cancellation.corrupt-spool-recovery")
+    let history_before_recovery = runs.load_run_records(50).await.expect("run history");
+    let cancellation = CancellationSignal::active("cancellation.terminal-recovery")
         .expect("recovery cancellation");
+    recovery_index::add_pending_blocking(dashboard_root, &journal_path, &expected_admission)
+        .expect("simulate a crash after the journal terminal but before pending cleanup");
     let recovery_index::AutomationEffectRecoveryPreparation::Pending(preparation) =
-        recovery_index::prepare_reserved_automation_effect_recovery(dashboard_root)
+        recovery_index::prepare_reserved_automation_effect_recovery(&runs)
             .await
             .expect("prepare canonical recovery")
     else {
@@ -3045,10 +3030,9 @@ async fn retained_user_job_rebinds_and_recovery_retires_only_terminal_corrupt_sp
         &recovery_scope,
     )
     .await
-    .expect("canonical corrupt spool recovery");
+    .expect("canonical terminal recovery");
     assert_eq!(recovery.inspected, 1);
     assert_eq!(recovery.already_terminal, 1);
-    assert_eq!(exact_spool_file_count(dashboard_root), 0);
     assert!(
         recovery_index::indexed_journals_blocking(dashboard_root, &expected_admission.scope)
             .expect("post-recovery pending authority")
@@ -3063,15 +3047,18 @@ async fn retained_user_job_rebinds_and_recovery_retires_only_terminal_corrupt_sp
         terminal_before_recovery
     );
     assert_eq!(
-        std::fs::read(&ledger_path).expect("recovered exact ledger"),
-        ledger_before_recovery
+        runs.load_run_records(50)
+            .await
+            .expect("recovered run history"),
+        history_before_recovery,
+        "terminal recovery replays the exact row without another transition"
     );
     assert_eq!(
-        crate::automation::run_ledger::find_run_record_exact_bounded_blocking(
-            dashboard_root,
-            run_id,
-        )
-        .expect("exact lookup after canonical recovery"),
+        runs_for(dashboard_root)
+            .await
+            .find_run_record(run_id)
+            .await
+            .expect("exact lookup after canonical recovery"),
         Some(expected_record)
     );
 }
@@ -3085,7 +3072,8 @@ async fn external_admission_does_not_resolve_memory_owner_but_memory_admission_d
         let (authority, _, _) = retained_external_authority(
             temp.path(),
             external_admission("run.context", "request.context"),
-        );
+        )
+        .await;
         let request = if memory_task {
             admission("run.memory", "request.memory").request
         } else {
@@ -3099,7 +3087,7 @@ async fn external_admission_does_not_resolve_memory_owner_but_memory_admission_d
                 observed_at: UtcMicros(2),
                 configuration_digest: authority.admission.configuration_digest.clone(),
                 request,
-                dashboard_root: temp.path().to_path_buf(),
+                runs: runs_for(temp.path()).await,
             },
             || {
                 called.store(true, Ordering::SeqCst);
@@ -3136,7 +3124,8 @@ async fn cancelled_after_admission_does_not_reserve_journal() {
     let (authority, _, _) = retained_external_authority(
         temp.path(),
         external_admission("run.fixture-cancel", "request.fixture-cancel"),
-    );
+    )
+    .await;
     let context = authority.context.clone();
     let cancellation = authority.cancellation.clone();
     let configuration_digest = authority.admission.configuration_digest.clone();
@@ -3161,7 +3150,7 @@ async fn cancelled_after_admission_does_not_reserve_journal() {
             observed_at: UtcMicros(2),
             configuration_digest,
             request,
-            dashboard_root: temp.path().to_path_buf(),
+            runs: runs_for(temp.path()).await,
         },
         || {
             Ok(FactOwnerV1::Project {
@@ -3202,7 +3191,8 @@ async fn timed_out_after_admission_does_not_reserve_journal() {
     let (authority, _, _) = retained_external_authority(
         temp.path(),
         external_admission("run.fixture-timeout", "request.fixture-timeout"),
-    );
+    )
+    .await;
     // Snapshot admission stays valid: observed_at (2) is before expires_at (100).
     // The live usecase clock is far past that deadline, so the reservation
     // recheck must refuse without writing journal state.
@@ -3233,7 +3223,7 @@ async fn timed_out_after_admission_does_not_reserve_journal() {
             observed_at: UtcMicros(2),
             configuration_digest,
             request,
-            dashboard_root: temp.path().to_path_buf(),
+            runs: runs_for(temp.path()).await,
         },
         || {
             Ok(FactOwnerV1::Project {
@@ -3280,7 +3270,7 @@ async fn a_settled_run_commits_each_journal_phase_once() {
     let retained = retained_disabled_user_job_run(dashboard_root, run_id, job_id).await;
     let admission = external_admission_for_job(run_id, "request.one-commit-per-phase", job_id);
     let (authority, journal_path, expected_admission) =
-        retained_external_authority(dashboard_root, admission);
+        retained_external_authority(dashboard_root, admission).await;
     recovery_index::add_pending_blocking(dashboard_root, &journal_path, &expected_admission)
         .expect("retain the reserved authority");
     assert_eq!(

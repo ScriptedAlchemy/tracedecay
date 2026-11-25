@@ -1671,7 +1671,69 @@ pub(super) const TABLES: &[Table] = &[
             ),
         ]
     ),
+    AUTOMATION_RUNS,
+    AUTOMATION_RUN_TRANSITIONS,
+    AUTOMATION_RUN_SEQUENCE,
+    AUTOMATION_RUN_STAGING,
 ];
+
+// Registered automation run-state authority. The transition rows are the
+// immutable ordered history; `automation_runs` is their current projection.
+const AUTOMATION_RUNS: Table = table!(
+    "automation_runs",
+    [
+        column("namespace", "TEXT", true, None, 1),
+        column("run_id", "TEXT", true, None, 2),
+        column("task", "TEXT", true, None, 0),
+        column("task_key", "TEXT", true, None, 0),
+        column("trigger", "TEXT", true, None, 0),
+        column("status", "TEXT", true, None, 0),
+        column("record_json", "TEXT", true, None, 0),
+        column("record_digest", "TEXT", true, None, 0),
+        column("completed_at_seconds", "INTEGER", true, None, 0),
+        column("completed_at_micros", "INTEGER", true, None, 0),
+        column("newest_sequence", "INTEGER", true, None, 0),
+        column("published_at_micros", "INTEGER", true, None, 0),
+    ],
+    []
+);
+
+const AUTOMATION_RUN_TRANSITIONS: Table = table!(
+    "automation_run_transitions",
+    [
+        column("namespace", "TEXT", true, None, 1),
+        column("run_id", "TEXT", true, None, 2),
+        column("status", "TEXT", true, None, 3),
+        column("record_json", "TEXT", true, None, 0),
+        column("record_digest", "TEXT", true, None, 0),
+        column("completed_at_seconds", "INTEGER", true, None, 0),
+        column("completed_at_micros", "INTEGER", true, None, 0),
+        column("published_sequence", "INTEGER", true, None, 0),
+        column("published_at_micros", "INTEGER", true, None, 0),
+    ],
+    []
+);
+
+const AUTOMATION_RUN_SEQUENCE: Table = table!(
+    "automation_run_sequence",
+    [
+        column("namespace", "TEXT", true, None, 1),
+        column("next_sequence", "INTEGER", true, None, 0),
+    ],
+    []
+);
+
+const AUTOMATION_RUN_STAGING: Table = table!(
+    "automation_run_staging",
+    [
+        column("namespace", "TEXT", true, None, 1),
+        column("run_id", "TEXT", true, None, 2),
+        column("record_json", "TEXT", true, None, 0),
+        column("record_digest", "TEXT", true, None, 0),
+        column("staged_at_micros", "INTEGER", true, None, 0),
+    ],
+    []
+);
 
 pub(super) const REGISTRY_TABLE_NAMES: &[&str] = &[
     "projects",
@@ -1695,11 +1757,93 @@ pub(super) struct Index {
     pub(super) columns: &'static [&'static str],
 }
 
-pub(super) const INDEX_DESCENDING_COLUMNS: &[(&str, &[&str])] =
-    &[("idx_code_projects_last_seen_project", &["last_seen_at"])];
+pub(super) const INDEX_DESCENDING_COLUMNS: &[(&str, &[&str])] = &[
+    ("idx_code_projects_last_seen_project", &["last_seen_at"]),
+    ("idx_automation_runs_recent", &["newest_sequence"]),
+    (
+        "idx_automation_runs_task",
+        &[
+            "completed_at_seconds",
+            "completed_at_micros",
+            "newest_sequence",
+        ],
+    ),
+    (
+        "idx_automation_runs_terminal",
+        &[
+            "completed_at_seconds",
+            "completed_at_micros",
+            "newest_sequence",
+        ],
+    ),
+    (
+        "idx_automation_runs_validation_cursor",
+        &["completed_at_seconds", "completed_at_micros"],
+    ),
+];
 pub(super) const INDEX_EXPRESSION_COLUMN: &str = "<expression>";
 
 pub(super) const INDEXES: &[Index] = &[
+    Index {
+        table: "automation_runs",
+        name: Some("idx_automation_runs_recent"),
+        unique: false,
+        origin: "c",
+        columns: &["namespace", "newest_sequence"],
+    },
+    Index {
+        table: "automation_runs",
+        name: Some("idx_automation_runs_task"),
+        unique: false,
+        origin: "c",
+        columns: &[
+            "namespace",
+            "task",
+            "task_key",
+            "completed_at_seconds",
+            "completed_at_micros",
+            "newest_sequence",
+        ],
+    },
+    Index {
+        table: "automation_runs",
+        name: Some("idx_automation_runs_terminal"),
+        unique: false,
+        origin: "c",
+        columns: &[
+            "namespace",
+            "status",
+            "completed_at_seconds",
+            "completed_at_micros",
+            "newest_sequence",
+        ],
+    },
+    Index {
+        table: "automation_runs",
+        name: Some("idx_automation_runs_validation_cursor"),
+        unique: false,
+        origin: "c",
+        columns: &[
+            "namespace",
+            "task_key",
+            "completed_at_seconds",
+            "completed_at_micros",
+        ],
+    },
+    Index {
+        table: "automation_run_transitions",
+        name: Some("idx_automation_run_transitions_run"),
+        unique: false,
+        origin: "c",
+        columns: &["namespace", "run_id", "published_sequence"],
+    },
+    Index {
+        table: "automation_run_transitions",
+        name: None,
+        unique: true,
+        origin: "u",
+        columns: &["namespace", "published_sequence"],
+    },
     Index {
         table: "code_projects",
         name: Some("idx_code_projects_last_seen_project"),

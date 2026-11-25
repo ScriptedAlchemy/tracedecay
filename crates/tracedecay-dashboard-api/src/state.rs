@@ -5,6 +5,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use tracedecay_automation_runtime::automation::host_io::HostIo;
+use tracedecay_automation_runtime::automation::registered_run_store::RegisteredAutomationRunStore;
 use tracedecay_contracts::code_index_freshness::CodeIndexFreshnessReader;
 use tracedecay_contracts::doctor::{DoctorReportV1, LanguageServerReadV1};
 use tracedecay_contracts::storage::{SchemaConvergenceFindingV1, TableGrowthDoctorEvidenceV1};
@@ -342,6 +343,19 @@ impl DashboardState {
                 tracing::warn!(%error, "dashboard automation scheduler reconcile not admitted");
             }
         }
+    }
+
+    /// The project's registered automation run-state authority. It is
+    /// unavailable until the project session store is mounted.
+    pub fn automation_run_store(&self) -> Result<RegisteredAutomationRunStore> {
+        let database = self.lcm_db.clone().ok_or_else(|| {
+            TraceDecayError::project_route(
+                "automation_run_store_unavailable",
+                true,
+                "the project session store holding automation run history is not mounted",
+            )
+        })?;
+        RegisteredAutomationRunStore::admit(database, self.dashboard_root.clone())
     }
 
     pub(crate) fn mount_session_authorities(&mut self, authorities: DashboardSessionAuthoritiesV1) {

@@ -166,7 +166,7 @@ fn final_self_improvement_smoke_covers_autonomous_curation_and_skill_deployment(
             .project_id
             .as_str()
             .to_owned();
-        let dashboard_root = cg.store_layout().dashboard_root.clone();
+        let run_store = cg.automation_run_store().unwrap();
         let agent = http_agent();
         let (endpoint, base_url) = dashboard_endpoint().await;
         let mut server = spawn_dashboard_server_with_configuration_runtime(
@@ -222,12 +222,7 @@ fn final_self_improvement_smoke_covers_autonomous_curation_and_skill_deployment(
         assert_eq!(settled["status"], "succeeded", "{settled}");
         assert_eq!(settled["accepted_count"], 1);
         assert_eq!(settled["rejected_count"], 0);
-        let records = tracedecay_automation_runtime::automation::run_ledger::load_run_records(
-            &dashboard_root,
-            10,
-        )
-        .await
-        .unwrap();
+        let records = run_store.load_run_records(10).await.unwrap();
         let record = records
             .iter()
             .find(|record| record.run_id == run_id)
@@ -518,6 +513,7 @@ fn automation_run_artifact_api_serves_verified_sidecar_payloads() {
             .with_global_db_override(&global_db_path);
 
         let (cg, host_runtime) = setup_project(&profile, &project_root).await;
+        let run_store = cg.automation_run_store().unwrap();
         let dashboard_root = cg.store_layout().dashboard_root.clone();
         let run_id = "artifact_api_run";
         let created_at = "2026-06-24T00:00:00Z";
@@ -539,8 +535,7 @@ fn automation_run_artifact_api_serves_verified_sidecar_payloads() {
         )
         .await
         .unwrap();
-        tracedecay_automation_runtime::automation::run_ledger::append_run_record(
-            &dashboard_root,
+        run_store.append_run_record(
             &tracedecay_automation_runtime::automation::run_ledger::AutomationRunLedgerRecord {
                 schema_version: 2,
                 run_id: run_id.to_string(),

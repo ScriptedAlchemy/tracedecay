@@ -81,7 +81,8 @@ async fn retained_session_reflector_preserves_retrieval_and_defers_ledger_public
 
     assert_eq!(run.run_id, "retained-session-reflector");
     assert!(
-        load_run_records(&cg.store_layout().dashboard_root, 10)
+        run_store(&cg)
+            .load_run_records(10)
             .await
             .unwrap()
             .is_empty(),
@@ -285,7 +286,8 @@ async fn project_runners_keep_distinct_budget_stages_in_terminal_reports_and_led
         assert_eq!(run.fallback_status, None);
         assert_eq!(run.session_evidence_budget_stage, Some(stage));
     }
-    let mut published: Vec<_> = load_run_records(&cg.store_layout().dashboard_root, 10)
+    let mut published: Vec<_> = run_store(&cg)
+        .load_run_records(10)
         .await
         .unwrap()
         .into_iter()
@@ -379,9 +381,7 @@ async fn project_reflector_and_skill_writer_terminal_evidence_matrix_has_zero_wr
         assert_eq!(skill.ledger_record.error.as_deref(), Some(reason));
         assert_eq!(reflector_backend.calls(), 0);
         assert_eq!(skill_backend.calls(), 0);
-        let records = load_run_records(&cg.store_layout().dashboard_root, 10)
-            .await
-            .unwrap();
+        let records = run_store(&cg).load_run_records(10).await.unwrap();
         assert_eq!(records.len(), 2, "settlement publishes both skip terminals");
         assert!(records.iter().all(|record| {
             record.status == AutomationRunStatus::Skipped
@@ -451,9 +451,7 @@ async fn project_reflector_and_skill_writer_terminal_evidence_matrix_has_zero_wr
         skill.ledger_record.error.as_deref(),
         Some("no_session_evidence")
     );
-    let records = load_run_records(&cg.store_layout().dashboard_root, 10)
-        .await
-        .unwrap();
+    let records = run_store(&cg).load_run_records(10).await.unwrap();
     assert_eq!(records.len(), 2, "settlement publishes both skip terminals");
     assert!(records.iter().all(|record| {
         record.status == AutomationRunStatus::Skipped
@@ -838,9 +836,7 @@ async fn session_reflector_runner_applies_valid_automatic_facts_by_default() {
         "session reflector should persist terminal automatic effects"
     );
 
-    let records = load_run_records(&cg.store_layout().dashboard_root, 10)
-        .await
-        .unwrap();
+    let records = run_store(&cg).load_run_records(10).await.unwrap();
     assert_eq!(records.len(), 1);
     assert_eq!(records[0].run_id, run.run_id);
     assert_eq!(records[0].accepted_count, 3);
@@ -1315,9 +1311,7 @@ async fn session_reflector_rejects_unsupported_source_role_and_time_filters_with
             .is_empty(),
         "filter and host-mode refusals must not write automatic facts"
     );
-    let records = load_run_records(&cg.store_layout().dashboard_root, 10)
-        .await
-        .unwrap();
+    let records = run_store(&cg).load_run_records(10).await.unwrap();
     let mut skip_reasons: Vec<_> = records
         .iter()
         .map(|record| record.error.as_deref())
@@ -1585,9 +1579,7 @@ async fn session_reflector_runner_ledgers_malformed_backend_output() {
         err.to_string().contains("expected ident") || err.to_string().contains("expected value"),
         "unexpected error: {err}"
     );
-    let records = load_run_records(&cg.store_layout().dashboard_root, 10)
-        .await
-        .unwrap();
+    let records = run_store(&cg).load_run_records(10).await.unwrap();
     assert_eq!(records.len(), 1);
     assert_eq!(records[0].task, AgentTaskKind::SessionReflector);
     assert_eq!(records[0].task_key, "session_reflector");
@@ -1651,9 +1643,7 @@ async fn session_reflector_runner_ledgers_missing_facts_array() {
         err.to_string()
             .contains("session reflector output must include a facts array")
     );
-    let records = load_run_records(&cg.store_layout().dashboard_root, 10)
-        .await
-        .unwrap();
+    let records = run_store(&cg).load_run_records(10).await.unwrap();
     assert_eq!(records.len(), 1);
     assert_eq!(records[0].task, AgentTaskKind::SessionReflector);
     assert_eq!(records[0].status, AutomationRunStatus::Failed);
@@ -1739,9 +1729,7 @@ async fn session_reflector_runner_records_noop_fallback_when_backend_run_task_fa
             .as_deref()
             .is_some_and(|error| error.contains("executable"))
     );
-    let records = load_run_records(&cg.store_layout().dashboard_root, 10)
-        .await
-        .unwrap();
+    let records = run_store(&cg).load_run_records(10).await.unwrap();
     assert_eq!(records.len(), 1);
     assert_noop_fallback_record(
         &records[0],

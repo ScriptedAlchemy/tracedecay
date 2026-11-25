@@ -24,7 +24,8 @@ use tracedecay_store::{FactReadControl, ProjectMemoryAutomationRunReceiptsV1};
 use super::journal::{self, DurableAutomationAdmission};
 use super::projection::project_recovered_committed_receipts;
 use super::{AutomationSettledTerminal, contract_error, digest};
-use crate::automation::run_ledger::{self, ExactRunPublishOutcome, ExactRunUnboundDiscardOutcome};
+use crate::automation::registered_run_store::RegisteredAutomationRunStore;
+use crate::automation::run_ledger::{ExactRunPublishOutcome, ExactRunUnboundDiscardOutcome};
 use tracedecay_domain::errors::{Result, TraceDecayError};
 
 const INDEX_SCHEMA_VERSION: u32 = 1;
@@ -49,7 +50,7 @@ pub enum AutomationEffectRecoveryPreparation {
 }
 
 pub struct PreparedAutomationEffectRecovery {
-    dashboard_root: PathBuf,
+    runs: RegisteredAutomationRunStore,
 }
 
 #[tracing::instrument(
@@ -58,19 +59,9 @@ pub struct PreparedAutomationEffectRecovery {
     skip_all
 )]
 pub async fn prepare_reserved_automation_effect_recovery(
-    dashboard_root: &Path,
+    runs: &RegisteredAutomationRunStore,
 ) -> Result<AutomationEffectRecoveryPreparation> {
-    let repair_root = dashboard_root.to_path_buf();
-    tracedecay_runtime_core::native_runtime::spawn_blocking(move || {
-        run_ledger::repair_corrupt_run_ledger_append_intent_blocking(&repair_root)
-    })
-    .await
-    .map_err(|error| {
-        contract_error(format!(
-            "automation run append-intent repair failed to join: {error}"
-        ))
-    })??;
-    let recovery_root = dashboard_root.to_path_buf();
+    let recovery_root = runs.dashboard_root().to_path_buf();
     let indexed = tracedecay_runtime_core::native_runtime::spawn_blocking(move || {
         indexed_recovery_blocking(&recovery_root)
     })
@@ -84,9 +75,7 @@ pub async fn prepare_reserved_automation_effect_recovery(
         ));
     }
     Ok(AutomationEffectRecoveryPreparation::Pending(
-        PreparedAutomationEffectRecovery {
-            dashboard_root: dashboard_root.to_path_buf(),
-        },
+        PreparedAutomationEffectRecovery { runs: runs.clone() },
     ))
 }
 
@@ -104,7 +93,8 @@ where
     F: Fn(RunId, FactReadControl) -> Fut + Sync,
     Fut: Future<Output = Result<ProjectMemoryAutomationRunReceiptsV1>> + Send,
 {
-    let PreparedAutomationEffectRecovery { dashboard_root } = preparation;
+    let PreparedAutomationEffectRecovery { runs } = preparation;
+    let dashboard_root = runs.dashboard_root().to_path_buf();
     let tracedecay_domain::FactOwnerV1::Project { project_id } = owner else {
         return Err(contract_error(
             "automation recovery requires a project owner",
@@ -136,7 +126,7 @@ where
         report.inspected += 1;
         match reconcile_indexed_automation_effect(
             &read_receipts,
-            &dashboard_root,
+            &runs,
             cancellation,
             owner,
             &scope,
@@ -178,7 +168,7 @@ enum EntryRecoveryOutcome {
 
 async fn reconcile_indexed_automation_effect<F, Fut>(
     read_receipts: &F,
-    dashboard_root: &Path,
+    runs: &RegisteredAutomationRunStore,
     cancellation: &CancellationSignal,
     owner: &tracedecay_domain::FactOwnerV1,
     scope: &ResolvedScope,
@@ -192,6 +182,7 @@ where
     if indexed.project_id != scope.project_id || indexed.scope_digest != scope.scope_digest {
         return Ok(EntryRecoveryOutcome::Deferred);
     }
+    let dashboard_root = runs.dashboard_root();
     let path = indexed.path.clone();
     let record = tracedecay_runtime_core::native_runtime::spawn_blocking(move || {
         journal::read_indexed_record_blocking(&path)
@@ -216,42 +207,22 @@ where
         return Ok(EntryRecoveryOutcome::Deferred);
     }
     if record.is_terminal() {
+        // A terminal journal must still prove its durable sidecar before its
+        // bound publication is replayed.
         let terminal_path = indexed.path.clone();
-        let terminal = tracedecay_runtime_core::native_runtime::spawn_blocking(move || {
+        tracedecay_runtime_core::native_runtime::spawn_blocking(move || {
             journal::read_indexed_terminal_blocking(&terminal_path)
         })
         .await
         .map_err(|error| contract_error(format!("automation terminal reader failed: {error}")))??
         .ok_or_else(|| contract_error("terminal journal lost its durable sidecar"))?;
         if let Some(publication) = record.publication() {
-            let published = run_ledger::publish_staged_run_record_exact(
-                dashboard_root,
-                admission.request.run_id.as_str(),
-                publication,
-            )
-            .await?;
+            let published = runs
+                .publish_staged_run_record_exact(admission.request.run_id.as_str(), publication)
+                .await?;
             if published == ExactRunPublishOutcome::MissingPayload {
                 return Ok(EntryRecoveryOutcome::Deferred);
             }
-            let cleanup_path = indexed.path.clone();
-            let cleanup_admission = admission.clone();
-            let cleanup_terminal = terminal.clone();
-            let cleanup_publication = publication.clone();
-            run_ledger::discard_stale_staged_run_record_exact_after_terminal(
-                dashboard_root,
-                admission.request.run_id.as_str(),
-                publication,
-                move || {
-                    Ok(journal::classify_durable_settlement_blocking(
-                        &cleanup_path,
-                        &cleanup_admission,
-                        &cleanup_terminal,
-                        Some(&cleanup_publication),
-                    )?
-                    .is_terminal())
-                },
-            )
-            .await?;
         }
         super::finalize_terminal_housekeeping(dashboard_root, &indexed.path).await?;
         return Ok(EntryRecoveryOutcome::AlreadyTerminal);
@@ -272,56 +243,29 @@ where
         .await
         .map_err(|error| contract_error(format!("prepared terminal reader failed: {error}")))??;
         let (terminal, publication) = terminal;
-        let published = run_ledger::publish_staged_run_record_exact(
-            dashboard_root,
-            admission.request.run_id.as_str(),
-            &publication,
-        )
-        .await?;
+        let published = runs
+            .publish_staged_run_record_exact(admission.request.run_id.as_str(), &publication)
+            .await?;
         if published == ExactRunPublishOutcome::MissingPayload {
             return Ok(EntryRecoveryOutcome::Deferred);
         }
         let path = indexed.path.clone();
         let requested = admission.clone();
-        let publication = publication.clone();
-        let cleanup_publication = publication.clone();
-        let cleanup_terminal = terminal.clone();
         tracedecay_runtime_core::native_runtime::spawn_blocking(move || {
             journal::promote_prepared_terminal_blocking(&path, &requested, terminal, &publication)
         })
         .await
         .map_err(|error| contract_error(format!("automation recovery writer failed: {error}")))??;
-        let terminal_path = indexed.path.clone();
-        let terminal_admission = admission.clone();
-        let terminal_publication = cleanup_publication.clone();
-        run_ledger::discard_stale_staged_run_record_exact_after_terminal(
-            dashboard_root,
-            admission.request.run_id.as_str(),
-            &cleanup_publication,
-            move || {
-                Ok(journal::classify_durable_settlement_blocking(
-                    &terminal_path,
-                    &terminal_admission,
-                    &cleanup_terminal,
-                    Some(&terminal_publication),
-                )?
-                .is_terminal())
-            },
-        )
-        .await?;
         remove_pending_async(dashboard_root, &indexed.path).await?;
         return Ok(EntryRecoveryOutcome::AlreadyTerminal);
     }
     let cleanup_path = indexed.path.clone();
     let cleanup_admission = admission.clone();
-    let discarded = run_ledger::discard_unbound_staged_run_records_if(
-        dashboard_root,
-        admission.request.run_id.as_str(),
-        move || {
+    let discarded = runs
+        .discard_unbound_staged_run_records_if(admission.request.run_id.as_str(), move || {
             journal::unbound_reserved_cleanup_is_safe_blocking(&cleanup_path, &cleanup_admission)
-        },
-    )
-    .await?;
+        })
+        .await?;
     if discarded == ExactRunUnboundDiscardOutcome::Retained {
         return Ok(EntryRecoveryOutcome::Deferred);
     }
@@ -908,17 +852,31 @@ mod tests {
         .expect("recovery scope")
     }
 
-    fn prepared_recovery(dashboard_root: &Path) -> PreparedAutomationEffectRecovery {
-        PreparedAutomationEffectRecovery {
-            dashboard_root: dashboard_root.to_path_buf(),
-        }
+    async fn prepared_recovery(
+        root: &Path,
+    ) -> (
+        PreparedAutomationEffectRecovery,
+        crate::automation::registered_run_store::tests::ProjectRunStoreFixture,
+    ) {
+        let fixture = crate::automation::registered_run_store::tests::project_run_store(
+            root,
+            &root.join("dashboard"),
+        )
+        .await;
+        (
+            PreparedAutomationEffectRecovery {
+                runs: fixture.runs.clone(),
+            },
+            fixture,
+        )
     }
 
     #[tokio::test]
     async fn prepared_recovery_rejects_non_project_memory_owner() {
         let temp = tempfile::tempdir().expect("tempdir");
+        let (preparation, _fixture) = prepared_recovery(temp.path()).await;
         let error = reconcile_prepared_automation_effects_for_project(
-            prepared_recovery(temp.path()),
+            preparation,
             |_, _| async { panic!("owner validation must precede memory access") },
             &FactOwnerV1::Profile,
             &CancellationSignal::active("cancellation.non-project-owner").expect("cancellation"),
@@ -937,8 +895,9 @@ mod tests {
     #[tokio::test]
     async fn prepared_recovery_rejects_memory_owner_scope_mismatch() {
         let temp = tempfile::tempdir().expect("tempdir");
+        let (preparation, _fixture) = prepared_recovery(temp.path()).await;
         let error = reconcile_prepared_automation_effects_for_project(
-            prepared_recovery(temp.path()),
+            preparation,
             |_, _| async { panic!("scope validation must precede memory access") },
             &FactOwnerV1::Project {
                 project_id: ProjectId::new("project.other").expect("project"),

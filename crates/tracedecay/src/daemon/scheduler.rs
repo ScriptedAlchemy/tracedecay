@@ -2199,7 +2199,14 @@ async fn run_user_jobs_scheduler_pass(
     backend: &tracedecay_automation_runtime::automation::backend::CodexAppServerBackend,
     first_error: &mut Option<TraceDecayError>,
 ) {
-    let dashboard_root = cg.store_layout().dashboard_root.clone();
+    let runs = match cg.automation_run_store() {
+        Ok(runs) => runs,
+        Err(error) => {
+            log_scheduler_task_error(project_path, AgentTaskKind::UserJob, &error);
+            first_error.get_or_insert(error);
+            return;
+        }
+    };
     let jobs = match cg.scheduled_jobs().await {
         Ok(jobs) => jobs,
         Err(e) => {
@@ -2226,7 +2233,7 @@ async fn run_user_jobs_scheduler_pass(
         // between narrow the anti-duplicate window below a row that already
         // carries this occurrence's derived diagnostic identity.
         let (requested_run_id, occurrence_anchor_run_id) =
-            match scheduled_user_job_run_id(&dashboard_root, job, &configuration_digest).await {
+            match scheduled_user_job_run_id(&runs, job, &configuration_digest).await {
                 Ok(occurrence) => occurrence,
                 Err(error) => {
                     log_scheduler_task_error(project_path, AgentTaskKind::UserJob, &error);
@@ -2235,7 +2242,7 @@ async fn run_user_jobs_scheduler_pass(
                 }
             };
         match tracedecay_automation_runtime::automation::jobs::evaluate_and_record_scheduler_skip(
-            &dashboard_root,
+            &runs,
             config,
             backend.executable(),
             job,
@@ -2260,7 +2267,7 @@ async fn run_user_jobs_scheduler_pass(
             cg,
             run_control,
             project_path,
-            &dashboard_root,
+            &runs,
             Some(&requested_run_id),
             configuration_digest.clone(),
             |run_id| {
@@ -2295,7 +2302,7 @@ async fn run_user_jobs_scheduler_pass(
             }
         };
         let retained_run = tracedecay_automation_runtime::automation::jobs::run_user_job_with_backend_for_retained_settlement(
-            &dashboard_root,
+            &runs,
             config,
             backend,
             job,
@@ -2373,16 +2380,13 @@ async fn run_user_jobs_scheduler_pass(
     skip_all
 )]
 async fn scheduled_user_job_run_id(
-    dashboard_root: &Path,
+    runs: &tracedecay_automation_runtime::automation::registered_run_store::RegisteredAutomationRunStore,
     job: &tracedecay_automation_runtime::automation::jobs::AutomationJob,
     configuration_digest: &tracedecay_domain::ManifestDigest,
 ) -> Result<(String, Option<String>)> {
     let task_key = tracedecay_automation_runtime::automation::jobs::job_task_key(&job.id);
-    let latest_scheduler_terminal =
-        tracedecay_automation_runtime::automation::run_ledger::load_latest_scheduler_effectful_for_task_key(
-            dashboard_root,
-            &task_key,
-        )
+    let latest_scheduler_terminal = runs
+        .load_latest_scheduler_effectful_for_task_key(&task_key)
         .await?;
     let occurrence = tracedecay_domain::canonical_sha256(&(
         "tracedecay.scheduler.user-job-occurrence.v1",

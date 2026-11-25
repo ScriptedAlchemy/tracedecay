@@ -129,8 +129,13 @@ async fn scheduled_disabled_session_reflector_reads_no_evidence_and_runs_no_back
     let control = run_control();
     let authority = curation_authority();
 
+    let runs = crate::automation::registered_run_store::tests::project_run_store(
+        directory.path(),
+        &directory.path().join("automation"),
+    )
+    .await;
     let run = run_session_reflector_for_store_with_publication(
-        directory.path().join("automation"),
+        runs.runs.clone(),
         sessions.profile_database_arc(),
         &retrieval,
         &memory,

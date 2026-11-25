@@ -7,8 +7,9 @@
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::mpsc::{Receiver, SyncSender, sync_channel};
 use std::time::Duration;
+
+use tokio::sync::oneshot;
 
 use tracedecay_contracts::prepare_retained_effect;
 use tracedecay_contracts::retained_receipts::PreparedRetainedEffect;
@@ -52,8 +53,9 @@ use crate::automation::effect_runtime::{
     digest, effect_authority_digest as calculate_effect_authority_digest,
     finalize_terminal_housekeeping, journal, recovered_partial_terminal, remove_pending_blocking,
 };
+use crate::automation::registered_run_store::RegisteredAutomationRunStore;
 use crate::automation::run_ledger::{
-    self, AutomationRunLedgerRecord, AutomationRunStatus, AutomationTrigger, ExactRunPublication,
+    AutomationRunLedgerRecord, AutomationRunStatus, AutomationTrigger, ExactRunPublication,
     ExactRunPublishOutcome, ExactRunUnboundDiscardOutcome,
 };
 use crate::automation::runner::{
@@ -68,16 +70,14 @@ use tracedecay_domain::errors::Result;
 #[path = "settlement/tests.rs"]
 mod tests;
 
-/// Total wall-clock budget for a retained-settlement blocking-pool retry
-/// loop before it gives up and returns an error instead of retrying
-/// forever.
+/// Total wall-clock budget for a retained-settlement retry loop before it
+/// gives up and returns an error instead of retrying forever.
 ///
-/// These loops run on a `spawn_blocking` thread while the caller's
+/// These loops run as runtime-owned tasks while the caller's
 /// `RetainedSettlementWaiter::wait().await` is parked on them and the held
 /// `AutomationRunSettlementGuard` keeps the task lock. A persistent,
-/// non-self-healing failure (stale append-intent from a different run's
-/// crashed publication, a read-only filesystem, ...) must not pin that
-/// thread and hang the daemon request forever. 120s is long enough to ride
+/// non-self-healing failure (an unavailable registered store, a read-only
+/// filesystem, ...) must not hang the daemon request forever. 120s is long enough to ride
 /// out transient filesystem contention, short enough that a wedged
 /// settlement surfaces as an error instead of a hung request. On
 /// exhaustion the journal state is left exactly as it was
@@ -92,31 +92,35 @@ pub struct AutomationEffectAuthority {
     prepared: PreparedRetainedEffect,
     admission: DurableAutomationAdmission,
     journal_path: PathBuf,
-    dashboard_root: PathBuf,
+    runs: RegisteredAutomationRunStore,
     _reservation_claim: Option<AutomationReservationClaim>,
 }
 
 /// An opaque join authority for durability work that has already started.
 ///
-/// Dropping this value only stops observing the task. The blocking owner still
-/// holds the application claim and scheduler guard until it proves the exact
-/// terminal durable (or proves an uncommitted reservation was abandoned).
+/// Dropping this value only stops observing the task. The runtime-owned
+/// settlement still holds the application claim and scheduler guard until it
+/// proves the exact terminal durable (or proves an uncommitted reservation was
+/// abandoned).
 #[must_use = "dropping the waiter does not cancel retained automation settlement"]
 pub struct RetainedSettlementWaiter<T> {
-    result: tokio::sync::oneshot::Receiver<T>,
+    result: oneshot::Receiver<T>,
 }
 
 impl<T: Send + 'static> RetainedSettlementWaiter<T> {
-    /// Queues `owner` on the native blocking pool before returning, so the
+    /// Spawns `future` on the native runtime before returning, so the
     /// settlement runs whether or not the waiter is ever polled.
-    fn start(owner: impl FnOnce() -> T + Send + 'static) -> Self {
-        let (sender, result) = tokio::sync::oneshot::channel();
-        let queued = native_runtime::handle().map(|runtime| {
-            native_runtime::spawn_blocking_on(&runtime, move || {
-                let _ = sender.send(owner());
+    pub fn start_future<F>(future: F) -> Self
+    where
+        F: Future<Output = T> + Send + 'static,
+    {
+        let (sender, result) = oneshot::channel();
+        let spawned = native_runtime::handle().map(|runtime| {
+            runtime.spawn(async move {
+                let _ = sender.send(future.await);
             })
         });
-        if queued.is_none() {
+        if spawned.is_none() {
             tracing::error!("native runtime unavailable for retained automation settlement");
         }
         Self { result }
@@ -159,6 +163,7 @@ enum RetainedSettlementPhase {
     PreparedWriteFailed,
     Prepared,
     Published,
+    JournalTerminal,
 }
 
 #[cfg(test)]
@@ -341,15 +346,15 @@ impl RetainedSettlementPairWaiter {
     }
 }
 
-/// A pair of already-running blocking owners waiting for their settlement
+/// A pair of already-running settlement owners waiting for their settlement
 /// requests. Until both requests are submitted, dropping this value closes
 /// the corresponding channels and makes each owner durably abandon its exact
 /// reservation.
 #[must_use = "dropping an unsubmitted pair durably abandons both retained reservations"]
 pub struct DeferredSettlementPairSubmission<T> {
     payload: Option<T>,
-    first_sender: Option<SyncSender<DeferredSettlementRequest>>,
-    second_sender: Option<SyncSender<DeferredSettlementRequest>>,
+    first_sender: Option<oneshot::Sender<DeferredSettlementRequest>>,
+    second_sender: Option<oneshot::Sender<DeferredSettlementRequest>>,
     waiter: Option<RetainedSettlementPairWaiter>,
 }
 
@@ -400,7 +405,7 @@ impl<T> DeferredSettlementPairSubmission<T> {
 }
 
 fn submit_pair_request(
-    sender: Option<SyncSender<DeferredSettlementRequest>>,
+    sender: Option<oneshot::Sender<DeferredSettlementRequest>>,
     request: DeferredSettlementRequest,
     leg: &'static str,
 ) -> Option<tracedecay_domain::errors::TraceDecayError> {
@@ -411,18 +416,15 @@ fn submit_pair_request(
     };
     sender.send(request).err().map(|_| {
         contract_error(format!(
-            "retained settlement pair {leg} blocking owner stopped before accepting its request"
+            "retained settlement pair {leg} owner stopped before accepting its request"
         ))
     })
 }
 
-fn receive_pair_request(
-    receiver: Receiver<DeferredSettlementRequest>,
+async fn receive_pair_request(
+    receiver: oneshot::Receiver<DeferredSettlementRequest>,
 ) -> DeferredSettlementRequest {
-    match receiver.recv() {
-        Ok(request) => request,
-        Err(_) => DeferredSettlementRequest::Abandon,
-    }
+    receiver.await.unwrap_or(DeferredSettlementRequest::Abandon)
 }
 
 fn pair_join_result(owned: Result<RetainedPairOwnerOutcome>) -> Result<DeferredSettlementOutcome> {
@@ -497,7 +499,7 @@ pub struct AdmittedAutomationEffectRequest {
     pub observed_at: UtcMicros,
     pub configuration_digest: ManifestDigest,
     pub request: AutomationRunRequestV1,
-    pub dashboard_root: PathBuf,
+    pub runs: RegisteredAutomationRunStore,
 }
 
 pub enum AutomationEffectAdmission {
@@ -584,83 +586,98 @@ impl AutomationEffectAuthority {
         P: FnOnce(T) -> R + Send + 'static,
         R: Into<RetainedAutomationSettlementProjection> + Send + 'static,
     {
-        RetainedSettlementWaiter::start(move || match retained.into_settlement_disposition() {
-            RetainedAutomationSettlementDisposition::Current {
-                result,
-                settlement_guard,
-            } => match result {
-                Ok(run) => {
-                    let projected =
-                        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| projector(run)));
-                    let projected = match projected {
-                        Ok(projected) => projected.into(),
-                        Err(_) => {
-                            return self.finish_projection_failure(
-                                RetainedSettlementGuardOwner::Single(settlement_guard),
-                                contract_error("retained automation settlement projector panicked"),
-                            );
-                        }
-                    };
-                    match projected {
-                        RetainedAutomationSettlementProjection::Run { record, committed } => self
-                            .settle_retained_run_blocking(
-                                record,
-                                committed.map(|receipt| *receipt),
-                                RetainedSettlementGuardOwner::Single(settlement_guard),
-                                observer,
-                                #[cfg(test)]
-                                phase_hook,
-                                #[cfg(test)]
-                                prepared_write_hook,
-                            )
-                            .map(|owned| {
-                                let (terminal, record) = owned.value;
-                                RetainedAutomationSettlementOutcome::Run {
-                                    terminal: Box::new(terminal),
+        RetainedSettlementWaiter::start_future(async move {
+            match retained.into_settlement_disposition() {
+                RetainedAutomationSettlementDisposition::Current {
+                    result,
+                    settlement_guard,
+                } => match result {
+                    Ok(run) => {
+                        let projected =
+                            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                                projector(run)
+                            }));
+                        let projected = match projected {
+                            Ok(projected) => projected.into(),
+                            Err(_) => {
+                                return self
+                                    .finish_projection_failure(
+                                        RetainedSettlementGuardOwner::Single(settlement_guard),
+                                        contract_error(
+                                            "retained automation settlement projector panicked",
+                                        ),
+                                    )
+                                    .await;
+                            }
+                        };
+                        match projected {
+                            RetainedAutomationSettlementProjection::Run { record, committed } => {
+                                self.settle_retained_run(
                                     record,
-                                }
-                            }),
-                        RetainedAutomationSettlementProjection::AbandonObserved { record } => {
-                            self.abandon_retained_blocking(RetainedSettlementGuardOwner::Single(
-                                settlement_guard,
-                            ))?;
-                            observe_automation_ledger(observer, &record);
-                            Ok(RetainedAutomationSettlementOutcome::AbandonedObserved { record })
+                                    committed.map(|receipt| *receipt),
+                                    RetainedSettlementGuardOwner::Single(settlement_guard),
+                                    observer,
+                                    #[cfg(test)]
+                                    phase_hook,
+                                    #[cfg(test)]
+                                    prepared_write_hook,
+                                )
+                                .await
+                                .map(|owned| {
+                                    let (terminal, record) = owned.value;
+                                    RetainedAutomationSettlementOutcome::Run {
+                                        terminal: Box::new(terminal),
+                                        record,
+                                    }
+                                })
+                            }
+                            RetainedAutomationSettlementProjection::AbandonObserved { record } => {
+                                self.abandon_retained(RetainedSettlementGuardOwner::Single(
+                                    settlement_guard,
+                                ))
+                                .await?;
+                                observe_automation_ledger(observer, &record);
+                                Ok(RetainedAutomationSettlementOutcome::AbandonedObserved {
+                                    record,
+                                })
+                            }
                         }
                     }
-                }
-                Err(error) => self
-                    .settle_retained_problem_blocking(
-                        error,
-                        RetainedSettlementGuardOwner::Single(settlement_guard),
-                        observer,
-                        #[cfg(test)]
-                        phase_hook,
-                    )
-                    .map(|owned| {
-                        let (problem, record) = owned.value;
-                        RetainedAutomationSettlementOutcome::Problem {
-                            problem: Box::new(problem),
-                            record,
-                        }
-                    }),
-            },
-            RetainedAutomationSettlementDisposition::ReusedSchedulerSkip {
-                reused,
-                settlement_guard,
-            } => {
-                if let Err(error) = self.validate_reused_scheduler_skip(&reused) {
-                    return self.finish_projection_failure(
-                        RetainedSettlementGuardOwner::Single(settlement_guard),
-                        error,
-                    );
-                }
-                self.abandon_retained_blocking(RetainedSettlementGuardOwner::Single(
+                    Err(error) => self
+                        .settle_retained_problem(
+                            error,
+                            RetainedSettlementGuardOwner::Single(settlement_guard),
+                            observer,
+                            #[cfg(test)]
+                            phase_hook,
+                        )
+                        .await
+                        .map(|owned| {
+                            let (problem, record) = owned.value;
+                            RetainedAutomationSettlementOutcome::Problem {
+                                problem: Box::new(problem),
+                                record,
+                            }
+                        }),
+                },
+                RetainedAutomationSettlementDisposition::ReusedSchedulerSkip {
+                    reused,
                     settlement_guard,
-                ))?;
-                let record = *reused.prior_record;
-                observe_automation_ledger(observer, &record);
-                Ok(RetainedAutomationSettlementOutcome::Reused { record })
+                } => {
+                    if let Err(error) = self.validate_reused_scheduler_skip(&reused) {
+                        return self
+                            .finish_projection_failure(
+                                RetainedSettlementGuardOwner::Single(settlement_guard),
+                                error,
+                            )
+                            .await;
+                    }
+                    self.abandon_retained(RetainedSettlementGuardOwner::Single(settlement_guard))
+                        .await?;
+                    let record = *reused.prior_record;
+                    observe_automation_ledger(observer, &record);
+                    Ok(RetainedAutomationSettlementOutcome::Reused { record })
+                }
             }
         })
     }
@@ -716,27 +733,31 @@ impl AutomationEffectAuthority {
         #[cfg(test)] second_phase_hook: Option<SettlementPhaseHook>,
     ) -> DeferredSettlementPairSubmission<T> {
         let guards = Arc::new(guards);
-        let (first_sender, first_receiver) = sync_channel(1);
-        let (second_sender, second_receiver) = sync_channel(1);
+        let (first_sender, first_receiver) = oneshot::channel();
+        let (second_sender, second_receiver) = oneshot::channel();
         let first_guards = Arc::clone(&guards);
-        let first = RetainedSettlementWaiter::start(move || {
-            let first_request = receive_pair_request(first_receiver);
-            first_authority.settle_pair_leg_blocking(
-                first_request,
-                first_guards,
-                #[cfg(test)]
-                first_phase_hook,
-            )
+        let first = RetainedSettlementWaiter::start_future(async move {
+            let first_request = receive_pair_request(first_receiver).await;
+            first_authority
+                .settle_pair_leg(
+                    first_request,
+                    first_guards,
+                    #[cfg(test)]
+                    first_phase_hook,
+                )
+                .await
         });
         let second_guards = Arc::clone(&guards);
-        let second = RetainedSettlementWaiter::start(move || {
-            let second_request = receive_pair_request(second_receiver);
-            second_authority.settle_pair_leg_blocking(
-                second_request,
-                second_guards,
-                #[cfg(test)]
-                second_phase_hook,
-            )
+        let second = RetainedSettlementWaiter::start_future(async move {
+            let second_request = receive_pair_request(second_receiver).await;
+            second_authority
+                .settle_pair_leg(
+                    second_request,
+                    second_guards,
+                    #[cfg(test)]
+                    second_phase_hook,
+                )
+                .await
         });
         drop(guards);
         DeferredSettlementPairSubmission {
@@ -779,8 +800,8 @@ impl AutomationEffectAuthority {
         observer: Option<AutomationLedgerObserver>,
     ) -> RetainedSettlementWaiter<Result<(AutomationSettledTerminal, AutomationRunLedgerRecord)>>
     {
-        RetainedSettlementWaiter::start(move || {
-            self.settle_retained_run_blocking(
+        RetainedSettlementWaiter::start_future(async move {
+            self.settle_retained_run(
                 ledger,
                 committed,
                 RetainedSettlementGuardOwner::Single(guard),
@@ -790,6 +811,7 @@ impl AutomationEffectAuthority {
                 #[cfg(test)]
                 None,
             )
+            .await
             .map(|owned| owned.value)
         })
     }
@@ -801,14 +823,15 @@ impl AutomationEffectAuthority {
         observer: Option<AutomationLedgerObserver>,
     ) -> RetainedSettlementWaiter<Result<(AutomationRunProblemV1, Option<AutomationRunLedgerRecord>)>>
     {
-        RetainedSettlementWaiter::start(move || {
-            self.settle_retained_problem_blocking(
+        RetainedSettlementWaiter::start_future(async move {
+            self.settle_retained_problem(
                 error,
                 RetainedSettlementGuardOwner::Single(guard),
                 observer,
                 #[cfg(test)]
                 None,
             )
+            .await
             .map(|owned| owned.value)
         })
     }
@@ -829,15 +852,16 @@ impl AutomationEffectAuthority {
                 _guard: guard,
             }));
         }
-        Ok(RetainedSettlementWaiter::start(move || {
-            self.abandon_retained_blocking(RetainedSettlementGuardOwner::Single(guard))?;
+        Ok(RetainedSettlementWaiter::start_future(async move {
+            self.abandon_retained(RetainedSettlementGuardOwner::Single(guard))
+                .await?;
             let prior_record = *reused.prior_record;
             observe_automation_ledger(observer, &prior_record);
             Ok(prior_record)
         }))
     }
 
-    fn settle_pair_leg_blocking(
+    async fn settle_pair_leg(
         self,
         request: DeferredSettlementRequest,
         guards: Arc<PairSettlementGuards>,
@@ -851,7 +875,7 @@ impl AutomationEffectAuthority {
                     committed,
                     observer,
                 } = *request;
-                self.settle_retained_run_blocking(
+                self.settle_retained_run(
                     ledger,
                     committed,
                     guard,
@@ -861,6 +885,7 @@ impl AutomationEffectAuthority {
                     #[cfg(test)]
                     None,
                 )
+                .await
                 .map(|owned| {
                     let (terminal, _) = owned.value;
                     RetainedPairOwnerOutcome {
@@ -873,13 +898,14 @@ impl AutomationEffectAuthority {
             }
             DeferredSettlementRequest::Problem(request) => {
                 let DeferredProblemSettlementRequest { error, observer } = *request;
-                self.settle_retained_problem_blocking(
+                self.settle_retained_problem(
                     error,
                     guard,
                     observer,
                     #[cfg(test)]
                     phase_hook,
                 )
+                .await
                 .map(|owned| RetainedPairOwnerOutcome {
                     outcome: DeferredSettlementOutcome::Settled(Box::new(DeferredSettledOutcome {
                         terminal: AutomationSettledTerminal::Problem(owned.value.0),
@@ -888,7 +914,8 @@ impl AutomationEffectAuthority {
                 })
             }
             DeferredSettlementRequest::Abandon => {
-                self.abandon_retained_blocking(guard)
+                self.abandon_retained(guard)
+                    .await
                     .map(|owned| RetainedPairOwnerOutcome {
                         outcome: DeferredSettlementOutcome::Abandoned,
                         _pair_keepalive: owned.pair_keepalive.unwrap_or(guards),
@@ -897,7 +924,7 @@ impl AutomationEffectAuthority {
         }
     }
 
-    fn settle_retained_run_blocking(
+    async fn settle_retained_run(
         self,
         ledger: AutomationRunLedgerRecord,
         committed: Option<AutomationCommittedReceipt>,
@@ -908,7 +935,7 @@ impl AutomationEffectAuthority {
     ) -> Result<RetainedOwnerValue<(AutomationSettledTerminal, AutomationRunLedgerRecord)>> {
         let terminal = match self.terminal_for_run(&ledger, committed.as_ref()) {
             Ok(terminal) => terminal,
-            Err(error) => return self.finish_projection_failure(guard, error),
+            Err(error) => return self.finish_projection_failure(guard, error).await,
         };
         settle_bound_owner(RetainedBoundSettlement {
             authority: self,
@@ -922,9 +949,10 @@ impl AutomationEffectAuthority {
             #[cfg(test)]
             prepared_write_hook,
         })
+        .await
     }
 
-    fn settle_retained_problem_blocking(
+    async fn settle_retained_problem(
         self,
         error: AutomationRunError,
         guard: RetainedSettlementGuardOwner,
@@ -955,12 +983,12 @@ impl AutomationEffectAuthority {
         };
         let (problem, ledger) = match projection {
             Ok(projected) => projected,
-            Err(error) => return self.finish_projection_failure(guard, error),
+            Err(error) => return self.finish_projection_failure(guard, error).await,
         };
         let terminal = AutomationSettledTerminal::Problem(problem);
         if let Some(ledger) = ledger {
             if let Err(error) = self.validate_failed_ledger(&ledger) {
-                return self.finish_projection_failure(guard, error);
+                return self.finish_projection_failure(guard, error).await;
             }
             let owned = settle_bound_owner(RetainedBoundSettlement {
                 authority: self,
@@ -973,7 +1001,8 @@ impl AutomationEffectAuthority {
                 phase_hook,
                 #[cfg(test)]
                 prepared_write_hook: None,
-            })?;
+            })
+            .await?;
             let (terminal, ledger) = owned.value;
             match terminal {
                 AutomationSettledTerminal::Problem(problem) => Ok(RetainedOwnerValue {
@@ -989,7 +1018,8 @@ impl AutomationEffectAuthority {
                 authority: self,
                 guard,
                 terminal,
-            })?;
+            })
+            .await?;
             match owned.value {
                 AutomationSettledTerminal::Problem(problem) => Ok(RetainedOwnerValue {
                     value: (problem, None),
@@ -1002,17 +1032,22 @@ impl AutomationEffectAuthority {
         }
     }
 
-    fn abandon_retained_blocking(
+    async fn abandon_retained(
         self,
         guard: RetainedSettlementGuardOwner,
     ) -> Result<RetainedOwnerValue<()>> {
-        abandon_retained_owner(RetainedAbandonment {
+        let state = RetainedAbandonment {
             authority: self,
             guard,
-        })
+        };
+        native_runtime::spawn_owned_blocking(move || abandon_retained_owner(state))
+            .await
+            .map_err(|error| {
+                contract_error(format!("retained automation abandonment failed: {error}"))
+            })?
     }
 
-    fn finish_projection_failure<T>(
+    async fn finish_projection_failure<T>(
         self,
         guard: RetainedSettlementGuardOwner,
         error: tracedecay_domain::errors::TraceDecayError,
@@ -1023,7 +1058,8 @@ impl AutomationEffectAuthority {
             authority: self,
             guard,
             terminal,
-        })?;
+        })
+        .await?;
         Err(error)
     }
 
@@ -1043,8 +1079,9 @@ impl AutomationEffectAuthority {
             observed_at,
             configuration_digest,
             request,
-            dashboard_root,
+            runs,
         } = admitted;
+        let dashboard_root = runs.dashboard_root().to_path_buf();
         if !request.validate() {
             return Err(contract_error("automation run identity is empty"));
         }
@@ -1207,36 +1244,17 @@ impl AutomationEffectAuthority {
                 publication,
             } => {
                 if let Some(publication) = publication.as_ref() {
-                    let published = run_ledger::publish_staged_run_record_exact(
-                        &dashboard_root,
-                        admission.request.run_id.as_str(),
-                        publication,
-                    )
-                    .await?;
+                    let published = runs
+                        .publish_staged_run_record_exact(
+                            admission.request.run_id.as_str(),
+                            publication,
+                        )
+                        .await?;
                     if published == ExactRunPublishOutcome::MissingPayload {
                         return Err(contract_error(
-                            "durable automation replay has neither its exact ledger row nor bound spool",
+                            "durable automation replay has neither its exact run row nor its staged terminal",
                         ));
                     }
-                    let cleanup_path = journal_path.clone();
-                    let cleanup_admission = admission.clone();
-                    let cleanup_terminal = terminal.clone();
-                    let cleanup_publication = publication.clone();
-                    run_ledger::discard_stale_staged_run_record_exact_after_terminal(
-                        &dashboard_root,
-                        admission.request.run_id.as_str(),
-                        publication,
-                        move || {
-                            Ok(classify_durable_settlement_blocking(
-                                &cleanup_path,
-                                &cleanup_admission,
-                                &cleanup_terminal,
-                                Some(&cleanup_publication),
-                            )?
-                            .is_terminal())
-                        },
-                    )
-                    .await?;
                 }
                 finalize_terminal_housekeeping(&dashboard_root, &journal_path).await?;
                 Ok(AutomationEffectAdmission::Replay(Box::new(terminal)))
@@ -1249,14 +1267,13 @@ impl AutomationEffectAuthority {
                     prepared,
                     admission,
                     journal_path,
-                    dashboard_root: dashboard_root.clone(),
+                    runs: runs.clone(),
                     _reservation_claim: Some(claim),
                 };
                 Ok(AutomationEffectAdmission::Execute(Box::new(authority)))
             }
             ReservationResult::Recover => {
-                discard_direct_recovery_unbound_spools(&dashboard_root, &journal_path, &admission)
-                    .await?;
+                discard_direct_recovery_unbound_staging(&runs, &journal_path, &admission).await?;
                 let authority = Self {
                     context,
                     cancellation: cancellation.clone(),
@@ -1264,7 +1281,7 @@ impl AutomationEffectAuthority {
                     prepared,
                     admission,
                     journal_path,
-                    dashboard_root: dashboard_root.clone(),
+                    runs: runs.clone(),
                     _reservation_claim: None,
                 };
                 if authority.admission.is_external() {
@@ -1319,7 +1336,7 @@ impl AutomationEffectAuthority {
                     prepared,
                     admission,
                     journal_path,
-                    dashboard_root: dashboard_root.clone(),
+                    runs: runs.clone(),
                     _reservation_claim: None,
                 };
                 let terminal = authority
@@ -1327,11 +1344,9 @@ impl AutomationEffectAuthority {
                     .await?;
                 Ok(AutomationEffectAdmission::Replay(Box::new(terminal)))
             }
-            ReservationResult::Conflict { terminal } => Result::Ok(reservation_conflict_admission(
-                &dashboard_root,
-                &journal_path,
-                terminal,
-            )),
+            // A conflicting caller does not own the existing terminal's
+            // staged-publication proof; project recovery retires it.
+            ReservationResult::Conflict { .. } => Result::Ok(AutomationEffectAdmission::Conflict),
         }?;
         Ok(admission)
     }
@@ -1573,7 +1588,7 @@ impl AutomationEffectAuthority {
     pub async fn abandon_uncommitted(self) -> Result<()> {
         let path = self.journal_path;
         let admission = self.admission;
-        let dashboard_root = self.dashboard_root;
+        let dashboard_root = self.runs.dashboard_root().to_path_buf();
         let index_path = path.clone();
         tracedecay_runtime_core::native_runtime::spawn_blocking(move || {
             abandon_reservation_blocking(&path, &admission)?;
@@ -1653,15 +1668,13 @@ impl AutomationEffectAuthority {
         terminal: AutomationSettledTerminal,
         publication: ExactRunPublication,
     ) -> Result<AutomationSettledTerminal> {
-        let published = run_ledger::publish_staged_run_record_exact(
-            &self.dashboard_root,
-            self.admission.request.run_id.as_str(),
-            &publication,
-        )
-        .await?;
+        let published = self
+            .runs
+            .publish_staged_run_record_exact(self.admission.request.run_id.as_str(), &publication)
+            .await?;
         if published == ExactRunPublishOutcome::MissingPayload {
             return Err(contract_error(
-                "prepared automation terminal has neither its spool nor exact ledger row",
+                "prepared automation terminal has neither its staged terminal nor exact run row",
             ));
         }
         let path = self.journal_path.clone();
@@ -1676,13 +1689,7 @@ impl AutomationEffectAuthority {
                 "automation prepared-terminal promotion failed: {error}"
             ))
         })??;
-        run_ledger::discard_staged_run_record_exact(
-            &self.dashboard_root,
-            self.admission.request.run_id.as_str(),
-            &publication,
-        )
-        .await?;
-        finalize_terminal_housekeeping(&self.dashboard_root, &self.journal_path).await?;
+        finalize_terminal_housekeeping(self.runs.dashboard_root(), &self.journal_path).await?;
         Ok(terminal)
     }
 
@@ -1706,24 +1713,24 @@ impl AutomationEffectAuthority {
     }
 }
 
-fn settle_bound_owner(
+async fn settle_bound_owner(
     state: RetainedBoundSettlement,
 ) -> Result<RetainedOwnerValue<(AutomationSettledTerminal, AutomationRunLedgerRecord)>> {
-    settle_bound_owner_with_budget(state, RETAINED_SETTLEMENT_RETRY_BUDGET)
+    settle_bound_owner_with_budget(state, RETAINED_SETTLEMENT_RETRY_BUDGET).await
 }
 
 #[tracing::instrument(name = "daemon.automation.effect.settle", level = "trace", skip_all)]
-fn settle_bound_owner_with_budget(
+async fn settle_bound_owner_with_budget(
     mut state: RetainedBoundSettlement,
     budget: Duration,
 ) -> Result<RetainedOwnerValue<(AutomationSettledTerminal, AutomationRunLedgerRecord)>> {
     let started = std::time::Instant::now();
     let mut delay = Duration::from_millis(25);
     loop {
-        let error = match settle_bound_once(&mut state) {
+        let error = match settle_bound_once(&mut state).await {
             Ok(()) => return Ok(complete_bound_settlement(state)),
             Err(error) => {
-                match classify_bound_settlement(&state) {
+                match classify_bound_settlement(BoundSettlementProbe::of(&state)).await {
                     Ok(classification)
                         if classification.is_terminal() && state.publication.is_some() =>
                     {
@@ -1732,19 +1739,19 @@ fn settle_bound_owner_with_budget(
                             error = %error,
                             "automation settlement reached its exact terminal with deferred housekeeping"
                         );
-                        cleanup_bound_terminal(&state);
+                        cleanup_bound_terminal(BoundSettlementProbe::of(&state)).await;
                         return Ok(complete_bound_settlement(state));
                     }
                     Ok(_) => tracing::warn!(
                         run_id = %state.ledger.run_id,
                         error = %error,
-                        "automation finalization remains pending under its blocking owner"
+                        "automation finalization remains pending under its settlement owner"
                     ),
                     Err(classification_error) => tracing::warn!(
                             run_id = %state.ledger.run_id,
                             error = %error,
                             classification_error = %classification_error,
-                            "automation finalization remains uncertain under its blocking owner"
+                            "automation finalization remains uncertain under its settlement owner"
                     ),
                 }
                 error
@@ -1752,7 +1759,7 @@ fn settle_bound_owner_with_budget(
         };
         if state.authority.cancellation.is_cancelled() {
             return Err(contract_error(format!(
-                "retained automation settlement for run '{}' was cancelled while its blocking owner retried; state remains recoverable: {error}",
+                "retained automation settlement for run '{}' was cancelled while its owner retried; state remains recoverable: {error}",
                 state.ledger.run_id
             )));
         }
@@ -1762,42 +1769,55 @@ fn settle_bound_owner_with_budget(
                 state.ledger.run_id
             )));
         }
-        std::thread::sleep(delay);
+        native_runtime::sleep_until(std::time::Instant::now() + delay)
+            .await
+            .map_err(|sleep_error| {
+                contract_error(format!(
+                    "retained automation settlement for run '{}' lost its retry timer; state remains recoverable: {sleep_error}",
+                    state.ledger.run_id
+                ))
+            })?;
         delay = delay.saturating_mul(2).min(Duration::from_secs(5));
     }
 }
 
-fn settle_bound_once(state: &mut RetainedBoundSettlement) -> Result<()> {
+/// One ordered settlement attempt: stage the exact terminal and bind it as
+/// `Prepared` in the effect journal, commit it to the registered store, then
+/// promote the journal to its terminal.
+async fn settle_bound_once(state: &mut RetainedBoundSettlement) -> Result<()> {
     if state.publication.is_none() {
         #[cfg(test)]
         let prepared_write_hook = state.prepared_write_hook.clone();
-        let bound = run_ledger::bind_staged_run_record_exact(
-            &state.authority.dashboard_root,
-            &state.ledger,
-            |publication| {
+        let journal_path = state.authority.journal_path.clone();
+        let admission = state.authority.admission.clone();
+        let terminal = state.terminal.clone();
+        let bound = state
+            .authority
+            .runs
+            .bind_staged_run_record_exact(&state.ledger, move |publication| {
                 #[cfg(test)]
                 if let Some(hook) = prepared_write_hook.as_ref() {
                     hook.before_write(publication)?;
                 }
                 let first = persist_prepared_terminal_blocking(
-                    &state.authority.journal_path,
-                    &state.authority.admission,
-                    &state.terminal,
+                    &journal_path,
+                    &admission,
+                    &terminal,
                     publication.clone(),
                 );
                 match first {
                     Ok(()) => Ok(()),
                     Err(first_error) => replay_exact_binding_after_error_blocking(
-                        &state.authority.journal_path,
-                        &state.authority.admission,
-                        &state.terminal,
+                        &journal_path,
+                        &admission,
+                        &terminal,
                         publication,
                     )?
                     .map(|_| ())
                     .ok_or(first_error),
                 }
-            },
-        );
+            })
+            .await;
         match bound {
             Ok((publication, ())) => {
                 state.publication = Some(publication);
@@ -1807,11 +1827,11 @@ fn settle_bound_once(state: &mut RetainedBoundSettlement) -> Result<()> {
                 }
             }
             Err(error) => {
-                // A staged payload identifies only captured bytes. Until the
+                // A staged terminal identifies only captured bytes. Until the
                 // bind callback returns successfully, the journal has not
-                // proven that exact publication as Prepared. Leave it
-                // unbound so this owner re-enters the canonical bind path,
-                // which reuses the digest-owned spool without publishing it.
+                // proven that exact publication as Prepared. Leave it unbound
+                // so this owner re-enters the canonical bind path, which
+                // reuses the identical staged row.
                 state.publication = None;
                 #[cfg(test)]
                 if let Some(phase_hook) = state.phase_hook.as_ref() {
@@ -1823,21 +1843,19 @@ fn settle_bound_once(state: &mut RetainedBoundSettlement) -> Result<()> {
     }
     let publication = state
         .publication
-        .as_ref()
+        .clone()
         .ok_or_else(|| contract_error("prepared settlement lost its exact publication"))?;
-    let published = {
-        let _span = tracing::trace_span!("daemon.automation.effect.publish").entered();
-        {
-            run_ledger::publish_staged_run_record_exact_blocking(
-                &state.authority.dashboard_root,
-                state.authority.admission.request.run_id.as_str(),
-                publication,
-            )
-        }
-    }?;
+    let published = tracing::Instrument::instrument(
+        state.authority.runs.publish_staged_run_record_exact(
+            state.authority.admission.request.run_id.as_str(),
+            &publication,
+        ),
+        tracing::trace_span!("daemon.automation.effect.publish"),
+    )
+    .await?;
     if published == ExactRunPublishOutcome::MissingPayload {
         return Err(contract_error(
-            "prepared automation terminal has neither its spool nor exact ledger row",
+            "prepared automation terminal has neither its staged terminal nor exact run row",
         ));
     }
     #[cfg(test)]
@@ -1846,48 +1864,96 @@ fn settle_bound_once(state: &mut RetainedBoundSettlement) -> Result<()> {
             phase_hook.notify(RetainedSettlementPhase::Published);
         }
     }
-    state.terminal = promote_prepared_terminal_blocking(
-        &state.authority.journal_path,
-        &state.authority.admission,
-        state.terminal.clone(),
-        publication,
-    )?;
-    cleanup_bound_terminal(state);
+    let journal_path = state.authority.journal_path.clone();
+    let admission = state.authority.admission.clone();
+    let terminal = state.terminal.clone();
+    state.terminal = native_runtime::spawn_owned_blocking(move || {
+        promote_prepared_terminal_blocking(&journal_path, &admission, terminal, &publication)
+    })
+    .await
+    .map_err(|error| {
+        contract_error(format!(
+            "automation prepared-terminal promotion failed: {error}"
+        ))
+    })??;
+    #[cfg(test)]
+    {
+        if let Some(phase_hook) = state.phase_hook.as_ref() {
+            phase_hook.notify(RetainedSettlementPhase::JournalTerminal);
+        }
+    }
+    cleanup_bound_terminal(BoundSettlementProbe::of(state)).await;
     Ok(())
 }
 
-fn classify_bound_settlement(
-    state: &RetainedBoundSettlement,
-) -> Result<DurableSettlementClassification> {
-    classify_durable_settlement_blocking(
-        &state.authority.journal_path,
-        &state.authority.admission,
-        &state.terminal,
-        state.publication.as_ref(),
-    )
+/// The registered-store-independent inputs a settlement owner needs off its
+/// own task; `RetainedBoundSettlement` itself is not `Sync`.
+struct BoundSettlementProbe {
+    dashboard_root: PathBuf,
+    journal_path: PathBuf,
+    admission: DurableAutomationAdmission,
+    terminal: AutomationSettledTerminal,
+    publication: Option<ExactRunPublication>,
+    run_id: String,
 }
 
-fn cleanup_bound_terminal(state: &RetainedBoundSettlement) {
-    if let Some(publication) = state.publication.as_ref()
-        && let Err(error) = run_ledger::discard_staged_run_record_exact_blocking(
-            &state.authority.dashboard_root,
-            state.authority.admission.request.run_id.as_str(),
-            publication,
-        )
-    {
-        tracing::warn!(
-            run_id = %state.ledger.run_id,
-            error = %error,
-            "exact automation terminal is committed; spool cleanup remains recoverable"
-        );
-        return;
+impl BoundSettlementProbe {
+    fn of(state: &RetainedBoundSettlement) -> Self {
+        Self {
+            dashboard_root: state.authority.runs.dashboard_root().to_path_buf(),
+            journal_path: state.authority.journal_path.clone(),
+            admission: state.authority.admission.clone(),
+            terminal: state.terminal.clone(),
+            publication: state.publication.clone(),
+            run_id: state.ledger.run_id.clone(),
+        }
     }
-    if let Err(error) = remove_pending_blocking(
-        &state.authority.dashboard_root,
-        &state.authority.journal_path,
-    ) {
+}
+
+async fn classify_bound_settlement(
+    probe: BoundSettlementProbe,
+) -> Result<DurableSettlementClassification> {
+    let BoundSettlementProbe {
+        journal_path,
+        admission,
+        terminal,
+        publication,
+        ..
+    } = probe;
+    native_runtime::spawn_owned_blocking(move || {
+        classify_durable_settlement_blocking(
+            &journal_path,
+            &admission,
+            &terminal,
+            publication.as_ref(),
+        )
+    })
+    .await
+    .map_err(|error| {
+        contract_error(format!(
+            "automation settlement classification failed: {error}"
+        ))
+    })?
+}
+
+/// The committed run already retired its staged terminal in the same
+/// transaction; only the pending-index entry remains to clear.
+async fn cleanup_bound_terminal(probe: BoundSettlementProbe) {
+    let BoundSettlementProbe {
+        dashboard_root,
+        journal_path,
+        run_id,
+        ..
+    } = probe;
+    let removed = native_runtime::spawn_owned_blocking(move || {
+        remove_pending_blocking(&dashboard_root, &journal_path)
+    })
+    .await
+    .map_err(|error| contract_error(format!("pending-index cleanup failed to run: {error}")))
+    .and_then(|removed| removed);
+    if let Err(error) = removed {
         tracing::warn!(
-            run_id = %state.ledger.run_id,
+            run_id = %run_id,
             error = %error,
             "exact automation terminal is committed; pending-index cleanup remains recoverable"
         );
@@ -1938,11 +2004,21 @@ fn observe_automation_ledger(
     }
 }
 
-fn settle_direct_owner(
+async fn settle_direct_owner(
+    state: RetainedDirectSettlement,
+) -> Result<RetainedOwnerValue<AutomationSettledTerminal>> {
+    native_runtime::spawn_owned_blocking(move || settle_direct_owner_blocking(state))
+        .await
+        .map_err(|error| {
+            contract_error(format!("retained automation settlement failed: {error}"))
+        })?
+}
+
+fn settle_direct_owner_blocking(
     mut state: RetainedDirectSettlement,
 ) -> Result<RetainedOwnerValue<AutomationSettledTerminal>> {
     state.terminal = settle_direct(
-        &state.authority.dashboard_root,
+        state.authority.runs.dashboard_root(),
         &state.authority.journal_path,
         &state.authority.admission,
         &state.authority.cancellation,
@@ -1976,7 +2052,7 @@ fn complete_direct_settlement(
 
 fn abandon_retained_owner(state: RetainedAbandonment) -> Result<RetainedOwnerValue<()>> {
     abandon(
-        &state.authority.dashboard_root,
+        state.authority.runs.dashboard_root(),
         &state.authority.journal_path,
         &state.authority.admission,
         &state.authority.cancellation,
@@ -2149,36 +2225,22 @@ fn abandon_once(
     remove_pending_blocking(dashboard_root, journal_path)
 }
 
-async fn discard_direct_recovery_unbound_spools(
-    dashboard_root: &Path,
+async fn discard_direct_recovery_unbound_staging(
+    runs: &RegisteredAutomationRunStore,
     journal_path: &Path,
     admission: &DurableAutomationAdmission,
 ) -> Result<()> {
     let cleanup_path = journal_path.to_path_buf();
     let cleanup_admission = admission.clone();
-    let outcome = run_ledger::discard_unbound_staged_run_records_if(
-        dashboard_root,
-        admission.request.run_id.as_str(),
-        move || {
+    let outcome = runs
+        .discard_unbound_staged_run_records_if(admission.request.run_id.as_str(), move || {
             journal::unbound_reserved_cleanup_is_safe_blocking(&cleanup_path, &cleanup_admission)
-        },
-    )
-    .await?;
+        })
+        .await?;
     match outcome {
         ExactRunUnboundDiscardOutcome::Discarded => Ok(()),
         ExactRunUnboundDiscardOutcome::Retained => Err(contract_error(
-            "direct automation recovery changed state before unbound spool cleanup",
+            "direct automation recovery changed state before unbound staging cleanup",
         )),
     }
-}
-
-fn reservation_conflict_admission(
-    _dashboard_root: &Path,
-    _journal_path: &Path,
-    _terminal: bool,
-) -> AutomationEffectAdmission {
-    // A conflicting caller does not own the existing terminal's staged-
-    // publication cleanup proof. Project recovery may retire an exact stale
-    // index entry, but this admission must not erase that authority.
-    AutomationEffectAdmission::Conflict
 }

@@ -4,18 +4,17 @@
 //! `tools/call`. The assertions are the text or JSON the client observes, not
 //! the ledger reader the handler happens to call.
 
-use std::fs::{self, OpenOptions};
-use std::io::Write;
-use std::path::{Path, PathBuf};
+use std::fs;
+use std::path::Path;
 use std::sync::Arc;
 
 use serde_json::{Value, json};
 use tempfile::TempDir;
 use tracedecay::mcp::McpServer;
 use tracedecay_automation::backend::AgentTaskKind;
+use tracedecay_automation_runtime::automation::registered_run_store::RegisteredAutomationRunStore;
 use tracedecay_automation_runtime::automation::run_ledger::{
     AutomationRunArtifact, AutomationRunLedgerRecord, AutomationRunStatus, AutomationTrigger,
-    append_run_record,
 };
 
 use crate::mcp_server_test::support::run_client_connection_with_messages;
@@ -27,7 +26,7 @@ use crate::support::{
 const STARTED_AT: &str = "1782283199";
 
 struct ServedProject {
-    dashboard_root: PathBuf,
+    run_store: RegisteredAutomationRunStore,
     server: Arc<McpServer>,
     _env: TestEnv,
 }
@@ -36,10 +35,10 @@ async fn serve_project(root: &Path) -> ServedProject {
     fs::create_dir_all(root.join("src")).unwrap();
     fs::write(root.join("src/lib.rs"), "pub fn fixture() {}\n").unwrap();
     let (graph, env) = init_test_project(root).await;
-    let dashboard_root = graph.store_layout().dashboard_root.clone();
+    let run_store = graph.automation_run_store().unwrap();
     let server = real_mcp_server(graph).await;
     ServedProject {
-        dashboard_root,
+        run_store,
         server,
         _env: env,
     }
@@ -150,8 +149,9 @@ fn record(
     }
 }
 
-async fn append(dashboard_root: &Path, row: &AutomationRunLedgerRecord) {
-    append_run_record(dashboard_root, row)
+async fn append(run_store: &RegisteredAutomationRunStore, row: &AutomationRunLedgerRecord) {
+    run_store
+        .append_run_record(row)
         .await
         .expect("active project ledger should accept the seeded run");
 }
@@ -224,9 +224,9 @@ async fn automation_run_list_returns_the_newest_deduped_page() {
         Some("queued snapshot must not be listed"),
         Vec::new(),
     );
-    append(&served.dashboard_root, &queued).await;
+    append(&served.run_store, &queued).await;
     append(
-        &served.dashboard_root,
+        &served.run_store,
         &record(
             "run-curated",
             AgentTaskKind::MemoryCurator,
@@ -245,7 +245,7 @@ async fn automation_run_list_returns_the_newest_deduped_page() {
     )
     .await;
     append(
-        &served.dashboard_root,
+        &served.run_store,
         &record(
             "run-reflected",
             AgentTaskKind::SessionReflector,
@@ -263,7 +263,7 @@ async fn automation_run_list_returns_the_newest_deduped_page() {
         ),
     )
     .await;
-    append(&served.dashboard_root, &queued).await;
+    append(&served.run_store, &queued).await;
 
     let reflected = json!({
         "run_id": "run-reflected",
@@ -350,121 +350,6 @@ async fn automation_run_list_returns_the_newest_deduped_page() {
 }
 
 #[tokio::test]
-async fn automation_run_list_reports_malformed_rows_as_partial() {
-    let dir = TempDir::new().unwrap();
-    let served = serve_project(dir.path()).await;
-    append(
-        &served.dashboard_root,
-        &record(
-            "run-kept-older",
-            AgentTaskKind::MemoryCurator,
-            "memory_curator",
-            AutomationTrigger::Dashboard,
-            AutomationRunStatus::Failed,
-            "1782283200",
-            "older-model",
-            1,
-            0,
-            1,
-            0,
-            Some("curator backend failed"),
-            Vec::new(),
-        ),
-    )
-    .await;
-    append(
-        &served.dashboard_root,
-        &record(
-            "run-kept-newer",
-            AgentTaskKind::SkillWriter,
-            "skill_writer",
-            AutomationTrigger::ManualMcp,
-            AutomationRunStatus::Skipped,
-            "1782283300",
-            "newer-model",
-            4,
-            0,
-            0,
-            4,
-            Some("skill writer skipped"),
-            Vec::new(),
-        ),
-    )
-    .await;
-    let ledger = served.dashboard_root.join("automation_runs.jsonl");
-    let mut file = OpenOptions::new()
-        .append(true)
-        .open(&ledger)
-        .expect("seeded ledger");
-    writeln!(file, "not json").unwrap();
-
-    let newer = json!({
-        "run_id": "run-kept-newer",
-        "task": "skill_writer",
-        "task_key": "skill_writer",
-        "trigger": "manual_mcp",
-        "backend": "codex_app_server",
-        "model": "newer-model",
-        "status": "skipped",
-        "reviewed_count": 4,
-        "accepted_count": 0,
-        "rejected_count": 0,
-        "skipped_count": 4,
-        "error": "skill writer skipped",
-        "started_at": STARTED_AT,
-        "completed_at": "1782283300",
-        "artifact_kinds": []
-    });
-    let older = json!({
-        "run_id": "run-kept-older",
-        "task": "memory_curator",
-        "task_key": "memory_curator",
-        "trigger": "dashboard",
-        "backend": "codex_app_server",
-        "model": "older-model",
-        "status": "failed",
-        "reviewed_count": 1,
-        "accepted_count": 0,
-        "rejected_count": 1,
-        "skipped_count": 0,
-        "error": "curator backend failed",
-        "started_at": STARTED_AT,
-        "completed_at": "1782283200",
-        "artifact_kinds": []
-    });
-
-    let full = list_call(&served.server, json!({"format": "json", "limit": 10})).await;
-    assert_eq!(
-        tool_json(&full),
-        json!({
-            "status": "ok",
-            "scope": "active_project",
-            "runs": [newer.clone(), older],
-            "count": 2,
-            "limit": 10,
-            "has_more": false,
-            "malformed_row_count": 1,
-            "completeness": "partial"
-        })
-    );
-
-    let head = list_call(&served.server, json!({"format": "json", "limit": 1})).await;
-    assert_eq!(
-        tool_json(&head),
-        json!({
-            "status": "ok",
-            "scope": "active_project",
-            "runs": [newer],
-            "count": 1,
-            "limit": 1,
-            "has_more": true,
-            "malformed_row_count": 1,
-            "completeness": "partial"
-        })
-    );
-}
-
-#[tokio::test]
 async fn automation_run_list_reads_only_the_active_project_ledger() {
     let dir = TempDir::new().unwrap();
     let served = serve_project(&dir.path().join("active")).await;
@@ -478,7 +363,7 @@ async fn automation_run_list_reads_only_the_active_project_ledger() {
             .expect("foreign project"),
     );
     append(
-        &foreign.store_layout().dashboard_root,
+        &foreign.automation_run_store().unwrap(),
         &record(
             "run-foreign-only",
             AgentTaskKind::MemoryCurator,
@@ -499,7 +384,7 @@ async fn automation_run_list_reads_only_the_active_project_ledger() {
     close_test_graph(foreign).await;
 
     append(
-        &served.dashboard_root,
+        &served.run_store,
         &record(
             "run-active-only",
             AgentTaskKind::SessionReflector,
@@ -551,23 +436,19 @@ async fn automation_run_list_reads_only_the_active_project_ledger() {
 }
 
 #[tokio::test]
-async fn automation_run_list_refuses_a_non_directory_dashboard_root() {
+async fn automation_run_list_refuses_retired_history() {
     let dir = TempDir::new().unwrap();
     let served = serve_project(dir.path()).await;
-    if served.dashboard_root.is_dir() {
-        fs::remove_dir_all(&served.dashboard_root).unwrap();
-    }
-    if let Some(parent) = served.dashboard_root.parent() {
-        fs::create_dir_all(parent).unwrap();
-    }
-    fs::write(&served.dashboard_root, "not a dashboard directory\n").unwrap();
+    let dashboard_root = served.run_store.dashboard_root();
+    fs::create_dir_all(dashboard_root).unwrap();
+    let retired_history = dashboard_root.join("automation_runs.jsonl");
+    fs::write(&retired_history, b"retired run history\n").unwrap();
 
     let response = list_call(&served.server, json!({"format": "json"})).await;
     let problem = refusal_problem(&response["result"]);
-    assert_eq!(problem["kind"], "unavailable");
-    assert_eq!(problem["code"], "automation_run_ledger_unavailable");
     assert_eq!(
-        problem["message"],
-        "automation run ledger is unavailable during list: config error: automation dashboard root is not a directory"
+        problem["code"], "automation_run_legacy_jsonl_refused",
+        "{problem}"
     );
+    assert_eq!(fs::read(retired_history).unwrap(), b"retired run history\n");
 }
