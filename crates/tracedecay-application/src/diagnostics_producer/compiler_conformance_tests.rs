@@ -7,21 +7,21 @@ use std::num::NonZeroUsize;
 use std::path::Path;
 use std::process::Command;
 use std::sync::Arc;
+use std::time::Instant;
 
-use tracedecay_lsp::TypeScriptCompilerAdmission;
 use tracedecay_runtime_core::background_cpu::ProcessBackgroundCpuV1;
 
 use super::installed_compiler_tests::{InstalledCompilerProject, PinnedTypeScript};
 use super::{
     CompilerProducerRunV1, TypeScriptDiagnosticsAvailabilityV1, TypeScriptProducerStateV1,
-    TypeScriptProducerStatusHandleV1, TypeScriptProjectCheckV1,
+    TypeScriptProducerStatusHandleV1, TypeScriptProjectCheckV1, test_compiler_admission,
     typescript_diagnostics_availability,
 };
 
 fn producer(status: &TypeScriptProducerStatusHandleV1) -> TypeScriptProducerStateV1 {
     TypeScriptProducerStateV1::new(
         status.clone(),
-        TypeScriptCompilerAdmission::new(Arc::new(ProcessBackgroundCpuV1::new(
+        test_compiler_admission(Arc::new(ProcessBackgroundCpuV1::new(
             NonZeroUsize::new(2).unwrap(),
         ))),
     )
@@ -205,7 +205,10 @@ async fn package_and_multiple_extends(release: PinnedTypeScript) {
                 "tsconfig.json",
                 r#"{"extends":["@fixture/tsconfig","./tsconfig.shared.json"]}"#,
             ),
-            ("src/index.ts", "export const value: number = 1;\n"),
+            (
+                "src/index.ts",
+                "const unused = 0;\nexport const value: number = 1;\n",
+            ),
             (
                 "src/checked.js",
                 "/** @type {string} */\nexport const label = 7;\n",
@@ -223,9 +226,11 @@ async fn package_and_multiple_extends(release: PinnedTypeScript) {
     project.log_compiler_runs();
     let status = TypeScriptProducerStatusHandleV1::default();
     let mut state = producer(&status);
+    let started = Instant::now();
     let run = project
         .run("generation.package-extends.1", &mut state)
         .await;
+    let cold = started.elapsed();
     assert!(
         matches!(run, CompilerProducerRunV1::Published { checked: 1, .. }),
         "{release:?}: {run:?}"
@@ -255,9 +260,14 @@ async fn package_and_multiple_extends(release: PinnedTypeScript) {
         "{release:?}: ordinary availability reads never invoke a compiler"
     );
 
+    let started = Instant::now();
     let run = project
         .run("generation.package-extends.2", &mut state)
         .await;
+    println!(
+        "{release:?}: cold producer {cold:?}, unchanged generation reuse {:?}",
+        started.elapsed()
+    );
     assert!(
         matches!(
             run,
@@ -304,6 +314,85 @@ async fn package_and_multiple_extends(release: PinnedTypeScript) {
         ))
     );
     assert_eq!(project.runs(), 0);
+
+    std::fs::write(
+        project
+            .root
+            .join("node_modules/@fixture/tsconfig/base.json"),
+        r#"{"compilerOptions":{"allowJs":true,"checkJs":false,"noUnusedLocals":true}}"#,
+    )
+    .unwrap();
+    let run = project
+        .run("generation.package-extends.5", &mut state)
+        .await;
+    assert!(
+        matches!(run, CompilerProducerRunV1::Published { checked: 1, .. }),
+        "{release:?}: the changed package base invalidates the check: {run:?}"
+    );
+    assert_eq!(project.checked(), ["tsconfig.json"]);
+    let findings = project.findings("generation.package-extends.5").await;
+    let mut codes = codes(&findings);
+    codes.sort_unstable();
+    assert_eq!(
+        codes,
+        ["TS2322", "TS6133"],
+        "{release:?}: a changed package's base config changes the actual findings"
+    );
+}
+
+#[tokio::test]
+async fn an_unindexed_dependency_edit_invalidates_clean_diagnostics() {
+    for release in RELEASES {
+        let project = InstalledCompilerProject::installing(
+            release,
+            &[
+                (
+                    "tsconfig.json",
+                    r#"{"include":["src"],"compilerOptions":{"strict":true,"module":"NodeNext"}}"#,
+                ),
+                (
+                    "node_modules/fixture/package.json",
+                    r#"{"name":"fixture","version":"1.0.0","types":"./index.d.ts"}"#,
+                ),
+                (
+                    "node_modules/fixture/index.d.ts",
+                    "export const value: string;\n",
+                ),
+                (
+                    "src/index.ts",
+                    "import { value } from 'fixture';\nexport const label: string = value;\n",
+                ),
+            ],
+        );
+        let status = TypeScriptProducerStatusHandleV1::default();
+        let mut state = producer(&status);
+        let run = project.run("generation.dependency.1", &mut state).await;
+        assert!(
+            matches!(run, CompilerProducerRunV1::Published { checked: 1, .. }),
+            "{release:?}: {run:?}"
+        );
+        assert_eq!(
+            owner(&project, &status, "src/index.ts"),
+            Some((
+                "tsconfig.json".to_owned(),
+                Some(TypeScriptProjectCheckV1::Checked)
+            ))
+        );
+        let findings = project.findings("generation.dependency.1").await;
+        assert!(findings.is_empty(), "{release:?}: {findings:?}");
+
+        std::fs::write(
+            project.root.join("node_modules/fixture/index.d.ts"),
+            "export const value: number;\n",
+        )
+        .unwrap();
+        let run = project.run("generation.dependency.2", &mut state).await;
+        assert_eq!(
+            codes(&project.findings("generation.dependency.2").await),
+            ["TS2322"],
+            "{release:?}: the installed declaration changed without an indexed edit: {run:?}"
+        );
+    }
 }
 
 const SOLUTION: &[(&str, &str)] = &[
@@ -371,8 +460,7 @@ async fn unbuilt_references(release: PinnedTypeScript) {
 
 /// Once built, app's check reads lib's declarations. Editing lib's source
 /// leaves them out of date, so app's earlier finding is not republished;
-/// reverting the edit leaves them current but for their timestamps, and app's
-/// finding is evidence again.
+/// restoring the input and rebuilding makes app's finding evidence again.
 #[tokio::test]
 async fn out_of_date_references_invalidate_the_referencing_projects_check() {
     for release in RELEASES {
@@ -413,14 +501,16 @@ async fn out_of_date_references(release: PinnedTypeScript) {
     assert!(reason.contains("packages/lib/tsconfig.json"), "{reason}");
 
     std::fs::write(&lib, built).unwrap();
-    project.run("generation.references.3", &mut state).await;
+    build_solution(&project);
+    let run = project.run("generation.references.3", &mut state).await;
+    let app = owner(&project, &status, "packages/app/src/main.ts");
     assert_eq!(
         codes(&project.findings("generation.references.3").await),
         ["TS2322"],
-        "{release:?}: lib's declarations match its source again"
+        "{release:?}: lib's declarations match its source again: {run:?}, {app:?}"
     );
     assert_eq!(
-        owner(&project, &status, "packages/app/src/main.ts"),
+        app,
         Some((
             "packages/app/tsconfig.json".to_owned(),
             Some(TypeScriptProjectCheckV1::Checked)
@@ -445,7 +535,7 @@ async fn unreadable_configuration(release: PinnedTypeScript) {
         &[
             (
                 "tsconfig.json",
-                r#"{"extends":"./base.json","include":["src"]}"#,
+                r#"{"extends":"./node_modules/fixture-base.json","include":["src"]}"#,
             ),
             ("src/index.ts", "export const value: string = 1;\n"),
         ],
@@ -465,7 +555,7 @@ async fn unreadable_configuration(release: PinnedTypeScript) {
         "{release:?}"
     );
 
-    std::fs::write(project.root.join("tsconfig.json"), r#"{"include":["src"]}"#).unwrap();
+    std::fs::write(project.root.join("node_modules/fixture-base.json"), "{}").unwrap();
     project.run("generation.unreadable.2", &mut state).await;
     assert_eq!(
         codes(&project.findings("generation.unreadable.2").await),

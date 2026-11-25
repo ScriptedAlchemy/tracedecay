@@ -41,7 +41,11 @@ pub(super) fn wait_for_application_mount(
         match client.execute::<ApplicationConfigurationObservedState>(
             &ConfigurationObservedStateRequestV1 {},
         ) {
-            Ok(response) => Some(response.result),
+            Ok(response) => Some(
+                response
+                    .result
+                    .expect("completed SDK response has a payload"),
+            ),
             Err(ClientError::Problem(problem))
                 if problem.kind == "not_found_or_not_authorized"
                     || problem.kind == "unavailable" =>

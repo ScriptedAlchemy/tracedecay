@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use tracedecay_domain::UtcMicros;
 use tracedecay_domain::test_fixtures::id;
-use tracedecay_lsp::{TypeScriptCompilerAdmission, typescript_projects};
+use tracedecay_lsp::typescript_projects;
 use tracedecay_runtime_core::background_cpu::ProcessBackgroundCpuV1;
 use tracedecay_runtime_core::db::engine::TestConnection;
 use tracedecay_runtime_core::test_executable::write_executable_script;
@@ -15,7 +15,7 @@ use tracedecay_runtime_core::test_executable::write_executable_script;
 use super::{
     CompilerProducerRunV1, TypeScriptDiagnosticsAvailabilityV1, TypeScriptProducerStateV1,
     TypeScriptProducerStatusHandleV1, TypeScriptProjectCheckV1, publish_typescript_discovery_v1,
-    run_typescript_producer_v1, typescript_diagnostics_availability,
+    run_typescript_producer_v1, test_compiler_admission, typescript_diagnostics_availability,
 };
 use crate::diagnostics_publication::CodeIndexPublicationIdentityV1;
 use crate::diagnostics_store::DiagnosticsStore;
@@ -87,7 +87,7 @@ async fn an_overlapping_old_compiler_cannot_replace_new_records_or_status_for_th
     let build_info = temp.path().join("typescript-build-info");
     let status = TypeScriptProducerStatusHandleV1::default();
     let background_cpu = Arc::new(ProcessBackgroundCpuV1::new(NonZeroUsize::new(2).unwrap()));
-    let admission = TypeScriptCompilerAdmission::new(Arc::clone(&background_cpu));
+    let admission = test_compiler_admission(Arc::clone(&background_cpu));
     let mut predecessor = TypeScriptProducerStateV1::new(status.clone(), admission.clone());
     assert_eq!(
         publish_typescript_discovery_v1(&root, &projects, &mut predecessor).await,

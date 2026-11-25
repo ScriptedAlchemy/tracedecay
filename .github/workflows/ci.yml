@@ -296,6 +296,7 @@ jobs:
           python3 scripts/test-check-release-artifacts.py
           python3 scripts/test-generate-release-inventory.py
           python3 scripts/test-update-release-checksums.py
+          node --test sdks/typescript/scripts/native-packages.test.mjs
           bash tests/macos_stable_codesign_test.sh
 
       # Exercise the release guard scripts when admitting proposed changes.
@@ -735,6 +736,15 @@ jobs:
         # Keep local Rust concurrency within the hosted runner's commit limit.
         run: bazel build --config=ci-windows --jobs=${{ steps.bazel.outputs.fleet-enabled == 'true' && '16' || '2' }} --nobuild_runfile_links //...
 
+      - name: Verify upgrade refusal while a Node host holds the addon
+        if: ${{ github.event_name != 'workflow_dispatch' }}
+        shell: bash
+        run: >-
+          bazel test --config=ci-windows
+          --jobs=${{ steps.bazel.outputs.fleet-enabled == 'true' && '16' || '2' }}
+          --test_filter=upgrade::tests::a_node_host_holding_the_installed_addon_refuses_publication_until_closed
+          --test_output=errors //crates/tracedecay-cli:tracedecay_unit_test
+
       - name: Build and test native targets
         if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_os }}
         shell: bash
@@ -945,10 +955,22 @@ jobs:
           echo "tag=v$(cat version.txt)" >> "$GITHUB_OUTPUT"
           echo "epoch=$(git show -s --format=%ct HEAD)" >> "$GITHUB_OUTPUT"
 
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "26"
+
+      - name: Build the shipped SDK addon
+        id: addon
+        uses: ./.github/actions/build-sdk-addon
+        with:
+          config: release
+          dest: target/x86_64-unknown-linux-gnu/release
+
       - name: Package and exercise the shipped artifacts
         uses: ./.github/actions/package-release
         with:
           binary: ${{ steps.cli.outputs.path }}
+          addon: ${{ steps.addon.outputs.path }}
           tag: ${{ steps.packaging.outputs.tag }}
           asset-prefix: tracedecay-${{ steps.packaging.outputs.tag }}
           platform: x86_64-linux
@@ -994,11 +1016,14 @@ jobs:
           bazel test --config=ci --test_output=errors
           //dashboard:typecheck //dashboard:unit_test
           //dashboard:bundle_sha256 //dashboard:bundle_determinism_test
-          //sdks/typescript:typecheck //sdks/typescript:unit_test
+          //sdks/typescript:typecheck
           //plugin/chatgpt-extension:typecheck
           //plugin/chatgpt-extension:adapter_test
           //plugin/chatgpt-extension:serve_client_test
           //plugin/chatgpt-extension:bridge_lifecycle_test
+
+      # The native SDK socket suite builds Rust and runs in the workspace-c
+      # (or fleet) shard's //... target set, keeping this frontend lane separate.
 
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:

@@ -196,6 +196,44 @@ impl FileQuarantine {
         sync_directory(stage).map_err(storage)
     }
 
+    /// Settles a committed `name` for a transaction that may restore
+    /// candidates to their source. Unlike [`Self::remove_committed`], an
+    /// entry found back in its source and absent from the stage is the
+    /// durable result of an earlier, interrupted restore of the same
+    /// transaction: it is left in place (`Ok(false)`) for an ordinary
+    /// retention pass to re-plan, rather than refusing recovery forever.
+    /// A staged entry is unlinked (`Ok(true)`); an entry present in both
+    /// places is still refused as a duplicate.
+    pub(super) fn settle_committed_restorable(
+        &self,
+        source: Option<&Dir>,
+        name: &str,
+    ) -> Result<bool, CodeGenerationRetentionErrorV1> {
+        let label = self.label;
+        let in_source = match source {
+            Some(source) => regular_entry_exists(source, name)?,
+            None => false,
+        };
+        let staged = match self.stage.as_ref() {
+            Some(stage) if regular_entry_exists(stage, name)? => Some(stage),
+            _ => None,
+        };
+        match (in_source, staged) {
+            (true, Some(_)) => Err(unsafe_state(format!(
+                "{label} cleanup found duplicate '{name}'"
+            ))),
+            (true, None) => Ok(false),
+            (false, Some(stage)) => {
+                stage.remove_file(name).map_err(|error| {
+                    mutation_failed("quarantine unlink", &target(label, name), &error)
+                })?;
+                sync_directory(stage).map_err(storage)?;
+                Ok(true)
+            }
+            (false, None) => Ok(true),
+        }
+    }
+
     /// Removes the stage once nothing is left in it.
     pub(super) fn remove_empty_stage(mut self) -> Result<(), CodeGenerationRetentionErrorV1> {
         let (Some(stage), Some(quarantine)) = (self.stage.take(), self.quarantine.as_ref()) else {

@@ -144,6 +144,11 @@ def runner_authority_cases(root: Path) -> None:
         assert build_required == "true"
         assert matrix == {"include": [{**current[0], "inventory_only": True}]}
         assert retained == sorted(published_packages)
+        outputs = dict(
+            line.split("=", 1)
+            for line in (root / "github-output").read_text(encoding="utf-8").splitlines()
+        )
+        assert json.loads(outputs["release_matrix"]) == {"include": current}
         assert "package_build_required=false\n" in (
             root / "github-output"
         ).read_text(encoding="utf-8")
@@ -155,6 +160,15 @@ def runner_authority_cases(root: Path) -> None:
         assert build_required == "false"
         assert matrix == {"include": []}
         assert retained == sorted(published)
+        outputs = dict(
+            line.split("=", 1)
+            for line in (root / "github-output").read_text(encoding="utf-8").splitlines()
+        )
+        assert json.loads(outputs["release_matrix"]) == {"include": current[1:]}
+        write_manifests(current_rows=[{**current[0], "target": "x86_64-apple-darwin"}, *current[1:]])
+        build_required, matrix, retained = run(root, published, profile)
+        assert build_required == "false"
+        assert matrix == {"include": []}
         write_manifests()
 
     # Later platforms cannot expand an immutable tag's artifact roster.

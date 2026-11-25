@@ -667,6 +667,7 @@ fn partial_effect_survives_http_mcp_and_both_sdks_across_restart() {
             OperationRequestOptions {
                 deadline_micros: Some(parked_request_deadline_micros()),
                 request_id: None,
+                page: None,
             },
         ) {
             Ok(response) => panic!(
