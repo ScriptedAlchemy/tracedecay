@@ -1100,6 +1100,24 @@ fn read_record(path: &Path) -> Result<Option<DurableAutomationRecord>> {
     let Some(bytes) = read_journal_bytes(path)? else {
         return Ok(None);
     };
+    // The JSONL row named by this old publication is no longer available.
+    // Refuse its exact journal rather than importing the retired shape or
+    // replaying an external effect whose publication can no longer be proven.
+    if let Ok(document) = serde_json::from_slice::<serde_json::Value>(&bytes)
+        && document
+            .pointer("/value/publication/schema_version")
+            .and_then(serde_json::Value::as_u64)
+            == Some(1)
+    {
+        return Err(TraceDecayError::project_route(
+            "automation_run_legacy_jsonl_refused",
+            false,
+            format!(
+                "automation effect journal at '{}' uses a retired run-publication schema and is not carried forward; archive its receipt and remove this journal to allow a new occurrence",
+                path.display()
+            ),
+        ));
+    }
     {
         let record = serde_json::from_slice::<DurableAutomationRecord>(&bytes).map_err(|error| {
             TraceDecayError::reset_required("automation effect journal", error.to_string())

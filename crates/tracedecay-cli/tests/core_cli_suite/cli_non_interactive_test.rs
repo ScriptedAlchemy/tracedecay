@@ -2202,9 +2202,9 @@ fn fact_store_curate_records_backend_disabled_skip_and_preserves_read_only_inspe
     assert_eq!(list_payload["limit"], 5);
     assert_eq!(
         list_payload["count"],
-        list_payload["runs"].as_array().unwrap().len()
+        list_payload["records"].as_array().unwrap().len()
     );
-    let listed = list_payload["runs"]
+    let listed = list_payload["records"]
         .as_array()
         .expect("runs list should return records")
         .iter()

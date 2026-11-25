@@ -28,6 +28,33 @@ use tracedecay_domain::{
 use tracedecay_tool_catalog::EffectClass;
 
 use crate::automation_effect::recovery_composition;
+
+#[test]
+fn legacy_run_publication_is_refused_without_repeating_its_external_effect() {
+    let directory = tempfile::tempdir().expect("legacy journal directory");
+    let journal_path = directory.path().join("legacy.json");
+    let retired = r#"{"state":"prepared","value":{"terminal":{"schema_version":1,"digest":"sha256:terminal","payload_len":1},"publication":{"schema_version":1,"ledger_digest":"sha256:legacy","payload_len":1}}}"#;
+    std::fs::write(&journal_path, retired).expect("write legacy journal");
+    let admission = external_admission_for_job(
+        "legacy-publication",
+        "request.legacy-publication",
+        "legacy-job",
+    );
+    let error = reserve_or_replay_blocking(&journal_path, admission)
+        .err()
+        .expect("the old publication must stop before another effect");
+    assert_eq!(
+        error
+            .project_route_context()
+            .map(|(code, retryable, _)| (code, retryable)),
+        Some(("automation_run_legacy_jsonl_refused", false))
+    );
+    assert!(error.reset_required_context().is_none());
+    assert_eq!(
+        std::fs::read(&journal_path).expect("retained journal"),
+        retired.as_bytes()
+    );
+}
 use tracedecay_automation_runtime::automation::effect_runtime::AutomationSettledTerminal;
 use tracedecay_automation_runtime::automation::effect_runtime::journal::*;
 use tracedecay_automation_runtime::automation::effect_runtime::recovery_index;

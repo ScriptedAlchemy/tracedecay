@@ -390,7 +390,7 @@ fn application_run_record_count(
     let payload: Value =
         serde_json::from_slice(&run(&mut list)).expect("registered automation run list JSON");
     assert_eq!(payload["has_more"], false, "all fixture runs must fit");
-    payload["runs"]
+    payload["records"]
         .as_array()
         .expect("run list")
         .iter()

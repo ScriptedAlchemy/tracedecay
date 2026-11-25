@@ -826,16 +826,18 @@ pub(crate) enum Durability {
 
 impl Durability {
     /// Durable memory (facts and the anchors they cite) lives in the project
-    /// and profile-memory stores and is never rebuilt, so those commit at
+    /// and profile-memory stores, and project sessions hold automation run
+    /// history and exact effect bindings. None is rebuilt, so those commit at
     /// `Full`. The other stores keep `Normal` until their durable rows move
     /// into classes of their own (docs/plans/storage).
     pub(crate) const fn for_scope(scope: &StoreShardScopeV1) -> Self {
         match scope {
-            StoreShardScopeV1::Project { .. } | StoreShardScopeV1::ProfileMemory => Self::Full,
+            StoreShardScopeV1::Project { .. }
+            | StoreShardScopeV1::ProfileMemory
+            | StoreShardScopeV1::ProjectSessions { .. } => Self::Full,
             StoreShardScopeV1::Profile
             | StoreShardScopeV1::ProfileSessions
             | StoreShardScopeV1::RemoteNode { .. }
-            | StoreShardScopeV1::ProjectSessions { .. }
             | StoreShardScopeV1::Code { .. } => Self::Normal,
         }
     }

@@ -41,7 +41,7 @@ pub(super) async fn handle_automation_runs_command(
                         "count": runs.len(),
                         "limit": limit,
                         "has_more": has_more,
-                        "runs": runs,
+                        "records": runs,
                     }))?
                 );
             } else {

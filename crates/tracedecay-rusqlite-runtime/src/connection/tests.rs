@@ -463,9 +463,9 @@ fn writer_bootstraps_fresh_incremental_auto_vacuum_before_wal() {
     );
 }
 
-/// Facts and the anchors they cite are never rebuilt, so the stores that hold
-/// them sync every commit; session and registry stores keep `NORMAL` until
-/// their durable rows move into classes of their own.
+/// Durable memory and automation run-state receipts must survive power loss,
+/// so their stores sync every commit; profile session and registry stores keep
+/// `NORMAL` until their durable rows move into classes of their own.
 #[cfg(any(unix, windows))]
 #[test]
 fn stores_holding_durable_memory_commit_at_full_sync() {
@@ -480,7 +480,7 @@ fn stores_holding_durable_memory_commit_at_full_sync() {
             2,
         ),
         (StoreShardScopeV1::ProfileMemory, 2),
-        (StoreShardScopeV1::ProjectSessions { project_id }, 1),
+        (StoreShardScopeV1::ProjectSessions { project_id }, 2),
         (StoreShardScopeV1::ProfileSessions, 1),
         (StoreShardScopeV1::Profile, 1),
     ] {
