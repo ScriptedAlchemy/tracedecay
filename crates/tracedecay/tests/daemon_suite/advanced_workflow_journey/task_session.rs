@@ -818,7 +818,8 @@ fn retrieve_over_sdk_mcp_and_dashboard(
     let sdk = client
         .execute::<WorkRetrieveEvidence>(&request)
         .unwrap_or_else(|error| panic!("typed SDK TaskSession retrieval failed: {error}"))
-        .result;
+        .result
+        .expect("completed SDK response has a payload");
     let mcp_envelope = serve_tool_call(
         home,
         project,
@@ -993,7 +994,7 @@ fn retrieve(
     identity: &WorkAttemptIdentityV1,
     temporal: TemporalModeV1,
 ) -> Result<AttemptEvidencePage, String> {
-    let result = client
+    let response = client
         .execute::<WorkRetrieveEvidence>(&WorkEvidenceRetrieveRequestV1 {
             selection: selection.clone(),
             task_id: task_id.clone(),
@@ -1004,8 +1005,13 @@ fn retrieve(
             continuation: None,
             observed_at: UtcMicros(now().0),
         })
-        .map_err(|error| error.to_string())?
-        .result;
+        .map_err(|error| error.to_string())?;
+    let result = response.result.ok_or_else(|| {
+        format!(
+            "evidence retrieval returned only its receipt: {}",
+            response.envelope
+        )
+    })?;
     Ok(evidence_for_attempt(result, identity))
 }
 

@@ -38,6 +38,7 @@ let snapshot = client.execute_with_options::<WorkSnapshot>(
     &request,
     OperationRequestOptions {
         deadline_micros: Some(1_800_000_000_000_000),
+        ..OperationRequestOptions::default()
     },
 )?;
 # Ok::<(), tracedecay_sdk::client::ClientError>(())
@@ -48,6 +49,12 @@ its request/result schemas, route, effect, idempotency, cancellation, and
 deadline contract. `operations::UNAVAILABLE_OPERATIONS` is generated from the
 same registry for cataloged operations that still lack a canonical schema or
 SDK transport; those entries do not acquire callable methods.
+
+`TypedResponse<T>::result` is `Option<T>`. A legal timeout, cancellation, or
+effect receipt can carry no payload; inspect `envelope.outcome.value.execution`
+before treating a response as completed. Callers migrating from the required
+`result: T` field must handle `None` as a receipt-only outcome, rather than
+substituting an empty result or reporting malformed data.
 
 ## Resuming an operation stream
 

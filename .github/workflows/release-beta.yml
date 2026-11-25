@@ -159,6 +159,7 @@ jobs:
           sparse-checkout: |
             .github/actions/package-release
             .github/actions/build-cli
+            .github/actions/build-sdk-addon
             .github/actions/setup-bazel
             scripts/generate-release-inventory.py
           sparse-checkout-cone-mode: false
@@ -191,11 +192,24 @@ jobs:
           cache-key: release-${{ matrix.target }}
           prepared-build: 'true'
 
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        if: matrix.inventory_only != true
+        with:
+          node-version: "26.13.1"
+
+      - name: Build the native SDK addon for the archive
+        if: matrix.inventory_only != true && hashFiles('crates/tracedecay-sdk-node/Cargo.toml') != ''
+        id: addon
+        uses: ./.release-automation/.github/actions/build-sdk-addon
+        with:
+          dest: target/${{ matrix.target }}/release
+
       - name: Package and verify native archive and MCPB
         if: matrix.inventory_only != true
         uses: ./.release-automation/.github/actions/package-release
         with:
           binary: ${{ steps.cli.outputs.path }}
+          addon: ${{ steps.addon.outputs.path }}
           tag: ${{ env.RELEASE_TAG }}
           asset-prefix: tracedecay-beta-${{ env.RELEASE_TAG }}
           platform: ${{ matrix.name }}

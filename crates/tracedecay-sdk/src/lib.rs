@@ -5,6 +5,7 @@
 pub mod client;
 mod observe;
 pub mod operations;
+pub mod protocol;
 pub mod remote_client;
 mod request_control;
 mod semantic;

@@ -266,7 +266,11 @@ fn attempt_status(
         run_id: identity.run_id().clone(),
         attempt_id: identity.attempt_id().clone(),
     }) {
-        Ok(response) => Some(response.result),
+        Ok(response) => Some(
+            response
+                .result
+                .expect("completed SDK response has a payload"),
+        ),
         Err(ClientError::Problem(problem)) if problem.kind == "not_found_or_not_authorized" => None,
         Err(error) => panic!("mounted Work attempt status failed: {error}"),
     }
@@ -574,7 +578,8 @@ fn mounted_fan_out_recovers_then_synthesizes_and_hands_off() {
     let observed = client
         .execute::<ApplicationConfigurationObservedState>(&ConfigurationObservedStateRequestV1 {})
         .expect("configuration observed state")
-        .result;
+        .result
+        .expect("completed SDK response has a payload");
     let expected_revision = observed
         .first()
         .expect("configuration component")
@@ -620,7 +625,8 @@ fn mounted_fan_out_recovers_then_synthesizes_and_hands_off() {
             key: SettingKey::new(WORK_EXECUTABLE_BINDINGS_SETTING_KEY).expect("binding key"),
         })
         .expect("pinned executable configuration")
-        .result;
+        .result
+        .expect("completed SDK response has a payload");
 
     let common_dir =
         tracedecay_runtime_core::worktree::git_common_dir(&project).expect("Git common dir");
@@ -854,7 +860,8 @@ fn mounted_fan_out_recovers_then_synthesizes_and_hands_off() {
             expected_revision: 1,
         })
         .expect("mounted workflow definition activation")
-        .result;
+        .result
+        .expect("completed SDK response has a payload");
     assert_eq!(
         activated.state,
         tracedecay_contracts::WorkflowDefinitionLifecycleState::Active
@@ -863,7 +870,8 @@ fn mounted_fan_out_recovers_then_synthesizes_and_hands_off() {
     let listed = client
         .execute::<WorkflowListDefinitions>(&WorkflowDefinitionListRequest {})
         .expect("list registered workflow definitions")
-        .result;
+        .result
+        .expect("completed SDK response has a payload");
     assert!(
         listed
             .iter()
@@ -896,7 +904,8 @@ fn mounted_fan_out_recovers_then_synthesizes_and_hands_off() {
             definition_id: definition_id.clone(),
         })
         .expect("read workflow definition history")
-        .result;
+        .result
+        .expect("completed SDK response has a payload");
     assert_eq!(history.len(), 2);
     let diff = client
         .execute::<WorkflowDiffDefinition>(&WorkflowDefinitionDiffRequest {
@@ -905,7 +914,8 @@ fn mounted_fan_out_recovers_then_synthesizes_and_hands_off() {
             to_version: 2,
         })
         .expect("diff workflow definition versions")
-        .result;
+        .result
+        .expect("completed SDK response has a payload");
     assert!(diff.changed_steps.contains(&step_id));
     let rejected = client
         .execute::<WorkflowRejectDefinition>(&WorkflowDefinitionRejectRequest {
@@ -914,7 +924,8 @@ fn mounted_fan_out_recovers_then_synthesizes_and_hands_off() {
             expected_revision: 1,
         })
         .expect("reject invalid workflow definition")
-        .result;
+        .result
+        .expect("completed SDK response has a payload");
     assert_eq!(
         rejected.state,
         tracedecay_contracts::WorkflowDefinitionLifecycleState::Rejected
@@ -992,7 +1003,11 @@ fn mounted_fan_out_recovers_then_synthesizes_and_hands_off() {
         wait_until("idempotent mounted workflow fan-out start", || match client
             .execute::<WorkflowStartRun>(&start_request)
         {
-            Ok(response) => Some(response.result),
+            Ok(response) => Some(
+                response
+                    .result
+                    .expect("completed SDK response has a payload"),
+            ),
             Err(ClientError::Problem(problem)) if problem.kind == "unavailable" => {
                 std::thread::sleep(Duration::from_millis(250));
                 None
@@ -1067,7 +1082,8 @@ fn mounted_fan_out_recovers_then_synthesizes_and_hands_off() {
     let retry = client
         .execute::<WorkRetryAttempt>(&retry_request)
         .expect("explicit workflow child recovery retry")
-        .result;
+        .result
+        .expect("completed SDK response has a payload");
     let replacement = match retry {
         WorkRetryAttemptOutcomeV1::Created { attempt, .. } => attempt.identity().clone(),
         WorkRetryAttemptOutcomeV1::Replayed { .. } => panic!("first workflow retry was replayed"),
@@ -1085,7 +1101,8 @@ fn mounted_fan_out_recovers_then_synthesizes_and_hands_off() {
             occurred_at: now(),
         })
         .expect("pause recovery retry run")
-        .result;
+        .result
+        .expect("completed SDK response has a payload");
     assert_eq!(
         paused.fenced_attempts(),
         &[replacement.attempt_id().clone()],
@@ -1094,7 +1111,8 @@ fn mounted_fan_out_recovers_then_synthesizes_and_hands_off() {
     let replayed = client
         .execute::<WorkRetryAttempt>(&retry_request)
         .expect("atomic workflow child retry replay")
-        .result;
+        .result
+        .expect("completed SDK response has a payload");
     assert!(
         matches!(
             replayed,
@@ -1128,7 +1146,11 @@ fn mounted_fan_out_recovers_then_synthesizes_and_hands_off() {
         match client.execute::<WorkflowGetRun>(&WorkflowRunGetRequest {
             run_id: run_id.clone(),
         }) {
-            Ok(response) => Some(response.result),
+            Ok(response) => Some(
+                response
+                    .result
+                    .expect("completed SDK response has a payload"),
+            ),
             Err(ClientError::Problem(problem)) if problem.kind == "unavailable" => None,
             Err(error) => panic!("durably recovered workflow run: {error}"),
         }
@@ -1141,7 +1163,8 @@ fn mounted_fan_out_recovers_then_synthesizes_and_hands_off() {
             command_id: id("command.workflow.pause-after-restart"),
         })
         .expect("mounted workflow pause")
-        .result;
+        .result
+        .expect("completed SDK response has a payload");
     assert_eq!(paused_workflow.status(), WorkflowRunStatus::Paused);
     let resumed_workflow = client
         .execute::<WorkflowResumeRun>(&WorkflowRunResumeRequest {
@@ -1150,7 +1173,8 @@ fn mounted_fan_out_recovers_then_synthesizes_and_hands_off() {
             command_id: id("command.workflow.resume-after-restart"),
         })
         .expect("mounted workflow resume")
-        .result;
+        .result
+        .expect("completed SDK response has a payload");
     assert_eq!(resumed_workflow.status(), WorkflowRunStatus::Running);
     client
         .execute::<WorkflowCancelRun>(&WorkflowRunCancelRequest {
@@ -1193,7 +1217,7 @@ fn mounted_fan_out_recovers_then_synthesizes_and_hands_off() {
                 run_id: run_id.clone(),
             })
             .ok()?
-            .result;
+            .result?;
         (projection.status() == WorkflowRunStatus::Cancelled).then_some(projection)
     });
 
@@ -1212,11 +1236,13 @@ fn mounted_fan_out_recovers_then_synthesizes_and_hands_off() {
             evidence: Vec::new(),
         })
         .expect("prepare synthesis product task")
-        .result;
+        .result
+        .expect("completed SDK response has a payload");
     let created_synthesis = client
         .execute::<WorkMutateGraph>(&prepared_synthesis_create)
         .expect("create synthesis product task")
-        .result;
+        .result
+        .expect("completed SDK response has a payload");
     let synthesis_input = fan_out_input(
         "synthesis",
         created_synthesis
@@ -1235,11 +1261,13 @@ fn mounted_fan_out_recovers_then_synthesizes_and_hands_off() {
             evidence: Vec::new(),
         })
         .expect("prepare synthesis proposal acceptance")
-        .result;
+        .result
+        .expect("completed SDK response has a payload");
     let accepted_synthesis = client
         .execute::<WorkMutateGraph>(&prepared_proposal_acceptance)
         .expect("accept synthesis proposal")
-        .result;
+        .result
+        .expect("completed SDK response has a payload");
     let prepared_execution_admission = client
         .execute::<WorkPrepareGraphMutation>(&PrepareWorkProductMutationRequestV1 {
             selection: product_selection.clone(),
@@ -1250,7 +1278,8 @@ fn mounted_fan_out_recovers_then_synthesizes_and_hands_off() {
             evidence: Vec::new(),
         })
         .expect("prepare synthesis execution admission")
-        .result;
+        .result
+        .expect("completed SDK response has a payload");
     let WorkProductMutationRequestV1::AdmitExecution(admission) = prepared_execution_admission
     else {
         panic!("synthesis admission preparation must produce the canonical request");
@@ -1289,7 +1318,8 @@ fn mounted_fan_out_recovers_then_synthesizes_and_hands_off() {
             sources: sources.clone(),
         })
         .expect("mounted synthesis admission")
-        .result;
+        .result
+        .expect("completed SDK response has a payload");
     let WorkSynthesisAttemptV1::Admitted(admission) = synthesis else {
         panic!("one successful source must admit synthesis: {synthesis:?}");
     };
@@ -1313,7 +1343,8 @@ fn mounted_fan_out_recovers_then_synthesizes_and_hands_off() {
             now(),
         ))
         .expect("read synthesis product graph")
-        .result;
+        .result
+        .expect("completed SDK response has a payload");
     let verified_version = graph
         .entries()
         .last()
@@ -1333,6 +1364,7 @@ fn mounted_fan_out_recovers_then_synthesizes_and_hands_off() {
         })
         .expect("retrieve sealed synthesis attempt evidence")
         .result
+        .expect("completed SDK response has a payload")
         .sources
         .into_iter()
         .find_map(|source| match source {
@@ -1386,7 +1418,8 @@ fn mounted_fan_out_recovers_then_synthesizes_and_hands_off() {
             now(),
         ))
         .expect("read product graph after physical restart")
-        .result;
+        .result
+        .expect("completed SDK response has a payload");
     let restored_entry = restored_graph
         .entries()
         .last()
@@ -1499,7 +1532,8 @@ fn mounted_fan_out_recovers_then_synthesizes_and_hands_off() {
     let redeemed = client
         .execute::<WorkflowHandoffRedeem>(&redeem)
         .expect("mounted host handoff redemption")
-        .result;
+        .result
+        .expect("completed SDK response has a payload");
     assert_eq!(redeemed.frontier, frontier);
     let replay = client
         .execute::<WorkflowHandoffRedeem>(&redeem)
@@ -1519,7 +1553,8 @@ fn mounted_fan_out_recovers_then_synthesizes_and_hands_off() {
             expected_revision: activated.revision,
         })
         .expect("retire active workflow definition")
-        .result;
+        .result
+        .expect("completed SDK response has a payload");
     assert_eq!(
         retired.state,
         tracedecay_contracts::WorkflowDefinitionLifecycleState::Retired

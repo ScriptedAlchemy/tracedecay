@@ -12,6 +12,7 @@ on:
       - "crates/tracedecay-daemon-service/**"
       - "crates/tracedecay-domain/**"
       - "crates/tracedecay-sdk/**"
+      - "crates/tracedecay-sdk-node/**"
       - "crates/tracedecay-tool-catalog/**"
       - "dashboard/codegen/**"
       - "dashboard/package.json"
@@ -98,11 +99,11 @@ jobs:
       - run: bazel test --config=ci //sdks/codegen:unit_test
       - run: pnpm run contracts:check
         working-directory: dashboard
-      - run: bazel test --config=ci //crates/tracedecay-sdk/...
-      - run: pnpm run typecheck
-        working-directory: sdks/typescript
-      - run: pnpm test
-        working-directory: sdks/typescript
+      - name: Test shared Rust and native Node SDK behavior
+        run: >-
+          bazel test --config=ci
+          //crates/tracedecay-sdk/...
+          //sdks/typescript:typecheck //sdks/typescript:unit_test
 
       - name: Save compiled Bazel actions
         if: always() && !cancelled() && github.ref == 'refs/heads/master' && steps.bazel.outputs.disk-cache-key != ''
@@ -158,8 +159,16 @@ jobs:
       - run: >-
           bazel test --config=ci //crates/tracedecay-sdk:sdk_suite
           --test_arg=--include-ignored
+      - name: Build the installed SDK addon
+        id: addon
+        uses: ./.github/actions/build-sdk-addon
+        with:
+          config: ci
+          dest: target/debug
       - run: pnpm run test:installed
         working-directory: sdks/typescript
+        env:
+          TRACEDECAY_SDK_ADDON: ${{ steps.addon.outputs.path }}
 
       - name: Report final build disk usage
         if: ${{ always() && hashFiles('.github/actions/setup-bazel/report_disk.sh') != '' }}

@@ -1018,6 +1018,19 @@ fn render_rust_operations(
             revision = operation.result_schema.revision,
         );
     }
+    out.push_str(
+        "\n/// Every generated operation's lifecycle contract, for callers that\n\
+         /// resolve operations by identifier rather than by Rust type.\n\
+         pub const OPERATION_CONTRACTS: &[crate::protocol::OperationContract] = &[\n",
+    );
+    for operation in operations {
+        emit!(
+            out,
+            "    crate::protocol::OperationContract::of::<{marker}>(),",
+            marker = type_name(&operation.name),
+        );
+    }
+    out.push_str("];\n");
     while out.ends_with("\n\n") {
         out.pop();
     }

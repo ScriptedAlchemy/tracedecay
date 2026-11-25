@@ -1,0 +1,88 @@
+{
+  "comment": "Canonical problems derived from typed details. The Rust SDK suite proves every entry equals ApplicationProblem::from_detail; the Node SDK suite builds wire envelopes from them.",
+  "problems": [
+    {
+      "detail": {
+        "kind": "parked",
+        "cause": "source unreadable",
+        "remedy": "restore the mode, then run `tracedecay sync`",
+        "retries_on_wake": false
+      },
+      "kind": "unavailable",
+      "code": "application.code-index.parked",
+      "message": "The code index for this worktree is parked; remedy: restore the mode, then run `tracedecay sync`; cause: source unreadable",
+      "retry": "never",
+      "legal_actions": [
+        "reconcile"
+      ]
+    },
+    {
+      "detail": {
+        "kind": "code_graph_rewarming",
+        "retry_after_millis": 7940
+      },
+      "kind": "unavailable",
+      "code": "application.code-graph.rewarming",
+      "message": "The project's code graph was released for memory and is warming again; retry after 7940ms.",
+      "retry": "after_delay",
+      "legal_actions": [
+        "retry"
+      ]
+    },
+    {
+      "detail": {
+        "kind": "diagnostics_unsupported",
+        "file": "src/main.rs",
+        "searched": [
+          {
+            "path": "src/tsconfig.json",
+            "present": false
+          },
+          {
+            "path": "tsconfig.json",
+            "present": true
+          }
+        ]
+      },
+      "kind": "unsupported",
+      "code": "application.diagnostics.unsupported",
+      "message": "No diagnostic producer is configured for this scope: no tsconfig owns `src/main.rs` (searched src/tsconfig.json, tsconfig.json (does not include it), and their project references), so no compiler runs automatically. Run the project's own build or type check and publish its output with tracedecay_diagnose (`cargo_output`), then read again.",
+      "retry": "never",
+      "legal_actions": [
+        "correct_request"
+      ]
+    },
+    {
+      "detail": {
+        "kind": "stale_precondition",
+        "field": "expected_revision",
+        "requested": 7,
+        "current": 1
+      },
+      "kind": "stale",
+      "code": "application.precondition-stale",
+      "message": "expected_revision 7 does not match the current value 1; refresh and resend with expected_revision 1.",
+      "retry": "after_revalidate",
+      "legal_actions": [
+        "refresh"
+      ]
+    },
+    {
+      "detail": {
+        "kind": "reset_required",
+        "authority": "project store",
+        "found_version": 3,
+        "required_version": 4,
+        "reason": "the store predates this binary",
+        "remedy": "tracedecay reset --project"
+      },
+      "kind": "reset_required",
+      "code": "application.reset-required",
+      "message": "The project store requires an explicit reset with `tracedecay reset --project`: the store predates this binary",
+      "retry": "never",
+      "legal_actions": [
+        "reset"
+      ]
+    }
+  ]
+}

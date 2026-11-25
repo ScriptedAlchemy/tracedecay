@@ -18,11 +18,12 @@ authority:
      SDK) and opens a `chore(release): release X.Y.Z` PR; merging it publishes
      a full release, then dispatches `Release` on the `master` run ref.
 2. `Release` runs when `Release Please` dispatches it for the stable tag.
-   - Builds platform binaries.
+   - Builds platform binaries and the Node SDK addon for each release target.
    - Uploads release assets, checksums, and `install.sh`.
    - Updates the in-repository `server.json` MCP registry manifest.
    - Builds, conformance-tests, and publishes the TypeScript SDK
-     (`@tracedecay/sdk`) to npm, gated on the release verification job.
+     (`@tracedecay/sdk` and its platform packages) to npm, gated on the release
+     verification job.
 
 Release packaging decision (owner, 2026-08-07): binaries ship through GitHub
 Release assets; the TypeScript SDK ships through npm on the same release
@@ -61,9 +62,19 @@ to the publish job: a configured token shadows the OIDC exchange.
 ## One-time npm trusted publisher setup (owner, before the first release)
 
 npm's trusted publisher is configured in the settings of an existing package,
-so a brand-new package needs a one-time manual seed publish (an interactive
-`npm publish` by a maintainer with 2FA) to create `@tracedecay/sdk` before the
-trusted publisher can be added. After that, on npmjs.com under
+so each brand-new package needs a one-time manual seed publish (an interactive
+`npm publish` by a maintainer with 2FA) before its trusted publisher can be
+added. Configure `@tracedecay/sdk` and every platform package in the release
+roster:
+
+- `@tracedecay/sdk-darwin-arm64`
+- `@tracedecay/sdk-linux-x64-gnu`
+- `@tracedecay/sdk-linux-arm64-gnu`
+- `@tracedecay/sdk-win32-x64-msvc`
+
+The authoritative roster is `.github/release-targets.json`; adding a target
+also requires configuring its npm package. Use the reviewed platform tarballs
+from the release build when seeding packages. On npmjs.com under
 Package → Settings → Trusted publishing, add a GitHub Actions publisher with
 exactly:
 
@@ -117,14 +128,25 @@ not block a beta or stable asset upload.
 The TypeScript SDK (`@tracedecay/sdk`) is a release artifact: `release.yml`
 publishes it to npm on the stable release trigger. The Rust SDK and every
 other Cargo workspace package remain private (`publish = false`) until the
-crate-naming decision lands, and the binary release jobs package no SDK
-clients. The npm publication keeps build authority separate from its
-protected publish job. The unprivileged build job regenerates the client
+crate-naming decision lands. The native addon is built through Bazel and
+loaded on every target runner. Each native daemon archive carries that addon
+beside the executable for offline plugin installations; MCPB bundles continue
+to launch the CLI directly. The archive inventory records the addon digest
+and its own Rust dependency closure separately from the CLI's dependencies.
+
+The npm publication keeps build authority separate from its protected publish
+job. Unprivileged platform jobs stage one addon package per target from the
+same release roster. The TypeScript build verifies their names, versions,
+platform constraints, complete coverage, and exact addon bytes before linking
+them as optional dependencies at the SDK version. It regenerates the client
 exclusively from the canonical SDK executable-binding registry and verifies
 codegen parity before running typecheck, tests, a package dry-run, and
-real-daemon conformance against the exact tarball whose digest it records.
+real-daemon conformance against the exact facade and platform tarballs whose
+digests it records. The clean consumer resolves its installed platform
+package without a workspace addon override.
 The publish job depends on both that build and the release verification job,
-digest-verifies the artifact bytes, and publishes through tokenless npm
+digest-verifies the artifact bytes, and publishes every platform package
+before the facade through tokenless npm
 trusted publishing (OIDC, provenance attached automatically) using the
 digest-pinned reviewed npm CLI.
 Missing schemas or mounted routes remain explicit unavailable entries in the
@@ -161,6 +183,7 @@ Manual install of a published beta (macOS arm64):
 gh release download <tag> -p "tracedecay-beta-<tag>-aarch64-macos.tar.gz"
 tar xzf "tracedecay-beta-<tag>-aarch64-macos.tar.gz"
 install -m 755 tracedecay ~/.cargo/bin/tracedecay
+install -m 644 tracedecay_sdk_node.node ~/.cargo/bin/tracedecay_sdk_node.node
 ```
 
 ## Stable Release (manual)
