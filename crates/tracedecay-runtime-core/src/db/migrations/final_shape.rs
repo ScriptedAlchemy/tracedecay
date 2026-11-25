@@ -8,6 +8,7 @@ use std::sync::LazyLock;
 use crate::db::engine::QueryExecutor;
 use tracedecay_domain::canonical_text::canonical_framed_sha256;
 use tracedecay_domain::errors::{Result, TraceDecayError};
+use tracedecay_rusqlite_runtime::has_sqlite_database_header;
 
 /// Domain tag for [`fingerprint_schema_objects`]. Changing it would rename
 /// every cache keyed on the digest; keep it stable.
@@ -32,13 +33,11 @@ pub struct GraphStoreSchemaAdmissionV1 {
 }
 
 pub fn inspect_graph_store_schema(path: &Path) -> Result<GraphStoreSchemaAdmissionV1> {
-    let has_header = crate::storage::has_sqlite_database_header(path).map_err(|error| {
-        TraceDecayError::Config {
-            message: format!(
-                "could not verify the store header at {}: {error}",
-                path.display()
-            ),
-        }
+    let has_header = has_sqlite_database_header(path).map_err(|error| TraceDecayError::Config {
+        message: format!(
+            "could not verify the store header at {}: {error}",
+            path.display()
+        ),
     })?;
     if !has_header {
         return Err(TraceDecayError::Config {

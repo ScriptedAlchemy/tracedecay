@@ -20,7 +20,7 @@ use tracedecay_application::native_integration::{
 };
 use tracedecay_application::source_authorization::ProjectSourceAccessSnapshot;
 use tracedecay_application::stack_coordinator::{
-    DaemonGitHubStackCoordinatorV1, StackCoordinatorErrorV1,
+    DaemonGitHubStackCoordinatorV1, GitHubStackScopeV1, StackCoordinatorErrorV1,
 };
 use tracedecay_contracts::git::{
     NativeWorktreeService, WorktreeCleanupReconcileRequestV1, WorktreeCleanupReconciliationV1,
@@ -309,13 +309,16 @@ impl DaemonNativeIntegrationOwner {
 
     /// Mounts exactly one stack-delivery runtime for one exact project scope.
     /// Re-opening the project refreshes its source-access expiry but never
-    /// creates a second delivery store.
+    /// creates a second delivery store. The runtime joins the registration
+    /// project open created, so delivery and review refresh share one scope
+    /// lifetime.
     pub fn mount_github_stack_runtime(
         &self,
         database: RegisteredGlobalDbLeaseV1,
         scope: ResolvedScope,
         access: ProjectSourceAccessSnapshot,
         coordinator: Arc<DaemonGitHubStackCoordinatorV1>,
+        registration: GitHubStackScopeV1,
     ) -> Result<Arc<DaemonGitHubStackRuntimeV1>, StackCoordinatorErrorV1> {
         if self.project_id != scope.project_id || self.repository_id != scope.repository_id {
             return Err(StackCoordinatorErrorV1::Stale);
@@ -334,6 +337,7 @@ impl DaemonNativeIntegrationOwner {
             access,
             database,
             coordinator,
+            registration,
             self.service_arc(),
             self.store.clone(),
         )?;

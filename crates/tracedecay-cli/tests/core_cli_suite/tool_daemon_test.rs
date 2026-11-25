@@ -1,6 +1,7 @@
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::{UnixListener, UnixStream};
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use std::sync::Arc;
@@ -9,10 +10,8 @@ use std::sync::mpsc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crate::common;
-#[cfg(target_os = "linux")]
-use crate::common::hermetic_path;
 use crate::common::{
-    canonical_existing_path, spawn_tracedecay_daemon, tracedecay_command_with_home,
+    canonical_existing_path, hermetic_path, spawn_tracedecay_daemon, tracedecay_command_with_home,
 };
 use serde_json::{Value, json};
 use tempfile::TempDir;
@@ -30,8 +29,8 @@ use tracedecay_domain::UtcMicros;
 use tracedecay_domain::{FactCategoryV1, ProjectId, RepositoryId, WorktreeId};
 use tracedecay_hooks::{HookEventV2, HookSpoolConfigV1, HookSpoolV1};
 use tracedecay_runtime_core::storage::{
-    default_profile_project_id, pin_fixture_repository_identity, profile_sharded_data_root,
-    profile_sharded_layout,
+    SESSIONS_DB_FILENAME, default_profile_project_id, pin_fixture_repository_identity,
+    profile_sharded_data_root, profile_sharded_layout,
 };
 #[cfg(target_os = "linux")]
 use tracedecay_runtime_core::test_executable::write_executable_script;
@@ -3669,6 +3668,140 @@ fn user_scoped_transcript_ingest_handshakes_projectless_from_filesystem_root_cwd
         tracedecay_tool_catalog::ApplicationSurfaceOperation::HookRuntime
     );
     assert_eq!(Value::Object(arguments), args);
+}
+
+fn ingest_sqlite_reader_fixture(home: &Path, project: &Path, ordinal: u32) {
+    let message = json!({
+        "role": if ordinal % 2 == 1 { "user" } else { "assistant" },
+        "content": format!("WAL reader fixture message {ordinal}"),
+        "id": format!("wal-reader-message-{ordinal}"),
+        "timestamp": ordinal,
+        "associated_project_roots": [project],
+    });
+    let args = json!({
+        "action": "ingest_transcript",
+        "provider": "hermes",
+        "session_id": "wal-reader-session",
+        "user_scope": false,
+        "messages": [message],
+    })
+    .to_string();
+    let output = ingest_transcript_until_published(
+        tracedecay_command_with_home(home)
+            .current_dir(project)
+            .args(["tool", "--project"])
+            .arg(project)
+            .args(["tracedecay_hook_runtime", "--json", "--args", &args]),
+    );
+    assert!(
+        output.status.success(),
+        "admitting fixture message {ordinal} failed: {}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+// A real external process uses the system SQLite build, not the bundled
+// library or its process-local inode bookkeeping. No immutable URI: this
+// reader must participate in WAL locking and see committed frames.
+fn sqlite_read_only(home: &Path, database: &Path) -> Command {
+    let mut command = Command::new("sqlite3");
+    command
+        .process_group(0)
+        .env_clear()
+        .env("PATH", hermetic_path::<&Path>(&[]))
+        .env("HOME", home)
+        .env("TMPDIR", home)
+        .current_dir(home)
+        .args(["-batch", "-bail", "-readonly", "-init", "/dev/null"])
+        .arg(database);
+    command
+}
+
+const WAL_READER_ROWS: &str = "SELECT message_id, content FROM lcm_raw_messages
+    WHERE provider = 'hermes' AND message_id GLOB 'wal-reader-message-*'
+    ORDER BY message_id;";
+
+#[test]
+fn external_sqlite_read_only_snapshot_survives_live_sessions_writes_and_daemon_restart() {
+    let home = TempDir::new().unwrap();
+    let project = TempDir::new().unwrap();
+    let home = canonical_existing_path(home.path());
+    let project = canonical_existing_path(project.path());
+    init_committed_git_project_with_cli(&home, &project);
+    let mut daemon = spawn_tracedecay_daemon(&home);
+    ingest_sqlite_reader_fixture(&home, &project, 1);
+
+    let database = profile_sharded_data_root(
+        &home.join(".tracedecay"),
+        &default_profile_project_id(&project),
+    )
+    .join(SESSIONS_DB_FILENAME);
+    let snapshot_output = home.join("sqlite-snapshot.out");
+    let mut reader = common::TestChildProcess::new(
+        sqlite_read_only(&home, &database)
+            .stdin(Stdio::piped())
+            .stdout(std::fs::File::create(&snapshot_output).unwrap())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("the external sqlite3 CLI must be installed for the storage journey"),
+    );
+    let first_row = "wal-reader-message-1|WAL reader fixture message 1\n";
+    let second_row = "wal-reader-message-2|WAL reader fixture message 2\n";
+    writeln!(
+        reader.stdin_mut().unwrap(),
+        "PRAGMA journal_mode;\nBEGIN;\n{WAL_READER_ROWS}"
+    )
+    .unwrap();
+    common::poll_until(
+        Instant::now() + CLI_ROUNDTRIP_TIMEOUT,
+        Duration::from_millis(25),
+        || {
+            if reader.try_wait().unwrap().is_some() {
+                let output = reader.wait_with_output(CLI_ROUNDTRIP_TIMEOUT).unwrap();
+                panic!("sqlite3 exited before acquiring a snapshot: {output:?}");
+            }
+            (std::fs::read_to_string(&snapshot_output).unwrap() == format!("wal\n{first_row}"))
+                .then_some(())
+        },
+        || "external sqlite3 did not read the first committed row in WAL mode".to_owned(),
+    );
+
+    ingest_sqlite_reader_fixture(&home, &project, 2);
+    writeln!(
+        reader.stdin_mut().unwrap(),
+        "{WAL_READER_ROWS}\nCOMMIT;\n{WAL_READER_ROWS}\nPRAGMA quick_check;"
+    )
+    .unwrap();
+    let output = reader.wait_with_output(CLI_ROUNDTRIP_TIMEOUT).unwrap();
+    assert!(
+        output.status.success(),
+        "external sqlite3 failed: {output:?}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(snapshot_output).unwrap(),
+        format!("wal\n{first_row}{first_row}{first_row}{second_row}ok\n"),
+        "only the new snapshot may see the concurrent commit"
+    );
+
+    assert!(daemon.try_wait().unwrap().is_none());
+    daemon
+        .kill_and_wait()
+        .expect("stop daemon before reopening the live store");
+    let _restarted = spawn_tracedecay_daemon(&home);
+    ingest_sqlite_reader_fixture(&home, &project, 3);
+    let mut integrity = sqlite_read_only(&home, &database);
+    integrity.arg(format!("{WAL_READER_ROWS} PRAGMA integrity_check;"));
+    let output = run_command_with_timeout(integrity, CLI_ROUNDTRIP_TIMEOUT);
+    assert!(
+        output.status.success(),
+        "reopened sqlite3 failed: {output:?}"
+    );
+    assert_eq!(
+        String::from_utf8(output.stdout).unwrap(),
+        format!("{first_row}{second_row}wal-reader-message-3|WAL reader fixture message 3\nok\n"),
+        "the restarted writer must preserve both earlier commits and admit a new one"
+    );
 }
 
 #[test]

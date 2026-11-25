@@ -331,6 +331,36 @@ fn the_same_command_with_different_input_is_an_idempotency_conflict() {
 }
 
 #[test]
+fn a_command_outside_the_selection_is_not_an_idempotency_conflict() {
+    let store = RegisteredWorkStore::start("work-product-replay-scope");
+    let command = "command.work-product.scoped";
+    create(
+        &store,
+        command,
+        UtcMicros(100),
+        vec![item("task.scoped", &[], 2)],
+    )
+    .expect("create repository-scoped work");
+
+    let refusal = mutations(&store)
+        .create(
+            &context(),
+            &binding(),
+            CreateWorkProductRequestV1 {
+                selection: WorkProductSelectionScopeV1::ProfileOwnedNoGit,
+                initial_graph: graph(vec![item("task.no-git", &[], 3)]),
+                mutation: mutation(command, UtcMicros(100)),
+            },
+        )
+        .expect_err("a narrower selection cannot inspect the stored command");
+    assert_eq!(
+        refusal,
+        WorkProductApplicationErrorV1::NotFoundOrNotAuthorized
+    );
+    assert_eq!(store.count("work_product_events_v1"), 1);
+}
+
+#[test]
 fn a_second_creation_cannot_claim_there_is_no_prior_graph() {
     let store = RegisteredWorkStore::start("work-product-version");
     create(
