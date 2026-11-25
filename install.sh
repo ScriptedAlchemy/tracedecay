@@ -192,6 +192,23 @@ else
 fi
 [[ $actual == "$expected" ]] || fail "checksum mismatch for ${asset}"
 
+# Recovery builds the selected tag's source, even when its workflow runs on
+# a newer master. Use that immutable source's member contract, as the release
+# workflow does, so a historical binary-only release stays installable.
+source_sha=$(curl -fsSL -H 'Accept: application/vnd.github.sha' \
+  "https://api.github.com/repos/${repository}/commits/tags/${tag}") ||
+  fail "cannot resolve the source of release ${tag}"
+[[ $source_sha =~ ^[[:xdigit:]]{40}$ ]] ||
+  fail "GitHub did not return a valid source commit for release ${tag}"
+contract_status=$(curl -sSL -o "${tmp_dir}/sdk-Cargo.toml" -w '%{http_code}' \
+  "https://raw.githubusercontent.com/${repository}/${source_sha}/crates/tracedecay-sdk-node/Cargo.toml") ||
+  fail "cannot read the member contract of release ${tag}"
+case $contract_status in
+  200) native_sdk=true ;;
+  404) native_sdk=false ;;
+  *) fail "cannot read the member contract of release ${tag}: HTTP ${contract_status}" ;;
+esac
+
 # SHA256SUMS is uploaded to the same release as the archive, so it proves only
 # that the download is intact: whoever can replace one asset can replace both.
 # The release workflow's build-provenance attestation proves who built the
@@ -204,15 +221,30 @@ else
   signer_workflow="https://github.com/${repository}/.github/workflows/release.yml"
 fi
 verify_build_provenance() {
-  local identity
+  local identity digests digest
   for identity in "${signer_workflow}@refs/heads/master" "${signer_workflow}@refs/tags/${tag}"; do
-    if gh attestation verify "${tmp_dir}/${asset}" \
+    if digests=$(gh attestation verify "${tmp_dir}/${asset}" \
       --repo "$repository" \
       --cert-identity "$identity" \
       --cert-oidc-issuer https://token.actions.githubusercontent.com \
-      >/dev/null 2>>"${tmp_dir}/attestation.log"; then
-      printf 'Verified build provenance: %s\n' "$identity"
-      return 0
+      --format json \
+      --jq '.[].verificationResult.signature.certificate.sourceRepositoryDigest' \
+      2>>"${tmp_dir}/attestation.log"); then
+      while IFS= read -r digest; do
+        [[ $digest =~ ^[[:xdigit:]]{40}$ ]] || continue
+        # Match the retained-asset verifier: tag runs name the exact source;
+        # master-dispatched builds may name a descendant workflow revision.
+        if [[ $digest == "$source_sha" ]] || {
+          [[ $identity == "${signer_workflow}@refs/heads/master" ]] &&
+            [[ $(gh api "repos/${repository}/compare/${source_sha}...${digest}" \
+              --jq .status 2>>"${tmp_dir}/attestation.log") == ahead ]]
+        }; then
+          printf 'Verified build provenance: %s\n' "$identity"
+          return 0
+        fi
+      done <<<"$digests"
+      printf 'Attested source does not match release %s at %s\n' \
+        "$tag" "$source_sha" >>"${tmp_dir}/attestation.log"
     fi
   done
   return 1
@@ -230,13 +262,17 @@ fi
 
 tar -xzf "${tmp_dir}/${asset}" -C "$tmp_dir"
 [[ -f ${tmp_dir}/tracedecay ]] || fail "archive does not contain tracedecay"
-[[ -f ${tmp_dir}/tracedecay_sdk_node.node && ! -L ${tmp_dir}/tracedecay_sdk_node.node ]] ||
-  fail "archive does not contain the native SDK binding tracedecay_sdk_node.node"
+members=(tracedecay)
+if [[ $native_sdk == true ]]; then
+  [[ -f ${tmp_dir}/tracedecay_sdk_node.node && ! -L ${tmp_dir}/tracedecay_sdk_node.node ]] ||
+    fail "archive does not contain the native SDK binding tracedecay_sdk_node.node"
+  members+=(tracedecay_sdk_node.node)
+fi
 
 mkdir -p "$install_dir"
 # mv interprets a directory, including a symlink to one, as a container.
-# Check both destinations before publishing either release member.
-for member in tracedecay tracedecay_sdk_node.node; do
+# Check every declared destination before publishing a release member.
+for member in "${members[@]}"; do
   [[ ! -d ${install_dir}/${member} ]] ||
     fail "cannot replace ${install_dir}/${member}: destination is a directory"
 done
@@ -247,13 +283,17 @@ done
 staged=$(mktemp "${install_dir}/.tracedecay.install.XXXXXX")
 staged_addon=
 trap 'rm -rf "$tmp_dir"; rm -f "$staged"; if [[ -n $staged_addon ]]; then rm -f "$staged_addon"; fi' EXIT
-staged_addon=$(mktemp "${install_dir}/.tracedecay-sdk.install.XXXXXX")
 install -m 0755 "${tmp_dir}/tracedecay" "$staged"
-install -m 0644 "${tmp_dir}/tracedecay_sdk_node.node" "$staged_addon"
+if [[ $native_sdk == true ]]; then
+  staged_addon=$(mktemp "${install_dir}/.tracedecay-sdk.install.XXXXXX")
+  install -m 0644 "${tmp_dir}/tracedecay_sdk_node.node" "$staged_addon"
+fi
 # After the archive checksum check. Re-signing changes the installed bytes
 # only; the published digest still matches the archive.
 stabilize_macos_adhoc_identity "$staged"
-mv -f "$staged_addon" "${install_dir}/tracedecay_sdk_node.node"
+if [[ -n $staged_addon ]]; then
+  mv -f "$staged_addon" "${install_dir}/tracedecay_sdk_node.node"
+fi
 mv -f "$staged" "${install_dir}/tracedecay"
 printf 'Installed tracedecay %s to %s\n' "${tag#v}" "${install_dir}/tracedecay"
 

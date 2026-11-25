@@ -21,6 +21,8 @@ BETA_TAG=v9.8.7-beta.1
 BETA_ASSET="tracedecay-beta-${BETA_TAG}-x86_64-linux.tar.gz"
 STABLE_TAG=v9.8.7
 STABLE_ASSET="tracedecay-${STABLE_TAG}-x86_64-linux.tar.gz"
+HISTORICAL_TAG=v9.8.6-beta.1
+HISTORICAL_ASSET="tracedecay-beta-${HISTORICAL_TAG}-x86_64-linux.tar.gz"
 # Newer prerelease that Release Please published before assets uploaded.
 INCOMPLETE_TAG=v9.8.8-beta.1
 
@@ -43,6 +45,15 @@ SH
 
 stage_release_archive "9.8.7-beta.1" "$BETA_ASSET" SHA256SUMS
 stage_release_archive "9.8.7" "$STABLE_ASSET" STABLE_SHA256SUMS
+mkdir "$tmpdir/historical"
+printf '#!/usr/bin/env bash\nprintf "tracedecay 9.8.6-beta.1\\n"\n' \
+  >"$tmpdir/historical/tracedecay"
+chmod +x "$tmpdir/historical/tracedecay"
+tar -czf "$tmpdir/$HISTORICAL_ASSET" -C "$tmpdir/historical" tracedecay
+(
+  cd "$tmpdir"
+  sha256sum "$HISTORICAL_ASSET" >HISTORICAL_SHA256SUMS
+)
 
 # Incomplete first, complete beta second: default latest must skip the empty
 # prerelease and install the beta that already lists archive + SHA256SUMS.
@@ -79,6 +90,18 @@ cat >"$tmpdir/releases.json" <<JSON
         "name": "SHA256SUMS",
         "browser_download_url": "https://github.com/ScriptedAlchemy/tracedecay/releases/download/${STABLE_TAG}/SHA256SUMS"
       }
+    ]
+  }
+]
+JSON
+cat >"$tmpdir/historical-releases.json" <<JSON
+[
+  {
+    "tag_name": "${HISTORICAL_TAG}",
+    "prerelease": true,
+    "assets": [
+      {"browser_download_url": "https://github.com/ScriptedAlchemy/tracedecay/releases/download/${HISTORICAL_TAG}/${HISTORICAL_ASSET}"},
+      {"browser_download_url": "https://github.com/ScriptedAlchemy/tracedecay/releases/download/${HISTORICAL_TAG}/SHA256SUMS"}
     ]
   }
 ]
@@ -121,6 +144,24 @@ while (($#)); do
 done
 
 case "$url" in
+  */api.github.com/repos/*/commits/tags/v9.8.7-beta.1)
+    printf '%s\n' "${TEST_SOURCE_SHA:-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb}"
+    ;;
+  */api.github.com/repos/*/commits/tags/v9.8.7)
+    printf '%s\n' cccccccccccccccccccccccccccccccccccccccc
+    ;;
+  */api.github.com/repos/*/commits/tags/v9.8.6-beta.1)
+    printf '%s\n' aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+    ;;
+  */raw.githubusercontent.com/*/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/crates/tracedecay-sdk-node/Cargo.toml)
+    printf '%s' "${TEST_CONTRACT_STATUS:-404}"
+    ;;
+  */raw.githubusercontent.com/*/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb/crates/tracedecay-sdk-node/Cargo.toml | \
+  */raw.githubusercontent.com/*/cccccccccccccccccccccccccccccccccccccccc/crates/tracedecay-sdk-node/Cargo.toml | \
+  */raw.githubusercontent.com/*/dddddddddddddddddddddddddddddddddddddddd/crates/tracedecay-sdk-node/Cargo.toml)
+    printf '[package]\nname = "tracedecay-sdk-node"\n' >"$output"
+    printf '%s' "${TEST_CONTRACT_STATUS:-200}"
+    ;;
   */api.github.com/repos/*/releases*)
     cat "$TEST_RELEASES_JSON"
     ;;
@@ -137,11 +178,17 @@ case "$url" in
   */download/v9.8.7/SHA256SUMS)
     cp "$TEST_STABLE_CHECKSUMS" "$output"
     ;;
+  */download/v9.8.6-beta.1/SHA256SUMS)
+    cp "$TEST_HISTORICAL_CHECKSUMS" "$output"
+    ;;
   */download/v9.8.7-beta.1/*.tar.gz)
     cp "$TEST_ARCHIVE" "$output"
     ;;
   */download/v9.8.7/*.tar.gz)
     cp "$TEST_STABLE_ARCHIVE" "$output"
+    ;;
+  */download/v9.8.6-beta.1/*.tar.gz)
+    cp "$TEST_HISTORICAL_ARCHIVE" "$output"
     ;;
   *)
     exit 2
@@ -165,6 +212,22 @@ cat >"$tmpdir/gh-bin/gh" <<'SH'
 #!/usr/bin/env bash
 set -euo pipefail
 printf '%s\n' "$*" >>"${GH_LOG:?}"
+if [[ ${1:-} == api ]]; then
+  case ${2:-} in
+    repos/ScriptedAlchemy/tracedecay/compare/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa...dddddddddddddddddddddddddddddddddddddddd)
+      printf 'ahead\n'
+      ;;
+    *) printf 'diverged\n' ;;
+  esac
+  exit 0
+fi
+case ${3:-} in
+  *tracedecay-beta-v9.8.7-beta.1-*) digest=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb ;;
+  *tracedecay-v9.8.7-*) digest=cccccccccccccccccccccccccccccccccccccccc ;;
+  # Recovery ran on a newer master whose source includes the native crate.
+  *tracedecay-beta-v9.8.6-beta.1-*) digest=dddddddddddddddddddddddddddddddddddddddd ;;
+  *) exit 2 ;;
+esac
 identity=
 while (($#)); do
   case "$1" in
@@ -178,7 +241,10 @@ while (($#)); do
   esac
 done
 while IFS= read -r accepted; do
-  [[ -n $accepted && $identity == "$accepted" ]] && exit 0
+  if [[ -n $accepted && $identity == "$accepted" ]]; then
+    printf '%s\n' "${GH_ATTESTED_SOURCE:-$digest}"
+    exit 0
+  fi
 done <<<"${GH_ACCEPTED_IDENTITIES:-}"
 printf 'Error: verifying with issuer "sigstore.dev"\n' >&2
 exit 1
@@ -191,6 +257,7 @@ STABLE_SIGNER=https://github.com/ScriptedAlchemy/tracedecay/.github/workflows/re
 run_installer() {
   PATH="$tmpdir/bin:${INSTALLER_GH_DIR:-$tmpdir/gh-bin}:$tmpdir/tools" \
   GH_LOG="$gh_log" \
+  GH_ATTESTED_SOURCE="${INSTALLER_ATTESTED_SOURCE:-}" \
   GH_ACCEPTED_IDENTITIES="${INSTALLER_ACCEPTED_IDENTITIES-${BETA_SIGNER}@refs/heads/master
 ${STABLE_SIGNER}@refs/tags/${STABLE_TAG}}" \
   TRACEDECAY_INSTALL_DIR="$tmpdir/install" \
@@ -199,6 +266,10 @@ ${STABLE_SIGNER}@refs/tags/${STABLE_TAG}}" \
   TEST_CHECKSUMS="${INSTALLER_CHECKSUMS:-$tmpdir/SHA256SUMS}" \
   TEST_STABLE_ARCHIVE="$tmpdir/${STABLE_ASSET}" \
   TEST_STABLE_CHECKSUMS="$tmpdir/STABLE_SHA256SUMS" \
+  TEST_HISTORICAL_ARCHIVE="$tmpdir/$HISTORICAL_ASSET" \
+  TEST_HISTORICAL_CHECKSUMS="$tmpdir/HISTORICAL_SHA256SUMS" \
+  TEST_SOURCE_SHA="${INSTALLER_SOURCE_SHA:-}" \
+  TEST_CONTRACT_STATUS="${INSTALLER_CONTRACT_STATUS:-}" \
     "$@"
 }
 
@@ -206,6 +277,7 @@ verify_args() {
   local signer=$1
   printf -- '--repo ScriptedAlchemy/tracedecay --cert-identity %s --cert-oidc-issuer https://token.actions.githubusercontent.com' \
     "$signer"
+  printf ' --format json --jq .[].verificationResult.signature.certificate.sourceRepositoryDigest'
 }
 
 rm -rf "$tmpdir/install"
@@ -222,6 +294,25 @@ run_installer "$INSTALLER" >"$tmpdir/beta-install.log"
 grep -Fqx "Verified build provenance: ${BETA_SIGNER}@refs/heads/master" \
   "$tmpdir/beta-install.log"
 
+# The latest available release and an explicit historical tag both use their
+# own binary-only source contract, not the newer recovery workflow's source.
+for selection in latest "$HISTORICAL_TAG"; do
+  rm -rf "$tmpdir/install"
+  INSTALLER_RELEASES_JSON="$tmpdir/historical-releases.json" \
+    run_installer env TRACEDECAY_VERSION="$selection" "$INSTALLER" \
+    >"$tmpdir/historical-install.log"
+  [[ "$("$tmpdir/install/tracedecay")" == "tracedecay 9.8.6-beta.1" ]]
+  [[ "$(stat "${mode_args[@]}" "$tmpdir/install/tracedecay")" == 755 ]]
+  [[ "$(ls -A "$tmpdir/install")" == tracedecay ]]
+done
+# The explicitly accepted checksum-only path uses the same source contract.
+rm -rf "$tmpdir/install"
+INSTALLER_GH_DIR="$tmpdir/no-gh" \
+  run_installer env TRACEDECAY_VERSION="$HISTORICAL_TAG" TRACEDECAY_INSTALL_UNATTESTED=1 \
+  "$INSTALLER" >"$tmpdir/historical-unattested.log" 2>&1
+[[ "$("$tmpdir/install/tracedecay")" == "tracedecay 9.8.6-beta.1" ]]
+[[ "$(ls -A "$tmpdir/install")" == tracedecay ]]
+
 # A stable release run on its tag is accepted after the master identity.
 rm -rf "$tmpdir/install"
 mkdir -p "$tmpdir/install"
@@ -233,6 +324,30 @@ run_installer env TRACEDECAY_VERSION=stable "$INSTALLER" >"$tmpdir/stable-instal
 [[ $(sed -n 2p "$gh_log") == "attestation verify "*"/${STABLE_ASSET} $(verify_args "${STABLE_SIGNER}@refs/tags/${STABLE_TAG}")" ]]
 grep -Fqx "Verified build provenance: ${STABLE_SIGNER}@refs/tags/${STABLE_TAG}" \
   "$tmpdir/stable-install.log"
+
+# An unavailable source contract must not make a native release binary-only,
+# and a verified workflow for an unrelated source cannot authorize the tag.
+if INSTALLER_CONTRACT_STATUS=503 run_installer "$INSTALLER" \
+  >"$tmpdir/contract-unavailable.log" 2>&1; then
+  echo "installer accepted an unavailable release member contract" >&2
+  exit 1
+fi
+grep -Fq 'cannot read the member contract of release v9.8.7-beta.1: HTTP 503' \
+  "$tmpdir/contract-unavailable.log"
+if INSTALLER_SOURCE_SHA=invalid run_installer "$INSTALLER" \
+  >"$tmpdir/source-invalid.log" 2>&1; then
+  echo "installer accepted an invalid release source identity" >&2
+  exit 1
+fi
+grep -Fq 'GitHub did not return a valid source commit' "$tmpdir/source-invalid.log"
+if INSTALLER_ATTESTED_SOURCE=eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee \
+  run_installer "$INSTALLER" >"$tmpdir/source-mismatch.log" 2>&1; then
+  echo "installer accepted an attestation for an unrelated release source" >&2
+  exit 1
+fi
+grep -Fq 'Attested source does not match release' "$tmpdir/source-mismatch.log"
+[[ "$("$tmpdir/install/tracedecay")" == "tracedecay 9.8.7" ]]
+[[ "$(cat "$tmpdir/install/tracedecay_sdk_node.node")" == "sdk binding 9.8.7" ]]
 
 # A verified archive without its binding must leave the installed pair alone.
 mkdir -p "$tmpdir/missing-addon"

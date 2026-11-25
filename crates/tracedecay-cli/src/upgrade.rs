@@ -542,22 +542,16 @@ fn publish_release(staged: &StagedRelease) -> Result<(Option<PathBuf>, bool)> {
     }
     #[cfg(not(unix))]
     {
-        let exe =
-            std::env::current_exe().map_err(io_err("cannot resolve the running executable"))?;
+        let exe = std::env::current_exe()
+            .and_then(|exe| exe.canonicalize())
+            .map_err(io_err("cannot resolve the running executable"))?;
         let addon = sdk_member_target(&exe)?;
         let prepared_executable =
             prepare_member(&staged.executable(), &exe, EXECUTABLE_MEMBER.mode)?;
         let prepared_addon = prepare_member(&staged.path_of(SDK_MEMBER), &addon, SDK_MEMBER.mode)?;
         persist_member(prepared_addon, &addon)?;
-        self_replace::self_replace(prepared_executable.path()).map_err(|e| {
-            TraceDecayError::Config {
-                message: format!(
-                    "binary replacement failed: {e}\n  \
-                 The old version is still in place.\n  \
-                 To upgrade manually: https://github.com/{GITHUB_REPO}/releases/latest"
-                ),
-            }
-        })?;
+        self_replace::self_replace(prepared_executable.path())
+            .map_err(executable_replacement_failed)?;
         Ok((Some(exe), false))
     }
 }
@@ -573,12 +567,22 @@ fn publish_release_at(staged: &StagedRelease, executable: &Path) -> Result<bool>
         prepare_member(&staged.executable(), executable, EXECUTABLE_MEMBER.mode)?;
     let prepared_addon = prepare_member(&staged.path_of(SDK_MEMBER), &addon, SDK_MEMBER.mode)?;
     persist_member(prepared_addon, &addon)?;
-    persist_member(prepared_executable, executable)?;
+    persist_member(prepared_executable, executable).map_err(executable_replacement_failed)?;
     // The archive checksum already matched. This only replaces an ad-hoc or
     // missing signature on the installed Mach-O; a team signature stays.
     // The binary is already the installed one: a codesign failure must not
     // turn into an error that drops that install.
     Ok(codesign_failed(stabilize_installed_executable(executable)))
+}
+
+fn executable_replacement_failed(error: impl fmt::Display) -> TraceDecayError {
+    TraceDecayError::Config {
+        message: format!(
+            "the native SDK binding was installed, but executable replacement failed: {error}. \
+             The installation is incomplete. Retry the update or reinstall the complete release \
+             bundle from https://github.com/{GITHUB_REPO}/releases/latest",
+        ),
+    }
 }
 
 fn sdk_member_target(executable: &Path) -> Result<PathBuf> {
@@ -984,6 +988,13 @@ fn prepare_member(source: &Path, target: &Path, mode: u32) -> Result<tempfile::N
         Err(error) if error.kind() == io::ErrorKind::NotFound => {}
         Err(error) => return Err(io_err("cannot inspect release member destination")(error)),
     }
+    #[cfg(windows)]
+    if target
+        .file_name()
+        .is_some_and(|name| name == SDK_MEMBER.name)
+    {
+        require_sdk_binding_replaceable(target)?;
+    }
     let dir = target.parent().ok_or_else(|| TraceDecayError::Config {
         message: "cannot determine target directory".into(),
     })?;
@@ -1004,10 +1015,52 @@ fn prepare_member(source: &Path, target: &Path, mode: u32) -> Result<tempfile::N
 }
 
 fn persist_member(sibling: tempfile::NamedTempFile, target: &Path) -> Result<()> {
-    sibling
-        .persist(target)
-        .map_err(|error| io_err("cannot replace release member")(error.error))?;
+    sibling.persist(target).map_err(|error| {
+        #[cfg(windows)]
+        if target
+            .file_name()
+            .is_some_and(|name| name == SDK_MEMBER.name)
+        {
+            return native_sdk_replacement_error(target, error.error);
+        }
+        io_err("cannot replace release member")(error.error)
+    })?;
     Ok(())
+}
+
+/// A loaded Node addon is a mapped DLL on Windows. Stopping the daemon does
+/// not close the separate ChatGPT/Node host that owns that mapping. Probe for
+/// exclusive write access before publishing either member of the release;
+/// do not terminate an application that the updater does not own.
+#[cfg(windows)]
+fn require_sdk_binding_replaceable(target: &Path) -> Result<()> {
+    use std::os::windows::fs::OpenOptionsExt;
+
+    match std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .share_mode(0)
+        .open(target)
+    {
+        Ok(probe) => {
+            drop(probe);
+            Ok(())
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(native_sdk_replacement_error(target, error)),
+    }
+}
+
+#[cfg(windows)]
+fn native_sdk_replacement_error(target: &Path, error: io::Error) -> TraceDecayError {
+    TraceDecayError::Config {
+        message: format!(
+            "native SDK binding '{}' cannot be replaced while in use or write-protected: {error}. \
+             Close ChatGPT and any Node process using this installation, check the binding's \
+             permissions, then retry. No release member was replaced",
+            target.display(),
+        ),
+    }
 }
 
 /// Downloads, extracts, and installs the binary for `version`/`is_beta`.
@@ -2056,6 +2109,81 @@ mod tests {
             "release targets must include the native SDK binding"
         );
         assert_eq!(required_members(), vec![EXECUTABLE_MEMBER, SDK_MEMBER]);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_node_host_holding_the_installed_addon_refuses_publication_until_closed() {
+        use std::process::Stdio;
+
+        struct NodeHost(std::process::Child);
+        impl Drop for NodeHost {
+            fn drop(&mut self) {
+                let _ = self.0.kill();
+                let _ = self.0.wait();
+            }
+        }
+
+        let source = PathBuf::from(
+            std::env::var_os("TRACEDECAY_TEST_SDK_ADDON")
+                .expect("Bazel must provide the native SDK addon"),
+        );
+        let install = tempfile::tempdir().unwrap();
+        let executable = install.path().join(EXECUTABLE_MEMBER.name);
+        let addon = install.path().join(SDK_MEMBER.name);
+        std::fs::write(&executable, b"old-executable").unwrap();
+        std::fs::copy(&source, &addon).unwrap();
+        let original_digest = Sha256::digest(std::fs::read(&addon).unwrap());
+        let ready = install.path().join("host-ready");
+        let mut host = NodeHost(
+            Command::new(std::env::var_os("NODE").expect("Bazel must provide Node"))
+                .arg("-e")
+                .arg(
+                    "const binding = require(process.argv[1]); \
+                     if (typeof binding.NativeClient !== 'function') throw new Error('missing native client'); \
+                     require('node:fs').writeFileSync(process.argv[2], 'ready'); \
+                     setInterval(() => {}, 1000)",
+                )
+                .arg(&addon)
+                .arg(&ready)
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::inherit())
+                .spawn()
+                .unwrap(),
+        );
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !ready.exists() && Instant::now() < deadline {
+            assert!(host.0.try_wait().unwrap().is_none(), "native host exited");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(ready.exists(), "native host did not load its addon");
+
+        let error = prepare_member(&source, &addon, SDK_MEMBER.mode).unwrap_err();
+        assert!(matches!(&error, TraceDecayError::Config { .. }), "{error}");
+        let message = error.to_string();
+        assert!(message.contains("Close ChatGPT"), "{message}");
+        assert!(message.contains("Node process"), "{message}");
+        assert!(
+            message.contains("No release member was replaced"),
+            "{message}"
+        );
+        assert_eq!(std::fs::read(&executable).unwrap(), b"old-executable");
+        assert_eq!(
+            Sha256::digest(std::fs::read(&addon).unwrap()),
+            original_digest
+        );
+        assert_eq!(std::fs::read_dir(install.path()).unwrap().count(), 3);
+
+        host.0.kill().unwrap();
+        host.0.wait().unwrap();
+        publish_member(&source, &addon, SDK_MEMBER.mode).unwrap();
+        assert_eq!(std::fs::read(&executable).unwrap(), b"old-executable");
+        assert_eq!(
+            Sha256::digest(std::fs::read(&addon).unwrap()),
+            original_digest
+        );
+        assert_eq!(std::fs::read_dir(install.path()).unwrap().count(), 3);
     }
 
     #[cfg(unix)]

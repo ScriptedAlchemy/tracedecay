@@ -50,6 +50,17 @@ deliver it some other way, such as an offline plugin install that places
   inconsistent with their kind, are `TraceDecayMalformedResponseError`.
   Unknown fields inside success payloads and canonical events still pass
   through.
+- Integer values from daemon responses must fit JavaScript's safe integer
+  range, including receipts, events, problems, and unknown integer fields.
+  Otherwise the binding raises `TraceDecayMalformedResponseError` before
+  JavaScript can round them. Unsafe values in integer request fields and
+  non-finite request numbers raise `TraceDecayProtocolError` before network
+  I/O. Fields declared as `f64` retain floating-point semantics and may exceed
+  2^53.
+- `resume.nextSequence` accepts a safe integer `number`, an unsigned decimal
+  string, or a `bigint` within the `u64` range. Decimal strings and bigints
+  preserve the exact resume query value. Numeric fields received in stream
+  frames still have to fit JavaScript's safe integer range.
 
 ## Usage
 

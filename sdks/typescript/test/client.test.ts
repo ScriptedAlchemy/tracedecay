@@ -1349,6 +1349,92 @@ describe("TraceDecayClient generated operation bindings", () => {
 
 });
 
+describe("native numeric representation", () => {
+  function grepEnvelope(storeId: number | null, score: number) {
+    const response = successEnvelope({ status: "ok", hits: [{
+      kind: "message", provider: "test", session_id: "session.sdk", message_id: null,
+      node_id: null, store_id: storeId, role: null, snippet: "needle", score,
+    }] });
+    response.value.binding_id = "binding.http.lcm_grep.v1";
+    response.value.contract.schema_id = "schema.application.retained.lcm-grep.result";
+    return response;
+  }
+
+  it("preserves large declared floating-point request and result values", async () => {
+    const largeFloat = 2 ** 54;
+    let requestBody = "";
+    await withServer([
+      (_request, reply, body) => {
+        requestBody = body;
+        json(reply, 200, factStoreEnvelope(
+          "fact_store_list", { facts: [], next_after: null, owner: { kind: "profile" } }, null,
+        ));
+      },
+      (_request, reply) => json(reply, 200, grepEnvelope(null, largeFloat)),
+    ], async (baseUrl, requests) => {
+      const client = createClient({ baseUrl, projectId: "project.sdk", token: "sdk-secret" });
+      await client.operations.application_fact_store_list({ min_trust: largeFloat });
+      expect(JSON.parse(requestBody).min_trust).toBe(largeFloat);
+      expect(await client.operations.application_lcm_grep({ query: "needle" })).toMatchObject({
+        outcome: { value: { payload: { hits: [{ score: largeFloat }] } } },
+        future_envelope_field: "preserved",
+      });
+      expect(requests).toHaveLength(2);
+    });
+  });
+
+  it("refuses unsafe typed request integers before contacting the daemon", async () => {
+    await withServer([], async (baseUrl, requests) => {
+      const client = createClient({ baseUrl, projectId: "project.sdk", token: "sdk-secret" });
+      await expect(client.operations.workflow_activate_definition({
+        definition_id: "workflow.sdk", definition_version: Number.MAX_SAFE_INTEGER + 1,
+        expected_revision: 1,
+      })).rejects.toBeInstanceOf(TraceDecayProtocolError);
+      expect(requests).toHaveLength(0);
+    });
+  });
+
+  it.each([NaN, Infinity, -Infinity])("refuses a non-finite optional request number (%s)", async (value) => {
+    await withServer([], async (baseUrl, requests) => {
+      const client = createClient({ baseUrl, projectId: "project.sdk", token: "sdk-secret" });
+      await expect(client.operations.application_fact_store_list({ min_trust: value }))
+        .rejects.toBeInstanceOf(TraceDecayProtocolError);
+      expect(requests).toHaveLength(0);
+    });
+  });
+
+  it("refuses unsafe response integers in results, receipts, extensions and problems", async () => {
+    const unsafe = Number.MAX_SAFE_INTEGER + 1;
+    const result = grepEnvelope(unsafe, 1.5);
+    const receipt = successEnvelope([]);
+    receipt.value.outcome.value.execution.budget.units_consumed = unsafe;
+    const extension = successEnvelope([]);
+    (extension.value as Record<string, unknown>).future_counter = unsafe;
+    // Send the exact odd integer that JSON.parse would silently round down.
+    const wire = (body: unknown) => JSON.stringify(body).replaceAll(String(unsafe), "9007199254740993");
+    const problem = JSON.stringify(detailedProblemEnvelope("code_graph_rewarming"))
+      .replaceAll("7940", "9007199254740993");
+    await withServer([
+      ...[result, receipt, extension].map((body): RequestHandler => (_request, reply) => {
+        reply.writeHead(200, { "content-type": "application/json" }).end(wire(body));
+      }),
+      (_request, reply) => { reply.writeHead(503, { "content-type": "application/json" }).end(problem); },
+    ], async (baseUrl, requests) => {
+      const client = createClient({ baseUrl, projectId: "project.sdk", token: "sdk-secret" });
+      await expect(client.operations.application_lcm_grep({ query: "needle" }))
+        .rejects.toBeInstanceOf(TraceDecayMalformedResponseError);
+      for (let index = 0; index < 2; index += 1) {
+        await expect(client.operations.workflow_list_definitions({}))
+          .rejects.toBeInstanceOf(TraceDecayMalformedResponseError);
+      }
+      await expect(client.operations.workflow_list_definitions({})).rejects.toMatchObject({
+        name: "TraceDecayMalformedResponseError", status: 503,
+      });
+      expect(requests).toHaveLength(4);
+    });
+  });
+});
+
 describe("TraceDecayClient transport envelopes", () => {
   it("requires concealed problems to omit identity and ordinary problems to bind it", async () => {
     const concealed = problemEnvelope("not_found_or_not_authorized", "concealed");

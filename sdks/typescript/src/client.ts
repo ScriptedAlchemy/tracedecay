@@ -312,9 +312,15 @@ export class TraceDecayClient {
     try {
       optionalSafeInteger(controls.deadlineMicros, "deadlineMicros");
       optionalSafeInteger(controls.page?.size, "page size");
+      const requestJson = JSON.stringify(request, (_key, value: unknown) => {
+        if (typeof value === "number" && !Number.isFinite(value)) {
+          throw new TraceDecayProtocolError("request numbers must be finite");
+        }
+        return value;
+      });
       call = this.#client().prepareOperation(
         operationId,
-        JSON.stringify(request),
+        requestJson,
         JSON.stringify(controls),
       );
     } catch (error) {

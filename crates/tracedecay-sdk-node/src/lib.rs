@@ -60,6 +60,17 @@ impl From<Failure> for Error {
             }
             Failure::Client(error) => client_error_payload(&error),
         };
+        if javascript_numbers(&payload, None).is_err() {
+            return Error::new(
+                Status::GenericFailure,
+                json!({
+                    "kind": "protocol",
+                    "message": "daemon problem contains an integer outside JavaScript's safe range",
+                    "status": payload.get("status"),
+                })
+                .to_string(),
+            );
+        }
         Error::new(Status::GenericFailure, payload.to_string())
     }
 }
@@ -95,6 +106,50 @@ fn client_error_payload(error: &ClientError) -> Value {
 
 fn invalid_request(message: impl Into<String>) -> Failure {
     Failure::Client(ClientError::InvalidRequest(message.into()))
+}
+
+/// JSON numbers lose their integer kind when JavaScript parses them. Inspect
+/// that kind before crossing the binding, using the typed Rust projection
+/// where a schema declares a float (even if its wire spelling is integral).
+/// Unknown fields retain their wire numeric kind and are checked as well.
+fn javascript_numbers(
+    value: &Value,
+    canonical: Option<&Value>,
+) -> std::result::Result<(), &'static str> {
+    const MAX_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
+    match value {
+        Value::Number(number) => {
+            let number = canonical.and_then(Value::as_number).unwrap_or(number);
+            if number
+                .as_u64()
+                .is_some_and(|value| value > MAX_SAFE_INTEGER)
+                || number
+                    .as_i64()
+                    .is_some_and(|value| value < -(MAX_SAFE_INTEGER as i64))
+            {
+                return Err("integer is outside JavaScript's safe range");
+            }
+        }
+        Value::Array(values) => {
+            for (index, value) in values.iter().enumerate() {
+                javascript_numbers(value, canonical.and_then(|value| value.get(index)))?;
+            }
+        }
+        Value::Object(values) => {
+            for (key, value) in values {
+                javascript_numbers(value, canonical.and_then(|value| value.get(key)))?;
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+fn invalid_response(status: Option<u16>, message: impl Into<String>) -> ClientError {
+    ClientError::Protocol {
+        status,
+        message: message.into(),
+    }
 }
 
 fn parse<'a, T: Deserialize<'a>>(text: &'a str, what: &str) -> std::result::Result<T, Failure> {
@@ -220,6 +275,8 @@ impl NativeClient {
             .endpoint
             .prepare_operation(contract, &request, &options)
             .map_err(Failure::from)?;
+        javascript_numbers(&request, Some(prepared.canonical_request()))
+            .map_err(invalid_request)?;
         Ok(NativeCall::new(
             self.http.clone(),
             CallKind::Operation(Box::new(prepared)),
@@ -302,15 +359,30 @@ impl NativeCall {
             content_type: content_type.as_deref(),
             body: &body,
         };
-        let value = match &self.kind {
-            CallKind::Operation(operation) => operation.admit_response(body)?.envelope,
+        let (value, projection) = match &self.kind {
+            CallKind::Operation(operation) => {
+                let admitted = operation.admit_response(body)?;
+                let payload = match admitted.payload() {
+                    Some(payload) if !payload.is_null() => operation
+                        .contract
+                        .canonical_result(payload)
+                        .map_err(|message| invalid_response(Some(status), message))?,
+                    _ => Value::Null,
+                };
+                (
+                    admitted.envelope,
+                    Some(json!({"outcome": {"value": {"payload": payload}}})),
+                )
+            }
             CallKind::Cancel(_) => {
                 let cancellation = decode_cancellation(body)?;
                 let mut value = Value::Object(cancellation.details);
                 value["status"] = json!(cancellation_status(cancellation.status));
-                value
+                (value, None)
             }
         };
+        javascript_numbers(&value, projection.as_ref())
+            .map_err(|message| invalid_response(Some(status), message))?;
         Ok(value.to_string())
     }
 }
@@ -471,10 +543,16 @@ impl NativeStream {
         if advanced.is_err() {
             inner.body = None;
         }
-        let event = advanced?;
-        Ok(event.map(|event| {
-            json!({"event": event.event, "id": event.id, "data": event.data}).to_string()
-        }))
+        let Some(event) = advanced? else {
+            return Ok(None);
+        };
+        let value = json!({"event": event.event, "id": event.id, "data": event.data});
+        if let Err(message) = javascript_numbers(&value, None) {
+            inner.body = None;
+            inner.ready.clear();
+            return Err(Failure::from(inner.state.fail(invalid_response(None, message))).into());
+        }
+        Ok(Some(value.to_string()))
     }
 
     /// Release the connection. A pending `next()` rejects as interrupted;

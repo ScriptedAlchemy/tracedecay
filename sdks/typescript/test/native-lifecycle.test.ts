@@ -5,11 +5,13 @@ import { describe, expect, it } from "vitest";
 
 import {
   TraceDecayAbortError,
+  TraceDecayAuthenticationError,
   TraceDecayDisconnectedError,
+  TraceDecayMalformedResponseError,
   TraceDecayProtocolError,
   type TraceDecayClient,
 } from "../src/client";
-import { addonPath, heldEvents, silent, withDaemon, type Handler } from "./support/daemon";
+import { addonPath, heldEvents, json, silent, withDaemon, type Handler } from "./support/daemon";
 
 const OPEN = "event: open\ndata: " + JSON.stringify({
   event: "open",
@@ -128,6 +130,31 @@ describe("native lifecycle ownership", () => {
       expect(daemon.requests.map((request) => request.method)).toEqual(["GET"]);
     });
   });
+
+  it("refuses an unsafe stream integer without rounding or reconnecting", async () => {
+    const opening = OPEN.replace('"next_sequence":0', '"next_sequence":9007199254740993');
+    await withDaemon([heldEvents(opening)], async (daemon) => {
+      const iterator = daemon.client().streamOperation("request.operation", { maxReconnects: 2 });
+      await expect(iterator.next()).rejects.toBeInstanceOf(TraceDecayMalformedResponseError);
+      await daemon.closed(0);
+      expect(daemon.requests).toHaveLength(1);
+    });
+  });
+
+  it.each([9_007_199_254_740_993n, "18446744073709551615"])(
+    "sends a large exact resume cursor without numeric conversion (%s)",
+    async (nextSequence) => {
+      await withDaemon([json(401, {})], async (daemon) => {
+        const iterator = daemon.client().streamOperation("request.operation", {
+          resume: { resumeToken: "resume", nextSequence },
+        });
+        await expect(iterator.next()).rejects.toBeInstanceOf(TraceDecayAuthenticationError);
+        const request = new URL(daemon.requests[0]!.url, daemon.baseUrl);
+        expect(request.searchParams.get("next_sequence")).toBe(String(nextSequence));
+        expect(daemon.requests).toHaveLength(1);
+      });
+    },
+  );
 
   it("applies backpressure to the daemon while the consumer is not reading", async () => {
     let produced = 0;

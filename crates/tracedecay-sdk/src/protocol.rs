@@ -9,8 +9,8 @@ use std::time::Duration;
 
 use reqwest::header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE, HeaderMap, HeaderValue, ORIGIN};
 use reqwest::{Method, StatusCode, Url};
-use serde::Deserialize as _;
 use serde::de::DeserializeOwned;
+use serde::{Deserialize as _, Serialize};
 use serde_json::Value;
 use tracedecay_contracts::retained_surfaces::{SdkRequestIdControlV1, SdkResultSemanticsV1};
 use tracedecay_contracts::{CancellationObservation, RequestId};
@@ -60,6 +60,7 @@ pub struct OperationContract {
     pub result_schema_revision: u32,
     canonical_request: fn(&Value) -> Result<Value, String>,
     validate_result: fn(&Value) -> Result<(), String>,
+    canonical_result: fn(&Value) -> Result<Value, String>,
 }
 
 impl OperationContract {
@@ -67,6 +68,7 @@ impl OperationContract {
     where
         Operation: TypedOperation,
         Operation::Request: DeserializeOwned,
+        Operation::Result: Serialize,
     {
         Self {
             operation_id: Operation::OPERATION_ID,
@@ -83,6 +85,7 @@ impl OperationContract {
             result_schema_revision: Operation::RESULT_SCHEMA_REVISION,
             canonical_request: canonical_request::<Operation>,
             validate_result: validate_result::<Operation>,
+            canonical_result: canonical_value::<Operation::Result>,
         }
     }
 
@@ -102,6 +105,13 @@ impl OperationContract {
                 self.operation_id
             ))
         })
+    }
+
+    /// Project a validated result through its canonical Rust type. Numeric
+    /// adapters can distinguish integer fields from floating-point metrics
+    /// without replacing the original payload or losing its unknown fields.
+    pub fn canonical_result(&self, payload: &Value) -> Result<Value, String> {
+        (self.canonical_result)(payload)
     }
 
     fn http_route(&self) -> Result<&'static str, ClientError> {
@@ -136,7 +146,11 @@ where
     Operation: TypedOperation,
     Operation::Request: DeserializeOwned,
 {
-    let typed = Operation::Request::deserialize(request).map_err(|error| error.to_string())?;
+    canonical_value::<Operation::Request>(request)
+}
+
+fn canonical_value<T: DeserializeOwned + Serialize>(value: &Value) -> Result<Value, String> {
+    let typed = T::deserialize(value).map_err(|error| error.to_string())?;
     serde_json::to_value(typed).map_err(|error| error.to_string())
 }
 
@@ -429,6 +443,11 @@ fn admit_canonical_sdk_http_binding(
 }
 
 impl PreparedOperation {
+    /// The typed request projection, including its canonical numeric kinds.
+    pub fn canonical_request(&self) -> &Value {
+        &self.canonical_request
+    }
+
     /// Validate the daemon's response against this operation's contract.
     pub fn admit_response(
         &self,
