@@ -83,7 +83,7 @@ async fn dependency_depth(server: &McpServer, arguments: Value) -> Value {
 
 /// `top -> mid -> leaf` is two edges. `aside` and `marker` stay length-1
 /// chains: derive and trait metadata is not a file dependency.
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn dependency_depth_reports_the_call_chain_and_ignores_derives() {
     let fixture = production_composition_fixture_with_sources(write_dependency_depth_sources).await;
     let server = fixture
@@ -171,7 +171,7 @@ async fn dependency_depth_reports_the_call_chain_and_ignores_derives() {
 
 /// A pair of mutual calls is one component. The answer is the single edge
 /// into that component, not a walk that never ends.
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn dependency_depth_collapses_a_mutual_call_cycle() {
     let fixture = production_composition_fixture_with_sources(write_dependency_depth_sources).await;
     let server = fixture

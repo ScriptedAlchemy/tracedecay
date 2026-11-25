@@ -343,6 +343,10 @@ fn record_lost_store_files(
 /// them; each store bounds its own deletion batches. The retired filesystem
 /// cache under the profile root and each registered project shard is removed
 /// with them. The sweep stops between stores once cancellation is requested.
+///
+/// `databases` are the owner leases of the stores swept, issued for this
+/// sweep alone and dropped when it returns: a lease pins its store against
+/// retirement, so none may outlive the sweep into the rest of the tick.
 async fn sweep_response_handles(
     databases: Vec<tracedecay_global_db::RegisteredGlobalDbLeaseV1>,
     retired_roots: Vec<PathBuf>,
@@ -1454,8 +1458,9 @@ impl MaintenanceCoordinator {
         administration
             .store_telemetry_sampling()
             .begin_retention_tick_log_window();
-        let mounted_session_databases = administration.mounted_registered_session_databases().await;
-        let session_databases = mounted_session_databases
+        let session_databases = administration
+            .mounted_registered_session_databases()
+            .await
             .iter()
             .map(|database| database.db_path().to_path_buf())
             .collect::<Vec<_>>();
@@ -1511,7 +1516,7 @@ impl MaintenanceCoordinator {
                 .map(Path::to_path_buf)
                 .collect();
             sweep_response_handles(
-                mounted_session_databases.clone(),
+                administration.mounted_registered_session_databases().await,
                 retired_roots,
                 self.cancellation.clone(),
             )

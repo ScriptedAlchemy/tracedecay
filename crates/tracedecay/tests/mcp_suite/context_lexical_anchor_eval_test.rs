@@ -163,7 +163,7 @@ async fn context_json(server: &tracedecay::mcp::McpServer, arguments: Value) -> 
         .unwrap_or_else(|error| panic!("tracedecay_context JSON invalid: {error}; text={text}"))
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn context_lexical_anchors_admit_every_exact_import_site() {
     let production = production_composition_fixture_with_sources(write_anchor_eval_project).await;
     let server = production
@@ -380,7 +380,7 @@ fn single_matched_receipt(payload: &Value) -> (u64, u64, Vec<(String, u64)>) {
     )
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn context_returns_a_rare_anchor_site_over_an_exact_word_neighborhood() {
     let production = production_composition_fixture_with_sources(write_update_anchor_project).await;
     let server = production
@@ -478,7 +478,7 @@ async fn context_returns_a_rare_anchor_site_over_an_exact_word_neighborhood() {
     production.harness.shutdown().await;
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn an_identifier_named_in_the_task_leads_plan_and_explore_context() {
     let production = production_composition_fixture_with_sources(write_update_anchor_project).await;
     let server = production
@@ -580,7 +580,7 @@ fn write_request_limit_project(dest: &Path) {
     .expect("unrelated headings");
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn context_finds_request_limit_by_question_stem_and_filename() {
     let production = production_composition_fixture_with_sources(write_request_limit_project).await;
     let server = production

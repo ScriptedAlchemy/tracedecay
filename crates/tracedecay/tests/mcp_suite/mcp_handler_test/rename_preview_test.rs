@@ -214,7 +214,7 @@ fn assert_sources_unchanged(fixture: &ProductionCompositionFixture) {
     assert_eq!(lib, LIB_RS);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn rename_preview_reports_the_declaration_the_caller_and_text_only_names() {
     let (fixture, server) = opened_fixture().await;
     let reserve_id = symbol_id(&server, "reserve_stock").await;
@@ -261,7 +261,7 @@ fn assert_invalid_request_refused(response: &Value, message: &str) {
     assert_eq!(problem["message"], message, "{response}");
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn rename_preview_refuses_incomplete_utf16_reference_source() {
     let (fixture, server) = opened_fixture().await;
     let reserve_id = symbol_id(&server, "reserve_stock").await;
@@ -291,7 +291,7 @@ async fn rename_preview_refuses_incomplete_utf16_reference_source() {
     assert_eq!(fs::read(&source_path).unwrap(), bytes);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn rename_preview_refuses_unknown_and_unusable_node_identity() {
     let (fixture, server) = opened_fixture().await;
 
@@ -350,7 +350,7 @@ async fn rename_preview_refuses_unknown_and_unusable_node_identity() {
     assert_sources_unchanged(&fixture);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn rename_preview_reads_dense_reference_sources_once_per_file() {
     if !crate::common::in_child_test() {
         crate::common::rerun_test_in_child(
@@ -424,7 +424,7 @@ async fn rename_preview_reads_dense_reference_sources_once_per_file() {
     fixture.shutdown().await;
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn rename_preview_uses_canonical_bom_and_utf16_source_for_snippets() {
     let encodings: &[SourceEncoding] = &[
         (&[0xEF, 0xBB, 0xBF], None),
@@ -468,7 +468,7 @@ async fn rename_preview_uses_canonical_bom_and_utf16_source_for_snippets() {
     }
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn rename_preview_rereads_current_text_on_the_next_request() {
     let (fixture, server) = opened_fixture().await;
     let reserve_id = symbol_id(&server, "reserve_stock").await;
@@ -502,7 +502,7 @@ async fn rename_preview_rereads_current_text_on_the_next_request() {
     fixture.shutdown().await;
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn rename_preview_refuses_reference_offsets_past_current_source() {
     let (fixture, server) = opened_fixture().await;
     let reserve_id = symbol_id(&server, "reserve_stock").await;
@@ -532,7 +532,7 @@ async fn rename_preview_refuses_reference_offsets_past_current_source() {
     fixture.shutdown().await;
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn rename_preview_keeps_a_missing_declaration_snippet_optional() {
     let (fixture, server) = opened_fixture().await;
     let reserve_id = symbol_id(&server, "reserve_stock").await;
@@ -556,7 +556,7 @@ async fn rename_preview_keeps_a_missing_declaration_snippet_optional() {
     fixture.shutdown().await;
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn rename_preview_deadline_stops_the_worker_before_the_next_file() {
     if !crate::common::in_child_test() {
         crate::common::rerun_test_in_child(
@@ -616,7 +616,7 @@ async fn rename_preview_deadline_stops_the_worker_before_the_next_file() {
     fixture.shutdown().await;
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn rename_preview_transport_cancel_stops_the_worker_before_the_next_file() {
     if !crate::common::in_child_test() {
         crate::common::rerun_test_in_child(

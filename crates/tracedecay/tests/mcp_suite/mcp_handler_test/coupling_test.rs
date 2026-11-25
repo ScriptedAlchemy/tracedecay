@@ -123,7 +123,7 @@ fn assert_coupling_json(response: &JsonRpcResponse, expected: &str) {
     assert_eq!(tool_text(response), expected);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn coupling_ranks_distinct_other_files_for_fan_in_and_fan_out() {
     let fixture = production_composition_fixture_with_sources(write_coupling_sources).await;
     let server = fixture

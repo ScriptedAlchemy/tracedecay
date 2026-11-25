@@ -23,7 +23,6 @@ use tracedecay_contracts::{
 use tracedecay_domain::configuration::{
     AuthorityRef, ConfigurationRevisionId, ScopeSourceBinding, SourceBindingId, SourceKindV1,
 };
-use tracedecay_domain::errors::TraceDecayError;
 use tracedecay_domain::feedback::{
     FeedbackActorContextV1, FeedbackAdvisoryProviderStateV1, FeedbackAuthoritativeRuntimeStateV1,
     FeedbackBaselineHorizonV1, FeedbackBaselineStateV1, FeedbackBudgetV1,

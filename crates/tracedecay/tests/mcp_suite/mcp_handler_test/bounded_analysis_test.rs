@@ -70,7 +70,7 @@ fn write_wide_cycle(project: &std::path::Path, module_count: usize, prefix: &str
 /// the response budget on their own: a huge strongly connected component has
 /// to be reported as a bounded member list plus truthful total/omitted counts,
 /// not as an unbounded path dump that the transport then truncates.
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn circular_honours_the_declared_limit_within_the_response_budget() {
     let fixture = production_composition_fixture_with_sources(|project| {
         write_wide_cycle(project, 240, "alpha");
@@ -139,7 +139,7 @@ async fn circular_honours_the_declared_limit_within_the_response_budget() {
 
 /// The markdown rendering of the same bounded request must also fit the budget
 /// and must state what it omitted.
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn circular_markdown_states_bounded_membership() {
     let fixture = production_composition_fixture_with_sources(|project| {
         write_wide_cycle(project, 240, "beta");

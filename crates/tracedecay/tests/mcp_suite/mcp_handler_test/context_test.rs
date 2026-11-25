@@ -127,7 +127,7 @@ fn committed_fact_id(payload: &Value) -> &str {
         .expect("committed add must return a canonical fact id")
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_context_appends_index_coverage_hint_for_skipped_generated_dirs() {
     let fixture = setup_production_generated_dir_project().await;
 
@@ -153,7 +153,7 @@ async fn test_context_appends_index_coverage_hint_for_skipped_generated_dirs() {
     fixture.harness.shutdown().await;
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn context_includes_matching_memory_facts() {
     let fixture = setup_production_project().await;
     let added = call_production_fact_tool(
@@ -246,7 +246,7 @@ async fn context_includes_matching_memory_facts() {
     fixture.harness.shutdown().await;
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn context_memory_controls_filter_disable_and_preserve_markdown() {
     let fixture = setup_production_project().await;
     let long_content = format!("Long memory control fact {}", "x".repeat(320));
@@ -355,7 +355,7 @@ async fn context_memory_controls_filter_disable_and_preserve_markdown() {
 // which pairs it with the schema `required` array the handler parser is
 // supposed to mirror instead of only asserting that *some* error came back.
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_context_scope_prefix_filters() {
     let fixture = setup_scoped_production_project("tests").await;
     let response = fixture

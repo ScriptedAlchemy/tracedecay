@@ -142,7 +142,7 @@ fn largest_cycle_page(limit: u64, member_limit: u64) -> Value {
 /// A caller asking which files cycle gets those files, not a count, and a
 /// caller asking a graph with no edges gets the empty answer rather than a
 /// guessed cycle.
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn circular_names_the_cycles_and_an_empty_graph_stays_empty() {
     let cyclic = production_composition_fixture_with_sources(write_disjoint_cycles).await;
     warm(&cyclic, "left_fn").await;

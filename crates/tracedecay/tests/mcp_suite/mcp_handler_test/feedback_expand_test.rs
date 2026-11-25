@@ -27,7 +27,7 @@ pub fn feedback_expand_probe() -> u32 {
 }
 ";
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn feedback_expand_returns_the_published_diagnostic_and_denies_other_handles() {
     let fixture = production_composition_fixture_with_sources(write_probe_sources).await;
     let server = fixture

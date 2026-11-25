@@ -20,7 +20,7 @@ use crate::support::{
 const SYMBOL: &str = "missing_feedback_list_symbol";
 const SOURCE: &str = "pub fn entry() { missing_feedback_list_symbol(); }\n";
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn feedback_list_returns_the_published_compiler_finding_and_denies_other_handles() {
     let fixture = production_composition_fixture_with_sources(|project| {
         fs::create_dir_all(project.join("src")).expect("source directory");

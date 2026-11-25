@@ -64,7 +64,7 @@ pub fn indirect() -> i32 {\n\
 
 const UNKNOWN_NODE_ID: &str = "function:0000000000000000000000000000ffff";
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn impact_reports_callers_by_depth_and_refuses_invalid_requests() {
     let fixture = production_composition_fixture_with_sources(|project| {
         fs::create_dir_all(project.join("src")).expect("src directory");

@@ -164,6 +164,7 @@ use tracedecay_mcp::tools::binding::{
 };
 use tracedecay_mcp::tools::dispatch::McpDispatchMetadataError;
 use tracedecay_mcp::{handle_multi_root, handle_work, handle_workflow};
+#[cfg(any(test, feature = "test-transport"))]
 use tracedecay_project::project::TraceDecay;
 #[cfg(any(test, feature = "test-transport"))]
 use tracedecay_runtime_core::storage::registered_project_id;

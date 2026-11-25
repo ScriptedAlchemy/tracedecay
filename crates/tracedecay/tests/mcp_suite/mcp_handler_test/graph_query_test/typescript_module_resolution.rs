@@ -100,7 +100,7 @@ fn unsupported_omissions(evidence: &Value) -> Vec<u64> {
         .collect()
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn typescript_monorepo_callers_and_file_dependents_bind_across_packages() {
     let fixture =
         graph_query_fixture_with_sources(|project| copy_fixture(Path::new(FIXTURE_ROOT), project))
@@ -266,7 +266,7 @@ async fn typescript_monorepo_callers_and_file_dependents_bind_across_packages() 
     shutdown_graph_fixture(fixture).await;
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn typescript_calls_inside_callbacks_and_jsx_bind_their_enclosing_symbol() {
     let fixture =
         graph_query_fixture_with_sources(|project| copy_fixture(Path::new(FIXTURE_ROOT), project))
@@ -317,7 +317,7 @@ async fn typescript_calls_inside_callbacks_and_jsx_bind_their_enclosing_symbol()
     shutdown_graph_fixture(fixture).await;
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn typescript_module_scope_calls_bind_to_module_init_blocks() {
     let fixture =
         graph_query_fixture_with_sources(|project| copy_fixture(Path::new(FIXTURE_ROOT), project))
@@ -413,7 +413,7 @@ async fn typescript_module_scope_calls_bind_to_module_init_blocks() {
     shutdown_graph_fixture(fixture).await;
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn typescript_same_module_exports_and_test_shadowing_bind_callers() {
     let fixture =
         graph_query_fixture_with_sources(|project| copy_fixture(Path::new(FIXTURE_ROOT), project))
