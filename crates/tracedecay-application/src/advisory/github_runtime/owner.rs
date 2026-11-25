@@ -26,9 +26,13 @@ use crate::observability::{
     GitHubStackDriftObservationResultV1, GitHubStackProbeOwnerV1, record_github_stack_capability,
     record_github_stack_drifts,
 };
+use crate::observability::{
+    GitHubStackDriftRestoreReportV1, RegisteredObservabilityPortV1,
+    restore_github_stack_drift_intervals,
+};
 use crate::stack_coordinator::{
     DaemonGitHubStackCoordinatorV1, GitHubStackCoordinatorErrorV1, GitHubStackObservationV1,
-    GitHubStackProviderOutcomeV1, GitHubStackProviderSourceBindingV1,
+    GitHubStackProviderOutcomeV1, GitHubStackProviderSourceBindingV1, GitHubStackScopeV1,
 };
 use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
 use tracedecay_runtime_core::db::Database;
@@ -97,6 +101,9 @@ pub struct GitHubReviewRuntimeOwnerConfigV1 {
     pub http: GitHubHttpReadConfigV1,
     pub identity: GitHubReviewProviderIdentityV1,
     pub stack_coordinator: Arc<DaemonGitHubStackCoordinatorV1>,
+    /// The registration project open mounted for this exact scope. The review
+    /// owner joins it instead of reconstructing the scope key.
+    pub stack_scope: GitHubStackScopeV1,
     pub stack_anchor_db: RegisteredGlobalDbLeaseV1,
     pub stack_observability: Option<GitHubStackObservabilityV1>,
 }
@@ -124,12 +131,14 @@ pub struct GitHubReviewRuntimeOwnerV1<R, A> {
     >,
     source_access: Arc<dyn GitHubSourceAccessAuthorityV1>,
     stack_client: GitHubReadOnlyClientV1,
-    stack_scope: ResolvedScope,
+    stack_scope: GitHubStackScopeV1,
     stack_provider: tracedecay_domain::ProviderId,
     stack_coordinator: Arc<DaemonGitHubStackCoordinatorV1>,
-    _stack_scope: crate::stack_coordinator::GitHubStackScopeV1,
     stack_anchors: super::ProjectGitHubStackAnchorAuthorityV1,
     stack_observability: Option<GitHubStackObservabilityV1>,
+    /// Durable drift restoration runs once per mounted owner, before this
+    /// owner publishes any observation that could open a duplicate interval.
+    stack_drift_restore: tokio::sync::OnceCell<Option<GitHubStackDriftRestoreReportV1>>,
 }
 
 impl<R, A> GitHubReviewRuntimeOwnerV1<R, A>
@@ -143,6 +152,9 @@ where
         request: &'a GitHubReviewReadRequestV1,
     ) -> FeedbackPortFuture<'a, GitHubReviewRefreshOutcomeV1> {
         Box::pin(async move {
+            // A restarted daemon rebuilds the scope's open drift intervals
+            // from durable receipts before this owner can publish a sample.
+            self.restore_stack_drift().await;
             let outcome = self.coordinator.refresh(context, request).await;
             if !outcome.has_usable_observation()
                 || !matches!(
@@ -158,7 +170,7 @@ where
             // registration.
             let stack_read = match self
                 .stack_coordinator
-                .authorize_provider_read(&self.stack_scope)
+                .authorize_provider_read(self.stack_scope.scope())
             {
                 Ok(read) => read,
                 Err(error) => {
@@ -253,6 +265,63 @@ where
         })
     }
 
+    /// Restores persisted open drift intervals once per mounted owner. A
+    /// missing Observatory lane or an unavailable store is named on the
+    /// operator stream; the refresh still proceeds, and the next observation
+    /// may then open a duplicate interval rather than fabricate closure.
+    async fn restore_stack_drift(&self) {
+        self.stack_drift_restore
+            .get_or_init(|| async {
+                let Some(observability) = self.stack_observability.as_ref() else {
+                    tracing::info!(
+                        event = "github_stack_drift_restore",
+                        outcome = "unmounted",
+                        "GitHub stack drift restoration has no observability store"
+                    );
+                    return None;
+                };
+                let port =
+                    RegisteredObservabilityPortV1::new(observability.observation_db.as_ref());
+                match restore_github_stack_drift_intervals(
+                    &port,
+                    self.stack_coordinator.as_ref(),
+                    &self.stack_scope,
+                    tracedecay_contracts::now_micros(),
+                )
+                .await
+                {
+                    Ok(report) => {
+                        tracing::info!(
+                            event = "github_stack_drift_restore",
+                            outcome = if report.scope_already_live {
+                                "already_live"
+                            } else {
+                                "restored"
+                            },
+                            scope_already_live = report.scope_already_live,
+                            restored = report.restored,
+                            closed_before_restart = report.closed_before_restart,
+                            skipped_unbound = report.skipped_unbound,
+                            pages_scanned = report.pages_scanned,
+                            coverage = ?report.coverage,
+                            "GitHub stack drift intervals were restored from durable receipts"
+                        );
+                        Some(report)
+                    }
+                    Err(error) => {
+                        tracing::warn!(
+                            event = "github_stack_drift_restore",
+                            outcome = "unavailable",
+                            error = ?error,
+                            "GitHub stack drift intervals could not be restored from durable receipts"
+                        );
+                        None
+                    }
+                }
+            })
+            .await;
+    }
+
     async fn observe_stack_policy(
         &self,
         context: &RequestContext,
@@ -274,7 +343,7 @@ where
             return;
         };
         match self.stack_coordinator.observe_policy(
-            self.stack_scope.clone(),
+            self.stack_scope.scope().clone(),
             self.stack_provider.clone(),
             binding.clone(),
             observed_at,
@@ -375,12 +444,12 @@ where
         rest_descriptor(GitHubReviewReadOperationV1::RestListPullRequestConversationComments),
     ])
     .map_err(map_admission_error)?;
-    let stack_scope = config.resolved_scope.clone();
+    if config.stack_scope.scope() != &config.resolved_scope {
+        return Err(GitHubReviewRuntimeOwnerBuildErrorV1::InvalidScope);
+    }
+    let stack_scope = config.stack_scope;
     let stack_provider = config.identity.provider.clone();
     let stack_coordinator = Arc::clone(&config.stack_coordinator);
-    let stack_scope_owner = stack_coordinator
-        .retain_scope(&stack_scope)
-        .map_err(|_| GitHubReviewRuntimeOwnerBuildErrorV1::InvalidScope)?;
     let stack_observability = config.stack_observability.clone();
     let stack_anchors = super::ProjectGitHubStackAnchorAuthorityV1::new(
         config.stack_anchor_db.clone(),
@@ -408,9 +477,9 @@ where
         stack_scope,
         stack_provider,
         stack_coordinator,
-        _stack_scope: stack_scope_owner,
         stack_anchors,
         stack_observability,
+        stack_drift_restore: tokio::sync::OnceCell::new(),
     })
 }
 
@@ -467,6 +536,7 @@ mod tests {
     };
     use super::super::{GitHubProviderLifecycleV1, ProjectGitHubStackAnchorAuthorityV1};
     use super::*;
+    use crate::stack_coordinator::github_stack_circuit_policy;
 
     #[derive(Clone)]
     struct EmptyReviewAnchors;
@@ -536,8 +606,12 @@ mod tests {
         .await
         .unwrap();
         let coordinator = Arc::new(DaemonGitHubStackCoordinatorV1::default());
-        let _scope_registration_1 = coordinator
-            .register_scope(context.scope(), GitHubStackedPullRequestPolicyV1::Disabled)
+        let scope_registration_1 = coordinator
+            .register_scope(
+                context.scope(),
+                GitHubStackedPullRequestPolicyV1::Disabled,
+                github_stack_circuit_policy().unwrap(),
+            )
             .unwrap();
         let (_credential_authority, resolution) =
             registered_fixture_credential(repository, FixtureCredentialAuthorityModeV1::Verified);
@@ -613,12 +687,12 @@ mod tests {
             ),
             source_access,
             stack_client: client,
-            stack_scope: context.scope().clone(),
+            stack_scope: scope_registration_1,
             stack_provider: ProviderId::new("provider.github").unwrap(),
             stack_coordinator: Arc::clone(&coordinator),
-            _stack_scope: coordinator.retain_scope(context.scope()).unwrap(),
             stack_anchors: anchors,
             stack_observability: None,
+            stack_drift_restore: tokio::sync::OnceCell::new(),
         });
 
         assert_eq!(
@@ -725,10 +799,11 @@ mod tests {
         .await
         .unwrap();
         let coordinator = Arc::new(DaemonGitHubStackCoordinatorV1::default());
-        let _scope_registration_2 = coordinator
+        let scope_registration_2 = coordinator
             .register_scope(
                 context.scope(),
                 GitHubStackedPullRequestPolicyV1::ProbePrivatePreview,
+                github_stack_circuit_policy().unwrap(),
             )
             .unwrap();
         let (_credential_authority, resolution) =
@@ -838,12 +913,12 @@ mod tests {
             ),
             source_access,
             stack_client: client,
-            stack_scope: context.scope().clone(),
+            stack_scope: scope_registration_2,
             stack_provider: ProviderId::new("provider.github").unwrap(),
             stack_coordinator: Arc::clone(&coordinator),
-            _stack_scope: coordinator.retain_scope(context.scope()).unwrap(),
             stack_anchors: anchors.clone(),
             stack_observability: None,
+            stack_drift_restore: tokio::sync::OnceCell::new(),
         });
         for _ in 0..2 {
             let outcome = owner.refresh(&context, &request).await;
@@ -876,13 +951,21 @@ mod tests {
             let refresh = tokio::spawn(async move { owner.refresh(&context, &request).await });
             request_arrived.await.unwrap();
             let _scope_registration_3 = coordinator
-                .register_scope(&open.scope, GitHubStackedPullRequestPolicyV1::Disabled)
+                .register_scope(
+                    &open.scope,
+                    GitHubStackedPullRequestPolicyV1::Disabled,
+                    github_stack_circuit_policy().unwrap(),
+                )
                 .unwrap();
             release.send(()).unwrap();
             assert!(refresh.await.unwrap().has_usable_observation());
         } else {
             let _scope_registration_4 = coordinator
-                .register_scope(context.scope(), GitHubStackedPullRequestPolicyV1::Disabled)
+                .register_scope(
+                    context.scope(),
+                    GitHubStackedPullRequestPolicyV1::Disabled,
+                    github_stack_circuit_policy().unwrap(),
+                )
                 .unwrap();
             let outcome = owner.refresh(&context, &request).await;
             assert!(outcome.has_usable_observation(), "{outcome:?}");

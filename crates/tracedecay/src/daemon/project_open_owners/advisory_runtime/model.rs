@@ -28,6 +28,10 @@ pub(crate) struct ProjectOpenDependentOwnerState {
         Arc<tokio::sync::Mutex<DiagnosticBroker>>,
     pub(in crate::daemon::project_open_owners) lsp_session_factory:
         Option<Arc<DaemonLspSessionFactory>>,
+    /// The GitHub stack registration project open mounted for this scope.
+    /// Present exactly when the checkout has a GitHub remote.
+    pub(in crate::daemon::project_open_owners) stack_scope:
+        Option<tracedecay_application::stack_coordinator::GitHubStackScopeV1>,
 }
 
 pub(super) fn advisory_monotonic_deadline(

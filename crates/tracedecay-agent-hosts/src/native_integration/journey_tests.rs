@@ -24,6 +24,7 @@ use tracedecay_application::native_integration::{
 use tracedecay_application::source_authorization::ProjectSourceAccessSnapshot;
 use tracedecay_application::stack_coordinator::{
     DaemonGitHubStackCoordinatorV1, StackCoordinatorErrorV1, StackSignalDraftV1, StackSignalV1,
+    github_stack_circuit_policy,
 };
 use tracedecay_code_index_runtime::code_index_scheduler::CodeIndexOwnerSignalsV1;
 use tracedecay_code_index_runtime::code_index_scheduler::CodeIndexSchedulerRegistryV1;
@@ -743,12 +744,13 @@ async fn mount_stack_runtime_off_tokio(
     access: ProjectSourceAccessSnapshot,
 ) -> Arc<super::stack_runtime::DaemonGitHubStackRuntimeV1> {
     native_runtime::spawn_blocking(move || {
-        owner.mount_github_stack_runtime(
-            database,
-            scope,
-            access,
-            Arc::new(DaemonGitHubStackCoordinatorV1::default()),
-        )
+        let coordinator = Arc::new(DaemonGitHubStackCoordinatorV1::default());
+        let registration = coordinator.register_scope(
+            &scope,
+            tracedecay_domain::configuration::GitHubStackedPullRequestPolicyV1::ProbePrivatePreview,
+            github_stack_circuit_policy()?,
+        ).map_err(|error| StackCoordinatorErrorV1::Invalid(format!("{error:?}")))?;
+        owner.mount_github_stack_runtime(database, scope, access, coordinator, registration)
     })
     .await
     .expect("native blocking pool")

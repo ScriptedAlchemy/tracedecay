@@ -9,7 +9,8 @@ use tracedecay_global_db::registry_context_candidate_roots;
 use tracedecay_runtime_core::config::{GLOBAL_DB_FILENAME, ProfileRoot};
 use tracedecay_runtime_core::native_runtime;
 use tracedecay_runtime_core::storage::{
-    SESSIONS_DB_FILENAME, profile_sharded_data_root, reject_symlink_components, validate_project_id,
+    SESSIONS_DB_FILENAME, enrolled_project_roots, profile_sharded_data_root,
+    reject_symlink_components, validate_project_id,
 };
 use tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1;
 
@@ -112,11 +113,14 @@ async fn reset_retired_pr_tracking(
     })?;
     let data_root = profile_sharded_data_root(&profile_root, project_id.as_str());
     require_existing_configuration_database(&data_root.join(SESSIONS_DB_FILENAME))?;
-    let database = Box::pin(registry.project_session_store(
-        project_id.clone(),
-        registry_context_candidate_roots(&context),
-    ))
-    .await?;
+    let candidates =
+        std::iter::once(project_root).chain(registry_context_candidate_roots(&context));
+    // A moved checkout keeps its enrollment marker even while the registry
+    // still names its former path. Read that authority without claiming paths
+    // now occupied by another project or repairing repository markers.
+    let enrollment_roots = enrolled_project_roots(candidates, &project_id)?;
+    let database =
+        Box::pin(registry.project_session_store(project_id.clone(), enrollment_roots)).await?;
     let store = GlobalDbConfigurationControlStore::new_registered(database.as_ref());
     let current = store
         .current()

@@ -1242,33 +1242,63 @@ fn has_store_schema(connection: &Connection) -> rusqlite::Result<bool> {
 /// own VFS file instead: the WAL still holds every committed frame, and
 /// SQLite's ordinary recovery restores them on the next writable open.
 fn main_header_declares_published_schema(connection: &Connection) -> bool {
-    let mut file: *mut ffi::sqlite3_file = std::ptr::null_mut();
     let mut header = [0_u8; 100];
+    read_main_header(connection, &mut header).is_ok()
+        && header.starts_with(b"SQLite format 3\0")
+        && header[68..72] == crate::schema_version::REGISTERED_STORE_APPLICATION_ID.to_be_bytes()
+}
+
+/// Probe only the main-file magic, without starting a transaction or opening
+/// sidecars. On Unix, closing a raw fd drops process-owned POSIX SQLite locks
+/// on the same inode; a connection lets the VFS coordinate that close.
+///
+/// # Errors
+/// Returns a SQLite error when opening or reading the main file fails, except
+/// that a short file has no complete magic and returns `Ok(false)`.
+pub fn has_sqlite_database_header(path: &Path) -> rusqlite::Result<bool> {
+    let connection = Connection::open_with_flags(
+        sqlite_host_path(path),
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_PRIVATE_CACHE,
+    )?;
+    let mut header = [0_u8; 16];
+    match read_main_header(&connection, &mut header) {
+        Ok(()) => Ok(header == *b"SQLite format 3\0"),
+        Err(ffi::SQLITE_IOERR_SHORT_READ) => Ok(false),
+        Err(rc) => Err(rusqlite::Error::SqliteFailure(ffi::Error::new(rc), None)),
+    }
+}
+
+fn read_main_header<const N: usize>(
+    connection: &Connection,
+    header: &mut [u8; N],
+) -> Result<(), i32> {
+    let mut file: *mut ffi::sqlite3_file = std::ptr::null_mut();
+    let length = i32::try_from(N).map_err(|_| ffi::SQLITE_MISUSE)?;
     // SAFETY: FILE_POINTER borrows the connection's open main file, which the
     // live `connection` keeps valid for this call. `header` is writable
     // storage of exactly the length passed to xRead.
-    let read = unsafe {
-        if ffi::sqlite3_file_control(
+    let rc = unsafe {
+        let rc = ffi::sqlite3_file_control(
             connection.handle(),
             c"main".as_ptr(),
             ffi::SQLITE_FCNTL_FILE_POINTER,
             (&raw mut file).cast(),
-        ) != ffi::SQLITE_OK
-        {
-            return false;
+        );
+        if rc != ffi::SQLITE_OK {
+            return Err(rc);
         }
-        let Some(read) = file
+        let read = file
             .as_ref()
             .and_then(|file| file.pMethods.as_ref())
             .and_then(|methods| methods.xRead)
-        else {
-            return false;
-        };
-        read(file, header.as_mut_ptr().cast(), header.len() as i32, 0)
+            .ok_or(ffi::SQLITE_NOTFOUND)?;
+        read(file, header.as_mut_ptr().cast(), length, 0)
     };
-    read == ffi::SQLITE_OK
-        && header.starts_with(b"SQLite format 3\0")
-        && header[68..72] == crate::schema_version::REGISTERED_STORE_APPLICATION_ID.to_be_bytes()
+    if rc == ffi::SQLITE_OK {
+        Ok(())
+    } else {
+        Err(rc)
+    }
 }
 
 /// A read transaction whose WAL-inclusive view holds the store schema. The

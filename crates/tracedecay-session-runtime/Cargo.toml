@@ -61,6 +61,10 @@ tracedecay-store-runtime = { path = "../tracedecay-store-runtime" }
 tracedecay-temporal-query = { path = "../tracedecay-temporal-query", features = ["test-helpers"] }
 
 [[test]]
+name = "session_codex_history_cost"
+required-features = ["test-helpers"]
+
+[[test]]
 name = "session_drain_read_cost"
 required-features = ["test-helpers"]
 

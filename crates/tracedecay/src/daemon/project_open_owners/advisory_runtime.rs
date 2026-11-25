@@ -2918,8 +2918,12 @@ async fn resolve_production_github_provider_config(
         &credential,
     )
     .await;
-    let github = match discovery {
-        Some(GitHubExactCommitDiscoveryOutcomeV1::Found(pull)) => {
+    // The review owner joins the registration project open mounted. Without
+    // that registration no provider read is authorized and no observation may
+    // be published, so the lane stays unmounted rather than reconstructing a
+    // second scope authority.
+    let github = match (discovery, state.stack_scope.clone()) {
+        (Some(GitHubExactCommitDiscoveryOutcomeV1::Found(pull)), Some(stack_scope)) => {
             let target = pull.target.clone();
             resolve_production_github_identity(project_root, feedback_scope, &target, pull).map(
                 |identity| GitHubReviewRuntimeOwnerConfigV1 {
@@ -2931,6 +2935,7 @@ async fn resolve_production_github_provider_config(
                     http: GitHubHttpReadConfigV1::default(),
                     identity,
                     stack_coordinator: invocation.github_stack_coordinator(),
+                    stack_scope,
                     stack_anchor_db: state.session_db.clone(),
                     stack_observability,
                 },

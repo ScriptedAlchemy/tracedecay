@@ -107,24 +107,23 @@ fn replay_from(
         return Ok(None);
     };
     let corrupt = || PortError::from_fault(StoreFault::Corrupt("replayed event row"));
-    let stored_digest = exact_sql_text(&row.values, 0).ok_or_else(corrupt)?;
-    if stored_digest != canonical_input_digest.as_str() {
-        // The same command id with different canonical input is a reused
-        // idempotency key, never a replay of this request.
-        return Err(PortError::IdempotencyConflict);
-    }
     let event: WorkProductEventV1 =
         serde_json::from_str(exact_sql_text(&row.values, 1).ok_or_else(corrupt)?)
             .map_err(|_| corrupt())?;
-    // A replayed event must still be one this selection is authorized to see;
-    // otherwise its existence would leak through the idempotency channel.
     if !selection_covers(scope.selection(), &event) {
         return Err(PortError::NotFoundOrNotAuthorized);
     }
-    let published = super::load_published_versions(source, scope)
+    let stored_digest = exact_sql_text(&row.values, 0).ok_or_else(corrupt)?;
+    if stored_digest != event.canonical_input_digest().as_str() {
+        return Err(corrupt());
+    }
+    if stored_digest != canonical_input_digest.as_str() {
+        return Err(PortError::IdempotencyConflict);
+    }
+    let sequence = event.sequence().get();
+    let published = super::load_published_versions_between(source, scope, sequence - 1, sequence)
         .map_err(PortError::from_fault)?
-        .into_iter()
-        .find(|published| published.event_sequence == event.sequence())
+        .pop()
         .ok_or(PortError::Unavailable)?;
     let verified = super::verified_version(&published, &event).ok_or(PortError::Unavailable)?;
     WorkProductEventCommitV1::new(event, verified)
@@ -143,16 +142,13 @@ pub(super) fn append_in_transaction(
     {
         return Err(PortError::NotFoundOrNotAuthorized);
     }
-    if let Some(event) = replay_in_transaction(transaction, context, draft)? {
-        let published = super::load_published_versions(transaction, scope)
-            .map_err(PortError::from_fault)?
-            .into_iter()
-            .find(|published| published.event_sequence == event.sequence())
-            .ok_or(PortError::Unavailable)?;
-        let verified = super::verified_version(&published, &event).ok_or(PortError::Unavailable)?;
-        return WorkProductEventCommitV1::new(event, verified)
-            .map(WorkProductEventCommitOutcomeV1::Replayed)
-            .map_err(|_| PortError::Unavailable);
+    if let Some(commit) = replay_from(
+        transaction,
+        context,
+        &draft.command_id,
+        &draft.canonical_input_digest,
+    )? {
+        return Ok(WorkProductEventCommitOutcomeV1::Replayed(commit));
     }
     let tail = load_journal_tail(transaction, scope).map_err(PortError::from_fault)?;
     let expected_matches = match (&tail, draft.expected_graph_version) {
@@ -175,35 +171,6 @@ pub(super) fn append_in_transaction(
     WorkProductEventCommitV1::new(event, verified)
         .map(WorkProductEventCommitOutcomeV1::Appended)
         .map_err(|_| PortError::Unavailable)
-}
-
-fn replay_in_transaction(
-    transaction: &impl RegisteredWorkWrite,
-    context: &WorkProductPortContextV1,
-    draft: &WorkProductEventDraftV1,
-) -> Result<Option<WorkProductEventV1>, PortError> {
-    let scope = context.authorized_scope();
-    let rows = registered_work_query(
-        transaction,
-        "SELECT canonical_input_digest, event_payload FROM work_product_events_v1
-         WHERE owner_brain_id = ?1 AND owner_profile_id = ?2 AND command_id = ?3",
-        owner_params(scope)
-            .into_iter()
-            .chain([ExactSqlValue::Text(draft.command_id.as_str().to_owned())])
-            .collect(),
-    )
-    .map_err(PortError::from_fault)?;
-    let Some(row) = rows.rows.first() else {
-        return Ok(None);
-    };
-    let corrupt = || PortError::from_fault(StoreFault::Corrupt("replayed event row"));
-    let stored_digest = exact_sql_text(&row.values, 0).ok_or_else(corrupt)?;
-    if stored_digest != draft.canonical_input_digest.as_str() {
-        return Err(PortError::IdempotencyConflict);
-    }
-    serde_json::from_str(exact_sql_text(&row.values, 1).ok_or_else(corrupt)?)
-        .map(Some)
-        .map_err(|_| corrupt())
 }
 
 /// Mint the canonical event this draft becomes at `sequence`.

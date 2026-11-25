@@ -385,6 +385,85 @@ fn retired_pr_tracking_upgrade_and_scoped_reset_reopen_two_registered_projects()
     }
 }
 
+#[test]
+fn retired_pr_tracking_reset_preserves_a_moved_project_and_foreign_alias() {
+    let home = TempDir::new().unwrap();
+    let projects = TempDir::new().unwrap();
+    let original = projects.path().join("original");
+    let moved = projects.path().join("moved");
+    std::fs::create_dir(&original).unwrap();
+    write_git_fixture(&original);
+    init_project_fixture(home.path(), &original);
+    let profile = profile_root(home.path());
+    let layout = tracedecay_runtime_core::storage::resolve_persisted_layout(&original, &profile)
+        .unwrap()
+        .unwrap();
+    let project_id = layout.identity.project_id.as_deref().unwrap();
+    create_runtime().block_on(async {
+        let runtime = HostAdmissionTestRuntimeV1::project(
+            profile.clone(),
+            &original,
+            ProjectId::new(project_id).unwrap(),
+        )
+        .await
+        .unwrap();
+        runtime
+            .upsert_session_for_test(
+                HostAdmissionScope::Project,
+                &global_session("claude", "preserved-session", project_id),
+            )
+            .await
+            .unwrap();
+        runtime
+            .checkpoint_session_database_for_test(HostAdmissionScope::Project)
+            .await
+            .unwrap();
+    });
+    seed_released_pr_tracking_settings(&layout.sessions_db_path, project_id, true);
+    let graph_before = std::fs::read(&layout.graph_db_path).unwrap();
+    std::fs::rename(&original, &moved).unwrap();
+    let marker_path = repository_identity_path(&moved).unwrap();
+    let marker_before = std::fs::read(&marker_path).unwrap();
+
+    // The registry still points at the old root, now owned by another repo.
+    // An offline reset may use the moved marker but must never claim this one.
+    std::fs::create_dir(&original).unwrap();
+    write_git_fixture(&original);
+    write_repository_identity_marker(&original, "proj_foreign_checkout").unwrap();
+    let foreign_marker = repository_identity_path(&original).unwrap();
+    let foreign_before = std::fs::read(&foreign_marker).unwrap();
+    let mut command = tracedecay_command_without_daemon(home.path(), &moved);
+    command
+        .args(["storage", "reset-retired-pr-tracking", "--project-root"])
+        .arg(&moved)
+        .arg("--yes");
+    let repaired = run_with_timeout(command, cli_timeout());
+    assert!(repaired.status.success(), "{repaired:?}");
+    assert_eq!(std::fs::read(&marker_path).unwrap(), marker_before);
+    assert_eq!(std::fs::read(&foreign_marker).unwrap(), foreign_before);
+    assert_eq!(std::fs::read(&layout.graph_db_path).unwrap(), graph_before);
+    let connection = rusqlite::Connection::open_with_flags(
+        &layout.sessions_db_path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .unwrap();
+    let title: String = connection
+        .query_row(
+            "SELECT title FROM sessions WHERE provider = 'claude' AND session_id = 'preserved-session'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(title, "Initial title");
+    drop(connection);
+
+    let _daemon = crate::common::spawn_tracedecay_daemon(home.path());
+    let mut command = tracedecay_command_without_daemon(home.path(), &moved);
+    command.args(["tool", "tracedecay_status", "--args", "{}", "--json"]);
+    let reopened = run_with_timeout(command, cli_timeout());
+    assert!(reopened.status.success(), "{reopened:?}");
+}
+
 fn git(project: &Path, args: &[&str]) {
     let output = Command::new("git")
         .args(["-c", "core.hooksPath=.git/no-hooks"])
