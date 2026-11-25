@@ -389,7 +389,7 @@ pub(crate) async fn assert_stalled_doctor_probe(
     profile_root: &Path,
     project_path: &Path,
     recorded_cause: &str,
-) {
+) -> u64 {
     let error = daemon_doctor_runtime(
         executor,
         std::time::Instant::now() + std::time::Duration::from_secs(30),
@@ -402,6 +402,23 @@ pub(crate) async fn assert_stalled_doctor_probe(
             .map(|(reason, retryable, _)| (reason, retryable)),
         Some(("project_route_open_backoff", true)),
     );
+    let record = tracedecay_mcp::application_output::tool_result::error_problem_record(&error)
+        .expect("Doctor retains the canonical problem record from the daemon refusal");
+    let Some(tracedecay_contracts::ApplicationProblemDetailV1::ProjectOpenBackoff {
+        retry_after_millis,
+        cause,
+    }) = &record.detail
+    else {
+        panic!("Doctor must retain the typed backoff detail: {record:?}");
+    };
+    let retry_after_millis = *retry_after_millis;
+    assert!(cause.contains(recorded_cause));
+    assert_eq!(record.retry_after_millis, Some(retry_after_millis));
+    assert_eq!(
+        record.pre_admission_retry_delay(),
+        Some(std::time::Duration::from_millis(retry_after_millis))
+    );
+    assert_eq!(record.owner_mount_resend_delay(), None);
     let mut counters = DoctorCounters::quiet();
     let mut pending_reset = false;
     let findings = render_current_project_daemon_status(
@@ -433,6 +450,7 @@ pub(crate) async fn assert_stalled_doctor_probe(
                 .message
                 .contains("Canonical Doctor report unavailable")
     }));
+    retry_after_millis
 }
 
 #[test]

@@ -802,21 +802,15 @@ fn project_open_refusal_response(
     git_operation: bool,
 ) -> DaemonInvocationResponse {
     // A completed open that is backed off is a recorded failure, not an
-    // absent application service. Keep its canonical reason and cause across
-    // the typed boundary so Doctor can explain the stalled project.
-    if let tracedecay_domain::errors::TraceDecayError::ProjectOpen {
-        kind: tracedecay_domain::errors::ProjectOpenFailureKind::BackedOff { .. },
-        detail,
-    } = error
-    {
-        let backoff = tracedecay_domain::errors::TraceDecayError::project_route(
-            "project_route_open_backoff",
-            true,
-            detail.clone(),
-        );
+    // absent application service. Keep its canonical reason, cause, and
+    // measured retry delay so every typed client sees the recorded backoff.
+    if matches!(
+        error.project_open_failure_kind(),
+        Some(tracedecay_domain::errors::ProjectOpenFailureKind::BackedOff { .. })
+    ) {
         return DaemonInvocationResponse::application_problem(
             request_id,
-            crate::mcp::tools::graph_tool_error_problem(&backoff),
+            crate::mcp::tools::graph_tool_error_problem(error),
         );
     }
     if error_is_project_open_retryable(error) {
@@ -934,6 +928,45 @@ mod workflow_reset_tests {
                 .diagnostic()
                 .map(|diagnostic| diagnostic.code.as_str()),
             Some(tracedecay_contracts::RUNTIME_MOUNTING_REASON_CODE)
+        );
+    }
+
+    #[test]
+    fn backed_off_project_open_keeps_its_delay_and_a_bounded_cause() {
+        let error = tracedecay_domain::errors::TraceDecayError::project_open(
+            tracedecay_domain::errors::ProjectOpenFailureKind::BackedOff {
+                retry_after_ms: 299_123,
+            },
+            format!(
+                "  owner\n refused\t mutable\u{0000} receipt: {}",
+                "é".repeat(300)
+            ),
+        );
+        let response =
+            project_open_refusal_response("request.backed-off".to_owned(), &error, false, false);
+        let wire = serde_json::to_vec(&response).expect("backoff response serializes");
+        let response: DaemonInvocationResponse =
+            serde_json::from_slice(&wire).expect("backoff response decodes");
+        let tracedecay_daemon_protocol::DaemonInvocationOutcome::ApplicationProblem { problem } =
+            response.outcome
+        else {
+            panic!("backoff must be an application problem, got {response:?}");
+        };
+        let cause = format!("owner refused mutable receipt: {}", "é".repeat(240));
+        assert_eq!(
+            problem.detail(),
+            Some(
+                &tracedecay_contracts::ApplicationProblemDetailV1::ProjectOpenBackoff {
+                    retry_after_millis: 299_123,
+                    cause: cause.clone(),
+                }
+            )
+        );
+        assert_eq!(
+            problem
+                .diagnostic()
+                .map(|diagnostic| diagnostic.message.as_str()),
+            Some(cause.as_str())
         );
     }
 

@@ -102,7 +102,7 @@ async fn unopened_committed_fixture(
 }
 
 #[tokio::test]
-async fn doctor_probe_preserves_a_stalled_project_open_cause() {
+async fn doctor_probe_preserves_a_stalled_project_open_cause_and_retry_delay() {
     use crate::daemon::project_open_admission::{ProjectOpenTaskClaim, ProjectOpenTasks};
     use tracedecay_domain::errors::{ProjectOpenFailureKind, TraceDecayError};
 
@@ -128,10 +128,14 @@ async fn doctor_probe_preserves_a_stalled_project_open_cause() {
     ProjectOpenTasks::wait_for_completion(state)
         .await
         .expect_err("record the rejected project open");
+    let recorded_status = tasks.status(&route).expect("recorded project status");
     assert_eq!(
-        tasks.status(&route).expect("recorded project status").state,
+        recorded_status.state,
         tracedecay_contracts::project_open::ProjectOpenStatusStateV1::Stalled,
     );
+    let delay_before_probe = recorded_status
+        .retry_after_ms
+        .expect("the stalled project records its retry delay");
 
     let (listener, endpoint) = tracedecay_daemon_protocol::BrokerListener::bind(
         &tracedecay_daemon_protocol::default_loopback_endpoint(),
@@ -158,13 +162,23 @@ async fn doctor_probe_preserves_a_stalled_project_open_cause() {
         ),
         handshake.clone(),
     );
-    crate::doctor::assert_stalled_doctor_probe(
+    let reported_delay = crate::doctor::assert_stalled_doctor_probe(
         &client,
         &handshake.client_identity.profile_root,
         &project_path,
         CAUSE,
     )
     .await;
+    let delay_after_probe = tasks
+        .status(&route)
+        .expect("the Doctor probe does not restart the rejected open")
+        .retry_after_ms
+        .expect("the recorded retry delay remains active");
+    assert!(
+        (delay_after_probe..=delay_before_probe).contains(&reported_delay),
+        "Doctor's wire delay {reported_delay} must match the owner's remaining backoff \
+         ({delay_after_probe}..={delay_before_probe})"
+    );
     drop(client);
     tokio::time::timeout(Duration::from_secs(30), serving)
         .await

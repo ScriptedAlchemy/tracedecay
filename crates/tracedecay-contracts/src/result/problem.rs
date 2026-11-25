@@ -613,8 +613,8 @@ impl ApplicationProblem {
     /// compare-and-swap answered as a conflict over the run. A lock
     /// deadline is capacity: the same request may succeed after a delay. A
     /// diagnostics scope no compiler owns is routed to publishing the
-    /// project's own check; a pending producer, and a daemon that may be
-    /// restarting, answer after a delay.
+    /// project's own check; a pending producer, a recorded project-open
+    /// backoff, and a daemon that may be restarting answer after a delay.
     pub fn from_detail(detail: ApplicationProblemDetailV1) -> Self {
         let diagnostic = SafeDiagnostic {
             code: detail.code().to_owned(),
@@ -661,6 +661,7 @@ impl ApplicationProblem {
             },
             ApplicationProblemDetailV1::DiagnosticsPending { .. }
             | ApplicationProblemDetailV1::CodeGraphRewarming { .. }
+            | ApplicationProblemDetailV1::ProjectOpenBackoff { .. }
             | ApplicationProblemDetailV1::DaemonUnreachable { .. } => Self::Unavailable {
                 classification: ApplicationUnavailableClassV1::Authority,
                 diagnostic,

@@ -628,6 +628,15 @@ pub(crate) fn graph_tool_error_problem(
         return graph_tool_unavailable(reason_code, retryable, detail);
     }
     match error {
+        TraceDecayError::ProjectOpen {
+            kind: ProjectOpenFailureKind::BackedOff { retry_after_ms },
+            detail,
+        } => tracedecay_contracts::ApplicationProblem::from_detail(
+            tracedecay_contracts::ApplicationProblemDetailV1::ProjectOpenBackoff {
+                retry_after_millis: *retry_after_ms,
+                cause: safe_diagnostic_message(detail),
+            },
+        ),
         TraceDecayError::Config { message }
         | TraceDecayError::InvalidRequest { message, .. }
         | TraceDecayError::ProjectOpen {
