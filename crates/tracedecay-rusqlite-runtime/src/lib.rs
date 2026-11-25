@@ -8,8 +8,8 @@ mod connection;
 pub mod schema_version;
 pub use connection::{
     ConnectionPolicyError, OpenedDatabaseFileError, VerifiedReader, VerifiedReaderError,
-    default_vfs_max_pathname, open_immutable_reader, open_verified_immutable_reader,
-    open_verified_read_snapshot,
+    default_vfs_max_pathname, has_sqlite_database_header, open_immutable_reader,
+    open_verified_immutable_reader, open_verified_read_snapshot,
 };
 #[doc(hidden)]
 pub mod exact_sql;

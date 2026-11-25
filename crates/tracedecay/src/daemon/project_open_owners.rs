@@ -26,6 +26,7 @@ use tracedecay_agent_hosts::native_integration::{
 use tracedecay_application::diagnostics_producer::TypeScriptProducerStateV1;
 use tracedecay_application::lsp_runtime::DaemonLspSessionFactory;
 use tracedecay_application::source_authorization::ProjectSourceAccessSnapshot;
+use tracedecay_application::stack_coordinator::{GitHubStackScopeV1, github_stack_circuit_policy};
 use tracedecay_code_index_runtime::git_transactions::DaemonGitIndexTransactionServiceRegistry;
 use tracedecay_daemon_service::{
     DaemonCallableCodeAuthorizationSource, DaemonContextScoutRuntimeRegistrationError,
@@ -499,6 +500,7 @@ pub(super) async fn register_project_open_production_owners(
     // stale/denied predicates and the handler's minted grants agree on one
     // policy identity. Non-Git projects advertise no native mutation
     // authority; the handler keeps answering the typed unavailable result.
+    let mut stack_scope_state: Option<GitHubStackScopeV1> = None;
     let native_owner = if let Some(repository_root) = repository_root {
         let analysis = Arc::new(DaemonNativeIntegrationAnalysisV1::new(
             invocation.code_index_schedulers.clone(),
@@ -561,16 +563,25 @@ pub(super) async fn register_project_open_production_owners(
         .is_some()
     {
         let stack_coordinator = invocation.github_stack_coordinator();
-        let _stack_registration = stack_coordinator
+        // One registration owns the stacked-PR policy, the preflight circuit
+        // and their state for this exact scope. The delivery runtime and the
+        // review refresh owner both join it, so neither reconstructs the
+        // scope key nor holds a registration the other cannot see.
+        let circuit_policy = github_stack_circuit_policy().map_err(|error| TraceDecayError::Config {
+            message: format!("project-open GitHub stack circuit policy is invalid: {error:?}"),
+        })?;
+        let stack_scope = stack_coordinator
             .register_scope(
                 &scope,
                 work_topology_policy.review_topology.github_stacked_prs,
+                circuit_policy,
             )
             .map_err(|error| TraceDecayError::Config {
                 message: format!(
                     "project-open GitHub stack coordinator registration failed: {error:?}"
                 ),
             })?;
+        stack_scope_state = Some(stack_scope.clone());
         if let Some(native_owner) = native_owner.as_ref() {
             let stack_runtime = native_owner
                 .mount_github_stack_runtime(
@@ -578,6 +589,7 @@ pub(super) async fn register_project_open_production_owners(
                     scope.clone(),
                     access.clone(),
                     Arc::clone(&stack_coordinator),
+                    stack_scope,
                 )
                 .map_err(|error| TraceDecayError::Config {
                     message: format!(
@@ -828,6 +840,7 @@ pub(super) async fn register_project_open_production_owners(
         admitted_root_uri,
         diagnostic_broker,
         lsp_session_factory,
+        stack_scope: stack_scope_state,
     })
         }).await
 }

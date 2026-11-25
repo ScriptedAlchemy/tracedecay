@@ -10,7 +10,9 @@ use std::{
 use rusqlite::{Connection, Error, ErrorCode, OpenFlags};
 use tempfile::TempDir;
 
-use super::{OpenedDatabaseFile, OpenedDatabaseFileError, live_path_identity};
+use super::{
+    OpenedDatabaseFile, OpenedDatabaseFileError, has_sqlite_database_header, live_path_identity,
+};
 
 const PROBE_PATH: &str = "TRACEDECAY_PATH_IDENTITY_PROBE_PATH";
 const PROBE_OPERATION: &str = "TRACEDECAY_PATH_IDENTITY_PROBE_OPERATION";
@@ -162,6 +164,47 @@ fn worker_identity_checks_keep_cross_process_writer_exclusion() {
         live_path_identity(&directory),
         Err(OpenedDatabaseFileError::NotFile)
     );
+}
+
+#[test]
+fn main_header_probe_preserves_external_writer_exclusion_without_touching_sidecars() {
+    let temp = TempDir::new().expect("tempdir");
+    let path = temp.path().join("sessions.db");
+    let writer = Connection::open(&path).expect("open database");
+    writer
+        .execute_batch(
+            "PRAGMA journal_mode = DELETE;
+         CREATE TABLE sample(value INTEGER);
+         INSERT INTO sample VALUES (1);
+         BEGIN IMMEDIATE;
+         UPDATE sample SET value = 2;",
+        )
+        .expect("hold rollback writer reservation");
+    probe_external_connection(&path, "write", true);
+    for _ in 0..3 {
+        assert!(has_sqlite_database_header(&path).expect("probe the live main file"));
+        probe_external_connection(&path, "write", true);
+    }
+    writer.execute_batch("COMMIT").expect("commit live writer");
+    probe_external_connection(&path, "write", false);
+    drop(writer);
+    assert_committed_data(&path);
+
+    let invalid = temp.path().join("invalid.db");
+    let wal = temp.path().join("invalid.db-wal");
+    let shm = temp.path().join("invalid.db-shm");
+    fs::write(&wal, b"preserve wal").unwrap();
+    fs::write(&shm, b"preserve shm").unwrap();
+    for contents in [b"".as_slice(), b"this is not an SQLite header"] {
+        fs::write(&invalid, contents).unwrap();
+        assert!(!has_sqlite_database_header(&invalid).unwrap());
+        assert_eq!(fs::read(&invalid).unwrap(), contents);
+        assert_eq!(fs::read(&wal).unwrap(), b"preserve wal");
+        assert_eq!(fs::read(&shm).unwrap(), b"preserve shm");
+    }
+    let absent = temp.path().join("absent.db");
+    assert!(has_sqlite_database_header(&absent).is_err());
+    assert!(!absent.exists());
 }
 
 /// A zero-byte existing SQLite file may belong to a live connection holding

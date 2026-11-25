@@ -40,7 +40,7 @@ export function WorkInspector({
   snapshot,
   graph,
   graphReading,
-  dag,
+  readDag,
   topology,
   topologyMetrics,
   onSelect,
@@ -49,7 +49,7 @@ export function WorkInspector({
   snapshot: WorkProductView;
   graph: WorkResult<WorkGraphReadV1> | undefined;
   graphReading: WorkGraphReading;
-  dag: WorkDagReading;
+  readDag: () => WorkDagReading;
   topology: WorkResult<ExecutionTopologyViewV1> | undefined;
   topologyMetrics: WorkResult<ExecutionTopologyMetricsV1> | undefined;
   onSelect: (taskId: string) => void;
@@ -91,7 +91,7 @@ export function WorkInspector({
       className="flex min-w-0 flex-col gap-3"
       data-work-inspector={task.task_id}
     >
-      <SelectedTask task={task} dag={dag} graphReading={graphReading} topology={topology} onSelect={onSelect} />
+      <SelectedTask task={task} dag={readDag()} graphReading={graphReading} topology={topology} onSelect={onSelect} />
       <WorkCommands projection={task} graph={graph} />
       <WorkEvidenceSummary
         task={task}
