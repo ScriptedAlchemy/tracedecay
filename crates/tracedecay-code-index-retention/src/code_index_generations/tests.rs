@@ -15,6 +15,7 @@ use tracedecay_domain::sha256_hex_suffix;
 
 mod graph_replay_pool_lock_tests;
 mod graph_replay_release_tests;
+mod text_artifact_recovery_tests;
 
 fn single_segment_content_pack(bytes: &[u8]) -> SealedGenerationContentPackV1 {
     let digest = ManifestDigest::from_sha256_bytes(&Sha256::digest(bytes)).expect("content digest");
@@ -1365,6 +1366,7 @@ fn cancellable_recovery_preserves_pending_artifact_journal_for_retry() {
         store.path(),
         &BTreeSet::new(),
         None,
+        StoreLockAdmissionV1::TryOnce,
         &|| true,
     )
     .expect_err("cancelled recovery must preserve its durable journal");

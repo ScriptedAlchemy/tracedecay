@@ -1,6 +1,6 @@
 import { Client } from "@modelcontextprotocol/client";
 import { StdioClientTransport } from "@modelcontextprotocol/client/stdio";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { setImmediate } from "node:timers/promises";
@@ -9,6 +9,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { AuthorityLookup, DaemonAuthorityRecord } from "../src/server/authority.js";
 import { daemonAuthorityRecordPath } from "../src/server/authority.js";
 import { DaemonBridge } from "../src/server/bridge.js";
+import { addonBesideBinary } from "../src/server/native-addon.js";
 import { RegistryClient } from "../src/server/registry-client.js";
 import { ServeSession } from "../src/server/serve-client.js";
 
@@ -73,6 +74,30 @@ async function fixture(expectedCloseError?: Error) {
   });
   return { bridge, root, authority, writeAuthority };
 }
+
+describe("offline native binding resolution", () => {
+  it.each([
+    ["tracedecay", "tracedecay.EXE"],
+    ["tracedecay.exe", "tracedecay.exe"],
+  ])("finds the installed addon for the Windows PATH command %s", async (command, filename) => {
+    const root = await mkdtemp(path.join(tmpdir(), "td-native-addon-"));
+    cleanups.push(() => rm(root, { recursive: true, force: true }));
+    await writeFile(path.join(root, filename), "installed executable");
+    await writeFile(path.join(root, "tracedecay_sdk_node.node"), "installed binding");
+    const expected = path.join(await realpath(root), "tracedecay_sdk_node.node");
+    const platform = Object.getOwnPropertyDescriptor(process, "platform")!;
+    let addon: string | undefined;
+    // Exercise Windows filename policy on every runner with real files.
+    // Restore the host identity before any async work or test assertion.
+    try {
+      Object.defineProperty(process, "platform", { value: "win32" });
+      addon = addonBesideBinary(command, { PATH: root, PATHEXT: ".EXE;.CMD" });
+    } finally {
+      Object.defineProperty(process, "platform", platform);
+    }
+    expect(addon).toBe(expected);
+  });
+});
 
 describe("bridge shutdown", () => {
   it("refuses every read after close without starting a child or an HTTP request", async () => {

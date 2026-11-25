@@ -795,6 +795,17 @@ async fn run_post_update_mutations(
     // rendered versions that no maintenance pass will touch.
     let agent_ids =
         crate::agent_cmd::maintenance_sweep_agents(profile, &config.installed_agents, &home);
+    if agent_ids.iter().any(|agent| agent == "chatgpt") {
+        tracedecay_runtime_core::native_runtime::spawn_blocking(
+            crate::upgrade::ensure_native_sdk_binding,
+        )
+        .await
+        .map_err(
+            |message| tracedecay_domain::errors::TraceDecayError::Config {
+                message: format!("native SDK installation failed: {message}"),
+            },
+        )??;
+    }
     if agent_ids.is_empty() {
         eprintln!("Refreshing agent integrations: nothing to refresh");
     } else {

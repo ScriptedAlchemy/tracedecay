@@ -1,10 +1,13 @@
 name: Package and verify release artifacts
-description: Package one Bazel-built CLI as the native archive and MCPB.
+description: Package the Bazel-built CLI and native SDK into release artifacts.
 
 inputs:
   binary:
     description: Exact staged CLI from the build-cli action.
     required: true
+  addon:
+    description: Node SDK addon built from the same release source and target.
+    default: ''
   tag:
     description: Validated release tag, including v.
     required: true
@@ -28,6 +31,7 @@ runs:
       shell: bash
       env:
         BINARY: ${{ inputs.binary }}
+        ADDON: ${{ inputs.addon }}
         TAG: ${{ inputs.tag }}
         ASSET_PREFIX: ${{ inputs.asset-prefix }}
         PLATFORM: ${{ inputs.platform }}
@@ -47,8 +51,14 @@ runs:
         if [[ "$RUNNER_OS" == "Windows" ]]; then
           entry_name=tracedecay.exe
         fi
+        addon_args=()
+        if [[ -f crates/tracedecay-sdk-node/Cargo.toml ]]; then
+          test -s "$ADDON"
+          addon_args=(--addon "$ADDON")
+        fi
         python3 scripts/package-release-archive.py \
           --binary "$BINARY" \
+          "${addon_args[@]}" \
           --output "${ASSET_PREFIX}-${PLATFORM}.${ARCHIVE_FORMAT}" \
           --format "$ARCHIVE_FORMAT" --entry-name "$entry_name" --epoch "$SOURCE_EPOCH"
 
@@ -58,6 +68,7 @@ runs:
       env:
         ASSET_PREFIX: ${{ inputs.asset-prefix }}
         PLATFORM: ${{ inputs.platform }}
+        ADDON: ${{ inputs.addon }}
       run: |
         set -euo pipefail
         verify_dir="$(mktemp -d)"
@@ -71,6 +82,11 @@ runs:
           "$binary" --version
           "$binary" --help >/dev/null
         done
+        if [[ -f crates/tracedecay-sdk-node/Cargo.toml ]]; then
+          cmp -- "$ADDON" "$verify_dir/binary/tracedecay_sdk_node.node"
+          node -e 'const binding = require(process.argv[1]); if (typeof binding.NativeClient !== "function") throw new Error("packaged native SDK client export is missing")' \
+            "$verify_dir/binary/tracedecay_sdk_node.node"
+        fi
 
     - name: Verify extracted binary runtime (Windows)
       if: runner.os == 'Windows'
@@ -78,6 +94,7 @@ runs:
       env:
         ASSET_PREFIX: ${{ inputs.asset-prefix }}
         PLATFORM: ${{ inputs.platform }}
+        ADDON: ${{ inputs.addon }}
       run: |
         $verifyDir = Join-Path $env:RUNNER_TEMP ([guid]::NewGuid().ToString())
         try {
@@ -86,6 +103,14 @@ runs:
           if ($LASTEXITCODE -ne 0) { throw "Packaged binary failed --version" }
           & "$verifyDir/tracedecay.exe" --help | Out-Null
           if ($LASTEXITCODE -ne 0) { throw "Packaged binary failed --help" }
+          if (Test-Path crates/tracedecay-sdk-node/Cargo.toml) {
+            $addon = Join-Path $verifyDir 'tracedecay_sdk_node.node'
+            if ((Get-FileHash $env:ADDON).Hash -ne (Get-FileHash $addon).Hash) {
+              throw "Packaged addon differs from the built native SDK"
+            }
+            node -e 'const binding = require(process.argv[1]); if (typeof binding.NativeClient !== "function") throw new Error("packaged native SDK client export is missing")' $addon
+            if ($LASTEXITCODE -ne 0) { throw "Packaged native SDK failed to load" }
+          }
         } finally {
           Remove-Item $verifyDir -Recurse -Force -ErrorAction SilentlyContinue
         }

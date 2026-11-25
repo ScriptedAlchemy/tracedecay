@@ -13,6 +13,9 @@ use tokio::sync::mpsc;
 use tracedecay_application::primitives::PrimitiveProjectRuntime;
 use tracedecay_application::project_open_authorization::project_open_work_grant;
 use tracedecay_configuration::config::PinnedRuntimeConfiguration;
+use tracedecay_contracts::code_index_freshness::{
+    CodeIndexReadinessTargetV1, CodeIndexReadinessWaitReadV1,
+};
 use tracedecay_contracts::retrieval::{
     DiagnosticsPrimitiveRequest, DiagnosticsPrimitiveScope, PrimitiveRequest,
 };
@@ -20,8 +23,12 @@ use tracedecay_contracts::{CancellationContext, Deadline};
 use tracedecay_daemon_service::{
     DaemonWorkProposalRoutingAuthorityV1, daemon_owned_project_source_access_at,
 };
+use tracedecay_domain::configuration::{
+    ConfigurationValueV1, SettingKey, TYPESCRIPT_DIAGNOSTICS_ENABLED_SETTING_KEY,
+};
 use tracedecay_domain::errors::TraceDecayError;
 use tracedecay_domain::{ManifestDigest, UtcMicros, WorkAuthority, canonical_sha256};
+use tracedecay_runtime_core::test_executable::write_executable_script;
 use tracedecay_tool_catalog::ApplicationSurfaceOperation;
 use tracing_subscriber::layer::{Context, Layer, SubscriberExt};
 use tracing_subscriber::registry::LookupSpan;
@@ -247,6 +254,114 @@ async fn published_primitive_reads_pending_before_the_compiler_task_starts() {
         "application.diagnostics.pending",
         "the public runtime must not claim that its appointed producer is unsupported"
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn configured_typescript_opt_out_does_not_disable_code_index_serving() {
+    const CHILD: &str = "TRACEDECAY_TEST_TYPESCRIPT_OPT_OUT_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let name = format!(
+            "{}::configured_typescript_opt_out_does_not_disable_code_index_serving",
+            module_path!().split_once("::").unwrap().1
+        );
+        let home = TempDir::new().unwrap();
+        let output = Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", &name, "--test-threads=1", "--nocapture"])
+            .env(CHILD, "1")
+            .env("HOME", home.path())
+            .env("XDG_CONFIG_HOME", home.path().join("config"))
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .output()
+            .expect("isolated compiler opt-out journey");
+        assert!(
+            output.status.success()
+                && String::from_utf8_lossy(&output.stdout).contains("test result: ok. 1 passed"),
+            "compiler opt-out journey failed:\n{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
+        );
+        return;
+    }
+
+    let temp = TempDir::new().unwrap();
+    let project = temp.path().join("project");
+    let profile = temp.path().join("profile");
+    std::fs::create_dir_all(project.join("src")).unwrap();
+    std::fs::write(project.join("src/index.ts"), "export const value = 1;\n").unwrap();
+    std::fs::write(project.join(".gitignore"), "node_modules/\n").unwrap();
+    std::fs::write(project.join("tsconfig.json"), r#"{"include":["src"]}"#).unwrap();
+    git(&project, &["init", "--quiet", "--initial-branch=main"]);
+    git(&project, &["add", "--all"]);
+    git(
+        &project,
+        &["commit", "--quiet", "-m", "test: compiler opt-out"],
+    );
+    let client_identity = test_client_identity_for(profile.clone());
+    initialize_test_project(&project, &client_identity).await;
+    let project = project.canonicalize().unwrap();
+    let handshake = DaemonHandshake {
+        project_path: Some(project.clone()),
+        client_identity,
+        ..test_handshake_defaults()
+    };
+    let _database_scope = enter_test_daemon_database_scope(&profile, "compiler-opt-out");
+    let configuration_engine = test_daemon_engine_for_profile(&profile);
+    drop(
+        apply_project_setting_via_surface(&configuration_engine, &handshake, |snapshot| {
+            let key = SettingKey::new(TYPESCRIPT_DIAGNOSTICS_ENABLED_SETTING_KEY).unwrap();
+            assert_eq!(
+                snapshot.effective_values.get(&key),
+                Some(&ConfigurationValueV1::Boolean(true))
+            );
+            (key, ConfigurationValueV1::Boolean(false))
+        })
+        .await,
+    );
+    assert!(
+        configuration_engine
+            .shutdown_all()
+            .await
+            .project_servers
+            .is_clean()
+    );
+    drop(configuration_engine);
+
+    std::fs::create_dir_all(project.join("node_modules/.bin")).unwrap();
+    write_executable_script(
+        &project.join("node_modules/.bin/tsc"),
+        "#!/bin/sh\necho invoked > node_modules/ran\nexit 1\n",
+    )
+    .unwrap();
+    let engine = test_daemon_engine_for_profile(&profile);
+    let server = engine.project_server(&handshake).await.unwrap();
+    let readiness = engine
+        .invocation
+        .code_index_schedulers
+        .wait_for_readiness(
+            &project,
+            CodeIndexReadinessTargetV1::Ready,
+            Duration::from_secs(30),
+        )
+        .await
+        .unwrap();
+    assert!(
+        matches!(readiness, CodeIndexReadinessWaitReadV1::Reached { .. }),
+        "{readiness:?}"
+    );
+    let outcome = diagnostics(&engine, &handshake).await;
+    let DaemonInvocationOutcome::ApplicationProblem { problem } = outcome else {
+        panic!("the disabled producer must not report a publication: {outcome:?}");
+    };
+    assert_eq!(
+        problem.diagnostic().unwrap().code,
+        "application.diagnostics.unsupported"
+    );
+    drop(server);
+    let shutdown = engine.shutdown_all().await;
+    assert!(shutdown.project_servers.is_clean(), "{shutdown:?}");
+    assert!(shutdown.background.unfinished().is_empty(), "{shutdown:?}");
+    assert!(!project.join("node_modules/ran").exists());
 }
 
 async fn register_work_for_configuration(
