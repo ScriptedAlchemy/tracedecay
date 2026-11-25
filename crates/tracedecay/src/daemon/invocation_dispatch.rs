@@ -801,6 +801,24 @@ fn project_open_refusal_response(
     workflow_application: bool,
     git_operation: bool,
 ) -> DaemonInvocationResponse {
+    // A completed open that is backed off is a recorded failure, not an
+    // absent application service. Keep its canonical reason and cause across
+    // the typed boundary so Doctor can explain the stalled project.
+    if let tracedecay_domain::errors::TraceDecayError::ProjectOpen {
+        kind: tracedecay_domain::errors::ProjectOpenFailureKind::BackedOff { .. },
+        detail,
+    } = error
+    {
+        let backoff = tracedecay_domain::errors::TraceDecayError::project_route(
+            "project_route_open_backoff",
+            true,
+            detail.clone(),
+        );
+        return DaemonInvocationResponse::application_problem(
+            request_id,
+            crate::mcp::tools::graph_tool_error_problem(&backoff),
+        );
+    }
     if error_is_project_open_retryable(error) {
         return DaemonInvocationResponse::application_problem(
             request_id,

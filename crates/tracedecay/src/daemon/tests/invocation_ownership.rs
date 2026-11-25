@@ -101,6 +101,80 @@ async fn unopened_committed_fixture(
     (temp, database_scope, engine, handshake)
 }
 
+#[tokio::test]
+async fn doctor_probe_preserves_a_stalled_project_open_cause() {
+    use crate::daemon::project_open_admission::{ProjectOpenTaskClaim, ProjectOpenTasks};
+    use tracedecay_domain::errors::{ProjectOpenFailureKind, TraceDecayError};
+
+    let (_temp, _database_scope, engine, handshake) =
+        unopened_committed_fixture("doctor-stalled-project-open").await;
+    super::prewarm_test_profile_runtime(&engine.store_administration).await;
+    let (project_path, route) = engine
+        .project_route(&handshake)
+        .expect("Doctor project route");
+    let tasks =
+        crate::daemon::project_routing::project_open_tasks(&engine.project_open_gates).await;
+    const CAUSE: &str = "session authority rejected mutable committed receipt history";
+    let ProjectOpenTaskClaim::InFlight(state) = tasks.start(route.clone(), async {
+        Err(TraceDecayError::project_open(
+            ProjectOpenFailureKind::AuthorityVerdict {
+                migration_pending: false,
+            },
+            CAUSE,
+        ))
+    }) else {
+        panic!("fixture must own the first project open");
+    };
+    ProjectOpenTasks::wait_for_completion(state)
+        .await
+        .expect_err("record the rejected project open");
+    assert_eq!(
+        tasks.status(&route).expect("recorded project status").state,
+        tracedecay_contracts::project_open::ProjectOpenStatusStateV1::Stalled,
+    );
+
+    let (listener, endpoint) = tracedecay_daemon_protocol::BrokerListener::bind(
+        &tracedecay_daemon_protocol::default_loopback_endpoint(),
+    )
+    .await
+    .expect("Doctor daemon endpoint");
+    let serving_engine = engine.clone();
+    let serving = tokio::spawn(async move {
+        let stream = listener.accept().await.expect("accept Doctor probe");
+        Box::pin(
+            crate::daemon::connection_serving::serve_authenticated_socket_client_with_class(
+                stream,
+                serving_engine,
+                super::TEST_AUTH_TOKEN.to_owned(),
+                crate::daemon::core_admission::DaemonClientAdmissionClass::General,
+            ),
+        )
+        .await
+    });
+    let client = tracedecay_daemon_protocol::DaemonInvocationClient::new(
+        tracedecay_daemon_protocol::DaemonConnection::new(
+            endpoint,
+            super::TEST_AUTH_TOKEN.to_owned(),
+        ),
+        handshake.clone(),
+    );
+    crate::doctor::assert_stalled_doctor_probe(
+        &client,
+        &handshake.client_identity.profile_root,
+        &project_path,
+        CAUSE,
+    )
+    .await;
+    drop(client);
+    tokio::time::timeout(Duration::from_secs(30), serving)
+        .await
+        .expect("Doctor connection must finish")
+        .expect("Doctor serving task")
+        .expect("Doctor daemon response");
+    let shutdown = engine.shutdown_all().await;
+    assert!(shutdown.project_servers.is_clean(), "{shutdown:?}");
+}
+
 const PREPARATION_RELEASE_DEADLINE: Duration = Duration::from_mins(1);
 
 #[derive(Default)]

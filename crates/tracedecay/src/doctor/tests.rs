@@ -381,6 +381,60 @@ fn stalled_snapshot_on_successful_status_is_a_typed_doctor_failure() {
     );
 }
 
+/// The daemon fixture calls the actual production probe and finding renderer,
+/// keeping the route-to-Doctor assertion inside Doctor's private boundary.
+#[cfg(unix)]
+pub(crate) async fn assert_stalled_doctor_probe(
+    executor: &dyn tracedecay_daemon_protocol::DaemonInvocationExecutor,
+    profile_root: &Path,
+    project_path: &Path,
+    recorded_cause: &str,
+) {
+    let error = daemon_doctor_runtime(
+        executor,
+        std::time::Instant::now() + std::time::Duration::from_secs(30),
+    )
+    .await
+    .expect_err("a stalled project must answer the Doctor probe with its recorded failure");
+    assert_eq!(
+        error
+            .project_route_context()
+            .map(|(reason, retryable, _)| (reason, retryable)),
+        Some(("project_route_open_backoff", true)),
+    );
+    let mut counters = DoctorCounters::quiet();
+    let mut pending_reset = false;
+    let findings = render_current_project_daemon_status(
+        &mut counters,
+        profile_root,
+        project_path,
+        Some(&Err(error)),
+        &mut pending_reset,
+    )
+    .expect("render the actual Doctor probe refusal");
+    assert!(matches!(
+        findings,
+        DoctorDaemonFindingsV1::Unread { reason } if reason == "project_route_open_backoff"
+    ));
+    assert_eq!(
+        (counters.issues, counters.warnings, pending_reset),
+        (1, 0, false)
+    );
+    assert_eq!(
+        doctor_result(&counters, pending_reset),
+        DoctorCompletion::Issues(1)
+    );
+    assert!(counters.checks.iter().any(|check| {
+        check.message.starts_with("Project open stalled:") && check.message.contains(recorded_cause)
+    }));
+    assert!(counters.checks.iter().all(|check| {
+        !check.message.contains("Preserve this recovery set")
+            && !check
+                .message
+                .contains("Canonical Doctor report unavailable")
+    }));
+}
+
 #[test]
 fn stalled_capacity_status_is_a_typed_doctor_failure_not_a_closed_connection() {
     let path = std::path::Path::new("/tmp/project.capacity");

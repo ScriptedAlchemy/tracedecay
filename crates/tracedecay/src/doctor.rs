@@ -836,7 +836,13 @@ fn classify_daemon_status_error(
     // A stalled snapshot whose recorded cause was not a real project-route
     // refusal arrives as the honest typed backoff, so the finding names that
     // backoff kind instead of reporting the daemon unavailable.
-    if let Some(ProjectOpenFailureKind::BackedOff { .. }) = error.project_open_failure_kind() {
+    if matches!(
+        error.project_open_failure_kind(),
+        Some(ProjectOpenFailureKind::BackedOff { .. })
+    ) || matches!(
+        error.project_route_context(),
+        Some(("project_route_open_backoff", _, _))
+    ) {
         dc.fail(&format!("Project open stalled: {error}"));
         return DoctorDaemonFindingsV1::unread("project_route_open_backoff");
     }
@@ -1351,3 +1357,6 @@ fn print_summary(dc: &DoctorCounters) {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(all(test, unix))]
+pub(crate) use tests::assert_stalled_doctor_probe;
