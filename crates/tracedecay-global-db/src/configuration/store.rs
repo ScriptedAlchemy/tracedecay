@@ -20,8 +20,8 @@ use tracedecay_domain::configuration::{
     LCM_SUMMARIZER_EXECUTABLES_SETTING_KEY, ProtectedChange, ProtectedChangePlan,
     ProtectedChangeSnapshotError, RedactedConfigurationChangeV1, RollbackModeV1,
     SOURCE_BINDINGS_SETTING_KEY, SYNC_WATCH_LINKED_WORKTREES_SETTING_KEY, ScopeControlOperationV1,
-    SettingKey, USER_CODE_INDEX_WORKERS_SETTING_KEY, UserProfileId,
-    WORK_TOPOLOGY_POLICY_SETTING_KEY,
+    SettingKey, TYPESCRIPT_DIAGNOSTICS_ENABLED_SETTING_KEY, USER_CODE_INDEX_WORKERS_SETTING_KEY,
+    UserProfileId, WORK_TOPOLOGY_POLICY_SETTING_KEY,
 };
 use tracedecay_domain::feedback::PROXIMITY_RELATIONSHIP_HINTS_SETTING_KEY_V1;
 use tracedecay_domain::{AccessPolicyDigest, ActorId, ManifestDigest, UtcMicros, canonical_sha256};
@@ -348,6 +348,20 @@ impl<'db> GlobalDbConfigurationControlStore<'db> {
         expected_revision_id: &ConfigurationRevisionId,
         occurred_at: UtcMicros,
     ) -> Result<ConfigurationCurrentStateV1, ConfigurationError> {
+        self.converge_project_registry_shape(
+            expected_revision_id,
+            occurred_at,
+            RegistryShapeOperation::Converge,
+        )
+        .await
+    }
+
+    async fn converge_project_registry_shape(
+        &self,
+        expected_revision_id: &ConfigurationRevisionId,
+        occurred_at: UtcMicros,
+        operation: RegistryShapeOperation,
+    ) -> Result<ConfigurationCurrentStateV1, ConfigurationError> {
         let registry = ConfigurationRegistry::core().map_err(ConfigurationError::validation)?;
         self.converge_registry_shape(
             expected_revision_id,
@@ -359,8 +373,30 @@ impl<'db> GlobalDbConfigurationControlStore<'db> {
                 LCM_SUMMARIZER_EXECUTABLES_SETTING_KEY,
                 SYNC_WATCH_LINKED_WORKTREES_SETTING_KEY,
                 PROXIMITY_RELATIONSHIP_HINTS_SETTING_KEY_V1,
+                TYPESCRIPT_DIAGNOSTICS_ENABLED_SETTING_KEY,
             ],
-            PROJECT_RETIRED_SETTING_KEYS,
+            operation,
+        )
+        .await
+    }
+
+    /// Explicitly abandon retired PR-tracking overrides in this project's
+    /// current revision. No other override or unrecognized drift is accepted.
+    pub async fn reset_retired_pr_tracking_configuration(
+        &self,
+        expected_revision_id: &ConfigurationRevisionId,
+        occurred_at: UtcMicros,
+    ) -> Result<ConfigurationCurrentStateV1, ConfigurationError> {
+        if !matches!(
+            self.db.binding().shard_id.scope,
+            StoreShardScopeV1::ProjectSessions { .. }
+        ) {
+            return Err(ConfigurationError::TargetUnavailable);
+        }
+        self.converge_project_registry_shape(
+            expected_revision_id,
+            occurred_at,
+            RegistryShapeOperation::ResetRetiredPrTracking,
         )
         .await
     }
@@ -376,7 +412,7 @@ impl<'db> GlobalDbConfigurationControlStore<'db> {
         occurred_at: UtcMicros,
         registry: &ConfigurationRegistry,
         additive_keys: &[&str],
-        retired_keys: &[&str],
+        operation: RegistryShapeOperation,
     ) -> Result<ConfigurationCurrentStateV1, ConfigurationError> {
         expected_revision_id
             .validate()
@@ -390,7 +426,8 @@ impl<'db> GlobalDbConfigurationControlStore<'db> {
                 .map_err(ConfigurationError::validation)
         };
         let additive_keys = setting_keys(additive_keys)?;
-        let retired_keys = setting_keys(retired_keys)?;
+        let retired_keys = setting_keys(PROJECT_RETIRED_SETTING_KEYS)?;
+        let retired_pr_tracking_keys = setting_keys(RETIRED_PR_TRACKING_SETTING_KEYS)?;
         transact_config(self.db, |_| ConfigurationError::Unavailable, async move |transaction| {
             let current = current_state_from_transaction(&transaction).await?;
             if current.revision_id != expected_revision_id {
@@ -433,35 +470,37 @@ impl<'db> GlobalDbConfigurationControlStore<'db> {
                 .difference(&expected_keys)
                 .cloned()
                 .collect::<Vec<_>>();
+            let has_pr_tracking_override = unregistered_keys.iter().any(|key| {
+                retired_pr_tracking_keys.contains(key)
+                    && current.snapshot.provenance.get(key) != Some(&default_provenance)
+            });
+            if operation == RegistryShapeOperation::ResetRetiredPrTracking && !has_pr_tracking_override {
+                return Err(ConfigurationError::validation(
+                    "no retired PR-tracking override to reset",
+                ));
+            }
             if missing_keys.is_empty() && stale_defaults.is_empty() && unregistered_keys.is_empty()
             {
                 validate_snapshot_registry_completeness_with_registry(&current.snapshot, &registry)
                     .map_err(map_store_error)?;
                 return Ok(current);
             }
-            if unregistered_keys.iter().any(|key| {
-                matches!(
-                    key.as_str(),
-                    "sync.auto_track_pr_branches.v1" | "sync.auto_track_pr_poll_secs.v1"
-                )
-            }) {
-                return Err(ConfigurationError::ResetRequired {
-                    reason: "automatic PR worktree tracking has been retired; this configuration still contains its removed settings and is preserved unchanged; follow the daemon's typed reset remediation, then use explicit branch activation"
-                        .to_owned(),
-                });
-            }
-            // A registered retired setting still at its registry default
-            // carries no user intent. An override of it does.
+            // Reset consent applies only to the two known PR-tracking keys.
+            // Other unknown keys or overrides must remain fail-closed.
             if missing_keys.iter().any(|key| !additive_keys.contains(key))
                 || unregistered_keys.iter().any(|key| {
-                    !retired_keys.contains(key)
-                        || current.snapshot.provenance.get(key) != Some(&default_provenance)
+                    !retired_pr_tracking_keys.contains(key)
+                        && (!retired_keys.contains(key)
+                            || current.snapshot.provenance.get(key) != Some(&default_provenance))
                 })
             {
                 return Err(ConfigurationError::ResetRequired {
                     reason: "configuration snapshot registry drift is not a registered additive-default upgrade"
                         .to_owned(),
                 });
+            }
+            if has_pr_tracking_override && operation == RegistryShapeOperation::Converge {
+                return Err(ConfigurationError::RetiredPrTrackingResetRequired);
             }
             let additions = missing_keys
                 .iter()
@@ -474,7 +513,10 @@ impl<'db> GlobalDbConfigurationControlStore<'db> {
                 .collect::<Result<Vec<_>, _>>()
                 .map_err(ConfigurationError::validation)?;
             let operation_digest = canonical_sha256(&(
-                "tracedecay.configuration.registry-shape-convergence.v1",
+                match operation {
+                    RegistryShapeOperation::Converge => "tracedecay.configuration.registry-shape-convergence.v1",
+                    RegistryShapeOperation::ResetRetiredPrTracking => "tracedecay.configuration.retired-pr-tracking-reset.v1",
+                },
                 &expected_revision_id,
                 &additions,
                 &unregistered_keys,
@@ -508,11 +550,15 @@ impl<'db> GlobalDbConfigurationControlStore<'db> {
                 revision_id: next_revision_id.clone(),
                 parent_revision_id: Some(expected_revision_id.clone()),
                 snapshot,
-                actor_id: ActorId::new(
-                    "actor.tracedecay-daemon.registry-shape-convergence".to_owned(),
-                )
+                actor_id: ActorId::new(match operation {
+                    RegistryShapeOperation::Converge => "actor.tracedecay-daemon.registry-shape-convergence",
+                    RegistryShapeOperation::ResetRetiredPrTracking => "actor.tracedecay-cli.retired-pr-tracking-reset",
+                })
                 .map_err(ConfigurationError::validation)?,
-                operation_kind: "registry_shape_convergence".to_owned(),
+                operation_kind: match operation {
+                    RegistryShapeOperation::Converge => "registry_shape_convergence",
+                    RegistryShapeOperation::ResetRetiredPrTracking => "retired_pr_tracking_reset",
+                }.to_owned(),
                 created_at: occurred_at,
             };
             insert_revision_with_registry(&transaction, &revision, &registry)
@@ -673,6 +719,16 @@ pub struct ProfileCodeIndexWorkerCommitV1 {
 /// Project settings a published registry removed. A store still holding one
 /// at its registry default converges by dropping it.
 const PROJECT_RETIRED_SETTING_KEYS: &[&str] = &["feedback.proximity.risk_threshold"];
+const RETIRED_PR_TRACKING_SETTING_KEYS: &[&str] = &[
+    "sync.auto_track_pr_branches.v1",
+    "sync.auto_track_pr_poll_secs.v1",
+];
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RegistryShapeOperation {
+    Converge,
+    ResetRetiredPrTracking,
+}
 
 /// Exact adapter over one registered `ProfileSessions` database.
 pub struct ProfileConfigurationStore<'db> {

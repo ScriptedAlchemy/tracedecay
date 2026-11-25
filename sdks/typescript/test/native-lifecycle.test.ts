@@ -205,24 +205,41 @@ describe("native lifecycle ownership", () => {
         (async () => {
           const call = client.prepareOperation("operation.workflow.list_definitions", "{}", "{}");
           const pending = call.run().catch((error) => JSON.parse(error.message).kind);
-          setTimeout(() => call.interrupt(), 50);
+          process.once("message", () => {
+            call.interrupt();
+            process.disconnect();
+          });
+          const interrupted = await pending;
           const stream = client.prepareStream("request.operation", "{}");
           const opened = JSON.parse(await stream.next()).event;
           stream.close();
-          console.log(JSON.stringify({ interrupted: await pending, opened }));
+          console.log(JSON.stringify({ interrupted, opened }));
         })();
       `;
-      const child = spawn(process.execPath, ["-e", script], { stdio: ["ignore", "pipe", "inherit"] });
+      const child = spawn(process.execPath, ["-e", script], { stdio: ["ignore", "pipe", "inherit", "ipc"] });
       let output = "";
-      child.stdout.on("data", (chunk: Buffer) => { output += chunk.toString("utf8"); });
+      child.stdout!.on("data", (chunk: Buffer) => { output += chunk.toString("utf8"); });
+      const exited = once(child, "close");
       const timer = setTimeout(() => child.kill("SIGKILL"), 10_000);
-      const [code, signal] = (await once(child, "exit")) as [number | null, NodeJS.Signals | null];
-      clearTimeout(timer);
-      expect(signal, "the child had to be killed: a native handle kept it alive").toBeNull();
-      expect(code).toBe(0);
-      expect(JSON.parse(output)).toEqual({ interrupted: "interrupted", opened: "open" });
-      await daemon.closed(0);
-      await daemon.closed(1);
+      try {
+        // Observe live I/O before interrupting, then let the child open the
+        // stream. Request arrival order must not depend on a 50 ms timer.
+        while (daemon.requests.length === 0 && child.exitCode === null && child.signalCode === null) {
+          await new Promise((resolve) => setTimeout(resolve, 5));
+        }
+        expect(daemon.requests.map((request) => request.method)).toEqual(["POST"]);
+        child.send("interrupt");
+        const [code, signal] = (await exited) as [number | null, NodeJS.Signals | null];
+        expect(signal, "the child had to be killed: a native handle kept it alive").toBeNull();
+        expect(code).toBe(0);
+        expect(JSON.parse(output)).toEqual({ interrupted: "interrupted", opened: "open" });
+        expect(daemon.requests.map((request) => request.method)).toEqual(["POST", "GET"]);
+        await daemon.closed(0);
+        await daemon.closed(1);
+      } finally {
+        clearTimeout(timer);
+        if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
+      }
     });
   });
 

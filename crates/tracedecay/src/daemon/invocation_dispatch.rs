@@ -414,6 +414,12 @@ async fn execute_invocation_with_project_owner<'a>(
         };
         if let Err(error) = project_server {
             record_project_open_refusal(request.operation().as_str(), &error);
+            if doctor_preserves_project_open_refusal(&request, &error) {
+                return DaemonInvocationResponse::application_problem(
+                    request_id,
+                    crate::mcp::tools::graph_tool_error_problem(&error),
+                );
+            }
             return project_open_refusal_response(
                 request_id,
                 &error,
@@ -785,6 +791,32 @@ pub(super) async fn execute_daemon_invocation(
         },
     )
     .await
+}
+
+/// Doctor diagnoses occupied project slots and a blocked repository walk;
+/// treating either as pending publication hides the state it must report.
+/// Other typed clients keep their existing bounded mounting retries, as does
+/// Doctor when an open or owner publication is actually still in flight.
+fn doctor_preserves_project_open_refusal(
+    request: &DaemonInvocationRequest,
+    error: &tracedecay_domain::errors::TraceDecayError,
+) -> bool {
+    matches!(
+        &request.payload,
+        DaemonInvocationPayload::GraphTool {
+            surface_operation: tracedecay_tool_catalog::ApplicationSurfaceOperation::Runtime,
+            arguments,
+            ..
+        } if arguments.get("doctor_report").and_then(serde_json::Value::as_bool) == Some(true)
+    ) && matches!(
+        error.project_route_context(),
+        Some((
+            tracedecay_daemon_protocol::PROJECT_SERVER_CAPACITY_REASON_CODE
+                | tracedecay_runtime_core::git_discovery::REPOSITORY_DISCOVERY_DEFERRED_REASON_CODE,
+            _,
+            _,
+        ))
+    )
 }
 
 /// A still-opening project is the mounting refusal the typed CLI re-sends

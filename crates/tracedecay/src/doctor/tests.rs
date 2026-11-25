@@ -477,6 +477,79 @@ fn stalled_capacity_status_is_a_typed_doctor_failure_not_a_closed_connection() {
     );
 }
 
+/// Exercise the production probe and finding renderer over the daemon
+/// fixture's real socket, including the retained problem's retry contract.
+#[cfg(unix)]
+pub(crate) async fn assert_project_route_doctor_probe(
+    executor: &dyn tracedecay_daemon_protocol::DaemonInvocationExecutor,
+    profile_root: &Path,
+    project_path: &Path,
+    expected_reason: &str,
+    expected_message: &str,
+) {
+    let error = daemon_doctor_runtime(
+        executor,
+        std::time::Instant::now() + std::time::Duration::from_secs(30),
+    )
+    .await
+    .expect_err("the Doctor probe must preserve the project admission refusal");
+    assert_eq!(
+        error
+            .project_route_context()
+            .map(|(reason, retryable, _)| (reason, retryable)),
+        Some((expected_reason, true)),
+    );
+    let record = tracedecay_mcp::application_output::tool_result::error_problem_record(&error)
+        .expect("Doctor retains the daemon's original problem record");
+    assert!(record.pre_admission_retry_delay().is_some());
+    assert_eq!(record.owner_mount_resend_delay(), None);
+    let mut counters = DoctorCounters::quiet();
+    let mut pending_reset = false;
+    let findings = render_current_project_daemon_status(
+        &mut counters,
+        profile_root,
+        project_path,
+        Some(&Err(error)),
+        &mut pending_reset,
+    )
+    .expect("render the actual Doctor probe refusal");
+    let (expected_finding, issues, warnings, completion) = match expected_reason {
+        PROJECT_SERVER_CAPACITY_REASON_CODE => (
+            PROJECT_SERVER_CAPACITY_REASON_CODE,
+            1,
+            0,
+            DoctorCompletion::Issues(1),
+        ),
+        REPOSITORY_DISCOVERY_DEFERRED_REASON_CODE => {
+            ("daemon_warming", 0, 1, DoctorCompletion::Healthy)
+        }
+        other => panic!("unexpected project admission fixture: {other}"),
+    };
+    assert!(matches!(
+        findings,
+        DoctorDaemonFindingsV1::Unread { reason } if reason == expected_finding
+    ));
+    assert_eq!(
+        (counters.issues, counters.warnings, pending_reset),
+        (issues, warnings, false)
+    );
+    assert_eq!(doctor_result(&counters, pending_reset), completion);
+    assert!(
+        counters
+            .checks
+            .iter()
+            .any(|check| check.message.contains(expected_message)),
+        "Doctor must explain the actual admission refusal: {:?}",
+        counters.checks
+    );
+    assert!(counters.checks.iter().all(|check| {
+        !check.message.contains("Preserve this recovery set")
+            && !check
+                .message
+                .contains("Canonical Doctor report unavailable")
+    }));
+}
+
 #[test]
 fn unavailable_canonical_report_is_an_issue_that_fails_the_doctor_exit() {
     let mut counters = DoctorCounters::new();

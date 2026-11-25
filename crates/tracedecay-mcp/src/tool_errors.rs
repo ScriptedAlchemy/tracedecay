@@ -5,7 +5,8 @@ use tracedecay_contracts::{
     ApplicationProblem, ApplicationProblemDetailV1, ApplicationProblemRecord,
 };
 use tracedecay_domain::errors::{
-    PROFILE_RESET_COMMAND, STALE_STORE_RESET_COMMAND, TraceDecayError,
+    PROFILE_RESET_COMMAND, RETIRED_PR_TRACKING_CONFIGURATION_AUTHORITY, STALE_STORE_RESET_COMMAND,
+    TraceDecayError,
 };
 use tracedecay_domain::{
     CURSOR_INVALID_CODE, CURSOR_PARAMETER_CHANGED_CODE, CursorBindingMismatchV1,
@@ -276,13 +277,17 @@ fn project_root_argument(project_root: Option<&std::path::Path>) -> String {
 }
 
 /// The one exact command that performs the legal `reset` action for a typed
-/// reset refusal. Refused shapes are never migrated or backed up: the reset
-/// deletes the authority's old data and the next open creates the shape this
-/// binary writes. `project_root` scopes a project-store reset to the refused
+/// reset refusal. A reset never migrates or backs up a refused store.
+/// `project_root` scopes a project reset to the refused
 /// project when the caller knows it. Single line, so it fits a bounded
 /// problem diagnostic.
 pub fn reset_required_command(authority: &str, project_root: Option<&std::path::Path>) -> String {
-    if is_project_store_authority(authority) {
+    if authority == RETIRED_PR_TRACKING_CONFIGURATION_AUTHORITY {
+        format!(
+            "tracedecay storage reset-retired-pr-tracking --project-root {} --yes",
+            project_root_argument(project_root)
+        )
+    } else if is_project_store_authority(authority) {
         format!(
             "tracedecay storage reset-project-store --project-root {} --yes",
             project_root_argument(project_root)
@@ -301,6 +306,16 @@ pub fn reset_required_command(authority: &str, project_root: Option<&std::path::
 /// follows.
 pub fn reset_required_remedy(authority: &str, project_root: Option<&std::path::Path>) -> String {
     let command = reset_required_command(authority, project_root);
+    if authority == RETIRED_PR_TRACKING_CONFIGURATION_AUTHORITY {
+        return format!(
+            "refused authority: {authority}\n\
+             stop the daemon, then run:\n  \
+             {command}\n\
+             this drops only the retired PR-tracking settings from the selected project's \
+             active configuration; its other overrides, graph, memory, and sessions stay in place. \
+             Restart the daemon afterwards."
+        );
+    }
     if is_project_store_authority(authority) {
         return format!(
             "refused authority: {authority}\n\
@@ -397,9 +412,22 @@ pub fn serialize_response_line(resp: &JsonRpcResponse) -> String {
 mod tests {
     use serde_json::json;
     use tracedecay_domain::ApplicationProblemDetailV1;
-    use tracedecay_domain::errors::TraceDecayError;
+    use tracedecay_domain::errors::{RETIRED_PR_TRACKING_CONFIGURATION_AUTHORITY, TraceDecayError};
 
     use super::tool_error_response;
+
+    #[test]
+    fn retired_pr_tracking_refusal_names_only_the_project_configuration_reset() {
+        let error = TraceDecayError::reset_required(
+            RETIRED_PR_TRACKING_CONFIGURATION_AUTHORITY,
+            "explicit overrides of retired settings",
+        );
+        let detail = super::reset_required_detail(&error).unwrap();
+        assert_eq!(
+            detail.message(),
+            "The retired PR-tracking configuration requires an explicit reset with `tracedecay storage reset-retired-pr-tracking --project-root <project-root> --yes`: explicit overrides of retired settings"
+        );
+    }
 
     #[test]
     fn a_typed_lookup_miss_is_invalid_params_not_found() {

@@ -20,7 +20,9 @@ use tracedecay_application::advisory::github_runtime::{
 
 use tracedecay_configuration::config::{PinnedRuntimeConfiguration, RuntimeTraceDecayConfig};
 use tracedecay_configuration::{SyncConfig, TelemetryConfig};
-use tracedecay_domain::errors::{Result, TraceDecayError};
+use tracedecay_domain::errors::{
+    RETIRED_PR_TRACKING_CONFIGURATION_AUTHORITY, Result, TraceDecayError,
+};
 use tracedecay_global_db::configuration::contracts::ports::{
     ConfigurationControlStore, ConfigurationCurrentStateV1,
 };
@@ -658,6 +660,10 @@ async fn current_after_conflict(
 
 fn map_configuration_error(error: ConfigurationError) -> TraceDecayError {
     match error {
+        ConfigurationError::RetiredPrTrackingResetRequired => TraceDecayError::reset_required(
+            RETIRED_PR_TRACKING_CONFIGURATION_AUTHORITY,
+            error.to_string(),
+        ),
         ConfigurationError::ResetRequired { reason } => {
             TraceDecayError::reset_required("configuration", reason)
         }

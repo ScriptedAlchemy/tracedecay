@@ -1358,4 +1358,4 @@ fn print_summary(dc: &DoctorCounters) {
 mod tests;
 
 #[cfg(all(test, unix))]
-pub(crate) use tests::assert_stalled_doctor_probe;
+pub(crate) use tests::{assert_project_route_doctor_probe, assert_stalled_doctor_probe};

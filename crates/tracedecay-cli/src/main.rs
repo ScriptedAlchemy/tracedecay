@@ -929,7 +929,8 @@ fn validate_host_bundle_options(
     if matches!(
         command,
         Commands::Storage {
-            action: ProfileStorageAction::ResetProjectStore { .. },
+            action: ProfileStorageAction::ResetProjectStore { .. }
+                | ProfileStorageAction::ResetRetiredPrTracking { .. },
         }
     ) {
         if host_bundle.component.is_some() || host_bundle.dry_run || host_bundle.adopt {

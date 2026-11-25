@@ -6,6 +6,7 @@ use std::future::Future;
 use std::path::Path;
 use std::pin::Pin;
 use std::process::Command;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 use std::time::{Duration, Instant};
 use tracedecay_daemon_protocol::{
@@ -187,6 +188,231 @@ async fn doctor_probe_preserves_a_stalled_project_open_cause_and_retry_delay() {
         .expect("Doctor connection must finish")
         .expect("Doctor serving task")
         .expect("Doctor daemon response");
+    let shutdown = engine.shutdown_all().await;
+    assert!(shutdown.project_servers.is_clean(), "{shutdown:?}");
+}
+
+/// Forward to the actual socket client, refusing a second Doctor attempt so
+/// the regression fails at the first unwanted resend instead of its deadline.
+struct SingleDoctorProbe<'a> {
+    executor: &'a dyn tracedecay_daemon_protocol::DaemonInvocationExecutor,
+    attempts: AtomicUsize,
+}
+
+impl tracedecay_contracts::ApplicationInvocationExecutor for SingleDoctorProbe<'_> {
+    fn invoke(
+        &self,
+        invocation: tracedecay_contracts::ApplicationInvocation,
+    ) -> tracedecay_contracts::ApplicationInvocationFuture<
+        '_,
+        Result<tracedecay_contracts::ApplicationResponse, tracedecay_contracts::InvocationError>,
+    > {
+        self.executor.invoke(invocation)
+    }
+}
+
+impl tracedecay_daemon_protocol::DaemonInvocationExecutor for SingleDoctorProbe<'_> {
+    fn invoke_controlled(
+        &self,
+        request: DaemonInvocationRequest,
+        deadline: Deadline,
+        cancellation: tracedecay_contracts::CancellationSignal,
+        policy: tracedecay_daemon_protocol::InvocationCancellationPolicy,
+    ) -> tracedecay_daemon_protocol::DaemonInvocationExecutorFuture<
+        '_,
+        Result<
+            tracedecay_daemon_protocol::DaemonInvocationResponse,
+            tracedecay_daemon_protocol::DaemonInvocationError,
+        >,
+    > {
+        assert_eq!(
+            self.attempts.fetch_add(1, Ordering::SeqCst),
+            0,
+            "Doctor must report this route refusal without a mounting resend"
+        );
+        self.executor
+            .invoke_controlled(request, deadline, cancellation, policy)
+    }
+
+    fn observe_feedback(
+        &self,
+        subject_digest: tracedecay_domain::ManifestDigest,
+        observed_at: UtcMicros,
+        event: tracedecay_contracts::feedback::observations::FeedbackSourceEventV1,
+    ) -> tracedecay_daemon_protocol::DaemonInvocationExecutorFuture<
+        '_,
+        tracedecay_domain::errors::Result<()>,
+    > {
+        self.executor
+            .observe_feedback(subject_digest, observed_at, event)
+    }
+}
+
+async fn assert_socket_doctor_project_open_refusal(
+    engine: &DaemonEngine,
+    handshake: &DaemonHandshake,
+    expected_reason: &str,
+    expected_message: &str,
+) {
+    let (project_path, _) = engine
+        .project_route(handshake)
+        .expect("Doctor project route");
+    let (listener, endpoint) = tracedecay_daemon_protocol::BrokerListener::bind(
+        &tracedecay_daemon_protocol::default_loopback_endpoint(),
+    )
+    .await
+    .expect("Doctor daemon endpoint");
+    let serving_engine = engine.clone();
+    let serving = tokio::spawn(async move {
+        let stream = listener.accept().await.expect("accept Doctor probe");
+        Box::pin(
+            crate::daemon::connection_serving::serve_authenticated_socket_client_with_class(
+                stream,
+                serving_engine,
+                super::TEST_AUTH_TOKEN.to_owned(),
+                crate::daemon::core_admission::DaemonClientAdmissionClass::General,
+            ),
+        )
+        .await
+    });
+    let client = tracedecay_daemon_protocol::DaemonInvocationClient::new(
+        tracedecay_daemon_protocol::DaemonConnection::new(
+            endpoint,
+            super::TEST_AUTH_TOKEN.to_owned(),
+        ),
+        handshake.clone(),
+    );
+    let observed_at = tracedecay_contracts::clock::now_micros();
+    let ordinary = client
+        .invoke(DaemonInvocationRequest::graph_tool(
+            "request.runtime.admission-control",
+            ApplicationSurfaceOperation::Runtime,
+            serde_json::Map::from_iter([("doctor_report".to_owned(), false.into())]),
+            observed_at,
+            Deadline::new(UtcMicros(observed_at.0.saturating_add(30_000_000)))
+                .expect("runtime control deadline"),
+            CancellationContext::active("cancel.runtime.admission-control")
+                .expect("runtime control cancellation"),
+        ))
+        .await
+        .expect("ordinary runtime refusal crosses the actual typed socket");
+    assert_eq!(
+        ordinary.outcome,
+        DaemonInvocationOutcome::ApplicationProblem {
+            problem: ApplicationProblem::runtime_mounting(),
+        },
+        "ordinary typed clients must retain their mounting retry contract"
+    );
+    let probe = SingleDoctorProbe {
+        executor: &client,
+        attempts: AtomicUsize::new(0),
+    };
+    crate::doctor::assert_project_route_doctor_probe(
+        &probe,
+        &handshake.client_identity.profile_root,
+        &project_path,
+        expected_reason,
+        expected_message,
+    )
+    .await;
+    assert_eq!(probe.attempts.load(Ordering::SeqCst), 1);
+    drop(client);
+    tokio::time::timeout(Duration::from_secs(30), serving)
+        .await
+        .expect("Doctor connection must finish")
+        .expect("Doctor serving task")
+        .expect("Doctor daemon response");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn doctor_probe_preserves_project_server_capacity() {
+    let (temp, _database_scope, engine, mut refused_handshake) =
+        unopened_committed_fixture("doctor-project-server-capacity").await;
+    let mut occupied = Vec::new();
+    for index in 0..crate::daemon::MAX_CACHED_PROJECT_SERVERS {
+        let project = temp.path().join(format!("occupied-{index}"));
+        std::fs::create_dir_all(&project).expect("occupied project directory");
+        initialize_test_project(&project, &refused_handshake.client_identity).await;
+        occupied.push(DaemonHandshake {
+            project_path: Some(project),
+            ..refused_handshake.clone()
+        });
+    }
+    super::prewarm_test_profile_runtime(&engine.store_administration).await;
+    let mut leased_servers = Vec::new();
+    for handshake in occupied {
+        match engine.project_server(&handshake).await {
+            Ok(server) => leased_servers.push(server),
+            Err(error)
+                if matches!(
+                    error.project_route_context(),
+                    Some((
+                        tracedecay_daemon_protocol::PROJECT_SERVER_CAPACITY_REASON_CODE,
+                        true,
+                        _
+                    ))
+                ) =>
+            {
+                // Resource admission may reach the same canonical capacity
+                // refusal before the route cache's maximum on a small host.
+                refused_handshake = handshake;
+                break;
+            }
+            Err(error) => panic!("open an occupied project: {error}"),
+        }
+    }
+    assert!(
+        !leased_servers.is_empty(),
+        "the fixture must hold a live owner"
+    );
+    assert_socket_doctor_project_open_refusal(
+        &engine,
+        &refused_handshake,
+        tracedecay_daemon_protocol::PROJECT_SERVER_CAPACITY_REASON_CODE,
+        "Project open stalled: daemon project server capacity reached",
+    )
+    .await;
+    drop(leased_servers);
+    let shutdown = engine.shutdown_all().await;
+    assert!(shutdown.project_servers.is_clean(), "{shutdown:?}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn doctor_probe_preserves_deferred_repository_discovery() {
+    use tracedecay_runtime_core::git_repository::{
+        block_repository_discovery_for_test, reset_repository_discovery_for_test,
+    };
+
+    let (_temp, _database_scope, engine, handshake) =
+        unopened_committed_fixture("doctor-deferred-repository-discovery").await;
+    super::prewarm_test_profile_runtime(&engine.store_administration).await;
+    let (project_path, _) = engine
+        .project_route(&handshake)
+        .expect("Doctor project route");
+    let mut blocked = block_repository_discovery_for_test(&project_path);
+    let opening_engine = engine.clone();
+    let opening_handshake = handshake.clone();
+    let opening =
+        tokio::spawn(async move { opening_engine.project_server(&opening_handshake).await });
+    blocked.wait_entered().await;
+    let Err(error) = opening.await.expect("blocked project open task") else {
+        panic!("the blocked discovery must refuse project admission");
+    };
+    assert!(crate::daemon::error_is_repository_discovery_deferred(
+        &error
+    ));
+    assert_socket_doctor_project_open_refusal(
+        &engine,
+        &handshake,
+        tracedecay_runtime_core::git_discovery::REPOSITORY_DISCOVERY_DEFERRED_REASON_CODE,
+        &format!(
+            "daemon is still warming: repository discovery blocked on {}",
+            project_path.display()
+        ),
+    )
+    .await;
+    blocked.release();
+    reset_repository_discovery_for_test(&project_path);
     let shutdown = engine.shutdown_all().await;
     assert!(shutdown.project_servers.is_clean(), "{shutdown:?}");
 }

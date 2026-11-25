@@ -1,8 +1,19 @@
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
-use tracedecay_runtime_core::config::ProfileRoot;
+use tracedecay_domain::ProjectId;
+use tracedecay_domain::errors::{Result, TraceDecayError};
+use tracedecay_global_db::configuration::GlobalDbConfigurationControlStore;
+use tracedecay_global_db::configuration::contracts::ports::ConfigurationControlStore;
+use tracedecay_global_db::registry_context_candidate_roots;
+use tracedecay_runtime_core::config::{GLOBAL_DB_FILENAME, ProfileRoot};
 use tracedecay_runtime_core::native_runtime;
+use tracedecay_runtime_core::storage::{
+    SESSIONS_DB_FILENAME, default_profile_project_id, enrolled_project_roots,
+    profile_sharded_data_root, read_repository_identity_marker, reject_symlink_components,
+    validate_project_id,
+};
+use tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1;
 
 use crate::cli::ProfileStorageAction;
 use tracedecay_contracts::retrieval::{AdminCliResultV1, AdminCliSurfaceRequestV1};
@@ -32,6 +43,142 @@ pub(crate) async fn handle_profile_storage_action(
             project_root,
             project_id,
         } => handle_reset_project_store(profile, project_root, project_id, assume_yes),
+        ProfileStorageAction::ResetRetiredPrTracking { project_root } => {
+            Box::pin(reset_retired_pr_tracking(
+                profile.data_dir(),
+                &project_root,
+                assume_yes,
+            ))
+            .await
+        }
+    }
+}
+
+/// Resolve the exact project through the offline profile registry, then
+/// publish a child revision in its existing session shard. No store is deleted.
+async fn reset_retired_pr_tracking(
+    profile_root: &Path,
+    project_root: &Path,
+    assume_yes: bool,
+) -> Result<()> {
+    const OPERATION: &str = "reset-retired-pr-tracking";
+    let config = |message: &str| TraceDecayError::Config {
+        message: message.to_owned(),
+    };
+    if !assume_yes {
+        return Err(config(
+            "reset-retired-pr-tracking requires --yes to confirm; configuration was not changed",
+        ));
+    }
+    let project_root = project_root
+        .canonicalize()
+        .map_err(|error| TraceDecayError::Config {
+            message: format!(
+                "cannot resolve project root '{}': {error}",
+                project_root.display()
+            ),
+        })?;
+    let profile_root = profile_root
+        .canonicalize()
+        .map_err(|error| TraceDecayError::Config {
+            message: format!(
+                "cannot resolve existing profile '{}': {error}",
+                profile_root.display()
+            ),
+        })?;
+    let lifecycle = match try_acquire_exclusive_for_profile(&profile_root, OPERATION)? {
+        ExclusiveLeaseAttempt::Acquired(lease) => lease,
+        ExclusiveLeaseAttempt::Busy { .. } => {
+            return Err(config(
+                "the profile is in use; stop the daemon and wait for any other maintenance before resetting retired PR tracking",
+            ));
+        }
+    };
+    let _database_scope = tracedecay_runtime_core::db::enter_maintenance_database_scope(
+        &lifecycle,
+        &profile_root,
+        OPERATION,
+    )?;
+    require_existing_configuration_database(&profile_root.join(GLOBAL_DB_FILENAME))?;
+    let identity = tracedecay_daemon_identity::profile_identity::load_existing(&profile_root)?;
+    let registry = Box::pin(DaemonSessionRuntimeRegistryV1::open(identity)).await?;
+    let profile_database = Box::pin(registry.profile_database()).await?;
+    let context = Box::pin(profile_database.project_registry_context_by_selector(&project_root))
+        .await?
+        .ok_or_else(|| config("the selected root has no registered project in this profile"))?;
+    validate_project_id(&context.project.project_id).map_err(config)?;
+    let project_id = ProjectId::new(context.project.project_id.as_str()).map_err(|error| {
+        TraceDecayError::Config {
+            message: format!("invalid registered project identity: {error}"),
+        }
+    })?;
+    // A stale registered alias may now hold a different repository, including
+    // one without a marker. Its own enrollment identity must agree before an
+    // alternate checkout can authorize opening the registered project's shard.
+    let selected_project_id = read_repository_identity_marker(&project_root)?
+        .map(|marker| marker.project_id)
+        .unwrap_or_else(|| default_profile_project_id(&project_root));
+    if selected_project_id != project_id.as_str() {
+        return Err(TraceDecayError::project_route(
+            "project_identity_conflict",
+            false,
+            format!(
+                "selected root '{}' belongs to project '{}', but its registered alias names '{}'; configuration was not changed",
+                project_root.display(),
+                selected_project_id,
+                project_id,
+            ),
+        ));
+    }
+    let data_root = profile_sharded_data_root(&profile_root, project_id.as_str());
+    require_existing_configuration_database(&data_root.join(SESSIONS_DB_FILENAME))?;
+    let candidates =
+        std::iter::once(project_root).chain(registry_context_candidate_roots(&context));
+    // A moved checkout keeps its enrollment marker even while the registry
+    // still names its former path. Read that authority without claiming paths
+    // now occupied by another project or repairing repository markers.
+    let enrollment_roots = enrolled_project_roots(candidates, &project_id)?;
+    let database =
+        Box::pin(registry.project_session_store(project_id.clone(), enrollment_roots)).await?;
+    let store = GlobalDbConfigurationControlStore::new_registered(database.as_ref());
+    let current = store
+        .current()
+        .await
+        .map_err(|error| TraceDecayError::Config {
+            message: format!("cannot read the selected project's configuration: {error}"),
+        })?;
+    store
+        .reset_retired_pr_tracking_configuration(
+            &current.revision_id,
+            tracedecay_contracts::clock::now_micros(),
+        )
+        .await
+        .map_err(|error| TraceDecayError::Config {
+            message: format!("cannot reset retired PR tracking for '{project_id}': {error}"),
+        })?;
+    println!(
+        "Reset retired PR-tracking overrides for '{project_id}'. Other overrides and project data were preserved. Restart the daemon to use the updated configuration."
+    );
+    Ok(())
+}
+
+fn require_existing_configuration_database(path: &Path) -> Result<()> {
+    reject_symlink_components(path, "configuration reset").map_err(|error| {
+        TraceDecayError::Config {
+            message: error.to_string(),
+        }
+    })?;
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.is_file() => Ok(()),
+        Ok(_) => Err(TraceDecayError::Config {
+            message: format!("expected an existing database file at '{}'", path.display()),
+        }),
+        Err(error) => Err(TraceDecayError::Config {
+            message: format!(
+                "cannot inspect existing database '{}': {error}",
+                path.display()
+            ),
+        }),
     }
 }
 
