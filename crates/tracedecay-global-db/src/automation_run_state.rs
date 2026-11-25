@@ -388,56 +388,56 @@ impl RegisteredGlobalDb {
                 message: error.to_string(),
             })?;
         let task_name = task_name(task);
-        let mut summary = AutomationRunTaskSummaryV1::default();
-        summary.latest_logical_activity = summary_row(
-            &snapshot,
-            namespace,
-            task_name,
-            task_key,
-            SummaryFilter::Any,
-        )
-        .await?;
-        summary.latest_successful = summary_row(
-            &snapshot,
-            namespace,
-            task_name,
-            task_key,
-            SummaryFilter::Successful,
-        )
-        .await?;
-        summary.latest_effectful_any_trigger = summary_row(
-            &snapshot,
-            namespace,
-            task_name,
-            task_key,
-            SummaryFilter::Effectful,
-        )
-        .await?;
-        summary.latest_scheduler_effectful = summary_row(
-            &snapshot,
-            namespace,
-            task_name,
-            task_key,
-            SummaryFilter::SchedulerEffectful,
-        )
-        .await?;
-        summary.latest_scheduler_activity = summary_row(
-            &snapshot,
-            namespace,
-            task_name,
-            task_key,
-            SummaryFilter::Scheduler,
-        )
-        .await?;
-        summary.latest_session_evidence_budget_exhausted = summary_row(
-            &snapshot,
-            namespace,
-            task_name,
-            task_key,
-            SummaryFilter::SessionEvidenceBudgetExhausted,
-        )
-        .await?;
-        Ok(summary)
+        Ok(AutomationRunTaskSummaryV1 {
+            latest_logical_activity: summary_row(
+                &snapshot,
+                namespace,
+                task_name,
+                task_key,
+                SummaryFilter::Any,
+            )
+            .await?,
+            latest_successful: summary_row(
+                &snapshot,
+                namespace,
+                task_name,
+                task_key,
+                SummaryFilter::Successful,
+            )
+            .await?,
+            latest_effectful_any_trigger: summary_row(
+                &snapshot,
+                namespace,
+                task_name,
+                task_key,
+                SummaryFilter::Effectful,
+            )
+            .await?,
+            latest_scheduler_effectful: summary_row(
+                &snapshot,
+                namespace,
+                task_name,
+                task_key,
+                SummaryFilter::SchedulerEffectful,
+            )
+            .await?,
+            latest_scheduler_activity: summary_row(
+                &snapshot,
+                namespace,
+                task_name,
+                task_key,
+                SummaryFilter::Scheduler,
+            )
+            .await?,
+            latest_session_evidence_budget_exhausted: summary_row(
+                &snapshot,
+                namespace,
+                task_name,
+                task_key,
+                SummaryFilter::SessionEvidenceBudgetExhausted,
+            )
+            .await?,
+        })
     }
 
     /// The nested validation-report cursor of the newest run for one task key.
@@ -1732,15 +1732,138 @@ mod tests {
                 .publish_staged_automation_run_terminal("run-stage", &staged)
                 .await
                 .unwrap(),
-            crate::AutomationRunStagePublishOutcomeV1::MissingPayload
+            crate::AutomationRunStagePublishOutcomeV1::Published,
+            "the committed terminal is the replay proof after staging is consumed"
         );
 
         let restaged = database
             .stage_automation_run_terminal(&terminal)
             .await
             .unwrap();
+        assert_eq!(restaged, staged);
+        database
+            .discard_staged_automation_run_terminal("run-stage", &restaged)
+            .await
+            .unwrap();
+        assert_eq!(
+            database
+                .publish_staged_automation_run_terminal("run-stage", &restaged)
+                .await
+                .unwrap(),
+            crate::AutomationRunStagePublishOutcomeV1::Published,
+            "discarding staging cannot erase the committed terminal"
+        );
+        assert_eq!(
+            database.automation_run_exact("run-stage").await.unwrap(),
+            Some(terminal)
+        );
+        let snapshot = database.read_snapshot().await.unwrap();
+        let state = snapshot
+            .query(
+                "SELECT newest_sequence,
+                        (SELECT COUNT(*) FROM automation_run_transitions
+                          WHERE namespace = ?1 AND run_id = ?2),
+                        (SELECT COUNT(*) FROM automation_run_staging
+                          WHERE namespace = ?1 AND run_id = ?2)
+                   FROM automation_runs WHERE namespace = ?1 AND run_id = ?2",
+                tracedecay_runtime_core::db::engine::params![
+                    database.automation_run_namespace().unwrap(),
+                    "run-stage"
+                ],
+            )
+            .await
+            .unwrap()
+            .next()
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(state.get::<i64>(0).unwrap(), 1, "replay does not republish");
+        assert_eq!(state.get::<i64>(1).unwrap(), 1, "one lifecycle transition");
+        assert_eq!(state.get::<i64>(2).unwrap(), 0, "staging remains consumed");
+    }
+
+    #[tokio::test]
+    async fn committed_staged_publication_refuses_conflicting_history() {
+        let (runtime, _root) = project_fixture().await;
+        let database = runtime.project_database().unwrap();
+        let terminal = record(
+            "run-committed",
+            AgentTaskKind::MemoryCurator,
+            "memory_curator",
+            AutomationRunStatus::Succeeded,
+            20,
+            None,
+        );
+        let mut conflicting = terminal.clone();
+        conflicting.completed_at = "21".to_owned();
+        let discarded = database
+            .stage_automation_run_terminal(&conflicting)
+            .await
+            .unwrap();
+        database
+            .discard_staged_automation_run_terminal("run-committed", &discarded)
+            .await
+            .unwrap();
+        let staged = database
+            .stage_automation_run_terminal(&terminal)
+            .await
+            .unwrap();
+        assert_eq!(
+            database
+                .publish_staged_automation_run_terminal("run-committed", &staged)
+                .await
+                .unwrap(),
+            crate::AutomationRunStagePublishOutcomeV1::Published
+        );
+        let stage_error = database
+            .stage_automation_run_terminal(&conflicting)
+            .await
+            .unwrap_err();
+        let replay_error = database
+            .publish_staged_automation_run_terminal("run-committed", &discarded)
+            .await
+            .unwrap_err();
+        for error in [stage_error, replay_error] {
+            assert!(
+                error.to_string().contains("conflicting durable history"),
+                "{error}"
+            );
+        }
+        assert_eq!(
+            database
+                .automation_run_exact("run-committed")
+                .await
+                .unwrap(),
+            Some(terminal)
+        );
+        assert_eq!(
+            database
+                .automation_run_terminal_digest("run-committed")
+                .await
+                .unwrap(),
+            Some(staged.digest)
+        );
+    }
+
+    #[tokio::test]
+    async fn discarded_unpublished_staging_reports_missing_payload() {
+        let (runtime, _root) = project_fixture().await;
+        let database = runtime.project_database().unwrap();
+        let task = AgentTaskKind::MemoryCurator;
+        let terminal = record(
+            "run-discarded",
+            task,
+            "memory_curator",
+            AutomationRunStatus::Succeeded,
+            20,
+            None,
+        );
+        let staged = database
+            .stage_automation_run_terminal(&terminal)
+            .await
+            .unwrap();
         let conflicting = record(
-            "run-stage",
+            "run-discarded",
             task,
             "memory_curator",
             AutomationRunStatus::Succeeded,
@@ -1756,15 +1879,42 @@ mod tests {
             "{error}"
         );
         database
-            .discard_staged_automation_run_terminal("run-stage", &restaged)
+            .discard_staged_automation_run_terminal("run-discarded", &staged)
             .await
             .unwrap();
         assert_eq!(
             database
-                .publish_staged_automation_run_terminal("run-stage", &restaged)
+                .publish_staged_automation_run_terminal("run-discarded", &staged)
                 .await
                 .unwrap(),
             crate::AutomationRunStagePublishOutcomeV1::MissingPayload
+        );
+        assert_eq!(
+            database
+                .automation_run_exact("run-discarded")
+                .await
+                .unwrap(),
+            None
+        );
+        assert_eq!(
+            database
+                .automation_run_terminal_digest("run-discarded")
+                .await
+                .unwrap(),
+            None,
+            "an unpublished discarded payload has no terminal replay proof"
+        );
+        let missing = crate::AutomationRunStagedPublicationV1 {
+            run_id: "run-missing".to_owned(),
+            digest: staged.digest,
+        };
+        assert_eq!(
+            database
+                .publish_staged_automation_run_terminal("run-missing", &missing)
+                .await
+                .unwrap(),
+            crate::AutomationRunStagePublishOutcomeV1::MissingPayload,
+            "a run with neither staging nor committed history stays missing"
         );
     }
 

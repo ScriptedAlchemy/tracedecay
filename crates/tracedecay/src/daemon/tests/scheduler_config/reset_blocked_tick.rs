@@ -7,6 +7,7 @@ use tracedecay_automation_runtime::automation::AutomationRunControl;
 use tracedecay_automation_runtime::automation::config::{
     AutomationBackendV1, AutomationConfigPatch, AutomationTaskPatch,
 };
+use tracedecay_contracts::automation::AutomationRunLedgerRecord;
 use tracedecay_contracts::retrieval::AutomationSchedulerReconcileOutcome;
 use tracedecay_daemon_protocol::DaemonHandshake;
 
@@ -143,7 +144,10 @@ async fn scheduler_refuses_legacy_history_and_resumes_after_removal() {
         Some(("automation_run_legacy_jsonl_refused", false))
     );
     assert_eq!(std::fs::read(&retired).unwrap(), LEGACY_HISTORY);
-    assert_eq!(runs.load_run_records(10).await.unwrap(), Vec::new());
+    assert_eq!(
+        runs.load_run_records(10).await.unwrap(),
+        Vec::<AutomationRunLedgerRecord>::new()
+    );
 
     std::fs::remove_file(retired).unwrap();
     Box::pin(crate::daemon::scheduler::run_automation_scheduler_tick(
@@ -155,7 +159,10 @@ async fn scheduler_refuses_legacy_history_and_resumes_after_removal() {
     ))
     .await
     .expect("ticks may resume once retired history is removed");
-    assert_eq!(runs.load_run_records(10).await.unwrap(), Vec::new());
+    assert_eq!(
+        runs.load_run_records(10).await.unwrap(),
+        Vec::<AutomationRunLedgerRecord>::new()
+    );
     drop(runs);
     engine.shutdown_all().await;
 }

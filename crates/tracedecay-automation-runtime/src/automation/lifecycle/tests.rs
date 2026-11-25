@@ -71,7 +71,7 @@ async fn pre_epoch_completion_clock_fails_before_ledger_mutation() {
             .load_run_records(1)
             .await
             .expect("load records"),
-        Vec::new()
+        Vec::<AutomationRunLedgerRecord>::new()
     );
 }
 
