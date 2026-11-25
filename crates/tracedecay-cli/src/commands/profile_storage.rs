@@ -9,8 +9,9 @@ use tracedecay_global_db::registry_context_candidate_roots;
 use tracedecay_runtime_core::config::{GLOBAL_DB_FILENAME, ProfileRoot};
 use tracedecay_runtime_core::native_runtime;
 use tracedecay_runtime_core::storage::{
-    SESSIONS_DB_FILENAME, default_profile_project_id, enrolled_project_roots, profile_sharded_data_root,
-    read_repository_identity_marker, reject_symlink_components, validate_project_id,
+    SESSIONS_DB_FILENAME, default_profile_project_id, enrolled_project_roots,
+    profile_sharded_data_root, read_repository_identity_marker, reject_symlink_components,
+    validate_project_id,
 };
 use tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1;
 
