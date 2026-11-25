@@ -604,6 +604,27 @@ impl SessionTemporalRefreshWakeState {
             .historical_state = state;
     }
 
+    /// Records a history turn the daemon-wide admission refused. No pass ran,
+    /// so the refusal is evidence only about scheduling, never about the
+    /// source frontier. Work that is already owed (`Pending`/`Retryable`)
+    /// reports the saturated admission it waits on. A converged frontier stays
+    /// `Current` while its idle recheck waits for a turn. Every caller that
+    /// owes new work marks the frontier pending first. A terminal blocker or
+    /// configured pause keeps its stronger reason.
+    pub(super) fn record_history_admission_refusal(&self, reason_code: &str) {
+        let mut telemetry = self
+            .telemetry
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if matches!(
+            telemetry.historical_state,
+            SessionHistoricalServingState::Pending | SessionHistoricalServingState::Retryable(_)
+        ) {
+            telemetry.historical_state =
+                SessionHistoricalServingState::Retryable(reason_code.to_owned());
+        }
+    }
+
     /// Folds a pass the historical ingestor ran into the catch-up progress
     /// status reports. Cancelled passes did not finish, so they are not
     /// counted.

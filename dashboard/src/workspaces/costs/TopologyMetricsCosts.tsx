@@ -1,3 +1,4 @@
+import { useState } from 'react';
 import type {
   ExecutionTopologyDimensionV1,
   ExecutionTopologyMetricsV1,
@@ -10,13 +11,22 @@ import { ReadSection, type ReadState } from '../../ui/ReadSection.tsx';
 import { useWorkTopologyMetrics } from '../work/workViewsQueries.ts';
 import type { WorkResult } from '../work/workApi.ts';
 
-/**
- * Plan 26's execution-topology accounting belongs on Costs beside the token
- * and pricing observations: duplicate work, reruns, delivery loss, and
- * blocked intervals are accounting facts as well as operating facts. The
- * daemon projects these descriptors once; this surface only presents them.
- */
 export function TopologyMetricsCosts() {
+  const [expanded, setExpanded] = useState(false);
+  return (
+    <details
+      className="border-t border-edge-subtle bg-surface-1"
+      onToggle={(event) => setExpanded(event.currentTarget.open)}
+    >
+      <summary className="cursor-pointer px-4 py-3 td-legend text-text-secondary">
+        Work execution accounting
+      </summary>
+      {expanded ? <TopologyMetricsSection /> : null}
+    </details>
+  );
+}
+
+function TopologyMetricsSection() {
   const topology = useWorkTopologyMetrics(true);
   return (
     <ReadSection

@@ -185,6 +185,19 @@ describe('the Work page over mounted routes', () => {
     expect(screen.getByText(/Commands · Alpha task/)).toBeTruthy();
   });
 
+  it('keeps the selected task and its dependency reading across Board, DAG, and Matrix', async () => {
+    const user = userEvent.setup();
+    renderPage();
+    await user.click(await screen.findByRole('button', { name: 'Alpha task' }));
+    expect(screen.getByText('longest declared dependency path')).toBeTruthy();
+    await user.click(screen.getByRole('tab', { name: 'DAG' }));
+    expect(screen.getByText('Task dependency graph')).toBeTruthy();
+    await user.click(screen.getByRole('tab', { name: 'Matrix' }));
+    expect(screen.getByText('Dependency structure matrix')).toBeTruthy();
+    expect(screen.getByText('longest declared dependency path')).toBeTruthy();
+    expect(screen.getByText(/Commands · Alpha task/)).toBeTruthy();
+  });
+
   it('accepts a task through the prepared product mutation', async () => {
     const calls: string[] = [];
     const prepared = {

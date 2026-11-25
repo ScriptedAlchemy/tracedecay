@@ -178,7 +178,7 @@ mod tests {
     };
     use crate::stack_coordinator::{
         DaemonGitHubStackCoordinatorV1, GitHubStackCoordinatorErrorV1,
-        GitHubStackProviderSnapshotV1,
+        GitHubStackProviderSnapshotV1, github_stack_circuit_policy,
     };
 
     const MERGE_BASE_COMMIT: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
@@ -424,6 +424,7 @@ mod tests {
             .register_scope(
                 context.scope(),
                 GitHubStackedPullRequestPolicyV1::ProbePrivatePreview,
+                github_stack_circuit_policy().unwrap(),
             )
             .unwrap();
         let stack_read = coordinator
@@ -615,6 +616,7 @@ mod tests {
             .register_scope(
                 context.scope(),
                 GitHubStackedPullRequestPolicyV1::ProbePrivatePreview,
+                github_stack_circuit_policy().unwrap(),
             )
             .unwrap();
 
@@ -637,12 +639,17 @@ mod tests {
         };
         request_arrived.recv().unwrap();
         let _scope_registration_3 = coordinator
-            .register_scope(context.scope(), GitHubStackedPullRequestPolicyV1::Disabled)
+            .register_scope(
+                context.scope(),
+                GitHubStackedPullRequestPolicyV1::Disabled,
+                github_stack_circuit_policy().unwrap(),
+            )
             .unwrap();
         let _scope_registration_4 = coordinator
             .register_scope(
                 context.scope(),
                 GitHubStackedPullRequestPolicyV1::ProbePrivatePreview,
+                github_stack_circuit_policy().unwrap(),
             )
             .unwrap();
         release.send(()).unwrap();
