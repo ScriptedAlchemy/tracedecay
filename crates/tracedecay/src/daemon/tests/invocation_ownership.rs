@@ -207,6 +207,11 @@ impl tracedecay_contracts::ApplicationInvocationExecutor for SingleDoctorProbe<'
         '_,
         Result<tracedecay_contracts::ApplicationResponse, tracedecay_contracts::InvocationError>,
     > {
+        assert_eq!(
+            self.attempts.fetch_add(1, Ordering::SeqCst),
+            0,
+            "Doctor must report this route refusal without a mounting resend"
+        );
         self.executor.invoke(invocation)
     }
 }
@@ -225,11 +230,6 @@ impl tracedecay_daemon_protocol::DaemonInvocationExecutor for SingleDoctorProbe<
             tracedecay_daemon_protocol::DaemonInvocationError,
         >,
     > {
-        assert_eq!(
-            self.attempts.fetch_add(1, Ordering::SeqCst),
-            0,
-            "Doctor must report this route refusal without a mounting resend"
-        );
         self.executor
             .invoke_controlled(request, deadline, cancellation, policy)
     }
