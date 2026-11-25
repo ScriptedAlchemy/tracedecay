@@ -7,9 +7,13 @@ use std::sync::Arc;
 use serde_json::{Value, json};
 
 use super::McpServer;
+use crate::daemon::retained_test_support::{
+    project_retained_owner_transport, register_project_retained_owner_for_test,
+};
 use tracedecay_code_index_runtime::CodeIndexSchedulerRegistryV1;
 use tracedecay_code_index_runtime::project_reads::project_code_graph_projection_read_port;
 use tracedecay_daemon_service::DaemonCodeGraphReadAdmission;
+use tracedecay_domain::errors::TraceDecayError;
 use tracedecay_graph_query::admitted_verified_graph_query_port_with_source;
 use tracedecay_mcp::transport::JsonRpcRequest;
 
@@ -64,12 +68,14 @@ async fn a_session_store_tool_on_the_core_owner_is_mounting_while_graph_tools_an
         .with_verified_graph_query_port(graph_query);
     // The core owner serves before the project session store mounts.
     context.project_session_db = None;
-    let server =
-        crate::daemon::retained_test_support::mcp_server_with_project_retained_owner_for_test(
-            context,
-        )
+    let transport = project_retained_owner_transport(&context).expect("core-owner transport");
+    let server = McpServer::new_with_context(
+        context.with_application_invocation_executor(Arc::clone(&transport.executor)),
+    )
+    .await;
+    register_project_retained_owner_for_test(&transport.service, &server)
         .await
-        .expect("core-owner MCP test server");
+        .expect("core-owner registration");
 
     let pr_context = call_tool(
         &server,
@@ -142,5 +148,66 @@ async fn a_session_store_tool_on_the_core_owner_is_mounting_while_graph_tools_an
             dir.path()
         ),
         "{answer}"
+    );
+
+    // A core retained after a failed full upgrade must stop telling Doctor
+    // to wait for a reader that will never publish on this attempt.
+    let root = dir.path().canonicalize().expect("registered project root");
+    let publication = transport
+        .service
+        .project_runtimes
+        .begin_publication(&root)
+        .expect("core-owner publication");
+    assert!(
+        transport
+            .service
+            .project_runtimes
+            .mark_publication_failed(&publication)
+    );
+    let failed = call_tool(
+        &server,
+        "tracedecay_runtime",
+        json!({"doctor_report": true, "format": "json"}),
+    )
+    .await;
+    assert_eq!(
+        failed["structuredContent"]["problem"]["code"],
+        json!("application.runtime.owner_failed"),
+        "{failed}"
+    );
+    assert_eq!(failed["structuredContent"]["problem"]["retry"], "never");
+
+    // If reader composition fails after session admission names a reset,
+    // preserve the exact reset refusal instead of inventing more warming.
+    let publication = transport
+        .service
+        .project_runtimes
+        .begin_publication(&root)
+        .expect("core-owner retry publication");
+    let refusal = tracedecay_mcp::reset_required_detail(&TraceDecayError::reset_required(
+        "observations",
+        "session observation authority is stale",
+    ))
+    .expect("typed observation reset detail");
+    assert!(
+        transport
+            .service
+            .project_runtimes
+            .mark_publication_reset_required(&publication, refusal.clone())
+    );
+    let reset = call_tool(
+        &server,
+        "tracedecay_runtime",
+        json!({"doctor_report": true, "format": "json"}),
+    )
+    .await;
+    assert_eq!(
+        reset["structuredContent"]["problem"]["code"], "application.reset-required",
+        "{reset}"
+    );
+    assert_eq!(
+        reset["structuredContent"]["problem"]["detail"],
+        serde_json::to_value(refusal).expect("reset detail JSON"),
+        "{reset}"
     );
 }

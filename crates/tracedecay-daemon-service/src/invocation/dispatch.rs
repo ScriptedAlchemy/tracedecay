@@ -842,7 +842,7 @@ impl DaemonInvocationService {
                 if let CancellationState::Cancelled { requested_at } = cancellation.state {
                     signal.cancel(requested_at);
                 }
-                Box::pin(execute_graph_tool(
+                let response = Box::pin(execute_graph_tool(
                     request_id,
                     owner,
                     surface_operation,
@@ -851,7 +851,17 @@ impl DaemonInvocationService {
                     signal,
                     request_cancellation,
                 ))
-                .await
+                .await;
+                // A registered graph owner can still lack a dependent
+                // authority. Once publication fails, its missing authority
+                // stays failed or reset-required instead of mounting forever.
+                if let DaemonInvocationOutcome::ApplicationProblem { problem } = &response.outcome
+                    && problem == &ApplicationProblem::runtime_mounting()
+                {
+                    missing_registered_owner_problem(publication, response.request_id)
+                } else {
+                    response
+                }
             }
             DaemonInvocationPayload::RetainedApplication {
                 request,

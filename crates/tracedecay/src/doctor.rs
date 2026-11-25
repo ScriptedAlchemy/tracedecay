@@ -747,10 +747,9 @@ fn daemon_doctor_runtime_args() -> serde_json::Value {
         "startup_health": false,
         "authority_audit": true,
         "doctor_report": true,
-        // `authority_audit` already requests session-temporal health. Keeping
-        // ingest health false avoids the core startup-only interception and
-        // routes comprehensive Doctor through the ready project owner, where
-        // the composed Doctor report reader is mounted.
+        // `authority_audit` already requests session-temporal health. The
+        // typed owner admits the requested report once its reader publishes,
+        // including when refused session stores leave only the core serving.
         "session_ingest_health": false,
     })
 }

@@ -53,6 +53,19 @@ impl ProjectGraphToolPortV1 for McpGraphToolPort {
             {
                 return Err(ApplicationProblem::runtime_mounting());
             }
+            // The report reader publishes after the dependent owners settle,
+            // including on a retained core whose session stores require reset.
+            // Until then a requested report is mounting, not unsupported.
+            if invocation.operation == ApplicationSurfaceOperation::Runtime
+                && invocation
+                    .arguments
+                    .get("doctor_report")
+                    .and_then(serde_json::Value::as_bool)
+                    == Some(true)
+                && !server.doctor_report_ready()
+            {
+                return Err(ApplicationProblem::runtime_mounting());
+            }
             let operation = invocation.operation;
             server
                 .compute_graph_tool(invocation)
