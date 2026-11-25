@@ -179,6 +179,11 @@ BUILD_SCRIPT_ENV = {
 # their `__test` build, which carries the test run's features as Cargo's would.
 RUNTIME_BINARIES = (
     (
+        "TRACEDECAY_TEST_SDK_ADDON",
+        "//crates/tracedecay-sdk-node:addon",
+        r'var_os\("TRACEDECAY_TEST_SDK_ADDON"\)',
+    ),
+    (
         "TRACEDECAY_TEST_TYPESCRIPT_COMPILER",
         "//dashboard:typescript_compiler",
         r'var_os\("TRACEDECAY_TEST_TYPESCRIPT_COMPILER"\)',
@@ -1234,7 +1239,11 @@ def main():
         dev_tree = contexts[(name, "normal,build,dev", frozenset())]
         bin_target_names = {}  # cargo bin name -> target its tests spawn
         md = member_deps_of[name]
-        lib_t = next((t for t in p["targets"] if "lib" in t["kind"]), None)
+        lib_t = next((t for t in p["targets"] if {"lib", "cdylib"} & set(t["kind"])), None)
+        # A cdylib member is a loadable addon (the Node SDK binding): Bazel
+        # links it as a shared library, and Cargo's `test = false` keeps its
+        # unit-test target out, because only its host can load it.
+        shared_library = lib_t is not None and "cdylib" in lib_t["kind"]
         has_build = any("custom-build" in t["kind"] for t in p["targets"])
 
         out = [BANNER]
@@ -1245,6 +1254,11 @@ def main():
             'load("@rules_rust//rust:defs.bzl", "rust_binary", "rust_library")\n'
             'load("//scripts:bazel/rust_test.bzl", "perf_rustc_flags", "rust_test")\n'
         )
+        if shared_library:
+            out.append('load("@rules_rust//rust:defs.bzl", "rust_shared_library")\n')
+            out.append(
+                'load("//scripts:bazel/rust_shared_library_output.bzl", "rust_shared_library_output")\n'
+            )
         if name == "tracedecay-sdk":
             out.append('load("@aspect_rules_js//js:defs.bzl", "js_library")\n')
 
@@ -1253,6 +1267,8 @@ def main():
                 variants[name].items(),
                 key=lambda kv: tname(name, kv[0][0], kv[0][1]),
             ):
+                if shared_library and vkind != "norm":
+                    continue  # nothing links an addon, so it has no dev variant
                 tgt = unique_name(tname(name, vkind, closure))
                 deps = dedup(
                     sorted(
@@ -1276,7 +1292,7 @@ def main():
                     srcs_expr_lib += " + [" + q(lib_mod_labels) + "]"
                 format_sources(srcs_expr_lib, lib_t["edition"])
                 out += [
-                    "rust_library(",
+                    "rust_shared_library(" if shared_library else "rust_library(",
                     f'    name = "{tgt}",',
                     "    srcs = " + srcs_expr_lib + ",",
                     f'    crate_root = "{rel_src(p, lib_t)}",',
@@ -1560,7 +1576,24 @@ def main():
                 ")\n",
             ]
 
-        if lib_t:
+        if shared_library:
+            # Node resolves addons by the `.node` extension on every platform.
+            # Select the runtime library explicitly: a cdylib's default output
+            # set also contains import/debug artifacts on Windows.
+            out += [
+                "rust_shared_library_output(",
+                '    name = "addon_library",',
+                f'    library = ":{name}",',
+                ")\n",
+                "genrule(",
+                '    name = "addon",',
+                '    srcs = [":addon_library"],',
+                f'    outs = ["{lib_t["name"].replace("-", "_")}.node"],',
+                '    cmd = "cp $< $@",',
+                "    cmd_ps = \"Copy-Item -Path '$<' -Destination '$@'\",",
+                ")\n",
+            ]
+        if lib_t and lib_t.get("test", True):
             lib_runfiles_env = runtime_binaries(p, lib_t, lib_pulled)
             dev_edges = md["normal"] + md["dev"]
             deps = dedup(
@@ -1611,8 +1644,8 @@ def main():
                 ')\n',
                 # rules_js copies shared test data in its owning package.
                 'js_library(',
-                '    name = "sse_framing_fixture",',
-                '    srcs = ["tests/fixtures/sse-framing.json"],',
+                '    name = "shared_client_fixtures",',
+                '    srcs = glob(["tests/fixtures/*.json"]),',
                 '    visibility = ["//visibility:public"],',
                 ')\n',
             ]

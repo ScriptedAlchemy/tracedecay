@@ -1515,3 +1515,90 @@ async fn the_worker_reports_provider_units_summed_over_its_history_passes() {
     state.cancel();
     worker.await.expect("refresh worker exits on cancellation");
 }
+
+async fn wait_worker_idle(state: &SessionTemporalRefreshWakeState) {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let idle = enabled_idle_notification(state);
+            if state.is_idle() {
+                break;
+            }
+            idle.await;
+        }
+    })
+    .await
+    .expect("the worker settles idle");
+}
+
+/// A converged project's idle recheck that waits for the shared history
+/// admission ran no pass. On a daemon with many mounted projects that
+/// admission is saturated by other projects' backlogs, so reporting the
+/// refusal as `historical_retry:history_admission_saturated` left every
+/// converged project stale and converging indefinitely (#4861). Owed work
+/// still reports the saturated admission it waits on; see
+/// `retained_history_precedes_summary_admission_on_worker_start`.
+#[tokio::test]
+async fn a_refused_idle_recheck_keeps_a_converged_frontier_current() {
+    let harness = RegisteredGlobalDbHarness::open("refused-idle-recheck").await;
+    let state = Arc::new(SessionTemporalRefreshWakeState::default());
+    let history = Arc::new(TalliedHistory {
+        passes: std::sync::Mutex::new(std::collections::VecDeque::new()),
+    });
+    let ingestor: SharedSessionHistoricalIngestor = history;
+    let admission = Arc::new(tokio::sync::Semaphore::new(1));
+    let handle = state.handle();
+    state.mark_history_pending();
+    state.wake_history();
+    let worker = tokio::spawn(run_session_temporal_refresh_scheduler(
+        harness.registered.clone(),
+        Arc::clone(&state),
+        Arc::new(CanonicalSessionTemporalProjector),
+        Arc::new(std::sync::RwLock::new(Some(ingestor))),
+        Arc::clone(&admission),
+        SessionTemporalRefreshPolicy::default(),
+    ));
+    wait_worker_idle(&state).await;
+    let converged = handle.serving_status();
+    assert_eq!(converged.state, SessionProjectionServingState::Current);
+    assert_eq!(
+        converged.convergence.state,
+        SessionConvergenceState::Converged
+    );
+    assert_eq!(converged.history.expect("history status").passes, 1);
+
+    // Another project's backlog holds the only permit while the idle timer
+    // rechecks this converged frontier.
+    let held = Arc::clone(&admission)
+        .try_acquire_owned()
+        .expect("the converged worker released its permit");
+    state.wake_history();
+    wait_worker_idle(&state).await;
+    let waiting = handle.serving_status();
+    assert_eq!(
+        waiting.state,
+        SessionProjectionServingState::Current,
+        "a refused recheck ran no pass and cannot invalidate the converged frontier"
+    );
+    assert_eq!(
+        waiting.convergence.state,
+        SessionConvergenceState::Converged
+    );
+    assert_eq!(waiting.history.expect("history status").passes, 1);
+
+    // The queued recheck keeps its turn and runs once the permit frees.
+    drop(held);
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while handle
+            .serving_status()
+            .history
+            .is_none_or(|history| history.passes < 2)
+            || handle.serving_status().state != SessionProjectionServingState::Current
+        {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the queued admission turn runs its pass");
+    state.cancel();
+    worker.await.expect("refresh worker exits on cancellation");
+}

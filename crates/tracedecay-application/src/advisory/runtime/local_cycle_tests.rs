@@ -84,7 +84,7 @@ use crate::feedback::concrete::{FeedbackRuntime, open_feedback_runtime};
 use crate::feedback::cycle_runtime::{FeedbackCycleLspInput, open_feedback_cycle_runtime};
 use crate::operation_stream::{OperationEventAuthority, OperationKind};
 use crate::source_authorization::ProjectSourceAccessSnapshot;
-use crate::stack_coordinator::DaemonGitHubStackCoordinatorV1;
+use crate::stack_coordinator::{DaemonGitHubStackCoordinatorV1, github_stack_circuit_policy};
 
 const PULL_REQUEST_NUMBER: u64 = 4817;
 
@@ -497,8 +497,12 @@ impl Harness {
             });
         }
         let stack_coordinator = Arc::new(DaemonGitHubStackCoordinatorV1::default());
-        let _stack_registration = stack_coordinator
-            .register_scope(&resolved, GitHubStackedPullRequestPolicyV1::Disabled)
+        let stack_registration = stack_coordinator
+            .register_scope(
+                &resolved,
+                GitHubStackedPullRequestPolicyV1::Disabled,
+                github_stack_circuit_policy().unwrap(),
+            )
             .unwrap();
         let pull_request_id = pull_request_id();
         let runtime = AdvisoryRuntime::open(
@@ -533,6 +537,7 @@ impl Harness {
                         merge_base_commit_id: fixture.merge_base_commit_id.clone(),
                     },
                     stack_coordinator,
+                    stack_scope: stack_registration,
                     stack_anchor_db: global.clone(),
                     stack_observability: None,
                 }),

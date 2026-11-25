@@ -3632,13 +3632,10 @@ async fn graph_read_during_reconcile_records_a_busy_follow_up() {
     registry.shutdown().await;
 }
 
-/// A producer that reads only sealed source must not wait for the serving
-/// swap. While the first publication's text projection is held, nothing
-/// serves, yet the sealed identity already names the generation and its
-/// files; once the projection finishes, the serving identity is that same
-/// generation.
+/// Automatic diagnostics must not compete with the first serving swap.
+/// Manual publication and LSP identity can still name the retained source.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn sealed_publication_identity_answers_before_the_generation_seats() {
+async fn automatic_diagnostics_wait_for_the_query_ready_generation() {
     let fixture = GitFixture::new(ALPHA_LIB_V1);
     let store = TempDir::new().expect("store root");
     let registry = CodeIndexSchedulerRegistryV1::with_background_reconcile_permits(1, 1);
@@ -3665,38 +3662,32 @@ async fn sealed_publication_identity_answers_before_the_generation_seats() {
             .is_none(),
         "no generation serves while its text projection is held"
     );
-    let sealed = registry
-        .sealed_publication_identity(fixture.path(), None)
-        .await
-        .expect("sealed identity read")
-        .expect("the seal names its generation before it serves");
+    assert!(
+        registry
+            .query_ready_diagnostics_identity(fixture.path(), None)
+            .await
+            .is_none(),
+        "automatic diagnostics must not start while text projection is held"
+    );
+    let read_identity =
+        CodeIndexPublicationIdentityPortV1::resolve(&registry, fixture.path().to_path_buf())
+            .await
+            .expect("manual publication can bind to the retained generation");
     assert_eq!(
-        sealed
+        read_identity
             .file_digests()
             .map(|(path, _)| path.to_owned())
             .collect::<Vec<_>>(),
         ["src/lib.rs"]
     );
-    assert!(
-        registry
-            .sealed_publication_identity(fixture.path(), Some(sealed.generation_id()))
-            .await
-            .expect("sealed identity read")
-            .is_none(),
-        "a caller that handled the sealed generation learns of no newer seal"
-    );
-    // A diagnostics read validates the seal-time publication against this
-    // identity, so it must name the sealed generation before text serves.
-    let read_identity =
-        CodeIndexPublicationIdentityPortV1::resolve(&registry, fixture.path().to_path_buf())
-            .await
-            .expect("the retained generation answers identity while its text projection is held");
-    assert_eq!(read_identity.generation_id(), sealed.generation_id());
     let lsp_identity = registry
         .current_identity(fixture.path().to_path_buf(), Some("src/lib.rs".to_owned()))
         .await
         .expect("LSP identity reads sealed source before lexical readiness");
-    assert_eq!(&lsp_identity.code_generation_id, sealed.generation_id());
+    assert_eq!(
+        &lsp_identity.code_generation_id,
+        read_identity.generation_id()
+    );
     assert_eq!(lsp_identity.source_revision, lsp_identity.head_commit_id);
     assert!(lsp_identity.document_content_digest.is_some());
 
@@ -3707,12 +3698,16 @@ async fn sealed_publication_identity_answers_before_the_generation_seats() {
         &registry,
         fixture.path(),
         SERVING_SEAT_FAILURE_CEILING,
-        || registry.latest_text_serving_for_root(fixture.path()),
+        || registry.query_ready_diagnostics_identity(fixture.path(), None),
     )
     .await;
-    assert_eq!(
-        &serving.metadata().manifest().generation_id,
-        sealed.generation_id()
+    assert_eq!(serving.generation_id(), read_identity.generation_id());
+    assert!(
+        registry
+            .query_ready_diagnostics_identity(fixture.path(), Some(serving.generation_id()))
+            .await
+            .is_none(),
+        "the already-handled generation does not start the producer again"
     );
     registry.shutdown().await;
 }

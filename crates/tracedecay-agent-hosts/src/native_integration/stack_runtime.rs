@@ -12,9 +12,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use tracedecay_application::source_authorization::ProjectSourceAccessSnapshot;
 use tracedecay_application::stack_coordinator::{
     DaemonGitHubStackCoordinatorV1, GitHubStackScopeV1, OptionalPreflightV1,
-    OptionalStackPreflightPort, StackCircuitPolicyV1, StackCoordinatorErrorV1,
-    StackCoordinatorStore, StackDeliveryAuthorizationPort, StackDeliveryAuthorizationV1,
-    StackSignalV1,
+    OptionalStackPreflightPort, StackCoordinatorErrorV1, StackCoordinatorStore,
+    StackDeliveryAuthorizationPort, StackDeliveryAuthorizationV1, StackSignalV1,
 };
 use tracedecay_contracts::git::{
     GITHUB_STACK_SIGNAL_EXPAND_OPERATION, GitHubStackSignalEvidenceRefV1,
@@ -41,9 +40,6 @@ use tracedecay_global_db::{
 
 use super::registry::DaemonProjectNativeIntegrationService;
 use super::store::DaemonNativeIntegrationStore;
-
-const STACK_CIRCUIT_FAILURE_THRESHOLD: u32 = 3;
-const STACK_CIRCUIT_OPEN_MICROS: i64 = 30_000_000;
 
 /// One project's view of the canonical registered-project delivery tables.
 /// It is not an authority: every call awaits the single global-db
@@ -549,21 +545,16 @@ impl DaemonGitHubStackRuntimeV1 {
         access: ProjectSourceAccessSnapshot,
         database: RegisteredGlobalDbLeaseV1,
         coordinator: Arc<DaemonGitHubStackCoordinatorV1>,
+        scope_registration: GitHubStackScopeV1,
         native_service: Arc<DaemonProjectNativeIntegrationService>,
         native_store: DaemonNativeIntegrationStore,
     ) -> Result<Arc<Self>, StackCoordinatorErrorV1> {
-        if project_id != scope.project_id || access.scope != scope {
+        if project_id != scope.project_id
+            || access.scope != scope
+            || scope_registration.scope() != &scope
+        {
             return Err(StackCoordinatorErrorV1::Stale);
         }
-        let policy = StackCircuitPolicyV1 {
-            revision: 1,
-            policy_digest: ManifestDigest::new(format!("sha256:{}", "0".repeat(64)))
-                .map_err(|error| StackCoordinatorErrorV1::Invalid(error.to_string()))?,
-            failure_threshold: STACK_CIRCUIT_FAILURE_THRESHOLD,
-            open_micros: STACK_CIRCUIT_OPEN_MICROS,
-        }
-        .seal()?;
-        let scope_registration = coordinator.register_circuit_policy(&scope, policy)?;
         let store = Arc::new(DaemonStackDeliveryStoreV1 {
             database,
             project_id: project_id.as_str().to_owned(),

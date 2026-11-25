@@ -190,14 +190,14 @@ impl DaemonInvocationState {
         })?;
         store_administration
             .configure_codex_preparation_resources(
-                resident_memory,
+                Arc::clone(&resident_memory),
                 Arc::clone(&installed.background_cpu),
             )
             .map_err(|error| TraceDecayError::Config {
                 message: format!("failed to configure Codex preparation resources: {error}"),
             })?;
         self.compiler_admission.get_or_init(|| {
-            TypeScriptCompilerAdmission::new(Arc::clone(&installed.background_cpu))
+            TypeScriptCompilerAdmission::new(Arc::clone(&installed.background_cpu), resident_memory)
         });
         Ok(installed)
     }

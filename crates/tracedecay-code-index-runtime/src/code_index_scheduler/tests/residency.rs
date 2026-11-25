@@ -1865,13 +1865,12 @@ async fn a_nested_successor_memory_refusal_survives_predecessor_projection_compl
         .await
         .expect("predecessor reaches its text projection")
         .expect("predecessor projection gate stays armed");
-    let predecessor = registry
-        .sealed_publication_identity(fixture.path(), None)
-        .await
-        .expect("predecessor sealed identity")
-        .expect("predecessor is sealed before projection")
-        .generation_id()
-        .clone();
+    assert!(
+        registry
+            .query_ready_diagnostics_identity(fixture.path(), None)
+            .await
+            .is_none()
+    );
     let clone_work = || {
         let stats = registry.byte_pool.physical_artifacts.stats();
         stats.clone_payloads_computed + stats.clone_payloads_reused
@@ -1882,15 +1881,23 @@ async fn a_nested_successor_memory_refusal_survives_predecessor_projection_compl
         .scheduler_handle(fixture.path())
         .await
         .expect("scheduler");
-    let worker_bytes = {
+    let (worker_bytes, predecessor) = {
         let scheduler = scheduler
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let predecessor = scheduler
+            .publication
+            .read_publication_pointer()
+            .expect("predecessor sealed identity")
+            .expect("predecessor is sealed before projection");
         let _workers = scheduler
             .ensure_worker_plan()
             .expect("installed worker plan");
-        tracedecay_code_index::parallelism::worker_reservation_bytes(
-            tracedecay_code_index::parallelism::indexing_workers(),
+        (
+            tracedecay_code_index::parallelism::worker_reservation_bytes(
+                tracedecay_code_index::parallelism::indexing_workers(),
+            ),
+            CodeGenerationId::new(predecessor.generation_id).unwrap(),
         )
     };
     let baseline = memory.snapshot().process_shared_charge_for(construction);

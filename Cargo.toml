@@ -38,6 +38,7 @@ members = [
     "crates/tracedecay-query",
     "crates/tracedecay-runtime-core",
     "crates/tracedecay-sdk",
+    "crates/tracedecay-sdk-node",
     "crates/tracedecay-search-eval",
     "crates/tracedecay-session-memory",
     "crates/tracedecay-session-runtime",

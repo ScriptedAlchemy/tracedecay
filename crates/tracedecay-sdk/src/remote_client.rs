@@ -45,7 +45,8 @@ use tracedecay_domain::{
     CurrentRemoteAuthorityStateV1, EnrollmentCredentialRecordV1, validate_remote_secret_length,
 };
 
-use crate::client::{ClientError, ProblemError, problem_error};
+use crate::client::{ClientError, ProblemError};
+use crate::protocol::problem_error;
 
 pub struct EnrolledRemoteClient {
     http: HttpClient,

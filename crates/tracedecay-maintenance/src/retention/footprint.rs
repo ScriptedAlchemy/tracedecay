@@ -156,7 +156,8 @@ pub struct ProfileFootprintEntryV1 {
 
 /// Every profile entry with its bound. Graph container and WAL entries inside
 /// a project store overlap that store's entry, so the profile total is the sum
-/// of walked files, never the sum of entries.
+/// of walked files plus any observed, unlinked SQLite spill, never the sum
+/// of entries.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProfileFootprintV1 {
     pub entries: Vec<ProfileFootprintEntryV1>,
@@ -168,6 +169,26 @@ pub struct ProfileFootprintV1 {
 }
 
 impl ProfileFootprintV1 {
+    /// Add the daemon's process-local spill census. Unlinked files cannot
+    /// overlap the pathname walk. A failed census makes the total a floor,
+    /// not a measured zero. Call only where descriptor census is supported.
+    pub fn account_for_sqlite_temp_spill(
+        &mut self,
+        fd_directory: &Path,
+        bound_overrides: &BTreeMap<String, u64>,
+    ) {
+        let observed = census_sqlite_temp_spill(fd_directory, bound_overrides);
+        let entry = match observed {
+            Some(entry) => entry,
+            None => sqlite_temp_spill_entry(0, 1, bound_overrides),
+        };
+        self.total_bytes = self.total_bytes.saturating_add(entry.bytes);
+        self.unavailable_entry_count = self
+            .unavailable_entry_count
+            .saturating_add(entry.unavailable_entry_count);
+        self.entries.push(entry);
+    }
+
     #[must_use]
     pub fn full_profile_size(&self) -> FullProfileSizeV1 {
         FullProfileSizeV1 {
@@ -488,7 +509,19 @@ pub fn census_sqlite_temp_spill(
             }
         }
     }
-    Some(ProfileFootprintEntryV1 {
+    Some(sqlite_temp_spill_entry(
+        bytes,
+        unavailable_entry_count,
+        bound_overrides,
+    ))
+}
+
+fn sqlite_temp_spill_entry(
+    bytes: u64,
+    unavailable_entry_count: usize,
+    bound_overrides: &BTreeMap<String, u64>,
+) -> ProfileFootprintEntryV1 {
+    ProfileFootprintEntryV1 {
         key: SQLITE_TEMP_SPILL_KEY.to_owned(),
         family: ProfileFamilyV1::SqliteTempSpill,
         bytes,
@@ -499,7 +532,7 @@ pub fn census_sqlite_temp_spill(
             .unwrap_or_else(|| default_bound_bytes(ProfileFamilyV1::SqliteTempSpill)),
         project: None,
         kinds: None,
-    })
+    }
 }
 
 fn tally(entry: &mut EntryTally, walked: WalkedEntryV1) {
@@ -1008,6 +1041,49 @@ mod tests {
                 .state(),
             DoctorEvidenceStateV1::Degraded
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn temp_spill_contributes_to_daemon_total_and_propagates_unavailable_coverage() {
+        let temporary = tempfile::tempdir().unwrap();
+        let profile = temporary.path().join("profile");
+        std::fs::create_dir(&profile).unwrap();
+        sized(&profile.join("user-sessions.db"), 10 * MIB);
+        let fd_directory = temporary.path().join("fd");
+        std::fs::create_dir(&fd_directory).unwrap();
+        let spill = temporary.path().join("etilqs_spill (deleted)");
+        sized(&spill, 8 * MIB);
+        std::os::unix::fs::symlink(&spill, fd_directory.join("3")).unwrap();
+        std::os::unix::fs::symlink(&spill, fd_directory.join("4")).unwrap();
+        let overrides = BTreeMap::from([(PROFILE_TOTAL_KEY.to_owned(), 16 * MIB)]);
+        let disk = census_profile_footprint(&profile, &BTreeMap::new(), &overrides);
+        assert_eq!(disk.total_bytes, 10 * MIB);
+
+        let mut measured = disk.clone();
+        measured.account_for_sqlite_temp_spill(&fd_directory, &overrides);
+        assert_eq!(measured.total_bytes, 18 * MIB);
+        assert_eq!(measured.unavailable_entry_count, 0);
+        assert_eq!(
+            findings(&measured)[PROFILE_TOTAL_KEY].finding().state(),
+            DoctorEvidenceStateV1::Degraded,
+            "only the combined footprint is over its budget"
+        );
+
+        let mut unavailable = disk;
+        unavailable.account_for_sqlite_temp_spill(&fd_directory.join("absent"), &overrides);
+        assert_eq!(unavailable.total_bytes, 10 * MIB);
+        assert_eq!(
+            unavailable.full_profile_size().state,
+            ProfileTotalCoverageStateV1::Partial
+        );
+        let observed = findings(&unavailable);
+        for key in [PROFILE_TOTAL_KEY, SQLITE_TEMP_SPILL_KEY] {
+            assert_eq!(
+                observed[key].finding().state(),
+                DoctorEvidenceStateV1::Partial
+            );
+        }
     }
 
     fn entry<'a>(footprint: &'a ProfileFootprintV1, key: &str) -> &'a ProfileFootprintEntryV1 {

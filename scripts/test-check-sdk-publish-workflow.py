@@ -35,6 +35,20 @@ class SdkPublishBoundaryTests(unittest.TestCase):
     def test_current_release_has_an_isolated_immutable_handoff(self) -> None:
         CHECKER.validate(self.workflow)
 
+    def test_native_build_has_no_publish_authority_or_mutable_source(self) -> None:
+        native = self.workflow["jobs"]["build-native-sdk"]
+        native["permissions"]["id-token"] = "write"
+        self.assert_rejected("read-only permissions")
+        del native["permissions"]["id-token"]
+        native["steps"][0]["with"]["ref"] = "master"
+        self.assert_rejected("validated source SHA")
+
+    def test_native_failure_cannot_be_accepted_as_historical_recovery(self) -> None:
+        self.build["if"] = self.build["if"].replace(
+            "needs.build-native-sdk.result == 'success'", "needs.build-native-sdk.result != 'cancelled'"
+        )
+        self.assert_rejected("successful dependencies")
+
     def test_command_refactoring_does_not_require_a_policy_inventory_update(self) -> None:
         for step in self.build["steps"]:
             if "run" in step:

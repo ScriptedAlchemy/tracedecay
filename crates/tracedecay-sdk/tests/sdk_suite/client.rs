@@ -11,7 +11,7 @@ use tracedecay_sdk::client::{
 };
 use tracedecay_sdk::operations::{
     ApplicationFactStoreCurate, MultiRootScopeSetRead, OperationTransport, TypedOperation,
-    WorkflowListDefinitions,
+    WorkflowActivateDefinition, WorkflowListDefinitions,
 };
 use tracedecay_tool_catalog::TerminalState;
 
@@ -603,6 +603,69 @@ fn typed_result_rejects_a_cancellation_stage_outside_the_operation_contract() {
 }
 
 #[test]
+fn a_timed_out_workflow_returns_its_receipt_without_a_payload() {
+    let mut body = list_definitions_success();
+    body["value"]["binding_id"] = json!(WorkflowActivateDefinition::BINDING_ID);
+    body["value"]["contract"] = json!({
+        "schema_id": WorkflowActivateDefinition::RESULT_SCHEMA_ID,
+        "schema_revision": WorkflowActivateDefinition::RESULT_SCHEMA_REVISION,
+    });
+    body["value"]["outcome"] = json!({
+        "outcome": "effect",
+        "value": {
+            "effect_id": "effect.workflow.sdk",
+            "effect_class": "administrative",
+            "idempotency_key": "workflow.idempotency.sdk",
+            "authority": {},
+            "expected_state": "workflow.revision.sdk",
+            "reconciliation": "required",
+            "receipt": {},
+            "payload": null,
+            "execution": {
+                "started_at": 1, "ended_at": 2,
+                "effective_deadline": {"expires_at": 2},
+                "cancellation": {"stage": "before_effect", "observed_at": 2},
+                "budget": {"units_consumed": 1, "bytes_consumed": 1, "elapsed_micros": 1},
+                "termination": "timed_out",
+            },
+        },
+    });
+    let mut failed = body.clone();
+    failed["value"]["outcome"]["value"]["execution"]["termination"] = json!("failed");
+    let mut malformed = body.clone();
+    malformed["value"]["outcome"]["value"]["execution"]["cancellation"]["stage"] =
+        json!("not_a_stage");
+    let (base_url, server) = serve(
+        [body, failed, malformed]
+            .into_iter()
+            .map(|body| json_response("200 OK", body))
+            .collect(),
+    );
+    let client = Client::builder(ConnectionMode::local(&base_url, "project.sdk", "sdk-token"))
+        .build()
+        .unwrap();
+    let request = serde_json::from_value(json!({
+        "definition_id": "workflow.sdk", "definition_version": 1, "expected_revision": 1,
+    }))
+    .unwrap();
+    let response = client
+        .execute::<WorkflowActivateDefinition>(&request)
+        .unwrap();
+    assert!(response.result.is_none());
+    assert_eq!(
+        response.envelope["outcome"]["value"]["execution"]["termination"],
+        "timed_out",
+    );
+    for _ in 0..2 {
+        assert!(matches!(
+            client.execute::<WorkflowActivateDefinition>(&request),
+            Err(ClientError::Protocol { .. }),
+        ));
+    }
+    assert_eq!(server.join().unwrap().len(), 3);
+}
+
+#[test]
 fn malformed_success_and_problem_fields_are_protocol_errors() {
     let mut missing_scope = list_definitions_success();
     missing_scope["value"]
@@ -914,15 +977,23 @@ fn terminal_frame(event: &str, receipt_termination: &str) -> String {
 }
 
 fn terminal_frame_at(event: &str, receipt_termination: &str, sequence: u64) -> String {
+    // The canonical receipt carries a cancellation observation exactly when
+    // the operation was cancelled or timed out.
+    let cancellation = if matches!(receipt_termination, "cancelled" | "timed_out") {
+        r#"{"stage":"during_read","observed_at":2}"#
+    } else {
+        "null"
+    };
     format!(
         concat!(
             "event: {event}\nid: {sequence}\n",
             "data: {{\"event\":\"{event}\",\"data\":{{\"sequence\":{sequence},\"terminal\":{{",
             "\"termination\":\"{event}\",\"receipt\":{{\"started_at\":1,\"ended_at\":2,",
-            "\"effective_deadline\":{{\"expires_at\":3}},\"cancellation\":null,",
+            "\"effective_deadline\":{{\"expires_at\":3}},\"cancellation\":{cancellation},",
             "\"budget\":{{\"units_consumed\":1,\"bytes_consumed\":1,\"elapsed_micros\":1}},",
             "\"termination\":\"{receipt}\"}}}}}}}}\n\n"
         ),
+        cancellation = cancellation,
         event = event,
         receipt = receipt_termination,
         sequence = sequence,
@@ -1416,4 +1487,254 @@ fn http_operations_refuse_the_mcp_execution_path_with_a_typed_error() {
             if operation_id == WorkflowListDefinitions::OPERATION_ID
     ));
     assert!(mcp.calls.lock().expect("test MCP calls lock").is_empty());
+}
+
+fn list_definitions_page(cursor: Value, started_at: u64, ended_at: u64) -> Value {
+    let mut success = list_definitions_success();
+    let value = &mut success["value"]["outcome"]["value"];
+    value["payload"] = json!([]);
+    value["page"]["cursor"] = cursor;
+    value["execution"]["started_at"] = json!(started_at);
+    value["execution"]["ended_at"] = json!(ended_at);
+    success
+}
+
+fn problem_response(status: &str, kind: &str, retry: &str, binding_id: Option<&str>) -> String {
+    // Canonically only a denial omits its diagnostic, and then its code and
+    // message are the kind's own safe identity.
+    let (diagnostic, code, message) = if kind == "not_found_or_not_authorized" {
+        (
+            Value::Null,
+            kind,
+            "The requested resource was not found or is not authorized",
+        )
+    } else {
+        (
+            json!({"code": "sdk.problem", "message": "problem"}),
+            "sdk.problem",
+            "problem",
+        )
+    };
+    let retry_scope = match retry {
+        "never" => Value::Null,
+        "after_revalidate" => json!("fresh_request"),
+        "after_reconcile" => json!("same_operation"),
+        _ => json!("same_request"),
+    };
+    let mut value = json!({
+        "contract": {"schema_id": "schema.application.problem", "schema_revision": 1},
+        "request_id": "request.sdk",
+        "problem": {
+            "revision": 1, "kind": kind, "code": code, "message": message,
+            "diagnostic": diagnostic, "detail": null, "committed_receipt": null,
+            "owning_layer": "adapter",
+            "terminality": "pre_admission", "retryable": retry != "never", "retry": retry,
+            "retry_scope": retry_scope, "retry_after_millis": null, "cancellation_stage": null,
+            "unavailable_classification": null, "execution_failure_classification": null,
+            "request_id": "request.sdk", "trace_id": "request.sdk", "details": [],
+            "legal_actions": [], "coverage": null
+        }
+    });
+    if let Some(binding_id) = binding_id {
+        value["binding_id"] = json!(binding_id);
+    }
+    json_response(status, json!({"kind": "problem", "value": value}))
+}
+
+fn list_definitions(
+    base_url: &str,
+    options: OperationRequestOptions,
+) -> Result<
+    tracedecay_sdk::client::TypedResponse<<WorkflowListDefinitions as TypedOperation>::Result>,
+    ClientError,
+> {
+    let client = Client::builder(ConnectionMode::local(base_url, "project.sdk", "sdk-token"))
+        .build()
+        .unwrap();
+    client.execute_with_options::<WorkflowListDefinitions>(
+        &serde_json::from_value(json!({})).unwrap(),
+        options,
+    )
+}
+
+#[test]
+fn page_options_reach_the_query_and_opaque_cursors_are_admitted() {
+    let (base_url, server) = serve(vec![json_response(
+        "200 OK",
+        list_definitions_page(json!({"kind": "opaque", "cursor": "cursor.page-3"}), 1, 2),
+    )]);
+    let response = list_definitions(
+        &base_url,
+        OperationRequestOptions {
+            page: Some(tracedecay_sdk::client::PageOptions {
+                size: Some(5),
+                cursor: Some("bc1/page-2".into()),
+            }),
+            ..OperationRequestOptions::default()
+        },
+    )
+    .expect("an opaque continuation cursor is canonical");
+    assert_eq!(
+        response.envelope["outcome"]["value"]["page"]["cursor"],
+        json!({"kind": "opaque", "cursor": "cursor.page-3"})
+    );
+    let requests = server.join().unwrap();
+    assert!(
+        requests[0].starts_with(
+            "POST /projects/project.sdk/application/workflow/list-definitions?page_size=5&cursor=bc1%2Fpage-2 "
+        ),
+        "{}",
+        requests[0]
+    );
+}
+
+#[test]
+fn non_canonical_page_cursors_are_protocol_failures() {
+    for cursor in [
+        json!("cursor.bare"),
+        json!({"kind": "opaque"}),
+        json!({"kind": "other", "cursor": "c"}),
+    ] {
+        let (base_url, server) = serve(vec![json_response(
+            "200 OK",
+            list_definitions_page(cursor.clone(), 1, 2),
+        )]);
+        let error = list_definitions(&base_url, OperationRequestOptions::default()).unwrap_err();
+        assert!(
+            matches!(error, ClientError::Protocol { .. }),
+            "{cursor}: {error:?}"
+        );
+        server.join().unwrap();
+    }
+}
+
+#[test]
+fn page_options_outside_the_contract_are_refused_before_transport() {
+    for page in [
+        tracedecay_sdk::client::PageOptions {
+            size: Some(0),
+            cursor: None,
+        },
+        tracedecay_sdk::client::PageOptions {
+            size: Some(1_001),
+            cursor: None,
+        },
+        tracedecay_sdk::client::PageOptions {
+            size: None,
+            cursor: Some(" padded ".into()),
+        },
+        tracedecay_sdk::client::PageOptions {
+            size: None,
+            cursor: Some("x".repeat(4_097)),
+        },
+    ] {
+        // Port 1 refuses connections, so reaching transport would surface as
+        // a transport error rather than the typed request refusal.
+        let error = list_definitions(
+            "http://127.0.0.1:1",
+            OperationRequestOptions {
+                page: Some(page.clone()),
+                ..OperationRequestOptions::default()
+            },
+        )
+        .unwrap_err();
+        assert!(
+            matches!(error, ClientError::InvalidRequest(_)),
+            "{page:?}: {error:?}"
+        );
+    }
+}
+
+#[test]
+fn a_receipt_that_ends_before_it_starts_is_a_protocol_failure() {
+    let (base_url, server) = serve(vec![json_response(
+        "200 OK",
+        list_definitions_page(Value::Null, 5, 2),
+    )]);
+    let error = list_definitions(&base_url, OperationRequestOptions::default()).unwrap_err();
+    assert!(matches!(error, ClientError::Protocol { .. }), "{error:?}");
+    server.join().unwrap();
+}
+
+#[test]
+fn problems_must_be_bound_to_the_invoked_operation() {
+    const BINDING: &str = "binding.http.workflow.list_definitions";
+    let cases = [
+        (
+            "409 Conflict",
+            "stale",
+            "after_revalidate",
+            Some(BINDING),
+            true,
+        ),
+        (
+            "409 Conflict",
+            "stale",
+            "after_revalidate",
+            Some("binding.http.other"),
+            false,
+        ),
+        ("409 Conflict", "stale", "after_revalidate", None, false),
+        // A denial never discloses which binding it refused.
+        (
+            "404 Not Found",
+            "not_found_or_not_authorized",
+            "never",
+            None,
+            true,
+        ),
+        (
+            "404 Not Found",
+            "not_found_or_not_authorized",
+            "never",
+            Some(BINDING),
+            false,
+        ),
+    ];
+    for (status, kind, retry, binding, typed_problem) in cases {
+        let (base_url, server) = serve(vec![problem_response(status, kind, retry, binding)]);
+        let error = list_definitions(&base_url, OperationRequestOptions::default()).unwrap_err();
+        let is_problem = matches!(&error, ClientError::Problem(problem) if problem.kind == kind);
+        assert_eq!(
+            is_problem, typed_problem,
+            "{kind} bound to {binding:?}: {error:?}"
+        );
+        if !typed_problem {
+            assert!(matches!(error, ClientError::Protocol { .. }), "{error:?}");
+        }
+        server.join().unwrap();
+    }
+}
+
+/// The shared fixture the Node SDK suite builds detailed problem envelopes
+/// from must stay the canonical derivation of each detail.
+#[test]
+fn shared_problem_detail_fixtures_are_the_canonical_derivation() {
+    #[derive(serde::Deserialize)]
+    struct Fixtures {
+        problems: Vec<Value>,
+    }
+    let fixtures: Fixtures =
+        serde_json::from_str(include_str!("../fixtures/problem-details.json")).unwrap();
+    assert!(!fixtures.problems.is_empty());
+    for fixture in fixtures.problems {
+        let detail: tracedecay_contracts::ApplicationProblemDetailV1 =
+            serde_json::from_value(fixture["detail"].clone()).unwrap();
+        let problem = tracedecay_contracts::ApplicationProblem::from_detail(detail);
+        let diagnostic = problem
+            .diagnostic()
+            .expect("detailed problems carry a diagnostic");
+        let canonical = json!({
+            "detail": fixture["detail"],
+            "kind": problem.kind(),
+            "code": diagnostic.code,
+            "message": diagnostic.message,
+            "retry": problem.retry(),
+            "legal_actions": problem.legal_actions(),
+        });
+        assert_eq!(
+            fixture, canonical,
+            "update tests/fixtures/problem-details.json"
+        );
+    }
 }

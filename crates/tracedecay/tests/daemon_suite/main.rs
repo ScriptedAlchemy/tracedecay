@@ -40,6 +40,8 @@ mod retired_project_owner_route_test;
 #[cfg(unix)]
 mod sealed_generation_crash_test;
 #[cfg(unix)]
+mod sealed_generation_retention_test;
+#[cfg(unix)]
 mod socket_lifecycle_test;
 #[cfg(unix)]
 mod stale_client_resilience_test;

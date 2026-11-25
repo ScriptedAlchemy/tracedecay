@@ -39,6 +39,35 @@ interface PackedArtifact {
   files: Array<{ path: string }>;
 }
 
+function packResults(output: string): PackedArtifact[] {
+  const value = JSON.parse(output) as
+    | PackedArtifact[]
+    | Record<string, PackedArtifact>;
+  return Array.isArray(value) ? value : Object.values(value);
+}
+
+/** The release target triple this host's platform package is built for. */
+function hostReleaseTarget(): string {
+  const targets: Record<string, string> = {
+    "darwin-arm64": "aarch64-apple-darwin",
+    "linux-x64": "x86_64-unknown-linux-gnu",
+    "linux-arm64": "aarch64-unknown-linux-gnu",
+    "win32-x64": "x86_64-pc-windows-msvc",
+  };
+  const target = targets[`${process.platform}-${process.arch}`];
+  if (target === undefined) throw new Error(`no release target for ${process.platform}-${process.arch}`);
+  return target;
+}
+
+/** The binding built by `bazel build //crates/tracedecay-sdk-node:addon`. */
+function builtAddon(): string {
+  const addon = process.env.TRACEDECAY_SDK_ADDON;
+  if (addon === undefined || !existsSync(addon)) {
+    throw new Error("TRACEDECAY_SDK_ADDON must name the built tracedecay_sdk_node.node");
+  }
+  return resolve(addon);
+}
+
 function isolatedEnvironment(home: string): NodeJS.ProcessEnv {
   const profile = join(home, ".tracedecay");
   return {
@@ -192,12 +221,12 @@ it(
       } else {
         ownsTarball = true;
         run(NPM, ["run", "build"], { cwd: PACKAGE_ROOT, env: process.env });
-        const packed = JSON.parse(
+        const packed = packResults(
           run(NPM, ["pack", "--json", "--ignore-scripts"], {
             cwd: PACKAGE_ROOT,
             env: process.env,
           }),
-        ) as PackedArtifact[];
+        );
         expect(packed).toHaveLength(1);
         const artifact = packed[0];
         expect(artifact).toBeDefined();
@@ -212,6 +241,57 @@ it(
         );
       }
 
+      // The binding reaches consumers as the host's platform package, staged
+      // by the same script the release uses.
+      const externalPlatformTarball = process.env.TRACEDECAY_SDK_NATIVE_TARBALL;
+      let platformTarball: string;
+      if (externalPlatformTarball !== undefined) {
+        platformTarball = resolve(externalPlatformTarball);
+        expect(
+          existsSync(platformTarball),
+          `missing prebuilt platform tarball: ${platformTarball}`,
+        ).toBe(true);
+        const platformManifest = JSON.parse(
+          run("tar", ["-xOf", platformTarball, "package/package.json"], {
+            cwd: PACKAGE_ROOT,
+            env: process.env,
+          }),
+        );
+        const sdkManifest = JSON.parse(
+          run("tar", ["-xOf", tarball, "package/package.json"], {
+            cwd: PACKAGE_ROOT,
+            env: process.env,
+          }),
+        );
+        expect(sdkManifest.optionalDependencies?.[platformManifest.name]).toBe(
+          platformManifest.version,
+        );
+      } else {
+        const platformDirectory = join(scratch, "platform-package");
+        run(
+          process.execPath,
+          [
+            join(PACKAGE_ROOT, "scripts/native-packages.mjs"),
+            "stage",
+            "--target",
+            hostReleaseTarget(),
+            "--addon",
+            builtAddon(),
+            "--out",
+            platformDirectory,
+          ],
+          { cwd: PACKAGE_ROOT, env: process.env },
+        );
+        const platformPacked = packResults(
+          run(NPM, ["pack", "--json", "--ignore-scripts", "--pack-destination", scratch], {
+            cwd: platformDirectory,
+            env: process.env,
+          }),
+        );
+        expect(platformPacked).toHaveLength(1);
+        platformTarball = join(scratch, platformPacked[0]!.filename);
+      }
+
       writeFileSync(
         join(consumer, "package.json"),
         '{"name":"tracedecay-sdk-installed-consumer","private":true,"type":"module"}\n',
@@ -224,6 +304,7 @@ it(
           "--no-audit",
           "--no-fund",
           tarball,
+          platformTarball,
         ],
         { cwd: consumer, env: process.env },
       );

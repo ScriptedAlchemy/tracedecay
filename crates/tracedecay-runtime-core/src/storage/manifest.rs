@@ -2,11 +2,12 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use tracedecay_domain::errors::{Result, TraceDecayError};
+use tracedecay_rusqlite_runtime::has_sqlite_database_header;
 
 use super::{
     PrivateStoreIo, ProfileShardValidationError, SESSIONS_DB_FILENAME, STORE_MANIFEST_FILENAME,
     STORE_MANIFEST_SCHEMA_VERSION, StoreKind, StoreLayout, StoreManifest, ValidatedProfileShard,
-    has_sqlite_database_header, profile_sharded_data_root,
+    profile_sharded_data_root,
 };
 
 pub fn write_store_manifest(layout: &StoreLayout) -> Result<StoreManifest> {

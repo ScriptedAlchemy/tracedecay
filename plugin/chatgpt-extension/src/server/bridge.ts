@@ -20,6 +20,7 @@ import type {
 } from "@tracedecay/sdk";
 import type { DaemonState, Failure, ProjectListing, ProjectRef } from "../shared/view.js";
 import { httpBaseUrl, probeDaemon, readDaemonAuthority, type AuthorityLookup, type DaemonAuthorityRecord } from "./authority.js";
+import { addonBesideBinary } from "./native-addon.js";
 import { RegistryClient } from "./registry-client.js";
 import { classifyCode, DaemonFailure, ServeSession, toFailure } from "./serve-client.js";
 
@@ -199,10 +200,12 @@ export class DaemonBridge {
       env: this.#options.env,
       cwd: project.project_root,
     });
+    const addon = addonBesideBinary(this.#options.binary, this.#options.env);
     const client = createClient({
       baseUrl,
       projectId: project.project_id,
       token: record.auth_token,
+      ...(addon === undefined ? {} : { addon }),
       mcp: {
         callTool: (toolName, request, options) => session.callJson(toolName, asRecord(request), options.signal),
       },
