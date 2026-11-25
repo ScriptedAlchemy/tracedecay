@@ -20,7 +20,11 @@ export function addonBesideBinary(binary: string, env: NodeJS.ProcessEnv): strin
 
 function resolveExecutable(binary: string, env: NodeJS.ProcessEnv): string | undefined {
   if (binary.includes("/") || binary.includes("\\")) return existsSync(binary) ? binary : undefined;
-  const extensions = process.platform === "win32" ? (env.PATHEXT ?? ".EXE").split(";") : [""];
+  // An explicitly suffixed executable is already a complete filename.
+  // Appending PATHEXT would look for tracedecay.exe.EXE and miss its addon.
+  const extensions = process.platform === "win32" && path.extname(binary) === ""
+    ? (env.PATHEXT ?? ".EXE").split(";")
+    : [""];
   for (const directory of (env.PATH ?? "").split(path.delimiter)) {
     if (directory === "") continue;
     for (const extension of extensions) {
