@@ -395,6 +395,7 @@ pub(super) async fn register_project_open_production_owners(
         invocation,
         project_root,
         &scope,
+        configuration.snapshot(),
     );
     let (admitted_root_uri, compiler_producer) = Box::pin(register_project_code_read_owners(
         invocation,

@@ -2357,7 +2357,7 @@ mod tests {
     ) -> crate::diagnostics_producer::TypeScriptProducerStateV1 {
         crate::diagnostics_producer::TypeScriptProducerStateV1::new(
             status.clone(),
-            tracedecay_lsp::TypeScriptCompilerAdmission::new(std::sync::Arc::new(
+            crate::diagnostics_producer::test_compiler_admission(std::sync::Arc::new(
                 tracedecay_runtime_core::background_cpu::ProcessBackgroundCpuV1::new(
                     std::num::NonZeroUsize::new(1).unwrap(),
                 ),
