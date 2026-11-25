@@ -1210,7 +1210,10 @@ mod worktree_inventory_tests {
     #[test]
     fn invalid_worktree_metadata_refuses_the_entire_inventory() {
         let temporary = tempfile::TempDir::new().expect("repository root");
-        let (primary, linked) = repository_with_linked_worktree(temporary.path());
+        // The inventory reports resolved roots; on macOS the temp dir sits
+        // behind the `/var` -> `/private/var` symlink.
+        let base = std::fs::canonicalize(temporary.path()).expect("canonical root");
+        let (primary, linked) = repository_with_linked_worktree(&base);
         let repository = tracedecay_runtime_core::git_open::open(&linked).expect("linked repo");
         let gitdir = repository.git_dir().join("gitdir");
         let valid = std::fs::read(&gitdir).expect("worktree metadata");

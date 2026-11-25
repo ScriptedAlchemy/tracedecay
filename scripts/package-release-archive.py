@@ -16,6 +16,7 @@ from pathlib import Path
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--binary", type=Path, required=True)
+    parser.add_argument("--addon", type=Path)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--format", choices=("tar.gz", "zip"), required=True)
     parser.add_argument("--entry-name", required=True)
@@ -92,6 +93,8 @@ def main() -> None:
     if args.epoch < 0:
         raise ValueError("epoch must be nonnegative")
     entries = [read_entry(args.binary, args.entry_name, 0o755)]
+    if args.addon is not None:
+        entries.append(read_entry(args.addon, "tracedecay_sdk_node.node", 0o644))
 
     args.output.parent.mkdir(parents=True, exist_ok=True)
     if args.format == "tar.gz":

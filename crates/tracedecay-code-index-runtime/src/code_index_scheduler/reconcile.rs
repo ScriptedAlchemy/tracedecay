@@ -1203,30 +1203,6 @@ impl HistoricalCodeIndexGenerationOwnerV1 {
             .is_some())
     }
 
-    /// The manifest and snapshot of the active durable publication, without
-    /// binding a text owner. A seal moves the pointer before its text
-    /// projection and serving swap, so this names the newest generation well
-    /// before any serving slot holds it. `None` without reading the manifest
-    /// while the pointer still names `known`.
-    pub(crate) fn active_publication_text_metadata(
-        &self,
-        known: Option<&CodeGenerationId>,
-    ) -> Result<Option<VerifiedSealedTextGenerationMetadataV1>, CodeIndexSchedulerErrorV1> {
-        let Some(pointer) = self
-            .publication
-            .read_publication_pointer()
-            .map_err(CodeIndexProductionErrorV1::Publication)?
-        else {
-            return Ok(None);
-        };
-        if known.is_some_and(|known| known.as_str() == pointer.generation_id) {
-            return Ok(None);
-        }
-        let generation_id = CodeGenerationId::new(pointer.generation_id.clone())
-            .map_err(|error| CodeIndexProductionErrorV1::Contract(error.to_string()))?;
-        self.text_metadata_in(&pointer, &generation_id)
-    }
-
     fn text_metadata_in(
         &self,
         pointer: &DurablePublicationPointerV1,

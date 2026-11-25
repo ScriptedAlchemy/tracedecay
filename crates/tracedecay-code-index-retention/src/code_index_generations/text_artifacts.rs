@@ -732,6 +732,17 @@ pub(super) fn verify_unreferenced_completed_text_artifact(
     Ok(true)
 }
 
+/// What a committed text-artifact transaction actually did.
+///
+/// A candidate that a concurrent publish relivened between the mark phase and
+/// cleanup is restored, not deleted. It is reported separately so a caller
+/// never counts a live descriptor target as reclaimed bytes.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub(super) struct CommittedTextArtifactCleanupV1 {
+    pub removed: Vec<String>,
+    pub restored_live: Vec<String>,
+}
+
 /// `active_pointer` is the pointer the store carries *now*, which is not
 /// `plan.active_pointer` when generation retention rewrote the durable index
 /// earlier in the same pass. The compare-and-swap below and the receipt's
@@ -746,6 +757,7 @@ pub(super) fn execute_text_artifact_retention_under_store_lock(
     (
         Vec<CodeTextArtifactRetentionCandidateV1>,
         Option<CodeTextArtifactRetentionReceiptV1>,
+        CommittedTextArtifactCleanupV1,
     ),
     CodeGenerationRetentionErrorV1,
 > {
@@ -765,6 +777,7 @@ pub(super) fn execute_text_artifact_retention_under_store_lock(
         receipt: receipt.clone(),
     };
     persist_journal(store_root, &TEXT_ARTIFACT_TRANSACTION_JOURNAL, &transaction)?;
+    let mut cleanup = CommittedTextArtifactCleanupV1::default();
     let result = (|| {
         if is_cancelled() {
             return Err(CodeGenerationRetentionErrorV1::Cancelled);
@@ -788,7 +801,7 @@ pub(super) fn execute_text_artifact_retention_under_store_lock(
             &receipt.receipt_digest,
             &receipt,
         )?;
-        cleanup_committed_text_artifact_transaction(store_root, &transaction)?;
+        cleanup = cleanup_committed_text_artifact_transaction(store_root, &transaction)?;
         clear_journal(store_root, &TEXT_ARTIFACT_TRANSACTION_JOURNAL)
     })();
     if let Err(error) = result {
@@ -803,26 +816,31 @@ pub(super) fn execute_text_artifact_retention_under_store_lock(
         }
         return Err(error);
     }
-    Ok((deleted_artifacts, Some(receipt)))
+    Ok((deleted_artifacts, Some(receipt), cleanup))
 }
 
+/// Resolve a pending transaction without refusing the whole recovery when one
+/// candidate was relivened by a concurrent publish. Every other candidate is
+/// finished or rolled back; the relivened one is restored to its source.
 pub(super) fn recover_pending_text_artifact_transaction_unlocked(
     store_root: &Path,
-) -> Result<(), CodeGenerationRetentionErrorV1> {
+) -> Result<CommittedTextArtifactCleanupV1, CodeGenerationRetentionErrorV1> {
     let Some(transaction) = load_journal(store_root, &TEXT_ARTIFACT_TRANSACTION_JOURNAL)? else {
-        return Ok(());
+        return Ok(CommittedTextArtifactCleanupV1::default());
     };
-    if receipt_store::receipt_is_durable(
+    let cleanup = if receipt_store::receipt_is_durable(
         store_root,
         &TEXT_ARTIFACT_RECEIPT_STORE,
         &transaction.receipt.receipt_digest,
         &transaction.receipt,
     )? {
-        cleanup_committed_text_artifact_transaction(store_root, &transaction)?;
+        cleanup_committed_text_artifact_transaction(store_root, &transaction)?
     } else {
         rollback_staged_text_artifact_transaction(store_root, &transaction)?;
-    }
-    clear_journal(store_root, &TEXT_ARTIFACT_TRANSACTION_JOURNAL)
+        CommittedTextArtifactCleanupV1::default()
+    };
+    clear_journal(store_root, &TEXT_ARTIFACT_TRANSACTION_JOURNAL)?;
+    Ok(cleanup)
 }
 
 pub(super) fn text_artifact_transaction_path(store_root: &Path) -> PathBuf {
@@ -1013,44 +1031,46 @@ pub(super) fn rollback_staged_text_artifact_transaction(
     quarantine.remove_empty_stage()
 }
 
+/// Finish a committed transaction candidate by candidate.
+///
+/// Liveness is proven against every scope's *current* pointer: a publish may
+/// have landed since the transaction was staged, in this scope or in a
+/// sibling that shares the completed artifact. A completed artifact named by
+/// any current pointer is therefore restored to its source instead of
+/// unlinked, and the remaining candidates still finish. Refusing the whole
+/// transaction on one relivened candidate left every other superseded
+/// generation in the store uncollectable.
 pub(super) fn cleanup_committed_text_artifact_transaction(
     store_root: &Path,
     transaction: &CodeTextArtifactRetentionTransactionV1,
-) -> Result<(), CodeGenerationRetentionErrorV1> {
-    ensure_text_artifact_transaction_liveness(store_root, transaction)?;
+) -> Result<CommittedTextArtifactCleanupV1, CodeGenerationRetentionErrorV1> {
+    let marked = scope_text_artifact_marks(store_root, &mut None, &|| false)?;
     let sources = TextArtifactSources::open(store_root)?;
     let quarantine = FileQuarantine::recover(
         TEXT_ARTIFACT_QUARANTINE_LABEL,
         &store_root.join(TEXT_ARTIFACT_QUARANTINE_DIRECTORY),
         &transaction.receipt.receipt_digest,
     )?;
+    let mut cleanup = CommittedTextArtifactCleanupV1::default();
     for candidate in &transaction.receipt.deleted_artifacts {
-        quarantine.remove_committed(sources.of(candidate.kind), &candidate.artifact_file)?;
+        if candidate.kind == CodeTextArtifactRetentionKindV1::Completed
+            && marked.contains(candidate.artifact_file.as_str())
+        {
+            quarantine.restore(sources.of(candidate.kind), &candidate.artifact_file)?;
+            cleanup.restored_live.push(candidate.artifact_file.clone());
+        } else if quarantine
+            .settle_committed_restorable(sources.of(candidate.kind), &candidate.artifact_file)?
+        {
+            cleanup.removed.push(candidate.artifact_file.clone());
+        } else {
+            // An earlier, interrupted run of this cleanup already restored
+            // it and its descriptor has since gone: it stays in its source
+            // as an ordinary artifact the next retention pass re-plans.
+            cleanup.restored_live.push(candidate.artifact_file.clone());
+        }
     }
-    quarantine.remove_empty_stage()
-}
-
-pub(super) fn ensure_text_artifact_transaction_liveness(
-    store_root: &Path,
-    transaction: &CodeTextArtifactRetentionTransactionV1,
-) -> Result<(), CodeGenerationRetentionErrorV1> {
-    // Liveness is proven against every scope's *current* pointer: a publish
-    // may have landed since the transaction was staged, in this scope or in
-    // a sibling that shares the completed artifact, and no durable
-    // descriptor target any of them names may be removed.
-    let marked = scope_text_artifact_marks(store_root, &mut None, &|| false)?;
-    if transaction
-        .receipt
-        .deleted_artifacts
-        .iter()
-        .filter(|candidate| candidate.kind != CodeTextArtifactRetentionKindV1::Staging)
-        .any(|candidate| marked.contains(candidate.artifact_file.as_str()))
-    {
-        return Err(CodeGenerationRetentionErrorV1::UnsafeState(
-            "text-artifact retention recovery would remove a durable descriptor target".to_owned(),
-        ));
-    }
-    Ok(())
+    quarantine.remove_empty_stage()?;
+    Ok(cleanup)
 }
 
 pub(super) fn build_text_artifact_receipt(

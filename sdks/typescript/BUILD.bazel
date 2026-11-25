@@ -28,15 +28,24 @@ rslib_bin.rslib(
 js_binary(
     name = "typed_terminal_live",
     entry_point = "test/typed-terminal-live.mjs",
-    data = [":dist", "package.json"],
+    data = [":dist", "package.json", "//crates/tracedecay-sdk-node:addon"],
+    env = {"TRACEDECAY_SDK_ADDON": "$(rootpath //crates/tracedecay-sdk-node:addon)"},
     visibility = ["//visibility:public"],
 )
 
+# The suite drives the real native binding over loopback sockets, loading it
+# by explicit path exactly as an offline host does.
 vitest_bin.vitest_test(
     name = "unit_test",
-    data = [":pkg", ":node_modules", "//crates/tracedecay-sdk:sse_framing_fixture"] + glob(["test/**", "*.json", "*.ts"]),
+    data = [
+        ":pkg",
+        ":node_modules",
+        "//crates/tracedecay-sdk:shared_client_fixtures",
+        "//crates/tracedecay-sdk-node:addon",
+    ] + glob(["test/**", "*.json", "*.ts"]),
     args = ["run", "--exclude", "test/installed-package.test.ts"],
     chdir = package_name(),
+    env = {"TRACEDECAY_SDK_ADDON": "$(rootpath //crates/tracedecay-sdk-node:addon)"},
 )
 
 tsc_bin.tsc_test(

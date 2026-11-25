@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate a deterministic SPDX inventory for a shipped CLI release target."""
+"""Generate a deterministic SPDX inventory for a shipped native release target."""
 
 from __future__ import annotations
 
@@ -25,6 +25,8 @@ except ImportError:
 
 
 TARGET = "//crates/tracedecay-cli:tracedecay"
+SDK_TARGET = "//crates/tracedecay-sdk-node:tracedecay-sdk-node"
+SDK_ADDON = "tracedecay_sdk_node.node"
 FONT_LICENSES = {
     "@fontsource-variable/archivo": "OFL-1.1",
     "@fontsource-variable/ibm-plex-sans": "OFL-1.1",
@@ -168,7 +170,7 @@ def label_name(label: str) -> str:
     return label.strip('"')
 
 
-def cquery(source_root: Path) -> tuple[str, str]:
+def cquery(source_root: Path, target: str = TARGET) -> tuple[str, str]:
     env = os.environ.copy()
     graph = subprocess.run(
         [
@@ -176,7 +178,7 @@ def cquery(source_root: Path) -> tuple[str, str]:
             "cquery",
             "--config=dist",
             "--config=ci",
-            f"deps({TARGET})",
+            f"deps({target})",
             "--output=graph",
             "--nograph:factored",
             "--graph:node_limit=-1",
@@ -193,7 +195,7 @@ def cquery(source_root: Path) -> tuple[str, str]:
             "cquery",
             "--config=dist",
             "--config=ci",
-            f"deps({TARGET})",
+            f"deps({target})",
             "--output=label_kind",
         ],
         cwd=source_root,
@@ -205,7 +207,7 @@ def cquery(source_root: Path) -> tuple[str, str]:
     return graph.stdout, kinds.stdout
 
 
-def parse_graph(graph: str, kinds: str) -> list[dict[str, str]]:
+def parse_graph(graph: str, kinds: str, target: str = TARGET) -> list[dict[str, str]]:
     target_kinds: dict[str, str] = {}
     for line in kinds.splitlines():
         match = re.match(r"(.+?) rule (.+)$", line.strip())
@@ -223,9 +225,9 @@ def parse_graph(graph: str, kinds: str) -> list[dict[str, str]]:
     for parent, child in edges:
         adjacency.setdefault(parent, []).append(child)
 
-    roots = [node for node in nodes if label_name(node) == TARGET]
+    roots = [node for node in nodes if label_name(node) == target]
     if len(roots) != 1:
-        raise ValueError("Bazel query did not expose one configured CLI target")
+        raise ValueError(f"Bazel query did not expose one configured target: {target}")
     pending = roots.copy()
     visited: set[str] = set()
     included: set[str] = set()
@@ -237,7 +239,7 @@ def parse_graph(graph: str, kinds: str) -> list[dict[str, str]]:
         kind = target_kinds.get(current, "")
         if kind in {"cargo_build_script", "rust_proc_macro", "rust_test"}:
             continue
-        if kind == "rust_library":
+        if kind in {"rust_library", "rust_shared_library"}:
             label = label_name(current)
             if label.startswith("@"):
                 included.add(label)
@@ -559,6 +561,14 @@ def scope_inventory(
         )
         is not None
     }
+    sdk_components = {}
+    if (source_root / "crates/tracedecay-sdk-node/Cargo.toml").is_file():
+        sdk_graph, sdk_kinds = cquery(source_root, SDK_TARGET)
+        sdk_components = {
+            str(record["purl"]): record
+            for item in parse_graph(sdk_graph, sdk_kinds, SDK_TARGET)
+            if (record := cargo_package(source_root, output_base, item["label"], cargo_lock)) is not None
+        }
     assets = []
     if not dashboard_dist.is_dir():
         raise FileNotFoundError(f"built dashboard asset directory is missing: {dashboard_dist}")
@@ -597,6 +607,7 @@ def scope_inventory(
         "bazel_target": TARGET,
         "source_sha": source_sha,
         "rust_components": [rust_components[key] for key in sorted(rust_components)],
+        "sdk_rust_components": [sdk_components[key] for key in sorted(sdk_components)],
         "embedded_sources": embedded_source_components(
             source_root, list(rust_components.values())
         ),
@@ -607,8 +618,7 @@ def scope_inventory(
     output.write_bytes(canonical_json(scope))
 
 
-def artifact_binary(archive: Path, platform: str) -> bytes:
-    member = "tracedecay.exe" if platform == "x86_64-windows" else "tracedecay"
+def artifact_member(archive: Path, member: str) -> bytes:
     if archive.name.endswith(".zip"):
         with zipfile.ZipFile(archive) as packaged:
             return packaged.read(member)
@@ -617,6 +627,11 @@ def artifact_binary(archive: Path, platform: str) -> bytes:
         if content is None:
             raise ValueError(f"archive does not contain {member}")
         return content.read()
+
+
+def artifact_binary(archive: Path, platform: str) -> bytes:
+    member = "tracedecay.exe" if platform == "x86_64-windows" else "tracedecay"
+    return artifact_member(archive, member)
 
 
 def mcpb_contents(bundle: Path, platform: str) -> tuple[bytes, bytes]:
@@ -695,11 +710,24 @@ def release_inventory(
         raise ValueError("native archive and MCPB do not contain identical CLI binaries")
     npm = npm_components(source_root, platform)
     components = [*scope["rust_components"], *scope.get("embedded_sources", []), *npm]
-    packages = [spdx_package(item) for item in components]
-    package_ids = {str(package["SPDXID"]) for package in packages}
+    sdk_components = scope.get("sdk_rust_components", [])
+    sdk_addon = None
+    if (source_root / "crates/tracedecay-sdk-node/Cargo.toml").is_file():
+        if not sdk_components:
+            raise ValueError("native SDK release is missing its configured dependency scope")
+        sdk_addon = artifact_member(archive, SDK_ADDON)
+        if not sdk_addon:
+            raise ValueError("native SDK release addon is empty")
+    cli_packages = [spdx_package(item) for item in components]
+    sdk_packages = [spdx_package(item) for item in sdk_components]
+    package_map = {str(package["SPDXID"]): package for package in [*cli_packages, *sdk_packages]}
+    packages = list(package_map.values())
+    package_ids = {str(package["SPDXID"]) for package in cli_packages}
+    sdk_package_ids = {str(package["SPDXID"]) for package in sdk_packages}
     archive_package_id = "SPDXRef-Archive"
     mcpb_package_id = "SPDXRef-MCPB"
     binary_id = "SPDXRef-CLI-Binary"
+    sdk_id = "SPDXRef-SDK-Addon"
     with (source_root / "crates/tracedecay-cli/Cargo.toml").open("rb") as source_file:
         product_manifest = tomllib.load(source_file).get("package", {})
     asset_package = lambda name, path, identifier: {
@@ -797,6 +825,23 @@ def release_inventory(
         {"spdxElementId": archive_package_id, "relationshipType": "CONTAINS", "relatedSpdxElement": binary_id},
         {"spdxElementId": mcpb_package_id, "relationshipType": "CONTAINS", "relatedSpdxElement": binary_id},
     ]
+    if sdk_addon is not None:
+        packages.append({
+            "name": SDK_ADDON,
+            "SPDXID": sdk_id,
+            "downloadLocation": f"https://github.com/{repository}",
+            "filesAnalyzed": False,
+            "licenseConcluded": "NOASSERTION",
+            "licenseDeclared": product_manifest.get("license") or "NOASSERTION",
+            "copyrightText": "NOASSERTION",
+            "checksums": [{"algorithm": "SHA256", "checksumValue": hashlib.sha256(sdk_addon).hexdigest()}],
+        })
+        relationships.append({"spdxElementId": archive_package_id, "relationshipType": "CONTAINS", "relatedSpdxElement": sdk_id})
+        for identifier in sorted(sdk_package_ids):
+            relationships.extend([
+                {"spdxElementId": sdk_id, "relationshipType": "DEPENDS_ON", "relatedSpdxElement": identifier},
+                {"spdxElementId": archive_package_id, "relationshipType": "CONTAINS", "relatedSpdxElement": identifier},
+            ])
     for identifier in sorted(package_ids):
         relationships.extend(
             [
@@ -858,6 +903,10 @@ def release_inventory(
         + "/"
         + hashlib.sha256((source_sha + sha256(archive) + sha256(mcpb)).encode()).hexdigest()
     )
+    unique_relationships = {
+        (item["spdxElementId"], item["relationshipType"], item["relatedSpdxElement"]): item
+        for item in relationships
+    }
     document = {
         "spdxVersion": "SPDX-2.3",
         "dataLicense": "CC0-1.0",
@@ -874,7 +923,7 @@ def release_inventory(
         "packages": sorted(packages, key=lambda package: str(package["SPDXID"])),
         "files": sorted(file_entries, key=lambda item: str(item["SPDXID"])),
         "relationships": sorted(
-            relationships,
+            unique_relationships.values(),
             key=lambda item: (
                 item["spdxElementId"],
                 item["relationshipType"],
@@ -907,6 +956,14 @@ def verify_inventory(inventory: Path, archive: Path, mcpb: Path) -> None:
     platform = "x86_64-windows" if archive.name.endswith(".zip") else "x86_64-linux"
     if artifact_binary(archive, platform) != mcpb_contents(mcpb, platform)[1]:
         raise ValueError("native archive and MCPB do not contain identical CLI binaries")
+    sdk_package = by_id.get("SPDXRef-SDK-Addon")
+    if sdk_package is not None:
+        checksums = {
+            checksum.get("algorithm"): checksum.get("checksumValue")
+            for checksum in sdk_package.get("checksums", [])
+        }
+        if checksums.get("SHA256") != hashlib.sha256(artifact_member(archive, SDK_ADDON)).hexdigest():
+            raise ValueError("inventory digest does not match the native SDK addon")
 
 
 def main() -> None:

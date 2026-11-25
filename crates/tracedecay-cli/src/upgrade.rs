@@ -3,7 +3,7 @@
 //! Direct installs use GitHub release assets: the platform archive is
 //! verified against the release's `SHA256SUMS` and its build-provenance
 //! attestation (see [`attestation`]), every required release member (the
-//! executable alone) is staged in an attempt-owned scratch directory, and
+//! executable and Node SDK binding) is staged in an attempt-owned scratch directory, and
 //! only then is it published over the running executable. Installations owned by
 //! a package manager (Homebrew, Scoop) are upgraded by that manager and never
 //! written to directly; see [`UpgradeSource`].
@@ -37,15 +37,12 @@ mod test_server;
 
 const GITHUB_REPO: &str = "ScriptedAlchemy/tracedecay";
 
-/// One member every release archive for this platform must carry. Every
-/// required member is an entry point published with [`RELEASE_MEMBER_MODE`].
+/// One member every release archive for this platform must carry.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct ReleaseMember {
     name: &'static str,
+    mode: u32,
 }
-
-#[cfg(unix)]
-const RELEASE_MEMBER_MODE: u32 = 0o755;
 
 const EXECUTABLE_MEMBER: ReleaseMember = ReleaseMember {
     name: if cfg!(windows) {
@@ -53,16 +50,17 @@ const EXECUTABLE_MEMBER: ReleaseMember = ReleaseMember {
     } else {
         "tracedecay"
     },
+    mode: 0o755,
 };
 
-/// Every member a release archive must contain: the executable alone, on
-/// every platform. The unit test
-/// `required_members_match_the_release_target_manifest` pins this to
-/// `.github/release-targets.json` declaring no runtime companions, so the
-/// installer and the packaging step cannot disagree about what a complete
-/// release is.
+const SDK_MEMBER: ReleaseMember = ReleaseMember {
+    name: "tracedecay_sdk_node.node",
+    mode: 0o644,
+};
+
+/// The executable and the native binding used by offline host bundles.
 fn required_members() -> Vec<ReleaseMember> {
-    vec![EXECUTABLE_MEMBER]
+    vec![EXECUTABLE_MEMBER, SDK_MEMBER]
 }
 
 /// A verified release whose required members sit in an attempt-owned scratch
@@ -435,7 +433,7 @@ fn stage_member(
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        file.set_permissions(std::fs::Permissions::from_mode(RELEASE_MEMBER_MODE))
+        file.set_permissions(std::fs::Permissions::from_mode(member.mode))
             .map_err(io_err("cannot set staged member permissions"))?;
     }
     staged.push(member.name);
@@ -544,30 +542,127 @@ fn publish_release(staged: &StagedRelease) -> Result<(Option<PathBuf>, bool)> {
     }
     #[cfg(not(unix))]
     {
-        let exe = std::env::current_exe().ok();
-        self_replace::self_replace(staged.executable()).map_err(|e| TraceDecayError::Config {
-            message: format!(
-                "binary replacement failed: {e}\n  \
-                 The old version is still in place.\n  \
-                 To upgrade manually: https://github.com/{GITHUB_REPO}/releases/latest"
-            ),
-        })?;
-        Ok((exe, false))
+        let exe = std::env::current_exe()
+            .and_then(|exe| exe.canonicalize())
+            .map_err(io_err("cannot resolve the running executable"))?;
+        let addon = sdk_member_target(&exe)?;
+        let prepared_executable =
+            prepare_member(&staged.executable(), &exe, EXECUTABLE_MEMBER.mode)?;
+        let prepared_addon = prepare_member(&staged.path_of(SDK_MEMBER), &addon, SDK_MEMBER.mode)?;
+        persist_member(prepared_addon, &addon)?;
+        self_replace::self_replace(prepared_executable.path())
+            .map_err(executable_replacement_failed)?;
+        Ok((Some(exe), false))
     }
 }
 
-/// Publishes a staged release by replacing `executable` with its entry point.
+/// Stages both members beside their destinations before replacing either one.
+/// Copy, permission, and invalid-destination failures leave the old pair alone.
+/// The two final renames are individually atomic; a later rename failure is
+/// reported as an incomplete upgrade, never as a successful installation.
 #[cfg(unix)]
 fn publish_release_at(staged: &StagedRelease, executable: &Path) -> Result<bool> {
-    executable.parent().ok_or_else(|| TraceDecayError::Config {
-        message: "cannot determine the running executable's directory".into(),
-    })?;
-    publish_member(&staged.executable(), executable, RELEASE_MEMBER_MODE)?;
+    let addon = sdk_member_target(executable)?;
+    let prepared_executable =
+        prepare_member(&staged.executable(), executable, EXECUTABLE_MEMBER.mode)?;
+    let prepared_addon = prepare_member(&staged.path_of(SDK_MEMBER), &addon, SDK_MEMBER.mode)?;
+    persist_member(prepared_addon, &addon)?;
+    persist_member(prepared_executable, executable).map_err(executable_replacement_failed)?;
     // The archive checksum already matched. This only replaces an ad-hoc or
     // missing signature on the installed Mach-O; a team signature stays.
     // The binary is already the installed one: a codesign failure must not
     // turn into an error that drops that install.
     Ok(codesign_failed(stabilize_installed_executable(executable)))
+}
+
+fn executable_replacement_failed(error: impl fmt::Display) -> TraceDecayError {
+    TraceDecayError::Config {
+        message: format!(
+            "the native SDK binding was installed, but executable replacement failed: {error}. \
+             The installation is incomplete. Retry the update or reinstall the complete release \
+             bundle from https://github.com/{GITHUB_REPO}/releases/latest",
+        ),
+    }
+}
+
+fn sdk_member_target(executable: &Path) -> Result<PathBuf> {
+    let directory = executable.parent().ok_or_else(|| TraceDecayError::Config {
+        message: "cannot determine the running executable's directory".into(),
+    })?;
+    Ok(directory.join(SDK_MEMBER.name))
+}
+
+fn publish_sdk_member(staged: &StagedRelease, executable: &Path) -> Result<()> {
+    publish_member(
+        &staged.path_of(SDK_MEMBER),
+        &sdk_member_target(executable)?,
+        SDK_MEMBER.mode,
+    )
+}
+
+/// Converges a direct install's required binding before publishing an offline
+/// ChatGPT host bundle. An updater that installed only the executable leaves
+/// the new binary responsible for completing its own release artifact set.
+pub(crate) fn ensure_native_sdk_binding() -> Result<()> {
+    let executable = std::env::current_exe()
+        .and_then(|path| path.canonicalize())
+        .map_err(io_err("cannot resolve the running executable"))?;
+    let directory = executable.parent().ok_or_else(|| TraceDecayError::Config {
+        message: "cannot determine the running executable's directory".into(),
+    })?;
+    let addon = directory.join(SDK_MEMBER.name);
+    match std::fs::symlink_metadata(&addon) {
+        Ok(metadata) if metadata.is_file() => return Ok(()),
+        Ok(_) => {
+            return Err(TraceDecayError::Config {
+                message: format!("the native SDK binding '{}' is not a file", addon.display()),
+            });
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(io_err("cannot inspect the installed native SDK binding")(
+                error,
+            ));
+        }
+    }
+    if let UpgradeSource::PackageManager(manager) =
+        upgrade_source_for(&cloud::detect_install_method())
+    {
+        return Err(TraceDecayError::Config {
+            message: format!(
+                "{} installed tracedecay without '{}'; reinstall its complete release bundle before refreshing the ChatGPT integration",
+                manager.label(),
+                SDK_MEMBER.name,
+            ),
+        });
+    }
+    let download = preflight_asset_check(env!("CARGO_PKG_VERSION"), cloud::is_beta())?;
+    let staged = download_and_stage(&download, &required_members())?;
+    publish_matching_sdk_member(
+        &staged,
+        &executable,
+        crate::product_runtime::PRODUCT_BUILD_VERSION,
+    )
+}
+
+fn publish_matching_sdk_member(
+    staged: &StagedRelease,
+    executable: &Path,
+    expected_version: &str,
+) -> Result<()> {
+    let staged_version = installed_binary_version(&staged.executable()).map_err(|error| {
+        TraceDecayError::Config {
+            message: format!("cannot verify the native SDK binding's release identity: {error}"),
+        }
+    })?;
+    if staged_version != expected_version {
+        return Err(TraceDecayError::Config {
+            message: format!(
+                "native SDK binding belongs to tracedecay {staged_version}, but the installed binary is {expected_version}; refusing to mix release artifacts",
+            ),
+        });
+    }
+    publish_sdk_member(staged, executable)
 }
 
 /// `true` when codesign did not complete after the binary was replaced.
@@ -869,10 +964,37 @@ fn finish_versioned_upgrade(
 /// `mode`, then renamed over `target`. Rename swaps directory entries, so a
 /// running executable (`ETXTBSY`) or a currently mapped library is never
 /// written in place, and a failure leaves `target` untouched.
-#[cfg(unix)]
 fn publish_member(source: &Path, target: &Path, mode: u32) -> Result<()> {
+    persist_member(prepare_member(source, target, mode)?, target)
+}
+
+/// Completes all fallible preparation before any member of the release is
+/// published. Destinations must be regular files or absent; an entry point
+/// symlink has already been resolved by `publish_release`.
+fn prepare_member(source: &Path, target: &Path, mode: u32) -> Result<tempfile::NamedTempFile> {
+    #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
 
+    match std::fs::symlink_metadata(target) {
+        Ok(metadata) if metadata.is_file() => {}
+        Ok(_) => {
+            return Err(TraceDecayError::Config {
+                message: format!(
+                    "cannot replace release member '{}': destination is not a regular file",
+                    target.display(),
+                ),
+            });
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => return Err(io_err("cannot inspect release member destination")(error)),
+    }
+    #[cfg(windows)]
+    if target
+        .file_name()
+        .is_some_and(|name| name == SDK_MEMBER.name)
+    {
+        require_sdk_binding_replaceable(target)?;
+    }
     let dir = target.parent().ok_or_else(|| TraceDecayError::Config {
         message: "cannot determine target directory".into(),
     })?;
@@ -882,14 +1004,63 @@ fn publish_member(source: &Path, target: &Path, mode: u32) -> Result<()> {
         .map_err(io_err("cannot stage release member beside its target"))?;
     let mut source = File::open(source).map_err(io_err("cannot open staged release member"))?;
     io::copy(&mut source, sibling.as_file_mut()).map_err(io_err("cannot copy release member"))?;
+    #[cfg(unix)]
     sibling
         .as_file()
         .set_permissions(std::fs::Permissions::from_mode(mode))
         .map_err(io_err("cannot set permissions"))?;
-    sibling
-        .persist(target)
-        .map_err(|error| io_err("cannot replace release member")(error.error))?;
+    #[cfg(not(unix))]
+    let _ = mode;
+    Ok(sibling)
+}
+
+fn persist_member(sibling: tempfile::NamedTempFile, target: &Path) -> Result<()> {
+    sibling.persist(target).map_err(|error| {
+        #[cfg(windows)]
+        if target
+            .file_name()
+            .is_some_and(|name| name == SDK_MEMBER.name)
+        {
+            return native_sdk_replacement_error(target, error.error);
+        }
+        io_err("cannot replace release member")(error.error)
+    })?;
     Ok(())
+}
+
+/// A loaded Node addon is a mapped DLL on Windows. Stopping the daemon does
+/// not close the separate ChatGPT/Node host that owns that mapping. Probe for
+/// exclusive write access before publishing either member of the release;
+/// do not terminate an application that the updater does not own.
+#[cfg(windows)]
+fn require_sdk_binding_replaceable(target: &Path) -> Result<()> {
+    use std::os::windows::fs::OpenOptionsExt;
+
+    match std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .share_mode(0)
+        .open(target)
+    {
+        Ok(probe) => {
+            drop(probe);
+            Ok(())
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(native_sdk_replacement_error(target, error)),
+    }
+}
+
+#[cfg(windows)]
+fn native_sdk_replacement_error(target: &Path, error: io::Error) -> TraceDecayError {
+    TraceDecayError::Config {
+        message: format!(
+            "native SDK binding '{}' cannot be replaced while in use or write-protected: {error}. \
+             Close ChatGPT and any Node process using this installation, check the binding's \
+             permissions, then retry. No release member was replaced",
+            target.display(),
+        ),
+    }
 }
 
 /// Downloads, extracts, and installs the binary for `version`/`is_beta`.
@@ -1920,9 +2091,7 @@ mod tests {
         assert_eq!(result.unwrap(), current);
     }
 
-    /// The installer's idea of a complete release must be the packaging
-    /// step's: `.github/release-targets.json` declares no runtime companions
-    /// for this platform, so the executable is the whole release.
+    /// The installer and packager agree on the runtime companions.
     #[test]
     fn required_members_match_the_release_target_manifest() {
         let manifest: serde_json::Value =
@@ -1936,10 +2105,85 @@ mod tests {
 
         assert_eq!(
             target.and_then(|target| target.get("runtime")),
-            None,
-            "release targets must not declare runtime companions"
+            Some(&serde_json::json!([SDK_MEMBER.name])),
+            "release targets must include the native SDK binding"
         );
-        assert_eq!(required_members(), vec![EXECUTABLE_MEMBER]);
+        assert_eq!(required_members(), vec![EXECUTABLE_MEMBER, SDK_MEMBER]);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_node_host_holding_the_installed_addon_refuses_publication_until_closed() {
+        use std::process::Stdio;
+
+        struct NodeHost(std::process::Child);
+        impl Drop for NodeHost {
+            fn drop(&mut self) {
+                let _ = self.0.kill();
+                let _ = self.0.wait();
+            }
+        }
+
+        let source = PathBuf::from(
+            std::env::var_os("TRACEDECAY_TEST_SDK_ADDON")
+                .expect("Bazel must provide the native SDK addon"),
+        );
+        let install = tempfile::tempdir().unwrap();
+        let executable = install.path().join(EXECUTABLE_MEMBER.name);
+        let addon = install.path().join(SDK_MEMBER.name);
+        std::fs::write(&executable, b"old-executable").unwrap();
+        publish_member(&source, &addon, SDK_MEMBER.mode).unwrap();
+        let original_digest = Sha256::digest(std::fs::read(&addon).unwrap());
+        let ready = install.path().join("host-ready");
+        let mut host = NodeHost(
+            Command::new(std::env::var_os("NODE").expect("Bazel must provide Node"))
+                .arg("-e")
+                .arg(
+                    "const binding = require(process.argv[1]); \
+                     if (typeof binding.NativeClient !== 'function') throw new Error('missing native client'); \
+                     require('node:fs').writeFileSync(process.argv[2], 'ready'); \
+                     setInterval(() => {}, 1000)",
+                )
+                .arg(&addon)
+                .arg(&ready)
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::inherit())
+                .spawn()
+                .unwrap(),
+        );
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !ready.exists() && Instant::now() < deadline {
+            assert!(host.0.try_wait().unwrap().is_none(), "native host exited");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(ready.exists(), "native host did not load its addon");
+
+        let error = prepare_member(&source, &addon, SDK_MEMBER.mode).unwrap_err();
+        assert!(matches!(&error, TraceDecayError::Config { .. }), "{error}");
+        let message = error.to_string();
+        assert!(message.contains("Close ChatGPT"), "{message}");
+        assert!(message.contains("Node process"), "{message}");
+        assert!(
+            message.contains("No release member was replaced"),
+            "{message}"
+        );
+        assert_eq!(std::fs::read(&executable).unwrap(), b"old-executable");
+        assert_eq!(
+            Sha256::digest(std::fs::read(&addon).unwrap()),
+            original_digest
+        );
+        assert_eq!(std::fs::read_dir(install.path()).unwrap().count(), 3);
+
+        host.0.kill().unwrap();
+        host.0.wait().unwrap();
+        publish_member(&source, &addon, SDK_MEMBER.mode).unwrap();
+        assert_eq!(std::fs::read(&executable).unwrap(), b"old-executable");
+        assert_eq!(
+            Sha256::digest(std::fs::read(&addon).unwrap()),
+            original_digest
+        );
+        assert_eq!(std::fs::read_dir(install.path()).unwrap().count(), 3);
     }
 
     #[cfg(unix)]
@@ -1953,17 +2197,17 @@ mod tests {
         use flate2::write::GzEncoder;
         use sha2::{Digest, Sha256};
         use tar::{Builder, EntryType, Header};
+        use tracedecay_runtime_core::test_executable::write_executable_script;
 
         use super::super::test_server::{FakeGitHub, attestations_path};
         use super::super::{
-            EXECUTABLE_MEMBER, RELEASE_MEMBER_MODE, ReleaseDownload, ReleaseMember,
-            ReleaseProvenance, StagedRelease, extract_targz, intended_member, publish_member,
-            publish_release_at, stage_release_in,
+            EXECUTABLE_MEMBER, ReleaseDownload, ReleaseMember, ReleaseProvenance, SDK_MEMBER,
+            StagedRelease, extract_targz, intended_member, publish_matching_sdk_member,
+            publish_member, publish_release_at, required_members, stage_release_in,
         };
 
-        /// The release contract every platform shares: the executable alone.
         fn members() -> Vec<ReleaseMember> {
-            vec![EXECUTABLE_MEMBER]
+            required_members()
         }
 
         struct Entry {
@@ -1998,7 +2242,10 @@ mod tests {
         }
 
         fn complete_release() -> Vec<u8> {
-            targz(&[file("tracedecay", b"new-executable")])
+            targz(&[
+                file("tracedecay", b"new-executable"),
+                file(SDK_MEMBER.name, b"new-addon"),
+            ])
         }
 
         fn stage(archive: &[u8], members: &[ReleaseMember]) -> super::super::Result<StagedRelease> {
@@ -2007,16 +2254,45 @@ mod tests {
             Ok(StagedRelease { scratch })
         }
 
+        // A sibling test's fork can inherit an in-process extraction writer
+        // and keep its executable busy after that writer closes here. Probe
+        // fixtures use the canonical subprocess writer so only the intended
+        // version identity decides whether the binding is published.
+        fn staged_probe_release(version: &str, addon: &[u8]) -> StagedRelease {
+            let scratch = tempfile::tempdir().unwrap();
+            write_executable_script(
+                &scratch.path().join(EXECUTABLE_MEMBER.name),
+                format!("#!/bin/sh\nprintf 'tracedecay {version}\\n'\n"),
+            )
+            .unwrap();
+            fs::write(scratch.path().join(SDK_MEMBER.name), addon).unwrap();
+            StagedRelease { scratch }
+        }
+
         fn mode_of(path: &std::path::Path) -> u32 {
             fs::metadata(path).unwrap().permissions().mode() & 0o777
         }
 
         #[test]
-        fn extraction_stages_the_executable_with_its_publication_mode() {
+        fn extraction_stages_the_executable_and_addon_with_their_publication_modes() {
             let staged = stage(&complete_release(), &members()).unwrap();
 
             assert_eq!(fs::read(staged.executable()).unwrap(), b"new-executable");
-            assert_eq!(mode_of(&staged.executable()), RELEASE_MEMBER_MODE);
+            assert_eq!(mode_of(&staged.executable()), EXECUTABLE_MEMBER.mode);
+            assert_eq!(fs::read(staged.path_of(SDK_MEMBER)).unwrap(), b"new-addon");
+            assert_eq!(mode_of(&staged.path_of(SDK_MEMBER)), SDK_MEMBER.mode);
+        }
+
+        #[test]
+        fn a_release_missing_its_native_binding_is_rejected() {
+            let archive = targz(&[file("tracedecay", b"new-executable")]);
+            let error = stage(&archive, &members()).unwrap_err();
+            assert!(
+                error
+                    .to_string()
+                    .contains("missing required member(s): tracedecay_sdk_node.node"),
+                "{error}"
+            );
         }
 
         #[test]
@@ -2092,17 +2368,19 @@ mod tests {
             let scratch = tempfile::tempdir().unwrap();
             let archive = targz(&[
                 file("tracedecay", b"new-executable"),
+                file(SDK_MEMBER.name, b"new-addon"),
                 file("bin/tracedecay", b"nested-decoy"),
                 file("README", b"unrequested"),
             ]);
 
             extract_targz(Cursor::new(&archive[..]), scratch.path(), &members()).unwrap();
 
-            let staged: Vec<String> = fs::read_dir(scratch.path())
+            let mut staged: Vec<String> = fs::read_dir(scratch.path())
                 .unwrap()
                 .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
                 .collect();
-            assert_eq!(staged, ["tracedecay"]);
+            staged.sort();
+            assert_eq!(staged, ["tracedecay", SDK_MEMBER.name]);
             assert_eq!(
                 fs::read(scratch.path().join("tracedecay")).unwrap(),
                 b"new-executable"
@@ -2110,39 +2388,150 @@ mod tests {
         }
 
         #[test]
-        fn publishing_replaces_the_executable_and_leaves_no_staging_sibling() {
+        fn publishing_replaces_the_executable_and_addon_without_retaining_staging() {
             let staged = stage(&complete_release(), &members()).unwrap();
             let install = tempfile::tempdir().unwrap();
             let executable = install.path().join("tracedecay");
             fs::write(&executable, b"old-executable").unwrap();
+            let addon = install.path().join(SDK_MEMBER.name);
+            fs::write(&addon, b"old-addon").unwrap();
 
             publish_release_at(&staged, &executable).unwrap();
 
             assert_eq!(fs::read(&executable).unwrap(), b"new-executable");
-            assert_eq!(mode_of(&executable), RELEASE_MEMBER_MODE);
-            let published: Vec<String> = fs::read_dir(install.path())
+            assert_eq!(mode_of(&executable), EXECUTABLE_MEMBER.mode);
+            assert_eq!(fs::read(&addon).unwrap(), b"new-addon");
+            assert_eq!(mode_of(&addon), SDK_MEMBER.mode);
+            let mut published: Vec<String> = fs::read_dir(install.path())
                 .unwrap()
                 .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
                 .collect();
+            published.sort();
             assert_eq!(
                 published,
-                ["tracedecay"],
+                ["tracedecay", SDK_MEMBER.name],
                 "no staging sibling may outlive publication"
             );
+        }
+
+        #[test]
+        fn an_invalid_destination_preserves_both_installed_release_members() {
+            use std::os::unix::fs::symlink;
+
+            for blocked_member in [EXECUTABLE_MEMBER, SDK_MEMBER] {
+                for symlinked in [false, true] {
+                    let staged = stage(&complete_release(), &members()).unwrap();
+                    let install = tempfile::tempdir().unwrap();
+                    let executable = install.path().join(EXECUTABLE_MEMBER.name);
+                    let addon = install.path().join(SDK_MEMBER.name);
+                    fs::write(&executable, b"old-executable").unwrap();
+                    fs::write(&addon, b"old-addon").unwrap();
+                    let occupied = install.path().join(blocked_member.name);
+                    fs::remove_file(&occupied).unwrap();
+                    let protected = tempfile::tempdir().unwrap();
+                    fs::write(protected.path().join("marker"), b"keep").unwrap();
+                    if symlinked {
+                        symlink(protected.path(), &occupied).unwrap();
+                    } else {
+                        fs::create_dir(&occupied).unwrap();
+                        fs::write(occupied.join("marker"), b"keep").unwrap();
+                    }
+
+                    let error = publish_release_at(&staged, &executable).unwrap_err();
+
+                    assert!(error.to_string().contains("not a regular file"), "{error}");
+                    assert_eq!(fs::read(occupied.join("marker")).unwrap(), b"keep");
+                    assert_eq!(fs::read(protected.path().join("marker")).unwrap(), b"keep");
+                    if blocked_member == EXECUTABLE_MEMBER {
+                        assert_eq!(fs::read(&addon).unwrap(), b"old-addon");
+                    } else {
+                        assert_eq!(fs::read(&executable).unwrap(), b"old-executable");
+                    }
+                    assert_eq!(fs::read_dir(install.path()).unwrap().count(), 2);
+                }
+            }
+        }
+
+        #[test]
+        fn failed_addon_preparation_preserves_the_installed_pair_and_cleans_staging() {
+            let staged = stage(&complete_release(), &members()).unwrap();
+            fs::remove_file(staged.path_of(SDK_MEMBER)).unwrap();
+            let install = tempfile::tempdir().unwrap();
+            let executable = install.path().join(EXECUTABLE_MEMBER.name);
+            let addon = install.path().join(SDK_MEMBER.name);
+            fs::write(&executable, b"old-executable").unwrap();
+            fs::write(&addon, b"old-addon").unwrap();
+
+            let error = publish_release_at(&staged, &executable).unwrap_err();
+
+            assert!(
+                error
+                    .to_string()
+                    .contains("cannot open staged release member"),
+                "{error}"
+            );
+            assert_eq!(fs::read(&executable).unwrap(), b"old-executable");
+            assert_eq!(fs::read(&addon).unwrap(), b"old-addon");
+            assert_eq!(fs::read_dir(install.path()).unwrap().count(), 2);
+        }
+
+        #[test]
+        fn completing_a_matching_release_adds_only_its_missing_binding() {
+            let staged = staged_probe_release(
+                "1.0.0+0123456789abcdef0123456789abcdef01234567",
+                b"matching-addon",
+            );
+            let install = tempfile::tempdir().unwrap();
+            let executable = install.path().join("tracedecay");
+            fs::write(&executable, b"installed-executable").unwrap();
+
+            publish_matching_sdk_member(
+                &staged,
+                &executable,
+                "1.0.0+0123456789abcdef0123456789abcdef01234567",
+            )
+            .unwrap();
+
+            assert_eq!(fs::read(&executable).unwrap(), b"installed-executable");
+            let addon = install.path().join(SDK_MEMBER.name);
+            assert_eq!(fs::read(&addon).unwrap(), b"matching-addon");
+            assert_eq!(mode_of(&addon), SDK_MEMBER.mode);
+        }
+
+        #[test]
+        fn a_binding_from_another_build_cannot_complete_the_install() {
+            let staged = staged_probe_release("1.0.0+another-build", b"foreign-addon");
+            let install = tempfile::tempdir().unwrap();
+            let executable = install.path().join("tracedecay");
+            fs::write(&executable, b"installed-executable").unwrap();
+            let error = publish_matching_sdk_member(
+                &staged,
+                &executable,
+                "1.0.0+0123456789abcdef0123456789abcdef01234567",
+            )
+            .unwrap_err();
+
+            assert!(
+                error
+                    .to_string()
+                    .contains("refusing to mix release artifacts"),
+                "{error}"
+            );
+            assert_eq!(fs::read(&executable).unwrap(), b"installed-executable");
+            assert!(!install.path().join(SDK_MEMBER.name).exists());
         }
 
         #[test]
         fn a_failed_member_publication_leaves_the_target_untouched() {
             let staged = stage(&complete_release(), &members()).unwrap();
             let install = tempfile::tempdir().unwrap();
-            // The target name is occupied by a directory, so the rename over it
-            // must fail after the sibling was fully staged.
+            // A directory at the exact destination is refused before staging.
             let occupied = install.path().join("tracedecay");
             fs::create_dir(&occupied).unwrap();
             fs::write(occupied.join("marker"), b"keep").unwrap();
 
-            let error =
-                publish_member(&staged.executable(), &occupied, RELEASE_MEMBER_MODE).unwrap_err();
+            let error = publish_member(&staged.executable(), &occupied, EXECUTABLE_MEMBER.mode)
+                .unwrap_err();
 
             assert!(
                 error.to_string().contains("cannot replace release member"),

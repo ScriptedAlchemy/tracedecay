@@ -1,5 +1,6 @@
 // Invoked by the physical-daemon transport journey after building this SDK.
 import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 const {
   createClient,
@@ -9,7 +10,9 @@ const {
 } = await import(pathToFileURL(process.argv[2]).href);
 
 const { connection, operation, request, deadlineMicros, allowSuccess = false } = JSON.parse(readFileSync(0, "utf8"));
-const client = createClient(connection);
+// Bazel stages the addon this journey loads, as an offline host would.
+const addon = resolve(process.env.JS_BINARY__RUNFILES, "_main", process.env.TRACEDECAY_SDK_ADDON);
+const client = createClient({ ...connection, addon });
 try {
   const options = deadlineMicros === null ? {} : { deadlineMicros };
   const allowed = ["fact_store_add", "fact_store_search", "storage_status", "session_refresh_begin",

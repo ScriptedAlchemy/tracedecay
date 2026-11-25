@@ -20,7 +20,15 @@ WORKFLOW_PATH = REPOSITORY_ROOT / ".github/workflows/release.yml"
 SOURCE_SHA_REF = "${{ needs.validate-release.outputs.source_sha }}"
 REPO_GUARD = "github.repository == 'ScriptedAlchemy/tracedecay'"
 BUILD_JOB = "build-typescript"
+NATIVE_BUILD_JOB = "build-native-sdk"
 PUBLISH_JOB = "publish-typescript"
+NATIVE_GUARD = REPO_GUARD + " && needs.validate-release.outputs.native_sdk == 'true'"
+BUILD_GUARD = (
+    "always() && " + REPO_GUARD + " && "
+    "needs.validate-release.result == 'success' && "
+    "((needs.validate-release.outputs.native_sdk == 'true' && needs.build-native-sdk.result == 'success') || "
+    "(needs.validate-release.outputs.native_sdk == 'false' && needs.build-native-sdk.result == 'skipped'))"
+)
 
 
 def fail(message: str) -> None:
@@ -76,29 +84,35 @@ def validate(workflow: dict[str, Any]) -> None:
             or release_tag.get("type") != "string"):
         fail("release dispatch must require a string release_tag input")
     jobs = workflow.get("jobs", {})
-    if not {"validate-release", "verify-release", BUILD_JOB, PUBLISH_JOB} <= jobs.keys():
+    if not {"validate-release", "verify-release", BUILD_JOB, NATIVE_BUILD_JOB, PUBLISH_JOB} <= jobs.keys():
         fail("source validation, release verification, SDK build and publisher are required")
     build, publish = jobs[BUILD_JOB], jobs[PUBLISH_JOB]
-    for name, job in ((BUILD_JOB, build), (PUBLISH_JOB, publish)):
-        if job.get("if") != REPO_GUARD or job.get("continue-on-error", False) is not False:
+    native = jobs[NATIVE_BUILD_JOB]
+    for name, job, guard in ((BUILD_JOB, build, BUILD_GUARD),
+                             (NATIVE_BUILD_JOB, native, NATIVE_GUARD),
+                             (PUBLISH_JOB, publish, REPO_GUARD)):
+        if " ".join(str(job.get("if", "")).split()) != guard or job.get("continue-on-error", False) is not False:
             fail(f"{name} must require successful dependencies in the owning repository")
-    if build.get("needs") != "validate-release" or build.get("permissions") != {"contents": "read"}:
+    if (set(build.get("needs", [])) != {"validate-release", NATIVE_BUILD_JOB}
+            or native.get("needs") != "validate-release"
+            or any(job.get("permissions") != {"contents": "read"} for job in (build, native))):
         fail("SDK build must depend on source validation and have read-only permissions")
-    if "environment" in build:
-        fail("SDK build must not hold protected-environment authority")
-    build_steps = reviewed_steps(steps(build))
-    checkouts = actions(build_steps, "actions/checkout")
-    if len(checkouts) != 1 or not build_steps or checkouts[0] is not build_steps[0]:
-        fail("SDK build must first and only check out the validated source")
-    checkout = checkouts[0]
-    options = checkout.get("with", {})
-    if (options.get("ref") != SOURCE_SHA_REF or options.get("persist-credentials") is not False
-            or "repository" in options or checkout.get("if") or checkout.get("continue-on-error")):
-        fail("SDK checkout must use the validated source SHA without persisted credentials")
-    checkout_path = options.get("path", ".")
-    if not isinstance(checkout_path, str) or PurePosixPath(checkout_path) != PurePosixPath("."):
-        fail("SDK checkout must place the validated source at the workspace root")
-    check_build_credentials(build)
+    for job in (build, native):
+        if "environment" in job:
+            fail("SDK build must not hold protected-environment authority")
+        build_steps = reviewed_steps(steps(job))
+        checkouts = actions(build_steps, "actions/checkout")
+        if len(checkouts) != 1 or not build_steps or checkouts[0] is not build_steps[0]:
+            fail("SDK build must first and only check out the validated source")
+        checkout = checkouts[0]
+        options = checkout.get("with", {})
+        if (options.get("ref") != SOURCE_SHA_REF or options.get("persist-credentials") is not False
+                or "repository" in options or checkout.get("if") or checkout.get("continue-on-error")):
+            fail("SDK checkout must use the validated source SHA without persisted credentials")
+        checkout_path = options.get("path", ".")
+        if not isinstance(checkout_path, str) or PurePosixPath(checkout_path) != PurePosixPath("."):
+            fail("SDK checkout must place the validated source at the workspace root")
+        check_build_credentials(job)
 
     if set(publish.get("needs", [])) != {"validate-release", "verify-release", BUILD_JOB}:
         fail("SDK publisher must depend on source validation, release verification and the SDK build")

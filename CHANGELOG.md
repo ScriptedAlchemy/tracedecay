@@ -5,6 +5,32 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.0-beta.112](https://github.com/ScriptedAlchemy/tracedecay/compare/v1.0.0-beta.111...v1.0.0-beta.112) (2026-11-25)
+
+
+### ⚠ BREAKING CHANGES
+
+* **sdk:** `ClientOptions.fetch` is removed. A Node >= 20 host needs the platform package for its OS/arch, or an explicit `addon` path. Error classes are unchanged but messages now come from the Rust client. Event names outside the canonical set, problem records with unknown or inconsistent fields, lone-CR line endings, a byte-order mark, malformed UTF-8, and a body ending inside a frame are protocol failures. `retry:` fields are ignored. The README documents the migration.
+
+### Features
+
+* **sdk:** run the Node SDK lifecycle in the shared Rust protocol ([#4963](https://github.com/ScriptedAlchemy/tracedecay/issues/4963)) ([509647a](https://github.com/ScriptedAlchemy/tracedecay/commit/509647a17284774341e352718dd9835bf487fb29))
+
+
+### Bug Fixes
+
+* **retention:** unblock sealed generation retirement on busy stores ([#4955](https://github.com/ScriptedAlchemy/tracedecay/issues/4955)) ([6e68c35](https://github.com/ScriptedAlchemy/tracedecay/commit/6e68c3518031d1e3f975e97136139a5c4fcf3f4a))
+* **sessions:** keep converged frontiers current on refused rechecks ([#4956](https://github.com/ScriptedAlchemy/tracedecay/issues/4956)) ([e4e979f](https://github.com/ScriptedAlchemy/tracedecay/commit/e4e979fc3f2ed280b671b81cee2b7b79f29ef9af))
+* **sqlite:** preserve reader locks and account for TEMP spill ([#4951](https://github.com/ScriptedAlchemy/tracedecay/issues/4951)) ([063266c](https://github.com/ScriptedAlchemy/tracedecay/commit/063266c478b40224838f36733929da3b8a3d9b23))
+* **stack:** restore scope drift intervals after restart ([#4961](https://github.com/ScriptedAlchemy/tracedecay/issues/4961)) ([fc80c47](https://github.com/ScriptedAlchemy/tracedecay/commit/fc80c47e205a2f96f565b029a306f915a0f751e7)), closes [#4436](https://github.com/ScriptedAlchemy/tracedecay/issues/4436)
+* **work:** authorize journal command replay before comparison ([#4954](https://github.com/ScriptedAlchemy/tracedecay/issues/4954)) ([6a4fced](https://github.com/ScriptedAlchemy/tracedecay/commit/6a4fced9b872e818b302fd365f42710dea12ea2a))
+
+
+### Performance Improvements
+
+* **code-index:** authenticate sealed packs in one pass ([#4952](https://github.com/ScriptedAlchemy/tracedecay/issues/4952)) ([9c289b6](https://github.com/ScriptedAlchemy/tracedecay/commit/9c289b6036edda55321838bee86a0f0c25b728f5))
+* **work:** defer dashboard execution accounting ([#4953](https://github.com/ScriptedAlchemy/tracedecay/issues/4953)) ([2f47031](https://github.com/ScriptedAlchemy/tracedecay/commit/2f470316449d5e357419b36840c3ce2bd0887487))
+
 ## [1.0.0-beta.111](https://github.com/ScriptedAlchemy/tracedecay/compare/v1.0.0-beta.110...v1.0.0-beta.111) (2026-11-22)
 
 

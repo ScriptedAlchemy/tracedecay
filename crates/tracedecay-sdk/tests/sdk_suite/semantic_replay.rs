@@ -67,7 +67,7 @@ fn public_curator_client_replays_one_durable_effect_and_rejects_foreign_identiti
         serde_json::json!({
             "run_id": VALID_REQUEST_ID,
             "task": "memory_curator",
-            "request_digest": accepted.result.request_digest.as_str(),
+            "request_digest": accepted.result.as_ref().expect("admitted curator receipt").request_digest.as_str(),
             "state": "started",
         })
     );

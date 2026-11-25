@@ -38,11 +38,16 @@ use super::{Diagnostic, is_diagnostic_level};
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_runtime_core::background_cpu::ProcessBackgroundCpuV1;
 use tracedecay_runtime_core::cancellation::CancellationToken;
-use tracedecay_runtime_core::git::{GitCommandBounds, GitCommandError, bounded_command_output};
+use tracedecay_runtime_core::git::{
+    GitCommandBounds, GitCommandError, bounded_command_output_with_resident_memory,
+};
 use tracedecay_runtime_core::native_runtime;
+use tracedecay_runtime_core::resident_memory::{
+    ProcessResidentMemoryV1, ResidentMemoryComponentIdV1,
+};
 
 /// Limit simultaneous compiler children as well as their background CPU demand.
-const MAX_CONCURRENT_COMPILERS: usize = 4;
+const MAX_CONCURRENT_COMPILERS: usize = 1;
 
 /// A shared ownership token for one build-info path's serialization lock.
 /// Clones let abandoned async checks retain the lock in detached compiler
@@ -58,16 +63,21 @@ pub struct TypeScriptCompilerAdmission {
     permits: Arc<Semaphore>,
     build_info_locks: Arc<Mutex<BTreeMap<PathBuf, Weak<Mutex<()>>>>>,
     background_cpu: Arc<ProcessBackgroundCpuV1>,
+    resident_memory: Arc<ProcessResidentMemoryV1>,
     cancellation: CancellationToken,
 }
 
 impl TypeScriptCompilerAdmission {
     #[must_use]
-    pub fn new(background_cpu: Arc<ProcessBackgroundCpuV1>) -> Self {
+    pub fn new(
+        background_cpu: Arc<ProcessBackgroundCpuV1>,
+        resident_memory: Arc<ProcessResidentMemoryV1>,
+    ) -> Self {
         Self {
             permits: Arc::new(Semaphore::new(MAX_CONCURRENT_COMPILERS)),
             build_info_locks: Arc::new(Mutex::new(BTreeMap::new())),
             background_cpu,
+            resident_memory,
             cancellation: CancellationToken::new(),
         }
     }
@@ -157,6 +167,7 @@ where
         max_stderr_bytes: limits.max_stderr_bytes,
     };
     let background_cpu = Arc::clone(&admission.background_cpu);
+    let resident_memory = Arc::clone(&admission.resident_memory);
     // The permit and build-info lock remain with the blocking runner until
     // the child is killed and reaped, even when its async waiter is dropped.
     native_runtime::spawn_blocking(move || {
@@ -181,7 +192,9 @@ where
                     GitCommandError::DeadlineExceeded
                 }
             })?;
-        bounded_command_output(cmd, None, &bounds)
+        let component = ResidentMemoryComponentIdV1::new("typescript.compiler")
+            .map_err(|error| GitCommandError::Wait(std::io::Error::other(error)))?;
+        bounded_command_output_with_resident_memory(cmd, &bounds, &resident_memory, component)
     })
     .await
     .map_err(|error| TraceDecayError::Config {
@@ -194,6 +207,9 @@ where
             }
             GitCommandError::ReadOutput { stream, source } => {
                 format!("failed to read `{}` {stream}: {source}", compiler.display())
+            }
+            GitCommandError::Wait(source) => {
+                format!("`{}` supervision failed: {source}", compiler.display())
             }
             other => format!("`{}` did not finish: {other}", compiler.display()),
         },
@@ -579,6 +595,11 @@ pub fn parse_tsc_line(line: &str) -> Option<Diagnostic> {
 mod tests {
     use super::*;
     #[cfg(unix)]
+    use std::num::NonZeroU64;
+    use tracedecay_runtime_core::resident_memory::DEFAULT_PROCESS_RESIDENT_MEMORY_LIMIT_V1;
+    #[cfg(unix)]
+    use tracedecay_runtime_core::resident_memory::ResidentMemoryPressureV1;
+    #[cfg(unix)]
     use tracedecay_runtime_core::test_executable::write_executable_script;
 
     #[test]
@@ -713,9 +734,71 @@ src/b.ts(2,2): warning TS6133: Second.
     }
 
     fn admission() -> TypeScriptCompilerAdmission {
-        TypeScriptCompilerAdmission::new(Arc::new(ProcessBackgroundCpuV1::new(
-            std::num::NonZeroUsize::new(MAX_CONCURRENT_COMPILERS).unwrap(),
-        )))
+        TypeScriptCompilerAdmission::new(
+            Arc::new(ProcessBackgroundCpuV1::new(std::num::NonZeroUsize::MIN)),
+            Arc::new(ProcessResidentMemoryV1::new(
+                DEFAULT_PROCESS_RESIDENT_MEMORY_LIMIT_V1,
+            )),
+        )
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn compiler_refusal_reaps_the_child_and_releases_its_shared_memory() {
+        let project = tempfile::tempdir().unwrap();
+        let compiler = project.path().join("tsc");
+        write_executable_script(
+            &compiler,
+            "#!/bin/sh\necho started > ran\nsleep 30\necho completed >> ran\n",
+        )
+        .unwrap();
+        let limits = CheckLimits {
+            deadline: Duration::from_secs(5),
+            max_stdout_bytes: 1024,
+            max_stderr_bytes: 1024,
+        };
+        let limit = NonZeroU64::new(2049).unwrap();
+        let pressure = Arc::new(ResidentMemoryPressureV1::with_sampler(
+            limit,
+            Arc::new(|| None),
+        ));
+        let memory = Arc::new(ProcessResidentMemoryV1::with_pressure(limit, pressure));
+        let admission = TypeScriptCompilerAdmission::new(
+            Arc::new(ProcessBackgroundCpuV1::new(std::num::NonZeroUsize::MIN)),
+            Arc::clone(&memory),
+        );
+        let foreground = memory
+            .reserve_process_shared(
+                ResidentMemoryComponentIdV1::new("foreground.fixture").unwrap(),
+                NonZeroU64::new(2).unwrap(),
+            )
+            .unwrap();
+        let run = || {
+            block(run_admitted(
+                &admission,
+                &compiler,
+                project.path(),
+                ["--version"],
+                None,
+                limits,
+            ))
+        };
+        let before_spawn = run().unwrap_err().to_string();
+        assert!(before_spawn.contains("requested=2048"), "{before_spawn}");
+        assert!(!project.path().join("ran").exists());
+        drop(foreground);
+
+        let after_spawn = run().unwrap_err().to_string();
+        assert!(
+            after_spawn.contains("resident-memory admission denied"),
+            "{after_spawn}"
+        );
+        assert!(!after_spawn.contains("requested=2048 "), "{after_spawn}");
+        let marker = project.path().join("ran");
+        if marker.exists() {
+            assert_eq!(std::fs::read_to_string(marker).unwrap(), "started\n");
+        }
+        assert_eq!(memory.snapshot().used_bytes, 0);
     }
 
     #[tokio::test]
@@ -1106,7 +1189,12 @@ src/b.ts(2,2): warning TS6133: Second.
         let cpu = Arc::new(ProcessBackgroundCpuV1::new(
             std::num::NonZeroUsize::new(1).unwrap(),
         ));
-        let admission = TypeScriptCompilerAdmission::new(Arc::clone(&cpu));
+        let admission = TypeScriptCompilerAdmission::new(
+            Arc::clone(&cpu),
+            Arc::new(ProcessResidentMemoryV1::new(
+                DEFAULT_PROCESS_RESIDENT_MEMORY_LIMIT_V1,
+            )),
+        );
         let held = cpu.acquire();
         let release = std::thread::spawn({
             let cpu = Arc::clone(&cpu);
@@ -1280,9 +1368,7 @@ src/b.ts(2,2): warning TS6133: Second.
             .map(|line| line.trim().parse::<usize>().unwrap())
             .max()
             .unwrap();
-        assert!(
-            (2..=MAX_CONCURRENT_COMPILERS).contains(&peak),
-            "peak concurrent compilers {peak}"
-        );
+        assert_eq!(seen.lines().count(), results.len());
+        assert_eq!(peak, MAX_CONCURRENT_COMPILERS);
     }
 }

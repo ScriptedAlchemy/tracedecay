@@ -613,6 +613,26 @@ tracedecay tool configuration_set --args '{"layer":{"kind":"user_profile","profi
 Read the current value and revision with `tracedecay tool configuration_get
 --args '{"key":"user.repeated_query_hints.v1"}'`.
 
+### Disabling automatic TypeScript diagnostics
+
+Automatic TypeScript diagnostics use the project's installed `tsc` after the
+code index is ready for queries. The daemon runs one compiler at a time and
+aborts the check if sampled compiler memory cannot fit its shared budget.
+Code search and manual diagnostic publication do not require the automatic
+producer.
+
+To disable the producer for a project, read its current value and revision,
+then apply a project-layer override and restart the daemon:
+
+```bash
+tracedecay tool configuration_get --args '{"key":"diagnostics.typescript_enabled.v1"}'
+tracedecay tool configuration_set --args '{"layer":{"kind":"project","project_id":"<id>"},"key":"diagnostics.typescript_enabled.v1","value":{"kind":"boolean","value":false},"expected_revision":"<revision>","idempotency_key":"<key>"}'
+tracedecay daemon restart
+```
+
+The default is `true`. Set the key back to `true` with the current revision and
+a new idempotency key, then restart, to resume automatic diagnostics.
+
 ### Pausing automatic history imports
 
 The profile setting `user.session_history_import_enabled.v1` controls automatic

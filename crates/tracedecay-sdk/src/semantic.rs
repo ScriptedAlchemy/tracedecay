@@ -1,16 +1,17 @@
 //! Cross-field result validation selected by generated operation metadata.
 
 use serde_json::Value;
-use tracedecay_contracts::RequestId;
 use tracedecay_contracts::retained_surfaces::{
     FactStoreCurateRequestV1, FactStoreCurateResultV1, SdkResultSemanticsV1,
 };
+use tracedecay_contracts::{RequestId, ResolvedScope};
 
 pub(crate) fn response_matches(
     semantics: SdkResultSemanticsV1,
     request_id: &str,
     expected_request_id: Option<&RequestId>,
     request: &Value,
+    scope: &Value,
     result: &Value,
 ) -> bool {
     if expected_request_id.is_some_and(|expected| expected.as_str() != request_id) {
@@ -19,6 +20,13 @@ pub(crate) fn response_matches(
     match semantics {
         SdkResultSemanticsV1::SchemaOnly => true,
         SdkResultSemanticsV1::FactStoreCurateReceipt => {
+            // The receipt is bound to the scope the daemon resolved; a scope
+            // whose digest does not commit to its identity is not that scope.
+            let scope_is_canonical = serde_json::from_value::<ResolvedScope>(scope.clone())
+                .is_ok_and(|scope| scope.validate().is_ok());
+            if !scope_is_canonical {
+                return false;
+            }
             let Ok(request_id) = RequestId::new(request_id.to_owned()) else {
                 return false;
             };
@@ -38,10 +46,11 @@ pub(crate) fn response_matches(
 #[cfg(test)]
 mod tests {
     use serde_json::json;
-    use tracedecay_contracts::RequestId;
     use tracedecay_contracts::retained_surfaces::{
         FactStoreCurateRequestV1, FactStoreCurateResultV1, SdkResultSemanticsV1,
     };
+    use tracedecay_contracts::{RequestId, ResolvedScope};
+    use tracedecay_domain::{ProjectId, RepositoryId, WorktreeId};
 
     use super::response_matches;
 
@@ -58,17 +67,37 @@ mod tests {
         assert_eq!(receipt["run_id"], "request.sdk.curate");
         assert_eq!(receipt["task"], "memory_curator");
         assert_eq!(receipt["state"], "started");
-        let matches = |request_id: &str, result: &serde_json::Value| {
-            response_matches(
-                SdkResultSemanticsV1::FactStoreCurateReceipt,
-                request_id,
+        let scope = serde_json::to_value(
+            ResolvedScope::new(
+                ProjectId::new("project.sdk").expect("project id"),
+                RepositoryId::new("repository.sdk").expect("repository id"),
+                WorktreeId::new("worktree.sdk").expect("worktree id"),
                 None,
-                &request,
-                result,
             )
-        };
+            .expect("resolved scope"),
+        )
+        .expect("scope json");
+        let matches_in =
+            |scope: &serde_json::Value, request_id: &str, result: &serde_json::Value| {
+                response_matches(
+                    SdkResultSemanticsV1::FactStoreCurateReceipt,
+                    request_id,
+                    None,
+                    &request,
+                    scope,
+                    result,
+                )
+            };
+        let matches =
+            |request_id: &str, result: &serde_json::Value| matches_in(&scope, request_id, result);
         assert!(matches("request.sdk.curate", &receipt));
         assert!(!matches("request.sdk.foreign", &receipt));
+        let mut forged_scope = scope.clone();
+        forged_scope["scope_digest"] = json!(format!("sha256:{}", "9".repeat(64)));
+        assert!(
+            !matches_in(&forged_scope, "request.sdk.curate", &receipt),
+            "a scope digest that does not commit to its identity is refused"
+        );
 
         let mut terminal = receipt.clone();
         let object = terminal.as_object_mut().expect("receipt object");

@@ -141,8 +141,24 @@ def main() -> None:
     package_build_required = any(
         not target.get("inventory_only", False) for target in missing
     )
+    current_by_name = {target["name"]: target for target in execution_targets}
+    # SDK packages need the full source roster, even when daemon assets have
+    # already shipped. Historical releases without a native SDK may have
+    # retired targets; their completed assets still need no execution runner.
+    supported = [
+        target for target in targets
+        if all(
+            current_by_name.get(target["name"], {}).get(field) == target[field]
+            for field in ("target", "archive")
+        )
+    ]
+    release_matrix = json.dumps(
+        {"include": execution_matrix(supported, execution_targets)},
+        separators=(",", ":"),
+    )
     with arguments.github_output.open("a", encoding="utf-8") as output:
         output.write(f"matrix={matrix}\n")
+        output.write(f"release_matrix={release_matrix}\n")
         output.write(f"build_required={'true' if missing else 'false'}\n")
         output.write(
             f"package_build_required={'true' if package_build_required else 'false'}\n"

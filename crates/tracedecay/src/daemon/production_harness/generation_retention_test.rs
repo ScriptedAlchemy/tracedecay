@@ -2,12 +2,17 @@
 use super::super::production_harness::ProductionProjectCompositionHarnessV1;
 use std::collections::BTreeSet;
 use std::path::Path;
+use std::sync::Arc;
 use std::time::Duration;
 
 use tempfile::TempDir;
+use tracedecay_code_index::graph_projection::{
+    CODE_GRAPH_PROJECTOR_REVISION, CodeGraphReadinessRequirement, code_graph_generation_id,
+};
 use tracedecay_contracts::doctor::DoctorStorageFamilyReadV1;
 use tracedecay_contracts::storage::compaction::CompactionThresholdConfig;
 use tracedecay_domain::{CodeGenerationId, canonical_text::sha256_hex};
+use tracedecay_graph_db::{GraphProjectorRevision, NeverCancelled};
 
 use crate::daemon::maintenance::project_store_maintenance_lease;
 use crate::test_support::git::git;
@@ -289,6 +294,149 @@ async fn mounted_code_generation_retention_continues_capped_segment_reclamation(
         "the Doctor census still reads the retained store: {findings_after:?}"
     );
 
+    drop(graph);
+    harness.shutdown().await;
+}
+
+/// The scheduled maintenance path must preserve a real mounted reader's old
+/// sealed graph, then reclaim it after that reader releases its admission.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn mounted_retention_preserves_a_reader_then_reclaims_its_sealed_generation() {
+    let isolation = TempDir::new().expect("isolated production composition");
+    let project_root = isolation.path().join("project");
+    std::fs::create_dir_all(&project_root).expect("project root");
+    initialize_git_project(&project_root);
+    let harness =
+        ProductionProjectCompositionHarnessV1::open(isolation.path(), [project_root.clone()])
+            .await
+            .expect("mounted production composition");
+    let resources = harness.resources.as_ref().expect("live harness resources");
+    let schedulers = &resources.invocation.code_index_schedulers;
+    let graph = harness
+        .server(&project_root)
+        .expect("project server")
+        .cg_snapshot()
+        .await;
+    let canonical_root =
+        canonical_existing_identity(graph.project_root()).expect("canonical project root");
+    let target = graph.configuration_runtime().configuration_target();
+    let scope = tracedecay_code_index_runtime::resolved_scope_for_project(
+        &canonical_root,
+        &target.project_id,
+    )
+    .expect("mounted code-index scope");
+    let serving = schedulers
+        .latest_text_serving_for_scope(&scope)
+        .await
+        .expect("text owner");
+    let store = serving
+        .interactive_graph_store()
+        .expect("published graph store");
+    let first = store.generation().clone();
+    let admission = store
+        .await_rewarm_and_retain_for(
+            Duration::from_secs(5),
+            CodeGraphReadinessRequirement::Catalog,
+        )
+        .expect("admit the graph reader");
+    let reader = store
+        .interactive_reader_with_cancellation(&first, Arc::new(NeverCancelled))
+        .expect("retain the first published graph");
+    // Only the reader may keep the old snapshot alive across publication.
+    drop(admission);
+    drop(store);
+    drop(serving);
+
+    let graph_generation = code_graph_generation_id(
+        &first,
+        &GraphProjectorRevision::try_from(CODE_GRAPH_PROJECTOR_REVISION.to_owned())
+            .expect("projector revision"),
+    )
+    .expect("canonical graph generation");
+    let sealed_root = graph.db().database_path().with_extension("sealed");
+    let first_directory = std::fs::read_dir(&sealed_root)
+        .expect("sealed graph store")
+        .map(|entry| entry.expect("sealed store entry").path())
+        .find(|path| {
+            let receipt_path = path.join("sealed.json");
+            if !receipt_path.is_file() {
+                return false;
+            }
+            let receipt: serde_json::Value = serde_json::from_slice(
+                &std::fs::read(receipt_path).expect("sealed generation receipt"),
+            )
+            .expect("valid sealed generation receipt");
+            receipt["generation"].as_str() == Some(graph_generation.as_str())
+        })
+        .expect("the reader's exact sealed generation exists");
+
+    let mut latest = first.clone();
+    for revision in 1..=4 {
+        latest = publish_code_edit(schedulers, &canonical_root, &latest, revision).await;
+    }
+    let observations = resources.store_administration.store_telemetry_sampling();
+    let cancellation = tracedecay_runtime_core::cancellation::CancellationToken::new();
+    let lease = project_store_maintenance_lease(graph.as_ref());
+    // Drive the same generation pass the daemon schedules while the reader
+    // still holds generation one, after five distinct publications.
+    tokio::time::timeout(Duration::from_mins(1), async {
+        let mut completed = 0;
+        while completed < 2 {
+            let outcome = tracedecay_maintenance::generation::run_project_generation_maintenance(
+                &lease,
+                schedulers,
+                &observations,
+                &cancellation,
+                None,
+                None,
+            )
+            .await;
+            assert!(
+                first_directory.is_dir(),
+                "retention deleted a reader-held sealed graph: {outcome:?}"
+            );
+            if outcome.succeeded() {
+                completed += 1;
+            } else {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        }
+    })
+    .await
+    .expect("maintenance completes passes while preserving the held reader");
+    assert_eq!(reader.generation(), &first);
+    assert_eq!(
+        reader
+            .resolve_simple_name("retained", Some("function"), 10, Arc::new(NeverCancelled))
+            .expect("the superseded reader still serves")
+            .len(),
+        1,
+    );
+
+    drop(reader);
+    tokio::time::timeout(Duration::from_mins(1), async {
+        while first_directory.exists() {
+            tracedecay_maintenance::generation::run_project_generation_maintenance(
+                &lease,
+                schedulers,
+                &observations,
+                &cancellation,
+                None,
+                None,
+            )
+            .await;
+            if first_directory.exists() {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        }
+    })
+    .await
+    .expect("maintenance reclaims the sealed graph after its last reader releases");
+    assert_eq!(
+        schedulers.latest_generation_id(&canonical_root).await,
+        Some(latest)
+    );
+    drop(lease);
     drop(graph);
     harness.shutdown().await;
 }
