@@ -27,6 +27,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::io::Read;
 use std::panic::AssertUnwindSafe;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use futures_util::FutureExt;
 use futures_util::StreamExt;
@@ -88,7 +89,7 @@ pub use status::{
 pub struct TypeScriptProducerStateV1 {
     status: TypeScriptProducerStatusWriterV1,
     admission: TypeScriptCompilerAdmission,
-    checked_files: Option<BTreeMap<String, ContentDigest>>,
+    checked_files: Option<Arc<BTreeMap<String, ContentDigest>>>,
     projects: BTreeMap<PathBuf, ProjectResult>,
 }
 
@@ -126,6 +127,8 @@ enum ProjectOutcome {
         /// The program the check recorded; `None` when its build-info could
         /// not be read or named none of its roots inside the project root.
         membership: Option<TypeScriptProgramMembershipV1>,
+        /// Whether the sealed index or compiler digest covers every recorded input.
+        inputs_covered: bool,
     },
     Failed {
         reason: String,
@@ -145,10 +148,14 @@ impl ProjectResult {
         }
     }
 
-    fn membership(&self) -> Option<&TypeScriptProgramMembershipV1> {
+    fn reusable_membership(&self) -> Option<&TypeScriptProgramMembershipV1> {
         match &self.outcome {
-            ProjectOutcome::Checked { membership, .. } => membership.as_ref(),
-            ProjectOutcome::Failed { .. } => None,
+            ProjectOutcome::Checked {
+                membership: Some(membership),
+                inputs_covered: true,
+                ..
+            } => Some(membership),
+            _ => None,
         }
     }
 }
@@ -187,7 +194,7 @@ fn update_framed(hasher: &mut Sha256, bytes: &[u8]) {
 )]
 fn installed_compiler_revisions(
     compilers: BTreeSet<PathBuf>,
-) -> BTreeMap<PathBuf, Option<[u8; 32]>> {
+) -> BTreeMap<PathBuf, Option<InstalledCompilerRevision>> {
     let mut packages = BTreeMap::new();
     compilers
         .into_iter()
@@ -206,7 +213,7 @@ fn installed_compiler_revisions(
 fn installed_compiler_revision(
     compiler: &Path,
     packages: &mut BTreeMap<PathBuf, Option<InstalledCompilerPackage>>,
-) -> Option<[u8; 32]> {
+) -> Option<InstalledCompilerRevision> {
     let package = std::fs::canonicalize(compiler.parent()?.parent()?.join("typescript")).ok()?;
     let installed = packages
         .entry(package.clone())
@@ -225,7 +232,37 @@ fn installed_compiler_revision(
     update_framed(&mut hasher, compiler.as_os_str().as_encoded_bytes());
     update_framed(&mut hasher, &launcher);
     hasher.update(installed.digest);
-    Some(hasher.finalize().into())
+    Some(InstalledCompilerRevision {
+        digest: hasher.finalize().into(),
+        packages: Arc::clone(&installed.packages),
+    })
+}
+
+#[derive(Clone)]
+struct InstalledCompilerRevision {
+    digest: [u8; 32],
+    packages: Arc<[PathBuf]>,
+}
+
+impl InstalledCompilerRevision {
+    fn covers(&self, file: &Path) -> bool {
+        let in_packages = |path: &Path| {
+            self.packages.iter().any(|package| {
+                path.strip_prefix(package).is_ok_and(|relative| {
+                    !relative
+                        .components()
+                        .any(|part| part.as_os_str() == "node_modules")
+                })
+            })
+        };
+        in_packages(file) || file.canonicalize().is_ok_and(|path| in_packages(&path))
+    }
+
+    fn covers_bundled_library(&self, name: &str) -> bool {
+        self.packages
+            .iter()
+            .any(|package| package.join("lib").join(name).is_file())
+    }
 }
 
 struct InstalledCompilerPackage {
@@ -233,6 +270,7 @@ struct InstalledCompilerPackage {
     entry: PathBuf,
     /// Every installed byte the entry can load.
     digest: [u8; 32],
+    packages: Arc<[PathBuf]>,
 }
 
 /// The launcher entry loads its implementation from elsewhere in the package,
@@ -267,6 +305,7 @@ fn installed_compiler_package(package: &Path) -> Option<InstalledCompilerPackage
     let mut hasher = Sha256::new();
     update_framed(&mut hasher, package.as_os_str().as_encoded_bytes());
     hash_package_tree(&mut hasher, package, Path::new(""), 0, &mut budget)?;
+    let mut packages = vec![package.to_path_buf()];
     for name in dependencies {
         if !Path::new(&name)
             .components()
@@ -281,10 +320,12 @@ fn installed_compiler_package(package: &Path) -> Option<InstalledCompilerPackage
         update_framed(&mut hasher, name.as_bytes());
         update_framed(&mut hasher, dependency.as_os_str().as_encoded_bytes());
         hash_package_tree(&mut hasher, &dependency, Path::new(""), 0, &mut budget)?;
+        packages.push(dependency);
     }
     Some(InstalledCompilerPackage {
         entry,
         digest: hasher.finalize().into(),
+        packages: packages.into(),
     })
 }
 
@@ -419,10 +460,12 @@ pub async fn run_typescript_producer_v1(
     state: &mut TypeScriptProducerStateV1,
     observed_at: UtcMicros,
 ) -> CompilerProducerRunV1 {
-    let files = identity
-        .file_digests()
-        .map(|(path, digest)| (path.to_owned(), digest.clone()))
-        .collect::<BTreeMap<_, _>>();
+    let files = Arc::new(
+        identity
+            .file_digests()
+            .map(|(path, digest)| (path.to_owned(), digest.clone()))
+            .collect::<BTreeMap<_, _>>(),
+    );
     let changes = state
         .checked_files
         .as_ref()
@@ -432,20 +475,21 @@ pub async fn run_typescript_producer_v1(
     let mut results = BTreeMap::new();
     let mut stale = Vec::new();
     for (tsconfig, project) in &resolved.checkable {
+        let revision = project.revision.as_ref().map(|revision| revision.digest);
         let configuration = match &project.configuration {
             Ok(configuration) => configuration,
             Err(reason) => {
                 results.insert(
                     tsconfig.clone(),
-                    ProjectResult::failed(project.revision, None, reason.clone()),
+                    ProjectResult::failed(revision, None, reason.clone()),
                 );
                 continue;
             }
         };
         match (state.projects.get(tsconfig), &changes) {
             (Some(previous), Some(changes))
-                if project.revision.is_some()
-                    && previous.compiler_revision == project.revision
+                if revision.is_some()
+                    && previous.compiler_revision == revision
                     && previous.configuration.as_ref() == Some(configuration)
                     && !changes.affect(
                         project_root,
@@ -460,7 +504,7 @@ pub async fn run_typescript_producer_v1(
             _ => stale.push(StaleProject {
                 tsconfig: tsconfig.clone(),
                 compiler: project.compiler.clone(),
-                compiler_revision: project.revision,
+                revision: project.revision.clone(),
                 configuration: configuration.clone(),
             }),
         }
@@ -473,7 +517,16 @@ pub async fn run_typescript_producer_v1(
             .filter(|project| project.configuration.is_err())
             .count();
     let checked = resolved.checkable.len() - reused;
-    results.extend(check_projects(project_root, build_info_dir, stale, &state.admission).await);
+    results.extend(
+        check_projects(
+            project_root,
+            build_info_dir,
+            stale,
+            &files,
+            &state.admission,
+        )
+        .await,
+    );
     state.checked_files = Some(files);
 
     let mut parsed = Vec::new();
@@ -504,6 +557,7 @@ pub async fn run_typescript_producer_v1(
             ProjectOutcome::Checked {
                 reported,
                 membership,
+                ..
             } => {
                 parsed.extend(reported.iter().cloned());
                 TypeScriptProjectStatusV1::Checked {
@@ -643,7 +697,7 @@ struct ResolvedProjects {
 
 struct CheckableProject {
     compiler: PathBuf,
-    revision: Option<[u8; 32]>,
+    revision: Option<InstalledCompilerRevision>,
     /// How the compiler resolved the tsconfig, or why it could not.
     configuration: Result<TypeScriptConfiguration, String>,
 }
@@ -689,7 +743,7 @@ async fn resolve_projects(
                 resolved.missing.insert(tsconfig);
                 continue;
             };
-            let revision = revisions.get(&compiler).copied().flatten();
+            let revision = revisions.get(&compiler).cloned().flatten();
             queries.push((tsconfig, compiler, revision));
         }
         let configured = futures_util::stream::iter(queries)
@@ -791,10 +845,9 @@ impl GenerationChanges {
     /// compiler and resolved configuration are those of `previous`: an added
     /// module candidate, a file its program or a referenced project's
     /// program read, or a package manifest governing the tsconfig or one of
-    /// those files. A program the producer could not record cannot rule a
-    /// change out, and neither can a reference it has no program for. Nor can
-    /// a failed check: typescript@7 reports a configuration it could not read
-    /// without the error, so any change may be the one that repairs it.
+    /// those files. A failed check, missing program, or program with unsealed
+    /// inputs outside the fingerprinted compiler packages cannot rule out a
+    /// change, including when it belongs to a referenced project.
     fn affect(
         &self,
         project_root: &Path,
@@ -806,24 +859,19 @@ impl GenerationChanges {
         if self.added_module_candidate {
             return true;
         }
-        let mut read = Vec::new();
-        match &previous.outcome {
-            ProjectOutcome::Checked {
-                membership: Some(membership),
-                ..
-            } => read.push(membership),
-            ProjectOutcome::Checked {
-                membership: None, ..
-            }
-            | ProjectOutcome::Failed { .. } => return true,
-        }
+        let Some(membership) = previous.reusable_membership() else {
+            return true;
+        };
+        let mut read = vec![membership];
         let mut references = configuration.references().to_vec();
         let mut visited = BTreeSet::new();
         while let Some(reference) = references.pop() {
             if !visited.insert(reference.clone()) {
                 continue;
             }
-            let Some(membership) = projects.get(&reference).and_then(ProjectResult::membership)
+            let Some(membership) = projects
+                .get(&reference)
+                .and_then(ProjectResult::reusable_membership)
             else {
                 return true;
             };
@@ -867,7 +915,7 @@ fn is_governing_manifest(
 struct StaleProject {
     tsconfig: PathBuf,
     compiler: PathBuf,
-    compiler_revision: Option<[u8; 32]>,
+    revision: Option<InstalledCompilerRevision>,
     configuration: TypeScriptConfiguration,
 }
 
@@ -877,6 +925,7 @@ async fn check_projects(
     project_root: &Path,
     build_info_dir: &Path,
     stale: Vec<StaleProject>,
+    indexed_files: &Arc<BTreeMap<String, ContentDigest>>,
     admission: &TypeScriptCompilerAdmission,
 ) -> BTreeMap<PathBuf, ProjectResult> {
     if stale.is_empty() {
@@ -897,7 +946,7 @@ async fn check_projects(
                 (
                     project.tsconfig,
                     ProjectResult::failed(
-                        project.compiler_revision,
+                        project.revision.map(|revision| revision.digest),
                         Some(project.configuration),
                         reason.clone(),
                     ),
@@ -909,21 +958,27 @@ async fn check_projects(
         .map(|project| {
             let build_info = build_info_dir.join(build_info_file_name(&project.tsconfig));
             let root = project_root.to_path_buf();
+            let indexed_files = Arc::clone(indexed_files);
             async move {
                 let tsconfig = project.tsconfig.clone();
-                let compiler_revision = project.compiler_revision;
+                let compiler_revision = project.revision.as_ref().map(|revision| revision.digest);
                 let configuration = project.configuration.clone();
-                let result =
-                    AssertUnwindSafe(check_project(admission, &root, &build_info, project))
-                        .catch_unwind()
-                        .await
-                        .unwrap_or_else(|_| {
-                            ProjectResult::failed(
-                                compiler_revision,
-                                Some(configuration),
-                                "the TypeScript check panicked".to_owned(),
-                            )
-                        });
+                let result = AssertUnwindSafe(check_project(
+                    admission,
+                    &root,
+                    &build_info,
+                    project,
+                    indexed_files,
+                ))
+                .catch_unwind()
+                .await
+                .unwrap_or_else(|_| {
+                    ProjectResult::failed(
+                        compiler_revision,
+                        Some(configuration),
+                        "the TypeScript check panicked".to_owned(),
+                    )
+                });
                 (tsconfig, result)
             }
         })
@@ -937,13 +992,15 @@ async fn check_project(
     project_root: &Path,
     build_info: &Path,
     project: StaleProject,
+    indexed_files: Arc<BTreeMap<String, ContentDigest>>,
 ) -> ProjectResult {
     let StaleProject {
         tsconfig,
         compiler,
-        compiler_revision,
+        revision,
         configuration,
     } = project;
+    let compiler_revision = revision.as_ref().map(|revision| revision.digest);
     let build_info_guard = admission.serialize_build_info(build_info).await;
     let bound = build_info.to_path_buf();
     let bind_guard = build_info_guard.clone();
@@ -985,15 +1042,28 @@ async fn check_project(
     };
     let (root, recorded) = (project_root.to_path_buf(), build_info.to_path_buf());
     let membership_guard = build_info_guard.clone();
-    let membership = native_runtime::spawn_blocking(move || {
+    let (membership, inputs_covered) = native_runtime::spawn_blocking(move || {
         let _build_info_guard = membership_guard;
-        typescript_build_info_program(&recorded)
-            .and_then(|program| program_membership(&root, &program))
+        let Some(program) = typescript_build_info_program(&recorded) else {
+            return (None, false);
+        };
+        let inputs_covered = revision.is_some_and(|revision| {
+            program.files.iter().all(|file| {
+                file.to_str()
+                    .and_then(|path| code_index_logical_path(&root, path))
+                    .is_some_and(|path| indexed_files.contains_key(&path))
+                    || revision.covers(file)
+            }) && program
+                .bundled_libraries
+                .iter()
+                .all(|name| revision.covers_bundled_library(name))
+        });
+        (program_membership(&root, &program), inputs_covered)
     })
     .await
     .unwrap_or_else(|error| {
         tracing::warn!(%error, "the TypeScript program was not read");
-        None
+        (None, false)
     });
     // A project with no root of its own, such as a solution config, reads
     // nothing its references emit.
@@ -1037,6 +1107,7 @@ async fn check_project(
         outcome: ProjectOutcome::Checked {
             reported: reported.into_iter().map(compiler_diagnostic).collect(),
             membership,
+            inputs_covered,
         },
     }
 }

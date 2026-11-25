@@ -340,6 +340,61 @@ async fn package_and_multiple_extends(release: PinnedTypeScript) {
     );
 }
 
+#[tokio::test]
+async fn an_unindexed_dependency_edit_invalidates_clean_diagnostics() {
+    for release in RELEASES {
+        let project = InstalledCompilerProject::installing(
+            release,
+            &[
+                (
+                    "tsconfig.json",
+                    r#"{"include":["src"],"compilerOptions":{"strict":true,"module":"NodeNext"}}"#,
+                ),
+                (
+                    "node_modules/fixture/package.json",
+                    r#"{"name":"fixture","version":"1.0.0","types":"./index.d.ts"}"#,
+                ),
+                (
+                    "node_modules/fixture/index.d.ts",
+                    "export const value: string;\n",
+                ),
+                (
+                    "src/index.ts",
+                    "import { value } from 'fixture';\nexport const label: string = value;\n",
+                ),
+            ],
+        );
+        let status = TypeScriptProducerStatusHandleV1::default();
+        let mut state = producer(&status);
+        let run = project.run("generation.dependency.1", &mut state).await;
+        assert!(
+            matches!(run, CompilerProducerRunV1::Published { checked: 1, .. }),
+            "{release:?}: {run:?}"
+        );
+        assert_eq!(
+            owner(&project, &status, "src/index.ts"),
+            Some((
+                "tsconfig.json".to_owned(),
+                Some(TypeScriptProjectCheckV1::Checked)
+            ))
+        );
+        let findings = project.findings("generation.dependency.1").await;
+        assert!(findings.is_empty(), "{release:?}: {findings:?}");
+
+        std::fs::write(
+            project.root.join("node_modules/fixture/index.d.ts"),
+            "export const value: number;\n",
+        )
+        .unwrap();
+        let run = project.run("generation.dependency.2", &mut state).await;
+        assert_eq!(
+            codes(&project.findings("generation.dependency.2").await),
+            ["TS2322"],
+            "{release:?}: the installed declaration changed without an indexed edit: {run:?}"
+        );
+    }
+}
+
 const SOLUTION: &[(&str, &str)] = &[
     (
         "tsconfig.json",
