@@ -10,7 +10,7 @@ use tracedecay_runtime_core::config::{GLOBAL_DB_FILENAME, ProfileRoot};
 use tracedecay_runtime_core::native_runtime;
 use tracedecay_runtime_core::storage::{
     SESSIONS_DB_FILENAME, enrolled_project_roots, profile_sharded_data_root,
-    reject_symlink_components, validate_project_id,
+    read_repository_identity_marker, reject_symlink_components, validate_project_id,
 };
 use tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1;
 
@@ -111,6 +111,22 @@ async fn reset_retired_pr_tracking(
             message: format!("invalid registered project identity: {error}"),
         }
     })?;
+    // A stale registered alias may now hold a different repository. The
+    // selected root must agree before another valid alias can open this shard.
+    if let Some(marker) = read_repository_identity_marker(&project_root)?
+        && marker.project_id != project_id.as_str()
+    {
+        return Err(TraceDecayError::project_route(
+            "project_identity_conflict",
+            false,
+            format!(
+                "selected root '{}' belongs to project '{}', but its registered alias names '{}'; configuration was not changed",
+                project_root.display(),
+                marker.project_id,
+                project_id,
+            ),
+        ));
+    }
     let data_root = profile_sharded_data_root(&profile_root, project_id.as_str());
     require_existing_configuration_database(&data_root.join(SESSIONS_DB_FILENAME))?;
     let candidates =

@@ -464,6 +464,90 @@ fn retired_pr_tracking_reset_preserves_a_moved_project_and_foreign_alias() {
     assert!(reopened.status.success(), "{reopened:?}");
 }
 
+#[test]
+fn retired_pr_tracking_reset_refuses_a_selected_alias_owned_by_another_project() {
+    let home = TempDir::new().unwrap();
+    let projects = TempDir::new().unwrap();
+    let primary = projects.path().join("z-primary");
+    let selected = projects.path().join("a-reused");
+    std::fs::create_dir(&primary).unwrap();
+    write_git_fixture(&primary);
+    init_project_fixture(home.path(), &primary);
+    git(
+        &primary,
+        &[
+            "worktree",
+            "add",
+            "-b",
+            "registered-alias",
+            selected.to_str().unwrap(),
+        ],
+    );
+    init_project_fixture(home.path(), &selected);
+    let profile = profile_root(home.path());
+    let layout = tracedecay_runtime_core::storage::resolve_persisted_layout(&primary, &profile)
+        .unwrap()
+        .unwrap();
+    let project_id = layout.identity.project_id.as_deref().unwrap();
+    seed_released_pr_tracking_settings(&layout.sessions_db_path, project_id, true);
+    let revision_ids = || {
+        let connection = rusqlite::Connection::open_with_flags(
+            &layout.sessions_db_path,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .unwrap();
+        let mut statement = connection
+            .prepare("SELECT revision_id FROM configuration_revisions ORDER BY revision_id")
+            .unwrap();
+        statement
+            .query_map([], |row| row.get::<_, String>(0))
+            .unwrap()
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .unwrap()
+    };
+    let revisions_before = revision_ids();
+    assert!(!revisions_before.is_empty());
+
+    // The registry keeps the old alias while the primary checkout remains a
+    // valid alternate enrollment. Reusing the selected path must not reset it.
+    git(
+        &primary,
+        &["worktree", "remove", "--force", selected.to_str().unwrap()],
+    );
+    std::fs::create_dir(&selected).unwrap();
+    write_git_fixture(&selected);
+    write_repository_identity_marker(&selected, "proj_foreign_selected").unwrap();
+    let primary_marker = repository_identity_path(&primary).unwrap();
+    let primary_before = std::fs::read(&primary_marker).unwrap();
+    let selected_marker = repository_identity_path(&selected).unwrap();
+    let selected_before = std::fs::read(&selected_marker).unwrap();
+    let mut command = tracedecay_command_without_daemon(home.path(), &selected);
+    command
+        .args(["storage", "reset-retired-pr-tracking", "--project-root"])
+        .arg(&selected)
+        .arg("--yes");
+    let refused = run_with_timeout(command, cli_timeout());
+    assert!(!refused.status.success(), "{refused:?}");
+    let diagnostic = format!(
+        "{}{}",
+        String::from_utf8_lossy(&refused.stdout),
+        String::from_utf8_lossy(&refused.stderr),
+    );
+    assert!(
+        diagnostic.contains("project_identity_conflict"),
+        "{diagnostic}"
+    );
+    assert!(diagnostic.contains(project_id), "{diagnostic}");
+    assert!(diagnostic.contains("proj_foreign_selected"), "{diagnostic}");
+    assert_eq!(
+        revision_ids(),
+        revisions_before,
+        "a foreign selection reset the former owner"
+    );
+    assert_eq!(std::fs::read(&primary_marker).unwrap(), primary_before);
+    assert_eq!(std::fs::read(&selected_marker).unwrap(), selected_before);
+}
+
 fn git(project: &Path, args: &[&str]) {
     let output = Command::new("git")
         .args(["-c", "core.hooksPath=.git/no-hooks"])
