@@ -1482,6 +1482,7 @@ fn verify_checked_seal_bundle_with_evidence_barrier(
     let hashed_segments = std::cell::Cell::new(0_u64);
     let range_reads = std::cell::Cell::new(0_u64);
     let range_bytes = std::cell::Cell::new(0_u64);
+    let content_pack_bytes = std::cell::Cell::new(0_u64);
     let verified = source
         .verify_segments(
             |digest, expected_size| {
@@ -1528,6 +1529,9 @@ fn verify_checked_seal_bundle_with_evidence_barrier(
                     segments.borrow_mut().read(request, buffer)?;
                     range_reads.set(range_reads.get().saturating_add(1));
                     range_bytes.set(range_bytes.get().saturating_add(length));
+                    if digest == source.content_pack().digest.as_str() {
+                        content_pack_bytes.set(content_pack_bytes.get().saturating_add(length));
+                    }
                     Ok(())
                 })();
                 if let Err(error) = (check)() {
@@ -1601,6 +1605,8 @@ fn verify_checked_seal_bundle_with_evidence_barrier(
         hashed_segments = hashed_segments.get(),
         range_reads = range_reads.get(),
         range_bytes = range_bytes.get(),
+        content_pack_bytes = content_pack_bytes.get(),
+        pack_open_attempts = segments.borrow().open_attempts,
         elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
         "verified sealed source authentication work"
     );
@@ -1970,6 +1976,7 @@ mod tests {
         GraphProjectionId, GraphProjectionIdentity, GraphProjectorRevision,
         SealedCodeGenerationReplay, SealedGraphStateDigest, SpilledGraphGeneration,
     };
+    use tracedecay_runtime_core::logging::capture_formatted_tracing;
     use tracedecay_runtime_core::resident_memory::{
         ProcessResidentMemoryV1, ResidentMemoryPressureV1,
     };
@@ -4494,6 +4501,9 @@ mod tests {
             );
             reads.load(Ordering::SeqCst)
         };
+        let trace_proof = |record: &VerifiedSealedSegmentsV1| {
+            capture_formatted_tracing(|| count_proof_reads(record))
+        };
         assert_ne!(
             first_manifest["generation"]["content_pack"]["digest"],
             successor["generation"]["content_pack"]["digest"],
@@ -4505,11 +4515,8 @@ mod tests {
             "the new generation must own its evidence pack"
         );
         let cold_reads = count_proof_reads(&VerifiedSealedSegmentsV1::default());
-        let trace = tracedecay_runtime_core::logging::FormattedTracingCapture::start();
-        let parent_witness_reads = count_proof_reads(&verified);
-        let observed = trace.text();
-        drop(trace);
-        let observed_field = |name: &str| -> u64 {
+        let (parent_witness_reads, observed) = trace_proof(&verified);
+        let observed_field = |observed: &str, name: &str| -> u64 {
             observed
                 .split(&format!("{name}="))
                 .nth(1)
@@ -4520,9 +4527,9 @@ mod tests {
                 })
         };
         assert!(observed.contains("event=sealed_source_proof"));
-        assert!(observed_field("hashed_segments") > 0);
+        assert!(observed_field(&observed, "hashed_segments") > 0);
         assert_eq!(
-            observed_field("reused_segments"),
+            observed_field(&observed, "reused_segments"),
             0,
             "even unchanged logical digests must be proved under the successor's pack binding"
         );
@@ -4530,7 +4537,41 @@ mod tests {
             parent_witness_reads, cold_reads,
             "a parent proof must not bypass physical or logical successor authentication"
         );
-        let successor_warm_reads = count_proof_reads(&verified);
+        let content_size = successor["generation"]["content_pack"]["size_bytes"]
+            .as_u64()
+            .unwrap();
+        let evidence_size = successor["generation"]["generation_evidence"]["segment_size_bytes"]
+            .as_u64()
+            .unwrap();
+        assert!(content_size > 0 && evidence_size > 0);
+        let cold_bytes = observed_field(&observed, "range_bytes");
+        let cold_opens = observed_field(&observed, "pack_open_attempts");
+        assert_eq!(
+            observed_field(&observed, "content_pack_bytes"),
+            content_size
+        );
+        assert_eq!(cold_bytes, content_size + evidence_size);
+        assert_eq!(cold_opens, payload_open_count(2) as u64);
+        let (successor_warm_reads, warm_observed) = trace_proof(&verified);
+        let warm_bytes = observed_field(&warm_observed, "range_bytes");
+        let warm_opens = observed_field(&warm_observed, "pack_open_attempts");
+        assert_eq!(
+            observed_field(&warm_observed, "content_pack_bytes"),
+            if cfg!(unix) { 0 } else { content_size }
+        );
+        assert_eq!(
+            warm_bytes,
+            if cfg!(unix) {
+                evidence_size
+            } else {
+                cold_bytes
+            }
+        );
+        assert_eq!(warm_opens, cold_opens);
+        println!(
+            "successor payload: {cold_bytes} bytes / {cold_opens} pack opens; repeated proof: \
+             {warm_bytes} bytes / {warm_opens} pack opens"
+        );
         if cfg!(unix) {
             assert!(
                 successor_warm_reads < cold_reads,
@@ -4614,7 +4655,7 @@ mod tests {
         // A failed proof must not evict the last complete evidence-pack proof.
         // Every extent in the changed content pack must be authenticated again;
         // the untouched evidence pack retains its exact physical witness.
-        let recovered_reads = count_proof_reads(&successor_record);
+        let (recovered_reads, recovered_observed) = trace_proof(&successor_record);
         if cfg!(unix) {
             assert!(
                 recovered_reads > warmed_reads,
@@ -4633,18 +4674,19 @@ mod tests {
             rewarmed_reads, warmed_reads,
             "successful recovery must restore the stable warm proof cost"
         );
-        let recovery_cold_reads = count_proof_reads(&VerifiedSealedSegmentsV1::default());
+        let (recovery_cold_reads, recovery_cold_observed) =
+            trace_proof(&VerifiedSealedSegmentsV1::default());
+        let recovered_hashes = observed_field(&recovered_observed, "hashed_segments");
+        let recovery_cold_hashes = observed_field(&recovery_cold_observed, "hashed_segments");
+        assert_eq!(recovery_cold_reads, recovered_reads);
         if cfg!(unix) {
-            assert!(
-                recovery_cold_reads > recovered_reads,
-                "a failed content proof evicted the unchanged evidence-pack witness: \
-                 cold={recovery_cold_reads}, recovered={recovered_reads}"
+            assert_eq!(
+                recovery_cold_hashes,
+                recovered_hashes + 1,
+                "a failed content proof must preserve the unchanged evidence-pack witness"
             );
         } else {
-            assert_eq!(
-                recovery_cold_reads, recovered_reads,
-                "platforms without reliable fingerprints must rehash every segment"
-            );
+            assert_eq!(recovery_cold_hashes, recovered_hashes);
         }
 
         let inherited = successor["generation"]["file_segments"]

@@ -1,7 +1,6 @@
 #[cfg(any(test, feature = "test-helpers", feature = "test-transport"))]
 use std::cell::Cell;
-use std::fs;
-use std::io::{self, Read};
+use std::io;
 use std::path::{Component, Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -139,21 +138,6 @@ fn inject_durable_namespace_sync_fault() -> io::Result<()> {
     Ok(())
 }
 pub const REPOSITORY_IDENTITY_SCHEMA_VERSION: u32 = 1;
-
-/// Checks the fixed 16-byte `SQLite` header without opening the database.
-///
-/// This is deliberately file-only: opening `SQLite` may create or rewrite WAL/SHM
-/// sidecars before reporting that the main file is not a database. Recovery
-/// paths use this preflight to preserve the complete on-disk recovery set.
-pub fn has_sqlite_database_header(path: &Path) -> io::Result<bool> {
-    let mut file = fs::File::open(path)?;
-    let mut header = [0_u8; 16];
-    match file.read_exact(&mut header) {
-        Ok(()) => Ok(header == *b"SQLite format 3\0"),
-        Err(err) if err.kind() == io::ErrorKind::UnexpectedEof => Ok(false),
-        Err(err) => Err(err),
-    }
-}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
