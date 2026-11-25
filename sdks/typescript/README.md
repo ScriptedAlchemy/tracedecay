@@ -18,9 +18,9 @@ registry determines whether an operation is available to the SDK.
 ## Architecture
 
 The HTTP lifecycle runs in Rust. The package is a generated TypeScript facade
-over a Node-API binding of the TraceDecay Rust SDK, so Node and Rust clients
-admit exactly the same envelopes, problems, stream frames, terminal states and
-reconnects. Network waits run on the binding's own threads and never block
+over a Node-API binding of the TraceDecay Rust SDK. Node and Rust clients share
+the same envelope, problem, stream-framing, terminal-state and reconnect rules.
+Network waits run on the binding's own threads and never block
 the Node event loop. The daemon remains the authority for storage, scheduling
 and admission.
 
@@ -59,8 +59,8 @@ deliver it some other way, such as an offline plugin install that places
   2^53.
 - `resume.nextSequence` accepts a safe integer `number`, an unsigned decimal
   string, or a `bigint` within the `u64` range. Decimal strings and bigints
-  preserve the exact resume query value. Numeric fields received in stream
-  frames still have to fit JavaScript's safe integer range.
+  preserve the exact resume query value. Sequence and other integer fields
+  received in stream frames still have to fit JavaScript's safe integer range.
 
 ## Usage
 
