@@ -56,12 +56,14 @@ where
     }
 }
 
-#[tokio::test]
+// The tracing gate parks the async settlement's worker while this test drives
+// shutdown and releases it. A current-thread executor cannot run that release.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn shutdown_waits_for_accepted_curator_settlement_and_lock_release() {
     const CHILD: &str = "TRACEDECAY_TEST_CURATOR_SHUTDOWN_CHILD";
     if std::env::var_os(CHILD).is_none() {
-        // The subscriber follows the real settlement onto a native blocking
-        // thread. Isolate it from every other test in the parent process.
+        // The subscriber pauses the real settlement on its async worker.
+        // Isolate it from every other test in the parent process.
         let test_name = format!(
             "{}::shutdown_waits_for_accepted_curator_settlement_and_lock_release",
             module_path!().split_once("::").unwrap().1
