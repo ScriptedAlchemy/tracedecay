@@ -39,8 +39,8 @@ fn sealed_generation_names(home: &Path, project: &Path) -> BTreeSet<String> {
     let root = project_store_root(home, project).join("tracedecay.sealed");
     match fs::read_dir(&root) {
         Ok(entries) => entries
-            .filter_map(Result::ok)
-            .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
+            .map(|entry| entry.expect("read sealed store entry"))
+            .filter(|entry| entry.file_type().expect("sealed entry file type").is_dir())
             .filter_map(|entry| {
                 let name = entry.file_name();
                 let name = name.to_str()?;
@@ -160,8 +160,8 @@ async fn superseded_sealed_generations_collect_to_live_plus_one() {
     }
     let retained = sealed_generation_names(environment.home(), &project);
     assert!(
-        retained.len() <= 2,
-        "scheduled maintenance did not retire superseded sealed generations: \
+        (1..=2).contains(&retained.len()),
+        "scheduled maintenance did not preserve live sealed generations while retiring superseded ones: \
          {retained:?} remain under tracedecay.sealed; daemon_log={}",
         crate::code_index_journey::daemon_log_for_failure()
     );

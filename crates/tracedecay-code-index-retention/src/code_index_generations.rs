@@ -1886,7 +1886,8 @@ pub fn execute_code_generation_retention_with_admission(
     // Retiring manifests and sweeping segments both change which segments
     // are named; neither may interleave with another scope's publication,
     // retention, or scope collection over the shared segment directory.
-    let _segments_lock = acquire_generation_segments_lock_checked(store_root, is_cancelled)?;
+    let _segments_lock =
+        acquire_generation_segments_lock_checked(store_root, admission, is_cancelled)?;
     if is_cancelled() {
         return Err(CodeGenerationRetentionErrorV1::Cancelled);
     }
@@ -2104,7 +2105,8 @@ fn recover_code_generation_retention_cancellable(
     let _store_lock = admission.acquire(store_root, is_cancelled)?;
     // Recovery may restore quarantined manifests into the generations
     // directory, which a concurrent sweep over shared segments must not miss.
-    let _segments_lock = acquire_generation_segments_lock_checked(store_root, is_cancelled)?;
+    let _segments_lock =
+        acquire_generation_segments_lock_checked(store_root, admission, is_cancelled)?;
     if is_cancelled() {
         return Err(CodeGenerationRetentionErrorV1::Cancelled);
     }

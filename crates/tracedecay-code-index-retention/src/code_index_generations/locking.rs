@@ -10,7 +10,8 @@ use tracedecay_private_fs::FileLease;
 
 use super::{
     CodeGenerationRetentionErrorV1, GRAPH_REPLAY_POOL_ACQUIRE_BUDGET,
-    GRAPH_REPLAY_POOL_ACQUIRE_POLL, SCOPE_RETENTION_LOCK_FILE, STORE_LOCK_FILE, storage,
+    GRAPH_REPLAY_POOL_ACQUIRE_POLL, SCOPE_RETENTION_LOCK_FILE, STORE_LOCK_FILE,
+    StoreLockAdmissionV1, storage,
 };
 #[cfg(windows)]
 use super::{SCOPE_RETENTION_TRANSACTION_FILE, is_code_index_scope_hash, journal, scope_roots};
@@ -217,15 +218,23 @@ pub(super) fn acquire_scope_retention_lock(
 /// manifest stop or start naming segments, retiring generations, sweeping
 /// segments, and collecting or restoring whole scopes, runs under it, so a
 /// sweep's mark phase observes every manifest that can still be read.
+/// Maintenance carries the same wait deadline through both lock levels: a
+/// sibling publisher can hold this shared-project lease while the selected
+/// scope's generation store is free.
 pub(super) fn acquire_generation_segments_lock_checked(
     store_root: &Path,
+    admission: StoreLockAdmissionV1,
     is_cancelled: &dyn Fn() -> bool,
 ) -> Result<CodeGenerationStoreLockV1, CodeGenerationRetentionErrorV1> {
+    let deadline = match admission {
+        StoreLockAdmissionV1::TryOnce => Instant::now() + GRAPH_REPLAY_POOL_ACQUIRE_BUDGET,
+        StoreLockAdmissionV1::WaitUntil(deadline) => deadline,
+    };
     lock_file(
         super::generation_segment_project_root(store_root),
         SCOPE_RETENTION_LOCK_FILE,
         false,
-        Instant::now() + GRAPH_REPLAY_POOL_ACQUIRE_BUDGET,
+        deadline,
         is_cancelled,
     )
 }
