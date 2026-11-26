@@ -5,6 +5,23 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.0-beta.113](https://github.com/ScriptedAlchemy/tracedecay/compare/v1.0.0-beta.112...v1.0.0-beta.113) (2026-11-26)
+
+
+### ⚠ BREAKING CHANGES
+
+* **response-handles:** handles issued by the filesystem cache are not read after upgrade; retrieving one answers the typed, retryable `handle_not_found`. `ActiveProjectStorageV1` drops `response_handle_root`.
+
+### Bug Fixes
+
+* **config:** converge diagnostics defaults after master integration ([b4e1e74](https://github.com/ScriptedAlchemy/tracedecay/commit/b4e1e74106c6806f372de4ac35110f6768fd0e11))
+* **config:** converge retired PR tracking defaults ([2b0ed95](https://github.com/ScriptedAlchemy/tracedecay/commit/2b0ed95eefeec57972273f88a4789ac4f83667f5))
+
+
+### Code Refactoring
+
+* **response-handles:** keep handles in the registered store ([#4964](https://github.com/ScriptedAlchemy/tracedecay/issues/4964)) ([4deb94d](https://github.com/ScriptedAlchemy/tracedecay/commit/4deb94de7a04811533d5c3ee3d055ad6571d42e1))
+
 ## [1.0.0-beta.112](https://github.com/ScriptedAlchemy/tracedecay/compare/v1.0.0-beta.111...v1.0.0-beta.112) (2026-11-25)
 
 
