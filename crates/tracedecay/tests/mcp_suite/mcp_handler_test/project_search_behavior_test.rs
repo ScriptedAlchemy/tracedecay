@@ -318,7 +318,7 @@ fn listed_branch(project: &RegisteredProject) -> &str {
     project.head_branch.unwrap_or(&project.branch)
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn project_search_returns_each_public_field_and_omits_the_credential_remote() {
     let fixture = open_search_fixture().await;
     let server = fixture.server.as_ref();
@@ -421,7 +421,7 @@ async fn project_search_returns_each_public_field_and_omits_the_credential_remot
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn project_search_bounds_pages_and_does_not_expand_wildcards() {
     let fixture = open_search_fixture().await;
     let server = fixture.server.as_ref();
@@ -534,7 +534,7 @@ async fn project_search_bounds_pages_and_does_not_expand_wildcards() {
     assert_eq!(injected["query"], "search-alpha'OR'1'='1");
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn project_search_refuses_arguments_outside_its_typed_request() {
     let fixture = open_search_fixture().await;
 

@@ -5,6 +5,7 @@
 //! to raw `rg`.
 //! `tracedecay_search` only matches symbol *names*, not file *content*.
 
+use crate::response_handles::ResponseHandlePublisher;
 use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
 use std::path::Path;
@@ -142,14 +143,14 @@ pub async fn compute_grep(
 
 /// Renders a grep result as its tool text, with `value` as its JSON body.
 pub fn render_grep(
-    response_handle_root: Option<&Path>,
+    response_handles: Option<&ResponseHandlePublisher>,
     args: &Value,
     value: &Value,
     result: &GrepSearchResultV1,
 ) -> Result<ToolResult> {
     let text = {
         let _span = tracing::trace_span!("mcp.search.grep.render").entered();
-        render::finalize(response_handle_root, args, value, || render_grep_md(result))
+        render::finalize(response_handles, args, value, || render_grep_md(result))
     };
     Ok(text_tool_result(&text, Vec::new()))
 }

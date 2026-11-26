@@ -1,1054 +1,148 @@
-//! Canonical local response-handle storage.
+//! The response-handle capabilities surfaces hold.
+//!
+//! Records live in the daemon-owned registered store of the admitted project
+//! (see `tracedecay_global_db::RegisteredGlobalDb::publish_response_handle`).
+//! Two capabilities reach that owner:
+//!
+//! - [`ResponseHandleStore`] publishes and reads through the registered lease
+//!   the daemon admitted for the project; retrieval, feedback, and LSP hold it.
+//! - [`ResponseHandlePublisher`] only publishes, through any
+//!   [`ResponseHandlePublishPort`]: the store itself inside the daemon, or a
+//!   daemon invocation from a client process that renders locally.
+//!
+//! A surface with neither answers the feature-scoped
+//! `handle_storage_unavailable` refusal; it never falls back elsewhere.
 
-use std::fs::{self, OpenOptions};
-use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant};
+use std::future::Future;
+use std::pin::Pin;
+use std::sync::Arc;
 
-use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
+use tracedecay_contracts::{CancellationSignal, Deadline};
 use tracedecay_domain::UtcMicros;
-use tracedecay_domain::errors::{InvalidRequestReason, TraceDecayError};
-use tracedecay_private_fs::{LockAdmissionError, lock_until};
-use tracedecay_runtime_core::storage::{
-    DURABLE_REMOVAL_TOMBSTONE_PREFIX, PrivateStoreIo, reject_symlink_components,
+use tracedecay_domain::errors::TraceDecayError;
+use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
+use tracedecay_runtime_core::cancellation::CancellationToken;
+
+pub use tracedecay_global_db::{
+    RESPONSE_HANDLE_TTL_SECS, ResponseHandleError, ResponseHandleInventory, ResponseHandleLookup,
+    ResponseHandleRecord, is_valid_response_handle, response_handle_for,
 };
 
-pub const RESPONSE_HANDLE_TTL_SECS: i64 = 86_400;
-
-/// Why the handle store could not answer. Callers choose recovery by variant:
-/// an invalid handle is the caller's to correct, a corrupt record is replaced
-/// by the next publication of its content, and a store failure is the cache
-/// itself being unreadable or unwritable.
-#[derive(Debug, thiserror::Error)]
-pub enum ResponseHandleError {
-    #[error(
-        "invalid response handle: expected `{}` followed by {} hex characters copied from a \
-         truncated MCP response envelope",
-        HANDLE_PREFIX,
-        HANDLE_HEX_CHARS
-    )]
-    InvalidHandle,
-    #[error("corrupt response-handle record: {reason}")]
-    CorruptRecord { path: PathBuf, reason: String },
-    #[error(transparent)]
-    Store(#[from] TraceDecayError),
-}
-
-impl From<ResponseHandleError> for TraceDecayError {
-    fn from(error: ResponseHandleError) -> Self {
-        match error {
-            ResponseHandleError::InvalidHandle => Self::InvalidRequest {
-                reason: InvalidRequestReason::InvalidResponseHandle,
-                message: error.to_string(),
-            },
-            ResponseHandleError::CorruptRecord { ref path, .. } => Self::File {
-                message: error.to_string(),
-                path: path.display().to_string(),
-            },
-            ResponseHandleError::Store(error) => error,
-        }
-    }
-}
-
 pub type Result<T, E = ResponseHandleError> = std::result::Result<T, E>;
+
+pub type ResponseHandleFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T>> + Send + 'a>>;
 
 /// Converts a UTC-micros clock sample to the second resolution the handle store uses.
 pub fn micros_to_seconds(value: UtcMicros) -> i64 {
     value.0.div_euclid(1_000_000)
 }
 
-const HANDLE_HEX_CHARS: usize = 24;
-const HANDLE_PREFIX: &str = "rh_";
-const LOCK_SUFFIX: &str = ".lock";
-const STAGING_PREFIX: &str = ".response-handle-staging-";
-/// Writers take the root lock one at a time for a publish, cleanup, or
-/// inventory. 10s covers a long queue and fits the daemon tool deadline.
-const WRITER_LOCK_DEADLINE: Duration = Duration::from_secs(10);
-
-#[derive(Debug, Clone)]
-pub struct ResponseHandleRecord {
-    pub handle: String,
-    pub created_at: i64,
-    pub expires_at: i64,
-    pub content: String,
+/// The admitted project's registered handle store.
+#[derive(Clone)]
+pub struct ResponseHandleStore {
+    database: RegisteredGlobalDbLeaseV1,
 }
 
-impl ResponseHandleRecord {
-    pub fn original_chars(&self) -> usize {
-        self.content.chars().count()
+impl std::fmt::Debug for ResponseHandleStore {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("ResponseHandleStore")
     }
 }
 
-#[derive(Debug, Clone)]
-pub enum ResponseHandleLookup {
-    Found(ResponseHandleRecord),
-    Missing,
-    Expired { created_at: i64, expires_at: i64 },
-}
-
-#[derive(Debug, Clone, Copy, Default, Eq, PartialEq)]
-pub struct ResponseHandleCleanup {
-    pub scanned: usize,
-    pub removed_expired: usize,
-    pub removed_staging: usize,
-    pub removed_tombstones: usize,
-}
-
-#[derive(Debug, Clone, Copy, Default, Eq, PartialEq)]
-pub struct ResponseHandleInventory {
-    pub file_count: u64,
-    pub total_bytes: u64,
-    pub oldest_expires_at: Option<i64>,
-    pub newest_expires_at: Option<i64>,
-}
-
-#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct StoredResponseHandleRecord {
-    created_at: i64,
-    expires_at: i64,
-    content: String,
-}
-
-struct StoredFile {
-    path: PathBuf,
-    bytes: u64,
-    record: StoredResponseHandleRecord,
-}
-
-pub fn is_valid_response_handle(handle: &str) -> bool {
-    let Some(hex) = handle.strip_prefix(HANDLE_PREFIX) else {
-        return false;
-    };
-    hex.len() == HANDLE_HEX_CHARS
-        && hex
-            .bytes()
-            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
-}
-
-pub fn store_response_handle(root: &Path, content: &str, now: i64) -> Result<ResponseHandleRecord> {
-    PrivateStoreIo::create_dir_all_durable(root)
-        .map_err(|error| file_error(root, "create durable directory", error))?;
-    with_exclusive_lock(root, || store_response_handle_locked(root, content, now))
-}
-
-fn store_response_handle_locked(
-    root: &Path,
-    content: &str,
-    now: i64,
-) -> Result<ResponseHandleRecord> {
-    let handle = response_handle_for(content);
-    let path = response_handle_path(root, &handle)?;
-    let stored = StoredResponseHandleRecord {
-        created_at: now,
-        expires_at: now.saturating_add(RESPONSE_HANDLE_TTL_SECS),
-        content: content.to_owned(),
-    };
-    let rollback_payload = match lookup_record(root, &handle, now) {
-        // The handle is the content digest, so an identical record with at
-        // least half its lifetime left already answers this store. Renewing
-        // it only once that half has passed keeps every issued handle valid
-        // for half a TTL without a durable write per repeated response.
-        Ok(ResponseHandleLookup::Found(existing))
-            if existing.content == stored.content
-                && existing.expires_at.saturating_sub(now) >= RESPONSE_HANDLE_TTL_SECS / 2 =>
-        {
-            return Ok(existing);
-        }
-        Ok(ResponseHandleLookup::Found(existing)) if existing.content == stored.content => Some(
-            serde_json::to_vec_pretty(&StoredResponseHandleRecord {
-                created_at: existing.created_at,
-                expires_at: existing.expires_at,
-                content: existing.content,
-            })
-            .map_err(TraceDecayError::from)?,
-        ),
-        Ok(ResponseHandleLookup::Found(_)) => {
-            return Err(corrupt_record_error(
-                &path,
-                "digest collision with different stored content",
-            ));
-        }
-        Ok(ResponseHandleLookup::Expired { .. }) => {
-            // Publication owns reclamation: retire the expired record under the
-            // writer lock before replacing it, so a fresh publish that fails
-            // before its rename leaves no record behind rather than a stale one.
-            PrivateStoreIo::remove_file_durable(&path)
-                .map_err(|error| file_error(&path, "durably delete expired record", error))?;
-            None
-        }
-        Ok(ResponseHandleLookup::Missing) | Err(ResponseHandleError::CorruptRecord { .. }) => None,
-        Err(error) => return Err(error),
-    };
-    let payload = serde_json::to_vec_pretty(&stored).map_err(TraceDecayError::from)?;
-    if let Err(error) = publish_record_durable(root, &path, &payload) {
-        if let Some(rollback_payload) = rollback_payload {
-            return match publish_record_durable(root, &path, &rollback_payload) {
-                Ok(()) => Err(error),
-                Err(rollback_error) => Err(compound_file_error(
-                    &path,
-                    format!(
-                        "{error}; additionally failed to restore the prior response-handle record: {rollback_error}"
-                    ),
-                )),
-            };
-        }
-        return match remove_failed_fresh_publish(&path, &stored) {
-            Ok(()) => Err(error),
-            Err(cleanup_error) => Err(compound_file_error(
-                &path,
-                format!(
-                    "{error}; additionally failed to clean up the rejected response-handle publication: {cleanup_error}"
-                ),
-            )),
-        };
+impl ResponseHandleStore {
+    pub fn registered(database: RegisteredGlobalDbLeaseV1) -> Self {
+        Self { database }
     }
-    Ok(ResponseHandleRecord {
-        handle,
-        created_at: stored.created_at,
-        expires_at: stored.expires_at,
-        content: stored.content,
-    })
-}
 
-/// Non-mutating lookup that never takes the root lock.
-///
-/// A record file is published by atomically renaming a fully synced staging
-/// file over its handle path and is never modified in place, so one `read`
-/// observes either a complete prior record, a complete replacement, or no
-/// file, never mixed bytes. Identity is revalidated from the bytes read
-/// (`validate_record` recomputes the digest), so a concurrent replacement
-/// cannot be mistaken for the record this lookup started with. Expired files
-/// are not reclaimed here; cleanup and the renewing publication remove them
-/// under the exclusive writer lock.
-pub fn retrieve_response_handle(
-    root: &Path,
-    handle: &str,
-    now: i64,
-) -> Result<ResponseHandleLookup> {
-    validate_handle(handle)?;
-    validate_response_handle_path(root)?;
-    if !path_exists(root)? {
-        return Ok(ResponseHandleLookup::Missing);
+    pub async fn publish(&self, content: &str, now: i64) -> Result<ResponseHandleRecord> {
+        self.database.publish_response_handle(content, now).await
     }
-    lookup_record(root, handle, now)
-}
 
-/// A record whose bytes fail decoding or identity validation is
-/// [`ResponseHandleError::CorruptRecord`]; publication replaces it.
-fn lookup_record(root: &Path, handle: &str, now: i64) -> Result<ResponseHandleLookup> {
-    let path = response_handle_path(root, handle)?;
-    let Some(payload) = read_record(&path)? else {
-        return Ok(ResponseHandleLookup::Missing);
-    };
-    let stored = decode_record(&path, &payload)?;
-    validate_record(handle, &stored, &path)?;
-    if stored.expires_at <= now {
-        return Ok(ResponseHandleLookup::Expired {
-            created_at: stored.created_at,
-            expires_at: stored.expires_at,
-        });
+    pub async fn publish_with_control(
+        &self,
+        content: &str,
+        deadline: Deadline,
+        cancellation: CancellationToken,
+        signal: Option<CancellationSignal>,
+    ) -> Result<ResponseHandleRecord> {
+        self.database
+            .publish_response_handle_with_control(content, deadline, cancellation, signal)
+            .await
     }
-    Ok(ResponseHandleLookup::Found(ResponseHandleRecord {
-        handle: handle.to_owned(),
-        created_at: stored.created_at,
-        expires_at: stored.expires_at,
-        content: stored.content,
-    }))
-}
 
-pub fn cleanup_expired_response_handles(root: &Path, now: i64) -> Result<ResponseHandleCleanup> {
-    validate_response_handle_path(root)?;
-    if !path_exists(root)? {
-        return Ok(ResponseHandleCleanup::default());
+    pub async fn lookup(&self, handle: &str, now: i64) -> Result<ResponseHandleLookup> {
+        self.database.lookup_response_handle(handle, now).await
     }
-    with_exclusive_lock(root, || {
-        let removed_staging = remove_abandoned_staging_files(root)?;
-        let removed_tombstones = remove_orphaned_removal_tombstones(root)?;
-        let mut cleanup = ResponseHandleCleanup {
-            scanned: 0,
-            removed_expired: 0,
-            removed_staging,
-            removed_tombstones,
-        };
-        cleanup.scanned = visit_stored_files(root, |file| {
-            if file.record.expires_at <= now
-                && PrivateStoreIo::remove_file_durable(&file.path).map_err(|error| {
-                    file_error(&file.path, "durably delete expired record", error)
-                })?
-            {
-                cleanup.removed_expired += 1;
-            }
-            Ok(())
-        })?;
-        Ok(cleanup)
-    })
-}
 
-pub fn inventory_response_handles(root: &Path) -> Result<ResponseHandleInventory> {
-    validate_response_handle_path(root)?;
-    if !path_exists(root)? {
-        return Ok(ResponseHandleInventory::default());
+    /// [`Self::publish`] for synchronous feedback and LSP paths; see
+    /// [`ResponseHandlePublisher::publish_blocking`].
+    pub fn publish_blocking(&self, content: &str, now: i64) -> Result<ResponseHandleRecord> {
+        block_on(self.publish(content, now))
     }
-    with_exclusive_lock(root, || {
-        let mut inventory = ResponseHandleInventory::default();
-        visit_stored_files(root, |file| {
-            inventory.file_count += 1;
-            inventory.total_bytes = inventory.total_bytes.saturating_add(file.bytes);
-            inventory.oldest_expires_at = Some(
-                inventory
-                    .oldest_expires_at
-                    .map_or(file.record.expires_at, |value| {
-                        value.min(file.record.expires_at)
-                    }),
-            );
-            inventory.newest_expires_at = Some(
-                inventory
-                    .newest_expires_at
-                    .map_or(file.record.expires_at, |value| {
-                        value.max(file.record.expires_at)
-                    }),
-            );
-            Ok(())
-        })?;
-        Ok(inventory)
-    })
-}
 
-fn visit_stored_files(
-    root: &Path,
-    mut visit: impl FnMut(StoredFile) -> Result<()>,
-) -> Result<usize> {
-    let entries = match fs::read_dir(root) {
-        Ok(entries) => entries,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(0),
-        Err(error) => return Err(file_error(root, "read response-handle directory", error)),
-    };
-    let mut scanned = 0;
-    for entry in entries {
-        let entry = entry.map_err(|error| file_error(root, "read directory entry", error))?;
-        let path = entry.path();
-        let Some(handle) = handle_from_record_path(&path)? else {
-            continue;
-        };
-        if !entry
-            .file_type()
-            .map_err(|error| file_error(&path, "read file type", error))?
-            .is_file()
-        {
-            return Err(corrupt_record_error(&path, "record is not a regular file"));
-        }
-        let bytes = entry
-            .metadata()
-            .map_err(|error| file_error(&path, "read metadata", error))?
-            .len();
-        let payload = read_record(&path)?.ok_or_else(|| {
-            corrupt_record_error(&path, "record disappeared during directory scan")
-        })?;
-        let record = decode_record(&path, &payload)?;
-        validate_record(&handle, &record, &path)?;
-        visit(StoredFile {
-            path,
-            bytes,
-            record,
-        })?;
-        scanned += 1;
+    /// [`Self::lookup`] for synchronous feedback paths.
+    pub fn lookup_blocking(&self, handle: &str, now: i64) -> Result<ResponseHandleLookup> {
+        block_on(self.lookup(handle, now))
     }
-    Ok(scanned)
-}
 
-fn remove_abandoned_staging_files(root: &Path) -> Result<usize> {
-    let entries = fs::read_dir(root)
-        .map_err(|error| file_error(root, "read response-handle directory", error))?;
-    let mut removed = 0;
-    for entry in entries {
-        let entry = entry.map_err(|error| file_error(root, "read directory entry", error))?;
-        let name = entry.file_name();
-        let Some(name) = name.to_str() else {
-            continue;
-        };
-        if !name.starts_with(STAGING_PREFIX) {
-            continue;
-        }
-        let path = entry.path();
-        if !entry
-            .file_type()
-            .map_err(|error| file_error(&path, "read staging file type", error))?
-            .is_file()
-        {
-            return Err(corrupt_record_error(
-                &path,
-                "staging record is not a regular file",
-            ));
-        }
-        if PrivateStoreIo::remove_file_durable(&path)
-            .map_err(|error| file_error(&path, "durably remove staging record", error))?
-        {
-            removed += 1;
-        }
-    }
-    Ok(removed)
-}
-
-fn remove_orphaned_removal_tombstones(root: &Path) -> Result<usize> {
-    let entries = fs::read_dir(root)
-        .map_err(|error| file_error(root, "read response-handle directory", error))?;
-    let mut removed = 0;
-    for entry in entries {
-        let entry = entry.map_err(|error| file_error(root, "read directory entry", error))?;
-        let name = entry.file_name();
-        let Some(name) = name.to_str() else {
-            continue;
-        };
-        if !name.starts_with(DURABLE_REMOVAL_TOMBSTONE_PREFIX) {
-            continue;
-        }
-        let path = entry.path();
-        if !entry
-            .file_type()
-            .map_err(|error| file_error(&path, "read removal tombstone type", error))?
-            .is_file()
-        {
-            return Err(corrupt_record_error(
-                &path,
-                "durable-removal tombstone is not a regular file",
-            ));
-        }
-        match fs::remove_file(&path) {
-            Ok(()) => removed += 1,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => {
-                return Err(file_error(&path, "remove durable-removal tombstone", error));
-            }
-        }
-    }
-    Ok(removed)
-}
-
-fn read_record(path: &Path) -> Result<Option<Vec<u8>>> {
-    validate_response_handle_path(path)?;
-    match fs::read(path) {
-        Ok(payload) => Ok(Some(payload)),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(error) => Err(file_error(path, "read response handle", error)),
+    /// The publish-only capability of this store, for render paths.
+    pub fn publisher(&self) -> ResponseHandlePublisher {
+        ResponseHandlePublisher::from_port(Arc::new(self.clone()))
     }
 }
 
-fn decode_record(path: &Path, payload: &[u8]) -> Result<StoredResponseHandleRecord> {
-    serde_json::from_slice(payload).map_err(|error| corrupt_record_error(path, &error.to_string()))
+/// A route that publishes into the registered owner of one admitted namespace.
+pub trait ResponseHandlePublishPort: Send + Sync {
+    fn publish<'a>(
+        &'a self,
+        content: &'a str,
+        now: i64,
+    ) -> ResponseHandleFuture<'a, ResponseHandleRecord>;
 }
 
-fn handle_from_record_path(path: &Path) -> Result<Option<String>> {
-    if path.extension().and_then(|extension| extension.to_str()) != Some("json") {
-        return Ok(None);
-    }
-    let handle = path
-        .file_stem()
-        .and_then(|stem| stem.to_str())
-        .ok_or_else(|| corrupt_record_error(path, "record filename is not valid UTF-8"))?;
-    validate_handle(handle).map_err(|error| corrupt_record_error(path, &error.to_string()))?;
-    Ok(Some(handle.to_owned()))
-}
-
-fn validate_record(handle: &str, record: &StoredResponseHandleRecord, path: &Path) -> Result<()> {
-    if record.expires_at != record.created_at.saturating_add(RESPONSE_HANDLE_TTL_SECS) {
-        return Err(corrupt_record_error(
-            path,
-            "record has a noncanonical expiry",
-        ));
-    }
-    if response_handle_for(&record.content) != handle {
-        return Err(corrupt_record_error(
-            path,
-            "record digest does not match its handle",
-        ));
-    }
-    Ok(())
-}
-
-/// Computes the canonical content identity without publishing a stored record.
-pub fn response_handle_for(content: &str) -> String {
-    let digest = Sha256::digest(content.as_bytes());
-    format!(
-        "{HANDLE_PREFIX}{}",
-        hex::encode(&digest[..HANDLE_HEX_CHARS / 2])
-    )
-}
-
-fn response_handle_path(root: &Path, handle: &str) -> Result<PathBuf> {
-    validate_handle(handle)?;
-    Ok(root.join(format!("{handle}.json")))
-}
-
-fn validate_handle(handle: &str) -> Result<()> {
-    if is_valid_response_handle(handle) {
-        return Ok(());
-    }
-    Err(ResponseHandleError::InvalidHandle)
-}
-
-fn path_exists(path: &Path) -> Result<bool> {
-    path.try_exists()
-        .map_err(|error| file_error(path, "check response-handle root", error))
-}
-
-fn validate_response_handle_path(path: &Path) -> Result<()> {
-    reject_symlink_components(path, "response-handle cache")
-        .map_err(|error| file_error(path, "validate response-handle path", error))
-}
-
-fn with_exclusive_lock<T>(root: &Path, operation: impl FnOnce() -> Result<T>) -> Result<T> {
-    with_exclusive_lock_within(root, WRITER_LOCK_DEADLINE, operation)
-}
-
-fn with_exclusive_lock_within<T>(
-    root: &Path,
-    budget: Duration,
-    operation: impl FnOnce() -> Result<T>,
-) -> Result<T> {
-    let deadline = Instant::now() + budget;
-    validate_response_handle_path(root)?;
-    let parent = root.parent().ok_or_else(|| TraceDecayError::File {
-        message: "response-handle root has no stable lock parent".to_string(),
-        path: root.display().to_string(),
-    })?;
-    let leaf = root
-        .file_name()
-        .and_then(|name| name.to_str())
-        .ok_or_else(|| TraceDecayError::File {
-            message: "response-handle root name is not valid UTF-8".to_string(),
-            path: root.display().to_string(),
-        })?;
-    let path = parent.join(format!(".{leaf}{LOCK_SUFFIX}"));
-    validate_response_handle_path(&path)?;
-    let lock = OpenOptions::new()
-        .create(true)
-        .truncate(false)
-        .read(true)
-        .write(true)
-        .open(&path)
-        .map_err(|error| file_error(&path, "open response-handle lock", error))?;
-    lock_until(&lock, deadline).map_err(|error| match error {
-        LockAdmissionError::TimedOut => ResponseHandleError::Store(TraceDecayError::LockDeadline {
-            resource: "response-handle writer lock",
-            deadline_ms: u64::try_from(budget.as_millis()).unwrap_or(u64::MAX),
-        }),
-        LockAdmissionError::Io(error) => file_error(&path, "acquire response-handle lock", error),
-    })?;
-    let result = operation();
-    let unlock = lock
-        .unlock()
-        .map_err(|error| file_error(&path, "release response-handle lock", error));
-    match (result, unlock) {
-        (Ok(value), Ok(())) => Ok(value),
-        (Err(error), Ok(())) => Err(error),
-        (Ok(_), Err(error)) => Err(error),
-        (Err(operation_error), Err(unlock_error)) => Err(compound_file_error(
-            &path,
-            format!("{operation_error}; additionally {unlock_error}"),
-        )),
+impl ResponseHandlePublishPort for ResponseHandleStore {
+    fn publish<'a>(
+        &'a self,
+        content: &'a str,
+        now: i64,
+    ) -> ResponseHandleFuture<'a, ResponseHandleRecord> {
+        Box::pin(ResponseHandleStore::publish(self, content, now))
     }
 }
 
-fn publish_record_durable(root: &Path, path: &Path, payload: &[u8]) -> Result<()> {
-    let temporary = tempfile::Builder::new()
-        .prefix(STAGING_PREFIX)
-        .tempfile_in(root)
-        .map_err(|error| file_error(root, "create temporary record", error))?;
-    let temporary_path = temporary
-        .into_temp_path()
-        .keep()
-        .map_err(|error| file_error(root, "retain temporary record", error.into()))?;
-    match PrivateStoreIo::write_file_atomically_durable(path, &temporary_path, payload) {
-        Ok(()) => Ok(()),
-        Err(error) => {
-            let failure = file_error(path, "durably publish response handle", error);
-            match PrivateStoreIo::remove_file_durable(&temporary_path) {
-                Ok(_) => Err(failure),
-                Err(cleanup_error) => Err(compound_file_error(
-                    &temporary_path,
-                    format!(
-                        "{failure}; additionally failed to durably remove temporary record: {cleanup_error}"
-                    ),
-                )),
-            }
-        }
+/// Publish-only access to the admitted project's handle store.
+#[derive(Clone)]
+pub struct ResponseHandlePublisher {
+    port: Arc<dyn ResponseHandlePublishPort>,
+}
+
+impl std::fmt::Debug for ResponseHandlePublisher {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("ResponseHandlePublisher")
     }
 }
 
-fn remove_failed_fresh_publish(path: &Path, expected: &StoredResponseHandleRecord) -> Result<()> {
-    let Some(payload) = read_record(path)? else {
-        return Ok(());
-    };
-    if &decode_record(path, &payload)? != expected {
-        return Err(corrupt_record_error(
-            path,
-            "refused to remove a failed publication whose record material does not match",
-        ));
+impl ResponseHandlePublisher {
+    pub fn from_port(port: Arc<dyn ResponseHandlePublishPort>) -> Self {
+        Self { port }
     }
-    PrivateStoreIo::remove_file_durable(path)
-        .map(|_| ())
-        .map_err(|error| file_error(path, "durably remove failed publication", error))
-}
 
-fn file_error(path: &Path, operation: &str, error: std::io::Error) -> ResponseHandleError {
-    compound_file_error(path, format!("failed to {operation}: {error}"))
-}
+    pub async fn publish(&self, content: &str, now: i64) -> Result<ResponseHandleRecord> {
+        self.port.publish(content, now).await
+    }
 
-fn compound_file_error(path: &Path, message: String) -> ResponseHandleError {
-    ResponseHandleError::Store(TraceDecayError::File {
-        message,
-        path: path.display().to_string(),
-    })
-}
-
-fn corrupt_record_error(path: &Path, reason: &str) -> ResponseHandleError {
-    ResponseHandleError::CorruptRecord {
-        path: path.to_path_buf(),
-        reason: reason.to_owned(),
+    /// [`Self::publish`] for the synchronous render path. The wait parks on
+    /// the shared native runtime; a context that cannot park (a
+    /// current-thread runtime) is a typed store failure, never a guess.
+    pub fn publish_blocking(&self, content: &str, now: i64) -> Result<ResponseHandleRecord> {
+        block_on(self.publish(content, now))
     }
 }
 
-#[cfg(test)]
-mod tests {
-    #[cfg(unix)]
-    use std::os::unix::fs::{PermissionsExt as _, symlink};
-    use std::sync::{Arc, Barrier};
-
-    use super::*;
-    use tracedecay_runtime_core::storage::{
-        DurableAtomicWriteFaultForTest, with_durable_atomic_write_fault_for_test,
-    };
-
-    #[test]
-    fn handles_and_character_counts_are_canonical() {
-        assert!(!is_valid_response_handle("rh_ABCDEF000000000000000000"));
-        let record = ResponseHandleRecord {
-            handle: "rh_000000000000000000000000".into(),
-            created_at: 0,
-            expires_at: RESPONSE_HANDLE_TTL_SECS,
-            content: "é🦀".into(),
-        };
-        assert_eq!(record.original_chars(), 2);
-    }
-
-    #[test]
-    fn concurrent_identical_stores_publish_one_complete_record() {
-        let root = tempfile::tempdir().unwrap();
-        let root = Arc::new(root.path().to_path_buf());
-        let barrier = Arc::new(Barrier::new(2));
-        let workers = [100, 100].map(|now| {
-            let root = Arc::clone(&root);
-            let barrier = Arc::clone(&barrier);
-            std::thread::spawn(move || {
-                barrier.wait();
-                store_response_handle(&root, "shared payload", now)
-            })
-        });
-        let handles = workers.map(|worker| worker.join().unwrap().unwrap().handle);
-        assert_eq!(handles[0], handles[1]);
-
-        assert_eq!(inventory_response_handles(&root).unwrap().file_count, 1);
-        let ResponseHandleLookup::Found(persisted) =
-            retrieve_response_handle(&root, &handles[0], 100).unwrap()
-        else {
-            panic!("concurrent response handle was not retrievable");
-        };
-        assert_eq!(persisted.content, "shared payload");
-    }
-
-    #[test]
-    fn concurrent_distinct_stores_all_publish() {
-        const WRITERS: usize = 16;
-        let root = tempfile::tempdir().unwrap();
-        let root = Arc::new(root.path().to_path_buf());
-        let barrier = Arc::new(Barrier::new(WRITERS));
-        let workers: Vec<_> = (0..WRITERS)
-            .map(|writer| {
-                let root = Arc::clone(&root);
-                let barrier = Arc::clone(&barrier);
-                std::thread::spawn(move || {
-                    let content = format!("payload {writer}");
-                    barrier.wait();
-                    (content.clone(), store_response_handle(&root, &content, 100))
-                })
-            })
-            .collect();
-
-        // Settle every owner before asserting so one failed admission does not
-        // detach the remaining writers.
-        let joined: Vec<_> = workers.into_iter().map(|worker| worker.join()).collect();
-        for (content, result) in joined.into_iter().map(|outcome| outcome.unwrap()) {
-            let stored = result.unwrap_or_else(|error| {
-                panic!("contended writer for {content:?} failed instead of waiting: {error}")
-            });
-            let ResponseHandleLookup::Found(persisted) =
-                retrieve_response_handle(&root, &stored.handle, 100).unwrap()
-            else {
-                panic!("published handle for {content:?} was not retrievable");
-            };
-            assert_eq!(persisted.content, content);
-        }
-    }
-
-    #[test]
-    fn writer_lock_held_past_the_deadline_is_a_retryable_busy_state() {
-        let root = tempfile::tempdir().unwrap();
-        let leaf = root.path().file_name().unwrap().to_str().unwrap();
-        let lock_path = root
-            .path()
-            .parent()
-            .unwrap()
-            .join(format!(".{leaf}{LOCK_SUFFIX}"));
-        let held = OpenOptions::new()
-            .create(true)
-            .truncate(false)
-            .read(true)
-            .write(true)
-            .open(lock_path)
-            .unwrap();
-        held.lock().unwrap();
-
-        let mut ran = false;
-        let result = with_exclusive_lock_within(root.path(), Duration::from_millis(20), || {
-            ran = true;
-            Ok(())
-        });
-        held.unlock().unwrap();
-
-        assert!(!ran, "a writer admitted past the deadline must not run");
-        assert!(matches!(
-            result,
-            Err(ResponseHandleError::Store(TraceDecayError::LockDeadline {
-                resource: "response-handle writer lock",
-                deadline_ms: 20,
-            }))
-        ));
-        inventory_response_handles(root.path())
-            .expect("the lock is admissible again once its holder releases it");
-    }
-
-    #[test]
-    fn expiry_cleanup_removes_the_exact_record() {
-        let root = tempfile::tempdir().unwrap();
-        let record = store_response_handle(root.path(), "expired", 10).unwrap();
-        let cleanup =
-            cleanup_expired_response_handles(root.path(), 10 + RESPONSE_HANDLE_TTL_SECS).unwrap();
-
-        assert_eq!(cleanup.scanned, 1);
-        assert_eq!(cleanup.removed_expired, 1);
-        assert!(matches!(
-            retrieve_response_handle(root.path(), &record.handle, 20).unwrap(),
-            ResponseHandleLookup::Missing
-        ));
-    }
-
-    #[test]
-    fn expired_lookup_is_non_mutating_until_cleanup_or_renewal() {
-        let root = tempfile::tempdir().unwrap();
-        let record = store_response_handle(root.path(), "stale", 10).unwrap();
-        let expired_at = 10 + RESPONSE_HANDLE_TTL_SECS;
-
-        for _ in 0..2 {
-            assert!(matches!(
-                retrieve_response_handle(root.path(), &record.handle, expired_at).unwrap(),
-                ResponseHandleLookup::Expired {
-                    created_at: 10,
-                    expires_at
-                } if expires_at == expired_at
-            ));
-        }
-        assert_eq!(
-            inventory_response_handles(root.path()).unwrap().file_count,
-            1,
-            "a lookup must not reclaim the expired record"
-        );
-
-        let renewed = store_response_handle(root.path(), "stale", expired_at).unwrap();
-        assert_eq!(renewed.handle, record.handle);
-        assert_eq!(renewed.created_at, expired_at);
-        assert_eq!(
-            inventory_response_handles(root.path()).unwrap().file_count,
-            1
-        );
-        let ResponseHandleLookup::Found(persisted) =
-            retrieve_response_handle(root.path(), &record.handle, expired_at).unwrap()
-        else {
-            panic!("renewed expired handle was not retrievable");
-        };
-        assert_eq!(persisted.created_at, expired_at);
-    }
-
-    #[test]
-    fn failed_renewal_of_an_expired_record_leaves_no_record() {
-        let root = tempfile::tempdir().unwrap();
-        let record = store_response_handle(root.path(), "retire me", 10).unwrap();
-        let expired_at = 10 + RESPONSE_HANDLE_TTL_SECS;
-
-        assert!(
-            with_durable_atomic_write_fault_for_test(
-                DurableAtomicWriteFaultForTest::AfterTempSync,
-                || store_response_handle(root.path(), "retire me", expired_at),
-            )
-            .is_err()
-        );
-
-        assert!(matches!(
-            retrieve_response_handle(root.path(), &record.handle, expired_at).unwrap(),
-            ResponseHandleLookup::Missing
-        ));
-        assert_eq!(
-            inventory_response_handles(root.path()).unwrap().file_count,
-            0,
-            "publication must retire the expired record before a fresh publish"
-        );
-    }
-
-    #[test]
-    fn lookups_do_not_take_the_writer_lock() {
-        let root = tempfile::tempdir().unwrap();
-        let record = store_response_handle(root.path(), "read me", 10).unwrap();
-        let leaf = root.path().file_name().unwrap().to_str().unwrap();
-        let lock_path = root
-            .path()
-            .parent()
-            .unwrap()
-            .join(format!(".{leaf}{LOCK_SUFFIX}"));
-        let held = OpenOptions::new()
-            .create(true)
-            .truncate(false)
-            .read(true)
-            .write(true)
-            .open(lock_path)
-            .unwrap();
-        held.lock().unwrap();
-
-        let lookup = retrieve_response_handle(root.path(), &record.handle, 10);
-        let missing = retrieve_response_handle(root.path(), "rh_000000000000000000000000", 10);
-        held.unlock().unwrap();
-
-        assert!(matches!(
-            lookup.unwrap(),
-            ResponseHandleLookup::Found(found) if found.content == "read me"
-        ));
-        assert!(matches!(missing.unwrap(), ResponseHandleLookup::Missing));
-    }
-
-    #[test]
-    fn retrieval_names_invalid_handles_and_corrupt_records_by_type() {
-        let root = tempfile::tempdir().unwrap();
-        let invalid = retrieve_response_handle(root.path(), "rh_ABCDEF000000000000000000", 10)
-            .expect_err("an uppercase digest is not a handle");
-        assert!(matches!(invalid, ResponseHandleError::InvalidHandle));
-        assert!(matches!(
-            TraceDecayError::from(invalid),
-            TraceDecayError::InvalidRequest {
-                reason: InvalidRequestReason::InvalidResponseHandle,
-                ..
-            }
-        ));
-
-        let stored = store_response_handle(root.path(), "payload", 10).unwrap();
-        let path = root.path().join(format!("{}.json", stored.handle));
-        fs::write(&path, b"{not-json").unwrap();
-        assert!(matches!(
-            retrieve_response_handle(root.path(), &stored.handle, 10),
-            Err(ResponseHandleError::CorruptRecord { path: error_path, .. }) if error_path == path
-        ));
-
-        store_response_handle(root.path(), "payload", 10)
-            .expect("publishing the same content replaces a corrupt record");
-        assert!(matches!(
-            retrieve_response_handle(root.path(), &stored.handle, 10).unwrap(),
-            ResponseHandleLookup::Found(record) if record.content == "payload"
-        ));
-    }
-
-    #[test]
-    fn cleanup_and_inventory_reject_corrupt_records() {
-        let root = tempfile::tempdir().unwrap();
-        let path = root.path().join("rh_000000000000000000000000.json");
-        fs::write(&path, b"{}").unwrap();
-
-        assert!(matches!(
-            inventory_response_handles(root.path()),
-            Err(ResponseHandleError::CorruptRecord { path: error_path, .. }) if error_path == path
-        ));
-        assert!(matches!(
-            cleanup_expired_response_handles(root.path(), 10),
-            Err(ResponseHandleError::CorruptRecord { path: error_path, .. }) if error_path == path
-        ));
-
-        #[cfg(unix)]
-        {
-            let owner = tempfile::tempdir().unwrap();
-            let attacker = tempfile::tempdir().unwrap();
-            let stored = store_response_handle(owner.path(), "private payload", 10).unwrap();
-            let linked_root = attacker.path().join("response-handles");
-            symlink(owner.path(), &linked_root).unwrap();
-
-            assert!(matches!(
-                retrieve_response_handle(&linked_root, &stored.handle, 10),
-                Err(ResponseHandleError::Store(TraceDecayError::File { message, .. }))
-                    if message.contains("must not contain symlinks")
-            ));
-            assert!(inventory_response_handles(&linked_root).is_err());
-            assert!(cleanup_expired_response_handles(&linked_root, 10).is_err());
-        }
-    }
-
-    #[test]
-    fn cleanup_durably_removes_abandoned_staging_records() {
-        let root = tempfile::tempdir().unwrap();
-        let staging = root.path().join(format!("{STAGING_PREFIX}orphan"));
-        fs::write(&staging, b"partial").unwrap();
-        let tombstone = root
-            .path()
-            .join(format!("{DURABLE_REMOVAL_TOMBSTONE_PREFIX}orphan"));
-        fs::write(&tombstone, b"private response payload").unwrap();
-
-        let cleanup = cleanup_expired_response_handles(root.path(), 10).unwrap();
-
-        assert_eq!(cleanup.scanned, 0);
-        assert_eq!(cleanup.removed_expired, 0);
-        assert_eq!(cleanup.removed_staging, 1);
-        assert_eq!(cleanup.removed_tombstones, 1);
-        assert!(!staging.exists());
-        assert!(!tombstone.exists());
-    }
-
-    #[test]
-    fn identical_store_replaces_a_corrupt_record() {
-        let root = tempfile::tempdir().unwrap();
-        let original = store_response_handle(root.path(), "recover me", 10).unwrap();
-        let path = root.path().join(format!("{}.json", original.handle));
-        fs::write(&path, b"{not-json").unwrap();
-
-        let restored = store_response_handle(root.path(), "recover me", 20).unwrap();
-
-        assert_eq!(restored.handle, original.handle);
-        assert_eq!(restored.created_at, 20);
-        assert_eq!(restored.expires_at, 20 + RESPONSE_HANDLE_TTL_SECS);
-        let ResponseHandleLookup::Found(persisted) =
-            retrieve_response_handle(root.path(), &restored.handle, 20).unwrap()
-        else {
-            panic!("restored response handle was not retrievable");
-        };
-        assert_eq!(persisted.content, "recover me");
-        assert_eq!(persisted.created_at, 20);
-    }
-
-    #[test]
-    fn interrupted_publish_exposes_no_record_and_retry_recovers() {
-        let root = tempfile::tempdir().unwrap();
-
-        assert!(
-            with_durable_atomic_write_fault_for_test(
-                DurableAtomicWriteFaultForTest::AfterTempSync,
-                || store_response_handle(root.path(), "retry me", 10),
-            )
-            .is_err()
-        );
-        let handle = response_handle_for("retry me");
-        assert!(matches!(
-            retrieve_response_handle(root.path(), &handle, 10).unwrap(),
-            ResponseHandleLookup::Missing
-        ));
-
-        let recovered = store_response_handle(root.path(), "retry me", 20).unwrap();
-        assert_eq!(recovered.handle, handle);
-        let ResponseHandleLookup::Found(persisted) =
-            retrieve_response_handle(root.path(), &handle, 20).unwrap()
-        else {
-            panic!("retried response handle was not retrievable");
-        };
-        assert_eq!(persisted.content, "retry me");
-    }
-
-    #[test]
-    fn post_rename_failure_durably_removes_record_before_retry() {
-        let root = tempfile::tempdir().unwrap();
-
-        assert!(
-            with_durable_atomic_write_fault_for_test(
-                DurableAtomicWriteFaultForTest::AfterRename,
-                || store_response_handle(root.path(), "retry after rename", 10),
-            )
-            .is_err()
-        );
-        let handle = response_handle_for("retry after rename");
-        assert!(matches!(
-            retrieve_response_handle(root.path(), &handle, 10).unwrap(),
-            ResponseHandleLookup::Missing
-        ));
-
-        let recovered = store_response_handle(root.path(), "retry after rename", 20).unwrap();
-        assert_eq!(recovered.handle, handle);
-        assert!(matches!(
-            retrieve_response_handle(root.path(), &handle, 20).unwrap(),
-            ResponseHandleLookup::Found(_)
-        ));
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn repeated_identical_store_reuses_the_record_without_writing() {
-        let root = tempfile::tempdir().unwrap();
-        let first = store_response_handle(root.path(), "same search", 10).unwrap();
-        let path = response_handle_path(root.path(), &first.handle).unwrap();
-        let written = std::fs::metadata(&path).unwrap().modified().unwrap();
-        std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o500)).unwrap();
-
-        let second = store_response_handle(root.path(), "same search", 20);
-
-        std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
-        let second = second.expect("an identical live record answers without a write");
-        assert_eq!(second.handle, first.handle);
-        assert_eq!(second.expires_at, first.expires_at);
-        assert_eq!(
-            std::fs::metadata(&path).unwrap().modified().unwrap(),
-            written
-        );
-
-        let renewed = store_response_handle(
-            root.path(),
-            "same search",
-            10 + RESPONSE_HANDLE_TTL_SECS / 2 + 1,
-        )
-        .unwrap();
-        assert_eq!(renewed.handle, first.handle);
-        assert!(
-            renewed.expires_at > first.expires_at,
-            "past half its TTL a store renews"
-        );
-    }
-
-    #[test]
-    fn failed_renewal_restores_the_previously_issued_record() {
-        let root = tempfile::tempdir().unwrap();
-        let original = store_response_handle(root.path(), "renew safely", 10).unwrap();
-
-        assert!(
-            with_durable_atomic_write_fault_for_test(
-                DurableAtomicWriteFaultForTest::AfterRename,
-                || {
-                    store_response_handle(
-                        root.path(),
-                        "renew safely",
-                        10 + RESPONSE_HANDLE_TTL_SECS / 2 + 1,
-                    )
-                },
-            )
-            .is_err()
-        );
-
-        let ResponseHandleLookup::Found(restored) =
-            retrieve_response_handle(root.path(), &original.handle, 11).unwrap()
-        else {
-            panic!("failed renewal must preserve the previously issued record");
-        };
-        assert_eq!(restored.created_at, original.created_at);
-        assert_eq!(restored.expires_at, original.expires_at);
-        assert_eq!(restored.content, original.content);
-    }
+fn block_on<T>(future: impl Future<Output = Result<T>>) -> Result<T> {
+    tracedecay_runtime_core::native_runtime::block_on(future).map_err(|message| {
+        ResponseHandleError::Store(TraceDecayError::Config {
+            message: format!("response-handle store wait could not run: {message}"),
+        })
+    })?
 }

@@ -74,7 +74,7 @@ function detailedProblemEnvelope(detailKind: string, detail?: unknown) {
     legalActions: canonical.legal_actions,
     diagnostic: { code: canonical.code, message: canonical.message },
     detail: detail ?? canonical.detail,
-    ...(canonical.detail.kind === "code_graph_rewarming"
+    ...(canonical.detail.kind === "code_graph_rewarming" || canonical.detail.kind === "project_open_backoff"
       ? { retryAfterMillis: canonical.detail.retry_after_millis as number }
       : {}),
   });
@@ -1787,6 +1787,44 @@ describe("TraceDecayClient transport envelopes", () => {
         await expect(requestThroughTransport(client)).rejects.toBeInstanceOf(
           TraceDecayMalformedResponseError,
         );
+      },
+    );
+  });
+
+  it("preserves a project-open failure's measured retry delay and cause", async () => {
+    const detail = {
+      kind: "project_open_backoff",
+      retry_after_millis: 3_210,
+      cause: "Project open is waiting after a bounded store-open failure.",
+    };
+    const malformed = [
+      { ...detail, retry_after_millis: "3210" },
+      { ...detail, retry_after_millis: -1 },
+      { ...detail, retry_after_millis: 1.5 },
+      { ...detail, retry_after_millis: Number.MAX_SAFE_INTEGER + 1 },
+      { ...detail, cause: null },
+      { ...detail, cause: 42 },
+    ];
+    const envelopes = [
+      detailedProblemEnvelope("project_open_backoff"),
+      ...malformed.map((value) => detailedProblemEnvelope("project_open_backoff", value)),
+    ];
+    await withServer(
+      envelopes.map((envelope): RequestHandler => (_request, response) => json(response, 503, envelope)),
+      async (baseUrl) => {
+        const client = createClient({ baseUrl, projectId: "project.sdk", token: "sdk-secret" });
+        const refusal = await requestThroughTransport(client).catch((error: unknown) => error);
+        expect(refusal, String(refusal)).toBeInstanceOf(TraceDecayUnavailableError);
+        const problem = (refusal as TraceDecayUnavailableError).problem;
+        expect(problem.detail).toEqual(detail);
+        expect(problem.retry_after_millis).toBe(3_210);
+        expect(problem.code).toBe("project_route_open_backoff");
+        expect(problem.diagnostic?.message).toBe(detail.cause);
+        for (const value of malformed) {
+          await expect(requestThroughTransport(client), JSON.stringify(value)).rejects.toBeInstanceOf(
+            TraceDecayMalformedResponseError,
+          );
+        }
       },
     );
   });

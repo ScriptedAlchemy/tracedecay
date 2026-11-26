@@ -414,6 +414,12 @@ async fn execute_invocation_with_project_owner<'a>(
         };
         if let Err(error) = project_server {
             record_project_open_refusal(request.operation().as_str(), &error);
+            if doctor_preserves_project_open_refusal(&request, &error) {
+                return DaemonInvocationResponse::application_problem(
+                    request_id,
+                    crate::mcp::tools::graph_tool_error_problem(&error),
+                );
+            }
             return project_open_refusal_response(
                 request_id,
                 &error,
@@ -787,6 +793,32 @@ pub(super) async fn execute_daemon_invocation(
     .await
 }
 
+/// Doctor diagnoses occupied project slots and a blocked repository walk;
+/// treating either as pending publication hides the state it must report.
+/// Other typed clients keep their existing bounded mounting retries, as does
+/// Doctor when an open or owner publication is actually still in flight.
+fn doctor_preserves_project_open_refusal(
+    request: &DaemonInvocationRequest,
+    error: &tracedecay_domain::errors::TraceDecayError,
+) -> bool {
+    matches!(
+        &request.payload,
+        DaemonInvocationPayload::GraphTool {
+            surface_operation: tracedecay_tool_catalog::ApplicationSurfaceOperation::Runtime,
+            arguments,
+            ..
+        } if arguments.get("doctor_report").and_then(serde_json::Value::as_bool) == Some(true)
+    ) && matches!(
+        error.project_route_context(),
+        Some((
+            tracedecay_daemon_protocol::PROJECT_SERVER_CAPACITY_REASON_CODE
+                | tracedecay_runtime_core::git_discovery::REPOSITORY_DISCOVERY_DEFERRED_REASON_CODE,
+            _,
+            _,
+        ))
+    )
+}
+
 /// A still-opening project is the mounting refusal the typed CLI re-sends
 /// until its deadline.
 ///
@@ -801,6 +833,18 @@ fn project_open_refusal_response(
     workflow_application: bool,
     git_operation: bool,
 ) -> DaemonInvocationResponse {
+    // A completed open that is backed off is a recorded failure, not an
+    // absent application service. Keep its canonical reason, cause, and
+    // measured retry delay so every typed client sees the recorded backoff.
+    if matches!(
+        error.project_open_failure_kind(),
+        Some(tracedecay_domain::errors::ProjectOpenFailureKind::BackedOff { .. })
+    ) {
+        return DaemonInvocationResponse::application_problem(
+            request_id,
+            crate::mcp::tools::graph_tool_error_problem(error),
+        );
+    }
     if error_is_project_open_retryable(error) {
         return DaemonInvocationResponse::application_problem(
             request_id,
@@ -916,6 +960,45 @@ mod workflow_reset_tests {
                 .diagnostic()
                 .map(|diagnostic| diagnostic.code.as_str()),
             Some(tracedecay_contracts::RUNTIME_MOUNTING_REASON_CODE)
+        );
+    }
+
+    #[test]
+    fn backed_off_project_open_keeps_its_delay_and_a_bounded_cause() {
+        let error = tracedecay_domain::errors::TraceDecayError::project_open(
+            tracedecay_domain::errors::ProjectOpenFailureKind::BackedOff {
+                retry_after_ms: 299_123,
+            },
+            format!(
+                "  owner\n refused\t mutable\u{0000} receipt: {}",
+                "é".repeat(300)
+            ),
+        );
+        let response =
+            project_open_refusal_response("request.backed-off".to_owned(), &error, false, false);
+        let wire = serde_json::to_vec(&response).expect("backoff response serializes");
+        let response: DaemonInvocationResponse =
+            serde_json::from_slice(&wire).expect("backoff response decodes");
+        let tracedecay_daemon_protocol::DaemonInvocationOutcome::ApplicationProblem { problem } =
+            response.outcome
+        else {
+            panic!("backoff must be an application problem, got {response:?}");
+        };
+        let cause = format!("owner refused mutable receipt: {}", "é".repeat(240));
+        assert_eq!(
+            problem.detail(),
+            Some(
+                &tracedecay_contracts::ApplicationProblemDetailV1::ProjectOpenBackoff {
+                    retry_after_millis: 299_123,
+                    cause: cause.clone(),
+                }
+            )
+        );
+        assert_eq!(
+            problem
+                .diagnostic()
+                .map(|diagnostic| diagnostic.message.as_str()),
+            Some(cause.as_str())
         );
     }
 

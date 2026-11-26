@@ -108,7 +108,6 @@ async fn context_scout_pause_and_resume_preserve_caller_idempotency_keys() {
         ))
         .unwrap();
         let result = handle_tool_call_with_registry_options(
-            &cg,
             tool_name,
             json!({
                 "address": address.clone(),

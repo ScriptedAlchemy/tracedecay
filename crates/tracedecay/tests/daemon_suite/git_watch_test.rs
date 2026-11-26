@@ -219,7 +219,7 @@ async fn wait_for_stale_serving(
         tokio::task::yield_now().await;
     }
 }
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn unhooked_commit_becomes_searchable_through_scheduler_reconciliation() {
     let (_root, project, harness) = indexed_repo().await;
     let initial = wait_for_symbol(&harness, &project, "refs/heads/main", None, "on_main").await;
@@ -248,7 +248,7 @@ async fn unhooked_commit_becomes_searchable_through_scheduler_reconciliation() {
     assert_ne!(fresh, initial);
     harness.shutdown().await;
 }
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn external_checkout_rebinds_the_exact_sealed_generation() {
     let (_root, project, harness) = indexed_repo().await;
     let initial = wait_for_symbol(&harness, &project, "refs/heads/main", None, "on_main").await;
@@ -273,7 +273,7 @@ async fn external_checkout_rebinds_the_exact_sealed_generation() {
     );
     harness.shutdown().await;
 }
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn linked_worktree_requires_mount_then_serves_only_its_exact_generation() {
     let (root, project, harness) = indexed_repo().await;
     let worktree = root.path().join("wt-feat-y");
@@ -359,7 +359,7 @@ async fn linked_worktree_requires_mount_then_serves_only_its_exact_generation() 
     assert_eq!(symbol_count(&isolated, "wt_only"), 0, "{isolated}");
     harness.shutdown().await;
 }
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn one_reconciliation_covers_a_fifty_commit_frontier() {
     let (_root, project, harness) = indexed_repo().await;
     let initial_revision = head(&project);
@@ -422,7 +422,7 @@ async fn concurrent_reconciliations_converge_on_one_sealed_generation() {
     harness.shutdown().await;
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn cold_and_restarted_daemon_status_retains_actual_native_graph_writes() {
     let (root, project, harness) = indexed_repo().await;
     let first = wait_for_symbol(&harness, &project, "refs/heads/main", None, "on_main").await;

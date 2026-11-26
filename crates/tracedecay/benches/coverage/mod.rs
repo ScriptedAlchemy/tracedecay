@@ -1464,20 +1464,22 @@ async fn seed_retrieve_handle(
             return;
         }
     };
-    let response_handle_root = server
-        .cg_snapshot()
-        .await
-        .store_layout()
-        .response_handle_root
-        .clone();
+    let Some(database) = server.project_session_db_for_test() else {
+        seeds
+            .skipped
+            .push("retrieve: project session store unavailable".to_owned());
+        return;
+    };
     let content = format!(
         "{{\"marker\":\"{BENCH_RETRIEVE_MARKER}\",\"items\":[\"real production response handle\"]}}"
     );
-    match tracedecay_mcp::response_handles::store_response_handle(
-        &response_handle_root,
-        &content,
-        tracedecay_runtime_core::tracedecay::current_timestamp(),
-    ) {
+    match tracedecay_mcp::response_handles::ResponseHandleStore::registered(database)
+        .publish(
+            &content,
+            tracedecay_runtime_core::tracedecay::current_timestamp(),
+        )
+        .await
+    {
         Ok(record) => seeds.retrieve_handle = Some(record.handle),
         Err(error) => seeds.skipped.push(format!("retrieve: {error}")),
     }

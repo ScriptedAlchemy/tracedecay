@@ -261,16 +261,20 @@ pub(crate) async fn dispatch_on_graph_authority(
         .filter(|operation| operation.is_graph_tool())
     {
         Some(operation) => {
+            let handle_store = super::dispatch_groups::response_handle_store(&options);
             let completion =
                 super::compute_graph_tool_for_owner(cg, operation, args.clone(), None, options)
                     .await?;
-            tracedecay_mcp::handlers::graph_tool::render_graph_tool(
-                Some(&cg.store_layout().response_handle_root),
-                &args,
-                completion,
-            )
+            tracedecay_mcp::response_handles::render_with_handles(move || {
+                tracedecay_mcp::handlers::graph_tool::render_graph_tool(
+                    handle_store.as_ref(),
+                    &args,
+                    completion,
+                )
+            })
+            .await
         }
-        None => handle_tool_call_with_registry_options(cg, tool_name, args, options).await,
+        None => handle_tool_call_with_registry_options(tool_name, args, options).await,
     }
 }
 

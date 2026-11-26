@@ -1836,6 +1836,7 @@ async fn a_transact_body_that_awaits_a_foreign_future_is_refused_and_writes_noth
         .unwrap()
         .transact(
             tracedecay_rusqlite_runtime::exact_sql::JobPolicy::Bounded,
+            None,
             async |tx| write_probe_then_yield(tx).await,
         )
         .await

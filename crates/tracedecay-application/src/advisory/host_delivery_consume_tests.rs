@@ -414,6 +414,7 @@ struct ConsumeFixture {
     queue: Arc<AdvisoryHookNoticeQueueV1>,
     completed: AdvisoryCycleOutcome,
     _root: tempfile::TempDir,
+    _response_handles: tracedecay_global_db::tests::harness::RegisteredGlobalDbHarness,
 }
 
 /// Runs the real feedback cycle service to one atomically recorded
@@ -426,11 +427,17 @@ async fn consume_fixture() -> ConsumeFixture {
     let scope = resolved_scope();
     let operation = operation();
     let context = context(&scope, &operation, observed_at);
+    let response_handles_1 = tracedecay_global_db::tests::harness::RegisteredGlobalDbHarness::open(
+        "host-delivery-consume-tests-1",
+    )
+    .await;
     let runtime: Arc<FeedbackRuntime> = Arc::new(
         open_feedback_runtime(
             database,
             root.path(),
-            root.path().join("response-handles"),
+            tracedecay_session_memory::response_handles::ResponseHandleStore::registered(
+                response_handles_1.registered.clone(),
+            ),
             scope.clone(),
             source_access(&scope, &operation, observed_at),
         )
@@ -523,6 +530,7 @@ async fn consume_fixture() -> ConsumeFixture {
             execution,
             FeedbackDurabilityV1::Durable,
         )
+        .await
         .expect("canonical feedback result"),
         contributions: AdvisoryContributionsV1::absent(),
         observation_input,
@@ -542,10 +550,11 @@ async fn consume_fixture() -> ConsumeFixture {
         queue,
         completed,
         _root: root,
+        _response_handles: response_handles_1,
     }
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn completed_publication_is_consumed_into_exactly_one_hook_notice() {
     let fixture = consume_fixture().await;
     let publication = fixture
@@ -679,7 +688,7 @@ async fn completed_publication_is_consumed_into_exactly_one_hook_notice() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn unpublished_cycles_and_hookless_hosts_deliver_nothing() {
     let fixture = consume_fixture().await;
 

@@ -7,9 +7,6 @@ use serde_json::Value;
 use std::os::unix::fs::symlink;
 use tempfile::TempDir;
 use tracedecay_global_db::{ProjectObservationStoreError, RegisteredGlobalDb, StoreInstanceUpsert};
-use tracedecay_mcp::response_handles::{
-    ResponseHandleLookup, retrieve_response_handle, store_response_handle,
-};
 use tracedecay_project::project::{TraceDecay, TraceDecayOpenOptions};
 use tracedecay_project::test_support::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay_runtime_core::branch_meta::{self, BranchMeta};

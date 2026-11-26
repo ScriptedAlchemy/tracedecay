@@ -26,8 +26,10 @@ pub const USER_MEMORY_DB_FILENAME: &str = "user-memory.db";
 /// Remote-node store file under `remote/nodes/<digest>/`.
 pub const REMOTE_DB_FILENAME: &str = "remote.db";
 pub const BRANCH_META_FILENAME: &str = "branch-meta.json";
-/// Directory holding truncated tool responses: under an enrolled project's
-/// store shard, or directly under the profile root for any other checkout.
+/// Retired filesystem cache of truncated tool responses, under an enrolled
+/// project's store shard or the profile root. Response handles now live in
+/// the registered store; this name remains only so maintenance and reset
+/// remove the owned directory.
 pub const RESPONSE_HANDLES_DIRECTORY: &str = "response-handles";
 pub(crate) const REPOSITORY_IDENTITY_FILENAME: &str = "tracedecay-project.json";
 pub const DURABLE_REMOVAL_TOMBSTONE_PREFIX: &str = ".tracedecay-deleted-";
@@ -173,7 +175,6 @@ pub struct StoreLayout {
     pub graph_db_path: PathBuf,
     pub branch_meta_path: PathBuf,
     pub sessions_db_path: PathBuf,
-    pub response_handle_root: PathBuf,
     pub lcm_payload_root: PathBuf,
     pub dashboard_root: PathBuf,
     pub manifest_path: Option<PathBuf>,

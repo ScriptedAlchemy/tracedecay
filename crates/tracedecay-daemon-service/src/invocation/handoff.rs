@@ -93,6 +93,7 @@ impl HandoffOpenTargetPort for DaemonHandoffOpenTargets {
                     )?;
                     let handle = feedback
                         .mint_get(request_id, finding_id.clone(), self.observed_at)
+                        .await
                         .map_err(|_| HandoffOpenTargetError::Unavailable)?;
                     let invocation = feedback
                         .owner()

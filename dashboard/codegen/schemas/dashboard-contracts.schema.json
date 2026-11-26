@@ -1689,6 +1689,30 @@
         },
         {
           "additionalProperties": false,
+          "description": "A completed project open was rejected. The owner retains its bounded\nfailure explanation and the measured delay before another open is\nadmitted.",
+          "properties": {
+            "cause": {
+              "type": "string"
+            },
+            "kind": {
+              "const": "project_open_backoff",
+              "type": "string"
+            },
+            "retry_after_millis": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "kind",
+            "retry_after_millis",
+            "cause"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
           "description": "No TraceDecay daemon accepts connections on `socket`. `named_by` is\nthe environment variable that chose the socket, when one did;\n`service_unit` is what this client observed of the managed service.",
           "properties": {
             "kind": {

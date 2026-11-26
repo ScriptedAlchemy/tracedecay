@@ -194,7 +194,9 @@ async fn register_project_code_read_owners(
         invocation.feedback_runtime_registrar().open_and_register(
             graph.db().clone(),
             project_root.to_path_buf(),
-            graph.store_layout().response_handle_root.clone(),
+            tracedecay_session_memory::response_handles::ResponseHandleStore::registered(
+                session_db.clone(),
+            ),
             access.scope.clone(),
             access.clone(),
             Arc::new(DaemonCallableCodeAuthorizationSource::production(

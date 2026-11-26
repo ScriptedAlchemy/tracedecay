@@ -291,7 +291,7 @@ fn assert_empty_note(output: &Value, note: &str) {
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn run_affected_tests_reports_the_cargo_result_for_the_changed_manifest() {
     let fixture = production_composition_fixture_with_sources(write_affected_fixture).await;
     let server = fixture
@@ -668,7 +668,7 @@ async fn concurrent_read_refusals_keep_each_callers_request_identity() {
 /// Independently composed daemons own distinct operation authorities. Both
 /// must admit the same request ID, and shutting down a peer must not truncate
 /// an already admitted run in the surviving composition.
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn operation_history_keeps_an_admitted_test_run_across_a_peer_composition_shutdown() {
     let owner = production_composition_fixture_with_sources(write_affected_fixture).await;
     let (peer, _peer_isolation) = peer_production_composition(&owner).await;

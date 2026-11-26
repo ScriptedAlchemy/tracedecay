@@ -80,6 +80,11 @@ mod registered_session_sync;
 mod registered_sessions;
 pub mod registry_maintenance;
 mod remote_deletion;
+mod response_handles;
+pub use response_handles::{
+    RESPONSE_HANDLE_TTL_SECS, ResponseHandleError, ResponseHandleInventory, ResponseHandleLookup,
+    ResponseHandleRecord, is_valid_response_handle, response_handle_for,
+};
 pub mod schema_contract;
 pub mod schema_stages;
 mod stack_delivery;

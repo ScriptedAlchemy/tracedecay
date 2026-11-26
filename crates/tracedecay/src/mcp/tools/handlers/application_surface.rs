@@ -86,10 +86,10 @@ fn complete_protocol_controls_with_ceiling(
 }
 
 /// Run one application-surface tool through `executor` and render its result,
-/// spilling oversized payloads under `response_handle_root` when one is given.
+/// spilling oversized payloads under `response_handles` when one is given.
 #[tracing::instrument(name = "mcp.application.surface.total", level = "trace", skip_all)]
 pub async fn handle_application_surface(
-    response_handle_root: Option<&std::path::Path>,
+    response_handles: Option<&tracedecay_mcp::response_handles::ResponseHandlePublisher>,
     operation: ApplicationSurfaceOperation,
     normalized: ApplicationToolRequest,
     executor: Option<&dyn DaemonInvocationExecutor>,
@@ -137,17 +137,21 @@ pub async fn handle_application_surface(
     )
     .await
     .map_err(ApplicationSurfaceAdapterError::into_trace_decay_error)?;
-    render_application_surface_result(response_handle_root, &result)
+    let response_handles = response_handles.cloned();
+    tracedecay_mcp::response_handles::render_with_handles(move || {
+        render_application_surface_result(response_handles.as_ref(), &result)
+    })
+    .await
 }
 
 /// Render one settled application-surface call as its tool result. MCP and
 /// the `tracedecay tool` CLI both print this.
 pub fn render_application_surface_result(
-    response_handle_root: Option<&std::path::Path>,
+    response_handles: Option<&tracedecay_mcp::response_handles::ResponseHandlePublisher>,
     result: &ApplicationSurfaceInvocationResult,
 ) -> Result<tracedecay_mcp::ToolResult> {
     render_application_result(
-        response_handle_root,
+        response_handles,
         result.operation.as_str(),
         &result.binding_id,
         &result.result,
@@ -168,7 +172,7 @@ pub struct RetainedSurfaceExecution {
 #[allow(clippy::too_many_arguments)]
 #[tracing::instrument(name = "mcp.retained.total", level = "trace", skip_all)]
 pub async fn run_retained_surface_tool(
-    response_handle_root: Option<&std::path::Path>,
+    response_handles: Option<&tracedecay_mcp::response_handles::ResponseHandlePublisher>,
     surface: tracedecay_tool_catalog::BindingSurface,
     operation: ApplicationSurfaceOperation,
     args: Value,
@@ -187,18 +191,22 @@ pub async fn run_retained_surface_tool(
         cancellation,
     )
     .await?;
-    render_retained_execution(response_handle_root, &execution)
+    let response_handles = response_handles.cloned();
+    tracedecay_mcp::response_handles::render_with_handles(move || {
+        render_retained_execution(response_handles.as_ref(), &execution)
+    })
+    .await
 }
 
 /// Render a settled retained tool call.
 pub fn render_retained_execution(
-    response_handle_root: Option<&std::path::Path>,
+    response_handles: Option<&tracedecay_mcp::response_handles::ResponseHandlePublisher>,
     execution: &RetainedSurfaceExecution,
 ) -> Result<tracedecay_mcp::ToolResult> {
     {
         let _span = tracing::trace_span!("mcp.retained.render").entered();
         render_application_result(
-            response_handle_root,
+            response_handles,
             execution.operation.as_str(),
             &execution.binding_id,
             &execution.result,
@@ -620,6 +628,15 @@ pub(crate) fn graph_tool_error_problem(
         return graph_tool_unavailable(reason_code, retryable, detail);
     }
     match error {
+        TraceDecayError::ProjectOpen {
+            kind: ProjectOpenFailureKind::BackedOff { retry_after_ms },
+            detail,
+        } => tracedecay_contracts::ApplicationProblem::from_detail(
+            tracedecay_contracts::ApplicationProblemDetailV1::ProjectOpenBackoff {
+                retry_after_millis: *retry_after_ms,
+                cause: safe_diagnostic_message(detail),
+            },
+        ),
         TraceDecayError::Config { message }
         | TraceDecayError::InvalidRequest { message, .. }
         | TraceDecayError::ProjectOpen {

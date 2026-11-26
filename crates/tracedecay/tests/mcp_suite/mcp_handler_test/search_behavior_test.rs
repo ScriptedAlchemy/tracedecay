@@ -28,7 +28,7 @@ fn search_displays(payload: &Value) -> Vec<Value> {
         .collect()
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn search_returns_the_named_symbol_and_refuses_arguments_outside_its_typed_request() {
     let fixture = production_composition_fixture_with_sources(|project| {
         fs::create_dir_all(project.join("src")).expect("search fixture sources");
@@ -264,7 +264,7 @@ const LEDGER_FAMILY: [&str; 5] = [
     "ledger_audit",
 ];
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn a_search_cursor_pages_only_the_request_and_operation_that_minted_it() {
     let fixture = production_composition_fixture_with_sources(|project| {
         fs::create_dir_all(project.join("src")).expect("search fixture sources");
@@ -380,7 +380,7 @@ fn display(name: &str, file: &str) -> Value {
 
 /// `clamp` does not contain the query text: the graph lane ranks it as the
 /// callee of `normalize_score`. That candidate is hydrated like the text hits.
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn search_names_every_ranked_symbol_including_graph_reached_callees() {
     let fixture = production_composition_fixture_with_sources(|project| {
         fs::create_dir_all(project.join("src")).expect("search fixture sources");
@@ -445,7 +445,7 @@ async fn search_names_every_ranked_symbol_including_graph_reached_callees() {
     fixture.harness.shutdown().await;
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn search_ranks_the_production_definition_ahead_of_the_test_reference() {
     let fixture = production_composition_fixture_with_sources(|project| {
         fs::create_dir_all(project.join("src")).expect("production sources");

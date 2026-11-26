@@ -68,6 +68,13 @@ pub enum ApplicationProblemDetailV1 {
     /// still warming again when the read's budget ran out;
     /// `retry_after_millis` is the measured warm-up it still needs.
     CodeGraphRewarming { retry_after_millis: u64 },
+    /// A completed project open was rejected. The owner retains its bounded
+    /// failure explanation and the measured delay before another open is
+    /// admitted.
+    ProjectOpenBackoff {
+        retry_after_millis: u64,
+        cause: String,
+    },
     /// No TraceDecay daemon accepts connections on `socket`. `named_by` is
     /// the environment variable that chose the socket, when one did;
     /// `service_unit` is what this client observed of the managed service.
@@ -153,7 +160,10 @@ impl ApplicationProblemDetailV1 {
     /// knows a better one than the canonical default.
     pub const fn retry_after_millis(&self) -> Option<u64> {
         match self {
-            Self::CodeGraphRewarming { retry_after_millis } => Some(*retry_after_millis),
+            Self::CodeGraphRewarming { retry_after_millis }
+            | Self::ProjectOpenBackoff {
+                retry_after_millis, ..
+            } => Some(*retry_after_millis),
             _ => None,
         }
     }
@@ -170,6 +180,7 @@ impl ApplicationProblemDetailV1 {
             Self::DiagnosticsUnsupported { .. } => "application.diagnostics.unsupported",
             Self::DiagnosticsPending { .. } => "application.diagnostics.pending",
             Self::CodeGraphRewarming { .. } => "application.code-graph.rewarming",
+            Self::ProjectOpenBackoff { .. } => "project_route_open_backoff",
             Self::DaemonUnreachable { .. } => "daemon.unreachable",
         }
     }
@@ -247,6 +258,7 @@ impl ApplicationProblemDetailV1 {
                 "The project's code graph was released for memory and is warming again; retry \
                  after {retry_after_millis}ms."
             ),
+            Self::ProjectOpenBackoff { cause, .. } => cause.clone(),
             Self::DaemonUnreachable {
                 socket,
                 named_by,
@@ -349,6 +361,13 @@ impl ApplicationProblemDetailV1 {
             Self::CodeGraphRewarming { retry_after_millis } => {
                 vec![("Retry after", format!("{retry_after_millis}ms"))]
             }
+            Self::ProjectOpenBackoff {
+                retry_after_millis,
+                cause,
+            } => vec![
+                ("Project open failure", cause.clone()),
+                ("Retry after", format!("{retry_after_millis}ms")),
+            ],
             // The unbounded sentence names the socket, the variable that chose
             // it, and the observed unit together with the next step.
             Self::DaemonUnreachable {

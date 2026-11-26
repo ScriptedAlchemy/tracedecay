@@ -113,7 +113,7 @@ fn symbol_identity(payload: &Value, name: &str) -> Value {
     })
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn tracedecay_context_returns_invoice_total_and_tax_policy() {
     let fixture = production_composition_fixture_with_sources(write_billing_sources).await;
     let server = fixture
@@ -328,7 +328,7 @@ async fn tracedecay_context_returns_invoice_total_and_tax_policy() {
     fixture.harness.shutdown().await;
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn tracedecay_context_serves_sanitized_code_when_catalog_is_ready() {
     let secret = ["sk", "-test-", "1234567890abcdef"].concat();
     let source = format!("pub fn billing_token() -> &'static str {{\n    \"{secret}\"\n}}\n");
@@ -378,7 +378,7 @@ async fn tracedecay_context_serves_sanitized_code_when_catalog_is_ready() {
     fixture.harness.shutdown().await;
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn tracedecay_context_withholds_code_that_drifted_after_indexing() {
     let fixture = production_composition_fixture_with_sources(write_billing_sources).await;
     let server = fixture
@@ -427,7 +427,7 @@ async fn tracedecay_context_withholds_code_that_drifted_after_indexing() {
     fixture.harness.shutdown().await;
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn tracedecay_context_binds_same_name_declarations_to_their_own_code() {
     let fixture = production_composition_fixture_with_sources(|project| {
         fs::create_dir_all(project.join("src")).expect("ledger src dir");
@@ -486,7 +486,7 @@ async fn tracedecay_context_binds_same_name_declarations_to_their_own_code() {
     fixture.harness.shutdown().await;
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn tracedecay_context_withholds_partial_windows_of_oversized_declarations() {
     let statements = 4_000;
     let fixture = production_composition_fixture_with_sources(|project| {
@@ -561,7 +561,7 @@ async fn tracedecay_context_withholds_partial_windows_of_oversized_declarations(
     fixture.harness.shutdown().await;
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn context_preserves_single_name_and_multiword_prose_routing() {
     let fixture = production_composition_fixture_with_sources(|project| {
         fs::create_dir_all(project.join("src")).expect("routing source directory");
@@ -669,7 +669,7 @@ fn assert_rejected(response: &Value, message: &str) {
     assert_eq!(problem["message"], message, "{response}");
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn tracedecay_context_rejects_malformed_requests() {
     let fixture = production_composition_fixture_with_sources(write_billing_sources).await;
     let server = fixture
@@ -770,7 +770,7 @@ async fn context_node_id(server: &McpServer, name: &str) -> String {
         .to_owned()
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn context_call_path_includes_intermediate_attested_source_and_reports_source_cuts() {
     let secret = ["sk", "-test-", "1234567890abcdef"].concat();
     let source = invoice_call_path_source(&secret);
@@ -942,7 +942,7 @@ async fn context_call_path_includes_intermediate_attested_source_and_reports_sou
     fixture.harness.shutdown().await;
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn context_call_path_distinguishes_disconnected_depth_cut_missing_and_zero_edge_paths() {
     let fixture = production_composition_fixture_with_sources(|project| {
         fs::create_dir_all(project.join("src")).expect("call-path src");

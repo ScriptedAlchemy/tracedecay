@@ -1191,6 +1191,14 @@ impl McpServer {
         self.background_cpu.clone()
     }
 
+    /// The registered project session store this server publishes truncated
+    /// responses into.
+    #[cfg(feature = "test-transport")]
+    #[doc(hidden)]
+    pub fn project_session_db_for_test(&self) -> Option<RegisteredGlobalDbLeaseV1> {
+        self.project_session_db.clone()
+    }
+
     #[cfg(feature = "test-transport")]
     #[doc(hidden)]
     pub fn has_project_application_retrieval_for_test(&self) -> bool {
@@ -1362,9 +1370,11 @@ impl McpServer {
             }
         }
 
-        let cg = self.cg_snapshot().await;
-        stats["response_handles"] =
-            response_handle_stats_json(Some(&cg.store_layout().response_handle_root));
+        let inventory = match self.project_session_db.as_ref() {
+            Some(database) => Some(database.inventory_response_handles().await),
+            None => None,
+        };
+        stats["response_handles"] = response_handle_stats_json(inventory);
 
         // Surface the verbose worktree-mismatch warning when present, so
         // `tracedecay_status` is the one tool whose output is loud about

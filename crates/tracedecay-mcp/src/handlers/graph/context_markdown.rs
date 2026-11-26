@@ -1,9 +1,9 @@
 //! Plan-context computation and the markdown every surface renders from a
 //! typed context result.
 
+use crate::response_handles::ResponseHandlePublisher;
 use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
-use std::path::Path;
 
 use super::search_freshness::freshness_lines;
 use super::{
@@ -40,19 +40,19 @@ use super::search_evidence::append_verified_graph_evidence_md;
 /// Renders a context result: the typed JSON for JSON callers, and a
 /// lane-bounded markdown preview otherwise.
 pub(crate) fn render_context(
-    response_handle_root: Option<&Path>,
+    response_handles: Option<&ResponseHandlePublisher>,
     args: &Value,
     result: &ContextResultV1,
 ) -> Result<ToolResult> {
     let value = serde_json::to_value(result)?;
     if render::wants_json(args) {
-        let text = render::finalize(response_handle_root, args, &value, String::new);
+        let text = render::finalize(response_handles, args, &value, String::new);
         return Ok(text_tool_result(&text, Vec::new()));
     }
     let mut output = freshness_lines(&result.freshness);
     let (code_md, kept_symbols) = if result.code.is_empty() {
         let rows = context_symbol_rows(&result.symbols, &result.search_matches);
-        let (rows_md, kept) = ranked_rows_md(response_handle_root, &result.task, &rows);
+        let (rows_md, kept) = ranked_rows_md(response_handles, &result.task, &rows);
         (rows_md, &result.symbols[..kept])
     } else {
         (
@@ -72,7 +72,7 @@ pub(crate) fn render_context(
     if result.symbols.is_empty() {
         append_context_search_matches(
             &mut output,
-            response_handle_root,
+            response_handles,
             &result.task,
             &result.search_matches,
         );
@@ -117,7 +117,7 @@ pub(crate) fn render_context(
     }
     append_retrieval_budget_md(&mut output, &result.retrieval);
     let preview = context_markdown_lane_preview(&output);
-    let text = render::markdown_preview_with_handle(response_handle_root, &output, &preview);
+    let text = render::markdown_preview_with_handle(response_handles, &output, &preview);
     Ok(text_tool_result(&text, Vec::new()))
 }
 
@@ -349,7 +349,7 @@ fn context_markdown(
 /// counts it as returned.
 fn append_context_search_matches(
     output: &mut String,
-    response_handle_root: Option<&Path>,
+    response_handles: Option<&ResponseHandlePublisher>,
     task: &str,
     matches: &[ContextSearchMatchV1],
 ) {
@@ -375,7 +375,7 @@ fn append_context_search_matches(
             ),
         })
         .collect::<Vec<_>>();
-    output.push_str(&ranked_rows_md(response_handle_root, task, &rows).0);
+    output.push_str(&ranked_rows_md(response_handles, task, &rows).0);
 }
 
 /// Every caller anchor's outcome, so an anchor that matched nothing is never
@@ -528,6 +528,7 @@ pub(super) fn verified_plan_context(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::response_handles::test_support::registered_handle_store;
 
     fn search_matches() -> Vec<ContextSearchMatchV1> {
         (1..=10)
@@ -547,11 +548,11 @@ mod tests {
 
     #[test]
     fn search_matches_trim_the_weak_tail_after_the_last_anchored_match() {
-        let root = tempfile::tempdir().expect("handle root");
+        let (_handles_harness, handles) = registered_handle_store();
         let mut trimmed = String::new();
         append_context_search_matches(
             &mut trimmed,
-            Some(root.path()),
+            Some(&handles.publisher()),
             "where is m1 defined",
             &search_matches(),
         );
@@ -572,7 +573,7 @@ mod tests {
         let mut anchored = String::new();
         append_context_search_matches(
             &mut anchored,
-            Some(root.path()),
+            Some(&handles.publisher()),
             "where is m1 defined",
             &matches,
         );
@@ -622,9 +623,9 @@ mod tests {
         symbols: &[PrimitiveSymbolLocationV1],
         matches: &[ContextSearchMatchV1],
     ) -> (String, usize) {
-        let root = tempfile::tempdir().expect("handle root");
+        let (_handles_harness, handles) = registered_handle_store();
         let rows = context_symbol_rows(symbols, matches);
-        let (rendered, kept) = ranked_rows_md(Some(root.path()), "unrelated task", &rows);
+        let (rendered, kept) = ranked_rows_md(Some(&handles.publisher()), "unrelated task", &rows);
         let kept_md = rendered
             .split_once("- _Trimmed ")
             .map_or(rendered.as_str(), |(kept, _)| kept)

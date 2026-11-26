@@ -1584,6 +1584,10 @@ export const ApplicationProblemDetailV1Schema: z.ZodType<ApplicationProblemDetai
   remedy: z.string(),
   retries_on_wake: z.boolean(),
 }).strict(), z.object({
+  cause: z.string(),
+  kind: z.literal("project_open_backoff"),
+  retry_after_millis: z.number().int().min(0),
+}).strict(), z.object({
   authority: z.string(),
   found_version: z.number().int().nullable(),
   kind: z.literal("reset_required"),

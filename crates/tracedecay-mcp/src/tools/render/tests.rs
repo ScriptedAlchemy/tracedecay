@@ -1,5 +1,6 @@
 use super::*;
-use crate::response_handles::{ResponseHandleLookup, retrieve_response_handle};
+use crate::response_handles::ResponseHandleLookup;
+use crate::response_handles::test_support::registered_handle_store;
 use serde_json::json;
 use tracedecay_runtime_core::tracedecay::current_timestamp;
 
@@ -18,7 +19,7 @@ fn json_format_is_compact() {
 
 #[test]
 fn truncated_json_envelope_includes_handle() {
-    let dir = tempfile::TempDir::new().unwrap();
+    let (_harness, store) = registered_handle_store();
     let long = format!(
         "{{\"items\":[{}]}}",
         (0..3_000)
@@ -27,7 +28,7 @@ fn truncated_json_envelope_includes_handle() {
             .join(",")
     );
 
-    let result = truncated_json_envelope_with_handle(Some(dir.path()), &long);
+    let result = truncated_json_envelope_with_handle(Some(&store.publisher()), &long);
     let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
 
     assert_eq!(parsed["truncated"], true);
@@ -43,7 +44,7 @@ fn truncated_json_envelope_includes_handle() {
     let handle = parsed["handle"].as_str().unwrap();
     assert!(handle.starts_with("rh_"));
 
-    let stored = retrieve_response_handle(dir.path(), handle, current_timestamp()).unwrap();
+    let stored = store.lookup_blocking(handle, current_timestamp()).unwrap();
     match stored {
         ResponseHandleLookup::Found(record) => assert_eq!(record.content, long),
         other => panic!("stored response should be retrievable, got {other:?}"),
@@ -65,10 +66,10 @@ fn truncated_json_envelope_reports_character_counts_for_utf8() {
 
 #[test]
 fn truncated_markdown_includes_readable_handle_guidance() {
-    let dir = tempfile::TempDir::new().unwrap();
+    let (_harness, store) = registered_handle_store();
     let long = format!("# Scan\n\n{}", "- repeated finding\n".repeat(3_000));
 
-    let result = truncated_markdown_with_handle(Some(dir.path()), &long);
+    let result = truncated_markdown_with_handle(Some(&store.publisher()), &long);
 
     assert!(result.starts_with("# Truncated Response"));
     assert!(result.contains("## Preview"));
@@ -89,7 +90,7 @@ fn truncated_markdown_includes_readable_handle_guidance() {
     };
     assert!(handle.starts_with("rh_"));
 
-    let stored = retrieve_response_handle(dir.path(), handle, current_timestamp()).unwrap();
+    let stored = store.lookup_blocking(handle, current_timestamp()).unwrap();
     match stored {
         ResponseHandleLookup::Found(record) => assert_eq!(record.content, long),
         other => panic!("stored markdown response should be retrievable, got {other:?}"),
@@ -98,13 +99,13 @@ fn truncated_markdown_includes_readable_handle_guidance() {
 
 #[test]
 fn truncated_markdown_preserves_late_priority_sections() {
-    let dir = tempfile::TempDir::new().unwrap();
+    let (_harness, store) = registered_handle_store();
     let long = format!(
         "## Code Context\n{}\n### Memory Matches\n- fact_id=fact.v1.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb category=project trust=0.90 score=0.500: remembered context\n\n### Entry Points\n- **late_symbol** (function) - src/lib.rs:10\n",
         "padding\n".repeat(5_000)
     );
 
-    let result = truncated_markdown_with_handle(Some(dir.path()), &long);
+    let result = truncated_markdown_with_handle(Some(&store.publisher()), &long);
 
     assert!(result.len() <= MAX_RESPONSE_CHARS);
     assert!(result.contains("## Preserved Priority Sections"));
@@ -181,14 +182,14 @@ fn priority_sections_keep_nested_heading_lines_inside_complete_code_blocks() {
 
 #[test]
 fn markdown_preview_with_handle_stores_full_text_when_preview_differs() {
-    let dir = tempfile::TempDir::new().unwrap();
+    let (_harness, store) = registered_handle_store();
     let full = format!(
         "# Full\n\nsmall visible preview\n\n{}## Details\nfull-only detail",
         "full-only body\n".repeat(MAX_RESPONSE_CHARS)
     );
     let preview = "# Full\n\nsmall visible preview";
 
-    let result = markdown_preview_with_handle(Some(dir.path()), &full, preview);
+    let result = markdown_preview_with_handle(Some(&store.publisher()), &full, preview);
 
     assert!(result.starts_with("# Truncated Response"));
     assert!(result.contains("lane-budgeted preview"));
@@ -202,7 +203,7 @@ fn markdown_preview_with_handle_stores_full_text_when_preview_differs() {
         panic!("markdown preview envelope should include handle");
     };
 
-    let stored = retrieve_response_handle(dir.path(), handle, current_timestamp()).unwrap();
+    let stored = store.lookup_blocking(handle, current_timestamp()).unwrap();
     match stored {
         ResponseHandleLookup::Found(record) => assert_eq!(record.content, full),
         other => panic!("stored markdown preview should be retrievable, got {other:?}"),
@@ -211,11 +212,7 @@ fn markdown_preview_with_handle_stores_full_text_when_preview_differs() {
 
 #[test]
 fn truncated_json_envelope_reports_store_failure() {
-    let dir = tempfile::TempDir::new().unwrap();
-    // A handle root beneath a regular file makes every durable write fail.
-    let blocker = dir.path().join("blocker");
-    std::fs::write(&blocker, b"not a directory").unwrap();
-    let handle_root = blocker.join("response-handles");
+    let publisher = crate::response_handles::test_support::refusing_publisher();
     let long = format!(
         "{{\"items\":[{}]}}",
         (0..3_000)
@@ -224,7 +221,7 @@ fn truncated_json_envelope_reports_store_failure() {
             .join(",")
     );
 
-    let result = truncated_json_envelope_with_handle(Some(&handle_root), &long);
+    let result = truncated_json_envelope_with_handle(Some(&publisher), &long);
     let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
 
     assert_eq!(parsed["truncated"], true);
@@ -234,20 +231,5 @@ fn truncated_json_envelope_reports_store_failure() {
         parsed["handle_status"]["reason_code"],
         "handle_store_failed"
     );
-    let message = parsed["handle_status"]["message"].as_str().unwrap();
-    assert_eq!(
-        message,
-        "The full response could not be cached locally, so no retrieval handle is available."
-    );
-    assert!(!message.contains(dir.path().to_string_lossy().as_ref()));
-}
-
-#[test]
-fn handle_store_busy_omits_paths() {
-    let busy = handle_store_failure_status(&TraceDecayError::LockDeadline {
-        resource: "response-handle writer lock",
-        deadline_ms: 10_000,
-    });
-    assert_eq!(busy["reason_code"], "handle_store_busy");
-    assert_eq!(busy["retryable"], true);
+    assert!(!result.contains("/private/operator"));
 }

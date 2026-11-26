@@ -38,7 +38,7 @@ use crate::support::{
 const TOP_K: usize = 5;
 const ANCHOR_K: usize = 3;
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn context_eval_fixture_scores_real_queries() {
     let production = production_composition_fixture_with_sources(copy_fixture_project).await;
     let server = production

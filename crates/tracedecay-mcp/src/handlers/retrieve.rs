@@ -1,12 +1,10 @@
 //! `tracedecay_retrieve`: one bounded page of a truncated tool response
-//! cached in the project's response-handle store.
+//! published to the project's registered response-handle store.
 //!
 //! The owner sizes the page by rendering it: the page limit shrinks until the
 //! page's JSON-RPC response frame fits the response budget. Every surface
 //! renders the returned page through [`render_retrieved_page`], so the frame a
 //! client sends is the frame the owner measured.
-
-use std::path::Path;
 
 use serde_json::Value;
 use tracedecay_contracts::graph_tool::{GraphToolCompletionV1, GraphToolResultV1};
@@ -20,7 +18,8 @@ use tracedecay_runtime_core::tracedecay::current_timestamp;
 use crate::handlers::graph::graph_tool_completion;
 use crate::handlers::support::{decode_primitive_request, text_tool_result};
 use crate::response_handles::{
-    ResponseHandleLookup, ResponseHandleRecord, public_retrieve_error, retrieve_response_handle,
+    ResponseHandleLookup, ResponseHandleRecord, ResponseHandleStore, public_retrieve_error,
+    retrieve_response_handle,
 };
 use crate::tools::render;
 use crate::transport::JsonRpcResponse;
@@ -30,11 +29,13 @@ const RETRIEVE_PAGE_HEADER_ALLOWANCE: usize = 2_048;
 /// Room the server keeps in the frame for what it appends after rendering
 /// (the accounting footer and `_meta`).
 const RETRIEVE_FRAME_RESERVED_BYTES: usize = 256;
+/// Why retrieval refused: the route admitted no response-handle store.
+pub const RETRIEVE_STORE_UNAVAILABLE_REASON: &str = "handle_storage_unavailable";
 const RETRY_INSTRUCTION: &str = "Re-run the original MCP tool in this project to regenerate the full response and a fresh handle.";
 
 #[tracing::instrument(name = "mcp.retrieve.handle.total", level = "trace", skip_all)]
 pub async fn compute_retrieve(
-    response_handle_root: &Path,
+    response_handles: Option<&ResponseHandleStore>,
     args: &Value,
 ) -> Result<GraphToolCompletionV1> {
     let request: RetrieveSurfaceRequestV1 = decode_primitive_request(args, "tracedecay_retrieve")?;
@@ -51,24 +52,18 @@ pub async fn compute_retrieve(
         Some(requested) => platform_size(requested, "max_chars")?.min(page_budget),
         None => page_budget,
     };
-    // The stored payload is by definition larger than the response cap, so
-    // loading it back is real disk I/O that must not run inline on the async
-    // dispatch worker.
-    let lookup = {
-        let root = response_handle_root.to_path_buf();
-        let handle = request.handle.clone();
-        tracing::Instrument::instrument(
-            tracedecay_runtime_core::native_runtime::spawn_blocking(move || {
-                retrieve_response_handle(&root, &handle, current_timestamp())
-            }),
-            tracing::trace_span!("mcp.retrieve.handle.load"),
+    // Retrieval reads only the admitted project's registered store; a route
+    // without one refuses this feature rather than searching elsewhere.
+    let store = response_handles.ok_or_else(|| {
+        TraceDecayError::project_route(
+            RETRIEVE_STORE_UNAVAILABLE_REASON,
+            true,
+            "this route has no admitted response-handle store",
         )
+    })?;
+    let lookup = retrieve_response_handle(store, &request.handle, current_timestamp())
         .await
-        .map_err(|join_error| TraceDecayError::Config {
-            message: format!("response handle retrieval task failed: {join_error}"),
-        })?
-        .map_err(public_retrieve_error)?
-    };
+        .map_err(public_retrieve_error)?;
     let result = match lookup {
         ResponseHandleLookup::Found(record) => {
             RetrieveResultV1::Page(fitted_page(&record, offset, max_chars, args)?)
@@ -78,7 +73,8 @@ pub async fn compute_retrieve(
             expired: None,
             content: None,
             reason_code: "handle_not_found".to_owned(),
-            message: "Response handle was not found in this project's local cache.".to_owned(),
+            message: "Response handle was not found in this project's response-handle store."
+                .to_owned(),
             retryable: true,
             retry_instruction: RETRY_INSTRUCTION.to_owned(),
             freshness: None,
@@ -91,9 +87,7 @@ pub async fn compute_retrieve(
             expired: true,
             content: None,
             reason_code: "handle_expired".to_owned(),
-            message: format!(
-                "Response handle expired at {expires_at} and was removed from this project's local cache."
-            ),
+            message: format!("Response handle expired at {expires_at}."),
             retryable: true,
             retry_instruction: RETRY_INSTRUCTION.to_owned(),
             created_at,

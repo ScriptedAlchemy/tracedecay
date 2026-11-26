@@ -7,7 +7,7 @@ use std::sync::Arc;
 use tracedecay_runtime_core::path_safety::canonical_existing_identity;
 
 #[cfg(feature = "test-transport")]
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn search_call_writes_mcp_runtime_analytics_event() {
     // Global accounting is a process-environment switch the cargo test
     // profile turns off, so the journey runs in a child without the opt-out.
@@ -105,7 +105,7 @@ async fn search_call_writes_mcp_runtime_analytics_event() {
 }
 
 #[cfg(feature = "test-transport")]
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn context_call_writes_memory_match_analytics_without_fact_bodies() {
     // Context retrieval lanes are served by the daemon-owned code-index
     // authority, so this journey runs through the production composition.
@@ -242,7 +242,7 @@ async fn context_call_writes_memory_match_analytics_without_fact_bodies() {
     fixture.harness.shutdown().await;
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn failed_tool_call_writes_mcp_runtime_analytics_event() {
     let fixture = setup_accounted_server().await;
     let (server, server_handle) = (fixture.server.clone(), fixture.server.clone());
@@ -292,7 +292,7 @@ async fn failed_tool_call_writes_mcp_runtime_analytics_event() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn skill_view_call_writes_skill_arguments_to_mcp_runtime_analytics() {
     let fixture = setup_accounted_server().await;
     let (server, server_handle) = (fixture.server.clone(), fixture.server.clone());
@@ -330,7 +330,7 @@ async fn skill_view_call_writes_skill_arguments_to_mcp_runtime_analytics() {
     assert_eq!(metadata["function"]["arguments"]["id"], "repo-hygiene");
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn structural_edit_failure_writes_real_failure_reason_to_analytics() {
     let fixture = crate::support::production_composition_fixture().await;
     let server = fixture
@@ -385,7 +385,7 @@ async fn structural_edit_failure_writes_real_failure_reason_to_analytics() {
 /// ledger writes for every default MCP-server install (dashboards showed "no
 /// events yet" while lifetime counters kept growing through the ungated CLI
 /// paths).
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn ledger_records_by_default_without_env_opt_in() {
     // Simulate a real (non-cargo) launch in a child process: the cargo-test
     // opt-out is absent, so the default-on path is exercised.
@@ -448,7 +448,7 @@ async fn ledger_records_by_default_without_env_opt_in() {
 /// A truthy `TRACEDECAY_DISABLE_GLOBAL_DB` is the one opt-out: a falsy value
 /// leaves accounting on, and the retired `TRACEDECAY_ENABLE_GLOBAL_DB` no
 /// longer overrides it.
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn global_accounting_env_overrides() {
     use tracedecay_global_db::{AccountingMode, global_accounting_mode};
 
@@ -483,7 +483,7 @@ async fn global_accounting_env_overrides() {
 /// saving (before - after) per call, so after a single compressed call the
 /// per-project counter equals the ledger total.
 #[cfg(feature = "test-transport")]
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn lifetime_counter_matches_ledger_net_savings() {
     // Global accounting is a process-environment switch the cargo test
     // profile turns off, so the journey runs in a child without the opt-out.

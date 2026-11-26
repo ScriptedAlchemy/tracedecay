@@ -146,7 +146,7 @@ fn occurrence_ids(payload: &Value) -> Vec<String> {
         .collect()
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn find_exact_symbol_returns_every_bare_name_hit() {
     let (fixture, server) = indexed_project().await;
 
@@ -199,7 +199,7 @@ async fn find_exact_symbol_returns_every_bare_name_hit() {
     fixture.harness.shutdown().await;
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn find_exact_symbol_applies_limit_and_rejects_bad_arguments() {
     let (fixture, server) = indexed_project().await;
     let billing = shared_token("src/billing.rs");
@@ -291,7 +291,7 @@ class Circle implements Shape {
 
 /// A Go interface's method spec is a symbol the interface contains, and a Java
 /// method is located at its declaration, not at the annotation above it.
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn find_exact_symbol_locates_interface_methods_at_their_declarations() {
     let fixture = production_composition_fixture_with_sources(|project| {
         fs::create_dir_all(project.join("shapes")).expect("go fixture dir");

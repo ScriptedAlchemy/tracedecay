@@ -284,7 +284,7 @@ async fn init_test_project(project: &Path) -> MountedProductionProject {
     mounted
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn constructors_distinguishes_explicit_update_and_missing_fields() {
     let dir = test_temp_dir();
     let project_root = dir.path().join("project");
@@ -359,7 +359,7 @@ pub fn recovered() -> BuildOptions {
     assert_eq!(sites[3]["field_coverage"], "unknown");
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn constructors_marks_same_name_struct_resolution_unknown() {
     let dir = test_temp_dir();
     let project_root = dir.path().join("project");
@@ -406,7 +406,7 @@ pub mod second {
     }));
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn unmounted_files_ignores_comment_quotes_when_reading_config_entries() {
     let dir = test_temp_dir();
     let project_root = dir.path().join("project");
@@ -465,7 +465,7 @@ export default defineConfig({
     assert_eq!(files, vec!["src/app/orphan.ts"], "{payload}");
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_branch_list_reports_live_vs_serving_drift_state() {
     let dir = test_temp_dir();
     let project_root = dir.path().join("project");
@@ -547,7 +547,7 @@ async fn test_branch_list_reports_live_vs_serving_drift_state() {
 /// first is the anti-vacuity gate: it waits for the graph to become current and
 /// panics unless that private, *called* symbol is in the census, which makes the
 /// zero below a real negative result rather than an unpopulated index.
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_dead_code() {
     let cg = production_composition_fixture().await;
     let _populated = find_node_id(&cg, "format_greeting").await;
@@ -574,7 +574,7 @@ async fn test_dead_code() {
 /// `src/utils.rs` holds `helper` and `format_greeting`, and `main` (in
 /// `src/main.rs`) calls `helper`. A correct semantic diff therefore reports both
 /// of the file's symbols as modified and `main` as impacted downstream.
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_diff_context() {
     let cg = production_composition_fixture().await;
     wait_for_current_graph(&cg).await;
@@ -631,7 +631,7 @@ async fn test_diff_context() {
 /// `utils.rs`; nothing imports back), so a correct analysis reports no cycles.
 /// Resolving a symbol first proves the graph is populated, so the zero below is
 /// a real "no cycles here" rather than "nothing was analysed".
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_circular() {
     let cg = production_composition_fixture().await;
     let _populated = find_node_id(&cg, "helper").await;
@@ -654,7 +654,7 @@ async fn test_circular() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_rename_preview() {
     let cg = production_composition_fixture().await;
     let node_id = find_node_id(&cg, "helper").await;
@@ -710,7 +710,7 @@ async fn test_rename_preview() {
 /// `format_greeting`) with no symbol calling itself or looping back, so a
 /// correct analysis finds no recursion. Resolving a symbol on that chain first
 /// proves the call edges are present, which is what makes zero meaningful.
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_recursion() {
     let cg = production_composition_fixture().await;
     let _populated = find_node_id(&cg, "format_greeting").await;
@@ -731,7 +731,7 @@ async fn test_recursion() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_changelog_no_git() {
     let cg = setup_empty_analysis_project().await;
     // The fixture repository holds a single commit, so `HEAD~1` names no
@@ -761,7 +761,7 @@ async fn test_changelog_no_git() {
     close_test_graph(cg).await;
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn pr_context_no_git_returns_structured_git_error() {
     let cg = setup_empty_analysis_project().await;
     let result = handle_tool_call(
@@ -779,7 +779,7 @@ async fn pr_context_no_git_returns_structured_git_error() {
     close_test_graph(cg).await;
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_port_status() {
     let cg = production_composition_fixture().await;
     wait_for_current_graph(&cg).await;
@@ -841,7 +841,7 @@ async fn test_port_status() {
 /// wild cross-type "matches", e.g. `Biquad::new` pairing with an unrelated
 /// `Adaa::new`. The match key must also include the parent type so siblings
 /// of distinct owners stay unmatched.
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn port_status_does_not_match_methods_of_different_parents() {
     let dir = test_temp_dir();
     let project_root = dir.path().join("project");
@@ -899,7 +899,7 @@ async fn port_status_does_not_match_methods_of_different_parents() {
 
 /// Sanity: when the same parent type name exists in both dirs, methods do
 /// match, confirming the parent-aware key isn't too strict.
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn port_status_matches_methods_with_same_parent_type() {
     let dir = test_temp_dir();
     let project_root = dir.path().join("project");
@@ -945,7 +945,7 @@ async fn port_status_matches_methods_with_same_parent_type() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_port_order() {
     let cg = production_composition_fixture().await;
     wait_for_current_graph(&cg).await;
@@ -1015,7 +1015,7 @@ async fn test_port_order() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn port_order_sorts_a_tied_level_before_applying_the_limit() {
     let dir = test_temp_dir();
     let project_root = dir.path().join("project");
@@ -1047,7 +1047,7 @@ async fn port_order_sorts_a_tied_level_before_applying_the_limit() {
     assert_eq!(output["returned"], json!(2));
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_rename_preview_not_found() {
     let cg = setup_empty_analysis_project().await;
     let result = handle_tool_call(
@@ -1072,7 +1072,7 @@ async fn test_rename_preview_not_found() {
 // which pairs each one with the schema `required` array the handler parser is
 // supposed to mirror instead of only asserting that *some* error came back.
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn commit_context_clean_worktree_returns_json() {
     let dir = test_temp_dir();
     let project_root = dir.path().join("project");
@@ -1108,7 +1108,7 @@ async fn commit_context_clean_worktree_returns_json() {
 }
 
 /// Changed declarations include removed before-side source as well as additions.
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn commit_context_staged_source_and_test_reports_symbols() {
     let dir = test_temp_dir();
     let project_root = dir.path().join("project");
@@ -1174,7 +1174,7 @@ async fn commit_context_staged_source_and_test_reports_symbols() {
 }
 
 /// Unsupported config and docs retain file roles and explicit source gaps.
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn commit_context_config_and_docs_report_chore() {
     let dir = test_temp_dir();
     let project_root = dir.path().join("project");
@@ -1226,7 +1226,7 @@ async fn commit_context_config_and_docs_report_chore() {
 /// `staged_only` is the difference between "what will this commit contain"
 /// and "what is dirty". An unstaged docs edit must appear only when the
 /// caller asks for every uncommitted change.
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn commit_context_staged_only_excludes_unstaged_file() {
     let dir = test_temp_dir();
     let project_root = dir.path().join("project");
@@ -1310,7 +1310,7 @@ async fn commit_context_staged_only_excludes_unstaged_file() {
 
 /// An unstaged edit whose mtime lands in the same second the index recorded
 /// for the file is still an uncommitted change.
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn commit_context_reports_an_edit_inside_the_index_mtime_second() {
     let dir = test_temp_dir();
     let project_root = dir.path().join("project");
@@ -1361,7 +1361,7 @@ async fn commit_context_reports_an_edit_inside_the_index_mtime_second() {
 }
 
 /// An unborn HEAD compares the initial source against an empty tree.
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn commit_context_unborn_head_describes_initial_source() {
     let dir = test_temp_dir();
     let project_root = dir.path().join("project");
@@ -1471,7 +1471,7 @@ fn commit_context_json(value: &Value) -> Value {
     })
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_changelog_with_real_git() {
     let dir = test_temp_dir();
     let project_root = dir.path().join("project");
@@ -1533,7 +1533,7 @@ async fn test_changelog_with_real_git() {
 /// `details=true` must surface raw counts + interpretation per dimension,
 /// so callers don't have to compose six separate tools to reproduce the
 /// breakdown.
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_health_detailed_includes_raw_signals() {
     let cg = production_composition_fixture().await;
     let result = handle_tool_call(&cg, "tracedecay_health", json!({ "details": true }), None)
@@ -1687,7 +1687,7 @@ fn matrix_edges(matrix: &Value) -> Vec<(String, String)> {
     edges
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_dsm_reports_authored_file_dependencies() {
     let host = production_composition_fixture_with_sources(write_dsm_coupling_sources).await;
     wait_for_current_graph(&host).await;
@@ -1853,7 +1853,7 @@ _No dependency clusters found._
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_test_risk() {
     let cg = production_composition_fixture().await;
     let result = handle_tool_call(&cg, "tracedecay_test_risk", json!({ "limit": 10 }), None)
@@ -1888,7 +1888,7 @@ async fn test_test_risk() {
     assert!(parsed.get("risks").is_some(), "risks array should exist");
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_test_risk_distinguishes_direct_and_closure_attribution() {
     let cg = setup_integration_test_risk_project().await;
     let result = handle_tool_call(
@@ -1963,7 +1963,7 @@ async fn test_test_risk_distinguishes_direct_and_closure_attribution() {
     close_test_graph(cg).await;
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_test_risk_scopes_workspace_source_before_following_external_test_callers() {
     let cg = setup_workspace_test_risk_fixture().await;
     let result = handle_tool_call(
@@ -1992,7 +1992,7 @@ async fn test_test_risk_scopes_workspace_source_before_following_external_test_c
     close_test_graph(cg).await;
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_test_risk_attributes_ts_describe_it_tests() {
     let cg = setup_ts_describe_it_project().await;
     let result = handle_tool_call(
@@ -2031,7 +2031,7 @@ async fn test_test_risk_attributes_ts_describe_it_tests() {
     close_test_graph(cg).await;
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_test_map_lists_ts_it_title_as_covering_test() {
     let cg = setup_ts_describe_it_project().await;
     let result = handle_tool_call(
@@ -2060,7 +2060,7 @@ async fn test_test_map_lists_ts_it_title_as_covering_test() {
     close_test_graph(cg).await;
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_test_risk_excludes_non_src_functions_from_denominator_and_risks() {
     let cg = setup_test_risk_non_src_fixture().await;
     let result = handle_tool_call(
@@ -2104,7 +2104,7 @@ async fn test_test_risk_excludes_non_src_functions_from_denominator_and_risks() 
     close_test_graph(cg).await;
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_todos_finds_markers() {
     let dir = test_temp_dir();
     let project_root = dir.path().join("project");
@@ -2159,7 +2159,7 @@ fn helper() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_todos_filters_by_kind() {
     let dir = test_temp_dir();
     let project_root = dir.path().join("project");
@@ -2192,7 +2192,7 @@ fn main() {
 /// `tracedecay_diff_context.impacted_symbols` must not list the same
 /// downstream node more than once. The same id appeared 6+ times
 /// consecutively when several modified symbols all reached the same dependent.
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn diff_context_dedupes_impacted_symbols() {
     let dir = test_temp_dir();
     let project_root = dir.path().join("project");
@@ -2237,7 +2237,7 @@ pub fn second() { dep::shared(); }
 
 /// `tracedecay_recursion` must preserve genuine direct recursion while
 /// filtering length-1 self-edge artifacts.
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn recursion_keeps_direct_recursion() {
     let dir = test_temp_dir();
     let project_root = dir.path().join("project");
@@ -2271,7 +2271,7 @@ async fn recursion_keeps_direct_recursion() {
     assert_reported_cycles_close(&output);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn recursion_filters_self_edge_artifacts() {
     let dir = test_temp_dir();
     let project_root = dir.path().join("project");
@@ -2305,7 +2305,7 @@ async fn recursion_filters_self_edge_artifacts() {
     assert_reported_cycles_close(&output);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn recursion_reports_real_cycle_path() {
     let dir = test_temp_dir();
     let project_root = dir.path().join("project");
@@ -2349,7 +2349,7 @@ pub fn c() { a(); }
 /// `files_not_indexed`. A small git repo with a real commit history that
 /// touches both a real file and a synthesised directory path must have the
 /// directory filtered out.
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn changelog_filters_directory_paths() {
     let dir = test_temp_dir();
     let project_root = dir.path().join("project");
@@ -2400,7 +2400,7 @@ async fn changelog_filters_directory_paths() {
 /// `tracedecay_dead_code` must support `include_public` so agents can audit
 /// pub items with no callers in the indexed scope. SQL that hard-codes
 /// `visibility != 'public'` reports 0 dead symbols on a mostly-`pub` codebase.
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn dead_code_with_include_public_finds_pub_unreferenced() {
     let dir = test_temp_dir();
     let project_root = dir.path().join("project");
@@ -2457,7 +2457,7 @@ pub fn caller() { called(); }
 /// normalization a diagnostic with span `/abs/path/to/project/src/lib.rs:42:1`
 /// or `src\lib.rs:42:1` resolves to `node: null` even though the file is
 /// indexed.
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn diagnose_normalizes_absolute_and_backslash_paths() {
     let dir = test_temp_dir();
     let project_root = dir.path().join("project");
@@ -2509,7 +2509,7 @@ async fn diagnose_normalizes_absolute_and_backslash_paths() {
 /// non-callable same-file symbol, e.g. a const literally named
 /// `default`, when it's the only same-file match for a blocklisted
 /// name.
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn resolver_blocklist_branch_respects_kind_filter() {
     let dir = test_temp_dir();
     let project_root = dir.path().join("project");
@@ -2573,7 +2573,7 @@ pub fn helper() {}
 /// manual `impl Default for X` blocks poisoned `tracedecay_rank --edge-kind
 /// implements`. Implements/Extends/derives references must only resolve to
 /// trait-shaped targets.
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn implements_refs_dont_resolve_to_enum_variants() {
     let dir = test_temp_dir();
     let project_root = dir.path().join("project");
@@ -2629,7 +2629,7 @@ impl Default for B { fn default() -> Self { B } }
 /// `tracedecay_circular` must report one entry per strongly-connected
 /// component, not every walk through the cycle. Counting DFS paths through
 /// the same SCC reported 73 "cycles" that were one genuine component.
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn circular_reports_one_entry_per_scc_not_per_walk() {
     let dir = test_temp_dir();
     let project_root = dir.path().join("project");
@@ -2684,7 +2684,7 @@ async fn circular_reports_one_entry_per_scc_not_per_walk() {
 /// each cycle separately, instead of collapsing all unsorted nodes into a
 /// single mega-blob. Collapsing them packed 200+ unrelated symbols into one
 /// entry with no way to know what to break first.
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn port_order_reports_separate_scc_groups() {
     let dir = test_temp_dir();
     let project_root = dir.path().join("project");
@@ -2747,7 +2747,7 @@ pub fn leaf() {}
 /// staring at an undifferentiated blob. Each cycle entry must carry
 /// per-symbol in-cycle degree data, a file-level member-count breakdown,
 /// and explicit `entry_point` / `break_point_candidate` suggestions.
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn port_order_provides_intra_cycle_ordering() {
     let dir = test_temp_dir();
     let project_root = dir.path().join("project");
@@ -2821,7 +2821,7 @@ pub fn h() { a(); }
 
 /// Self-edges from fuzzy resolution (`self.rows.push(...)` inside a method
 /// named `push`) must not make singleton symbols appear as cycles.
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn port_order_ignores_self_edges() {
     let dir = test_temp_dir();
     let project_root = dir.path().join("project");
@@ -2864,7 +2864,7 @@ impl Triplet {
 
 /// `tracedecay_inheritance_depth` must surface Rust supertrait chains
 /// (`trait T: U`) as `Extends` edges.
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn inheritance_depth_walks_rust_supertraits() {
     let dir = test_temp_dir();
     let project_root = dir.path().join("project");
@@ -2900,7 +2900,7 @@ pub trait Leaf: Middle {}
     assert!(depth >= 2, "Leaf depth should be >= 2 hops, got {depth}");
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn analysis_symbol_locations_are_one_based() {
     let dir = test_temp_dir();
     let project_root = dir.path().join("project");
@@ -3006,7 +3006,7 @@ async fn analysis_symbol_locations_are_one_based() {
     close_test_graph(graph).await;
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn typescript_typed_variables_reach_public_type_relation_queries() {
     let dir = test_temp_dir();
     let project_root = dir.path().join("project");
@@ -3096,7 +3096,7 @@ async fn typescript_typed_variables_reach_public_type_relation_queries() {
     close_test_graph(graph).await;
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn navigation_pinned_to_a_generation_the_project_does_not_hold_is_not_found() {
     let dir = test_temp_dir();
     let project_root = dir.path().join("project");
@@ -3153,7 +3153,7 @@ fn hierarchy_has_child(hierarchy: &Value, relation: &str, child: &str) -> bool {
         .any(|item| item["edge_kind"] == relation && item["symbol"]["name"] == child)
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn typescript_interface_extends_drives_hierarchy_and_depth() {
     let dir = test_temp_dir();
     let project_root = dir.path().join("project");
@@ -3281,7 +3281,7 @@ function helper() { return unrelated; }
 /// condensation step is broken. This stress test wires up many disjoint
 /// cycles plus DAG-style tails between them and asserts no file leaks into
 /// a second cycle entry.
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn circular_emits_disjoint_sccs_under_load() {
     let dir = test_temp_dir();
     let project_root = dir.path().join("project");
@@ -3356,7 +3356,7 @@ async fn circular_emits_disjoint_sccs_under_load() {
 /// even when callers pass the same path multiple times in `files`. A file
 /// node listed 7× in a row is the caller duplicating the same path
 /// upstream.
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn diff_context_dedupes_modified_symbols_on_duplicate_input() {
     let dir = test_temp_dir();
     let project_root = dir.path().join("project");
@@ -3397,7 +3397,7 @@ async fn diff_context_dedupes_modified_symbols_on_duplicate_input() {
 /// filter misses this because the path is gone from disk by the time it is
 /// checked. gix's `entry_mode` flag skips tree entries before they enter
 /// the change list.
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn changelog_filters_deleted_directory_entries() {
     let dir = test_temp_dir();
     let project_root = dir.path().join("project");
@@ -3445,7 +3445,7 @@ async fn changelog_filters_deleted_directory_entries() {
 /// `[version]`, `[dependencies]` key. A Cargo.toml change with ~30
 /// dependency lines produced ~70 entries that pushed the response past
 /// 760k tokens. Config keys should collapse to one summary per change class.
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn pr_context_collapses_cargo_toml_keys() {
     let dir = test_temp_dir();
     let project_root = dir.path().join("project");
@@ -3607,7 +3607,7 @@ fn pr_context_view(output: &Value) -> Value {
 /// These literals are the tool result for one pinned history: `master` at
 /// `bece36f8dada44933bc1bfa4c42faaccf77dcaab` and `feature` at
 /// `bd4bc112c3374fbe23cb4ae2185cbf7945cb0e82`.
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn pr_context_reports_the_pinned_feature_summary() {
     let dir = test_temp_dir();
     let project_root = dir.path().join("project");
@@ -3772,7 +3772,7 @@ async fn pr_context_reports_the_pinned_feature_summary() {
 /// A short branch name whose local tip and `origin` tip have diverged is not
 /// a comparison. The tool must say so, naming both explicit refs, instead of
 /// silently picking one side.
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn pr_context_names_both_refs_when_a_branch_has_diverged() {
     let dir = test_temp_dir();
     let project_root = dir.path().join("project");
@@ -3842,7 +3842,7 @@ async fn pr_context_names_both_refs_when_a_branch_has_diverged() {
 /// attribute) has an incoming `annotates` edge from the synthesised
 /// annotation_usage node, which `NOT EXISTS (target = id AND kind !=
 /// 'contains')` accepted as a live reference.
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn dead_code_flags_unreferenced_fn_with_attribute() {
     let dir = test_temp_dir();
     let project_root = dir.path().join("project");
@@ -3887,7 +3887,7 @@ fn dead_helper_with_attr() {}
 /// was correct) but the Markdown renderer dropped every finding and printed
 /// "No diagnostics.", so agents saw nothing. The default (Markdown) response
 /// must surface the site.
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn unsafe_patterns_reports_unsafe_block_in_markdown_and_json() {
     let cg = setup_unsafe_block_fixture().await;
 
@@ -3948,7 +3948,7 @@ async fn unsafe_patterns_reports_unsafe_block_in_markdown_and_json() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn field_sites_applies_the_qualified_field_owner() {
     let dir = test_temp_dir();
     let project_root = dir.path().join("project");
@@ -4074,7 +4074,7 @@ pub fn while_let_then_sibling(target: &Target, mut other: Option<Other>) -> u32 
     }
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn field_sites_ignores_field_text_in_rust_literals() {
     let dir = test_temp_dir();
     let project_root = dir.path().join("project");
@@ -4140,7 +4140,7 @@ impl MmapReader {
 /// byte per preceding line past the sealed offset, so with 300 lines ahead of
 /// the only declarations every disk offset falls beyond the file's last
 /// sealed span and no site could be bound to its declaration.
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn field_sites_binds_qualified_receivers_in_a_crlf_checkout() {
     let dir = test_temp_dir();
     let project_root = dir.path().join("project");
@@ -4270,7 +4270,7 @@ async fn call_field_sites(host: &impl AnalysisToolHost, arguments: Value) -> Val
     extract_json(&result.value)
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn field_sites_behavior_reports_literal_read_and_write_sites() {
     let dir = test_temp_dir();
     let project_root = dir.path().join("project");
@@ -4447,7 +4447,7 @@ async fn field_sites_behavior_reports_literal_read_and_write_sites() {
     close_test_graph(qualified_host).await;
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn field_sites_behavior_refuses_unbound_qualified_receiver() {
     let dir = test_temp_dir();
     let project_root = dir.path().join("project");
@@ -4543,7 +4543,7 @@ async fn find_node_id(host: &impl AnalysisToolHost, name: &str) -> String {
 /// `tracedecay_diff_context` and `tracedecay_pr_context` warn when a change
 /// edits a file but leaves out the file history says changes with it: here
 /// every schema change on `master` shipped with its migration.
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn git_context_warns_about_co_change_partners_missing_from_the_change() {
     let dir = test_temp_dir();
     let project_root = dir.path().join("project");
@@ -4700,7 +4700,7 @@ fn write_call_chain(project: &Path) {
     fs::write(project.join("src/tier_c.rs"), TIER_C_RS).unwrap();
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn diff_context_reports_changed_symbols_callers_and_refuses_invalid_input() {
     let dir = test_temp_dir();
     let project = dir.path().join("project");
@@ -4966,7 +4966,7 @@ fn outliers_sorted_by_name(mut payload: Value) -> Value {
     payload
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn gini_reports_literal_coefficients_for_known_distributions() {
     let host = production_composition_fixture_with_sources(write_gini_distribution_sources).await;
     wait_for_current_graph(&host).await;
@@ -5163,7 +5163,7 @@ async fn gini_reports_literal_coefficients_for_known_distributions() {
     close_test_graph(host).await;
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn gini_empty_index_reports_perfect_equality() {
     let host = setup_empty_analysis_project().await;
     wait_for_current_graph(&host).await;
@@ -5459,7 +5459,7 @@ fn assert_clamped_truncation(payload: &Value) {
     assert!(instruction.contains("tracedecay_retrieve"), "{instruction}");
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn hotspots_ranks_symbols_by_edge_degree_and_clamps_limit() {
     let chain_dir = test_temp_dir();
     let chain_root = chain_dir.path().join("project");
@@ -5736,7 +5736,7 @@ async fn call_recursion(graph: &impl AnalysisToolHost, arguments: Value) -> Valu
     extract_json(&result.value)
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn recursion_reports_literal_cycles_and_refuses_non_positive_limit() {
     let dir = test_temp_dir();
     let project_root = dir.path().join("project");

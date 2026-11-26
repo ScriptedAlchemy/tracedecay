@@ -154,7 +154,7 @@ async fn function_id(server: &McpServer, name: &str) -> String {
     ids[0].to_owned()
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn tracedecay_callers_reports_literal_call_sites_and_typed_rejections() {
     let fixture = production_composition_fixture_with_sources(|project| {
         fs::create_dir_all(project.join("src")).unwrap();
@@ -281,7 +281,7 @@ async fn tracedecay_callers_reports_literal_call_sites_and_typed_rejections() {
 /// A registered-project selector reads the selected project's own graph. The
 /// target's symbols do not exist in the active project, so an aliased read of
 /// the active graph could not produce these rows.
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn tracedecay_callers_reads_the_selected_registered_project() {
     let isolation = test_temp_dir();
     let active = isolation.path().join("active");
@@ -399,7 +399,7 @@ pub fn handler() {}\n";
 /// with a complete caller answer. A body that is not an item list is not
 /// expanded: its call is attributed to the `route!` invocation, and the answer
 /// is partial with a typed `macro_body_unparsed` omission naming it.
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn tracedecay_callers_parses_item_macro_bodies_and_discloses_unexpanded_ones() {
     let fixture = production_composition_fixture_with_sources(|project| {
         fs::create_dir_all(project.join("src")).unwrap();
@@ -467,7 +467,7 @@ pub fn glob_miss() {
 /// Issue #2270's shapes: a glob `use` in a block and a `use` in an inline
 /// module bind their calls. A call under a glob whose module does not
 /// define the name stays a disclosed `import_unmodeled` gap.
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn tracedecay_callers_binds_scoped_uses_and_discloses_an_unmodeled_glob() {
     let fixture = production_composition_fixture_with_sources(|project| {
         fs::create_dir_all(project.join("src")).unwrap();

@@ -74,11 +74,16 @@ async fn feedback_admission_conflicts_construct_zero_losing_producers() {
         effective_capabilities: std::collections::BTreeSet::default(),
         grant_expires_at: UtcMicros(i64::MAX),
     };
+    let response_handles_1 =
+        tracedecay_global_db::tests::harness::RegisteredGlobalDbHarness::open("types-tests-1")
+            .await;
     let incumbent_runtime = Arc::new(
         open_feedback_runtime(
             database.clone(),
             project.path(),
-            project.path().join("response-handles"),
+            tracedecay_session_memory::response_handles::ResponseHandleStore::registered(
+                response_handles_1.registered.clone(),
+            ),
             scope.clone(),
             access.clone(),
         )
@@ -147,11 +152,16 @@ async fn feedback_admission_conflicts_construct_zero_losing_producers() {
         }
 
         let registrar = DaemonFeedbackRuntimeRegistrar::new(&service);
+        let response_handles_2 =
+            tracedecay_global_db::tests::harness::RegisteredGlobalDbHarness::open("types-tests-2")
+                .await;
         let result = registrar
             .open_and_register(
                 database.clone(),
                 project.path().to_path_buf(),
-                project.path().join("response-handles"),
+                tracedecay_session_memory::response_handles::ResponseHandleStore::registered(
+                    response_handles_2.registered.clone(),
+                ),
                 scope.clone(),
                 access.clone(),
                 Arc::new(DaemonCallableCodeAuthorizationSource::production(
@@ -226,11 +236,16 @@ async fn feedback_admission_conflicts_construct_zero_losing_producers() {
     let publisher_access = access.clone();
     let publisher_configuration = Arc::clone(graph.configuration_runtime());
     let publisher = tokio::spawn(async move {
+        let response_handles_3 =
+            tracedecay_global_db::tests::harness::RegisteredGlobalDbHarness::open("types-tests-3")
+                .await;
         registrar
             .open_and_register(
                 publisher_database,
                 publisher_root.clone(),
-                publisher_root.join("response-handles"),
+                tracedecay_session_memory::response_handles::ResponseHandleStore::registered(
+                    response_handles_3.registered.clone(),
+                ),
                 publisher_scope.clone(),
                 publisher_access,
                 Arc::new(DaemonCallableCodeAuthorizationSource::production(
@@ -306,11 +321,16 @@ async fn feedback_admission_conflicts_construct_zero_losing_producers() {
     let publisher_access = access.clone();
     let publisher_configuration = Arc::clone(graph.configuration_runtime());
     let publisher = tokio::spawn(async move {
+        let response_handles_4 =
+            tracedecay_global_db::tests::harness::RegisteredGlobalDbHarness::open("types-tests-4")
+                .await;
         publisher_registrar
             .open_and_register(
                 publisher_database,
                 publisher_root.clone(),
-                publisher_root.join("response-handles"),
+                tracedecay_session_memory::response_handles::ResponseHandleStore::registered(
+                    response_handles_4.registered.clone(),
+                ),
                 publisher_scope.clone(),
                 publisher_access,
                 Arc::new(DaemonCallableCodeAuthorizationSource::production(

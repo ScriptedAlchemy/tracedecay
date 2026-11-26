@@ -93,7 +93,7 @@ fn method_selector(name: &str) -> Value {
     json!({"selector": {"selector": "method", "name": name}})
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn implementations_returns_literal_bodies_for_trait_interface_and_method() {
     let fixture = indexed_project().await;
 

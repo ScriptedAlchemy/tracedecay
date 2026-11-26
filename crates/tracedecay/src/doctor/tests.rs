@@ -238,6 +238,47 @@ fn daemon_runtime_parser_reports_missing_database_telemetry_as_pending() {
     assert!(malformed.to_string().contains("was not an object"));
 }
 
+#[test]
+fn an_owner_reset_refusal_remains_a_pending_operator_action() {
+    let project = Path::new("/tmp/doctor-reset-project");
+    let detail = tracedecay_contracts::ApplicationProblemDetailV1::ResetRequired {
+        authority: "project sessions".to_owned(),
+        found_version: Some(1),
+        required_version: Some(2),
+        reason: "session storage uses a retired schema".to_owned(),
+        remedy: "tracedecay reset sessions".to_owned(),
+    };
+    let error = TraceDecayError::project_route_with_detail(detail.code(), false, detail.clone());
+    let mut counters = DoctorCounters::quiet();
+    let mut pending_reset = false;
+    let findings = classify_daemon_status_or_reset(
+        &mut counters,
+        Path::new("/tmp/doctor-reset-profile"),
+        project,
+        &mut pending_reset,
+        &error,
+    );
+
+    assert!(matches!(
+        findings,
+        DoctorDaemonFindingsV1::Unread { reason } if reason == "reset_required"
+    ));
+    assert_eq!(counters.issues, 0);
+    assert_eq!(counters.pending_actions, 1);
+    assert!(pending_reset);
+    assert_eq!(
+        doctor_result(&counters, pending_reset),
+        DoctorCompletion::PendingOperatorAction,
+    );
+    assert!(counters.checks[0].message.contains("project sessions"));
+    assert!(
+        counters.checks[0]
+            .message
+            .contains("session storage uses a retired schema")
+    );
+    assert_eq!(error.project_route_typed_detail(), Some(&detail));
+}
+
 /// The sole daemon owner is the only authority that can observe storage
 /// health, so Doctor losing it is an issue, not a warning: nothing else in the
 /// run opened the store, and a zero exit reads as "checked and fine" to every
@@ -340,6 +381,78 @@ fn stalled_snapshot_on_successful_status_is_a_typed_doctor_failure() {
     );
 }
 
+/// The daemon fixture calls the actual production probe and finding renderer,
+/// keeping the route-to-Doctor assertion inside Doctor's private boundary.
+#[cfg(unix)]
+pub(crate) async fn assert_stalled_doctor_probe(
+    executor: &dyn tracedecay_daemon_protocol::DaemonInvocationExecutor,
+    profile_root: &Path,
+    project_path: &Path,
+    recorded_cause: &str,
+) -> u64 {
+    let error = daemon_doctor_runtime(
+        executor,
+        std::time::Instant::now() + std::time::Duration::from_secs(30),
+    )
+    .await
+    .expect_err("a stalled project must answer the Doctor probe with its recorded failure");
+    assert_eq!(
+        error
+            .project_route_context()
+            .map(|(reason, retryable, _)| (reason, retryable)),
+        Some(("project_route_open_backoff", true)),
+    );
+    let record = tracedecay_mcp::application_output::tool_result::error_problem_record(&error)
+        .expect("Doctor retains the canonical problem record from the daemon refusal");
+    let Some(tracedecay_contracts::ApplicationProblemDetailV1::ProjectOpenBackoff {
+        retry_after_millis,
+        cause,
+    }) = &record.detail
+    else {
+        panic!("Doctor must retain the typed backoff detail: {record:?}");
+    };
+    let retry_after_millis = *retry_after_millis;
+    assert!(cause.contains(recorded_cause));
+    assert_eq!(record.retry_after_millis, Some(retry_after_millis));
+    assert_eq!(
+        record.pre_admission_retry_delay(),
+        Some(std::time::Duration::from_millis(retry_after_millis))
+    );
+    assert_eq!(record.owner_mount_resend_delay(), None);
+    let mut counters = DoctorCounters::quiet();
+    let mut pending_reset = false;
+    let findings = render_current_project_daemon_status(
+        &mut counters,
+        profile_root,
+        project_path,
+        Some(&Err(error)),
+        &mut pending_reset,
+    )
+    .expect("render the actual Doctor probe refusal");
+    assert!(matches!(
+        findings,
+        DoctorDaemonFindingsV1::Unread { reason } if reason == "project_route_open_backoff"
+    ));
+    assert_eq!(
+        (counters.issues, counters.warnings, pending_reset),
+        (1, 0, false)
+    );
+    assert_eq!(
+        doctor_result(&counters, pending_reset),
+        DoctorCompletion::Issues(1)
+    );
+    assert!(counters.checks.iter().any(|check| {
+        check.message.starts_with("Project open stalled:") && check.message.contains(recorded_cause)
+    }));
+    assert!(counters.checks.iter().all(|check| {
+        !check.message.contains("Preserve this recovery set")
+            && !check
+                .message
+                .contains("Canonical Doctor report unavailable")
+    }));
+    retry_after_millis
+}
+
 #[test]
 fn stalled_capacity_status_is_a_typed_doctor_failure_not_a_closed_connection() {
     let path = std::path::Path::new("/tmp/project.capacity");
@@ -362,6 +475,79 @@ fn stalled_capacity_status_is_a_typed_doctor_failure_not_a_closed_connection() {
         (reason, counters.issues, counters.warnings),
         ("project_server_capacity_reached", 1, 0)
     );
+}
+
+/// Exercise the production probe and finding renderer over the daemon
+/// fixture's real socket, including the retained problem's retry contract.
+#[cfg(unix)]
+pub(crate) async fn assert_project_route_doctor_probe(
+    executor: &dyn tracedecay_daemon_protocol::DaemonInvocationExecutor,
+    profile_root: &Path,
+    project_path: &Path,
+    expected_reason: &str,
+    expected_message: &str,
+) {
+    let error = daemon_doctor_runtime(
+        executor,
+        std::time::Instant::now() + std::time::Duration::from_secs(30),
+    )
+    .await
+    .expect_err("the Doctor probe must preserve the project admission refusal");
+    assert_eq!(
+        error
+            .project_route_context()
+            .map(|(reason, retryable, _)| (reason, retryable)),
+        Some((expected_reason, true)),
+    );
+    let record = tracedecay_mcp::application_output::tool_result::error_problem_record(&error)
+        .expect("Doctor retains the daemon's original problem record");
+    assert!(record.pre_admission_retry_delay().is_some());
+    assert_eq!(record.owner_mount_resend_delay(), None);
+    let mut counters = DoctorCounters::quiet();
+    let mut pending_reset = false;
+    let findings = render_current_project_daemon_status(
+        &mut counters,
+        profile_root,
+        project_path,
+        Some(&Err(error)),
+        &mut pending_reset,
+    )
+    .expect("render the actual Doctor probe refusal");
+    let (expected_finding, issues, warnings, completion) = match expected_reason {
+        PROJECT_SERVER_CAPACITY_REASON_CODE => (
+            PROJECT_SERVER_CAPACITY_REASON_CODE,
+            1,
+            0,
+            DoctorCompletion::Issues(1),
+        ),
+        REPOSITORY_DISCOVERY_DEFERRED_REASON_CODE => {
+            ("daemon_warming", 0, 1, DoctorCompletion::Healthy)
+        }
+        other => panic!("unexpected project admission fixture: {other}"),
+    };
+    assert!(matches!(
+        findings,
+        DoctorDaemonFindingsV1::Unread { reason } if reason == expected_finding
+    ));
+    assert_eq!(
+        (counters.issues, counters.warnings, pending_reset),
+        (issues, warnings, false)
+    );
+    assert_eq!(doctor_result(&counters, pending_reset), completion);
+    assert!(
+        counters
+            .checks
+            .iter()
+            .any(|check| check.message.contains(expected_message)),
+        "Doctor must explain the actual admission refusal: {:?}",
+        counters.checks
+    );
+    assert!(counters.checks.iter().all(|check| {
+        !check.message.contains("Preserve this recovery set")
+            && !check
+                .message
+                .contains("Canonical Doctor report unavailable")
+    }));
 }
 
 #[test]

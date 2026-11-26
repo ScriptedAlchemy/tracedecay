@@ -34,7 +34,6 @@ use tracedecay_contracts::{
     ApplicationContractError, ApplicationOperation, CoverageCompleteness, FreshnessState,
     RequestAdmission, RequestContext,
 };
-use tracedecay_domain::errors::TraceDecayError;
 use tracedecay_domain::feedback::{
     FeedbackDurabilityV1, FeedbackFindingId, FeedbackFindingV1, FeedbackImpactStateV1,
     FeedbackImpactV1, FeedbackTriggerV1,
@@ -234,9 +233,6 @@ impl FeedbackCycleRuntimeError {
     pub fn lsp_failure_class(&self) -> &'static str {
         match self {
             Self::Contract(_) => "feedback-cycle-contract",
-            Self::Runtime(FeedbackRuntimeError::HandleStore(TraceDecayError::LockDeadline {
-                ..
-            })) => "feedback-cycle-handle-store-busy",
             Self::Runtime(_) => "feedback-cycle-runtime",
             Self::NoManagedDiagnosticProviders => "feedback-cycle-provider-missing",
             Self::ProviderSetMismatch => "feedback-cycle-provider-mismatch",
@@ -401,7 +397,7 @@ impl FeedbackCycleRuntime {
             >,
         > = Box::pin(self.service.execute(&context, request));
         let execution = execution.await?;
-        compose_canonical_result(&self.feedback, execution, requested_durability)
+        compose_canonical_result(&self.feedback, execution, requested_durability).await
     }
 
     /// Runs one canonical feedback cycle with source-backed advisory findings.
@@ -431,7 +427,7 @@ impl FeedbackCycleRuntime {
             .service
             .execute_with_advisory(context, request, advisory)
             .await?;
-        compose_canonical_result(&self.feedback, execution, requested_durability)
+        compose_canonical_result(&self.feedback, execution, requested_durability).await
     }
 
     fn admits_provider_set(&self, providers: &[DiagnosticProviderIdentity]) -> bool {
@@ -518,7 +514,7 @@ impl FeedbackCycleRuntime {
     }
 }
 
-pub(crate) fn compose_canonical_result(
+pub(crate) async fn compose_canonical_result(
     feedback: &FeedbackRuntime,
     execution: FeedbackCycleExecutionResult,
     requested_durability: FeedbackDurabilityV1,
@@ -537,33 +533,43 @@ pub(crate) fn compose_canonical_result(
 
     let observed_at = execution.usage.completed_at;
     let read_handles = FeedbackCycleReadHandlesV1 {
-        diagnostics_handle: feedback.mint_diagnostics(
-            feedback_cycle_handle_request_id("diagnostics", &execution)?,
-            FeedbackDiagnosticsReadRequestV1 {
-                head_commit_id: execution.cycle.scope.head_commit_id.clone(),
-            },
-            observed_at,
-        )?,
-        list_handle: feedback.mint_list(
-            feedback_cycle_handle_request_id("list", &execution)?,
-            Some(execution.cycle.scope.head_commit_id.clone()),
-            100,
-            observed_at,
-        )?,
+        diagnostics_handle: feedback
+            .mint_diagnostics(
+                feedback_cycle_handle_request_id("diagnostics", &execution)?,
+                FeedbackDiagnosticsReadRequestV1 {
+                    head_commit_id: execution.cycle.scope.head_commit_id.clone(),
+                },
+                observed_at,
+            )
+            .await?,
+        list_handle: feedback
+            .mint_list(
+                feedback_cycle_handle_request_id("list", &execution)?,
+                Some(execution.cycle.scope.head_commit_id.clone()),
+                100,
+                observed_at,
+            )
+            .await?,
     };
     let mut finding_handles = Vec::with_capacity(execution.cycle.findings.len());
     for finding in &execution.cycle.findings {
-        let get_handle = feedback.mint_get(
-            feedback_handle_request_id("get", &execution, finding)?,
-            finding.finding_id.clone(),
-            observed_at,
-        )?;
-        let expansion_handle = if let Some(request) = feedback_expansion_request(finding)? {
-            Some(feedback.mint_expand(
-                feedback_handle_request_id("expand", &execution, finding)?,
-                request,
+        let get_handle = feedback
+            .mint_get(
+                feedback_handle_request_id("get", &execution, finding)?,
+                finding.finding_id.clone(),
                 observed_at,
-            )?)
+            )
+            .await?;
+        let expansion_handle = if let Some(request) = feedback_expansion_request(finding)? {
+            Some(
+                feedback
+                    .mint_expand(
+                        feedback_handle_request_id("expand", &execution, finding)?,
+                        request,
+                        observed_at,
+                    )
+                    .await?,
+            )
         } else {
             None
         };

@@ -372,6 +372,11 @@ export type ApplicationProblemDetailV1 =
     retries_on_wake: boolean;
   }
   | {
+    cause: string;
+    kind: "project_open_backoff";
+    retry_after_millis: number;
+  }
+  | {
     authority: string;
     found_version: number | null;
     kind: "reset_required";

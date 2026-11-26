@@ -338,47 +338,79 @@ fn record_lost_store_files(
     }
 }
 
-/// Expired response handles are removed from the profile root and every
-/// registered project store, so a daemon that outlives the handle TTL still
-/// reclaims them. The sweep stops between roots once cancellation is
-/// requested.
+/// The admitted store unit owns the lease and retirement fence for this
+/// sweep. Listing or waiting for another unit must not retain store clients.
 async fn sweep_response_handles(
-    handle_roots: Vec<PathBuf>,
+    database: &tracedecay_global_db::RegisteredGlobalDb,
+    now: i64,
+) -> MaintenanceTickOutcome {
+    match tracedecay_mcp::response_handles::cleanup_expired_response_handles(database, now).await {
+        Ok(removed) => {
+            if removed > 0 {
+                log_daemon_event(
+                    "response_handle_cleanup",
+                    &[
+                        ("stores", "1".to_owned()),
+                        ("removed_expired", removed.to_string()),
+                        ("failed_stores", "0".to_owned()),
+                    ],
+                );
+            }
+            MaintenanceTickOutcome::Complete
+        }
+        Err(_) => MaintenanceTickOutcome::Retry,
+    }
+}
+
+async fn sweep_retired_response_handle_caches(
+    retired_roots: Vec<PathBuf>,
     cancellation: tracedecay_runtime_core::cancellation::CancellationToken,
 ) {
-    let swept = native_runtime::spawn_blocking(move || {
-        let now = tracedecay_runtime_core::tracedecay::current_timestamp();
-        let (mut removed, mut failed) = (0usize, 0usize);
-        for root in &handle_roots {
-            if cancellation.is_cancelled() {
-                break;
-            }
-            match tracedecay_mcp::response_handles::cleanup_expired_response_handles(root, now) {
-                Ok(count) => removed = removed.saturating_add(count),
-                Err(_) => failed = failed.saturating_add(1),
-            }
-        }
-        (handle_roots.len(), removed, failed)
+    if cancellation.is_cancelled() {
+        return;
+    }
+    let retired = native_runtime::spawn_blocking(move || {
+        retired_roots
+            .iter()
+            .filter_map(|root| remove_retired_response_handle_cache(root).err())
+            .collect::<Vec<_>>()
     })
     .await;
-    match swept {
-        Ok((roots, removed, failed)) if removed > 0 || failed > 0 => log_daemon_event(
-            "response_handle_cleanup",
-            &[
-                ("roots", roots.to_string()),
-                ("removed_expired", removed.to_string()),
-                ("failed_roots", failed.to_string()),
-            ],
-        ),
-        Ok(_) => {}
-        Err(error) => log_daemon_event(
+    let failures = match retired {
+        Ok(failures) => failures,
+        Err(error) => vec![error],
+    };
+    for error in failures {
+        log_daemon_event(
             "retention_degraded",
             &[
                 ("pass", "response_handles".to_owned()),
-                ("failure", "blocking_pool_unavailable".to_owned()),
+                ("failure", "retired_cache_removal_failed".to_owned()),
                 ("error", error),
             ],
-        ),
+        );
+    }
+}
+
+/// Removes the retired `response-handles` directory and its writer lock
+/// beside it, both owned by the store shard (or profile) root `parent`.
+fn remove_retired_response_handle_cache(parent: &Path) -> std::result::Result<(), String> {
+    let directory = parent.join(RESPONSE_HANDLES_DIRECTORY);
+    let lock = parent.join(format!(".{RESPONSE_HANDLES_DIRECTORY}.lock"));
+    tracedecay_runtime_core::storage::reject_symlink_components(
+        &directory,
+        "retired response-handle cache",
+    )
+    .map_err(|error| error.to_string())?;
+    match std::fs::remove_dir_all(&directory) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(format!("{}: {error}", directory.display())),
+    }
+    match std::fs::remove_file(&lock) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(format!("{}: {error}", lock.display())),
     }
 }
 
@@ -514,6 +546,7 @@ async fn run_registered_store_retention(
             return MaintenanceTickOutcome::Retry;
         }
     };
+    let response_handles_outcome = sweep_response_handles(database, now).await;
     let report =
         tracedecay_maintenance::retention::registered_store::run_registered_store_retention(
             database,
@@ -583,7 +616,7 @@ async fn run_registered_store_retention(
             return MaintenanceTickOutcome::Retry;
         }
     }
-    outcome
+    outcome.combine(response_handles_outcome)
 }
 
 async fn run_registered_terminal_housekeeping(
@@ -1466,15 +1499,15 @@ impl MaintenanceCoordinator {
             }
         };
         if optional && continuation.is_none() && !self.cancellation.is_cancelled() {
-            let handle_roots = std::iter::once(profile_root)
+            let retired_roots = std::iter::once(profile_root)
                 .chain(
                     registered_projects
                         .iter()
                         .map(|(_, store)| store.data_root.as_path()),
                 )
-                .map(|root| root.join(RESPONSE_HANDLES_DIRECTORY))
+                .map(Path::to_path_buf)
                 .collect();
-            sweep_response_handles(handle_roots, self.cancellation.clone()).await;
+            sweep_retired_response_handle_caches(retired_roots, self.cancellation.clone()).await;
         }
         let mut active_telemetry_paths = BTreeSet::from([profile_database.db_path().to_path_buf()]);
         active_telemetry_paths.extend(session_databases.iter().cloned());
@@ -2270,6 +2303,77 @@ mod tests {
                 super::run_registered_terminal_housekeeping(&harness.registered).await,
                 MaintenanceTickOutcome::Complete
             );
+        })
+        .expect("native runtime");
+    }
+
+    #[test]
+    fn admitted_store_retention_reclaims_expired_handles_and_retries_failed_cleanup() {
+        native_runtime::block_on(async {
+            let harness = tracedecay_global_db::tests::harness::RegisteredGlobalDbHarness::open(
+                "response-handle-retention",
+            )
+            .await;
+            let database = &harness.registered;
+            let now = tracedecay_runtime_core::tracedecay::current_timestamp();
+            database
+                .publish_response_handle("expired", 1)
+                .await
+                .unwrap();
+            let fresh = database
+                .publish_response_handle("fresh", now)
+                .await
+                .unwrap();
+            database
+                .writer_connection()
+                .unwrap()
+                .execute_batch(
+                    "CREATE TRIGGER refuse_handle_cleanup BEFORE DELETE ON response_handles
+                     BEGIN SELECT RAISE(ABORT, 'handle cleanup blocked'); END;",
+                )
+                .await
+                .unwrap();
+            let config = tracedecay_configuration::RetentionConfig::default();
+            assert_eq!(
+                super::run_registered_store_retention(database, &config).await,
+                MaintenanceTickOutcome::Retry,
+                "failed handle cleanup must keep the store eligible for maintenance"
+            );
+            assert_eq!(
+                database
+                    .inventory_response_handles()
+                    .await
+                    .unwrap()
+                    .record_count,
+                2
+            );
+            database
+                .writer_connection()
+                .unwrap()
+                .execute_batch("DROP TRIGGER refuse_handle_cleanup")
+                .await
+                .unwrap();
+            assert!(
+                super::run_registered_store_retention(database, &config)
+                    .await
+                    .succeeded()
+            );
+            assert_eq!(
+                database
+                    .inventory_response_handles()
+                    .await
+                    .unwrap()
+                    .record_count,
+                1
+            );
+            assert!(matches!(
+                database
+                    .lookup_response_handle(&fresh.handle, now)
+                    .await
+                    .unwrap(),
+                tracedecay_global_db::ResponseHandleLookup::Found(record)
+                    if record.content == "fresh"
+            ));
         })
         .expect("native runtime");
     }
@@ -3314,14 +3418,9 @@ mod tests {
             &other_store, 6,
         );
         let handles = profile_root.join(super::RESPONSE_HANDLES_DIRECTORY);
-        tracedecay_session_memory::response_handles::store_response_handle(&handles, "expired", 1)
-            .expect("expired profile handle");
-        tracedecay_session_memory::response_handles::store_response_handle(
-            &handles,
-            "fresh",
-            tracedecay_runtime_core::tracedecay::current_timestamp(),
-        )
-        .expect("fresh profile handle");
+        std::fs::create_dir_all(&handles).expect("retired profile handle cache");
+        std::fs::write(handles.join("rh_000000000000000000000000.json"), b"{}")
+            .expect("retired profile handle record");
         for _ in 0..2 {
             let deferred = native_runtime::timeout(
                 Duration::from_secs(10),
@@ -3347,12 +3446,9 @@ mod tests {
                 1,
                 "B reclaims its five superseded generations before A releases",
             );
-            assert_eq!(
-                tracedecay_session_memory::response_handles::inventory_response_handles(&handles)
-                    .expect("profile handle inventory")
-                    .file_count,
-                1,
-                "the profile sweep removes the expired handle before A releases",
+            assert!(
+                !handles.exists(),
+                "the profile sweep retires the filesystem handle cache before A releases",
             );
             let pending = coordinator.writer_jobs.pending.lock().unwrap();
             assert_eq!(pending.len(), 1, "only one acquisition, for busy A");
@@ -3448,12 +3544,8 @@ mod tests {
     }
 
     #[test]
-    fn a_full_tick_sweeps_expired_response_handles_from_the_profile_and_each_store() {
+    fn a_full_tick_retires_the_filesystem_handle_cache_of_the_profile_and_each_store() {
         tracedecay_runtime_core::native_runtime::block_on(async {
-            use tracedecay_session_memory::response_handles::{
-                inventory_response_handles, store_response_handle,
-            };
-
             let temp = tempfile::TempDir::new().expect("temp root");
             let profile_root = temp.path().join("profile");
             let checkout = temp.path().join("checkout");
@@ -3472,16 +3564,20 @@ mod tests {
                 &profile_root,
                 &project.project_id,
             );
+            let unrelated = store_root.join("sessions.db");
             std::fs::create_dir_all(&store_root).expect("project store");
-            let roots = [
-                profile_root.join(super::RESPONSE_HANDLES_DIRECTORY),
-                store_root.join(super::RESPONSE_HANDLES_DIRECTORY),
-            ];
-            let now = tracedecay_runtime_core::tracedecay::current_timestamp();
-            for root in &roots {
-                store_response_handle(root, "expired", 1).expect("expired handle");
-                store_response_handle(root, "fresh", now).expect("fresh handle");
-                assert_eq!(inventory_response_handles(root).expect("inventory").file_count, 2);
+            std::fs::write(&unrelated, b"unrelated store data").expect("unrelated store file");
+            let parents = [profile_root.clone(), store_root.clone()];
+            for parent in &parents {
+                let directory = parent.join(super::RESPONSE_HANDLES_DIRECTORY);
+                std::fs::create_dir_all(&directory).expect("retired cache");
+                std::fs::write(directory.join("rh_000000000000000000000000.json"), b"{}")
+                    .expect("retired record");
+                std::fs::write(
+                    parent.join(format!(".{}.lock", super::RESPONSE_HANDLES_DIRECTORY)),
+                    b"",
+                )
+                .expect("retired lock");
             }
             let coordinator = MaintenanceCoordinator {
                 background_cpu: Some(Arc::new(
@@ -3505,14 +3601,18 @@ mod tests {
                 )
                 .await;
 
-            for root in &roots {
-                assert_eq!(
-                    inventory_response_handles(root).expect("inventory").file_count,
-                    1,
-                    "the tick removes the expired handle and keeps the fresh one under {}",
-                    root.display()
+            for parent in &parents {
+                assert!(!parent.join(super::RESPONSE_HANDLES_DIRECTORY).exists());
+                assert!(
+                    !parent
+                        .join(format!(".{}.lock", super::RESPONSE_HANDLES_DIRECTORY))
+                        .exists()
                 );
             }
+            assert_eq!(
+                std::fs::read(&unrelated).expect("unrelated store file survives"),
+                b"unrelated store data"
+            );
         })
         .expect("native runtime");
     }

@@ -1253,6 +1253,45 @@ mod tests {
     }
 
     #[test]
+    fn project_open_backoff_preserves_measured_delay_through_wire_and_source() {
+        for measured_delay in [299_123, MAX_RETRY_AFTER_MILLIS + 1] {
+            let request_id = RequestId::new("request.project-open.backoff").expect("request");
+            let envelope = ApplicationProblemEnvelope::new(
+                contract(),
+                request_id.clone(),
+                ApplicationProblem::from_detail(ApplicationProblemDetailV1::ProjectOpenBackoff {
+                    retry_after_millis: measured_delay,
+                    cause: "The recorded project open was rejected.".to_owned(),
+                }),
+            )
+            .expect("backoff envelope");
+            let exported_delay = measured_delay.min(MAX_RETRY_AFTER_MILLIS);
+            let wire = serde_json::to_value(&envelope).expect("backoff serializes");
+            assert_eq!(wire["problem"]["retry_after_millis"], exported_delay);
+            assert_eq!(
+                wire["problem"]["detail"]["retry_after_millis"], measured_delay,
+                "the detail retains the owner's measurement even when the directive is clamped"
+            );
+            assert_eq!(
+                envelope.problem.pre_admission_retry_delay(),
+                Some(Duration::from_millis(exported_delay))
+            );
+            assert_eq!(envelope.problem.owner_mount_resend_delay(), None);
+
+            let decoded = serde_json::from_value::<ApplicationProblemEnvelope>(wire)
+                .expect("backoff decodes");
+            assert_eq!(decoded, envelope);
+            let reconstructed = ApplicationProblemEnvelope::new(
+                contract(),
+                request_id,
+                (*decoded.problem).into_source(),
+            )
+            .expect("source backoff envelope");
+            assert_eq!(reconstructed, envelope);
+        }
+    }
+
+    #[test]
     fn only_a_mounting_refusal_is_resent_by_the_one_shot_client() {
         let mounting = retry_directed_record(RUNTIME_MOUNTING_REASON_CODE, 40);
         let answered = retry_directed_record("application.retained.authority-unavailable", 40);

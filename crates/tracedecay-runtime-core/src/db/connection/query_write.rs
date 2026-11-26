@@ -5,7 +5,8 @@ use super::{
     TraceDecayError, TransactionBehavior, database_query_error, integrity,
 };
 use crate::db::engine::{Executor, Result as EngineResult, WriteTx};
-use tracedecay_rusqlite_runtime::exact_sql::JobPolicy;
+use std::sync::Arc;
+use tracedecay_rusqlite_runtime::exact_sql::{ExactSqlWriteAuthority, JobPolicy};
 
 enum JobAbort<E> {
     Body(E),
@@ -360,14 +361,16 @@ impl Database {
         R: Send + 'static,
         E: Send + 'static,
     {
-        self.transact_with_policy(operation, JobPolicy::Bounded, body)
-            .await
+        self.transact_with_write_guard(operation, None, body).await
     }
 
-    async fn transact_with_policy<R, E, F>(
+    /// Adds a request fence to the registered authority at writer admission,
+    /// every statement and commit. Dropping the wait cannot remove the fence
+    /// from a job the writer already accepted.
+    pub async fn transact_with_write_guard<R, E, F>(
         &self,
         operation: &str,
-        policy: JobPolicy,
+        guard: Option<Arc<dyn ExactSqlWriteAuthority>>,
         body: F,
     ) -> Result<std::result::Result<R, E>>
     where
@@ -379,13 +382,17 @@ impl Database {
         let conn = self.open_writer_connection_unguarded(operation)?;
         let _client_guard = self.client_guard();
         let verdict = conn
-            .transact(policy, async move |tx: &WriteTx<'_, '_>| {
-                let value = body(tx).await.map_err(JobAbort::Body)?;
-                advance_graph_transaction_generation(tx)
-                    .await
-                    .map_err(JobAbort::Commit)?;
-                Ok(value)
-            })
+            .transact(
+                JobPolicy::Bounded,
+                guard,
+                async move |tx: &WriteTx<'_, '_>| {
+                    let value = body(tx).await.map_err(JobAbort::Body)?;
+                    advance_graph_transaction_generation(tx)
+                        .await
+                        .map_err(JobAbort::Commit)?;
+                    Ok(value)
+                },
+            )
             .await
             .map_err(|error| TraceDecayError::Database {
                 message: format!("isolated writer job failed: {error}"),
