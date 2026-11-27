@@ -506,13 +506,9 @@ impl InvocationConnectionLease {
     }
 
     fn release_after_response(&mut self, response: &crate::contract::DaemonInvocationResponse) {
-        // Admission saturation answers the request and closes the stream.
-        // Preserve that typed answer without pooling a connection it retired.
-        if !matches!(
-            &response.outcome,
-            crate::contract::DaemonInvocationOutcome::ApplicationProblem { problem }
-                if problem.kind() == ApplicationProblemKind::Saturated
-        ) {
+        // Admitted owners can keep serving after the same typed refusals that
+        // close an unadmitted stream. The daemon owns that disposition.
+        if response.stream.is_open() {
             self.release_to_pool();
         }
     }

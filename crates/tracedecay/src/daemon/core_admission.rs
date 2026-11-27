@@ -461,7 +461,8 @@ fn invocation_saturation_response(
                 saturation.kind.reason_code(),
                 "The owning TraceDecay daemon has no request capacity",
             ),
-        ),
+        )
+        .closing_stream(),
     )
 }
 
@@ -687,4 +688,81 @@ pub(super) fn coordinated_dashboard_automation_writer(
         let administration = administration.clone();
         Box::pin(async move { administration.with_writer(operation).await })
     })
+}
+
+#[cfg(test)]
+mod saturation_response_tests {
+    use super::{
+        AuthenticatedFirstRequest, DaemonClientSaturationKind, DaemonClientSaturationResponse,
+        reject_admitted_request,
+    };
+    use tracedecay_contracts::{
+        ApplicationProblem, CancellationContext, Deadline, MultiRootScopeSetReadRequestV1,
+    };
+    use tracedecay_daemon_protocol::{
+        DaemonInvocationOutcome, DaemonInvocationRequest, DaemonInvocationResponse,
+        DaemonInvocationStream,
+    };
+    use tracedecay_domain::{ScopeSetId, UtcMicros};
+    use tracedecay_mcp::transport::ChannelTransport;
+    use tracedecay_runtime_core::native_runtime;
+
+    #[test]
+    fn native_admission_refusals_mark_the_stream_closing() {
+        let request = DaemonInvocationRequest::multi_root_scope_set_read(
+            "request.admission.saturated",
+            MultiRootScopeSetReadRequestV1::new(
+                ScopeSetId::new("scope-set.absent").expect("scope set id"),
+            )
+            .expect("scope set read"),
+            UtcMicros(1),
+            Deadline::new(UtcMicros(5_000_000)).expect("deadline"),
+            CancellationContext::active("cancel.admission.saturated").expect("cancellation"),
+        );
+        let first_request = AuthenticatedFirstRequest::new(
+            serde_json::to_string(&request).expect("invocation wire"),
+        );
+        for (kind, reason) in [
+            (
+                DaemonClientSaturationKind::ClientCapacityReached,
+                "daemon_client_capacity_saturated",
+            ),
+            (
+                DaemonClientSaturationKind::PerClientCapacityReached,
+                "daemon_per_client_capacity_saturated",
+            ),
+            (
+                DaemonClientSaturationKind::BulkCapacityReached,
+                "daemon_bulk_capacity_saturated",
+            ),
+        ] {
+            let (mut transport, _input, mut output) = ChannelTransport::new();
+            native_runtime::block_on(reject_admitted_request(
+                &mut transport,
+                &first_request,
+                DaemonClientSaturationResponse {
+                    kind,
+                    retryable: true,
+                    capacity: 1,
+                },
+            ))
+            .expect("native runtime runs the admission refusal")
+            .expect("admission refusal reaches the client");
+            let wire: String = std::iter::from_fn(|| output.try_recv().ok()).collect();
+            let response: DaemonInvocationResponse =
+                serde_json::from_str(&wire).expect("native saturation refusal");
+            assert_eq!(response.request_id, request.request_id);
+            assert_eq!(response.stream, DaemonInvocationStream::Closing);
+            let DaemonInvocationOutcome::ApplicationProblem { problem } = response.outcome else {
+                panic!("admission saturation must remain a typed application problem");
+            };
+            assert_eq!(
+                problem,
+                ApplicationProblem::saturated(
+                    reason,
+                    "The owning TraceDecay daemon has no request capacity",
+                )
+            );
+        }
+    }
 }

@@ -80,6 +80,7 @@ impl tracedecay_daemon_protocol::DaemonInvocationExecutor for RecordingApplicati
                     revision: tracedecay_daemon_protocol::DAEMON_INVOCATION_REVISION,
                     request_id: request.request_id,
                     outcome,
+                    stream: tracedecay_daemon_protocol::DaemonInvocationStream::Open,
                 }),
                 None => Err(tracedecay_daemon_protocol::DaemonInvocationError::Unavailable),
             }

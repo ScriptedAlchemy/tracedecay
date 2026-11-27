@@ -36,8 +36,9 @@ under reduced motion, and reflow or provide focus modes at 200% browser zoom.
 5. Return to all projects: explicit scope clear.
 6. Real activity: bloom exact `project_id`; conduct across at most one evidenced,
    drawn relation. A shared-repository hop does not light sibling checkouts.
-7. Honest states: registry loading, empty, partial, unavailable, inconsistent,
-   or truncated; stream connecting/offline; graph empty/renderer unavailable.
+7. Show registry loading, empty, partial, unavailable, inconsistent, and
+   truncated states separately. Also show when the stream is connecting or
+   offline, the graph is empty, or the renderer is unavailable.
 
 ### Loom, accepted final target
 
@@ -107,7 +108,7 @@ coverage, initial paused playback, and 0.5–4x presentation speed during migrat
 
 ## Remaining workspace coverage
 
-| Workspace | Canonical interaction plates | Honest-state concepts |
+| Workspace | Canonical interaction plates | Data and connection states |
 |---|---|---|
 | Explorer | browse lanes; search progress/cancel; result inspector | complete empty, partial, stale, offline, source unavailable, cancelled, error |
 | Sessions | timeline/list; transcript search; paged inspector | empty window, partial page, offline, store/temporal unavailable, token count unknown |

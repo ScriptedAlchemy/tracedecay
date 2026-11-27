@@ -1,11 +1,10 @@
 # Evaluations
 
-TraceDecay keeps evaluation assets under one top-level directory while
-preserving the distinct runtimes:
+TraceDecay keeps its evaluations here. Each group has its own runner:
 
 - `memory/` contains deterministic memory scenarios and the cost-gated
   real-model runner shared with the Rust memory suite.
-- `hermetic/` contains isolated Claude and Codex lifecycle harnesses, corpora,
+- `hermetic/` contains isolated Claude and Codex lifecycle runners, corpora,
   fixtures, scorers, and smoke commands.
 - `agent_adoption/` contains the neutral-prompt adoption and ablation matrix,
   including its dry-run and self-test tooling.

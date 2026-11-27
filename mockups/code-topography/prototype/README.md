@@ -1,20 +1,18 @@
 # TRACE, round two, the live physics prototype
 
-Round one (`../trace.html`) settled the **spatial** language of the TRACE
-surface. It could not answer the question the sensory contract actually asks:
-does the structure *feel* like what it is. This folder is that answer. The same
-26-node subgraph, the same visual grammar, with real spring physics under it, a
-flight recorder on it, and a gate that can fail.
+The static TRACE sheet (`../trace.html`) established the layout. This prototype
+keeps the same 26-node subgraph and adds a spring simulation to test whether
+motion conveys node weight and coupling. It records the motion and checks the
+result against numeric criteria.
 
 Requirements this implements live in
 `docs/plans/tracedecay-v2/11b-structure-visualization.md`, sections *Sensory
 contract*, *Rendering strategy*, and *Topography round one, coordinator
 verdict*.
 
-> This is still a **prototype**, not `dashboard/src`. But `sim.js` is written to
-> production standard because it is the module that gets lifted: pure, seeded,
-> DOM-free, deterministic, and covered by `sim.test.mjs`. The renderer and the
-> page are throwaway scaffolding around it.
+> This prototype is outside `dashboard/src`. Only `sim.js` is intended for
+> reuse. It is a deterministic, seeded simulation without DOM dependencies, and
+> `sim.test.mjs` covers it. The renderer and page are specific to the prototype.
 
 ## Files
 
@@ -78,8 +76,8 @@ if any check fails.
 
 ## Tuning parameters
 
-Every knob, its default, and why that default. These are the numbers the owner's
-feel feedback moves.
+The table lists each parameter and default. Adjust these values in response to
+feedback about how the simulation moves.
 
 | Parameter | Default | Meaning | Why this value |
 | --- | --- | --- | --- |

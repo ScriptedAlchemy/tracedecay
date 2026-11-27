@@ -82,8 +82,8 @@ from **that** copy with `<env>/bin` first on `PATH`. Then:
 * the MCP `tracedecay` command resolves to the staged copy via `PATH` (fixes #1),
 * the plugin bundle is deployed from this worktree's `plugin/` dir (fixes #3).
 
-`setup` asserts the staged path actually appears in the baked hook JSON and
-warns loudly if it does not.
+`setup` checks for the staged path in the installed hook JSON and warns if it
+is missing.
 
 ## Env dir layout
 
@@ -141,10 +141,9 @@ A scenario **passes** when every `expected_tools` fragment appears in MCP tool
 names, every `expected_cli` fragment appears in captured command strings, and no
 `anti_tools` appear. When `verify_cmd` is set, its exit status is also
 required (`verify_pass`). If no expectations are listed, the fallback pass
-criterion is at least one tracedecay MCP tool and no anti-tool use. This is a
-deliberately simple end-state judge, the harness exists to guarantee
-*isolation*, not to be a sophisticated grader; layer a stricter judge on top of
-`results.jsonl` if needed.
+criterion is at least one tracedecay MCP tool and no anti-tool use. The runner
+isolates the host environment; these checks only grade the listed outcomes.
+Use `results.jsonl` if you need stricter grading.
 
 Each scored row in `results.jsonl` also records derived fields: **`verify_pass`**
 (whether `verify_cmd` succeeded, or `null` if unset), **`tool_cmd_attempts`**
@@ -204,16 +203,13 @@ the code change (plus model noise), not to drift in the user's real environment.
 ## Fact-store adoption scorecard
 
 The `evals/hermetic/corpora/fact-store-adoption.jsonl` corpus measures whether a
-real agent actually **uses project memory** the way the tools intend: whether it
-**stores** durable facts (`tracedecay_fact_store_add`), **recalls** them (`tracedecay_fact_store_search`) when they
-would help, and, the headline metric, gives **feedback** on the facts it used
-(`tracedecay_fact_feedback`). The write/recall/feedback loop is the point:
-storing a fact nobody ever reinforces or corrects decays in value, so the
-feedback bucket is the truest signal of adoption.
+real agent stores durable facts (`tracedecay_fact_store_add`), recalls them when
+useful (`tracedecay_fact_store_search`), and rates the facts it used
+(`tracedecay_fact_feedback`). Feedback is the primary metric because it shows
+whether the agent reinforces or corrects facts after using them.
 
-`scorecard.py` rolls a run's `results.jsonl` into an **adoption %** per bucket
-(write / recall / feedback) plus an overall figure, so a single number tells you
-how close the agent is to the intended loop.
+`scorecard.py` reads the run's `results.jsonl` and reports adoption percentages
+for writing, recall, and feedback, plus an overall percentage.
 
 Run recipe (adapted from the reusable-env examples above):
 

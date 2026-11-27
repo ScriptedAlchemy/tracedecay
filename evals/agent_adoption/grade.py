@@ -42,10 +42,9 @@ import stock_check
 # Loading a skill is routing, which is scored separately.
 IGNORED_TOOLS = {"TodoWrite", "Skill"}
 
-# Routing subscore weights for the adoption composite. Applicable subscores are
-# selected per scenario, then the weights are renormalized to 0..1. Correctness,
-# tool success, and efficiency are deliberately absent: a routing bonus must not
-# compensate for a wrong answer or a failed call.
+# The grader selects the routing subscores that apply to each scenario and
+# renormalizes their weights to 0..1. It scores correctness, tool success, and
+# efficiency separately so routing cannot offset a wrong answer or failed call.
 ADOPTION_WEIGHTS = {
     "first_tool_choice": 0.30,
     "not_forbidden_first": 0.25,
@@ -100,14 +99,11 @@ CH_UNPROMPTED = "unprompted"            # bare condition: no hints/skills/steeri
 CH_CLI = "cli-only"                     # plugin guidance drove supported CLI fallback
 CHANNELS = (CH_HINT, CH_SKILL, CH_STEERING, CH_UNPROMPTED, CH_CLI, CH_NONE)
 
-# The HINT_SIGNATURES above are hand-mirrored fragments of the hook messages in
-# crates/tracedecay-policy/src/intent_catalog.rs. That mirror is load-bearing: if the source wording
-# drifts and a signature stops matching, the hint text still fires in live
-# transcripts but grade.py no longer recognizes it, so genuinely hint-driven
-# adoptions get silently misfiled as `steering-or-description` and the whole
-# channel-efficacy table lies. `check_hint_drift()` / `grade.py --check-hints`
-# turn the README's "refresh these if the table changes" footnote into an
-# enforced check; run.sh runs it before spending a single live token.
+# HINT_SIGNATURES copies fragments of the hook messages in
+# crates/tracedecay-policy/src/intent_catalog.rs. If a message changes and its
+# signature stops matching, the grader records hint-driven adoption as
+# `steering-or-description`. run.sh runs `grade.py --check-hints` before live
+# agent calls to catch that mismatch.
 HINT_SOURCE_REL = os.path.join(
     "crates", "tracedecay-policy", "src", "intent_catalog.rs"
 )
@@ -605,7 +601,7 @@ def _is_skill_invocation(tc: ToolCall) -> bool:
     """True when this tool call invokes a tracedecay:* skill."""
     if tc.canon == "Skill" or tc.raw_name == "Skill":
         return any("tracedecay" in s.lower() for s in _string_leaves(tc.input))
-    # Some hosts surface a skill as a tool whose name carries the skill id.
+    # Some hosts report a skill as a tool named with the skill ID.
     return "tracedecay:" in (tc.raw_name or "").lower()
 
 
@@ -1210,7 +1206,7 @@ def aggregate(results: list[dict]) -> dict:
             "adoption_rate": round(
                 sum(1 for r in rs if r.get("channel") != CH_NONE) / n, 4
             ) if n else 0.0,
-            # Tool success: which attempted calls actually executed.
+            # Count every attempted call and its outcome.
             "tool_success": {
                 "attempted": sum(c["attempted"] for c in calls),
                 "succeeded": sum(c["succeeded"] for c in calls),

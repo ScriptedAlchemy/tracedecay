@@ -1227,6 +1227,7 @@ async fn execute_context_scout_state_transition(
         revision,
         request_id,
         outcome,
+        stream,
     } = response;
     let DaemonInvocationOutcome::Configuration { scope, outcome } = outcome else {
         return DaemonInvocationResponse {
@@ -1234,6 +1235,7 @@ async fn execute_context_scout_state_transition(
             revision,
             request_id,
             outcome,
+            stream,
         };
     };
     if let Err(error) = reconcile_context_scout_configuration(

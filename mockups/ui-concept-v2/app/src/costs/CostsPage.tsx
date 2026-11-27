@@ -6,10 +6,9 @@ import sparksRaw from "../data/session-sparks.json";
 import "./costs.css";
 
 /*
- * Costs keeps the profile snapshot honest while offering a clearly marked,
- * session-local fixture for the complete usage-to-outcome interaction. The
- * snapshot never manufactures token or price values. Fixture totals derive
- * only from the exact records below and never escape browser workspace state.
+ * The snapshot leaves missing token and price values unavailable. A labeled,
+ * session-local fixture demonstrates how usage is attributed to outcomes. Its
+ * totals use only the records below and stay in browser workspace state.
  */
 
 const HUES: Record<string, string> = {
