@@ -770,12 +770,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn disabled_refresh_closes_provider_drift_without_a_stack_read() {
+    async fn disabled_refresh_preserves_drift_until_live_comparisons_resume() {
         policy_disable_journey(false).await;
     }
 
     #[tokio::test]
-    async fn superseded_refresh_closes_provider_drift_under_current_policy() {
+    async fn superseded_refresh_preserves_drift_under_current_policy() {
         policy_disable_journey(true).await;
     }
 
@@ -834,7 +834,7 @@ mod tests {
             .to_owned();
         let server = std::thread::spawn(move || {
             let mut arrived = Some(arrived);
-            for round in 0..3 {
+            for round in 0..5 {
                 // Complete collection refreshes require two agreeing scans.
                 for _ in 0..2 {
                     let (mut review, _) = listener.accept().unwrap();
@@ -982,7 +982,6 @@ mod tests {
             let outcome = owner.refresh(&context, &request).await;
             assert!(outcome.has_usable_observation(), "{outcome:?}");
         }
-        server.join().unwrap();
         let mut records = anchor_database
             .read_connection()
             .query("SELECT anchor_json FROM retrieval_anchors", ())
@@ -1007,7 +1006,7 @@ mod tests {
             .observe_policy(
                 context.scope().clone(),
                 owner.stack_provider.clone(),
-                binding,
+                binding.clone(),
                 tracedecay_contracts::now_micros(),
             )
             .unwrap();
@@ -1017,8 +1016,44 @@ mod tests {
         );
         assert!(
             settled.drift_observations.is_empty(),
-            "the runtime refresh must already have closed provider drift"
+            "disabled policy supplies no evidence that provider drift has ended"
         );
+        let _reenabled = coordinator
+            .register_scope(
+                context.scope(),
+                GitHubStackedPullRequestPolicyV1::ProbePrivatePreview,
+                github_stack_circuit_policy().unwrap(),
+            )
+            .unwrap();
+        for round in 0..2 {
+            let outcome = owner.refresh(&context, &request).await;
+            assert!(outcome.has_usable_observation(), "{outcome:?}");
+            let comparison = coordinator
+                .observe_policy(
+                    context.scope().clone(),
+                    owner.stack_provider.clone(),
+                    binding.clone(),
+                    tracedecay_contracts::now_micros(),
+                )
+                .unwrap();
+            if round == 0 {
+                assert!(comparison.drift_observations.is_empty());
+            } else {
+                let [closed] = comparison.drift_observations.as_slice() else {
+                    panic!("the stable live pair must close the original interval: {comparison:?}");
+                };
+                let [opened] = open.drift_observations.as_slice() else {
+                    panic!("the base advance must open exactly one interval: {open:?}");
+                };
+                assert_eq!(closed.trace_id, opened.trace_id);
+                assert_eq!(closed.drift.state, IntervalStateV1::Closed);
+                assert_eq!(
+                    closed.drift.first_observed_micros,
+                    opened.drift.first_observed_micros
+                );
+            }
+        }
+        server.join().unwrap();
     }
 
     /// Everything one exact scope needs to mount real review runtime owners
@@ -1027,16 +1062,17 @@ mod tests {
     /// daemon coordinator, and a verified loopback credential.
     struct RuntimeJourney {
         coordinator: Arc<DaemonGitHubStackCoordinatorV1>,
-        producer: std::sync::Mutex<Arc<BoundedObservabilityProducerV1>>,
+        producer: Arc<BoundedObservabilityProducerV1>,
+        producer_boot: u64,
         project_database: RegisteredGlobalDbLeaseV1,
         review_database: Database,
         scope: FeedbackScopeV1,
         context: RequestContext,
         request: GitHubReviewReadRequestV1,
         credential: GitHubReadOnlyCredentialV1,
-        _storage: tempfile::TempDir,
         _project_owner: RegisteredGlobalDbOwnerV1,
         _credential_authority: Arc<dyn GitHubReadOnlyCredentialAuthorityV1>,
+        _storage: tempfile::TempDir,
     }
 
     const RUNTIME_HEAD: &str = "dddddddddddddddddddddddddddddddddddddddd";
@@ -1096,13 +1132,14 @@ mod tests {
     fn start_producer(
         project_database: &RegisteredGlobalDbLeaseV1,
         scope: &FeedbackScopeV1,
+        boot: u64,
     ) -> Arc<BoundedObservabilityProducerV1> {
         Arc::new(
             BoundedObservabilityProducerV1::start(
                 project_database.clone(),
                 ObservabilityProducerIdentityV1 {
                     authorized_scope_ref: scope.project_id.as_str().to_owned(),
-                    process_boot_id: "boot:github-runtime-lifetime".to_owned(),
+                    process_boot_id: format!("boot:github-runtime-lifetime:{boot}"),
                     producer_revision: "github-runtime-lifetime.v1".to_owned(),
                     configuration_revision: "github-runtime-lifetime.v1".to_owned(),
                     policy_revision: "github-runtime-lifetime.v1".to_owned(),
@@ -1129,7 +1166,7 @@ mod tests {
             )
             .await
             .unwrap();
-            let producer = start_producer(&project_database, &scope);
+            let producer = start_producer(&project_database, &scope, 0);
             crate::register_test_schema_installer();
             let review_path = storage.path().join("review.db");
             let authority =
@@ -1150,7 +1187,8 @@ mod tests {
             };
             Self {
                 coordinator: Arc::new(DaemonGitHubStackCoordinatorV1::default()),
-                producer: std::sync::Mutex::new(producer),
+                producer,
+                producer_boot: 0,
                 project_database,
                 review_database,
                 scope,
@@ -1239,7 +1277,7 @@ mod tests {
                         true,
                     )
                     .unwrap(),
-                    producer: Arc::clone(&self.producer.lock().unwrap()),
+                    producer: Arc::clone(&self.producer),
                     observation_db: self.project_database.clone(),
                 }),
                 stack_drift_restore: tokio::sync::OnceCell::new(),
@@ -1249,13 +1287,13 @@ mod tests {
         /// The daemon restart boundary: the current producer drains and joins
         /// so every receipt it accepted is durable, and a fresh producer
         /// serves the next mount exactly as a restarted daemon would.
-        async fn restart_observability(&self) {
-            let producer = self.producer.lock().unwrap().clone();
-            producer
+        async fn restart_observability(&mut self) {
+            self.producer
                 .shutdown()
                 .await
                 .expect("flush the mounted producer");
-            *self.producer.lock().unwrap() = start_producer(&self.project_database, &self.scope);
+            self.producer_boot += 1;
+            self.producer = start_producer(&self.project_database, &self.scope, self.producer_boot);
         }
 
         /// Capability and snapshot anchors the mounted refreshes published to
@@ -1280,7 +1318,7 @@ mod tests {
 
         /// Durable drift receipts the mounted refreshes published, read after
         /// the producer has flushed them.
-        async fn drift_receipts(&self) -> Vec<WorkStackDriftObservedV1> {
+        async fn drift_receipts(&mut self) -> Vec<WorkStackDriftObservedV1> {
             self.restart_observability().await;
             RegisteredObservabilityPortV1::new(self.project_database.as_ref())
                 .query(ObservabilityQueryV1 {
@@ -1310,7 +1348,7 @@ mod tests {
     /// emits no drift receipt for the base advance it observed.
     #[tokio::test]
     async fn late_read_cannot_publish_into_a_replacement_registration() {
-        let journey = RuntimeJourney::mount("runtime-late-read").await;
+        let mut journey = RuntimeJourney::mount("runtime-late-read").await;
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap();
         let circuit = github_stack_circuit_policy().unwrap();
@@ -1387,13 +1425,13 @@ mod tests {
         assert_eq!(journey.coordinator.retained_scope_count(), 0);
     }
 
-    /// Retiring a mounted owner releases its scope state. After a restart the
-    /// fresh mount restores the one open drift interval from durable receipts
-    /// and closes it exactly once, on that interval's original trace, once the
-    /// provider no longer reports the change.
+    /// A cold mount restores an interval's identity but not its prior provider
+    /// baseline. Its first sample must not close the interval, even when the
+    /// base advanced during the restart. Later live comparisons retain the
+    /// original trace until a stable pair actually proves closure.
     #[tokio::test]
-    async fn retired_owner_releases_state_and_a_fresh_mount_closes_its_drift_once() {
-        let journey = RuntimeJourney::mount("runtime-remount").await;
+    async fn restored_drift_waits_for_a_live_comparison_and_closes_its_original_trace() {
+        let mut journey = RuntimeJourney::mount("runtime-remount").await;
         let probe = GitHubStackedPullRequestPolicyV1::ProbePrivatePreview;
         let circuit = github_stack_circuit_policy().unwrap();
         let branch = journey
@@ -1435,22 +1473,41 @@ mod tests {
         // The daemon restarts: the retired owner's receipts become durable
         // before a fresh mount of the same scope reads them back.
         journey.restart_observability().await;
+        // No in-memory coordinator state survives a daemon restart.
+        journey.coordinator = Arc::new(DaemonGitHubStackCoordinatorV1::default());
         let second = journey
             .coordinator
             .register_scope(journey.context.scope(), probe, circuit)
             .unwrap();
         assert_eq!(journey.coordinator.retained_scope_count(), 1);
-        // The provider reports the same further-advanced base, so this
-        // observation adds no new drift and the restored interval closes.
+        // The first post-restart sample has advanced again, but there is no
+        // retained snapshot to compare with. The second advances once more;
+        // the third is stable and can close the original interval.
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap();
         let remount_branch = branch.clone();
         let server = std::thread::spawn(move || {
-            serve_refresh(&listener, FURTHER_ADVANCED_BASE, &remount_branch)
+            serve_refresh(
+                &listener,
+                "ffffffffffffffffffffffffffffffffffffffff",
+                &remount_branch,
+            );
+            serve_refresh(
+                &listener,
+                "1111111111111111111111111111111111111111",
+                &remount_branch,
+            );
+            serve_refresh(
+                &listener,
+                "1111111111111111111111111111111111111111",
+                &remount_branch,
+            );
         });
         let owner = journey.owner(&journey.scope, &second, address);
-        let outcome = owner.refresh(&journey.context, &journey.request).await;
-        assert!(outcome.has_usable_observation(), "{outcome:?}");
+        for _ in 0..3 {
+            let outcome = owner.refresh(&journey.context, &journey.request).await;
+            assert!(outcome.has_usable_observation(), "{outcome:?}");
+        }
         server.join().unwrap();
 
         let receipts = journey.drift_receipts().await;
@@ -1462,8 +1519,8 @@ mod tests {
         // produces, open or closed, carries the trace that opened it.
         assert_eq!(
             base_advanced.len(),
-            3,
-            "two observations of the advance and its close: {receipts:?}"
+            4,
+            "three observed advances and one proved close: {receipts:?}"
         );
         let first_observed = base_advanced[0].first_observed_micros;
         assert!(
@@ -1474,52 +1531,72 @@ mod tests {
         );
         assert_eq!(base_advanced[0].state, IntervalStateV1::Open);
         assert_eq!(base_advanced[1].state, IntervalStateV1::Open);
-        assert_eq!(base_advanced[2].state, IntervalStateV1::Closed);
+        assert_eq!(base_advanced[2].state, IntervalStateV1::Open);
+        assert_eq!(base_advanced[3].state, IntervalStateV1::Closed);
         drop(owner);
         drop(second);
         assert_eq!(journey.coordinator.retained_scope_count(), 0);
     }
 
-    /// A retired mount whose cleanup runs after its replacement registered
-    /// cannot remove that replacement. The second holder keeps the old mount
-    /// alive across the replacement's registration, then releases it.
+    /// A provider read retains only its admitted state. Retiring the mounted
+    /// runtime must release the scope even while that read drains, and the old
+    /// read's eventual cleanup must leave a fresh mount usable.
     #[tokio::test]
-    async fn late_cleanup_of_a_retired_mount_cannot_remove_its_replacement() {
+    async fn a_draining_provider_read_cannot_retain_or_retire_a_remounted_owner() {
         let journey = RuntimeJourney::mount("runtime-late-cleanup").await;
         let probe = GitHubStackedPullRequestPolicyV1::ProbePrivatePreview;
         let circuit = github_stack_circuit_policy().unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
         let retired = journey
             .coordinator
             .register_scope(journey.context.scope(), probe, circuit.clone())
             .unwrap();
-        let late_holder = retired.clone();
+        let retired_owner = journey.owner(&journey.scope, &retired, address);
+        let draining_read = journey
+            .coordinator
+            .authorize_provider_read(journey.context.scope())
+            .unwrap()
+            .expect("the mounted probe registration admits a provider read");
         drop(retired);
+        assert_eq!(journey.coordinator.retained_scope_count(), 1);
+        drop(retired_owner);
         assert_eq!(
             journey.coordinator.retained_scope_count(),
-            1,
-            "a second holder keeps the retired mount mounted"
+            0,
+            "an admitted provider read must not keep its retired runtime mounted"
         );
 
         let replacement = journey
             .coordinator
             .register_scope(journey.context.scope(), probe, circuit)
             .unwrap();
-        // The retired mount's cleanup runs now, after its replacement exists.
-        drop(late_holder);
+        let replacement_owner = journey.owner(&journey.scope, &replacement, address);
+        drop(replacement);
+        drop(draining_read);
         assert_eq!(
             journey.coordinator.retained_scope_count(),
             1,
-            "a retired mount's late cleanup must not remove its replacement"
+            "cleanup of the old read must not remove the new runtime's registration"
         );
+        let branch = journey
+            .scope
+            .branch_ref
+            .trim_start_matches("refs/heads/")
+            .to_owned();
+        let server = std::thread::spawn(move || serve_refresh(&listener, MERGE_BASE, &branch));
+        let outcome = replacement_owner
+            .refresh(&journey.context, &journey.request)
+            .await;
+        assert!(outcome.has_usable_observation(), "{outcome:?}");
+        server.join().unwrap();
         assert!(
-            journey
-                .coordinator
-                .authorize_provider_read(journey.context.scope())
-                .unwrap()
-                .is_some(),
-            "the replacement still authorizes provider reads after the old mount is cleaned up"
+            journey.stack_anchors().await.iter().any(|target| {
+                matches!(target, GitTopologyAnchorTargetV1::GitHubStackSnapshot(_))
+            }),
+            "the replacement runtime must publish its provider snapshot"
         );
-        drop(replacement);
+        drop(replacement_owner);
         assert_eq!(
             journey.coordinator.retained_scope_count(),
             0,
@@ -1555,7 +1632,8 @@ mod tests {
                 .coordinator
                 .register_scope(&resolved, probe, circuit.clone())
                 .unwrap();
-            owners.push((journey.owner(&scope, &registration, address), registration));
+            owners.push(journey.owner(&scope, &registration, address));
+            drop(registration);
             assert_eq!(
                 journey.coordinator.retained_scope_count(),
                 index + 1,
