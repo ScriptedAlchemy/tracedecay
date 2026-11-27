@@ -35,12 +35,10 @@ production = [
 # chars/4.
 token-counting = ["tracedecay-agent-hosts/token-counting", "tracedecay-dashboard-api/token-counting"]
 
-# Lite enables the core code grammars plus Markdown and JSON. Markdown uses
-# its dedicated grammar crate, so lite does not require the large bundle.
-# The production feature above also enables the medium grammar tier. The
-# full tier is opt-in: it adds 86.4 MB (23.8%) to the shipped binary for
-# languages no tracker issue names, so a source build selects `full`
-# explicitly when it needs them.
+# Lite enables the core code grammars plus Markdown, JSON, and TOML. Package
+# manifests remain indexed because Rust and TypeScript resolution read their
+# canonical names and module settings. Production adds the medium grammar
+# tier; a source build selects `full` explicitly for the optional grammars.
 lite = ["tracedecay-code-index/lite", "tracedecay-code-index-runtime/lite"]
 
 medium = ["tracedecay-code-index/medium"]
@@ -277,9 +275,9 @@ tracedecay-capture = { path = "../tracedecay-capture" }
 # Test builds opt into the query kernel's `*_for_test` constructors; the
 # feature stays off for production builds.
 tracedecay-query = { path = "../tracedecay-query", features = ["test-helpers"] }
-# Production already forwards `lite`/`full` through the `production` feature.
-# Keep this edge grammar-free so tests do not also pull `medium` (code-index
-# defaults) and so the test graph matches the CLI lane plus `test-helpers`.
+# Production forwards `lite`/`medium` through the `production` feature.
+# Keep this helper edge grammar-free so it does not select the index crate's
+# broader default grammar set.
 tracedecay-code-index = { path = "../tracedecay-code-index", default-features = false, features = ["test-helpers"] }
 tracedecay-code-index-runtime = { path = "../tracedecay-code-index-runtime", default-features = false, features = ["test-helpers", "test-transport"] }
 # Sealed-generation store fixtures for the maintenance tick's retention tests.

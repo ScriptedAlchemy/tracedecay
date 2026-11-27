@@ -31,9 +31,9 @@ def load_gen_builds():
 class ProductionFeatureResolutionTests(unittest.TestCase):
     ROOT = (
         "tracedecay v0.1.0 (/workspace/crates/tracedecay)|"
-        "default,full,lite,production,token-counting"
+        "default,lite,medium,production,token-counting"
     )
-    ROOT_FEATURES = {"default", "full", "lite", "production", "token-counting"}
+    ROOT_FEATURES = {"default", "lite", "medium", "production", "token-counting"}
 
     def setUp(self) -> None:
         self.gen = load_gen_builds()
@@ -56,13 +56,13 @@ class ProductionFeatureResolutionTests(unittest.TestCase):
             "path-derive v1.0.0 (proc-macro) (/vendor/path-derive)|derive",
             "registry-derive v1.0.0 (proc-macro) (registry `https://example.invalid/crates/index`)|derive",
             "tracedecay-macros v0.1.0 (proc-macro) (/workspace/crates/tracedecay-macros)|expand",
-            "tracedecay-code-index v0.1.0 (/workspace/crates/tracedecay-code-index)|full (*)",
+            "tracedecay-code-index v0.1.0 (/workspace/crates/tracedecay-code-index)|medium (*)",
             "tracedecay-empty v0.1.0 (/workspace/crates/tracedecay-empty)| (*)",
             "",
         ])
         self.assertEqual(self.resolve(output), {
             "tracedecay": self.ROOT_FEATURES,
-            "tracedecay-code-index": {"lite", "full"},
+            "tracedecay-code-index": {"lite", "medium"},
             "tracedecay-macros": {"expand"},
             "tracedecay-empty": set(),
         })
@@ -114,6 +114,40 @@ class ProductionFeatureResolutionTests(unittest.TestCase):
     def test_nonrepeated_external_transport_is_rejected(self) -> None:
         with self.assertRaises(ValueError):
             self.resolve(f"{self.ROOT}\nexternal v1.0.0|test-transport\n")
+
+    def test_production_rejects_transitively_enabled_full_grammar_tier(self) -> None:
+        for root in ("tracedecay", "tracedecay-cli"):
+            for package in self.gen.GRAMMAR_PROFILE_PACKAGES:
+                with self.subTest(root=root, package=package):
+                    output = (
+                        f"{self.ROOT}\n"
+                        f"{package} v0.1.0 (/workspace/crates/{package})|lite\n"
+                        f"{package} v0.1.0 (/workspace/crates/{package})|full (*)\n"
+                    )
+                    with self.assertRaisesRegex(ValueError, "opt-in full grammar tier"):
+                        self.resolve(output, package=root)
+
+    def test_explicit_full_and_dev_builds_keep_optional_grammars(self) -> None:
+        output = (
+            f"{self.ROOT}\n"
+            "tracedecay-code-extraction v0.1.0 (/workspace/crates/tracedecay-code-extraction)|full,lite,medium\n"
+        )
+        for context in (
+            ("tracedecay", "normal,build", ("full",)),
+            ("tracedecay-cli", "normal,build", ("full",)),
+            (None, "normal,build,dev", ("tracedecay-cli/full",)),
+        ):
+            with self.subTest(context=context):
+                self.assertEqual(
+                    self.resolve(output, *context)["tracedecay-code-extraction"],
+                    {"full", "lite", "medium"},
+                )
+
+    def test_optional_full_artifacts_still_refuse_test_transport(self) -> None:
+        output = f"{self.ROOT}\nexternal v1.0.0|test-transport\n"
+        for root in ("tracedecay", "tracedecay-cli"):
+            with self.subTest(root=root), self.assertRaisesRegex(ValueError, "test-transport"):
+                self.resolve(output, package=root, features=("full",))
 
     def test_lean_context_preserves_empty_features_and_locked_request(self) -> None:
         output = "tracedecay v0.1.0 (/workspace/crates/tracedecay)|\n"
@@ -167,6 +201,105 @@ class ProductionFeatureResolutionTests(unittest.TestCase):
                 self.assertEqual(self.resolve(
                     f"tracedecay v0.1.0 ({path})|production\n",
                 ), {"tracedecay": {"production"}})
+
+
+class TestFeatureSelectionTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.gen = load_gen_builds()
+        self.package = {
+            "name": "tracedecay-code-index",
+            "features": {"lite": [], "medium": [], "full": [], "test-helpers": []},
+            "targets": [{
+                "name": "code_index_suite", "kind": ["test"],
+                "required-features": ["test-helpers"],
+            }],
+            "metadata": {"bazel": {"test_features": {"code_index_suite": {
+                "default-features": False, "features": ["lite", "medium"],
+            }}}},
+        }
+
+    def test_selected_suite_preserves_required_features_without_workspace_unification(self) -> None:
+        selected = self.gen.test_feature_overrides(self.package)["code_index_suite"]
+        self.assertEqual(selected, {"lite", "medium", "test-helpers", self.gen.NO_DEFAULT_FEATURES})
+        key = (self.package["name"], "normal,build,dev", selected)
+        shared = frozenset({"tracedecay-code-index/full"})
+        self.assertEqual(self.gen.feature_resolution_context(key, shared), key)
+        default = (self.package["name"], "normal,build,dev", frozenset())
+        self.assertEqual(
+            self.gen.feature_resolution_context(default, shared),
+            (None, "normal,build,dev", shared),
+        )
+        query = mock.Mock(spec=self.gen.CargoQuery)
+        query.run.return_value = "tracedecay-code-index v0.1.0 (/workspace/crates/tracedecay-code-index)|lite,medium,test-helpers\n"
+        self.assertEqual(self.gen.feature_map(query, *key), {
+            "tracedecay-code-index": {"lite", "medium", "test-helpers"},
+        })
+        command = query.run.call_args.args[0]
+        self.assertIn("--no-default-features", command)
+        self.assertNotIn("--workspace", command)
+        self.assertEqual(command[command.index("--features") + 1], "lite,medium,test-helpers")
+
+    def test_invalid_or_unknown_feature_profiles_fail_closed(self) -> None:
+        invalid = [
+            {"unknown_suite": {"default-features": False, "features": ["lite"]}},
+            {"code_index_suite": {"default-features": True, "features": ["lite"]}},
+            {"code_index_suite": {"default-features": False, "features": ["missing"]}},
+            {"code_index_suite": {"default-features": False, "features": "lite"}},
+            {"code_index_suite": {"features": ["lite"]}},
+            {"code_index_suite": {"default-features": False, "features": [1]}},
+            [],
+        ]
+        for configured in invalid:
+            with self.subTest(configured=configured), self.assertRaises(ValueError):
+                self.gen.test_feature_overrides(self.package | {
+                    "metadata": {"bazel": {"test_features": configured}},
+                })
+
+    def test_same_named_binary_or_benchmark_keeps_its_own_required_features(self) -> None:
+        overrides = self.gen.test_feature_overrides(self.package)
+        for kind in ("bin", "bench", "example"):
+            target = {"name": "code_index_suite", "kind": [kind], "required-features": ["full"]}
+            with self.subTest(kind=kind):
+                self.assertEqual(self.gen.target_requested_features(target, overrides), {"full"})
+        self.assertEqual(
+            self.gen.target_requested_features(self.package["targets"][0], overrides),
+            overrides["code_index_suite"],
+        )
+
+
+class BinaryOutputNameTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.gen = load_gen_builds()
+        self.package = {
+            "name": "tracedecay-cli",
+            "targets": [
+                {"name": "tracedecay", "kind": ["bin"]},
+                {"name": "tracedecay-full", "kind": ["bin"]},
+            ],
+        }
+
+    def test_feature_binary_preserves_the_canonical_executable_basename(self) -> None:
+        configured = {"tracedecay-full": "full/tracedecay"}
+        self.assertEqual(self.gen.binary_name_overrides(self.package | {
+            "metadata": {"bazel": {"binary_names": configured}},
+        }), configured)
+
+    def test_unknown_escaping_reserved_or_overlapping_outputs_are_refused(self) -> None:
+        invalid = [
+            {"unknown": "full/tracedecay"},
+            {"tracedecay-full": "../tracedecay"},
+            {"tracedecay-full": "/tmp/tracedecay"},
+            {"tracedecay-full": "test/tracedecay"},
+            {"tracedecay-full": "tracedecay"},
+            {"tracedecay-full": "tracedecay/child"},
+            {"tracedecay-full": 1},
+            [],
+        ]
+        for configured in invalid:
+            with self.subTest(configured=configured), self.assertRaises(ValueError):
+                self.gen.binary_name_overrides(self.package | {
+                    "metadata": {"bazel": {"binary_names": configured}},
+                })
 
 
 class ProductionDeclarationTests(unittest.TestCase):

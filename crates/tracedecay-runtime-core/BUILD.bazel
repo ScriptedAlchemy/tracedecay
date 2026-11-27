@@ -41,6 +41,22 @@ rust_library(
 )
 
 rust_library(
+    name = "tracedecay-runtime-core__+test-helpers__d8448ea796a__dev",
+    srcs = glob(["src/**/*.rs"]),
+    crate_root = "src/lib.rs",
+    crate_name = "tracedecay_runtime_core",
+    edition = crate_edition(),
+    compile_data = glob(["src/**/*"], exclude=["src/**/*.rs"], allow_empty = True)
+        + glob(["assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True),
+    version = "0.1.0",
+    deps = all_crate_deps(normal = True) + ["//crates/tracedecay-capture:tracedecay-capture__d84922c7be3__dev", "//crates/tracedecay-domain:tracedecay-domain__dev", "//crates/tracedecay-graph-db:tracedecay-graph-db__+test-helpers__d56232f5837__dev", "//crates/tracedecay-private-fs:tracedecay-private-fs__dcf802cdb93__dev", "//crates/tracedecay-rusqlite-runtime:tracedecay-rusqlite-runtime__d104a1ff1c8__dev", "//crates/tracedecay-store:tracedecay-store__d7547c5d340__dev"],
+    proc_macro_deps = all_crate_deps(proc_macro = True),
+    aliases = aliases(normal = True),
+    rustc_flags = perf_rustc_flags(2),
+    crate_features = ["default", "test-helpers"],
+)
+
+rust_library(
     name = "tracedecay-runtime-core__db496041207",
     srcs = glob(["src/**/*.rs"]),
     crate_root = "src/lib.rs",

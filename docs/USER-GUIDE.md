@@ -1444,36 +1444,40 @@ directly. Edit tools modify source files.
 
 ## Supported Languages
 
-TraceDecay organizes its tree-sitter grammars into three tiers. Each tier includes all the languages from the tier below it.
+TraceDecay organizes its supported languages and document formats into three tiers. Each tier includes the languages from the tier below it. Counts follow the language registry: JavaScript and TypeScript share one entry, while Markdown, JSON, and TOML each have an entry.
 
-### Lite (14 languages)
+### Lite (16 languages and document formats)
 
-Always compiled. The smallest binary for the most popular languages.
+Core code grammars, documentation, and package manifests. Markdown, JSON, and TOML remain available in every tier: Rust resolution reads package names from `Cargo.toml`, and TypeScript resolution reads `package.json` and `tsconfig` settings.
 
-Rust, Go, Java, Scala, TypeScript, JavaScript, Python, C, C++, Kotlin, C#, Swift, Svelte, Astro
+Rust, Go, Java, Scala, TypeScript/JavaScript, Python, C, C++, Kotlin, C#, Swift, Svelte, Astro, Markdown, JSON, TOML
 
-### Medium (Lite + 9 languages, plus Markdown and JSON)
+### Medium (25 languages and document formats)
 
-Adds scripting, config, and additional systems languages. Markdown and JSON ride in every tier because documentation and `package.json`/`tsconfig` are architecture content.
+Adds nine scripting, configuration, and systems languages.
 
 Dart, Pascal, PHP, Ruby, Bash, Protobuf, PowerShell, Nix, VB.NET
 
 **The shipped release binary carries the Medium tier.** A file whose language is not in this set is reported as `unsupported_language` in the index; it is never indexed as source and never reported as an empty success.
 
-### Full (Medium + 28 languages, opt-in)
+### Full (52 languages and document formats, opt-in)
 
-Everything, including legacy and niche languages. This tier is not in the shipped binary: it adds 86.4 MB (23.8%) to the release artifact for languages no tracker issue names, so a source build selects it explicitly.
+Adds 27 languages to Medium. These grammars remain available in an explicit Full source build and are omitted from the shipped release profile.
 
-Lua, Zig, Objective-C, Perl, Batch/CMD, Fortran, COBOL, MS BASIC 2.0, GW-BASIC, QBasic, QuickBASIC 4.5, Dockerfile, GLSL, WGSL, HLSL, Metal, R, SQL, Julia, Haskell, OCaml, Clojure, Erlang, Elixir, F#, Quint, TOML, Lean
+Lua, Zig, Objective-C, Perl, Batch/CMD, Fortran, COBOL, MS BASIC 2.0, GW-BASIC, QBasic, QuickBASIC 4.5, Dockerfile, GLSL, WGSL, HLSL, Metal, R, SQL, Julia, Haskell, OCaml, Clojure, Erlang, Elixir, F#, Quint, Lean
 
 ### Selecting a tier in a source build
 
-The `production` feature is what the release binary builds. It carries Lite and Medium. To build with the Full tier, or to cherry-pick individual languages without taking a full tier:
+The default Bazel target builds the production profile with Lite and Medium. Select the separate Full target to include the optional grammars:
 
 ```bash
-cargo build -p tracedecay-cli --release --features full
-cargo build -p tracedecay-cli --release --no-default-features --features production,lang-nix,lang-bash
+bazel build --config=dist //crates/tracedecay-cli:tracedecay
+bazel build --config=dist //crates/tracedecay-cli:tracedecay-full
 ```
+
+The resulting binaries are `bazel-bin/crates/tracedecay-cli/tracedecay` and `bazel-bin/crates/tracedecay-cli/full/tracedecay`, with `.exe` appended on Windows. Building the Full target does not change the grammar set in the default release target.
+
+For host integrations, install the Full binary as `tracedecay` (`tracedecay.exe` on Windows) in a stable location outside the Bazel output tree before configuring the host. Host configuration deliberately prefers an installed executable over a build output. The release updater downloads the Medium artifact; to retain Full when updating a source build, rebuild and install the Full target from the desired version.
 
 ### What gets extracted
 

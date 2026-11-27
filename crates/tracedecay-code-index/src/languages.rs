@@ -667,14 +667,50 @@ mod tests {
         );
     }
 
-    /// Every language the extras profile advertises registers a descriptor, so
-    /// selecting `full` delivers the whole opt-in tier. The production build
-    /// omits this tier; `gen_builds` refuses a `production` feature that
-    /// reaches `full`, and capture marks an extension with no descriptor
-    /// `UnsupportedLanguage` rather than indexing it as source.
+    #[test]
+    #[cfg(feature = "lite")]
+    fn lite_tier_extracts_cargo_package_identity() {
+        let registry = StaticLanguageRegistry::new();
+        for (extension, expected_language) in [
+            ("rs", "rust"),
+            ("ts", "typescript"),
+            ("js", "typescript"),
+            ("md", "markdown"),
+            ("json", "json"),
+            ("toml", "toml"),
+        ] {
+            assert_eq!(
+                registry
+                    .descriptor_for_extension(extension)
+                    .map(|descriptor| descriptor.language.as_str()),
+                Some(expected_language),
+                "core code and its documentation and manifests remain admitted"
+            );
+        }
+
+        let extractors = tracedecay_code_extraction::LanguageRegistry::new();
+        let manifest = extractors
+            .extractor_for_file("Cargo.toml")
+            .expect("Lite must retain Rust's package-name authority")
+            .extract_artifact("Cargo.toml", "[package]\nname = \"declared-crate\"\n");
+        assert!(manifest.result.errors.is_empty());
+        let package_name = manifest
+            .result
+            .nodes
+            .iter()
+            .find(|node| node.qualified_name == "Cargo.toml::package::name")
+            .expect("the resolver consumes the extracted package.name symbol");
+        assert_eq!(
+            package_name.signature.as_deref(),
+            Some("name = \"declared-crate\"")
+        );
+    }
+
+    /// Full builds retain the niche extensions alongside the complete
+    /// descriptor set checked by `full_tier_registers_every_compiled_extractor_language`.
     #[test]
     #[cfg(feature = "full")]
-    fn extras_profile_registers_and_extracts_every_advertised_grammar() {
+    fn full_tier_admits_niche_extensions() {
         let registry = StaticLanguageRegistry::new();
         for (extension, language) in [
             ("cob", "cobol"),
